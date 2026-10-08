@@ -302,6 +302,11 @@ function checkJq() {
 // ─────────────────────────────────────────── §3 the pre-push hook
 function hookFixture(hookText, { fnm = false, nodeVersion = "v22.23.2" } = {}) {
 	const repo = tmpDir("hook-repo");
+	// A real repository: the hook checks the worktree git names, and finds it
+	// with git rev-parse (scripts/test-pre-push-hook.js pins which one).
+	const noGitVars = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+	const init = spawnSync("git", ["init", "-q", repo], { env: noGitVars, encoding: "utf8" });
+	if (init.status !== 0) throw new Error(`git init ${repo} failed: ${init.stderr}`);
 	fs.mkdirSync(path.join(repo, ".githooks"));
 	fs.writeFileSync(path.join(repo, ".githooks/pre-push"), hookText, { mode: 0o755 });
 	fs.writeFileSync(path.join(repo, ".nvmrc"), "22.23.2\n");
@@ -320,14 +325,16 @@ function runHook(hookText, { input, npmExit = 0, fnm = false, nodeVersion } = {}
 		encoding: "utf8",
 		timeout: 20000,
 		input: input === undefined ? `refs/heads/x ${SHA} refs/heads/x ${"d".repeat(40)}\n` : input,
-		cwd: os.tmpdir(),
+		// As git runs it: at the worktree's top, with the repository variables
+		// it exports to hooks.
+		cwd: f.repo,
 		env: {
 			PATH: `${f.bin}:/usr/bin:/bin`,
 			STUB_LOG: log,
 			STUB_NPM_EXIT: String(npmExit),
-			GIT_DIR: "/somewhere/else/.git",
-			GIT_WORK_TREE: "/somewhere/else",
-			GIT_INDEX_FILE: "/somewhere/else/.git/index",
+			GIT_DIR: path.join(f.repo, ".git"),
+			GIT_WORK_TREE: f.repo,
+			GIT_INDEX_FILE: path.join(f.repo, ".git/index"),
 		},
 	});
 	const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
@@ -340,7 +347,7 @@ function checkHook(hookText, tag = "") {
 	const npm = good.calls.filter((c) => c.startsWith("npm "));
 	r.push([good.code === 0 && npm.length === 1 && npm[0].startsWith("npm run check|"), `${tag}§3 a push runs npm run check once and passes when it passes (exit ${good.code}, calls ${JSON.stringify(good.calls)})`]);
 	const cwd = npm[0] ? npm[0].split("|").find((x) => x.startsWith("cwd=")).slice(4) : "";
-	r.push([!!cwd && fs.realpathSync(cwd) === fs.realpathSync(good.repo), `${tag}§3 …from the repo root, wherever git started the hook (got ${npm[0]})`]);
+	r.push([!!cwd && fs.realpathSync(cwd) === fs.realpathSync(good.repo), `${tag}§3 …in the worktree git runs it in (got ${npm[0]})`]);
 	r.push([npm[0] && /\|GIT_DIR=\|GIT_WORK_TREE=\|GIT_INDEX_FILE=$/.test(npm[0]), `${tag}§3 …with git's repository variables unset, so the deploy runners' own git sandboxes stay theirs (got ${npm[0]})`]);
 	const bad = runHook(hookText, { npmExit: 1 });
 	r.push([bad.code === 1 && /push was blocked/.test(bad.out), `${tag}§3 a failing check blocks the push (exit ${bad.code})`]);

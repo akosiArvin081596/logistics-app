@@ -5,12 +5,20 @@
 # Turn it on once per clone:   git config core.hooksPath .githooks
 # Skip it for one push:        git push --no-verify
 #
-# It checks the WORKING TREE, which is what was just committed when the tree
-# is clean. A push that only deletes remote branches runs nothing.
+# It checks the WORKING TREE of the worktree being pushed (the one git runs
+# the hook in), which is what was just committed when the tree is clean. That
+# holds in a linked worktree too, where core.hooksPath may be an absolute path
+# to another checkout's .githooks. Run by hand, it checks the worktree around
+# the current directory. A push that only deletes remote branches runs nothing.
 #
 # The runners load better-sqlite3, which is built for the Node in .nvmrc, so
 # the hook switches to that Node through fnm when fnm is installed.
 set -uo pipefail
+
+# The worktree to check: the one git runs the hook in (git starts hooks at its
+# top level), never the checkout this file lives in. Read before the unset
+# below, so it follows the repository variables git hands the hook.
+root=$(git rev-parse --show-toplevel 2>/dev/null)
 
 # Git exports where the repository is (GIT_DIR and friends) to its hooks. The
 # deploy runners build throwaway repositories of their own and run git inside
@@ -36,7 +44,10 @@ if [ "$refs" -gt 0 ] && [ "$updates" -eq 0 ]; then
 	exit 0
 fi
 
-root=$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")
+if [ -z "$root" ]; then
+	echo "pre-push: not inside a git worktree. Run it from the worktree you want to check."
+	exit 1
+fi
 cd "$root" || exit 1
 
 if command -v fnm >/dev/null 2>&1; then
