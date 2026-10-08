@@ -57,6 +57,9 @@ function startsJob(name) {
 }
 
 require("dotenv").config();
+// A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
+// decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).
+require("./lib/replica-mode").checkDotenvFlag(process.env);
 const express = require("express");
 const http = require("http");
 const https = require("https");

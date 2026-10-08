@@ -17,16 +17,17 @@
 //    else: every other request is refused and counted.
 // 3. --visit <path> opens each page in turn (--dwell seconds each, default 4);
 //    --screens <dir> saves a screenshot of the landing page and of each visit
-//    (they show real people's data: keep them outside the repo and Documents).
+//    (they show real people's data: kept outside the repo, Documents and Desktop).
 //    Headless: signs out at the end. Headed: stays open until you close it.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const C = require("./common.js");
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+const REPO = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."));
 const keychain = require(path.join(REPO, "scripts", "e2e", "keychain.cjs"));
 const KEYCHAIN_ITEM = { service: "logisx-replica", account: "local-copy" };
 
@@ -55,10 +56,19 @@ if (!server) C.fail(`no replica is running for task ${task}; start one with npm 
 const BASE = `http://127.0.0.1:${server.port}`;
 const dbPath = path.join(C.paths.work(task), "app.db");
 if (!fs.realpathSync(dbPath).startsWith(fs.realpathSync(path.join(C.ROOT, "work")) + path.sep)) C.fail("the working copy is not under ~/LogisX-replica/work");
+// The real path of `p`, through its nearest existing ancestor (symlinks resolved).
+function realOf(p) {
+	const abs = path.resolve(p);
+	try { return fs.realpathSync(abs); } catch {
+		const parent = path.dirname(abs);
+		return parent === abs ? abs : path.join(realOf(parent), path.basename(abs));
+	}
+}
 if (screens) {
-	const real = path.resolve(screens);
-	if (real.startsWith(REPO + path.sep) || real.startsWith(path.join(process.env.HOME, "Documents") + path.sep)) {
-		C.fail("--screens must be outside the repo and outside Documents (the screenshots show real people's data)");
+	const real = realOf(screens);
+	const synced = ["Documents", "Desktop"].map((d) => realOf(path.join(process.env.HOME, d)));
+	if ([REPO, ...synced].some((d) => real === d || real.startsWith(d + path.sep))) {
+		C.fail("--screens must be outside the repo and outside Documents and Desktop (the screenshots show real people's data)");
 	}
 	fs.mkdirSync(real, { recursive: true, mode: 0o700 });
 }
@@ -89,7 +99,15 @@ async function chromePath() {
 	const api = typeof p.executablePath === "function" ? p : p.default;
 	return await api.executablePath();
 }
-const browser = await chromium.launch({ executablePath: await chromePath(), headless, args: headless ? [] : ["--window-size=1400,900"] });
+// The same isolation as the replica's PDF browser, with the replica itself let
+// through: every request but one to 127.0.0.1 goes to a closed proxy, and no
+// host name resolves. The route below refuses (and counts) them as well.
+const ISOLATION = [
+	"--proxy-server=http://127.0.0.1:9",
+	"--proxy-bypass-list=127.0.0.1",
+	"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+];
+const browser = await chromium.launch({ executablePath: await chromePath(), headless, args: [...ISOLATION, ...(headless ? [] : ["--window-size=1400,900"])] });
 const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 let blocked = 0;
 const blockedHosts = new Set();

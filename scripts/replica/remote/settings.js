@@ -7,10 +7,13 @@
 // Reads <app dir>/.env with the app's own dotenv and judges every setting with
 // lib/replica-rules.js (classifySetting): a name containing KEY, SECRET, TOKEN,
 // PASS, CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is a secret and is never
-// copied, nor is a value that is a URL carrying credentials, nor a runtime
-// setting replica:start sets itself (NODE_ENV, PORT, ...). The rest is written,
-// file mode 600, and only names are printed: the copied keys, and each skipped
-// key with the rule that skipped it. No value is ever printed.
+// copied, nor is a value that is a URL carrying credentials or looks like a key,
+// nor a runtime setting replica:start sets itself (NODE_ENV, PORT, ...). It is an
+// allowlist too: only names the running app reads (process.env.NAME in
+// <app dir>/server.js and lib/) are copied, so a name nothing reads, whatever it
+// holds, stays on the server. The rest is written, file mode 600, and only
+// names are printed: the copied keys, and each skipped key with the rule that
+// skipped it. No value is ever printed.
 "use strict";
 
 const fs = require("fs");
@@ -32,12 +35,12 @@ function envLine(name, value) {
 	return null;
 }
 
-function exportSettings(parsed) {
+function exportSettings(parsed, { readByApp } = {}) {
 	const copied = [];
 	const skipped = [];
 	const lines = [];
 	for (const name of Object.keys(parsed).sort()) {
-		const verdict = rules.classifySetting(name, parsed[name]);
+		const verdict = rules.classifySetting(name, parsed[name], { readByApp });
 		if (!verdict.copy) { skipped.push({ name, rule: verdict.rule }); continue; }
 		const line = envLine(name, parsed[name]);
 		if (!line) { skipped.push({ name, rule: "value cannot be quoted for .env" }); continue; }
@@ -55,7 +58,9 @@ if (require.main === module) {
 		const dotenv = require(path.join(appDir, "node_modules", "dotenv"));
 		const envFile = path.join(appDir, ".env");
 		const parsed = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
-		const { copied, skipped, text } = exportSettings(parsed);
+		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join(appDir, "lib", f))]
+			.map((f) => fs.readFileSync(f, "utf8"));
+		const { copied, skipped, text } = exportSettings(parsed, { readByApp: rules.namesReadBy(appSources) });
 		fs.writeFileSync(out, text, { mode: 0o600, flag: "wx" });
 		console.log(JSON.stringify({ step: "settings", copied, skipped }));
 	} catch (err) {

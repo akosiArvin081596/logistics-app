@@ -135,19 +135,23 @@ npm run replica:clean -- [--task <name>]
   `--force`). Production is only read. The ssh destination comes from `LOGISX_PROD_SSH` and is
   never stored in the repo. A program streamed over ssh (`scripts/replica/remote/`, nothing is
   installed on the server) works in one temporary folder, `/root/logisx-replica-tmp/<stamp>/`
-  (mode 700, umask 077):
+  (a stamp unique to the run; mode 700, umask 077), at low CPU and I/O priority. It first removes
+  any such folder an earlier pull left behind for more than 6 hours:
   - it copies the live `app.db` read-only (`VACUUM INTO` from a `readonly` connection, so rows
     still in the WAL are included);
-  - in that copy it deletes the sessions and clears stored tokens (any token column, found from
-    the schema);
+  - in that copy it deletes the sessions and clears stored credentials (any token, secret, key,
+    nonce, OTP, `*_code` or `*_hash` column, found from the schema; password hashes and receipt
+    fingerprints are kept, by name). It does so with SQLite's secure delete and then VACUUMs the
+    copy, and the pull fails if any removed value can still be found in the file's bytes;
   - it exports the non-secret settings from `.env`. A name containing KEY, SECRET, TOKEN, PASS,
     CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is never copied, nor is a URL carrying
-    credentials, nor `NODE_ENV`/`PORT`-style runtime settings;
+    credentials (in its user, query or path), a value that looks like a key, a
+    `NODE_ENV`/`PORT`-style runtime setting, or any name production's code does not read;
   - it reads every tab of the Google Sheets the app uses with its own `spreadsheets.readonly`
     client. The server's key never leaves the server.
 
   The folder is then downloaded with rsync and deleted, also when a step fails (a trap on each
-  side). `uploads/`, `storage/` and `evidence-archive/` are copied with rsync. After the first
+  side); the pull fails when it cannot confirm the folder is gone. `uploads/`, `storage/` and `evidence-archive/` are copied with rsync. After the first
   pull, only what changed is transferred. The manifest (`clean/manifest.json`) records the
   production commit, its Node version and time zone, and every table's row count.
 - **`replica:start`** clones the clean snapshot and the files as a task's working copy
@@ -162,17 +166,25 @@ npm run replica:clean -- [--task <name>]
   login page in Chrome for Testing (headed unless `--headless`). The browser may reach the
   replica and nothing else.
 - **`replica:clean`** stops the task's server (by its recorded PID, only while that PID is still
-  that server) and deletes its working copy. The clean snapshot stays.
+  that server) and deletes its working copy. The clean snapshot stays. While the recorded PID
+  is alive but cannot be shown to be that server, it stops and deletes nothing.
 
 **Replica mode (`LOCAL_REPLICA=1`, `lib/replica-mode.js`)** differs from production on purpose:
 
 - **It refuses to start** in any of these cases:
+  - anywhere but macOS, or not started by `replica:start` (it sets a marker nothing else sets);
   - `NODE_ENV=production`, or signs of a server: pm2, running as root, a server path such as
     `/var/www`, or a hosting host name;
-  - any outbound credential set (`lib/replica-rules.js`). `SESSION_SECRET` is not one:
-    `replica:start` passes a fresh random one, in memory only;
+  - any outbound credential set (`lib/replica-rules.js`), or a setting in `settings.env` that the
+    export would not copy. `SESSION_SECRET` is not a credential: `replica:start` passes a fresh
+    random one, in memory only;
+  - any proxy setting (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in any case, `NODE_USE_ENV_PROXY`);
   - `BIND_HOST` other than loopback;
-  - a database, data folder, Sheets copy or settings file outside `~/LogisX-replica/`.
+  - a database or data folder outside the task's working copy (`~/LogisX-replica/work/<task>/`),
+    or a settings file or guard log outside `~/LogisX-replica/`.
+- **`LOCAL_REPLICA` is read before dotenv.** A value other than 1 is reported and ignored (never a
+  reason to stop a normal run), and a `LOCAL_REPLICA` that only a `.env` file sets stops the
+  server, which would otherwise run normally with that file's credentials.
 - **Settings:** it never loads the repo's `.env` (dotenv is made a no-op, and a file guard refuses
   to read any `.env` or Google key). It reads `~/LogisX-replica/settings.env` instead.
 - **Outbound paths are off:**

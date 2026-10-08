@@ -96,20 +96,28 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 echo $$ >"$LOCK/pid"
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+# Unique per run (time, then 8 random hex digits), in the shape the server
+# program and the production-write guard accept.
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+case "$STAMP" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) die "could not make a stamp" ;; esac
 LOG="$ROOT/logs/pull-$STAMP.log"
 INCOMING="$ROOT/clean.incoming"
 REMOTE_STARTED=0
 START_TS=$(date +%s)
 
+# Removes the server's temporary folder and confirms it is gone; returns
+# non-zero when it cannot confirm that, which fails the pull.
 remote_cleanup() {
-  ssh "${SSH_OPTS[@]}" "$LOGISX_PROD_SSH" "rm -rf -- '$TMP_PARENT/$STAMP'; rmdir -- '$TMP_PARENT' 2>/dev/null; test ! -e '$TMP_PARENT/$STAMP'" </dev/null \
-    && echo "replica:pull: the server's temporary folder is removed" \
-    || echo "replica:pull: WARNING: could not confirm the server's temporary folder $TMP_PARENT/$STAMP is removed; check it" >&2
+  if ssh "${SSH_OPTS[@]}" "$LOGISX_PROD_SSH" "rm -rf -- '$TMP_PARENT/$STAMP'; rmdir -- '$TMP_PARENT' 2>/dev/null; test ! -e '$TMP_PARENT/$STAMP'" </dev/null; then
+    echo "replica:pull: the server's temporary folder is removed"
+    return 0
+  fi
+  echo "replica:pull: ERROR: could not confirm the server's temporary folder $TMP_PARENT/$STAMP is removed (the next pull removes it once it is 6 hours old)" >&2
+  return 1
 }
 on_exit() {
   rc=$?
-  if [ "$REMOTE_STARTED" = 1 ]; then remote_cleanup; fi
+  if [ "$REMOTE_STARTED" = 1 ] && ! remote_cleanup; then rc=1; fi
   if [ "$rc" != 0 ]; then rm -rf "$INCOMING"; echo "replica:pull: FAILED (exit $rc); the clean snapshot was left as it was. Log: $LOG" >&2; fi
   rm -rf "$LOCK"
   exit "$rc"
@@ -152,7 +160,7 @@ chmod -R go-rwx "$INCOMING"
 log "download: $(( $(date +%s) - T0 )) s"
 
 # --- 4: the server's temporary folder goes now (and in the trap on any failure) --------
-remote_cleanup | tee -a "$LOG"
+remote_cleanup 2>&1 | tee -a "$LOG"
 REMOTE_STARTED=0
 
 # The download is whole before it replaces the clean snapshot.

@@ -2,25 +2,33 @@
 // Replica mode (LOCAL_REPLICA=1, lib/replica-mode.js): a local copy of
 // production that can reach no real person and no real service.
 //
-//   §1 the rules: which settings are secrets, which credentials refuse a start
-//   §2 the start refusals: NODE_ENV=production, a server (pm2, root, a server
-//      path, a hosting host name), any outbound credential, a database, data
-//      folder, Sheets copy, settings file or guard log outside ~/LogisX-replica
-//   §3 server.js, read: replica mode boots before dotenv; every runtime data
-//      path goes through DATA_DIR; every boot-time job asks startsJob(); every
-//      outbound path (Sheets, Drive, mail, IMAP, n8n, HTTP, OCR, ELD and scan
-//      providers, Chromium) is off in a replica; every secret-named variable
-//      the app reads is an outbound credential the boot refuses
+//   §1 the rules: which settings are secrets (by name, by a URL or a value that
+//      looks like a key, by the allowlist of names the app reads), which
+//      credentials and proxy settings refuse a start
+//   §2 the start refusals: anywhere but macOS, without replica:start's marker,
+//      NODE_ENV=production, a server (pm2, root, a server path, a hosting host
+//      name), any outbound credential or proxy setting, a database or data
+//      folder outside the task's working copy, a settings file or guard log
+//      outside ~/LogisX-replica
+//   §3 server.js, read: replica mode boots before dotenv and a .env-only
+//      LOCAL_REPLICA is checked right after it; every runtime data path goes
+//      through DATA_DIR; every boot-time job asks startsJob(); every outbound
+//      path (Sheets, Drive, mail, IMAP, n8n, HTTP, OCR, ELD and scan providers,
+//      Chromium) is off in a replica; every secret-named variable the app reads
+//      is an outbound credential the boot refuses
 //   §4 the network guard refuses and records every non-loopback socket, DNS
-//      query and fetch, and lets loopback through
+//      query and fetch, holds "localhost" to loopback answers, and lets
+//      loopback through
 //   §5 the file guard refuses .env files and Google keys, and nothing else
 //   §6 the banner is on every page, and nothing else is touched
-//   §7 server.js itself, booted in replica mode: refusals exit before
-//      listening; a good boot serves the banner (login page included), starts
-//      no scheduled job, uses the local Sheets copy, never reads the .env or the
-//      key file beside it, and attempts no outbound connection
-//   §8 outside replica mode nothing changes: boot() returns null and patches
-//      nothing, and DATA_DIR is the app directory
+//   §7 server.js itself: refusals exit before listening (a LOCAL_REPLICA set
+//      only by a .env file included). On macOS, where a replica runs, a good
+//      boot serves the banner (login page included), starts no scheduled job,
+//      uses the local Sheets copy, never reads the .env or the key file beside
+//      it, and attempts no outbound connection; elsewhere the boot is refused
+//   §8 outside replica mode nothing changes: boot() returns null for any value
+//      but 1 (a stray one is reported, never an exit) and patches nothing, and
+//      DATA_DIR is the app directory
 //
 // Standalone: node scripts/test-replica-mode.js. Temporary folders only (HOME is
 // pointed at one for the boots), port 0, no network.
@@ -74,6 +82,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		LOGISX_REPLICA_DATA_DIR: work,
 		LOGISX_REPLICA_GUARD_LOG: path.join(root, "logs", "outbound.log"),
 		NODE_ENV: "development",
+		[rules.LAUNCHER_ENV]: rules.LAUNCHER_VALUE,
 	};
 	return { home, root, work, env };
 }
@@ -88,6 +97,17 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	ok("a URL with userinfo carries credentials", rules.isCredentialUrl("https://u:p@h.example.test/x"));
 	ok("a URL with ?api_key= carries credentials", rules.isCredentialUrl("https://h.example.test/x?api_key=1"));
 	ok("a plain URL does not", !rules.isCredentialUrl("https://h.example.test/help?page=2"));
+	ok("a URL with a token-like path segment carries credentials", rules.isCredentialUrl("https://hooks.example.test/services/T01/B02/aB3dE5fG7hI9jK1lM3nO5pQ7"));
+	ok("...a URL with ordinary path words does not", !rules.isCredentialUrl("https://logisx.example.test/help/driver-guide-2026"));
+	ok("a value that looks like a key is one", rules.isBareKeyValue("SOME_SETTING", "AIzaSyD3x9EXAMPLEEXAMPLE12345"));
+	ok("...so is a long hex value", rules.isBareKeyValue("SOME_SETTING", "0123456789abcdef0123456789abcdef"));
+	for (const [n, v] of [["GEMINI_OCR_MODEL", "gemini-2.5-flash"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GMAIL_USER", "dispatch@example.test"], ["ROUTEMATE_POLL_LIVE_SEC", "60"], ["GOOGLE_DRIVE_FOLDER_ID", "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL"]]) {
+		ok(`${n}'s kind of value is not taken for a key`, !rules.isBareKeyValue(n, v));
+	}
+	eq("a setting the app does not read is skipped by the allowlist", rules.classifySetting("SOMETHING_ELSE", "x", { readByApp: new Set(["ROUTEMATE_ENABLED"]) }).rule, "not read by the app");
+	eq("...one it reads is copied", rules.classifySetting("ROUTEMATE_ENABLED", "true", { readByApp: new Set(["ROUTEMATE_ENABLED"]) }).copy, true);
+	eq("namesReadBy lists process.env names", [...rules.namesReadBy(["process.env.A_B || process.env.C"])].sort(), ["A_B", "C"]);
+	eq("proxy settings are found in any case, and NODE_USE_ENV_PROXY", rules.proxySettingsSet({ https_proxy: "x", HTTP_PROXY: "y", All_Proxy: "z", NODE_USE_ENV_PROXY: "1", NO_PROXY: "localhost", PATH: "/bin" }), ["All_Proxy", "HTTP_PROXY", "NODE_USE_ENV_PROXY", "https_proxy"]);
 	eq("outboundCredentialsSet names credentials, ignores empties and SESSION_SECRET", rules.outboundCredentialsSet({ GEMINI_API_KEY: "x", GOOGLE_MAPS_API_KEY: "", SESSION_SECRET: "s", ROUTEMATE_ENABLED: "true", FEED: "https://a:b@x.example.test" }), ["FEED (a URL carrying credentials)", "GEMINI_API_KEY"]);
 	for (const n of rules.OUTBOUND_CREDENTIALS) ok(`${n} refuses a start`, rules.outboundCredentialsSet({ [n]: "x" }).length === 1);
 
@@ -95,7 +115,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	console.log("§2 the start refusals");
 	{
 		const h = replicaHome();
-		const base = { env: h.env, appDir: ROOT, cwd: h.work, uid: 501, hostname: "dev-mac.local", home: h.home };
+		const base = { env: h.env, appDir: ROOT, cwd: h.work, uid: 501, hostname: "dev-mac.local", home: h.home, platform: "darwin" };
 		eq("a well-formed replica may start", replica.refusals(base), []);
 		const has = (name, ctx, re) => {
 			const r = replica.refusals({ ...base, ...ctx });
@@ -123,6 +143,15 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		has("GOOGLE_APPLICATION_CREDENTIALS refuses", { env: { ...h.env, GOOGLE_APPLICATION_CREDENTIALS: "/k.json" } }, /GOOGLE_APPLICATION_CREDENTIALS/);
 		has("BIND_HOST other than loopback refuses", { env: { ...h.env, BIND_HOST: "0.0.0.0" } }, /BIND_HOST is 0\.0\.0\.0/);
 		has("a bad task name refuses", { env: { ...h.env, LOGISX_REPLICA_TASK: "../x" } }, /LOGISX_REPLICA_TASK/);
+		has("anywhere but macOS refuses", { platform: "linux" }, /a replica runs on a developer Mac \(macOS\) only/);
+		const noMarker = { ...h.env };
+		delete noMarker[rules.LAUNCHER_ENV];
+		has("a start without replica:start's marker refuses", { env: noMarker }, /not started by replica:start/);
+		has("a proxy setting refuses (any case)", { env: { ...h.env, https_proxy: "http://127.0.0.1:9" } }, /proxy settings are set: https_proxy/);
+		has("NODE_USE_ENV_PROXY refuses", { env: { ...h.env, NODE_USE_ENV_PROXY: "1" } }, /proxy settings are set: NODE_USE_ENV_PROXY/);
+		has("a database in the clean snapshot refuses (only the task's working copy)", { env: { ...h.env, DATABASE_PATH: path.join(h.root, "clean", "app.db") } }, /DATABASE_PATH .* is not under .*work\/t1 \(the task's working copy\)/);
+		has("a data folder that is the whole replica folder refuses", { env: { ...h.env, LOGISX_REPLICA_DATA_DIR: h.root } }, /LOGISX_REPLICA_DATA_DIR .* is not under .*work\/t1/);
+		has("another task's working copy refuses", { env: { ...h.env, DATABASE_PATH: path.join(h.root, "work", "other", "app.db") } }, /DATABASE_PATH .* is not under .*work\/t1/);
 		eq("SESSION_SECRET alone is accepted (it reaches nothing)", replica.refusals({ ...base, env: { ...h.env, SESSION_SECRET: "x" } }), []);
 		eq("BIND_HOST=127.0.0.1 is accepted", replica.refusals({ ...base, env: { ...h.env, BIND_HOST: "127.0.0.1" } }), []);
 	}
@@ -133,6 +162,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		const at = (s) => SRC.indexOf(s);
 		const bootAt = at('const REPLICA = require("./lib/replica-mode").boot({ appDir: __dirname });');
 		ok("replica mode boots after the umask and before dotenv", bootAt > at("process.umask(BOOT_UMASK)") && bootAt < at('require("dotenv").config();'));
+		ok("a LOCAL_REPLICA that only a .env file set is checked right after dotenv", SRC.includes('require("dotenv").config();\n// A LOCAL_REPLICA that only a .env file set is refused here: replica mode was\n// decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).\nrequire("./lib/replica-mode").checkDotenvFlag(process.env);\n'));
 		ok("...and before every other module", bootAt < SRC.search(/^const express = require\("express"\);/m));
 		ok("server.js's fetch is the replica's in replica mode", /^const fetch = REPLICA \? REPLICA\.fetch : globalThis\.fetch;$/m.test(SRC));
 		ok("startsJob() always says yes outside replica mode", /function startsJob\(name\) \{\n\treturn REPLICA \? REPLICA\.jobNotStarted\(name\) : true;\n\}/.test(SRC));
@@ -218,7 +248,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		ok("every Gemini extraction caller checks GEMINI_API_KEY (refused at a replica's start)", geminiCallers >= 3 && (SRC.match(/if \(!GEMINI_API_KEY\) return res\.status\(503\)/g) || []).length >= 4 && /const geminiExtract = GEMINI_API_KEY\n/.test(SRC));
 		ok("receipt OCR (a child process that downloads its model) is off in a replica", /function queueReceiptOcr\(documentId, imageBuffer\) \{\n(\t\/\/[^\n]*\n)*\tif \(REPLICA\) \{ REPLICA\.off\("receipt OCR"\); return false; \}/.test(SRC));
 		const pdf = fs.readFileSync(path.join(ROOT, "lib", "pdf-browser.js"), "utf8");
-		ok("Chromium (PDFs) starts unable to reach anything in a replica", /process\.env\.LOCAL_REPLICA === "1" \? require\("\.\/replica-rules"\)\.CHROMIUM_OFFLINE_ARGS : \[\]/.test(pdf));
+		ok("Chromium (PDFs) starts unable to reach anything in a replica, as boot() decided (never the environment)", /require\("\.\/replica-mode"\)\.active\(\) \? require\("\.\/replica-rules"\)\.CHROMIUM_OFFLINE_ARGS : \[\]/.test(pdf));
 		ok("...those arguments send every request to a closed loopback proxy and resolve no name", rules.CHROMIUM_OFFLINE_ARGS.includes("--proxy-server=http://127.0.0.1:9") && rules.CHROMIUM_OFFLINE_ARGS.some((a) => /^--host-resolver-rules=MAP \* ~NOTFOUND/.test(a)));
 		ok("the banner is mounted ahead of the static files", at("if (REPLICA) app.use(REPLICA.bannerMiddleware(") > 0 && at("if (REPLICA) app.use(REPLICA.bannerMiddleware(") < at("app.use(express.static(clientDistPath));"));
 
@@ -262,19 +292,26 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 				await settle("loopback localhost", (d) => http.get("http://localhost:" + port + "/", (r) => { r.resume(); d(r.statusCode); }).on("error", (e) => d(e.code)));
 				await settle("loopback fetch", (d) => fetch("http://127.0.0.1:" + port + "/").then((r) => d(r.status), (e) => d("ERR " + (e.cause && e.cause.code))));
 				await settle("loopback net", (d) => { const s = net.connect(port, "127.0.0.1", () => { s.destroy(); d("CONNECTED"); }); s.on("error", (e) => d(e.code)); });
+				await settle("dns.lookup name.localhost", (d) => dns.lookup("guard.localhost", (e) => d(e ? e.code : "RESOLVED")));
+				await settle("dns.lookup localhost", (d) => dns.lookup("localhost", { all: true }, (e, a) => d(e ? e.code : (a.every((x) => /^127\.|^::1$/.test(x.address)) ? "LOOPBACK" : "OTHER"))));
+				await settle("loopback via localhost", (d) => http.get("http://localhost:" + port + "/", (r) => { r.resume(); d(r.statusCode); }).on("error", (e) => d(e.code)));
 				srv.close();
 				process.stdout.write(JSON.stringify(results));
 			})();`;
 		const r = spawnSync(process.execPath, ["-e", child], { encoding: "utf8", timeout: 45000 });
 		let res = {};
 		try { res = JSON.parse(r.stdout); } catch { ok("the guard child ran", false, r.stderr.slice(0, 400)); }
-		for (const k of ["net.connect", "tls.connect", "http.get", "https.request", "fetch", "dns.lookup", "dns.promises.lookup", "dns.resolve4", "Resolver.resolve4", "dns.promises.resolveTxt"]) {
+		for (const k of ["net.connect", "tls.connect", "http.get", "https.request", "fetch", "dns.lookup", "dns.promises.lookup", "dns.resolve4", "Resolver.resolve4", "dns.promises.resolveTxt", "dns.lookup name.localhost"]) {
 			eq(`${k} to the outside is refused before any packet`, res[k], "REPLICA_OUTBOUND_REFUSED");
 		}
 		for (const k of ["loopback http", "loopback localhost", "loopback fetch"]) eq(`${k} goes through`, res[k], 200);
 		eq("loopback net.connect goes through", res["loopback net"], "CONNECTED");
+		eq("localhost resolves, to loopback only", res["dns.lookup localhost"], "LOOPBACK");
+		eq("a connection by the name localhost goes through", res["loopback via localhost"], 200);
+		ok("a localhost answer that is not loopback is caught", !!replica.nonLoopbackAnswer([{ address: "127.0.0.1", family: 4 }, { address: "203.0.113.9", family: 4 }]) && !replica.nonLoopbackAnswer([{ address: "127.0.0.1", family: 4 }, { address: "::1", family: 6 }]) && !!replica.nonLoopbackAnswer("10.0.0.1", 4));
+		ok("only 127.0.0.0/8 and ::1 are loopback addresses", ["127.0.0.1", "127.9.8.7", "::1", "::ffff:127.0.0.1"].every(replica.isLoopbackAddress) && !["10.0.0.1", "0.0.0.0", "::", "localhost", "a.localhost"].some(replica.isLoopbackAddress));
 		const entries = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-		ok("every refused attempt is in the guard log (and nothing else is)", entries.length >= 10 && entries.every((e) => /192\.0\.2\.1|guard-test\.invalid/.test(e.target)), entries.map((e) => e.target));
+		ok("every refused attempt is in the guard log (and nothing else is)", entries.length >= 10 && entries.every((e) => /192\.0\.2\.1|guard-test\.invalid|guard\.localhost/.test(e.target)), entries.map((e) => e.target));
 		ok("...with what asked: the via and the caller", entries.every((e) => e.via && e.caller));
 		ok("...never a URL's path or query", !fs.readFileSync(log, "utf8").includes("key=x"));
 		eq("the guard log is private (0600)", (fs.statSync(log).mode & 0o777).toString(8), "600");
@@ -369,9 +406,26 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	refused("a credential in the settings file: refused before listening", (e, h) => { fs.writeFileSync(path.join(h.root, "settings.env"), "GMAIL_APP_PASSWORD='x'\n"); }, /outbound credentials are set: GMAIL_APP_PASSWORD/);
 	refused("a database outside ~/LogisX-replica: refused before listening", (e) => { e.DATABASE_PATH = path.join(tmp("elsewhere-"), "app.db"); }, /DATABASE_PATH .* is not under/);
 	refused("pm2 in the environment: refused before listening", (e) => { e.pm_id = "7"; }, /running under pm2/);
-	refused("LOCAL_REPLICA set to anything but 1: refused", (e) => { e.LOCAL_REPLICA = "true"; }, /LOCAL_REPLICA must be 1/);
-
+	refused("a start without replica:start's marker: refused before listening", (e) => { delete e[rules.LAUNCHER_ENV]; }, /not started by replica:start/);
+	refused("a proxy setting: refused before listening", (e) => { e.HTTPS_PROXY = "http://127.0.0.1:9"; }, /proxy settings are set: HTTPS_PROXY/);
+	refused("a database in the clean snapshot: refused before listening", (e, h) => { e.DATABASE_PATH = path.join(h.root, "clean", "app.db"); }, /DATABASE_PATH .* is not under .*work\/t1/);
+	refused("a settings value that looks like a key: refused before listening", (e, h) => { fs.writeFileSync(path.join(h.root, "settings.env"), "SOME_SETTING='AIzaSyD3x9EXAMPLEEXAMPLE12345'\n"); }, /settings file holds SOME_SETTING, which a replica does not take \(secret: value looks like a key\)/);
+	if (process.platform !== "darwin") {
+		refused("off macOS (this machine): refused before listening", () => {}, /a replica runs on a developer Mac \(macOS\) only/);
+	}
 	{
+		// Replica mode is decided before dotenv: a LOCAL_REPLICA that only a .env
+		// file sets must stop a normal run, which would otherwise hold that file's
+		// credentials while someone believes it is a replica.
+		const d = tmp("replica-dotenv-");
+		fs.writeFileSync(path.join(d, ".env"), "LOCAL_REPLICA=1\nGEMINI_API_KEY=from-the-repo-env\n");
+		const r = spawnSync(process.execPath, [SERVER], { cwd: d, env: { PATH: process.env.PATH, HOME: tmp("replica-home-"), PORT: "0" }, encoding: "utf8", timeout: 20000 });
+		ok("a LOCAL_REPLICA set only by a .env file stops a normal run before it listens", r.status === 1 && /LOCAL_REPLICA was set by a \.env file/.test(r.stderr) && !/Server running/.test(r.stdout), { status: r.status, err: r.stderr.slice(0, 300) });
+	}
+
+	if (process.platform === "darwin") {
+		// A replica runs on macOS only, so the boot itself is exercised there; off
+		// macOS the refusal above is what this section asserts.
 		const settings = [
 			"SPREADSHEET_ID='replica-test-main'",
 			"ARCHIVE_SPREADSHEET_ID='replica-test-archive'",
@@ -428,15 +482,18 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 			const dotenv = require(${JSON.stringify(path.join(ROOT, "node_modules", "dotenv"))});
 			const config = dotenv.config;
 			const replica = require(${JSON.stringify(MODE)});
-			const r = [replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: {} }), replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: { LOCAL_REPLICA: "0" } }), replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: { LOCAL_REPLICA: "" } })];
+			const r = ["", "0", undefined, "true", "yes"].map((v) => replica.boot({ appDir: ${JSON.stringify(ROOT)}, env: v === undefined ? {} : { LOCAL_REPLICA: v } }));
 			const after = [net.Socket.prototype.connect, dns.lookup, dns.resolve4, globalThis.fetch, fs.readFileSync, fs.promises.readFile];
-			process.stdout.write(JSON.stringify({ nulls: r.every((x) => x === null), same: before.every((f, i) => f === after[i]), dotenv: dotenv.config === config }));`;
+			replica.checkDotenvFlag({ LOCAL_REPLICA: "0" });
+			process.stdout.write(JSON.stringify({ nulls: r.every((x) => x === null), same: before.every((f, i) => f === after[i]), dotenv: dotenv.config === config, active: replica.active() }));`;
 		const r = spawnSync(process.execPath, ["-e", child], { encoding: "utf8", timeout: 20000 });
 		let res = {};
 		try { res = JSON.parse(r.stdout); } catch { ok("the child ran", false, r.stderr.slice(0, 300)); }
-		eq("boot() is null when LOCAL_REPLICA is unset, empty or 0", res.nulls, true);
+		eq("boot() is null when LOCAL_REPLICA is unset, empty, 0, or any value but 1", res.nulls, true);
+		ok("...a stray value is reported, never a reason to stop the process", /LOCAL_REPLICA is "true", not 1: replica mode is OFF/.test(r.stderr) && r.status === 0, r.stderr.slice(0, 200));
 		eq("...and patches no socket, DNS, fetch or file function", res.same, true);
 		eq("...and leaves dotenv alone", res.dotenv, true);
+		eq("...and the PDF browser is told replica mode is off", res.active, false);
 		const dataDirLine = SRC.match(/^const DATA_DIR = (.*);$/m)[1];
 		eq("DATA_DIR evaluates to the app directory when REPLICA is null", new Function("REPLICA", "__dirname", `return ${dataDirLine};`)(null, "/app"), "/app");
 		eq("startsJob() evaluates to true when REPLICA is null", new Function("REPLICA", `${SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0]}\nreturn startsJob("x");`)(null), true);

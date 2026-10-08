@@ -9,7 +9,8 @@
 //   §2 reads: A1 ranges as the app writes them, Google's trimming, FORMULA render
 //   §3 writes: update, batchUpdate, append, row deletes; each saved to the
 //      working copy file and nowhere else; null skips a cell as the API does
-//   §4 errors shaped like the API's (unknown spreadsheet, unknown tab)
+//   §4 errors shaped like the API's (unknown spreadsheet, unknown tab), and a
+//      batch refused whole: no request of a refused batch is applied
 //   §5 isolation: no googleapis module is loaded and nothing but the file is written
 //
 // Standalone: node scripts/test-replica-sheets.js. No server, no network.
@@ -143,6 +144,28 @@ const onDisk = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 	eq("an unknown tab is Google's 400 'Unable to parse range'", [e400 && e400.code, /Unable to parse range/.test(e400 && e400.message)], [400, true]);
 	const eReq = await errOf(s.spreadsheets.batchUpdate({ spreadsheetId: MAIN, requestBody: { requests: [{ addSheet: { properties: { title: "X" } } }] } }));
 	ok("a request kind the copy does not support is refused, never ignored", eReq && eReq.code === 400);
+	// A batch is applied whole or not at all, as Google applies one.
+	const before = fs.readFileSync(file, "utf8");
+	const rowsBefore = (await get("Job Tracking!A:A")).values;
+	const eHalf = await errOf(s.spreadsheets.batchUpdate({ spreadsheetId: MAIN, requestBody: { requests: [
+		{ deleteDimension: { range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: 2 } } },
+		{ addSheet: { properties: { title: "X" } } },
+	] } }));
+	ok("a batch with one refused request is refused...", eHalf && eHalf.code === 400);
+	eq("...and its valid requests are not applied (no half-applied batch)", (await get("Job Tracking!A:A")).values, rowsBefore);
+	const eBad = await errOf(s.spreadsheets.batchUpdate({ spreadsheetId: MAIN, requestBody: { requests: [
+		{ deleteDimension: { range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: 2 } } },
+		{ deleteDimension: { range: { sheetId: 99, dimension: "ROWS", startIndex: 1, endIndex: 2 } } },
+	] } }));
+	ok("an unknown sheet id anywhere in a batch refuses the whole batch", eBad && eBad.code === 400 && JSON.stringify((await get("Job Tracking!A:A")).values) === JSON.stringify(rowsBefore));
+	const eInv = await errOf(s.spreadsheets.batchUpdate({ spreadsheetId: MAIN, requestBody: { requests: [{ deleteDimension: { range: { sheetId: 0, dimension: "ROWS", startIndex: 3, endIndex: 2 } } }] } }));
+	ok("an inverted row range is refused", eInv && eInv.code === 400);
+	const eVals = await errOf(s.spreadsheets.values.batchUpdate({ spreadsheetId: MAIN, requestBody: { valueInputOption: "RAW", data: [
+		{ range: "Job Tracking!C2", values: [["SHOULD NOT LAND"]] },
+		{ range: "No Such Tab!A1", values: [["x"]] },
+	] } }));
+	ok("values.batchUpdate with one unknown range writes none of its ranges", eVals && eVals.code === 400 && !JSON.stringify((await get("Job Tracking")).values).includes("SHOULD NOT LAND"));
+	eq("...and the working copy file is untouched by refused batches", fs.readFileSync(file, "utf8"), before);
 	let badFormat = null;
 	const { file: f2 } = workingCopy();
 	fs.writeFileSync(f2, JSON.stringify({ format: 99 }));

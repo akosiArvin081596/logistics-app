@@ -30,7 +30,14 @@ async function stop() {
 	const server = C.runningServer(task);
 	if (!server) {
 		const r = C.readJson(rec);
-		return console.log(`replica: the recorded pid ${r.pid} is not this task's server (not running, or now another process); nothing signalled`);
+		// A live process that cannot be shown to be this task's server may still
+		// be using the working copy: nothing is signalled and nothing is deleted.
+		if (Number.isInteger(r.pid) && C.alive(r.pid)) {
+			C.fail(`the recorded pid ${r.pid} is running but cannot be verified as this task's server ` +
+				`(command: ${C.commandOf(r.pid) || "unknown"}; working directory: ${C.cwdOf(r.pid) || "unknown"}). ` +
+				"Nothing was signalled and the working copy was kept; stop that process yourself if it is the replica, then run this again.");
+		}
+		return console.log(`replica: the recorded pid ${r.pid} is not running; nothing to stop`);
 	}
 	process.kill(server.pid, "SIGTERM");
 	for (let i = 0; i < 30 && C.alive(server.pid); i++) await sleep(500);

@@ -30,6 +30,7 @@ const path = require("path");
 const http = require("http");
 const { execFileSync, spawn } = require("child_process");
 const C = require("./common");
+const rules = require("../../lib/replica-rules");
 
 const argv = process.argv.slice(2);
 const known = new Set(["--task", "--port", "--prod-commit", "--fresh", "-h", "--help"]);
@@ -189,6 +190,7 @@ async function main() {
 		TZ: tz,
 		NODE_ENV: "development",
 		LOCAL_REPLICA: "1",
+		[rules.LAUNCHER_ENV]: rules.LAUNCHER_VALUE,
 		LOGISX_REPLICA_TASK: task,
 		DATABASE_PATH: path.join(work, "app.db"),
 		LOGISX_REPLICA_DATA_DIR: work,
