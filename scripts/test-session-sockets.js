@@ -417,10 +417,13 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	const normalizeDriverName = new Function(`${NORMALIZE_SRC}\nreturn normalizeDriverName;`)();
 	new Function("app", "requireRole", "db", "getSheets", "SPREADSHEET_ID", "auditText", "recordPeriodRefusal", "userUpdateLockBlockers",
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
-		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", sources.updateUser)(
+		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
+		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
-		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => []);
+		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
+		// The directory-carrier lock (its own subject is scripts/test-account-directory-row-lock.js): nothing to judge.
+		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {});
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions

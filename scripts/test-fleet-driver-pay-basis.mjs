@@ -91,7 +91,9 @@ console.log('§3 the Fleet Breakdown prints it')
   const vue = read('client', 'src', 'components', 'investor', 'FleetBreakdownSection.vue')
   ok('§3 FleetBreakdownSection.vue imports truckDriverPayBasis from lib/driverPay',
     /^import \{ truckDriverPayBasis \} from '\.\.\/\.\.\/lib\/driverPay'$/m.test(vue))
-  ok('§3 the Driver Pay hint is driverBasis(t)', vue.includes('<span class="bd-hint"> ({{ driverBasis(t) }})</span>'))
+  // Under the Driver Pay label since 2026-10-08 (bd-sub), so the value column
+  // holds only the figure.
+  ok('§3 the Driver Pay hint is driverBasis(t)', /<span class="bd-hint[^"]*">\s*\(\{\{ driverBasis\(t\) \}\}\)<\/span>/.test(vue))
   ok('§3 ...which hands the pay earned on that truck (perTruckData[unit].driverPay) to truckDriverPayBasis()',
     vue.includes('function driverBasis(t) { return truckDriverPayBasis(perUnit(t).driverPay) }'))
   ok('§3 no template prints "days x $" itself', !/days x \$\{\{/.test(vue))

@@ -33,7 +33,8 @@
  *   §3 a rename is judged on both names' histories
  *   §4 Job Tracking unreadable: a pay edit is held over every finalized month,
  *      a Dispatcher's pay change is still the audited 403, and a contact edit
- *      does not need it
+ *      does not need it; a delete of a row with terms gets the PUT's 409 (not a
+ *      500) and deletes nothing (2026-10-08)
  *   §5 period locks unreadable: held as before
  *
  * Pure: no server, no app.db, no network.
@@ -347,6 +348,28 @@ const got = (r) => `got ${r.status} ${(r.body || {}).code || ""} ${periodsOf(r).
 		const { db, put } = reset({ jtFails: true });
 		const r = await put(1, { PhoneNumber: "555-0199" });
 		check(`§4 a phone-number edit does not need it: 200 (${got(r)})`, r.status === 200 && rowById(db, 1).phone === "555-0199");
+	}
+	{
+		// The delete answers as the PUT does (2026-10-08): the history reads as
+		// every finalized month, so a row with terms of its own is held with the
+		// PUT's 409, not a 500, and nothing is deleted or unlinked.
+		const { db, put, del } = reset({ jtFails: true });
+		db.prepare("INSERT INTO legal_documents (driver_id, file_url) VALUES (2, '/uploads/doc.pdf')").run();
+		const before = JSON.stringify(rowById(db, 2));
+		const edit = await put(2, { PayPercentage: "30" });
+		const r = await del(2);
+		check(`§4 deleting Pct Sept (20%): 409 PERIOD_FINALIZED over every finalized month, as the PUT answers (${got(r)}; PUT ${got(edit)})`,
+			r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(periodsOf(r)) === JSON.stringify(LOCKED) &&
+			r.status === edit.status && r.body.code === edit.body.code && JSON.stringify(periodsOf(r)) === JSON.stringify(periodsOf(edit)));
+		check("§4 …the same refusal, worded for a delete, and audited as delete_driver_blocked",
+			/^Cannot delete Pct Sept/.test((S.refusals[1] || {}).what || "") && (S.refusals[1].audit || {}).action === "delete_driver_blocked");
+		check("§4 …nothing written: the row and its documents are still there",
+			JSON.stringify(rowById(db, 2)) === before && db.prepare("SELECT COUNT(*) AS n FROM legal_documents WHERE driver_id = 2").get().n === 1);
+	}
+	{
+		const { db, del } = reset({ jtFails: true });
+		const r = await del(4);
+		check(`§4 deleting a row at the defaults does not need it: 200 (${got(r)})`, r.status === 200 && !rowById(db, 4));
 	}
 
 	console.log("§5 period locks unreadable");

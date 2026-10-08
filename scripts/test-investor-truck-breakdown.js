@@ -30,6 +30,13 @@
  *   §3 receipts follow the truck they name, else the driver's assigned truck
  *   §4 fixed costs come from the server and the parts add up
  *   §5 a day whose loads name two trucks counts on one of them
+ *   §6 a day counts on the truck named by its first load that names one; only a
+ *      day no load names a truck for goes to the assigned truck; a closed month's
+ *      days stay where they were (2026-10-08)
+ *   §7 the breakdown's bottom lines are the server's: Monthly Net, Est. Annual
+ *      Take-Home (Monthly Net x 12), each truck's own months, ROI and the fleet
+ *      totals; a Super Admin previewing the investor gets the same figures, and
+ *      with no investor in view the scope says "fleet" (2026-10-08)
  *
  * Pure: no server, no app.db, no network, no Sheets.
  *   node scripts/test-investor-truck-breakdown.js
@@ -86,6 +93,7 @@ const FNS = [
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "sanitizeDetails", "getLoadMilesIndex",
+	"periodLockStmt", "isLocked",
 ];
 const ROUTE = liftBetween('\napp.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {', "\n});\n", "GET /api/investor");
 const MODULE = [
@@ -158,10 +166,13 @@ function seed(db) {
 	e.run("Pat Percent", 50, "2026-08-20", "");
 }
 
-async function investorView(rows = ROWS) {
+// `opts.seed(db)` adds to the fixture; `opts.session` and `opts.query` make the
+// request (the investor by default).
+async function investorView(rows = ROWS, opts = {}) {
 	const db = new Database(":memory:");
 	db.exec(DDL);
 	seed(db);
+	if (opts.seed) opts.seed(db);
 	let handler = null;
 	const passthrough = (req, res, next) => (next ? next() : undefined);
 	const deps = {
@@ -183,7 +194,7 @@ async function investorView(rows = ROWS) {
 	};
 	new Function(...Object.keys(deps), MODULE)(...Object.values(deps));
 	const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
-	await handler({ session: { user: { id: 5, role: "Investor", username: "inv5" } }, query: {}, params: {}, headers: {} }, res);
+	await handler({ session: { user: opts.session || { id: 5, role: "Investor", username: "inv5" } }, query: opts.query || {}, params: {}, headers: {} }, res);
 	return res;
 }
 
@@ -248,6 +259,79 @@ async function investorView(rows = ROWS) {
 			dee201.totalPay === dee201.activeDays * 250 && dee203.totalPay === dee203.activeDays * 250 && dee201.activeDays === 4);
 		check(`§5 …while the load's revenue counts on the truck it names: 201 $2,400, $1,200 a month (got ${(p["201"] || {}).unitMonthlyGross})`,
 			(p["201"] || {}).unitMonthlyGross === 1200 && (p["201"] || {}).loadCount === 3);
+	}
+
+	console.log("§6 a day counts on the truck named by its first load that names one");
+	{
+		// August 25: Dee's first load that day (in sheet order) names no truck, the
+		// second names 201. The day is 201's; only a day no load names a truck for
+		// goes to Dee's assigned truck (202).
+		const AUG25 = [
+			jt("7", "Dee Dayrate", "8/25/2026 8:00", "8/25/2026 18:00", "8/24/2026", "$300.00", ""),
+			jt("8", "Dee Dayrate", "8/25/2026 12:00", "8/25/2026 20:00", "8/24/2026", "$200.00", "201"),
+		];
+		const deeOn = (p, unit) => (((p[unit] || {}).driverPay || { drivers: [] }).drivers.find((x) => x.name === "Dee Dayrate") || {});
+		const r6 = await investorView([...ROWS, ...AUG25]);
+		const p = (r6.body && r6.body.production && r6.body.production.perTruckData) || {};
+		check(`§6 the day goes to 201, named by its second load: Dee has 5 days on 201, $1,250 (got ${deeOn(p, "201").activeDays}, ${deeOn(p, "201").totalPay})`,
+			deeOn(p, "201").activeDays === 5 && deeOn(p, "201").totalPay === 1250);
+		check(`§6 …and none on 202, Dee's assigned truck, which hauled nothing (got ${show((p["202"] || {}).driverPay)})`, (p["202"] || {}).driverPay === null);
+		check(`§6 …the load naming no truck still counts its revenue on 202 (got ${(p["202"] || {}).unitMonthlyGross} a month, ${(p["202"] || {}).loadCount} load)`,
+			(p["202"] || {}).unitMonthlyGross === 150 && (p["202"] || {}).loadCount === 1);
+		// A day whose only load names no truck: the assigned truck, as before.
+		const r6b = await investorView([...ROWS, AUG25[0]]);
+		const pb = (r6b.body && r6b.body.production && r6b.body.production.perTruckData) || {};
+		check(`§6 a day whose only load names no truck counts on 202, Dee's assigned truck (got ${deeOn(pb, "202").activeDays} day)`, deeOn(pb, "202").activeDays === 1);
+		// August closed: the day stays where the first load put it, as recorded.
+		const r6c = await investorView([...ROWS, ...AUG25], { seed: (db) => db.prepare("INSERT INTO period_locks (period, status) VALUES ('2026-08', 'locked')").run() });
+		const pc = (r6c.body && r6c.body.production && r6c.body.production.perTruckData) || {};
+		check(`§6 with August closed the day stays on 202, its first load's (got 201 ${deeOn(pc, "201").activeDays}, 202 ${deeOn(pc, "202").activeDays}; ${r6c.statusCode})`,
+			r6c.statusCode === 200 && deeOn(pc, "201").activeDays === 4 && deeOn(pc, "202").activeDays === 1);
+	}
+
+	console.log("§7 the breakdown's bottom lines come from the server");
+	{
+		// 204 went into service in September: one month of its own inside the
+		// fleet's two (July and August).
+		const seed204 = (db) => db.prepare("INSERT INTO trucks (id, unit_number, owner_id, insurance_monthly, purchase_price, in_service_date) VALUES (4, '204', 5, 1000, 0, '2026-09-01')").run();
+		const r7 = await investorView(ROWS, { seed: seed204 });
+		const prod = (r7.body && r7.body.production) || {};
+		const p = prod.perTruckData || {};
+		for (const unit of ["201", "202", "203", "204"]) {
+			const t = p[unit] || {};
+			check(`§7 ${unit}: Monthly Net is revenue less costs, $${t.unitMonthlyGross} − $${t.unitMonthlyExpenses} (got ${t.unitMonthlyNet})`,
+				Number.isFinite(t.unitMonthlyNet) && t.unitMonthlyNet === t.unitMonthlyGross - t.unitMonthlyExpenses);
+			check(`§7 ${unit}: Est. Annual Take-Home is Monthly Net x 12 (got ${t.unitEstAnnualTakeHome})`,
+				Number.isFinite(t.unitEstAnnualTakeHome) && t.unitEstAnnualTakeHome === t.unitMonthlyNet * 12);
+		}
+		check(`§7 201: Monthly Net −$550 ($1,000 − $500 pay − $1,000 fixed − $50 trip), −$6,600 a year (got ${(p["201"] || {}).unitMonthlyNet}, ${(p["201"] || {}).unitEstAnnualTakeHome})`,
+			(p["201"] || {}).unitMonthlyNet === -550 && (p["201"] || {}).unitEstAnnualTakeHome === -6600);
+		check(`§7 each truck carries the months its figures are averaged on: 201 2, 204 1 (in service in September), the fleet 2 (got ${(p["201"] || {}).months}, ${(p["204"] || {}).months}, ${prod.monthsOfOperation})`,
+			(p["201"] || {}).months === 2 && (p["204"] || {}).months === 1 && prod.monthsOfOperation === 2);
+		const roiOf = (t) => (t.estAnnualInvestorRevenue === null ? null : (t.purchasePrice > 0 ? Math.round((t.estAnnualInvestorRevenue / t.purchasePrice) * 1000) / 10 : 0));
+		check(`§7 each truck carries its own purchase price and the ROI over it: 201 $80,000 (got ${(p["201"] || {}).purchasePrice}, ROI ${(p["201"] || {}).investorROI})`,
+			(p["201"] || {}).purchasePrice === 80000 && ["201", "202", "203", "204"].every((u) => (p[u] || {}).investorROI === roiOf(p[u] || {})));
+		check(`§7 204 has no recorded price: ROI 0 or no projection, not a ratio over the fleet's price (got ${(p["204"] || {}).investorROI})`,
+			(p["204"] || {}).investorROI === 0 || (p["204"] || {}).investorROI === null);
+		const projected = Object.values(p).filter((t) => t.estAnnualInvestorRevenue !== null).reduce((s, t) => s + t.estAnnualInvestorRevenue, 0);
+		check(`§7 the Fleet Total is the trucks with a projection, summed: $${projected} (got ${prod.fleetEstAnnualInvestorRevenue})`,
+			prod.fleetEstAnnualInvestorRevenue === projected);
+		check(`§7 the Fleet ROI is that total over the fleet's $240,000 (got ${prod.fleetInvestorROI})`,
+			prod.fleetInvestorROI === Math.round((projected / 240000) * 1000) / 10 && prod.totalPurchasePrice === 240000);
+		check(`§7 the investor's own view is scoped "investor" (got ${JSON.stringify(prod.perTruckScope)})`, prod.perTruckScope === "investor");
+
+		// The same truck and period, seen by a Super Admin previewing investor 5.
+		const admin = { id: 1, role: "Super Admin", username: "super_admin" };
+		const preview = await investorView(ROWS, { seed: seed204, session: admin, query: { as_user_id: "5" } });
+		const pp = (preview.body && preview.body.production) || {};
+		const same = (k) => JSON.stringify(pp[k]) === JSON.stringify(prod[k]);
+		check(`§7 a Super Admin previewing the investor gets the same per-truck figures (${preview.statusCode})`,
+			preview.statusCode === 200 && same("perTruckData") && Object.keys(pp.perTruckData || {}).length === 4);
+		check("§7 …and the same fleet figures and months", ["fleetEstAnnualInvestorRevenue", "fleetInvestorROI", "monthsOfOperation", "totalPurchasePrice", "perTruckScope"].every(same));
+		const fleet = await investorView(ROWS, { seed: seed204, session: admin });
+		const fp = (fleet.body && fleet.body.production) || {};
+		check(`§7 a Super Admin with no investor in view: scope "fleet", no per-truck figures (got ${JSON.stringify(fp.perTruckScope)}, ${Object.keys(fp.perTruckData || {}).length} trucks)`,
+			fp.perTruckScope === "fleet" && Object.keys(fp.perTruckData || {}).length === 0);
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

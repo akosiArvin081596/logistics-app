@@ -34,6 +34,9 @@
  *   §2 onboarding completion (all documents signed)
  *   §3 drug-test completion (fully onboarded, no row yet)
  *   §4 onboarding completion while Job Tracking cannot be read
+ *   §5 PUT /api/users/:id: the carrier its directory sync writes (the account's
+ *      company name) is held the same way, with the same 409 as POST /api/users
+ *      (accountDirectorySync() / accountDirectorySyncLock(), 2026-10-08)
  *
  * Pure: no server, no app.db, no network.
  *   node scripts/test-account-directory-row-lock.js
@@ -79,11 +82,12 @@ function liftConst(head, close = null) {
 	const end = close ? SRC.indexOf(close, a) : SRC.indexOf(";\n", a);
 	return SRC.slice(a, end + (close ? close.length : 1));
 }
-const USERS_ROUTE = (() => {
-	const head = 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {';
-	const a = findOnce(`\n${head}`, "registration of POST /api/users");
+function liftRoute(head, what) {
+	const a = findOnce(`\n${head}`, `registration of ${what}`);
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
-})();
+}
+const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
+const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {', "PUT /api/users/:id");
 
 const MODULE_SRC = [
 	liftConst("const REFUSAL_AUDIT_WINDOW_MS = "),
@@ -118,11 +122,13 @@ const MODULE_SRC = [
 	liftNew("accountDirectoryRowLock"),
 	liftNew("accountDirectoryCarrier"),
 	liftNew("onboardingAddsJudgedRow"),
+	liftNew("accountDirectorySync"),
+	liftNew("accountDirectorySyncLock"),
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("checkAndCompleteOnboarding", "async function"),
 ].join("\n");
-const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
-	...["accountDirectoryRowJudged", "accountDirectoryRowLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
+const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
+	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountDirectorySync", "accountDirectorySyncLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
 
 const LOCKED = ["2026-06", "2026-07", "2026-08"];
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
@@ -195,6 +201,33 @@ function makeApp() {
 	const names = Object.keys(env);
 	new Function(...names, USERS_ROUTE)(...names.map((k) => env[k]));
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
+	// PUT /api/users/:id with the same month-end lock and directory sync. Its
+	// rename machinery (the sheet count, the cascade, the merge scan) and its own
+	// lock guard are stubbed to "nothing blocks": §5 edits no driver name.
+	let putHandler = null;
+	const putEnv = {
+		...env,
+		app: { put: (p, guard, h) => { putHandler = h; } },
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [["Load ID", "Driver"]] } }) } } }),
+		SPREADSHEET_ID: "not-a-sheet",
+		getJobTrackingCached: async () => { S.jtReads++; if (S.jtFails) throw new Error("Job Tracking could not be read"); return JT; },
+		recordPeriodRefusal: (audit, code) => S.recorded.push({ audit, code }),
+		userUpdateLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		periodLabel: (p) => p,
+		driverRenameMergeScan: () => ({ mergeTargets: {}, mergeRows: 0 }),
+		applyDriverRenameSqlite: () => ({ counts: {} }),
+		purgeUserSessions: () => 0,
+		refreshOwnSession: () => true,
+	};
+	const putNames = Object.keys(putEnv);
+	new Function(...putNames, USER_PUT_ROUTE)(...putNames.map((k) => putEnv[k]));
+	if (typeof putHandler !== "function") die("the lifted PUT /api/users/:id did not register a handler");
+	const updateUser = async (id, body) => {
+		const out = { status: 200, body: null };
+		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+		await putHandler({ session: { user: SUPER }, sessionID: "sid", params: { id: String(id) }, query: {}, body }, res);
+		return out;
+	};
 	const createUser = async (body) => {
 		const out = { status: 200, body: null };
 		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
@@ -210,7 +243,7 @@ function makeApp() {
 		for (const d of docs) db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed) VALUES (?, ?, ?, 1)").run(id, d.key || d.docKey || "k", d.name || "Doc");
 	};
 	const complete = (id) => m.checkAndCompleteOnboarding(id, { session: { user: SUPER } });
-	return { db, m, createUser, onboarding, complete };
+	return { db, m, createUser, updateUser, onboarding, complete };
 }
 
 function reset() {
@@ -312,6 +345,85 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 		const rec = S.recorded.find((x) => blockedAudit(x.audit));
 		check("§4 …and the withheld carrier is recorded over every finalized month",
 			!!rec && JSON.stringify(rec.periods) === JSON.stringify(LOCKED));
+	}
+
+	console.log("§5 PUT /api/users/:id: the carrier its directory sync writes");
+	{
+		// A Driver account, and its drivers_directory row unless `rowCarrier` is null.
+		const driverAccount = (db, id, name, company, rowCarrier) => {
+			db.prepare("INSERT INTO users (id, username, role, driver_name, email, company_name) VALUES (?, ?, 'Driver', ?, 'd@example.com', ?)").run(id, `u${id}`, name, company);
+			if (rowCarrier !== null) db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, status) VALUES (?, ?, 'active')").run(name, rowCarrier);
+		};
+		const account = (db, id) => db.prepare("SELECT company_name, email, full_name FROM users WHERE id = ?").get(id);
+		const refusedLikePost = (r) => r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(r.body.periods) === JSON.stringify(LOCKED);
+		const got = (r) => `got ${r.status} ${(r.body || {}).code || ""}`.trim();
+		{
+			const { db, updateUser } = reset();
+			driverAccount(db, 50, "Cara Carrier", "", "");
+			const r = await updateUser(50, { companyName: "Acme Leasing" });
+			check(`§5 company → an investor's company, the driver's loads reach June: 409 PERIOD_FINALIZED over ${LOCKED.join(", ")}, as POST /api/users answers (${got(r)})`,
+				refusedLikePost(r));
+			check("§5 …nothing written: the account keeps no company, the row no carrier",
+				account(db, 50).company_name === "" && dirRow(db, "Cara Carrier").carrier_name === "");
+			const ref = S.refusals[0] || {};
+			check("§5 …refused through POST /api/users's response, naming the account and the carrier",
+				/^Cannot update the account for Cara Carrier/.test(ref.what || "") && (ref.blockers || []).some((b) => b.field === "carrier_name"));
+			check("§5 …audited as update_user_blocked, naming the carrier", !!ref.audit && ref.audit.action === "update_user_blocked" && /Acme Leasing/.test(ref.audit.subject || ""));
+			check(`§5 …the history was read once (reads ${S.jtReads})`, S.jtReads === 1);
+		}
+		{
+			// No directory row yet: the sync would add it with the company as its
+			// carrier, the row POST /api/users judges (accountDirectoryRowLock()).
+			const { db, updateUser } = reset();
+			driverAccount(db, 51, "Cara Carrier", "", null);
+			const r = await updateUser(51, { companyName: "Acme Leasing" });
+			check(`§5 no directory row yet, company → an investor's company: 409 PERIOD_FINALIZED (${got(r)})`, refusedLikePost(r));
+			check("§5 …no row added, the account keeps no company", !dirRow(db, "Cara Carrier") && account(db, 51).company_name === "");
+		}
+		{
+			// The account already names an investor's company and the row does not:
+			// an e-mail edit's sync writes that company as the carrier.
+			const { db, updateUser } = reset();
+			driverAccount(db, 52, "Cara Carrier", "Acme Leasing", "");
+			const r = await updateUser(52, { email: "new@example.com" });
+			check(`§5 an e-mail edit whose sync would set the row's carrier to an investor's company: 409 PERIOD_FINALIZED (${got(r)})`, refusedLikePost(r));
+			check("§5 …nothing written", account(db, 52).email === "d@example.com" && dirRow(db, "Cara Carrier").carrier_name === "");
+		}
+		{
+			// Off a ledger is a move too: the row carries the investor's company.
+			const { db, updateUser } = reset();
+			driverAccount(db, 53, "Cara Carrier", "Acme Leasing", "Acme Leasing");
+			const r = await updateUser(53, { companyName: "" });
+			check(`§5 company cleared while the row puts the driver on an investor's ledger: 409 PERIOD_FINALIZED (${got(r)})`, refusedLikePost(r));
+			check("§5 …nothing written", account(db, 53).company_name === "Acme Leasing" && dirRow(db, "Cara Carrier").carrier_name === "Acme Leasing");
+		}
+		for (const [label, name, company] of [
+			["a new hire (no history), an investor's company", "New Hire", "Acme Leasing"],
+			["a driver with June loads, a company no investor has", "Cara Carrier", "Cara Trucking LLC"],
+		]) {
+			const { db, updateUser } = reset();
+			driverAccount(db, 54, name, "", "");
+			const r = await updateUser(54, { companyName: company });
+			check(`§5 ${label}: 200, the account and the row carry ${JSON.stringify(company)} (${got(r)}, row ${JSON.stringify(dirRow(db, name).carrier_name)})`,
+				r.status === 200 && account(db, 54).company_name === company && dirRow(db, name).carrier_name === company);
+		}
+		{
+			const { db, updateUser } = reset();
+			driverAccount(db, 55, "Cara Carrier", "", "");
+			const r = await updateUser(55, { fullName: "Cara C. Carrier" });
+			check(`§5 a name-only edit: 200, no Job Tracking read (${got(r)}, reads ${S.jtReads})`,
+				r.status === 200 && account(db, 55).full_name === "Cara C. Carrier" && S.jtReads === 0);
+		}
+		{
+			// Job Tracking unreadable: the history cannot be dated, so every finalized
+			// month is held, as the create and the directory edit hold it.
+			const { db, updateUser } = reset();
+			S.jtFails = true;
+			driverAccount(db, 56, "New Hire", "", "");
+			const r = await updateUser(56, { companyName: "Acme Leasing" });
+			check(`§5 Job Tracking unreadable, a new hire → an investor's company: 409 PERIOD_FINALIZED over every finalized month, nothing written (${got(r)})`,
+				refusedLikePost(r) && account(db, 56).company_name === "" && dirRow(db, "New Hire").carrier_name === "");
+		}
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

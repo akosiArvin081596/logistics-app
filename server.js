@@ -8621,9 +8621,14 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		// await, and only for a row whose removal changes what the money math reads
 		// (anything but the default terms with no carrier); the row is read again
 		// below, so the lock, the unlinks and the DELETE run with no await between.
+		// A failed read leaves `jt` null, as on the PUT: the lock then judges every
+		// finalized month, so the delete gets the PUT's 409, not a 500, and writes
+		// nothing.
 		const peek = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		let jt = null;
-		if (peek && Object.keys(directoryChangedColumns(directoryDefaultRow(peek.driver_name), peek)).length) jt = await getJobTrackingCached();
+		if (peek && Object.keys(directoryChangedColumns(directoryDefaultRow(peek.driver_name), peek)).length) {
+			try { jt = await getJobTrackingCached(); } catch (err) { console.error("[drivers-directory] Job Tracking unreadable for the month-end lock:", err.message); }
+		}
 
 		// ⚠️ The third door onto the same money, and the widest: deleting the row
 		// is the pay-structure half of a rename with no destination. The money
@@ -23635,6 +23640,15 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				console.error("PUT /api/users/:id: Job Tracking read failed, the rename will be refused:", e.message);
 			}
 		}
+		// The carrier the directory sync writes after the commit is held to the
+		// month-end lock (guard (c2)), which sizes the driver's history off Job
+		// Tracking. Read here, with the other awaits, and only when that sync would
+		// change a carrier (accountDirectorySync()). A failed read leaves `jt` null,
+		// and guard (c2) then judges every finalized month.
+		let jt = null;
+		if (accountDirectorySync(user, { driverName, email, companyName })) {
+			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/users/:id: Job Tracking unreadable for the month-end lock:", e.message); }
+		}
 
 		// ⚠️ RE-READ THE ACCOUNT AFTER THE LAST await, AND GUARD ONLY ON THIS COPY.
 		// "No await between the guard and the write" is only half the rule. The
@@ -23884,6 +23898,28 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				unresolved,
 				blockers: lock.blockers,
 			});
+		}
+
+		// (c2) The month-end lock on the drivers_directory carrier the sync after
+		// the commit writes: the account's company name. Judged as POST /api/users
+		// judges the row it adds (accountDirectoryRowLock()) and as
+		// PUT /api/drivers-directory/:id judges a carrier edit, so a company name an
+		// investor's company matches cannot put a driver whose history reaches a
+		// finalized month on that investor's ledger here either, nor take them off
+		// one. Refused whole, with the same 409 as POST /api/users.
+		const dirSync = accountDirectorySync(user, { driverName, email, companyName });
+		const syncLock = accountDirectorySyncLock(dirSync, jt);
+		if (syncLock && (syncLock.unreadable || syncLock.blockers.length)) {
+			const accountRowAudit = {
+				...userEditAudit,
+				subject: `${userEditAudit.subject}, drivers directory carrier ${JSON.stringify(auditText((dirSync.row && dirSync.row.carrier_name) || "", 100))} -> ${JSON.stringify(auditText(dirSync.carrier, 100))}`,
+			};
+			if (syncLock.unreadable) return periodLockUnreadableResponse(req, res, "Updating this account", accountRowAudit);
+			return periodBlockedResponse(req, res,
+				`Cannot update the account for ${dirSync.name}`,
+				syncLock.blockers,
+				"Save the account without this company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				accountRowAudit);
 		}
 
 		// (d) ⚠️ THE SHEET LEG THIS ROUTE DOES NOT HAVE.
@@ -27801,6 +27837,39 @@ function accountDirectoryCarrier(driverName, companyName, jt, req) {
 		subject: `add ${name} at onboarding: carrier ${JSON.stringify(auditText(companyName, 100))} withheld, the row was added without it`,
 	}, lock.unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED", periods, `Adding ${name} to the drivers directory`);
 	return "";
+}
+
+// The drivers_directory write PUT /api/users/:id makes after its commit, read
+// off the two syncDriverToCarrierSheet() calls there, so it can be judged before
+// anything is written: a new non-blank driver name, or a Driver account's email
+// or company name, syncs the row with the account's company name as its carrier
+// (the one sent, else the stored one). `user` is the account as stored; the body
+// fields are undefined when not sent. Returns { name, carrier, row } when that
+// write would change what the money math reads (a carrier on a first row that
+// accountDirectoryRowJudged() judges, or a different carrier on the row the sync
+// updates, found as the sync finds it), else null.
+function accountDirectorySync(user, { driverName, email, companyName }) {
+	const stored = String(user.driver_name || "");
+	let name;
+	if (driverName !== undefined && driverName !== stored) name = String(driverName).trim();
+	else if (user.role === "Driver" && stored && (email !== undefined || companyName !== undefined)) name = stored.trim();
+	if (!name) return null;
+	const carrier = String((companyName !== undefined ? companyName : user.company_name) || "");
+	const found = findDirectoryRowForDriver(stored.trim() || name);
+	const row = found ? db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(found.id) : null;
+	if (!row) return accountDirectoryRowJudged(name, carrier) ? { name, carrier, row: null } : null;
+	return String(row.carrier_name || "") === carrier ? null : { name, carrier, row };
+}
+
+// The month-end lock on that write: accountDirectoryRowLock() for a first row
+// (POST /api/users's own check), directoryEditLockBlockers() for a carrier change
+// on an existing row (PUT /api/drivers-directory/:id's), the driver's exposure
+// sized off driverHistoryFloorMonth(). `jt` as accountDirectoryRowLock() takes
+// it: null judges every finalized month. null when there is nothing to judge.
+function accountDirectorySyncLock(sync, jt) {
+	if (!sync) return null;
+	if (!sync.row) return accountDirectoryRowLock(sync.name, sync.carrier, jt);
+	return directoryEditLockBlockers(sync.row, { carrier_name: sync.carrier }, { history: driverHistoryFloorMonth(sync.row.driver_name, jt) });
 }
 
 // Whether this checkAndCompleteOnboarding() call will add a judged row: every
@@ -52558,7 +52627,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// driver's assigned truck. Inner maps are null-prototype too.
 		const loadsByDriverTruck = Object.create(null);   // { driver: { truckUnit|"": count } }
 		const revenueByDriverTruck = Object.create(null); // { driver: { truckUnit|"": revenue } }
-		const dayTruckByDriver = Object.create(null);     // { driver: Map<"YYYY-MM-DD", truckUnit|""> }, first load in sheet order
+		const dayTruckByDriver = Object.create(null);     // { driver: Map<"YYYY-MM-DD", { unit: truckUnit|"", month }> }, see the active-day block
 		const revenueByTruck = Object.create(null);       // { truckUnit: completed revenue, whoever drove }
 		// Per-truck per-month REVENUE (completed loads only), bucketed by the load's
 		// ASSIGNED month exactly like monthlyRevenue / driverMonthlyRevenue below.
@@ -52592,6 +52661,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// the same way across /api/investor, /api/financials, and the weekly
 		// invoice so the three numbers stay reconciled.
 		const driverDayOverrides = getAllExcludedDriverDays();
+		// Whether a month is closed (isLocked()), asked once per month: the per-truck
+		// day attribution below keeps a closed month's days where they were.
+		const closedByMonth = new Map();
+		const monthClosed = (mk) => {
+			if (!closedByMonth.has(mk)) closedByMonth.set(mk, isLocked(mk));
+			return closedByMonth.get(mk);
+		};
 		const now = new Date();
 		const thirtyDaysAgo = new Date(now);
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -52725,10 +52801,19 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
 					counted.forEach(d => driverDaySets[driver].add(d));
 					// The truck each of these days counts on in the per-truck breakdown: the
-					// one named by the first load, in sheet order, that counts the day.
+					// one named by the first load, in sheet order, that counts the day and
+					// names a truck. A day no such load names keeps "" and goes to the
+					// driver's assigned truck. In a closed month a day stays on the first
+					// load that counts it, the load the month's frozen line items name for
+					// that day, so a closed month's per-truck figures read as recorded.
 					{
 						const byDay = dayTruckByDriver[driver] || (dayTruckByDriver[driver] = new Map());
-						counted.forEach(d => { if (!byDay.has(d)) byDay.set(d, truckUnit); });
+						counted.forEach(d => {
+							const month = assignedMonthKey || d.slice(0, 7);
+							const prev = byDay.get(d);
+							if (!prev) byDay.set(d, { unit: truckUnit, month });
+							else if (!prev.unit && truckUnit && !monthClosed(prev.month)) byDay.set(d, { unit: truckUnit, month });
+						});
 					}
 					// Per-assigned-month set (for monthly P&L). Falls back to the
 					// physical day's month if the load has no assigned date (rare).
@@ -53320,12 +53405,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const home = homeOf(driver);
 				// Each active day on exactly one truck, so the per-truck day counts add
 				// up to the driver's activeDays and "N days x $R" matches the pay beside
-				// it. A day whose loads name two trucks goes to the first, in sheet
-				// order. An admin-added day has no load, so it counts on the driver's
-				// assigned truck. A day that resolves to no truck is still part of the
-				// whole.
+				// it. A day counts on the truck named by its first load that names one,
+				// in sheet order (in a closed month, its first load: see dayTruckByDriver
+				// above); a day no load names a truck for, and an admin-added day (it has
+				// no load), counts on the driver's assigned truck. A day that resolves to
+				// no truck is still part of the whole.
 				const unitOfDay = new Map();
-				for (const [d, tk] of dayTruckByDriver[driver] || new Map()) unitOfDay.set(d, tk || home);
+				for (const [d, tk] of dayTruckByDriver[driver] || new Map()) unitOfDay.set(d, tk.unit || home);
 				for (const d of det.dates || []) if (!unitOfDay.has(d)) unitOfDay.set(d, home);
 				const daysOn = Object.create(null);
 				for (const [d, unit] of unitOfDay) (daysOn[unit] || (daysOn[unit] = new Set())).add(d);
@@ -53453,15 +53539,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// browser's formula did). A truck with no fixed costs of its own shows
 				// none, even when rounding leaves a dollar.
 				const unitTripExpenses = varExp + maintExp + compExp;
+				const monthlyGross = unitInFleet ? avgMonthlyGross : 0;
 				const monthlyExpenses = unitInFleet ? avgMonthlyExpenses : 0;
 				const monthlyTrip = unitInFleet && truckMonths > 0 ? Math.round(unitTripExpenses / truckMonths) : 0;
 				const monthlyPay = unitInFleet && truckMonths > 0 ? Math.round(driverPay / truckMonths) : 0;
 				perTruckData[truck.unit_number] = {
-					unitMonthlyGross: unitInFleet ? avgMonthlyGross : 0,
+					unitMonthlyGross: monthlyGross,
 					unitMonthlyExpenses: monthlyExpenses,
 					unitMonthlyTripExpenses: monthlyTrip,
 					unitMonthlyDriverPay: monthlyPay,
 					unitMonthlyFixedCosts: fixedPerMonth > 0 ? monthlyExpenses - monthlyPay - monthlyTrip : 0,
+					// The breakdown's bottom lines, the server's like every line above
+					// them: Monthly Net is the monthly revenue less the monthly costs, and
+					// Est. Annual Take-Home is that Monthly Net x 12 (2026-10-08). `months`
+					// is the divisor every monthly figure here is averaged on: this
+					// truck's own months in service within the fleet's operating window.
+					unitMonthlyNet: monthlyGross - monthlyExpenses,
+					unitEstAnnualTakeHome: (monthlyGross - monthlyExpenses) * 12,
+					months: truckMonths,
+					purchasePrice: truck.purchase_price || 0,
 					// How the pay on this truck was earned, per driver (their days and
 					// rate, or their share), over the months it is averaged on; null when
 					// none was earned on it.
@@ -53707,10 +53803,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				perTruckData[unit].monthlyInvestorEarnings = monthly;
 				perTruckData[unit].estAnnualInvestorRevenue = annual;
 				// investorROI follows the annual rather than being pinned to 0 — a 0% ROI
-				// is the same false claim as $0 revenue. It stays published (the client
-				// recomputes ROI from estAnnualInvestorRevenue and ignores this field, but
-				// dropping fields is a separate cleanup, not something to couple to a
-				// money-visible change).
+				// is the same false claim as $0 revenue. It is the ROI the Fleet Breakdown
+				// shows (2026-10-08: the browser used to work it out, over a price that
+				// fell back to the fleet's when the truck had none), over the truck's own
+				// purchase price, which perTruckData publishes beside it.
 				perTruckData[unit].investorROI = annual === null
 					? null
 					: ((unitInFleet && price > 0) ? Math.round((annual / price) * 1000) / 10 : 0);
@@ -53729,6 +53825,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					: 0;
 			}
 		}
+		// The Fleet Total and Fleet ROI under the per-truck table, the server's like
+		// each row's: the trucks that have a projection, summed (a null is left out,
+		// never counted as $0), over the fleet's recorded purchase price.
+		const fleetEstAnnualInvestorRevenue = Object.values(perTruckData)
+			.reduce((s, t) => s + (Number.isFinite(t.estAnnualInvestorRevenue) ? t.estAnnualInvestorRevenue : 0), 0);
+		const fleetInvestorROI = totalPurchasePrice > 0 ? Math.round((fleetEstAnnualInvestorRevenue / totalPurchasePrice) * 1000) / 10 : 0;
 
 		// ---- My Loads (pending + active) — scoped to this investor's drivers/trucks ----
 		// filteredJobData is already investor-scoped (owner_id + driver-set fallback) and has
@@ -53801,6 +53903,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				totalPurchasePrice,
 				totalStartupExpenses,
 				perTruckData,
+				// "investor" when perTruckData holds an investor's trucks; "fleet" for a
+				// Super Admin with no investor in view, which builds none (per-truck
+				// figures are an investor's), so the breakdown says so instead of
+				// showing every truck at $0.
+				perTruckScope: investorDriverSet ? "investor" : "fleet",
+				fleetEstAnnualInvestorRevenue,
+				fleetInvestorROI,
 				monthlyEarnings,
 				fixedCostBreakdown,
 				// Only while the current month is paid as a fixed monthly lease.
