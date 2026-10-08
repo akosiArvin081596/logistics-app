@@ -270,10 +270,10 @@ async function build(L = LIFTED, { db = makeDb() } = {}) {
 	const logs = [];
 	const fakeConsole = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
 	const mod = new Function(
-		"app", "express", "path", "__dirname", "db", "requireAuth", "requireRole", "loadBelongsToDriver",
+		"app", "express", "path", "__dirname", "DATA_DIR", "db", "requireAuth", "requireRole", "loadBelongsToDriver",
 		"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "console", "Date",
 		compose(L),
-	)(app, express, path, TMP, db, requireAuth, requireRole, loadBelongsToDriver,
+	)(app, express, path, TMP, TMP, db, requireAuth, requireRole, loadBelongsToDriver,
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"),
 		fakeConsole, FakeDate);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));

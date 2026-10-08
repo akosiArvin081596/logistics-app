@@ -145,7 +145,7 @@ function mountRoute(routeSrc, env) {
 	};
 }
 function mount(w, routes = ROUTES) {
-	const env = { db: w.db, fs, path, __dirname: w.root, ...HELPERS };
+	const env = { db: w.db, fs, path, __dirname: w.root, DATA_DIR: w.root, ...HELPERS };
 	const up = mountRoute(routes.upload, env);
 	const del = mountRoute(routes.del, env);
 	return {

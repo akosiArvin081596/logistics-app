@@ -253,7 +253,7 @@ function extractHandler(mountPrefix) {
 	`);
 
 	const H = new Function(
-		"req", "res", "db", "fs", "path", "__dirname", "isConfidentialOnboardingDoc",
+		"req", "res", "db", "fs", "path", "__dirname", "DATA_DIR", "isConfidentialOnboardingDoc",
 		extractHandler(`app.get("/api/admin/orphaned-signed-artifacts", requireRole`)
 	);
 	const out = { status: 200, body: null };
@@ -265,7 +265,7 @@ function extractHandler(mountPrefix) {
 		[{ key: "w9", confidential: 1 }, { key: "contractor_agreement", confidential: 1 }, { key: "mobile_policy", confidential: 0 }],
 		[{ key: "w9", confidential: 1 }, { key: "master_agreement", confidential: 1 }],
 	);
-	H({ query: {} }, res, db, fs, path, root, G);
+	H({ query: {} }, res, db, fs, path, root, root, G);
 
 	const r = out.body;
 	check("orphans: status is 200", out.status, 200);
@@ -292,14 +292,14 @@ function extractHandler(mountPrefix) {
 	// implementation which parses the filename and checks the id.
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, signed, signed_pdf_url) VALUES (41,'w9',1,'/uploads/onboarding-signed/SOMETHING-ELSE.pdf')").run();
 	const out2 = { body: null };
-	H({ query: {} }, { status() { return this; }, json(b) { out2.body = b; return this; } }, db, fs, path, root, G);
+	H({ query: {} }, { status() { return this; }, json(b) { out2.body = b; return this; } }, db, fs, path, root, root, G);
 	check("orphans: a row for the same id pointing at a DIFFERENT file does not clear the orphan",
 		out2.body.orphans.some((o) => o.file === "w9-41-signed.pdf"), true);
 
 	// And the converse: pointing a row at the file clears it.
 	db.prepare("UPDATE onboarding_documents SET signed_pdf_url = '/uploads/onboarding-signed/w9-41-signed.pdf' WHERE user_id = 41").run();
 	const out3 = { body: null };
-	H({ query: {} }, { status() { return this; }, json(b) { out3.body = b; return this; } }, db, fs, path, root, G);
+	H({ query: {} }, { status() { return this; }, json(b) { out3.body = b; return this; } }, db, fs, path, root, root, G);
 	check("orphans: a row pointing AT the file clears it",
 		out3.body.orphans.some((o) => o.file === "w9-41-signed.pdf"), false);
 
@@ -310,7 +310,7 @@ function extractHandler(mountPrefix) {
 	// A missing directory must not throw — a fresh install has neither.
 	const bare = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-empty-"));
 	const out4 = { status: 200, body: null };
-	H({ query: {} }, { status(s) { out4.status = s; return this; }, json(b) { out4.body = b; return this; } }, db, fs, path, bare, G);
+	H({ query: {} }, { status(s) { out4.status = s; return this; }, json(b) { out4.body = b; return this; } }, db, fs, path, bare, bare, G);
 	check("orphans: a missing uploads directory is not an error", out4.status, 200);
 	check("orphans: and reports zero files scanned", out4.body.filesScanned, 0);
 	fs.rmSync(bare, { recursive: true, force: true });
