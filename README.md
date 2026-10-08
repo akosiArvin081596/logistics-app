@@ -47,11 +47,12 @@ Needed at the repo root, and never committed:
   variables, with the reasoning for each.
 - **`service-account-key.json`** — Google service account credentials.
 
-> ⚠️ **`SPREADSHEET_ID` has no safe default.** When it is unset, `server.js`
-> falls through to the **production** Dispatch Management sheet — so any server
-> started without an explicit override writes to the live book. Always set it
-> locally. Identify a sheet by its **ID, never its title**: the staging sheet is
-> titled "logisx-production".
+> ⚠️ **`SPREADSHEET_ID` has no default.** A server started without one refuses to
+> start, and scripts and `test-suite.js` refuse to run (`lib/sheet-id.js`). Only
+> production's own pm2 process (`logistics-app` in `/var/www/logistics-app`,
+> whose `.env` names none) gets the production Dispatch Management sheet without
+> it. Set it locally to a copy. Identify a sheet by its **ID, never its title**:
+> the staging sheet is titled "logisx-production".
 
 ## Tests
 
@@ -86,8 +87,9 @@ a push that only deletes branches. It checks the working tree, so commit first.
 a running server, it **writes** (it logs an expense, among other things), and it
 is deliberately excluded from CI. Before running it:
 
-- **Point the server at a non-production sheet.** Start it with an explicit
-  `SPREADSHEET_ID` for a copy — without one it writes to the live book (see
+- **Point the server and the suite at a non-production sheet.** Start the server
+  with an explicit `SPREADSHEET_ID` for a copy, and run the suite with the same
+  value: it refuses to run without one, and refuses the production sheet (see
   Configuration above).
 - **Mind the port.** The suite defaults to `3000`, which is production on the
   VPS; set `TEST_PORT` (and the server's `PORT`) to run anywhere else.

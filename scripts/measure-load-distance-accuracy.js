@@ -40,7 +40,7 @@
  *
  * ENV
  *   GOOGLE_MAPS_API_KEY   required unless --dry-run (never printed)
- *   SPREADSHEET_ID        optional; defaults to the production sheet (read-only)
+ *   SPREADSHEET_ID        required; the sheet to read (read-only). No default.
  *   SERVICE_ACCOUNT_KEY   optional path; defaults to ./service-account-key.json
  */
 
@@ -64,8 +64,14 @@ const CACHE_FILE = val("--cache", "");
 const CONCURRENCY = 4;
 
 const ROOT = path.resolve(__dirname, "..");
-const SHEET_ID =
-	process.env.SPREADSHEET_ID || "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
+// The sheet is always named (lib/sheet-id.js): there is no default, so a run
+// never reaches the production sheet unless the command says so.
+const TARGET = require("../lib/sheet-id").scriptSpreadsheetId(process.env, { script: "measure-load-distance-accuracy.js" });
+if (!TARGET.id) {
+	console.error(TARGET.error);
+	process.exit(2);
+}
+const SHEET_ID = TARGET.id;
 const KEY_FILE =
 	process.env.SERVICE_ACCOUNT_KEY || path.join(ROOT, "service-account-key.json");
 

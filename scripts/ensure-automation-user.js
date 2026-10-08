@@ -8,7 +8,7 @@
 //     | ssh <vps> 'cd /var/www/logisx-staging && /opt/node22/bin/node scripts/ensure-automation-user.js --db=app.db --username=e2e_playwright'
 //
 // - Refuses on production: an app whose .env names no SPREADSHEET_ID, or names
-//   the production sheet (server.js's default), writes to production's books,
+//   the production sheet (lib/sheet-id.js), writes to production's books,
 //   and an automation Super Admin must never exist there. The .env is the one
 //   of the app directory --db is in; a database anywhere else is refused (a
 //   copy under the temp directory, for tests, may name its .env with
@@ -26,7 +26,6 @@
 
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { parseArgs, envFor } = require("./lib/ledger-world");
@@ -41,9 +40,7 @@ function refuse(msg) {
 }
 
 function productionSheetId() {
-	const m = fs.readFileSync(path.join(ROOT, "server.js"), "utf8").match(/^const SPREADSHEET_ID = process\.env\.SPREADSHEET_ID \|\| "([^"]+)"/m);
-	if (!m) throw new Error("server.js's default SPREADSHEET_ID was not found");
-	return m[1];
+	return require("../lib/sheet-id").PRODUCTION_SPREADSHEET_ID;
 }
 
 function readStdin() {
