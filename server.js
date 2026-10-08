@@ -7796,8 +7796,22 @@ const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 // Drive folder where the n8n dispatch workflow stores every Bison rate-con,
 // named by email subject (e.g. "Subject: RE: Bison Transport Order #7007280").
 // The Draft Bison Invoice route matches by order number to attach the rate-con.
-const RATECON_DRIVE_FOLDER_ID =
-	process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
+//
+// No default: only the environment names it (production's .env names
+// production's folder). Unset or blank, the rate-con Drive features are off
+// and none of them calls Drive: getRateConBytes() skips both Drive steps,
+// POST /api/admin/ratecon-index answers 503, and POST /api/loads/from-ratecon
+// keeps the dropped PDF in the local archive only.
+// scripts/test-ratecon-drive-folder-required.js pins all three.
+const RATECON_DRIVE_FOLDER_ID = String(process.env.RATECON_DRIVE_FOLDER_ID ?? "").trim();
+// Module scope, so it is logged once per process start and never per request.
+if (!RATECON_DRIVE_FOLDER_ID) {
+	console.warn(
+		"[ratecon-drive] ⚠️ RATECON_DRIVE_FOLDER_ID is not set — the rate-con Drive features are off: " +
+		"invoice drafting does not search Drive for a rate-con, POST /api/admin/ratecon-index answers 503, " +
+		"and a rate-con dropped on POST /api/loads/from-ratecon is archived locally only.",
+	);
+}
 // The rate-con matcher's pure helpers. Required at module scope because step 1 of
 // getRateConBytes() uses filenameCarriesLoadId() on the hot path.
 const rcIndexShared = require("./lib/ratecon-drive-index.js");
@@ -42167,38 +42181,41 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			// (a) BEST-EFFORT — mirror into the Drive folder too, for parity with
 			// the n8n email pipeline. Expected to fail under the service account
 			// in production; that's fine, (b) is authoritative. Silent on error.
-			try {
-				const { Readable } = require("stream");
-				const drive = await getDrive();
-				const created = await drive.files.create({
-					requestBody: {
-						name: `${loadId}.pdf`,
-						parents: [RATECON_DRIVE_FOLDER_ID],
-						mimeType: "application/pdf",
-					},
-					media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
-					fields: "id,name",
-					supportsAllDrives: true,
-				});
-				// ⚠️ KEEP THE ID. This asked for `fields: "id,name"` and then threw
-				// the id away, so the row above was left with drive_file_id = ''.
-				// fetchDocumentBytes() falls back to Drive ONLY via drive_file_id,
-				// which means a RATECON row whose local file later goes missing
-				// returns null bytes and the rate-con silently stops being
-				// attached — even though a perfectly good copy is sitting in the
-				// folder. uploads/ is not in the nightly backup, so "the local file
-				// went missing" is a routine event, not a hypothetical.
-				const driveId = created && created.data && created.data.id;
-				if (driveId && rateconArchived) {
-					db.prepare(
-						`UPDATE documents SET drive_file_id = ?
-						 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
-					).run(driveId, loadId);
+			// Without RATECON_DRIVE_FOLDER_ID there is no folder: skipped, no Drive call.
+			if (RATECON_DRIVE_FOLDER_ID) {
+				try {
+					const { Readable } = require("stream");
+					const drive = await getDrive();
+					const created = await drive.files.create({
+						requestBody: {
+							name: `${loadId}.pdf`,
+							parents: [RATECON_DRIVE_FOLDER_ID],
+							mimeType: "application/pdf",
+						},
+						media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
+						fields: "id,name",
+						supportsAllDrives: true,
+					});
+					// ⚠️ KEEP THE ID. This asked for `fields: "id,name"` and then threw
+					// the id away, so the row above was left with drive_file_id = ''.
+					// fetchDocumentBytes() falls back to Drive ONLY via drive_file_id,
+					// which means a RATECON row whose local file later goes missing
+					// returns null bytes and the rate-con silently stops being
+					// attached — even though a perfectly good copy is sitting in the
+					// folder. uploads/ is not in the nightly backup, so "the local file
+					// went missing" is a routine event, not a hypothetical.
+					const driveId = created && created.data && created.data.id;
+					if (driveId && rateconArchived) {
+						db.prepare(
+							`UPDATE documents SET drive_file_id = ?
+							 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
+						).run(driveId, loadId);
+					}
+				} catch (e) {
+					// No warning to the dispatcher — the local copy already made the
+					// load invoiceable. Log for observability only.
+					console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
 				}
-			} catch (e) {
-				// No warning to the dispatcher — the local copy already made the
-				// load invoiceable. Log for observability only.
-				console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
 			}
 		}
 
