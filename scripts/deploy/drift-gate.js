@@ -78,13 +78,13 @@ const HINTS = Object.freeze({
 	"behind-healable":
 		"production's last verified deploy is behind main but it is serving, and main's commit PASSED staging: the shape of a deploy that failed on transport, or one that died after its checkout (HEAD moved, never verified). Healing once, a full deploy of main's commit with the same smoke check, edge check and auto-rollback as deploy.yml.",
 	"behind-staging-pending":
-		"production is behind main, but the Deploy run for main's commit has not finished its staging job yet. The deploy is still on its way; the next tick re-checks.",
+		"production is behind main, but the Deploy run for main's commit has not finished yet (its staging job, with the staging smoke and the wait for CI on main, or its production job). The deploy is still on its way; the next tick re-checks.",
 	"behind-already-attempted":
 		"an automatic attempt at main's commit is already recorded on the box: an earlier heal, a production auto-rollback, or a manual pin to another ref. Not retrying. Fix main, or deploy it by hand once it is safe (Actions → Deploy → production, ref=main).",
 	"behind-and-unhealthy":
 		"production is behind main AND not serving 200. That is an incident, not a missed deploy; healing would paper over it.",
 	"behind-staging-failed":
-		"staging REJECTED main's commit, so production must not get it. Fix main; the next green staging deploys production normally.",
+		"staging REJECTED main's commit (its deploy, the staging smoke, or CI on main failed), so production must not get it. Fix main; the next green staging deploys production normally.",
 	"behind-staging-unverified":
 		"no staging verdict exists for main's commit (no push-triggered Deploy run, e.g. [skip ci], or the GitHub API lookup failed). Not healing without one.",
 	"behind-staging-unreached":
@@ -187,10 +187,10 @@ function stagingVerdict(runs, jobsByRun, sha, annotationsByJob) {
 	// has not given its answer yet. A re-run still waiting in the queue lists
 	// its PREVIOUS attempt's jobs, finished and maybe failed, and reading
 	// those as its verdict would alarm on (or re-run, or heal) a run that is
-	// about to answer for itself. While a drift run executes it holds the
-	// concurrency group it shares with deploy.yml's production job, so a Deploy
-	// run it sees is completed, queued, or still in its staging job (staging
-	// has its own queue); any of those not completed is on its way.
+	// about to answer for itself. The drift check does not share a queue with
+	// any Deploy job, so a Deploy run it sees may be queued or running any of
+	// its jobs (staging with its smoke and CI wait, or production); any run not
+	// completed is on its way.
 	// Never key this on the staging JOB's run_attempt instead: after a re-run
 	// of production alone, staging keeps attempt 1 in a run on attempt 2, and
 	// its pass must still count (the heal).

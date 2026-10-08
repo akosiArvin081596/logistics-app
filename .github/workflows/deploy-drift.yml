@@ -29,20 +29,28 @@ name: Deploy drift
 # GitHub has been observed firing it every 2.5–6 h, 8–26 min late.
 #
 # ⚠️ Invariants. Keep all five:
-#   1. SERIALIZED WITH PRODUCTION DEPLOYS. The same concurrency group as
-#      deploy.yml's production job (queue: max): a drift run waits for any
-#      in-flight production deploy and reads the box after it, and a re-run's
-#      production job waits for it. A Deploy run's staging job has its own
-#      queue, so the gate may see a run still in progress: it reads that as
-#      pending, never as a verdict. remote-deploy.sh also holds a box-level
-#      flock per app directory, whatever started it.
+#   1. THE HEAL IS SERIALIZED WITH PRODUCTION DEPLOYS; THE CHECK IS NOT. The
+#      heal job, the one job here that changes production, sits in the same
+#      concurrency group as deploy.yml's production job (queue: max): it waits
+#      for an in-flight production deploy, and a production deploy waits for
+#      it. The workflow itself has its own group, so the read-only check never
+#      queues behind a production deploy and two drift runs never overlap. The
+#      check may therefore read the box while a Deploy run is still going: the
+#      gate reads any Deploy run that is not completed as pending, never as a
+#      verdict, and the heal prep re-reads the box once the heal holds the
+#      production slot and refuses if production moved since the check.
+#      remote-deploy.sh also holds a box-level flock per app directory,
+#      whatever started it.
 #   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
 #      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
 #   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
 #      rollback_on_failure, exactly like deploy.yml's production job.
-#   4. SAME APPROVAL. The heal job runs in the `production` environment, so a
-#      required reviewer added there gates heals too. A re-run's production
-#      job is deploy.yml's own, in that same environment.
+#   4. SAME GATE. A heal deploys only a commit whose staging job passed, and
+#      on a push that job includes the staging smoke and CI on main
+#      (deploy.yml), so a heal clears exactly what an automatic production
+#      deploy clears. The heal job runs in the `production` environment, like
+#      deploy.yml's production job, so a protection rule added there gates
+#      heals too. A re-run's production job is deploy.yml's own.
 #   5. A STAGING JOB THAT NEVER REACHED THE VPS IS RE-RUN, NEVER HEALED. The
 #      rerun job replays main's own Deploy run, same commit and same jobs, so
 #      staging deploys and smoke-checks it first and production still runs only
@@ -57,12 +65,15 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
-# ⚠️ SAME literal group as deploy.yml's production job, on purpose. See the note
-# there. Staging deploys have their own queue and do not wait for a drift run.
+# ⚠️ ITS OWN group, never deploy.yml's (invariant 1): the check is read-only,
+# so it must not wait in the production deploy queue, nor hold a deploy there.
+# Only the heal job joins that queue (see there). The default queue keeps one
+# pending drift run and cancels an older pending one when a newer tick
+# arrives: every tick reads the box afresh, so a pending duplicate is worth
+# nothing. A running drift run is never cancelled.
 concurrency:
-  group: deploy-refs/heads/main
+  group: deploy-drift
   cancel-in-progress: false
-  queue: max
 
 # Read-only for every job but `rerun`, which sets its own (see there).
 permissions:
@@ -205,7 +216,15 @@ jobs:
     if: needs.check.outputs.action == 'heal'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Same environment as deploy.yml's production job, so a required reviewer
+    # ⚠️ SAME literal group as deploy.yml's production job, on purpose
+    # (invariant 1): the heal deploys production, so it waits for an in-flight
+    # production deploy and a production deploy waits for it. queue: max, for
+    # the reason given in deploy.yml: the default would cancel a queued deploy.
+    concurrency:
+      group: deploy-refs/heads/main
+      cancel-in-progress: false
+      queue: max
+    # Same environment as deploy.yml's production job, so a protection rule
     # added there gates this heal as well.
     environment:
       name: production
@@ -277,11 +296,12 @@ jobs:
     # main's NEWEST Deploy run. A mismatch is an error; a re-run since the
     # check, or a newer push, is a notice and no re-run.
     #
-    # Concurrency: the re-run is an attempt of a deploy.yml run, so it joins
-    # the shared deploy-refs/heads/main group (queue: max) behind THIS drift run
-    # and starts after it ends. No deadlock, because this run never waits for
-    # it. Nor does anything rest on that order: this run is done with the box
-    # by now, and remote-deploy.sh's flock serializes everything else.
+    # Concurrency: the re-run is an attempt of a deploy.yml run, so its staging
+    # job queues in deploy-staging and its production job in
+    # deploy-refs/heads/main, the heal's group. This drift run holds neither
+    # (it runs no heal when it re-runs), and it never waits for the re-run, so
+    # nothing can deadlock. Nor does anything rest on order: this run is done
+    # with the box by now, and remote-deploy.sh's flock serializes the rest.
     name: re-run the Deploy run whose staging never reached the VPS
     needs: check
     if: needs.check.outputs.action == 'rerun'

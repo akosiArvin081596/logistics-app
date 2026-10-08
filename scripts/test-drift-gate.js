@@ -22,8 +22,9 @@
  *   §5 decide(): every failure path is fail-closed (unverified), never a heal
  *   §6 the CLI end to end against a local fake GitHub API, including the
  *      $GITHUB_OUTPUT contract deploy-drift.yml reads
- *   §7 source pins — the workflow files and the gate agree (job name,
- *      concurrency group, queue: max, the heal's rollback, the retry helper);
+ *   §7 source pins — the workflow files and the gate agree (job name; the
+ *      heal shares production's queue, with queue: max, while the drift check
+ *      has a group of its own; the heal's rollback; the retry helper);
  *      no workflow or action puts an expression inside a run: script or uses a
  *      bare `ssh -i`; backup-freshness.yml uses the shared ssh helpers under
  *      its OWN concurrency group and its remote half never takes the deploy
@@ -32,7 +33,8 @@
  *      remote-drift-check.sh can print has its own entry in the gate
  *   §8 mutants — a gate that heals on a staging failure, trusts a run for
  *      another commit, re-runs every staging failure or ignores the attempt
- *      count, and a rerun job without its guards, must all be caught above
+ *      count, a rerun job without its guards, and a heal outside production's
+ *      queue or a drift check back inside it, must all be caught above
  *   §9 the rerun job's own script, run against a stub `gh`: one re-run
  *      request, and none when the run moved since the check or the id is
  *      not a number
@@ -757,6 +759,48 @@ function checkProductionGate(deployText, tag = "") {
 	];
 }
 
+// A workflow-level concurrency block (indent 0), or a job's (indent 4).
+function concBlock(block) {
+	const g = /group:\s*(\S+)/.exec(block);
+	return { group: g && g[1], queueMax: /\bqueue:\s*max\b/.test(block), noCancel: /cancel-in-progress:\s*false/.test(block) };
+}
+const NO_CONC = { group: null, queueMax: false, noCancel: false };
+function conc(s) {
+	const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
+	return m ? concBlock(m[1]) : NO_CONC;
+}
+function jobConc(s, job) {
+	const jm = new RegExp(`\\n {2}${job}:\\n((?: {4,}.*\\n|\\s*\\n)+)`).exec(noComments(s));
+	const m = jm && /\n {4}concurrency:\n((?: {6}.*\n)+)/.exec(`\n${jm[1]}`);
+	return m ? concBlock(m[1]) : NO_CONC;
+}
+
+// The queues. Staging and production deploys have separate queues, so nothing
+// production waits for holds a staging deploy back. Production's queue is the
+// one the drift HEAL shares, since a heal deploys production. The drift CHECK
+// is read-only: it has its own group, so it never waits in the production
+// queue (it sat 15 h there behind an unanswered approval) and never holds a
+// production deploy back.
+function checkQueues(deployText, driftText, tag = "") {
+	const cdWorkflow = conc(deployText);
+	const cd = jobConc(deployText, "production");
+	const cs = jobConc(deployText, "staging");
+	const cr = conc(driftText);
+	const ch = jobConc(driftText, "heal");
+	const others = ["check", "rerun"].map((j) => [j, jobConc(driftText, j)]);
+	return [
+		[cdWorkflow.group === null, `${tag}§7 deploy.yml has no workflow-level concurrency: one queue there makes anything production waits for hold every later staging deploy (got ${cdWorkflow.group})`],
+		[!!cd.group && cd.group === ch.group, `${tag}§7 deploy.yml's production job and deploy-drift.yml's heal job must share ONE concurrency group (got ${cd.group} vs ${ch.group})`],
+		[!!cd.group && !/\$\{\{/.test(cd.group), `${tag}§7 the shared group is a literal, not an expression that could resolve differently per workflow`],
+		[!!cs.group && !/\$\{\{/.test(cs.group) && cs.group !== cd.group, `${tag}§7 deploy.yml's staging job has its own literal queue, not production's (got ${cs.group}; production ${cd.group})`],
+		[!!cr.group && !/\$\{\{/.test(cr.group) && cr.group !== cd.group && cr.group !== cs.group,
+			`${tag}§7 deploy-drift.yml's workflow-level group is its own literal, never a deploy queue: the read-only check must not wait in, or hold, the production queue (got ${cr.group}; production ${cd.group})`],
+		...others.map(([j, c]) => [c.group === null, `${tag}§7 deploy-drift.yml's ${j} job joins no queue of its own: only the heal waits for production deploys (got ${c.group})`]),
+		[cd.queueMax && cs.queueMax && ch.queueMax, `${tag}§7 both deploy jobs and the drift heal set queue: max — the default cancels a pending job, so a heal could cancel a queued deploy`],
+		[cd.noCancel && cs.noCancel && ch.noCancel && cr.noCancel, `${tag}§7 nothing may cancel an in-progress deploy, heal or drift run`],
+	];
+}
+
 // A run: script as bash receives it: the `|` header dropped, the block
 // dedented. A one-liner is returned as is.
 function scriptOf(s) {
@@ -796,33 +840,8 @@ function sourcePins() {
 	}
 	ok(gate.actionFor("verified-record-inconsistent") === "alarm", "§7 an inconsistent verified-deploy record alarms; it never heals");
 
-	// A workflow-level concurrency block (indent 0), or a job's (indent 4).
-	const concBlock = (block) => {
-		const g = /group:\s*(\S+)/.exec(block);
-		return { group: g && g[1], queueMax: /\bqueue:\s*max\b/.test(block), noCancel: /cancel-in-progress:\s*false/.test(block) };
-	};
-	const conc = (s) => {
-		const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
-		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
-	};
-	const jobConc = (s, job) => {
-		const jm = new RegExp(`\\n {2}${job}:\\n((?: {4,}.*\\n|\\s*\\n)+)`).exec(noComments(s));
-		const m = jm && /\n {4}concurrency:\n((?: {6}.*\n)+)/.exec(`\n${jm[1]}`);
-		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
-	};
-	// Staging and production have separate queues, so a production job waiting
-	// for approval never holds a staging deploy back. Production's queue is the
-	// one the drift heal shares.
-	const cdWorkflow = conc(deploy);
+	for (const [c, m] of checkQueues(deploy, drift)) ok(c, m);
 	const cd = jobConc(deploy, "production");
-	const cs = jobConc(deploy, "staging");
-	const cr = conc(drift);
-	ok(cdWorkflow.group === null, `§7 deploy.yml has no workflow-level concurrency: one queue there makes a production job waiting for approval hold every later staging deploy (got ${cdWorkflow.group})`);
-	ok(cd.group && cd.group === cr.group, `§7 deploy.yml's production job and deploy-drift.yml must share ONE concurrency group (got ${cd.group} vs ${cr.group})`);
-	ok(cd.group && !/\$\{\{/.test(cd.group), "§7 the shared group is a literal, not an expression that could resolve differently per workflow");
-	ok(cs.group && !/\$\{\{/.test(cs.group) && cs.group !== cd.group, `§7 deploy.yml's staging job has its own literal queue, not production's (got ${cs.group}; production ${cd.group})`);
-	ok(cd.queueMax && cs.queueMax && cr.queueMax, "§7 both deploy jobs and the drift workflow set queue: max — the default cancels a pending job, so a drift tick could cancel a queued deploy");
-	ok(cd.noCancel && cs.noCancel && cr.noCancel, "§7 nothing may cancel an in-progress deploy");
 
 	const d = noComments(drift);
 	ok(/node scripts\/deploy\/drift-gate\.js/.test(d), "§7 deploy-drift.yml runs the gate");
@@ -1066,6 +1085,21 @@ async function mutants() {
 		const m = deployText.split(from).join(to);
 		ok(m !== deployText, `§8 mutant '${name}' must actually differ from deploy.yml (update it if the job moved)`);
 		ok(checkProductionGate(m, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
+	}
+
+	// The queues (§7), mutated in memory only.
+	const driftText = fs.readFileSync(path.join(ROOT, ".github/workflows/deploy-drift.yml"), "utf8");
+	const healConc = "    concurrency:\n      group: deploy-refs/heads/main\n      cancel-in-progress: false\n      queue: max\n";
+	for (const [name, file, from, to] of [
+		["the heal leaves the production queue", "drift", healConc, ""],
+		["the drift check waits in the production queue again", "drift", "concurrency:\n  group: deploy-drift\n", "concurrency:\n  group: deploy-refs/heads/main\n"],
+		["the heal may cancel a queued deploy", "drift", healConc, healConc.replace("      queue: max\n", "")],
+		["production's queue is renamed in deploy.yml only", "deploy", "      group: deploy-refs/heads/main\n", "      group: deploy-production\n"],
+	]) {
+		const d = file === "deploy" ? deployText.split(from).join(to) : deployText;
+		const r = file === "drift" ? driftText.split(from).join(to) : driftText;
+		ok(d !== deployText || r !== driftText, `§8 mutant '${name}' must actually differ from the workflows (update it if the job moved)`);
+		ok(checkQueues(d, r, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
 	}
 
 	// The rerun job's own guards (§9).

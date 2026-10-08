@@ -3,6 +3,13 @@ name: CI
 # Runs on every PR into main and on every push to main (so the merge commit
 # itself is verified, not just the branch that fed it — a green PR can still
 # produce a red merge when two PRs interact).
+#
+# ⚠️ The push run GATES PRODUCTION. Branch protection does not require a PR to
+# be up to date with main, so the commit a merge creates may be a combination
+# no PR run tested. deploy.yml's staging job waits for THIS workflow's
+# `check · unit · build` on the pushed commit (scripts/deploy/wait-for-ci.sh)
+# and production deploys only once it passed. Keep the push trigger and the
+# job name.
 on:
   pull_request:
     branches: [main]
@@ -10,11 +17,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# One run per branch. A force-push supersedes the previous run rather than
-# racing it. Safe to cancel: CI only reads, so a half-finished run leaves
+# A PR: one run per branch, and a new push supersedes the previous run rather
+# than racing it. Safe to cancel: CI only reads, so a half-finished run leaves
 # nothing behind (the deploy workflow deliberately does NOT do this).
+# A push to main: one group PER COMMIT, so a quick second merge never cancels
+# the first merge's run, or its pending run: production waits for each commit's
+# own verdict, and a cancelled run would leave that commit undeployed.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -69,16 +79,19 @@ jobs:
         run: npm ci --no-audit --no-fund
         working-directory: client
 
-      # server.js is ~47k lines in ONE file. A syntax error anywhere in it does
+      # server.js is ~60k lines in ONE file. A syntax error anywhere in it does
       # not degrade a feature, it stops the entire application from booting —
       # so this is the cheapest, highest-value gate in the pipeline and it runs
-      # first. CLAUDE.md already asks for it by hand before every commit; this
-      # is that rule, enforced.
-      - name: Syntax-check server.js
-        run: npm run check
+      # first. `npm run lint` is `node --check` over server.js, lib/*.js and
+      # scripts/*.js, under a second. (`npm run check` is lint plus the unit
+      # runners, the local pre-push check; CI runs the two as separate steps
+      # so the unit runners run once.)
+      - name: Syntax check (server.js, lib, scripts)
+        run: npm run lint
 
       # The standalone runners. Hermetic — :memory:/mkdtemp only, no network,
-      # no fixtures, no app.db. ~6 s here.
+      # no fixtures, no app.db. 4 at a time (run-unit-tests.js's default; the
+      # isolation audit is in its header), timing-sensitive ones alone after.
       #
       # ⚠️ UNIT_TEST_SKIP_TIMING drops the timing-sensitive runners (currently
       # exactly one: test-pdf-cold-start.js, which induces an event-loop stall
@@ -132,13 +145,14 @@ jobs:
 
       - name: Note what this run did not cover
         if: always()
+        # A quoted heredoc: the backticks are Markdown, never command substitution.
         run: |
-          {
-            echo "### CI coverage note"
-            echo ""
-            echo "Timing-sensitive runners are **skipped on CI** and are not covered by this green check:"
-            echo ""
-            echo '- `scripts/test-pdf-cold-start.js` — induces an event-loop stall and asserts on the recovery; unreliable on a 2-core shared runner.'
-            echo ""
-            echo 'Run `npm run test:unit` locally (without `UNIT_TEST_SKIP_TIMING`) to cover it — required before changing `lib/pdf-browser.js` or the PDF render path.'
-          } >> "$GITHUB_STEP_SUMMARY"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### CI coverage note
+
+          Timing-sensitive runners are **skipped on CI** and are not covered by this green check:
+
+          - `scripts/test-pdf-cold-start.js` — induces an event-loop stall and asserts on the recovery; unreliable on a 2-core shared runner.
+
+          Run `npm run test:unit` locally (without `UNIT_TEST_SKIP_TIMING`) to cover it — required before changing `lib/pdf-browser.js` or the PDF render path.
+          SUMMARY
