@@ -27,14 +27,20 @@ function arg(name) {
 	return hit ? hit.slice(name.length + 3) : undefined;
 }
 
-// The ID the app resolves: the .env value, else server.js's default.
+// The ID the app resolves: the .env value, else production's own default. The
+// main sheet's default is lib/sheet-id.js's PRODUCTION_SPREADSHEET_ID (an older
+// server.js carried it as a literal); the archive's is still in server.js.
 function spreadsheetIds(appDir, dotenv) {
 	const envFile = path.join(appDir, ".env");
 	const env = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
 	const src = fs.readFileSync(path.join(appDir, "server.js"), "utf8");
+	const libFile = path.join(appDir, "lib", "sheet-id.js");
+	const lib = fs.existsSync(libFile) ? fs.readFileSync(libFile, "utf8") : "";
 	const fallback = (name) => {
 		const m = src.match(new RegExp(`const ${name} = process\\.env\\.${name} \\|\\| "([A-Za-z0-9_-]+)"`));
-		return m ? m[1] : "";
+		if (m) return m[1];
+		const l = name === "SPREADSHEET_ID" ? lib.match(/^const PRODUCTION_SPREADSHEET_ID = "([A-Za-z0-9_-]+)";$/m) : null;
+		return l ? l[1] : "";
 	};
 	const ids = {
 		main: (env.SPREADSHEET_ID || "").trim() || fallback("SPREADSHEET_ID"),

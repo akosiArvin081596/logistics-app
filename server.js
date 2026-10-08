@@ -60,6 +60,14 @@ require("dotenv").config();
 // A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
 // decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).
 require("./lib/replica-mode").checkDotenvFlag(process.env);
+// The Google Sheet this server reads and writes (lib/sheet-id.js): SPREADSHEET_ID,
+// or the production sheet for production's own pm2 process only. Anything else
+// without one stops here, before the database opens or Google is called.
+const SHEET_TARGET = require("./lib/sheet-id").resolveServerSpreadsheetId(process.env, process.cwd());
+if (!SHEET_TARGET.id) {
+	console.error(`Refusing to start: ${SHEET_TARGET.error}`);
+	process.exit(1);
+}
 const express = require("express");
 const http = require("http");
 const https = require("https");
@@ -7590,9 +7598,9 @@ if (fs.existsSync(clientDistPath)) {
 // ============================================================
 // CONFIGURATION — Update these values with your own
 // ============================================================
-// Sheet IDs default to production so existing deployments keep working unchanged.
-// Override in staging (or any non-prod env) by setting these in the env file.
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"; // Production sheet (Dispatch Management - original, n8n writes here)
+// The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
+// SPREADSHEET_ID; production's own process alone runs without one.
+const SPREADSHEET_ID = SHEET_TARGET.id;
 const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON

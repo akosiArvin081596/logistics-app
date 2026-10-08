@@ -2,12 +2,19 @@
 // the row's Load ID matches the expected value. Refuses to proceed on
 // mismatch (defensive — if rows shifted, we don't want to nuke the wrong job).
 //
-// Usage: node scripts/delete-load-row.js <rowIndex> <expectedLoadId>
+// Usage: SPREADSHEET_ID=<sheet> node scripts/delete-load-row.js <rowIndex> <expectedLoadId>
 
 const path = require("path");
 const { google } = require("googleapis");
 
-const SPREADSHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
+// The sheet is always named (lib/sheet-id.js): there is no default, so a run
+// never reaches the production sheet unless the command says so.
+const TARGET = require("../lib/sheet-id").scriptSpreadsheetId(process.env, { script: "delete-load-row.js" });
+if (!TARGET.id) {
+	console.error(TARGET.error);
+	process.exit(2);
+}
+const SPREADSHEET_ID = TARGET.id;
 const SHEET = "Job Tracking";
 
 async function getSheets() {

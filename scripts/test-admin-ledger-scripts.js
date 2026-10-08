@@ -423,7 +423,7 @@ const backups = () => fs.readdirSync(TMP).filter((f) => f.startsWith("app.db.pre
 		"both scripts refuse to run with no sheet named", `${noSheet.stderr.slice(0, 120)} | ${noSheetPr.stderr.slice(0, 120)}`);
 
 	console.log("§5 scripts/ensure-automation-user.js");
-	const PROD_ID = SRC.match(/^const SPREADSHEET_ID = process\.env\.SPREADSHEET_ID \|\| "([^"]+)"/m)[1];
+	const PROD_ID = require(path.join(ROOT, "lib", "sheet-id.js")).PRODUCTION_SPREADSHEET_ID;
 	const envWith = (name, body) => { const f = path.join(TMP, name); fs.writeFileSync(f, body); return f; };
 	const stagingEnv = envWith("staging.env", "SPREADSHEET_ID=staging-copy-of-the-sheet\n");
 	const prodEnv = envWith("prod.env", `SPREADSHEET_ID=${PROD_ID}\n`);

@@ -13,7 +13,7 @@
 // prompt — not implemented; just edit the script if you really need it.
 //
 // Usage on the VPS:
-//   cd /var/www/logistics-app && node scripts/regenerate-invoice-pdfs.js
+//   cd /var/www/logistics-app && SPREADSHEET_ID=<the app's sheet> node scripts/regenerate-invoice-pdfs.js
 
 const fs = require("fs");
 const path = require("path");
@@ -21,7 +21,14 @@ const Database = require("better-sqlite3");
 const { google } = require("googleapis");
 const { renderPolicy } = require("../lib/policy-renderer");
 
-const SPREADSHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
+// The sheet is always named (lib/sheet-id.js): there is no default, so a run
+// never reaches the production sheet unless the command says so.
+const TARGET = require("../lib/sheet-id").scriptSpreadsheetId(process.env, { script: "regenerate-invoice-pdfs.js" });
+if (!TARGET.id) {
+	console.error(TARGET.error);
+	process.exit(2);
+}
+const SPREADSHEET_ID = TARGET.id;
 
 function normalizeDriverName(name) {
 	return String(name || "").toLowerCase().replace(/\s+/g, " ").trim();

@@ -116,6 +116,21 @@ function mib(bytes) {
 	return `${(bytes / 1048576).toFixed(1)} MiB`;
 }
 
+// The sheet IDs a working copy's Sheets copy holds, by role (sheets-export.js
+// writes { role } on each book). replica:start hands them to the server, which
+// refuses to start without a SPREADSHEET_ID (lib/sheet-id.js); the replica's
+// Sheets stub answers for exactly these books.
+function replicaSheetIds(sheetsJsonPath) {
+	const doc = readJson(sheetsJsonPath);
+	const byRole = (role) => Object.keys(doc.spreadsheets || {}).find((id) => (doc.spreadsheets[id] || {}).role === role) || "";
+	const main = byRole("main");
+	if (!main) throw new Error(`${sheetsJsonPath} holds no main sheet; run npm run replica:pull again`);
+	const ids = { SPREADSHEET_ID: main };
+	const archive = byRole("archive");
+	if (archive) ids.ARCHIVE_SPREADSHEET_ID = archive;
+	return ids;
+}
+
 module.exports = {
 	ROOT,
 	DATA_FOLDERS,
@@ -133,4 +148,5 @@ module.exports = {
 	runningServer,
 	dirStats,
 	mib,
+	replicaSheetIds,
 };

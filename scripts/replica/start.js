@@ -198,6 +198,9 @@ async function main() {
 		PORT: String(port),
 		BIND_HOST: "127.0.0.1",
 		SESSION_SECRET: crypto.randomBytes(32).toString("hex"),
+		// The books this copy's Sheets stub holds: the server needs its sheet
+		// named (lib/sheet-id.js), and these are the only ones the stub answers.
+		...C.replicaSheetIds(path.join(work, "sheets.json")),
 	};
 	const out = fs.openSync(logFile, "a", 0o600);
 	const child = spawn(process.execPath, ["server.js"], { cwd: codeDir, env, detached: true, stdio: ["ignore", out, out] });

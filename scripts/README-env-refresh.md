@@ -169,9 +169,10 @@ or there is no pm2), it refuses before installing rather than guess. Proof:
 | Integrity | the file fails `integrity_check` | all modes that open one |
 | **Assertions** | any scrubbed column still holds a value, or any account accepts a known or shared password — see below | sanitize, `--verify`, install |
 
-The spreadsheet gate is the one that matters. `server.js` falls back to the production sheet
-whenever `SPREADSHEET_ID` is unset, so **the override is the safety** — a refreshed database
-sitting next to an `.env` without one is a production writer on first boot. The gate reads the
+The spreadsheet gate is the one that matters. `server.js` used to fall back to the production
+sheet whenever `SPREADSHEET_ID` was unset, so a refreshed database sitting next to an `.env`
+without one was a production writer on first boot. It now refuses to start without one unless it
+is production's own pm2 process (`lib/sheet-id.js`), and this gate still refuses first. The gate reads the
 `.env` the server will actually load rather than trusting the directory name, for the same
 reason the staging sheet is *titled* "logisx-production" and is not: **identify by ID, never by
 name.**

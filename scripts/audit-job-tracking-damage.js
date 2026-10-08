@@ -51,9 +51,10 @@
  * is reused here so the shape cannot drift.
  *
  * Usage:
- *   node scripts/audit-job-tracking-damage.js --db=<app.db with FRESH locks>
- *   node scripts/audit-job-tracking-damage.js --db=... --json=out.json
+ *   SPREADSHEET_ID=<production sheet> node scripts/audit-job-tracking-damage.js --db=<app.db with FRESH locks>
+ *   SPREADSHEET_ID=<production sheet> node scripts/audit-job-tracking-damage.js --db=... --json=out.json
  *   node scripts/audit-job-tracking-damage.js --sheet-id=<id> --allow-non-production
+ * The sheet has no default: SPREADSHEET_ID or --sheet-id names it.
  */
 
 "use strict";
@@ -69,7 +70,8 @@ const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
 // ── the sheet, identified by ID and never by title ───────────────────────────
 // The staging sheet is *titled* "logisx-production" and is not production, so a
 // title check reads as the opposite of the truth. Only the ID is authoritative.
-const PRODUCTION_SHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
+const sheetIdLib = require("../lib/sheet-id");
+const PRODUCTION_SHEET_ID = sheetIdLib.PRODUCTION_SPREADSHEET_ID;
 const LOCAL_COPY_SHEET_ID = "156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0";
 const SHEET_TAB = "Job Tracking";
 
@@ -195,7 +197,8 @@ const COMPLETED_STATUS_RE = /^(delivered|completed|pod received)$/i;
  */
 async function runAudit(opts = {}) {
 	const started = Date.now();
-	const sheetId = opts.sheetId || PRODUCTION_SHEET_ID;
+	const sheetId = opts.sheetId;
+	if (!sheetId) throw new Error("runAudit: name the sheet (opts.sheetId); there is no default");
 	const dbPath = opts.dbPath || path.join(ROOT, "app.db");
 	const keyFile = opts.keyFile || process.env.SERVICE_ACCOUNT_KEY || path.join(ROOT, "service-account-key.json");
 	const log = opts.log || (() => {});
@@ -405,7 +408,16 @@ if (require.main === module) {
 		const eq = hit.indexOf("=");
 		return eq === -1 ? true : hit.slice(eq + 1);
 	};
-	const sheetId = String(arg("sheet-id", PRODUCTION_SHEET_ID));
+	// The sheet is always named, by --sheet-id or SPREADSHEET_ID (lib/sheet-id.js):
+	// a run never reaches the production sheet unless the command says so.
+	const named = arg("sheet-id", "");
+	const target = sheetIdLib.scriptSpreadsheetId(typeof named === "string" && named ? { SPREADSHEET_ID: named } : process.env,
+		{ script: "audit-job-tracking-damage.js" });
+	if (!target.id) {
+		console.error(`${target.error} (--sheet-id=<id> names it too)`);
+		process.exit(2);
+	}
+	const sheetId = target.id;
 	if (sheetId !== PRODUCTION_SHEET_ID && !arg("allow-non-production", false)) {
 		console.error(`Refusing: --sheet-id is not the production Dispatch Management sheet.`);
 		console.error(`  given:      ${sheetId}`);

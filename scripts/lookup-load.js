@@ -1,10 +1,17 @@
-// One-shot: print the row for a given load ID from the live Job Tracking sheet.
-// Usage: node scripts/lookup-load.js <loadId>
+// One-shot: print the row for a given load ID from a Job Tracking sheet.
+// Usage: SPREADSHEET_ID=<sheet> node scripts/lookup-load.js <loadId>
 
 const path = require("path");
 const { google } = require("googleapis");
 
-const SPREADSHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo";
+// The sheet is always named (lib/sheet-id.js): there is no default, so a run
+// never reaches the production sheet unless the command says so.
+const TARGET = require("../lib/sheet-id").scriptSpreadsheetId(process.env, { script: "lookup-load.js" });
+if (!TARGET.id) {
+	console.error(TARGET.error);
+	process.exit(2);
+}
+const SPREADSHEET_ID = TARGET.id;
 const SHEET = "Job Tracking";
 
 async function getSheets() {

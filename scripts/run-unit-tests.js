@@ -26,9 +26,10 @@
  * ------------------------------------
  * `test-suite.js` at the repo root. That one is an HTTP harness: it needs a live
  * server, it WRITES (test 46 logs an expense), it defaults to **port 3000 — which
- * is production on the VPS** — and with no SPREADSHEET_ID override `server.js`
- * falls through to the **live Dispatch Management sheet**. Running it from CI
- * would write to the customer's real books. It lives at the repo root, outside
+ * is production on the VPS** — and whatever sheet its target server uses is the
+ * one it writes (it refuses the production sheet by ID, but cannot see which
+ * sheet a running server holds). Running it from CI could write to the
+ * customer's real books. It lives at the repo root, outside
  * `scripts/`, so the glob below cannot reach it even by accident. Keep it that
  * way: do not "helpfully" widen the pattern to the repo root.
  *

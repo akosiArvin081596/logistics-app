@@ -13,6 +13,15 @@ const { spawn } = require("child_process");
 // Run against staging with TEST_PORT=3003.
 const PORT = Number(process.env.TEST_PORT) || 3000;
 
+// The suite writes, so the sheet must be named and must not be production's
+// (lib/sheet-id.js): set SPREADSHEET_ID to the target server's own sheet (the
+// value in its .env). The throwaway server booted further down inherits it.
+const SUITE_SHEET = require("./lib/sheet-id").scriptSpreadsheetId(process.env, { script: "test-suite.js", refuseProduction: true });
+if (!SUITE_SHEET.id) {
+  console.error(SUITE_SHEET.error);
+  process.exit(2);
+}
+
 // lib/broker-invoice.js is pure (no network, no DB), so tests 82-90 exercise it
 // directly — the only assertions here that need neither a server nor fixture
 // data. Required defensively: the module is loaded at suite start, and a hard
