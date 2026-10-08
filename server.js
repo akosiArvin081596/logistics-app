@@ -8355,10 +8355,15 @@ app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), 
 		// Job Tracking is read here, the handler's one await, and only when the body
 		// could move a settlement column (directoryEditMayMoveMoney()), so a contact
 		// edit never waits on the sheet. Everything below reads the row again, so
-		// the checks and the UPDATE run with no await between them.
+		// the checks and the UPDATE run with no await between them. A failed read
+		// leaves `jt` null rather than failing the request: the pay check below
+		// still refuses (and audits) a Dispatcher's pay change, and a change that
+		// reaches the lock is judged over every finalized month.
 		const peek = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		let jt = null;
-		if (peek && directoryEditMayMoveMoney(peek, obj)) jt = await getJobTrackingCached();
+		if (peek && directoryEditMayMoveMoney(peek, obj)) {
+			try { jt = await getJobTrackingCached(); } catch (err) { console.error("[drivers-directory] Job Tracking unreadable for the month-end lock:", err.message); }
+		}
 		// Keep existing status / pay fields if the client didn't send them.
 		// SELECT * (was: five columns) because the period guard also needs
 		// driver_name, and a 404 because this route previously answered
@@ -14938,9 +14943,15 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 	// its carrier, held to the month-end lock (accountDirectoryCarrier()), which
 	// sizes the driver's history off Job Tracking. Read first, the function's one
 	// await, and only when this call adds a judged row (onboardingAddsJudgedRow());
-	// everything below reads its rows after it.
+	// everything below reads its rows after it. A failed read must not fail the
+	// signature or the drug-test upload that got here (a retried signature answers
+	// "already signed" and never comes back), so it leaves `jt` null: the
+	// driver's history then reads as undated, every finalized month, and a carrier
+	// that would move them onto an investor's ledger is withheld and audited.
 	let jt = null;
-	if (onboardingAddsJudgedRow(userId)) jt = await getJobTrackingCached();
+	if (onboardingAddsJudgedRow(userId)) {
+		try { jt = await getJobTrackingCached(); } catch (err) { console.error("[onboarding] Job Tracking unreadable for the directory row's month-end check:", err.message); }
+	}
 	const ob = db.prepare("SELECT * FROM driver_onboarding WHERE user_id = ?").get(userId);
 	if (!ob || ob.status === "fully_onboarded") return ob;
 	const signedCount = db.prepare(
@@ -52547,7 +52558,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// driver's assigned truck. Inner maps are null-prototype too.
 		const loadsByDriverTruck = Object.create(null);   // { driver: { truckUnit|"": count } }
 		const revenueByDriverTruck = Object.create(null); // { driver: { truckUnit|"": revenue } }
-		const daysByDriverTruck = Object.create(null);    // { driver: { truckUnit|"": Set<"YYYY-MM-DD"> } }
+		const dayTruckByDriver = Object.create(null);     // { driver: Map<"YYYY-MM-DD", truckUnit|""> }, first load in sheet order
 		const revenueByTruck = Object.create(null);       // { truckUnit: completed revenue, whoever drove }
 		// Per-truck per-month REVENUE (completed loads only), bucketed by the load's
 		// ASSIGNED month exactly like monthlyRevenue / driverMonthlyRevenue below.
@@ -52713,11 +52724,11 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					// All-time set (for totals)
 					if (!driverDaySets[driver]) driverDaySets[driver] = new Set();
 					counted.forEach(d => driverDaySets[driver].add(d));
-					// The same days, by the truck this load names (the per-truck breakdown).
+					// The truck each of these days counts on in the per-truck breakdown: the
+					// one named by the first load, in sheet order, that counts the day.
 					{
-						const byTruck = daysByDriverTruck[driver] || (daysByDriverTruck[driver] = Object.create(null));
-						const days = byTruck[truckUnit] || (byTruck[truckUnit] = new Set());
-						counted.forEach(d => days.add(d));
+						const byDay = dayTruckByDriver[driver] || (dayTruckByDriver[driver] = new Map());
+						counted.forEach(d => { if (!byDay.has(d)) byDay.set(d, truckUnit); });
 					}
 					// Per-assigned-month set (for monthly P&L). Falls back to the
 					// physical day's month if the load has no assigned date (rare).
@@ -53307,22 +53318,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				const det = driverPayDetails[driver];
 				if (!(det.totalPay > 0)) continue;
 				const home = homeOf(driver);
-				// Active days per truck, deduplicated within a truck. An admin-added
-				// day has no load, so it counts on the driver's assigned truck. A day
-				// that resolves to no truck is still part of the whole.
+				// Each active day on exactly one truck, so the per-truck day counts add
+				// up to the driver's activeDays and "N days x $R" matches the pay beside
+				// it. A day whose loads name two trucks goes to the first, in sheet
+				// order. An admin-added day has no load, so it counts on the driver's
+				// assigned truck. A day that resolves to no truck is still part of the
+				// whole.
+				const unitOfDay = new Map();
+				for (const [d, tk] of dayTruckByDriver[driver] || new Map()) unitOfDay.set(d, tk || home);
+				for (const d of det.dates || []) if (!unitOfDay.has(d)) unitOfDay.set(d, home);
 				const daysOn = Object.create(null);
-				const onLoads = new Set();
-				const byTruckDays = daysByDriverTruck[driver] || Object.create(null);
-				for (const tk of Object.keys(byTruckDays)) {
-					const unit = tk || home;
-					for (const d of byTruckDays[tk]) {
-						onLoads.add(d);
-						(daysOn[unit] || (daysOn[unit] = new Set())).add(d);
-					}
-				}
-				for (const d of det.dates || []) {
-					if (!onLoads.has(d)) (daysOn[home] || (daysOn[home] = new Set())).add(d);
-				}
+				for (const [d, unit] of unitOfDay) (daysOn[unit] || (daysOn[unit] = new Set())).add(d);
 				const weight = Object.create(null);
 				let whole = 0;
 				if (det.payType === "percentage") {

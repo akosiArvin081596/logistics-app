@@ -1029,7 +1029,7 @@ const PINNED = [
 		["milesByLoadId", "milesByDriver", "milesByTruck", "loadsByTruck", "revenueByTruckMonth",
 			"driverDaySets", "driverMonthlyDays", "driverMonthlyDayLoads", "driverDisplayName", "driverMonthlyRevenue", "unitToVid",
 			"driverDaySource", "driverPayDetails", "trucksByDriver",
-			"loadsByDriverTruck", "revenueByDriverTruck", "daysByDriverTruck", "homeUnit",
+			"loadsByDriverTruck", "revenueByDriverTruck", "dayTruckByDriver", "homeUnit",
 			// keyed by unit number
 			"revenueByTruck", "revenueOnUnit", "loadsOnUnit", "payOnUnit", "expOnUnit",
 			"perTruckData", "maintByTruck", "compByTruck", "windowRevenue", "modeByUnit", "insufficient", "basis", "alloc"]],

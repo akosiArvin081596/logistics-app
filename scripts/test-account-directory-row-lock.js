@@ -33,6 +33,7 @@
  *   §1 POST /api/users
  *   §2 onboarding completion (all documents signed)
  *   §3 drug-test completion (fully onboarded, no row yet)
+ *   §4 onboarding completion while Job Tracking cannot be read
  *
  * Pure: no server, no app.db, no network.
  *   node scripts/test-account-directory-row-lock.js
@@ -166,8 +167,9 @@ function makeApp() {
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04", () => true,
 		{ hash: async () => "hash" }, () => {}, { run() {} }, () => {},
-		async () => { S.jtReads++; return JT; },
-		(name) => S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false },
+		async () => { S.jtReads++; if (S.jtFails) throw new Error("Job Tracking could not be read"); return JT; },
+		// As driverHistoryFloorMonth() answers: with no sheet in hand nothing can be dated.
+		(name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		(audit, code, periods, subject) => { S.recorded.push({ audit, code, periods, subject }); },
 		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} });
 	let handler = null;
@@ -177,7 +179,7 @@ function makeApp() {
 		db, ...m,
 		bcrypt: { hash: async () => "hash" },
 		getJobTrackingCached: async () => { S.jtReads++; return JT; },
-		driverHistoryFloorMonth: (name) => S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false },
+		driverHistoryFloorMonth: (name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		periodLocksReadable: () => true,
 		periodBlockedResponse: (req, res, what, blockers, remedy, audit) => {
 			S.refusals.push({ what, blockers, audit });
@@ -212,7 +214,7 @@ function makeApp() {
 }
 
 function reset() {
-	Object.assign(S, { floors: { "cara carrier": { floor: "2026-06", unbounded: false } }, jtReads: 0, refusals: [], recorded: [] });
+	Object.assign(S, { floors: { "cara carrier": { floor: "2026-06", unbounded: false } }, jtReads: 0, jtFails: false, refusals: [], recorded: [] });
 	return makeApp();
 }
 const dirRow = (db, name) => db.prepare("SELECT * FROM drivers_directory WHERE driver_name = ?").get(name);
@@ -291,6 +293,25 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 		await complete(31);
 		const row = dirRow(db, "New Hire");
 		check(`§3 a new hire: added with the carrier (got ${row ? JSON.stringify(row.carrier_name) : "no row"})`, row && row.carrier_name === "Acme Leasing");
+	}
+
+	console.log("§4 onboarding completion while Job Tracking cannot be read");
+	{
+		// A retried signature answers "already signed" and never comes back here,
+		// so the completion must not fail: the history reads as undated (every
+		// finalized month), the investor's carrier is withheld, and it is audited.
+		const { db, onboarding, complete } = reset();
+		S.jtFails = true;
+		onboarding(40, "New Hire", "Acme Leasing", "documents_pending");
+		let threw = null;
+		try { await complete(40); } catch (err) { threw = err.message; }
+		const row = dirRow(db, "New Hire");
+		check(`§4 the completion does not throw (got ${threw || "no error"})`, threw === null);
+		check("§4 …the onboarding moves on", db.prepare("SELECT status FROM driver_onboarding WHERE user_id = 40").get().status === "documents_signed");
+		check(`§4 …the row is added without the carrier (got ${row ? JSON.stringify(row.carrier_name) : "no row"})`, row && row.carrier_name === "");
+		const rec = S.recorded.find((x) => blockedAudit(x.audit));
+		check("§4 …and the withheld carrier is recorded over every finalized month",
+			!!rec && JSON.stringify(rec.periods) === JSON.stringify(LOCKED));
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

@@ -29,6 +29,7 @@
  *   §2 pay is split across the trucks it was earned on, with its basis
  *   §3 receipts follow the truck they name, else the driver's assigned truck
  *   §4 fixed costs come from the server and the parts add up
+ *   §5 a day whose loads name two trucks counts on one of them
  *
  * Pure: no server, no app.db, no network, no Sheets.
  *   node scripts/test-investor-truck-breakdown.js
@@ -157,7 +158,7 @@ function seed(db) {
 	e.run("Pat Percent", 50, "2026-08-20", "");
 }
 
-async function investorView() {
+async function investorView(rows = ROWS) {
 	const db = new Database(":memory:");
 	db.exec(DDL);
 	seed(db);
@@ -167,7 +168,7 @@ async function investorView() {
 		db, geolib, fuelModel, normalizeLoadId, loadMilesLib: require("../lib/load-miles"), Date: FixedDate,
 		app: { get: (p, ...h) => { handler = h[h.length - 1]; } },
 		requireRole: () => passthrough,
-		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: ROWS.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
+		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: rows.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getDeletedLoadIds: () => new Set(),
 		getEldTravelDaysByVehicleCached: () => Object.create(null),
 		logAudit: () => {},
@@ -230,6 +231,23 @@ async function investorView() {
 		check(`§4 ${unit}: fixed costs $1,000 a month (got ${row.unitMonthlyFixedCosts})`, row.unitMonthlyFixedCosts === 1000);
 		check(`§4 ${unit}: pay + fixed + trip = monthly expenses (${row.unitMonthlyDriverPay} + ${row.unitMonthlyFixedCosts} + ${row.unitMonthlyTripExpenses} vs ${row.unitMonthlyExpenses})`,
 			row.unitMonthlyDriverPay + row.unitMonthlyFixedCosts + row.unitMonthlyTripExpenses === row.unitMonthlyExpenses);
+	}
+
+	console.log("§5 a day whose loads name two trucks counts on one of them");
+	{
+		// Dee also hauled a $400 load on 201 on August 3, the day of the load on 203.
+		// Dee still has 5 days ($1,250); the day stays with 203 (the first load, in
+		// sheet order), so each truck's "N days x $250" is the pay beside it.
+		const r5 = await investorView([...ROWS, jt("6", "Dee Dayrate", "8/3/2026 12:00", "8/3/2026 20:00", "8/2/2026", "$400.00", "201")]);
+		const p = (r5.body && r5.body.production && r5.body.production.perTruckData) || {};
+		const dee201 = ((p["201"] || {}).driverPay || { drivers: [] }).drivers.find((x) => x.name === "Dee Dayrate") || {};
+		const dee203 = ((p["203"] || {}).driverPay || { drivers: [] }).drivers.find((x) => x.name === "Dee Dayrate") || {};
+		check(`§5 Dee's days on the two trucks add up to Dee's 5 (got ${dee201.activeDays} + ${dee203.activeDays})`,
+			dee201.activeDays + dee203.activeDays === 5);
+		check(`§5 …and each truck's pay is its days x $250 (got ${dee201.totalPay} on 201, ${dee203.totalPay} on 203)`,
+			dee201.totalPay === dee201.activeDays * 250 && dee203.totalPay === dee203.activeDays * 250 && dee201.activeDays === 4);
+		check(`§5 …while the load's revenue counts on the truck it names: 201 $2,400, $1,200 a month (got ${(p["201"] || {}).unitMonthlyGross})`,
+			(p["201"] || {}).unitMonthlyGross === 1200 && (p["201"] || {}).loadCount === 3);
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);

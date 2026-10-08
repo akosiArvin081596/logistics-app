@@ -31,7 +31,8 @@
  *   §2 allowed: history only in open months; a driver with no record anywhere;
  *      a contact-only edit (no sheet read); a resend of the stored terms
  *   §3 a rename is judged on both names' histories
- *   §4 Job Tracking unreadable: a pay edit fails without writing; a contact edit
+ *   §4 Job Tracking unreadable: a pay edit is held over every finalized month,
+ *      a Dispatcher's pay change is still the audited 403, and a contact edit
  *      does not need it
  *   §5 period locks unreadable: held as before
  *
@@ -132,6 +133,7 @@ const MODULE_EXPORTS = [
 // ── fixtures ────────────────────────────────────────────────────────────────
 const LOCKED = ["2026-06", "2026-07", "2026-08"];
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
+const DISPATCHER = { id: 6, username: "dispatch1", role: "Dispatcher" };
 const INVESTOR_COMPANY = "ACME LEASING";
 
 function auditDdl() {
@@ -212,21 +214,21 @@ function makeApp() {
 	new Function(...names, PUT_ROUTE)(...names.map((k) => env[k]));
 	new Function(...names, DELETE_ROUTE)(...names.map((k) => env[k]));
 	if (typeof handlers.put !== "function" || typeof handlers.delete !== "function") die("the lifted routes did not register");
-	const send = async (verb, id, cells) => {
+	const send = async (verb, id, cells, user = SUPER) => {
 		const out = { status: 200, body: null };
 		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
 		const body = cells ? { headers: Object.keys(cells), values: Object.values(cells) } : {};
-		await handlers[verb]({ session: { user: SUPER }, params: { id: String(id) }, query: {}, body }, res);
+		await handlers[verb]({ session: { user }, params: { id: String(id) }, query: {}, body }, res);
 		return out;
 	};
 	// The edit form's whole-row resend (DriverTable.vue), with the fields changed.
-	const put = (id, change) => {
+	const put = (id, change, user = SUPER) => {
 		const row = db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(id);
 		return send("put", id, {
 			Driver: row.driver_name, "Carrier Name": row.carrier_name, PhoneNumber: row.phone, Status: row.status,
 			PayType: row.pay_type, PayPercentage: row.pay_type === "percentage" ? String(row.pay_percentage) : "",
 			PayDaily: row.pay_type === "fixed" && row.pay_daily ? String(row.pay_daily) : "", ...change,
-		});
+		}, user);
 	};
 	return { db, m, put, del: (id) => send("delete", id) };
 }
@@ -324,10 +326,22 @@ const got = (r) => `got ${r.status} ${(r.body || {}).code || ""} ${periodsOf(r).
 
 	console.log("§4 Job Tracking unreadable");
 	{
+		// The driver's history cannot be dated, so it reads as every finalized month.
 		const { db, put } = reset({ jtFails: true });
 		const before = JSON.stringify(rowById(db, 1));
 		const r = await put(1, { PayType: "percentage", PayPercentage: "20" });
-		check(`§4 a pay edit fails and writes nothing (${got(r)})`, r.status >= 500 && JSON.stringify(rowById(db, 1)) === before);
+		check(`§4 a pay edit is held over every finalized month and writes nothing (${got(r)})`,
+			r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(periodsOf(r)) === JSON.stringify(LOCKED) &&
+			JSON.stringify(rowById(db, 1)) === before);
+	}
+	{
+		// The pay check still answers first, and is audited.
+		const { db, put } = reset({ jtFails: true });
+		const before = JSON.stringify(rowById(db, 1));
+		const r = await put(1, { PayType: "percentage", PayPercentage: "20" }, DISPATCHER);
+		const audit = db.prepare("SELECT action FROM audit_trail WHERE action = 'pay_edit_blocked'").all();
+		check(`§4 a Dispatcher's pay change is still 403 PAY_EDIT_ADMIN_ONLY, audited, nothing written (${got(r)}, ${audit.length} audit row)`,
+			r.status === 403 && r.body.code === "PAY_EDIT_ADMIN_ONLY" && audit.length === 1 && JSON.stringify(rowById(db, 1)) === before);
 	}
 	{
 		const { db, put } = reset({ jtFails: true });
