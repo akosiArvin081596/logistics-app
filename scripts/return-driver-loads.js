@@ -3,23 +3,34 @@
  * One-time data fix: return a driver's surplus "Dispatched" loads to the Job Board.
  *
  * Context: the "one load at a time" rule (enforced server-side as of this change)
- * means a driver can only ever hold a single active load. Howard predates the rule
- * with 3 assigned loads. This script returns every load currently in "Dispatched"
- * status for the target driver back to the Job Board — exactly reversing what
- * POST /api/dispatch writes (Driver, Status, Truck, Owner ID) so the row looks
- * untouched/unassigned again. Loads that have progressed past Dispatched
- * (Assigned, In Transit, etc.) are LEFT ALONE.
+ * means a driver can only ever hold a single active load. A driver who predates
+ * the rule can still hold several. This script returns every load currently in
+ * "Dispatched" status for the named driver back to the Job Board — exactly
+ * reversing what POST /api/dispatch writes (Driver, Status, Truck, Owner ID) so
+ * the row looks untouched/unassigned again. Loads that have progressed past
+ * Dispatched (Assigned, In Transit, etc.) are LEFT ALONE.
+ *
+ * The driver is a required argument, the name as Job Tracking's Driver column
+ * holds it (case and spacing aside). There is no default: the script refuses to
+ * run without one.
  *
  * Safe by default: prints what it WOULD change and exits. Pass --apply to write.
  *
- *   node scripts/return-howard-loads.js                 # dry run (read-only)
- *   node scripts/return-howard-loads.js --apply         # perform the revert
- *   node scripts/return-howard-loads.js "Howard" --apply # explicit driver name
+ *   node scripts/return-driver-loads.js "<driver name>"           # dry run (read-only)
+ *   node scripts/return-driver-loads.js "<driver name>" --apply   # perform the revert
  *
  * Writes directly to the production Dispatch Management sheet via the service
- * account, so it does NOT emit sockets — Howard's app drops the loads on its
+ * account, so it does NOT emit sockets — the driver's app drops the loads on its
  * next refresh/login. Run from the project root (service-account-key.json there).
  */
+
+const args = process.argv.slice(2);
+const APPLY = args.includes("--apply");
+const TARGET_DRIVER = (args.find((a) => !a.startsWith("--")) || "").trim();
+if (!TARGET_DRIVER) {
+  console.error('return-driver-loads: refusing to run: name the driver, e.g. node scripts/return-driver-loads.js "<driver name>" [--apply] (there is no default).');
+  process.exit(2);
+}
 
 const path = require("path");
 const { google } = require("googleapis");
@@ -31,10 +42,6 @@ const KEY_FILE = path.join(__dirname, "..", "service-account-key.json");
 // Status we return to the board, and the value we write for "back on the board".
 const REVERT_STATUS_RE = /^dispatched$/i;
 const UNASSIGNED_STATUS = "Unassigned";
-
-const args = process.argv.slice(2);
-const APPLY = args.includes("--apply");
-const TARGET_DRIVER = (args.find((a) => !a.startsWith("--")) || "Howard").trim();
 
 function normalizeDriverName(s) {
   return (s || "").trim().toLowerCase().replace(/\s+/g, " ");

@@ -5,7 +5,8 @@
 // Prerequisites:
 //   1. npm run build:client     (so Express can serve client/dist/)
 //   2. node scripts/prepare-test-fixtures.js --yes-local-db   (known passwords)
-//   3. node scripts/seed-staging.js        (multi-role test users + trucks)
+//   3. SEED_STAGING_PASSWORD=… node scripts/seed-staging.js   (multi-role test users + trucks;
+//      run this script with the same SEED_STAGING_PASSWORD)
 //   4. npm start                (Express on :3000) — leave running in another shell
 //
 // Usage:
@@ -30,14 +31,17 @@ const FILTER =
 
 const OUT_DIR = path.join(__dirname, "..", "..", "docs", "manual", "assets", "screenshots");
 
-// Default credentials match scripts/seed-staging.js. For ad-hoc captures
-// (e.g. against a production snapshot with reset passwords), override via
-// the CAPTURE_CREDS env var: a JSON object with the same shape as below.
+// Default credentials match scripts/seed-staging.js: its accounts sign in with
+// the password it was run with, SEED_STAGING_PASSWORD (no default, there or
+// here). For ad-hoc captures (e.g. against a production snapshot with reset
+// passwords), override via the CAPTURE_CREDS env var: a JSON object with the
+// same shape as below.
+const SEEDED_PASSWORD = process.env.SEED_STAGING_PASSWORD || "";
 const DEFAULT_CREDENTIALS = {
 	super_admin: { username: "super_admin", password: "Password123!" },
-	dispatcher: { username: "dispatch1", password: "investor123" },
-	driver: { username: "leonora", password: "investor123" },
-	investor: { username: "kevin", password: "investor123" },
+	dispatcher: { username: "dispatch1", password: SEEDED_PASSWORD },
+	driver: { username: "leonora", password: SEEDED_PASSWORD },
+	investor: { username: "kevin", password: SEEDED_PASSWORD },
 	public: null,
 };
 const CREDENTIALS = process.env.CAPTURE_CREDS
@@ -54,6 +58,9 @@ function ensureOutDir() {
 
 // Hit /api/auth/login and pull connect.sid from Set-Cookie.
 async function loginAndGetCookie(creds) {
+	if (!creds.password) {
+		throw new Error(`No password for ${creds.username}: set SEED_STAGING_PASSWORD (the one scripts/seed-staging.js was run with) or pass it in CAPTURE_CREDS`);
+	}
 	const res = await fetch(`${BASE}/api/auth/login`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },

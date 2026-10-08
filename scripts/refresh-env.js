@@ -111,7 +111,8 @@ function unknowableSecret() {
 // account against this list. It is what that check runs AGAINST, never a
 // default: nothing in this file hashes these values.
 //   "Password123!" — scripts/prepare-test-fixtures.js and test-suite.js (LOCAL databases)
-//   "investor123"  — scripts/seed-staging.js
+//   "investor123"  — scripts/seed-staging.js until 2026-10-08 (it now reads
+//                    SEED_STAGING_PASSWORD), still in the repository's history
 const PUBLISHED_PASSWORDS = ["Password123!", "investor123"];
 
 // RFC 2606 reserves .invalid: guaranteed never to resolve, so even a

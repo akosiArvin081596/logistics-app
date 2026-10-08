@@ -22,10 +22,15 @@
  * run against anything but a local server on the LOCAL sheet. It writes through
  * the driver's own session, so it cannot reach anything a driver could not.
  *
+ * THE DRIVER ON SCREEN is the e2e test driver on the staging copy, never a real
+ * driver: --user names that account (there is no default), and the storyboard
+ * reads the driver's loads under the name that account signs in with. --load and
+ * --load2 name that driver's two Dispatched demo loads (see the storyboard).
+ *
  * Usage:
- *   node scripts/docs/capture-driver-guide.js
- *   node scripts/docs/capture-driver-guide.js --base=http://localhost:3100
- *   node scripts/docs/capture-driver-guide.js --only=05,06     (re-shoot a beat)
+ *   node scripts/docs/capture-driver-guide.js --user=<e2e test driver> --load=<id> --load2=<id>
+ *   … --base=http://localhost:3100
+ *   … --only=05,06     (re-shoot a beat)
  *   node scripts/docs/capture-driver-guide.js --list           (print storyboard)
  */
 
@@ -41,7 +46,7 @@ const BASE = arg("base", "http://localhost:3100");
 const ONLY = (arg("only", "") || "").split(",").map((s) => s.trim()).filter(Boolean);
 const LIST = process.argv.includes("--list");
 
-const DRIVER = { username: arg("user", "LogisX-3867"), password: arg("pass", "Password123!") };
+const DRIVER = { username: arg("user", ""), password: arg("pass", "Password123!") };
 const OUT_DIR = path.join(__dirname, "..", "..", "docs", "driver-guide", "screenshots");
 // Annotated twins live beside the clean set so both are available to the editor.
 const ANNO_DIR = path.join(__dirname, "..", "..", "docs", "driver-guide", "screenshots-annotated");
@@ -503,6 +508,8 @@ async function main() {
 		return;
 	}
 
+	if (!DRIVER.username) throw new Error("name the e2e test driver's account with --user=… (there is no default; never a real driver's)");
+	if (!storyboard.demoLoads.every(Boolean)) throw new Error("name that driver's two Dispatched demo loads with --load=… and --load2=…");
 	await assertSafeTarget();
 	fs.mkdirSync(OUT_DIR, { recursive: true });
 
@@ -521,7 +528,7 @@ async function main() {
 		console.log(`[${num}] ${step.title}`);
 		try {
 			if (step.before) {
-				const note = await step.before({ api, adminApi });
+				const note = await step.before({ api, adminApi, driverName: user.driverName });
 				if (note) console.log(`    state: ${note}`);
 			}
 			await capture(browser, step, i + 1);
