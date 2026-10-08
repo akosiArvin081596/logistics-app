@@ -346,7 +346,7 @@ import MetricInfoDialog from './MetricInfoDialog.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 import { leaseBasisOf } from '../../lib/payoutPeriod'
 import { leaseExplain } from '../../lib/leasePayoutText'
-import { driverPayBasis } from '../../lib/driverPay'
+import { truckDriverPayBasis } from '../../lib/driverPay'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -417,23 +417,15 @@ function noProjectionTitle(t) {
 }
 function truckPrice(t) { return t.PurchasePrice || t.purchase_price || props.asset?.purchasePrice || 0 }
 function truckMonths(t) { return props.production?.monthsOfOperation || 1 }
-function driverPay(t) {
-  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
-  return (props.production?.driverPayDetails || {})[driver]?.totalPay || 0
-}
-function driverBasis(t) {
-  const driver = (t.AssignedDriver || t.assigned_driver || '').trim().toLowerCase()
-  return driverPayBasis((props.production?.driverPayDetails || {})[driver])
-}
-function fixedCosts(t) {
-  const pu = perUnit(t)
-  return (pu.unitMonthlyExpenses || 0) - (driverPay(t) / (truckMonths(t) || 1)) - tripExp(t)
-}
+// The truck's own figures, per month, exactly as the server sends them: the pay
+// earned on THIS truck (not its current driver's whole pay, which put a driver's
+// pay under a truck that earned none of it), its fixed costs, and its trip
+// expenses. Nothing is worked out here.
+function driverPay(t) { return perUnit(t).unitMonthlyDriverPay || 0 }
+function driverBasis(t) { return truckDriverPayBasis(perUnit(t).driverPay) }
+function fixedCosts(t) { return perUnit(t).unitMonthlyFixedCosts || 0 }
 function tripExp(t) {
-  // Fuel, repairs, maintenance and compliance for this unit, per month. The
-  // server sends it now; this used to return 0 with a TODO, which made
-  // fixedCosts() — total minus driver pay minus THIS — absorb every variable
-  // cost and report it to the investor as fixed.
+  // Fuel, repairs, maintenance and compliance for this unit, per month.
   return perUnit(t).unitMonthlyTripExpenses || 0
 }
 function monthlyNet(t) {

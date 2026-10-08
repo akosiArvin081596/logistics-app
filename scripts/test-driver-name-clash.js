@@ -623,6 +623,12 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		recordPayRateChanges: () => {},
 		directoryChangedColumns,
 		directoryDefaultRow,
+		// POST /api/users holds the directory row a Driver account adds to the
+		// month-end lock. That lock is scripts/test-account-directory-row-lock.js's
+		// subject; here it judges nothing, so only the name check decides.
+		accountDirectoryRowJudged: () => false,
+		accountDirectoryRowLock: () => null,
+		getJobTrackingCached: async () => ({ headers: [], data: [] }),
 	};
 	const names = Object.keys(env);
 	new Function(...names, routeSrc)(...names.map((k) => env[k]));

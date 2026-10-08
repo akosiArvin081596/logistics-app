@@ -10,11 +10,13 @@
 // their percentage pay.
 //
 //   §1 driverPayBasis() (client/src/lib/driverPay.js): the share for a
-//      percentage-paid driver, the day count and rate for anyone else, exactly
-//      as before
+//      percentage-paid driver, the day count and rate for anyone else, and
+//      "No pay this period" for a driver with no pay entry (2026-10-04); and
+//      truckDriverPayBasis(), the same per truck, over the months averaged
 //   §2 GET /api/investor sends each driver's payType and payPercentage with
 //      their totalPay (read from server.js)
-//   §3 FleetBreakdownSection.vue prints the hint through driverPayBasis()
+//   §3 FleetBreakdownSection.vue prints the hint through truckDriverPayBasis(),
+//      from the pay earned on that truck
 //
 // No DOM, no server.
 //   node scripts/test-fleet-driver-pay-basis.mjs
@@ -46,13 +48,32 @@ for (const [label, details, want] of [
     '22.5% of revenue after deductible trip expenses'],
   ['a day-rate driver', { activeDays: 18, dailyRate: 300, totalPay: 5400, payType: 'fixed', payPercentage: 0 }, '18 days x $300'],
   ['a day-rate driver from a server that sends no pay type', { activeDays: 18, dailyRate: 275, totalPay: 4950 }, '18 days x $275'],
-  ['a truck whose driver has no pay entry', undefined, '0 days x $250'],
+  // 2026-10-04: a driver with no pay entry was paid nothing.
+  ['a truck whose driver has no pay entry', undefined, 'No pay this period'],
 ]) {
   const got = basis(details)
   ok(`§1 ${label}: "${want}" (got "${got}")`, got === want)
 }
 ok('§1 a percentage-paid driver never reads as a day rate',
   !/days x \$/.test(basis({ activeDays: 21, dailyRate: 0, payType: 'percentage', payPercentage: 20 })))
+
+// The per-truck basis (2026-10-04): the server's perTruckData[unit].driverPay.
+const { truckDriverPayBasis } = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'driverPay.js')).href)
+const truckBasis = typeof truckDriverPayBasis === 'function' ? truckDriverPayBasis : () => '(no truckDriverPayBasis)'
+const DEE = { name: 'Dee Dayrate', payType: 'fixed', payPercentage: 0, activeDays: 36, dailyRate: 250, totalPay: 9000 }
+const PAT = { name: 'Pat Percent', payType: 'percentage', payPercentage: 20, activeDays: 20, dailyRate: 0, totalPay: 6700 }
+for (const [label, pay, want] of [
+  ['no pay on the truck', null, 'No pay this period'],
+  ['a pay entry of $0', { months: 3, totalPay: 0, drivers: [{ ...DEE, totalPay: 0 }] }, 'No pay this period'],
+  ['one day-rate driver over 10 months', { months: 10, totalPay: 9000, drivers: [DEE] }, '36 days x $250 over 10 months'],
+  ['one day-rate driver over 1 month', { months: 1, totalPay: 9000, drivers: [DEE] }, '36 days x $250'],
+  ['one share-paid driver', { months: 10, totalPay: 6700, drivers: [PAT] }, '20% of revenue after deductible trip expenses'],
+  ['two drivers on one truck', { months: 2, totalPay: 15700, drivers: [PAT, DEE] },
+    'Pat Percent: 20% of revenue after deductible trip expenses; Dee Dayrate: 36 days x $250 over 2 months'],
+]) {
+  const got = truckBasis(pay)
+  ok(`§1 truckDriverPayBasis(), ${label}: "${want}" (got "${got}")`, got === want)
+}
 
 console.log('§2 GET /api/investor sends the pay type with each driver\'s pay')
 {
@@ -68,11 +89,11 @@ console.log('§2 GET /api/investor sends the pay type with each driver\'s pay')
 console.log('§3 the Fleet Breakdown prints it')
 {
   const vue = read('client', 'src', 'components', 'investor', 'FleetBreakdownSection.vue')
-  ok('§3 FleetBreakdownSection.vue imports driverPayBasis from lib/driverPay',
-    /^import \{ driverPayBasis \} from '\.\.\/\.\.\/lib\/driverPay'$/m.test(vue))
+  ok('§3 FleetBreakdownSection.vue imports truckDriverPayBasis from lib/driverPay',
+    /^import \{ truckDriverPayBasis \} from '\.\.\/\.\.\/lib\/driverPay'$/m.test(vue))
   ok('§3 the Driver Pay hint is driverBasis(t)', vue.includes('<span class="bd-hint"> ({{ driverBasis(t) }})</span>'))
-  ok('§3 ...which hands the driver\'s pay entry to driverPayBasis()',
-    vue.includes('return driverPayBasis((props.production?.driverPayDetails || {})[driver])'))
+  ok('§3 ...which hands the pay earned on that truck (perTruckData[unit].driverPay) to truckDriverPayBasis()',
+    vue.includes('function driverBasis(t) { return truckDriverPayBasis(perUnit(t).driverPay) }'))
   ok('§3 no template prints "days x $" itself', !/days x \$\{\{/.test(vue))
 }
 

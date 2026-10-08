@@ -134,7 +134,7 @@ function liftConst(head, close = null) {
 const HEADS = {
 	dirGet: 'app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	dirPost: 'app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
-	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	truckPost: 'app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {',
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 };
@@ -399,6 +399,8 @@ function mountAll(db, { routes = {}, moduleSrc = {}, locked = false, duringActiv
 		// too; the real pair is scripts/test-truck-create-new-driver.js's subject.
 		getJobTrackingCached: async () => ({ headers: ["Load ID", "Driver", "Assigned Date"], data: [] }),
 		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
+		// Whether the PUT reads Job Tracking first, shipped as is.
+		directoryEditMayMoveMoney: new Function(`"use strict";\n${liftFunction("directoryEditMayMoveMoney")}\nreturn directoryEditMayMoveMoney;`)(),
 		periodBlockedResponse: periodRefusal,
 		periodLockUnreadableResponse: periodRefusal,
 		DIRECTORY_LOCK_REMEDY: "",
@@ -960,7 +962,11 @@ function sourcePins() {
 
 	const dp = code(ROUTES.dirPut);
 	const dpo = code(ROUTES.dirPost);
-	ok(!/\bawait\b/.test(dp), "§6 PUT /api/drivers-directory/:id never awaits, so its check and its UPDATE see one row");
+	// One await (Job Tracking, for the month-end lock's driver history), before
+	// the row is read: the pay check, the lock and the UPDATE see one row.
+	ok((dp.match(/\bawait\b/g) || []).length === 1 &&
+		["const current = db.prepare(", "refusePayEdit(", "directoryEditLockBlockers(", "UPDATE drivers_directory SET"].every((s) => before(dp, "await ", s)),
+		"§6 PUT /api/drivers-directory/:id awaits once, before it reads the row its check and its UPDATE see");
 	ok(before(dp, "refusePayEdit(", "directoryEditLockBlockers(") && before(dp, "refusePayEdit(", "UPDATE drivers_directory SET"),
 		"§6 ...and refuses a pay change before its month-end lock and its UPDATE");
 	ok(dp.includes("directoryPayChanges(current, { pay_type: nextPayType, pay_percentage: nextPayPct, pay_daily: nextPayDaily })"),

@@ -64,11 +64,31 @@ export function directoryPayType(stored) {
 // production.driverPayDetails. A percentage-paid driver is paid a share of
 // revenue after deductible trip expenses, and the server sends them a daily
 // rate of 0, so the day-rate wording read "N days x $250" for them. Text only:
-// the figure beside it is the server's totalPay.
+// the figure beside it is the server's totalPay. A driver with no pay entry
+// was paid nothing: "No pay this period", not "0 days x $250".
 export function driverPayBasis(details) {
-  const d = details || {}
+  if (!details) return 'No pay this period'
+  const d = details
   if (d.payType === 'percentage') {
     return `${Number(d.payPercentage) || 0}% of revenue after deductible trip expenses`
   }
   return `${d.activeDays || 0} days x $${d.dailyRate || 250}`
+}
+
+// How the pay on ONE truck in the Fleet Breakdown was earned, from the server's
+// perTruckData[unit].driverPay: { months, totalPay, drivers: [{ name, payType,
+// payPercentage, activeDays, dailyRate, totalPay }] }, or null when none was
+// earned on that truck. Text only: the figure beside it is the server's
+// unitMonthlyDriverPay, a monthly average, so a day rate names the months it is
+// averaged over and the days and rate can be checked against it. A truck two
+// drivers earned on names each.
+export function truckDriverPayBasis(pay) {
+  const drivers = (pay && Array.isArray(pay.drivers) ? pay.drivers : []).filter((d) => d && Number(d.totalPay) > 0)
+  if (!drivers.length) return 'No pay this period'
+  const months = Number(pay.months) || 1
+  const part = (d) => d.payType === 'percentage'
+    ? driverPayBasis(d)
+    : `${driverPayBasis(d)}${months > 1 ? ` over ${months} months` : ''}`
+  if (drivers.length === 1) return part(drivers[0])
+  return drivers.map((d) => `${d.name}: ${part(d)}`).join('; ')
 }

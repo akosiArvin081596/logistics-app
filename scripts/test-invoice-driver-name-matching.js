@@ -146,11 +146,12 @@ const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
 // payout ledger's own calculation, so its map is gatherLedgerScopeFacts()'s,
 // read fleet-wide (no investor driver set).
 const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t{\n\t\tconst truckQuery = investorDriverSet';
-// GET /api/investor's per-truck expense map, read as expByDriver[normalizeDriverName(
-// truck.assigned_driver)] (one investor's receipts). GET /api/financials keeps no
-// such map: its per-truck receipts are the books' items.
-const INVESTOR_TRUCK_EXP_ANCHOR = "const expByDriver = foldExpenseTotalsByDriver(\n";
-const INVESTOR_TRUCK_EXP_END = "\n\t\t\t);";
+// GET /api/investor's per-truck expense map for receipts naming no truck, folded
+// by driver and counted on the truck whose assigned driver normalizes to that key
+// (one investor's receipts). GET /api/financials keeps no such map: its
+// per-truck receipts are the books' items.
+const INVESTOR_TRUCK_EXP_ANCHOR = "// Receipts by the truck they name, and those naming no truck by their";
+const INVESTOR_TRUCK_EXP_END = "const expByDriver = foldExpenseTotalsByDriver(expRows.filter((r) => !r.u));";
 
 // The one-per-driver-week index, exactly as the migration builds it.
 const INDEX_COLS = new Function(`${liftConst(SRC, "INVOICE_WEEK_IDX_COLS")}\nreturn INVOICE_WEEK_IDX_COLS;`)();
@@ -193,7 +194,7 @@ const DDL = `
 	CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '');
 	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '');
 	CREATE UNIQUE INDEX idx_invoices_driver_week ON ${INDEX_COLS};
-	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', truck_unit TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
 	CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', phone TEXT DEFAULT '', cell TEXT DEFAULT '', pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0);
 	CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT DEFAULT '', email TEXT DEFAULT '', role TEXT DEFAULT 'Driver', driver_name TEXT DEFAULT '');
@@ -941,9 +942,9 @@ async function batteryPay(src) {
 		t("§4 (f) …so '' holds only the row stored as '', none of the whitespace or NULL rows", pnl[""], { _total: 13, "2026-09": 13 });
 	}
 	{
-		// THE PER-TRUCK EXPENSE MAPS FOLD THE SAME WAY. Each handler reads its map
-		// as expByDriver[normalizeDriverName(truck.assigned_driver)] || 0 (§7 pins
-		// both reads), which `read` repeats.
+		// THE PER-TRUCK EXPENSE MAPS FOLD THE SAME WAY. GET /api/investor counts a
+		// driver's receipts naming no truck on the truck whose assigned driver
+		// normalizes to the same key (§7 pins it), which `read` repeats.
 		const w = buildWorld({ src, seed: seedDeductions });
 		const read = (map, assignedDriver) => map[w.normalizeDriverName(assignedDriver)] || 0;
 		const inv = w.investorTruckExp(INVESTOR);
@@ -1205,10 +1206,11 @@ function mutate(find, replace, label) {
 					(SRC.match(/const driver = jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "";/g) || []).length,
 					(SRC.match(/driver: jtDriverCol \? normalizeDriverName\(driverNameForTotals\(r\[jtDriverCol\]\)\) : "",/g) || []).length],
 				[1, 1, 1, 1]],
-			["§7 GET /api/investor's per-truck expense map is folded, and read by normalizeDriverName(truck.assigned_driver)",
+			["§7 GET /api/investor's per-truck expense map is folded, and each driver's receipts naming no truck land on the truck assigned to them by normalizeDriverName()",
 				[(SRC.match(/= foldExpenseTotalsByDriver\(/g) || []).length, SRC.includes(".map(r => [r.d, r.t])"),
-					(SRC.match(/const driverName = normalizeDriverName\(truck\.assigned_driver\);/g) || []).length,
-					SRC.includes("const varExp = expByDriver[driverName] || 0;")],
+					(SRC.match(/const d = normalizeDriverName\(t\.assigned_driver\);\n\t*if \(d && !Object\.prototype\.hasOwnProperty\.call\(homeUnit, d\)\) homeUnit\[d\] = t\.unit_number\.toLowerCase\(\);/g) || []).length,
+					SRC.includes("if (home) expOnUnit[home] = (expOnUnit[home] || 0) + expByDriver[driver];") &&
+						SRC.includes("const varExp = expOnUnit[unitLower] || 0;")],
 				[1, false, 1, true]],
 		];
 		report(pins);

@@ -211,7 +211,7 @@ const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("ge
 const HEADS = {
 	usersPut: 'app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {',
 	fix: 'app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {',
-	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	truckPost: 'app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {',
 	usersDelete: 'app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {',
@@ -413,6 +413,11 @@ function mountDirectoryPut(db, { routeSrc = ROUTES.dirPut, moduleSrc = {} } = {}
 		db,
 		directoryChangedColumns,
 		directoryEditLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		// The lock is stubbed, so the history it is handed is too; the PUT's own
+		// "read the sheet?" test is shipped as is.
+		getJobTrackingCached: async () => ({ headers: JOB_TRACKING[0].slice(), data: [] }),
+		driverHistoryFloorMonth: () => ({ floor: "", unbounded: false }),
+		directoryEditMayMoveMoney: new Function(`"use strict";\n${liftFunction("directoryEditMayMoveMoney")}\nreturn directoryEditMayMoveMoney;`)(),
 		periodLockUnreadableResponse: refuse,
 		periodBlockedResponse: refuse,
 		DIRECTORY_LOCK_REMEDY: "",
