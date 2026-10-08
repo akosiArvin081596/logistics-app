@@ -22326,9 +22326,15 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 			if (lock.blockers.length) {
 				// See the twin on the paid branch: an unresolved-date refusal carries its
 				// own remedy, because "reopen the affected period" names none.
+				//
+				// A finalized month is refused in plain words: this `error` is the toast an
+				// admin reads on the Invoices screen, so it names the months and where
+				// corrections go, not an API path. The unresolved-date refusal keeps the
+				// composed text and its own remedy.
 				return periodBlockedResponse(req, res,
 					`Cannot adjust ${invoice.invoice_number || `invoice #${invoice.id}`}`,
-					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit);
+					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit,
+					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} finalized, so this invoice can't be changed here. Corrections go into the current month.`);
 			}
 		}
 
@@ -26912,16 +26918,22 @@ function recordPeriodRefusal(audit, code, periods, subjectFallback) {
 // to reopen a period that is open. FINALIZED outranks UNRESOLVED when both are
 // present, the same ranking dispatchWriteBlocker() and statusOverrideBlocker()
 // already use: "this would restate June" is the answer an operator can act on.
-function periodBlockedResponse(req, res, what, blockers, remedy, audit) {
+//
+// `finalizedMessage` is optional (only PUT /api/invoices/:id/adjust passes it).
+// When the blockers name finalized months and nothing unresolved, it gets those
+// months' labels and returns the whole `error`. The rest of the body and the
+// audit row are the same either way.
+function periodBlockedResponse(req, res, what, blockers, remedy, audit, finalizedMessage) {
 	const periods = [...new Set(blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
 	const unresolved = blockers.some((b) => b.periods.some((p) => !p));
 	const code = periods.length ? "PERIOD_FINALIZED" : (unresolved ? "PERIOD_UNRESOLVED" : "PERIOD_FINALIZED");
 	recordPeriodRefusal(audit === AUDITED_UPSTREAM ? audit : { req, ...(audit || {}) }, code, periods, what);
 	return res.status(409).json({
-		error: `${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
+		error: finalizedMessage && periods.length && !unresolved ? finalizedMessage(periods.map(periodLabel)) : (
+			`${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
 			(periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized. ` : "") +
 			(unresolved ? "Some rows carry a date the server cannot resolve to a month, so they are withheld until it is corrected. " : "") +
-			remedy,
+			remedy),
 		code: "PERIOD_FINALIZED",
 		periods,
 		unresolved,
@@ -29721,7 +29733,10 @@ function invoiceRowPeriodLocked(r) {
 }
 
 // The remedy sentence every invoice write guard ends on, kept in one place so the
-// two routes cannot drift into telling an admin two different things.
+// two routes cannot drift into telling an admin two different things. The adjust
+// route's finalized-month refusal is the exception: it says its own plain sentence
+// (periodBlockedResponse()'s `finalizedMessage`). Mark-paid, revert and the Data
+// Issues list still end on this one.
 const INVOICE_LOCK_REMEDY =
 	"Reopen the affected period first — POST /api/periods/:period/reopen records a reason.";
 
