@@ -583,7 +583,7 @@ function liftNamed(name) {
 const LOCK_HELPERS = ["investorAccountState", "investorCompanyMoves", "investorCompanyLockBlockers"];
 const LOCK_SRC = [
 	(SRC.match(/\nconst AUDITED_UPSTREAM = [^\n]*\n/) || [""])[0],
-	...["normalizeDriverName", "investorsHoldingDriver", "driverPayLockedMonths", "lockedPeriodsDesc", "periodLockStmt", "periodLocksReadable",
+	...["normalizeDriverName", "findCol", "getCarrierDBFromSQLite", "getInvestorDriverSet", "driverPayLockedMonths", "lockedPeriodsDesc", "periodLockStmt", "periodLocksReadable",
 		"periodLabel", "scrubPurgeMarker", "auditText", "periodBlockedResponse", "periodLockUnreadableResponse", ...LOCK_HELPERS].map(liftNamed),
 ].join("\n");
 const LOCKED = ["2026-06", "2026-07", "2026-08"];

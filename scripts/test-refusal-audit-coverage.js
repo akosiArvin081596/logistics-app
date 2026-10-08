@@ -591,8 +591,9 @@ const MUST_NOT_BE_PURGEABLE = [
 	// settlement evidence, so kept forever too.
 	"update_payout_basis_blocked",
 	// A new Investor account refused because its company name would put drivers'
-	// finalized months on its ledger: the create-side twin of update_user_blocked.
-	"create_user_blocked",
+	// finalized months on its ledger: the create-side twin of update_user_blocked,
+	// from POST /api/users and from an investor application's acceptance.
+	"create_user_blocked", "accept_investor_blocked",
 ];
 check("every new period-refusal action exists in server.js",
 	MUST_NOT_BE_PURGEABLE.filter((a) => !SRC.includes(`"${a}"`)), []);

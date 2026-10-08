@@ -132,6 +132,9 @@ const MODULE_SRC = [
 	liftNew("accountDirectorySyncLock"),
 	// The investor ledgers' company-name lock the same two routes now judge
 	// (scripts/test-investor-company-lock.js); a Driver account moves nobody.
+	liftFunction("findCol"),
+	liftFunction("getCarrierDBFromSQLite"),
+	liftFunction("getInvestorDriverSet"),
 	liftNew("investorAccountState"),
 	liftNew("investorCompanyMoves"),
 	liftNew("investorCompanyLockBlockers"),
