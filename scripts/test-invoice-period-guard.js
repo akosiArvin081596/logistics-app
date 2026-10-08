@@ -541,6 +541,147 @@ guarded("section 4-5 (behaviour + mutants) ran", () => {
 			inv({ week_start: "2026-13-01", week_end: "2026-13-07" })).blockers.length > 0; });
 });
 
+// ── 6. the adjust route's finalized refusal, in plain words ─────────────────
+// The 409's `error` is the toast an admin reads on the Invoices screen, so the
+// adjust route's finalized-month refusal names the months and where corrections
+// go, and no API path. Only that string changes: the status, `code`, `periods`,
+// `unresolved`, `blockers` and the audit call are asserted as before, and the
+// unresolved-date and unreadable-lock refusals keep their own text.
+//
+// The REAL route runs, lifted from server.js with the real guard and response
+// helpers on the in-memory db above; only the audit recorder is captured.
+const PLAIN_TAIL = "so this invoice can't be changed here. Corrections go into the current month.";
+
+async function section6() {
+	section("6. the adjust route's finalized refusal (real route, real helpers)");
+
+	healLocks();
+	db.exec(`CREATE TABLE invoices (id INTEGER PRIMARY KEY, invoice_number TEXT, driver TEXT,
+		week_start TEXT, week_end TEXT, status TEXT, adjustment REAL DEFAULT 0, deleted_at TEXT)`);
+	const addInvoice = db.prepare(
+		"INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, status) VALUES (?, ?, ?, ?, ?, ?)");
+	// A Sat–Fri week straddling September and October 2026, so one invoice gives
+	// both the one-month and the two-month sentence.
+	addInvoice.run(39, "INV-SK-2026W39-01", "soren king", "2026-09-26", "2026-10-02", "Approved");
+	addInvoice.run(41, "INV-SK-2026W41-01", "soren king", "2026-10-10", "", "Draft");
+	const row = (id) => db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
+
+	const remedyConst = /\nconst INVOICE_LOCK_REMEDY =[^;]*;/.exec(SRC);
+	if (!remedyConst) throw new Error("INVOICE_LOCK_REMEDY not found in server.js");
+
+	const mkRes = () => {
+		const out = { status: 0, body: null };
+		return { out, res: { status(c) { out.status = c; return { json(b) { out.body = b; return b; } }; } } };
+	};
+	const build = () => {
+		const handlers = [];
+		const recorded = [];
+		const R = new Function("db", "INVOICE_MAX_SPAN_MONTHS", "AUDITED_UPSTREAM", "recordPeriodRefusal",
+			"app", "requireRole", "refuseCrossOrigin", [
+				extract("periodLockStmt"), extract("isLocked"), extract("periodLocksReadable"),
+				extract("scrubPurgeMarker"), extract("periodLabel"), extract("auditText"), extract("auditReasonNote"),
+				extract("invoiceMonthLockBlockers"), extract("periodBlockedResponse"), extract("periodLockUnreadableResponse"),
+				remedyConst[0], `${ADJUST};`,
+				"return { invoiceMonthLockBlockers, periodBlockedResponse };",
+			].join("\n"))(
+			db, MAX_SPAN, Symbol("AUDITED_UPSTREAM"),
+			(audit, code, periods, what) => recorded.push({
+				action: audit.action, entity: audit.entity, entityId: audit.entityId, code, periods, what }),
+			{ put: (p, ...hs) => handlers.push(hs[hs.length - 1]) },
+			() => () => {}, () => {});
+		if (handlers.length !== 1) throw new Error(`the adjust route registered ${handlers.length} handlers, expected 1`);
+		R.adjust = async (id) => {
+			recorded.length = 0;
+			const { out, res } = mkRes();
+			await handlers[0]({ params: { id: String(id) }, body: { adjustment: -300, adjustmentNote: "test" },
+				session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } }, res);
+			return { ...out, recorded: recorded.slice() };
+		};
+		return R;
+	};
+	const errorOf = (r) => (r.body && r.body.error) || "";
+
+	setLocks(["2026-09"]);
+	let R = build();
+	let r = await R.adjust(39);
+	check("ONE MONTH: the refusal is a 409", r.status, 409);
+	check("...worded in plain language", errorOf(r), `September 2026 is finalized, ${PLAIN_TAIL}`);
+	check("...naming no API path", /\/api\//.test(errorOf(r)), false);
+	check("...and the rest of the body is as before (code, periods, unresolved, blockers)",
+		r.body && [r.body.code, r.body.periods, r.body.unresolved, r.body.blockers],
+		["PERIOD_FINALIZED", ["2026-09"], false, R.invoiceMonthLockBlockers(row(39)).blockers]);
+	check("...with the same audit call (adjust_invoice_blocked, PERIOD_FINALIZED, the month)", r.recorded,
+		[{ action: "adjust_invoice_blocked", entity: "invoice", entityId: "39",
+			code: "PERIOD_FINALIZED", periods: ["2026-09"], what: "Cannot adjust INV-SK-2026W39-01" }]);
+
+	setLocks(["2026-09", "2026-10"]);
+	R = build();
+	r = await R.adjust(39);
+	check("TWO MONTHS: both named, in the order of the wire `periods`",
+		errorOf(r), `September 2026, October 2026 are finalized, ${PLAIN_TAIL}`);
+	check("...naming no API path", /\/api\//.test(errorOf(r)), false);
+	check("...and the rest of the body is as before",
+		[r.status, r.body && r.body.code, r.body && r.body.periods, r.body && r.body.unresolved],
+		[409, "PERIOD_FINALIZED", ["2026-09", "2026-10"], false]);
+	check("...with the same audit call", r.recorded.map((x) => [x.action, x.code, x.periods]),
+		[["adjust_invoice_blocked", "PERIOD_FINALIZED", ["2026-09", "2026-10"]]]);
+
+	// ⚠️ PAIRED: an unresolved week date keeps the helper's composed refusal and
+	// its own date remedy; no month is finalized there, so the plain sentence
+	// would be false.
+	setLocks([]);
+	R = build();
+	{
+		const lock = R.invoiceMonthLockBlockers(row(41));
+		const composed = mkRes();
+		R.periodBlockedResponse({}, composed.res, "Cannot adjust INV-SK-2026W41-01", lock.blockers, lock.remedy,
+			{ action: "adjust_invoice_blocked" });
+		r = await R.adjust(41);
+		check("UNRESOLVED DATE: the composed refusal, unchanged", errorOf(r), composed.out.body && composed.out.body.error);
+		check("...ending on the date remedy, not the plain sentence",
+			[errorOf(r).endsWith(lock.remedy), errorOf(r).includes(PLAIN_TAIL)], [true, false]);
+		check("...and audited PERIOD_UNRESOLVED", r.recorded.map((x) => x.code), ["PERIOD_UNRESOLVED"]);
+	}
+
+	// ⚠️ PAIRED: an unreadable lock table keeps its own refusal.
+	breakLocks();
+	R = build();
+	r = await R.adjust(39);
+	check("UNREADABLE LOCKS: its own refusal, not the plain sentence",
+		[r.status, r.body && r.body.code, /could not be read/.test(errorOf(r)), errorOf(r).includes(PLAIN_TAIL)],
+		[409, "PERIOD_LOCK_UNREADABLE", true, false]);
+	healLocks();
+
+	// ⚠️ THE HELPER'S OWN RULE, pinned for any later caller (the adjust route can
+	// never reach these shapes): a refusal that also carries an unresolved date,
+	// or that names no month at all, keeps the composed text even when a
+	// finalizedMessage is passed. Each half of the condition has its own case.
+	R = build();
+	{
+		const plain = (labels) => `${labels.join(", ")} ${labels.length === 1 ? "is" : "are"} finalized, ${PLAIN_TAIL}`;
+		const both = (blockers) => {
+			const withMsg = mkRes();
+			const without = mkRes();
+			R.periodBlockedResponse({}, withMsg.res, "Cannot adjust X", blockers, "REMEDY.", { action: "t" }, plain);
+			R.periodBlockedResponse({}, without.res, "Cannot adjust X", blockers, "REMEDY.", { action: "t" });
+			return [errorOf(withMsg.out), errorOf(without.out)];
+		};
+		const [mixedWith, mixedWithout] = both([
+			{ table: "invoices", rows: 1, periods: ["2026-09"], detail: "a" },
+			{ table: "invoices", rows: 1, periods: [""], detail: "b" },
+		]);
+		check("MIXED finalized + unresolved: the composed text even with a finalizedMessage",
+			[mixedWith === mixedWithout, mixedWith.includes(PLAIN_TAIL)], [true, false]);
+		const [noneWith, noneWithout] = both([{ table: "invoices", rows: 1, periods: [], detail: "c" }]);
+		check("NO month named: the composed text even with a finalizedMessage",
+			[noneWith === noneWithout, noneWith.includes(PLAIN_TAIL)], [true, false]);
+	}
+
+	// The plain sentence is the adjust route's alone: mark-paid and revert keep theirs.
+	check("the plain sentence is in server.js once, in the adjust route",
+		[SRC.split(PLAIN_TAIL).length - 1, ADJUST.includes(PLAIN_TAIL)], [1, true]);
+}
+
 // The read-side predicate, built separately so the paired assertion above can
 // compare the two without the mutant harness reaching it.
 function buildGuardRow() {
@@ -551,10 +692,15 @@ function buildGuardRow() {
 	return new Function("db", `${body}\n return invoiceRowPeriodLocked;`)(db);
 }
 
-db.close();
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail) {
-	console.log("\nFailures:");
-	for (const f of failures) console.log(f);
-	process.exit(1);
-}
+// Section 6 awaits the route handler, so the summary waits for it.
+section6()
+	.catch((err) => { fail++; failures.push(`  section 6 (adjust refusal wording) ran\n      threw: ${err.message}`); })
+	.then(() => {
+		db.close();
+		console.log(`\n${pass} passed, ${fail} failed`);
+		if (fail) {
+			console.log("\nFailures:");
+			for (const f of failures) console.log(f);
+			process.exit(1);
+		}
+	});

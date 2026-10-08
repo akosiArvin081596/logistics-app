@@ -16,10 +16,10 @@
  *
  * Safe by default: prints what it WOULD change and exits. Pass --apply to write.
  *
- *   node scripts/return-driver-loads.js "<driver name>"           # dry run (read-only)
- *   node scripts/return-driver-loads.js "<driver name>" --apply   # perform the revert
+ *   SPREADSHEET_ID=<sheet> node scripts/return-driver-loads.js "<driver name>"           # dry run (read-only)
+ *   SPREADSHEET_ID=<sheet> node scripts/return-driver-loads.js "<driver name>" --apply   # perform the revert
  *
- * Writes directly to the production Dispatch Management sheet via the service
+ * Writes directly to the named Dispatch Management sheet via the service
  * account, so it does NOT emit sockets — the driver's app drops the loads on its
  * next refresh/login. Run from the project root (service-account-key.json there).
  */
@@ -31,11 +31,18 @@ if (!TARGET_DRIVER) {
   console.error('return-driver-loads: refusing to run: name the driver, e.g. node scripts/return-driver-loads.js "<driver name>" [--apply] (there is no default).');
   process.exit(2);
 }
+// The sheet is always named too (lib/sheet-id.js): there is no default, so a
+// run never reaches the production sheet unless the command says so.
+const TARGET = require("../lib/sheet-id").scriptSpreadsheetId(process.env, { script: "return-driver-loads.js" });
+if (!TARGET.id) {
+  console.error(TARGET.error);
+  process.exit(2);
+}
 
 const path = require("path");
 const { google } = require("googleapis");
 
-const SPREADSHEET_ID = "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"; // production Job Tracking
+const SPREADSHEET_ID = TARGET.id;
 const SHEET = "Job Tracking";
 const KEY_FILE = path.join(__dirname, "..", "service-account-key.json");
 

@@ -265,6 +265,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
+import { appToday, fmtAppDate, shiftYm } from '../../utils/datetime'
 import { monthLabel } from '../../lib/monthLabel'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { leaseBasisOf } from '../../lib/payoutPeriod'
@@ -317,9 +318,11 @@ const breakEvenDate = computed(() => {
   if (typeof breakEvenMonths.value !== 'number') return ''
   const monthsOperated = props.production?.monthsOfOperation || 0
   const monthsRemaining = Math.max(0, breakEvenMonths.value - monthsOperated)
-  const d = new Date()
-  d.setMonth(d.getMonth() + monthsRemaining)
-  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+  // Whole months on from the app's current month (APP_TIMEZONE,
+  // utils/datetime.js), not the viewer's clock. Month arithmetic, not
+  // setMonth() on today's date, which ran Jan 31 + 1 month into March.
+  const month = shiftYm(appToday().slice(0, 7), monthsRemaining)
+  return month ? fmtAppDate(`${month}-01`, { month: 'short', year: 'numeric' }) : ''
 })
 
 // --- Detail modal ---

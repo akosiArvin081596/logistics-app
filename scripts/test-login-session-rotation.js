@@ -246,12 +246,13 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	app.use(buildFlagRefresh(db));
 	const stampLastLogin = buildStamp(db);
 	const passThrough = (req, res, next) => next();
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", loginSrc)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub);
-	new Function("app", SESSION_ROUTE_SRC)(app);
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", loginSrc)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub, "America/New_York");
+	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
+	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");
 	if (withSetup) {
-		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", SETUP_SRC)(
-			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub);
+		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", SETUP_SRC)(
+			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub, "America/New_York");
 	}
 	const requireAuth = buildRequireAuth();
 	app.get("/api/whoami", requireAuth, (req, res) => res.json({ id: req.session.user.id }));

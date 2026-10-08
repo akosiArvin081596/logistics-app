@@ -7,7 +7,8 @@
  *   §1 checkInvestorRfi(): required fields, the email check, length caps,
  *      control and invisible characters stripped from every text field, one
  *      scalar per field, consent, and the honeypot
- *   §2 buildInvestorRfiEmail(): to info@logisx.com, Reply-To the submitter,
+ *   §2 buildInvestorRfiEmail(): to the inbox it is given (ADMIN_NOTIFY_EMAIL in
+ *      server.js; admin@example.test here), Reply-To the submitter,
  *      "[STAGING] " only for the staging site, every value escaped
  *   §3 the real middleware on a real Express app over loopback, with a fake
  *      mail sender: a valid submit sends one email (JSON and form shapes);
@@ -62,6 +63,8 @@ function ok(name, cond) {
 	else { console.log(`FAIL  ${name}`); failed++; }
 }
 
+// The admin inbox the middleware is given, as server.js passes ADMIN_NOTIFY_EMAIL.
+const ADMIN = "admin@example.test";
 const STAGING = "https://staging-logisx.logisx.com";
 const PROD = "https://logisx.com";
 const VALID = Object.freeze({
@@ -85,6 +88,7 @@ function buildApp({ sendResult = true } = {}) {
 	app.use(express.json({ limit: "50mb" }));
 	app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({
 		sendEmail,
+		to: ADMIN,
 		now: () => new Date("2026-10-07T15:04:05.000Z"),
 	}));
 	// A neighbour route, to prove the form parser stays on its own path.
@@ -202,9 +206,9 @@ const asForm = (origin, payload, { referer } = {}) => ({
 
 	// --- §2 buildInvestorRfiEmail --------------------------------------------------
 	const at = new Date("2026-10-07T15:04:05.000Z");
-	const prodMail = rfi.buildInvestorRfiEmail(good.value, { staging: false, submittedAt: at });
-	const stgMail = rfi.buildInvestorRfiEmail(good.value, { staging: true, submittedAt: at });
-	ok("§2 the email goes to info@logisx.com", prodMail.to === "info@logisx.com" && stgMail.to === "info@logisx.com");
+	const prodMail = rfi.buildInvestorRfiEmail(good.value, { staging: false, submittedAt: at, to: ADMIN });
+	const stgMail = rfi.buildInvestorRfiEmail(good.value, { staging: true, submittedAt: at, to: ADMIN });
+	ok("§2 the email goes to the inbox it is given", prodMail.to === ADMIN && stgMail.to === ADMIN);
 	ok("§2 production subject: 'Investor RFI: <name>'", prodMail.subject === "Investor RFI: Jane Q. Sample");
 	ok("§2 staging subject is prefixed '[STAGING] '", stgMail.subject === "[STAGING] Investor RFI: Jane Q. Sample");
 	ok("§2 Reply-To is the submitter", prodMail.replyTo === "jane.sample@example.com");
@@ -230,8 +234,8 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		let r = await request(server, asJson(STAGING, VALID));
 		ok("§3 valid JSON submit from staging → 200 { ok: true }", r.status === 200 && r.json && r.json.ok === true);
 		ok("§3 ... sends exactly one email", sent.length === 1);
-		ok("§3 ... to info@logisx.com, '[STAGING] Investor RFI: <name>', Reply-To the submitter",
-			sent[0] && sent[0].to === "info@logisx.com" && sent[0].subject === "[STAGING] Investor RFI: Jane Q. Sample" && sent[0].opts && sent[0].opts.replyTo === VALID.email);
+		ok("§3 ... to the admin inbox, '[STAGING] Investor RFI: <name>', Reply-To the submitter",
+			sent[0] && sent[0].to === ADMIN && sent[0].subject === "[STAGING] Investor RFI: Jane Q. Sample" && sent[0].opts && sent[0].opts.replyTo === VALID.email);
 
 		r = await request(server, asForm(PROD, { ...VALID, consent: "true" }));
 		ok("§3 valid form POST from logisx.com → 303 to https://logisx.com/invest-in-logisx?sent=1",
@@ -330,7 +334,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		const sent = [];
 		const app = express();
 		app.use(rfi.INVESTOR_RFI_PATH, ...rfi.createBodyParsers());
-		app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, dailySendCap: 2 }));
+		app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, to: ADMIN, dailySendCap: 2 }));
 		const server = await listen(app);
 		const first = [await request(server, asJson(PROD, VALID)), await request(server, asJson(PROD, VALID))];
 		ok("§3 under the daily cap, submissions are sent", first.every((r) => r.status === 200) && sent.length === 2);
@@ -460,10 +464,10 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	}
 
 	const hasRow = (html, label, value) => html.includes(`>${label}</td><td style="padding:6px 0;vertical-align:top">${value}</td></tr>`);
-	const callProd = rfi.buildCallRequestEmail(goodCall.value, { staging: false, submittedAt: at });
-	const callStg = rfi.buildCallRequestEmail(goodCall.value, { staging: true, submittedAt: at });
-	ok("§6 the call email goes to info@logisx.com, Reply-To the submitter",
-		callProd.to === "info@logisx.com" && callStg.to === "info@logisx.com" && callProd.replyTo === CALL.email);
+	const callProd = rfi.buildCallRequestEmail(goodCall.value, { staging: false, submittedAt: at, to: ADMIN });
+	const callStg = rfi.buildCallRequestEmail(goodCall.value, { staging: true, submittedAt: at, to: ADMIN });
+	ok("§6 the call email goes to the inbox it is given, Reply-To the submitter",
+		callProd.to === ADMIN && callStg.to === ADMIN && callProd.replyTo === CALL.email);
 	ok("§6 production subject: 'Call request: <topic label>', from the validated topic only", callProd.subject === "Call request: Owning part of LogisX");
 	ok("§6 staging subject is prefixed '[STAGING] '", callStg.subject === "[STAGING] Call request: Owning part of LogisX");
 	{
@@ -519,7 +523,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		let r = await request(server, asJson(STAGING, CALL));
 		ok("§6 valid call (JSON) from staging → 200 { ok: true }", r.status === 200 && r.json && r.json.ok === true);
 		ok("§6 ... sends exactly one email: '[STAGING] Call request: …', Reply-To the submitter",
-			sent.length === 1 && sent[0].to === "info@logisx.com" && sent[0].subject === "[STAGING] Call request: Owning part of LogisX" &&
+			sent.length === 1 && sent[0].to === ADMIN && sent[0].subject === "[STAGING] Call request: Owning part of LogisX" &&
 			sent[0].opts && sent[0].opts.replyTo === CALL.email && sent[0].html.includes(">[STAGING] Call request</h2>"));
 		r = await request(server, asForm(PROD, CALL_FORM));
 		ok("§6 valid call (form) from logisx.com → 303 to the call form, ?call=sent#schedule-a-call",
@@ -602,7 +606,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		const sent = [];
 		const app = express();
 		app.use(rfi.INVESTOR_RFI_PATH, ...rfi.createBodyParsers());
-		app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, now: () => NOW, dailySendCap: 2 }));
+		app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, to: ADMIN, now: () => NOW, dailySendCap: 2 }));
 		const server = await listen(app);
 		const first = [await request(server, asJson(PROD, VALID)), await request(server, asJson(PROD, CALL))];
 		ok("§6 an RFI and a call both count toward the daily cap", first.every((r) => r.status === 200) && sent.length === 2);
@@ -624,6 +628,22 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		r = await request(server, asForm(PROD, CALL_FORM));
 		ok("§6 a failed call send (form) → 303 ?call=error#schedule-a-call", r.status === 303 && r.headers.location === CALL_ERROR(PROD));
 		ok("§6 ... the sender was asked both times", sent.length === 2);
+		server.close();
+	}
+
+	{
+		// No inbox (server.js without ADMIN_NOTIFY_EMAIL): a call is answered like
+		// a failed send and nothing is sent, the same as an RFI.
+		const sent = [];
+		const app = express();
+		app.use(rfi.INVESTOR_RFI_PATH, ...rfi.createBodyParsers());
+		app.post(rfi.INVESTOR_RFI_PATH, ...rfi.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, now: () => NOW }));
+		const server = await listen(app);
+		let r = await request(server, asJson(PROD, CALL));
+		ok("§6 a call with no inbox (JSON) → 503 SEND_FAILED", r.status === 503 && r.json.code === "SEND_FAILED");
+		r = await request(server, asForm(PROD, CALL_FORM));
+		ok("§6 a call with no inbox (form) → 303 ?call=error#schedule-a-call", r.status === 303 && r.headers.location === CALL_ERROR(PROD));
+		ok("§6 ... and nothing is sent", sent.length === 0);
 		server.close();
 	}
 
@@ -734,8 +754,8 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	const bigJsonAt = SRC.indexOf('app.use(express.json({ limit: "50mb" }));');
 	ok("§4 the RFI body parsers are mounted on the RFI path", parsersAt > 0);
 	ok("§4 ... above the 50 MB JSON parser", parsersAt > 0 && bigJsonAt > parsersAt);
-	ok("§4 the route mounts the middleware with the shared sendEmail",
-		SRC.includes("app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail }));"));
+	ok("§4 the route mounts the middleware with the shared sendEmail, to ADMIN_NOTIFY_EMAIL",
+		SRC.includes("app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail, to: ADMIN_NOTIFY_EMAIL }));"));
 	// Code lines only: server.js's comments name express.urlencoded() in their warnings.
 	const CODE = SRC.split("\n").filter((line) => !/^\s*(\/\/|\/?\*)/.test(line)).join("\n");
 	ok("§4 server.js mounts no form-encoded parser of its own", !/express\.urlencoded\s*\(/.test(CODE));
@@ -769,17 +789,17 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok("MUTANT: a date with no upper bound is caught by §6",
 		noUpperBound.checkWebsiteForm({ ...CALL, preferredDate: "2027-02-05" }, { now: NOW }).ok === true);
 	for (const [label, src] of [
-		["a call answered with the RFI's redirect", LIB_SRC.replace('if (formKind(req.body) === "call") {', "if (false) {")],
+		["a call answered with the RFI's redirect", LIB_SRC.replace("if (isCallForm(req)) {", "if (false) {")],
 		["a call mailed as an RFI", LIB_SRC.replace('check.kind === "call" ? buildCallRequestEmail : buildInvestorRfiEmail', "buildInvestorRfiEmail")],
 	]) {
 		const mutant = loadLib(src);
 		const sent = [];
 		const app = express();
 		app.use(mutant.INVESTOR_RFI_PATH, ...mutant.createBodyParsers());
-		app.post(mutant.INVESTOR_RFI_PATH, ...mutant.createInvestorRfiMiddleware({ sendEmail: async (to, subject) => { sent.push(subject); return true; }, now: () => NOW }));
+		app.post(mutant.INVESTOR_RFI_PATH, ...mutant.createInvestorRfiMiddleware({ sendEmail: async (to, subject) => { sent.push(subject); return true; }, to: ADMIN, now: () => NOW }));
 		const server = await listen(app);
 		const r = await request(server, asForm(PROD, CALL_FORM));
-		ok(`MUTANT: ${label} is caught by §6`, r.headers.location !== CALL_SENT(PROD) || sent[0] !== "Call request: Carl O. Callback (Owning part of LogisX)");
+		ok(`MUTANT: ${label} is caught by §6`, r.headers.location !== CALL_SENT(PROD) || sent[0] !== "Call request: Owning part of LogisX");
 		server.close();
 	}
 	const noStrip = loadLib(LIB_SRC.replace('const value = stripInvisible(raw, { multiline }).trim();', "const value = raw.trim();"));
@@ -805,7 +825,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		const mutant = loadLib(src);
 		const app = express();
 		app.use(mutant.INVESTOR_RFI_PATH, ...mutant.createBodyParsers());
-		app.post(mutant.INVESTOR_RFI_PATH, ...mutant.createInvestorRfiMiddleware({ sendEmail: async () => true, now: () => NOW }));
+		app.post(mutant.INVESTOR_RFI_PATH, ...mutant.createInvestorRfiMiddleware({ sendEmail: async () => true, to: ADMIN, now: () => NOW }));
 		const server = await listen(app);
 		const r = await request(server, asForm(PROD, CALL_FORM, { referer }));
 		ok(`MUTANT: ${label} is caught by §7`, r.headers.location !== CALL_SENT(PROD, "/contact"));
@@ -816,7 +836,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		const sent = [];
 		const app = express();
 		app.use(openOrigin.INVESTOR_RFI_PATH, ...openOrigin.createBodyParsers());
-		app.post(openOrigin.INVESTOR_RFI_PATH, ...openOrigin.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; } }));
+		app.post(openOrigin.INVESTOR_RFI_PATH, ...openOrigin.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, to: ADMIN }));
 		// The mutant has no allowlist entry to read `staging` from; it throws, and the route answers 500.
 		const server = await listen(app);
 		const r = await request(server, asJson("https://evil.example", VALID));

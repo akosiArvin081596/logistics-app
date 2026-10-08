@@ -100,13 +100,20 @@ echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)
 LEASE="${INVESTOR_LEASE_PAYOUTS_ENABLED:-false}"
 echo "lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED=$LEASE"
 
-# The rate-con Drive folder. server.js reads RATECON_DRIVE_FOLDER_ID with a
-# fallback: an EMPTY value (or none) means production's rate-con folder, which is
-# hardcoded there. So it cannot be blanked like the keys below: it is set to a
-# value that names no Drive folder, and a Drive call against it (the mirror of a
-# dropped rate-con PDF, the rate-con lookups) would name no real folder.
-NO_DRIVE_FOLDER=logisx-e2e-no-drive-folder
-echo "rate-con Drive folder: RATECON_DRIVE_FOLDER_ID=$NO_DRIVE_FOLDER (names no folder; an empty value would mean production's)"
+# The mail recipients. server.js and lib/broker-invoice.js have no default for
+# them, so the run names example.test inboxes (a reserved name nothing delivers
+# to), whatever .env says: the admin notifications have a recipient, and an
+# invoice draft (captured by the fake Gmail, or answered as a preview without
+# it) is addressed as it would be in production, never to a real inbox.
+ADMIN_TO=admin@example.test
+BISON_TO=bison-ap@example.test
+DEFAULT_TO=ap@example.test
+echo "mail recipients: ADMIN_NOTIFY_EMAIL=$ADMIN_TO BISON_INVOICE_EMAIL=$BISON_TO DEFAULT_INVOICE_EMAIL=$DEFAULT_TO"
+
+# The rate-con Drive folder. server.js has no default for RATECON_DRIVE_FOLDER_ID:
+# blanked like the keys below, the rate-con Drive features are off and no Drive
+# call is made (the mirror of a dropped rate-con PDF, the rate-con lookups).
+echo "rate-con Drive folder: blanked (RATECON_DRIVE_FOLDER_ID empty: the rate-con Drive features are off)"
 
 # Gmail: blanked, unless E2E_FAKE_GMAIL=1 asks for the fake. Its credentials are
 # obviously fake (.invalid is a reserved name), and fake-gmail.cjs, preloaded into
@@ -138,8 +145,9 @@ if [ -n "$FAKE_MOD" ]; then export NODE_OPTIONS="--require \"$FAKE_MOD\""; fi
 env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   SPREADSHEET_ID="$SHEET" \
   GMAIL_USER="$G_USER" GMAIL_APP_PASSWORD="$G_PASS" E2E_FAKE_GMAIL_DIR="$FAKE_DIR" \
+  ADMIN_NOTIFY_EMAIL="$ADMIN_TO" BISON_INVOICE_EMAIL="$BISON_TO" DEFAULT_INVOICE_EMAIL="$DEFAULT_TO" \
   N8N_INVOICE_WEBHOOK_URL= GEMINI_API_KEY= \
-  RATECON_DRIVE_FOLDER_ID="$NO_DRIVE_FOLDER" \
+  RATECON_DRIVE_FOLDER_ID= \
   GOOGLE_MAPS_API_KEY= GOOGLE_MAPS_BROWSER_KEY= \
   ROUTEMATE_API_KEY= SCANKIT_API_KEY= LINXUP_WEBHOOK_TOKEN= \
   ROUTEMATE_ENABLED=false LINXUP_ENABLED=false SCANKIT_ENABLED=false \

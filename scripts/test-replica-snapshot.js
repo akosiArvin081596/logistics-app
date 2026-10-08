@@ -204,7 +204,7 @@ console.log("§3 the settings export copies business settings only");
 		REPORT_URL: "https://user:secret@reports.example.test/x", FEED_URL: "https://feed.example.test/data?api_key=abc", PLAIN_URL: "https://logisx.example.test/help",
 		NODE_ENV: "production", PORT: "3000", DATABASE_PATH: "/var/www/x/app.db",
 		REPORT_SETTING: "AIzaSyD3x9EXAMPLEEXAMPLE12345", ALERT_URL: "https://hooks.example.test/services/T01/B02/aB3dE5fG7hI9jK1lM3nO5pQ7",
-		DRIVE_FOLDER_ID: "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL",
+		DRIVE_FOLDER_ID: "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ",
 	};
 	const { copied, skipped, text } = exportSettings(prod);
 	eq("business settings are copied", copied, ["CSRF_HEADER_REQUIRED", "DRIVE_FOLDER_ID", "GEMINI_OCR_MODEL", "GMAIL_USER", "MAINTENANCE_NOTICE_MESSAGE", "PLAIN_URL", "RATECON_RECONCILE_MAILBOX", "ROUTEMATE_ENABLED"]);

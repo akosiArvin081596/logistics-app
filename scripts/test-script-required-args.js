@@ -129,7 +129,8 @@ Module._load = function (request, ...rest) { return request === "googleapis" ? {
 	}
 	check("§2 …and writes nothing", !fs.existsSync(writes));
 	{
-		const r = run("scripts/return-driver-loads.js", ["Quinn Testdriver"], { env: opsEnv });
+		// The sheet is named too (it has no default; test-sheet-id-required.js).
+		const r = run("scripts/return-driver-loads.js", ["Quinn Testdriver"], { env: { ...opsEnv, SPREADSHEET_ID: "sheet-under-test" } });
 		check(`§2 a named driver: the dry run lists their Dispatched load and writes nothing (exit ${r.code})`,
 			r.code === 0 && /L-1/.test(r.out) && /DRY RUN/.test(r.out) && !fs.existsSync(writes));
 	}

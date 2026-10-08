@@ -348,6 +348,7 @@ import { useInvestorStore } from '../stores/investor'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { formatCurrency as fmt } from '../utils/format'
+import { appToday, fmtAppDate } from '../utils/datetime'
 import { monthLabel } from '../lib/monthLabel'
 
 const api = useApi()
@@ -734,7 +735,7 @@ function formatTs(iso) {
   if (ageSec < 3600) return `${Math.round(ageSec / 60)}m ago`
   if (ageSec < 86400) return `${Math.round(ageSec / 3600)}h ago`
   if (ageSec < 86400 * 30) return `${Math.round(ageSec / 86400)}d ago`
-  return d.toLocaleDateString()
+  return fmtAppDate(d) // the APP_TIMEZONE date, not the viewer's
 }
 function titleCase(s) {
   return (s || '').replace(/\b\w/g, c => c.toUpperCase())
@@ -760,10 +761,8 @@ function cellClass(cell) {
   if (!cell) return 'cal-cell empty filler'
   const cls = ['cal-cell', cell.state]
   if (activeCell.value && activeCell.value.date === cell.date) cls.push('selected')
-  const today = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  const todayStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
-  if (cell.date === todayStr) cls.push('today')
+  // Today in APP_TIMEZONE (utils/datetime.js), the same ring for every viewer.
+  if (cell.date === appToday()) cls.push('today')
   return cls.join(' ')
 }
 function cellAriaLabel(cell) {

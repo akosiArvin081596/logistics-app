@@ -131,6 +131,7 @@ import { useFileDrop } from '../composables/useFileDrop'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../lib/imageUtils'
 import { rangeHintFor } from '../lib/investorReportText'
+import { fmtAppDate } from '../utils/datetime'
 import EarningsSection from '../components/investor/EarningsSection.vue'
 import ProductionSection from '../components/investor/ProductionSection.vue'
 import TrendSection from '../components/investor/TrendSection.vue'
@@ -264,8 +265,10 @@ const dashboardTitle = computed(() => {
   return name ? `${titleCase(name)} - Asset Dashboard` : 'Asset Dashboard'
 })
 
+// Today on the app's calendar (APP_TIMEZONE, utils/datetime.js), the same date
+// for every viewer.
 const todayFormatted = computed(() =>
-  new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  fmtAppDate(Date.now(), { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 )
 
 const taxShieldData = computed(() => {

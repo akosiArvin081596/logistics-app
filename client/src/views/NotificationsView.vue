@@ -51,6 +51,7 @@ import { useRouter } from 'vue-router'
 import { useDispatchNotificationsStore } from '../stores/dispatchNotifications'
 import { useSocket } from '../composables/useSocket'
 import { useViewport } from '../composables/useViewport'
+import { appDayOf, appToday, shiftYmd } from '../utils/datetime'
 
 const store = useDispatchNotificationsStore()
 const socket = useSocket()
@@ -60,7 +61,9 @@ const { isMobile } = useViewport()
 // Day-bucket grouping. Today / Yesterday / This Week / Older — applied to
 // both desktop and mobile because scanning a 200-row flat list is tedious
 // everywhere. Items within a bucket preserve their existing ORDER BY id
-// DESC server-side sort (newest first).
+// DESC server-side sort (newest first). The days are the app's calendar
+// (APP_TIMEZONE, utils/datetime.js), not the viewer's: each notification's
+// day key is compared with today's, so "Today" means the same for everyone.
 const groupedNotifications = computed(() => {
   const groups = [
     { key: 'today',     label: 'Today',     items: [] },
@@ -68,16 +71,15 @@ const groupedNotifications = computed(() => {
     { key: 'thisWeek',  label: 'This Week', items: [] },
     { key: 'older',     label: 'Older',     items: [] },
   ]
-  const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const startOfYesterday = startOfToday - 24 * 3600 * 1000
-  const sevenDaysAgo = startOfToday - 7 * 24 * 3600 * 1000
+  const today = appToday()
+  const yesterday = shiftYmd(today, -1)
+  const weekAgo = shiftYmd(today, -7)
   for (const n of store.notifications) {
-    const t = n.createdAt ? new Date(n.createdAt).getTime() : 0
-    if (!t || isNaN(t)) { groups[3].items.push(n); continue }
-    if (t >= startOfToday) groups[0].items.push(n)
-    else if (t >= startOfYesterday) groups[1].items.push(n)
-    else if (t >= sevenDaysAgo) groups[2].items.push(n)
+    const day = n.createdAt ? appDayOf(n.createdAt) : ''
+    if (!day) { groups[3].items.push(n); continue }
+    if (day >= today) groups[0].items.push(n)
+    else if (day >= yesterday) groups[1].items.push(n)
+    else if (day >= weekAgo) groups[2].items.push(n)
     else groups[3].items.push(n)
   }
   return groups

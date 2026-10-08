@@ -1078,10 +1078,16 @@ async function acceptanceSection() {
 		recordPayRateChanges: () => {},
 		escapeHtml: (s) => String(s ?? ""),
 		sendEmail: (to) => { mail.push(to); },
+		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
+		ADMIN_NOTIFY_EMAIL: "admin@example.test",
 		// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
 		// subject; this application signs the standard contract, so none is.
 		recordSignedPayoutBasis: () => null,
 		unrecordedLeaseNote: () => "",
+		// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+		// subject (§10); here it judges nothing.
+		getJobTrackingCached: async () => ({ headers: [], data: [] }),
+		investorCompanyLockBlockers: () => null,
 	});
 	const r = await quiet(() => accept({ session: { user: SUPER }, params: { id: "42" }, body: { status: "Accepted" } }));
 	const b = r.body || {};

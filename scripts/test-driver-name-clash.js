@@ -399,6 +399,8 @@ function mountAccept(db, { routeSrc = ACCEPT_SRC, docs = ONBOARDING_DOCS, clashS
 		ONBOARDING_DOCS: docs,
 		escapeHtml,
 		sendEmail: (to, subject) => { log.mail.push({ to, subject }); return Promise.resolve(true); },
+		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
+		ADMIN_NOTIFY_EMAIL: "admin@example.test",
 		findDriverNameClash: buildClash(db, { clashSrc }),
 	};
 	const names = Object.keys(env);
@@ -462,7 +464,7 @@ async function acceptBattery({ routeSrc = ACCEPT_SRC, clashSrc = CLASH_SRC } = {
 		const row = log.audits.find((a) => a.action === "accept_application");
 		t("the success audit quotes the name capped and on one line",
 			!!row && !/[\r\n]/.test(row.details) && row.details.length < 220);
-		const adminMail = log.mail.find((m) => m.to === "info@logisx.com");
+		const adminMail = log.mail.find((m) => m.to === "admin@example.test");
 		t("the admin email's subject quotes the name the same way: capped and on one line",
 			!!adminMail && adminMail.subject.startsWith("Driver Accepted: Ava Brooks") && !/[\r\n]/.test(adminMail.subject) &&
 			adminMail.subject.length <= "Driver Accepted: ".length + 120);
@@ -628,6 +630,10 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		// subject; here it judges nothing, so only the name check decides.
 		accountDirectoryRowJudged: () => false,
 		accountDirectoryRowLock: () => null,
+		// So does the lock on a new Investor's company name
+		// (scripts/test-investor-company-lock.js's subject).
+		investorCompanyMoves: () => [],
+		investorCompanyLockBlockers: () => null,
 		getJobTrackingCached: async () => ({ headers: [], data: [] }),
 	};
 	const names = Object.keys(env);

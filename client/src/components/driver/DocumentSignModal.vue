@@ -130,6 +130,7 @@ import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 import { useGoogleMaps } from '../../composables/useGoogleMaps'
 import { SIGNING_CONSENT_TEXT, buildConsent } from '../../lib/signingConsent'
+import { fmtAppDate } from '../../utils/datetime'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -338,9 +339,11 @@ async function handleSign() {
   }
 }
 
+// The day it was signed on the app's calendar (APP_TIMEZONE, utils/datetime.js),
+// not the phone's.
 function formatDate(d) {
   if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  return fmtAppDate(d, { fallback: '' })
 }
 </script>
 

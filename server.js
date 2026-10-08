@@ -60,6 +60,14 @@ require("dotenv").config();
 // A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
 // decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).
 require("./lib/replica-mode").checkDotenvFlag(process.env);
+// The Google Sheet this server reads and writes (lib/sheet-id.js): SPREADSHEET_ID,
+// or the production sheet for production's own pm2 process only. Anything else
+// without one stops here, before the database opens or Google is called.
+const SHEET_TARGET = require("./lib/sheet-id").resolveServerSpreadsheetId(process.env, process.cwd());
+if (!SHEET_TARGET.id) {
+	console.error(`Refusing to start: ${SHEET_TARGET.error}`);
+	process.exit(1);
+}
 const express = require("express");
 const http = require("http");
 const https = require("https");
@@ -126,6 +134,10 @@ const publicFormInput = require("./lib/public-form-input");
 // and its "Schedule a call" form (kind: "call").
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
+// The one zone an instant becomes a date in when no business rule pins one
+// (a document's "today"); never the server's own UTC clock. lib/app-time.js
+const appTime = require("./lib/app-time");
+const APP_TIMEZONE = appTime.resolveAppTimeZone(process.env.APP_TIMEZONE, (msg) => console.warn(msg));
 
 // Where the files the app writes at runtime live: uploads/, storage/ and
 // evidence-archive/, and every stored "/uploads/…" path resolves against it.
@@ -1216,7 +1228,8 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //   • ⚠️ EVERY PERIOD-GUARD REFUSAL ACTION, and this was decided per action, not
 //     as a batch. `update_driver_pay_blocked`, `create_driver_pay_blocked`,
 //     `delete_driver_blocked`,
-//     `update_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
+//     `update_user_blocked`, `create_user_blocked`, `accept_investor_blocked`,
+//     `delete_user_blocked`, `create_truck_blocked`,
 //     `update_truck_blocked`, `delete_truck_blocked`, `driver_rename_blocked`,
 //     `delete_sheet_rows_blocked`, `delete_load_blocked`,
 //     `add_driver_day_blocked`, `exclude_driver_day_blocked`,
@@ -1839,10 +1852,13 @@ function syncCarrierDriverHistory(carrierDBData, driverColName, carrierColName) 
 	});
 }
 
-// Helper: get ALL drivers for an investor via company_name on their user account
-function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColName) {
-	const usr = db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId);
-	const carrierName = usr ? (usr.company_name || "").trim() : "";
+// Helper: get ALL drivers for an investor via company_name on their user account.
+// `opts.companyName` stands in for the stored company name, to ask what a write
+// to it would do (investorCompanyMoves()).
+function getInvestorDriverSet(userId, carrierDBData, driverColName, carrierColName, opts) {
+	const companyOverride = !!opts && opts.companyName !== undefined;
+	const usr = companyOverride ? null : db.prepare("SELECT company_name FROM users WHERE id = ?").get(userId);
+	const carrierName = companyOverride ? String(opts.companyName ?? "").trim() : (usr ? (usr.company_name || "").trim() : "");
 	const set = new Set();
 	// 1. From trucks assigned to this investor (most authoritative — direct owner_id link)
 	const truckDrivers = db.prepare(
@@ -7483,6 +7499,24 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	}
 });
 
+// The inbox the admin notifications go to: new driver and investor
+// applications, driver and investor acceptances, signed driver documents, and
+// the website's investor RFI form (lib/investor-rfi.js). No default: only the
+// environment names it (production's .env names production's inbox), so a
+// local or staging server never mails it by accident. Unset or blank, each of
+// those sends is skipped and nothing else in its request changes; the RFI form
+// answers its "couldn't send" message. scripts/test-no-production-defaults.js
+// pins it.
+const ADMIN_NOTIFY_EMAIL = String(process.env.ADMIN_NOTIFY_EMAIL ?? "").trim();
+// Module scope, so it is logged once per process start and never per request.
+if (!ADMIN_NOTIFY_EMAIL) {
+	console.warn(
+		"[admin-notify] ⚠️ ADMIN_NOTIFY_EMAIL is not set — no admin notification email is sent: " +
+		"new driver and investor applications, driver and investor acceptances and signed driver documents " +
+		"send none, and the investor RFI form answers that it couldn't send the request.",
+	);
+}
+
 // Shared email helper
 // Returns TRUE only when the message was actually handed to Gmail. Callers that
 // ignore the return value behave exactly as before (it used to return undefined
@@ -7591,9 +7625,9 @@ if (fs.existsSync(clientDistPath)) {
 // ============================================================
 // CONFIGURATION — Update these values with your own
 // ============================================================
-// Sheet IDs default to production so existing deployments keep working unchanged.
-// Override in staging (or any non-prod env) by setting these in the env file.
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo"; // Production sheet (Dispatch Management - original, n8n writes here)
+// The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
+// SPREADSHEET_ID; production's own process alone runs without one.
+const SPREADSHEET_ID = SHEET_TARGET.id;
 const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
@@ -7785,8 +7819,22 @@ const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 // Drive folder where the n8n dispatch workflow stores every Bison rate-con,
 // named by email subject (e.g. "Subject: RE: Bison Transport Order #7007280").
 // The Draft Bison Invoice route matches by order number to attach the rate-con.
-const RATECON_DRIVE_FOLDER_ID =
-	process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
+//
+// No default: only the environment names it (production's .env names
+// production's folder). Unset or blank, the rate-con Drive features are off
+// and none of them calls Drive: getRateConBytes() skips both Drive steps,
+// POST /api/admin/ratecon-index answers 503, and POST /api/loads/from-ratecon
+// keeps the dropped PDF in the local archive only.
+// scripts/test-ratecon-drive-folder-required.js pins all three.
+const RATECON_DRIVE_FOLDER_ID = String(process.env.RATECON_DRIVE_FOLDER_ID ?? "").trim();
+// Module scope, so it is logged once per process start and never per request.
+if (!RATECON_DRIVE_FOLDER_ID) {
+	console.warn(
+		"[ratecon-drive] ⚠️ RATECON_DRIVE_FOLDER_ID is not set — the rate-con Drive features are off: " +
+		"invoice drafting does not search Drive for a rate-con, POST /api/admin/ratecon-index answers 503, " +
+		"and a rate-con dropped on POST /api/loads/from-ratecon is archived locally only.",
+	);
+}
 // The rate-con matcher's pure helpers. Required at module scope because step 1 of
 // getRateConBytes() uses filenameCarriesLoadId() on the hot path.
 const rcIndexShared = require("./lib/ratecon-drive-index.js");
@@ -7857,10 +7905,17 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 // the /track/:loadId customer tracker) — so whatever it serves is, by design,
 // world-readable. That is fine for a restricted browser key and is precisely
 // what must never be true of the server key.
-const GOOGLE_MAPS_BROWSER_KEY =
-	process.env.GOOGLE_MAPS_BROWSER_KEY || GOOGLE_MAPS_API_KEY;
+//
+// "Set" means a non-blank value that does not contain the server key, ignoring
+// surrounding whitespace. A blank value, or one holding the server key (a copy,
+// padded or not), counts as unset: the browser gets the server key as before,
+// the warning below is logged and /api/admin/maps-key-usage reports the keys as
+// not distinct. The value served is the trimmed one, so stray whitespace from a
+// quoted .env value never reaches the browser. scripts/test-maps-browser-key.js
+// runs this block and every browser-reachable Maps path against fake keys.
+const GOOGLE_MAPS_BROWSER_KEY_SETTING = String(process.env.GOOGLE_MAPS_BROWSER_KEY ?? "").trim();
 
-// ⚠️ THE FALLBACK ABOVE IS SILENT, AND THAT SILENCE IS THE PROBLEM. With
+// ⚠️ THE FALLBACK BELOW IS SILENT, AND THAT SILENCE IS THE PROBLEM. With
 // GOOGLE_MAPS_BROWSER_KEY unset, GET /api/config/maps-key serves the SERVER key
 // to every anonymous visitor, and nothing anywhere says so — the split looks
 // deployed because the code reads the variable, while in reality one key is
@@ -7872,8 +7927,13 @@ const GOOGLE_MAPS_BROWSER_KEY =
 // ⚠️ NEVER log or return the key, or any prefix of it. A digest is enough to
 // answer "are these two the same?", which is the only question being asked.
 const GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT =
-	!!process.env.GOOGLE_MAPS_BROWSER_KEY &&
-	process.env.GOOGLE_MAPS_BROWSER_KEY !== GOOGLE_MAPS_API_KEY;
+	GOOGLE_MAPS_BROWSER_KEY_SETTING !== "" &&
+	!(GOOGLE_MAPS_API_KEY.trim() !== "" && GOOGLE_MAPS_BROWSER_KEY_SETTING.includes(GOOGLE_MAPS_API_KEY.trim()));
+const GOOGLE_MAPS_BROWSER_KEY = GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT
+	? GOOGLE_MAPS_BROWSER_KEY_SETTING
+	: GOOGLE_MAPS_API_KEY;
+// Module scope, so it is logged once per process start and never per request:
+// each line in pm2's log is one start (a deploy or a restart).
 if (GOOGLE_MAPS_API_KEY && !GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT) {
 	console.warn(
 		"[maps] ⚠️ GOOGLE_MAPS_BROWSER_KEY is not set to a distinct value — " +
@@ -10416,7 +10476,7 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 			</div>
 		</div>`;
-		sendEmail("info@logisx.com", `New Driver Application: ${full_name}`, adminDriverHtml);
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `New Driver Application: ${full_name}`, adminDriverHtml);
 	} catch (err) {
 		console.error("apply submission failed:", err);
 		// The emails above are built after res.json(), inside this same try, so
@@ -10437,10 +10497,11 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 // allowlist (logisx.com and its staging site), a rate limit with
 // publicFormLimiter's numbers plus a daily cap on the emails it sends, both
 // shared by the two forms, the public-form-input checks, a honeypot, and one
-// email to info@logisx.com with Reply-To the submitter. No database write and
-// no submitter data in logs. All of it lives in lib/investor-rfi.js;
-// scripts/test-investor-rfi.js drives this middleware.
-app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail }));
+// email to ADMIN_NOTIFY_EMAIL with Reply-To the submitter (without it, nothing
+// is sent and the visitor is told so). No database write and no submitter data
+// in logs. All of it lives in lib/investor-rfi.js; scripts/test-investor-rfi.js
+// drives this middleware.
+app.post(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createInvestorRfiMiddleware({ sendEmail, to: ADMIN_NOTIFY_EMAIL }));
 
 // List endpoint is lightweight — excludes base64 image/signature/ssn/long-text columns
 // that the table UI doesn't render. Detail endpoint below serves the full record.
@@ -10789,7 +10850,7 @@ app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, 
 			</div>`;
 			// The name comes from the application, so the subject quotes it the way the
 			// success audit does: capped, on one line.
-			sendEmail("info@logisx.com", `Driver Accepted: ${auditText(fullName, 120)}`, adminDriverAcceptHtml);
+			if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Accepted: ${auditText(fullName, 120)}`, adminDriverAcceptHtml);
 			return;
 		}
 
@@ -11476,8 +11537,8 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 				</div>`
 			: "";
 
-		sendEmail(
-			"info@logisx.com",
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(
+			ADMIN_NOTIFY_EMAIL,
 			`${failedDocs.length ? "ACTION NEEDED — " : ""}New Investor Application: ${legal_name}`,
 			docWarningHtml + paymentTermsHtml + adminHtml,
 			pdfAttachments,
@@ -14613,12 +14674,22 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 		}
 		const appId = parseInt(req.params.id);
 
-		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It is the
-		// handler's only await, so every check below and the transaction that
-		// follows them run synchronously on state read after it — the rule
-		// PUT /api/users/:id and the driver acceptance follow.
+		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It and the
+		// Job Tracking read below are the handler's only awaits, so every check
+		// below and the transaction that follows them run synchronously on state
+		// read after them — the rule PUT /api/users/:id and the driver acceptance
+		// follow.
 		const tempPassword = crypto.randomBytes(4).toString("hex");
 		const hash = status === "Accepted" ? await bcrypt.hash(tempPassword, 10) : "";
+		// The company name the new Investor account takes is held to the month-end
+		// lock (investorCompanyLockBlockers(), below), which sizes each linked
+		// driver's history off Job Tracking. Read here, beside the hash and for the
+		// same reason. A failed read leaves `jt` null, and a driver the company
+		// name would link is then held in every finalized month.
+		let jt = null;
+		if (status === "Accepted") {
+			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/investor-applications/:id/status: Job Tracking unreadable for the month-end lock:", e.message); }
+		}
 
 		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
 		// matters most. `status = 'Accepted'` does not merely set a column: it
@@ -14700,6 +14771,25 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				});
 			}
 
+			// The new account's company name links drivers to its ledger in every
+			// month they worked (getInvestorDriverSet() legs 2 and 3), so one whose
+			// drivers' history reaches a finalized month is refused before anything
+			// is written, as PUT /api/users/:id refuses the same company name.
+			const accountCompany = application.dba || fullName;
+			const companyLock = investorCompanyLockBlockers(null, { role: "Investor", companyName: accountCompany }, jt);
+			if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+				const companyAudit = {
+					action: "accept_investor_blocked", entity: "investor_application", entityId: String(appId),
+					subject: `accept application ${appId}: company_name ${JSON.stringify(auditText(accountCompany, 100))}`,
+				};
+				if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Accepting this application", companyAudit);
+				return periodBlockedResponse(req, res,
+					`Not accepted: ${fullName}`,
+					companyLock.blockers,
+					"Nothing was changed. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason), then accept it again.",
+					companyAudit);
+			}
+
 			// Auto-create investor user account. The username is folded to a-z, 0-9
 			// and "." (whitespace becomes ".") from the legal name, else the email's
 			// local part, else investor<application id>: the first that keeps a
@@ -14739,7 +14829,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				// the client router sends every role to /account/change-password.
 				const userResult = db.prepare(
 					"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
-				).run(username, hash, application.email || "", fullName, application.dba || fullName);
+				).run(username, hash, application.email || "", fullName, accountCompany);
 				const userId = userResult.lastInsertRowid;
 
 				// Create investor record with full business info from application
@@ -14833,7 +14923,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 					<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 				</div>
 			</div>`;
-			sendEmail("info@logisx.com", `Investor Accepted: ${fullName}`, adminAcceptHtml);
+			if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Investor Accepted: ${fullName}`, adminAcceptHtml);
 			return;
 		}
 
@@ -15166,7 +15256,7 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 				<div style="font-size:11px;color:#94a3b8;line-height:1.6">LogisX Inc. | 4576 Research Forest Dr, Suite 200, The Woodlands, TX 77381 | USDOT# 4302683</div>
 			</div>
 		</div>`;
-		sendEmail("info@logisx.com", `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
+		if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, `Driver Documents Signed: ${driverName}`, adminDocsHtml, pdfAttachments);
 	}
 	// Fully onboarded if all signed AND drug test passed
 	if (allSigned && ob.drug_test_result === "pass") {
@@ -15547,6 +15637,24 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewL
 
 // Helper: compute LogisX week range (Saturday–Friday) in CST
 function getWeekRange(referenceDate) {
+	// A BARE CALENDAR DAY ("2026-09-26") IS A DATE, NOT AN INSTANT, so its Sat–Fri
+	// week is calendar arithmetic with no zone in it. Sent down the instant path
+	// below, `new Date("2026-09-26")` is UTC midnight, which Central reads as 19:00
+	// on the Friday before: a Saturday resolved to the PREVIOUS week on every
+	// server, UTC included. Any other weekday stays inside its own week, which is
+	// why the batch's Friday week-ends never showed it. Only a real day takes this
+	// branch; an instant, a Date, nothing ("now") or a non-day such as "2026-02-30"
+	// keeps its Houston-day path exactly as before (scripts/test-calendar-day-zones.js).
+	const bare = typeof referenceDate === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(referenceDate.trim()) : null;
+	if (bare) {
+		const [y, m, dd] = [Number(bare[1]), Number(bare[2]), Number(bare[3])];
+		const day = new Date(Date.UTC(y, m - 1, dd));
+		if (day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === dd) {
+			const sat = Date.UTC(y, m - 1, dd - ((day.getUTCDay() + 1) % 7)); // back to Saturday
+			const key = (ms) => new Date(ms).toISOString().slice(0, 10);
+			return { weekStart: key(sat), weekEnd: key(sat + 6 * 86400000) };
+		}
+	}
 	const d = referenceDate ? new Date(referenceDate) : new Date();
 	// Convert to CST (America/Chicago)
 	const cstStr = d.toLocaleString("en-US", { timeZone: "America/Chicago" });
@@ -16675,7 +16783,12 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 		.replace(/[^\x20-\x7E]/g, "?");
 	const note = winAnsiSafe(invoiceRow.adjustment_note || "");
 	const adjustedBy = winAnsiSafe(invoiceRow.adjusted_by || "");
-	const adjustedAt = (invoiceRow.adjusted_at || "").toString().slice(0, 10);
+	// `adjusted_at` is an ISO instant, so its first ten characters are the UTC
+	// day; print the APP_TIMEZONE day (an unparseable value prints as before).
+	const adjustedAtMs = Date.parse(invoiceRow.adjusted_at || "");
+	const adjustedAt = Number.isFinite(adjustedAtMs)
+		? appTime.dayInZone(new Date(adjustedAtMs), APP_TIMEZONE)
+		: (invoiceRow.adjusted_at || "").toString().slice(0, 10);
 	const invoiceNo = winAnsiSafe(invoiceRow.invoice_number || "");
 	const money = (n) =>
 		`$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -17347,7 +17460,10 @@ async function generateInvoiceHandler(req, res) {
 		const payType = payStruct.payType;
 		const payPercentage = payStruct.payPercentage;
 
-		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
+		// at 8 PM Eastern, which UTC already calls Saturday, and the template prints
+		// this beside a literal "Friday,".
+		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
@@ -17644,7 +17760,7 @@ function abortAutogenRun(range, reason) {
 			insertDispatchNotification.run("invoices-autogen", title, body, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, aborted: true }));
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body });
 		} catch (e) { console.error("[invoice-autogen] abort alert notify failed:", e.message); }
-		const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+		const adminEmail = process.env.GMAIL_USER;
 		sendEmail(adminEmail, title, invoiceEmailHtml({ heading: "Weekly Invoices — Sheet Unreadable", bodyHtml: `<p style="margin:0;color:#b91c1c;line-height:1.6">${escHtml(body)}</p>`, ctaText: "Open Invoices", ctaHref: "https://app.logisx.com/invoices" }))
 			.catch((e) => console.error("[invoice-autogen] abort alert email failed:", e.message));
 	}
@@ -17811,7 +17927,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
-			const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+			const adminEmail = process.env.GMAIL_USER;
 			const html = invoiceEmailHtml({
 				heading: needsAttention ? "Weekly Invoices — Action Needed" : "Weekly Invoices Generated",
 				bodyHtml: `
@@ -18165,7 +18281,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0 } = {}) {
 			ctaText: "Review Invoices",
 			ctaHref: "https://app.logisx.com/invoices",
 		});
-		emailed = (await sendEmail(process.env.GMAIL_USER || "info@logisx.com", `⚠️ ${title}`, html)) === true;
+		emailed = (await sendEmail(process.env.GMAIL_USER, `⚠️ ${title}`, html)) === true;
 	} catch (e) { console.error("[invoice-undated] email failed:", e && e.message); }
 	return { emailed, notified };
 }
@@ -21597,7 +21713,8 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// initials in the same period), which is why the prefix is passed in
 		// rather than swapped in afterwards.
 		const invoiceNumber = generateInvoiceNumber(payee, periodStart, { prefix: "INV-M-" });
-		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		// Today in APP_TIMEZONE, not on the server's UTC clock (see the weekly route).
+		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtPeriodDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
@@ -21811,7 +21928,13 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 		const fmtMoney = (n) =>
 			"$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 		const fmtDay = (s) => (s ? String(s).slice(0, 10) : "—");
-		const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+		// `paid_at` is an ISO instant, not a bare day: its APP_TIMEZONE day, where
+		// its first ten characters would be the UTC day.
+		const fmtPaidDay = (s) => {
+			const ms = Date.parse(s || "");
+			return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), APP_TIMEZONE) : fmtDay(s);
+		};
+		const dateStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 		const payeeDisplay = report.payee.toUpperCase();
 
 		// ── Header band
@@ -21879,7 +22002,7 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 				fmtMoney(inv.total_earnings),
 				inv.adjustment ? fmtMoney(inv.adjustment) : "—",
 				fmtMoney(inv.total_due),
-				inv.status === "Paid" ? fmtDay(inv.paid_at) : "—",
+				inv.status === "Paid" ? fmtPaidDay(inv.paid_at) : "—",
 			];
 			cols.forEach((c, j) => doc.text(vals[j], c.x + 3, y + 4, { width: c.w - 6, align: c.align, lineBreak: false }));
 			doc.y = y + 16;
@@ -22031,7 +22154,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		// try/catch so any email failure never blocks the 200 response.
 		(async () => {
 			try {
-				const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
+				const adminEmail = process.env.GMAIL_USER;
 				const pdfPath = path.join(DATA_DIR, "uploads", "invoices", invoice.pdf_file_name || "");
 				const attachments = invoice.pdf_file_name && fs.existsSync(pdfPath)
 					? [{ filename: invoice.pdf_file_name, path: pdfPath }]
@@ -22240,9 +22363,15 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 			if (lock.blockers.length) {
 				// See the twin on the paid branch: an unresolved-date refusal carries its
 				// own remedy, because "reopen the affected period" names none.
+				//
+				// A finalized month is refused in plain words: this `error` is the toast an
+				// admin reads on the Invoices screen, so it names the months and where
+				// corrections go, not an API path. The unresolved-date refusal keeps the
+				// composed text and its own remedy.
 				return periodBlockedResponse(req, res,
 					`Cannot adjust ${invoice.invoice_number || `invoice #${invoice.id}`}`,
-					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit);
+					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit,
+					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} finalized, so this invoice can't be changed here. Corrections go into the current month.`);
 			}
 		}
 
@@ -22746,7 +22875,9 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 				return res.status(500).json({ error: "Administrator created, but the session could not be started. Please log in." });
 			}
 			req.session.user = userSnapshot;
-			req.session.save(() => res.json({ success: true, role: "Super Admin" }));
+			// appTimeZone: the same APP_TIMEZONE GET /api/auth/session hands over, for
+			// a browser that signed in on a fresh page without a session check.
+			req.session.save(() => res.json({ success: true, role: "Super Admin", appTimeZone: APP_TIMEZONE }));
 		});
 	} catch (error) {
 		console.error("Error during setup:", error.message);
@@ -22856,6 +22987,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 				fullName: current.full_name || "",
 				mustChangePassword: !!current.must_change_password,
 			},
+			// The same APP_TIMEZONE GET /api/auth/session hands over: a sign-in from
+			// a fresh /login page has not run a session check yet.
+			appTimeZone: APP_TIMEZONE,
 		});
 	} catch (error) {
 		// Through refuse(), so an unexpected throw after rotation (the re-read,
@@ -22877,12 +23011,13 @@ app.post("/api/auth/logout", (req, res) => {
 	res.json({ success: true });
 });
 
-// Get current session
+// Get current session. `appTimeZone` hands the browser the same APP_TIMEZONE the
+// server dates instants in, so a viewer's "today" never comes from their laptop.
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
-		res.json({ authenticated: true, user: req.session.user });
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE });
 	} else {
-		res.json({ authenticated: false });
+		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
 	}
 });
 
@@ -23076,9 +23211,16 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// row is held to the month-end lock (accountDirectoryRowLock()), which sizes
 		// the driver's history off Job Tracking. Read here, beside the hash and for
 		// the same reason: the checks and the INSERTs below run with no await
-		// between them. Only when that row will be judged.
+		// between them. Only when that row will be judged, or when a new Investor's
+		// company name links drivers to its ledger (investorCompanyMoves()), which
+		// the same lock judges.
 		let jt = null;
-		if (role === "Driver" && accountDirectoryRowJudged(newDriverName, companyName)) jt = await getJobTrackingCached();
+		// A failed read leaves `jt` null, and both locks then judge every finalized
+		// month, as PUT /api/users/:id does.
+		if ((role === "Driver" && accountDirectoryRowJudged(newDriverName, companyName))
+			|| investorCompanyMoves(null, { role, companyName }).length) {
+			try { jt = await getJobTrackingCached(); } catch (e) { console.error("POST /api/users: Job Tracking unreadable for the month-end lock:", e.message); }
+		}
 
 		const existing = db
 			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
@@ -23146,6 +23288,24 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 					"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
 					accountRowAudit);
 			}
+		}
+
+		// A new Investor's company name links drivers to its ledger in every month
+		// they worked (investorCompanyLockBlockers()), so one whose drivers' history
+		// reaches a finalized month is refused whole, before the INSERT, as
+		// PUT /api/users/:id refuses the same company name on an existing account.
+		const companyLock = investorCompanyLockBlockers(null, { role, companyName }, jt);
+		if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+			const companyAudit = {
+				action: "create_user_blocked", entity: "user", entityId: auditText(newUsername, 100),
+				subject: `create ${auditText(newUsername, 100)} as ${auditText(role, 30)}: company_name ${JSON.stringify(auditText(companyName, 100))}`,
+			};
+			if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Creating this account", companyAudit);
+			return periodBlockedResponse(req, res,
+				`Cannot create the account ${newUsername}`,
+				companyLock.blockers,
+				"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				companyAudit);
 		}
 
 		db.prepare(
@@ -23702,13 +23862,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				console.error("PUT /api/users/:id: Job Tracking read failed, the rename will be refused:", e.message);
 			}
 		}
-		// The carrier the directory sync writes after the commit is held to the
-		// month-end lock (guard (c2)), which sizes the driver's history off Job
-		// Tracking. Read here, with the other awaits, and only when that sync would
-		// change a carrier (accountDirectorySync()). A failed read leaves `jt` null,
-		// and guard (c2) then judges every finalized month.
+		// The carrier the directory sync writes after the commit (guard (c2)) and
+		// the drivers an investor's company name links (guard (c3)) are held to the
+		// month-end lock, which sizes each driver's history off Job Tracking. Read
+		// here, with the other awaits, and only when that sync would change a
+		// carrier (accountDirectorySync()) or the write would move a driver onto or
+		// off an investor's ledger (investorCompanyMoves()). A failed read leaves
+		// `jt` null, and guards (c2) and (c3) then judge every finalized month.
 		let jt = null;
-		if (accountDirectorySync(user, { driverName, companyName })) {
+		if (accountDirectorySync(user, { driverName, companyName })
+			|| investorCompanyMoves(user, { role, companyName }).length) {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/users/:id: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
@@ -23983,6 +24146,32 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				syncLock.blockers,
 				"Save the account without this company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
 				accountRowAudit);
+		}
+
+		// (c3) The investor ledgers' company-name legs (investorCompanyLockBlockers()):
+		// a company name sent and different, or a role change to or from Investor,
+		// moves every driver that name links onto or off this account's ledger, in
+		// every month they worked. Refused whole when a moved driver's history
+		// reaches a finalized month, with the same 409 as (c2). This is not leg (2)
+		// of userUpdateLockBlockers(), which never refuses a change TO Investor:
+		// that leg keeps settled payout rows reachable, which such a change
+		// restores, while this one keeps the drivers a company name links, which
+		// such a change adds. It reads the directory with the carrier (c2)'s sync
+		// writes (`dirSync`), so a save that changes both is judged as one.
+		const companyLock = investorCompanyLockBlockers(user, { role: nextRole, companyName }, jt, dirSync);
+		if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+			const companyAudit = {
+				...userEditAudit,
+				subject: `${userEditAudit.subject}, company_name ${JSON.stringify(auditText(user.company_name || "", 100))} -> ` +
+					`${companyName === undefined ? "(unchanged)" : JSON.stringify(auditText(companyName, 100))}`,
+			};
+			if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Updating this account", companyAudit);
+			return periodBlockedResponse(req, res,
+				`Cannot update ${user.username}`,
+				companyLock.blockers,
+				"Keep the company name and the role as they are (a change of letter case, or of spaces at either end, keeps every driver linked), " +
+				"or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				companyAudit);
 		}
 
 		// (d) ⚠️ THE SHEET LEG THIS ROUTE DOES NOT HAVE.
@@ -26771,16 +26960,22 @@ function recordPeriodRefusal(audit, code, periods, subjectFallback) {
 // to reopen a period that is open. FINALIZED outranks UNRESOLVED when both are
 // present, the same ranking dispatchWriteBlocker() and statusOverrideBlocker()
 // already use: "this would restate June" is the answer an operator can act on.
-function periodBlockedResponse(req, res, what, blockers, remedy, audit) {
+//
+// `finalizedMessage` is optional (only PUT /api/invoices/:id/adjust passes it).
+// When the blockers name finalized months and nothing unresolved, it gets those
+// months' labels and returns the whole `error`. The rest of the body and the
+// audit row are the same either way.
+function periodBlockedResponse(req, res, what, blockers, remedy, audit, finalizedMessage) {
 	const periods = [...new Set(blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
 	const unresolved = blockers.some((b) => b.periods.some((p) => !p));
 	const code = periods.length ? "PERIOD_FINALIZED" : (unresolved ? "PERIOD_UNRESOLVED" : "PERIOD_FINALIZED");
 	recordPeriodRefusal(audit === AUDITED_UPSTREAM ? audit : { req, ...(audit || {}) }, code, periods, what);
 	return res.status(409).json({
-		error: `${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
+		error: finalizedMessage && periods.length && !unresolved ? finalizedMessage(periods.map(periodLabel)) : (
+			`${what}: ${blockers.map((b) => b.detail).join("; ")}. ` +
 			(periods.length ? `${periods.map(periodLabel).join(", ")} ${periods.length === 1 ? "is" : "are"} finalized. ` : "") +
 			(unresolved ? "Some rows carry a date the server cannot resolve to a month, so they are withheld until it is corrected. " : "") +
-			remedy,
+			remedy),
 		code: "PERIOD_FINALIZED",
 		periods,
 		unresolved,
@@ -27970,6 +28165,159 @@ function onboardingAddsJudgedRow(userId) {
 	if (ob.status !== "documents_pending" && ob.drug_test_result !== "pass") return false;
 	const user = db.prepare("SELECT driver_name, company_name FROM users WHERE id = ?").get(userId);
 	return !!user && accountDirectoryRowJudged(user.driver_name, user.company_name);
+}
+
+// ============================================================================
+// AN INVESTOR'S COMPANY NAME IS PART OF THEIR LEDGER (2026-10-08)
+// ============================================================================
+// getInvestorDriverSet() legs 2 and 3 give an investor every driver whose
+// drivers_directory carrier or carrier_driver_history carrier is the investor's
+// users.company_name, compared trimmed and case aside, and
+// getInvestorDriverMonthWindows() leg C dates the second. Neither leg has a month
+// dimension, so changing that company name, or whether the account is an
+// investor at all, moves those drivers' revenue, expenses and pay onto or off
+// the investor's ledger in every month they worked, finalized months included,
+// for every reader that recomputes them (the portal, the report, the tax CSV,
+// the documents).
+//
+// So every write that can do that is judged by the membership it moves, the
+// question directoryEditLockBlockers() check (5) asks of a directory carrier:
+// the account's own getInvestorDriverSet() before and after the write, compared
+// key for key (the ledger's own matching: driver names trimmed and lower-cased,
+// nothing else folded), each moved driver's exposure sized off
+// driverHistoryFloorMonth(). A move that reaches a finalized month is refused
+// whole, with nothing written: 409 PERIOD_FINALIZED through
+// periodBlockedResponse(), on
+//   • PUT /api/users/:id: a company name sent and different, or a role change to
+//     or from Investor (audited as update_user_blocked);
+//   • POST /api/users: a new Investor with a company name (create_user_blocked);
+//   • PUT /api/investor-applications/:id/status: an acceptance, whose new
+//     Investor account takes the DBA, else the legal name, as its company name
+//     (accept_investor_blocked).
+// Nothing else writes an investor's company name: the driver acceptance creates
+// a Driver account with none, and no route lets an investor edit their own.
+//
+// Never judged, because it keeps every link: the same company name once trimmed
+// and lower-cased (a change of letter case, or of spaces at either end). A change
+// of the spaces INSIDE the name is a different name to those legs. Judged and
+// allowed: a change that moves only drivers with no history in a finalized
+// month, or only drivers the investor also holds through its own trucks
+// (legs 1 and 1b keep them either way).
+
+// An account as the investor guards see it: whether it is an investor, and its
+// company name. `account` is the stored users row, null for one not yet created;
+// `next` holds the role and company name a write would store, each undefined (or
+// a blank role) when the write leaves it as it is.
+//
+// An investor is the Investor role OR the owner of a truck, deliberately the
+// universe investorsHoldingDriver() reasons over for every other ledger guard,
+// although the payouts list (listSettlableInvestors()) and the portal read the
+// role alone. So a role change on an account that owns a truck moves nothing
+// here: whether a demotion may drop its settled months is leg (2) of
+// userUpdateLockBlockers()'s question, and a change TO Investor is the repair
+// that leg leaves open.
+function investorAccountState(account, next = {}) {
+	const id = account ? Number(account.id) || 0 : 0;
+	const role = typeof next.role === "string" && next.role ? next.role : String((account && account.role) || "");
+	const companyName = next.companyName !== undefined ? String(next.companyName ?? "") : String((account && account.company_name) || "");
+	const ownsTruck = id > 0 && !!db.prepare("SELECT 1 FROM trucks WHERE owner_id = ? LIMIT 1").get(id);
+	return { investor: role === "Investor" || ownsTruck, companyName };
+}
+
+// The drivers a write moves onto or off the account's investor ledger, as
+// [{ driver, onto }]: the account's getInvestorDriverSet() as it stands against
+// the same set as written, every key in one and not the other. `account` and
+// `next` as investorAccountState() takes them; an account that is not an
+// investor holds nobody. Nothing moves unless the write changes the company
+// name's key (trimmed, lower-cased) or whether the account is an investor.
+//
+// `sync` is accountDirectorySync()'s answer for the same request: the carrier the
+// directory sync after the commit writes on the account's own driver row. The
+// "as written" set reads the directory with that carrier in place, because guard
+// (c2) judges the sync against the account as it stands and this guard judges
+// the account change against the directory as it stands: a save that changes
+// both (a Driver made an Investor under a company its own row is then given)
+// would otherwise pass both.
+function investorCompanyMoves(account, next = {}, sync = null) {
+	const id = account ? Number(account.id) : null;
+	const before = investorAccountState(account);
+	const after = investorAccountState(account, next);
+	const key = (s) => (s.investor ? String(s.companyName || "").trim().toLowerCase() : "");
+	if (key(before) === key(after)) return [];
+	const carrierDB = getCarrierDBFromSQLite();
+	const driverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCol = findCol(carrierDB.headers, /carrier/i);
+	let written = carrierDB.data;
+	if (sync) {
+		written = sync.row
+			? carrierDB.data.map((r) => (r._rowIndex === sync.row.id ? { ...r, [carrierCol]: sync.carrier } : r))
+			: [...carrierDB.data, { [driverCol]: sync.name, [carrierCol]: sync.carrier }];
+	}
+	const ledger = (s, rows) => (s.investor
+		? getInvestorDriverSet(id, rows, driverCol, carrierCol, { companyName: s.companyName })
+		: new Set());
+	const was = ledger(before, carrierDB.data);
+	const now = ledger(after, written);
+	// Each key as a person reads it: the first spelling stored under it.
+	const shown = new Map();
+	const see = (name) => {
+		const k = String(name || "").trim().toLowerCase();
+		if (k && !shown.has(k)) shown.set(k, String(name).trim());
+	};
+	for (const r of written) see(r[driverCol]);
+	for (const r of db.prepare("SELECT driver_name FROM carrier_driver_history").all()) see(r.driver_name);
+	const moves = [];
+	for (const k of new Set([...was, ...now])) {
+		if (was.has(k) !== now.has(k)) moves.push({ driver: shown.get(k) || k, onto: now.has(k) });
+	}
+	return moves;
+}
+
+// The month-end lock on that write, with directoryEditLockBlockers()'s contract
+// ({ unreadable, blockers }), or null when it moves nobody. One blocker per
+// direction, naming the moved drivers whose history reaches a finalized month.
+// `jt` is getJobTrackingCached()'s answer, read by the caller before its checks;
+// null dates nothing, so every finalized month is held, the safe direction.
+// `sync` as investorCompanyMoves() takes it.
+function investorCompanyLockBlockers(account, next, jt, sync = null) {
+	const moves = investorCompanyMoves(account, next, sync);
+	if (!moves.length) return null;
+	const before = investorAccountState(account);
+	const after = investorAccountState(account, next);
+	// Fail CLOSED: isLocked() swallows its errors and answers "not locked".
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	const change = before.investor && after.investor
+		? `the company name ${JSON.stringify(before.companyName)} → ${JSON.stringify(after.companyName)}`
+		: after.investor
+			? `becoming an investor with the company name ${JSON.stringify(after.companyName)}`
+			: `no longer being an investor (company name ${JSON.stringify(before.companyName)})`;
+	const blockers = [];
+	for (const onto of [false, true]) {
+		const drivers = [];
+		const periods = new Set();
+		for (const m of moves) {
+			if (m.onto !== onto) continue;
+			const months = driverPayLockedMonths(m.driver, locked, driverHistoryFloorMonth(m.driver, jt));
+			if (!months.length) continue;
+			drivers.push(m.driver);
+			for (const p of months) periods.add(p);
+		}
+		if (!drivers.length) continue;
+		drivers.sort((a, b) => a.localeCompare(b));
+		blockers.push({
+			field: "company_name",
+			from: before.investor ? before.companyName : "",
+			to: after.investor ? after.companyName : "",
+			effect: "driver_set",
+			direction: onto ? "onto" : "off",
+			drivers,
+			periods: [...periods].sort(),
+			detail: `${change} ${onto ? "puts" : "takes"} ${drivers.join(", ")} ${onto ? "onto" : "off"} this investor's ledger, ` +
+				`with their revenue, expenses and pay, across ${periods.size} finalized month${periods.size === 1 ? "" : "s"}`,
+		});
+	}
+	return { unreadable: false, blockers };
 }
 
 // Everything POST /api/trucks would restate inside a finalized month by
@@ -29427,7 +29775,10 @@ function invoiceRowPeriodLocked(r) {
 }
 
 // The remedy sentence every invoice write guard ends on, kept in one place so the
-// two routes cannot drift into telling an admin two different things.
+// two routes cannot drift into telling an admin two different things. The adjust
+// route's finalized-month refusal is the exception: it says its own plain sentence
+// (periodBlockedResponse()'s `finalizedMessage`). Mark-paid, revert and the Data
+// Issues list still end on this one.
 const INVOICE_LOCK_REMEDY =
 	"Reopen the affected period first — POST /api/periods/:period/reopen records a reason.";
 
@@ -41896,38 +42247,41 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			// (a) BEST-EFFORT — mirror into the Drive folder too, for parity with
 			// the n8n email pipeline. Expected to fail under the service account
 			// in production; that's fine, (b) is authoritative. Silent on error.
-			try {
-				const { Readable } = require("stream");
-				const drive = await getDrive();
-				const created = await drive.files.create({
-					requestBody: {
-						name: `${loadId}.pdf`,
-						parents: [RATECON_DRIVE_FOLDER_ID],
-						mimeType: "application/pdf",
-					},
-					media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
-					fields: "id,name",
-					supportsAllDrives: true,
-				});
-				// ⚠️ KEEP THE ID. This asked for `fields: "id,name"` and then threw
-				// the id away, so the row above was left with drive_file_id = ''.
-				// fetchDocumentBytes() falls back to Drive ONLY via drive_file_id,
-				// which means a RATECON row whose local file later goes missing
-				// returns null bytes and the rate-con silently stops being
-				// attached — even though a perfectly good copy is sitting in the
-				// folder. uploads/ is not in the nightly backup, so "the local file
-				// went missing" is a routine event, not a hypothetical.
-				const driveId = created && created.data && created.data.id;
-				if (driveId && rateconArchived) {
-					db.prepare(
-						`UPDATE documents SET drive_file_id = ?
-						 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
-					).run(driveId, loadId);
+			// Without RATECON_DRIVE_FOLDER_ID there is no folder: skipped, no Drive call.
+			if (RATECON_DRIVE_FOLDER_ID) {
+				try {
+					const { Readable } = require("stream");
+					const drive = await getDrive();
+					const created = await drive.files.create({
+						requestBody: {
+							name: `${loadId}.pdf`,
+							parents: [RATECON_DRIVE_FOLDER_ID],
+							mimeType: "application/pdf",
+						},
+						media: { mimeType: "application/pdf", body: Readable.from(pdfBuffer) },
+						fields: "id,name",
+						supportsAllDrives: true,
+					});
+					// ⚠️ KEEP THE ID. This asked for `fields: "id,name"` and then threw
+					// the id away, so the row above was left with drive_file_id = ''.
+					// fetchDocumentBytes() falls back to Drive ONLY via drive_file_id,
+					// which means a RATECON row whose local file later goes missing
+					// returns null bytes and the rate-con silently stops being
+					// attached — even though a perfectly good copy is sitting in the
+					// folder. uploads/ is not in the nightly backup, so "the local file
+					// went missing" is a routine event, not a hypothetical.
+					const driveId = created && created.data && created.data.id;
+					if (driveId && rateconArchived) {
+						db.prepare(
+							`UPDATE documents SET drive_file_id = ?
+							 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
+						).run(driveId, loadId);
+					}
+				} catch (e) {
+					// No warning to the dispatcher — the local copy already made the
+					// load invoiceable. Log for observability only.
+					console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
 				}
-			} catch (e) {
-				// No warning to the dispatcher — the local copy already made the
-				// load invoiceable. Log for observability only.
-				console.error("Rate-con load: Drive mirror failed (non-fatal):", e.message);
 			}
 		}
 
@@ -43092,6 +43446,19 @@ function latestDraftNotes(loadId) {
 	}
 }
 
+// The broker AP inboxes an invoice draft is addressed to by default
+// (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL) have no default in code; see
+// INVOICE_TO_SETTINGS in lib/broker-invoice.js. Module scope, so a missing one
+// is logged once per process start and never per request.
+const MISSING_INVOICE_TO_SETTINGS = brokerInvoice.missingInvoiceToSettings();
+if (MISSING_INVOICE_TO_SETTINGS.length) {
+	console.warn(
+		`[invoice-draft] ⚠️ ${MISSING_INVOICE_TO_SETTINGS.join(" and ")} ${MISSING_INVOICE_TO_SETTINGS.length === 1 ? "is" : "are"} ` +
+		"not set to an email address — an invoice draft that would be addressed to that inbox is refused " +
+		"(503 INVOICE_RECIPIENT_UNCONFIGURED) unless its rate-con or the reviewer names the recipient.",
+	);
+}
+
 // ⚠️ THE GUARDS WERE ON THE WRONG ROUTE. This one had `requireRole` and nothing
 // else, while its own preview sibling below — which does, by its own header
 // comment, "zero Sheets, zero Drive, zero Gemini, zero DB writes" — carried a
@@ -43388,8 +43755,10 @@ app.post(
 			}
 
 			// Recipient: the rate-con's "email documents to" address wins over the
-			// hardcoded default (drives both the Gmail To: and the printed
-			// "Invoice To" block); falls back to Bison AP inbox / quickpay when absent.
+			// configured default (drives both the Gmail To: and the printed
+			// "Invoice To" block); falls back to BISON_INVOICE_EMAIL /
+			// DEFAULT_INVOICE_EMAIL when absent, and to "" when that setting is
+			// missing (refused below, step 6a-2, before anything is minted).
 			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
 
 			// The review-before-approve preview sends the recipient the dispatcher SAW
@@ -43548,6 +43917,24 @@ app.post(
 						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
 					code: "INVOICE_REFS_REQUIRED",
 					details: { needsOrderNumber, needsPoNumber, rateconFound: !!(rateconBuffer && rateconBuffer.length) },
+				});
+			}
+
+			// 6a-2) A RECIPIENT. The default AP inboxes are settings with no default
+			//     in code (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL), so on a server
+			//     without the one this load needs, and with no rate-con address or
+			//     reviewer-typed recipient, To is empty. No draft is created with an
+			//     empty To: refused HERE, before nextInvoiceNumber() below, so nothing
+			//     is minted, rendered, drafted or recorded. The dryRun still answers
+			//     (with an empty recipient) so the review can collect one, exactly as
+			//     it collects a missing total.
+			if (!invoiceTo.email && !dryRun) {
+				const setting = isBison ? "BISON_INVOICE_EMAIL" : "DEFAULT_INVOICE_EMAIL";
+				return res.status(503).json({
+					error:
+						`No recipient for the invoice on load ${loadId}: this server has no ${isBison ? "Bison" : "default"} ` +
+						`invoice address configured (${setting}). Enter the recipient's email in the review, then approve.`,
+					code: "INVOICE_RECIPIENT_UNCONFIGURED",
 				});
 			}
 
@@ -44763,7 +45150,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 		// null = the fleet total is "Not available" (a truck with no price, under
 		// UNPRICED_TRUCKS "not-available"), and so is At-Risk Capital, which reads it.
 		const atRiskCapital = priced.total === null ? null : Math.max(0, (priced.total + totalStartupExpenses) - netRevenueToDate);
-		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+		const today = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { year: "numeric", month: "long", day: "numeric" });
 		const ownerLabel = isSuperAdmin ? "All Investors" : user.username;
 
 		const { NOT_RECORDED, NOT_AVAILABLE, CSV_COUNT_LABEL } = investorReportOptions.UNPRICED_TEXT;
@@ -44795,7 +45182,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 		// dollar figures, so it gets the same formula-injection guard as every
 		// other export rather than the quote-only escaping it used to do.
 		const csv = csvRows(rows);
-		const filename = `tax-shield-${user.username}-${new Date().toISOString().slice(0, 10)}.csv`;
+		const filename = `tax-shield-${user.username}-${appTime.dayInZone(new Date(), APP_TIMEZONE)}.csv`;
 		res.setHeader("Content-Type", "text/csv");
 		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 		res.send(csv);
@@ -44906,7 +45293,10 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			if (endBound && dayKey > endBound) continue;
 			let key, label, start, end;
 			if (period === "weekly") {
-				const wr = getWeekRange(dt);
+				// The day key, not `dt`: `dt` is the row's LOCAL midnight, which on the
+				// UTC VPS is UTC midnight, and getWeekRange() reads an instant in
+				// Central — a Saturday load landed in the week before.
+				const wr = getWeekRange(dayKey);
 				key = wr.weekStart; start = wr.weekStart; end = wr.weekEnd; label = `${wr.weekStart} to ${wr.weekEnd}`;
 			} else {
 				key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
@@ -45467,10 +45857,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 
 		// Whole dollars; a negative amount prints as -$1,234 (it printed $-1,234).
 		const fmt = n => { const v = Math.round(Number(n || 0)); return (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("en-US"); };
-		const dateStr = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+		const dateStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { weekday:"long", year:"numeric", month:"long", day:"numeric" });
 		const investorName = isSuperAdmin ? "Super Admin" : user.username;
+		// `filterStart` is the range's first day at UTC midnight, so it is read back
+		// in UTC: in a US zone that instant is still the evening before, and the
+		// line printed the day before. `filterEnd` is built at the server's own
+		// 23:59:59, so its own zone reads it back as the day it was built from.
 		const periodStr = filterStart || filterEnd
-			? `Period: ${filterStart ? filterStart.toLocaleDateString("en-US") : "All"} – ${filterEnd ? filterEnd.toLocaleDateString("en-US") : "Today"}`
+			? `Period: ${filterStart ? filterStart.toLocaleDateString("en-US", { timeZone: "UTC" }) : "All"} – ${filterEnd ? filterEnd.toLocaleDateString("en-US") : "Today"}`
 			: "All-time";
 
 		// ── Header
@@ -45645,7 +46039,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 		await new Promise(resolve => doc.on("end", resolve));
 
 		const pdfBuffer = Buffer.concat(chunks);
-		const fileName = `${investorName.replace(/\s+/g,"_")}_Report_${new Date().toISOString().slice(0,10)}.pdf`;
+		const fileName = `${investorName.replace(/\s+/g,"_")}_Report_${appTime.dayInZone(new Date(), APP_TIMEZONE)}.pdf`;
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
 		res.send(pdfBuffer);
@@ -58237,9 +58631,10 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 		// The client asked "what are we spending on an average week"; the answer
 		// existed only as month-spend / (elapsed days / 7) inside the Financials
 		// month modal, which is Super Admin only and is not a real week.
-		// ⚠️ getWeekRange() parses a bare 'YYYY-MM-DD' as UTC midnight and then
-		// shifts it into the previous Central day, so a Saturday resolves to the
-		// week BEFORE the one it starts. Anchor at midday first.
+		// getWeekRange() reads a bare 'YYYY-MM-DD' as its own calendar day (#442);
+		// before that it read UTC midnight, so a Saturday resolved to the week
+		// before. The midday anchor below takes its instant path and lands on the
+		// same Houston day either way.
 		const weekly = {};
 		for (const e of fuelExpenses) {
 			const day = String(e.date || "").slice(0, 10);
@@ -59170,15 +59565,12 @@ app.get("/api/analytics/mileage",
 		const truckById = new Map(trucks.map(t => [t.id, t]));
 		const truckOfRow = (r) => truckById.get(devices.truckForVehicleOnDay(r.vid, r.local_day)) || null;
 
-		// ⚠️ ANCHOR AT MIDDAY-UTC BEFORE HANDING A BARE DATE TO getWeekRange().
-		// It does `new Date(str)`, which parses 'YYYY-MM-DD' as UTC MIDNIGHT, then
-		// converts to America/Chicago — moving it to 19:00 the PREVIOUS day. A
-		// Saturday therefore reads as a Friday and resolves to the week BEFORE the
-		// one it starts. The existing invoice callers pass a Friday week-END, where
-		// the same shift lands on a Thursday inside the same Sat-Fri week and is
-		// harmless, which is why this has never bitten. Passing a week START, as
-		// this route does, is what exposes it. T12:00:00Z is far enough from both
-		// midnights that no US zone can cross a day boundary.
+		// getWeekRange() now reads a bare 'YYYY-MM-DD' as its own calendar day
+		// (#442). It used to parse one as UTC MIDNIGHT and convert to
+		// America/Chicago, 19:00 the PREVIOUS day, so a Saturday resolved to the
+		// week BEFORE the one it starts; this route passes week STARTS, which is
+		// why it anchors at T12:00:00Z. The anchor takes the instant path and lands
+		// on the same Houston day, far from both midnights in every US zone.
 		const weekRangeOf = (day) => getWeekRange(String(day).slice(0, 10) + "T12:00:00Z");
 		// week key = the Sat-Fri billing week this day falls in, so miles line up
 		// with the invoice that pays for them.

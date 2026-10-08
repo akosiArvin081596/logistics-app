@@ -30,6 +30,13 @@
  * forever. Crucially the DAY is now taken verbatim everywhere — screen, CSV and
  * the money paths all read the date part as written, so they cannot disagree.
  * See the note above sheetSortKey before adding any day-converting helper.
+ *
+ * A SECOND RULE, for calendar dates and "today" (the owner, 2026-10-08): a bare
+ * 'YYYY-MM-DD' is a calendar date and is never moved through a zone, and where an
+ * instant has to become a day, or for "today", the zone is APP_TIMEZONE, the one
+ * setting the server sends. See the APP_TIMEZONE section at the bottom. The
+ * Houston-pinned helpers in this file keep their pin until the owner decides
+ * whether they move to APP_TIMEZONE.
  */
 
 const HOUSTON = 'America/Chicago'
@@ -61,28 +68,41 @@ export function isZoned(v) {
   return /(?:Z|[+-]\d{2}:?\d{2})$/.test(s) || /\b(GMT|UTC)\b/i.test(s)
 }
 
+// One formatter per zone, built on first use and kept: building an
+// Intl.DateTimeFormat costs far more than using one, and a list can send every
+// row through here (Houston, plus the APP_TIMEZONE section at the bottom).
+const PARTS_FORMATTERS = new Map()
+
+/** An instant's wall clock in `timeZone`, as strings: { year: '2026', month: '09', day: '28', hour: '23', … }. */
+function zonedParts(instantMs, timeZone) {
+  let f = PARTS_FORMATTERS.get(timeZone)
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23',
+    })
+    PARTS_FORMATTERS.set(timeZone, f)
+  }
+  return f.formatToParts(new Date(instantMs)).reduce((acc, part) => ((acc[part.type] = part.value), acc), {})
+}
+
 /** Milliseconds `timeZone` is ahead of UTC at a given instant (DST-aware). */
 function tzOffsetMs(instantMs, timeZone) {
-  const p = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hourCycle: 'h23',
-  })
-    .formatToParts(new Date(instantMs))
-    .reduce((acc, part) => ((acc[part.type] = part.value), acc), {})
+  const p = zonedParts(instantMs, timeZone)
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - instantMs
 }
 
 /**
- * A Houston wall clock → the true instant. Two correction passes: the first
- * offset is looked up at the wrong instant, which only matters within the
+ * A wall clock in `timeZone` → the true instant. Two correction passes: the
+ * first offset is looked up at the wrong instant, which only matters within the
  * one-hour DST seam, and the second pass settles it.
  */
-function houstonWallClockToInstant(y, mo, d, h, mi, s) {
+function wallClockToInstant(timeZone, y, mo, d, h, mi, s) {
   const guess = Date.UTC(y, mo - 1, d, h, mi, s)
-  let ms = guess - tzOffsetMs(guess, HOUSTON)
-  ms = guess - tzOffsetMs(ms, HOUSTON)
+  let ms = guess - tzOffsetMs(guess, timeZone)
+  ms = guess - tzOffsetMs(ms, timeZone)
   return new Date(ms)
 }
 
@@ -102,7 +122,7 @@ export function parseSheetStamp(v) {
     const [, mo, day, year, hour, minute, seconds] = m
     const ymd = `${year}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     d = ymd >= SHEET_STAMP_TZ_CUTOVER
-      ? houstonWallClockToInstant(+year, +mo, +day, +hour, +minute, +(seconds || 0))
+      ? wallClockToInstant(HOUSTON, +year, +mo, +day, +hour, +minute, +(seconds || 0))
       : new Date(Date.UTC(+year, +mo - 1, +day, +hour, +minute, +(seconds || 0)))
   } else {
     d = new Date(v)
@@ -263,10 +283,11 @@ export function sheetSortKey(v) {
  * the NEXT day in Manila, so a form there pre-filled a date the business has
  * not reached yet, onto a stored expense or load.
  */
-export function houstonToday() {
+export function houstonToday(now = Date.now()) {
+  // `now` (epoch ms or a Date) pins the moment, as appToday(now) does below.
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: HOUSTON, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date())
+  }).format(new Date(now))
 }
 
 /** True for a bare 'YYYY-MM-DD' (no time component). */
@@ -403,4 +424,240 @@ export function fmtArrivalClock(v, { weekday = false, fallback = null } = {}) {
     month: 'short', day: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
   }).format(dt)
+}
+
+// ---------------------------------------------------------------------------
+// APP_TIMEZONE — whose calendar decides "today", and the day an instant is on.
+//
+// Two rules, decided by the owner on 2026-10-08:
+//
+//   D1. A date-only value ('YYYY-MM-DD': a load date, a start or end date, an
+//       invoice period) is a CALENDAR DATE. It is never converted through UTC
+//       and shows the same date for every viewer in every time zone.
+//   D2. When an instant has to become a date, or for "today", the zone is ONE
+//       setting, APP_TIMEZONE. Its default is America/New_York (EST and EDT
+//       follow by themselves). Never the browser's own zone.
+//
+// WHY. "Today" and "which day is this" were read off the viewer's clock on a
+// dozen screens. This app is used from the US and from Manila, half a day
+// apart, so for half of every day two people saw different dates for the same
+// moment, and some of those dates were sent back to the server: the end of the
+// driver's invoice week (POST /api/invoices/generate), the day "+ Add day"
+// suggests (POST /api/admin/excluded-days), the range of the IFTA report.
+//
+// WHERE THE SETTING COMES FROM. The server sends it on GET /api/auth/session
+// (`appTimeZone`), and stores/auth.js hands every answer's value to
+// setAppTimeZone(). Until an answer arrives, and whenever the value is missing
+// or a zone this browser does not know, the default stands.
+//
+// The Houston-pinned helpers above (houstonToday, fmtTimestamp, fmtSheetMoment,
+// fmtYmd's timestamp branch, fmtArrivalClock) are NOT routed through this. They
+// are pinned to the carrier's own city on purpose, and whether they move to
+// APP_TIMEZONE is a separate decision.
+//
+// Pinned by scripts/test-app-timezone-client.mjs, which runs every helper below
+// on machines set to New York, Manila and UTC and requires the same answers.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_APP_TIME_ZONE = 'America/New_York'
+// An IANA region name or "UTC"; the same test as lib/app-time.js on the server.
+const APP_TIME_ZONE_RE = /^(?:UTC|[A-Za-z][A-Za-z_]*(?:\/[A-Za-z0-9_+-]+)+)$/
+let appZone = DEFAULT_APP_TIME_ZONE
+const DAY_MS = 24 * 60 * 60 * 1000
+const pad2 = (n) => String(n).padStart(2, '0')
+
+/**
+ * Adopt the server's APP_TIMEZONE. Takes an IANA region name ("America/New_York")
+ * or "UTC" that this browser accepts, the same shape lib/app-time.js accepts;
+ * anything else (missing, misspelled, an offset such as "-0400" or "EST" that
+ * never follows daylight time, or a zone this browser's Intl data lacks) leaves
+ * the zone in use as it is. Never throws: it runs inside the session check.
+ * Returns the zone in use afterwards.
+ */
+export function setAppTimeZone(timeZone) {
+  if (typeof timeZone !== 'string' || !APP_TIME_ZONE_RE.test(timeZone)) return appZone
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone })
+  } catch {
+    return appZone
+  }
+  appZone = timeZone
+  return appZone
+}
+
+/** The zone in use: the server's APP_TIMEZONE, or America/New_York until it arrives. */
+export function appTimeZone() {
+  return appZone
+}
+
+/**
+ * Epoch ms for a value that IS an instant: a Date, a number, or a string that
+ * carries its own zone. NaN for anything else. A bare wall clock is NaN, not a
+ * guess: reading one would take the viewer's zone (see fmtTimestamp's guard).
+ */
+function instantMs(v) {
+  let ms = NaN
+  if (v instanceof Date) ms = v.getTime()
+  else if (typeof v === 'number') ms = v
+  else {
+    const s = String(v ?? '').trim()
+    if (s && isZoned(s)) ms = Date.parse(s)
+  }
+  // Through new Date() so that a number past what a Date can hold is NaN too:
+  // Intl throws on an invalid Date rather than returning something to check.
+  return new Date(ms).getTime()
+}
+
+/** The 'YYYY-MM-DD' an instant falls on in `timeZone`. */
+function dayIn(ms, timeZone) {
+  const p = zonedParts(ms, timeZone)
+  return `${p.year}-${p.month}-${p.day}`
+}
+
+/**
+ * 'YYYY-MM-DD' → epoch ms of its UTC midnight, the anchor for calendar
+ * arithmetic. NaN unless it names a real day ('2026-02-30' is NaN, not Mar 2).
+ */
+function ymdUtcMs(v) {
+  const s = String(v ?? '').trim()
+  if (!YMD_RE.test(s)) return NaN
+  const [y, m, d] = s.split('-').map(Number)
+  const ms = Date.UTC(y, m - 1, d)
+  const dt = new Date(ms)
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d ? ms : NaN
+}
+
+/** Epoch ms → its UTC calendar date as 'YYYY-MM-DD'. */
+function utcYmd(ms) {
+  const dt = new Date(ms)
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`
+}
+
+/**
+ * The APP_TIMEZONE day an instant falls on, as 'YYYY-MM-DD'.
+ *
+ *   appDayOf('2026-09-28T23:30:00-04:00')  -> '2026-09-28'   (already Sep 29 in Manila)
+ *   appDayOf(Date.now())                   -> today, as appToday() gives it
+ *   appDayOf('2026-09-28')                 -> '2026-09-28'   (a calendar date is its own day, D1)
+ *
+ * Takes a Date, epoch ms, or a string carrying its zone. '' for anything else,
+ * a bare wall clock ("2026-09-28 23:30:00") and a day that does not exist
+ * ('2026-02-30') included: neither has an instant to place.
+ */
+export function appDayOf(v) {
+  if (typeof v === 'string' && isYmd(v)) return Number.isNaN(ymdUtcMs(v)) ? '' : v.trim()
+  const ms = instantMs(v)
+  return Number.isNaN(ms) ? '' : dayIn(ms, appZone)
+}
+
+/**
+ * Today in APP_TIMEZONE, as 'YYYY-MM-DD': for "today" defaults and highlights,
+ * and the current week or month. `now` (epoch ms or a Date) pins the moment.
+ */
+export function appToday(now = Date.now()) {
+  return appDayOf(now)
+}
+
+const APP_DATE_FORMAT = Object.freeze({ month: 'short', day: 'numeric', year: 'numeric' })
+
+/**
+ * A DATE for display, en-US, on the APP_TIMEZONE calendar.
+ *
+ *   fmtAppDate('2026-09-29T02:15:00Z')    -> "Sep 28, 2026"   (10:15 PM EDT)
+ *   fmtAppDate('2026-09-29T02:15:00Z', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+ *                                         -> "Monday, September 28, 2026"
+ *   fmtAppDate('2026-09-28')              -> "Sep 28, 2026"   (shown as itself, D1)
+ *
+ * Other options are Intl date fields (weekday, month, day, year) and replace the
+ * default set; a `timeZone` among them is ignored, because the zone is the
+ * setting. Anything unreadable, a bare wall clock included, gives `fallback`.
+ */
+export function fmtAppDate(v, { fallback = '—', ...format } = {}) {
+  const fields = Object.keys(format).length ? format : APP_DATE_FORMAT
+  if (typeof v === 'string' && isYmd(v)) {
+    // A calendar date already names its day: shown as itself, read and written
+    // in UTC so that no zone can move it.
+    const ms = ymdUtcMs(v)
+    return Number.isNaN(ms) ? fallback : new Intl.DateTimeFormat('en-US', { ...fields, timeZone: 'UTC' }).format(new Date(ms))
+  }
+  const ms = instantMs(v)
+  return Number.isNaN(ms) ? fallback : new Intl.DateTimeFormat('en-US', { ...fields, timeZone: appZone }).format(new Date(ms))
+}
+
+/**
+ * The first instant of calendar day `ymd` in `timeZone`, as epoch ms (NaN if
+ * `ymd` is not a real day). Midnight through wallClockToInstant(), which reads
+ * the zone's offset AT that day, so a DST day comes out 23 or 25 hours long.
+ *
+ * Every US zone changes its clocks at 2 AM, so there midnight is one real
+ * instant and that is the whole answer. A few zones change AT midnight. Where a
+ * zone west of UTC skips midnight (Cuba: 00:00 jumps to 01:00), the two passes
+ * land on the evening before; the day then starts where the clocks jump, which
+ * is what the first pass alone gives. Checked, not assumed: the fallback runs
+ * only when the two-pass answer is not on `ymd`.
+ */
+function dayStartMs(ymd, timeZone) {
+  const utcMidnight = ymdUtcMs(ymd)
+  if (Number.isNaN(utcMidnight)) return NaN
+  const day = utcYmd(utcMidnight)
+  const [y, m, d] = day.split('-').map(Number)
+  const ms = wallClockToInstant(timeZone, y, m, d, 0, 0, 0).getTime()
+  return dayIn(ms, timeZone) === day ? ms : utcMidnight - tzOffsetMs(utcMidnight, timeZone)
+}
+
+/**
+ * The start of calendar day `ymd` in APP_TIMEZONE, as an ISO instant:
+ * appDayStartIso('2026-11-01') -> '2026-11-01T04:00:00.000Z'. '' if `ymd` is not
+ * a real 'YYYY-MM-DD'. For a date range a server compares instants against, so
+ * every viewer asks for the same range.
+ */
+export function appDayStartIso(ymd) {
+  const ms = dayStartMs(ymd, appZone)
+  return Number.isNaN(ms) ? '' : new Date(ms).toISOString()
+}
+
+/**
+ * The last millisecond of calendar day `ymd` in APP_TIMEZONE, as an ISO instant:
+ * appDayEndIso('2026-11-01') -> '2026-11-02T04:59:59.999Z' (that day is 25 hours
+ * long). The next day's start minus 1 ms, so an inclusive `<=` bound misses
+ * nothing. '' if `ymd` is not a real 'YYYY-MM-DD'.
+ */
+export function appDayEndIso(ymd) {
+  const ms = dayStartMs(shiftYmd(ymd, 1), appZone)
+  return Number.isNaN(ms) ? '' : new Date(ms - 1).toISOString()
+}
+
+// --- Calendar arithmetic on date keys ---------------------------------------
+// Pure: Date.UTC and getUTC* only. The UTC calendar has no DST and no viewer, so
+// a day is always 24 hours there and the answer is the same on every machine.
+
+/** 'YYYY-MM-DD' moved by `n` calendar days: shiftYmd('2026-09-30', 1) -> '2026-10-01'. '' if unreadable. */
+export function shiftYmd(ymd, n) {
+  const ms = ymdUtcMs(ymd)
+  if (Number.isNaN(ms) || !Number.isInteger(n)) return ''
+  const moved = ms + n * DAY_MS
+  return Number.isNaN(new Date(moved).getTime()) ? '' : utcYmd(moved)
+}
+
+/** 'YYYY-MM' moved by `n` calendar months: shiftYm('2026-12', 1) -> '2027-01'. '' if unreadable. */
+export function shiftYm(ym, n) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym ?? '').trim())
+  const month = m ? Number(m[2]) : 0
+  if (!m || month < 1 || month > 12 || !Number.isInteger(n)) return ''
+  const dt = new Date(Date.UTC(Number(m[1]), month - 1 + n, 1))
+  return Number.isNaN(dt.getTime()) ? '' : `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}`
+}
+
+/**
+ * The Saturday-to-Friday week holding calendar day `ymd` (the driver invoice
+ * week), as { start, end } 'YYYY-MM-DD':
+ * satFriWeekOf('2026-09-28') -> { start: '2026-09-26', end: '2026-10-02' }.
+ * A Saturday starts its own week. null if `ymd` is not a real day.
+ */
+export function satFriWeekOf(ymd) {
+  const ms = ymdUtcMs(ymd)
+  if (Number.isNaN(ms)) return null
+  const sinceSaturday = (new Date(ms).getUTCDay() + 1) % 7 // Sat 0, Sun 1, … Fri 6
+  const start = ms - sinceSaturday * DAY_MS
+  return { start: utcYmd(start), end: utcYmd(start + 6 * DAY_MS) }
 }

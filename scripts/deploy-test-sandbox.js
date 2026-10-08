@@ -3,7 +3,7 @@
  * scripts/test-deploy-record.js and scripts/test-deploy-live.js. NOT a runner
  * itself (the unit-test glob takes only scripts/test-*.js and check-*.js):
  * each runner requires it and gets its own sandbox, so each keeps its own 60 s
- * budget.
+ * budget (test-deploy-scripts.js gets one per worker process).
  *
  * On require it builds, in a mkdtemp directory: a bare "origin" with main =
  * c1 → c2 → c3 plus a side commit s1, a "box" clone of it, stub
@@ -64,8 +64,24 @@ const INTERP_DIR = path.join(T, "interp");
 fs.mkdirSync(INTERP_DIR);
 fs.symlinkSync(process.execPath, path.join(INTERP_DIR, "node"));
 
+// macOS's /usr/bin/git is xcrun's shim, which looks the real binary up on every
+// call: about 10 ms a call against 4 ms (measured 2026-10-08), and a run of
+// test-deploy-scripts.js makes some 1,900. So on macOS the sandbox puts a link
+// to the real binary first on its PATH. Elsewhere (CI, the VPS) git on PATH
+// already is the real one, and nothing changes.
+const GIT_DIR = path.join(T, "gitbin");
+function realGitDir() {
+	if (process.platform !== "darwin") return "";
+	const r = spawnSync("xcrun", ["--find", "git"], { encoding: "utf8" });
+	const real = r.status === 0 ? r.stdout.trim() : "";
+	if (!real || !fs.existsSync(real)) return "";
+	fs.mkdirSync(GIT_DIR);
+	fs.symlinkSync(real, path.join(GIT_DIR, "git"));
+	return `${GIT_DIR}:`;
+}
+
 const ENV = {
-	PATH: `${D.bin}:${NODE_DIR}:${process.env.PATH}`,
+	PATH: `${D.bin}:${realGitDir()}${NODE_DIR}:${process.env.PATH}`,
 	HOME: D.home,
 	LC_ALL: "C",
 	GIT_CONFIG_NOSYSTEM: "1",
@@ -89,9 +105,28 @@ function git(cwd, ...args) {
 }
 const tryGit = (cwd, ...args) => spawnSync("git", args, { cwd, env: ENV, encoding: "utf8" });
 
+// ⚠️ macOS assesses every NEW executable file the first time it runs: ~80 ms
+// each, and seconds when several processes write theirs at once. So a stub is
+// not an executable of its own. writeExec(p, body) writes the body as a plain
+// file, .stubs/<name> beside p, and makes p a link to ONE executable,
+// STUB_EXEC, which runs the body named like the link: a bash body in its own
+// process (STUB_EXEC's), any other through its #! interpreter. The worker
+// processes of test-deploy-scripts.js all link to the one their parent wrote
+// (DEPLOY_TEST_STUB_EXEC); any other runner writes its own.
+const STUB_EXEC = process.env.DEPLOY_TEST_STUB_EXEC || path.join(T, "stub-exec");
+if (!process.env.DEPLOY_TEST_STUB_EXEC) fs.writeFileSync(STUB_EXEC, `#!/bin/bash
+__stub_body="\${0%/*}/.stubs/\${0##*/}"
+IFS= read -r __stub_first < "$__stub_body"
+case "$__stub_first" in
+	"#!/bin/bash") . "$__stub_body" ;;
+	*) exec \${__stub_first#"#!"} "$__stub_body" "$@" ;;
+esac
+`, { mode: 0o755 });
 function writeExec(p, body) {
-	fs.writeFileSync(p, body);
-	fs.chmodSync(p, 0o755);
+	const stubs = path.join(path.dirname(p), ".stubs");
+	fs.mkdirSync(stubs, { recursive: true });
+	fs.writeFileSync(path.join(stubs, path.basename(p)), body);
+	fs.symlinkSync(STUB_EXEC, p);
 }
 
 // Stubs. Each logs what it was asked, which deploy asked (STUB_TAG), and
@@ -196,7 +231,7 @@ if (defined $wait) {
 	while (1) {
 		exit 0 if flock($fh, LOCK_EX | LOCK_NB);
 		exit 1 if time >= $end;
-		sleep 0.05;
+		sleep 0.01;
 	}
 }
 exit(flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) ? 0 : 1);
@@ -347,9 +382,19 @@ const mutantHelpers = (() => {
 	return { swap, cut, expectCaught };
 })();
 
+// Each worker process of scripts/test-deploy-scripts.js runs its share of the
+// cases in a sandbox of its own and hands its counts to the process that
+// reports: tally() there, absorb() here.
+const removeSandbox = () => fs.rmSync(T, { recursive: true, force: true });
+const tally = () => ({ pass, failures: [...failures] });
+function absorb(t) {
+	pass += t.pass;
+	failures.push(...t.failures);
+}
+
 // Remove the sandbox and report. Exits 1 on any failure.
 function finish() {
-	fs.rmSync(T, { recursive: true, force: true });
+	removeSandbox();
 	console.log(`\n${"=".repeat(64)}`);
 	if (failures.length) {
 		console.log(`FAILURES (${failures.length}):`);
@@ -372,6 +417,14 @@ const healExpect = (checkOutput) => ({
 // …and the box as it is right now, for a heal prep called with no check before it.
 const boxSeen = () => ({ EXPECT_HEAD: head(), EXPECT_MARKER: marker() || "none" });
 
+// Blocks this process for `ms` without starting a `sleep` process.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// The lock holder's wait, once it holds the lock: a node process that inherits
+// FD 9 (and with it the lock) and exits when RELEASE appears or HOLD_MS has
+// passed. One process for the whole hold, not a `sleep` per tick.
+const HOLDER_WAIT = `const end = Date.now() + Number(process.env.HOLD_MS);
+setInterval(() => { if (require("fs").existsSync(process.env.RELEASE) || Date.now() >= end) process.exit(0); }, 5);`;
+
 // Holds the box's deploy lock from another process, the way a running deploy
 // does: `note` is the holder's note it writes into the lock file (as every
 // holder does), and with `seconds` it lets go by itself after that long, so a
@@ -380,14 +433,14 @@ const boxSeen = () => ({ EXPECT_HEAD: head(), EXPECT_MARKER: marker() || "none" 
 function holdLock({ note = "", seconds = 0 } = {}) {
 	const ready = path.join(T, `lock-held-${Math.random().toString(36).slice(2)}`);
 	const release = `${ready}.release`;
-	const ticks = seconds > 0 ? Math.round(seconds * 20) : 72000;
-	const env = { ...ENV, LOCK: LOCK_FILE, READY: ready, RELEASE: release, NOTE: note, TICKS: String(ticks) };
-	spawnSync("bash", ["-c", '( exec 9<>"$LOCK"; flock -w 10 9 || exit 3; if [ -n "$NOTE" ]; then printf "%s\\n" "$NOTE" > "$LOCK"; fi; : > "$READY"; i=0; while [ ! -e "$RELEASE" ] && [ "$i" -lt "$TICKS" ]; do sleep 0.05; i=$((i + 1)); done ) >/dev/null 2>&1 </dev/null &'], { env });
+	const holdMs = seconds > 0 ? Math.round(seconds * 1000) : 3600000;
+	const env = { ...ENV, LOCK: LOCK_FILE, READY: ready, RELEASE: release, NOTE: note, HOLD_MS: String(holdMs), HOLDER_NODE: process.execPath, HOLDER_WAIT };
+	spawnSync("bash", ["-c", '( exec 9<>"$LOCK"; flock -w 10 9 || exit 3; if [ -n "$NOTE" ]; then printf "%s\\n" "$NOTE" > "$LOCK"; fi; : > "$READY"; exec "$HOLDER_NODE" -e "$HOLDER_WAIT" ) >/dev/null 2>&1 </dev/null &'], { env });
 	const free = () => spawnSync("bash", ["-c", 'exec 9<>"$LOCK"; flock -n 9'], { env }).status === 0;
 	const until = Date.now() + 10000;
 	while (!fs.existsSync(ready)) {
 		if (Date.now() > until) throw new Error("could not take the deploy lock for the test");
-		spawnSync("sleep", ["0.05"]);
+		pause(5);
 	}
 	return {
 		release() {
@@ -395,7 +448,7 @@ function holdLock({ note = "", seconds = 0 } = {}) {
 			const until2 = Date.now() + 10000;
 			while (!free()) {
 				if (Date.now() > until2) throw new Error("the deploy lock was never released after the test");
-				spawnSync("sleep", ["0.05"]);
+				pause(5);
 			}
 			fs.rmSync(ready, { force: true });
 			fs.rmSync(release, { force: true });
@@ -417,9 +470,9 @@ const holderNote = (by) => `pid=1 since=2026-10-08T00:00:00Z by=${by}`;
 
 module.exports = {
 	DEPLOY_DIR, readScript, REAL, SMOKE,
-	ok, record, finish, crash,
+	ok, record, finish, crash, removeSandbox, tally, absorb,
 	T, D, ENV, NODE_DIR,
-	git, tryGit, writeExec, hasRealFlock,
+	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
 	MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,

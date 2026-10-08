@@ -103,7 +103,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	ok("...a URL with ordinary path words does not", !rules.isCredentialUrl("https://logisx.example.test/help/driver-guide-2026"));
 	ok("a value that looks like a key is one", rules.isBareKeyValue("SOME_SETTING", "AIzaSyD3x9EXAMPLEEXAMPLE12345"));
 	ok("...so is a long hex value", rules.isBareKeyValue("SOME_SETTING", "0123456789abcdef0123456789abcdef"));
-	for (const [n, v] of [["GEMINI_OCR_MODEL", "gemini-2.5-flash"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GMAIL_USER", "dispatch@example.test"], ["ROUTEMATE_POLL_LIVE_SEC", "60"], ["GOOGLE_DRIVE_FOLDER_ID", "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL"]]) {
+	for (const [n, v] of [["GEMINI_OCR_MODEL", "gemini-2.5-flash"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GMAIL_USER", "dispatch@example.test"], ["ROUTEMATE_POLL_LIVE_SEC", "60"], ["GOOGLE_DRIVE_FOLDER_ID", "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ"]]) {
 		ok(`${n}'s kind of value is not taken for a key`, !rules.isBareKeyValue(n, v));
 	}
 	eq("a setting the app does not read is skipped by the allowlist", rules.classifySetting("SOMETHING_ELSE", "x", { readByApp: new Set(["ROUTEMATE_ENABLED"]) }).rule, "not read by the app");

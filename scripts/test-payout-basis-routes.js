@@ -196,9 +196,15 @@ function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis
 		currentMonthKeyCT: () => CURRENT_MONTH,
 		notifyChange: (d) => calls.notify.push(d),
 		sendEmail: (to, subject) => { calls.mail.push({ to, subject }); return Promise.resolve(true); },
+		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
+		ADMIN_NOTIFY_EMAIL: "admin@example.test",
 		bcrypt: { hash: async () => "hashed" },
 		registerApplicationVehicles: vehicles || (() => ({ created: 0, existing: 0, heldByOther: 0, failed: 0 })),
 		findDriverNameClash: () => null,
+		// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+		// subject (§10); here it judges nothing.
+		getJobTrackingCached: async () => ({ headers: [], data: [] }),
+		investorCompanyLockBlockers: () => null,
 		periodLocksReadable: () => locksReadable,
 		lockedPeriodsDesc: () => db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period DESC").all().map((r) => r.period),
 		periodLockUnreadableResponse: (req, res, what, audit) => {

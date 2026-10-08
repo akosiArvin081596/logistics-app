@@ -202,6 +202,8 @@ function buildServer({ routes = {}, hooks = {} } = {}) {
 		alertOnboardingDocFailure: () => {},
 		resolveOnboardingDocAlert: () => {},
 		sendEmail: (to, subject, html) => { calls.mail.push({ to, subject, html }); },
+		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
+		ADMIN_NOTIFY_EMAIL: "admin@example.test",
 		notifyChange: (domain) => { calls.notify.push(domain); },
 		EVIDENCE_DATE_TZ: "UTC",
 		signedArtifactLooksValid: () => state.artifactPresent,
@@ -392,7 +394,7 @@ async function scenarioApply(srv) {
 	check("with no invite every snapshot is NULL", docRows(db, plain.body.applicationId).every((r) => r.payment_terms_json === null));
 	check("with no invite the invites table is untouched", dump(db, "investor_invites") === invitesBefore);
 	check("with no invite the contracts render the standard terms", calls.renders.length === 2 && calls.renders.every((r) => r.data.paymentTerms === null));
-	check("with no invite the admin email has no terms block", !calls.mail.find((m) => m.to === "info@logisx.com").html.includes("Payment terms invitation"));
+	check("with no invite the admin email has no terms block", !calls.mail.find((m) => m.to === "admin@example.test").html.includes("Payment terms invitation"));
 
 	// With an invite.
 	calls.renders.length = 0;
@@ -408,7 +410,7 @@ async function scenarioApply(srv) {
 	check("the W-9 carries no snapshot", snaps.w9 === null);
 	check("both contracts render the invite's terms", calls.renders.length === 2 && calls.renders.every((r) => same(r.data.paymentTerms, LEASE_TERMS)));
 	check("the bind is audited and notified", audits(db, "bind_investor_invite").length === 1 && audits(db, "bind_investor_invite")[0].entity_id === String(lease.id));
-	const adminMail = calls.mail.filter((m) => m.to === "info@logisx.com").pop();
+	const adminMail = calls.mail.filter((m) => m.to === "admin@example.test").pop();
 	check("the admin email carries the terms", adminMail.html.includes(`Payment terms invitation #${lease.id} (terms revision 1)`) && adminMail.html.includes("Paid on the 5th."));
 	check("the admin email is the terms block between the warning and the body", adminMail.html.indexOf("Payment terms invitation") < adminMail.html.indexOf("A new investor application"));
 	check("no step after the response failed", calls.errors.length === 0);

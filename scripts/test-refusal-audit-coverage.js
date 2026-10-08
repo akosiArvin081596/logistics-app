@@ -151,7 +151,7 @@ function callSites(name) {
 // the shape that passes. AUDITED_UPSTREAM is spelled out at the call site so a
 // deliberate skip is legible as one.
 const AUDITED = (args) => /\baction:\s*["'`a-zA-Z]/.test(args) || /AUDITED_UPSTREAM/.test(args)
-	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit|accountRowAudit)\b/.test(args);
+	|| /\b(dirAudit|dirDelAudit|createAudit|truckEditAudit|truckDelAudit|linkAudit|unlinkAudit|maintAudit|feeAudit|feePayAudit|loadDelAudit|invoiceAdjustAudit|invoicePaidAudit|invoiceRevertAudit|basisAudit|accountRowAudit|companyAudit)\b/.test(args);
 
 let totalSites = 0;
 for (const h of HELPERS) {
@@ -590,6 +590,10 @@ const MUST_NOT_BE_PURGEABLE = [
 	// A payout basis change refused over a settled or closed month: the same
 	// settlement evidence, so kept forever too.
 	"update_payout_basis_blocked",
+	// A new Investor account refused because its company name would put drivers'
+	// finalized months on its ledger: the create-side twin of update_user_blocked,
+	// from POST /api/users and from an investor application's acceptance.
+	"create_user_blocked", "accept_investor_blocked",
 ];
 check("every new period-refusal action exists in server.js",
 	MUST_NOT_BE_PURGEABLE.filter((a) => !SRC.includes(`"${a}"`)), []);

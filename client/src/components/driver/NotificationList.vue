@@ -41,6 +41,7 @@
 <script setup>
 import { computed } from 'vue'
 import { Cell as VanCell, CellGroup as VanCellGroup, Badge as VanBadge, Button as VanButton, Empty as VanEmpty } from 'vant'
+import { fmtAppDate } from '../../utils/datetime'
 
 const props = defineProps({
   notifications: { type: Array, default: () => [] },
@@ -68,7 +69,7 @@ function formatTime(ts) {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`
-  return d.toLocaleDateString()
+  return fmtAppDate(d) // the APP_TIMEZONE date, not the phone's
 }
 </script>
 

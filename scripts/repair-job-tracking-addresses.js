@@ -33,8 +33,12 @@
  * than being managed. Point LOGISX_ROOT at the checkout:
  *
  *   LOGISX_ROOT=/var/www/logistics-app node repair-job-tracking-addresses.js \
- *     --db=/var/www/logistics-app/app.db --rows=409,411            # dry run
- *   ... --apply --snapshot=/path/rollback.json                     # writes
+ *     --sheet-id=<id> --db=/var/www/logistics-app/app.db --rows=409,411   # dry run
+ *   ... --apply --snapshot=/path/rollback.json                          # writes
+ *
+ * --sheet-id is required, with no default: without it the script refuses
+ * (exit 2) before any Google call. The sheet is labelled "(PRODUCTION)" when
+ * the ID given is production's.
  *
  * ── ⚠️ NEVER `values.append` ────────────────────────────────────────────────
  * append with a bare tab range lets Sheets auto-detect the anchor column from
@@ -67,17 +71,22 @@ const arg = (name, dflt) => {
 	return eq === -1 ? true : hit.slice(eq + 1);
 };
 const APPLY = !!arg("apply", false);
-const SHEET_ID = String(arg("sheet-id", PRODUCTION_SHEET_ID));
+// No default sheet: --sheet-id=<id> names it every time (a bare --sheet-id names nothing).
+const SHEET_ARG = arg("sheet-id", "");
+const SHEET_ID = typeof SHEET_ARG === "string" ? SHEET_ARG.trim() : "";
 const DB_PATH = String(arg("db", path.join(ROOT, "app.db")));
 const KEY_FILE = arg("key", undefined) ? String(arg("key")) : (process.env.SERVICE_ACCOUNT_KEY || path.join(ROOT, "service-account-key.json"));
 const ROWS_ARG = String(arg("rows", ""));
 const ALL_CANDIDATES = !!arg("all-candidates", false);
 const OVERWRITE_UNUSABLE = !!arg("overwrite-unusable", false);
 const SNAPSHOT_OUT = String(arg("snapshot", path.join(process.cwd(), `jt-address-repair-snapshot-${Date.now()}.json`)));
-const RATECON_DRIVE_FOLDER_ID = process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
 
 if (arg("stale-locks-ok", false)) {
 	console.error("Refusing: --stale-locks-ok is a REPORTING flag. A repair never runs on a lock table that may be missing a closed month.");
+	process.exit(2);
+}
+if (!SHEET_ID) {
+	console.error("Refusing: --sheet-id=<id> is required: name the sheet to repair. There is no default sheet.");
 	process.exit(2);
 }
 
@@ -85,6 +94,9 @@ if (arg("stale-locks-ok", false)) {
 try { require("dotenv").config({ path: path.join(ROOT, ".env"), quiet: true }); } catch { /* optional */ }
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_OCR_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+// The rate-con folder has no default, as in server.js: the checkout's .env
+// (LOGISX_ROOT) or the environment names it, and without it the script refuses.
+const RATECON_DRIVE_FOLDER_ID = String(process.env.RATECON_DRIVE_FOLDER_ID ?? "").trim();
 
 // ── the SHIPPING extractor, lifted from server.js source ─────────────────────
 // Same reasoning as the audit's helper extraction: server.js cannot be
@@ -159,6 +171,7 @@ const PDF_MAGIC = "JVBERi"; // base64 of "%PDF-"
 	console.log(`  locks db  ${DB_PATH}`);
 	console.log(`  model     ${GEMINI_OCR_MODEL}   key ${GEMINI_API_KEY ? "present" : "MISSING"}`);
 	if (!GEMINI_API_KEY) { console.error("Refusing: GEMINI_API_KEY is not set — there is no extraction path."); process.exit(2); }
+	if (!RATECON_DRIVE_FOLDER_ID) { console.error("Refusing: RATECON_DRIVE_FOLDER_ID is not set — there is no rate-con folder to read."); process.exit(2); }
 
 	// ── 1. classify, via the audit and only the audit ──────────────────────────
 	const report = await runAudit({ sheetId: SHEET_ID, dbPath: DB_PATH, keyFile: KEY_FILE });
