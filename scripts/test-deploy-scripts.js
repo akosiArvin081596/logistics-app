@@ -72,23 +72,43 @@
  * macOS ships no flock(1): there a perl flock(2) shim stands in (same syscall,
  * same fd-inheritance semantics). CI and the VPS use the real util-linux one.
  *
- * Run: node scripts/test-deploy-scripts.js
+ * Run: node scripts/test-deploy-scripts.js. It runs its cases in up to 8
+ * worker processes at once, each with a sandbox of its own ("running it", at
+ * the end).
  */
 "use strict";
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawn, spawnSync } = require("child_process");
+const { fork, spawn, spawnSync } = require("child_process");
 
 const {
-	DEPLOY_DIR, readScript, REAL, SMOKE, ok, record, finish, crash,
-	T, D, ENV, git, tryGit, writeExec, hasRealFlock,
+	DEPLOY_DIR, readScript, REAL, SMOKE, ok, record, finish, crash, removeSandbox, tally, absorb,
+	T, D, ENV, git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
 	short, rollback, boxSeen, withLockHeld, holdLock, holderNote,
 } = require("./deploy-test-sandbox.js");
 
+// A unit of work for one worker process (see "running it" at the end). `secs`:
+// roughly how long it takes, for the jobs that take a second or more (most of
+// them sit out a held lock). The longest are handed out first.
+const job = (name, fn, secs = 0) => ({ name, fn, secs });
+
 // ───────────────────────────────────────────────── §1 the box lock (async)
+// runSh without blocking, for contenders that run side by side.
+function runShAsync(text, env = {}) {
+	return new Promise((resolve) => {
+		const c = spawn("bash", ["-s"], { cwd: T, env: { ...ENV, ...env }, timeout: 60000 });
+		let stdout = "";
+		let stderr = "";
+		c.stdout.setEncoding("utf8").on("data", (d) => (stdout += d));
+		c.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+		c.on("close", (code) => resolve({ code, out: `${stdout}${stderr}`, stdout }));
+		c.stdin.end(text);
+	});
+}
+
 async function lockScenario(S, tag = "") {
 	const r = [];
 	resetBox(C1);
@@ -107,10 +127,14 @@ async function lockScenario(S, tag = "") {
 			throw new Error(`deploy A exited (${aExited}) before reaching npm install:\n${aOut}`);
 		}
 		const B = runSh(S.deploy, deployEnv({ SHA: C2, STUB_TAG: "B" }));
-		const R = runSh(S.rollback, { DIR: D.box, PM2: "logistics-app", PREV: C1, STUB_TAG: "R" });
-		// A has checked out C2 and is still installing: C2 is NOT verified. The
-		// record step shares the lock, so it can never record a deploy mid-flight.
-		const V = runSh(S.record, { DIR: D.box, SHA: C2, STUB_TAG: "V" });
+		// The rollback and the record step each wait out their bounded wait for
+		// A, side by side. A has checked out C2 and is still installing: C2 is
+		// NOT verified. The record step shares the lock, so it can never record a
+		// deploy mid-flight.
+		const [R, V] = await Promise.all([
+			runShAsync(S.rollback, { DIR: D.box, PM2: "logistics-app", PREV: C1, STUB_TAG: "R" }),
+			runShAsync(S.record, { DIR: D.box, SHA: C2, STUB_TAG: "V" }),
+		]);
 		r.push([V.code === 75 && verified() === "", `${tag}§1 recording a verified deploy while a deploy runs is refused (75) and records nothing (got ${V.code}, record '${verified().slice(0, 7)}')`]);
 		r.push([B.code === 75, `${tag}§1 a second deploy while one runs must exit 75 (got ${B.code})`]);
 		r.push([/lock .* is held/.test(B.out) && B.out.includes(LOCK_FILE), `${tag}§1 the refusal names the held lock file`]);
@@ -437,7 +461,6 @@ const DRIFT_CASES = {
 		return r;
 	},
 };
-const runCases = (cases, S, tag = "") => Object.values(cases).flatMap((fn) => fn(S, tag));
 
 // ─────────────────────────────────── §9 the native-module probe opens a DB
 // Measured on the VPS 2026-09-19: /usr/bin/node v20 passes
@@ -602,10 +625,11 @@ function probePins() {
 // checkouts modified. Each script's install line is run for real with the npm
 // on PATH, offline, in a root + client/ layout whose client lockfile is valid
 // but not in npm's own layout, so any write to it shows. The bare command is
-// the control: it must rewrite the file, or this check proves nothing.
-function installPins() {
+// the control: it must rewrite the file, or this check proves nothing. The
+// three installs run side by side, each in a directory of its own.
+async function installPins() {
 	const INSTALL = /^\s*(?:npm_config_\w+=\S+\s+)*npm\s+(?:install|i|ci)\b/;
-	const lockAfter = (cmd) => {
+	const lockAfter = (cmd) => new Promise((resolve) => {
 		const d = fs.mkdtempSync(path.join(T, "install-"));
 		fs.mkdirSync(path.join(d, "client"));
 		fs.writeFileSync(path.join(d, "package.json"),
@@ -613,24 +637,26 @@ function installPins() {
 		fs.writeFileSync(path.join(d, "client", "package.json"), JSON.stringify({ name: "client", version: "1.0.0" }));
 		const lock = JSON.stringify({ name: "client", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "client", version: "1.0.0" } } });
 		fs.writeFileSync(path.join(d, "client", "package-lock.json"), lock);
-		const r = spawnSync("sh", ["-c", cmd.replace(/\s*\|\|.*$/, "")], {
-			cwd: d, encoding: "utf8", timeout: 60000,
+		spawn("sh", ["-c", cmd.replace(/\s*\|\|.*$/, "")], {
+			cwd: d, stdio: "ignore", timeout: 60000,
 			env: { ...process.env, npm_config_offline: "true", npm_config_update_notifier: "false" },
-		});
-		return { code: r.status, rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock };
-	};
-	const control = lockAfter("npm install --silent --no-audit --no-fund");
+		}).on("close", (code) => resolve({ code, rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock }));
+	});
+	const scripts = [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]].map(([name, text]) =>
+		[name, text.split("\n").filter((l) => !/^\s*#/.test(l) && INSTALL.test(l))]);
+	const [control, ...runs] = await Promise.all([
+		lockAfter("npm install --silent --no-audit --no-fund"),
+		...scripts.map(([, installs]) => (installs.length === 1 ? lockAfter(installs[0].trim()) : null)),
+	]);
 	ok(control.code === 0 && control.rewritten,
 		`§16 control: a bare npm install rewrites the client lockfile through the postinstall (code ${control.code}, rewritten ${control.rewritten})`);
-	for (const [name, text] of [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]]) {
-		const installs = text.split("\n").filter((l) => !/^\s*#/.test(l) && INSTALL.test(l));
+	scripts.forEach(([name, installs], i) => {
 		ok(installs.length === 1 && /^\s*npm_config_save=false npm install\b/.test(installs[0]),
 			`§16 ${name} installs once, with npm_config_save=false (got ${JSON.stringify(installs.map((l) => l.trim()))})`);
-		if (installs.length !== 1) continue;
-		const run = lockAfter(installs[0].trim());
-		ok(run.code === 0 && !run.rewritten,
-			`§16 ${name}'s install line leaves the client lockfile as committed (code ${run.code}, rewritten ${run.rewritten})`);
-	}
+		if (installs.length !== 1) return;
+		ok(runs[i].code === 0 && !runs[i].rewritten,
+			`§16 ${name}'s install line leaves the client lockfile as committed (code ${runs[i].code}, rewritten ${runs[i].rewritten})`);
+	});
 }
 
 // ───────────────────────────────────────── §6 runner-side ssh helpers
@@ -820,85 +846,88 @@ function sourcePins() {
 }
 
 // ──────────────────────────────────────────────────────────────── §8 mutants
-async function mutants() {
-	const M = "[mutant] ";
-	expectCaught("no box lock", await lockScenario({ ...REAL, deploy: cut(REAL.deploy), rollback: cut(REAL.rollback) }, M));
-	expectCaught("SHA ignored", PIN_CASES.exact({ ...REAL, deploy: swap(REAL.deploy, 'if [ -n "$SHA" ]; then\n\tif ! git cat-file', 'if false; then\n\tif ! git cat-file') }, M));
-	expectCaught("no-op check removed (deploys backwards)", PIN_CASES.noop({ ...REAL, deploy: swap(REAL.deploy, '[ "$SHA" != "$LIVE" ] && git merge-base', 'false && git merge-base') }, M));
-	expectCaught("the rollback takes any PREV", PIN_CASES.badInput({ ...REAL, rollback: swap(REAL.rollback, 'if ! [[ "$PREV" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then") }, M));
-	expectCaught("the fast-forward merge keeps the lock FD", gitFdPins({ ...REAL, deploy: swap(REAL.deploy, 'git merge --ff-only "$SHA" 9>&-', 'git merge --ff-only "$SHA"') }, M));
-	expectCaught("the deploy writes the verified record at restart", refPins({
-		...REMOTE_SCRIPTS,
-		"remote-deploy.sh": swap(REMOTE_SCRIPTS["remote-deploy.sh"], 'refs/logisx/started-deploy "$NEW"', 'refs/logisx/verified-deploy "$NEW"'),
-	}, M));
-	expectCaught("the smoke check marks a commit started", refPins({
-		...REMOTE_SCRIPTS,
-		"remote-smoke.sh": `${REMOTE_SCRIPTS["remote-smoke.sh"]}git update-ref refs/logisx/started-deploy HEAD\n`,
-	}, M));
-	expectCaught("failed pull ignored", PIN_CASES.pullFails({
-		...REAL,
-		deploy: swap(REAL.deploy, "if ! { git checkout main && git pull --ff-only origin main 9>&-; }; then", "if ! { git checkout main && git pull --ff-only origin main 9>&- || true; }; then"),
-	}, M));
-	expectCaught("pm2 inherits the lock FD", PIN_CASES.exact({ ...REAL, deploy: swap(REAL.deploy, 'pm2 restart "$PM2" --silent 9>&-', 'pm2 restart "$PM2" --silent') }, M));
-	expectCaught("rollback leaves no marker", DRIFT_CASES.rollbackMarker({ ...REAL, rollback: swap(REAL.rollback, 'printf \'%s\' "$FAILED" > "$DIR/.drift-heal-attempted"', "true") }, M));
-	expectCaught("manual pin leaves no marker", DRIFT_CASES.manualPin({ ...REAL, deploy: swap(REAL.deploy, 'printf \'%s\' "$PIN_MAIN" > "$DIR/.drift-heal-attempted"', "true") }, M));
-	expectCaught("heal prep skips its compare-and-swap", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$NOW" = "$EXPECT" ] ||', "true ||") }, M));
-	expectCaught("heal prep skips its HEAD compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$HEAD_NOW" = "$EXPECT_HEAD" ] ||', "true ||") }, M));
-	expectCaught("heal prep skips its marker compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "${SEEN:-none}" = "$EXPECT_MARKER" ] ||', "true ||") }, M));
-	expectCaught("the drift check ignores a held deploy lock", DRIFT_CASES.checkLocked({ ...REAL, check: swap(REAL.check, "if ! flock -n 9; then", "if false; then") }, M));
-	expectCaught("the drift check never calls a lock stuck", DRIFT_CASES.checkLockStuck({ ...REAL, check: swap(REAL.check, "-mmin +30", "-mmin +999999") }, M));
-	expectCaught("the drift check holds the lock through its HTTP probe", checkLockPins({
-		...REAL,
-		check: swap(swap(REAL.check, "# Refs and the marker are read: let a deploy have the box before the probe.\nexec 9>&-\n", ""),
-			'echo "DRIFT_LOCAL=$LOCAL"', 'exec 9>&-\necho "DRIFT_LOCAL=$LOCAL"'),
-	}, M));
-	expectCaught("ls-remote takes the first ref whose tail matches", DRIFT_CASES.checkExactMain({
-		...REAL,
-		check: swap(REAL.check, "awk '$2==\"refs/heads/main\"{print $1}'", "cut -f1 | head -1"),
-	}, M));
-	expectCaught("an unreadable origin falls back to the clone's origin/main", DRIFT_CASES.checkRemoteUnreadable({
-		...REAL,
-		check: swap(REAL.check, '\techo "could not read main\'s tip from origin (git ls-remote)"\n\techo "DRIFT_STATE=remote-unreadable"\n\texit 0\n', "\tREMOTE=$(git rev-parse origin/main)\n"),
-	}, M));
-	expectCaught("the drift check fetches again", DRIFT_CASES.checkReadsOnly({
-		...REAL,
-		check: swap(REAL.check, "REMOTE=$(ls_main 2>/dev/null | awk '$2==\"refs/heads/main\"{print $1}')", "git fetch --quiet origin; REMOTE=$(git rev-parse origin/main)"),
-	}, M));
-	expectCaught("a rollback fails fast on the drift check's read", DRIFT_CASES.rollbackWaits({ ...REAL, rollback: swap(REAL.rollback, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));
-	expectCaught("the record step fails fast on the drift check's read", DRIFT_CASES.recordWaits({ ...REAL, record: swap(REAL.record, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));
-	expectCaught("a deploy waits for another deploy", DRIFT_CASES.deployFailsFast({ ...REAL, deploy: swap(REAL.deploy, "LOCK_WAITS_FOR=drift-check", "LOCK_WAITS_FOR=any") }, M));
-	expectCaught("a deploy ignores the holder's note", DRIFT_CASES.deployWaitsForCheck({ ...REAL, deploy: swap(REAL.deploy, ' || [[ "$LOCK_HOLDER" == *"by=remote-drift-check.sh"* ]]', "") }, M));
-	expectCaught("deploy probe only require()s the module (passes under the wrong Node)", PROBE_CASES.lazyAbi({ ...REAL, deploy: swap(REAL.deploy, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
-	expectCaught("rollback probe only require()s the module", PROBE_CASES.rollbackLazyAbi({ ...REAL, rollback: swap(REAL.rollback, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
-	expectCaught("deploy restarts even when the rebuild did not help", PROBE_CASES.stillBroken({
-		...REAL,
-		deploy: swap(REAL.deploy, `|| { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }`, `|| echo "better-sqlite3 still fails to load after rebuild"`),
-	}, M));
+// One job each (see "running it" below).
+const mutant = (name, results, secs = 0) => job(`${M}${name}`, async () => expectCaught(name, await results()), secs);
+function mutants() {
 	// ssh-retry.sh's give-up line (§6): the title, the message and the level
 	// are each pinned. Each mutant runs as a real script in the sandbox.
-	const retryText = fs.readFileSync(RETRY, "utf8");
-	for (const [name, from, to] of [
-		["ssh-retry drops the give-up title", "::error title=VPS unreachable::", "::error::"],
-		["ssh-retry rewords the give-up message", "ssh failed to connect after $total attempts", "could not reach the VPS after $total attempts"],
-		["ssh-retry gives up with a warning, not an error", 'echo "::error title=VPS unreachable::', 'echo "::warning title=VPS unreachable::'],
-	]) {
+	const retryMutant = ([name, from, to]) => mutant(name, () => {
 		const mutated = path.join(T, `ssh-retry-mutant-${Math.random().toString(36).slice(2)}.sh`);
-		fs.writeFileSync(mutated, swap(retryText, from, to));
-		expectCaught(name, giveUpPins(runRetry([255, 255, 255], "0 0", mutated), M));
-	}
-	// §10: the smoke check's log tail with workflow commands left on.
-	expectCaught("the smoke check prints the pm2 log with commands on", smokeLogPins(
-		swap(swap(SMOKE, 'echo "::stop-commands::$tok"', ":"), 'echo "::$tok::"', ":"), M));
-	// §11: a remote script that exits 255 itself, or lets errexit do it.
-	expectCaught("remote-deploy.sh ends with exit 255", exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M));
-	expectCaught("remote-rollback.sh turns on errexit", exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M));
-	expectCaught("remote-drift-check.sh gets a bare exit", exitPins({ ...REMOTE_SCRIPTS, "remote-drift-check.sh": swap(REMOTE_SCRIPTS["remote-drift-check.sh"], 'cd "$DIR" || exit 1', 'cd "$DIR" || exit') }, M));
+		fs.writeFileSync(mutated, swap(fs.readFileSync(RETRY, "utf8"), from, to));
+		return giveUpPins(runRetry([255, 255, 255], "0 0", mutated), M);
+	});
+	return [
+		mutant("no box lock", () => lockScenario({ ...REAL, deploy: cut(REAL.deploy), rollback: cut(REAL.rollback) }, M), 2),
+		mutant("SHA ignored", () => PIN_CASES.exact({ ...REAL, deploy: swap(REAL.deploy, 'if [ -n "$SHA" ]; then\n\tif ! git cat-file', 'if false; then\n\tif ! git cat-file') }, M)),
+		mutant("no-op check removed (deploys backwards)", () => PIN_CASES.noop({ ...REAL, deploy: swap(REAL.deploy, '[ "$SHA" != "$LIVE" ] && git merge-base', 'false && git merge-base') }, M)),
+		mutant("the rollback takes any PREV", () => PIN_CASES.badInput({ ...REAL, rollback: swap(REAL.rollback, 'if ! [[ "$PREV" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then") }, M)),
+		mutant("the fast-forward merge keeps the lock FD", () => gitFdPins({ ...REAL, deploy: swap(REAL.deploy, 'git merge --ff-only "$SHA" 9>&-', 'git merge --ff-only "$SHA"') }, M)),
+		mutant("the deploy writes the verified record at restart", () => refPins({
+			...REMOTE_SCRIPTS,
+			"remote-deploy.sh": swap(REMOTE_SCRIPTS["remote-deploy.sh"], 'refs/logisx/started-deploy "$NEW"', 'refs/logisx/verified-deploy "$NEW"'),
+		}, M)),
+		mutant("the smoke check marks a commit started", () => refPins({
+			...REMOTE_SCRIPTS,
+			"remote-smoke.sh": `${REMOTE_SCRIPTS["remote-smoke.sh"]}git update-ref refs/logisx/started-deploy HEAD\n`,
+		}, M)),
+		mutant("failed pull ignored", () => PIN_CASES.pullFails({
+			...REAL,
+			deploy: swap(REAL.deploy, "if ! { git checkout main && git pull --ff-only origin main 9>&-; }; then", "if ! { git checkout main && git pull --ff-only origin main 9>&- || true; }; then"),
+		}, M)),
+		mutant("pm2 inherits the lock FD", () => PIN_CASES.exact({ ...REAL, deploy: swap(REAL.deploy, 'pm2 restart "$PM2" --silent 9>&-', 'pm2 restart "$PM2" --silent') }, M)),
+		mutant("rollback leaves no marker", () => DRIFT_CASES.rollbackMarker({ ...REAL, rollback: swap(REAL.rollback, 'printf \'%s\' "$FAILED" > "$DIR/.drift-heal-attempted"', "true") }, M)),
+		mutant("manual pin leaves no marker", () => DRIFT_CASES.manualPin({ ...REAL, deploy: swap(REAL.deploy, 'printf \'%s\' "$PIN_MAIN" > "$DIR/.drift-heal-attempted"', "true") }, M)),
+		mutant("heal prep skips its compare-and-swap", () => DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$NOW" = "$EXPECT" ] ||', "true ||") }, M), 1),
+		mutant("heal prep skips its HEAD compare", () => DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$HEAD_NOW" = "$EXPECT_HEAD" ] ||', "true ||") }, M), 1),
+		mutant("heal prep skips its marker compare", () => DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "${SEEN:-none}" = "$EXPECT_MARKER" ] ||', "true ||") }, M), 1),
+		mutant("the drift check ignores a held deploy lock", () => DRIFT_CASES.checkLocked({ ...REAL, check: swap(REAL.check, "if ! flock -n 9; then", "if false; then") }, M)),
+		mutant("the drift check never calls a lock stuck", () => DRIFT_CASES.checkLockStuck({ ...REAL, check: swap(REAL.check, "-mmin +30", "-mmin +999999") }, M)),
+		mutant("the drift check holds the lock through its HTTP probe", () => checkLockPins({
+			...REAL,
+			check: swap(swap(REAL.check, "# Refs and the marker are read: let a deploy have the box before the probe.\nexec 9>&-\n", ""),
+				'echo "DRIFT_LOCAL=$LOCAL"', 'exec 9>&-\necho "DRIFT_LOCAL=$LOCAL"'),
+		}, M)),
+		mutant("ls-remote takes the first ref whose tail matches", () => DRIFT_CASES.checkExactMain({
+			...REAL,
+			check: swap(REAL.check, "awk '$2==\"refs/heads/main\"{print $1}'", "cut -f1 | head -1"),
+		}, M)),
+		mutant("an unreadable origin falls back to the clone's origin/main", () => DRIFT_CASES.checkRemoteUnreadable({
+			...REAL,
+			check: swap(REAL.check, '\techo "could not read main\'s tip from origin (git ls-remote)"\n\techo "DRIFT_STATE=remote-unreadable"\n\texit 0\n', "\tREMOTE=$(git rev-parse origin/main)\n"),
+		}, M)),
+		mutant("the drift check fetches again", () => DRIFT_CASES.checkReadsOnly({
+			...REAL,
+			check: swap(REAL.check, "REMOTE=$(ls_main 2>/dev/null | awk '$2==\"refs/heads/main\"{print $1}')", "git fetch --quiet origin; REMOTE=$(git rev-parse origin/main)"),
+		}, M)),
+		mutant("a rollback fails fast on the drift check's read", () => DRIFT_CASES.rollbackWaits({ ...REAL, rollback: swap(REAL.rollback, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M), 1),
+		mutant("the record step fails fast on the drift check's read", () => DRIFT_CASES.recordWaits({ ...REAL, record: swap(REAL.record, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M), 1),
+		mutant("a deploy waits for another deploy", () => DRIFT_CASES.deployFailsFast({ ...REAL, deploy: swap(REAL.deploy, "LOCK_WAITS_FOR=drift-check", "LOCK_WAITS_FOR=any") }, M), 3),
+		mutant("a deploy ignores the holder's note", () => DRIFT_CASES.deployWaitsForCheck({ ...REAL, deploy: swap(REAL.deploy, ' || [[ "$LOCK_HOLDER" == *"by=remote-drift-check.sh"* ]]', "") }, M), 1),
+		mutant("deploy probe only require()s the module (passes under the wrong Node)", () => PROBE_CASES.lazyAbi({ ...REAL, deploy: swap(REAL.deploy, DB_PROBE, REQUIRE_ONLY_PROBE) }, M)),
+		mutant("rollback probe only require()s the module", () => PROBE_CASES.rollbackLazyAbi({ ...REAL, rollback: swap(REAL.rollback, DB_PROBE, REQUIRE_ONLY_PROBE) }, M)),
+		mutant("deploy restarts even when the rebuild did not help", () => PROBE_CASES.stillBroken({
+			...REAL,
+			deploy: swap(REAL.deploy, `|| { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }`, `|| echo "better-sqlite3 still fails to load after rebuild"`),
+		}, M)),
+		...[
+			["ssh-retry drops the give-up title", "::error title=VPS unreachable::", "::error::"],
+			["ssh-retry rewords the give-up message", "ssh failed to connect after $total attempts", "could not reach the VPS after $total attempts"],
+			["ssh-retry gives up with a warning, not an error", 'echo "::error title=VPS unreachable::', 'echo "::warning title=VPS unreachable::'],
+		].map(retryMutant),
+		// §10: the smoke check's log tail with workflow commands left on.
+		mutant("the smoke check prints the pm2 log with commands on", () => smokeLogPins(
+			swap(swap(SMOKE, 'echo "::stop-commands::$tok"', ":"), 'echo "::$tok::"', ":"), M), 1),
+		// §11: a remote script that exits 255 itself, or lets errexit do it.
+		mutant("remote-deploy.sh ends with exit 255", () => exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M)),
+		mutant("remote-rollback.sh turns on errexit", () => exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M)),
+		mutant("remote-drift-check.sh gets a bare exit", () => exitPins({ ...REMOTE_SCRIPTS, "remote-drift-check.sh": swap(REMOTE_SCRIPTS["remote-drift-check.sh"], 'cd "$DIR" || exit 1', 'cd "$DIR" || exit') }, M)),
 
-	expectCaught("the record script skips the deploy lock", await lockScenario({ ...REAL, record: cut(REAL.record) }, M));
+		mutant("the record script skips the deploy lock", () => lockScenario({ ...REAL, record: cut(REAL.record) }, M), 2),
 
-	// §15: the restart is proven.
-	expectCaught("the deploy ignores whether the start time moved", RESTART_CASES.deployRestartNoop({ ...REAL, deploy: swap(REAL.deploy,
-		'elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then', "elif false; then") }, M));
+		// §15: the restart is proven.
+		mutant("the deploy ignores whether the start time moved", () => RESTART_CASES.deployRestartNoop({ ...REAL, deploy: swap(REAL.deploy,
+			'elif [ "$UPTIME_AFTER" = "$UPTIME_BEFORE" ]; then', "elif false; then") }, M)),
+	];
 }
 
 // ─────────────────────── §10 the smoke check's log tail, commands switched off
@@ -1076,23 +1105,99 @@ function exitScannerSelfCheck() {
 		`§11 the scan covers every scripts/deploy/remote-*.sh (got ${names.join(", ")})`);
 }
 
-(async () => {
+// ─────────────────────────────────────────────────────────────── running it
+// Run one after another, these checks took ~45 s on a Mac: some 730 processes,
+// a few hundred ms per real deploy, and lock waits that only time can prove.
+// So each case is a job, and WORKERS processes run the jobs side by side, each
+// in a sandbox of its own (deploy-test-sandbox.js builds one per process). This
+// process hands the jobs out, one at a time as each worker finishes its last,
+// then adds up every worker's counts and reports. The longest jobs go first,
+// so the short ones fill in around them.
+const WORKER_ENV = "DEPLOY_SCRIPTS_TEST_WORKER";
+const WORKERS = Math.max(2, Math.min(8, os.availableParallelism()));
+const caseJobs = (section, cases, secs = {}) => Object.entries(cases).map(([name, fn]) => job(`${section} ${name}`, () => record(fn(REAL, "")), secs[name]));
+const ALL_JOBS = [
+	job("§1 the box lock", async () => record(await lockScenario(REAL)), 2),
+	...caseJobs("§2/§3", PIN_CASES),
+	...caseJobs("§4/§5", DRIFT_CASES, { recordWaits: 1, rollbackWaits: 1, deployWaitsForCheck: 1, waitBounded: 1, healPrep: 1 }),
+	...caseJobs("§9", PROBE_CASES),
+	...caseJobs("§15", RESTART_CASES),
+	job("§7 restart pins", () => record(restartPins(REAL))),
+	job("§6 ssh helpers", sshScenarios),
+	job("§7 source pins", sourcePins),
+	job("§9 probe pins", probePins),
+	job("§16 install pins", installPins, 1),
+	job("§10 smoke log tail", () => record(smokeLogPins(SMOKE)), 1),
+	job("§10 smoke static pins", smokeStaticPins),
+	job("§11 exit scanner", exitScannerSelfCheck),
+	job("§11 exit pins", () => record(exitPins(REMOTE_SCRIPTS))),
+	...mutants(),
+];
+const JOBS = [...ALL_JOBS].sort((a, b) => b.secs - a.secs);
+
+// A worker: runs each job it is handed; on `end`, removes its sandbox and
+// hands back its counts.
+function work() {
+	let ended = false;
+	process.on("message", async (m) => {
+		if (m.end) {
+			ended = true;
+			removeSandbox();
+			process.send({ tally: tally() }, () => process.disconnect());
+			return;
+		}
+		const { name, fn } = JOBS[m.job];
+		try {
+			await fn();
+		} catch (err) {
+			ok(false, `${name}: crashed: ${err && err.stack ? err.stack : err}`);
+		}
+		process.send({ done: m.job });
+	});
+	// The process that reports is gone (killed by its own timeout): stop too.
+	process.on("disconnect", () => {
+		if (ended) return;
+		removeSandbox();
+		process.exit(1);
+	});
+	process.send({ ready: true });
+}
+
+function runWorker(i, nextJob) {
+	return new Promise((resolve) => {
+		const env = { ...process.env, [WORKER_ENV]: String(i), DEPLOY_TEST_STUB_EXEC: STUB_EXEC };
+		const w = fork(__filename, [], { env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+		let out = "";
+		let counts = null;
+		let current = null;
+		w.stdout.on("data", (c) => (out += c));
+		w.stderr.on("data", (c) => (out += c));
+		w.on("message", (m) => {
+			if (m.tally) {
+				counts = m.tally;
+				return;
+			}
+			current = nextJob();
+			w.send(current === null ? { end: true } : { job: current });
+		});
+		w.on("close", (code, signal) => {
+			if (counts) absorb(counts);
+			else ok(false, `worker ${i} exited (${code === null ? signal : code}) before handing back its counts${current === null ? "" : `, during ${JOBS[current].name}`}:\n${out}`);
+			resolve();
+		});
+	});
+}
+
+async function coordinate() {
 	console.log(`flock: ${hasRealFlock ? "real flock(1) from PATH" : "perl flock(2) shim (no flock(1) on this machine)"}`);
-	record(await lockScenario(REAL));
-	record(runCases(PIN_CASES, REAL));
-	record(runCases(DRIFT_CASES, REAL));
-	record(runCases(PROBE_CASES, REAL));
-	record(runCases(RESTART_CASES, REAL));
-	record(restartPins(REAL));
-	sshScenarios();
-	sourcePins();
-	probePins();
-	installPins();
-	record(smokeLogPins(SMOKE));
-	smokeStaticPins();
-	exitScannerSelfCheck();
-	record(exitPins(REMOTE_SCRIPTS));
-	await mutants();
-})()
-	.catch(crash)
-	.finally(finish);
+	console.log(`${JOBS.length} jobs in ${WORKERS} worker processes`);
+	let next = 0;
+	const nextJob = () => (next < JOBS.length ? next++ : null);
+	await Promise.all(Array.from({ length: WORKERS }, (_, i) => runWorker(i, nextJob)));
+}
+
+if (process.send && process.env[WORKER_ENV]) {
+	work();
+} else {
+	coordinate().catch(crash).finally(finish);
+}
