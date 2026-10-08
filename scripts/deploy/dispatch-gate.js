@@ -58,7 +58,8 @@ async function decideDispatch({
 	backoffMs,
 }) {
 	const refused = (reason) => ({ ok: false, reason });
-	if (!REF_RE.test(String(ref || "")) || String(ref).startsWith("-")) {
+	// No ref name can hold `..` (git check-ref-format), so one that does is not a ref.
+	if (!REF_RE.test(String(ref || "")) || String(ref).startsWith("-") || String(ref).includes("..")) {
 		return refused(`the ref '${ref}' is not a plain branch, tag or commit name`);
 	}
 	if (!repo) return refused("GITHUB_REPOSITORY is not set");

@@ -650,7 +650,7 @@ async function checkDispatch(mod, tag = "") {
 		d = await decide(scenario, ref, true);
 		r.push([!d.ok && /cannot resolve/.test(d.reason), `${tag}§6 a ref that names no commit is refused even with override (${scenario}, '${ref}')`]);
 	}
-	for (const ref of ["-main", "a b", "", "x".repeat(101)]) {
+	for (const ref of ["-main", "a b", "", "x".repeat(101), "main..x", "../../etc"]) {
 		d = await decide("passed", ref, true);
 		r.push([!d.ok && d.calls.length === 0, `${tag}§6 the ref ${JSON.stringify(ref.slice(0, 12))} is refused before any API call`]);
 	}
@@ -717,6 +717,7 @@ async function asyncMutants() {
 		["any verdict passes", 'if (verdict.verdict === "passed") return', "if (true) return"],
 		["override deploys a ref that names no commit", '// Not even override deploys a ref that names no commit.\n\t\treturn refused(', "// Not even override deploys a ref that names no commit.\n\t\tif (!override) return refused("],
 		["main deploys unpinned", 'ref === "main" ? { ref: "main", sha }', 'ref === "main" ? { ref: "main", sha: "" }'],
+		["a ref may hold ..", ' || String(ref).includes(".."))', ")"],
 	]) {
 		const src = fs.readFileSync(gatePath, "utf8");
 		const code = src.split(from).join(to);

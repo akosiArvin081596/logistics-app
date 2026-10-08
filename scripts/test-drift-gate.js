@@ -19,7 +19,9 @@
  *   §4 lookupStaging(): the exact API calls, retry on 5xx/429 only, fatal on
  *      4xx; annotations are read only for a FAILED staging job, and when they
  *      cannot be read the verdict stays `failed`
- *   §5 decide(): every failure path is fail-closed (unverified), never a heal
+ *   §5 decide(): every failure path is fail-closed (unverified), never a heal;
+ *      a box behind and not answering with main checked out is
+ *      deploy-in-progress only while main's Deploy run still runs
  *   §6 the CLI end to end against a local fake GitHub API, including the
  *      $GITHUB_OUTPUT contract deploy-drift.yml reads
  *   §7 source pins — the workflow files and the gate agree (job name; the
@@ -114,6 +116,8 @@ function checkActionTable(g, tag = "") {
 		"verified-record-inconsistent": "alarm",
 		// A deploy held the box lock, so the check read nothing: on its way.
 		"deploy-in-progress": "notice",
+		// The lock has been held for over 30 minutes.
+		"deploy-lock-stuck": "alarm",
 	};
 	for (const [state, action] of Object.entries(expect)) {
 		r.push([g.actionFor(state) === action, `${tag}§1 ${state} must map to '${action}' (got '${g.actionFor(state)}')`]);
@@ -297,6 +301,33 @@ function fakeFetch(routes) {
 	return fn;
 }
 const noSleep = async () => {};
+
+// §5 behind and not answering with main's commit checked out: the app may be
+// restarting under main's own deploy (the box lock is released before the
+// smoke check). A Deploy run still running makes it deploy-in-progress; any
+// other answer leaves the box's alarm standing.
+async function checkUnhealthyDeploy(g, tag = "") {
+	const r = [];
+	const serve = (runExtra) => fakeFetch([
+		[/\/runs\?/, { body: { workflow_runs: [run(91, runExtra)] } }],
+		[/\/runs\/91\/jobs\?/, { body: { jobs: [job("staging", "completed", "success", { id: 9101 }), job("production", "in_progress", null, { id: 9102 })] } }],
+	]);
+	const d = (fetchImpl, head = SHA) => g.decide({ boxState: "behind-and-unhealthy", targetSha: SHA, boxHead: head, repo: "o/r", fetchImpl, sleepImpl: noSleep, missingRetryMs: 0 });
+	const running = await d(serve({ status: "in_progress", conclusion: null }));
+	r.push([running.state === "deploy-in-progress" && running.action === "notice",
+		`${tag}§5 unhealthy with main checked out while main's Deploy run still runs → deploy-in-progress, a notice (got ${running.state})`]);
+	const done = await d(serve({}));
+	r.push([done.state === "behind-and-unhealthy" && done.action === "alarm",
+		`${tag}§5 …and once that run has completed, the box's alarm stands (got ${done.state})`]);
+	const never = fakeFetch([[/./, () => { throw new Error("must not be called"); }]]);
+	const other = await d(never, OTHER);
+	r.push([other.state === "behind-and-unhealthy" && other.action === "alarm" && never.calls.length === 0,
+		`${tag}§5 …and with another commit checked out it is an incident at once, no API call (got ${other.state}, ${never.calls.length} calls)`]);
+	const outage = await d(fakeFetch([[/./, { status: 500, body: {} }]]));
+	r.push([outage.state === "behind-and-unhealthy" && outage.action === "alarm",
+		`${tag}§5 …and an API outage leaves the alarm standing (got ${outage.state})`]);
+	return r;
+}
 
 // §4 for the annotations call, as a suite a mutant can be run through (§8).
 async function checkAnnotationLookup(g, tag = "") {
@@ -488,6 +519,7 @@ async function checkAnnotationLookup(g, tag = "") {
 		ok(done.state === "behind-healable" && done.action === "heal",
 			`§5 that re-run completed and production failed again → heal: staging's attempt-1 pass still counts (got ${done.state})`);
 	}
+	for (const [c, m] of await checkUnhealthyDeploy(gate)) ok(c, m);
 	{
 		const never = fakeFetch([[/./, () => { throw new Error("must not be called"); }]]);
 		for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy"]) {
@@ -871,6 +903,7 @@ function sourcePins() {
 
 	const d = noComments(drift);
 	ok(/node scripts\/deploy\/drift-gate\.js/.test(d), "§7 deploy-drift.yml runs the gate");
+	ok(/^\s*BOX_HEAD:\s*\$\{\{\s*steps\.check\.outputs\.head\s*\}\}\s*$/m.test(d), "§7 the gate is told the HEAD the check read (an unhealthy box with main checked out asks about main's Deploy run)");
 	ok(/permissions:\s*\n(?: {2}.*\n)*? {2}actions:\s*read/.test(d), "§7 deploy-drift.yml grants actions: read (the gate reads Deploy runs)");
 	ok(/uses:\s*\.\/\.github\/actions\/vps-deploy/.test(d), "§7 the heal uses the shared vps-deploy action");
 	ok(/rollback_on_failure:\s*"true"/.test(d), "§7 the heal auto-rolls-back on failed verification");
@@ -1100,6 +1133,14 @@ async function mutants() {
 	ok(failOpen !== src, "§8 mutant 'unreadable annotations read as unreached' must actually differ from the source");
 	ok((await checkAnnotationLookup(load(failOpen), "[mutant] ")).some(([c]) => !c), "§8 mutant 'unreadable annotations read as unreached' must be caught by §4");
 	const readsQueued = src.replace("\t\t\tnewest.status === \"completed\" &&\n", "");
+	for (const [name, from, to] of [
+		["any unhealthy box with a running Deploy run is excused, whatever HEAD is", "&& boxHead === targetSha && repo) {", "&& repo) {"],
+		["any answer about main's Deploy run excuses an unhealthy box", 'if (seen.verdict === "pending") {', "if (true) {"],
+	]) {
+		const code = src.replace(from, to);
+		ok(code !== src, `§8 mutant '${name}' must actually differ from the source`);
+		ok((await checkUnhealthyDeploy(load(code), "[mutant] ")).some(([c]) => !c), `§8 mutant '${name}' must be caught by §5`);
+	}
 	ok(readsQueued !== src, "§8 mutant 'annotations read for a run that is not completed' must actually differ from the source");
 	ok((await checkAnnotationLookup(load(readsQueued), "[mutant] ")).some(([c]) => !c), "§8 mutant 'annotations read for a run that is not completed' must be caught by §4");
 

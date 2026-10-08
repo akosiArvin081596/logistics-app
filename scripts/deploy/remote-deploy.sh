@@ -51,6 +51,9 @@ if [ -n "$SHA" ]; then
 fi
 
 LOCK_OWNER=remote-deploy.sh
+# A deploy waits only for the drift check's read; any other holder is another
+# deploy, which it must never start on top of (see the block below).
+LOCK_WAITS_FOR=drift-check
 # >>> deploy-lock — keep byte-identical in remote-deploy.sh, remote-rollback.sh
 # and remote-record-verified.sh (scripts/test-deploy-scripts.js pins the copies)
 #
@@ -63,8 +66,18 @@ LOCK_OWNER=remote-deploy.sh
 # i.e. /run/lock: tmpfs, root-writable, cleared at boot). A file inside $DIR
 # could be clobbered by a checkout, and would mean nothing to a second clone.
 #
-# ⚠️ flock -n: a held lock FAILS FAST with exit 75. It never queues. Waiting
-# would start this deploy on top of whatever the other one leaves behind.
+# ⚠️ flock -n: a held lock FAILS FAST with exit 75 when another deploy, rollback
+# or record step holds it. It never queues behind one: that would start this
+# run on top of whatever the other one leaves behind. Two bounded waits
+# (DEPLOY_LOCK_WAIT_S, default 20 s) are the exceptions:
+#   - LOCK_WAITS_FOR=any (the rollback and the record step): they run inside a
+#     job that already holds the Actions production slot, so no other deploy of
+#     this directory runs through Actions; whatever holds the lock is the drift
+#     check's read (milliseconds) or a human, and failing would leave a broken
+#     deploy unrolled-back or a good one unrecorded.
+#   - LOCK_WAITS_FOR=drift-check (the deploy): it waits only when the holder's
+#     note says remote-drift-check.sh, which holds the lock just long enough to
+#     read refs and the marker.
 #
 # ⚠️ FD 9 is inherited by every child. flock(1) locks the open file description,
 # so a long-lived child holding FD 9 would hold the lock after this script has
@@ -73,6 +86,7 @@ LOCK_OWNER=remote-deploy.sh
 # with `9>&-`.
 LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}
 LOCK_FILE="$LOCK_DIR/logisx-deploy$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '_').lock"
+LOCK_WAIT_S=${DEPLOY_LOCK_WAIT_S:-20}
 if ! command -v flock >/dev/null 2>&1; then
 	echo "::error::flock(1) is not installed on this host — refusing to run without the box-level deploy lock"
 	exit 1
@@ -84,10 +98,20 @@ if ! exec 9<>"$LOCK_FILE"; then
 	exit 1
 fi
 if ! flock -n 9; then
-	echo "::error::another deploy of $DIR is running — lock $LOCK_FILE is held. Refusing to overlap it."
-	echo "lock holder: $(cat "$LOCK_FILE" 2>/dev/null || echo unknown)"
-	echo "(if nothing is actually deploying, find the holder with: fuser -v $LOCK_FILE)"
-	exit 75
+	LOCK_HOLDER=$(head -1 "$LOCK_FILE" 2>/dev/null || echo unknown)
+	if [ "$LOCK_WAITS_FOR" = any ] || [[ "$LOCK_HOLDER" == *"by=remote-drift-check.sh"* ]]; then
+		echo "deploy lock $LOCK_FILE is held ($LOCK_HOLDER); waiting up to ${LOCK_WAIT_S}s"
+		LOCK_GOT=0
+		flock -w "$LOCK_WAIT_S" 9 && LOCK_GOT=1
+	else
+		LOCK_GOT=0
+	fi
+	if [ "$LOCK_GOT" != 1 ]; then
+		echo "::error::another deploy of $DIR is running — lock $LOCK_FILE is held. Refusing to overlap it."
+		echo "lock holder: $(cat "$LOCK_FILE" 2>/dev/null || echo unknown)"
+		echo "(if nothing is actually deploying, find the holder with: fuser -v $LOCK_FILE)"
+		exit 75
+	fi
 fi
 printf 'pid=%s since=%s by=%s ref=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 	"$LOCK_OWNER" "${REF:-}" "${SHA:-}" > "$LOCK_FILE" 2>/dev/null || true

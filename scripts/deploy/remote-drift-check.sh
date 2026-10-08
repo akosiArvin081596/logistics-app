@@ -14,20 +14,28 @@ set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"
 cd "$DIR" || exit 1
 
-git fetch --quiet --prune origin 2>/dev/null || true
-REMOTE=$(git rev-parse origin/main)
+# main's tip, read without writing anything into the clone (no fetch). If
+# origin cannot be asked, the clone's last-fetched origin/main stands in, as a
+# failed fetch always did here.
+REMOTE=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1 | head -1)
+if ! [[ "$REMOTE" =~ ^[0-9a-f]{40}$ ]]; then
+	echo "::warning::could not read main's tip from origin; comparing with this clone's last-fetched origin/main"
+	REMOTE=$(git rev-parse origin/main)
+fi
 
 # ⚠️ THE DEPLOY LOCK. The drift check has its own queue in Actions
 # (deploy-drift.yml, invariant 1), so it can run while a deploy of this
-# directory is mid-flight: HEAD, the records and the HTTP answer are then all
-# half-changed. So it takes the box lock every deploy, rollback and record step
-# takes: the same LOCK_FILE as remote-deploy.sh's deploy-lock block
+# directory is mid-flight, with HEAD and the records half-changed. So it reads
+# them under the box lock every deploy, rollback and record step takes: the
+# same LOCK_FILE as remote-deploy.sh's deploy-lock block
 # (scripts/test-deploy-scripts.js pins the two lines identical), with flock -n.
 # If a deploy holds it, the check reads nothing more and reports
-# `deploy-in-progress`, which the gate turns into a notice. It holds the lock
-# only while it reads (git refs, the marker, one local HTTP probe), never
-# across the fetch above. A deploy that starts in that second fails fast with
-# 75, like any overlap, and the next drift tick heals it.
+# `deploy-in-progress` (a notice), or `deploy-lock-stuck` (an alarm) once the
+# holder's note is over 30 minutes old: no deploy takes that long.
+# It holds the lock only while it reads local refs and the marker
+# (milliseconds), never across ls-remote or the HTTP probe. Whatever meets it
+# there waits for it (remote-deploy.sh's deploy-lock block): a deploy because
+# the note names this script, a rollback or record step for any holder.
 LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}
 LOCK_FILE="$LOCK_DIR/logisx-deploy$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '_').lock"
 if ! command -v flock >/dev/null 2>&1; then
@@ -42,7 +50,13 @@ fi
 if ! flock -n 9; then
 	echo "deploy lock $LOCK_FILE is held: $(head -1 "$LOCK_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9=:./_ -')"
 	echo "DRIFT_REMOTE=$REMOTE"
-	echo "DRIFT_STATE=deploy-in-progress"
+	# The holder writes its note when it takes the lock, so the file's age is
+	# how long it has held it. find -mmin reads that the same way on GNU and BSD.
+	if [ -n "$(find "$LOCK_FILE" -mmin +30 2>/dev/null)" ]; then
+		echo "DRIFT_STATE=deploy-lock-stuck"
+	else
+		echo "DRIFT_STATE=deploy-in-progress"
+	fi
 	exit 0
 fi
 printf 'pid=%s since=%s by=remote-drift-check.sh\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE" 2>/dev/null || true
@@ -91,10 +105,6 @@ fi
 # record alarms below; LOCAL is HEAD there only so the report stays readable.
 if [ "$VERIFIED_STATE" = ok ]; then LOCAL=$VERIFIED; else LOCAL=$HEAD_SHA; fi
 
-PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
-PORT=${PORT:-3000}
-CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
-
 # ⚠️ One automatic heal PER COMMIT, tracked by a marker on the box. Without this
 # a genuinely broken deploy would be retried on every schedule tick, restarting
 # production in a loop. Transport failures are worth one retry; a deploy that
@@ -108,8 +118,18 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PO
 #                         was at it (a manual rollback, or a hotfix)
 MARKER="$DIR/.drift-heal-attempted"
 LAST=$(cat "$MARKER" 2>/dev/null || echo "")
-# Everything is read: let a deploy have the box.
+# Refs and the marker are read: let a deploy have the box before the probe.
 exec 9>&-
+
+# Up to 8 s, so never under the lock. A deploy that takes the lock after this
+# point restarts the app only after its install and build, well after the
+# probe. One that has already released the lock left main checked out, so HEAD
+# reads main, and the gate (drift-gate.js) asks GitHub whether main's Deploy
+# run is still running before it calls a box behind and not answering an
+# incident: the app boots for 2–16 s after the restart.
+PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
+PORT=${PORT:-3000}
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
 
 echo "DRIFT_LOCAL=$LOCAL"
 echo "DRIFT_HEAD=$HEAD_SHA"

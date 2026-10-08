@@ -56,8 +56,9 @@ runs:
         set -euo pipefail
         # REF and SHA reach the box inside the remote command's quotes, so only
         # a plain branch, tag or commit name gets that far (a dispatch's `ref`
-        # is free text). The value itself is never echoed.
-        if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]]; then
+        # is free text; no ref name can hold `..`). The value itself is never
+        # echoed.
+        if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]] || [[ "$REF" == *..* ]]; then
           echo "::error::the ref to deploy is not a plain branch, tag or commit name — nothing was deployed"
           exit 1
         fi

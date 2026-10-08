@@ -76,6 +76,8 @@ const ACTIONS = Object.freeze({
 	// The box's deploy lock was held: a deploy, rollback or record step was
 	// running, so the check read nothing. Not an incident; the next tick reads.
 	"deploy-in-progress": "notice",
+	// The lock has been held for over 30 minutes: nothing deploys that long.
+	"deploy-lock-stuck": "alarm",
 });
 
 const HINTS = Object.freeze({
@@ -97,7 +99,9 @@ const HINTS = Object.freeze({
 	"behind-staging-unreached-retried":
 		"main's staging job never reached the VPS (every ssh attempt exited 255), and its Deploy run is already past its first attempt (a re-run, automatic or by hand, already happened) or reports no attempt number. Not re-running it again. 255 is not only the network: a refused deploy key, a changed host key and a dropped session end the same way. Check those, then re-run it by hand: gh run rerun <run-id> --failed.",
 	"deploy-in-progress":
-		"the box's deploy lock is held: a deploy, rollback or record step of production is running right now, so the drift check read nothing. The next tick reads the box once it is done.",
+		"a deploy of production is running right now: either the box's deploy lock was held (a deploy, rollback or record step), so the drift check read nothing, or main's commit is checked out but not answering while its Deploy run is still running (the app restarting). The next tick reads the box once it is done.",
+	"deploy-lock-stuck":
+		"the box's deploy lock has been held for over 30 minutes, longer than any deploy, rollback or record step takes, so every deploy of production now fails fast. Find the holder on the box (fuser -v on the lock file the check names) before deploying again.",
 	"verified-record-inconsistent":
 		"production's record of its last verified deploy (git ref refs/logisx/verified-deploy) names a commit HEAD does not contain, or no commit at all: HEAD was moved back past it outside the deploy scripts, a manual deploy of an older ref died after its checkout, or a verified pin off main was followed by a deploy of main that died after its checkout. Which commit serves is unknown, so nothing heals. Check the box, then deploy main by hand (Actions → Deploy → production, ref=main); a verified deploy rewrites the record.",
 });
@@ -349,8 +353,27 @@ async function lookupStaging({
 }
 
 /** The whole decision, with the network injected. Never throws. */
-async function decide({ boxState, targetSha, repo, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs }) {
+async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs }) {
 	let gate = { verdict: "", detail: "not needed", url: "" };
+	// Behind and not answering, with main's own commit already checked out: a
+	// deploy of that commit may be restarting the app. The box lock is released
+	// once remote-deploy.sh exits, and the app then boots for 2–16 s while the
+	// smoke check polls it. While main's Deploy run is still running, that is a
+	// deploy in progress; otherwise the box's alarm stands.
+	if (boxState === "behind-and-unhealthy" && SHA_RE.test(targetSha || "") && boxHead === targetSha && repo) {
+		let seen;
+		try {
+			seen = await lookupStaging({ repo, sha: targetSha, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs });
+		} catch (err) {
+			seen = { verdict: "unverified", detail: `GitHub API lookup failed: ${err && err.message ? err.message : err}`, url: "" };
+		}
+		if (seen.verdict === "pending") {
+			const state = "deploy-in-progress";
+			return { state, action: actionFor(state), hint: hintFor(state), ...seen };
+		}
+		gate = { ...seen, detail: `${seen.detail}; no Deploy run of main's commit is still running, so the app not answering is an incident` };
+		return { state: boxState, action: actionFor(boxState), hint: hintFor(boxState), ...gate };
+	}
 	if (boxState === "behind-healable") {
 		if (!SHA_RE.test(targetSha || "")) {
 			gate = { verdict: "unverified", detail: `the drift check reported no usable main SHA ('${targetSha || ""}')`, url: "" };
@@ -389,6 +412,7 @@ async function main() {
 	const result = await decide({
 		boxState: (process.env.BOX_STATE || "").trim(),
 		targetSha: (process.env.TARGET_SHA || "").trim(),
+		boxHead: (process.env.BOX_HEAD || "").trim(),
 		repo: process.env.GITHUB_REPOSITORY || "",
 		token: process.env.GITHUB_TOKEN || "",
 		apiBase: process.env.GITHUB_API_URL || "https://api.github.com",

@@ -36,13 +36,18 @@ name: Deploy drift
 #      it. The workflow itself has its own group, so the read-only check never
 #      queues behind a production deploy and two drift runs never overlap. The
 #      check may therefore start while a deploy is mid-flight, so it reads the
-#      box under the box's deploy lock (remote-drift-check.sh, flock -n on the
-#      same lock file as remote-deploy.sh): while a deploy, rollback or record
-#      step holds it, the check reads nothing and reports deploy-in-progress, a
-#      notice. The gate reads any Deploy run that is not completed as pending,
-#      never as a verdict. And the heal prep re-reads the box once the heal
-#      holds the production slot, and refuses if production's verified record,
-#      HEAD or the drift marker moved since the check read them.
+#      box's refs and marker under the box's deploy lock (remote-drift-check.sh,
+#      flock -n on the same lock file as remote-deploy.sh, held for
+#      milliseconds, never across its ls-remote or HTTP probe). While a deploy,
+#      rollback or record step holds it, the check reads nothing and reports
+#      deploy-in-progress, a notice (deploy-lock-stuck, an alarm, past 30 min).
+#      A deploy, rollback or record step that meets the check's hold waits for
+#      it, bounded. A box behind and not answering with main checked out is
+#      deploy-in-progress while main's Deploy run still runs. The gate reads
+#      any Deploy run that is not completed as pending, never as a verdict.
+#      And the heal prep re-reads the box once the heal holds the production
+#      slot, and refuses if production's verified record, HEAD or the drift
+#      marker moved since the check read them.
 #   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
 #      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
 #   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
@@ -156,11 +161,16 @@ jobs:
 
       - name: Staging gate
         # The box can tell "behind and serving". Only GitHub can tell whether
-        # main's commit passed staging. Only `behind-healable` calls the API.
+        # main's commit passed staging. Only `behind-healable` calls the API,
+        # and `behind-and-unhealthy` with main checked out (is its Deploy run
+        # still restarting the app?).
         id: gate
         env:
           BOX_STATE: ${{ steps.check.outputs.state }}
           TARGET_SHA: ${{ steps.check.outputs.remote }}
+          # Only for a box behind and not answering with main checked out: is
+          # main's Deploy run still restarting it?
+          BOX_HEAD: ${{ steps.check.outputs.head }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/deploy/drift-gate.js
 
