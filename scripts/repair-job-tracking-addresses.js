@@ -74,7 +74,6 @@ const ROWS_ARG = String(arg("rows", ""));
 const ALL_CANDIDATES = !!arg("all-candidates", false);
 const OVERWRITE_UNUSABLE = !!arg("overwrite-unusable", false);
 const SNAPSHOT_OUT = String(arg("snapshot", path.join(process.cwd(), `jt-address-repair-snapshot-${Date.now()}.json`)));
-const RATECON_DRIVE_FOLDER_ID = process.env.RATECON_DRIVE_FOLDER_ID || "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL";
 
 if (arg("stale-locks-ok", false)) {
 	console.error("Refusing: --stale-locks-ok is a REPORTING flag. A repair never runs on a lock table that may be missing a closed month.");
@@ -85,6 +84,9 @@ if (arg("stale-locks-ok", false)) {
 try { require("dotenv").config({ path: path.join(ROOT, ".env"), quiet: true }); } catch { /* optional */ }
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_OCR_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+// The rate-con folder has no default, as in server.js: the checkout's .env
+// (LOGISX_ROOT) or the environment names it, and without it the script refuses.
+const RATECON_DRIVE_FOLDER_ID = String(process.env.RATECON_DRIVE_FOLDER_ID ?? "").trim();
 
 // ── the SHIPPING extractor, lifted from server.js source ─────────────────────
 // Same reasoning as the audit's helper extraction: server.js cannot be
@@ -159,6 +161,7 @@ const PDF_MAGIC = "JVBERi"; // base64 of "%PDF-"
 	console.log(`  locks db  ${DB_PATH}`);
 	console.log(`  model     ${GEMINI_OCR_MODEL}   key ${GEMINI_API_KEY ? "present" : "MISSING"}`);
 	if (!GEMINI_API_KEY) { console.error("Refusing: GEMINI_API_KEY is not set — there is no extraction path."); process.exit(2); }
+	if (!RATECON_DRIVE_FOLDER_ID) { console.error("Refusing: RATECON_DRIVE_FOLDER_ID is not set — there is no rate-con folder to read."); process.exit(2); }
 
 	// ── 1. classify, via the audit and only the audit ──────────────────────────
 	const report = await runAudit({ sheetId: SHEET_ID, dbPath: DB_PATH, keyFile: KEY_FILE });

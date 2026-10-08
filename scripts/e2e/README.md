@@ -140,19 +140,16 @@ expected to FAIL exactly the fix rows.
   - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
     Linxup and ScanKit are blanked or off). Production's read-only archive sheet (the `ARCHIVE_SPREADSHEET_ID` default)
     is read only by the `/archive` page and the rate-con reconcile; the run opens neither, and the reconcile is off.
-  - **The rate-con Drive folder is never reached.** `server.js` reads `RATECON_DRIVE_FOLDER_ID` with a fallback: an
-    empty value, or none (the local `.env` sets none), means production's rate-con folder, which is hardcoded there.
-    So it cannot be blanked like a key: `boot-server.sh` sets it to `logisx-e2e-no-drive-folder`, a value that names
-    no Drive folder, so a Drive call against it names no real folder. `POST /api/loads/from-ratecon`
-    (RC1) archives a rate-con to disk and mirrors it to Drive only for an attached PDF, and RC1 attaches none. It sends
-    no addresses either, so the route makes no geocode or Distance Matrix call, and it never calls the Gemini
-    extraction (`POST /api/loads/ratecon/extract`).
-  - **The invoice section's draft calls do ask Drive, and get nothing.** `POST /api/loads/:loadId/draft-invoice` (the
-    `?dryRun=1` opens and I7's approve) looks for the load's rate-con in the Drive folder, by name and then by content.
-    Against `logisx-e2e-no-drive-folder` both lists fail (the server log shows `rate-con Drive list failed: File not
-    found` and `rate-con content scan failed: File not found`), and the draft goes on without a rate-con. The POD is read
-    from disk (the linked files, see `prep-worktree.sh`), so the POD's own Drive fallback is not reached. Gemini is
-    blanked, so nothing is extracted. Each invoice render (Chromium) loads the invoice template's Google Font.
+  - **The rate-con Drive folder is never reached.** `server.js` has no default for `RATECON_DRIVE_FOLDER_ID`, and
+    `boot-server.sh` blanks it like a key: the rate-con Drive features are off, no Drive call is made, and the server
+    log carries one `[ratecon-drive]` warning at start saying so. `POST /api/loads/from-ratecon` (RC1) archives a
+    rate-con to disk only for an attached PDF, and RC1 attaches none. It sends no addresses either, so the route makes
+    no geocode or Distance Matrix call, and it never calls the Gemini extraction (`POST /api/loads/ratecon/extract`).
+  - **The invoice section's draft calls do not ask Drive.** `POST /api/loads/:loadId/draft-invoice` (the `?dryRun=1`
+    opens and I7's approve) looks for the load's rate-con in the Drive folder only when one is configured; with the
+    setting blank it skips both Drive steps (by name and by content), and the draft goes on without a rate-con. The
+    POD is read from disk (the linked files, see `prep-worktree.sh`), so the POD's own Drive fallback is not reached.
+    Gemini is blanked, so nothing is extracted. Each invoice render (Chromium) loads the invoice template's Google Font.
   - **The email's logo is answered locally.** The email HTML names production's logo
     (`https://app.logisx.com/logo.avif`), which the Email message tab (I10–I14b) and the harness's own rendering of a
     captured draft would load. The invoice section's browser answers that one URL with the local server's `/logo.avif`
@@ -424,8 +421,8 @@ command line (dotenv never overrides a set variable):
 
 - **Credentials and keys blanked:** Gmail (unless `E2E_FAKE_GMAIL=1`, below), n8n invoice webhook, Gemini, Google Maps
   (server and browser), Routemate, ScanKit and Linxup.
-- **The rate-con Drive folder named away:** `RATECON_DRIVE_FOLDER_ID=logisx-e2e-no-drive-folder`. An empty value would
-  not do: `server.js` falls back to production's folder (see "What leaves the machine").
+- **The rate-con Drive folder blanked:** `RATECON_DRIVE_FOLDER_ID=` (empty). `server.js` has no default, so the rate-con
+  Drive features are off (see "What leaves the machine").
 - **Feature flags off:** `ROUTEMATE/LINXUP/SCANKIT/INVOICE_AUTOGEN/PERIOD_FINALIZE/FUEL_GALLONS_RECOVERY/RATECON_RECONCILE/RATECON_INDEX_APPLY/FUEL_EVENTS/CHAT_ORPHAN_SWEEP_ENABLED=false`.
 - **Default-ON alerts off:** `ELD_STALE/FUEL_LOW/EXPENSE_DUPLICATE/INVOICE_UNDATED/RATECON_EXTRACT_ALERT_ENABLED=false`.
 - **The maintenance notice:** off (`MAINTENANCE_NOTICE_ENABLED=false`) unless the script is run with
@@ -905,7 +902,7 @@ I14, I14b, and Ic.
 message for any other broker names only our load number, so a field change can only move a Bison message. The load is
 `30080873`, a delivered Bison load with a POD on the local copy (`E2E_BISON_LOAD` picks another; the steps SKIP, with the
 reason, when it is not a delivered Bison load with a POD). Locally its rate-con is out of reach: it lives in the
-production Drive folder `boot-server.sh` names away, and no local document row holds a rate-con file. So its own dryRun
+production Drive folder, which `boot-server.sh` leaves unconfigured, and no local document row holds a rate-con file. So its own dryRun
 cannot read an Order #, which is exactly I13f's case. For the editor steps, IB hands the editor's own dryRun request a
 synthetic Bison rate-con (`page.route` adds `rateconPdfBase64` to the request's body, `{}`: an upload, one of the
 route's own rate-con sources). The PDF carries only the "Billing Information" block that `lib/broker-invoice.js`'s
