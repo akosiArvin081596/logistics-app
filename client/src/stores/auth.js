@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 // reason lib/payoutPeriod.js imports './monthLabel.js'.
 import { useApi } from '../composables/useApi.js'
 import { setSocketOwner, useSocket } from '../composables/useSocket.js'
+import { setAppTimeZone } from '../utils/datetime.js'
 import {
   ACTION,
   BACKGROUND,
@@ -201,9 +202,14 @@ function notifyResolved() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // One GET /api/auth/session. Never throws: the answer is data, and so is its absence.
+// Any answer, signed in or not, may carry APP_TIMEZONE (`appTimeZone`), the zone
+// for "today" and dates (utils/datetime.js). setAppTimeZone() never throws and
+// keeps the zone in use when the value is missing or one this browser doesn't know.
 async function probeSession(timeout) {
   try {
-    return { data: await api.get('/api/auth/session', { timeout }) }
+    const data = await api.get('/api/auth/session', { timeout })
+    if (data && typeof data === 'object') setAppTimeZone(data.appTimeZone)
+    return { data }
   } catch (error) {
     return { error }
   }

@@ -112,6 +112,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
+import { appToday, shiftYm } from '../../utils/datetime'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { leaseBasisOf, leaseNotes } from '../../lib/payoutPeriod'
 import { LEASE_LABEL } from '../../lib/leasePayoutText'
@@ -131,17 +132,18 @@ const MONTH_FULL = ['January','February','March','April','May','June','July','Au
 const months = computed(() => props.production.monthlyData || [])
 const monthlyEarnings = computed(() => props.production.monthlyEarnings || [])
 
-// Build 12-month view — current month centered (6 before + current + 5 after)
+// Build 12-month view — current month centered (6 before + current + 5 after).
+// The current month is the app's (APP_TIMEZONE, utils/datetime.js), not the
+// viewer's clock, and the other eleven are calendar steps from it.
 const chartMonths = computed(() => {
-  const now = new Date()
+  const current = appToday().slice(0, 7)
   const dataMap = {}
   months.value.forEach(m => { dataMap[m.month] = m.amount })
   const result = []
   for (let i = -6; i <= 5; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
-    const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    const key = shiftYm(current, i)
     const isCurrent = i === 0
-    result.push({ key, label: MONTH_SHORT[d.getMonth()], amount: dataMap[key] || 0, isCurrent })
+    result.push({ key, label: MONTH_SHORT[Number(key.slice(5, 7)) - 1], amount: dataMap[key] || 0, isCurrent })
   }
   return result
 })

@@ -288,6 +288,7 @@ async function freshWorld({ socketSrc = USE_SOCKET_SRC, authSrc = AUTH_SRC, with
       '../composables/useApi.js': fileUrl('composables/useApi.js'),
       '../composables/useSocket.js': socketUrl,
       '../lib/sessionCheck.js': fileUrl('lib/sessionCheck.js'),
+      '../utils/datetime.js': fileUrl('utils/datetime.js'),
     }))
     const mod = await import(authUrl)
     store = mod.useAuthStore(pinia.createPinia())

@@ -84,6 +84,7 @@ import { ref, computed } from 'vue'
 import { Popup as VanPopup } from 'vant'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
+import { appToday, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
 
 const driverStore = useDriverStore()
@@ -98,32 +99,15 @@ const selectedInvoice = ref(null)
 // Week navigation
 const weekOffset = ref(0)
 
-// Format a Date as "YYYY-MM-DD" using its LOCAL components. Avoid
-// `toISOString()` here — that converts to UTC and shifts the day for any
-// browser east/west of UTC, so the displayed Sat–Fri range disagrees with
-// the user's actual week.
-const fmtLocalYMD = (d) =>
-  d.getFullYear() + '-' +
-  String(d.getMonth() + 1).padStart(2, '0') + '-' +
-  String(d.getDate()).padStart(2, '0')
+// The Saturday-to-Friday week `weekOffset` weeks back, as 'YYYY-MM-DD' keys,
+// counted from today in APP_TIMEZONE (utils/datetime.js), never the phone's
+// clock: weekEnd is the week POST /api/invoices/generate bills, so a phone in
+// another zone must not roll to next Saturday while the business is still on
+// Friday. Calendar arithmetic only; no Date ever holds these days.
+const weekRange = computed(() => satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset.value)))
 
-const weekRange = computed(() => {
-  const now = new Date()
-  // Shift by offset weeks
-  const ref = new Date(now.getTime() - weekOffset.value * 7 * 86400000)
-  const day = ref.getDay()
-  const satOffset = day === 6 ? 0 : day + 1
-  const start = new Date(ref)
-  start.setDate(ref.getDate() - satOffset)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(start)
-  end.setDate(start.getDate() + 6)
-  end.setHours(23, 59, 59, 999)
-  return { start, end }
-})
-
-const weekStart = computed(() => fmtLocalYMD(weekRange.value.start))
-const weekEnd = computed(() => fmtLocalYMD(weekRange.value.end))
+const weekStart = computed(() => weekRange.value.start)
+const weekEnd = computed(() => weekRange.value.end)
 const isCurrentWeek = computed(() => weekOffset.value === 0)
 
 const pastDeadline = computed(() => {
