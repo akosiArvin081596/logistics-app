@@ -7857,11 +7857,11 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 // world-readable. That is fine for a restricted browser key and is precisely
 // what must never be true of the server key.
 //
-// "Set" means a non-blank value that is not the server key, ignoring
-// surrounding whitespace. A blank value, or a copy of the server key (padded or
-// not), counts as unset: the browser gets the server key as before, the warning
-// below is logged and /api/admin/maps-key-usage reports the keys as not
-// distinct. The value served is the trimmed one, so stray whitespace from a
+// "Set" means a non-blank value that does not contain the server key, ignoring
+// surrounding whitespace. A blank value, or one holding the server key (a copy,
+// padded or not), counts as unset: the browser gets the server key as before,
+// the warning below is logged and /api/admin/maps-key-usage reports the keys as
+// not distinct. The value served is the trimmed one, so stray whitespace from a
 // quoted .env value never reaches the browser. scripts/test-maps-browser-key.js
 // runs this block and every browser-reachable Maps path against fake keys.
 const GOOGLE_MAPS_BROWSER_KEY_SETTING = String(process.env.GOOGLE_MAPS_BROWSER_KEY ?? "").trim();
@@ -7879,7 +7879,7 @@ const GOOGLE_MAPS_BROWSER_KEY_SETTING = String(process.env.GOOGLE_MAPS_BROWSER_K
 // answer "are these two the same?", which is the only question being asked.
 const GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT =
 	GOOGLE_MAPS_BROWSER_KEY_SETTING !== "" &&
-	GOOGLE_MAPS_BROWSER_KEY_SETTING !== GOOGLE_MAPS_API_KEY.trim();
+	!(GOOGLE_MAPS_API_KEY.trim() !== "" && GOOGLE_MAPS_BROWSER_KEY_SETTING.includes(GOOGLE_MAPS_API_KEY.trim()));
 const GOOGLE_MAPS_BROWSER_KEY = GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT
 	? GOOGLE_MAPS_BROWSER_KEY_SETTING
 	: GOOGLE_MAPS_API_KEY;

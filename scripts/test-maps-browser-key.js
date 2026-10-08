@@ -15,10 +15,11 @@
  *                        server key, and exactly one warning is logged at
  *                        startup, never one per request.
  *
- * "Set" means set to a non-blank value different from the server key once
- * surrounding whitespace is ignored. A blank value, or the server key itself
- * (padded or not), counts as unset: the warning is logged and the admin report
- * says the keys are not distinct.
+ * "Set" means set to a non-blank value that does not contain the server key
+ * once surrounding whitespace is ignored. A blank value, or one holding the
+ * server key (a copy, padded or not, or two keys pasted together), counts as
+ * unset: the warning is logged and the admin report says the keys are not
+ * distinct.
  *
  * WHAT IS ASSERTED
  *   §1 key resolution and the startup warning, per configuration (executed)
@@ -48,10 +49,13 @@ const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 const FAKE_SERVER = "fake-server-key-c3";
 const FAKE_BROWSER = "fake-browser-key-c3";
 
+// Failure details never print a key value, not even a fake one.
+const redact = (s) => String(s).split(FAKE_SERVER).join("<server key>").split(FAKE_BROWSER).join("<browser key>");
+
 let failed = 0;
 function ok(name, cond, detail) {
 	if (cond) console.log(`ok    ${name}`);
-	else { console.log(`FAIL  ${name}${detail ? `\n      ${detail}` : ""}`); failed++; }
+	else { console.log(`FAIL  ${name}${detail ? `\n      ${redact(detail)}` : ""}`); failed++; }
 }
 
 // --- lifting ----------------------------------------------------------------
@@ -161,6 +165,8 @@ const CONFIGS = {
 	blank: { GOOGLE_MAPS_API_KEY: FAKE_SERVER, GOOGLE_MAPS_BROWSER_KEY: "   " },
 	sameAsServer: { GOOGLE_MAPS_API_KEY: FAKE_SERVER, GOOGLE_MAPS_BROWSER_KEY: FAKE_SERVER },
 	sameAsServerPadded: { GOOGLE_MAPS_API_KEY: FAKE_SERVER, GOOGLE_MAPS_BROWSER_KEY: ` ${FAKE_SERVER} ` },
+	serverWithZeroWidth: { GOOGLE_MAPS_API_KEY: FAKE_SERVER, GOOGLE_MAPS_BROWSER_KEY: `​${FAKE_SERVER}` },
+	bothKeys: { GOOGLE_MAPS_API_KEY: FAKE_SERVER, GOOGLE_MAPS_BROWSER_KEY: `${FAKE_SERVER} ${FAKE_BROWSER}` },
 	none: {},
 };
 
@@ -206,7 +212,12 @@ for (const [name, label] of [["empty", "set to an empty string"], ["blank", "set
 		`served ${JSON.stringify(keys.GOOGLE_MAPS_BROWSER_KEY === FAKE_SERVER ? "<server key>" : keys.GOOGLE_MAPS_BROWSER_KEY)}, ` +
 		`warnings ${mapsWarnings(cap).length}, distinct ${keys.GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT}`);
 }
-for (const [name, label] of [["sameAsServer", "set to the server key"], ["sameAsServerPadded", "set to the server key padded with spaces"]]) {
+for (const [name, label] of [
+	["sameAsServer", "set to the server key"],
+	["sameAsServerPadded", "set to the server key padded with spaces"],
+	["serverWithZeroWidth", "set to the server key behind a zero-width space"],
+	["bothKeys", "set to both keys pasted together"],
+]) {
 	const { keys, cap } = boot(CONFIGS[name]);
 	ok(`browser key ${label}: one warning and reported NOT distinct`,
 		mapsWarnings(cap).length === 1 && keys.GOOGLE_MAPS_BROWSER_KEY_IS_DISTINCT === false,
@@ -243,7 +254,7 @@ console.log("\n§2  GET /api/config/maps-key");
 for (const name of ["unset", "empty", "blank"]) {
 	const { res } = askConfig(CONFIGS[name]);
 	ok(`browser key ${name}: answers with the server key, as today`, res.body && res.body.key === FAKE_SERVER,
-		`answered ${JSON.stringify(res.body)}`.replace(FAKE_SERVER, "<server key>"));
+		redact(`answered ${JSON.stringify(res.body)}`));
 }
 {
 	const { res } = askConfig(CONFIGS.none);
@@ -329,7 +340,7 @@ async function helper(label, name, extraDeps, call) {
 		let out, threw = null;
 		try { out = await call(fn); } catch (e) { threw = e; }
 		ok(`${label} [${mode}]: never throws, so no caller can echo its error`, threw === null,
-			threw && String(threw.message).replace(FAKE_SERVER, "<server key>"));
+			threw && redact(threw.message));
 		ok(`${label} [${mode}]: the return value carries no server key`, !JSON.stringify(out ?? null).includes(FAKE_SERVER));
 		outboundCheck(`${label} [${mode}]`, calls);
 	}
@@ -568,6 +579,6 @@ async function section8() {
 	console.log(failed ? `\n${failed} test(s) failed` : "\nall passed");
 	process.exit(failed ? 1 : 0);
 })().catch((e) => {
-	console.error(`FAIL  runner crashed: ${e && e.stack ? e.stack.replace(new RegExp(FAKE_SERVER, "g"), "<server key>") : e}`);
+	console.error(`FAIL  runner crashed: ${redact(e && e.stack ? e.stack : e)}`);
 	process.exit(1);
 });
