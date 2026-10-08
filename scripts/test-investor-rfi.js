@@ -31,6 +31,11 @@
  *      redirects (sent, refusals, honeypot, rate limit, daily cap, failed
  *      send, body-parser refusal), and the limiter and daily cap shared with
  *      the RFI. Its submissions also feed §3's console check.
+ *   §7 a call's return page: the Referer chooses /contact or /invest-in-logisx
+ *      on the validated origin (one trailing slash ignored, its query
+ *      dropped), for sent and error answers alike; no Referer, any other page,
+ *      another origin or a Referer that is not a URL lands on /contact; the
+ *      RFI's redirect never reads it
  *
  * Hermetic: an in-process server on 127.0.0.1, no app.db, no Gmail, no
  * network beyond loopback, no fixtures.
@@ -115,11 +120,12 @@ const asJson = (origin, payload, extra = {}) => ({
 	headers: { "Content-Type": "application/json", Accept: "application/json", ...(origin ? { Origin: origin } : {}), ...extra },
 	body: JSON.stringify(payload),
 });
-const asForm = (origin, payload) => ({
+const asForm = (origin, payload, { referer } = {}) => ({
 	headers: {
 		"Content-Type": "application/x-www-form-urlencoded",
 		Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		...(origin ? { Origin: origin } : {}),
+		...(referer ? { Referer: referer } : {}),
 	},
 	body: typeof payload === "string" ? payload : new URLSearchParams(payload).toString(),
 });
@@ -366,8 +372,9 @@ const asForm = (origin, payload) => ({
 		consent: true,
 	});
 	const CALL_FORM = Object.freeze({ ...CALL, consent: "true" });
-	const CALL_SENT = (origin) => `${origin}/invest-in-logisx?call=sent#schedule-a-call`;
-	const CALL_ERROR = (origin) => `${origin}/invest-in-logisx?call=error#schedule-a-call`;
+	// A call's 303 names the call form it came from (§7); with no Referer, /contact.
+	const CALL_SENT = (origin, page = "/contact") => `${origin}${page}?call=sent#schedule-a-call`;
+	const CALL_ERROR = (origin, page = "/contact") => `${origin}${page}?call=error#schedule-a-call`;
 	const checkCall = (body, now = NOW) => rfi.checkWebsiteForm(body, { now });
 	const refusedAs = (r, code, field) => r.ok === false && r.status === 400 && r.code === code && r.field === field;
 
@@ -515,7 +522,7 @@ const asForm = (origin, payload) => ({
 			sent.length === 1 && sent[0].to === "info@logisx.com" && sent[0].subject === "[STAGING] Call request: Owning part of LogisX" &&
 			sent[0].opts && sent[0].opts.replyTo === CALL.email && sent[0].html.includes(">[STAGING] Call request</h2>"));
 		r = await request(server, asForm(PROD, CALL_FORM));
-		ok("§6 valid call (form) from logisx.com → 303 to /invest-in-logisx?call=sent#schedule-a-call",
+		ok("§6 valid call (form) from logisx.com → 303 to the call form, ?call=sent#schedule-a-call",
 			r.status === 303 && r.headers.location === CALL_SENT(PROD));
 		ok("§6 ... sends one email, no [STAGING] prefix, with the form's values",
 			sent.length === 2 && sent[1].subject === "Call request: Owning part of LogisX" && !sent[1].html.includes("[STAGING]") &&
@@ -664,6 +671,56 @@ const asForm = (origin, payload) => ({
 		server.close();
 	}
 
+	// --- §7 a call's return page ------------------------------------------------------
+	{
+		const INVEST = "/invest-in-logisx";
+		const cases = [
+			[PROD, `${PROD}/contact`, "/contact", "the Referer /contact → /contact"],
+			[PROD, `${PROD}${INVEST}`, INVEST, "the Referer /invest-in-logisx → /invest-in-logisx"],
+			[STAGING, `${STAGING}/contact`, "/contact", "from staging, the Referer /contact → staging's /contact"],
+			[STAGING, `${STAGING}${INVEST}`, INVEST, "from staging, the Referer /invest-in-logisx → staging's /invest-in-logisx"],
+			[PROD, `${PROD}/contact/`, "/contact", "a trailing slash is ignored"],
+			[PROD, `${PROD}${INVEST}?call=error&x=1`, INVEST, "the Referer's query is dropped (a second try after an error)"],
+			[PROD, undefined, "/contact", "no Referer → /contact"],
+			[PROD, `${PROD}/truck-fund`, "/contact", "any other page → /contact"],
+			[PROD, `${PROD}${INVEST}/more`, "/contact", "a longer path → /contact (exact match only)"],
+			[PROD, `${PROD}/Contact`, "/contact", "another casing → /contact (exact match only)"],
+			[PROD, `${STAGING}${INVEST}`, "/contact", "a Referer on another of our origins → /contact on the validated origin"],
+			[PROD, `https://other.example${INVEST}`, "/contact", "a Referer on another site → /contact on the validated origin"],
+			[PROD, "not a url", "/contact", "a Referer that is not a URL → /contact"],
+		];
+		for (const [origin, referer, page, label] of cases) {
+			const { app, sent } = buildApp();
+			const server = await listen(app);
+			const r = await request(server, asForm(origin, CALL_FORM, { referer }));
+			ok(`§7 ${label}`, r.status === 303 && r.headers.location === CALL_SENT(origin, page) && sent.length === 1);
+			server.close();
+		}
+		{
+			const { app } = buildApp({ sendResult: false });
+			const server = await listen(app);
+			const r = await request(server, asForm(PROD, CALL_FORM, { referer: `${PROD}${INVEST}` }));
+			ok("§7 a failed send goes back to the page it came from (?call=error)", r.status === 303 && r.headers.location === CALL_ERROR(PROD, INVEST));
+			server.close();
+		}
+		{
+			const { app, sent } = buildApp();
+			const server = await listen(app);
+			let r = await request(server, asForm(PROD, { ...CALL_FORM, phone: "" }, { referer: `${PROD}${INVEST}` }));
+			ok("§7 a refused call goes back to the page it came from (?call=error)", r.status === 303 && r.headers.location === CALL_ERROR(PROD, INVEST));
+			r = await request(server, { urlPath: `${rfi.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, { ...CALL_FORM, message: "x".repeat(40_000) }, { referer: `${PROD}${INVEST}` }) });
+			ok("§7 a body-parser refusal (?kind=call) goes back to the page it came from", r.status === 303 && r.headers.location === CALL_ERROR(PROD, INVEST));
+			r = await request(server, asForm(PROD, { ...VALID, consent: "true" }, { referer: `${PROD}/contact` }));
+			ok("§7 the RFI's redirect never reads the Referer", r.status === 303 && r.headers.location === `${PROD}${INVEST}?sent=1`);
+			r = await request(server, asJson(PROD, CALL, { Referer: `${PROD}/contact` }));
+			ok("§7 a call as JSON is still answered with JSON, no redirect", r.status === 200 && r.json && r.json.ok === true && !r.headers.location);
+			ok("§7 ... and only the RFI and the JSON call were sent", sent.length === 2);
+			server.close();
+		}
+		ok("§7 the call's return pages are exactly /contact and /invest-in-logisx, /contact by default",
+			JSON.stringify(rfi.CALL_FORM_PATHS) === JSON.stringify(["/contact", INVEST]) && rfi.CALL_FORM_DEFAULT_PATH === "/contact");
+	}
+
 	console.warn = realConsole.warn; console.error = realConsole.error;
 	const typed = [VALID.fullName, VALID.email, VALID.phone, VALID.company, "Interested in the data room", "jane.sample",
 		CALL.fullName, CALL.email, CALL.phone, "Afternoons suit me best", "carl.callback", "2026-10-15"];
@@ -738,6 +795,20 @@ const asForm = (origin, payload) => ({
 		const server = await listen(app);
 		const r = await request(server, { urlPath: `${noQuery.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, { ...CALL_FORM, message: "x".repeat(40_000) }) });
 		ok("MUTANT: ignoring ?kind=call on a parser refusal is caught by §6", r.headers.location !== CALL_ERROR(PROD));
+		server.close();
+	}
+	for (const [label, src, referer] of [
+		["a return page taken from the Referer without the allowlist", LIB_SRC.replace("return CALL_FORM_PATHS.find((page) => page === pathname) || CALL_FORM_DEFAULT_PATH;", "return pathname;"), `${PROD}/truck-fund`],
+		["a Referer on another origin choosing the page", LIB_SRC.replace("if (url.origin !== origin) return CALL_FORM_DEFAULT_PATH;", ""), `${STAGING}/invest-in-logisx`],
+		["a call sent back to /invest-in-logisx whatever its Referer", LIB_SRC.replace("${callReturnPath(req, origin)}?call=", "${RFI_PAGE_PATH}?call="), `${PROD}/contact`],
+	]) {
+		const mutant = loadLib(src);
+		const app = express();
+		app.use(mutant.INVESTOR_RFI_PATH, ...mutant.createBodyParsers());
+		app.post(mutant.INVESTOR_RFI_PATH, ...mutant.createInvestorRfiMiddleware({ sendEmail: async () => true, now: () => NOW }));
+		const server = await listen(app);
+		const r = await request(server, asForm(PROD, CALL_FORM, { referer }));
+		ok(`MUTANT: ${label} is caught by §7`, r.headers.location !== CALL_SENT(PROD, "/contact"));
 		server.close();
 	}
 	const openOrigin = loadLib(LIB_SRC.replace("return origin && RFI_ORIGINS.has(origin) ? origin : null;", "return origin || null;"));
