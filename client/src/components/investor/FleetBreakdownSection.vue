@@ -6,6 +6,10 @@
     </div>
 
     <div v-if="trucksError" class="empty-state load-error" role="alert">Couldn't load your trucks: {{ trucksError }} Refresh the page to try again.</div>
+    <!-- A Super Admin with no investor in view: the server builds no per-truck
+         figures there (they are an investor's), so every truck would read $0 and
+         "—" where its investor's portal shows its real figures. -->
+    <div v-else-if="fleetWide" class="empty-state">Per-truck figures are per investor. Open an investor's portal to see each truck's figures.</div>
     <div v-else-if="trucks.length === 0" class="empty-state">No trucks in database yet.</div>
 
     <table v-else class="fleet-table">
@@ -114,64 +118,61 @@
             <td colspan="9">
               <div class="truck-detail">
                 <div class="detail-header">{{ t.UnitNumber }} &middot; {{ [t.Make, t.Model].filter(Boolean).join(' ') }} &middot; {{ t.AssignedDriver || 'Unassigned' }}</div>
-                <!-- "Monthly avg based on N months" is the fleet's operating
-                     window, so it would contradict the "—" on a truck that
-                     hasn't run that long. Swap it for the in-service fact. -->
+                <!-- The months every figure below is averaged on: this truck's
+                     own (`months`, from the server), not the fleet's, so a truck
+                     in service for one month says one month. -->
                 <div class="detail-sub">
                   {{ t.loadCount || 0 }} completed load{{ t.loadCount !== 1 ? 's' : '' }} &middot;
-                  <template v-if="t.estRevenue === null">{{ inServiceLong(t) ? `In service since ${inServiceLong(t)}` : 'Not yet in service a full 3 months' }}</template>
-                  <template v-else>Monthly avg based on {{ truckMonths(t) }} month{{ truckMonths(t) !== 1 ? 's' : '' }}</template>
+                  <template v-if="unitMonths(t) > 0">Monthly avg based on {{ unitMonths(t) }} month{{ unitMonths(t) !== 1 ? 's' : '' }}</template>
+                  <template v-else>No months in service yet</template>
                 </div>
+                <!-- One label column and one value column, every value the
+                     server's: the browser works out none of them. A row's note
+                     sits under its label, so the values stay in one column. -->
                 <div class="detail-breakdown">
                   <div class="bd-row">
-                    <span>Revenue ({{ t.loadCount || 0 }} load{{ t.loadCount !== 1 ? 's' : '' }})</span>
-                    <span class="bd-val" style="color:var(--accent)">{{ fmt(perUnit(t)?.unitMonthlyGross) }}</span>
+                    <span class="bd-label">Revenue ({{ t.loadCount || 0 }} load{{ t.loadCount !== 1 ? 's' : '' }})</span>
+                    <span class="bd-val" style="color:var(--accent)">{{ fmt(perUnit(t).unitMonthlyGross || 0) }}</span>
                   </div>
                   <div class="bd-row deduct">
-                    <span>- Driver Pay</span>
-                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}<span class="bd-hint"> ({{ driverBasis(t) }})</span></span>
+                    <span class="bd-label">- Driver Pay<span class="bd-hint bd-sub">({{ driverBasis(t) }})</span></span>
+                    <span class="bd-val">{{ fmt(-(driverPay(t))) }}</span>
                   </div>
                   <div class="bd-row deduct">
-                    <span>- Fixed Costs</span>
+                    <span class="bd-label">- Fixed Costs</span>
                     <span class="bd-val">{{ fmt(-(fixedCosts(t))) }}</span>
                   </div>
                   <div class="bd-row deduct">
-                    <span>- Trip Expenses</span>
+                    <span class="bd-label">- Trip Expenses</span>
                     <span class="bd-val">{{ fmt(-(tripExp(t))) }}</span>
                   </div>
-                  <div class="bd-divider"></div>
                   <div class="bd-row total">
-                    <span>Monthly Net</span>
+                    <span class="bd-label">Monthly Net</span>
                     <span class="bd-val" :style="{color: monthlyNet(t) >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ fmt(monthlyNet(t)) }}</span>
                   </div>
-                  <div class="bd-row">
-                    <span>&times; 12 months</span>
-                    <span class="bd-val"></span>
-                  </div>
-                  <div class="bd-row total">
-                    <span>Est. Your Annual Take-Home</span>
-                    <span v-if="t.estRevenue === null" class="bd-val no-proj" :title="noProjectionTitle(t)">&#8212;</span>
-                    <span v-else class="bd-val" style="color:var(--blue)">{{ fmt(t.estRevenue) }}</span>
-                  </div>
-                  <div v-if="t.estRevenue === null" class="bd-row">
-                    <span class="bd-hint">No projection yet &mdash; this truck hasn't run a full 3 months, so there's no average to annualise. Not a $0 forecast.</span>
+                  <div class="bd-row total" title="Est. Annual Take-Home = Monthly Net × 12">
+                    <span class="bd-label">Est. Annual Take-Home<span class="bd-hint bd-sub">Monthly Net &times; 12</span></span>
+                    <span class="bd-val" style="color:var(--blue)">{{ fmt(annualTakeHome(t)) }}</span>
                   </div>
                   <!-- Revenue is attributed to the truck named on the load.
                        When no load names a truck, the figures above fall back
                        to the assigned driver's loads — say so rather than
                        implying a per-truck measurement we don't have. -->
-                  <div v-else-if="attributionMode(t) === 'driver-fallback'" class="bd-row">
+                  <div v-if="attributionMode(t) === 'driver-fallback'" class="bd-row note">
                     <span class="bd-hint">Loads here don't name a truck, so these figures come from {{ t.AssignedDriver || 'the assigned driver' }}'s loads.</span>
                   </div>
-                  <div class="bd-divider"></div>
-                  <div v-if="t.roi !== null" class="bd-row">
-                    <span>ROI ({{ fmt(t.estRevenue) }} / {{ fmt(truckPrice(t)) }})</span>
-                    <span class="bd-val" :style="{color: t.roi >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%</span>
+                  <div class="bd-row roi">
+                    <span class="bd-label">ROI<span v-if="t.roi !== null" class="bd-hint bd-sub">Est. Your Revenue {{ fmt(t.estRevenue) }} &divide; {{ fmt(truckPrice(t)) }}</span></span>
+                    <span v-if="t.roi === null" class="bd-val no-proj" :title="noProjectionTitle(t)">&#8212;</span>
+                    <span v-else class="bd-val" :style="{color: t.roi >= 0 ? 'var(--accent)' : 'var(--danger)'}">{{ t.roi >= 0 ? '+' : '' }}{{ t.roi.toFixed(1) }}%</span>
+                  </div>
+                  <div v-if="t.roi === null" class="bd-row note">
+                    <span class="bd-hint">No projection yet &mdash; this truck hasn't run a full 3 months, so there's no average to annualise. Not a $0 forecast.</span>
                   </div>
                   <!-- breakEvenMonths is already null-safe: null is falsy, so
                        the row is omitted rather than rendering "null months". -->
                   <div v-if="t.breakEvenMonths" class="bd-row">
-                    <span>Break-even</span>
+                    <span class="bd-label">Break-even</span>
                     <span class="bd-val">{{ t.breakEvenMonths }} months</span>
                   </div>
                 </div>
@@ -207,7 +208,7 @@
          truck, it divides the fleet's take-home across the trucks by the revenue
          each one's loads produced (see the Est. Your Revenue dialog). A lease adds
          the sentence that states the lease. -->
-    <div class="fleet-note">
+    <div v-if="!fleetWide" class="fleet-note">
       Est. Your Revenue = that truck's own trailing 3-month take-home × 12.{{ currentLease ? ` ${leaseExplain(currentLease)}` : '' }} Each truck is projected from its own loads, so trucks in the same fleet will differ. ROI = Est. Your Revenue / Purchase Price × 100. A &ldquo;&mdash;&rdquo; means the truck hasn't been in service a full 3 months yet, so there's nothing to average from — it isn't a $0 forecast, and it's left out of the Fleet Total. Based on {{ monthsLabel }} of data — projections become more accurate over time.
     </div>
 
@@ -353,7 +354,6 @@ const props = defineProps({
   // Why the truck list failed to load ('' when it loaded); shown instead of the
   // empty state.
   trucksError: { type: String, default: '' },
-  asset: { type: Object, default: () => ({}) },
   production: { type: Object, default: () => ({}) },
 })
 
@@ -415,8 +415,12 @@ function noProjectionTitle(t) {
     ? `No projection yet — ${unit} went into service ${when}, so it hasn't run a full 3 months to average from. This is not a forecast of $0.`
     : `No projection yet — ${unit} hasn't been in service a full 3 months, so there is nothing to average from. This is not a forecast of $0.`
 }
-function truckPrice(t) { return t.PurchasePrice || t.purchase_price || props.asset?.purchasePrice || 0 }
-function truckMonths(t) { return props.production?.monthsOfOperation || 1 }
+// The price the server's ROI for this truck is over: the truck's own (0 when
+// none is recorded), never the fleet's.
+function truckPrice(t) { return perUnit(t).purchasePrice || 0 }
+// The months this truck's monthly figures are averaged on (its own, from the
+// server), 0 when it has none in the fleet's operating window.
+function unitMonths(t) { return perUnit(t).months || 0 }
 // The truck's own figures, per month, exactly as the server sends them: the pay
 // earned on THIS truck (not its current driver's whole pay, which put a driver's
 // pay under a truck that earned none of it), its fixed costs, and its trip
@@ -428,15 +432,16 @@ function tripExp(t) {
   // Fuel, repairs, maintenance and compliance for this unit, per month.
   return perUnit(t).unitMonthlyTripExpenses || 0
 }
-function monthlyNet(t) {
-  const pu = perUnit(t)
-  return (pu.unitMonthlyGross || 0) - (pu.unitMonthlyExpenses || 0)
-}
+// The breakdown's bottom lines, the server's too (2026-10-08): Monthly Net, and
+// Est. Annual Take-Home, which is that Monthly Net x 12.
+function monthlyNet(t) { return perUnit(t).unitMonthlyNet || 0 }
+function annualTakeHome(t) { return perUnit(t).unitEstAnnualTakeHome || 0 }
+
+// A Super Admin with no investor in view: the server sends no per-truck figures.
+const fleetWide = computed(() => props.production?.perTruckScope === 'fleet')
 
 const trucksWithROI = computed(() => {
   const perTruckData = props.production?.perTruckData || {}
-  const grossRevenue = props.production?.totalRevenue || 0
-  const purchasePrice = props.asset?.purchasePrice || 0
 
   return props.trucks.map(t => {
     const unitKey = t.UnitNumber || t.unit_number || ''
@@ -457,13 +462,11 @@ const trucksWithROI = computed(() => {
     const estRevenue = Number.isFinite(Number(rawEst)) && rawEst !== null && rawEst !== ''
       ? Number(rawEst)
       : null
-    const truckPrice = t.PurchasePrice || t.purchase_price || purchasePrice
-    // ROI = estimated annual investor take-home / truck investment cost.
-    // null propagates: without a take-home figure there is no ratio, and
-    // rendering "+0.0%" on a week-old truck is its own wrong answer.
-    const roi = estRevenue === null
-      ? null
-      : (truckPrice > 0 ? (estRevenue / truckPrice) * 100 : 0)
+    // ROI = Est. Your Revenue / the truck's purchase price, the server's
+    // (investorROI). null when there is no projection: without a take-home
+    // figure there is no ratio, and "+0.0%" on a week-old truck is its own wrong
+    // answer.
+    const roi = estRevenue !== null && Number.isFinite(perUnit?.investorROI) ? perUnit.investorROI : null
     const totalMiles = perUnit?.totalMiles ?? 0
     const loadCount = perUnit?.loadCount ?? 0
     const breakEvenMonths = perUnit?.breakEvenMonths ?? null
@@ -471,12 +474,10 @@ const trucksWithROI = computed(() => {
   })
 })
 
-// Sums real numbers only. A null must never coerce into the total — the fleet
-// figure has to stay a true sum of the trucks that have a projection, and the
-// count of the ones it omits is surfaced next to it.
-const totalEstRevenue = computed(() =>
-  trucksWithROI.value.reduce((s, t) => s + (Number.isFinite(t.estRevenue) ? t.estRevenue : 0), 0)
-)
+// The server's Fleet Total: the trucks that have a projection, summed (a null
+// is left out, never counted as $0). The count of the ones it omits is surfaced
+// next to it.
+const totalEstRevenue = computed(() => props.production?.fleetEstAnnualInvestorRevenue || 0)
 const totalLoads = computed(() => trucksWithROI.value.reduce((s, t) => s + (t.loadCount || 0), 0))
 
 const unprojectedTrucks = computed(() => trucksWithROI.value.filter(t => t.estRevenue === null))
@@ -496,12 +497,8 @@ const exampleTruck = computed(() =>
   || trucksWithROI.value[0]
   || null
 )
-// Fleet ROI = total est annual net / total fleet purchase price
-const fleetROI = computed(() => {
-  const totalPrice = props.production?.totalPurchasePrice || props.asset?.purchasePrice || 0
-  if (totalPrice === 0) return 0
-  return (totalEstRevenue.value / totalPrice) * 100
-})
+// Fleet ROI = the Fleet Total / the fleet's purchase price, the server's.
+const fleetROI = computed(() => props.production?.fleetInvestorROI || 0)
 
 const monthsLabel = computed(() => {
   const m = props.production?.monthsOfOperation || 1
@@ -639,6 +636,32 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
   font-family: 'DM Sans', sans-serif; font-weight: 400;
   color: var(--text-dim); white-space: normal;
 }
+/* The expanded row. It had no rules of its own, so each label ran straight into
+   its value. Now two columns like the table above: the label on the left, the
+   value right-aligned in the table's monospace, rows padded and ruled like its
+   cells, the two bottom lines (Monthly Net, Est. Annual Take-Home) set off as
+   the footer is. A row's note sits under its label, never in the value column. */
+.detail-row > td { background: var(--bg); padding: 0.75rem 0.5rem 1rem; }
+.truck-detail { max-width: 36rem; }
+.detail-header { font-weight: 700; font-size: 0.85rem; }
+.detail-sub { font-size: 0.72rem; color: var(--text-dim); margin: 0.2rem 0 0.6rem; }
+.detail-breakdown { border-top: 2px solid var(--border); }
+.bd-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.5rem;
+  align-items: baseline; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--surface);
+}
+.bd-label { min-width: 0; }
+.bd-val {
+  font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;
+  text-align: right; white-space: nowrap;
+}
+.bd-row.deduct .bd-label { padding-left: 0.75rem; color: var(--text-dim); }
+.bd-row.total { font-weight: 700; border-top: 2px solid var(--border); }
+.bd-row.total + .bd-row.total { border-top: none; }
+.bd-row.note { grid-template-columns: minmax(0, 1fr); }
+.bd-row.roi { margin-top: 0.5rem; }
+/* A note under a label, in the label column. */
+.bd-hint.bd-sub { display: block; font-weight: 400; margin-top: 0.1rem; }
 .fleet-note {
   font-size: 0.68rem; color: var(--text-dim); font-style: italic;
   margin-top: 0.75rem; padding: 0.5rem 0; border-top: 1px solid var(--bg);

@@ -366,6 +366,12 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		normalizeDriverName: m.normalizeDriverName,
 		findDriverNameClash: m.findDriverNameClash,
 		findDriverNameClashes: m.findDriverNameClashes,
+		// The month-end lock on the directory carrier the sync writes, stubbed to
+		// "nothing to judge" like the route's other period checks here (its own
+		// subject is scripts/test-account-directory-row-lock.js).
+		accountDirectorySync: () => null,
+		accountDirectorySyncLock: () => null,
+		getJobTrackingCached: async () => ({ headers: JOB_TRACKING[0].slice(), data: [] }),
 	});
 	return { put: (id, body) => quiet(() => call({ params: { id: String(id) }, body })), log };
 }

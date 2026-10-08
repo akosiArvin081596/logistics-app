@@ -49,10 +49,11 @@ where it matters — a production note.
 # 1. local server on the LOCAL sheet (never production)
 PORT=3100 SPREADSHEET_ID=156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0 npm start
 
-# 2. capture
-node scripts/docs/capture-driver-guide.js --base=http://localhost:3100
+# 2. capture, as the e2e test driver on the staging copy (never a real driver):
+#    --user names that account (no default), --load / --load2 its two demo loads
+node scripts/docs/capture-driver-guide.js --base=http://localhost:3100 --user=<e2e test driver> --load=<id> --load2=<id>
 node scripts/docs/capture-driver-guide.js --list        # the storyboard
-node scripts/docs/capture-driver-guide.js --only=14     # re-shoot one beat
+node scripts/docs/capture-driver-guide.js --user=<e2e test driver> --load=<id> --load2=<id> --only=14     # re-shoot one beat
 ```
 
 Storyboard: `scripts/docs/driver-guide-storyboard.js`. Runner:
@@ -65,18 +66,17 @@ A production copy has **no live loads** — every row is Completed, Delivered or
 Cancelled — so the accept flow and the status ladder cannot be photographed
 as-found. Before a full re-run the LOCAL sheet needs:
 
-- `DEMO-GUIDE-001` and `DEMO-GUIDE-002`, both `Dispatched`, assigned to the
-  guide's driver, with **no** rows in `load_responses`
+- the two demo loads (`--load`, `--load2`), both `Dispatched`, assigned to the
+  guide's driver (the e2e test driver), with **no** rows in `load_responses`
 - that driver holding **no other active load** (`At Shipper` / `Loading` /
   `In Transit` / `At Receiver`), or `PUT /api/driver/status` answers 409 on the
   first `At Shipper`
 
-On the copy this guide was shot from, the blocker was real load `7086762` parked
-at `At Receiver` inside a **finalized** July 2026 — neither the driver route nor
-an admin sheet edit could retire it, and both refused with `PERIOD_FINALIZED`.
-The period had to be reopened, the row set to Completed, and the period
-re-finalized. That guard is working correctly; plan around it rather than through
-it.
+A load of the driver's parked at `At Receiver` inside a **finalized** month
+cannot be retired by the driver route or an admin sheet edit: both refuse with
+`PERIOD_FINALIZED`. The period has to be reopened, the row set to Completed, and
+the period re-finalized. That guard is working correctly; plan around it rather
+than through it.
 
 Re-shooting a single beat with `--only` after a good run is safe.
 
@@ -99,21 +99,19 @@ redact: [".inv-amount"]
 ```
 
 It runs BEFORE the clean capture, so real values never reach either file.
-Currently used on frame 21 only, to blur a real driver's weekly pay. Blur rather
+Currently used on frame 21 only, to blur the driver's weekly pay. Blur rather
 than substitution on purpose: an invented "$900.00 your pay" in a training video
 reads as a rate a driver can expect, whereas a blur plainly says "redacted".
 Everything the beat teaches — invoice number, week, status, load count, receipts
 filed — stays legible.
 
-2. **The account on screen is a real driver.** These were shot as `Soren King`
-   (`LogisX-3867`), the account with enough history — 112 expenses, 17 invoices —
-   for the Invoices and Expenses tabs to look real. The pay column in
-   `21-invoices.png` is blurred (see Redaction above); the driver's NAME is still
-   in the header of every frame, which is a much lower-sensitivity call but yours
-   to make. The database is sanitized (0 leaks
-   asserted by `refresh-env.js`), but names and pay figures are not. To reshoot
-   under a different account, pass `--user=` / `--pass=` and update the driver
-   name in `driver-guide-storyboard.js`.
+2. **The account on screen is the e2e test driver on the staging copy.** The
+   guide is watched by every driver, so it is never shot as a real driver: their
+   name would be in the header of every frame. `--user` has no default, and the
+   storyboard names no driver; it reads the loads of the account the runner signs
+   in as. The pay column in `21-invoices.png` is still blurred (see Redaction
+   above). Screenshots shot before 2026-10-08 used a real driver's account:
+   re-shoot them as the test driver before they go anywhere.
 
 
 ## ⚠️ Verifying a re-shoot — md5 is NOT enough

@@ -19,6 +19,11 @@
 //      figures are the server's, pay sits on the truck that earned it, and a
 //      truck with none reads "No pay this period"
 //   §3 the component computes no money
+//   §4 (2026-10-08) the expanded row: labels and values in two columns, each
+//      truck's own months on its sub-line, Monthly Net, Est. Annual Take-Home
+//      (Monthly Net x 12, with a note saying so), ROI and the fleet totals as
+//      the server sends them; and with no investor in view (a Super Admin's
+//      fleet-wide page) a note instead of $0 rows
 //
 // No DOM, no server.
 //   node scripts/test-fleet-breakdown-truck-pay.mjs
@@ -85,6 +90,17 @@ async function compileComponent(rel, source = null) {
   return new Function('__deps', body)(deps)
 }
 const text = (html) => html.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]+>/g, ' ').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+// The breakdown's rows as { label, value }: the label column and the value
+// column of each `.bd-row`, as rendered.
+function rowsOf(html) {
+  const out = []
+  for (const m of html.matchAll(/<div class="bd-row[^"]*"[^>]*>([\s\S]*?)<\/div>/g)) {
+    const at = m[1].indexOf('class="bd-val')
+    out.push({ label: text(at < 0 ? m[1] : m[1].slice(0, m[1].lastIndexOf('<', at))), value: at < 0 ? '' : text(m[1].slice(m[1].lastIndexOf('<', at))) })
+  }
+  return out
+}
+const rowOf = (rows, label) => rows.find((r) => r.label.includes(label)) || { label: '', value: '' }
 
 // One fleet. The server's per-truck figures sit beside the per-driver ones the
 // old breakdown read, which disagree with them on purpose.
@@ -92,37 +108,49 @@ const text = (html) => html.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]+>/g, 
 //   T-NEW was just given to Dee and has hauled nothing.
 //   T-PCT is Pat's, paid a share.
 //   T-IDLE has no driver.
+// The trucks list's PurchasePrice (60,000 on T-OLD) is what the browser used to
+// divide by; the server's ROI is over the truck's own price in perTruckData.
 const TRUCKS = [
-  { id: 1, UnitNumber: 'T-OLD', AssignedDriver: '', Status: 'Active' },
+  { id: 1, UnitNumber: 'T-OLD', AssignedDriver: '', Status: 'Active', PurchasePrice: 60000 },
   { id: 2, UnitNumber: 'T-NEW', AssignedDriver: 'Dee Dayrate', Status: 'Active' },
   { id: 3, UnitNumber: 'T-PCT', AssignedDriver: 'Pat Percent', Status: 'Active' },
   { id: 4, UnitNumber: 'T-IDLE', AssignedDriver: '', Status: 'Active' },
 ]
 const PRODUCTION = {
   monthsOfOperation: 10,
+  perTruckScope: 'investor',
+  // The server's Fleet Total and Fleet ROI (the trucks with a projection, over
+  // the fleet's recorded prices).
+  fleetEstAnnualInvestorRevenue: 21000,
+  fleetInvestorROI: 8.8,
   driverPayDetails: {
     'dee dayrate': { activeDays: 36, dailyRate: 250, totalPay: 9000, payType: 'fixed', payPercentage: 0 },
     'pat percent': { activeDays: 20, dailyRate: 0, totalPay: 6700, payType: 'percentage', payPercentage: 20 },
   },
   perTruckData: {
+    // T-OLD's figures are averaged on its own 7 months, not the fleet's 10.
     'T-OLD': {
       unitMonthlyGross: 5000, unitMonthlyExpenses: 3100, unitMonthlyTripExpenses: 400,
       unitMonthlyDriverPay: 900, unitMonthlyFixedCosts: 1800, loadCount: 30, estAnnualInvestorRevenue: 12000,
+      unitMonthlyNet: 1900, unitEstAnnualTakeHome: 22800, months: 7, purchasePrice: 80000, investorROI: 15,
       driverPay: { months: 10, totalPay: 9000, drivers: [{ name: 'Dee Dayrate', payType: 'fixed', payPercentage: 0, activeDays: 36, dailyRate: 250, totalPay: 9000 }] },
     },
     'T-NEW': {
       unitMonthlyGross: 0, unitMonthlyExpenses: 0, unitMonthlyTripExpenses: 0,
       unitMonthlyDriverPay: 0, unitMonthlyFixedCosts: 0, loadCount: 0, estAnnualInvestorRevenue: null,
+      unitMonthlyNet: 0, unitEstAnnualTakeHome: 0, months: 1, purchasePrice: 90000, investorROI: null,
       driverPay: null,
     },
     'T-PCT': {
       unitMonthlyGross: 4000, unitMonthlyExpenses: 2470, unitMonthlyTripExpenses: 300,
       unitMonthlyDriverPay: 670, unitMonthlyFixedCosts: 1500, loadCount: 20, estAnnualInvestorRevenue: 9000,
+      unitMonthlyNet: 1530, unitEstAnnualTakeHome: 18360, months: 10, purchasePrice: 70000, investorROI: 12.9,
       driverPay: { months: 10, totalPay: 6700, drivers: [{ name: 'Pat Percent', payType: 'percentage', payPercentage: 20, activeDays: 20, dailyRate: 0, totalPay: 6700 }] },
     },
     'T-IDLE': {
       unitMonthlyGross: 0, unitMonthlyExpenses: 1200, unitMonthlyTripExpenses: 0,
       unitMonthlyDriverPay: 0, unitMonthlyFixedCosts: 1200, loadCount: 0, estAnnualInvestorRevenue: 0,
+      unitMonthlyNet: -1200, unitEstAnnualTakeHome: -14400, months: 10, purchasePrice: 0, investorROI: 0,
       driverPay: null,
     },
   },
@@ -140,27 +168,56 @@ try {
   Comp = await compileComponent(REL, SOURCE.replace(OPEN_ROW, 'const expandedUnit = ref(globalThis.__openUnit ?? null)'))
 } catch (err) { ok(`§2 FleetBreakdownSection.vue compiles in this harness (${err.message})`, false) }
 if (Comp) {
-  async function expanded(unit) {
+  const render = (production = PRODUCTION) => renderToString(Vue.createSSRApp(Comp, { trucks: TRUCKS, production }))
+  // The open row's HTML.
+  async function expandedHtml(unit) {
     globalThis.__openUnit = unit
-    const html = await renderToString(Vue.createSSRApp(Comp, { trucks: TRUCKS, production: PRODUCTION, asset: {} }))
+    const html = await render()
     const from = html.indexOf('class="truck-detail"')
-    return from < 0 ? '' : text(html.slice(from, html.indexOf('</tr>', from)))
+    return from < 0 ? '' : html.slice(from, html.indexOf('</tr>', from))
   }
+  const expanded = async (unit) => text(await expandedHtml(unit))
   const old = await expanded('T-OLD')
+  const oldRows = rowsOf(await expandedHtml('T-OLD'))
   ok('§2 the breakdown renders when a truck is expanded', old.includes('T-OLD'))
-  ok(`§2 T-OLD: Fixed Costs is the server's $1,800 (got "${(/Fixed Costs ([^A-Z]*)/.exec(old) || [])[1] || ''}")`, /Fixed Costs -\$1,800/.test(old))
-  ok(`§2 T-OLD: Driver Pay is the $900 a month earned on it (got "${(/Driver Pay ([^A-Z]*)/.exec(old) || [])[1] || ''}")`, /Driver Pay -\$900/.test(old))
-  ok('§2 T-OLD: the basis names the days and rate, over the months averaged', old.includes('(36 days x $250 over 10 months)'))
+  ok(`§2 T-OLD: Fixed Costs is the server's $1,800 (got "${rowOf(oldRows, 'Fixed Costs').value}")`, rowOf(oldRows, 'Fixed Costs').value === '-$1,800')
+  ok(`§2 T-OLD: Driver Pay is the $900 a month earned on it (got "${rowOf(oldRows, 'Driver Pay').value}")`, rowOf(oldRows, 'Driver Pay').value === '-$900')
+  ok('§2 T-OLD: the basis names the days and rate, over the months averaged', rowOf(oldRows, 'Driver Pay').label.includes('(36 days x $250 over 10 months)'))
   const fresh = await expanded('T-NEW')
-  ok(`§2 T-NEW (no loads yet): no driver pay, though Dee is its driver now (got "${(/Driver Pay ([^A-Z]*)/.exec(fresh) || [])[1] || ''}")`,
+  ok(`§2 T-NEW (no loads yet): no driver pay, though Dee is its driver now (got "${rowOf(rowsOf(await expandedHtml('T-NEW')), 'Driver Pay').value}")`,
     !/9,000|\$900|\$670/.test(fresh) && fresh.includes('No pay this period'))
   ok('§2 T-NEW: …and not "(0 days x $250)"', !fresh.includes('0 days x $250'))
   const pct = await expanded('T-PCT')
-  ok('§2 T-PCT: a share-paid driver keeps the share wording', pct.includes('(20% of revenue after deductible trip expenses)') && /Driver Pay -\$670/.test(pct))
-  ok('§2 T-PCT: Fixed Costs is the server\'s $1,500', /Fixed Costs -\$1,500/.test(pct))
+  const pctRows = rowsOf(await expandedHtml('T-PCT'))
+  ok('§2 T-PCT: a share-paid driver keeps the share wording', pct.includes('(20% of revenue after deductible trip expenses)') && rowOf(pctRows, 'Driver Pay').value === '-$670')
+  ok('§2 T-PCT: Fixed Costs is the server\'s $1,500', rowOf(pctRows, 'Fixed Costs').value === '-$1,500')
   const idle = await expanded('T-IDLE')
   ok('§2 T-IDLE (no driver): "No pay this period", not "(0 days x $250)"', idle.includes('No pay this period') && !idle.includes('0 days x $250'))
-  ok('§2 T-IDLE: Fixed Costs is the server\'s $1,200', /Fixed Costs -\$1,200/.test(idle))
+  ok('§2 T-IDLE: Fixed Costs is the server\'s $1,200', rowOf(rowsOf(await expandedHtml('T-IDLE')), 'Fixed Costs').value === '-$1,200')
+
+  // ══ §4 — the expanded row's bottom lines, the months, ROI and the totals ═══
+  ok(`§4 T-OLD's sub-line counts its own 7 months, not the fleet's 10 (got "${(/Monthly avg based on [^·]*?months?/.exec(old) || [''])[0]}")`,
+    old.includes('Monthly avg based on 7 months') && !old.includes('based on 10 months'))
+  ok(`§4 T-OLD: Monthly Net is the server's $1,900 (got "${rowOf(oldRows, 'Monthly Net').value}")`, rowOf(oldRows, 'Monthly Net').value === '$1,900')
+  const annual = rowOf(oldRows, 'Est. Annual Take-Home')
+  ok(`§4 T-OLD: Est. Annual Take-Home is the server's Monthly Net x 12, $22,800 (got "${annual.value}")`, annual.value === '$22,800')
+  ok(`§4 …with a note beside it saying how it is reached (got "${annual.label}")`, /Monthly Net × 12/.test(annual.label))
+  ok(`§4 T-OLD: ROI is the server's +15.0%, over its own $80,000 (got "${rowOf(oldRows, 'ROI').value}", "${rowOf(oldRows, 'ROI').label}")`,
+    rowOf(oldRows, 'ROI').value === '+15.0%' && rowOf(oldRows, 'ROI').label.includes('$12,000') && rowOf(oldRows, 'ROI').label.includes('$80,000'))
+  const freshRows = rowsOf(await expandedHtml('T-NEW'))
+  ok(`§4 T-NEW (no projection yet): ROI "—", Est. Annual Take-Home still the server's $0 (got "${rowOf(freshRows, 'ROI').value}", "${rowOf(freshRows, 'Est. Annual Take-Home').value}")`,
+    rowOf(freshRows, 'ROI').value === '—' && rowOf(freshRows, 'Est. Annual Take-Home').value === '$0' && fresh.includes('No projection yet'))
+  ok(`§4 T-NEW's sub-line: 1 month (got "${(/Monthly avg based on [^·]*?months?/.exec(fresh) || [''])[0]}")`, fresh.includes('Monthly avg based on 1 month') && !fresh.includes('1 months'))
+  ok(`§4 every row has one label and one value column, notes aside (rows: ${oldRows.map((r) => r.value || '·').join(' | ')})`,
+    oldRows.filter((r) => r.value).length === 7 && oldRows.every((r) => !/[a-z]/i.test(r.value.replace(/months|—/g, ''))))
+  globalThis.__openUnit = null
+  const table = text(await render())
+  ok(`§4 the ROI column shows the server's +15.0% for T-OLD, not a ratio over the trucks list's price (+20.0%)`, table.includes('+15.0%') && !table.includes('+20.0%'))
+  ok(`§4 the Fleet Total and Fleet ROI are the server's ($21,000, +8.8%)`, /Fleet Total[^$]*\$21,000/.test(table) && table.includes('+8.8%'))
+  const fleetWide = text(await render({ ...PRODUCTION, perTruckScope: 'fleet', perTruckData: {} }))
+  ok('§4 no investor in view (a Super Admin\'s fleet-wide page): the note, not a table of $0 rows',
+    fleetWide.includes('Per-truck figures are per investor. Open an investor\'s portal to see each truck\'s figures.') && !fleetWide.includes('Fleet Total'))
+  ok('§4 an investor\'s page never shows that note', !table.includes('Per-truck figures are per investor'))
 }
 
 // ══ §3 — no money is worked out in the component ═════════════════════════════
@@ -168,6 +225,18 @@ if (Comp) {
   const src = read(...REL.split('/'))
   ok('§3 FleetBreakdownSection.vue has no fixedCosts() subtraction', !/function fixedCosts\([^)]*\)\s*\{[^}]*-/.test(src))
   ok('§3 …and does not divide a driver\'s pay in the browser', !/driverPay\([^)]*\)\s*\/\s*\(/.test(src))
+  const script = src.slice(src.indexOf('<script setup>'), src.indexOf('</script>'))
+  ok('§3 …nor subtract expenses from revenue for Monthly Net', !/unitMonthlyGross[^\n]*-[^\n]*unitMonthlyExpenses/.test(script))
+  ok('§3 …nor work out an ROI from a price', !/\/\s*truckPrice|estRevenue\s*\/|\/\s*totalPrice|\*\s*100\b/.test(script))
+  ok('§3 …nor add up the Fleet Total', !/\.reduce\([^\n]*estRevenue/.test(script))
+}
+
+// ══ §4 — the expanded row is styled as two columns ═══════════════════════════
+{
+  const style = SOURCE.slice(SOURCE.indexOf('<style scoped>'))
+  const rule = (sel) => (new RegExp(`(^|\\n)${sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(style) || [])[2] || ''
+  ok('§4 .bd-row is a two-column grid (label, value)', /display:\s*grid/.test(rule('.bd-row')) && /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/.test(rule('.bd-row')))
+  ok('§4 .bd-val is right-aligned in the table\'s monospace', /text-align:\s*right/.test(rule('.bd-val')) && /JetBrains Mono/.test(rule('.bd-val')))
 }
 
 console.log(`\nfleet-breakdown-truck-pay: ${pass} passed, ${failures.length} failed`)

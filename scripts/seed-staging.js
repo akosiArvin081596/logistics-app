@@ -1,9 +1,23 @@
 #!/usr/bin/env node
+// Seed the multi-role test accounts and trucks into ./app.db (a LOCAL copy).
+//
+// Every seeded account gets the password in SEED_STAGING_PASSWORD. There is no
+// default: a password written here is a published password (refresh-env.js lists
+// the one this script used to hard-code), so the script refuses to run without
+// one. Load it without echoing it, and pass it to this command alone:
+//   read -rs SEED_STAGING_PASSWORD
+//   SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" node scripts/seed-staging.js
+const password = process.env.SEED_STAGING_PASSWORD || "";
+if (!password.trim()) {
+	console.error("seed-staging: refusing to run: set SEED_STAGING_PASSWORD to the password the seeded accounts get (there is no default).");
+	process.exit(2);
+}
+
 const Database = require("better-sqlite3");
 const bcrypt = require("bcryptjs");
 
 const db = new Database("app.db");
-const hash = bcrypt.hashSync("investor123", 10);
+const hash = bcrypt.hashSync(password, 10);
 
 // -- Investors --
 db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -59,7 +73,7 @@ const users = db.prepare("SELECT id, username, role, full_name, company_name FRO
 const trucks = db.prepare("SELECT unit_number, make, model, assigned_driver, owner_id, purchase_price FROM trucks").all();
 
 console.log("\n=== STAGING TEST DATA ===\n");
-console.log("Users (password: investor123 for all):");
+console.log("Users (password: the one in SEED_STAGING_PASSWORD, for all):");
 users.forEach(u => console.log(`  [${u.id}] ${u.username} (${u.role}) - ${u.full_name} ${u.company_name ? '@ ' + u.company_name : ''}`));
 console.log("\nTrucks:");
 trucks.forEach(t => console.log(`  ${t.unit_number} ${t.make} ${t.model} | Driver: ${t.assigned_driver} | Owner ID: ${t.owner_id} | $${t.purchase_price}`));

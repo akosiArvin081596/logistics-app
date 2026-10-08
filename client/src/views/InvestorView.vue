@@ -94,7 +94,7 @@
       <MyLoadsSection :my-loads="store.myLoads" />
       <AssetSection v-if="store.asset?.totalMiles > 0" :asset="store.asset" :config="store.config" :payout-basis="store.production?.payoutBasis || null" />
       <MyTrucks :trucks="trucks" :trucks-error="trucksError" :production="store.production" :is-preview="store.isPreview" @reload="loadData" />
-      <FleetBreakdownSection :trucks="trucks" :trucks-error="trucksError" :asset="store.asset" :production="store.production" />
+      <FleetBreakdownSection :trucks="trucks" :trucks-error="trucksError" :production="store.production" />
       <CashFlowSection :production="store.production" :asset="store.asset" :config="store.config" />
       <LoadReportsSection :production="store.production" :config="store.config" :preview-user-id="store.previewUserId" />
       <ExpensesSection :trucks="trucks" :preview-user-id="store.previewUserId" />

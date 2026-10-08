@@ -19,39 +19,35 @@
  * raises while the first is still rolling, so it only reproduces once the first
  * load is genuinely active.
  *
- * ⚠️ Staging is a PRECONDITION, not something these beats do. Both DEMO-GUIDE
- * rows must exist as `Dispatched` with no `load_responses`, and the driver must
- * have no other active load. On this local copy the real load 7086762 sat at
- * "At Receiver" inside a FINALIZED July, so neither the driver route nor an
- * admin sheet edit could retire it — the period had to be reopened, the row
- * completed, and the period re-finalized. Re-shooting one beat with --only
- * after a full run is safe; re-running the whole storyboard needs that staging
- * redone first.
+ * ⚠️ Staging is a PRECONDITION, not something these beats do. Both demo loads
+ * must exist as `Dispatched` with no `load_responses`, and the driver must
+ * have no other active load. A load of the driver's that sits inside a
+ * FINALIZED month cannot be retired by the driver route or an admin sheet edit:
+ * the period has to be reopened, the row completed, and the period
+ * re-finalized. Re-shooting one beat with --only after a full run is safe;
+ * re-running the whole storyboard needs that staging redone first.
  */
 
-// The demo load created for this guide, and the real load that starts active.
-// ⚠️ This driver, not the other one on the local sheet. The owner's correction:
-// the guide must show real data, never an empty state. The other driver's truck
-// reports fuel_pct = null (a
-// sensor dropout), so the Fuel beat rendered "this truck's ELD isn't reporting
-// a fuel level" — a blank screen that teaches nothing. LogisX-#33 reports a
-// real level against a configured 203-gallon tank, so the range is on screen.
-const DRIVER_NAME = "Howard Reddie";
+const { arg } = require("./lib/driver-guide-runtime");
 
-// ⚠️ REAL LOADS, not synthetic rows. The owner: "Use real data... show em the
-// actual thing." Since the LOCAL sheet is now an exact copy of production's
-// Job Tracking, this driver has two genuine loads — real shipper, real
-// reference numbers, real commodity and appointment times. The invented
-// DEMO-GUIDE rows were deleted; nothing on screen is made up.
-//   566293352  Dispatched  HEB (HOUSTON REC) -> Valliant Mill      (the walk)
-//   566076070  In Transit  HEB Reverse Logistics -> Fresh-Pak      (the queue)
-const DEMO = { loadId: "566293352" };
-// A second dispatched load, used only to photograph the "one active job" refusal.
-const DEMO2 = { loadId: "566076070" };
+// ⚠️ THE DRIVER IS THE E2E TEST DRIVER ON THE STAGING COPY, NEVER A REAL DRIVER.
+// The guide is watched by every driver, so a real driver's name, loads and pay
+// must not be on it. There is no driver name here: every beat reads the loads
+// of the account capture-driver-guide.js signs in as (--user, no default), under
+// the name that account signs in with (ctx.driverName). Pick a test driver whose
+// truck reports a fuel level, or the Fuel beat photographs "this truck's ELD
+// isn't reporting a fuel level", a blank screen that teaches nothing.
+//
+// That driver's two demo loads, both `Dispatched` (see the precondition above):
+// --load is the one the guide walks up the status ladder, --load2 the second
+// one, used only to photograph the "one active job" refusal. No defaults: the
+// capture refuses to run without both.
+const DEMO = { loadId: arg("load", "") };
+const DEMO2 = { loadId: arg("load2", "") };
 
 /** Find a load's current sheet row + status through the driver's own payload. */
-async function findLoad({ api }, loadId) {
-	const data = await api(`/api/driver/${encodeURIComponent(DRIVER_NAME)}`);
+async function findLoad({ api, driverName }, loadId) {
+	const data = await api(`/api/driver/${encodeURIComponent(driverName)}`);
 	const hit = (data.loads || []).find(
 		(l) => String(l["Load ID"] || "").replace(/^#/, "") === String(loadId).replace(/^#/, ""),
 	);
@@ -208,8 +204,8 @@ module.exports = [
 		highlight: [{ sel: ".status-stepper, .stepper, .steps", pad: 6, label: 1 }],
 		title: "Arrived at Shipper — your first status update",
 		before: async (ctx) => {
-			// ⚠️ Free the slot first, and it takes an ADMIN to do it. The driver's
-			// other real load is In Transit, and one-active-job makes "At Shipper"
+			// ⚠️ Free the slot first, and it takes an ADMIN to do it. When the
+			// driver's other load is In Transit, one-active-job makes "At Shipper"
 			// 409. The driver route cannot close it either — no POD on that load,
 			// so it answers POD_REQUIRED. That guard is the subject of a later beat
 			// and must not be weakened, so an admin writes the sheet row instead,
@@ -312,8 +308,8 @@ module.exports = [
 	{
 		id: "invoices",
 		highlight: [{ text: "Generate Weekly Invoice", label: 1 }],
-		// ⚠️ This is the one frame that puts a REAL driver's weekly pay on screen,
-		// in a guide every other driver will watch. The beat teaches the anatomy
+		// ⚠️ This is the one frame that puts a driver's weekly pay on screen, in
+		// a guide every other driver will watch. The beat teaches the anatomy
 		// of the invoice list — number, week, status, load count — none of which
 		// needs the actual amount legible.
 		redact: [".inv-amount"],
@@ -322,3 +318,6 @@ module.exports = [
 		delay: 1400,
 	},
 ];
+
+// The two demo loads (--load, --load2), so the capture can refuse to run without them.
+module.exports.demoLoads = [DEMO.loadId, DEMO2.loadId];

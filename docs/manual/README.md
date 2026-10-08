@@ -27,9 +27,12 @@ The screenshots in `assets/screenshots/` are captured by Puppeteer driving a loc
 # 1. Build the SPA so Express can serve it from client/dist/
 npm run build:client
 
-# 2. Reset the local DB and seed multi-role users + trucks
+# 2. Reset the local DB and seed multi-role users + trucks. The seeded accounts
+#    get the password in SEED_STAGING_PASSWORD (no default; the seed refuses to
+#    run without it). Load it without echoing it, and keep it for step 5.
 node scripts/prepare-test-fixtures.js --yes-local-db
-node scripts/seed-staging.js
+read -rs SEED_STAGING_PASSWORD
+SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" node scripts/seed-staging.js
 
 # 3. (One time after first seed) populate the trucks if seed-staging.js
 #    fails partway (the seed expects the trucks table to exist, which
@@ -39,9 +42,9 @@ node scripts/docs/_seed-trucks.js
 # 4. Start the server (leave running in another terminal)
 npm start
 
-# 5. Run the capture
-npm run docs:screenshots
-# or: node scripts/docs/capture-screenshots.js --filter driver
+# 5. Run the capture, with the password the seed used
+SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" npm run docs:screenshots
+# or: SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" node scripts/docs/capture-screenshots.js --filter driver
 ```
 
 Accounts the capture signs in as — on a **local** database, after step 2 above:
@@ -49,11 +52,11 @@ Accounts the capture signs in as — on a **local** database, after step 2 above
 | Username | Role | Password set by |
 |---|---|---|
 | `super_admin` | Super Admin | `scripts/prepare-test-fixtures.js` (its local test password) |
-| `dispatch1` | Dispatcher | `scripts/seed-staging.js` |
-| `leonora` | Driver | `scripts/seed-staging.js` |
-| `kevin` | Investor (owns 2 trucks) | `scripts/seed-staging.js` |
+| `dispatch1` | Dispatcher | `scripts/seed-staging.js` (`SEED_STAGING_PASSWORD`) |
+| `leonora` | Driver | `scripts/seed-staging.js` (`SEED_STAGING_PASSWORD`) |
+| `kevin` | Investor (owns 2 trucks) | `scripts/seed-staging.js` (`SEED_STAGING_PASSWORD`) |
 
-`capture-screenshots.js` already carries these as its defaults, so nothing needs typing. They exist only on a local database those two scripts have written to: a refreshed copy accepts none of them, because `scripts/refresh-env.js` gives every account its own random password.
+`capture-screenshots.js` carries these usernames as its defaults and reads the seeded accounts' password from `SEED_STAGING_PASSWORD`, so pass it the same value the seed used. They exist only on a local database those two scripts have written to: a refreshed copy accepts none of them, because `scripts/refresh-env.js` gives every account its own random password.
 
 The capture script logs in via `POST /api/auth/login`, forwards the session cookie to a new Puppeteer page, navigates to each route in `screenshot-manifest.js`, waits for animations to settle, and writes a PNG to `assets/screenshots/`.
 
