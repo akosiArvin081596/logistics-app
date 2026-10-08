@@ -10,14 +10,21 @@
 #   TARGET  the full SHA the staging gate approved (main's tip at check time)
 #   EXPECT  what the drift check reported as production (DRIFT_LOCAL): the
 #           box's last verified deploy, or HEAD while there is no record
+#   EXPECT_HEAD    the HEAD the drift check read (DRIFT_HEAD)
+#   EXPECT_MARKER  the drift marker the check read (DRIFT_MARKER), or `none`
 # Prints HEAL_READY=yes, or HEAL_READY=no plus HEAL_REASON=..., and exits 0 in
 # both cases. Non-zero only when it could not do its job at all.
+#
+# All three EXPECT values are a compare-and-swap: the check no longer waits in
+# the production deploy queue (deploy-drift.yml, invariant 1), so a deploy, a
+# rollback or a pin may have run since it read the box. Any of them moves the
+# record, HEAD or the marker, and the heal then waits for the next tick.
 #
 # The marker is written BEFORE the deploy, deliberately: if the deploy dies
 # halfway the marker still records that this SHA was attempted, so the next
 # schedule tick alarms instead of retrying. Fail-closed, not fail-open.
 set -uo pipefail
-: "${DIR:?}"; : "${TARGET:?}"; : "${EXPECT:?}"
+: "${DIR:?}"; : "${TARGET:?}"; : "${EXPECT:?}"; : "${EXPECT_HEAD:?}"; : "${EXPECT_MARKER:?}"
 cd "$DIR" || exit 1
 MARKER="$DIR/.drift-heal-attempted"
 
@@ -75,6 +82,10 @@ case "$VERIFIED_STATE" in
 	*) not_ready "the verified-deploy record does not match this clone's history; a human decides" ;;
 esac
 [ "$NOW" = "$EXPECT" ] || not_ready "production moved from $EXPECT to $NOW since the drift check; the next tick re-reads it"
+HEAD_NOW=$(git rev-parse HEAD)
+[ "$HEAD_NOW" = "$EXPECT_HEAD" ] || not_ready "HEAD moved from $EXPECT_HEAD to $HEAD_NOW since the drift check; the next tick re-reads it"
+SEEN=$(cat "$MARKER" 2>/dev/null || true)
+[ "${SEEN:-none}" = "$EXPECT_MARKER" ] || not_ready "the drift marker changed since the drift check; the next tick re-reads it"
 [ "$(cat "$MARKER" 2>/dev/null || true)" != "$TARGET" ] || not_ready "an automatic attempt at $TARGET is already recorded in $MARKER"
 git merge-base --is-ancestor "$TARGET" origin/main 2>/dev/null || not_ready "$TARGET is no longer on origin/main"
 

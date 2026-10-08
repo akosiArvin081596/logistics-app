@@ -34,7 +34,19 @@
  *
  * Every runner in scope is hermetic — `new Database(":memory:")` or a fresh
  * `mkdtemp`, no network, no fixtures, and it does not read the real `app.db`.
- * Verified on a clean checkout with no `app.db` present: 46/46 pass in ~20 s.
+ *
+ * FOUR AT A TIME, SO EVERY RUNNER MUST BE ISOLATED
+ * ------------------------------------------------
+ * Runners run CONCURRENCY at a time (default 4), so no runner may share
+ * anything with another: temp files and directories come from `mkdtemp` (or
+ * carry the pid), databases are `:memory:` or inside that temp directory,
+ * servers listen on port 0, and nothing is written into the repo tree.
+ * Audited 2026-10-08 (all 182 runners): every node process each runner
+ * started was traced for file writes, SQLite opens, listen() calls and child
+ * processes, the repo tree was checked for new files afterwards, and the
+ * runners were grepped for fixed temp paths and ports. No shared file, port or
+ * database was found; the suite then passed 3/3 at 4 at a time. Serial it took
+ * ~240 s on an M-series Mac, 4 at a time ~70 s.
  */
 
 const { spawn } = require("child_process");
@@ -49,10 +61,12 @@ const REPO_ROOT = path.join(__dirname, "..");
 // hung runner fails the build in a minute instead of burning the job's timeout.
 const TIMEOUT_MS = Number(process.env.UNIT_TEST_TIMEOUT_MS) || 60_000;
 
-// Serial by default. These are cheap (~17 s for all 45) and several of them
-// shell out or spawn a child of their own, so a wide fan-out buys little and
-// makes an interleaved failure log much harder to read.
-const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || 1);
+// Four at a time by default, in CI (a public repo's runner has 4 vCPUs) and in
+// `npm run check`. UNIT_TEST_CONCURRENCY=1 runs them one by one. Each runner's
+// output is buffered and printed whole, so parallel runs never interleave.
+// Timing-sensitive runners (below) never share the machine: they run alone,
+// one by one, after every other runner has finished.
+const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || 4);
 
 /**
  * Runners whose assertions are TIMING-SENSITIVE and therefore cannot give a
@@ -181,7 +195,7 @@ async function main() {
 	const toRun = files.filter((f) => !skipped.includes(f));
 
 	console.log(
-		`Running ${toRun.length} standalone runners (timeout ${TIMEOUT_MS / 1000}s each)` +
+		`Running ${toRun.length} standalone runners, ${CONCURRENCY} at a time (timeout ${TIMEOUT_MS / 1000}s each)` +
 			(skipped.length ? `, skipping ${skipped.length} timing-sensitive` : "") +
 			"\n"
 	);
@@ -190,7 +204,11 @@ async function main() {
 	}
 
 	const results = [];
-	const queue = [...toRun];
+	// The timing-sensitive runners wait for the pool to drain, then run alone:
+	// their assertions measure the event loop, and three other runners beside
+	// them is exactly the load that breaks them.
+	const alone = toRun.filter((f) => TIMING_SENSITIVE.has(f));
+	let queue = toRun.filter((f) => !TIMING_SENSITIVE.has(f));
 
 	async function worker() {
 		while (queue.length) {
@@ -216,7 +234,9 @@ async function main() {
 		}
 	}
 
-	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, Math.max(1, queue.length)) }, worker));
+	queue = alone;
+	await worker();
 
 	const failed = results.filter((r) => !r.ok);
 

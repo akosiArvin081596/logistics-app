@@ -9,7 +9,9 @@
  *   §1 THE BOX LOCK: two deploys of one directory must never overlap (two
  *      pulls, two installs, two builds into one client/dist). The second fails
  *      fast with exit 75 and changes nothing, and a deploy and a rollback
- *      share the one lock.
+ *      share the one lock. The bounded waits: a rollback and the record step
+ *      wait for any holder, a deploy only for the drift check's read; a deploy
+ *      meeting another deploy still fails at once, and every wait ends in 75.
  *   §2 EXACT-SHA DEPLOYS: with SHA set the box lands on exactly that commit,
  *      stays on branch main, never moves backwards, and refuses a commit that
  *      main does not contain. Without SHA, REF=main keeps its old meaning.
@@ -19,8 +21,10 @@
  *      manual pin. After any of them the drift check must ALARM
  *      (behind-already-attempted), never heal: a rolled-back commit, or main
  *      over a human's pin, is a human's call.
- *   §5 remote-drift-check.sh's four box states, and the heal prep's
- *      compare-and-swap (it refuses when the box moved since the check).
+ *   §5 remote-drift-check.sh's four box states, plus deploy-in-progress while
+ *      a deploy holds the box lock, and the heal prep's compare-and-swap (it
+ *      refuses when production's record, HEAD or the marker moved since the
+ *      check).
  *   §6 ssh-retry.sh retries ONLY transport failures (255); a remote failure
  *      and the lock's 75 pass straight through. Its give-up line is pinned
  *      exactly, and drift-gate.js must read it back as "never reached the
@@ -81,7 +85,7 @@ const {
 	T, D, ENV, git, tryGit, writeExec, hasRealFlock,
 	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
-	short, rollback,
+	short, rollback, boxSeen, withLockHeld, holdLock, holderNote,
 } = require("./deploy-test-sandbox.js");
 
 // ───────────────────────────────────────────────── §1 the box lock (async)
@@ -220,6 +224,12 @@ const PIN_CASES = {
 
 // ─────────────────────────── §4/§5 marker writers, drift check, heal prep
 const checkState = (S, env = {}) => field(runSh(S.check, { DIR: D.box, PM2: "logistics-app", ...env }).out, "DRIFT_STATE");
+// ─────────────────────────── §1b who waits for a held lock, and who fails fast
+// A holder that lets go after half a second; the contender is given 10 s.
+// Each case waits, at its end, for any holder it left (one a mutant failed
+// fast against lets go by itself) so the next case starts with the lock free.
+const timed = (fn) => { const t0 = Date.now(); const x = fn(); return { ...x, ms: Date.now() - t0 }; };
+const settle = () => holdLock().release();
 const DRIFT_CASES = {
 	checkStates(S, tag) {
 		const r = [];
@@ -233,23 +243,155 @@ const DRIFT_CASES = {
 		r.push([checkState(S, { STUB_HTTP_CODE: "503" }) === "behind-and-unhealthy", `${tag}§5 behind + not serving → behind-and-unhealthy`]);
 		return r;
 	},
+	checkLocked(S, tag) {
+		// The drift check no longer waits in the production deploy queue, so it
+		// can meet a deploy mid-flight. Under the deploy's lock it reads nothing.
+		const r = [];
+		resetBox(C2);
+		const x = withLockHeld(() => runSh(S.check, { DIR: D.box, PM2: "logistics-app", STUB_HTTP_CODE: "503" }));
+		r.push([x.code === 0 && field(x.out, "DRIFT_STATE") === "deploy-in-progress" && field(x.out, "DRIFT_REMOTE") === C3,
+			`${tag}§5 a held deploy lock → deploy-in-progress, never behind-and-unhealthy from a restart in progress (got ${field(x.out, "DRIFT_STATE")}, exit ${x.code})`]);
+		r.push([!/^DRIFT_(LOCAL|HEAD|MARKER|HTTP)=/m.test(x.out), `${tag}§5 …and reports nothing it would have read under the lock`]);
+		r.push([checkState(S) === "behind-healable", `${tag}§5 once the lock is free the check reads the box again`]);
+		const d = runSh(S.deploy, deployEnv({ SHA: C3 }));
+		r.push([d.code === 0 && head() === C3, `${tag}§5 the check lets go of the lock: a deploy right after it runs (exit ${d.code})`]);
+		return r;
+	},
+	checkLockStuck(S, tag) {
+		// A holder whose note is over 30 minutes old is stuck, not deploying.
+		const r = [];
+		resetBox(C2);
+		const stuck = withLockHeld(() => {
+			const old = new Date(Date.now() - 31 * 60 * 1000);
+			fs.utimesSync(LOCK_FILE, old, old);
+			return runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		}, { note: holderNote("remote-deploy.sh") });
+		r.push([field(stuck.out, "DRIFT_STATE") === "deploy-lock-stuck", `${tag}§5 a lock held for over 30 minutes → deploy-lock-stuck, an alarm (got ${field(stuck.out, "DRIFT_STATE")})`]);
+		const fresh = withLockHeld(() => runSh(S.check, { DIR: D.box, PM2: "logistics-app" }), { note: holderNote("remote-deploy.sh") });
+		r.push([field(fresh.out, "DRIFT_STATE") === "deploy-in-progress", `${tag}§5 …and a fresh one is still deploy-in-progress (got ${field(fresh.out, "DRIFT_STATE")})`]);
+		return r;
+	},
+	checkReadsOnly(S, tag) {
+		// main's tip comes from origin without a fetch: the clone's refs stay as
+		// they were, even a stale origin/main.
+		const r = [];
+		resetBox(C2);
+		git(D.box, "update-ref", "refs/remotes/origin/main", C1);
+		const before = git(D.box, "for-each-ref");
+		const fetchHead = path.join(D.box, ".git", "FETCH_HEAD");
+		const fhBefore = fs.existsSync(fetchHead) ? fs.statSync(fetchHead).mtimeMs : null;
+		const x = runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		const fhAfter = fs.existsSync(fetchHead) ? fs.statSync(fetchHead).mtimeMs : null;
+		r.push([field(x.out, "DRIFT_REMOTE") === C3, `${tag}§5 the check reads main's tip from origin itself, not the clone's stale origin/main (got ${short(field(x.out, "DRIFT_REMOTE"))})`]);
+		r.push([git(D.box, "for-each-ref") === before && fhBefore === fhAfter, `${tag}§5 …and writes nothing into the clone: no ref moves, no FETCH_HEAD`]);
+		git(D.box, "update-ref", "refs/remotes/origin/main", C3);
+		return r;
+	},
+	checkExactMain(S, tag) {
+		// ls-remote matches ref TAILS: a branch named a/refs/heads/main also
+		// matches "refs/heads/main", and sorts first.
+		resetBox(C2);
+		git(D.seed, "push", "-q", "origin", `${C1}:refs/heads/a/refs/heads/main`);
+		let x;
+		try {
+			x = runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		} finally {
+			git(D.seed, "push", "-q", "origin", ":refs/heads/a/refs/heads/main");
+		}
+		return [[field(x.out, "DRIFT_REMOTE") === C3, `${tag}§5 main's tip is refs/heads/main exactly, never a branch whose name ends in it (got ${short(field(x.out, "DRIFT_REMOTE"))})`]];
+	},
+	checkRemoteUnreadable(S, tag) {
+		// No stand-in for main's tip: the clone's last-fetched origin/main would
+		// read a box that cannot reach origin as in-sync while main moved on.
+		resetBox(C3);
+		git(D.box, "remote", "set-url", "origin", path.join(T, "no-such-origin"));
+		let x;
+		try {
+			x = runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		} finally {
+			git(D.box, "remote", "set-url", "origin", D.origin);
+		}
+		return [[x.code === 0 && field(x.out, "DRIFT_STATE") === "remote-unreadable" && field(x.out, "DRIFT_REMOTE") === "",
+			`${tag}§5 an origin the box cannot read → remote-unreadable, never in-sync from a stale origin/main (got ${field(x.out, "DRIFT_STATE")}, exit ${x.code})`]];
+	},
+	recordWaits(S, tag) {
+		resetBox(C2);
+		holdLock({ note: holderNote("someone-else"), seconds: 0.5 });
+		const x = timed(() => runSh(S.record, { DIR: D.box, SHA: C2, DEPLOY_LOCK_WAIT_S: "10" }));
+		settle();
+		return [[x.code === 0 && verified() === C2 && /waiting up to 10s/.test(x.out),
+			`${tag}§1 the record step waits (bounded) for any holder, then records (exit ${x.code}, ${x.ms} ms)`]];
+	},
+	rollbackWaits(S, tag) {
+		resetBox(C3);
+		holdLock({ note: holderNote("someone-else"), seconds: 0.5 });
+		const x = timed(() => rollback(S, C2, { DEPLOY_LOCK_WAIT_S: "10" }));
+		settle();
+		return [[x.code === 0 && head() === C2 && /waiting up to 10s/.test(x.out),
+			`${tag}§1 a rollback waits (bounded) for any holder, then rolls back (exit ${x.code}, ${x.ms} ms)`]];
+	},
+	deployWaitsForCheck(S, tag) {
+		resetBox(C2);
+		holdLock({ note: holderNote("remote-drift-check.sh"), seconds: 0.5 });
+		const x = timed(() => runSh(S.deploy, deployEnv({ SHA: C3, DEPLOY_LOCK_WAIT_S: "10" })));
+		settle();
+		return [[x.code === 0 && head() === C3 && /waiting up to 10s/.test(x.out),
+			`${tag}§1 a deploy waits for the drift check's read, then deploys (exit ${x.code}, ${x.ms} ms)`]];
+	},
+	deployFailsFast(S, tag) {
+		resetBox(C2);
+		const h = holdLock({ note: holderNote("remote-deploy.sh") });
+		let x;
+		try {
+			x = timed(() => runSh(S.deploy, deployEnv({ SHA: C3, DEPLOY_LOCK_WAIT_S: "3" })));
+		} finally {
+			h.release();
+		}
+		return [[x.code === 75 && x.ms < 2500 && !/waiting up to/.test(x.out) && head() === C2,
+			`${tag}§1 a deploy never waits for another deploy: 75 at once (exit ${x.code}, ${x.ms} ms)`]];
+	},
+	waitBounded(S, tag) {
+		resetBox(C2);
+		const h = holdLock({ note: holderNote("remote-deploy.sh") });
+		let x;
+		try {
+			x = timed(() => runSh(S.record, { DIR: D.box, SHA: C2, DEPLOY_LOCK_WAIT_S: "1" }));
+		} finally {
+			h.release();
+		}
+		return [[x.code === 75 && verified() === "" && /lock .* is held/.test(x.out) && x.ms >= 900,
+			`${tag}§1 the record step's wait is bounded: a holder that stays past it → 75, nothing recorded (exit ${x.code}, ${x.ms} ms)`]];
+	},
 	healPrep(S, tag) {
-		// Heal prep: compare-and-swap against what the check saw.
+		// Heal prep: compare-and-swap against what the check saw: production's
+		// record, HEAD and the marker.
 		const r = [];
 		let x;
 		resetBox(C2);
-		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, ...boxSeen() });
 		r.push([x.code === 0 && field(x.out, "HEAL_READY") === "yes" && marker() === C3, `${tag}§5 heal prep: box as the check saw it → ready, marker = target`]);
 		x = runSh(S.deploy, deployEnv({ SHA: C3 }));
 		r.push([x.code === 0 && head() === C3 && checkState(S) === "in-sync", `${tag}§5 the heal's exact-SHA deploy brings the box in sync`]);
 		resetBox(C2);
-		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C1 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C1, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no" && marker() === "", `${tag}§5 heal prep: the box moved since the check → not ready, NO marker written`]);
-		fs.writeFileSync(MARKER, C3);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C1, EXPECT_MARKER: "none" });
+		r.push([field(x.out, "HEAL_READY") === "no" && /HEAD moved/.test(field(x.out, "HEAL_REASON")) && marker() === "",
+			`${tag}§5 heal prep: HEAD moved since the check → not ready, NO marker written (got ${field(x.out, "HEAL_REASON")})`]);
+		fs.writeFileSync(MARKER, C1);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C2, EXPECT_MARKER: "none" });
+		r.push([field(x.out, "HEAL_READY") === "no" && /marker changed/.test(field(x.out, "HEAL_REASON")) && marker() === C1,
+			`${tag}§5 heal prep: the marker changed since the check → not ready, the marker left as it is (got ${field(x.out, "HEAL_REASON")})`]);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C2, EXPECT_MARKER: C1 });
+		r.push([field(x.out, "HEAL_READY") === "yes" && marker() === C3, `${tag}§5 heal prep: an old marker the check also saw → ready`]);
+		resetBox(C2);
 		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2 });
+		r.push([x.code !== 0 && field(x.out, "HEAL_READY") === "" && marker() === "", `${tag}§5 heal prep: without HEAD and marker from the check it refuses to run (exit ${x.code})`]);
+		fs.writeFileSync(MARKER, C3);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no", `${tag}§5 heal prep: already attempted → not ready`]);
 		fs.rmSync(MARKER, { force: true });
-		x = runSh(S.heal, { DIR: D.box, TARGET: S1, EXPECT: C2 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: S1, EXPECT: C2, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no" && marker() === "", `${tag}§5 heal prep: a target main does not contain → not ready`]);
 		return r;
 	},
@@ -617,6 +759,31 @@ function gitFdPins(S, tag = "") {
 			`${tag}§7 every git fetch/pull/merge in ${name} closes the lock FD (9>&-) (${lines.length} found; open: ${JSON.stringify(open.map((l) => l.trim()))})`];
 	});
 }
+// The drift check reads the box under the deploy's own lock: the same file,
+// computed the same way, taken with -n after ls-remote and before any read,
+// released once the refs and the marker are read and before the HTTP probe.
+// It never fetches. Who waits for a held lock is set per script.
+function checkLockPins(S, tag = "") {
+	const lockLines = (text) => text.split("\n").filter((l) => /^LOCK_(DIR|FILE)=/.test(l)).join("\n");
+	const code = (text) => text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+	const c = code(S.check);
+	const flockAt = c.indexOf("if ! flock -n 9; then");
+	const releaseAt = c.indexOf("exec 9>&-");
+	return [
+		[lockLines(S.deploy) !== "" && lockLines(S.check) === lockLines(S.deploy),
+			`${tag}§7 remote-drift-check.sh computes the deploy lock file exactly as remote-deploy.sh does (got ${JSON.stringify(lockLines(S.check))})`],
+		[flockAt > c.indexOf("git ls-remote origin refs/heads/main") && flockAt < c.indexOf("HEAD_SHA=$(git rev-parse HEAD)"),
+			`${tag}§7 remote-drift-check.sh takes the lock (flock -n) after ls-remote and before it reads HEAD`],
+		[releaseAt > c.indexOf('LAST=$(cat "$MARKER"') && releaseAt < c.indexOf("CODE=$(curl") && releaseAt < c.indexOf('echo "DRIFT_LOCAL='),
+			`${tag}§7 remote-drift-check.sh lets go of the lock once refs and the marker are read, before the HTTP probe`],
+		[!/\bgit fetch\b/.test(c), `${tag}§7 remote-drift-check.sh never fetches: it writes nothing into the clone`],
+		[/by=remote-drift-check\.sh/.test(c), `${tag}§7 remote-drift-check.sh writes a holder note naming itself, which a deploy reads to decide to wait`],
+		[/^LOCK_WAITS_FOR=drift-check$/m.test(S.deploy) && /^LOCK_WAITS_FOR=any$/m.test(S.rollback) && /^LOCK_WAITS_FOR=any$/m.test(S.record),
+			`${tag}§7 a deploy waits only for the drift check; a rollback and the record step wait for any holder (bounded)`],
+		[/^LOCK_WAIT_S=\$\{DEPLOY_LOCK_WAIT_S:-(1[5-9]|2\d|30)\}$/m.test(S.deploy), `${tag}§7 the bounded wait defaults to 15–30 s`],
+	];
+}
+
 function sourcePins() {
 	const ld = lockBlock(REAL.deploy);
 	const lr = lockBlock(REAL.rollback);
@@ -630,6 +797,7 @@ function sourcePins() {
 	const vd = verifiedBlock(REAL.deploy);
 	ok(vd && vd === verifiedBlock(REAL.check) && vd === verifiedBlock(REAL.heal),
 		"§7 the verified-record block is byte-identical in remote-deploy.sh, remote-drift-check.sh and remote-drift-heal.sh");
+	record(checkLockPins(REAL));
 	record(refPins(REMOTE_SCRIPTS));
 	for (const [name, text] of [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]]) {
 		const lockAt = text.indexOf("# >>> deploy-lock");
@@ -675,6 +843,31 @@ async function mutants() {
 	expectCaught("rollback leaves no marker", DRIFT_CASES.rollbackMarker({ ...REAL, rollback: swap(REAL.rollback, 'printf \'%s\' "$FAILED" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("manual pin leaves no marker", DRIFT_CASES.manualPin({ ...REAL, deploy: swap(REAL.deploy, 'printf \'%s\' "$PIN_MAIN" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("heal prep skips its compare-and-swap", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$NOW" = "$EXPECT" ] ||', "true ||") }, M));
+	expectCaught("heal prep skips its HEAD compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$HEAD_NOW" = "$EXPECT_HEAD" ] ||', "true ||") }, M));
+	expectCaught("heal prep skips its marker compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "${SEEN:-none}" = "$EXPECT_MARKER" ] ||', "true ||") }, M));
+	expectCaught("the drift check ignores a held deploy lock", DRIFT_CASES.checkLocked({ ...REAL, check: swap(REAL.check, "if ! flock -n 9; then", "if false; then") }, M));
+	expectCaught("the drift check never calls a lock stuck", DRIFT_CASES.checkLockStuck({ ...REAL, check: swap(REAL.check, "-mmin +30", "-mmin +999999") }, M));
+	expectCaught("the drift check holds the lock through its HTTP probe", checkLockPins({
+		...REAL,
+		check: swap(swap(REAL.check, "# Refs and the marker are read: let a deploy have the box before the probe.\nexec 9>&-\n", ""),
+			'echo "DRIFT_LOCAL=$LOCAL"', 'exec 9>&-\necho "DRIFT_LOCAL=$LOCAL"'),
+	}, M));
+	expectCaught("ls-remote takes the first ref whose tail matches", DRIFT_CASES.checkExactMain({
+		...REAL,
+		check: swap(REAL.check, "awk '$2==\"refs/heads/main\"{print $1}'", "cut -f1 | head -1"),
+	}, M));
+	expectCaught("an unreadable origin falls back to the clone's origin/main", DRIFT_CASES.checkRemoteUnreadable({
+		...REAL,
+		check: swap(REAL.check, '\techo "could not read main\'s tip from origin (git ls-remote)"\n\techo "DRIFT_STATE=remote-unreadable"\n\texit 0\n', "\tREMOTE=$(git rev-parse origin/main)\n"),
+	}, M));
+	expectCaught("the drift check fetches again", DRIFT_CASES.checkReadsOnly({
+		...REAL,
+		check: swap(REAL.check, "REMOTE=$(ls_main 2>/dev/null | awk '$2==\"refs/heads/main\"{print $1}')", "git fetch --quiet origin; REMOTE=$(git rev-parse origin/main)"),
+	}, M));
+	expectCaught("a rollback fails fast on the drift check's read", DRIFT_CASES.rollbackWaits({ ...REAL, rollback: swap(REAL.rollback, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));
+	expectCaught("the record step fails fast on the drift check's read", DRIFT_CASES.recordWaits({ ...REAL, record: swap(REAL.record, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));
+	expectCaught("a deploy waits for another deploy", DRIFT_CASES.deployFailsFast({ ...REAL, deploy: swap(REAL.deploy, "LOCK_WAITS_FOR=drift-check", "LOCK_WAITS_FOR=any") }, M));
+	expectCaught("a deploy ignores the holder's note", DRIFT_CASES.deployWaitsForCheck({ ...REAL, deploy: swap(REAL.deploy, ' || [[ "$LOCK_HOLDER" == *"by=remote-drift-check.sh"* ]]', "") }, M));
 	expectCaught("deploy probe only require()s the module (passes under the wrong Node)", PROBE_CASES.lazyAbi({ ...REAL, deploy: swap(REAL.deploy, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
 	expectCaught("rollback probe only require()s the module", PROBE_CASES.rollbackLazyAbi({ ...REAL, rollback: swap(REAL.rollback, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
 	expectCaught("deploy restarts even when the rebuild did not help", PROBE_CASES.stillBroken({

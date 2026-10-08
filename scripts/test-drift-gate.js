@@ -19,11 +19,14 @@
  *   §4 lookupStaging(): the exact API calls, retry on 5xx/429 only, fatal on
  *      4xx; annotations are read only for a FAILED staging job, and when they
  *      cannot be read the verdict stays `failed`
- *   §5 decide(): every failure path is fail-closed (unverified), never a heal
+ *   §5 decide(): every failure path is fail-closed (unverified), never a heal;
+ *      a box behind and not answering with main checked out is
+ *      deploy-in-progress only while main's Deploy run still runs
  *   §6 the CLI end to end against a local fake GitHub API, including the
  *      $GITHUB_OUTPUT contract deploy-drift.yml reads
- *   §7 source pins — the workflow files and the gate agree (job name,
- *      concurrency group, queue: max, the heal's rollback, the retry helper);
+ *   §7 source pins — the workflow files and the gate agree (job name; the
+ *      heal shares production's queue, with queue: max, while the drift check
+ *      has a group of its own; the heal's rollback; the retry helper);
  *      no workflow or action puts an expression inside a run: script or uses a
  *      bare `ssh -i`; backup-freshness.yml uses the shared ssh helpers under
  *      its OWN concurrency group and its remote half never takes the deploy
@@ -32,7 +35,8 @@
  *      remote-drift-check.sh can print has its own entry in the gate
  *   §8 mutants — a gate that heals on a staging failure, trusts a run for
  *      another commit, re-runs every staging failure or ignores the attempt
- *      count, and a rerun job without its guards, must all be caught above
+ *      count, a rerun job without its guards, and a heal outside production's
+ *      queue or a drift check back inside it, must all be caught above
  *   §9 the rerun job's own script, run against a stub `gh`: one re-run
  *      request, and none when the run moved since the check or the id is
  *      not a number
@@ -110,6 +114,12 @@ function checkActionTable(g, tag = "") {
 		"behind-staging-unreached-retried": "alarm",
 		// The box's record of its last verified deploy contradicts its HEAD.
 		"verified-record-inconsistent": "alarm",
+		// A deploy held the box lock, so the check read nothing: on its way.
+		"deploy-in-progress": "notice",
+		// The lock has been held for over 30 minutes.
+		"deploy-lock-stuck": "alarm",
+		// The box could not read main's tip from origin.
+		"remote-unreadable": "alarm",
 	};
 	for (const [state, action] of Object.entries(expect)) {
 		r.push([g.actionFor(state) === action, `${tag}§1 ${state} must map to '${action}' (got '${g.actionFor(state)}')`]);
@@ -134,6 +144,8 @@ for (const s of Object.keys(gate.ACTIONS)) {
 }
 for (const s of Object.keys(gate.HINTS)) ok(Object.prototype.hasOwnProperty.call(gate.ACTIONS, s), `§1 hint for '${s}' belongs to a state in ACTIONS`);
 ok(/gh run rerun <run-id> --failed/.test(gate.HINTS["behind-staging-unreached-retried"]), "§1 the retried alarm tells the operator how to re-run by hand");
+ok(/re-run that CI run/.test(gate.HINTS["behind-staging-failed"]) && /gh run rerun <run-id> --failed/.test(gate.HINTS["behind-staging-failed"]) && /only when CI or the smoke is genuinely red/.test(gate.HINTS["behind-staging-failed"]),
+	"§1 a failed staging job's alarm names the remedy: re-run CI, then the Deploy run's failed jobs; fix main only when it is genuinely red");
 
 // ────────────────────────────────────────────────────── §2 refineState
 function checkRefine(g, tag = "") {
@@ -291,6 +303,42 @@ function fakeFetch(routes) {
 	return fn;
 }
 const noSleep = async () => {};
+
+// §5 behind and not answering with main's commit checked out: the app may be
+// restarting under main's own deploy (the box lock is released before the
+// smoke check). A Deploy run still running makes it deploy-in-progress; any
+// other answer leaves the box's alarm standing.
+async function checkUnhealthyDeploy(g, tag = "") {
+	const r = [];
+	const serve = (runExtra) => fakeFetch([
+		[/\/runs\?/, { body: { workflow_runs: [run(91, runExtra)] } }],
+		[/\/runs\/91\/jobs\?/, { body: { jobs: [job("staging", "completed", "success", { id: 9101 }), job("production", "in_progress", null, { id: 9102 })] } }],
+	]);
+	const d = (fetchImpl, head = SHA) => g.decide({ boxState: "behind-and-unhealthy", targetSha: SHA, boxHead: head, repo: "o/r", fetchImpl, sleepImpl: noSleep, missingRetryMs: 0 });
+	const runningFetch = serve({ status: "in_progress", conclusion: null });
+	const running = await d(runningFetch);
+	r.push([running.state === "deploy-in-progress" && running.action === "notice",
+		`${tag}§5 unhealthy with main checked out while main's Deploy run still runs → deploy-in-progress, a notice (got ${running.state})`]);
+	const asked = (runningFetch.calls[0] || {}).url || "";
+	r.push([asked.includes(`/actions/workflows/deploy.yml/runs?head_sha=${SHA}`) && !asked.includes("event="),
+		`${tag}§5 …asking for Deploy runs of that commit of ANY event (got ${asked})`]);
+	const runs = (list) => fakeFetch([[/\/runs\?/, { body: { workflow_runs: list } }]]);
+	const dispatched = await d(runs([run(91), run(92, { event: "workflow_dispatch", status: "in_progress", conclusion: null })]));
+	r.push([dispatched.state === "deploy-in-progress", `${tag}§5 …a manual production deploy dispatched from main counts too (got ${dispatched.state})`]);
+	const elsewhere = await d(runs([run(93, { head_sha: OTHER, status: "in_progress", conclusion: null })]));
+	r.push([elsewhere.state === "behind-and-unhealthy", `${tag}§5 …but a running Deploy run of another commit does not (got ${elsewhere.state})`]);
+	const done = await d(serve({}));
+	r.push([done.state === "behind-and-unhealthy" && done.action === "alarm",
+		`${tag}§5 …and once that run has completed, the box's alarm stands (got ${done.state})`]);
+	const never = fakeFetch([[/./, () => { throw new Error("must not be called"); }]]);
+	const other = await d(never, OTHER);
+	r.push([other.state === "behind-and-unhealthy" && other.action === "alarm" && never.calls.length === 0,
+		`${tag}§5 …and with another commit checked out it is an incident at once, no API call (got ${other.state}, ${never.calls.length} calls)`]);
+	const outage = await d(fakeFetch([[/./, { status: 500, body: {} }]]));
+	r.push([outage.state === "behind-and-unhealthy" && outage.action === "alarm",
+		`${tag}§5 …and an API outage leaves the alarm standing (got ${outage.state})`]);
+	return r;
+}
 
 // §4 for the annotations call, as a suite a mutant can be run through (§8).
 async function checkAnnotationLookup(g, tag = "") {
@@ -482,6 +530,7 @@ async function checkAnnotationLookup(g, tag = "") {
 		ok(done.state === "behind-healable" && done.action === "heal",
 			`§5 that re-run completed and production failed again → heal: staging's attempt-1 pass still counts (got ${done.state})`);
 	}
+	for (const [c, m] of await checkUnhealthyDeploy(gate)) ok(c, m);
 	{
 		const never = fakeFetch([[/./, () => { throw new Error("must not be called"); }]]);
 		for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy"]) {
@@ -757,6 +806,70 @@ function checkProductionGate(deployText, tag = "") {
 	];
 }
 
+// A workflow-level concurrency block (indent 0), or a job's (indent 4).
+function concBlock(block) {
+	const g = /group:\s*(\S+)/.exec(block);
+	return { group: g && g[1], queueMax: /\bqueue:\s*max\b/.test(block), noCancel: /cancel-in-progress:\s*false/.test(block) };
+}
+const NO_CONC = { group: null, queueMax: false, noCancel: false };
+function conc(s) {
+	const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
+	return m ? concBlock(m[1]) : NO_CONC;
+}
+function jobConc(s, job) {
+	const jm = new RegExp(`\\n {2}${job}:\\n((?: {4,}.*\\n|\\s*\\n)+)`).exec(noComments(s));
+	const m = jm && /\n {4}concurrency:\n((?: {6}.*\n)+)/.exec(`\n${jm[1]}`);
+	return m ? concBlock(m[1]) : NO_CONC;
+}
+
+// The queues. Staging and production deploys have separate queues, so nothing
+// production waits for holds a staging deploy back. Production's queue is the
+// one the drift HEAL shares, since a heal deploys production. The drift CHECK
+// is read-only: it has its own group, so it never waits in the production
+// queue (it sat 15 h there behind an unanswered approval) and never holds a
+// production deploy back.
+function checkQueues(deployText, driftText, tag = "") {
+	const cdWorkflow = conc(deployText);
+	const cd = jobConc(deployText, "production");
+	const cs = jobConc(deployText, "staging");
+	const cr = conc(driftText);
+	const ch = jobConc(driftText, "heal");
+	const others = ["check", "rerun"].map((j) => [j, jobConc(driftText, j)]);
+	return [
+		[cdWorkflow.group === null, `${tag}§7 deploy.yml has no workflow-level concurrency: one queue there makes anything production waits for hold every later staging deploy (got ${cdWorkflow.group})`],
+		[!!cd.group && cd.group === ch.group, `${tag}§7 deploy.yml's production job and deploy-drift.yml's heal job must share ONE concurrency group (got ${cd.group} vs ${ch.group})`],
+		[!!cd.group && !/\$\{\{/.test(cd.group), `${tag}§7 the shared group is a literal, not an expression that could resolve differently per workflow`],
+		[!!cs.group && !/\$\{\{/.test(cs.group) && cs.group !== cd.group, `${tag}§7 deploy.yml's staging job has its own literal queue, not production's (got ${cs.group}; production ${cd.group})`],
+		[!!cr.group && !/\$\{\{/.test(cr.group) && cr.group !== cd.group && cr.group !== cs.group,
+			`${tag}§7 deploy-drift.yml's workflow-level group is its own literal, never a deploy queue: the read-only check must not wait in, or hold, the production queue (got ${cr.group}; production ${cd.group})`],
+		...others.map(([j, c]) => [c.group === null, `${tag}§7 deploy-drift.yml's ${j} job joins no queue of its own: only the heal waits for production deploys (got ${c.group})`]),
+		[cd.queueMax && cs.queueMax && ch.queueMax, `${tag}§7 both deploy jobs and the drift heal set queue: max — the default cancels a pending job, so a heal could cancel a queued deploy`],
+		[cd.noCancel && cs.noCancel && ch.noCancel && cr.noCancel, `${tag}§7 nothing may cancel an in-progress deploy, heal or drift run`],
+	];
+}
+
+// What the check job hands the heal prep. The check reads the box outside the
+// production queue, so the prep compares production's record, HEAD and the
+// marker against what the check read, and refuses if any moved
+// (remote-drift-heal.sh; scripts/test-deploy-scripts.js §5 runs that half).
+function checkHealHandover(driftText, tag = "") {
+	const jobs = jobBlocks(driftText);
+	const check = noComments(jobs.check || "");
+	const heal = noComments(jobs.heal || "");
+	return [
+		[/^ {6}head:\s*\$\{\{\s*steps\.check\.outputs\.head\s*\}\}\s*$/m.test(check) && /^ {6}marker:\s*\$\{\{\s*steps\.check\.outputs\.marker\s*\}\}\s*$/m.test(check),
+			`${tag}§7 the check job exports the HEAD and the marker it read`],
+		[/echo "marker=\$marker"/.test(check) && /marker=none/.test(check) && /marker=unrecognised/.test(check),
+			`${tag}§7 the check step writes the marker as a SHA, none or unrecognised`],
+		[/^\s*EXPECT_HEAD:\s*\$\{\{\s*needs\.check\.outputs\.head\s*\}\}\s*$/m.test(heal) && /^\s*EXPECT_MARKER:\s*\$\{\{\s*needs\.check\.outputs\.marker\s*\}\}\s*$/m.test(heal),
+			`${tag}§7 the heal prep receives the check's HEAD and marker through env:`],
+		[/EXPECT_HEAD='\$EXPECT_HEAD' EXPECT_MARKER='\$EXPECT_MARKER' bash -s/.test(heal),
+			`${tag}§7 the heal prep passes both on to remote-drift-heal.sh`],
+		[/"\$EXPECT_HEAD" =~ \^\[0-9a-f\]\{40\}\$/.test(heal) && /"\$EXPECT_MARKER" =~ \^\(\[0-9a-f\]\{40\}\|none\|unrecognised\)\$/.test(heal),
+			`${tag}§7 …after checking their shapes, since they reach the box inside the remote command's quotes`],
+	];
+}
+
 // A run: script as bash receives it: the `|` header dropped, the block
 // dedented. A one-liner is returned as is.
 function scriptOf(s) {
@@ -796,36 +909,12 @@ function sourcePins() {
 	}
 	ok(gate.actionFor("verified-record-inconsistent") === "alarm", "§7 an inconsistent verified-deploy record alarms; it never heals");
 
-	// A workflow-level concurrency block (indent 0), or a job's (indent 4).
-	const concBlock = (block) => {
-		const g = /group:\s*(\S+)/.exec(block);
-		return { group: g && g[1], queueMax: /\bqueue:\s*max\b/.test(block), noCancel: /cancel-in-progress:\s*false/.test(block) };
-	};
-	const conc = (s) => {
-		const m = /\nconcurrency:\n((?: {2}.*\n)+)/.exec(noComments(s));
-		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
-	};
-	const jobConc = (s, job) => {
-		const jm = new RegExp(`\\n {2}${job}:\\n((?: {4,}.*\\n|\\s*\\n)+)`).exec(noComments(s));
-		const m = jm && /\n {4}concurrency:\n((?: {6}.*\n)+)/.exec(`\n${jm[1]}`);
-		return m ? concBlock(m[1]) : { group: null, queueMax: false, noCancel: false };
-	};
-	// Staging and production have separate queues, so a production job waiting
-	// for approval never holds a staging deploy back. Production's queue is the
-	// one the drift heal shares.
-	const cdWorkflow = conc(deploy);
+	for (const [c, m] of checkQueues(deploy, drift)) ok(c, m);
 	const cd = jobConc(deploy, "production");
-	const cs = jobConc(deploy, "staging");
-	const cr = conc(drift);
-	ok(cdWorkflow.group === null, `§7 deploy.yml has no workflow-level concurrency: one queue there makes a production job waiting for approval hold every later staging deploy (got ${cdWorkflow.group})`);
-	ok(cd.group && cd.group === cr.group, `§7 deploy.yml's production job and deploy-drift.yml must share ONE concurrency group (got ${cd.group} vs ${cr.group})`);
-	ok(cd.group && !/\$\{\{/.test(cd.group), "§7 the shared group is a literal, not an expression that could resolve differently per workflow");
-	ok(cs.group && !/\$\{\{/.test(cs.group) && cs.group !== cd.group, `§7 deploy.yml's staging job has its own literal queue, not production's (got ${cs.group}; production ${cd.group})`);
-	ok(cd.queueMax && cs.queueMax && cr.queueMax, "§7 both deploy jobs and the drift workflow set queue: max — the default cancels a pending job, so a drift tick could cancel a queued deploy");
-	ok(cd.noCancel && cs.noCancel && cr.noCancel, "§7 nothing may cancel an in-progress deploy");
 
 	const d = noComments(drift);
 	ok(/node scripts\/deploy\/drift-gate\.js/.test(d), "§7 deploy-drift.yml runs the gate");
+	ok(/^\s*BOX_HEAD:\s*\$\{\{\s*steps\.check\.outputs\.head\s*\}\}\s*$/m.test(d), "§7 the gate is told the HEAD the check read (an unhealthy box with main checked out asks about main's Deploy run)");
 	ok(/permissions:\s*\n(?: {2}.*\n)*? {2}actions:\s*read/.test(d), "§7 deploy-drift.yml grants actions: read (the gate reads Deploy runs)");
 	ok(/uses:\s*\.\/\.github\/actions\/vps-deploy/.test(d), "§7 the heal uses the shared vps-deploy action");
 	ok(/rollback_on_failure:\s*"true"/.test(d), "§7 the heal auto-rolls-back on failed verification");
@@ -902,8 +991,9 @@ function sourcePins() {
 	for (const [c, m] of checkProductionGate(deploy)) ok(c, m);
 
 	const pd = noComments(deploy);
-	const shaPins = pd.match(/sha:\s*\$\{\{\s*github\.event_name == 'push' && github\.sha \|\| '' \}\}/g) || [];
+	const shaPins = pd.match(/sha:\s*\$\{\{\s*github\.event_name == 'push' && github\.sha \|\| (''|steps\.gate\.outputs\.sha) \}\}/g) || [];
 	ok(shaPins.length === 2, `§7 both deploy.yml jobs pin a push to github.sha (found ${shaPins.length})`);
+	for (const [c, m] of checkHealHandover(drift)) ok(c, m);
 	ok(/SHA='\$SHA'/.test(action), "§7 the action forwards SHA to remote-deploy.sh");
 
 	// ── The run: scanner checks itself first. A scanner that silently matches
@@ -1054,6 +1144,16 @@ async function mutants() {
 	ok(failOpen !== src, "§8 mutant 'unreadable annotations read as unreached' must actually differ from the source");
 	ok((await checkAnnotationLookup(load(failOpen), "[mutant] ")).some(([c]) => !c), "§8 mutant 'unreadable annotations read as unreached' must be caught by §4");
 	const readsQueued = src.replace("\t\t\tnewest.status === \"completed\" &&\n", "");
+	for (const [name, from, to] of [
+		["any unhealthy box with a running Deploy run is excused, whatever HEAD is", "&& boxHead === targetSha && repo) {", "&& repo) {"],
+		["any answer about main's Deploy run excuses an unhealthy box", 'if (seen.verdict === "pending") {', "if (true) {"],
+		["only push runs count as a deploy in progress", ".filter((r) => r && r.head_sha === sha);\n\tconst running", '.filter((r) => r && r.event === "push" && r.head_sha === sha);\n\tconst running'],
+		["a running Deploy run of any commit counts", ".filter((r) => r && r.head_sha === sha);\n\tconst running", ".filter((r) => !!r);\n\tconst running"],
+	]) {
+		const code = src.replace(from, to);
+		ok(code !== src, `§8 mutant '${name}' must actually differ from the source`);
+		ok((await checkUnhealthyDeploy(load(code), "[mutant] ")).some(([c]) => !c), `§8 mutant '${name}' must be caught by §5`);
+	}
 	ok(readsQueued !== src, "§8 mutant 'annotations read for a run that is not completed' must actually differ from the source");
 	ok((await checkAnnotationLookup(load(readsQueued), "[mutant] ")).some(([c]) => !c), "§8 mutant 'annotations read for a run that is not completed' must be caught by §4");
 
@@ -1066,6 +1166,29 @@ async function mutants() {
 		const m = deployText.split(from).join(to);
 		ok(m !== deployText, `§8 mutant '${name}' must actually differ from deploy.yml (update it if the job moved)`);
 		ok(checkProductionGate(m, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
+	}
+
+	// The queues (§7), mutated in memory only.
+	const driftText = fs.readFileSync(path.join(ROOT, ".github/workflows/deploy-drift.yml"), "utf8");
+	const healConc = "    concurrency:\n      group: deploy-refs/heads/main\n      cancel-in-progress: false\n      queue: max\n";
+	for (const [name, file, from, to] of [
+		["the heal leaves the production queue", "drift", healConc, ""],
+		["the drift check waits in the production queue again", "drift", "concurrency:\n  group: deploy-drift\n", "concurrency:\n  group: deploy-refs/heads/main\n"],
+		["the heal may cancel a queued deploy", "drift", healConc, healConc.replace("      queue: max\n", "")],
+		["production's queue is renamed in deploy.yml only", "deploy", "      group: deploy-refs/heads/main\n", "      group: deploy-production\n"],
+	]) {
+		const d = file === "deploy" ? deployText.split(from).join(to) : deployText;
+		const r = file === "drift" ? driftText.split(from).join(to) : driftText;
+		ok(d !== deployText || r !== driftText, `§8 mutant '${name}' must actually differ from the workflows (update it if the job moved)`);
+		ok(checkQueues(d, r, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
+	}
+	for (const [name, from, to] of [
+		["the heal prep drops the marker from its compare", " EXPECT_MARKER='$EXPECT_MARKER' bash -s", " bash -s"],
+		["the check job stops exporting the HEAD it read", "      head: ${{ steps.check.outputs.head }}\n", ""],
+	]) {
+		const r = driftText.split(from).join(to);
+		ok(r !== driftText, `§8 mutant '${name}' must actually differ from deploy-drift.yml`);
+		ok(checkHealHandover(r, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
 	}
 
 	// The rerun job's own guards (§9).

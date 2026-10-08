@@ -76,6 +76,10 @@ const ENV = {
 	STUB_LOG_DIR: D.logs,
 	STUB_NODE: path.join(INTERP_DIR, "node"),
 	DEPLOY_LOCK_DIR: D.lock,
+	// The bounded wait for a held lock (remote-deploy.sh's deploy-lock block),
+	// short here so a contender that must give up does so quickly. Cases that
+	// prove the wait succeeds set their own.
+	DEPLOY_LOCK_WAIT_S: "1",
 };
 
 function git(cwd, ...args) {
@@ -170,16 +174,31 @@ exit "\${code:-0}"
 `);
 const hasRealFlock = spawnSync("sh", ["-c", "command -v flock"], { env: { PATH: process.env.PATH } }).status === 0;
 if (!hasRealFlock) {
-	// Implements only the form the scripts use: `flock -n <fd>`. flock(2) on the
-	// inherited descriptor, exactly like util-linux: the lock stays with the open
-	// file description, so it outlives this process and dies with the shell's FD.
+	// Implements only the forms the scripts use: `flock -n <fd>` and
+	// `flock -w <seconds> <fd>`. flock(2) on the inherited descriptor, exactly
+	// like util-linux: the lock stays with the open file description, so it
+	// outlives this process and dies with the shell's FD. -w retries a
+	// non-blocking flock until the timeout, then exits 1, as util-linux does.
 	writeExec(path.join(D.bin, "flock"), `#!/usr/bin/perl
-use strict; use Fcntl qw(:flock);
-my $nb = 0; my @a = @ARGV;
-while (@a && $a[0] =~ /^-/) { my $o = shift @a; $nb = 1 if $o eq '-n' || $o eq '--nonblock'; }
+use strict; use Fcntl qw(:flock); use Time::HiRes qw(time sleep);
+my $nb = 0; my $wait; my @a = @ARGV;
+while (@a && $a[0] =~ /^-/) {
+	my $o = shift @a;
+	if ($o eq '-n' || $o eq '--nonblock') { $nb = 1; }
+	elsif ($o eq '-w' || $o eq '--timeout') { $wait = shift @a; }
+	else { die "flock shim: unsupported option $o\\n"; }
+}
 my $fd = shift @a;
-die "flock shim: only 'flock [-n] <fd>' is supported\\n" unless defined $fd && $fd =~ /^\\d+$/ && !@a;
+die "flock shim: only 'flock [-n | -w <s>] <fd>' is supported\\n" unless defined $fd && $fd =~ /^\\d+$/ && !@a;
 open(my $fh, "+<&=", $fd) or die "flock shim: fd $fd: $!\\n";
+if (defined $wait) {
+	my $end = time + $wait;
+	while (1) {
+		exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+		exit 1 if time >= $end;
+		sleep 0.05;
+	}
+}
 exit(flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) ? 0 : 1);
 `);
 }
@@ -342,6 +361,60 @@ function finish() {
 }
 const crash = (err) => failures.push(`runner crashed: ${err && err.stack ? err.stack : err}`);
 
+// The heal prep's compare-and-swap inputs, exactly as deploy-drift.yml hands
+// them over from a drift check's output: production as the check read it, its
+// HEAD, and its marker (`none` when there was none).
+const healExpect = (checkOutput) => ({
+	EXPECT: field(checkOutput, "DRIFT_LOCAL"),
+	EXPECT_HEAD: field(checkOutput, "DRIFT_HEAD"),
+	EXPECT_MARKER: field(checkOutput, "DRIFT_MARKER") || "none",
+});
+// …and the box as it is right now, for a heal prep called with no check before it.
+const boxSeen = () => ({ EXPECT_HEAD: head(), EXPECT_MARKER: marker() || "none" });
+
+// Holds the box's deploy lock from another process, the way a running deploy
+// does: `note` is the holder's note it writes into the lock file (as every
+// holder does), and with `seconds` it lets go by itself after that long, so a
+// contender run meanwhile can be seen to wait for it. Returns once the lock is
+// held; release() lets go and waits until the lock is free.
+function holdLock({ note = "", seconds = 0 } = {}) {
+	const ready = path.join(T, `lock-held-${Math.random().toString(36).slice(2)}`);
+	const release = `${ready}.release`;
+	const ticks = seconds > 0 ? Math.round(seconds * 20) : 72000;
+	const env = { ...ENV, LOCK: LOCK_FILE, READY: ready, RELEASE: release, NOTE: note, TICKS: String(ticks) };
+	spawnSync("bash", ["-c", '( exec 9<>"$LOCK"; flock -w 10 9 || exit 3; if [ -n "$NOTE" ]; then printf "%s\\n" "$NOTE" > "$LOCK"; fi; : > "$READY"; i=0; while [ ! -e "$RELEASE" ] && [ "$i" -lt "$TICKS" ]; do sleep 0.05; i=$((i + 1)); done ) >/dev/null 2>&1 </dev/null &'], { env });
+	const free = () => spawnSync("bash", ["-c", 'exec 9<>"$LOCK"; flock -n 9'], { env }).status === 0;
+	const until = Date.now() + 10000;
+	while (!fs.existsSync(ready)) {
+		if (Date.now() > until) throw new Error("could not take the deploy lock for the test");
+		spawnSync("sleep", ["0.05"]);
+	}
+	return {
+		release() {
+			fs.writeFileSync(release, "");
+			const until2 = Date.now() + 10000;
+			while (!free()) {
+				if (Date.now() > until2) throw new Error("the deploy lock was never released after the test");
+				spawnSync("sleep", ["0.05"]);
+			}
+			fs.rmSync(ready, { force: true });
+			fs.rmSync(release, { force: true });
+		},
+	};
+}
+// …while fn runs, then releases it.
+function withLockHeld(fn, opts = {}) {
+	const h = holdLock(opts);
+	try {
+		return fn();
+	} finally {
+		h.release();
+	}
+}
+// The note each kind of holder writes (remote-deploy.sh's deploy-lock block,
+// remote-drift-check.sh).
+const holderNote = (by) => `pid=1 since=2026-10-08T00:00:00Z by=${by}`;
+
 module.exports = {
 	DEPLOY_DIR, readScript, REAL, SMOKE,
 	ok, record, finish, crash,
@@ -352,6 +425,7 @@ module.exports = {
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,
+	healExpect, boxSeen, withLockHeld, holdLock, holderNote,
 	...mutantHelpers,
 	M: "[mutant] ",
 };

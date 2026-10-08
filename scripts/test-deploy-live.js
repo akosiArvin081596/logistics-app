@@ -57,7 +57,7 @@ const {
 	C1, C2, C3, S1, head, onMain, marker, log, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, clearLogs, reflog, checkOut, result, deployedFrom, didFullDeploy, isNoop, rollback,
-	fastBinDir, leaveHalfFinished,
+	fastBinDir, leaveHalfFinished, healExpect,
 } = require("./deploy-test-sandbox.js");
 
 // The deploy's stdout, as the action reads it.
@@ -158,7 +158,7 @@ const LIVE_CASES = {
 		resetBox(C3, { verified: C2, started: C3 });
 		// Drift reads it as behind-healable; the heal prep writes the marker.
 		let out = checkOut(S);
-		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: field(out, "DRIFT_LOCAL") });
+		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, ...healExpect(out) });
 		r.push([field(out, "DRIFT_STATE") === "behind-healable" && field(h.out, "HEAL_READY") === "yes" && marker() === C3,
 			`${tag}§13 (setup) drift heals it once: behind-healable, marker C3 (got ${field(out, "DRIFT_STATE")})`]);
 		// The heal deploys C3 again. LIVE is C3, the very commit it restarts.
@@ -544,7 +544,7 @@ const DEPLOY_STEP_CASES = {
 		return [[x.code === 0 && x.outputs.prev === "", `${tag}§14 a DEPLOYED_FROM that is not a full commit id gives no rollback target at all (prev ${JSON.stringify(x.outputs.prev)})`]];
 	},
 	refRefused(script, tag) {
-		return ["main'; touch pwned; '", "-x", "--upload-pack=x", "", "a".repeat(101), "main\nx", "feat x", "main$(id)", "a@{1}"].map((bad) => {
+		return ["main'; touch pwned; '", "-x", "--upload-pack=x", "", "a".repeat(101), "main\nx", "feat x", "main$(id)", "a@{1}", "main..x", "../../etc"].map((bad) => {
 			const x = runDeployStep(script, { REF: bad, out: deployOut() });
 			return [x.code === 1 && x.calls === "" && /the ref to deploy is not a plain branch, tag or commit name/.test(x.out) && (bad.length < 3 || !x.out.includes(bad)),
 				`${tag}§14 the deploy step refuses REF=${JSON.stringify(bad.slice(0, 24))} before any ssh, without echoing it (code ${x.code})`];
@@ -747,8 +747,9 @@ function mutants() {
 	expectCaught("the deploy step reads the first line of its kind", deployStepPins(swap(step, "| tail -1 |", "| head -1 |"), M, ["earlierLines"]));
 	expectCaught("the deploy step matches inside a line", deployStepPins(swap(step, 'grep -E "^$1=($2)\\$"', 'grep -E "$1=($2)"'), M, ["wholeLines"]));
 	expectCaught("any ref reaches the box", deployStepPins(swap(step,
-		'if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]]; then', "if false; then"), M, ["refRefused"]));
+		'if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]] || [[ "$REF" == *..* ]]; then', "if false; then"), M, ["refRefused"]));
 	expectCaught("a ref may start with a dash", deployStepPins(swap(step, ' || [[ "$REF" == -* ]]', ""), M, ["refRefused"]));
+	expectCaught("a ref may hold ..", deployStepPins(swap(step, ' || [[ "$REF" == *..* ]]', ""), M, ["refRefused"]));
 	expectCaught("any SHA reaches the box", deployStepPins(swap(step,
 		'if [ -n "$SHA" ] && ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then', "if false; then"), M, ["shaRefused"]));
 	expectCaught("the rollback target takes any hex length", deployStepPins(swap(step,

@@ -18,6 +18,17 @@ inputs:
   host:                { description: VPS host,                            required: true }
   user:                { description: VPS user,                            required: true }
 
+# What the deploy step read back from remote-deploy.sh's last lines, for a job
+# that must know what its later steps are checking (deploy.yml's staging job
+# refuses to smoke-check a build that is not this run's commit).
+outputs:
+  result:
+    description: "deployed, noop (a newer live commit already contains this one) or unproven; empty when the deploy step never reported"
+    value: ${{ steps.deploy.outputs.result }}
+  to:
+    description: The full SHA serving after the deploy step (for a noop, the newer live commit)
+    value: ${{ steps.deploy.outputs.to }}
+
 runs:
   using: composite
   steps:
@@ -45,8 +56,9 @@ runs:
         set -euo pipefail
         # REF and SHA reach the box inside the remote command's quotes, so only
         # a plain branch, tag or commit name gets that far (a dispatch's `ref`
-        # is free text). The value itself is never echoed.
-        if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]]; then
+        # is free text; no ref name can hold `..`). The value itself is never
+        # echoed.
+        if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$REF" == -* ]] || [[ "$REF" == *..* ]]; then
           echo "::error::the ref to deploy is not a plain branch, tag or commit name — nothing was deployed"
           exit 1
         fi

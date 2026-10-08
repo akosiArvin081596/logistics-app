@@ -58,13 +58,29 @@ Needed at the repo root, and never committed:
 No Jest/Vitest/ESLint. Instead, standalone runners plus a manual HTTP harness:
 
 ```bash
-npm run check      # node --check server.js — one very large file (wc -l server.js)
-npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs) — no server needed
-npm run ci         # check + test:unit + build:client — the same gate CI runs
+npm run lint       # node --check over server.js, lib/*.js and scripts/*.js (under a second)
+npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), 4 at a time — no server needed
+npm run check      # lint + test:unit: the fast local check, 70–110 s on an M-series Mac
+npm run ci         # check + build:client — the same gate CI runs
 ```
 
 `npm run test:unit` (that is, `node scripts/run-unit-tests.js`) prints how many
-runners it found and names each one, so no count is kept here.
+runners it found and names each one, so no count is kept here. It runs them 4 at
+a time (`UNIT_TEST_CONCURRENCY=1` for one by one), so a new runner must be
+isolated: temp files from `mkdtemp`, databases `:memory:` or inside that temp
+directory, servers on port 0, nothing written into the repo. Timing-sensitive
+runners (`scripts/test-pdf-cold-start.js`) run alone after the rest.
+
+**Pre-push hook.** `.githooks/pre-push` runs `npm run check` before every push
+and blocks the push if it fails. Turn it on once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It switches to the Node in `.nvmrc` through fnm when fnm is installed, and skips
+a push that only deletes branches. It checks the working tree, so commit first.
+`git push --no-verify` skips it for one push; CI runs the same runners anyway.
 
 `test-suite.js` at the repo root is a **separate, manual** HTTP harness. It needs
 a running server, it **writes** (it logs an expense, among other things), and it
@@ -90,11 +106,17 @@ Browser end-to-end tests (Playwright, local and staging) live in
 GitHub Actions. Every PR into `main`, and every push to it, runs the `ci` gate
 above on the Node version in `.nvmrc`.
 
-**Merging to `main` deploys staging automatically; production follows once a reviewer
-approves it** (the `production` Environment has a required reviewer since 2026-09-25:
-test staging, then approve). Production runs only if staging went green, smoke-checks
-itself, verifies the public edge, and **rolls itself back** to the previous SHA if
-either check fails.
+**Merging to `main` deploys staging, then production, with nobody approving.**
+Production deploys only after the staging job passed: staging deployed, a
+read-only staging smoke check through the public edge passed (health, the login
+page, every bundle file, an API call that must answer 401 signed out, the
+live-update handshake), and CI's push run passed on that same commit. Branch
+protection does not require PRs to be up to date with `main`, so that push run
+is the first CI verdict on what a merge produced. Production then smoke-checks
+itself, verifies the public edge, and **rolls itself back** to the previous SHA
+if either check fails. A manual production deploy (a rollback, say) deploys
+only a commit that passed staging in its own push run, unless it is run with
+`override=true`, which is recorded as a warning on the run.
 
 Setup, the safety reasoning, and the rollback design: [`.github/workflows/README.md`](.github/workflows/README.md).
 

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pre-push: runs `npm run check` (syntax check + every unit runner, 4 at a
+# time) and blocks the push when it fails.
+#
+# Turn it on once per clone:   git config core.hooksPath .githooks
+# Skip it for one push:        git push --no-verify
+#
+# It checks the WORKING TREE, which is what was just committed when the tree
+# is clean. A push that only deletes remote branches runs nothing.
+#
+# The runners load better-sqlite3, which is built for the Node in .nvmrc, so
+# the hook switches to that Node through fnm when fnm is installed.
+set -uo pipefail
+
+# Git exports where the repository is (GIT_DIR and friends) to its hooks. The
+# deploy runners build throwaway repositories of their own and run git inside
+# them; inherited, these variables would point those git commands back at
+# this repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX \
+	GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+
+# Git hands the hook one line per ref: <local ref> <local oid> <remote ref>
+# <remote oid>. A deletion has an all-zero local oid. Read only when stdin is
+# not a terminal, so running the hook by hand does not wait for input.
+zero=0000000000000000000000000000000000000000
+refs=0
+updates=0
+if [ ! -t 0 ]; then
+	while read -r _local_ref local_oid _remote_ref _remote_oid; do
+		refs=$((refs + 1))
+		[ "$local_oid" = "$zero" ] || updates=$((updates + 1))
+	done
+fi
+if [ "$refs" -gt 0 ] && [ "$updates" -eq 0 ]; then
+	echo "pre-push: only branch deletions, nothing to check."
+	exit 0
+fi
+
+root=$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")
+cd "$root" || exit 1
+
+if command -v fnm >/dev/null 2>&1; then
+	eval "$(fnm env --shell bash)"
+	fnm use >/dev/null 2>&1 || echo "pre-push: fnm could not switch to the Node in .nvmrc ($(cat .nvmrc)); using $(node -v)."
+fi
+want=$(cat .nvmrc 2>/dev/null)
+have=$(node -v 2>/dev/null)
+if [ -n "$want" ] && [ "${have#v}" != "${want#v}" ]; then
+	echo "pre-push: Node $have is running, .nvmrc wants $want. Runners that load better-sqlite3 will fail with NODE_MODULE_VERSION errors until you switch (fnm use)."
+fi
+
+start=$SECONDS
+if npm run check; then
+	echo "pre-push: npm run check passed in $((SECONDS - start)) s."
+	exit 0
+fi
+echo "pre-push: npm run check FAILED, so the push was blocked. Fix it, or push with --no-verify to skip the check once."
+exit 1

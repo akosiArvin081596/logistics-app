@@ -34,6 +34,8 @@
  * run_id and run_attempt.
  */
 
+// lookupStaging() also gates a manual production deploy
+// (scripts/deploy/dispatch-gate.js), so the same verdict decides both.
 // ⚠️ deploy.yml's staging job is looked up BY NAME. Renaming it (the `name:`,
 // not the job id) makes every heal fail closed as unverified until this moves
 // with it. scripts/test-drift-gate.js pins the two together.
@@ -71,6 +73,14 @@ const ACTIONS = Object.freeze({
 	"behind-staging-unverified": "alarm",
 	"behind-staging-unreached-retried": "alarm",
 	"verified-record-inconsistent": "alarm",
+	// The box's deploy lock was held: a deploy, rollback or record step was
+	// running, so the check read nothing. Not an incident; the next tick reads.
+	"deploy-in-progress": "notice",
+	// The lock has been held for over 30 minutes: nothing deploys that long.
+	"deploy-lock-stuck": "alarm",
+	// The box could not read main's tip from origin, so it cannot compare, and
+	// it could not fetch for its next deploy either.
+	"remote-unreadable": "alarm",
 });
 
 const HINTS = Object.freeze({
@@ -78,19 +88,25 @@ const HINTS = Object.freeze({
 	"behind-healable":
 		"production's last verified deploy is behind main but it is serving, and main's commit PASSED staging: the shape of a deploy that failed on transport, or one that died after its checkout (HEAD moved, never verified). Healing once, a full deploy of main's commit with the same smoke check, edge check and auto-rollback as deploy.yml.",
 	"behind-staging-pending":
-		"production is behind main, but the Deploy run for main's commit has not finished its staging job yet. The deploy is still on its way; the next tick re-checks.",
+		"production is behind main, but the Deploy run for main's commit has not finished yet (its staging job, with the staging smoke and the wait for CI on main, or its production job). The deploy is still on its way; the next tick re-checks.",
 	"behind-already-attempted":
 		"an automatic attempt at main's commit is already recorded on the box: an earlier heal, a production auto-rollback, or a manual pin to another ref. Not retrying. Fix main, or deploy it by hand once it is safe (Actions → Deploy → production, ref=main).",
 	"behind-and-unhealthy":
 		"production is behind main AND not serving 200. That is an incident, not a missed deploy; healing would paper over it.",
 	"behind-staging-failed":
-		"staging REJECTED main's commit, so production must not get it. Fix main; the next green staging deploys production normally.",
+		"main's staging job failed (its deploy, the staging smoke, or the wait for CI on main), so production must not get the commit. Open the failed staging job first. If CI on main failed or timed out for a reason unrelated to the commit, re-run that CI run, then re-run the Deploy run's failed jobs (gh run rerun <run-id> --failed): staging redeploys, smoke-checks, finds CI green, and production follows. Fix main only when CI or the smoke is genuinely red; the next green staging then deploys production normally.",
 	"behind-staging-unverified":
 		"no staging verdict exists for main's commit (no push-triggered Deploy run, e.g. [skip ci], or the GitHub API lookup failed). Not healing without one.",
 	"behind-staging-unreached":
 		"production is behind main because main's staging job never reached the VPS: every ssh attempt exited 255 and ssh-retry.sh gave up, so staging produced no verdict at all. Re-running that Deploy run's failed jobs once. Staging deploys and smoke-checks the same commit again, and production follows only if staging passes.",
 	"behind-staging-unreached-retried":
 		"main's staging job never reached the VPS (every ssh attempt exited 255), and its Deploy run is already past its first attempt (a re-run, automatic or by hand, already happened) or reports no attempt number. Not re-running it again. 255 is not only the network: a refused deploy key, a changed host key and a dropped session end the same way. Check those, then re-run it by hand: gh run rerun <run-id> --failed.",
+	"deploy-in-progress":
+		"a deploy of production is running right now: either the box's deploy lock was held (a deploy, rollback or record step), so the drift check read nothing, or main's commit is checked out but not answering while its Deploy run is still running (the app restarting). The next tick reads the box once it is done.",
+	"remote-unreadable":
+		"the box could not read main's tip from origin (git ls-remote failed or timed out), so drift cannot tell whether production is behind, and the next deploy's fetch would fail the same way. Check the box's access to GitHub (its deploy key, DNS, the network).",
+	"deploy-lock-stuck":
+		"the box's deploy lock has been held for over 30 minutes, longer than any deploy, rollback or record step takes, so every deploy of production now fails fast. Find the holder on the box (fuser -v on the lock file the check names) before deploying again.",
 	"verified-record-inconsistent":
 		"production's record of its last verified deploy (git ref refs/logisx/verified-deploy) names a commit HEAD does not contain, or no commit at all: HEAD was moved back past it outside the deploy scripts, a manual deploy of an older ref died after its checkout, or a verified pin off main was followed by a deploy of main that died after its checkout. Which commit serves is unknown, so nothing heals. Check the box, then deploy main by hand (Actions → Deploy → production, ref=main); a verified deploy rewrites the record.",
 });
@@ -187,10 +203,10 @@ function stagingVerdict(runs, jobsByRun, sha, annotationsByJob) {
 	// has not given its answer yet. A re-run still waiting in the queue lists
 	// its PREVIOUS attempt's jobs, finished and maybe failed, and reading
 	// those as its verdict would alarm on (or re-run, or heal) a run that is
-	// about to answer for itself. While a drift run executes it holds the
-	// concurrency group it shares with deploy.yml's production job, so a Deploy
-	// run it sees is completed, queued, or still in its staging job (staging
-	// has its own queue); any of those not completed is on its way.
+	// about to answer for itself. The drift check does not share a queue with
+	// any Deploy job, so a Deploy run it sees may be queued or running any of
+	// its jobs (staging with its smoke and CI wait, or production); any run not
+	// completed is on its way.
 	// Never key this on the staging JOB's run_attempt instead: after a re-run
 	// of production alone, staging keeps attempt 1 in a run on attempt 2, and
 	// its pass must still count (the heal).
@@ -341,9 +357,64 @@ async function lookupStaging({
 	return stagingVerdict(runs, jobsByRun, sha, annotationsByJob);
 }
 
+/**
+ * Is a Deploy run of `sha` still running? Runs of ANY event count: a push, or
+ * a manual production deploy dispatched from main (a dispatch's head_sha is
+ * the tip of the branch it ran from). Answers { verdict: "pending", ... } for
+ * the newest such run, or { verdict: "none", ... }. Throws on an API failure.
+ */
+async function deployRunning({
+	repo,
+	sha,
+	token,
+	apiBase = "https://api.github.com",
+	fetchImpl = globalThis.fetch,
+	sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)),
+	backoffMs,
+}) {
+	const base = apiBase.replace(/\/+$/, "");
+	const body = await getJson(
+		`${base}/repos/${repo}/actions/workflows/${DEPLOY_WORKFLOW_FILE}/runs?head_sha=${encodeURIComponent(sha)}&per_page=20`,
+		{ token, fetchImpl, sleepImpl, backoffMs }
+	);
+	// Filtered again client-side, as lookupStaging() does.
+	const runs = (Array.isArray(body && body.workflow_runs) ? body.workflow_runs : []).filter((r) => r && r.head_sha === sha);
+	const running = runs.filter((r) => PENDING.has(r.status)).sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+	if (running) {
+		return {
+			verdict: "pending",
+			detail: `Deploy run ${running.id} (${running.event}) of main's commit is '${running.status}'`,
+			url: running.html_url || "",
+			runId: running.id,
+			runAttempt: running.run_attempt,
+		};
+	}
+	return { verdict: "none", detail: `none of the ${runs.length} Deploy run(s) of main's commit is still running`, url: "" };
+}
+
 /** The whole decision, with the network injected. Never throws. */
-async function decide({ boxState, targetSha, repo, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs }) {
+async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs }) {
 	let gate = { verdict: "", detail: "not needed", url: "" };
+	// Behind and not answering, with main's own commit already checked out: a
+	// deploy of that commit may be restarting the app. The box lock is released
+	// once remote-deploy.sh exits, and the app then boots for 2–16 s while the
+	// smoke check polls it. While a Deploy run of main's commit is still
+	// running (any event: a push, or a manual production deploy dispatched
+	// from main), that is a deploy in progress; otherwise the box's alarm stands.
+	if (boxState === "behind-and-unhealthy" && SHA_RE.test(targetSha || "") && boxHead === targetSha && repo) {
+		let seen;
+		try {
+			seen = await deployRunning({ repo, sha: targetSha, token, apiBase, fetchImpl, sleepImpl, backoffMs });
+		} catch (err) {
+			seen = { verdict: "unverified", detail: `GitHub API lookup failed: ${err && err.message ? err.message : err}`, url: "" };
+		}
+		if (seen.verdict === "pending") {
+			const state = "deploy-in-progress";
+			return { state, action: actionFor(state), hint: hintFor(state), ...seen };
+		}
+		gate = { ...seen, detail: `${seen.detail}, so the app not answering is an incident` };
+		return { state: boxState, action: actionFor(boxState), hint: hintFor(boxState), ...gate };
+	}
 	if (boxState === "behind-healable") {
 		if (!SHA_RE.test(targetSha || "")) {
 			gate = { verdict: "unverified", detail: `the drift check reported no usable main SHA ('${targetSha || ""}')`, url: "" };
@@ -382,6 +453,7 @@ async function main() {
 	const result = await decide({
 		boxState: (process.env.BOX_STATE || "").trim(),
 		targetSha: (process.env.TARGET_SHA || "").trim(),
+		boxHead: (process.env.BOX_HEAD || "").trim(),
 		repo: process.env.GITHUB_REPOSITORY || "",
 		token: process.env.GITHUB_TOKEN || "",
 		apiBase: process.env.GITHUB_API_URL || "https://api.github.com",
@@ -428,7 +500,9 @@ module.exports = {
 	refineState,
 	neverReachedVps,
 	stagingVerdict,
+	getJson,
 	lookupStaging,
+	deployRunning,
 	decide,
 };
 
