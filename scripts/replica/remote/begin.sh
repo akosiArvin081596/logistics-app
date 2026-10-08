@@ -1,0 +1,33 @@
+# replica:pull, the start of the program the server runs (bash, read from ssh's
+# stdin; scripts/replica/pull.sh streams it: the variables below, this file, the
+# step scripts as here-documents, then finish.sh). Nothing is installed or left
+# on the server: everything happens in one temporary folder, created mode 700
+# with umask 077, and a trap removes that folder if any step fails. On success
+# the folder stays for pull.sh to download, and pull.sh removes it afterwards
+# (its own trap does that even when the download fails).
+#
+# Set by pull.sh before this file: STAMP, APP, NODE, TMP_PARENT.
+set -euo pipefail
+umask 077
+case "$STAMP" in
+  ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) echo "replica-remote: bad stamp" >&2; exit 2 ;;
+esac
+[ "$TMP_PARENT" = /root/logisx-replica-tmp ] || { echo "replica-remote: unexpected temporary folder" >&2; exit 2; }
+TMP="$TMP_PARENT/$STAMP"
+REPLICA_REMOTE_OK=0
+replica_remote_cleanup() {
+  rc=$?
+  if [ "$REPLICA_REMOTE_OK" != 1 ]; then
+    rm -rf -- "$TMP"
+    rmdir -- "$TMP_PARENT" 2>/dev/null || true
+    echo "replica-remote: a step failed; the temporary folder was removed" >&2
+  fi
+  exit "$rc"
+}
+trap replica_remote_cleanup EXIT
+trap 'exit 130' INT TERM HUP
+[ -f "$APP/app.db" ] || { echo "replica-remote: no database at $APP/app.db" >&2; exit 2; }
+[ -x "$NODE" ] || { echo "replica-remote: no node at $NODE" >&2; exit 2; }
+mkdir -p -m 700 -- "$TMP_PARENT"
+mkdir -m 700 -- "$TMP"
+echo "replica-remote: temporary folder created ($TMP)"

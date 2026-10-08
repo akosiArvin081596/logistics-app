@@ -184,6 +184,7 @@ function documentDeps(overrides = {}) {
 		imageToPdf: async () => Buffer.from("%PDF-"),
 		path,
 		__dirname: "/srv/logisx",
+		DATA_DIR: "/srv/logisx",
 		fs: {
 			existsSync: () => true,
 			mkdirSync: () => {},

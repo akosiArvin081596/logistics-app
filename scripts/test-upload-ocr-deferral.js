@@ -143,10 +143,10 @@ function buildQueue({ queueSrc = QUEUE_SRC, maxSrc = MAX_SRC, bytesSrc = BYTES_S
 		},
 	};
 	const fakeConsole = { warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")), log() {} };
-	const api = new Function("extractReceiptText", "receiptOcrSkipReason", "db", "console",
+	const api = new Function("extractReceiptText", "receiptOcrSkipReason", "db", "console", "REPLICA",
 		`"use strict";\n${maxSrc}\n${bytesSrc}\n${CHAIN_SRC}\n${PENDING_SRC}\n${QUEUED_BYTES_SRC}\n${queueSrc}\n` +
 		"return { queueReceiptOcr, pending: () => receiptOcrPending, queuedBytes: () => receiptOcrQueuedBytes, chain: () => receiptOcrChain };")(
-		ocr, skipReason, db, fakeConsole);
+		ocr, skipReason, db, fakeConsole, null);
 	return { ...api, logs, updates };
 }
 

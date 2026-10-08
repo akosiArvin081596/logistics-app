@@ -180,7 +180,7 @@ function buildServer({ routes = {}, hooks = {} } = {}) {
 	const reg = (verb) => (p, ...h) => { handlers[`${verb} ${p}`] = h[h.length - 1]; };
 	const env = {
 		app: { get: reg("GET"), post: reg("POST"), put: reg("PUT"), delete: reg("DELETE") },
-		db, crypto, path, fs, __dirname: TMP,
+		db, crypto, path, fs, __dirname: TMP, DATA_DIR: TMP,
 		requireRole: () => noop, refuseCrossOrigin: noop, publicFormLimiter: noop, pdfPreviewLimiter: noop,
 		onboardingSignLimiter: noop, onboardingPreviewLimiter: noop, investorInviteLookupLimiter: noop,
 		publicFormInput, w9Input, imageLimits, safeSignatureImage, piiMask, investorPaymentTerms,

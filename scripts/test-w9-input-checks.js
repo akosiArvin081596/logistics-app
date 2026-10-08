@@ -406,8 +406,8 @@ function build(src = FILL_SRC, { missingField } = {}) {
 			return doc;
 		},
 	};
-	return new Function("path", "fs", "__dirname", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
-		`"use strict";\n${src}\nreturn fillW9Form;`)(path, fs, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits,
+	return new Function("path", "fs", "__dirname", "DATA_DIR", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
+		`"use strict";\n${src}\nreturn fillW9Form;`)(path, fs, ROOT, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits,
 		{ ...console, warn: () => {} });
 }
 const APPLICANT = { legalName: "QA-TEST Holdings LLC", entityType: "LLC", taxClassification: "C-Corp", address: "1 QA Test Way, Testville, TX 77001", einSsn: "12-3456789", effectiveDate: "September 30, 2026" };

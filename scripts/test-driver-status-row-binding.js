@@ -506,7 +506,7 @@ check("the cutoff is an ISO string computed in JS, not SQLite datetime()",
 	/new Date\(Date\.now\(\) - REFUSAL_AUDIT_RETENTION_DAYS[\s\S]*?\.toISOString\(\)/.test(PURGE_FN), true);
 check("...so the DELETE never calls datetime('now', …)", /datetime\('now'/.test(PURGE_FN), false);
 check("the purge is scheduled like purgeOldDriverLocations (boot + weekly)",
-	/purgeOldAuditRefusals\(\);\nsetInterval\(purgeOldAuditRefusals, 7 \* 24 \* 60 \* 60 \* 1000\)/.test(SRC), true);
+	/purgeOldAuditRefusals\(\);\n\s*setInterval\(purgeOldAuditRefusals, 7 \* 24 \* 60 \* 60 \* 1000\)/.test(SRC), true);
 check("logAudit itself is untouched — successes are never coalesced",
 	/function logAudit\(req, action, entity, entityId, details\) \{\n\ttry \{\n\t\tconst user = req\.session\?\.user \|\| \{\};\n\t\tdb\.prepare\("INSERT INTO audit_trail/.test(SRC), true);
 
