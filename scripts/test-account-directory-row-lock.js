@@ -486,6 +486,18 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 				r.status === 200 && S.jtReads === 1 && dirRow(db, "Cara Carrier").carrier_name === "acme leasing" && account(db, 65).company_name === "acme leasing");
 		}
 		{
+			// An account with no driver name gets one that has a directory row (the
+			// Users page's Linked Driver list offers only those): the save still
+			// refreshes that row's e-mail, and judges nothing.
+			const { db, updateUser } = reset();
+			db.prepare("INSERT INTO users (id, username, role, driver_name, email, company_name) VALUES (67, 'u67', 'Driver', '', 'new@example.com', '')").run();
+			db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, email, status) VALUES ('Cara Carrier', 'Acme Leasing', 'old@example.com', 'active')").run();
+			const r = await updateUser(67, usersPageSave("Cara Carrier", { email: "new@example.com" }));
+			const row = dirRow(db, "Cara Carrier");
+			check(`§6 an account given its first driver name, the row exists: 200, the row's e-mail refreshed, its carrier kept, no lock read (${got(r)}, row email ${JSON.stringify(row.email)}, reads ${S.jtReads})`,
+				r.status === 200 && row.email === "new@example.com" && row.carrier_name === "Acme Leasing" && S.jtReads === 0);
+		}
+		{
 			// No directory row and no company change: the save adds no row, so
 			// onboarding can still add the driver's first row with its carrier judged.
 			const { db, updateUser } = reset();

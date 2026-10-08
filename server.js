@@ -24238,7 +24238,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// company / truck-unit sync that is the whole point of the call is
 			// skipped with no error. The lookup has to use the name the row carries
 			// now.
-			if (driverName.trim() && syncs(doRename ? driverName : user.driver_name)) {
+			// Looked up as the sync looks it up (`oldName || driverName`).
+			if (driverName.trim() && syncs((doRename ? driverName : user.driver_name) || driverName)) {
 				syncDriverToCarrierSheet(driverName, { oldName: doRename ? driverName : user.driver_name, email: email !== undefined ? email : user.email, companyName: syncCarrier, action: "update" });
 			}
 		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined) && syncs(user.driver_name)) {
