@@ -29695,7 +29695,10 @@ function invoiceRowPeriodLocked(r) {
 }
 
 // The remedy sentence every invoice write guard ends on, kept in one place so the
-// two routes cannot drift into telling an admin two different things.
+// two routes cannot drift into telling an admin two different things. The adjust
+// route's finalized-month refusal is the exception: it says its own plain sentence
+// (periodBlockedResponse()'s `finalizedMessage`). Mark-paid, revert and the Data
+// Issues list still end on this one.
 const INVOICE_LOCK_REMEDY =
 	"Reopen the affected period first — POST /api/periods/:period/reopen records a reason.";
 

@@ -652,6 +652,31 @@ async function section6() {
 		[409, "PERIOD_LOCK_UNREADABLE", true, false]);
 	healLocks();
 
+	// ⚠️ THE HELPER'S OWN RULE, pinned for any later caller (the adjust route can
+	// never reach these shapes): a refusal that also carries an unresolved date,
+	// or that names no month at all, keeps the composed text even when a
+	// finalizedMessage is passed. Each half of the condition has its own case.
+	R = build();
+	{
+		const plain = (labels) => `${labels.join(", ")} ${labels.length === 1 ? "is" : "are"} finalized, ${PLAIN_TAIL}`;
+		const both = (blockers) => {
+			const withMsg = mkRes();
+			const without = mkRes();
+			R.periodBlockedResponse({}, withMsg.res, "Cannot adjust X", blockers, "REMEDY.", { action: "t" }, plain);
+			R.periodBlockedResponse({}, without.res, "Cannot adjust X", blockers, "REMEDY.", { action: "t" });
+			return [errorOf(withMsg.out), errorOf(without.out)];
+		};
+		const [mixedWith, mixedWithout] = both([
+			{ table: "invoices", rows: 1, periods: ["2026-09"], detail: "a" },
+			{ table: "invoices", rows: 1, periods: [""], detail: "b" },
+		]);
+		check("MIXED finalized + unresolved: the composed text even with a finalizedMessage",
+			[mixedWith === mixedWithout, mixedWith.includes(PLAIN_TAIL)], [true, false]);
+		const [noneWith, noneWithout] = both([{ table: "invoices", rows: 1, periods: [], detail: "c" }]);
+		check("NO month named: the composed text even with a finalizedMessage",
+			[noneWith === noneWithout, noneWith.includes(PLAIN_TAIL)], [true, false]);
+	}
+
 	// The plain sentence is the adjust route's alone: mark-paid and revert keep theirs.
 	check("the plain sentence is in server.js once, in the adjust route",
 		[SRC.split(PLAIN_TAIL).length - 1, ADJUST.includes(PLAIN_TAIL)], [1, true]);
