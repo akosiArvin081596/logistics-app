@@ -403,13 +403,23 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	};
 	refused("NODE_ENV=production: refused before listening", (e) => { e.NODE_ENV = "production"; }, /REFUSING TO START[\s\S]*NODE_ENV is production/);
 	refused("an outbound credential: refused before listening", (e) => { e.GEMINI_API_KEY = "x"; }, /outbound credentials are set: GEMINI_API_KEY/);
-	refused("a credential in the settings file: refused before listening", (e, h) => { fs.writeFileSync(path.join(h.root, "settings.env"), "GMAIL_APP_PASSWORD='x'\n"); }, /outbound credentials are set: GMAIL_APP_PASSWORD/);
 	refused("a database outside ~/LogisX-replica: refused before listening", (e) => { e.DATABASE_PATH = path.join(tmp("elsewhere-"), "app.db"); }, /DATABASE_PATH .* is not under/);
 	refused("pm2 in the environment: refused before listening", (e) => { e.pm_id = "7"; }, /running under pm2/);
 	refused("a start without replica:start's marker: refused before listening", (e) => { delete e[rules.LAUNCHER_ENV]; }, /not started by replica:start/);
 	refused("a proxy setting: refused before listening", (e) => { e.HTTPS_PROXY = "http://127.0.0.1:9"; }, /proxy settings are set: HTTPS_PROXY/);
 	refused("a database in the clean snapshot: refused before listening", (e, h) => { e.DATABASE_PATH = path.join(h.root, "clean", "app.db"); }, /DATABASE_PATH .* is not under .*work\/t1/);
-	refused("a settings value that looks like a key: refused before listening", (e, h) => { fs.writeFileSync(path.join(h.root, "settings.env"), "SOME_SETTING='AIzaSyD3x9EXAMPLEEXAMPLE12345'\n"); }, /settings file holds SOME_SETTING, which a replica does not take \(secret: value looks like a key\)/);
+	// The settings file is judged after it is read, which on a machine that is not
+	// a Mac never happens (the start is refused first). So boot() itself is run
+	// here with the platform given as macOS: the rest of its checks are real.
+	const refusedAfterSettings = (name, settings, re) => {
+		const h = replicaHome({ settings });
+		const code = `require(${JSON.stringify(MODE)}).boot({ appDir: ${JSON.stringify(ROOT)}, env: process.env, platform: "darwin" }); console.log("BOOTED");`;
+		const r = spawnSync(process.execPath, ["-e", code], { cwd: decoy(), env: baseEnv(h), encoding: "utf8", timeout: 20000 });
+		ok(name, r.status === 1 && re.test(r.stderr) && !/BOOTED/.test(r.stdout), { status: r.status, err: r.stderr.slice(0, 300) });
+	};
+	refusedAfterSettings("a credential in the settings file: refused once the file is read", "GMAIL_APP_PASSWORD='x'\n", /outbound credentials are set: GMAIL_APP_PASSWORD/);
+	refusedAfterSettings("a settings value that looks like a key: refused once the file is read", "SOME_SETTING='AIzaSyD3x9EXAMPLEEXAMPLE12345'\n", /settings file holds SOME_SETTING, which a replica does not take \(secret: value looks like a key\)/);
+	refusedAfterSettings("a runtime setting in the settings file (NODE_OPTIONS): refused once the file is read", "NODE_OPTIONS='--max-old-space-size=64'\n", /settings file holds NODE_OPTIONS, which a replica does not take \(runtime: set by replica:start\)/);
 	if (process.platform !== "darwin") {
 		refused("off macOS (this machine): refused before listening", () => {}, /a replica runs on a developer Mac \(macOS\) only/);
 	}
