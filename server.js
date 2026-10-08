@@ -133,6 +133,10 @@ const publicFormInput = require("./lib/public-form-input");
 // POST /api/public/investor-rfi: the website's investor Request for Information.
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
+// The one zone an instant becomes a date in when no business rule pins one
+// (a document's "today"); never the server's own UTC clock. lib/app-time.js
+const appTime = require("./lib/app-time");
+const APP_TIMEZONE = appTime.resolveAppTimeZone(process.env.APP_TIMEZONE, (msg) => console.warn(msg));
 
 // Where the files the app writes at runtime live: uploads/, storage/ and
 // evidence-archive/, and every stored "/uploads/…" path resolves against it.
@@ -15596,6 +15600,24 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewL
 
 // Helper: compute LogisX week range (Saturday–Friday) in CST
 function getWeekRange(referenceDate) {
+	// A BARE CALENDAR DAY ("2026-09-26") IS A DATE, NOT AN INSTANT, so its Sat–Fri
+	// week is calendar arithmetic with no zone in it. Sent down the instant path
+	// below, `new Date("2026-09-26")` is UTC midnight, which Central reads as 19:00
+	// on the Friday before: a Saturday resolved to the PREVIOUS week on every
+	// server, UTC included. Any other weekday stays inside its own week, which is
+	// why the batch's Friday week-ends never showed it. Only a real day takes this
+	// branch; an instant, a Date, nothing ("now") or a non-day such as "2026-02-30"
+	// keeps its Houston-day path exactly as before (scripts/test-calendar-day-zones.js).
+	const bare = typeof referenceDate === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(referenceDate.trim()) : null;
+	if (bare) {
+		const [y, m, dd] = [Number(bare[1]), Number(bare[2]), Number(bare[3])];
+		const day = new Date(Date.UTC(y, m - 1, dd));
+		if (day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === dd) {
+			const sat = Date.UTC(y, m - 1, dd - ((day.getUTCDay() + 1) % 7)); // back to Saturday
+			const key = (ms) => new Date(ms).toISOString().slice(0, 10);
+			return { weekStart: key(sat), weekEnd: key(sat + 6 * 86400000) };
+		}
+	}
 	const d = referenceDate ? new Date(referenceDate) : new Date();
 	// Convert to CST (America/Chicago)
 	const cstStr = d.toLocaleString("en-US", { timeZone: "America/Chicago" });
@@ -16724,7 +16746,12 @@ async function appendInvoiceAdjustmentAddendum(invoiceRow) {
 		.replace(/[^\x20-\x7E]/g, "?");
 	const note = winAnsiSafe(invoiceRow.adjustment_note || "");
 	const adjustedBy = winAnsiSafe(invoiceRow.adjusted_by || "");
-	const adjustedAt = (invoiceRow.adjusted_at || "").toString().slice(0, 10);
+	// `adjusted_at` is an ISO instant, so its first ten characters are the UTC
+	// day; print the APP_TIMEZONE day (an unparseable value prints as before).
+	const adjustedAtMs = Date.parse(invoiceRow.adjusted_at || "");
+	const adjustedAt = Number.isFinite(adjustedAtMs)
+		? appTime.dayInZone(new Date(adjustedAtMs), APP_TIMEZONE)
+		: (invoiceRow.adjusted_at || "").toString().slice(0, 10);
 	const invoiceNo = winAnsiSafe(invoiceRow.invoice_number || "");
 	const money = (n) =>
 		`$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -17396,7 +17423,10 @@ async function generateInvoiceHandler(req, res) {
 		const payType = payStruct.payType;
 		const payPercentage = payStruct.payPercentage;
 
-		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
+		// at 8 PM Eastern, which UTC already calls Saturday, and the template prints
+		// this beside a literal "Friday,".
+		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
@@ -21646,7 +21676,8 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// initials in the same period), which is why the prefix is passed in
 		// rather than swapped in afterwards.
 		const invoiceNumber = generateInvoiceNumber(payee, periodStart, { prefix: "INV-M-" });
-		const nowStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+		// Today in APP_TIMEZONE, not on the server's UTC clock (see the weekly route).
+		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtPeriodDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
@@ -21860,7 +21891,13 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 		const fmtMoney = (n) =>
 			"$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 		const fmtDay = (s) => (s ? String(s).slice(0, 10) : "—");
-		const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+		// `paid_at` is an ISO instant, not a bare day: its APP_TIMEZONE day, where
+		// its first ten characters would be the UTC day.
+		const fmtPaidDay = (s) => {
+			const ms = Date.parse(s || "");
+			return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), APP_TIMEZONE) : fmtDay(s);
+		};
+		const dateStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 		const payeeDisplay = report.payee.toUpperCase();
 
 		// ── Header band
@@ -21928,7 +21965,7 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 				fmtMoney(inv.total_earnings),
 				inv.adjustment ? fmtMoney(inv.adjustment) : "—",
 				fmtMoney(inv.total_due),
-				inv.status === "Paid" ? fmtDay(inv.paid_at) : "—",
+				inv.status === "Paid" ? fmtPaidDay(inv.paid_at) : "—",
 			];
 			cols.forEach((c, j) => doc.text(vals[j], c.x + 3, y + 4, { width: c.w - 6, align: c.align, lineBreak: false }));
 			doc.y = y + 16;
@@ -22926,12 +22963,13 @@ app.post("/api/auth/logout", (req, res) => {
 	res.json({ success: true });
 });
 
-// Get current session
+// Get current session. `appTimeZone` hands the browser the same APP_TIMEZONE the
+// server dates instants in, so a viewer's "today" never comes from their laptop.
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
-		res.json({ authenticated: true, user: req.session.user });
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE });
 	} else {
-		res.json({ authenticated: false });
+		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
 	}
 });
 
@@ -45019,7 +45057,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 		// null = the fleet total is "Not available" (a truck with no price, under
 		// UNPRICED_TRUCKS "not-available"), and so is At-Risk Capital, which reads it.
 		const atRiskCapital = priced.total === null ? null : Math.max(0, (priced.total + totalStartupExpenses) - netRevenueToDate);
-		const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+		const today = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { year: "numeric", month: "long", day: "numeric" });
 		const ownerLabel = isSuperAdmin ? "All Investors" : user.username;
 
 		const { NOT_RECORDED, NOT_AVAILABLE, CSV_COUNT_LABEL } = investorReportOptions.UNPRICED_TEXT;
@@ -45051,7 +45089,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 		// dollar figures, so it gets the same formula-injection guard as every
 		// other export rather than the quote-only escaping it used to do.
 		const csv = csvRows(rows);
-		const filename = `tax-shield-${user.username}-${new Date().toISOString().slice(0, 10)}.csv`;
+		const filename = `tax-shield-${user.username}-${appTime.dayInZone(new Date(), APP_TIMEZONE)}.csv`;
 		res.setHeader("Content-Type", "text/csv");
 		res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 		res.send(csv);
@@ -45162,7 +45200,10 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			if (endBound && dayKey > endBound) continue;
 			let key, label, start, end;
 			if (period === "weekly") {
-				const wr = getWeekRange(dt);
+				// The day key, not `dt`: `dt` is the row's LOCAL midnight, which on the
+				// UTC VPS is UTC midnight, and getWeekRange() reads an instant in
+				// Central — a Saturday load landed in the week before.
+				const wr = getWeekRange(dayKey);
 				key = wr.weekStart; start = wr.weekStart; end = wr.weekEnd; label = `${wr.weekStart} to ${wr.weekEnd}`;
 			} else {
 				key = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0");
@@ -45723,10 +45764,14 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 
 		// Whole dollars; a negative amount prints as -$1,234 (it printed $-1,234).
 		const fmt = n => { const v = Math.round(Number(n || 0)); return (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("en-US"); };
-		const dateStr = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+		const dateStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE, { weekday:"long", year:"numeric", month:"long", day:"numeric" });
 		const investorName = isSuperAdmin ? "Super Admin" : user.username;
+		// `filterStart` is the range's first day at UTC midnight, so it is read back
+		// in UTC: in a US zone that instant is still the evening before, and the
+		// line printed the day before. `filterEnd` is built at the server's own
+		// 23:59:59, so its own zone reads it back as the day it was built from.
 		const periodStr = filterStart || filterEnd
-			? `Period: ${filterStart ? filterStart.toLocaleDateString("en-US") : "All"} – ${filterEnd ? filterEnd.toLocaleDateString("en-US") : "Today"}`
+			? `Period: ${filterStart ? filterStart.toLocaleDateString("en-US", { timeZone: "UTC" }) : "All"} – ${filterEnd ? filterEnd.toLocaleDateString("en-US") : "Today"}`
 			: "All-time";
 
 		// ── Header
@@ -45901,7 +45946,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 		await new Promise(resolve => doc.on("end", resolve));
 
 		const pdfBuffer = Buffer.concat(chunks);
-		const fileName = `${investorName.replace(/\s+/g,"_")}_Report_${new Date().toISOString().slice(0,10)}.pdf`;
+		const fileName = `${investorName.replace(/\s+/g,"_")}_Report_${appTime.dayInZone(new Date(), APP_TIMEZONE)}.pdf`;
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
 		res.send(pdfBuffer);

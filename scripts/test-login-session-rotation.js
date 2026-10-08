@@ -248,7 +248,8 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	const passThrough = (req, res, next) => next();
 	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", loginSrc)(
 		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub);
-	new Function("app", SESSION_ROUTE_SRC)(app);
+	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
+	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");
 	if (withSetup) {
 		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", SETUP_SRC)(
 			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub);

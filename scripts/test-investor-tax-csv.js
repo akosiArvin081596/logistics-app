@@ -344,6 +344,8 @@ async function runHandler(handlerSrc, { session, query = {}, sources = SOURCES, 
 		db,
 		normalizeLoadId,
 		csvRows,
+		// The CSV prints "today" in APP_TIMEZONE (lib/app-time.js).
+		appTime: require("../lib/app-time"), APP_TIMEZONE: "America/New_York",
 		SPREADSHEET_ID: "fixture-sheet",
 		getSheets: async () => ({ spreadsheets: { values: {
 			batchGet: async ({ ranges }) => {
@@ -644,6 +646,7 @@ function agreement(sources) {
 			const deps = {
 				db: { prepare: (sql) => { if (/FROM trucks/.test(sql)) throw new Error(SECRETISH); return db.prepare(sql); } },
 				normalizeLoadId, csvRows, SPREADSHEET_ID: "fixture-sheet",
+				appTime: require("../lib/app-time"), APP_TIMEZONE: "America/New_York",
 				getSheets: async () => { throw new Error("the sheet is not reached"); },
 				getInvestorDriverMonthWindows: () => new Map(),
 				investorReportOptions,
