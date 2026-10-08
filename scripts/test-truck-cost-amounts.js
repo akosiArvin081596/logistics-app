@@ -1082,6 +1082,10 @@ async function acceptanceSection() {
 		// subject; this application signs the standard contract, so none is.
 		recordSignedPayoutBasis: () => null,
 		unrecordedLeaseNote: () => "",
+		// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+		// subject (§10); here it judges nothing.
+		getJobTrackingCached: async () => ({ headers: [], data: [] }),
+		investorCompanyLockBlockers: () => null,
 	});
 	const r = await quiet(() => accept({ session: { user: SUPER }, params: { id: "42" }, body: { status: "Accepted" } }));
 	const b = r.body || {};

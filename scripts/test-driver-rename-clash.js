@@ -372,6 +372,10 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		// subject is scripts/test-account-directory-row-lock.js).
 		accountDirectorySync: () => null,
 		accountDirectorySyncLock: () => null,
+		// So is the lock on an investor's company name (its own subject is
+		// scripts/test-investor-company-lock.js).
+		investorCompanyMoves: () => [],
+		investorCompanyLockBlockers: () => null,
 		// server.js's own: whether the body changes the company (and so the carrier).
 		accountCompanyChange: new Function(`${liftFunction("accountCompanyChange")}\nreturn accountCompanyChange;`)(),
 		getJobTrackingCached: async () => ({ headers: JOB_TRACKING[0].slice(), data: [] }),

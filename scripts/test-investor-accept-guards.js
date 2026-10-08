@@ -15,9 +15,14 @@
  * Accepted and nothing else is written or sent: 200 { success: true,
  * accountCreated: false, existingUserId, message }, the status and its audit
  * row in one transaction.
- * bcrypt.hash is the handler's only await and runs first; the checks read the
- * state after it, and the status, account, record and trucks are written in
- * one synchronous transaction. The emails are sent after it commits.
+ * It is also refused, nothing written, when the company name the new account
+ * takes (the DBA, else the legal name) links a driver whose history reaches a
+ * finalized month to its ledger → 409 PERIOD_FINALIZED, audited as
+ * accept_investor_blocked (investorCompanyLockBlockers(), 2026-10-08).
+ * bcrypt.hash and the Job Tracking read for that lock are the handler's only
+ * awaits and run first; the checks read the state after them, and the status,
+ * account, record and trucks are written in one synchronous transaction. The
+ * emails are sent after it commits.
  *
  * WHAT IS ASSERTED. The shipped handler is lifted out of server.js with the
  * helpers it calls (registerApplicationVehicles, colLetter, parseTruckAmount,
@@ -46,7 +51,8 @@
  *      refused.
  *   §6 unchanged: re-accepting an application whose record exists, New /
  *      Reviewed / Rejected, a removed application (409) and a missing one (404).
- *   §7 source pins: the only await is bcrypt.hash, above the first read; none
+ *   §7 source pins: the only awaits are bcrypt.hash and the Job Tracking read,
+ *      above the first read; none
  *      between the re-read and the transaction; the record INSERT is not
  *      OR IGNORE; the emails follow the transaction; the existing-account
  *      branch writes the status and its audit row in one transaction and
@@ -66,6 +72,12 @@
  *      fallback, the application-id fallback, the name-clash test and (with the
  *      name-clash test off, since it compares usernames too) the trimmed
  *      comparison each dropped.
+ *   §10 the month-end lock on the new account's company name, with server.js's
+ *      own investorsHoldingDriver() and lock helpers: a DBA that links a driver
+ *      with finalized-month history (a carrier name an earlier rename left in
+ *      the carrier history) is 409 PERIOD_FINALIZED, nothing written, no mail,
+ *      audited; one that links only a new hire, or nobody, is accepted; Job
+ *      Tracking unreadable holds a linked driver in every finalized month.
  *
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
@@ -189,8 +201,18 @@ const snapshot = (db) => JSON.stringify({
 });
 const statusOf = (db, id) => db.prepare("SELECT status FROM investor_applications WHERE id = ?").get(id).status;
 
-// Runs the lifted handler once. `duringHash` runs inside the only await.
-async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, duringHash = null } = {}) {
+// The month-end lock on the new account's company name, judging nothing: §1-§9
+// are about the other checks, and §10 hands in server.js's own (lockFor()).
+const NO_COMPANY_LOCK = {
+	getJobTrackingCached: async () => ({ headers: [], data: [] }),
+	investorCompanyLockBlockers: () => null,
+	periodBlockedResponse: () => { throw new Error("no refusal expected"); },
+	periodLockUnreadableResponse: () => { throw new Error("no refusal expected"); },
+	auditText: (v, max) => String(v ?? "").slice(0, max),
+};
+
+// Runs the lifted handler once. `duringHash` runs inside the first await.
+async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, duringHash = null, lock = NO_COMPANY_LOCK } = {}) {
 	let handler = null;
 	const mail = [];
 	const audits = [];
@@ -206,11 +228,13 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 	};
 	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
 	// subject; here these applications sign the standard contract, so none is.
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", routeSrc)(
+	const lockNames = Object.keys(NO_COMPANY_LOCK);
+	const lockEnv = typeof lock === "function" ? lock(audits) : lock;
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", ...lockNames, routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db, bcrypt, crypto,
 		(req, action, entity, entityId, details) => audits.push({ action, entityId, details }), () => {}, colLetter, escapeHtml,
 		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "");
+		() => null, () => "", ...lockNames.map((k) => lockEnv[k]));
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const e = console.error;
@@ -430,11 +454,16 @@ function pinSection() {
 	const t = (cond, name) => r.push({ ok: !!cond, name });
 	const src = code(ACCEPT_SRC);
 	const awaits = [...src.matchAll(/\bawait\b[^\n]*/g)].map((m) => m[0]);
-	t(awaits.length === 1 && /await bcrypt\.hash\(tempPassword, 10\)/.test(awaits[0]), `§7 the only await is bcrypt.hash (got ${JSON.stringify(awaits)})`);
+	t(awaits.length === 2 && /await bcrypt\.hash\(tempPassword, 10\)/.test(awaits[0]) && /await getJobTrackingCached\(\)/.test(awaits[1]),
+		`§7 the only awaits are bcrypt.hash and the Job Tracking read (got ${JSON.stringify(awaits)})`);
 	const hashAt = src.indexOf("await bcrypt.hash");
+	const jtAt = src.indexOf("await getJobTrackingCached()");
 	const reread = src.indexOf('db.prepare("SELECT id, deleted_at FROM investor_applications WHERE id = ?")');
 	const txAt = src.indexOf("const { userId, vehicleCounts, payoutBasis } = db.transaction(");
 	t(hashAt > 0 && hashAt < src.indexOf("db.prepare("), "§7 the hash runs before the first read");
+	t(jtAt > hashAt && jtAt < src.indexOf("db.prepare("), "§7 ...and so does the Job Tracking read");
+	const lockAt = src.indexOf("investorCompanyLockBlockers(");
+	t(lockAt > reread && lockAt < txAt, "§7 the company-name lock is judged after the re-read and before the transaction");
 	t(reread > hashAt && txAt > reread && !/\bawait\b/.test(src.slice(reread, txAt)), "§7 no await between the re-read and the transaction");
 	const tx = src.slice(txAt, src.indexOf("})();", txAt));
 	t(/setStatus\.run\(status, appId\)/.test(tx) && /INSERT INTO users/.test(tx) && /INSERT INTO investors/.test(tx) && /registerApplicationVehicles\(vehicles, appId, userId\)/.test(tx)
@@ -536,6 +565,101 @@ async function mutantSection() {
 	// SQL test's trim is only observable with the name-clash test off.
 	t(failed(await usernameSection(swap(noClash, 'SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)', 'SELECT id FROM users WHERE LOWER(username) = LOWER(?)'))),
 		"MUTANT the taken-username test not trimmed (the name-clash test off): caught by §8");
+	t(failed(await companyLockSection(swap(ACCEPT_SRC, "if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {", "if (false) {"))),
+		"MUTANT the company-name lock dropped: caught by §10");
+	return r;
+}
+
+// ─────────────────────────────────────────────────────── §10 the company-name lock
+// server.js's own month-end lock on the new account's company name, over the
+// tables it reads. "" when a helper is missing (a base commit), and §10 then
+// fails rather than the runner dying.
+function liftNamed(name) {
+	const needle = `\nfunction ${name}(`;
+	if (SRC.split(needle).length - 1 !== 1) return "";
+	const a = SRC.indexOf(needle) + 1;
+	return SRC.slice(a, SRC.indexOf("\n}\n", a) + 2);
+}
+const LOCK_HELPERS = ["investorAccountState", "investorCompanyMoves", "investorCompanyLockBlockers"];
+const LOCK_SRC = [
+	(SRC.match(/\nconst AUDITED_UPSTREAM = [^\n]*\n/) || [""])[0],
+	...["normalizeDriverName", "findCol", "getCarrierDBFromSQLite", "getInvestorDriverSet", "driverPayLockedMonths", "lockedPeriodsDesc", "periodLockStmt", "periodLocksReadable",
+		"periodLabel", "scrubPurgeMarker", "auditText", "periodBlockedResponse", "periodLockUnreadableResponse", ...LOCK_HELPERS].map(liftNamed),
+].join("\n");
+const LOCKED = ["2026-06", "2026-07", "2026-08"];
+// driverHistoryFloorMonth()'s answer per driver; without Job Tracking nothing can be dated.
+const FLOORS = { "hank history": { floor: "2026-07", unbounded: false } };
+
+function makeLockDb() {
+	const db = makeDb();
+	db.exec(`
+		ALTER TABLE drivers_directory ADD COLUMN carrier_name TEXT DEFAULT '';
+		ALTER TABLE trucks ADD COLUMN assigned_driver TEXT DEFAULT '';
+		CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '');
+		CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT);
+		CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked');
+	`);
+	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period) VALUES (?)").run(p);
+	// A carrier name an earlier rename left in the carrier history, no investors
+	// record holding it; and a new hire filed under another company.
+	db.prepare("INSERT INTO carrier_driver_history (carrier_name, driver_name, started_at) VALUES ('Old Acme Name', 'Hank History', '2026-07-03T15:00:00.000Z')").run();
+	db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name) VALUES ('Gil New', 'Gamma Haul')").run();
+	return db;
+}
+// The `lock` accept() hands the route: server.js's helpers over `db`, the
+// refusal recorded beside the route's own audit rows.
+function lockFor(db, { jtFails = false } = {}) {
+	return (audits) => {
+		const m = new Function("db", "driverHistoryFloorMonth", "recordPeriodRefusal",
+			`"use strict";\n${LOCK_SRC}\nreturn { ${["auditText", "periodBlockedResponse", "periodLockUnreadableResponse", ...LOCK_HELPERS].filter((n) => LOCK_SRC.includes(`\nfunction ${n}(`) || LOCK_SRC.startsWith(`function ${n}(`)).join(", ")} };`)(
+			db,
+			(name, jt) => (jt ? FLOORS[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
+			(audit, code, periods) => audits.push({ action: audit.action, entityId: audit.entityId, details: `${audit.subject} [${code}] periods=${periods.join(",")}` }));
+		return {
+			...NO_COMPANY_LOCK, ...m,
+			getJobTrackingCached: async () => { if (jtFails) throw new Error("Job Tracking could not be read"); return { headers: ["Load ID", "Driver"], data: [] }; },
+		};
+	};
+}
+
+async function companyLockSection(routeSrc = ACCEPT_SRC) {
+	const r = [];
+	const t = (cond, name) => r.push({ ok: !!cond, name });
+	t(LOCK_HELPERS.every((n) => liftNamed(n)), `§10 server.js defines ${LOCK_HELPERS.join(", ")}`);
+	const drivers = (x) => (x.body && Array.isArray(x.body.blockers) ? x.body.blockers.flatMap((b) => b.drivers || []) : []);
+	for (const dba of ["Old Acme Name", "  OLD ACME name "]) {
+		const db = makeLockDb();
+		const id = addApplication(db, { legal_name: "Acme Holdings LLC", dba, email: "acme@example.test" });
+		const before = snapshot(db);
+		const x = await accept(db, id, { routeSrc, lock: lockFor(db) });
+		t(x.status === 409 && x.body && x.body.code === "PERIOD_FINALIZED" && JSON.stringify(x.body.periods) === JSON.stringify(["2026-07", "2026-08"])
+			&& JSON.stringify(drivers(x)) === JSON.stringify(["Hank History"]),
+		`§10 a DBA (${JSON.stringify(dba)}) that links a driver with finalized-month history: 409 PERIOD_FINALIZED over 2026-07, 2026-08 naming the driver (got ${x.status} ${JSON.stringify(x.body && x.body.code)})`);
+		t(typeof (x.body && x.body.error) === "string" && /Hank History/.test(x.body.error) && /July 2026/.test(x.body.error), "§10 ...the reason names the driver and the months");
+		t(snapshot(db) === before && statusOf(db, id) === "New" && x.mail.length === 0, "§10 ...nothing written (no account, record or truck, still New), no mail");
+		t(x.audits.some((a) => a.action === "accept_investor_blocked" && a.entityId === String(id) && /\[PERIOD_FINALIZED\]/.test(a.details)),
+			"§10 ...audited as accept_investor_blocked [PERIOD_FINALIZED]");
+	}
+	for (const [label, fields, company] of [
+		["a DBA that links only a new hire (no finalized-month history)", { legal_name: "Gamma Holdings LLC", dba: "Gamma Haul" }, "Gamma Haul"],
+		["no DBA, a legal name that links nobody", { legal_name: "Fresh Start Hauling LLC", dba: "" }, "Fresh Start Hauling LLC"],
+	]) {
+		const db = makeLockDb();
+		const id = addApplication(db, { ...fields, email: "ok@example.test" });
+		const x = await accept(db, id, { routeSrc, lock: lockFor(db) });
+		const userId = x.body && x.body.credentials && x.body.credentials.userId;
+		const row = userId ? db.prepare("SELECT role, company_name FROM users WHERE id = ?").get(userId) : null;
+		t(x.status === 200 && x.body.accountCreated === true && row && row.role === "Investor" && row.company_name === company,
+			`§10 ${label}: accepted, the account's company name ${JSON.stringify(company)} (got ${x.status} ${JSON.stringify(row)})`);
+	}
+	{
+		const db = makeLockDb();
+		const id = addApplication(db, { legal_name: "Gamma Holdings LLC", dba: "Gamma Haul", email: "jt@example.test" });
+		const before = snapshot(db);
+		const x = await accept(db, id, { routeSrc, lock: lockFor(db, { jtFails: true }) });
+		t(x.status === 409 && x.body.code === "PERIOD_FINALIZED" && JSON.stringify(x.body.periods) === JSON.stringify(LOCKED) && snapshot(db) === before,
+			`§10 Job Tracking unreadable, a DBA that links a driver: 409 over every finalized month, nothing written (got ${x.status} ${JSON.stringify(x.body && x.body.periods)})`);
+	}
 	return r;
 }
 
@@ -561,6 +685,8 @@ function record(results) {
 	record(pinSection());
 	section("§8 the username");
 	record(await usernameSection());
+	section("§10 the month-end lock on the new account's company name");
+	record(await companyLockSection());
 	section("§9 mutants");
 	record(await mutantSection());
 

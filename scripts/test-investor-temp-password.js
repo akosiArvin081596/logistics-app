@@ -169,9 +169,11 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC } 
 	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
 	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
 	// subject; this application signs the standard contract, so none is.
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", routeSrc)(
+	// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+	// subject (§10); here it judges nothing.
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", routeSrc)(
 		app, requireRole, db, fastBcrypt, crypto, () => {}, () => {}, colLetter, escapeHtml, sendEmail, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "");
+		() => null, () => "", async () => ({ headers: [], data: [] }), () => null);
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const res = {

@@ -628,6 +628,10 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 		// subject; here it judges nothing, so only the name check decides.
 		accountDirectoryRowJudged: () => false,
 		accountDirectoryRowLock: () => null,
+		// So does the lock on a new Investor's company name
+		// (scripts/test-investor-company-lock.js's subject).
+		investorCompanyMoves: () => [],
+		investorCompanyLockBlockers: () => null,
 		getJobTrackingCached: async () => ({ headers: [], data: [] }),
 	};
 	const names = Object.keys(env);
