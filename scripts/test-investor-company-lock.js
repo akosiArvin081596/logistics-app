@@ -13,8 +13,9 @@
  * application is the third path: scripts/test-investor-accept-guards.js §10.)
  *
  * THE FIX. Each write is judged by the ledger membership it moves:
- * investorCompanyLockBlockers() compares investorsHoldingDriver() before and
- * after for every driver either company name reaches, and sizes each moved
+ * investorCompanyLockBlockers() compares the account's own getInvestorDriverSet()
+ * before and after the write, key for key, with the carrier the same save's
+ * directory sync writes already in the "after" directory, and sizes each moved
  * driver's exposure off driverHistoryFloorMonth(), the question
  * directoryEditLockBlockers() check (5) asks of a directory carrier. A move that
  * reaches a finalized month is refused whole through periodBlockedResponse(): 409
@@ -25,10 +26,12 @@
  * through.
  *
  * WHAT RUNS. PUT /api/users/:id and POST /api/users lifted whole out of server.js
- * over an in-memory SQLite, with server.js's own investorsHoldingDriver(),
+ * over an in-memory SQLite, with server.js's own getInvestorDriverSet(),
+ * investorsHoldingDriver(), directory-sync judgement (accountDirectorySync()),
  * month-end lock, refusal responses and audit writers. Stubbed: bcrypt, Job
  * Tracking (a counter), the history floor (a per-driver answer), the rename
- * machinery (no case renames a driver), the directory sync and sessions.
+ * machinery (no case renames a driver), the directory sync's write (a counter)
+ * and sessions.
  *   §1 a refused company change: off a ledger and onto one
  *   §2 an allowed rename that keeps every link, and a company that links nobody
  *   §3 drivers with no finalized-month history
@@ -169,6 +172,7 @@ const FLOORS = {
 	"dee history": { floor: "2026-08", unbounded: false },
 	"ann owner": { floor: "2026-06", unbounded: false },
 	"jon smith": { floor: "2026-07", unbounded: false },
+	"nora norow": { floor: "2026-08", unbounded: false },
 };
 const S = { jtReads: 0, jtFails: false, syncs: 0 };
 const JT = { headers: ["Load ID", "Driver", "Assigned Date"], data: [] };
@@ -181,7 +185,9 @@ const JT = { headers: ["Load ID", "Driver", "Assigned Date"], data: [] };
 // Haul (12) owns no truck and links Jon Smith through his directory row, while a
 // carrier-history row files him under another spelling ("Jon  Smith") and another
 // company ("Echo Haul Inc"). Account 13 is a Driver, Ann Owner, whose company and
-// directory carrier are House Carrier, which no investor has.
+// directory carrier are House Carrier, which no investor has. Accounts 14 and 15
+// are Drivers with no directory row and no company: Nora Norow, with August
+// loads, and Ned Newcomer, with none.
 function seed(db) {
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	const user = db.prepare("INSERT INTO users (id, username, role, company_name, email) VALUES (?, ?, ?, ?, ?)");
@@ -193,6 +199,8 @@ function seed(db) {
 	user.run(11, "delta", "Investor", "Delta Lines", "delta@example.test");
 	user.run(12, "echo", "Investor", "Echo Haul", "echo@example.test");
 	db.prepare("INSERT INTO users (id, username, role, driver_name, company_name, email) VALUES (13, 'ann', 'Driver', 'Ann Owner', 'House Carrier', 'ann@example.test')").run();
+	db.prepare("INSERT INTO users (id, username, role, driver_name, company_name, email) VALUES (14, 'nora', 'Driver', 'Nora Norow', '', 'nora@example.test')").run();
+	db.prepare("INSERT INTO users (id, username, role, driver_name, company_name, email) VALUES (15, 'ned', 'Driver', 'Ned Newcomer', '', 'ned@example.test')").run();
 	db.prepare("INSERT INTO trucks (id, unit_number, assigned_driver, owner_id) VALUES (1, 'AC-1', 'Tara Truck', 7), (2, 'BF-1', 'Bo Beta', 8)").run();
 	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Tara Truck', '2026-05-02T15:00:00.000Z'), (2, 'Bo Beta', '2026-05-02T15:00:00.000Z')").run();
 	const dir = db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name) VALUES (?, ?)");
@@ -411,6 +419,22 @@ const driversIn = (r) => (r.body && Array.isArray(r.body.blockers) ? r.body.bloc
 			refused(r, LOCKED) && JSON.stringify(driversIn(r)) === JSON.stringify(["Ann Owner"]));
 		check("§4 …nothing written, no directory sync", fingerprint(db) === before && S.syncs === 0 && account(db, 13).role === "Driver");
 	}
+	{
+		// The same save on a Driver with no directory row yet: the sync would add her
+		// first row under the new company name.
+		const { db, updateUser } = reset();
+		const before = fingerprint(db);
+		const r = await updateUser(14, { role: "Investor", companyName: "Nora Freight" });
+		check(`§4 a Driver with no directory row made an Investor under a company name the sync would give her first row: 409 PERIOD_FINALIZED over 2026-08 (${got(r)}, ${JSON.stringify(driversIn(r))})`,
+			refused(r, ["2026-08"]) && JSON.stringify(driversIn(r)) === JSON.stringify(["Nora Norow"]));
+		check("§4 …nothing written, no directory sync", fingerprint(db) === before && S.syncs === 0);
+	}
+	{
+		const { db, updateUser } = reset();
+		const r = await updateUser(15, { role: "Investor", companyName: "Ned Freight" });
+		check(`§4 the same save for a Driver with no finalized-month history: 200, saved, the directory sync run (${got(r)}, syncs ${S.syncs})`,
+			r.status === 200 && account(db, 15).role === "Investor" && account(db, 15).company_name === "Ned Freight" && S.syncs === 1);
+	}
 
 	console.log("§5 POST /api/users creating an Investor with a company name");
 	{
@@ -457,6 +481,17 @@ const driversIn = (r) => (r.body && Array.isArray(r.body.blockers) ? r.body.bloc
 		const before = fingerprint(db);
 		const r = await createUser({ username: "newinv", password: "pw-Long-enough-1", role: "Investor", companyName: "Gamma Haul" });
 		check(`§6 POST /api/users, a new Investor whose company name links a driver, Job Tracking unreadable: 409 over every finalized month, no account (${got(r)})`,
+			refused(r, LOCKED) && fingerprint(db) === before);
+	}
+	{
+		// The Driver path of the same read (accountDirectoryRowLock()): without the
+		// sheet a new hire's history cannot be dated either, so an investor's company
+		// as the carrier of the row the account adds is held, not answered with a 500.
+		const { db, createUser } = reset();
+		S.jtFails = true;
+		const before = fingerprint(db);
+		const r = await createUser({ username: "pat", password: "pw-Long-enough-1", role: "Driver", driverName: "Pat Newhire", companyName: "Acme Leasing" });
+		check(`§6 POST /api/users, a Driver whose company is an investor's, Job Tracking unreadable: 409 over every finalized month, no account (${got(r)})`,
 			refused(r, LOCKED) && fingerprint(db) === before);
 	}
 
