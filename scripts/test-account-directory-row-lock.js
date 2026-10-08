@@ -37,6 +37,11 @@
  *   §5 PUT /api/users/:id: the carrier its directory sync writes (the account's
  *      company name) is held the same way, with the same 409 as POST /api/users
  *      (accountDirectorySync() / accountDirectorySyncLock(), 2026-10-08)
+ *   §6 PUT /api/users/:id: only a company name that is sent and differs from the
+ *      stored one moves the carrier (accountCompanyChange(), 2026-10-08). A
+ *      Users-page save of other fields on a driver whose carrier was held back,
+ *      or whose row alone names an investor, saves with the carrier and the
+ *      ledger untouched; a conflicting company name is still a 409.
  *
  * Pure: no server, no app.db, no network.
  *   node scripts/test-account-directory-row-lock.js
@@ -122,13 +127,14 @@ const MODULE_SRC = [
 	liftNew("accountDirectoryRowLock"),
 	liftNew("accountDirectoryCarrier"),
 	liftNew("onboardingAddsJudgedRow"),
+	liftNew("accountCompanyChange"),
 	liftNew("accountDirectorySync"),
 	liftNew("accountDirectorySyncLock"),
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("checkAndCompleteOnboarding", "async function"),
 ].join("\n");
 const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
-	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountDirectorySync", "accountDirectorySyncLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
+	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountCompanyChange", "accountDirectorySync", "accountDirectorySyncLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
 
 const LOCKED = ["2026-06", "2026-07", "2026-08"];
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
@@ -381,13 +387,14 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 			check("§5 …no row added, the account keeps no company", !dirRow(db, "Cara Carrier") && account(db, 51).company_name === "");
 		}
 		{
-			// The account already names an investor's company and the row does not:
-			// an e-mail edit's sync writes that company as the carrier.
+			// The account already names an investor's company and the row does not
+			// (a carrier held back at onboarding): an e-mail edit sends no company
+			// name, so its sync leaves the carrier alone and nothing is judged (§6).
 			const { db, updateUser } = reset();
 			driverAccount(db, 52, "Cara Carrier", "Acme Leasing", "");
 			const r = await updateUser(52, { email: "new@example.com" });
-			check(`§5 an e-mail edit whose sync would set the row's carrier to an investor's company: 409 PERIOD_FINALIZED (${got(r)})`, refusedLikePost(r));
-			check("§5 …nothing written", account(db, 52).email === "d@example.com" && dirRow(db, "Cara Carrier").carrier_name === "");
+			check(`§5 an e-mail edit on a driver whose carrier was held back: 200, the row keeps no carrier (${got(r)})`,
+				r.status === 200 && account(db, 52).email === "new@example.com" && dirRow(db, "Cara Carrier").carrier_name === "");
 		}
 		{
 			// Off a ledger is a move too: the row carries the investor's company.
@@ -423,6 +430,64 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 			const r = await updateUser(56, { companyName: "Acme Leasing" });
 			check(`§5 Job Tracking unreadable, a new hire → an investor's company: 409 PERIOD_FINALIZED over every finalized month, nothing written (${got(r)})`,
 				refusedLikePost(r) && account(db, 56).company_name === "" && dirRow(db, "New Hire").carrier_name === "");
+		}
+	}
+
+	console.log("§6 PUT /api/users/:id: only a company name that is sent and differs moves the carrier");
+	{
+		const driverAccount = (db, id, name, company, rowCarrier) => {
+			db.prepare("INSERT INTO users (id, username, role, driver_name, email, company_name) VALUES (?, ?, 'Driver', ?, 'd@example.com', ?)").run(id, `u${id}`, name, company);
+			if (rowCarrier !== null) db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, status) VALUES (?, ?, 'active')").run(name, rowCarrier);
+		};
+		const account = (db, id) => db.prepare("SELECT company_name, email, full_name FROM users WHERE id = ?").get(id);
+		const history = (db) => db.prepare("SELECT COUNT(*) AS n FROM carrier_driver_history").get().n;
+		const blocked = () => S.refusals.length + S.recorded.filter((x) => x.audit && x.audit.action === "update_user_blocked").length;
+		const got = (r) => `got ${r.status} ${(r.body || {}).code || ""}`.trim();
+		// What the Users page sends on Save (UserTable.vue handleSaveEdit): every
+		// field it shows, never a company name.
+		const usersPageSave = (name, extra = {}) => ({ role: "Driver", driverName: name, email: "d@example.com", fullName: "Cara C. Carrier", ...extra });
+		for (const [label, company, rowCarrier] of [
+			["a driver whose carrier was held back at onboarding (account: an investor's company, row: none)", "Acme Leasing", ""],
+			["a driver on an investor's ledger through the row only (account: no company, row: the investor's company)", "", "Acme Leasing"],
+		]) {
+			const { db, updateUser } = reset();
+			driverAccount(db, 60, "Cara Carrier", company, rowCarrier);
+			const r = await updateUser(60, usersPageSave("Cara Carrier"));
+			check(`§6 ${label}: a Users-page save of other fields → 200 (${got(r)})`, r.status === 200);
+			check(`§6 …the row's carrier stays ${JSON.stringify(rowCarrier)} and the account's company ${JSON.stringify(company)} (row ${JSON.stringify(dirRow(db, "Cara Carrier").carrier_name)})`,
+				dirRow(db, "Cara Carrier").carrier_name === rowCarrier && account(db, 60).company_name === company);
+			check("§6 …the other fields are saved", account(db, 60).full_name === "Cara C. Carrier");
+			check(`§6 …no ledger write and no lock judged (history rows ${history(db)}, refusals ${blocked()}, reads ${S.jtReads})`,
+				history(db) === 0 && blocked() === 0 && S.jtReads === 0);
+		}
+		{
+			// The same company name sent back is not a change.
+			const { db, updateUser } = reset();
+			driverAccount(db, 61, "Cara Carrier", "Acme Leasing", "");
+			const r = await updateUser(61, usersPageSave("Cara Carrier", { companyName: "Acme Leasing" }));
+			check(`§6 a held-back driver, the unchanged company name sent back: 200, the row keeps no carrier (${got(r)}, row ${JSON.stringify(dirRow(db, "Cara Carrier").carrier_name)})`,
+				r.status === 200 && dirRow(db, "Cara Carrier").carrier_name === "" && blocked() === 0);
+		}
+		{
+			// A company name that differs and would move the driver onto another
+			// investor's ledger, for a driver whose loads reach a finalized month.
+			const { db, updateUser } = reset();
+			db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (8, 'beta', 'Investor', 'Beta Leasing')").run();
+			driverAccount(db, 62, "Cara Carrier", "Acme Leasing", "");
+			const r = await updateUser(62, usersPageSave("Cara Carrier", { companyName: "Beta Leasing" }));
+			check(`§6 a held-back driver with finalized-month history, a conflicting company name: 409 PERIOD_FINALIZED over ${LOCKED.join(", ")} (${got(r)})`,
+				r.status === 409 && r.body.code === "PERIOD_FINALIZED" && JSON.stringify(r.body.periods) === JSON.stringify(LOCKED));
+			check("§6 …nothing written: company, carrier, other fields and history as they were",
+				account(db, 62).company_name === "Acme Leasing" && account(db, 62).full_name === "" && dirRow(db, "Cara Carrier").carrier_name === "" && history(db) === 0);
+			check("§6 …audited as update_user_blocked", (S.refusals[0] || {}).audit && S.refusals[0].audit.action === "update_user_blocked");
+		}
+		{
+			// A normal company change for a driver with no finalized-month history.
+			const { db, updateUser } = reset();
+			driverAccount(db, 63, "New Hire", "", "");
+			const r = await updateUser(63, usersPageSave("New Hire", { companyName: "Acme Leasing" }));
+			check(`§6 a driver with no finalized-month history, company → an investor's company: 200, the account and the row carry it (${got(r)}, row ${JSON.stringify(dirRow(db, "New Hire").carrier_name)})`,
+				r.status === 200 && account(db, 63).company_name === "Acme Leasing" && dirRow(db, "New Hire").carrier_name === "Acme Leasing");
 		}
 	}
 

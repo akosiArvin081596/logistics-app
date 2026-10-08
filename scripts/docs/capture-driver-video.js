@@ -10,8 +10,11 @@
 //
 //   node scripts/docs/capture-driver-video.js --list
 //   node scripts/docs/capture-driver-video.js --dry            # script only, no browser
-//   node scripts/docs/capture-driver-video.js --only=03
-//   node scripts/docs/capture-driver-video.js
+//   node scripts/docs/capture-driver-video.js --user=<e2e test driver> --only=03
+//   node scripts/docs/capture-driver-video.js --user=<e2e test driver>
+//
+// --user names the driver account on screen. There is no default, and it is
+// never a real driver's: the sign-in beats type it where the viewer can see it.
 //
 // ⚠️ RUN THE SERVER WITH THE ELD POLLERS OFF:
 //     ROUTEMATE_ENABLED=false LINXUP_ENABLED=false PORT=3100 \
@@ -38,7 +41,9 @@ const { makeStateOps } = require("./lib/state-ops");
 const CLIPS = require("./driver-video-storyboard");
 
 const BASE = arg("base", "http://localhost:3100");
-const DRIVER = { username: arg("user", "LogisX-0621"), password: arg("pass", "Password123!") };
+// The account on screen: --user names it (there is no default; never a real
+// driver's), as for the still guide (capture-driver-guide.js).
+const DRIVER = { username: arg("user", ""), password: arg("pass", "Password123!") };
 const ADMIN = { username: arg("admin", "super_admin"), password: arg("adminpass", "Password123!") };
 const ONLY = (arg("only", "") || "").split(",").map((s) => s.trim()).filter(Boolean);
 const KEEP_WEBM = has("keep-webm");
@@ -161,6 +166,9 @@ function helpers(page, state) {
 	const fx = (fn, ...a) => page.evaluate(`window.__vfx.${fn}(${a.map((x) => JSON.stringify(x)).join(",")})`);
 
 	const H = {
+		// The signed-in account, for the beats that type it on the sign-in screen.
+		account: { username: DRIVER.username, password: DRIVER.password },
+
 		settle: (ms) => sleep(ms),
 
 		async caption(text, at) {
@@ -477,6 +485,7 @@ async function main() {
 		return;
 	}
 
+	if (!DRIVER.username) throw new Error("name the e2e test driver's account with --user=… (there is no default; never a real driver's)");
 	await assertSafeTarget(BASE);
 	const drv = await login(BASE, DRIVER.username, DRIVER.password);
 	const adm = await login(BASE, ADMIN.username, ADMIN.password);

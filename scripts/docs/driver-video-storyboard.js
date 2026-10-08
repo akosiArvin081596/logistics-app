@@ -89,14 +89,14 @@ module.exports = [
 				say: "Your username is not your name. It is a driver ID that dispatch gives you. On most accounts it looks like LogisX, a dash, and four numbers. It never changes. Save it in your phone.",
 				caption: "Your username is a driver ID, not your name",
 				do: async (page, h) => {
-					await h.type({ sel: 'input[autocomplete="username"]' }, "LogisX-0621");
+					await h.type({ sel: 'input[autocomplete="username"]' }, h.account.username);
 				},
 			},
 			{
 				say: "Type your password, and tap Sign In. If you've forgotten it, don't guess — call dispatch and they'll reset it for you.",
 				caption: "Type your password, then tap SIGN IN",
 				do: async (page, h) => {
-					await h.type({ sel: 'input[autocomplete="current-password"]' }, "Password123!");
+					await h.type({ sel: 'input[autocomplete="current-password"]' }, h.account.password);
 					await h.tap({ text: "SIGN IN", exact: false });
 					await h.settle(3200);
 				},
