@@ -133,7 +133,7 @@ const MODULE_SRC = [
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("checkAndCompleteOnboarding", "async function"),
 ].join("\n");
-const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
+const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "findDirectoryRowForDriver", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
 	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountCompanyChange", "accountDirectorySync", "accountDirectorySyncLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
 
 const LOCKED = ["2026-06", "2026-07", "2026-08"];
@@ -465,8 +465,34 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 			const { db, updateUser } = reset();
 			driverAccount(db, 61, "Cara Carrier", "Acme Leasing", "");
 			const r = await updateUser(61, usersPageSave("Cara Carrier", { companyName: "Acme Leasing" }));
-			check(`§6 a held-back driver, the unchanged company name sent back: 200, the row keeps no carrier (${got(r)}, row ${JSON.stringify(dirRow(db, "Cara Carrier").carrier_name)})`,
-				r.status === 200 && dirRow(db, "Cara Carrier").carrier_name === "" && blocked() === 0);
+			check(`§6 a held-back driver, the unchanged company name sent back: 200, the row keeps no carrier, no lock read (${got(r)}, row ${JSON.stringify(dirRow(db, "Cara Carrier").carrier_name)}, reads ${S.jtReads})`,
+				r.status === 200 && dirRow(db, "Cara Carrier").carrier_name === "" && blocked() === 0 && S.jtReads === 0);
+		}
+		{
+			// Padded with spaces it is still the stored name.
+			const { db, updateUser } = reset();
+			driverAccount(db, 64, "Cara Carrier", "Acme Leasing", "");
+			const r = await updateUser(64, usersPageSave("Cara Carrier", { companyName: "  Acme Leasing " }));
+			check(`§6 the stored company name sent back with spaces: 200, the row keeps no carrier, no lock read (${got(r)}, reads ${S.jtReads})`,
+				r.status === 200 && dirRow(db, "Cara Carrier").carrier_name === "" && blocked() === 0 && S.jtReads === 0);
+		}
+		{
+			// A case-only change is a change, and is judged; ledger membership
+			// compares names case-insensitively, so it moves nothing and is saved.
+			const { db, updateUser } = reset();
+			driverAccount(db, 65, "Cara Carrier", "Acme Leasing", "Acme Leasing");
+			const r = await updateUser(65, usersPageSave("Cara Carrier", { companyName: "acme leasing" }));
+			check(`§6 a case-only company change on a driver already on that ledger: judged (reads ${S.jtReads}) and saved, 200, the row re-spelt (${got(r)}, row ${JSON.stringify(dirRow(db, "Cara Carrier").carrier_name)})`,
+				r.status === 200 && S.jtReads === 1 && dirRow(db, "Cara Carrier").carrier_name === "acme leasing" && account(db, 65).company_name === "acme leasing");
+		}
+		{
+			// No directory row and no company change: the save adds no row, so
+			// onboarding can still add the driver's first row with its carrier judged.
+			const { db, updateUser } = reset();
+			driverAccount(db, 66, "Cara Carrier", "Acme Leasing", null);
+			const r = await updateUser(66, usersPageSave("Cara Carrier"));
+			check(`§6 a driver with no directory row, a Users-page save: 200, no row added, no lock read (${got(r)}, row ${dirRow(db, "Cara Carrier") ? "added" : "none"}, reads ${S.jtReads})`,
+				r.status === 200 && !dirRow(db, "Cara Carrier") && account(db, 66).full_name === "Cara C. Carrier" && S.jtReads === 0);
 		}
 		{
 			// A company name that differs and would move the driver onto another

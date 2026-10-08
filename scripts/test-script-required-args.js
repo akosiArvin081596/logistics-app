@@ -161,8 +161,11 @@ Module._load = function (request, ...rest) { return request === "googleapis" ? {
 		check("§4 the storyboard types the signed-in account, no driver ID or password of its own",
 			src.includes("h.account.username") && src.includes("h.account.password") && !/LogisX-\d{4}/.test(src) && !/Password123!/.test(src));
 		// Refused before any request: the base names a port nothing listens on.
+		const outDirs = ["clips", ".raw", "captions"].map((d) => path.join(ROOT, "docs", "driver-video", d));
+		const existed = outDirs.filter((d) => fs.existsSync(d));
 		const noUser = run("scripts/docs/capture-driver-video.js", ["--base=http://127.0.0.1:9"], { cwd: ROOT });
 		check(`§4 run without --user: refuses (exit ${noUser.code})`, noUser.code === 1 && /--user=/.test(noUser.out));
+		check("§4 …before writing anything: no output folder created", outDirs.filter((d) => fs.existsSync(d)).length === existed.length);
 	}
 } finally {
 	fs.rmSync(tmp, { recursive: true, force: true });

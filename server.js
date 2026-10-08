@@ -23704,7 +23704,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// change a carrier (accountDirectorySync()). A failed read leaves `jt` null,
 		// and guard (c2) then judges every finalized month.
 		let jt = null;
-		if (accountDirectorySync(user, { driverName, email, companyName })) {
+		if (accountDirectorySync(user, { driverName, companyName })) {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/users/:id: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
@@ -23959,13 +23959,14 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// (c2) The month-end lock on the drivers_directory carrier the sync after
-		// the commit writes: the account's company name. Judged as POST /api/users
-		// judges the row it adds (accountDirectoryRowLock()) and as
+		// the commit writes, which only a company-name change carries: the sent
+		// company name (accountCompanyChange()). Judged as POST /api/users judges
+		// the row it adds (accountDirectoryRowLock()) and as
 		// PUT /api/drivers-directory/:id judges a carrier edit, so a company name an
 		// investor's company matches cannot put a driver whose history reaches a
 		// finalized month on that investor's ledger here either, nor take them off
 		// one. Refused whole, with the same 409 as POST /api/users.
-		const dirSync = accountDirectorySync(user, { driverName, email, companyName });
+		const dirSync = accountDirectorySync(user, { driverName, companyName });
 		const syncLock = accountDirectorySyncLock(dirSync, jt);
 		if (syncLock && (syncLock.unreadable || syncLock.blockers.length)) {
 			const accountRowAudit = {
@@ -24212,8 +24213,13 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 
 		// The carrier moves only with a company-name change (accountCompanyChange(),
 		// the change guard (c2) judged); every other sync leaves it as it is.
-		// `user` is still the account as it stood before the write above.
+		// `user` is still the account as it stood before the write above. Without
+		// a company change the sync only refreshes an existing row: adding one here
+		// would give it no carrier, and onboarding, which adds a driver's first row
+		// with the carrier judged (accountDirectoryCarrier()), would then find it
+		// and add nothing.
 		const syncCarrier = accountCompanyChange(user, companyName) ? companyName : undefined;
+		const syncs = (name) => syncCarrier !== undefined || !!findDirectoryRowForDriver(name || "");
 		if (driverName !== undefined && driverName !== (user.driver_name || "")) {
 			// Sync renamed driver to Carrier Database sheet.
 			// ⚠️ Only when there IS a name. This ran unconditionally, so clearing the
@@ -24232,10 +24238,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// company / truck-unit sync that is the whole point of the call is
 			// skipped with no error. The lookup has to use the name the row carries
 			// now.
-			if (driverName.trim()) {
+			if (driverName.trim() && syncs(doRename ? driverName : user.driver_name)) {
 				syncDriverToCarrierSheet(driverName, { oldName: doRename ? driverName : user.driver_name, email: email !== undefined ? email : user.email, companyName: syncCarrier, action: "update" });
 			}
-		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined)) {
+		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined) && syncs(user.driver_name)) {
 			// Name didn't change but email/company did
 			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: syncCarrier, action: "update" });
 		}

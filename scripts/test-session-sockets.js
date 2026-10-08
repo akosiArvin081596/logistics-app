@@ -419,14 +419,16 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
-		"accountCompanyChange", sources.updateUser)(
+		"accountCompanyChange", "findDirectoryRowForDriver", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
 		// The directory-carrier lock (its own subject is scripts/test-account-directory-row-lock.js): nothing to judge.
 		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {},
 		// server.js's own: whether the body changes the company (and so the carrier).
-		new Function(`${liftFunction("function accountCompanyChange(user, companyName) {")}\nreturn accountCompanyChange;`)());
+		new Function(`${liftFunction("function accountCompanyChange(user, companyName) {")}\nreturn accountCompanyChange;`)(),
+		// No drivers_directory here (the directory sync above is a no-op): no row.
+		() => null);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions

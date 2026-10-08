@@ -230,7 +230,7 @@ function buildModule(db, src = {}, stubs = {}) {
 		"return { normalizeDriverName, isBuiltInPropertyName, reservedDriverNameRefusal, findDriverNameClash, findDriverNameClashes, canonicalDriverName, DRIVER_RENAME_TARGETS," +
 		" DRIVER_RENAME_ID_CAP, DRIVER_RENAME_HARD_BLOCK_CODES, planDriverRenameSqlite, driverRenameMergeScan, applyDriverRenameSqlite," +
 		" driverRenameAccountIds, syncDriverToCarrierSheet, assignDriverToTruck, auditText, getDriverPayStructures," +
-		" userUpdateLockBlockers, findTruckForDriverAccount, driverRenameWhereSql, driverRenameWhereArgs };")(
+		" userUpdateLockBlockers, findTruckForDriverAccount, driverRenameWhereSql, driverRenameWhereArgs, findDirectoryRowForDriver };")(
 		db, st.isLocked, st.expenseRowPeriodLocked, st.invoiceRowPeriodLocked, st.namedLockedPeriods, st.expensePostedPeriod, st.periodLocksReadable);
 }
 const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
@@ -358,6 +358,7 @@ function mountUsersPut(db, { routeSrc = ROUTES.usersPut, moduleSrc = {}, realLoc
 		driverRenameMergeScan: m.driverRenameMergeScan,
 		applyDriverRenameSqlite: m.applyDriverRenameSqlite,
 		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
+		findDirectoryRowForDriver: m.findDirectoryRowForDriver,
 		purgeUserSessions: () => 0,
 		logAudit: (req, action, entity, entityId, details) => log.audits.push({ action, details }),
 		notifyChange: () => {},

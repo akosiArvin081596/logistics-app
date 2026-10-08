@@ -465,6 +465,8 @@ function helpers(page, state) {
 
 async function main() {
 	if (has("list")) { listClips(); return; }
+	// Before anything is written: a capture without its account refuses here.
+	if (!has("dry") && !DRIVER.username) throw new Error("name the e2e test driver's account with --user=… (there is no default; never a real driver's)");
 	lintCaptions();
 
 	for (const d of Object.values(DIR)) fs.mkdirSync(d, { recursive: true });
@@ -485,7 +487,6 @@ async function main() {
 		return;
 	}
 
-	if (!DRIVER.username) throw new Error("name the e2e test driver's account with --user=… (there is no default; never a real driver's)");
 	await assertSafeTarget(BASE);
 	const drv = await login(BASE, DRIVER.username, DRIVER.password);
 	const adm = await login(BASE, ADMIN.username, ADMIN.password);
