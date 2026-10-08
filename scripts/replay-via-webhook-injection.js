@@ -16,17 +16,18 @@
  *  - If restore fails, you can manually re-PUT the backup with:
  *      curl -X PUT -H "X-N8N-API-KEY: $KEY" -H "Content-Type: application/json" \
  *        --data @scripts/.wf-backup-<ts>.json \
- *        https://sandhub.app.n8n.cloud/api/v1/workflows/ydFgTSFpKTyyZbXW
+ *        "$N8N_BASE_URL/api/v1/workflows/$N8N_WORKFLOW_ID"
  *
- * Usage: N8N_API_KEY=... node scripts/replay-via-webhook-injection.js [messageId]
+ * Usage: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/replay-via-webhook-injection.js [messageId]
+ *  (no defaults: without N8N_BASE_URL or N8N_WORKFLOW_ID it exits 2)
  *  default messageId = 19df41c0f90151db (RE: Bison #6942913, exec 2067)
  */
 
 const fs = require('fs');
 const path = require('path');
+const { requireN8nSettings } = require('./lib/n8n-settings');
 
-const N8N_BASE = process.env.N8N_BASE_URL || 'https://sandhub.app.n8n.cloud';
-const WORKFLOW_ID = process.env.N8N_WORKFLOW_ID || 'ydFgTSFpKTyyZbXW';
+const { base: N8N_BASE, workflowId: WORKFLOW_ID } = requireN8nSettings('replay-via-webhook-injection.js');
 const API_KEY = process.env.N8N_API_KEY;
 if (!API_KEY) { console.error('N8N_API_KEY env var required'); process.exit(1); }
 

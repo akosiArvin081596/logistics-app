@@ -53,6 +53,12 @@ const ROOT = path.join(__dirname, "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
+// The broker AP inboxes have no default in code; resolveInvoiceTo() reads them
+// at each call, so the routes below address their drafts to these.
+const BISON_TO = "bison-ap@example.test";
+const DEFAULT_TO = "ap@example.test";
+process.env.BISON_INVOICE_EMAIL = BISON_TO;
+process.env.DEFAULT_INVOICE_EMAIL = DEFAULT_TO;
 const brokerInvoice = require(LIB_PATH);
 
 // -------------------------------------------------------------------- runner
@@ -594,6 +600,7 @@ async function routesSection() {
 		eq([(bison.body || {}).emailBodyDefault, (bison.body || {}).emailHtml],
 			[BISON_MOVE_PO_TEXT, brokerInvoice.buildInvoiceEmailHtml(FIXTURES.bisonMovePo)],
 			withErrors("§5 dryRun, Bison: the generated text and the default Bison email", bison));
+		eq((bison.body || {}).to, BISON_TO, "§5 …addressed to the Bison AP inbox (BISON_INVOICE_EMAIL)");
 
 		// A Bison load whose Order # could not be read: the message the editor
 		// starts from carries the Order # BLANK, as the orderNumber seed does —
@@ -622,6 +629,7 @@ async function routesSection() {
 	const d0 = plain.seen.drafts[0] || {};
 	eq([pr.status, (pr.body || {}).via, plain.seen.drafts.length], [200, "imap", 1], withErrors("§5 approve, no emailBody → one IMAP draft", pr));
 	eq(d0.html, DEFAULT, "§5 …carrying the default email, byte for byte");
+	eq(d0.to, DEFAULT_TO, "§5 …addressed to the default AP inbox (DEFAULT_INVOICE_EMAIL)");
 	eq(plain.seen.audits.map((a) => a.action), ["invoice_draft_created"], "§5 …and no invoice_draft_edited row");
 	eq(plain.row(), { edited: 0, edited_fields: "", overrides_json: "" }, "§5 …and an unedited draft record");
 

@@ -10,7 +10,7 @@
  *
  *   PUT /api/investor-applications/:id/status (Accepted)
  *     welcomeHtml        the investor welcome email (username + temp password)
- *     adminAcceptHtml    the "Investor Accepted" note to info@logisx.com
+ *     adminAcceptHtml    the "Investor Accepted" note to the admin inbox (ADMIN_NOTIFY_EMAIL)
  *   POST /api/public/investor-apply
  *     vehicleRows, applicantHtml, adminHtml   applicant confirmation + admin note
  *     paymentTermsHtml   the payment terms invitation block of the admin note
@@ -267,11 +267,11 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	// subject; this application signs the standard contract, so none is.
 	// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
 	// subject (§10); here it judges nothing.
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", routeSrc)(
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", "ADMIN_NOTIFY_EMAIL", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
 		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "", async () => ({ headers: [], data: [] }), () => null);
+		() => null, () => "", async () => ({ headers: [], data: [] }), () => null, "admin@example.test");
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },
@@ -280,7 +280,7 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	return {
 		body: out.body,
 		welcome: (mail.find((m) => m.to === row.email) || {}).html,
-		admin: (mail.find((m) => m.to === "info@logisx.com") || {}).html,
+		admin: (mail.find((m) => m.to === "admin@example.test") || {}).html,
 	};
 }
 

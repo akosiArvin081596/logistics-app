@@ -256,9 +256,9 @@ function applyRoute(src = SRC, lib = LIB) {
 		liftFunction("function escapeHtml(", src),
 		`${routeSource("post", "/api/public/apply", src)};`,
 	].join("\n");
-	new Function("app", "publicFormLimiter", "publicFormInput", "w9Input", "imageLimits", "db", "logAudit", "sendEmail", "console",
+	new Function("app", "publicFormLimiter", "publicFormInput", "w9Input", "imageLimits", "db", "logAudit", "sendEmail", "console", "ADMIN_NOTIFY_EMAIL",
 		`"use strict";\n${lifted}`)(app, LIMITER, publicFormInput, lib, imageLimits, db,
-		(...a) => audits.push(a), (...a) => mail.push(a), QUIET);
+		(...a) => audits.push(a), (...a) => mail.push(a), QUIET, "admin@example.test");
 	const mounted = handlers["/api/public/apply"];
 	if (!mounted || mounted.length !== 2 || mounted[0] !== LIMITER) die("POST /api/public/apply is not mounted behind publicFormLimiter");
 	const call = (body) => {
@@ -349,7 +349,8 @@ function realFormRows(src = SRC) {
 	r.t(row.ssn === "123-45-6789" && row.skills === "" && row.availability === JSON.stringify(["Full-time"]) &&
 		row.full_name === payload.full_name && row.cdl_front === PDF,
 	"…with the SSN, the blank skills answer, the availability and the attachments as sent");
-	r.t(route.mail.length === 2 && route.audits.length === 1, "…and the two emails and the audit row, as before");
+	r.t(route.mail.length === 2 && route.audits.length === 1 && route.mail.filter((m) => m[0] === "admin@example.test").length === 1,
+		"…and the two emails (the admin's to ADMIN_NOTIFY_EMAIL) and the audit row, as before");
 	return r;
 }
 

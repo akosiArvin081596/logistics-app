@@ -423,6 +423,10 @@ command line (dotenv never overrides a set variable):
   (server and browser), Routemate, ScanKit and Linxup.
 - **The rate-con Drive folder blanked:** `RATECON_DRIVE_FOLDER_ID=` (empty). `server.js` has no default, so the rate-con
   Drive features are off (see "What leaves the machine").
+- **Mail recipients named, at example.test:** `ADMIN_NOTIFY_EMAIL=admin@example.test`,
+  `BISON_INVOICE_EMAIL=bison-ap@example.test` and `DEFAULT_INVOICE_EMAIL=ap@example.test`, whatever `.env` says. None
+  has a default in code, so these keep the admin notifications and the invoice drafts addressed as in production, to
+  a reserved name nothing delivers to (and with Gmail blanked or faked, nothing is sent anyway).
 - **Feature flags off:** `ROUTEMATE/LINXUP/SCANKIT/INVOICE_AUTOGEN/PERIOD_FINALIZE/FUEL_GALLONS_RECOVERY/RATECON_RECONCILE/RATECON_INDEX_APPLY/FUEL_EVENTS/CHAT_ORPHAN_SWEEP_ENABLED=false`.
 - **Default-ON alerts off:** `ELD_STALE/FUEL_LOW/EXPENSE_DUPLICATE/INVOICE_UNDATED/RATECON_EXTRACT_ALERT_ENABLED=false`.
 - **The maintenance notice:** off (`MAINTENANCE_NOTICE_ENABLED=false`) unless the script is run with

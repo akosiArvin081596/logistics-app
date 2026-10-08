@@ -196,6 +196,8 @@ function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis
 		currentMonthKeyCT: () => CURRENT_MONTH,
 		notifyChange: (d) => calls.notify.push(d),
 		sendEmail: (to, subject) => { calls.mail.push({ to, subject }); return Promise.resolve(true); },
+		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
+		ADMIN_NOTIFY_EMAIL: "admin@example.test",
 		bcrypt: { hash: async () => "hashed" },
 		registerApplicationVehicles: vehicles || (() => ({ created: 0, existing: 0, heldByOther: 0, failed: 0 })),
 		findDriverNameClash: () => null,

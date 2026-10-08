@@ -184,7 +184,7 @@ function makeApp() {
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (7, 'acme', 'Investor', 'Acme Leasing')").run();
 	const m = new Function("db", "todayKeyCT", "periodLocksReadable", "bcrypt", "sendEmail", "insertNotification", "notifyChange",
-		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console",
+		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04", () => true,
 		{ hash: async () => "hash" }, () => {}, { run() {} }, () => {},
@@ -192,7 +192,7 @@ function makeApp() {
 		// As driverHistoryFloorMonth() answers: with no sheet in hand nothing can be dated.
 		(name, jt) => (jt ? S.floors[String(name || "").trim().toLowerCase()] || { floor: "", unbounded: false } : { floor: "", unbounded: true }),
 		(audit, code, periods, subject) => { S.recorded.push({ audit, code, periods, subject }); },
-		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} });
+		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test");
 	let handler = null;
 	const env = {
 		app: { post: (p, guard, h) => { handler = h; } },

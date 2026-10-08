@@ -85,23 +85,28 @@
  *  - Reads the API key from N8N_API_KEY only. Never prints it.
  *
  * USAGE
+ *   export N8N_BASE_URL=...      # the n8n instance; no default
+ *   export N8N_WORKFLOW_ID=...   # the workflow; no default
  *   export N8N_API_KEY=$(jq -r '.n8n.api_key' ~/Documents/Credentials/credentials.json)
  *   node scripts/stage-n8n-details-fix.js                                  # dry run
  *   node scripts/stage-n8n-details-fix.js --apply --i-really-mean-production
  *   node scripts/stage-n8n-details-fix.js --revert --apply --i-really-mean-production
+ * Without N8N_BASE_URL or N8N_WORKFLOW_ID it exits 2 before anything else.
  */
+
+const { requireN8nSettings } = require("./lib/n8n-settings");
+const { base: N8N_BASE, workflowId: WORKFLOW_ID } = requireN8nSettings("stage-n8n-details-fix.js");
 
 // Hard stop: this change is already live (see header). Re-applying it would be
 // a no-op at best; the real risk is someone refreshing the stale assertions to
 // make it "work" again and PUTting a 41-node body over a 42-node workflow.
 console.error(
 	"stage-n8n-details-fix.js is RETIRED — the fix was applied 2026-08-07 and is live.\n" +
-	"Verify with: GET /api/v1/workflows/ydFgTSFpKTyyZbXW -> nodes[] -> 'Update Job Tracking (Distance)'\n" +
+	`Verify with: GET /api/v1/workflows/${WORKFLOW_ID} -> nodes[] -> 'Update Job Tracking (Distance)'\n` +
 	"Expected mapping: \"Details\": \"={{ $('JOB DETAILS ENTRY').item.json['Details'] }}\"");
 process.exit(3);
 
-const BASE = process.env.N8N_BASE_URL || "https://sandhub.app.n8n.cloud/api/v1";
-const WORKFLOW_ID = "ydFgTSFpKTyyZbXW";
+const BASE = `${N8N_BASE}/api/v1`;
 const NODE_NAME = "Update Job Tracking (Distance)";
 const EXPECTED_NODE_COUNT = 41;
 

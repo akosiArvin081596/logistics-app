@@ -19,14 +19,15 @@
  * Fix: remove the Driver field from columns.value AND from the schema
  * removed:false entries. Idempotent + backed up.
  *
- * Run: N8N_API_KEY=... node scripts/patch-protect-dispatch-fields.js
+ * Run: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/patch-protect-dispatch-fields.js
+ *      (no defaults: without N8N_BASE_URL or N8N_WORKFLOW_ID it exits 2)
  */
 
 const fs = require('fs');
 const path = require('path');
+const { requireN8nSettings } = require('./lib/n8n-settings');
 
-const N8N_BASE = process.env.N8N_BASE_URL || 'https://sandhub.app.n8n.cloud';
-const WORKFLOW_ID = process.env.N8N_WORKFLOW_ID || 'ydFgTSFpKTyyZbXW';
+const { base: N8N_BASE, workflowId: WORKFLOW_ID } = requireN8nSettings('patch-protect-dispatch-fields.js');
 const API_KEY = process.env.N8N_API_KEY;
 if (!API_KEY) { console.error('N8N_API_KEY env var required'); process.exit(1); }
 

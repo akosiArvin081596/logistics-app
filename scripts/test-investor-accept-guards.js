@@ -230,11 +230,11 @@ async function accept(db, appId, { status = "Accepted", routeSrc = ACCEPT_SRC, d
 	// subject; here these applications sign the standard contract, so none is.
 	const lockNames = Object.keys(NO_COMPANY_LOCK);
 	const lockEnv = typeof lock === "function" ? lock(audits) : lock;
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", ...lockNames, routeSrc)(
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "ADMIN_NOTIFY_EMAIL", ...lockNames, routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db, bcrypt, crypto,
 		(req, action, entity, entityId, details) => audits.push({ action, entityId, details }), () => {}, colLetter, escapeHtml,
 		(to, subject) => { mail.push({ to, subject }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "", ...lockNames.map((k) => lockEnv[k]));
+		() => null, () => "", "admin@example.test", ...lockNames.map((k) => lockEnv[k]));
 	if (typeof handler !== "function") die("the lifted route did not register a handler");
 	const out = { status: 200, body: null };
 	const e = console.error;
@@ -362,7 +362,7 @@ async function successSection() {
 		"§3 the status, the account (Investor, forced password change, the hashed temporary password) are written");
 	t(inv.application_id === id && inv.carrier_name === "Acme" && inv.full_name === "Acme Hauling LLC", "§3 ...the investors record, carrying the DBA as its company name");
 	t(trucks.length === 2 && trucks.every((tr) => tr.owner_id === creds.userId) && trucks[0].unit_number === `INV-${id}-A`, "§3 ...and the trucks, owned by the new account");
-	t(x.audits.some((a) => a.action === "accept_investor") && x.mail.length === 2 && x.mail.some((m) => m.to === "owner@acme.example.test") && x.mail.some((m) => m.to === "info@logisx.com"),
+	t(x.audits.some((a) => a.action === "accept_investor") && x.mail.length === 2 && x.mail.some((m) => m.to === "owner@acme.example.test") && x.mail.some((m) => m.to === "admin@example.test"),
 		"§3 the acceptance is audited and both emails are sent");
 	return r;
 }

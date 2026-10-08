@@ -42,6 +42,10 @@ const SERVER = path.join(__dirname, "..", "server.js");
 const LIB = path.join(__dirname, "..", "lib", "broker-invoice.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
 const LIB_SRC = fs.readFileSync(LIB, "utf8");
+// The default AP inbox has no default in code (DEFAULT_INVOICE_EMAIL); the runner
+// names an example.test one, read by resolveInvoiceTo() at each call.
+const DEFAULT_TO = "ap@example.test";
+process.env.DEFAULT_INVOICE_EMAIL = DEFAULT_TO;
 const brokerInvoice = require(LIB);
 const rcIndexShared = require(path.join(__dirname, "..", "lib", "ratecon-drive-index.js"));
 
@@ -227,7 +231,7 @@ async function bolOnlyLoadViolations(serverSrc, lib) {
 	if (spy.length) v.push(`the BOL was passed to the extractor ${spy.length} time(s)`);
 	for (const k of Object.keys(EMPTY)) if (read.fields[k]) v.push(`${k} was taken from the BOL: ${read.fields[k]}`);
 	const to = lib.resolveInvoiceTo({ brokerEmail: BROKER_EMAIL, documentsEmail: read.fields.documentsEmail });
-	if (to.email !== lib.DEFAULT_INVOICE_EMAIL) v.push(`recipient ${to.email}, want the default ${lib.DEFAULT_INVOICE_EMAIL}`);
+	if (to.email !== DEFAULT_TO) v.push(`recipient ${to.email}, want the default ${DEFAULT_TO}`);
 	if (env.calls.errors.length) v.push(`getRateConBytes logged errors: ${env.calls.errors.join(" | ")}`);
 	return v;
 }
