@@ -5,7 +5,8 @@
  *
  * WHAT IS ASSERTED, and against what:
  *   §1 checkInvestorRfi(): required fields, the email check, length caps,
- *      control characters, one scalar per field, consent, and the honeypot
+ *      control and invisible characters stripped from every text field, one
+ *      scalar per field, consent, and the honeypot
  *   §2 buildInvestorRfiEmail(): to info@logisx.com, Reply-To the submitter,
  *      "[STAGING] " only for the staging site, every value escaped
  *   §3 the real middleware on a real Express app over loopback, with a fake
@@ -152,17 +153,33 @@ const asForm = (origin, payload) => ({
 		ok(`§1 ${field} over ${max} characters is refused`, r.ok === false && r.code === "FIELD_TOO_LONG" && r.field === field);
 		ok(`§1 ${field} at exactly ${max} characters passes`, rfi.checkInvestorRfi({ ...VALID, [field]: "x".repeat(max) }).ok === true);
 	}
-	ok("§1 a CR/LF in the name (it goes into the subject) is refused",
-		rfi.checkInvestorRfi({ ...VALID, fullName: "Jane\r\nBcc: x@example.com" }).code === "INVALID_FIELD");
-	for (const [label, ch] of [["a right-to-left override", "\u202E"], ["a zero-width space", "\u200B"], ["a line separator", "\u2028"], ["a C1 control", "\u0085"], ["a byte-order mark", "\uFEFF"]]) {
-		ok(`§1 ${label} in the name is refused`, rfi.checkInvestorRfi({ ...VALID, fullName: `Jane${ch}Doe` }).code === "INVALID_FIELD");
-		ok(`§1 ${label} in the message is refused`, rfi.checkInvestorRfi({ ...VALID, message: `a${ch}b` }).code === "INVALID_FIELD");
+	// Control and invisible characters are STRIPPED from every text field (2026-10-08).
+	ok("§1 a CR/LF in the name is stripped",
+		rfi.checkInvestorRfi({ ...VALID, fullName: "Jane\r\nDoe" }).value.fullName === "JaneDoe");
+	const INVISIBLES = [
+		["a right-to-left override", "\u202E"], ["a zero-width space", "\u200B"], ["a zero-width joiner", "\u200D"],
+		["a line separator", "\u2028"], ["a paragraph separator", "\u2029"], ["a C1 control", "\u0085"],
+		["a byte-order mark", "\uFEFF"], ["a soft hyphen", "\u00AD"], ["an Arabic letter mark", "\u061C"],
+		["a Hangul filler", "\u3164"], ["a Hangul choseong filler", "\u115F"], ["a halfwidth Hangul filler", "\uFFA0"],
+		["a combining grapheme joiner", "\u034F"], ["a Mongolian vowel separator", "\u180E"], ["a variation selector", "\uFE0F"],
+		["a tag character", "\u{E0041}"], ["a first-strong isolate", "\u2068"], ["a NUL", "\u0000"], ["a BEL", "\u0007"],
+	];
+	for (const [label, ch] of INVISIBLES) {
+		const r = rfi.checkInvestorRfi({ ...VALID, fullName: `Jane${ch}Doe`, phone: `555${ch}0100`, company: `A${ch}B`, message: `a${ch}b` });
+		ok(`§1 ${label} is stripped from the name, phone, company and message`,
+			r.ok === true && r.value.fullName === "JaneDoe" && r.value.phone === "5550100" && r.value.company === "AB" && r.value.message === "ab");
 	}
-	ok("§1 accented and non-Latin names pass", rfi.checkInvestorRfi({ ...VALID, fullName: "José Ñúñez 李雷" }).ok === true);
-	ok("§1 a NUL in the company is refused", rfi.checkInvestorRfi({ ...VALID, company: "A\u0000B" }).code === "INVALID_FIELD");
-	ok("§1 line breaks and tabs are allowed in the message", rfi.checkInvestorRfi({ ...VALID, message: "a\r\nb\tc" }).ok === true);
-	ok("§1 other control characters in the message are refused",
-		rfi.checkInvestorRfi({ ...VALID, message: "a\u0007b" }).code === "INVALID_FIELD");
+	ok("§1 a name made only of invisible characters is answered as missing",
+		(() => { const r = rfi.checkInvestorRfi({ ...VALID, fullName: "\u200B\u3164\u00AD " }); return r.code === "FIELD_REQUIRED" && r.field === "fullName"; })());
+	ok("§1 a zero-width space pasted into the email is stripped",
+		rfi.checkInvestorRfi({ ...VALID, email: "jane.sample\u200B@example.com" }).value.email === "jane.sample@example.com");
+	ok("§1 an email made only of invisible characters is answered as missing",
+		rfi.checkInvestorRfi({ ...VALID, email: "\u200B\uFEFF" }).code === "FIELD_REQUIRED");
+	ok("§1 stripping a CR/LF out of the email cannot smuggle in a header",
+		rfi.checkInvestorRfi({ ...VALID, email: "a@example.com\r\nBcc: x@example.com" }).code === "INVALID_EMAIL");
+	ok("§1 accented and non-Latin names pass unchanged", rfi.checkInvestorRfi({ ...VALID, fullName: "José Ñúñez 李雷" }).value.fullName === "José Ñúñez 李雷");
+	ok("§1 line breaks and tabs are kept in the message", rfi.checkInvestorRfi({ ...VALID, message: "a\r\nb\tc" }).value.message === "a\r\nb\tc");
+	ok("§1 tabs are stripped from one-line fields", rfi.checkInvestorRfi({ ...VALID, fullName: "Jane\tDoe" }).value.fullName === "JaneDoe");
 	for (const field of rfi.RFI_SCALAR_FIELDS) {
 		const r = rfi.checkInvestorRfi({ ...VALID, [field]: ["a", "b"] });
 		ok(`§1 ${field} sent twice (an array) is refused`, r.ok === false && r.code === "INVALID_FIELD");
@@ -378,12 +395,14 @@ const asForm = (origin, payload) => ({
 	}
 	ok("§6 a phone over 40 characters is refused", checkCall({ ...CALL, phone: "1".repeat(41) }).code === "FIELD_TOO_LONG");
 	ok("§6 a phone at exactly 40 characters passes", checkCall({ ...CALL, phone: "1".repeat(40) }).ok === true);
-	ok("§6 a CR/LF in the phone is refused", refusedAs(checkCall({ ...CALL, phone: "555\r\n0100" }), "INVALID_FIELD", "phone"));
-	ok("§6 a CR/LF in the name is refused", refusedAs(checkCall({ ...CALL, fullName: "Carl\r\nBcc: x@example.com" }), "INVALID_FIELD", "fullName"));
+	ok("§6 a CR/LF in the phone is stripped", checkCall({ ...CALL, phone: "555\r\n0100" }).value.phone === "5550100");
+	ok("§6 a CR/LF in the name is stripped", checkCall({ ...CALL, fullName: "Carl\r\nCallback" }).value.fullName === "CarlCallback");
+	ok("§6 an invisible Hangul filler and an Arabic letter mark are stripped from the name",
+		checkCall({ ...CALL, fullName: "Carl\u3164\u061C O. Callback" }).value.fullName === "Carl O. Callback");
 	ok("§6 the message is optional", (() => { const r = checkCall({ ...CALL, message: undefined }); return r.ok === true && r.value.message === ""; })());
 	ok("§6 a message over 2,000 characters is refused", checkCall({ ...CALL, message: "x".repeat(2001) }).code === "FIELD_TOO_LONG");
-	ok("§6 line breaks are allowed in the message, other controls are not",
-		checkCall({ ...CALL, message: "a\r\nb\tc" }).ok === true && refusedAs(checkCall({ ...CALL, message: "a‮b" }), "INVALID_FIELD", "message"));
+	ok("§6 line breaks are kept in the message, other controls are stripped",
+		checkCall({ ...CALL, message: "a\r\nb\tc" }).value.message === "a\r\nb\tc" && checkCall({ ...CALL, message: "a\u202Eb\u0007c" }).value.message === "abc");
 	ok("§6 a company is ignored", (() => { const r = checkCall({ ...CALL, company: "Acme Freight" }); return r.ok === true && !("company" in r.value); })());
 	for (const field of rfi.CALL_SCALAR_FIELDS) {
 		ok(`§6 ${field} sent twice (an array) is refused`, (() => { const r = checkCall({ ...CALL, [field]: ["a", "b"] }); return r.ok === false && r.code === "INVALID_FIELD"; })());
@@ -438,8 +457,14 @@ const asForm = (origin, payload) => ({
 	const callStg = rfi.buildCallRequestEmail(goodCall.value, { staging: true, submittedAt: at });
 	ok("§6 the call email goes to info@logisx.com, Reply-To the submitter",
 		callProd.to === "info@logisx.com" && callStg.to === "info@logisx.com" && callProd.replyTo === CALL.email);
-	ok("§6 production subject: 'Call request: <name> (<topic label>)'", callProd.subject === "Call request: Carl O. Callback (Owning part of LogisX)");
-	ok("§6 staging subject is prefixed '[STAGING] '", callStg.subject === "[STAGING] Call request: Carl O. Callback (Owning part of LogisX)");
+	ok("§6 production subject: 'Call request: <topic label>', from the validated topic only", callProd.subject === "Call request: Owning part of LogisX");
+	ok("§6 staging subject is prefixed '[STAGING] '", callStg.subject === "[STAGING] Call request: Owning part of LogisX");
+	{
+		const spoof = checkCall({ ...CALL, fullName: "Bob (Truck Fund)", topic: "other" });
+		const spoofMail = rfi.buildCallRequestEmail(spoof.value, { staging: false, submittedAt: at });
+		ok("§6 a name that looks like a topic never reaches the subject",
+			spoof.ok === true && spoofMail.subject === "Call request: Other" && !spoofMail.subject.includes("Bob") && hasRow(spoofMail.html, "Name", "<b>Bob (Truck Fund)</b>"));
+	}
 	ok("§6 heading 'Call request', '[STAGING] ' only on staging",
 		callProd.html.includes(">Call request</h2>") && !callProd.html.includes("[STAGING]") && callStg.html.includes(">[STAGING] Call request</h2>"));
 	ok("§6 the intro names the form, and the staging site only on staging",
@@ -468,7 +493,7 @@ const asForm = (origin, payload) => ({
 	ok("§6 every topic shows its label, in the subject too",
 		[["truck-fund", "Truck Fund"], ["owning-logisx", "Owning part of LogisX"], ["broker-free-platform", "Broker-free platform"], ["other", "Other"]].every(([v, label]) =>
 			hasRow(labelled("topic", v), "Topic", label) &&
-			rfi.buildCallRequestEmail(checkCall({ ...CALL, topic: v }).value, { staging: false, submittedAt: at }).subject === `Call request: Carl O. Callback (${label})`));
+			rfi.buildCallRequestEmail(checkCall({ ...CALL, topic: v }).value, { staging: false, submittedAt: at }).subject === `Call request: ${label}`));
 	ok("§6 the preferred date is formatted as the day it names",
 		hasRow(labelled("preferredDate", "2027-01-01"), "Preferred date", "Fri, Jan 1, 2027") && hasRow(labelled("preferredDate", "2026-10-07"), "Preferred date", "Wed, Oct 7, 2026"));
 	const hostileCall = checkCall({ ...CALL, fullName: "<img src=x onerror=alert(1)>", email: "o'brien&co@example.com", phone: "\"><b>", message: "<script>x</script>" });
@@ -487,13 +512,13 @@ const asForm = (origin, payload) => ({
 		let r = await request(server, asJson(STAGING, CALL));
 		ok("§6 valid call (JSON) from staging → 200 { ok: true }", r.status === 200 && r.json && r.json.ok === true);
 		ok("§6 ... sends exactly one email: '[STAGING] Call request: …', Reply-To the submitter",
-			sent.length === 1 && sent[0].to === "info@logisx.com" && sent[0].subject === "[STAGING] Call request: Carl O. Callback (Owning part of LogisX)" &&
+			sent.length === 1 && sent[0].to === "info@logisx.com" && sent[0].subject === "[STAGING] Call request: Owning part of LogisX" &&
 			sent[0].opts && sent[0].opts.replyTo === CALL.email && sent[0].html.includes(">[STAGING] Call request</h2>"));
 		r = await request(server, asForm(PROD, CALL_FORM));
 		ok("§6 valid call (form) from logisx.com → 303 to /invest-in-logisx?call=sent#schedule-a-call",
 			r.status === 303 && r.headers.location === CALL_SENT(PROD));
 		ok("§6 ... sends one email, no [STAGING] prefix, with the form's values",
-			sent.length === 2 && sent[1].subject === "Call request: Carl O. Callback (Owning part of LogisX)" && !sent[1].html.includes("[STAGING]") &&
+			sent.length === 2 && sent[1].subject === "Call request: Owning part of LogisX" && !sent[1].html.includes("[STAGING]") &&
 			hasRow(sent[1].html, "Preferred date", "Thu, Oct 15, 2026") && hasRow(sent[1].html, "Time zone", "Mountain"));
 		r = await request(server, asForm(STAGING, CALL_FORM));
 		ok("§6 a call form from staging is sent back to staging", r.status === 303 && r.headers.location === CALL_SENT(STAGING));
@@ -618,6 +643,27 @@ const asForm = (origin, payload) => ({
 		server.close();
 	}
 
+	{
+		// A REAL oversized no-JavaScript call (2026-10-08): the parser refuses the
+		// body before reading it, so only the action's `?kind=call` can say it was
+		// a call. Without the query it stays the RFI's answer.
+		const { app, sent } = buildApp();
+		const server = await listen(app);
+		const huge = { ...CALL_FORM, message: "x".repeat(40_000) };
+		let r = await request(server, { urlPath: `${rfi.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, huge) });
+		ok("§6 an oversized call (form, ?kind=call) → 303 ?call=error#schedule-a-call", r.status === 303 && r.headers.location === CALL_ERROR(PROD));
+		r = await request(server, asForm(PROD, huge));
+		ok("§6 ... the same body without ?kind=call → the RFI's ?error=1", r.status === 303 && r.headers.location === "https://logisx.com/invest-in-logisx?error=1");
+		r = await request(server, { urlPath: `${rfi.INVESTOR_RFI_PATH}?kind=call`, ...asJson(PROD, huge) });
+		ok("§6 ... and as JSON it stays 413 BODY_TOO_LARGE", r.status === 413 && r.json && r.json.code === "BODY_TOO_LARGE");
+		r = await request(server, { urlPath: `${rfi.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, CALL_FORM) });
+		ok("§6 a valid call posted to ?kind=call is sent as usual", r.status === 303 && r.headers.location === CALL_SENT(PROD) && sent.length === 1);
+		r = await request(server, { urlPath: `${rfi.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, { ...VALID, consent: "true" }) });
+		ok("§6 ?kind=call never turns a parsed RFI body into a call (validated and answered as the RFI)",
+			r.status === 303 && r.headers.location === "https://logisx.com/invest-in-logisx?sent=1" && sent.length === 2 && sent[1].subject === "Investor RFI: Jane Q. Sample");
+		server.close();
+	}
+
 	console.warn = realConsole.warn; console.error = realConsole.error;
 	const typed = [VALID.fullName, VALID.email, VALID.phone, VALID.company, "Interested in the data room", "jane.sample",
 		CALL.fullName, CALL.email, CALL.phone, "Afternoons suit me best", "carl.callback", "2026-10-15"];
@@ -677,6 +723,21 @@ const asForm = (origin, payload) => ({
 		const server = await listen(app);
 		const r = await request(server, asForm(PROD, CALL_FORM));
 		ok(`MUTANT: ${label} is caught by §6`, r.headers.location !== CALL_SENT(PROD) || sent[0] !== "Call request: Carl O. Callback (Owning part of LogisX)");
+		server.close();
+	}
+	const noStrip = loadLib(LIB_SRC.replace('const value = stripInvisible(raw, { multiline }).trim();', "const value = raw.trim();"));
+	ok("MUTANT: text fields that are not stripped are caught by §1",
+		noStrip.checkInvestorRfi({ ...VALID, fullName: "Jane\u061CDoe" }).value.fullName !== "JaneDoe");
+	const nameInSubject = loadLib(LIB_SRC.replace('subject: `${staging ? "[STAGING] " : ""}Call request: ${topicLabel}`', 'subject: `${staging ? "[STAGING] " : ""}Call request: ${call.fullName} (${topicLabel})`'));
+	ok("MUTANT: the name back in the call subject is caught by §6",
+		nameInSubject.buildCallRequestEmail(checkCall({ ...CALL, fullName: "Bob (Truck Fund)", topic: "other" }).value, { staging: false, submittedAt: at }).subject !== "Call request: Other");
+	{
+		const noQuery = loadLib(LIB_SRC.replace('return req.query && req.query.kind === "call";', "return false;"));
+		const app = express();
+		app.use(noQuery.INVESTOR_RFI_PATH, ...noQuery.createBodyParsers());
+		const server = await listen(app);
+		const r = await request(server, { urlPath: `${noQuery.INVESTOR_RFI_PATH}?kind=call`, ...asForm(PROD, { ...CALL_FORM, message: "x".repeat(40_000) }) });
+		ok("MUTANT: ignoring ?kind=call on a parser refusal is caught by §6", r.headers.location !== CALL_ERROR(PROD));
 		server.close();
 	}
 	const openOrigin = loadLib(LIB_SRC.replace("return origin && RFI_ORIGINS.has(origin) ? origin : null;", "return origin || null;"));
