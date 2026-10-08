@@ -1040,6 +1040,30 @@ function sourcePins() {
 		ok(!/\bssh\s+-i\b/.test(noComments(text)), `§7 ${f}: no bare \`ssh -i\` — every connection goes through scripts/deploy/ssh-retry.sh`);
 	}
 
+	// ── The VPS secrets are environment secrets, and the staging and production
+	// environments accept runs from main only. A job that reads them without an
+	// environment gets nothing once the repository-level copies are gone. The
+	// jobs that deploy record a deployment; the read-only ones must not.
+	const DEPLOYING_JOBS = new Set(["deploy.yml:staging", "deploy.yml:production", "deploy-drift.yml:heal"]);
+	const vpsJobs = [];
+	for (const f of wfFiles) {
+		for (const [id, text] of Object.entries(jobBlocks(read(f)))) {
+			const body = noComments(text);
+			if (!/\$\{\{\s*secrets\.VPS_/.test(body)) continue;
+			const key = `${path.basename(f)}:${id}`;
+			vpsJobs.push(key);
+			const env = /^ {4}environment:\s*\n((?: {6}.*\n)+)/m.exec(body);
+			const name = env && (/^ {6}name:\s*(\S+)\s*$/m.exec(env[1]) || [])[1];
+			ok(name === "staging" || name === "production",
+				`§7 ${key} reads the VPS secrets inside the staging or production environment (got ${name || "no environment"})`);
+			const recordsNoDeployment = !!env && /^ {6}deployment:\s*false\s*$/m.test(env[1]);
+			ok(recordsNoDeployment === !DEPLOYING_JOBS.has(key),
+				`§7 ${key}: ${DEPLOYING_JOBS.has(key) ? "a deploy records its deployment (no `deployment: false`)" : "a read-only job sets `deployment: false`"}`);
+		}
+	}
+	ok(["deploy-drift.yml:check", "backup-freshness.yml:check", ...DEPLOYING_JOBS].every((k) => vpsJobs.includes(k)),
+		`§7 the VPS-secret scan sees every job that reaches the box (got ${vpsJobs.join(", ")})`);
+
 	// ── backup-freshness.yml: read-only, so it must never share the deploy
 	// queue or the box's deploy lock, and it reaches the box exactly the way a
 	// deploy does.
