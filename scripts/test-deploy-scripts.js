@@ -287,6 +287,33 @@ const DRIFT_CASES = {
 		git(D.box, "update-ref", "refs/remotes/origin/main", C3);
 		return r;
 	},
+	checkExactMain(S, tag) {
+		// ls-remote matches ref TAILS: a branch named a/refs/heads/main also
+		// matches "refs/heads/main", and sorts first.
+		resetBox(C2);
+		git(D.seed, "push", "-q", "origin", `${C1}:refs/heads/a/refs/heads/main`);
+		let x;
+		try {
+			x = runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		} finally {
+			git(D.seed, "push", "-q", "origin", ":refs/heads/a/refs/heads/main");
+		}
+		return [[field(x.out, "DRIFT_REMOTE") === C3, `${tag}§5 main's tip is refs/heads/main exactly, never a branch whose name ends in it (got ${short(field(x.out, "DRIFT_REMOTE"))})`]];
+	},
+	checkRemoteUnreadable(S, tag) {
+		// No stand-in for main's tip: the clone's last-fetched origin/main would
+		// read a box that cannot reach origin as in-sync while main moved on.
+		resetBox(C3);
+		git(D.box, "remote", "set-url", "origin", path.join(T, "no-such-origin"));
+		let x;
+		try {
+			x = runSh(S.check, { DIR: D.box, PM2: "logistics-app" });
+		} finally {
+			git(D.box, "remote", "set-url", "origin", D.origin);
+		}
+		return [[x.code === 0 && field(x.out, "DRIFT_STATE") === "remote-unreadable" && field(x.out, "DRIFT_REMOTE") === "",
+			`${tag}§5 an origin the box cannot read → remote-unreadable, never in-sync from a stale origin/main (got ${field(x.out, "DRIFT_STATE")}, exit ${x.code})`]];
+	},
 	recordWaits(S, tag) {
 		resetBox(C2);
 		holdLock({ note: holderNote("someone-else"), seconds: 0.5 });
@@ -825,9 +852,17 @@ async function mutants() {
 		check: swap(swap(REAL.check, "# Refs and the marker are read: let a deploy have the box before the probe.\nexec 9>&-\n", ""),
 			'echo "DRIFT_LOCAL=$LOCAL"', 'exec 9>&-\necho "DRIFT_LOCAL=$LOCAL"'),
 	}, M));
+	expectCaught("ls-remote takes the first ref whose tail matches", DRIFT_CASES.checkExactMain({
+		...REAL,
+		check: swap(REAL.check, "awk '$2==\"refs/heads/main\"{print $1}'", "cut -f1 | head -1"),
+	}, M));
+	expectCaught("an unreadable origin falls back to the clone's origin/main", DRIFT_CASES.checkRemoteUnreadable({
+		...REAL,
+		check: swap(REAL.check, '\techo "could not read main\'s tip from origin (git ls-remote)"\n\techo "DRIFT_STATE=remote-unreadable"\n\texit 0\n', "\tREMOTE=$(git rev-parse origin/main)\n"),
+	}, M));
 	expectCaught("the drift check fetches again", DRIFT_CASES.checkReadsOnly({
 		...REAL,
-		check: swap(REAL.check, "REMOTE=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1 | head -1)", "git fetch --quiet origin; REMOTE=$(git rev-parse origin/main)"),
+		check: swap(REAL.check, "REMOTE=$(ls_main 2>/dev/null | awk '$2==\"refs/heads/main\"{print $1}')", "git fetch --quiet origin; REMOTE=$(git rev-parse origin/main)"),
 	}, M));
 	expectCaught("a rollback fails fast on the drift check's read", DRIFT_CASES.rollbackWaits({ ...REAL, rollback: swap(REAL.rollback, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));
 	expectCaught("the record step fails fast on the drift check's read", DRIFT_CASES.recordWaits({ ...REAL, record: swap(REAL.record, "LOCK_WAITS_FOR=any", "LOCK_WAITS_FOR=drift-check") }, M));

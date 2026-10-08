@@ -130,9 +130,10 @@ jobs:
           # DRIFT_LOCAL is what production runs as far as the box can tell: its
           # last VERIFIED deploy (HEAD only while no record exists yet). A box
           # whose deploy lock was held (deploy-in-progress) reports no LOCAL,
-          # HEAD or marker: it read nothing.
+          # HEAD or marker: it read nothing. One that could not read main's
+          # tip (remote-unreadable, an alarm) reports no REMOTE either.
           local_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_LOCAL=[0-9a-f]+' | cut -d= -f2 || true)
-          remote_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_REMOTE=[0-9a-f]+' | cut -d= -f2)
+          remote_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_REMOTE=[0-9a-f]+' | cut -d= -f2 || true)
           head_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_HEAD=[0-9a-f]+' | cut -d= -f2 || true)
           record=$(printf '%s' "$out" | grep -oE 'DRIFT_RECORD=[a-z]+' | cut -d= -f2 || true)
           # HEAD and the marker go to the heal prep, which refuses if either

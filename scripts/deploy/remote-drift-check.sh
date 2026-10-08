@@ -14,13 +14,26 @@ set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"
 cd "$DIR" || exit 1
 
-# main's tip, read without writing anything into the clone (no fetch). If
-# origin cannot be asked, the clone's last-fetched origin/main stands in, as a
-# failed fetch always did here.
-REMOTE=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1 | head -1)
+# main's tip, read without writing anything into the clone (no fetch), bounded
+# at 30 s where timeout(1) exists. ls-remote matches a pattern against ref
+# TAILS, so refs/heads/a/refs/heads/main would match too: only the exact ref
+# counts, and a remote lists each ref once. (No `exit` in the awk program:
+# scripts/test-deploy-scripts.js §11 reads every `exit` in this file.)
+ls_main() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 30 git ls-remote origin refs/heads/main
+	else
+		git ls-remote origin refs/heads/main
+	fi
+}
+REMOTE=$(ls_main 2>/dev/null | awk '$2=="refs/heads/main"{print $1}')
+# ⚠️ No stand-in. Compared with the clone's last-fetched origin/main, a box
+# that cannot reach origin would read as in-sync while main moved on. And a box
+# that cannot reach origin cannot fetch for its next deploy either: an alarm.
 if ! [[ "$REMOTE" =~ ^[0-9a-f]{40}$ ]]; then
-	echo "::warning::could not read main's tip from origin; comparing with this clone's last-fetched origin/main"
-	REMOTE=$(git rev-parse origin/main)
+	echo "could not read main's tip from origin (git ls-remote)"
+	echo "DRIFT_STATE=remote-unreadable"
+	exit 0
 fi
 
 # ⚠️ THE DEPLOY LOCK. The drift check has its own queue in Actions

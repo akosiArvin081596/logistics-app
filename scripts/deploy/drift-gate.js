@@ -78,6 +78,9 @@ const ACTIONS = Object.freeze({
 	"deploy-in-progress": "notice",
 	// The lock has been held for over 30 minutes: nothing deploys that long.
 	"deploy-lock-stuck": "alarm",
+	// The box could not read main's tip from origin, so it cannot compare, and
+	// it could not fetch for its next deploy either.
+	"remote-unreadable": "alarm",
 });
 
 const HINTS = Object.freeze({
@@ -100,6 +103,8 @@ const HINTS = Object.freeze({
 		"main's staging job never reached the VPS (every ssh attempt exited 255), and its Deploy run is already past its first attempt (a re-run, automatic or by hand, already happened) or reports no attempt number. Not re-running it again. 255 is not only the network: a refused deploy key, a changed host key and a dropped session end the same way. Check those, then re-run it by hand: gh run rerun <run-id> --failed.",
 	"deploy-in-progress":
 		"a deploy of production is running right now: either the box's deploy lock was held (a deploy, rollback or record step), so the drift check read nothing, or main's commit is checked out but not answering while its Deploy run is still running (the app restarting). The next tick reads the box once it is done.",
+	"remote-unreadable":
+		"the box could not read main's tip from origin (git ls-remote failed or timed out), so drift cannot tell whether production is behind, and the next deploy's fetch would fail the same way. Check the box's access to GitHub (its deploy key, DNS, the network).",
 	"deploy-lock-stuck":
 		"the box's deploy lock has been held for over 30 minutes, longer than any deploy, rollback or record step takes, so every deploy of production now fails fast. Find the holder on the box (fuser -v on the lock file the check names) before deploying again.",
 	"verified-record-inconsistent":
@@ -352,18 +357,54 @@ async function lookupStaging({
 	return stagingVerdict(runs, jobsByRun, sha, annotationsByJob);
 }
 
+/**
+ * Is a Deploy run of `sha` still running? Runs of ANY event count: a push, or
+ * a manual production deploy dispatched from main (a dispatch's head_sha is
+ * the tip of the branch it ran from). Answers { verdict: "pending", ... } for
+ * the newest such run, or { verdict: "none", ... }. Throws on an API failure.
+ */
+async function deployRunning({
+	repo,
+	sha,
+	token,
+	apiBase = "https://api.github.com",
+	fetchImpl = globalThis.fetch,
+	sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)),
+	backoffMs,
+}) {
+	const base = apiBase.replace(/\/+$/, "");
+	const body = await getJson(
+		`${base}/repos/${repo}/actions/workflows/${DEPLOY_WORKFLOW_FILE}/runs?head_sha=${encodeURIComponent(sha)}&per_page=20`,
+		{ token, fetchImpl, sleepImpl, backoffMs }
+	);
+	// Filtered again client-side, as lookupStaging() does.
+	const runs = (Array.isArray(body && body.workflow_runs) ? body.workflow_runs : []).filter((r) => r && r.head_sha === sha);
+	const running = runs.filter((r) => PENDING.has(r.status)).sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+	if (running) {
+		return {
+			verdict: "pending",
+			detail: `Deploy run ${running.id} (${running.event}) of main's commit is '${running.status}'`,
+			url: running.html_url || "",
+			runId: running.id,
+			runAttempt: running.run_attempt,
+		};
+	}
+	return { verdict: "none", detail: `none of the ${runs.length} Deploy run(s) of main's commit is still running`, url: "" };
+}
+
 /** The whole decision, with the network injected. Never throws. */
 async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs }) {
 	let gate = { verdict: "", detail: "not needed", url: "" };
 	// Behind and not answering, with main's own commit already checked out: a
 	// deploy of that commit may be restarting the app. The box lock is released
 	// once remote-deploy.sh exits, and the app then boots for 2–16 s while the
-	// smoke check polls it. While main's Deploy run is still running, that is a
-	// deploy in progress; otherwise the box's alarm stands.
+	// smoke check polls it. While a Deploy run of main's commit is still
+	// running (any event: a push, or a manual production deploy dispatched
+	// from main), that is a deploy in progress; otherwise the box's alarm stands.
 	if (boxState === "behind-and-unhealthy" && SHA_RE.test(targetSha || "") && boxHead === targetSha && repo) {
 		let seen;
 		try {
-			seen = await lookupStaging({ repo, sha: targetSha, token, apiBase, fetchImpl, sleepImpl, backoffMs, missingRetryMs });
+			seen = await deployRunning({ repo, sha: targetSha, token, apiBase, fetchImpl, sleepImpl, backoffMs });
 		} catch (err) {
 			seen = { verdict: "unverified", detail: `GitHub API lookup failed: ${err && err.message ? err.message : err}`, url: "" };
 		}
@@ -371,7 +412,7 @@ async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetc
 			const state = "deploy-in-progress";
 			return { state, action: actionFor(state), hint: hintFor(state), ...seen };
 		}
-		gate = { ...seen, detail: `${seen.detail}; no Deploy run of main's commit is still running, so the app not answering is an incident` };
+		gate = { ...seen, detail: `${seen.detail}, so the app not answering is an incident` };
 		return { state: boxState, action: actionFor(boxState), hint: hintFor(boxState), ...gate };
 	}
 	if (boxState === "behind-healable") {
@@ -461,6 +502,7 @@ module.exports = {
 	stagingVerdict,
 	getJson,
 	lookupStaging,
+	deployRunning,
 	decide,
 };
 

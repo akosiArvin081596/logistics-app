@@ -118,6 +118,8 @@ function checkActionTable(g, tag = "") {
 		"deploy-in-progress": "notice",
 		// The lock has been held for over 30 minutes.
 		"deploy-lock-stuck": "alarm",
+		// The box could not read main's tip from origin.
+		"remote-unreadable": "alarm",
 	};
 	for (const [state, action] of Object.entries(expect)) {
 		r.push([g.actionFor(state) === action, `${tag}§1 ${state} must map to '${action}' (got '${g.actionFor(state)}')`]);
@@ -313,9 +315,18 @@ async function checkUnhealthyDeploy(g, tag = "") {
 		[/\/runs\/91\/jobs\?/, { body: { jobs: [job("staging", "completed", "success", { id: 9101 }), job("production", "in_progress", null, { id: 9102 })] } }],
 	]);
 	const d = (fetchImpl, head = SHA) => g.decide({ boxState: "behind-and-unhealthy", targetSha: SHA, boxHead: head, repo: "o/r", fetchImpl, sleepImpl: noSleep, missingRetryMs: 0 });
-	const running = await d(serve({ status: "in_progress", conclusion: null }));
+	const runningFetch = serve({ status: "in_progress", conclusion: null });
+	const running = await d(runningFetch);
 	r.push([running.state === "deploy-in-progress" && running.action === "notice",
 		`${tag}§5 unhealthy with main checked out while main's Deploy run still runs → deploy-in-progress, a notice (got ${running.state})`]);
+	const asked = (runningFetch.calls[0] || {}).url || "";
+	r.push([asked.includes(`/actions/workflows/deploy.yml/runs?head_sha=${SHA}`) && !asked.includes("event="),
+		`${tag}§5 …asking for Deploy runs of that commit of ANY event (got ${asked})`]);
+	const runs = (list) => fakeFetch([[/\/runs\?/, { body: { workflow_runs: list } }]]);
+	const dispatched = await d(runs([run(91), run(92, { event: "workflow_dispatch", status: "in_progress", conclusion: null })]));
+	r.push([dispatched.state === "deploy-in-progress", `${tag}§5 …a manual production deploy dispatched from main counts too (got ${dispatched.state})`]);
+	const elsewhere = await d(runs([run(93, { head_sha: OTHER, status: "in_progress", conclusion: null })]));
+	r.push([elsewhere.state === "behind-and-unhealthy", `${tag}§5 …but a running Deploy run of another commit does not (got ${elsewhere.state})`]);
 	const done = await d(serve({}));
 	r.push([done.state === "behind-and-unhealthy" && done.action === "alarm",
 		`${tag}§5 …and once that run has completed, the box's alarm stands (got ${done.state})`]);
@@ -1136,6 +1147,8 @@ async function mutants() {
 	for (const [name, from, to] of [
 		["any unhealthy box with a running Deploy run is excused, whatever HEAD is", "&& boxHead === targetSha && repo) {", "&& repo) {"],
 		["any answer about main's Deploy run excuses an unhealthy box", 'if (seen.verdict === "pending") {', "if (true) {"],
+		["only push runs count as a deploy in progress", ".filter((r) => r && r.head_sha === sha);\n\tconst running", '.filter((r) => r && r.event === "push" && r.head_sha === sha);\n\tconst running'],
+		["a running Deploy run of any commit counts", ".filter((r) => r && r.head_sha === sha);\n\tconst running", ".filter((r) => !!r);\n\tconst running"],
 	]) {
 		const code = src.replace(from, to);
 		ok(code !== src, `§8 mutant '${name}' must actually differ from the source`);
