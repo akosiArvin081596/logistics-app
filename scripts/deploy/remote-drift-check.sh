@@ -4,7 +4,8 @@
 # Inputs (env): DIR, PM2
 #
 # Prints DRIFT_*=... lines for the workflow to parse. Read-only: it never writes
-# the marker it reads, nor the verified-deploy record.
+# the marker it reads, nor the verified-deploy record. The one file it writes is
+# its holder note in the deploy lock file, while it holds the lock (below).
 #
 # ⚠️ `behind-healable` is the box's view only, NOT permission to heal: the box
 # cannot see whether main's commit passed staging.
@@ -14,8 +15,39 @@ set -uo pipefail
 cd "$DIR" || exit 1
 
 git fetch --quiet --prune origin 2>/dev/null || true
-HEAD_SHA=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
+
+# ⚠️ THE DEPLOY LOCK. The drift check has its own queue in Actions
+# (deploy-drift.yml, invariant 1), so it can run while a deploy of this
+# directory is mid-flight: HEAD, the records and the HTTP answer are then all
+# half-changed. So it takes the box lock every deploy, rollback and record step
+# takes: the same LOCK_FILE as remote-deploy.sh's deploy-lock block
+# (scripts/test-deploy-scripts.js pins the two lines identical), with flock -n.
+# If a deploy holds it, the check reads nothing more and reports
+# `deploy-in-progress`, which the gate turns into a notice. It holds the lock
+# only while it reads (git refs, the marker, one local HTTP probe), never
+# across the fetch above. A deploy that starts in that second fails fast with
+# 75, like any overlap, and the next drift tick heals it.
+LOCK_DIR=${DEPLOY_LOCK_DIR:-/var/lock}
+LOCK_FILE="$LOCK_DIR/logisx-deploy$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '_').lock"
+if ! command -v flock >/dev/null 2>&1; then
+	echo "::error::flock(1) is not installed on this host — refusing to read the box without the deploy lock"
+	exit 1
+fi
+# `<>` opens read-write WITHOUT truncating: the holder's note stays readable.
+if ! exec 9<>"$LOCK_FILE"; then
+	echo "::error::cannot open the deploy lock $LOCK_FILE"
+	exit 1
+fi
+if ! flock -n 9; then
+	echo "deploy lock $LOCK_FILE is held: $(head -1 "$LOCK_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9=:./_ -')"
+	echo "DRIFT_REMOTE=$REMOTE"
+	echo "DRIFT_STATE=deploy-in-progress"
+	exit 0
+fi
+printf 'pid=%s since=%s by=remote-drift-check.sh\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE" 2>/dev/null || true
+
+HEAD_SHA=$(git rev-parse HEAD)
 
 # >>> verified-record — keep byte-identical in remote-deploy.sh,
 # remote-drift-check.sh and remote-drift-heal.sh (scripts/test-deploy-scripts.js
@@ -76,6 +108,8 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PO
 #                         was at it (a manual rollback, or a hotfix)
 MARKER="$DIR/.drift-heal-attempted"
 LAST=$(cat "$MARKER" 2>/dev/null || echo "")
+# Everything is read: let a deploy have the box.
+exec 9>&-
 
 echo "DRIFT_LOCAL=$LOCAL"
 echo "DRIFT_HEAD=$HEAD_SHA"

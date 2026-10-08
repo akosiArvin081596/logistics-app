@@ -40,7 +40,7 @@ const {
 	C1, C2, C3, S1, head, onMain, marker, log, VERIFIED_REF, verified, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
-	rollback, leaveHalfFinished,
+	rollback, leaveHalfFinished, healExpect, boxSeen,
 } = require("./deploy-test-sandbox.js");
 
 // A deploy that dies AFTER its checkout: HEAD moves to `sha`, the build fails,
@@ -197,7 +197,7 @@ const RECORD_CASES = {
 	},
 	inconsistentHeal(S, tag) {
 		resetBox(C2, { verified: S1 });
-		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2 });
+		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, ...boxSeen() });
 		return [[field(h.out, "HEAL_READY") === "no" && marker() === "", `${tag}§12 an inconsistent record: the heal prep refuses and writes no marker, so it never heals`]];
 	},
 	inconsistentDeploy(S, tag) {
@@ -250,22 +250,24 @@ const RECORD_CASES = {
 		// record, here with a half-finished HEAD past it.
 		resetBox(C1, { verified: C1 });
 		leaveHalfFinished(C2);
-		const local = field(checkOut(S), "DRIFT_LOCAL");
-		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: local });
+		const out = checkOut(S);
+		const local = field(out, "DRIFT_LOCAL");
+		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, ...healExpect(out) });
 		return [[local === C1 && field(h.out, "HEAL_READY") === "yes" && marker() === C3,
 			`${tag}§12 with a verified record and a half-finished HEAD past it, the heal prep reads production exactly as the drift check reported it (${short(local)}) and is ready`]];
 	},
 	healPrepOther(S, tag) {
 		const r = [];
 		resetBox(C2);
-		let local = field(checkOut(S), "DRIFT_LOCAL");
-		let h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: local });
+		let out = checkOut(S);
+		const local = field(out, "DRIFT_LOCAL");
+		let h = runSh(S.heal, { DIR: D.box, TARGET: C3, ...healExpect(out) });
 		r.push([local === C2 && field(h.out, "HEAL_READY") === "yes" && marker() === C3, `${tag}§12 with no record, the heal prep reads HEAD, as the drift check did, and is ready`]);
 		resetBox(C1, { verified: C1 });
 		leaveHalfFinished(C2);
-		local = field(checkOut(S), "DRIFT_LOCAL");
+		out = checkOut(S);
 		git(D.box, "update-ref", VERIFIED_REF, C2);
-		h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: local });
+		h = runSh(S.heal, { DIR: D.box, TARGET: C3, ...healExpect(out) });
 		r.push([field(h.out, "HEAL_READY") === "no" && marker() === "", `${tag}§12 a deploy verified between the check and the prep → not ready (production moved)`]);
 		return r;
 	},

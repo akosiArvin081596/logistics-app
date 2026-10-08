@@ -114,7 +114,9 @@ live-update handshake), and CI's push run passed on that same commit. Branch
 protection does not require PRs to be up to date with `main`, so that push run
 is the first CI verdict on what a merge produced. Production then smoke-checks
 itself, verifies the public edge, and **rolls itself back** to the previous SHA
-if either check fails.
+if either check fails. A manual production deploy (a rollback, say) deploys
+only a commit that passed staging in its own push run, unless it is run with
+`override=true`, which is recorded as a warning on the run.
 
 Setup, the safety reasoning, and the rollback design: [`.github/workflows/README.md`](.github/workflows/README.md).
 

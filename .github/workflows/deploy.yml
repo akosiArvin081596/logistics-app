@@ -18,8 +18,17 @@ name: Deploy
 #      `check · unit · build` on this exact commit must succeed. Branch
 #      protection does not require a PR to be up to date with main, so the
 #      commit a merge creates can be a combination no PR run tested; this is
-#      the first CI verdict on it. Bounded at 12 min; anything but success
+#      the first CI verdict on it. Bounded at 20 min; anything but success
 #      leaves production undeployed.
+# Before the smoke, the job checks that staging serves THIS run's commit: a
+# no-op deploy (a newer commit already live there) would let the smoke vouch
+# for another build.
+#
+# A MANUAL production deploy (workflow_dispatch) runs the production job alone,
+# so it carries its own gate (scripts/deploy/dispatch-gate.js): the commit its
+# ref names must have passed the staging job of a push-triggered Deploy run,
+# which every commit main deployed before did, so rollbacks work. override=true
+# deploys anyway and records a warning.
 # `production` needs `staging` and runs only when it SUCCEEDED, so it deploys
 # after all three, with no reviewer. It keeps `environment: production`, so
 # every production deploy is still recorded as a deployment of that environment.
@@ -39,7 +48,7 @@ name: Deploy
 #
 # ⚠️ NO JOB WAITS ON A HUMAN. The production environment has no required
 # reviewer, and every wait is bounded: each job has timeout-minutes, the CI
-# wait its own 12 min, and a queue only ever waits for jobs that are bounded
+# wait its own 20 min, and a queue only ever waits for jobs that are bounded
 # themselves. From 2026-09-25 until the reviewer was removed, a production job
 # waiting for approval held the production queue (#428 sat 22 h). Re-adding a
 # reviewer brings that back; see .github/workflows/README.md.
@@ -77,6 +86,11 @@ on:
         required: false
         default: main
         type: string
+      override:
+        description: "Production only: deploy even though the commit never passed staging in a push-triggered Deploy run (recorded as a warning)"
+        required: false
+        default: false
+        type: boolean
 
 # ⚠️ TWO QUEUES, ONE PER ENVIRONMENT (since 2026-10-03): each job carries its
 # own concurrency group, and the workflow has none.
@@ -116,8 +130,8 @@ jobs:
     runs-on: ubuntu-latest
     # The deploy and its record step (ssh-retry.sh's transport budget is ~5 min
     # per connection, the deploy itself about 1), the smoke (2 min at most) and
-    # the CI wait (12 min at most).
-    timeout-minutes: 30
+    # the CI wait (20 min at most).
+    timeout-minutes: 40
     # Staging's own queue (see the note above `permissions`).
     concurrency:
       group: deploy-staging
@@ -132,7 +146,8 @@ jobs:
       name: staging
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/vps-deploy
+      - id: deploy
+        uses: ./.github/actions/vps-deploy
         with:
           dir: /var/www/logisx-staging
           pm2: logisx-staging
@@ -150,6 +165,32 @@ jobs:
       # Push runs only: they are the ones production follows. A manual staging
       # dispatch may deploy an older ref, which the checks below were not
       # written for (the foreign-Origin refusal, for one, is newer than some).
+      #
+      # The smoke vouches for whatever staging serves, so first make sure that is
+      # this run's commit. A no-op deploy (a newer main commit is already live
+      # on staging, e.g. an old run re-run) leaves the newer build serving, and
+      # its smoke would pass this commit on another commit's build. Production
+      # would no-op on it too, so nothing is lost by stopping here.
+      - name: Staging serves this run's commit
+        if: github.event_name == 'push'
+        env:
+          RESULT: ${{ steps.deploy.outputs.result }}
+          TO: ${{ steps.deploy.outputs.to }}
+          SHA: ${{ github.sha }}
+        run: |
+          case "$RESULT" in
+            deployed|noop) ;;
+            *)
+              echo "::error title=Staging deploy unconfirmed::the staging deploy reported '$RESULT', not deployed or noop. Production not deployed."
+              exit 1
+              ;;
+          esac
+          if [ "$TO" != "$SHA" ]; then
+            echo "::error title=Staging serves another commit::the staging deploy reported $RESULT with ${TO:-no commit} serving, not this run's $SHA, so the smoke would check another build. Production not deployed; a newer run deploys its own commit."
+            exit 1
+          fi
+          echo "staging serves $SHA ($RESULT)"
+
       - name: Staging smoke (read-only, signed out)
         if: github.event_name == 'push'
         timeout-minutes: 2
@@ -157,14 +198,16 @@ jobs:
           BASE: https://staging-app.logisx.com
         run: bash scripts/deploy/staging-smoke.sh
 
+      # 20 min: ci.yml's job timeout (15) plus room for its runner queue, so the
+      # wait never gives up on a CI run that is still allowed to finish.
       - name: CI on main passed on this commit
         if: github.event_name == 'push'
-        timeout-minutes: 13
+        timeout-minutes: 21
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          CI_WAIT_S: "720"
+          CI_WAIT_S: "1200"
         run: bash scripts/deploy/wait-for-ci.sh
 
   production:
@@ -185,21 +228,52 @@ jobs:
       group: deploy-refs/heads/main
       cancel-in-progress: false
       queue: max
-    # No required reviewer: the staging job above is the gate. The environment
-    # stays so each deploy is recorded against `production`. A reviewer added
-    # here would pause this job holding the production queue again.
+    # No required reviewer: the staging job above is the gate on a push, and the
+    # dispatch gate below on a manual deploy. The environment stays so each
+    # deploy is recorded against `production`. A reviewer added here would
+    # pause this job holding the production queue again.
     environment:
       name: production
       url: https://app.logisx.com
+    # Job-level permissions replace the workflow's: checkout reads the repo, and
+    # the dispatch gate reads Deploy runs, their jobs and a failed staging job's
+    # annotations (drift-gate.js's lookup).
+    permissions:
+      contents: read
+      actions: read
+      checks: read
     steps:
       - uses: actions/checkout@v5
+
+      # ⚠️ A MANUAL production deploy has no staging job in front of it. It
+      # deploys only a commit that passed the staging job of a push-triggered
+      # Deploy run (so a rollback to anything main deployed before works), or
+      # anything with override=true, recorded as a warning. The gate resolves
+      # `ref` to a SHA and the deploy gets exactly that commit.
+      - uses: actions/setup-node@v5
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          node-version-file: .nvmrc
+      - name: A manual deploy names a commit that passed staging
+        id: gate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REF: ${{ github.event.inputs.ref }}
+          OVERRIDE: ${{ github.event.inputs.override }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/deploy/dispatch-gate.js
+
       - uses: ./.github/actions/vps-deploy
         with:
           dir: /var/www/logistics-app
           pm2: logistics-app
-          ref: ${{ github.event.inputs.ref || 'main' }}
-          # The same commit staging just verified, never a newer one.
-          sha: ${{ github.event_name == 'push' && github.sha || '' }}
+          # A push: main. A dispatch: what the gate resolved (main, or the SHA
+          # the ref named).
+          ref: ${{ github.event_name == 'push' && 'main' || steps.gate.outputs.ref }}
+          # A push: the commit staging just verified, never a newer one. A
+          # dispatch of main: the SHA the gate checked; of any other ref: empty,
+          # since `ref` is then that SHA itself.
+          sha: ${{ github.event_name == 'push' && github.sha || steps.gate.outputs.sha }}
           # unattended: production must recover itself.
           rollback_on_failure: "true"
           public_url: https://app.logisx.com/api/config/maintenance

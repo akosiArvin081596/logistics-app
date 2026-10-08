@@ -112,6 +112,8 @@ function checkActionTable(g, tag = "") {
 		"behind-staging-unreached-retried": "alarm",
 		// The box's record of its last verified deploy contradicts its HEAD.
 		"verified-record-inconsistent": "alarm",
+		// A deploy held the box lock, so the check read nothing: on its way.
+		"deploy-in-progress": "notice",
 	};
 	for (const [state, action] of Object.entries(expect)) {
 		r.push([g.actionFor(state) === action, `${tag}§1 ${state} must map to '${action}' (got '${g.actionFor(state)}')`]);
@@ -136,6 +138,8 @@ for (const s of Object.keys(gate.ACTIONS)) {
 }
 for (const s of Object.keys(gate.HINTS)) ok(Object.prototype.hasOwnProperty.call(gate.ACTIONS, s), `§1 hint for '${s}' belongs to a state in ACTIONS`);
 ok(/gh run rerun <run-id> --failed/.test(gate.HINTS["behind-staging-unreached-retried"]), "§1 the retried alarm tells the operator how to re-run by hand");
+ok(/re-run that CI run/.test(gate.HINTS["behind-staging-failed"]) && /gh run rerun <run-id> --failed/.test(gate.HINTS["behind-staging-failed"]) && /only when CI or the smoke is genuinely red/.test(gate.HINTS["behind-staging-failed"]),
+	"§1 a failed staging job's alarm names the remedy: re-run CI, then the Deploy run's failed jobs; fix main only when it is genuinely red");
 
 // ────────────────────────────────────────────────────── §2 refineState
 function checkRefine(g, tag = "") {
@@ -801,6 +805,28 @@ function checkQueues(deployText, driftText, tag = "") {
 	];
 }
 
+// What the check job hands the heal prep. The check reads the box outside the
+// production queue, so the prep compares production's record, HEAD and the
+// marker against what the check read, and refuses if any moved
+// (remote-drift-heal.sh; scripts/test-deploy-scripts.js §5 runs that half).
+function checkHealHandover(driftText, tag = "") {
+	const jobs = jobBlocks(driftText);
+	const check = noComments(jobs.check || "");
+	const heal = noComments(jobs.heal || "");
+	return [
+		[/^ {6}head:\s*\$\{\{\s*steps\.check\.outputs\.head\s*\}\}\s*$/m.test(check) && /^ {6}marker:\s*\$\{\{\s*steps\.check\.outputs\.marker\s*\}\}\s*$/m.test(check),
+			`${tag}§7 the check job exports the HEAD and the marker it read`],
+		[/echo "marker=\$marker"/.test(check) && /marker=none/.test(check) && /marker=unrecognised/.test(check),
+			`${tag}§7 the check step writes the marker as a SHA, none or unrecognised`],
+		[/^\s*EXPECT_HEAD:\s*\$\{\{\s*needs\.check\.outputs\.head\s*\}\}\s*$/m.test(heal) && /^\s*EXPECT_MARKER:\s*\$\{\{\s*needs\.check\.outputs\.marker\s*\}\}\s*$/m.test(heal),
+			`${tag}§7 the heal prep receives the check's HEAD and marker through env:`],
+		[/EXPECT_HEAD='\$EXPECT_HEAD' EXPECT_MARKER='\$EXPECT_MARKER' bash -s/.test(heal),
+			`${tag}§7 the heal prep passes both on to remote-drift-heal.sh`],
+		[/"\$EXPECT_HEAD" =~ \^\[0-9a-f\]\{40\}\$/.test(heal) && /"\$EXPECT_MARKER" =~ \^\(\[0-9a-f\]\{40\}\|none\|unrecognised\)\$/.test(heal),
+			`${tag}§7 …after checking their shapes, since they reach the box inside the remote command's quotes`],
+	];
+}
+
 // A run: script as bash receives it: the `|` header dropped, the block
 // dedented. A one-liner is returned as is.
 function scriptOf(s) {
@@ -921,8 +947,9 @@ function sourcePins() {
 	for (const [c, m] of checkProductionGate(deploy)) ok(c, m);
 
 	const pd = noComments(deploy);
-	const shaPins = pd.match(/sha:\s*\$\{\{\s*github\.event_name == 'push' && github\.sha \|\| '' \}\}/g) || [];
+	const shaPins = pd.match(/sha:\s*\$\{\{\s*github\.event_name == 'push' && github\.sha \|\| (''|steps\.gate\.outputs\.sha) \}\}/g) || [];
 	ok(shaPins.length === 2, `§7 both deploy.yml jobs pin a push to github.sha (found ${shaPins.length})`);
+	for (const [c, m] of checkHealHandover(drift)) ok(c, m);
 	ok(/SHA='\$SHA'/.test(action), "§7 the action forwards SHA to remote-deploy.sh");
 
 	// ── The run: scanner checks itself first. A scanner that silently matches
@@ -1100,6 +1127,14 @@ async function mutants() {
 		const r = file === "drift" ? driftText.split(from).join(to) : driftText;
 		ok(d !== deployText || r !== driftText, `§8 mutant '${name}' must actually differ from the workflows (update it if the job moved)`);
 		ok(checkQueues(d, r, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
+	}
+	for (const [name, from, to] of [
+		["the heal prep drops the marker from its compare", " EXPECT_MARKER='$EXPECT_MARKER' bash -s", " bash -s"],
+		["the check job stops exporting the HEAD it read", "      head: ${{ steps.check.outputs.head }}\n", ""],
+	]) {
+		const r = driftText.split(from).join(to);
+		ok(r !== driftText, `§8 mutant '${name}' must actually differ from deploy-drift.yml`);
+		ok(checkHealHandover(r, "[mutant] ").some(([c]) => !c), `§8 mutant '${name}' must be caught by §7`);
 	}
 
 	// The rerun job's own guards (§9).

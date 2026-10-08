@@ -35,12 +35,14 @@ name: Deploy drift
 #      for an in-flight production deploy, and a production deploy waits for
 #      it. The workflow itself has its own group, so the read-only check never
 #      queues behind a production deploy and two drift runs never overlap. The
-#      check may therefore read the box while a Deploy run is still going: the
-#      gate reads any Deploy run that is not completed as pending, never as a
-#      verdict, and the heal prep re-reads the box once the heal holds the
-#      production slot and refuses if production moved since the check.
-#      remote-deploy.sh also holds a box-level flock per app directory,
-#      whatever started it.
+#      check may therefore start while a deploy is mid-flight, so it reads the
+#      box under the box's deploy lock (remote-drift-check.sh, flock -n on the
+#      same lock file as remote-deploy.sh): while a deploy, rollback or record
+#      step holds it, the check reads nothing and reports deploy-in-progress, a
+#      notice. The gate reads any Deploy run that is not completed as pending,
+#      never as a verdict. And the heal prep re-reads the box once the heal
+#      holds the production slot, and refuses if production's verified record,
+#      HEAD or the drift marker moved since the check read them.
 #   2. STAGING GATE. A heal deploys only a commit whose own staging job passed.
 #      scripts/deploy/drift-gate.js asks GitHub, because the box cannot see it.
 #   3. ROLLBACK. The heal runs .github/actions/vps-deploy with
@@ -90,6 +92,8 @@ jobs:
       action: ${{ steps.gate.outputs.action }}
       local: ${{ steps.check.outputs.local }}
       remote: ${{ steps.check.outputs.remote }}
+      head: ${{ steps.check.outputs.head }}
+      marker: ${{ steps.check.outputs.marker }}
       run_id: ${{ steps.gate.outputs.run_id }}
       run_attempt: ${{ steps.gate.outputs.run_attempt }}
     steps:
@@ -119,18 +123,29 @@ jobs:
           echo "$out"
           state=$(printf '%s' "$out" | grep -oE 'DRIFT_STATE=[a-z-]+' | cut -d= -f2)
           # DRIFT_LOCAL is what production runs as far as the box can tell: its
-          # last VERIFIED deploy (HEAD only while no record exists yet). HEAD
-          # and the record's state are for the summary.
-          local_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_LOCAL=[0-9a-f]+' | cut -d= -f2)
+          # last VERIFIED deploy (HEAD only while no record exists yet). A box
+          # whose deploy lock was held (deploy-in-progress) reports no LOCAL,
+          # HEAD or marker: it read nothing.
+          local_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_LOCAL=[0-9a-f]+' | cut -d= -f2 || true)
           remote_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_REMOTE=[0-9a-f]+' | cut -d= -f2)
           head_sha=$(printf '%s' "$out" | grep -oE 'DRIFT_HEAD=[0-9a-f]+' | cut -d= -f2 || true)
           record=$(printf '%s' "$out" | grep -oE 'DRIFT_RECORD=[a-z]+' | cut -d= -f2 || true)
+          # HEAD and the marker go to the heal prep, which refuses if either
+          # moved since this read. The marker is a SHA or absent; anything else
+          # is passed as `unrecognised`, which the box can never match.
+          marker=$(printf '%s\n' "$out" | grep -E '^DRIFT_MARKER=' | tail -1 | cut -d= -f2- || true)
+          if [ -z "$marker" ]; then
+            marker=none
+          elif ! [[ "$marker" =~ ^[0-9a-f]{40}$ ]]; then
+            marker=unrecognised
+          fi
           {
             echo "state=$state"
             echo "local=$local_sha"
             echo "remote=$remote_sha"
             echo "head=$head_sha"
             echo "record=$record"
+            echo "marker=$marker"
           } >> "$GITHUB_OUTPUT"
 
       - name: Remove the deploy key (nothing after the drift check needs it)
@@ -245,13 +260,23 @@ jobs:
           USER: ${{ secrets.VPS_USER }}
           TARGET: ${{ needs.check.outputs.remote }}
           EXPECT: ${{ needs.check.outputs.local }}
+          EXPECT_HEAD: ${{ needs.check.outputs.head }}
+          EXPECT_MARKER: ${{ needs.check.outputs.marker }}
         run: |
           set -euo pipefail
+          # All four reach the box inside the remote command's quotes, so only
+          # their fixed shapes get that far.
+          if ! [[ "$TARGET" =~ ^[0-9a-f]{40}$ && "$EXPECT" =~ ^[0-9a-f]{40}$ && "$EXPECT_HEAD" =~ ^[0-9a-f]{40}$ ]] \
+             || ! [[ "$EXPECT_MARKER" =~ ^([0-9a-f]{40}|none|unrecognised)$ ]]; then
+            echo "::error::not healing: the drift check handed over target '$TARGET', production '$EXPECT', HEAD '$EXPECT_HEAD' and marker '$EXPECT_MARKER' (want full SHAs, and a SHA, none or unrecognised)"
+            exit 1
+          fi
           echo "::warning::production ($EXPECT) is behind main ($TARGET), main's commit passed staging, and production is serving. Most likely a transport-failed deploy. Healing once."
           # Marker first: if the deploy dies halfway, the next tick alarms
-          # instead of retrying. Fail-closed.
+          # instead of retrying. Fail-closed. The box refuses if production's
+          # record, HEAD or the marker moved since the check read them.
           out=$(bash scripts/deploy/ssh-retry.sh "$USER@$HOST" \
-                "DIR='/var/www/logistics-app' TARGET='$TARGET' EXPECT='$EXPECT' bash -s" \
+                "DIR='/var/www/logistics-app' TARGET='$TARGET' EXPECT='$EXPECT' EXPECT_HEAD='$EXPECT_HEAD' EXPECT_MARKER='$EXPECT_MARKER' bash -s" \
                 < scripts/deploy/remote-drift-heal.sh)
           echo "$out"
           ready=$(printf '%s\n' "$out" | grep -oE '^HEAL_READY=(yes|no)$' | tail -1 | cut -d= -f2 || true)

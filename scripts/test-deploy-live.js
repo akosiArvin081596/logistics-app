@@ -57,7 +57,7 @@ const {
 	C1, C2, C3, S1, head, onMain, marker, log, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, clearLogs, reflog, checkOut, result, deployedFrom, didFullDeploy, isNoop, rollback,
-	fastBinDir, leaveHalfFinished,
+	fastBinDir, leaveHalfFinished, healExpect,
 } = require("./deploy-test-sandbox.js");
 
 // The deploy's stdout, as the action reads it.
@@ -158,7 +158,7 @@ const LIVE_CASES = {
 		resetBox(C3, { verified: C2, started: C3 });
 		// Drift reads it as behind-healable; the heal prep writes the marker.
 		let out = checkOut(S);
-		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: field(out, "DRIFT_LOCAL") });
+		const h = runSh(S.heal, { DIR: D.box, TARGET: C3, ...healExpect(out) });
 		r.push([field(out, "DRIFT_STATE") === "behind-healable" && field(h.out, "HEAL_READY") === "yes" && marker() === C3,
 			`${tag}§13 (setup) drift heals it once: behind-healable, marker C3 (got ${field(out, "DRIFT_STATE")})`]);
 		// The heal deploys C3 again. LIVE is C3, the very commit it restarts.

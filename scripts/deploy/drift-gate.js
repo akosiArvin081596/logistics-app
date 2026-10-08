@@ -34,6 +34,8 @@
  * run_id and run_attempt.
  */
 
+// lookupStaging() also gates a manual production deploy
+// (scripts/deploy/dispatch-gate.js), so the same verdict decides both.
 // ⚠️ deploy.yml's staging job is looked up BY NAME. Renaming it (the `name:`,
 // not the job id) makes every heal fail closed as unverified until this moves
 // with it. scripts/test-drift-gate.js pins the two together.
@@ -71,6 +73,9 @@ const ACTIONS = Object.freeze({
 	"behind-staging-unverified": "alarm",
 	"behind-staging-unreached-retried": "alarm",
 	"verified-record-inconsistent": "alarm",
+	// The box's deploy lock was held: a deploy, rollback or record step was
+	// running, so the check read nothing. Not an incident; the next tick reads.
+	"deploy-in-progress": "notice",
 });
 
 const HINTS = Object.freeze({
@@ -84,13 +89,15 @@ const HINTS = Object.freeze({
 	"behind-and-unhealthy":
 		"production is behind main AND not serving 200. That is an incident, not a missed deploy; healing would paper over it.",
 	"behind-staging-failed":
-		"staging REJECTED main's commit (its deploy, the staging smoke, or CI on main failed), so production must not get it. Fix main; the next green staging deploys production normally.",
+		"main's staging job failed (its deploy, the staging smoke, or the wait for CI on main), so production must not get the commit. Open the failed staging job first. If CI on main failed or timed out for a reason unrelated to the commit, re-run that CI run, then re-run the Deploy run's failed jobs (gh run rerun <run-id> --failed): staging redeploys, smoke-checks, finds CI green, and production follows. Fix main only when CI or the smoke is genuinely red; the next green staging then deploys production normally.",
 	"behind-staging-unverified":
 		"no staging verdict exists for main's commit (no push-triggered Deploy run, e.g. [skip ci], or the GitHub API lookup failed). Not healing without one.",
 	"behind-staging-unreached":
 		"production is behind main because main's staging job never reached the VPS: every ssh attempt exited 255 and ssh-retry.sh gave up, so staging produced no verdict at all. Re-running that Deploy run's failed jobs once. Staging deploys and smoke-checks the same commit again, and production follows only if staging passes.",
 	"behind-staging-unreached-retried":
 		"main's staging job never reached the VPS (every ssh attempt exited 255), and its Deploy run is already past its first attempt (a re-run, automatic or by hand, already happened) or reports no attempt number. Not re-running it again. 255 is not only the network: a refused deploy key, a changed host key and a dropped session end the same way. Check those, then re-run it by hand: gh run rerun <run-id> --failed.",
+	"deploy-in-progress":
+		"the box's deploy lock is held: a deploy, rollback or record step of production is running right now, so the drift check read nothing. The next tick reads the box once it is done.",
 	"verified-record-inconsistent":
 		"production's record of its last verified deploy (git ref refs/logisx/verified-deploy) names a commit HEAD does not contain, or no commit at all: HEAD was moved back past it outside the deploy scripts, a manual deploy of an older ref died after its checkout, or a verified pin off main was followed by a deploy of main that died after its checkout. Which commit serves is unknown, so nothing heals. Check the box, then deploy main by hand (Actions → Deploy → production, ref=main); a verified deploy rewrites the record.",
 });
@@ -428,6 +435,7 @@ module.exports = {
 	refineState,
 	neverReachedVps,
 	stagingVerdict,
+	getJson,
 	lookupStaging,
 	decide,
 };

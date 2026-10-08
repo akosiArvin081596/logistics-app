@@ -18,6 +18,17 @@ inputs:
   host:                { description: VPS host,                            required: true }
   user:                { description: VPS user,                            required: true }
 
+# What the deploy step read back from remote-deploy.sh's last lines, for a job
+# that must know what its later steps are checking (deploy.yml's staging job
+# refuses to smoke-check a build that is not this run's commit).
+outputs:
+  result:
+    description: "deployed, noop (a newer live commit already contains this one) or unproven; empty when the deploy step never reported"
+    value: ${{ steps.deploy.outputs.result }}
+  to:
+    description: The full SHA serving after the deploy step (for a noop, the newer live commit)
+    value: ${{ steps.deploy.outputs.to }}
+
 runs:
   using: composite
   steps:

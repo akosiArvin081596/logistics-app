@@ -342,6 +342,44 @@ function finish() {
 }
 const crash = (err) => failures.push(`runner crashed: ${err && err.stack ? err.stack : err}`);
 
+// The heal prep's compare-and-swap inputs, exactly as deploy-drift.yml hands
+// them over from a drift check's output: production as the check read it, its
+// HEAD, and its marker (`none` when there was none).
+const healExpect = (checkOutput) => ({
+	EXPECT: field(checkOutput, "DRIFT_LOCAL"),
+	EXPECT_HEAD: field(checkOutput, "DRIFT_HEAD"),
+	EXPECT_MARKER: field(checkOutput, "DRIFT_MARKER") || "none",
+});
+// …and the box as it is right now, for a heal prep called with no check before it.
+const boxSeen = () => ({ EXPECT_HEAD: head(), EXPECT_MARKER: marker() || "none" });
+
+// Holds the box's deploy lock from another process, the way a running deploy
+// does, while fn runs; then releases it and waits until it is free.
+function withLockHeld(fn) {
+	const ready = path.join(T, `lock-held-${Math.random().toString(36).slice(2)}`);
+	const release = `${ready}.release`;
+	const env = { ...ENV, LOCK: LOCK_FILE, READY: ready, RELEASE: release };
+	spawnSync("bash", ["-c", '( exec 9<>"$LOCK"; flock -n 9 || exit 3; : > "$READY"; while [ ! -e "$RELEASE" ]; do sleep 0.05; done ) >/dev/null 2>&1 </dev/null &'], { env });
+	const free = () => spawnSync("bash", ["-c", 'exec 9<>"$LOCK"; flock -n 9'], { env }).status === 0;
+	const until = Date.now() + 10000;
+	while (!fs.existsSync(ready)) {
+		if (Date.now() > until) throw new Error("could not take the deploy lock for the test");
+		spawnSync("sleep", ["0.05"]);
+	}
+	try {
+		return fn();
+	} finally {
+		fs.writeFileSync(release, "");
+		const until2 = Date.now() + 10000;
+		while (!free()) {
+			if (Date.now() > until2) throw new Error("the deploy lock was never released after the test");
+			spawnSync("sleep", ["0.05"]);
+		}
+		fs.rmSync(ready, { force: true });
+		fs.rmSync(release, { force: true });
+	}
+}
+
 module.exports = {
 	DEPLOY_DIR, readScript, REAL, SMOKE,
 	ok, record, finish, crash,
@@ -352,6 +390,7 @@ module.exports = {
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,
+	healExpect, boxSeen, withLockHeld,
 	...mutantHelpers,
 	M: "[mutant] ",
 };

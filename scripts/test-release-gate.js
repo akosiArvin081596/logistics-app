@@ -14,20 +14,30 @@
  *      Origin); only no answer or a 5xx is retried, 3 tries; the deadline holds
  *   §2 scripts/deploy/wait-for-ci.sh against a stub `gh`: only `success`
  *      passes; any other conclusion fails at once; queued, running or absent
- *      is polled until the deadline, then fails; a 4xx read fails at once and
- *      a 5xx read is retried. Its jq filter runs through real jq.
+ *      is polled until the deadline, then fails; a 4xx read fails at once, but
+ *      a 5xx, a 429 or a rate-limited 403 is retried. Its jq filter runs
+ *      through real jq: the newest check run by id decides, even one queued
+ *      with no start time yet.
  *   §3 .githooks/pre-push against stub npm, fnm and node: it runs
  *      `npm run check` and blocks on failure, skips a deletion-only push,
  *      switches Node through fnm when present, and never passes git's
  *      repository variables on to the runners
- *   §4 source pins: the smoke and the CI wait are push-only steps of the
- *      staging job, after its deploy; production needs staging and keeps its
- *      environment; every job in every workflow has a timeout; ci.yml keeps its
- *      push trigger, the check name the wait reads, and one group per pushed
- *      commit; the unit runners run once in CI; package.json's check and ci
- *   §5 mutants: a smoke that trusts any 200 for a bundle, a CI wait that takes
- *      any conclusion, a hook that ignores npm's exit code, and a staging job
- *      without its smoke must each be caught above
+ *   §4 source pins: the serves check, the smoke and the CI wait are push-only
+ *      steps of the staging job, after its deploy, with nothing allowed to
+ *      fail; the serves check's own script refuses a no-op that leaves a newer
+ *      build serving; the CI wait outlasts CI's own timeout and takes no
+ *      CHECK_NAME or poll override; production needs staging, keeps its
+ *      environment, and a manual dispatch passes the dispatch gate and deploys
+ *      exactly the commit it checked; every job in every workflow has a
+ *      timeout; ci.yml runs on every push to main with no path filter, and a
+ *      manual run can never cancel the push run (its group expression is
+ *      evaluated per event); the unit runners run once in CI; package.json
+ *   §5 mutants of each script, workflow and the dispatch gate, caught above
+ *   §6 scripts/deploy/dispatch-gate.js against a fake GitHub API: only a
+ *      commit whose push-triggered staging job passed deploys (main pinned to
+ *      that commit, any other ref as its SHA); failed, missing, running or
+ *      another commit's run is refused unless override, and a ref that names
+ *      no commit is refused even then; the CLI end to end
  *
  * Hermetic: a 127.0.0.1 server on port 0, mkdtemp directories, stubs on PATH;
  * no network, no secrets.
@@ -246,6 +256,12 @@ function checkWait(script, tag = "") {
 	r.push([refused.code === 1 && refused.calls.length === 1 && /refused the check-run read/.test(refused.out), `${tag}§2 a 4xx read fails at once (exit ${refused.code}, ${refused.calls.length} reads)`]);
 	const blip = runWait(script, ["1|gh: Bad Gateway (HTTP 502)", "1|gh: rate limited (HTTP 429)", "1|dial tcp: i/o timeout", `0|completed success ${URL1}`]);
 	r.push([blip.code === 0 && blip.calls.length === 4, `${tag}§2 a 5xx, a 429 or a transport failure is retried (exit ${blip.code}, ${blip.calls.length} reads)`]);
+	const limited = runWait(script, [
+		"1|gh: API rate limit exceeded for installation ID 123. (HTTP 403)",
+		"1|gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+		`0|completed success ${URL1}`,
+	]);
+	r.push([limited.code === 0 && limited.calls.length === 3, `${tag}§2 a 403 that names a rate limit is retried, not read as a refusal (exit ${limited.code}, ${limited.calls.length} reads)`]);
 	const garbled = runWait(script, ["0|", "0|surprise", `0|completed success ${URL1}`]);
 	r.push([garbled.code === 0 && garbled.calls.length === 3, `${tag}§2 an unreadable answer is never a pass; it is read again (exit ${garbled.code})`]);
 	for (const [name, opts] of [["a short SHA", { sha: "abc123" }], ["an empty SHA", { sha: "" }], ["a repo with a path", { repo: "o/r/../x" }]]) {
@@ -265,13 +281,17 @@ function checkJq() {
 	const jq = (body) => spawnSync("jq", ["-r", m[1]], { input: JSON.stringify(body), encoding: "utf8" });
 	const probe = jq({ check_runs: [] });
 	ok(probe.status === 0, `§2 jq runs the filter (install jq if this fails: ${probe.stderr || probe.error})`);
-	const runAt = (t, status, conclusion, slug = "github-actions") => ({ started_at: t, status, conclusion, html_url: `u-${t}`, app: { slug } });
+	// The id decides, not started_at: a re-run still queued has started_at null,
+	// which would sort FIRST and let the older run's verdict stand.
+	const runAt = (id, t, status, conclusion, slug = "github-actions") => ({ id, started_at: t, status, conclusion, html_url: `u-${id}`, app: { slug } });
 	const cases = [
 		[{ check_runs: [] }, "none"],
-		[{ check_runs: [runAt("2026-10-08T01:00:00Z", "completed", "success", "some-other-app")] }, "none"],
-		[{ check_runs: [runAt("2026-10-08T01:00:00Z", "completed", "failure"), runAt("2026-10-08T02:00:00Z", "completed", "success")] }, "completed success u-2026-10-08T02:00:00Z"],
-		[{ check_runs: [runAt("2026-10-08T02:00:00Z", "completed", "failure"), runAt("2026-10-08T01:00:00Z", "completed", "success")] }, "completed failure u-2026-10-08T02:00:00Z"],
-		[{ check_runs: [runAt("2026-10-08T03:00:00Z", "in_progress", null)] }, "in_progress none u-2026-10-08T03:00:00Z"],
+		[{ check_runs: [runAt(1, "2026-10-08T01:00:00Z", "completed", "success", "some-other-app")] }, "none"],
+		[{ check_runs: [runAt(1, "2026-10-08T01:00:00Z", "completed", "failure"), runAt(2, "2026-10-08T02:00:00Z", "completed", "success")] }, "completed success u-2"],
+		[{ check_runs: [runAt(2, "2026-10-08T02:00:00Z", "completed", "failure"), runAt(1, "2026-10-08T01:00:00Z", "completed", "success")] }, "completed failure u-2"],
+		[{ check_runs: [runAt(3, "2026-10-08T03:00:00Z", "in_progress", null)] }, "in_progress none u-3"],
+		[{ check_runs: [runAt(1, "2026-10-08T01:00:00Z", "completed", "success"), runAt(2, null, "queued", null)] }, "queued none u-2"],
+		[{ check_runs: [runAt(2, null, "queued", null), runAt(1, "2026-10-08T01:00:00Z", "completed", "failure")] }, "queued none u-2"],
 	];
 	for (const [body, want] of cases) {
 		const got = jq(body).stdout.trim();
@@ -365,35 +385,131 @@ function stepBlocks(jobText) {
 const stepKey = (step, key) => { const m = new RegExp(`^ {6}(?:- )?\\s*${key}:\\s*(.*?)\\s*$`, "m").exec(step); return m ? m[1] : null; };
 const stepEnv = (step, key) => { const m = new RegExp(`^ {10}${key}:\\s*(.*?)\\s*$`, "m").exec(step); return m ? m[1] : null; };
 
-function checkDeployGate(deployText, tag = "") {
+// The same, comments kept: a run: script as bash will see it.
+function rawStepBlocks(jobText) {
+	const out = [];
+	for (const l of jobText.split("\n")) {
+		if (/^ {6}- /.test(l)) out.push("");
+		if (out.length) out[out.length - 1] += `${l}\n`;
+	}
+	return out;
+}
+// A step's `run: |` block, dedented.
+function runText(stepRaw) {
+	const lines = stepRaw.split("\n");
+	const i = lines.findIndex((l) => /^ {8}run:\s*\|\s*$/.test(l));
+	if (i < 0) return "";
+	const body = [];
+	for (const l of lines.slice(i + 1)) {
+		if (l.trim() && !l.startsWith("          ")) break;
+		body.push(l.slice(10));
+	}
+	return `${body.join("\n").replace(/\s+$/, "")}\n`;
+}
+const envKeys = (step) => {
+	const m = /\n {8}env:\n((?: {10}.*\n)+)/.exec(`\n${step}`);
+	return m ? m[1].split("\n").map((l) => (/^ {10}([A-Z_]+):/.exec(l) || [])[1]).filter(Boolean).sort() : [];
+};
+const DEPLOY_YML = path.join(ROOT, ".github/workflows/deploy.yml");
+const CI_YML = path.join(ROOT, ".github/workflows/ci.yml");
+const ACTION_YML = path.join(ROOT, ".github/actions/vps-deploy/action.yml");
+const STAGING_IF = "github.event_name == 'push' || github.event.inputs.target == 'staging'";
+
+function checkDeployGate(deployText, ciText, tag = "") {
 	const r = [];
 	const jobs = jobBlocks(deployText);
 	const staging = jobs.staging || "";
 	const steps = stepBlocks(staging);
-	const iDeploy = steps.findIndex((s) => /uses:\s*\.\/\.github\/actions\/vps-deploy\s*$/m.test(s));
-	const iSmoke = steps.findIndex((s) => /run:\s*bash scripts\/deploy\/staging-smoke\.sh\s*$/m.test(s));
-	const iWait = steps.findIndex((s) => /run:\s*bash scripts\/deploy\/wait-for-ci\.sh\s*$/m.test(s));
-	r.push([iDeploy >= 0 && iSmoke === iDeploy + 1 && iWait === iSmoke + 1,
-		`${tag}§4 the staging job runs its deploy, then the staging smoke, then the CI wait, as its last three steps (deploy ${iDeploy}, smoke ${iSmoke}, wait ${iWait} of ${steps.length})`]);
-	r.push([iWait === steps.length - 1, `${tag}§4 nothing follows the CI wait in the staging job`]);
+	const at = (re) => steps.findIndex((s) => re.test(s));
+	const iDeploy = at(/uses:\s*\.\/\.github\/actions\/vps-deploy\s*$/m);
+	const iServes = at(/- name: Staging serves this run's commit\s*$/m);
+	const iSmoke = at(/run:\s*bash scripts\/deploy\/staging-smoke\.sh\s*$/m);
+	const iWait = at(/run:\s*bash scripts\/deploy\/wait-for-ci\.sh\s*$/m);
+	r.push([iDeploy >= 0 && iServes === iDeploy + 1 && iSmoke === iServes + 1 && iWait === iSmoke + 1 && iWait === steps.length - 1,
+		`${tag}§4 the staging job runs its deploy, then checks staging serves this commit, then the smoke, then the CI wait, last (deploy ${iDeploy}, serves ${iServes}, smoke ${iSmoke}, wait ${iWait} of ${steps.length})`]);
+	r.push([/^ {6}- id: deploy\s*$/m.test(steps[iDeploy] || ""), `${tag}§4 the staging deploy step has id: deploy, which the serves check reads`]);
+	r.push([(/^ {4}if:\s*(.+?)\s*$/m.exec(noComments(staging)) || [])[1] === STAGING_IF, `${tag}§4 the staging job's if: is exactly "${STAGING_IF}"`]);
+	r.push([!/continue-on-error/.test(noComments(staging)), `${tag}§4 nothing in the staging job, job or step, has continue-on-error: any failure stops production`]);
+	const serves = steps[iServes] || "";
 	const smoke = steps[iSmoke] || "";
 	const wait = steps[iWait] || "";
-	for (const [name, s] of [["smoke", smoke], ["CI wait", wait]]) {
+	for (const [name, s] of [["serves check", serves], ["smoke", smoke], ["CI wait", wait]]) {
 		r.push([stepKey(s, "if") === "github.event_name == 'push'", `${tag}§4 the ${name} runs on every push, and on nothing that could skip it (if: ${stepKey(s, "if")})`]);
-		r.push([!/continue-on-error/.test(s), `${tag}§4 a failed ${name} fails the staging job (no continue-on-error)`]);
 	}
+	r.push([stepEnv(serves, "RESULT") === "${{ steps.deploy.outputs.result }}" && stepEnv(serves, "TO") === "${{ steps.deploy.outputs.to }}" && stepEnv(serves, "SHA") === "${{ github.sha }}",
+		`${tag}§4 the serves check compares the deploy's result and commit with this run's own`]);
 	r.push([stepEnv(smoke, "BASE") === "https://staging-app.logisx.com", `${tag}§4 the smoke checks staging's public origin (BASE: ${stepEnv(smoke, "BASE")})`]);
-	r.push([Number(stepKey(smoke, "timeout-minutes")) > 0 && Number(stepKey(smoke, "timeout-minutes")) <= 2, `${tag}§4 the smoke step is held under 2 minutes (timeout-minutes: ${stepKey(smoke, "timeout-minutes")})`]);
+	const smokeT = Number(stepKey(smoke, "timeout-minutes"));
+	r.push([smokeT > 0 && smokeT <= 2, `${tag}§4 the smoke step is held under 2 minutes (timeout-minutes: ${smokeT})`]);
 	r.push([stepEnv(wait, "SHA") === "${{ github.sha }}" && stepEnv(wait, "REPO") === "${{ github.repository }}" && stepEnv(wait, "GH_TOKEN") === "${{ github.token }}",
 		`${tag}§4 the CI wait reads this run's own commit, through env:`]);
+	r.push([envKeys(wait).join() === "CI_WAIT_S,GH_TOKEN,REPO,SHA", `${tag}§4 the CI wait's env sets nothing else: no CHECK_NAME or CI_POLL_S override (got ${envKeys(wait).join()})`]);
+	const ciTimeout = Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(jobBlocks(ciText).verify || "")) || [])[1]);
 	const waitS = Number(String(stepEnv(wait, "CI_WAIT_S") || "").replace(/"/g, ""));
-	r.push([waitS > 0 && waitS <= 720 && Number(stepKey(wait, "timeout-minutes")) * 60 > waitS, `${tag}§4 the CI wait is bounded at 12 min, inside its step timeout (CI_WAIT_S ${waitS}, timeout-minutes ${stepKey(wait, "timeout-minutes")})`]);
+	const waitT = Number(stepKey(wait, "timeout-minutes"));
+	r.push([ciTimeout > 0 && waitS >= ciTimeout * 60 + 120 && waitS <= 1800 && waitT * 60 > waitS,
+		`${tag}§4 the CI wait outlasts CI's own ${ciTimeout}-minute timeout plus queue room, at most 30 min, inside its step timeout (CI_WAIT_S ${waitS}, step ${waitT} min)`]);
+	const jobT = Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(staging)) || [])[1]);
+	r.push([jobT >= waitT + smokeT + 10, `${tag}§4 the staging job's timeout (${jobT}) leaves room for the deploy after the CI wait (${waitT}) and the smoke (${smokeT})`]);
 	const perms = /\n {4}permissions:\n((?: {6}.*\n)+)/.exec(`\n${noComments(staging)}`);
 	const permSet = perms ? perms[1].split("\n").map((l) => l.trim()).filter(Boolean).sort().join(",") : "";
 	r.push([permSet === "checks: read,contents: read", `${tag}§4 the staging job's token reads the repo and check runs, nothing more (got ${permSet})`]);
+
+	// Production: needs staging on a push; a manual dispatch passes its own gate.
 	const prod = noComments(jobs.production || "");
-	r.push([/^ {4}needs:\s*\[\s*staging\s*\]\s*$/m.test(prod), `${tag}§4 production needs the staging job, which now includes the smoke and the CI wait`]);
+	r.push([/^ {4}needs:\s*\[\s*staging\s*\]\s*$/m.test(prod), `${tag}§4 production needs the staging job`]);
 	r.push([/^ {4}environment:\s*\n {6}name:\s*production\s*$/m.test(prod), `${tag}§4 production keeps environment: production, so its deploys stay recorded`]);
+	r.push([!/continue-on-error/.test(prod), `${tag}§4 nothing in the production job has continue-on-error`]);
+	const psteps = stepBlocks(jobs.production || "");
+	const iGate = psteps.findIndex((s) => /run:\s*node scripts\/deploy\/dispatch-gate\.js\s*$/m.test(s));
+	const iProd = psteps.findIndex((s) => /uses:\s*\.\/\.github\/actions\/vps-deploy\s*$/m.test(s));
+	const gateStep = psteps[iGate] || "";
+	r.push([iGate >= 0 && iProd > iGate && /^ {8}id: gate\s*$/m.test(gateStep) && stepKey(gateStep, "if") === "github.event_name == 'workflow_dispatch'",
+		`${tag}§4 a manual dispatch passes the dispatch gate (id: gate) before production deploys (gate ${iGate}, deploy ${iProd})`]);
+	r.push([stepEnv(gateStep, "REF") === "${{ github.event.inputs.ref }}" && stepEnv(gateStep, "OVERRIDE") === "${{ github.event.inputs.override }}" && stepEnv(gateStep, "GITHUB_TOKEN") === "${{ github.token }}",
+		`${tag}§4 the dispatch gate reads the dispatch's ref and override, through env:`]);
+	const pd = psteps[iProd] || "";
+	r.push([/^ {10}ref:\s*\$\{\{ github\.event_name == 'push' && 'main' \|\| steps\.gate\.outputs\.ref \}\}\s*$/m.test(pd)
+		&& /^ {10}sha:\s*\$\{\{ github\.event_name == 'push' && github\.sha \|\| steps\.gate\.outputs\.sha \}\}\s*$/m.test(pd),
+	`${tag}§4 production deploys main's pushed commit, or exactly the commit the dispatch gate checked`]);
+	const pperms = /\n {4}permissions:\n((?: {6}.*\n)+)/.exec(`\n${prod}`);
+	const ppermSet = pperms ? pperms[1].split("\n").map((l) => l.trim()).filter(Boolean).sort().join(",") : "";
+	r.push([ppermSet === "actions: read,checks: read,contents: read", `${tag}§4 the production job's token only reads (got ${ppermSet})`]);
+	const override = /\n {6}override:\n((?: {8}.*\n)+)/.exec(noComments(deployText));
+	r.push([!!override && /type:\s*boolean/.test(override[1]) && /default:\s*false/.test(override[1]), `${tag}§4 the dispatch has a boolean override input, false by default`]);
+	return r;
+}
+
+function checkAction() {
+	const a = noComments(fs.readFileSync(ACTION_YML, "utf8"));
+	ok(/^outputs:\n {2}result:\n(?: {4}.*\n)*? {4}value:\s*\$\{\{ steps\.deploy\.outputs\.result \}\}\s*$/m.test(a)
+		&& /^ {2}to:\n(?: {4}.*\n)*? {4}value:\s*\$\{\{ steps\.deploy\.outputs\.to \}\}\s*$/m.test(a),
+	"§4 the vps-deploy action exposes the deploy step's result and commit as outputs");
+}
+
+// The serves check's own script, run under bash for each answer the deploy step
+// can give. noop-newer is the case it exists for: a newer build serving.
+const OTHER = "e".repeat(40);
+function checkServes(deployText, tag = "") {
+	const r = [];
+	const steps = rawStepBlocks(jobBlocks(deployText).staging || "");
+	const script = runText(steps.find((s) => /- name: Staging serves this run's commit/.test(s)) || "");
+	r.push([script.length > 0, `${tag}§4 the serves check has a run: script`]);
+	const file = path.join(tmpDir("serves"), "step.sh");
+	fs.writeFileSync(file, script);
+	const run = (RESULT, TO) => spawnSync("bash", ["-e", file], { encoding: "utf8", env: { PATH: process.env.PATH, RESULT, TO, SHA } });
+	for (const [name, result, to, want] of [
+		["a deploy of this commit", "deployed", SHA, 0],
+		["a no-op that leaves this very commit serving", "noop", SHA, 0],
+		["a no-op with a NEWER commit serving", "noop", OTHER, 1],
+		["a deploy that reports another commit", "deployed", OTHER, 1],
+		["an unproven restart", "unproven", SHA, 1],
+		["no result at all", "", "", 1],
+	]) {
+		const x = run(result, to);
+		r.push([x.status === want && (want === 0 || /::error title=Staging (serves another commit|deploy unconfirmed)::/.test(x.stdout)),
+			`${tag}§4 the serves check on ${name}: exit ${want} (got ${x.status}: ${(x.stdout || "").trim().slice(0, 160)})`]);
+	}
 	return r;
 }
 
@@ -404,24 +520,61 @@ function checkTimeouts() {
 		ok(Object.keys(jobs).length > 0, `§4 ${f} has jobs`);
 		for (const [id, text] of Object.entries(jobs)) {
 			const m = /^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(text));
-			ok(!!m && Number(m[1]) > 0 && Number(m[1]) <= 30, `§4 ${f} job '${id}' has its own timeout-minutes (1–30), so nothing it holds is held forever (got ${m && m[1]})`);
+			ok(!!m && Number(m[1]) > 0 && Number(m[1]) <= 45, `§4 ${f} job '${id}' has its own timeout-minutes (1–45), so nothing it holds is held forever (got ${m && m[1]})`);
 		}
 	}
 }
 
-function checkCi() {
-	const ci = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
-	const c = noComments(ci);
-	ok(/^ {2}push:\s*\n {4}branches:\s*\[\s*main\s*\]\s*$/m.test(c), "§4 ci.yml still runs on every push to main: production waits for that run");
-	const name = (/^ {4}name:\s*(.+?)\s*$/m.exec(jobBlocks(ci).verify || "") || [])[1];
-	const waitDefault = (/^CHECK_NAME=\$\{CHECK_NAME:-(.+)\}$/m.exec(fs.readFileSync(WAIT, "utf8")) || [])[1];
-	ok(name === "check · unit · build" && waitDefault === name, `§4 the CI wait reads the check ci.yml's job reports (job '${name}', wait '${waitDefault}')`);
-	const group = (/^concurrency:\s*\n {2}group:\s*(.+?)\s*$/m.exec(c) || [])[1];
-	ok(group === "ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
-		`§4 ci.yml keys a push run's group on its commit, so a later merge never cancels the run production waits for (got ${group})`);
-	ok((c.match(/run:\s*npm run test:unit\s*$/gm) || []).length === 1 && !/run:\s*npm run (check|ci)\b/.test(c), "§4 CI runs the unit runners exactly once (test:unit, never check or ci, which include them)");
-	ok(/run:\s*npm run lint\s*$/m.test(c), "§4 CI runs the syntax check (npm run lint)");
+// A small evaluator for the expressions ci.yml's concurrency uses: context
+// paths, string literals, ==, && and || with GitHub's value semantics.
+function evalExpr(src, ctx) {
+	const toks = src.match(/'[^']*'|==|&&|\|\||[()]|[A-Za-z_][A-Za-z0-9_.]*/g) || [];
+	let i = 0;
+	const primary = () => {
+		const t = toks[i++];
+		if (t === "(") { const v = or(); i++; return v; }
+		if (t[0] === "'") return t.slice(1, -1);
+		if (t === "true" || t === "false") return t === "true";
+		const v = t.split(".").reduce((o, k) => (o == null ? undefined : o[k]), ctx);
+		return v == null ? "" : v;
+	};
+	const eq = () => { let v = primary(); while (toks[i] === "==") { i++; const w = primary(); v = String(v).toLowerCase() === String(w).toLowerCase(); } return v; };
+	const and = () => { let v = eq(); while (toks[i] === "&&") { i++; const w = eq(); v = v ? w : v; } return v; };
+	const or = () => { let v = and(); while (toks[i] === "||") { i++; const w = and(); v = v || w; } return v; };
+	return or();
+}
+const evalTemplate = (s, ctx) => s.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, e) => String(evalExpr(e, ctx)));
 
+function checkCi(ciText, tag = "") {
+	const r = [];
+	const c = noComments(ciText);
+	const push = /^ {2}push:\s*\n((?: {4,}.*\n)*)/m.exec(c);
+	const pushBody = push ? push[1].split("\n").filter((l) => l.trim()) : [];
+	r.push([pushBody.length === 1 && /^ {4}branches:\s*\[\s*main\s*\]\s*$/.test(pushBody[0]),
+		`${tag}§4 ci.yml runs on every push to main, with no paths, paths-ignore or other filter: production waits for that run (got ${JSON.stringify(pushBody)})`]);
+	const name = (/^ {4}name:\s*(.+?)\s*$/m.exec(jobBlocks(ciText).verify || "") || [])[1];
+	const waitDefault = (/^CHECK_NAME=\$\{CHECK_NAME:-(.+)\}$/m.exec(fs.readFileSync(WAIT, "utf8")) || [])[1];
+	r.push([name === "check · unit · build" && waitDefault === name, `${tag}§4 the CI wait reads the check ci.yml's job reports (job '${name}', wait '${waitDefault}')`]);
+	const group = (/^concurrency:\s*\n {2}group:\s*(.+?)\s*$/m.exec(c) || [])[1] || "";
+	const cancel = (/^concurrency:\s*\n(?: {2}.*\n)*? {2}cancel-in-progress:\s*(.+?)\s*$/m.exec(c) || [])[1] || "";
+	const ctx = (event, sha, ref) => ({ github: { event_name: event, sha, ref } });
+	const A = "a".repeat(40);
+	const B = "b".repeat(40);
+	const g = (x) => evalTemplate(group, x);
+	const k = (x) => String(evalTemplate(cancel, x));
+	r.push([g(ctx("push", A, "refs/heads/main")) !== g(ctx("push", B, "refs/heads/main")), `${tag}§4 two merges' push runs never share a group (got ${g(ctx("push", A, "refs/heads/main"))})`]);
+	r.push([g(ctx("workflow_dispatch", A, "refs/heads/main")) !== g(ctx("push", A, "refs/heads/main")),
+		`${tag}§4 a manual run of the same commit never shares the push run's group, so it cannot cancel the run production waits for (got ${g(ctx("workflow_dispatch", A, "refs/heads/main"))})`]);
+	r.push([k(ctx("push", A, "refs/heads/main")) === "false" && k(ctx("workflow_dispatch", A, "refs/heads/main")) === "false",
+		`${tag}§4 push and manual runs never cancel anything in progress (got ${k(ctx("push", A, "refs/heads/main"))}, ${k(ctx("workflow_dispatch", A, "refs/heads/main"))})`]);
+	r.push([g(ctx("pull_request", A, "refs/pull/7/merge")) === g(ctx("pull_request", B, "refs/pull/7/merge")) && k(ctx("pull_request", A, "refs/pull/7/merge")) === "true",
+		`${tag}§4 a PR's new push still cancels its previous run`]);
+	r.push([(c.match(/run:\s*npm run test:unit\s*$/gm) || []).length === 1 && !/run:\s*npm run (check|ci)\b/.test(c), `${tag}§4 CI runs the unit runners exactly once (test:unit, never check or ci, which include them)`]);
+	r.push([/run:\s*npm run lint\s*$/m.test(c), `${tag}§4 CI runs the syntax check (npm run lint)`]);
+	return r;
+}
+
+function checkLocal() {
 	const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts;
 	ok(pkg.check === "npm run lint && npm run test:unit", `§4 npm run check is the syntax check plus every unit runner (got ${pkg.check})`);
 	ok(pkg.ci === "npm run check && npm run build:client", `§4 npm run ci is the full CI gate: check plus the client build (got ${pkg.ci})`);
@@ -434,6 +587,109 @@ function checkCi() {
 	ok((mode & 0o111) === 0o111, `§4 .githooks/pre-push is executable (mode ${(mode & 0o777).toString(8)})`);
 }
 
+// ─────────────────────────────────────────── §6 the manual-dispatch gate
+// A fake GitHub API: the commit a ref names, the Deploy runs for a SHA, and
+// their jobs. `s` picks the scenario.
+function apiAnswer(pathAndQuery, s) {
+	const u = new URL(pathAndQuery, "http://x");
+	const m = /^\/repos\/o\/r\/commits\/(.+)$/.exec(u.pathname);
+	if (m) {
+		const ref = decodeURIComponent(m[1]);
+		if (s.resolve && Object.prototype.hasOwnProperty.call(s.resolve, ref)) return { status: 200, body: { sha: s.resolve[ref] } };
+		return { status: 404, body: { message: "No commit found" } };
+	}
+	if (u.pathname === "/repos/o/r/actions/workflows/deploy.yml/runs") {
+		const sha = u.searchParams.get("head_sha");
+		return { status: 200, body: { workflow_runs: (s.runs || []).map((x) => ({ head_sha: sha, ...x })) } };
+	}
+	const j = /^\/repos\/o\/r\/actions\/runs\/(\d+)\/jobs$/.exec(u.pathname);
+	if (j) return { status: 200, body: { jobs: (s.jobs && s.jobs[j[1]]) || [] } };
+	if (/^\/repos\/o\/r\/check-runs\/\d+\/annotations$/.test(u.pathname)) return { status: 200, body: [] };
+	return { status: 404, body: {} };
+}
+const fakeFetch = (s, calls) => async (url) => {
+	calls.push(url);
+	const a = apiAnswer(url.replace(/^https?:\/\/[^/]+/, ""), s);
+	return { status: a.status, ok: a.status >= 200 && a.status < 300, json: async () => a.body };
+};
+const pushRun = (extra = {}) => ({ id: 7, event: "push", status: "completed", conclusion: "success", run_attempt: 1, html_url: "https://x/runs/7", ...extra });
+const stagingJob = (conclusion, status = "completed") => ({ id: 70, name: "staging", status, conclusion, html_url: "https://x/jobs/70" });
+const SCENARIOS = {
+	passed: { resolve: { main: SHA, [SHA]: SHA, "v1.0": SHA, "feat/x": SHA }, runs: [pushRun()], jobs: { 7: [stagingJob("success")] } },
+	failed: { resolve: { main: SHA, [SHA]: SHA }, runs: [pushRun({ conclusion: "failure" })], jobs: { 7: [stagingJob("failure")] } },
+	noRun: { resolve: { main: SHA, [SHA]: SHA }, runs: [], jobs: {} },
+	running: { resolve: { main: SHA }, runs: [pushRun({ status: "in_progress", conclusion: null })], jobs: { 7: [stagingJob(null, "in_progress")] } },
+	otherSha: { resolve: { main: SHA }, runs: [pushRun({ head_sha: OTHER })], jobs: { 7: [stagingJob("success")] } },
+	badSha: { resolve: { main: "not-a-sha" }, runs: [pushRun()], jobs: { 7: [stagingJob("success")] } },
+};
+
+async function checkDispatch(mod, tag = "") {
+	const r = [];
+	const decide = async (scenario, ref, override = false) => {
+		const calls = [];
+		const d = await mod.decideDispatch({ repo: "o/r", ref, override, token: "t", apiBase: "https://api.example", fetchImpl: fakeFetch(SCENARIOS[scenario], calls), sleepImpl: async () => {}, backoffMs: [] });
+		return { ...d, calls };
+	};
+	let d = await decide("passed", "main");
+	r.push([d.ok && !d.override && d.ref === "main" && d.sha === SHA, `${tag}§6 main, whose commit passed staging, deploys as main pinned to that commit (got ${JSON.stringify([d.ok, d.ref, d.sha])})`]);
+	r.push([d.calls.some((u) => u.includes("/actions/workflows/deploy.yml/runs?head_sha=") && u.includes(SHA) && u.includes("event=push")),
+		`${tag}§6 …after asking for the push-triggered Deploy runs of exactly that commit`]);
+	d = await decide("passed", SHA);
+	r.push([d.ok && d.ref === SHA && d.sha === "", `${tag}§6 a rollback to a SHA that passed staging deploys that SHA (got ${JSON.stringify([d.ok, d.ref, d.sha])})`]);
+	d = await decide("passed", "v1.0");
+	r.push([d.ok && d.ref === SHA && d.sha === "", `${tag}§6 a tag deploys the commit it named when checked, not whatever it names at pull time (got ${JSON.stringify([d.ok, d.ref])})`]);
+	d = await decide("passed", "feat/x");
+	r.push([d.ok && d.ref === SHA && d.calls[0].endsWith("/repos/o/r/commits/feat/x"), `${tag}§6 a branch with a slash resolves too (got ${d.calls[0]})`]);
+	for (const [scenario, ref, verdict] of [["failed", "main", "failed"], ["noRun", "main", "unverified"], ["running", "main", "pending"], ["otherSha", "main", "unverified"]]) {
+		d = await decide(scenario, ref);
+		r.push([!d.ok && d.verdict === verdict && /has not passed the staging job/.test(d.reason), `${tag}§6 ${scenario}: refused, verdict '${verdict}' (got ${JSON.stringify([d.ok, d.verdict])})`]);
+		const o = await decide(scenario, ref, true);
+		r.push([o.ok && o.override && o.ref === "main" && o.sha === SHA, `${tag}§6 ${scenario} with override: deploys, marked as an override (got ${JSON.stringify([o.ok, o.override])})`]);
+	}
+	for (const [scenario, ref] of [["passed", "no-such-branch"], ["badSha", "main"]]) {
+		d = await decide(scenario, ref, true);
+		r.push([!d.ok && /cannot resolve/.test(d.reason), `${tag}§6 a ref that names no commit is refused even with override (${scenario}, '${ref}')`]);
+	}
+	for (const ref of ["-main", "a b", "", "x".repeat(101)]) {
+		d = await decide("passed", ref, true);
+		r.push([!d.ok && d.calls.length === 0, `${tag}§6 the ref ${JSON.stringify(ref.slice(0, 12))} is refused before any API call`]);
+	}
+	return r;
+}
+
+// The CLI end to end against the fake API, served on 127.0.0.1.
+async function checkDispatchCli() {
+	const r = [];
+	for (const [scenario, ref, override, wantCode, wantOut, wantLog] of [
+		["passed", "main", "false", 0, `ref=main\nsha=${SHA}\n`, /passed staging/],
+		["failed", "main", "false", 1, "", /::error title=Manual production deploy refused::/],
+		["failed", SHA, "true", 0, `ref=${SHA}\nsha=\n`, /::warning title=Staging gate overridden::/],
+	]) {
+		const server = http.createServer((req, res) => {
+			const a = apiAnswer(req.url, SCENARIOS[scenario]);
+			res.writeHead(a.status, { "Content-Type": "application/json" });
+			res.end(JSON.stringify(a.body));
+		});
+		await new Promise((res) => server.listen(0, "127.0.0.1", res));
+		const out = path.join(tmpDir("dispatch"), "out");
+		fs.writeFileSync(out, "");
+		const x = await new Promise((resolve) => {
+			const child = spawn(process.execPath, [path.join(ROOT, "scripts/deploy/dispatch-gate.js")], {
+				env: { PATH: process.env.PATH, REF: ref, OVERRIDE: override, GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: "t", GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_OUTPUT: out, DISPATCH_GATE_RETRY_MS: "" },
+			});
+			let log = "";
+			child.stdout.on("data", (c) => (log += c));
+			child.stderr.on("data", (c) => (log += c));
+			child.on("close", (code) => resolve({ code, log }));
+		});
+		server.close();
+		const written = fs.readFileSync(out, "utf8");
+		r.push([x.code === wantCode && written === wantOut && wantLog.test(x.log),
+			`§6 CLI ${scenario} ref=${ref.slice(0, 7)} override=${override}: exit ${wantCode}, outputs ${JSON.stringify(wantOut)} (got exit ${x.code}, ${JSON.stringify(written)}: ${x.log.trim().slice(0, 200)})`]);
+	}
+	return r;
+}
+
 // ─────────────────────────────────────────── §5 mutants
 function mut(file, from, to) {
 	const src = fs.readFileSync(file, "utf8");
@@ -444,45 +700,96 @@ function mut(file, from, to) {
 	return { p, text: out };
 }
 
-async function smokeMutants() {
+async function asyncMutants() {
 	const m1 = mut(SMOKE, '[[ "$CTYPE" =~ $want ]] ||', "true ||");
 	const m2 = mut(SMOKE, "000|5??|\"\")", "000|5??|4??|\"\")");
 	const [r1, r2] = await Promise.all([checkSmoke(m1.p, "[mutant] "), checkSmoke(m2.p, "[mutant] ")]);
 	ok(r1.some(([c]) => !c), "§5 mutant 'any 200 is a bundle file' must be caught by §1");
 	ok(r2.some(([c]) => !c), "§5 mutant 'a 4xx is retried' must be caught by §1");
+	// The dispatch gate, loaded from mutated text with its real require().
+	const gatePath = path.join(ROOT, "scripts/deploy/dispatch-gate.js");
+	const load = (code) => {
+		const m = { exports: {} };
+		new Function("module", "exports", "require", code.replace(/^#!.*\n/, "\n"))(m, m.exports, require("module").createRequire(gatePath));
+		return m.exports;
+	};
+	for (const [name, from, to] of [
+		["any verdict passes", 'if (verdict.verdict === "passed") return', "if (true) return"],
+		["override deploys a ref that names no commit", '// Not even override deploys a ref that names no commit.\n\t\treturn refused(', "// Not even override deploys a ref that names no commit.\n\t\tif (!override) return refused("],
+		["main deploys unpinned", 'ref === "main" ? { ref: "main", sha }', 'ref === "main" ? { ref: "main", sha: "" }'],
+	]) {
+		const src = fs.readFileSync(gatePath, "utf8");
+		const code = src.split(from).join(to);
+		ok(code !== src, `§5 mutant '${name}' must actually differ from dispatch-gate.js`);
+		let caught = true;
+		try {
+			caught = (await checkDispatch(load(code), "[mutant] ")).some(([c]) => !c);
+		} catch {
+			caught = true;
+		}
+		ok(caught, `§5 mutant '${name}' must be caught by §6`);
+	}
 }
 
 function mutants() {
 	const m3 = mut(WAIT, '"completed success")', "completed\\ *)");
 	ok(checkWait(m3.p, "[mutant] ").some(([c]) => !c), "§5 mutant 'any conclusion passes' must be caught by §2");
+	const m3b = mut(WAIT, "&& ! printf '%s' \"$out\" | grep -qiE 'rate limit'", "");
+	ok(checkWait(m3b.p, "[mutant] ").some(([c]) => !c), "§5 mutant 'a rate-limited 403 is a refusal' must be caught by §2");
 	const m4 = mut(HOOK, "if npm run check; then", "if npm run check || true; then");
 	ok(checkHook(m4.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'the hook ignores the check's exit code' must be caught by §3");
 	const m5 = mut(HOOK, "unset GIT_DIR", "unset GIT_NOTHING");
 	ok(checkHook(m5.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'GIT_DIR reaches the runners' must be caught by §3");
-	const deployText = fs.readFileSync(path.join(ROOT, ".github/workflows/deploy.yml"), "utf8");
+	const deployText = fs.readFileSync(DEPLOY_YML, "utf8");
+	const ciText = fs.readFileSync(CI_YML, "utf8");
 	const smokeStep = /\n {6}- name: Staging smoke[^\n]*\n(?: {8}.*\n)+/.exec(deployText);
-	ok(!!smokeStep, "§5 the smoke step can be found in deploy.yml");
+	const gateStep = /\n {6}- name: A manual deploy names a commit that passed staging\n(?: {8}.*\n)+/.exec(deployText);
+	ok(!!smokeStep && !!gateStep, "§5 the smoke and dispatch-gate steps can be found in deploy.yml");
 	for (const [name, text] of [
 		["the staging job without its smoke", smokeStep ? deployText.replace(smokeStep[0], "\n") : deployText],
 		["the smoke allowed to fail", deployText.replace("        run: bash scripts/deploy/staging-smoke.sh\n", "        continue-on-error: true\n        run: bash scripts/deploy/staging-smoke.sh\n")],
-		["the CI wait on dispatches only", deployText.replace("        if: github.event_name == 'push'\n        timeout-minutes: 13\n", "        if: github.event_name == 'workflow_dispatch'\n        timeout-minutes: 13\n")],
+		["the staging job allowed to fail", deployText.replace("    timeout-minutes: 40\n", "    timeout-minutes: 40\n    continue-on-error: true\n")],
+		["the CI wait on dispatches only", deployText.replace("        if: github.event_name == 'push'\n        timeout-minutes: 21\n", "        if: github.event_name == 'workflow_dispatch'\n        timeout-minutes: 21\n")],
+		["the CI wait reads another check", deployText.replace('          CI_WAIT_S: "1200"\n', '          CI_WAIT_S: "1200"\n          CHECK_NAME: build\n')],
+		["the CI wait polls on its own clock", deployText.replace('          CI_WAIT_S: "1200"\n', '          CI_WAIT_S: "1200"\n          CI_POLL_S: "600"\n')],
+		["the CI wait gives up before CI's own timeout", deployText.replace('CI_WAIT_S: "1200"', 'CI_WAIT_S: "720"')],
+		["the staging job runs on dispatches of production too", deployText.replace(`if: ${STAGING_IF}`, "if: always()")],
+		["production without the dispatch gate", gateStep ? deployText.replace(gateStep[0], "\n") : deployText],
+		["production deploys the raw dispatch ref", deployText.replace("ref: ${{ github.event_name == 'push' && 'main' || steps.gate.outputs.ref }}", "ref: ${{ github.event.inputs.ref || 'main' }}")],
+		["no override input", deployText.replace("        default: false\n        type: boolean\n", "")],
 	]) {
 		ok(text !== deployText, `§5 mutant '${name}' must actually differ from deploy.yml`);
-		ok(checkDeployGate(text, "[mutant] ").some(([c]) => !c), `§5 mutant '${name}' must be caught by §4`);
+		ok(checkDeployGate(text, ciText, "[mutant] ").some(([c]) => !c), `§5 mutant '${name}' must be caught by §4`);
+	}
+	const servesLoose = deployText.replace('if [ "$TO" != "$SHA" ]; then', "if false; then");
+	ok(servesLoose !== deployText && checkServes(servesLoose, "[mutant] ").some(([c]) => !c), "§5 mutant 'the serves check accepts a newer build' must be caught by §4");
+	for (const [name, text] of [
+		["ci.yml skips docs-only pushes", ciText.replace("  push:\n    branches: [main]\n", "  push:\n    branches: [main]\n    paths-ignore: [\"**.md\"]\n")],
+		["a manual run shares the push run's group", ciText.replace("ci-${{ github.event_name }}-${{", "ci-${{")],
+		["push runs cancel each other again", ciText.replace("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "cancel-in-progress: true")],
+	]) {
+		ok(text !== ciText, `§5 mutant '${name}' must actually differ from ci.yml`);
+		ok(checkCi(text, "[mutant] ").some(([c]) => !c), `§5 mutant '${name}' must be caught by §4`);
 	}
 }
 
 (async () => {
-	// The smoke cases and their mutants run together first: their stub servers
-	// live on this event loop, which the synchronous sections after them block.
-	const [smoke] = await Promise.all([checkSmoke(SMOKE), smokeMutants()]);
-	for (const [c, m] of smoke) ok(c, m);
+	// Everything served from this event loop runs first, together: the stub app
+	// for the smoke and the fake API for the dispatch CLI. The synchronous
+	// sections after them block the loop.
+	const [smoke, dispatch, cli] = await Promise.all([checkSmoke(SMOKE), checkDispatch(require("./deploy/dispatch-gate.js")), checkDispatchCli(), asyncMutants()]);
+	for (const [c, m] of [...smoke, ...dispatch, ...cli]) ok(c, m);
 	for (const [c, m] of checkWait(WAIT)) ok(c, m);
 	checkJq();
 	for (const [c, m] of checkHook(fs.readFileSync(HOOK, "utf8"))) ok(c, m);
-	for (const [c, m] of checkDeployGate(fs.readFileSync(path.join(ROOT, ".github/workflows/deploy.yml"), "utf8"))) ok(c, m);
+	const deployText = fs.readFileSync(DEPLOY_YML, "utf8");
+	const ciText = fs.readFileSync(CI_YML, "utf8");
+	for (const [c, m] of checkDeployGate(deployText, ciText)) ok(c, m);
+	for (const [c, m] of checkServes(deployText)) ok(c, m);
+	for (const [c, m] of checkCi(ciText)) ok(c, m);
+	checkAction();
 	checkTimeouts();
-	checkCi();
+	checkLocal();
 	mutants();
 
 	console.log(`\n${"=".repeat(64)}`);

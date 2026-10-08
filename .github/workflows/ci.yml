@@ -20,12 +20,14 @@ on:
 # A PR: one run per branch, and a new push supersedes the previous run rather
 # than racing it. Safe to cancel: CI only reads, so a half-finished run leaves
 # nothing behind (the deploy workflow deliberately does NOT do this).
-# A push to main: one group PER COMMIT, so a quick second merge never cancels
-# the first merge's run, or its pending run: production waits for each commit's
-# own verdict, and a cancelled run would leave that commit undeployed.
+# Anything else (a push to main, a manual run): one group per event AND commit,
+# and nothing is cancelled. A quick second merge never cancels the first
+# merge's run, and a manual run of the same commit never cancels its push run:
+# production waits for each pushed commit's own verdict, and a cancelled run
+# would leave that commit undeployed.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

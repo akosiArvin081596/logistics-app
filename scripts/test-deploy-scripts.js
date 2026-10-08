@@ -19,8 +19,10 @@
  *      manual pin. After any of them the drift check must ALARM
  *      (behind-already-attempted), never heal: a rolled-back commit, or main
  *      over a human's pin, is a human's call.
- *   §5 remote-drift-check.sh's four box states, and the heal prep's
- *      compare-and-swap (it refuses when the box moved since the check).
+ *   §5 remote-drift-check.sh's four box states, plus deploy-in-progress while
+ *      a deploy holds the box lock, and the heal prep's compare-and-swap (it
+ *      refuses when production's record, HEAD or the marker moved since the
+ *      check).
  *   §6 ssh-retry.sh retries ONLY transport failures (255); a remote failure
  *      and the lock's 75 pass straight through. Its give-up line is pinned
  *      exactly, and drift-gate.js must read it back as "never reached the
@@ -81,7 +83,7 @@ const {
 	T, D, ENV, git, tryGit, writeExec, hasRealFlock,
 	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
-	short, rollback,
+	short, rollback, boxSeen, withLockHeld,
 } = require("./deploy-test-sandbox.js");
 
 // ───────────────────────────────────────────────── §1 the box lock (async)
@@ -233,23 +235,50 @@ const DRIFT_CASES = {
 		r.push([checkState(S, { STUB_HTTP_CODE: "503" }) === "behind-and-unhealthy", `${tag}§5 behind + not serving → behind-and-unhealthy`]);
 		return r;
 	},
+	checkLocked(S, tag) {
+		// The drift check no longer waits in the production deploy queue, so it
+		// can meet a deploy mid-flight. Under the deploy's lock it reads nothing.
+		const r = [];
+		resetBox(C2);
+		const x = withLockHeld(() => runSh(S.check, { DIR: D.box, PM2: "logistics-app", STUB_HTTP_CODE: "503" }));
+		r.push([x.code === 0 && field(x.out, "DRIFT_STATE") === "deploy-in-progress" && field(x.out, "DRIFT_REMOTE") === C3,
+			`${tag}§5 a held deploy lock → deploy-in-progress, never behind-and-unhealthy from a restart in progress (got ${field(x.out, "DRIFT_STATE")}, exit ${x.code})`]);
+		r.push([!/^DRIFT_(LOCAL|HEAD|MARKER|HTTP)=/m.test(x.out), `${tag}§5 …and reports nothing it would have read under the lock`]);
+		r.push([checkState(S) === "behind-healable", `${tag}§5 once the lock is free the check reads the box again`]);
+		const d = runSh(S.deploy, deployEnv({ SHA: C3 }));
+		r.push([d.code === 0 && head() === C3, `${tag}§5 the check lets go of the lock: a deploy right after it runs (exit ${d.code})`]);
+		return r;
+	},
 	healPrep(S, tag) {
-		// Heal prep: compare-and-swap against what the check saw.
+		// Heal prep: compare-and-swap against what the check saw: production's
+		// record, HEAD and the marker.
 		const r = [];
 		let x;
 		resetBox(C2);
-		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, ...boxSeen() });
 		r.push([x.code === 0 && field(x.out, "HEAL_READY") === "yes" && marker() === C3, `${tag}§5 heal prep: box as the check saw it → ready, marker = target`]);
 		x = runSh(S.deploy, deployEnv({ SHA: C3 }));
 		r.push([x.code === 0 && head() === C3 && checkState(S) === "in-sync", `${tag}§5 the heal's exact-SHA deploy brings the box in sync`]);
 		resetBox(C2);
-		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C1 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C1, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no" && marker() === "", `${tag}§5 heal prep: the box moved since the check → not ready, NO marker written`]);
-		fs.writeFileSync(MARKER, C3);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C1, EXPECT_MARKER: "none" });
+		r.push([field(x.out, "HEAL_READY") === "no" && /HEAD moved/.test(field(x.out, "HEAL_REASON")) && marker() === "",
+			`${tag}§5 heal prep: HEAD moved since the check → not ready, NO marker written (got ${field(x.out, "HEAL_REASON")})`]);
+		fs.writeFileSync(MARKER, C1);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C2, EXPECT_MARKER: "none" });
+		r.push([field(x.out, "HEAL_READY") === "no" && /marker changed/.test(field(x.out, "HEAL_REASON")) && marker() === C1,
+			`${tag}§5 heal prep: the marker changed since the check → not ready, the marker left as it is (got ${field(x.out, "HEAL_REASON")})`]);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, EXPECT_HEAD: C2, EXPECT_MARKER: C1 });
+		r.push([field(x.out, "HEAL_READY") === "yes" && marker() === C3, `${tag}§5 heal prep: an old marker the check also saw → ready`]);
+		resetBox(C2);
 		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2 });
+		r.push([x.code !== 0 && field(x.out, "HEAL_READY") === "" && marker() === "", `${tag}§5 heal prep: without HEAD and marker from the check it refuses to run (exit ${x.code})`]);
+		fs.writeFileSync(MARKER, C3);
+		x = runSh(S.heal, { DIR: D.box, TARGET: C3, EXPECT: C2, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no", `${tag}§5 heal prep: already attempted → not ready`]);
 		fs.rmSync(MARKER, { force: true });
-		x = runSh(S.heal, { DIR: D.box, TARGET: S1, EXPECT: C2 });
+		x = runSh(S.heal, { DIR: D.box, TARGET: S1, EXPECT: C2, ...boxSeen() });
 		r.push([field(x.out, "HEAL_READY") === "no" && marker() === "", `${tag}§5 heal prep: a target main does not contain → not ready`]);
 		return r;
 	},
@@ -630,6 +659,17 @@ function sourcePins() {
 	const vd = verifiedBlock(REAL.deploy);
 	ok(vd && vd === verifiedBlock(REAL.check) && vd === verifiedBlock(REAL.heal),
 		"§7 the verified-record block is byte-identical in remote-deploy.sh, remote-drift-check.sh and remote-drift-heal.sh");
+	// The drift check reads the box under the deploy's own lock: the same file,
+	// computed the same way, taken with -n before any read, released after.
+	const lockLines = (text) => text.split("\n").filter((l) => /^LOCK_(DIR|FILE)=/.test(l)).join("\n");
+	ok(lockLines(REAL.deploy) !== "" && lockLines(REAL.check) === lockLines(REAL.deploy),
+		`§7 remote-drift-check.sh computes the deploy lock file exactly as remote-deploy.sh does (got ${JSON.stringify(lockLines(REAL.check))})`);
+	const flockAt = REAL.check.indexOf("if ! flock -n 9; then");
+	ok(flockAt > 0 && flockAt < REAL.check.indexOf("HEAD_SHA=$(git rev-parse HEAD)") && flockAt > REAL.check.indexOf("git fetch"),
+		"§7 remote-drift-check.sh takes the lock (flock -n) after its fetch and before it reads HEAD");
+	const releaseAt = REAL.check.indexOf("exec 9>&-");
+	ok(releaseAt > REAL.check.indexOf('LAST=$(cat "$MARKER"') && releaseAt < REAL.check.indexOf('echo "DRIFT_LOCAL='),
+		"§7 remote-drift-check.sh lets go of the lock once it has read the marker, before it reports");
 	record(refPins(REMOTE_SCRIPTS));
 	for (const [name, text] of [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]]) {
 		const lockAt = text.indexOf("# >>> deploy-lock");
@@ -675,6 +715,9 @@ async function mutants() {
 	expectCaught("rollback leaves no marker", DRIFT_CASES.rollbackMarker({ ...REAL, rollback: swap(REAL.rollback, 'printf \'%s\' "$FAILED" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("manual pin leaves no marker", DRIFT_CASES.manualPin({ ...REAL, deploy: swap(REAL.deploy, 'printf \'%s\' "$PIN_MAIN" > "$DIR/.drift-heal-attempted"', "true") }, M));
 	expectCaught("heal prep skips its compare-and-swap", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$NOW" = "$EXPECT" ] ||', "true ||") }, M));
+	expectCaught("heal prep skips its HEAD compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "$HEAD_NOW" = "$EXPECT_HEAD" ] ||', "true ||") }, M));
+	expectCaught("heal prep skips its marker compare", DRIFT_CASES.healPrep({ ...REAL, heal: swap(REAL.heal, '[ "${SEEN:-none}" = "$EXPECT_MARKER" ] ||', "true ||") }, M));
+	expectCaught("the drift check ignores a held deploy lock", DRIFT_CASES.checkLocked({ ...REAL, check: swap(REAL.check, "if ! flock -n 9; then", "if false; then") }, M));
 	expectCaught("deploy probe only require()s the module (passes under the wrong Node)", PROBE_CASES.lazyAbi({ ...REAL, deploy: swap(REAL.deploy, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
 	expectCaught("rollback probe only require()s the module", PROBE_CASES.rollbackLazyAbi({ ...REAL, rollback: swap(REAL.rollback, DB_PROBE, REQUIRE_ONLY_PROBE) }, M));
 	expectCaught("deploy restarts even when the rebuild did not help", PROBE_CASES.stillBroken({
