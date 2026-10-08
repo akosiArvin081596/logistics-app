@@ -419,7 +419,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
-		"accountCompanyChange", "findDirectoryRowForDriver", sources.updateUser)(
+		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
@@ -428,7 +428,10 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		// server.js's own: whether the body changes the company (and so the carrier).
 		new Function(`${liftFunction("function accountCompanyChange(user, companyName) {")}\nreturn accountCompanyChange;`)(),
 		// No drivers_directory here (the directory sync above is a no-op): no row.
-		() => null);
+		() => null,
+		// The lock on an investor's company name (its own subject is
+		// scripts/test-investor-company-lock.js): nothing to judge.
+		() => [], () => null);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions

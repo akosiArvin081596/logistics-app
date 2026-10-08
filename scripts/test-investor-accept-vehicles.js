@@ -289,11 +289,15 @@ async function acceptOnce(vehicles, { helperSrc = HELPER_SRC, seed } = {}) {
 	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
 	// subject; this application signs the standard contract, so none is.
 	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail",
-		"parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", ACCEPT_SRC)(
+		"parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote",
+		"getJobTrackingCached", "investorCompanyLockBlockers", ACCEPT_SRC)(
 		{ put: (p, guard, h) => { handler = h; } }, () => null, db, { hash: async () => "hashed" }, require("crypto"),
 		(req, action, entity, entityId, details) => audits.push({ action, details }), () => {}, colLetter, escapeHtml,
 		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, register, findDriverNameClash,
-		() => null, () => "");
+		() => null, () => "",
+		// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+		// subject (§10); here it judges nothing.
+		async () => ({ headers: [], data: [] }), () => null);
 	const out = { status: 200, body: null };
 	await handler({ params: { id: "42" }, body: { status: "Accepted" }, session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } },
 		{ status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } });

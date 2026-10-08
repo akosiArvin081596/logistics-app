@@ -265,11 +265,13 @@ async function acceptanceMail(routeSrc, vals = {}) {
 	const findDriverNameClash = new Function("db", `${CLASH_SRC}\nreturn findDriverNameClash;`)(db);
 	// The payout basis the acceptance records is scripts/test-payout-basis-routes.js's
 	// subject; this application signs the standard contract, so none is.
-	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", routeSrc)(
+	// The lock on the new account's company name is scripts/test-investor-accept-guards.js's
+	// subject (§10); here it judges nothing.
+	new Function("app", "requireRole", "db", "bcrypt", "crypto", "logAudit", "notifyChange", "colLetter", "escapeHtml", "sendEmail", "parseTruckAmount", "registerApplicationVehicles", "findDriverNameClash", "recordSignedPayoutBasis", "unrecordedLeaseNote", "getJobTrackingCached", "investorCompanyLockBlockers", routeSrc)(
 		{ put: (p, guard, h) => { handler = h; } }, () => (req, res, next) => next(), db,
 		{ hash: (pw) => bcrypt.hash(pw, 4) }, crypto, () => {}, () => {}, colLetter, escapeHtml,
 		(to, subject, html) => { mail.push({ to, subject, html }); return Promise.resolve(true); }, parseTruckAmount, registerApplicationVehicles, findDriverNameClash,
-		() => null, () => "");
+		() => null, () => "", async () => ({ headers: [], data: [] }), () => null);
 	const out = {};
 	await handler({
 		params: { id: String(appId) }, body: { status: "Accepted" },

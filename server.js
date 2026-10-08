@@ -1215,7 +1215,7 @@ function logAuditRefusal(req, action, entity, entityId, details, code) {
 //   • ⚠️ EVERY PERIOD-GUARD REFUSAL ACTION, and this was decided per action, not
 //     as a batch. `update_driver_pay_blocked`, `create_driver_pay_blocked`,
 //     `delete_driver_blocked`,
-//     `update_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
+//     `update_user_blocked`, `create_user_blocked`, `delete_user_blocked`, `create_truck_blocked`,
 //     `update_truck_blocked`, `delete_truck_blocked`, `driver_rename_blocked`,
 //     `delete_sheet_rows_blocked`, `delete_load_blocked`,
 //     `add_driver_day_blocked`, `exclude_driver_day_blocked`,
@@ -14609,12 +14609,22 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 		}
 		const appId = parseInt(req.params.id);
 
-		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It is the
-		// handler's only await, so every check below and the transaction that
-		// follows them run synchronously on state read after it — the rule
-		// PUT /api/users/:id and the driver acceptance follow.
+		// ⚠️ HASHED FIRST, ABOVE EVERY CHECK, AND IT MUST STAY HERE. It and the
+		// Job Tracking read below are the handler's only awaits, so every check
+		// below and the transaction that follows them run synchronously on state
+		// read after them — the rule PUT /api/users/:id and the driver acceptance
+		// follow.
 		const tempPassword = crypto.randomBytes(4).toString("hex");
 		const hash = status === "Accepted" ? await bcrypt.hash(tempPassword, 10) : "";
+		// The company name the new Investor account takes is held to the month-end
+		// lock (investorCompanyLockBlockers(), below), which sizes each linked
+		// driver's history off Job Tracking. Read here, beside the hash and for the
+		// same reason. A failed read leaves `jt` null, and a driver the company
+		// name would link is then held in every finalized month.
+		let jt = null;
+		if (status === "Accepted") {
+			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/investor-applications/:id/status: Job Tracking unreadable for the month-end lock:", e.message); }
+		}
 
 		// ⚠️ CHECKED BEFORE THE UPDATE, and this is the reader where filtering
 		// matters most. `status = 'Accepted'` does not merely set a column: it
@@ -14696,6 +14706,25 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				});
 			}
 
+			// The new account's company name links drivers to its ledger in every
+			// month they worked (getInvestorDriverSet() legs 2 and 3), so one whose
+			// drivers' history reaches a finalized month is refused before anything
+			// is written, as PUT /api/users/:id refuses the same company name.
+			const accountCompany = application.dba || fullName;
+			const companyLock = investorCompanyLockBlockers(null, { role: "Investor", companyName: accountCompany }, jt);
+			if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+				const companyAudit = {
+					action: "accept_investor_blocked", entity: "investor_application", entityId: String(appId),
+					subject: `accept application ${appId}: company_name ${JSON.stringify(auditText(accountCompany, 100))}`,
+				};
+				if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Accepting this application", companyAudit);
+				return periodBlockedResponse(req, res,
+					`Not accepted: ${fullName}`,
+					companyLock.blockers,
+					"Nothing was changed. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason), then accept it again.",
+					companyAudit);
+			}
+
 			// Auto-create investor user account. The username is folded to a-z, 0-9
 			// and "." (whitespace becomes ".") from the legal name, else the email's
 			// local part, else investor<application id>: the first that keeps a
@@ -14735,7 +14764,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				// the client router sends every role to /account/change-password.
 				const userResult = db.prepare(
 					"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, 'Investor', '', ?, ?, ?, 1)"
-				).run(username, hash, application.email || "", fullName, application.dba || fullName);
+				).run(username, hash, application.email || "", fullName, accountCompany);
 				const userId = userResult.lastInsertRowid;
 
 				// Create investor record with full business info from application
@@ -23072,9 +23101,12 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// row is held to the month-end lock (accountDirectoryRowLock()), which sizes
 		// the driver's history off Job Tracking. Read here, beside the hash and for
 		// the same reason: the checks and the INSERTs below run with no await
-		// between them. Only when that row will be judged.
+		// between them. Only when that row will be judged, or when a new Investor's
+		// company name links drivers to its ledger (investorCompanyMoves()), which
+		// the same lock judges.
 		let jt = null;
-		if (role === "Driver" && accountDirectoryRowJudged(newDriverName, companyName)) jt = await getJobTrackingCached();
+		if ((role === "Driver" && accountDirectoryRowJudged(newDriverName, companyName))
+			|| investorCompanyMoves(null, { role, companyName }).length) jt = await getJobTrackingCached();
 
 		const existing = db
 			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
@@ -23142,6 +23174,24 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 					"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
 					accountRowAudit);
 			}
+		}
+
+		// A new Investor's company name links drivers to its ledger in every month
+		// they worked (investorCompanyLockBlockers()), so one whose drivers' history
+		// reaches a finalized month is refused whole, before the INSERT, as
+		// PUT /api/users/:id refuses the same company name on an existing account.
+		const companyLock = investorCompanyLockBlockers(null, { role, companyName }, jt);
+		if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+			const companyAudit = {
+				action: "create_user_blocked", entity: "user", entityId: auditText(newUsername, 100),
+				subject: `create ${auditText(newUsername, 100)} as ${auditText(role, 30)}: company_name ${JSON.stringify(auditText(companyName, 100))}`,
+			};
+			if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Creating this account", companyAudit);
+			return periodBlockedResponse(req, res,
+				`Cannot create the account ${newUsername}`,
+				companyLock.blockers,
+				"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				companyAudit);
 		}
 
 		db.prepare(
@@ -23698,13 +23748,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				console.error("PUT /api/users/:id: Job Tracking read failed, the rename will be refused:", e.message);
 			}
 		}
-		// The carrier the directory sync writes after the commit is held to the
-		// month-end lock (guard (c2)), which sizes the driver's history off Job
-		// Tracking. Read here, with the other awaits, and only when that sync would
-		// change a carrier (accountDirectorySync()). A failed read leaves `jt` null,
-		// and guard (c2) then judges every finalized month.
+		// The carrier the directory sync writes after the commit (guard (c2)) and
+		// the drivers an investor's company name links (guard (c3)) are held to the
+		// month-end lock, which sizes each driver's history off Job Tracking. Read
+		// here, with the other awaits, and only when that sync would change a
+		// carrier (accountDirectorySync()) or the write would move a driver onto or
+		// off an investor's ledger (investorCompanyMoves()). A failed read leaves
+		// `jt` null, and guards (c2) and (c3) then judge every finalized month.
 		let jt = null;
-		if (accountDirectorySync(user, { driverName, companyName })) {
+		if (accountDirectorySync(user, { driverName, companyName })
+			|| investorCompanyMoves(user, { role, companyName }).length) {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/users/:id: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
@@ -23979,6 +24032,31 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				syncLock.blockers,
 				"Save the account without this company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
 				accountRowAudit);
+		}
+
+		// (c3) The investor ledgers' company-name legs (investorCompanyLockBlockers()):
+		// a company name sent and different, or a role change to or from Investor,
+		// moves every driver that name links onto or off this account's ledger, in
+		// every month they worked. Refused whole when a moved driver's history
+		// reaches a finalized month, with the same 409 as (c2). This is not leg (2)
+		// of userUpdateLockBlockers(), which never refuses a change TO Investor:
+		// that leg keeps settled payout rows reachable, which such a change
+		// restores, while this one keeps the drivers a company name links, which
+		// such a change adds.
+		const companyLock = investorCompanyLockBlockers(user, { role: nextRole, companyName }, jt);
+		if (companyLock && (companyLock.unreadable || companyLock.blockers.length)) {
+			const companyAudit = {
+				...userEditAudit,
+				subject: `${userEditAudit.subject}, company_name ${JSON.stringify(auditText(user.company_name || "", 100))} -> ` +
+					`${companyName === undefined ? "(unchanged)" : JSON.stringify(auditText(companyName, 100))}`,
+			};
+			if (companyLock.unreadable) return periodLockUnreadableResponse(req, res, "Updating this account", companyAudit);
+			return periodBlockedResponse(req, res,
+				`Cannot update ${user.username}`,
+				companyLock.blockers,
+				"Keep the company name and the role as they are (a change of letter case, or of spaces at either end, keeps every driver linked), " +
+				"or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				companyAudit);
 		}
 
 		// (d) ⚠️ THE SHEET LEG THIS ROUTE DOES NOT HAVE.
@@ -27361,7 +27439,11 @@ function truckDeleteLockBlockers(truck) {
 //      asked for and can never remove through this API.
 //
 // `excludeTruckId` models a truck about to be deleted; `carrierOverride` /
-// `nameOverride` model a drivers_directory row about to be written.
+// `nameOverride` model a drivers_directory row about to be written; `account`
+// ({ id, investor, companyName }, investorAccountState()'s answer plus the id)
+// models a users row about to be written: whether that account is one of the
+// investors below, and its company name. Its id is null for an account not yet
+// created.
 //
 // The investor universe is the UNION of role='Investor' and every distinct
 // trucks.owner_id — deliberately wider than either alone. Keying on the role
@@ -27383,6 +27465,10 @@ function investorsHoldingDriver(driverName, opts = {}) {
 			const u = db.prepare("SELECT COALESCE(company_name, '') AS company_name FROM users WHERE id = ?").get(t.owner_id);
 			investors.set(t.owner_id, u ? u.company_name : "");
 		}
+	}
+	if (opts.account) {
+		if (opts.account.investor) investors.set(opts.account.id, String(opts.account.companyName || ""));
+		else investors.delete(opts.account.id);
 	}
 
 	// legs 1 + 1b — the truck side. normalizeDriverName() on both sides, matching
@@ -27966,6 +28052,137 @@ function onboardingAddsJudgedRow(userId) {
 	if (ob.status !== "documents_pending" && ob.drug_test_result !== "pass") return false;
 	const user = db.prepare("SELECT driver_name, company_name FROM users WHERE id = ?").get(userId);
 	return !!user && accountDirectoryRowJudged(user.driver_name, user.company_name);
+}
+
+// ============================================================================
+// AN INVESTOR'S COMPANY NAME IS PART OF THEIR LEDGER (2026-10-08)
+// ============================================================================
+// getInvestorDriverSet() legs 2 and 3 give an investor every driver whose
+// drivers_directory carrier or carrier_driver_history carrier is the investor's
+// users.company_name, compared trimmed and case aside, and
+// getInvestorDriverMonthWindows() leg C dates the second. Neither leg has a month
+// dimension, so changing that company name, or whether the account is an
+// investor at all, moves those drivers' revenue, expenses and pay onto or off
+// the investor's ledger in every month they worked, finalized months included,
+// for every reader that recomputes them (the portal, the report, the tax CSV,
+// the documents).
+//
+// So every write that can do that is judged by the membership it moves, the
+// question directoryEditLockBlockers() check (5) asks of a directory carrier:
+// investorsHoldingDriver() before and after, for each driver either company name
+// reaches, each moved driver's exposure sized off driverHistoryFloorMonth(). A
+// move that reaches a finalized month is refused whole, with nothing written:
+// 409 PERIOD_FINALIZED through periodBlockedResponse(), on
+//   • PUT /api/users/:id: a company name sent and different, or a role change to
+//     or from Investor (audited as update_user_blocked);
+//   • POST /api/users: a new Investor with a company name (create_user_blocked);
+//   • PUT /api/investor-applications/:id/status: an acceptance, whose new
+//     Investor account takes the DBA, else the legal name, as its company name
+//     (accept_investor_blocked).
+// Nothing else writes an investor's company name: the driver acceptance creates
+// a Driver account with none, and no route lets an investor edit their own.
+//
+// Never judged, because it keeps every link: the same company name once trimmed
+// and lower-cased (a change of letter case, or of spaces at either end). A change
+// of the spaces INSIDE the name is a different name to those legs. Judged and
+// allowed: a change that moves only drivers with no history in a finalized
+// month, or only drivers the investor also holds through its own trucks
+// (legs 1 and 1b keep them either way).
+
+// An account as investorsHoldingDriver() sees it: whether it is one of the
+// investors that function reasons over (the Investor role, or the owner of a
+// truck) and its company name. `account` is the stored users row, null for one
+// not yet created; `next` holds the role and company name a write would store,
+// each undefined (or a blank role) when the write leaves it as it is.
+function investorAccountState(account, next = {}) {
+	const id = account ? Number(account.id) || 0 : 0;
+	const role = typeof next.role === "string" && next.role ? next.role : String((account && account.role) || "");
+	const companyName = next.companyName !== undefined ? String(next.companyName ?? "") : String((account && account.company_name) || "");
+	const ownsTruck = id > 0 && !!db.prepare("SELECT 1 FROM trucks WHERE owner_id = ? LIMIT 1").get(id);
+	return { investor: role === "Investor" || ownsTruck, companyName };
+}
+
+// The drivers a write moves onto or off the account's investor ledger through
+// the company-name legs, as [{ driver, onto }]. `account` and `next` as
+// investorAccountState() takes them. Each drivers_directory and
+// carrier_driver_history row whose carrier the stored or the written company name
+// reaches is put to investorsHoldingDriver() twice, the account modelled as it
+// stands and as written; a directory row is asked with its own carrier, so a
+// driver whose row is stored under another spacing of their name is still seen.
+function investorCompanyMoves(account, next = {}) {
+	const id = account ? Number(account.id) : null;
+	const before = investorAccountState(account);
+	const after = investorAccountState(account, next);
+	const key = (s) => (s.investor ? String(s.companyName || "").trim().toLowerCase() : "");
+	const from = key(before);
+	const to = key(after);
+	if (from === to) return [];
+	const reached = (carrier) => {
+		const c = String(carrier || "").trim().toLowerCase();
+		return c !== "" && (c === from || c === to);
+	};
+	const asks = [];
+	for (const r of db.prepare("SELECT driver_name, carrier_name FROM drivers_directory").all()) {
+		if (reached(r.carrier_name)) asks.push({ driver: r.driver_name, opts: { carrierOverride: r.carrier_name || "" } });
+	}
+	for (const r of db.prepare("SELECT driver_name, carrier_name FROM carrier_driver_history").all()) {
+		if (reached(r.carrier_name)) asks.push({ driver: r.driver_name, opts: {} });
+	}
+	const moved = new Map();
+	for (const { driver, opts } of asks) {
+		const lc = normalizeDriverName(driver);
+		if (!lc || moved.has(lc)) continue;
+		const was = investorsHoldingDriver(driver, { ...opts, account: { id, ...before } }).has(id);
+		const now = investorsHoldingDriver(driver, { ...opts, account: { id, ...after } }).has(id);
+		if (was !== now) moved.set(lc, { driver: String(driver).trim(), onto: now });
+	}
+	return [...moved.values()];
+}
+
+// The month-end lock on that write, with directoryEditLockBlockers()'s contract
+// ({ unreadable, blockers }), or null when it moves nobody. One blocker per
+// direction, naming the moved drivers whose history reaches a finalized month.
+// `jt` is getJobTrackingCached()'s answer, read by the caller before its checks;
+// null dates nothing, so every finalized month is held, the safe direction.
+function investorCompanyLockBlockers(account, next, jt) {
+	const moves = investorCompanyMoves(account, next);
+	if (!moves.length) return null;
+	const before = investorAccountState(account);
+	const after = investorAccountState(account, next);
+	// Fail CLOSED: isLocked() swallows its errors and answers "not locked".
+	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
+	const locked = lockedPeriodsDesc();
+	const change = before.investor && after.investor
+		? `the company name ${JSON.stringify(before.companyName)} → ${JSON.stringify(after.companyName)}`
+		: after.investor
+			? `becoming an investor with the company name ${JSON.stringify(after.companyName)}`
+			: `no longer being an investor (company name ${JSON.stringify(before.companyName)})`;
+	const blockers = [];
+	for (const onto of [false, true]) {
+		const drivers = [];
+		const periods = new Set();
+		for (const m of moves) {
+			if (m.onto !== onto) continue;
+			const months = driverPayLockedMonths(m.driver, locked, driverHistoryFloorMonth(m.driver, jt));
+			if (!months.length) continue;
+			drivers.push(m.driver);
+			for (const p of months) periods.add(p);
+		}
+		if (!drivers.length) continue;
+		drivers.sort((a, b) => a.localeCompare(b));
+		blockers.push({
+			field: "company_name",
+			from: before.investor ? before.companyName : "",
+			to: after.investor ? after.companyName : "",
+			effect: "driver_set",
+			direction: onto ? "onto" : "off",
+			drivers,
+			periods: [...periods].sort(),
+			detail: `${change} ${onto ? "puts" : "takes"} ${drivers.join(", ")} ${onto ? "onto" : "off"} this investor's ledger, ` +
+				`with their revenue, expenses and pay, across ${periods.size} finalized month${periods.size === 1 ? "" : "s"}`,
+		});
+	}
+	return { unreadable: false, blockers };
 }
 
 // Everything POST /api/trucks would restate inside a finalized month by

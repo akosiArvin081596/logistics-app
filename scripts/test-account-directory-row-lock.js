@@ -130,11 +130,17 @@ const MODULE_SRC = [
 	liftNew("accountCompanyChange"),
 	liftNew("accountDirectorySync"),
 	liftNew("accountDirectorySyncLock"),
+	// The investor ledgers' company-name lock the same two routes now judge
+	// (scripts/test-investor-company-lock.js); a Driver account moves nobody.
+	liftNew("investorAccountState"),
+	liftNew("investorCompanyMoves"),
+	liftNew("investorCompanyLockBlockers"),
 	liftFunction("syncDriverToCarrierSheet"),
 	liftFunction("checkAndCompleteOnboarding", "async function"),
 ].join("\n");
 const MODULE_EXPORTS = ["logAudit", "auditText", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes", "findDirectoryRowForDriver", "syncDriverToCarrierSheet", "checkAndCompleteOnboarding",
-	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountCompanyChange", "accountDirectorySync", "accountDirectorySyncLock"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
+	...["accountDirectoryRowJudged", "accountDirectoryRowLock", "accountCompanyChange", "accountDirectorySync", "accountDirectorySyncLock",
+		"investorCompanyMoves", "investorCompanyLockBlockers"].filter((n) => SRC.includes(`\nfunction ${n}(`))];
 
 const LOCKED = ["2026-06", "2026-07", "2026-08"];
 const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
