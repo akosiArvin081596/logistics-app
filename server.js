@@ -35,7 +35,31 @@ try {
 	console.error(`WARNING: could not set umask ${BOOT_UMASK.toString(8)} — new files may be world-readable:`, err.message);
 }
 
+// ---------------------------------------------------------------------------
+// LOCAL REPLICA MODE (LOCAL_REPLICA=1): this app on a local copy of production
+// (npm run replica:start; README "Local replica of production"). It runs here,
+// before dotenv and before any module that could open a connection, because in
+// replica mode it refuses to start on a server or with any outbound credential
+// set, installs the outbound network guard, and keeps dotenv from reading the
+// repo's .env. Outside replica mode REPLICA is null and nothing changes; every
+// replica difference below is behind it. See lib/replica-mode.js.
+// ---------------------------------------------------------------------------
+const REPLICA = require("./lib/replica-mode").boot({ appDir: __dirname });
+// In a replica every outbound HTTP call this file makes is answered by the
+// replica (refused before any connection, the way an unreachable service
+// fails); otherwise it is the global fetch.
+const fetch = REPLICA ? REPLICA.fetch : globalThis.fetch;
+// Every interval and boot-time job this file starts asks first. Outside replica
+// mode the answer is always yes, so each starts exactly as before; in a replica
+// none starts, and each is named in the log.
+function startsJob(name) {
+	return REPLICA ? REPLICA.jobNotStarted(name) : true;
+}
+
 require("dotenv").config();
+// A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
+// decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).
+require("./lib/replica-mode").checkDotenvFlag(process.env);
 const express = require("express");
 const http = require("http");
 const https = require("https");
@@ -101,6 +125,12 @@ const publicFormInput = require("./lib/public-form-input");
 // POST /api/public/investor-rfi: the website's investor Request for Information.
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
+
+// Where the files the app writes at runtime live: uploads/, storage/ and
+// evidence-archive/, and every stored "/uploads/…" path resolves against it.
+// The app directory, as always, except in a replica, where it is the task's
+// working copy under ~/LogisX-replica/ (lib/replica-mode.js).
+const DATA_DIR = REPLICA ? REPLICA.dataDir : __dirname;
 
 // ---------------------------------------------------------------------------
 // PII_MASK_ENABLED — deliberately defaults ON, unlike every other flag here.
@@ -1296,8 +1326,10 @@ function purgeOldAuditRefusals() {
 		console.error("[cleanup] audit_trail refusal purge failed:", err.message);
 	}
 }
-purgeOldAuditRefusals();
-setInterval(purgeOldAuditRefusals, 7 * 24 * 60 * 60 * 1000); // weekly
+if (startsJob("audit-trail refusal purge (at boot, then weekly)")) {
+	purgeOldAuditRefusals();
+	setInterval(purgeOldAuditRefusals, 7 * 24 * 60 * 60 * 1000); // weekly
+}
 
 // Load status phase history — append-only transition log. Powers the per-phase
 // started/ended/duration timeline (admin load modals + driver app). Forward-only:
@@ -1694,7 +1726,7 @@ try {
 
 // One-time seed: import Carrier Database from Google Sheet into SQLite on first boot
 const driverCount = db.prepare("SELECT COUNT(*) AS cnt FROM drivers_directory").get().cnt;
-if (driverCount === 0) {
+if (driverCount === 0 && startsJob("driver directory seed from the Carrier Database (empty database only)")) {
 	// Deferred to the next tick: getSheets() reads module-scope `sheetsClient`/`auth`
 	// declared ~2000 lines below, so seeding inline during module load throws a TDZ
 	// ("Cannot access 'sheetsClient' before initialization") and silently skips the import
@@ -2437,8 +2469,10 @@ function purgeOldDriverLocations() {
 		console.error("[cleanup] driver_locations purge failed:", err.message);
 	}
 }
-purgeOldDriverLocations();
-setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
+if (startsJob("driver location purge (at boot, then weekly)")) {
+	purgeOldDriverLocations();
+	setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000); // weekly
+}
 
 // --- Routemate ELD/telematics tables (Phase 1 — additive) ---
 // All six tables follow the existing IF NOT EXISTS migration style.
@@ -2878,8 +2912,10 @@ function purgeOldRoutemateTelemetry() {
 		console.error("[cleanup] routemate_telemetry purge failed:", err.message);
 	}
 }
-purgeOldRoutemateTelemetry();
-setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000); // weekly
+if (startsJob("ELD telemetry trim (at boot, then weekly)")) {
+	purgeOldRoutemateTelemetry();
+	setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000); // weekly
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ELD FEED SILENCE — detection, ledger and alerting
@@ -3613,7 +3649,7 @@ async function maybeSweepEldFeedSilence() {
 	}
 }
 
-if (ELD_STALE_ALERT_ENABLED) {
+if (ELD_STALE_ALERT_ENABLED && startsJob("ELD feed-silence sweep")) {
 	// ⚠️ THE REJECTION HANDLER LOGS — deliberately not `.catch(() => {})`. Same
 	// call as the expense-duplicates tick: maybeSweepEldFeedSilence() owns its own
 	// try/catch/finally and should never reject, so anything arriving here is a
@@ -4209,7 +4245,7 @@ async function routemateSyncTelemetry() {
 }
 
 // Reset 24h error counter daily at boot-aligned hour.
-setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
+if (startsJob("Routemate 24 h error-counter reset")) setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
 
 // --- Phase 4: telemetry-derived MPG rollup ---
 // Routemate's IFTA endpoint returns mileage only (no gallons), and live
@@ -4399,8 +4435,10 @@ function routemateRollupFuelDaily(daysBack = 7) {
 // fills — and the trucks link column, so it keeps producing per-truck daily MPG
 // on a live cadence regardless of which GPS provider is active (Routemate poll
 // or Linxup push). No provider poll is required for this to run.
-setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
-setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
+if (startsJob("ELD fuel daily rollup")) {
+	setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
+	setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
+}
 
 // --- ELD device history: seed, writer, resolver (2026-10-02) ----------------
 // See the eld_device_assignments table comment. Three pieces:
@@ -4521,7 +4559,7 @@ function buildEldDeviceResolver() {
 }
 
 // After every table exists (server_state is created further down this file).
-setImmediate(() => {
+if (startsJob("ELD device-history reconcile (at boot)")) setImmediate(() => {
 	try {
 		const r = reconcileEldDeviceAssignments();
 		if (r.seeded || r.opened) console.log(`[eld-device-history] ${r.seeded ? "seeded with the links in force now" : `recorded ${r.opened} link(s) changed outside the link routes`}`);
@@ -4699,8 +4737,10 @@ async function runEldMilesDailyRollup() {
 // Same cadence and the same not-gated-on-ROUTEMATE_ENABLED reasoning as the fuel
 // rollup above: it reads the shared telemetry table, which Linxup also fills.
 // runEldMilesDailyRollup() never rejects.
-setTimeout(() => { runEldMilesDailyRollup(); }, 6 * 60 * 1000);
-setInterval(() => { runEldMilesDailyRollup(); }, 6 * 60 * 60 * 1000);
+if (startsJob("ELD miles daily rollup")) {
+	setTimeout(() => { runEldMilesDailyRollup(); }, 6 * 60 * 1000);
+	setInterval(() => { runEldMilesDailyRollup(); }, 6 * 60 * 60 * 1000);
+}
 
 // --- Miles per state per truck per day: rollup and one-time backfill ---------
 // Fills eld_state_miles_daily (see its table comment). One function serves both:
@@ -4847,8 +4887,10 @@ async function runEldStateMilesRollup() {
 // Not gated on ROUTEMATE_ENABLED, for the reason given at rollupEldMilesDaily:
 // it reads the shared telemetry table, which Linxup also fills. Staggered after
 // the 6-minute miles rollup. runEldStateMilesRollup() never rejects.
-setTimeout(() => { runEldStateMilesRollup(); }, 9 * 60 * 1000);
-setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
+if (startsJob("ELD state miles rollup")) {
+	setTimeout(() => { runEldStateMilesRollup(); }, 9 * 60 * 1000);
+	setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
+}
 
 // --- Phase 5: fault codes (DTC) + DVIR sync ---
 // Routemate's /dtc/{vehicleId} returns {code, status} pairs per vehicle.
@@ -4992,20 +5034,24 @@ async function routemateSyncDvirs() {
 
 // Fault codes poll every ROUTEMATE_POLL_FAULTS_SEC (default 5min).
 const ROUTEMATE_POLL_FAULTS_MS = (parseInt(process.env.ROUTEMATE_POLL_FAULTS_SEC || "300", 10) || 300) * 1000;
-setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
-setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
+if (startsJob("Routemate fault-code poll")) {
+	setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
+	setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
+}
 
 // DVIR sync once per 6h. Inspections are added a few times a day max.
-setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
-setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
+if (startsJob("Routemate DVIR poll")) {
+	setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
+	setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
+}
 
 // Live telemetry: poll every ROUTEMATE_POLL_LIVE_SEC (default 60s).
 const ROUTEMATE_POLL_LIVE_MS = (parseInt(process.env.ROUTEMATE_POLL_LIVE_SEC || "60", 10) || 60) * 1000;
-setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
+if (startsJob("Routemate live telemetry poll")) setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
 
 // Vehicle inventory: refresh once per day. Cheap (one paginated call) and the
 // list rarely changes — admins shouldn't need to manually re-sync.
-setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
+if (startsJob("Routemate vehicle sync (daily)")) setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
 
 // Boot-time vehicle sync — populates routemate_vehicles shortly after start
 // so the truck-link UI has data without waiting 24h for the daily interval
@@ -5013,7 +5059,7 @@ setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1
 // binding before any outbound HTTP. The helper itself no-ops when the kill
 // switch is off; we don't gate here because ROUTEMATE_ENABLED is declared
 // later in the file (TDZ would crash the boot).
-setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
+if (startsJob("Routemate vehicle sync (at boot)")) setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS investor_config (
@@ -6536,7 +6582,8 @@ const SESSION_COOKIE_SAMESITE = resolveSessionSameSite(process.env.SESSION_COOKI
 // underlying HTTP request before the WebSocket upgrade completes — that
 // gives the connection handler a populated `socket.request.session`.
 const sessionMiddleware = session({
-	store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 3600000 } }),
+	// The store sweeps expired sessions hourly; a replica starts no scheduled job.
+	store: new SqliteStore({ client: db, expired: { clear: !REPLICA, intervalMs: 3600000 } }),
 	secret: SESSION_SECRET,
 	resave: false,
 	saveUninitialized: false,
@@ -7445,6 +7492,8 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 // submitter's address, already checked by lib/public-form-input.js); every
 // other caller sends exactly what it sent before.
 async function sendEmail(to, subject, htmlBody, attachments = [], { replyTo } = {}) {
+	// A replica sends no mail: callers see an unconfigured mailbox.
+	if (REPLICA) { REPLICA.off("email (SMTP)"); return false; }
 	const gmailUser = process.env.GMAIL_USER;
 	const gmailPass = process.env.GMAIL_APP_PASSWORD;
 	if (!gmailUser || !gmailPass) return false;
@@ -7529,6 +7578,9 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 // Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
 const clientDistPath = path.join(__dirname, "client", "dist");
 const publicPath = path.join(__dirname, "public");
+// A replica answers every page with the "LOCAL COPY OF PRODUCTION" banner in
+// it, the login page included (lib/replica-mode.js), ahead of the static files.
+if (REPLICA) app.use(REPLICA.bannerMiddleware(fs.existsSync(clientDistPath) ? clientDistPath : publicPath));
 if (fs.existsSync(clientDistPath)) {
 	app.use(express.static(clientDistPath));
 } else {
@@ -7691,7 +7743,9 @@ google.options({
 // ============================================================
 // Google Sheets Auth Setup (cached — created once, reused)
 // ============================================================
-const auth = new google.auth.GoogleAuth({
+// A replica never constructs a Google client or reads the key: Sheets come from
+// its local working copy (getSheets()) and Drive is off (getDrive()).
+const auth = REPLICA ? null : new google.auth.GoogleAuth({
 	keyFile: KEY_FILE,
 	scopes: [
 		"https://www.googleapis.com/auth/spreadsheets",
@@ -7845,7 +7899,7 @@ const GEMINI_OCR_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
 // until the key is wired in production.
 const SCANKIT_BASE_URL = process.env.SCANKIT_BASE_URL || "https://api.scankit.io";
 const SCANKIT_API_KEY = process.env.SCANKIT_API_KEY || "";
-const SCANKIT_ENABLED = String(process.env.SCANKIT_ENABLED || "").toLowerCase() === "true";
+const SCANKIT_ENABLED = !REPLICA && String(process.env.SCANKIT_ENABLED || "").toLowerCase() === "true";
 
 // Routemate AI ELD/telematics integration. Phase 1 deploys with the kill
 // switch off (ROUTEMATE_ENABLED=false) so the foundation lands before the
@@ -7853,7 +7907,7 @@ const SCANKIT_ENABLED = String(process.env.SCANKIT_ENABLED || "").toLowerCase() 
 // added in later phases also gate on ROUTEMATE_ENABLED.
 const ROUTEMATE_BASE_URL = process.env.ROUTEMATE_BASE_URL || "https://cloud.routemate.ai";
 const ROUTEMATE_API_KEY = process.env.ROUTEMATE_API_KEY || "";
-const ROUTEMATE_ENABLED = String(process.env.ROUTEMATE_ENABLED || "").toLowerCase() === "true";
+const ROUTEMATE_ENABLED = !REPLICA && String(process.env.ROUTEMATE_ENABLED || "").toLowerCase() === "true";
 function routemateCreds() { return { apiKey: ROUTEMATE_API_KEY, baseUrl: ROUTEMATE_BASE_URL }; }
 // Last-sync tracker for /api/routemate/health. Updated by the manual probe
 // endpoint and (later phases) by interval sync jobs.
@@ -7869,7 +7923,7 @@ const routemateHealth = {
 // outages to Super Admins. Rolling 24h counters reset on the interval below;
 // noCreditsSince latches the first 402 until a successful scan clears it.
 const scanKitHealth = { lastScan: null, lastError: null, noCreditsSince: null, errorsLast24h: 0, scans24h: { ok: 0, failed: 0 } };
-setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { ok: 0, failed: 0 }; }, 24 * 60 * 60 * 1000);
+if (startsJob("ScanKit 24 h counter reset")) setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { ok: 0, failed: 0 }; }, 24 * 60 * 60 * 1000);
 
 // Per-source error de-dup state. Long-running upstream outages (e.g. the
 // /assets/vehicles 500 loop on Routemate's side) should log ONCE on first
@@ -7902,6 +7956,8 @@ function clearRoutemateLogState(source) {
 }
 
 async function getSheets() {
+	// A replica reads and writes its local copy of the spreadsheets, never Google.
+	if (REPLICA) return REPLICA.sheets();
 	if (!sheetsClient) {
 		const authClient = await auth.getClient();
 		sheetsClient = google.sheets({ version: "v4", auth: authClient });
@@ -8668,7 +8724,7 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		for (const doc of orphanedDocs) {
 			if (!doc.file_url) continue;
 			try {
-				const filePath = path.join(__dirname, doc.file_url);
+				const filePath = path.join(DATA_DIR, doc.file_url);
 				if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 			} catch (err) { console.error("Failed to unlink driver doc on cascade:", err.message); }
 		}
@@ -8676,7 +8732,7 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		const existingDriver = dirRow;
 		if (existingDriver?.profile_picture_url) {
 			try {
-				const picPath = path.join(__dirname, existingDriver.profile_picture_url);
+				const picPath = path.join(DATA_DIR, existingDriver.profile_picture_url);
 				if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
 			} catch (err) { console.error("Failed to unlink driver profile pic on cascade:", err.message); }
 		}
@@ -8713,7 +8769,7 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // Helper: persist a base64-encoded image to uploads/profile-pictures/ and return its public URL.
 // Frontend pre-resizes and exports JPEG via canvas, so we always save with .jpg extension.
 function saveProfilePicture(entityType, entityId, fileData) {
-	const dir = path.join(__dirname, "uploads", "profile-pictures");
+	const dir = path.join(DATA_DIR, "uploads", "profile-pictures");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const safeName = `${entityType}-${entityId}-${Date.now()}.jpg`;
 	const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
@@ -8759,7 +8815,7 @@ app.post("/api/drivers-directory/:id/profile-picture", requireAuth, (req, res) =
 		// Unlink the old picture if the driver already had one
 		if (driver.profile_picture_url) {
 			try {
-				const oldPath = path.join(__dirname, driver.profile_picture_url);
+				const oldPath = path.join(DATA_DIR, driver.profile_picture_url);
 				if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
 			} catch (err) { console.error("Failed to unlink old driver profile pic:", err.message); }
 		}
@@ -8796,7 +8852,7 @@ app.post("/api/investors/:id/profile-picture", requireAuth, (req, res) => {
 		// Unlink the old picture if the investor already had one
 		if (investor.profile_picture_url) {
 			try {
-				const oldPath = path.join(__dirname, investor.profile_picture_url);
+				const oldPath = path.join(DATA_DIR, investor.profile_picture_url);
 				if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
 			} catch (err) { console.error("Failed to unlink old investor profile pic:", err.message); }
 		}
@@ -10145,7 +10201,7 @@ function setUploadServeHeaders(res, fileNameOrPath, opts = {}) {
 		res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
 	}
 }
-app.use("/uploads", requireAuth, express.static(path.join(__dirname, "uploads"), {
+app.use("/uploads", requireAuth, express.static(path.join(DATA_DIR, "uploads"), {
 	setHeaders: (res, filePath) => {
 		res.setHeader("X-Content-Type-Options", "nosniff");
 		// The mount deliberately does NOT set an inline disposition — express.static
@@ -11204,7 +11260,7 @@ app.post("/api/public/investor-apply", publicFormLimiter, async (req, res) => {
 		}
 
 		// 2. Generate signed PDFs (outside transaction — file I/O)
-		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
+		const signedDir = path.join(DATA_DIR, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 
 		// The per-document render data (the old `appData` literal) now comes from
@@ -11758,7 +11814,7 @@ async function writeSignedArtifact({ render, signedPath, publicUrl, label }) {
 // on disk as a named, accepted exposure — growing that inventory inside the
 // web root, defended by a lookup miss, is the wrong shape. A directory the
 // static handler cannot reach removes the class instead of guarding it.
-const SIGNED_ARCHIVE_DIR = path.join(__dirname, "evidence-archive", "signed-artifacts");
+const SIGNED_ARCHIVE_DIR = path.join(DATA_DIR, "evidence-archive", "signed-artifacts");
 function archiveSignedArtifact(signedPath) {
 	if (!signedArtifactLooksValid(signedPath)) return null;
 	if (!fs.existsSync(SIGNED_ARCHIVE_DIR)) fs.mkdirSync(SIGNED_ARCHIVE_DIR, { recursive: true });
@@ -11865,7 +11921,7 @@ async function fillW9Form({ legalName = "", dba = "", entityType = "", taxClassi
 	// yet pulled the new path.
 	const templatePath = [
 		path.join(__dirname, "onboarding-templates", "pdf", "fw9.pdf"),
-		path.join(__dirname, "uploads", "onboarding-templates", "fw9.pdf"),
+		path.join(DATA_DIR, "uploads", "onboarding-templates", "fw9.pdf"),
 	].find((p) => fs.existsSync(p));
 	if (!templatePath) return null;
 	const templateBytes = fs.readFileSync(templatePath);
@@ -12368,7 +12424,7 @@ app.get("/api/admin/onboarding-evidence/:scope/:ownerId", requireRole("Super Adm
 				     FROM investor_onboarding_documents WHERE application_id = ? ORDER BY id`
 		).all(ownerId);
 
-		const signedDir = path.join(__dirname, "uploads", isDriver ? "onboarding-signed" : "investor-onboarding-signed");
+		const signedDir = path.join(DATA_DIR, "uploads", isDriver ? "onboarding-signed" : "investor-onboarding-signed");
 		const documents = rows.map((r) => {
 			// Resolve the file from signed_pdf_url, never by rebuilding the name —
 			// the stored URL is what every other reader uses, so verifying a
@@ -12511,7 +12567,7 @@ app.post("/api/admin/investor-onboarding/:id/documents/:docKey/regenerate", requ
 		}
 		const paymentTermsSummary = investorPaymentTerms.describeTerms(paymentTerms).summary;
 
-		const signedDir = path.join(__dirname, "uploads", "investor-onboarding-signed");
+		const signedDir = path.join(DATA_DIR, "uploads", "investor-onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-inv-${appId}-signed.pdf`;
 		const signedPath = path.join(signedDir, signedFileName);
@@ -14356,7 +14412,7 @@ app.get("/api/admin/orphaned-signed-artifacts", requireRole("Super Admin"), orph
 		let rowsScanned = 0;
 
 		for (const s of scopes) {
-			const absDir = path.join(__dirname, "uploads", s.dir);
+			const absDir = path.join(DATA_DIR, "uploads", s.dir);
 			// One membership SET per scope, built from the DB. A row-per-file query
 			// would be N lookups and, worse, would invite matching on something
 			// other than the URL.
@@ -14799,7 +14855,7 @@ app.post("/api/investor-outreach/send", requireRole("Super Admin"), async (req, 
 		}
 
 		const gmailUser = process.env.GMAIL_USER;
-		const gmailPass = process.env.GMAIL_APP_PASSWORD;
+		const gmailPass = REPLICA ? "" : process.env.GMAIL_APP_PASSWORD; // none in a replica: no mail leaves it
 		if (!gmailUser || !gmailPass) {
 			return res.status(500).json({ error: "Email not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env" });
 		}
@@ -15021,7 +15077,7 @@ async function checkAndCompleteOnboarding(userId, req = null) {
 		const signedDocs = db.prepare("SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1").all(userId);
 		const pdfAttachments = signedDocs.map(d => {
 			if (!d.signed_pdf_url) return null;
-			const filepath = path.join(__dirname, d.signed_pdf_url.replace(/^\//, ""));
+			const filepath = path.join(DATA_DIR, d.signed_pdf_url.replace(/^\//, ""));
 			return fs.existsSync(filepath) ? { filename: `${d.doc_name}.pdf`, path: filepath } : null;
 		}).filter(Boolean);
 
@@ -15250,7 +15306,7 @@ app.post("/api/onboarding/:userId/documents/:docKey/sign", requireAuth, onboardi
 		if (!consent) return;
 		const net = signerNetworkEvidence(req);
 
-		const signedDir = path.join(__dirname, "uploads", "onboarding-signed");
+		const signedDir = path.join(DATA_DIR, "uploads", "onboarding-signed");
 		if (!fs.existsSync(signedDir)) fs.mkdirSync(signedDir, { recursive: true });
 		const signedFileName = `${docKey}-${userId}-signed.pdf`;
 		const signedPath = path.join(signedDir, signedFileName);
@@ -15398,7 +15454,7 @@ app.post("/api/onboarding/:userId/drug-test", requireRole("Super Admin"), async 
 		if (fileData && fileName) {
 			if (!validateFileExt(fileName)) return res.status(400).json({ error: "File type not allowed" });
 			// Save file to uploads/onboarding/
-			const uploadsDir = path.join(__dirname, "uploads", "onboarding");
+			const uploadsDir = path.join(DATA_DIR, "uploads", "onboarding");
 			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 			const ext = path.extname(fileName) || ".pdf";
 			const safeName = `drug-test-${userId}-${Date.now()}${ext}`;
@@ -15791,7 +15847,7 @@ function invoiceWriteRefusal(code, message) {
 // mean "generate it again"; the retry mints the next free number and re-reads the
 // week.
 function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, insert }) {
-	const dir = path.join(__dirname, "uploads", "invoices");
+	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, pdfFileName);
 	const tmpPath = path.join(dir, `.${pdfFileName}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
@@ -16487,8 +16543,10 @@ function warmEldTravelMemo() {
 		if (vids.length) getEldTravelDaysByVehicleCached(vids, 0, Date.now() + 86400000);
 	} catch (e) { /* best-effort warm */ }
 }
-setTimeout(warmEldTravelMemo, 8000);                 // shortly after boot (once the app is serving)
-setInterval(warmEldTravelMemo, 4 * 60 * 1000);       // < the 5-min TTL, so the entry is refreshed before it goes stale
+if (startsJob("ELD travel-day cache warm-up")) {
+	setTimeout(warmEldTravelMemo, 8000);                 // shortly after boot (once the app is serving)
+	setInterval(warmEldTravelMemo, 4 * 60 * 1000);       // < the 5-min TTL, so the entry is refreshed before it goes stale
+}
 
 // Re-render an invoice PDF using the snapshot stored at generate time, with
 // the row's current adjustment fields. Used by PUT /api/invoices/:id/adjust
@@ -16523,7 +16581,7 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	renderData.adjustment = invoiceRow.adjustment || 0;
 	renderData.adjustmentNote = invoiceRow.adjustment_note || "";
 	const pdfBuffer = await renderPolicy(templateName, renderData);
-	const uploadsDir = path.join(__dirname, "uploads", "invoices");
+	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
 	assertInvoiceFileStillOwn(invoiceRow);
@@ -16570,7 +16628,7 @@ function writeInvoiceFileAtomically(filePath, bytes) {
 // original exactly. Uses pdf-lib (already imported), so no source re-fetch and
 // no risk of the base totals drifting since the driver submitted.
 async function appendInvoiceAdjustmentAddendum(invoiceRow) {
-	const uploadsDir = path.join(__dirname, "uploads", "invoices");
+	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	const servedPath = path.join(uploadsDir, invoiceRow.pdf_file_name);
 	const basePath = servedPath + ".base";
@@ -18132,7 +18190,7 @@ async function maybeRunWeeklyInvoiceBatch() {
 	}
 }
 
-if (INVOICE_AUTOGEN_ENABLED) {
+if (INVOICE_AUTOGEN_ENABLED && startsJob("weekly invoice batch")) {
 	// First-ever startup: seed a baseline marker (recorded as a clean, exhausted
 	// run) for the most recent billing Friday so the feature NEVER retroactively
 	// bills a pre-feature week. First real run is the next Friday 7 PM Central.
@@ -18512,7 +18570,7 @@ async function reconcileRateCons({ alert = true, forceFloorWindow = false } = {}
 	const isBaseline = win.deep && !rateconLastRunAt(null);
 	const fetched = await fetchRateConSubjects({
 		user: process.env.GMAIL_USER,
-		pass: process.env.GMAIL_APP_PASSWORD,
+		pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD, // none in a replica: no mailbox is read
 		mailbox: RATECON_RECONCILE_MAILBOX,
 		sinceDays: win.sinceDays,
 		scanFilenames: RATECON_RECONCILE_SCAN_FILENAMES,
@@ -18730,7 +18788,7 @@ async function maybeReconcileRateCons() {
 	}
 }
 
-if (RATECON_RECONCILE_ENABLED) {
+if (RATECON_RECONCILE_ENABLED && startsJob("rate-con email reconcile")) {
 	setInterval(() => { maybeReconcileRateCons().catch(() => {}); }, RATECON_RECONCILE_INTERVAL_MS);
 	setTimeout(() => { maybeReconcileRateCons().catch(() => {}); }, 2 * 60 * 1000);   // boot run, after init
 	console.log(`[ratecon-reconcile] enabled — every 6h over "${RATECON_RECONCILE_MAILBOX}"; window = high-water mark (min ${RATECON_RECONCILE_DAYS}d, max ${RATECON_RECONCILE_MAX_DAYS}d), deep ${RATECON_RECONCILE_DEEP_DAYS}d every ${RATECON_RECONCILE_DEEP_EVERY_HOURS}h`);
@@ -18796,7 +18854,7 @@ if (RATECON_RECONCILE_ENABLED) {
 // go without one.
 async function rateConReconcileHttp(req, res, alert) {
 	try {
-		if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+		if (REPLICA || !process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
 			return res.status(503).json({ error: "GMAIL_USER / GMAIL_APP_PASSWORD not configured" });
 		}
 		// ⚠️ ONE SWEEP AT A TIME, ACROSS THE TIMER AND BOTH ROUTES. The unit of
@@ -20108,7 +20166,7 @@ async function maybeSweepDuplicateReceipts() {
 	}
 }
 
-if (EXPENSE_DUPLICATE_ALERT_ENABLED) {
+if (EXPENSE_DUPLICATE_ALERT_ENABLED && startsJob("duplicate-receipt alert sweep")) {
 	// ⚠️ THE REJECTION HANDLER LOGS. It is deliberately NOT `.catch(() => {})` —
 	// copied from periodCloseTick rather than from the fuel-events interval three
 	// screens up, whose empty handler is, by its own neighbouring comment, how a
@@ -20464,7 +20522,7 @@ async function maybeSweepFuelEvents() {
 	}
 }
 
-if (FUEL_EVENTS_ENABLED) {
+if (FUEL_EVENTS_ENABLED && startsJob("fuel-event sweep")) {
 	setInterval(() => { maybeSweepFuelEvents().catch(() => {}); }, FUEL_EVENTS_INTERVAL_MS);
 	setTimeout(() => { fuelEventsBaselineSeed().catch(() => {}); }, 3 * 60 * 1000);
 	console.log(`[fuel-events] enabled — every 6h; detect ${FUEL_EVENTS_SCAN_DAYS}d, match ${FUEL_EVENTS_MATCH_DAYS}d`);
@@ -21910,7 +21968,7 @@ app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {
 		if (invoice.deleted_at && user.role !== "Super Admin") {
 			return res.status(404).json({ error: "Invoice not found" });
 		}
-		const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name);
+		const pdfPath = path.join(DATA_DIR, "uploads", "invoices", invoice.pdf_file_name);
 		if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found" });
 		res.setHeader("Content-Type", "application/pdf");
 		// nosniff: the Content-Type above is asserted from the DB row, not from the
@@ -21970,7 +22028,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 		(async () => {
 			try {
 				const adminEmail = process.env.GMAIL_USER || "info@logisx.com";
-				const pdfPath = path.join(__dirname, "uploads", "invoices", invoice.pdf_file_name || "");
+				const pdfPath = path.join(DATA_DIR, "uploads", "invoices", invoice.pdf_file_name || "");
 				const attachments = invoice.pdf_file_name && fs.existsSync(pdfPath)
 					? [{ filename: invoice.pdf_file_name, path: pdfPath }]
 					: [];
@@ -23646,7 +23704,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// change a carrier (accountDirectorySync()). A failed read leaves `jt` null,
 		// and guard (c2) then judges every finalized month.
 		let jt = null;
-		if (accountDirectorySync(user, { driverName, email, companyName })) {
+		if (accountDirectorySync(user, { driverName, companyName })) {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("PUT /api/users/:id: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
@@ -23901,13 +23959,14 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// (c2) The month-end lock on the drivers_directory carrier the sync after
-		// the commit writes: the account's company name. Judged as POST /api/users
-		// judges the row it adds (accountDirectoryRowLock()) and as
+		// the commit writes, which only a company-name change carries: the sent
+		// company name (accountCompanyChange()). Judged as POST /api/users judges
+		// the row it adds (accountDirectoryRowLock()) and as
 		// PUT /api/drivers-directory/:id judges a carrier edit, so a company name an
 		// investor's company matches cannot put a driver whose history reaches a
 		// finalized month on that investor's ledger here either, nor take them off
 		// one. Refused whole, with the same 409 as POST /api/users.
-		const dirSync = accountDirectorySync(user, { driverName, email, companyName });
+		const dirSync = accountDirectorySync(user, { driverName, companyName });
 		const syncLock = accountDirectorySyncLock(dirSync, jt);
 		if (syncLock && (syncLock.unreadable || syncLock.blockers.length)) {
 			const accountRowAudit = {
@@ -24152,6 +24211,15 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			});
 		}
 
+		// The carrier moves only with a company-name change (accountCompanyChange(),
+		// the change guard (c2) judged); every other sync leaves it as it is.
+		// `user` is still the account as it stood before the write above. Without
+		// a company change the sync only refreshes an existing row: adding one here
+		// would give it no carrier, and onboarding, which adds a driver's first row
+		// with the carrier judged (accountDirectoryCarrier()), would then find it
+		// and add nothing.
+		const syncCarrier = accountCompanyChange(user, companyName) ? companyName : undefined;
+		const syncs = (name) => syncCarrier !== undefined || !!findDirectoryRowForDriver(name || "");
 		if (driverName !== undefined && driverName !== (user.driver_name || "")) {
 			// Sync renamed driver to Carrier Database sheet.
 			// ⚠️ Only when there IS a name. This ran unconditionally, so clearing the
@@ -24170,12 +24238,13 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			// company / truck-unit sync that is the whole point of the call is
 			// skipped with no error. The lookup has to use the name the row carries
 			// now.
-			if (driverName.trim()) {
-				syncDriverToCarrierSheet(driverName, { oldName: doRename ? driverName : user.driver_name, email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+			// Looked up as the sync looks it up (`oldName || driverName`).
+			if (driverName.trim() && syncs((doRename ? driverName : user.driver_name) || driverName)) {
+				syncDriverToCarrierSheet(driverName, { oldName: doRename ? driverName : user.driver_name, email: email !== undefined ? email : user.email, companyName: syncCarrier, action: "update" });
 			}
-		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined)) {
+		} else if (user.role === "Driver" && user.driver_name && (email !== undefined || companyName !== undefined) && syncs(user.driver_name)) {
 			// Name didn't change but email/company did
-			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: companyName !== undefined ? companyName : user.company_name, action: "update" });
+			syncDriverToCarrierSheet(user.driver_name, { email: email !== undefined ? email : user.email, companyName: syncCarrier, action: "update" });
 		}
 
 		// This route rewrites finance rows across every DRIVER_RENAME_TARGETS leg
@@ -24887,7 +24956,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 // Returns `{ archived, skipped }`. `archived.length` is unchanged from the
 // pre-report shape by construction — nothing moved between the two lists.
 function archiveUserSignedArtifacts(userId) {
-	const dir = path.join(__dirname, "uploads", "onboarding-signed");
+	const dir = path.join(DATA_DIR, "uploads", "onboarding-signed");
 	const rows = db.prepare(
 		"SELECT doc_key, doc_name, signed_pdf_url FROM onboarding_documents WHERE user_id = ? AND signed = 1 AND COALESCE(signed_pdf_url, '') <> ''"
 	).all(userId);
@@ -25596,7 +25665,7 @@ app.delete("/api/investors/:id", requireRole("Super Admin"), (req, res) => {
 		// Cascade: unlink the profile picture from disk
 		if (existing.profile_picture_url) {
 			try {
-				const picPath = path.join(__dirname, existing.profile_picture_url);
+				const picPath = path.join(DATA_DIR, existing.profile_picture_url);
 				if (fs.existsSync(picPath)) fs.unlinkSync(picPath);
 			} catch (err) { console.error("Failed to unlink investor profile pic on cascade:", err.message); }
 		}
@@ -27839,22 +27908,34 @@ function accountDirectoryCarrier(driverName, companyName, jt, req) {
 	return "";
 }
 
-// The drivers_directory write PUT /api/users/:id makes after its commit, read
-// off the two syncDriverToCarrierSheet() calls there, so it can be judged before
-// anything is written: a new non-blank driver name, or a Driver account's email
-// or company name, syncs the row with the account's company name as its carrier
-// (the one sent, else the stored one). `user` is the account as stored; the body
-// fields are undefined when not sent. Returns { name, carrier, row } when that
-// write would change what the money math reads (a carrier on a first row that
-// accountDirectoryRowJudged() judges, or a different carrier on the row the sync
-// updates, found as the sync finds it), else null.
-function accountDirectorySync(user, { driverName, email, companyName }) {
+// Whether a PUT /api/users/:id body changes the account's company name: one is
+// sent, and it differs from the stored one once both are trimmed. Only such a
+// change may move the driver's carrier. An edit that sends no company name, or
+// sends the stored one back, leaves the carrier and the ledger as they are,
+// whatever the directory row says (2026-10-08). `user` is the account as stored.
+function accountCompanyChange(user, companyName) {
+	return companyName !== undefined &&
+		String(companyName ?? "").trim() !== String((user && user.company_name) || "").trim();
+}
+
+// The carrier write PUT /api/users/:id's directory sync makes after its commit,
+// read off the two syncDriverToCarrierSheet() calls there, so it can be judged
+// before anything is written. Only a company-name change (accountCompanyChange())
+// carries a carrier: the sync then writes the sent company name as the carrier of
+// the account's row (a new non-blank driver name's row, else a Driver account's
+// stored one). `user` is the account as stored; the body fields are undefined
+// when not sent. Returns { name, carrier, row } when that write would change what
+// the money math reads (a carrier on a first row that accountDirectoryRowJudged()
+// judges, or a different carrier on the row the sync updates, found as the sync
+// finds it), else null.
+function accountDirectorySync(user, { driverName, companyName }) {
+	if (!accountCompanyChange(user, companyName)) return null;
 	const stored = String(user.driver_name || "");
 	let name;
 	if (driverName !== undefined && driverName !== stored) name = String(driverName).trim();
-	else if (user.role === "Driver" && stored && (email !== undefined || companyName !== undefined)) name = stored.trim();
+	else if (user.role === "Driver" && stored) name = stored.trim();
 	if (!name) return null;
-	const carrier = String((companyName !== undefined ? companyName : user.company_name) || "");
+	const carrier = String(companyName ?? "");
 	const found = findDirectoryRowForDriver(stored.trim() || name);
 	const row = found ? db.prepare("SELECT * FROM drivers_directory WHERE id = ?").get(found.id) : null;
 	if (!row) return accountDirectoryRowJudged(name, carrier) ? { name, carrier, row: null } : null;
@@ -37141,7 +37222,7 @@ app.get("/api/driver/shared-documents/:id/download", requireAuth, (req, res) => 
 			}
 		}
 		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
-		const filePath = path.join(__dirname, doc.file_url);
+		const filePath = path.join(DATA_DIR, doc.file_url);
 		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
 		// Same headers the /uploads mount applies — this route bypasses it, and an
 		// admin can upload any ALLOWED_FILE_EXTS type here, so a bare sendFile would
@@ -37207,7 +37288,7 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 			}
 		}
 		if (!doc.file_url) return res.status(404).json({ error: "File missing" });
-		const filePath = path.join(__dirname, doc.file_url);
+		const filePath = path.join(DATA_DIR, doc.file_url);
 		if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File missing" });
 		// Shared rule (see setUploadServeHeaders): nosniff always, inline for the
 		// formats we deliberately render, attachment for everything else. This
@@ -38587,7 +38668,7 @@ app.get("/api/routemate/health", requireRole("Super Admin"), (req, res) => {
 //   LINXUP_ENABLED        — master write switch (default false)
 //   LINXUP_WEBHOOK_TOKEN  — shared secret Linxup must present on every push
 //   LINXUP_SPEED_UNIT     — mph | kmh | mps (default mph → converted to m/s)
-const LINXUP_ENABLED = String(process.env.LINXUP_ENABLED || "").toLowerCase() === "true";
+const LINXUP_ENABLED = !REPLICA && String(process.env.LINXUP_ENABLED || "").toLowerCase() === "true";
 const LINXUP_WEBHOOK_TOKEN = process.env.LINXUP_WEBHOOK_TOKEN || "";
 const LINXUP_SPEED_UNIT = process.env.LINXUP_SPEED_UNIT || "mph";
 const linxupHealth = {
@@ -39724,7 +39805,7 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 // Receipt photo storage helpers — write base64 data URIs to disk and return
 // the URL path. Old base64-in-DB rows still work because the frontend img tag
 // accepts both data URIs and URL paths.
-const RECEIPTS_DIR = path.join(__dirname, "uploads", "expense-receipts");
+const RECEIPTS_DIR = path.join(DATA_DIR, "uploads", "expense-receipts");
 try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
 // Image formats we are prepared to STORE AND SERVE as a receipt. Deliberately
 // narrower than isValidImageMagic (which also allows GIF, because imageToPdf can
@@ -40574,8 +40655,8 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			// deleting a live expense's receipt.
 			try {
 				if (wroteReceiptFile && wroteReceiptFile.startsWith("/uploads/expense-receipts/")) {
-					const orphan = path.join(__dirname, wroteReceiptFile.replace(/^\//, ""));
-					if (orphan.startsWith(path.join(__dirname, "uploads", "expense-receipts"))) fs.unlinkSync(orphan);
+					const orphan = path.join(DATA_DIR, wroteReceiptFile.replace(/^\//, ""));
+					if (orphan.startsWith(path.join(DATA_DIR, "uploads", "expense-receipts"))) fs.unlinkSync(orphan);
 				}
 			} catch { /* best effort */ }
 			return res.status(409).json({
@@ -41248,6 +41329,9 @@ let receiptOcrChain = Promise.resolve();
 let receiptOcrPending = 0;
 let receiptOcrQueuedBytes = 0;
 function queueReceiptOcr(documentId, imageBuffer) {
+	// A replica runs no OCR: the engine runs in a child process, beyond the
+	// network guard, and fetches its model from a CDN.
+	if (REPLICA) { REPLICA.off("receipt OCR"); return false; }
 	const skip = receiptOcrSkipReason(imageBuffer);
 	if (skip) {
 		console.warn(`[upload] receipt OCR skipped for document ${documentId}: ${skip}`);
@@ -41788,7 +41872,7 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			// (b) PRIMARY — local /uploads + a documents row. This is what
 			// getRateConBytes() step 2 reads, and it needs no Drive quota.
 			try {
-				const rcDir = path.join(__dirname, "uploads", "rate-cons");
+				const rcDir = path.join(DATA_DIR, "uploads", "rate-cons");
 				if (!fs.existsSync(rcDir)) fs.mkdirSync(rcDir, { recursive: true });
 				const safeLoad = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
 				const fileNameOut = `${safeLoad}.pdf`;
@@ -42094,6 +42178,12 @@ app.delete("/api/documents/:id", requireRole("Super Admin"), async (req, res) =>
 // the n8n-populated rate-con folder — see getRateConBytes).
 let driveClient = null;
 async function getDrive() {
+	// A replica has no Drive: each caller already handles a Drive failure (the
+	// rate-con lookups fall back to the local archive, the mirror is best-effort).
+	if (REPLICA) {
+		REPLICA.off("Google Drive");
+		throw Object.assign(new Error("Google Drive is off in the local replica"), { code: "REPLICA_OUTBOUND_OFF" });
+	}
 	if (!driveClient) {
 		const authClient = await auth.getClient();
 		driveClient = google.drive({ version: "v3", auth: authClient });
@@ -42113,7 +42203,7 @@ async function fetchDocumentBytes(doc) {
 			? doc.drive_url.replace("/uploads/", "")
 			: doc.file_name;
 	if (localName) {
-		const uploadsRoot = path.join(__dirname, "uploads");
+		const uploadsRoot = path.join(DATA_DIR, "uploads");
 		const localPath = path.join(uploadsRoot, localName);
 		// SECURITY — containment assert, same pattern as the receipt reads.
 		// `drive_url` and `file_name` are the two columns POST /api/documents/upload
@@ -43778,7 +43868,7 @@ app.post(
 			};
 
 			const gmailUser = process.env.GMAIL_USER;
-			const gmailPass = process.env.GMAIL_APP_PASSWORD;
+			const gmailPass = REPLICA ? "" : process.env.GMAIL_APP_PASSWORD; // none in a replica: no mail leaves it
 			let imapError = null;
 			if (gmailUser && gmailPass) {
 				try {
@@ -43801,7 +43891,7 @@ app.post(
 			}
 
 			// FALLBACK: POST to the n8n webhook, only if explicitly configured.
-			const webhookUrl = process.env.N8N_INVOICE_WEBHOOK_URL;
+			const webhookUrl = REPLICA ? "" : process.env.N8N_INVOICE_WEBHOOK_URL; // none in a replica: no webhook is called
 			const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
 			if (webhookUrl && webhookSecret) {
 				// ⚠️ The workflow does not use emailHtml (below): this path's draft
@@ -44228,7 +44318,7 @@ app.post("/api/legal-documents/upload", requireRole("Super Admin", "Investor"), 
 		const drvId = parseInt(driverId) || 0;
 		const prefix = drvId > 0 ? `driver${drvId}` : (unitNumber || 'truck').replace(/[^a-zA-Z0-9]/g, '_');
 		const safeName = `${prefix}_${safeType.replace(/[\s']/g, '_')}_${Date.now()}${ext}`;
-		const legalDir = path.join(__dirname, "uploads", "legal");
+		const legalDir = path.join(DATA_DIR, "uploads", "legal");
 		if (!fs.existsSync(legalDir)) fs.mkdirSync(legalDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
 		const legalBuf = Buffer.from(base64, "base64");
@@ -44307,7 +44397,7 @@ app.delete("/api/legal-documents/:id", requireRole("Super Admin", "Investor"), (
 			if (!inScope || !uploadedByThem) return notFound();
 		}
 		if (doc.file_url) {
-			const filePath = path.join(__dirname, doc.file_url);
+			const filePath = path.join(DATA_DIR, doc.file_url);
 			try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
 		}
 		db.prepare("DELETE FROM legal_documents WHERE id = ?").run(id);
@@ -44357,7 +44447,7 @@ app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req,
 		const attachmentType = (mimeType || '').startsWith('image/') ? 'image' : (mimeType === 'application/pdf' ? 'pdf' : 'other');
 		const ext = path.extname(fileName) || (attachmentType === 'image' ? '.jpg' : '.bin');
 		const safeName = `chat_${Date.now()}_${Math.random().toString(36).slice(2,7)}${ext}`;
-		const chatDir = path.join(__dirname, "uploads", "chat");
+		const chatDir = path.join(DATA_DIR, "uploads", "chat");
 		if (!fs.existsSync(chatDir)) fs.mkdirSync(chatDir, { recursive: true });
 		const base64 = fileData.replace(/^data:[^;]+;base64,/, "");
 		const chatBuf = Buffer.from(base64, "base64");
@@ -44431,7 +44521,7 @@ const CHAT_ORPHAN_MIN_AGE_MS =
 	Math.max(1, parseInt(process.env.CHAT_ORPHAN_MIN_AGE_HOURS ?? "168", 10) || 168) * 60 * 60 * 1000;
 
 function sweepOrphanedChatAttachments({ apply = false } = {}) {
-	const chatDir = path.join(__dirname, "uploads", "chat");
+	const chatDir = path.join(DATA_DIR, "uploads", "chat");
 	let removed = 0, orphans = 0, bytes = 0;
 	try {
 		if (!fs.existsSync(chatDir)) return { removed, orphans, bytes };
@@ -44484,8 +44574,10 @@ function sweepOrphanedChatAttachments({ apply = false } = {}) {
 // pm2-restarts during business hours), then daily. Unlike purgeOrphanedDbExports
 // this producer is a LIVE process, so a boot-only sweep would let orphans
 // accumulate for however long the process stays up — weeks, on this box.
-setTimeout(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 5 * 60 * 1000);
-setInterval(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 24 * 60 * 60 * 1000);
+if (startsJob("chat attachment orphan sweep")) {
+	setTimeout(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 5 * 60 * 1000);
+	setInterval(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 24 * 60 * 60 * 1000);
+}
 
 // GET /api/investor/onboarding-documents — Investor's signed onboarding docs (Master Agreement, Vehicle Lease, W-9)
 app.get("/api/investor/onboarding-documents", requireRole("Super Admin", "Investor"), (req, res) => {
@@ -45682,7 +45774,7 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 
 		// Save to local disk
 		try {
-			const uploadsDir = path.join(__dirname, "uploads");
+			const uploadsDir = path.join(DATA_DIR, "uploads");
 			if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 			// Belt-and-braces containment assert, mirroring the receipts ZIP export.
 			// The sanitizer above already makes traversal unrepresentable; this
@@ -47386,6 +47478,8 @@ async function geocodeAddress(address) {
 	// Check cache
 	const cached = db.prepare("SELECT lat, lng FROM geocode_cache WHERE address = ?").get(key);
 	if (cached) return cached.lat ? { lat: cached.lat, lng: cached.lng } : null;
+	// A replica geocodes from the cache only.
+	if (REPLICA) { REPLICA.off("Google geocoding"); return null; }
 	// Call Google Geocoding API. 5s abort — this now runs inline in the expense
 	// submit path, so a hung Google call must not hang the driver's POST.
 	try {
@@ -47411,6 +47505,7 @@ async function geocodeAddress(address) {
 
 // Reverse geocode coordinates to a formatted address using Google Geocoding API
 async function geocodeReverse(lat, lng) {
+	if (REPLICA) { REPLICA.off("Google geocoding"); return null; }
 	try {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 5000);
@@ -47766,6 +47861,8 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 	if (cached && Date.now() - cached.time < ROUTE_CACHE_TTL) {
 		return cached.result;
 	}
+	// A replica asks Google nothing: callers fall back to the straight line.
+	if (REPLICA) { REPLICA.off("Google Routes"); return null; }
 
 	const reqBody = {
 		origin: { location: { latLng: { latitude: from.latitude, longitude: from.longitude } } },
@@ -48630,8 +48727,10 @@ async function sweepLoadEldMiles() {
 }
 
 // Staggered after the state-miles rollup (+9 min). sweepLoadEldMiles() never rejects.
-setTimeout(() => { sweepLoadEldMiles(); }, 10 * 60 * 1000);
-setInterval(() => { sweepLoadEldMiles(); }, 6 * 60 * 60 * 1000);
+if (startsJob("load ELD miles sweep")) {
+	setTimeout(() => { sweepLoadEldMiles(); }, 10 * 60 * 1000);
+	setInterval(() => { sweepLoadEldMiles(); }, 6 * 60 * 60 * 1000);
+}
 
 // --- Per-load miles, one index for every reader (2026-10-02) -----------------
 // getLoadMilesIndex() -> Map(loadMilesKey(id) -> { miles, loadedMiles,
@@ -48728,8 +48827,10 @@ async function syncLoadRateconMiles() {
 
 // After the sweep (+10 min). One Job Details read every 6 hours.
 // syncLoadRateconMiles() never rejects.
-setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
-setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
+if (startsJob("load rate-con miles sync")) {
+	setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
+	setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
+}
 
 const haulLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -50393,6 +50494,7 @@ app.get("/api/geocode", geocodeLimiter, async (req, res) => {
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
 		return res.status(400).json({ error: "lat and lng required" });
 	}
+	if (REPLICA) { REPLICA.off("Google geocoding"); return res.json({ status: "ERROR", results: [] }); }
 	try {
 		const resp = await fetch(
 			`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`
@@ -50431,6 +50533,7 @@ app.get("/api/geocode/search", geocodeLimiter, async (req, res) => {
 	// already here, and it degrades to the route's own empty-result contract rather
 	// than erroring — nothing is stored, so there is no truncation to be lossy about.
 	if (q.length < 3 || q.length > ADDRESS_MAX_CHARS) return res.json({ results: [] });
+	if (REPLICA) { REPLICA.off("Google Places search"); return res.json({ results: [] }); }
 	try {
 		const resp = await fetch("https://places.googleapis.com/v1/places:searchText", {
 			method: "POST",
@@ -50586,6 +50689,7 @@ app.get("/api/geocode/bulk", requireRole("Super Admin"), async (req, res) => {
 app.get("/api/weather", requireAuth, async (req, res) => {
 	const { lat, lng } = req.query;
 	if (!lat || !lng) return res.status(400).json({ error: "lat and lng required" });
+	if (REPLICA) { REPLICA.off("Google weather"); return res.json({ error: "unavailable" }); }
 	try {
 		const resp = await fetch(
 			`https://weather.googleapis.com/v1/forecast:lookup?location.latitude=${lat}&location.longitude=${lng}&unitsSystem=IMPERIAL&key=${GOOGLE_MAPS_API_KEY}`
@@ -54323,7 +54427,7 @@ const STATEMENT_TEMPLATE_VERSION = 1;
 // not). Keeping the bytes out of the static tree makes this route structurally
 // the only reader — no GUARDED_UPLOAD_DIRS entry to get right, and no path
 // shape for the guard and the static mount to disagree about.
-const PAYOUT_STATEMENT_DIR = path.join(__dirname, "storage", "payout-statements");
+const PAYOUT_STATEMENT_DIR = path.join(DATA_DIR, "storage", "payout-statements");
 
 // The filename is read back OUT OF THE DATABASE and then joined onto a path, so
 // it is validated against the exact shape this module writes before it goes
@@ -56661,9 +56765,9 @@ async function maybeCloseFinishedPeriods() {
 }
 
 // The pay-rate history starts when this code first runs (pay_rate_history).
-setTimeout(recordPayRateChanges, 20 * 1000);
+if (startsJob("pay-rate history recorder (at boot)")) setTimeout(recordPayRateChanges, 20 * 1000);
 
-if (PERIOD_FINALIZE_ENABLED) {
+if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 	// First-ever enable: lock every period whose window has ALREADY passed, in one
 	// pass, without recomputing anything. Rationale:
 	//   - months already processing/paid are de facto final; formalising it is
@@ -57662,7 +57766,7 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 		// Escaping (quoting + the formula-injection guard) lives in lib/csv.js so
 		// this export and the completed-loads export can never drift apart.
 		const manifestRows = [["date", "expense_id", "driver", "load_id", "type", "amount", "description", "file_name"]];
-		const receiptsDir = path.join(__dirname, "uploads", "expense-receipts");
+		const receiptsDir = path.join(DATA_DIR, "uploads", "expense-receipts");
 		let attachedCount = 0;
 		for (const exp of expenses) {
 			const p = exp.photo_data || "";
@@ -57672,7 +57776,7 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 			// any stray absolute path that might have been stored before the
 			// disk-migration landed.
 			if (p && p.startsWith("/uploads/expense-receipts/")) {
-				const srcPath = path.join(__dirname, p.replace(/^\//, ""));
+				const srcPath = path.join(DATA_DIR, p.replace(/^\//, ""));
 				if (srcPath.startsWith(receiptsDir) && fs.existsSync(srcPath)) {
 					const ext = path.extname(srcPath).toLowerCase() || ".bin";
 					fileName = `${exp.date}_exp-${exp.id}${exp.load_id ? "_load-" + exp.load_id : ""}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -60030,7 +60134,7 @@ publicTrack.on("connection", (socket) => {
 });
 
 // Live reload: broadcast to all clients when server restarts (via --watch)
-setTimeout(() => io.emit("reload"), 500);
+if (startsJob("reload notice to open browsers (at boot)")) setTimeout(() => io.emit("reload"), 500);
 
 // JSON payload too large error handler
 app.use((err, req, res, next) => {
@@ -60087,6 +60191,7 @@ const PORT = process.env.PORT || 3000;
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
+	if (REPLICA) REPLICA.listening(server.address());
 	// Tripwire for the umask set at the top of this file — the create-time half
 	// of the uploads/app.db permission fix. Re-applying returns the PREVIOUS
 	// mask, so this both re-asserts and reads back the effective value without
@@ -60127,7 +60232,7 @@ server.listen(PORT, BIND_HOST, async () => {
 		console.log(`Google Sheets connected — ${tabs.length} tabs cached`);
 
 		// Background: auto-geocode all load addresses
-		(async () => {
+		if (startsJob("address geocode and load-coordinate backfill (at boot)")) (async () => {
 			try {
 				const sheets2 = await getSheets();
 				const jtResp = await sheets2.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });

@@ -137,6 +137,108 @@ has its full usage; none has a default sheet.
 
 Tests: `node scripts/test-admin-ledger-scripts.js`.
 
+## Local replica of production
+
+A full local copy of production, to reproduce an issue first-hand on the same data, files,
+version and settings, on a Mac, with nothing able to reach a real person or a real service. It
+lives in `~/LogisX-replica/` (mode 700, files 600; outside the repo and outside Documents, so
+iCloud never syncs it). **It holds real people's data, unredacted. Keep screenshots and exports
+from it out of the repo and out of anything shared.**
+
+```bash
+fnm use   # Node 22.23.2: the replica refuses another version than production's
+LOGISX_PROD_SSH=<user@host> LOGISX_PROD_SSH_KEY=<identity file> npm run replica:pull [-- --force]
+npm run replica:start -- [--task <name>] [--port <n>] [--fresh] [--prod-commit]
+npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]...
+npm run replica:clean -- [--task <name>]
+```
+
+- **`replica:pull`** refreshes the clean snapshot when it is older than 24 hours (or with
+  `--force`). Production is only read. The ssh destination comes from `LOGISX_PROD_SSH` and is
+  never stored in the repo. A program streamed over ssh (`scripts/replica/remote/`, nothing is
+  installed on the server) works in one temporary folder, `/root/logisx-replica-tmp/<stamp>/`
+  (a stamp unique to the run; mode 700, umask 077), at low CPU and I/O priority. It first removes
+  any such folder an earlier pull left behind for more than 6 hours:
+  - it copies the live `app.db` read-only (`VACUUM INTO` from a `readonly` connection, so rows
+    still in the WAL are included);
+  - in that copy it deletes the sessions and clears stored credentials (any token, secret, key,
+    nonce, OTP, `*_code` or `*_hash` column, found from the schema; password hashes and receipt
+    fingerprints are kept, by name). It does so with SQLite's secure delete and then VACUUMs the
+    copy, and the pull fails if any removed value can still be found in the file's bytes;
+  - it exports the non-secret settings from `.env`. A name containing KEY, SECRET, TOKEN, PASS,
+    CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is never copied, nor is a URL carrying
+    credentials (in its user, query or path), a value that looks like a key, a
+    `NODE_ENV`/`PORT`-style runtime setting, or any name production's code does not read;
+  - it reads every tab of the Google Sheets the app uses with its own `spreadsheets.readonly`
+    client. The server's key never leaves the server.
+
+  The folder is then downloaded with rsync and deleted, also when a step fails (a trap on each
+  side); the pull fails when it cannot confirm the folder is gone. `uploads/`, `storage/` and `evidence-archive/` are copied with rsync. After the first
+  pull, only what changed is transferred. The manifest (`clean/manifest.json`) records the
+  production commit, its Node version and time zone, and every table's row count.
+- **`replica:start`** clones the clean snapshot and the files as a task's working copy
+  (`work/<task>/`, APFS clones: instant, no space until something changes; kept until
+  `replica:clean`). It then starts this checkout's server on it in replica mode at
+  `http://127.0.0.1:3901` (or `--port`), serving the built client, and prints the PID.
+  `--prod-commit` runs production's exact commit from a worktree under
+  `~/LogisX-replica/code/`; it is refused for a commit without replica mode (remove that
+  worktree with `git worktree remove` when you are done with it).
+- **`replica:login`** sets a local password on that account in the working copy only, from the
+  Keychain item `logisx-replica` (generated once, never shown), then signs in through the
+  login page in Chrome for Testing (headed unless `--headless`). The browser may reach the
+  replica and nothing else.
+- **`replica:clean`** stops the task's server (by its recorded PID, only while that PID is still
+  that server) and deletes its working copy. The clean snapshot stays. While the recorded PID
+  is alive but cannot be shown to be that server, it stops and deletes nothing.
+
+**Replica mode (`LOCAL_REPLICA=1`, `lib/replica-mode.js`)** differs from production on purpose:
+
+- **It refuses to start** in any of these cases:
+  - anywhere but macOS, or not started by `replica:start` (it sets a marker nothing else sets);
+  - `NODE_ENV=production`, or signs of a server: pm2, running as root, a server path such as
+    `/var/www`, or a hosting host name;
+  - any outbound credential set (`lib/replica-rules.js`), or a setting in `settings.env` that the
+    export would not copy. `SESSION_SECRET` is not a credential: `replica:start` passes a fresh
+    random one, in memory only;
+  - any proxy setting (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in any case, `NODE_USE_ENV_PROXY`);
+  - `BIND_HOST` other than loopback;
+  - a database or data folder outside the task's working copy (`~/LogisX-replica/work/<task>/`),
+    or a settings file or guard log outside `~/LogisX-replica/`.
+- **`LOCAL_REPLICA` is read before dotenv, and judged the same way after it.**
+  - Unset, empty, `0`, `false`, `no` and `off` (any case) mean off.
+  - Any other value but `1` is reported and otherwise ignored.
+  - The flag stops a normal run in one case only: `LOCAL_REPLICA=1` set by a `.env` file. That
+    server would otherwise run normally with the file's credentials while seeming to be a
+    replica.
+- **Settings:** it never loads the repo's `.env` (dotenv is made a no-op, and a file guard refuses
+  to read any `.env` or Google key). It reads `~/LogisX-replica/settings.env` instead.
+- **Outbound paths are off:**
+  - Google Sheets come from the working copy, reads and writes alike (`lib/replica-sheets.js`).
+    No Google client is ever built;
+  - Drive, mail (SMTP and Gmail IMAP drafts), the rate-con mailbox reconcile, the n8n webhook,
+    every HTTP call `server.js` makes (Maps, Routes, Places, geocoding, weather, Gemini), receipt
+    OCR, Routemate, Linxup and ScanKit are off;
+  - Chromium (PDFs) starts unable to reach any host.
+- **No scheduled job starts**, each named in the log. The one timer kept is the sweep that ends
+  sockets whose session has ended.
+- **A network guard** refuses every non-loopback socket, DNS query and `fetch()` before a packet
+  leaves, and records the attempt in `~/LogisX-replica/logs/outbound-<task>-<time>.log`. An
+  empty log means nothing was attempted.
+- **Every page shows a "LOCAL COPY OF PRODUCTION" banner**, the login page included.
+
+What is not reproduced:
+
+- Production's secrets, active sessions and stored tokens.
+- Maps. The map area of Tracking and the other map views stays blank, because the browser key is
+  a secret and the browser may reach only the replica. Lists, routes already in the route cache,
+  and coordinates already geocoded still show; anything new falls back to straight lines.
+- Google's number and date formatting of values the replica writes to its Sheets copy.
+- The rate-con PDFs that exist only in Google Drive. The draft-invoice lookup that would read
+  them finds the local rate-con archive (`uploads/rate-cons/`) or nothing.
+
+Tests: `node scripts/test-replica-mode.js`, `node scripts/test-replica-sheets.js` and
+`node scripts/test-replica-snapshot.js`.
+
 ## Docs
 
 - [`docs/manual/`](docs/manual/) — user guides and technical documentation

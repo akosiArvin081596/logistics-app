@@ -425,8 +425,8 @@ async function driverW9(einSsn) {
 			return doc;
 		},
 	};
-	const fill = new Function("path", "fs", "__dirname", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
-		`"use strict";\n${FILL_SRC}\nreturn fillW9Form;`)(path, fs, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits, QUIET);
+	const fill = new Function("path", "fs", "__dirname", "DATA_DIR", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
+		`"use strict";\n${FILL_SRC}\nreturn fillW9Form;`)(path, fs, ROOT, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits, QUIET);
 	// pdf-lib's own notice about the template's XFA data, on every load.
 	const warn = console.warn;
 	console.warn = () => {};

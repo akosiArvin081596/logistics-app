@@ -323,7 +323,7 @@ function buildWorld(opts = {}) {
 				adjustment: data.adjustment || 0,
 			}));
 		},
-		fs: opts.fs || fs, path, __dirname: root,
+		fs: opts.fs || fs, path, __dirname: root, DATA_DIR: root,
 		__sheet: sheet,
 		notifyChange: () => {},
 		insertDispatchNotification: { run: (...args) => notes.push(args) },

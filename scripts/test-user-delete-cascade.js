@@ -316,8 +316,8 @@ function seedOnboardedDriver(db) {
 	if (!minBytes) throw new Error("SIGNED_ARTIFACT_MIN_BYTES not found in server.js");
 
 	const A = new Function(
-		"__dirname", "fs", "path", "crypto", "db", "SIGNED_ARTIFACT_MIN_BYTES",
-		`const SIGNED_ARCHIVE_DIR = path.join(__dirname, "evidence-archive", "signed-artifacts");
+		"__dirname", "DATA_DIR", "fs", "path", "crypto", "db", "SIGNED_ARTIFACT_MIN_BYTES",
+		`const SIGNED_ARCHIVE_DIR = path.join(DATA_DIR, "evidence-archive", "signed-artifacts");
 		 ${extract("sha256File")}
 		 ${extract("signedArtifactLooksValid")}
 		 ${extract("archiveSignedArtifact")}
@@ -331,7 +331,7 @@ function seedOnboardedDriver(db) {
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed, signed_pdf_url) VALUES (7,'substance_policy','Substance Policy',1,'/uploads/onboarding-signed/gone-7-signed.pdf')").run();
 	db.prepare("INSERT INTO onboarding_documents (user_id, doc_key, doc_name, signed, signed_pdf_url) VALUES (7,'equipment_policy','Equipment Policy',0,'')").run();
 
-	const M = A(root, fs, path, crypto, db, Number(minBytes));
+	const M = A(root, root, fs, path, crypto, db, Number(minBytes));
 	// ⚠️ `{ archived, skipped }`, and `archived` must still mean exactly what it
 	// meant before the skip report existed — nothing moved between the two lists.
 	// Every assertion below this line is unchanged for that reason.

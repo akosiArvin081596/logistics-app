@@ -206,9 +206,9 @@ const logs = [];
 const quiet = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
 const updates = [];
 const db = { prepare: (sql) => ({ run: (...args) => { updates.push(args); return { changes: 1 }; } }) };
-const api = new Function("require", "db", "console", "__dirname", "path", "fs",
+const api = new Function("require", "db", "console", "__dirname", "path", "fs", "REPLICA",
 	'"use strict";\n' + cfg.src + "\nreturn { queueReceiptOcr, pending: () => receiptOcrPending };")(
-	repoRequire, db, quiet, cfg.repo, path, fs);
+	repoRequire, db, quiet, cfg.repo, path, fs, null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const spawned = () => fs.readdirSync(cfg.standinDir).filter((f) => f.startsWith("spawned-")).map((f) => Number(f.slice(8)));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };

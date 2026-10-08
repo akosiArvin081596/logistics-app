@@ -14,6 +14,9 @@
  *   §3 the docs driver-guide storyboard names no driver: it reads the loads of
  *      the account the capture signs in as, and the capture has no default
  *      account and no default demo loads.
+ *   §4 the docs driver-video capture has no default account either: without
+ *      --user it refuses before any request, and its sign-in beats type the
+ *      account it signs in as, never a driver ID or password of their own.
  *
  * Hermetic: each script runs in a child process in a fresh mkdtemp directory;
  * the Google client is a stub preloaded into the child, so nothing reaches the
@@ -148,6 +151,21 @@ Module._load = function (request, ...rest) { return request === "googleapis" ? {
 		check(`§3 run without --user: refuses (exit ${noUser.code})`, noUser.code === 1 && /--user=/.test(noUser.out));
 		const noLoads = run("scripts/docs/capture-driver-guide.js", ["--base=http://127.0.0.1:9", "--user=qa-test-driver"], { cwd: ROOT });
 		check(`§3 run without --load / --load2: refuses (exit ${noLoads.code})`, noLoads.code === 1 && /--load=/.test(noLoads.out));
+	}
+
+	console.log("§4 the docs driver-video storyboard");
+	{
+		const runner = readSource("scripts", "docs", "capture-driver-video.js");
+		check("§4 the capture has no default account", /username:\s*arg\("user",\s*""\)/.test(runner));
+		const src = readSource("scripts", "docs", "driver-video-storyboard.js");
+		check("§4 the storyboard types the signed-in account, no driver ID or password of its own",
+			src.includes("h.account.username") && src.includes("h.account.password") && !/LogisX-\d{4}/.test(src) && !/Password123!/.test(src));
+		// Refused before any request: the base names a port nothing listens on.
+		const outDirs = ["clips", ".raw", "captions"].map((d) => path.join(ROOT, "docs", "driver-video", d));
+		const existed = outDirs.filter((d) => fs.existsSync(d));
+		const noUser = run("scripts/docs/capture-driver-video.js", ["--base=http://127.0.0.1:9"], { cwd: ROOT });
+		check(`§4 run without --user: refuses (exit ${noUser.code})`, noUser.code === 1 && /--user=/.test(noUser.out));
+		check("§4 …before writing anything: no output folder created", outDirs.filter((d) => fs.existsSync(d)).length === existed.length);
 	}
 } finally {
 	fs.rmSync(tmp, { recursive: true, force: true });

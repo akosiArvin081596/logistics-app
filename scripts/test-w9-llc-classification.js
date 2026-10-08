@@ -90,8 +90,8 @@ const PdfLibDocument = {
 	},
 };
 function build(src = FILL_SRC) {
-	return new Function("path", "fs", "__dirname", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
-		`"use strict";\n${src}\nreturn fillW9Form;`)(path, fs, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits,
+	return new Function("path", "fs", "__dirname", "DATA_DIR", "PdfLibDocument", "StandardFonts", "rgb", "imageLimits", "console",
+		`"use strict";\n${src}\nreturn fillW9Form;`)(path, fs, ROOT, ROOT, PdfLibDocument, pdfLib.StandardFonts, pdfLib.rgb, imageLimits,
 		{ ...console, warn: () => {} });
 }
 

@@ -475,6 +475,7 @@ function harness(L, env = {}, { imapFails = false } = {}) {
 			seen.drafts.push(msg);
 		},
 		sentIfRendererBusy: () => false,
+		REPLICA: null,
 		process: { env: { ...env } },
 		fetch: async (url, init) => {
 			seen.posts.push({ url, payload: JSON.parse(init.body) });

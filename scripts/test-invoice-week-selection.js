@@ -180,6 +180,7 @@ function buildWorld(db, opts = {}) {
 		fs: { existsSync: () => true, mkdirSync: () => {}, writeFileSync: () => {}, renameSync: () => {}, unlinkSync: () => {} },
 		path,
 		__dirname: "/nonexistent",
+		DATA_DIR: "/nonexistent",
 		__overrides: opts.overrides || {},
 		__sheet: sheet,
 		// The batch's side effects, captured instead of performed. `notifyFails(type)`
@@ -1221,7 +1222,7 @@ function oldImpl(db) {
 			"pin: the batch's return value is untouched, and still its last statement");
 		eq([/undatedInWeek\.slice\(0, undatedEntriesInApp\)/.test(batchSrc), /undatedInWeek\.slice\(0, undatedEntriesByEmail\)/.test(batchSrc), /undatedInWeek\.slice\(0, \d+\)/.test(batchSrc)],
 			[true, true, false], "pin: the summary and the email print through the same two caps the ledger counts with");
-		const bootStart = SRC.indexOf("\nif (INVOICE_AUTOGEN_ENABLED) {\n");
+		const bootStart = SRC.indexOf("\nif (INVOICE_AUTOGEN_ENABLED && startsJob(\"weekly invoice batch\")) {\n");
 		const boot = SRC.slice(bootStart, SRC.indexOf("\n}\n", bootStart));
 		eq(/if \(INVOICE_UNDATED_ALERT_ENABLED\) \{\n\t\tconst undatedSeedTick = setTimeout\(\(\) => \{ runUndatedLoadAlerts\(\{ seedOnly: true \}\)/.test(boot) && boot.includes("undatedSeedTick.unref()"),
 			true, "pin: the silent seed runs on an unref'd boot tick, only where the batch itself runs");
