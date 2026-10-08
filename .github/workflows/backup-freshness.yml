@@ -52,6 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     # ssh-retry.sh's transport budget spans ~5 min; the check itself is seconds.
     timeout-minutes: 10
+    # The VPS secrets are environment secrets, and both environments accept
+    # runs from main only. Read-only, so `deployment: false` gives it
+    # production's secrets without recording a deployment.
+    environment:
+      name: production
+      deployment: false
     steps:
       - uses: actions/checkout@v5
 

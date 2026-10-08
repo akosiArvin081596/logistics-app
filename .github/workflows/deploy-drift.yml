@@ -93,6 +93,12 @@ jobs:
     name: production vs main
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The VPS secrets are environment secrets, and both environments accept
+    # runs from main only. This job only reads the box, so `deployment: false`
+    # gives it production's secrets without recording a deployment.
+    environment:
+      name: production
+      deployment: false
     outputs:
       action: ${{ steps.gate.outputs.action }}
       local: ${{ steps.check.outputs.local }}

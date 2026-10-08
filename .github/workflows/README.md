@@ -14,13 +14,13 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 
 ## One-time setup
 
-Nothing runs until these four repository secrets exist. **Until then the deploy job fails at the SSH step** — which is the intended failure mode, not a silent no-op.
+Nothing runs until these four secrets exist as **environment secrets in both `staging` and `production`** (not repository secrets; see 5). **Until then the deploy job fails at the SSH step** — which is the intended failure mode, not a silent no-op.
 
-Add at **Settings → Secrets and variables → Actions → New repository secret**.
+Add them at **Settings → Environments → `staging` / `production` → Environment secrets**, or with `gh secret set <NAME> --env <staging|production>`, reading the value from a file or stdin so it is never printed.
 
 ### 1. `VPS_SSH_KEY` — the deploy private key
 
-Generate a **dedicated** key. Do not paste in `~/.ssh/abedubas_vps`: that key is your personal login to a box hosting ~23 other clients' apps, and a repo secret is readable by anyone who can push a workflow to `main`. A separate key can be revoked without locking you out.
+Generate a **dedicated** key. Do not paste in `~/.ssh/abedubas_vps`: that key is your personal login to a box hosting ~23 other clients' apps, and an environment secret is readable by any workflow run on `main`. A separate key can be revoked without locking you out.
 
 ```bash
 # On your Mac
@@ -29,8 +29,10 @@ ssh-keygen -t ed25519 -C "github-actions-logisx-deploy" -f ~/.ssh/logisx_deploy 
 # Authorise it on the VPS (uses your existing personal key to get in)
 ssh-copy-id -i ~/.ssh/logisx_deploy.pub -o IdentityFile=~/.ssh/abedubas_vps root@76.13.22.110
 
-# Copy the PRIVATE key into the secret — the whole file, BEGIN/END lines included
-pbcopy < ~/.ssh/logisx_deploy
+# Store the PRIVATE key in both environments — the whole file, BEGIN/END lines included
+gh secret set VPS_SSH_KEY --env staging < ~/.ssh/logisx_deploy
+gh secret set VPS_SSH_KEY --env production < ~/.ssh/logisx_deploy
+rm ~/.ssh/logisx_deploy   # the environments hold the only copy
 ```
 
 ### 2. `VPS_SSH_KNOWN_HOSTS` — the pinned host key
@@ -55,6 +57,8 @@ Both are already in this public repo's history, so these are secrets for tidines
 ### 5. Environments
 
 **Settings → Environments** → create `staging` and `production`.
+
+**Both accept runs from `main` only** (Deployment branches and tags → Selected branches and tags → `main`). The VPS secrets live in these environments, so a workflow run from any other branch, edited workflow or not, gets none of them. Every job that reads a `VPS_` secret declares an environment: the deploys (`deploy.yml`'s staging and production jobs, the drift heal) record a deployment; the read-only jobs (the drift check, backup freshness) use `environment: { name: production, deployment: false }`, which gives them the secrets without a deployment record. `scripts/test-drift-gate.js` §7 fails a job that reads a `VPS_` secret outside an environment.
 
 ⚠️ **Neither environment has a required reviewer or a wait timer.** The gate before production is deploy.yml's staging job (below), not a person. Both environments stay, so every deploy is recorded against `staging` or `production` and shows in the repo's Environments view. History: production auto-deployed from 2026-08-25, had a required reviewer from 2026-09-25, and auto-deploys again behind the staging smoke and CI on main. While the reviewer was there, a production job waiting for approval held the production queue (#428 waited 22 h). **Adding a reviewer or a wait timer back brings that wait back**: deploy.yml's production job, a manual production dispatch and the drift heal would each pause, holding the production queue, until answered.
 
