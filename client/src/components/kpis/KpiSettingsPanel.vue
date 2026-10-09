@@ -110,7 +110,7 @@
 
       <div class="kpi-settings-actions">
         <span class="kpi-field-hint" aria-live="polite">{{ pendingText }}</span>
-        <Button type="button" variant="outline" class="text-[12px]" :disabled="!pending.changed.length || saving" @click="reset">Discard changes</Button>
+        <Button type="button" variant="outline" class="text-[12px]" :disabled="(!pending.changed.length && !Object.keys(pending.errors).length) || saving" @click="reset">Discard changes</Button>
         <Button type="submit" class="text-[12px]" :disabled="!canSave">{{ saving ? 'Saving…' : 'Save settings' }}</Button>
       </div>
     </form>

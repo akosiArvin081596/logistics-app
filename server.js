@@ -60752,6 +60752,9 @@ const KPI_DRIVE_TIMEOUT_MS = 20 * 1000;
 // Rate-con PDFs read per scheduled run, and how long a not_found / error answer
 // stands before that load is tried again.
 const KPI_WEIGHT_MAX_PER_RUN = 40;
+// The most text one rate-con may yield (lib/broker-invoice.js extractPdfText()'s
+// maxInflatedBytes): a 3 MB file that inflates to gigabytes stops here.
+const KPI_PDF_TEXT_MAX_BYTES = 8 * 1024 * 1024;
 const KPI_WEIGHT_RETRY_MS = 30 * 24 * 60 * 60 * 1000;
 // After a failed scheduled run: wait this long, and stop for the day after this
 // many failures, so a Sheets outage is not retried every minute.
@@ -61091,12 +61094,56 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 function kpiWeightFromPdf(buffer, fileId) {
 	const size = buffer.length;
 	if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", weightLb: null, fileId, fileSize: size };
-	const text = brokerInvoice.extractPdfText(buffer);
+	const text = brokerInvoice.extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES });
 	const cls = kpiWeight.classifyPdfText(text, size);
 	if (cls !== "ok") return { status: cls, weightLb: null, fileId, fileSize: size };
 	const w = kpiWeight.parseWeight(text);
 	if (w.status === "ok") return { status: "ok", weightLb: w.weightLb, fileId, fileSize: size };
 	return { status: w.status === "conflict" ? "conflict" : "no_weight", weightLb: null, fileId, fileSize: size };
+}
+
+// A stored RATECON document's bytes for the weight phase: its local /uploads
+// copy (kept inside DATA_DIR/uploads, its size checked before it is read), else
+// its Drive file (its size read first, then a download capped at MAX_PDF_BYTES,
+// within the KPI timeout, each request counted). Returns { buffer }, or
+// { status: 'too_large' | 'error', fileSize }, or null when nothing is stored.
+// Its own reader, not fetchDocumentBytes(): that one serves the invoice routes,
+// has no size cap or timeout and logs file names, and this job logs codes only.
+async function kpiStoredRateConBytes(doc, counter, deadlineMs) {
+	const max = kpiWeight.MAX_PDF_BYTES;
+	const localName = doc.drive_url && String(doc.drive_url).startsWith("/uploads/")
+		? String(doc.drive_url).slice("/uploads/".length)
+		: String(doc.file_name || "");
+	if (localName) {
+		const uploadsRoot = path.join(DATA_DIR, "uploads");
+		const localPath = path.join(uploadsRoot, localName);
+		if (localPath.startsWith(uploadsRoot + path.sep)) {
+			let st = null;
+			try {
+				st = fs.statSync(localPath);
+			} catch {
+				st = null;
+			}
+			if (st && st.isFile()) {
+				if (st.size > max) return { status: "too_large", fileSize: st.size };
+				return { buffer: fs.readFileSync(localPath) };
+			}
+		}
+	}
+	if (!doc.drive_file_id) return null;
+	const drive = await getDrive();
+	const timeout = Math.max(1000, Math.min(KPI_DRIVE_TIMEOUT_MS, deadlineMs - Date.now()));
+	counter.driveFetches++;
+	const meta = await drive.files.get({ fileId: doc.drive_file_id, fields: "id,size", supportsAllDrives: true }, { timeout });
+	const size = Number(meta && meta.data && meta.data.size);
+	if (!(size > 0)) return { status: "error", fileSize: null };
+	if (size > max) return { status: "too_large", fileSize: size };
+	counter.driveFetches++;
+	const resp = await drive.files.get(
+		{ fileId: doc.drive_file_id, alt: "media", supportsAllDrives: true },
+		{ responseType: "arraybuffer", timeout, maxContentLength: max },
+	);
+	return { buffer: Buffer.from(resp.data) };
 }
 
 // One load's rate-con: the stored RATECON document first, then, only where the
@@ -61110,11 +61157,15 @@ async function kpiRateConWeight(loadId, counter, deadlineMs) {
 		 ORDER BY uploaded_at DESC LIMIT 1`,
 	).get(loadId, `#${loadId}`, ...RATECON_DOC_TYPES);
 	if (doc) {
-		const buffer = await fetchDocumentBytes(doc);
-		if (buffer && buffer.length) return kpiWeightFromPdf(buffer, `document:${doc.id}`);
+		const stored = await kpiStoredRateConBytes(doc, counter, deadlineMs);
+		if (stored && stored.status) return { status: stored.status, weightLb: null, fileId: `document:${doc.id}`, fileSize: stored.fileSize };
+		if (stored && stored.buffer && stored.buffer.length) return kpiWeightFromPdf(stored.buffer, `document:${doc.id}`);
 	}
+	// Drive is searched by file name, so a short id (one that sits inside many
+	// other numbers) is never looked up, and a name must carry the id as a whole
+	// token, not inside a longer number.
 	const safe = String(loadId).replace(/[^A-Za-z0-9]/g, "");
-	if (RATECON_DRIVE_FOLDER_ID && safe) {
+	if (RATECON_DRIVE_FOLDER_ID && safe.length >= rcIndexShared.MIN_LOAD_ID_LEN) {
 		const drive = await getDrive();
 		const timeout = Math.max(1000, Math.min(KPI_DRIVE_TIMEOUT_MS, deadlineMs - Date.now()));
 		counter.driveFetches++;
@@ -61128,7 +61179,8 @@ async function kpiRateConWeight(loadId, counter, deadlineMs) {
 		}, { timeout });
 		// Our keys are lowercased; the file name is compared the same way.
 		const files = ((list && list.data && list.data.files) || [])
-			.filter((f) => rcIndexShared.filenameCarriesLoadId(String(f.name || "").toLowerCase(), loadId))
+			.filter((f) => rcIndexShared.filenameCarriesLoadId(String(f.name || "").toLowerCase(), loadId)
+				&& rcIndexShared.textHasToken(String(f.name || "").toLowerCase(), safe.toLowerCase()))
 			.sort((a, b) => String(b.createdTime || "").localeCompare(String(a.createdTime || "")));
 		const newest = files[0];
 		if (!newest) return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
@@ -61138,7 +61190,7 @@ async function kpiRateConWeight(loadId, counter, deadlineMs) {
 		counter.driveFetches++;
 		const resp = await drive.files.get(
 			{ fileId: newest.id, alt: "media", supportsAllDrives: true },
-			{ responseType: "arraybuffer", timeout },
+			{ responseType: "arraybuffer", timeout, maxContentLength: kpiWeight.MAX_PDF_BYTES },
 		);
 		return kpiWeightFromPdf(Buffer.from(resp.data), String(newest.id || ""));
 	}
@@ -61147,11 +61199,19 @@ async function kpiRateConWeight(loadId, counter, deadlineMs) {
 
 // The weight phase of a scheduled run: delivered live loads whose Details state
 // no weight and that have no answer on file yet (or a not_found / error answer
-// older than 30 days), newest first, at most KPI_WEIGHT_MAX_PER_RUN, until
-// `deadlineMs`. Returns { driveFetches, checked, codes }.
-async function kpiBackfillWeights(deadlineMs, loads) {
+// older than 30 days), newest first, until `deadlineMs`. At most
+// KPI_WEIGHT_MAX_PER_RUN loads per business day `day`, whatever the number of
+// runs (a failed run is retried): loads already checked that day count against
+// it. Each load is recorded as 'error' BEFORE its rate-con is fetched, so a load
+// whose file takes the process down is not tried again for 30 days.
+// Returns { driveFetches, checked, codes }.
+async function kpiBackfillWeights(deadlineMs, loads, day) {
 	const out = { driveFetches: 0, checked: 0, codes: new Set() };
 	const nowMs = Date.now();
+	const checkedToday = db.prepare("SELECT checked_at FROM kpi_load_weights WHERE checked_at >= ?")
+		.all(new Date(nowMs - 2 * 86400000).toISOString())
+		.filter((r) => kpiInstantDay(r.checked_at, APP_TIMEZONE) === day).length;
+	const budget = Math.max(0, KPI_WEIGHT_MAX_PER_RUN - checkedToday);
 	const known = new Map(db.prepare("SELECT load_id, status, checked_at FROM kpi_load_weights").all().map((r) => [r.load_id, r]));
 	const candidates = [];
 	for (const load of loads) {
@@ -61172,17 +61232,18 @@ async function kpiBackfillWeights(deadlineMs, loads) {
 			weight_lb = excluded.weight_lb, source = excluded.source, status = excluded.status,
 			file_id = excluded.file_id, file_size = excluded.file_size, checked_at = excluded.checked_at
 	`);
-	for (const load of candidates.slice(0, KPI_WEIGHT_MAX_PER_RUN)) {
+	for (const load of candidates.slice(0, budget)) {
 		if (Date.now() >= deadlineMs) {
 			out.codes.add("RATECON_TIME_LIMIT");
 			break;
 		}
+		upsert.run(load.loadId, null, "error", "", null, new Date().toISOString());
 		let result;
 		try {
-			result = await kpiRateConWeight(load.loadId, out, deadlineMs);
-		} catch {
+			result = await kpiWithin(kpiRateConWeight(load.loadId, out, deadlineMs), deadlineMs - Date.now());
+		} catch (e) {
 			result = { status: "error", weightLb: null, fileId: "", fileSize: null };
-			out.codes.add("RATECON_FETCH_FAILED");
+			out.codes.add(e && e.kpiCode === "TIME_LIMIT" ? "RATECON_TIME_LIMIT" : "RATECON_FETCH_FAILED");
 		}
 		upsert.run(load.loadId, Number.isFinite(result.weightLb) ? result.weightLb : null, result.status, result.fileId || "", Number.isFinite(result.fileSize) ? result.fileSize : null, new Date().toISOString());
 		out.checked++;
@@ -61303,7 +61364,7 @@ async function runKpiSnapshot(kind) {
 
 		if (kind !== "manual") {
 			try {
-				const w = await kpiBackfillWeights(Math.min(Date.now() + KPI_DRIVE_TIME_LIMIT_MS, deadlineMs), sheet.loads);
+				const w = await kpiBackfillWeights(Math.min(Date.now() + KPI_DRIVE_TIME_LIMIT_MS, deadlineMs), sheet.loads, day);
 				driveFetches = w.driveFetches;
 				for (const code of w.codes) note("freight_tons_stated", code);
 			} catch {
@@ -61405,6 +61466,15 @@ function kpiJobState(nowMs) {
 	};
 }
 
+// The settings an approval is recorded and checked against: the saved settings
+// with the AI dispatch start the metrics actually use (the admin's date, else the
+// date the last run derived), so an approval of truck utilization lapses when
+// the derived date moves, not only when an admin sets one.
+function kpiApprovalSettings(saved) {
+	const derived = kpiReadDerived().aiDispatchStart.value;
+	return { ...saved, aiDispatchStart: kpiIsDay(saved.aiDispatchStart) ? saved.aiDispatchStart : derived };
+}
+
 // The server's own check on what lib/kpi-metrics.js reports as approved: a
 // metric is shown approved ONLY when its stored row is valid for today's
 // definition and settings. No row, or a stale one, is never approved, whatever
@@ -61440,15 +61510,17 @@ function kpiResponse(nowMs) {
 		timeZone: APP_TIMEZONE,
 		generatedAt: new Date(nowMs).toISOString(),
 		job: kpiJobState(nowMs),
-		// The saved settings, exactly as approvals hash them (settingsHashFor()).
+		// The saved settings (shown on the page), and the ones approvals are
+		// hashed against (settingsHashFor(), kpiApprovalSettings()).
 		settings,
+		approvalSettings: kpiApprovalSettings(settings),
 		defaultRecipientConfigured: Boolean(ADMIN_NOTIFY_EMAIL),
 		derived: kpiReadDerived(),
 		snapshots,
 		series,
 		approvals,
 	});
-	return kpiEnforceApprovals(response, approvals, settings);
+	return kpiEnforceApprovals(response, approvals, kpiApprovalSettings(settings));
 }
 
 // Claim an email slot, then send it. The claim (INSERT OR IGNORE) comes first and
@@ -61602,7 +61674,7 @@ app.put("/api/admin/kpis/approvals/:key", requireRole("Super Admin"), refuseCros
 		if (body.definitionVersion !== meta.definitionVersion) {
 			return res.status(409).json({ error: "This KPI's definition has changed since the page loaded. Reload it and review the new definition.", code: "DEFINITION_CHANGED" });
 		}
-		const settings = kpiReadSettings();
+		const settings = kpiApprovalSettings(kpiReadSettings());
 		const before = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals WHERE metric_key = ?").get(key);
 		const wasApproved = Boolean(before) && kpiCatalog.approvalIsValid(before, key, settings);
 		const at = new Date().toISOString();
@@ -61634,6 +61706,14 @@ app.put("/api/admin/kpis/settings", requireRole("Super Admin"), refuseCrossOrigi
 		const before = kpiReadSettings();
 		const next = kpiNormalizeSettings({ ...before, ...parsed.patch });
 		const shown = (k, v) => (k === "recipients" ? `${v.length} address${v.length === 1 ? "" : "es"}` : (v === null ? "not set" : String(v)));
+		// Recipients get internal, unapproved figures every week, so the audit row
+		// names each address added or removed (staff-entered, never driver data).
+		const said = (k) => {
+			if (k !== "recipients") return `${k}: ${shown(k, before[k])} → ${shown(k, next[k])}`;
+			const added = next.recipients.filter((r) => !before.recipients.includes(r));
+			const removed = before.recipients.filter((r) => !next.recipients.includes(r));
+			return `recipients: ${shown(k, before[k])} → ${shown(k, next[k])}${added.length ? `; added ${added.join(", ")}` : ""}${removed.length ? `; removed ${removed.join(", ")}` : ""}`;
+		};
 		const changed = KPI_SETTING_FIELDS.filter((k) => JSON.stringify(before[k]) !== JSON.stringify(next[k]));
 		if (changed.length) {
 			db.prepare(
@@ -61641,7 +61721,7 @@ app.put("/api/admin/kpis/settings", requireRole("Super Admin"), refuseCrossOrigi
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`
 			).run(KPI_SETTINGS_KEY, JSON.stringify(next), new Date().toISOString(), req.session.user.username || "");
 			logAudit(req, "kpi_settings_update", "kpi", "settings",
-				auditText(changed.map((k) => `${k}: ${shown(k, before[k])} → ${shown(k, next[k])}`).join("; "), 2000));
+				auditText(changed.map(said).join("; "), 2000));
 			notifyChange("kpis");
 		}
 		res.json({ settings: kpiResponse(Date.now()).settings, changed });

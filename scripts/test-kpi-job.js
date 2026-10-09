@@ -70,6 +70,7 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const os = require("os");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
@@ -278,15 +279,25 @@ function fakeLibs(log) {
 
 // ── the world ───────────────────────────────────────────────────────────────
 // opts: block, env, now (ISO), startsJob, folder, admin, sheet, drive
-// ({ files(safe) -> [...], advanceMs, throws }), docs (id -> Buffer), sendResult,
-// db (reuse a database: a restart), seed.
+// ({ files(safe) -> [...], advanceMs, throws, bytes(fileId), metaSize(fileId) }),
+// localDocs (file name under DATA_DIR/uploads -> Buffer, or a byte count for a
+// sparse file), sendResult, db (reuse a database: a restart), seed.
+const tmpDirs = [];
+process.on("exit", () => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
 function world(opts = {}) {
 	const clock = { ms: Date.parse(opts.now || "2026-10-09T08:30:00Z") };
 	class FakeDate extends Date {
 		constructor(...a) { if (a.length) super(...a); else super(clock.ms); }
 		static now() { return clock.ms; }
 	}
-	const log = { inputs: [], builds: [], sheetReads: 0, drive: [], docs: [], mails: [], events: [], logs: [], timeouts: [], intervals: [], computeThrows: false, bigBreakdown: false };
+	const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "kpi-job-"));
+	tmpDirs.push(dataDir);
+	fs.mkdirSync(path.join(dataDir, "uploads"), { recursive: true });
+	for (const [name, content] of Object.entries(opts.localDocs || {})) {
+		const file = path.join(dataDir, "uploads", name);
+		if (typeof content === "number") { fs.writeFileSync(file, ""); fs.truncateSync(file, content); } else fs.writeFileSync(file, content);
+	}
+	const log = { inputs: [], builds: [], sheetReads: 0, drive: [], mails: [], events: [], logs: [], timeouts: [], intervals: [], computeThrows: false, bigBreakdown: false };
 	const libs = fakeLibs(log);
 	const db = opts.db || new Database(":memory:");
 	if (!opts.db) {
@@ -319,7 +330,7 @@ function world(opts = {}) {
 		publicFormInput: require(path.join(ROOT, "lib", "public-form-input.js")),
 		normalizeLoadId: require(path.join(ROOT, "lib", "ratecon-load.js")).normalizeLoadId,
 		getJobTrackingCached: async () => { log.sheetReads++; clock.ms += control.sheetAdvanceMs; if (control.sheetThrows) throw new Error(`Sheets down near ${BROKER}`); return cache; },
-		fetchDocumentBytes: async (doc) => { log.docs.push(doc.id); return (opts.docs || {})[doc.id] || null; },
+		fs, path, DATA_DIR: dataDir,
 		getDrive: async () => ({
 			files: {
 				list: async (params, options) => {
@@ -330,7 +341,12 @@ function world(opts = {}) {
 					return { data: { files: drive.files ? drive.files(safe) : [] } };
 				},
 				get: async (params, options) => {
-					log.drive.push({ op: "get", fileId: params.fileId, timeout: options && options.timeout });
+					if (params.alt !== "media") {
+						log.drive.push({ op: "meta", fileId: params.fileId, fields: params.fields, timeout: options && options.timeout });
+						return { data: { id: params.fileId, size: drive.metaSize ? drive.metaSize(params.fileId) : "1200" } };
+					}
+					const marked = db.prepare("SELECT status FROM kpi_load_weights WHERE load_id = ?").get(String(params.fileId).replace(/^[a-z]+-/, ""));
+					log.drive.push({ op: "get", fileId: params.fileId, timeout: options && options.timeout, maxContentLength: options && options.maxContentLength, markedAtFetch: marked ? marked.status : null });
 					clock.ms += drive.advanceMs || 0;
 					return { data: drive.bytes ? drive.bytes(params.fileId) : pdfWith("Weight: 42,000 lbs") };
 				},
@@ -554,7 +570,7 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 	const day = 86400000;
 	const nowMs = Date.parse("2026-10-09T08:30:00Z");
 	const w = world({ block, sheet, drive: { files: (safe) => (safe === "512000002" ? [{ id: "big", name: `Order ${safe}.pdf`, size: String(4 * 1024 * 1024), createdTime: "x" }] : []) },
-		docs: { 9: pdfWith("Gross weight 41,250 lbs") },
+		localDocs: { [`${BROKER} rate con.pdf`]: pdfWith("Gross weight 41,250 lbs") },
 		before: (db) => {
 			db.exec("CREATE TABLE IF NOT EXISTS kpi_load_weights (load_id TEXT PRIMARY KEY, weight_lb REAL, source TEXT NOT NULL DEFAULT 'ratecon_pdf', status TEXT NOT NULL, file_id TEXT NOT NULL DEFAULT '', file_size INTEGER, checked_at TEXT NOT NULL)");
 			const ins = db.prepare("INSERT INTO kpi_load_weights (load_id, status, checked_at) VALUES (?, ?, ?)");
@@ -566,7 +582,7 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 	await w.k.runKpiSnapshot("nightly");
 	const listed = w.log.drive.filter((d) => d.op === "list").map((d) => d.q.match(/'(\d+)'$/)[1]).sort();
 	t(listed.join() === "512000002,512000004", `§6 Drive listed only for the load with no stored rate-con and the 31-day-old not_found (${listed})`);
-	t(w.log.docs.join() === "9", "§6 the stored RATECON document read first");
+	t(!w.log.drive.some((d) => /512000001/.test(String(d.q || d.fileId))), "§6 the stored RATECON document (on disk) read first: no Drive request for that load");
 	const r = (id) => one(w, "SELECT * FROM kpi_load_weights WHERE load_id = ?", id);
 	t(r("512000001").status === "ok" && r("512000001").weight_lb === 41250 && r("512000001").file_id === "document:9", "§6 ...and its weight taken, with no Drive request");
 	t(r("512000002").status === "too_large" && r("512000002").file_size === 4 * 1024 * 1024 && !w.log.drive.some((d) => d.op === "get"), "§6 a file over the size limit: too_large, never downloaded");
@@ -590,6 +606,55 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 	t(all(broken, "SELECT status FROM kpi_load_weights").every((x) => x.status === "error"), "§6 ...and the loads are marked error, to be tried again later");
 	const everything = JSON.stringify(all(broken, "SELECT * FROM kpi_runs")) + JSON.stringify(all(broken, "SELECT * FROM kpi_load_weights")) + broken.log.logs.join("\n");
 	t(!everything.includes("/srv/private") && !everything.includes(BROKER), "§6 ...and the error's text is stored and logged nowhere");
+});
+
+// ─────────────────────────────────────────── §6b the weight phase's limits
+// A rate-con that inflates far past the text cap (8 MB), from a few dozen kilobytes.
+function bombPdf() {
+	return Buffer.concat([Buffer.from("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n"), zlib.deflateSync(Buffer.from("(Weight: 42,000 lbs) Tj\n".repeat(400000))), Buffer.from("\nendstream\nendobj\n%%EOF\n")]);
+}
+const weightLimitsSection = section(async (t, block = BLOCK) => {
+	const w = world({ block, sheet: weightSheet(50), drive: { files: driveFiles } });
+	await w.k.runKpiSnapshot("nightly");
+	const gets = w.log.drive.filter((d) => d.op === "get");
+	t(gets.length === 40 && gets.every((g) => g.markedAtFetch === "error"), "§6b each load is recorded (error) before its rate-con is fetched, so a crash is not retried nightly");
+	t(gets.every((g) => g.maxContentLength === 3 * 1024 * 1024), "§6b every download is capped at 3 MB");
+	w.log.drive.length = 0;
+	w.clock.ms += 3600000;
+	await w.k.runKpiSnapshot("nightly");
+	t(w.log.drive.length === 0 && one(w, "SELECT COUNT(*) AS n FROM kpi_load_weights").n === 40, "§6b a second run the same business day reads no more: 40 loads a day, not a run");
+
+	const stored = world({ block, sheet: weightSheet(3), drive: { files: () => [], metaSize: (id) => (id === "drive-big" ? String(4 * 1024 * 1024) : "1200"), bytes: () => pdfWith("Weight: 39,000 lbs") },
+		localDocs: { "big.pdf": 4 * 1024 * 1024 },
+		before: (db) => {
+			const ins = db.prepare("INSERT INTO documents (id, load_id, driver, type, file_name, drive_file_id, uploaded_at) VALUES (?, ?, 'x', 'RATECON', ?, ?, '2026-09-01 00:00:00')");
+			ins.run(11, "512000001", "big.pdf", null);
+			ins.run(12, "512000002", "not-on-disk.pdf", "drive-ok");
+			ins.run(13, "512000003", "not-on-disk-either.pdf", "drive-big");
+		} });
+	await stored.k.runKpiSnapshot("nightly");
+	const r = (id) => one(stored, "SELECT * FROM kpi_load_weights WHERE load_id = ?", id);
+	t(r("512000001").status === "too_large" && r("512000001").file_size === 4 * 1024 * 1024, "§6b a stored file over 3 MB on disk: too_large, never read");
+	t(r("512000002").status === "ok" && r("512000002").weight_lb === 39000 && r("512000002").file_id === "document:12", "§6b a stored Drive file: its size first, then the download");
+	const ops = (id) => stored.log.drive.filter((d) => d.fileId === id).map((d) => d.op).join();
+	t(ops("drive-ok") === "meta,get" && ops("drive-big") === "meta" && r("512000003").status === "too_large", "§6b ...and one over 3 MB is never downloaded");
+	t(stored.log.drive.filter((d) => d.fileId === "drive-ok").every((d) => d.timeout === 20000), "§6b ...within the 20 s timeout");
+	t(one(stored, "SELECT drive_fetches AS n FROM kpi_runs").n === 3, "§6b ...and each of those requests is counted");
+
+	const names = world({ block, sheet: { headers: HEADERS, data: [
+		row(0, { "Load ID": "1234", Status: "Delivered", Details: "General freight", "Completion Date": "2026-09-01" }),
+		row(1, { "Load ID": "512000001", Status: "Delivered", Details: "General freight", "Completion Date": "2026-09-02" }),
+	] }, drive: { files: (safe) => [{ id: `look-${safe}`, name: `Order 9${safe}7.pdf`, size: "1200", createdTime: "2026-09-01T00:00:00.000Z" }] } });
+	await names.k.runKpiSnapshot("nightly");
+	const lists = names.log.drive.filter((d) => d.op === "list");
+	t(lists.length === 1 && /512000001/.test(lists[0].q), "§6b a load id under 5 characters is never looked up by file name");
+	t(one(names, "SELECT status FROM kpi_load_weights WHERE load_id = '512000001'").status === "not_found" && !names.log.drive.some((d) => d.op === "get"),
+		"§6b a file whose name holds the id inside a longer number is not that load's");
+
+	const bomb = world({ block, sheet: weightSheet(1), drive: { files: driveFiles, bytes: () => bombPdf() } });
+	await bomb.k.runKpiSnapshot("nightly");
+	const b = one(bomb, "SELECT status, weight_lb FROM kpi_load_weights");
+	t(b && b.status !== "ok" && b.weight_lb === null, `§6b a rate-con that inflates past 8 MB is not read past the cap (${b && b.status})`);
 });
 
 // ─────────────────────────────────────────── §7 the time box
@@ -780,7 +845,7 @@ const failed = (results) => results.some((x) => !x.ok);
 (async () => {
 	const sections = [
 		["§1 storage", storageSection], ["§2 gathering", gatherSection], ["§3 the sheet", sheetSection], ["§4 revenue", revenueSection],
-		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection],
+		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection], ["§6b the weight phase's limits", weightLimitsSection],
 		["§7 the time box", timeSection], ["§8 emails", emailSection], ["§8 the first-start digest marker", seedSection],
 		["§9 the scheduler", schedulerSection], ["§10 aggregates only", aggregateSection],
 	];
@@ -797,13 +862,20 @@ const failed = (results) => results.some((x) => !x.ok);
 		["the preview latch set although sendEmail() returned false", emailSection, swap(BLOCK, `const status = finish(sent ? "sent" : "failed", sent ? new Date().toISOString() : null);`, `const status = finish("sent", new Date().toISOString());`)],
 		["the preview sent to the page's recipients", emailSection, swap(BLOCK, "const recipients = ADMIN_NOTIFY_EMAIL ? [ADMIN_NOTIFY_EMAIL] : [];\n\treturn kpiClaimAndSend({ slotKey: \"preview\"", "const recipients = kpiReadSettings().recipients;\n\treturn kpiClaimAndSend({ slotKey: \"preview\"")],
 		["no first-start digest marker", seedSection, swap(BLOCK, "\t\tkpiSeedDigestMarker(Date.now());\n", "")],
-		["a 41st Drive load", weightSection, swap(BLOCK, "candidates.slice(0, KPI_WEIGHT_MAX_PER_RUN)", "candidates.slice(0, KPI_WEIGHT_MAX_PER_RUN + 1)")],
+		["a 41st Drive load", weightSection, swap(BLOCK, "candidates.slice(0, budget)", "candidates.slice(0, budget + 1)")],
+		["the 40 counted per run, not per business day", weightLimitsSection, swap(BLOCK, "KPI_WEIGHT_MAX_PER_RUN - checkedToday", "KPI_WEIGHT_MAX_PER_RUN - 0")],
+		["a load not recorded before its rate-con is fetched", weightLimitsSection, swap(BLOCK, "upsert.run(load.loadId, null, \"error\", \"\", null, new Date().toISOString());\n", "")],
+		["a Drive download not capped", weightLimitsSection, swap(BLOCK, "{ responseType: \"arraybuffer\", timeout, maxContentLength: kpiWeight.MAX_PDF_BYTES }", "{ responseType: \"arraybuffer\", timeout }")],
+		["a stored Drive file downloaded before its size is checked", weightLimitsSection, swap(BLOCK, "if (size > max) return { status: \"too_large\", fileSize: size };\n\tcounter.driveFetches++;", "counter.driveFetches++;")],
+		["the PDF text not capped", weightLimitsSection, swap(BLOCK, "extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES })", "extractPdfText(buffer)")],
+		["a short load id looked up by file name", weightLimitsSection, swap(BLOCK, "safe.length >= rcIndexShared.MIN_LOAD_ID_LEN", "safe.length > 0")],
+		["a file name matched inside a longer number", weightLimitsSection, swap(BLOCK, "\n\t\t\t\t&& rcIndexShared.textHasToken(String(f.name || \"\").toLowerCase(), safe.toLowerCase()))", ")")],
 		["the not-found cache ignored", weightCacheSection, swap(BLOCK, " && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS)", "")],
 		["the Drive phase's time limit ignored", timeSection, swap(BLOCK, "if (Date.now() >= deadlineMs) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");", "if (false) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");")],
 		["the run's time limit ignored", timeSection, swapAll(BLOCK, `if (Date.now() >= deadlineMs) throw kpiStop("TIME_LIMIT");`, "")],
 		["the startsJob gate removed", schedulerSection, swap(BLOCK, 'if (KPI_SNAPSHOT_ENABLED && startsJob("KPI snapshot")) {', "if (KPI_SNAPSHOT_ENABLED) {")],
-		["raw error text stored", weightCacheSection, swap(BLOCK, "} catch {\n\t\t\tresult = { status: \"error\", weightLb: null, fileId: \"\", fileSize: null };\n\t\t\tout.codes.add(\"RATECON_FETCH_FAILED\");",
-			"} catch (e) {\n\t\t\tresult = { status: \"error\", weightLb: null, fileId: String(e.message), fileSize: null };\n\t\t\tout.codes.add(String(e.message));")],
+		["raw error text stored", weightCacheSection, swap(BLOCK, "result = { status: \"error\", weightLb: null, fileId: \"\", fileSize: null };\n\t\t\tout.codes.add(e && e.kpiCode === \"TIME_LIMIT\" ? \"RATECON_TIME_LIMIT\" : \"RATECON_FETCH_FAILED\");",
+			"result = { status: \"error\", weightLb: null, fileId: String(e.message), fileSize: null };\n\t\t\tout.codes.add(String(e.message));")],
 		["SELECT * on expenses", gatherSection, swap(BLOCK, `"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'"`, `"SELECT * FROM expenses WHERE LOWER(type) = 'fuel'"`)],
 	];
 	const results = [];

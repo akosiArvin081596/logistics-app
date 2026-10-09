@@ -391,6 +391,14 @@ async function approvalSection(block) {
 		g = await w.call("GET", "/api/admin/kpis");
 		t(g.body.metrics.find((m) => m.key === "fuel_savings").approval.approved === false, "§4 ...lapses when the baseline it used changes");
 		t(g.body.metrics.find((m) => m.key === "loads_delivered").approval.approved === true, "§4 ...and a metric that reads no setting keeps its approval");
+		const derive = (day) => w.db.prepare("INSERT OR REPLACE INTO server_state (key, value) VALUES ('kpi.derived', ?)").run(JSON.stringify({ aiDispatchStart: { value: day, evidence: "x" } }));
+		derive("2026-04-10");
+		await put("truck_utilization", { approved: true, definitionVersion: 1 });
+		g = await w.call("GET", "/api/admin/kpis");
+		t(g.body.metrics.find((m) => m.key === "truck_utilization").approval.approved === true, "§4 truck_utilization approved under the derived AI start");
+		derive("2026-04-20");
+		g = await w.call("GET", "/api/admin/kpis");
+		t(g.body.metrics.find((m) => m.key === "truck_utilization").approval.approved === false, "§4 ...lapses when the derived AI start it used moves");
 		const off = await put("loads_delivered", { approved: false, definitionVersion: 1 });
 		t(off.status === 200 && auditsOf(w, "kpi_approval_set").slice(-1)[0].details.startsWith("loads_delivered: approved → not approved"), "§4 withdraw: audited approved → not approved");
 	} catch (e) {
@@ -442,7 +450,7 @@ async function settingsSection(block) {
 		t(ok.body.settings && ok.body.settings.baselineMpg === 8 && ok.body.settings.dedicatedStart.value === "2026-08-30", "§5 the answer carries the settings as GET shows them");
 		const a = auditsOf(w, "kpi_settings_update");
 		t(a.length === 1 && a[0].entity === "kpi" && a[0].entity_id === "settings" && a[0].details.includes("baselineMpg: not set → 8") &&
-			a[0].details.includes("recipients: 0 addresses → 2 addresses") && !a[0].details.includes("@"), `§5 audited, recipients by count only (${a[0] && a[0].details})`);
+			a[0].details.includes("recipients: 0 addresses → 2 addresses; added ops@example.test, owner@example.test"), `§5 audited, each recipient added named (${a[0] && a[0].details})`);
 		const same = await put({ baselineMpg: 8 });
 		t(same.status === 200 && same.body.changed.length === 0 && auditsOf(w, "kpi_settings_update").length === 1, "§5 a no-op save: changed [], no audit row");
 		const cleared = await put({ dedicatedStart: null, baselineMpg: 3 });
@@ -553,6 +561,10 @@ const failed = (results) => results.some((x) => !x.ok);
 		() => recomputeSection(swap(BLOCK, `logAudit(req, "kpi_recompute", "kpi", String(runId), "Manual KPI recompute started");`, ""))]);
 	mutants.push(["the recompute not single-flight",
 		() => recomputeSection(swap(BLOCK, `if (kpiRunning) return res.status(409).json({ error: "A KPI run is already in progress.", code: "KPI_RUN_IN_PROGRESS" });`, ""))]);
+	mutants.push(["approvals hashed against the saved settings only (a moved derived AI start keeps the approval)",
+		() => approvalSection(swap(BLOCK, "return { ...saved, aiDispatchStart: kpiIsDay(saved.aiDispatchStart) ? saved.aiDispatchStart : derived };", "return { ...saved };"))]);
+	mutants.push(["the settings audit names no recipient",
+		() => settingsSection(swap(BLOCK, "auditText(changed.map(said).join(\"; \"), 2000));", "auditText(changed.map((k) => `${k}: ${shown(k, before[k])} → ${shown(k, next[k])}`).join(\"; \"), 2000));"))]);
 	mutants.push(["a metric with no approval row shown approved",
 		() => getSection(swap(BLOCK, "const valid = Boolean(row) && kpiCatalog.approvalIsValid(row, m.key, settings);", "const valid = !row || kpiCatalog.approvalIsValid(row, m.key, settings);"))]);
 	mutants.push(["the KPI block moved below app.get(\"*\")", async () => {

@@ -200,6 +200,16 @@ function battery(mods) {
 	const ms8m = timed(() => { W.parseWeight(p8m); W.classifyPdfText(p8m, 1000); });
 	t(ms8m < TIMING_BUDGET_MS, `§4 8 MB of it: still under ${TIMING_BUDGET_MS} ms, the cap cuts it first`, `${ms8m.toFixed(1)} ms`);
 
+	// §4 extractPdfText()'s maxInflatedBytes (the nightly job reads files it never chose)
+	const small = makePdf("BT (Weight: 42,000 lbs) Tj ET");
+	t(extractPdfText(small) === extractPdfText(small, { maxInflatedBytes: 8 * 1024 * 1024 }), "§4 a normal rate-con reads the same with the cap as without it");
+	const bomb = makePdf("(Weight: 42,000 lbs) Tj\n".repeat(400000));
+	const tb = Date.now();
+	const capped = extractPdfText(bomb, { maxInflatedBytes: 1024 * 1024 });
+	t(Date.now() - tb < TIMING_BUDGET_MS && !/Weight: 42,000/.test(capped), "§4 a stream that inflates past the cap is not inflated (kept as its raw bytes)");
+	t(capped.length <= 1024 * 1024, "§4 the text handed back is cut to the cap");
+	t(/Weight: 42,000/.test(extractPdfText(bomb)), "§4 ...and without the cap (the invoice routes) nothing changes");
+
 	// §5 classifyPdfText
 	const prose = "ZED SENTINEL FREIGHT RATE CONFIRMATION Pickup Atlanta GA Delivery Dallas TX Commodity paper rolls Weight 42,000 LBS Rate $2,450.00";
 	t(W.classifyPdfText(prose, 3 * 1024 * 1024 + 1) === "too_large" && W.classifyPdfText(prose, 3 * 1024 * 1024) === "ok", "§5 over 3 MB is too_large; 3 MB is read");
