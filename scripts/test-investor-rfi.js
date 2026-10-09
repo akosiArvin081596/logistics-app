@@ -6,7 +6,9 @@
  * WHAT IS ASSERTED, and against what:
  *   §1 checkInvestorRfi(): required fields, the email check, length caps,
  *      control and invisible characters stripped from every text field, one
- *      scalar per field, consent, and the honeypot
+ *      scalar per field, consent, the honeypot, and the phone's shape (digits,
+ *      spaces, + - and parentheses, 7–20 characters, at least 7 digits;
+ *      optional here)
  *   §2 buildInvestorRfiEmail(): to the inbox it is given (ADMIN_NOTIFY_EMAIL in
  *      server.js; admin@example.test here), Reply-To the submitter,
  *      "[STAGING] " only for the staging site, every value escaped
@@ -37,6 +39,14 @@
  *      dropped), for sent and error answers alike; no Referer, any other page,
  *      another origin or a Referer that is not a URL lands on /contact; the
  *      RFI's redirect never reads it
+ *   §8 the hourly limit per client address (RFI_HOURLY_LIMIT, 5 an hour), with
+ *      the app's `trust proxy` and X-Forwarded-For as nginx sends it: one
+ *      counter for both forms; refused requests count; the next request is
+ *      refused 429 (JSON) or answered with its form's error page, and nothing
+ *      over the limit is sent; another address keeps its own count; the
+ *      RateLimit-Policy header names the hour. The other sections run with
+ *      the limit raised (buildApp's `hourlyLimit`), so they test what they
+ *      name.
  *
  * Hermetic: an in-process server on 127.0.0.1, no app.db, no Gmail, no
  * network beyond loopback, no fixtures.
@@ -77,7 +87,8 @@ const VALID = Object.freeze({
 });
 
 // --- a real Express app around the real middleware --------------------------
-function buildApp({ sendResult = true } = {}) {
+// `hourlyLimit` is raised for every section but §8, which tests the real one.
+function buildApp({ sendResult = true, hourlyLimit = 1000 } = {}) {
 	const sent = [];
 	const sendEmail = async (to, subject, html, attachments, opts) => {
 		sent.push({ to, subject, html, attachments, opts });
@@ -90,6 +101,7 @@ function buildApp({ sendResult = true } = {}) {
 		sendEmail,
 		to: ADMIN,
 		now: () => new Date("2026-10-07T15:04:05.000Z"),
+		hourlyLimit,
 	}));
 	// A neighbour route, to prove the form parser stays on its own path.
 	app.post("/api/other", (req, res) => res.json({ body: req.body ?? null }));
@@ -159,10 +171,12 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok("§1 an email with surrounding spaces is trimmed, then accepted",
 		rfi.checkInvestorRfi({ ...VALID, email: "  jane@example.com " }).value.email === "jane@example.com");
 	for (const [field, max] of Object.entries(rfi.RFI_FIELD_MAX)) {
-		const r = rfi.checkInvestorRfi({ ...VALID, [field]: "x".repeat(max + 1) });
+		const fill = field === "phone" ? "1" : "x"; // a phone must also look like one
+		const r = rfi.checkInvestorRfi({ ...VALID, [field]: fill.repeat(max + 1) });
 		ok(`§1 ${field} over ${max} characters is refused`, r.ok === false && r.code === "FIELD_TOO_LONG" && r.field === field);
-		ok(`§1 ${field} at exactly ${max} characters passes`, rfi.checkInvestorRfi({ ...VALID, [field]: "x".repeat(max) }).ok === true);
+		ok(`§1 ${field} at exactly ${max} characters passes`, rfi.checkInvestorRfi({ ...VALID, [field]: fill.repeat(max) }).ok === true);
 	}
+	ok("§1 the phone's cap is 20 characters", rfi.RFI_FIELD_MAX.phone === 20);
 	// Control and invisible characters are STRIPPED from every text field (2026-10-08).
 	ok("§1 a CR/LF in the name is stripped",
 		rfi.checkInvestorRfi({ ...VALID, fullName: "Jane\r\nDoe" }).value.fullName === "JaneDoe");
@@ -197,6 +211,22 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok("§1 consent sent twice (an array) is refused", rfi.checkInvestorRfi({ ...VALID, consent: ["true", "true"] }).code === "CONSENT_REQUIRED");
 	ok("§1 an object for a field is refused", rfi.checkInvestorRfi({ ...VALID, company: { a: 1 } }).code === "INVALID_FIELD");
 	ok("§1 a number for a text field is refused", rfi.checkInvestorRfi({ ...VALID, phone: 5550100 }).code === "INVALID_FIELD");
+	// The phone's shape (2026-10-09): digits, spaces, + - and parentheses; 7–20
+	// characters; at least 7 digits. Optional on the RFI.
+	const GOOD_PHONES = ["+1 (555) 010-0199", "555-0100", "5550100", "(555) 010 0199", "+44 20 7946 0958", "+1-555-010-0199"];
+	const BAD_PHONES = [
+		["letters", "call 555-0100"], ["dots", "555.010.0199"], ["a URL", "http://x.co/1234567"],
+		["an extension", "555-0100 x12"], ["a slash", "555/010/0199"], ["only symbols", "+(-) (-)"],
+		["6 digits", "555-010"], ["6 characters", "123456"], ["full-width digits", "５５５０１００"],
+		["an email", "jane@example.com"], ["a plus inside a word", "555+0100+abc"],
+	];
+	for (const phone of GOOD_PHONES) ok(`§1 phone ${JSON.stringify(phone)} passes`, rfi.checkInvestorRfi({ ...VALID, phone }).value?.phone === phone);
+	for (const [label, phone] of BAD_PHONES) {
+		const r = rfi.checkInvestorRfi({ ...VALID, phone });
+		ok(`§1 a phone with ${label} is refused INVALID_FIELD phone`, r.ok === false && r.status === 400 && r.code === "INVALID_FIELD" && r.field === "phone" && /digits, spaces/.test(r.message));
+	}
+	ok("§1 no phone is still fine on an RFI", rfi.checkInvestorRfi({ ...VALID, phone: "" }).ok === true && rfi.checkInvestorRfi({ ...VALID, phone: undefined }).ok === true);
+	ok("§1 a phone is trimmed before its shape is checked", rfi.checkInvestorRfi({ ...VALID, phone: "  555-0100  " }).value?.phone === "555-0100");
 	ok("§1 a missing body is refused, not thrown", rfi.checkInvestorRfi(undefined).code === "FIELD_REQUIRED");
 	const trapped = rfi.checkInvestorRfi({ ...VALID, [rfi.RFI_HONEYPOT_FIELD]: "https://spam.example" });
 	ok("§1 a filled honeypot is answered as a silent drop", trapped.ok === true && trapped.honeypot === true && !trapped.value);
@@ -406,8 +436,12 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	for (const phone of [undefined, "", "   "]) {
 		ok(`§6 phone ${JSON.stringify(phone)} is refused FIELD_REQUIRED (required for a call)`, refusedAs(checkCall({ ...CALL, phone }), "FIELD_REQUIRED", "phone"));
 	}
-	ok("§6 a phone over 40 characters is refused", checkCall({ ...CALL, phone: "1".repeat(41) }).code === "FIELD_TOO_LONG");
-	ok("§6 a phone at exactly 40 characters passes", checkCall({ ...CALL, phone: "1".repeat(40) }).ok === true);
+	ok("§6 a phone over 20 characters is refused", checkCall({ ...CALL, phone: "1".repeat(21) }).code === "FIELD_TOO_LONG");
+	ok("§6 a phone at exactly 20 characters passes", checkCall({ ...CALL, phone: "1".repeat(20) }).ok === true);
+	for (const phone of GOOD_PHONES) ok(`§6 call phone ${JSON.stringify(phone)} passes`, checkCall({ ...CALL, phone }).value?.phone === phone);
+	for (const [label, phone] of BAD_PHONES) {
+		ok(`§6 a call phone with ${label} is refused INVALID_FIELD phone`, refusedAs(checkCall({ ...CALL, phone }), "INVALID_FIELD", "phone"));
+	}
 	ok("§6 a CR/LF in the phone is stripped", checkCall({ ...CALL, phone: "555\r\n0100" }).value.phone === "5550100");
 	ok("§6 a CR/LF in the name is stripped", checkCall({ ...CALL, fullName: "Carl\r\nCallback" }).value.fullName === "CarlCallback");
 	ok("§6 an invisible Hangul filler and an Arabic letter mark are stripped from the name",
@@ -511,8 +545,11 @@ const asForm = (origin, payload, { referer } = {}) => ({
 			rfi.buildCallRequestEmail(checkCall({ ...CALL, topic: v }).value, { staging: false, submittedAt: at }).subject === `Call request: ${label}`));
 	ok("§6 the preferred date is formatted as the day it names",
 		hasRow(labelled("preferredDate", "2027-01-01"), "Preferred date", "Fri, Jan 1, 2027") && hasRow(labelled("preferredDate", "2026-10-07"), "Preferred date", "Wed, Oct 7, 2026"));
-	const hostileCall = checkCall({ ...CALL, fullName: "<img src=x onerror=alert(1)>", email: "o'brien&co@example.com", phone: "\"><b>", message: "<script>x</script>" });
-	const hostileCallMail = rfi.buildCallRequestEmail(hostileCall.value, { staging: false, submittedAt: at });
+	// The phone check refuses markup now (§6 above), so the email builder is
+	// handed a hostile phone directly: escaping must not depend on validation.
+	const hostileCall = checkCall({ ...CALL, fullName: "<img src=x onerror=alert(1)>", email: "o'brien&co@example.com", message: "<script>x</script>" });
+	ok("§6 markup in the phone is refused before any email is built", refusedAs(checkCall({ ...CALL, phone: "\"><b>" }), "INVALID_FIELD", "phone"));
+	const hostileCallMail = rfi.buildCallRequestEmail({ ...hostileCall.value, phone: "\"><b>" }, { staging: false, submittedAt: at });
 	ok("§6 every call value is HTML-escaped",
 		hostileCall.ok === true && !hostileCallMail.html.includes("<img src=x") && !hostileCallMail.html.includes("<script>") &&
 		hostileCallMail.html.includes("&lt;img src=x onerror=alert(1)&gt;") && hostileCallMail.html.includes("&quot;&gt;&lt;b&gt;") &&
@@ -753,6 +790,55 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		["daily cap of 2 emails reached", "the notification email was not sent", "submission failed"].every((t) => captured.slice(capturedBeforeCalls).some((line) => line.startsWith("investor-rfi:") && line.includes(t))));
 	ok("§3 the failures above did log an outcome line", captured.some((line) => line.includes("investor-rfi:")));
 
+	// --- §8 the hourly limit per client address ------------------------------------------
+	ok("§8 the hourly limit is 5 requests per address per hour", rfi.RFI_HOURLY_LIMIT === 5 && rfi.RFI_HOURLY_WINDOW_MS === 60 * 60 * 1000);
+	// One run against a lib (the real one here, mutants in §5), with the limit at
+	// its default. The app trusts one proxy hop and every request carries
+	// X-Forwarded-For, as server.js (`trust proxy`, 1) and the website vhosts
+	// ($remote_addr) do. Addresses from the documentation range.
+	const hourlyScenario = async (lib) => {
+		const sent = [];
+		const app = express();
+		app.set("trust proxy", 1);
+		app.use(lib.INVESTOR_RFI_PATH, ...lib.createBodyParsers());
+		app.post(lib.INVESTOR_RFI_PATH, ...lib.createInvestorRfiMiddleware({ sendEmail: async (...a) => { sent.push(a); return true; }, to: ADMIN, now: () => NOW }));
+		const server = await listen(app);
+		const from = (ip, shape) => ({ ...shape, headers: { ...shape.headers, "X-Forwarded-For": ip } });
+		const out = { aServed: [], bRefused: [] };
+		// A: five sent, RFIs and calls mixed; then a call, an RFI form and a call form over the limit.
+		for (let i = 0; i < 5; i++) {
+			const r = await request(server, from("203.0.113.10", asJson(PROD, i % 2 ? CALL : VALID)));
+			if (i === 0) out.aFirst = r;
+			out.aServed.push(r.status);
+		}
+		out.aSentAtLimit = sent.length;
+		out.aCallJson = await request(server, from("203.0.113.10", asJson(PROD, CALL)));
+		out.aRfiForm = await request(server, from("203.0.113.10", asForm(PROD, { ...VALID, consent: "true" })));
+		out.aCallForm = await request(server, from("203.0.113.10", asForm(PROD, CALL_FORM)));
+		out.aSentAfter = sent.length;
+		// B: five refused (incomplete) requests, then a valid one.
+		for (let i = 0; i < 5; i++) out.bRefused.push((await request(server, from("203.0.113.20", asJson(PROD, { ...CALL, fullName: "" })))).status);
+		const sentBeforeB = sent.length;
+		out.bValid = await request(server, from("203.0.113.20", asJson(PROD, VALID)));
+		out.bSent = sent.length - sentBeforeB;
+		// C: a third address, its own count.
+		out.cValid = await request(server, from("203.0.113.30", asJson(PROD, CALL)));
+		server.close();
+		return out;
+	};
+	{
+		const s = await hourlyScenario(rfi);
+		ok("§8 one address: its first 5 requests (RFIs and calls mixed) are served and sent", s.aServed.every((x) => x === 200) && s.aSentAtLimit === 5);
+		ok("§8 ... its 6th, a call (JSON) → 429 RATE_LIMITED", s.aCallJson.status === 429 && s.aCallJson.json && s.aCallJson.json.code === "RATE_LIMITED");
+		ok("§8 ... an RFI form over the limit → 303 ?error=1", s.aRfiForm.status === 303 && s.aRfiForm.headers.location === `${PROD}/invest-in-logisx?error=1`);
+		ok("§8 ... a call form over the limit → 303 ?call=error#schedule-a-call", s.aCallForm.status === 303 && s.aCallForm.headers.location === CALL_ERROR(PROD));
+		ok("§8 ... and nothing over the limit was sent", s.aSentAfter === 5);
+		ok("§8 refused requests count: 5 incomplete ones (400), then a valid one → 429, nothing sent",
+			s.bRefused.every((x) => x === 400) && s.bValid.status === 429 && s.bSent === 0);
+		ok("§8 another address keeps its own count", s.cValid.status === 200);
+		ok("§8 the RateLimit-Policy header names 5 an hour", s.aFirst.headers["ratelimit-policy"] === "5;w=3600");
+	}
+
 	// --- §4 wiring ------------------------------------------------------------------
 	const parsersAt = SRC.indexOf("app.use(investorRfi.INVESTOR_RFI_PATH, ...investorRfi.createBodyParsers());");
 	const bigJsonAt = SRC.indexOf('app.use(express.json({ limit: "50mb" }));');
@@ -781,9 +867,41 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok("MUTANT: dropping the consent check is caught by §1", noConsent.checkInvestorRfi({ ...VALID, consent: undefined }).ok === true);
 	const noTrap = loadLib(LIB_SRC.replace('String(trap) !== ""', "false"));
 	ok("MUTANT: an unchecked honeypot is caught by §1", noTrap.checkInvestorRfi({ ...VALID, website: "x" }).honeypot === false);
-	const optionalPhone = loadLib(LIB_SRC.replace('checkText(src.phone, "phone", { required: true })', 'checkText(src.phone, "phone")'));
+	const optionalPhone = loadLib(LIB_SRC.replace("checkPhone(src.phone, { required: true })", "checkPhone(src.phone)"));
 	ok("MUTANT: a call without the phone requirement is caught by §6",
 		optionalPhone.checkWebsiteForm({ ...CALL, phone: "" }, { now: NOW }).ok === true);
+	// The phone's shape (§1, §6). Each mutant must change the source, and the
+	// check named must then pass a phone the real code refuses.
+	for (const [label, src, slips] of [
+		["a phone of any characters", LIB_SRC.replace("!PHONE_RE.test(text.value) || ", ""),
+			(lib) => lib.checkWebsiteForm({ ...CALL, phone: "call 555-0100" }, { now: NOW }).ok === true],
+		["dots allowed in a phone", LIB_SRC.replace("const PHONE_RE = /^[0-9 +()-]{7,20}$/;", "const PHONE_RE = /^[0-9 +().-]{7,20}$/;"),
+			(lib) => lib.checkWebsiteForm({ ...CALL, phone: "555.010.0199" }, { now: NOW }).ok === true],
+		["a phone with no digit minimum", LIB_SRC.replace("digits < PHONE_MIN_DIGITS", "false"),
+			(lib) => lib.checkWebsiteForm({ ...CALL, phone: "+(-) (-)" }, { now: NOW }).ok === true],
+		["the RFI's phone left unchecked", LIB_SRC.replace("const phone = checkPhone(src.phone);", 'const phone = checkText(src.phone, "phone");'),
+			(lib) => lib.checkInvestorRfi({ ...VALID, phone: "call 555-0100" }).ok === true],
+		["the old 40-character phone cap", LIB_SRC.replace("phone: 20,", "phone: 40,"),
+			(lib) => lib.checkWebsiteForm({ ...CALL, phone: "1".repeat(21) }, { now: NOW }).code !== "FIELD_TOO_LONG"],
+	]) {
+		ok(`MUTANT: ${label} is caught by §1/§6`, src !== LIB_SRC && slips(loadLib(src)));
+	}
+	// The hourly limit (§8): run the same scenario on each mutant; what it lets
+	// through is what §8 refuses.
+	for (const [label, src, slips] of [
+		["no hourly limit", LIB_SRC.replace("return [originGuard, limiter, hourlyLimiter, handle];", "return [originGuard, limiter, handle];"),
+			(s) => s.aCallJson.status !== 429 && s.aSentAfter > 5],
+		["one hourly count for every address", LIB_SRC.replace("const hourlyLimiter = rateLimit({", 'const hourlyLimiter = rateLimit({ keyGenerator: () => "everyone",'),
+			(s) => s.cValid.status !== 200],
+		["refused requests left uncounted", LIB_SRC.replace("const hourlyLimiter = rateLimit({", "const hourlyLimiter = rateLimit({ skipFailedRequests: true,"),
+			(s) => s.bValid.status !== 429],
+		["a 15-minute window", LIB_SRC.replace("const RFI_HOURLY_WINDOW_MS = 60 * 60 * 1000;", "const RFI_HOURLY_WINDOW_MS = 15 * 60 * 1000;"),
+			(s) => s.aFirst.headers["ratelimit-policy"] !== "5;w=3600"],
+		["a limit of 10 an hour", LIB_SRC.replace("const RFI_HOURLY_LIMIT = 5;", "const RFI_HOURLY_LIMIT = 10;"),
+			(s) => s.aCallJson.status !== 429],
+	]) {
+		ok(`MUTANT: ${label} is caught by §8`, src !== LIB_SRC && slips(await hourlyScenario(loadLib(src))));
+	}
 	const anyKind = loadLib(LIB_SRC.replace('if (!kind) return refusal("INVALID_FIELD", "kind", MESSAGES.invalid);', ""));
 	ok("MUTANT: an unchecked kind is caught by §6", anyKind.checkWebsiteForm({ ...VALID, kind: "meeting" }).ok === true);
 	const utcToday = loadLib(LIB_SRC.replace("calendarDayNumber(businessDate(now))", "calendarDayNumber(now.toISOString().slice(0, 10))"));
