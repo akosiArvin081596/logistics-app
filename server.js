@@ -60598,6 +60598,1111 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 });
 
 // ============================================================
+// KPI BOT — nightly KPI snapshots, the admin KPI API and the weekly digest
+// ============================================================
+// WHY. The company's KPIs (freight moved, loads, revenue, miles, on-time, fleet,
+// fuel, carbon, AI and automation work, utilization) were worked out by hand
+// from several screens. This block works them out once a night from what the
+// system already records, keeps each day's figures, serves them to Super Admins
+// at GET /api/admin/kpis, and mails a weekly digest. Every metric carries an
+// "approved for public use" flag, off until a Super Admin turns it on for the
+// definition and settings it was reviewed under.
+//
+// WHAT IT READS, all read-only: Job Tracking (one liveJobTrackingView() read per
+// run), the Financials books (buildFinancialsLedger(), so revenue matches the
+// Financials page and closed months stay as settled), and SQLite (ELD miles,
+// trucks, fuel receipts, status history, load miles, audit rows). The formulas
+// live in lib/kpi-metrics.js; this block only gathers, stores and serves.
+//
+// WHAT IT WRITES: its own kpi_* tables, app_settings 'kpi.settings' (the page's
+// settings) and server_state 'kpi.derived' (the AI dispatch start the last run
+// derived). Nothing else, and never a money record.
+//
+// AGGREGATES ONLY. What leaves this block (the API, the stored payloads, the
+// email, the logs) is counts, totals and rates. No driver, broker, shipper or
+// customer name, no load ID, no file name and no raw error message: a failure is
+// stored and logged as a CODE ({ metric, code }).
+//
+// WHEN. A 1-minute tick (started 10 minutes after boot, with a boot run then)
+// takes the snapshot at 04:00 APP_TIMEZONE (03:00 US Central), catching up a
+// missed slot the same business day, and sends the digest on Mondays at 09:00
+// (08:00 Central). Slot maths: lib/kpi-schedule.js. Two kill switches, both
+// default ON (the `!/^(false|0|no|off)$/i` shape): KPI_SNAPSHOT_ENABLED (the
+// nightly job and with it every scheduled email) and KPI_DIGEST_ENABLED (every
+// KPI email, the one-time preview included). A Super Admin's
+// POST /api/admin/kpis/recompute runs whatever the switches say.
+//
+// ⚠️ THIS BLOCK SITS DIRECTLY ABOVE THE SPA CATCH-ALL ON PURPOSE. app.get("*")
+// answers every GET registered after it, so a KPI GET placed below it would
+// never be reached. scripts/test-kpi-routes.js pins the order.
+const kpiCatalog = require("./lib/kpi-catalog");
+const kpiMetrics = require("./lib/kpi-metrics");
+const kpiWeight = require("./lib/kpi-weight");
+const kpiSchedule = require("./lib/kpi-schedule");
+const kpiDigest = require("./lib/kpi-digest");
+
+// One row per run: nightly, boot (the catch-up 10 minutes after a start) or
+// manual (POST /api/admin/kpis/recompute). `errors` is a JSON array of
+// { metric, code }; codes only. Timestamps are ISO-8601 Z strings.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind TEXT NOT NULL,
+		day TEXT NOT NULL,
+		started_at TEXT NOT NULL,
+		finished_at TEXT,
+		status TEXT NOT NULL DEFAULT 'running',
+		duration_ms INTEGER,
+		errors TEXT NOT NULL DEFAULT '[]',
+		drive_fetches INTEGER NOT NULL DEFAULT 0
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_kpi_runs_day ON kpi_runs(day, status)`); } catch {}
+// Each business day's figures, one row per metric. A later run of the SAME day
+// replaces that day's rows; an earlier day is never written again, so the
+// history (fleet size on a past day, say) stays what it was on that day.
+// `payload` is the JSON of { current, totals, comparisons, beforeAfter, coverage,
+// warnings, assumptions, breakdown, missingReason }, at most 4 KB.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_snapshots (
+		day TEXT NOT NULL,
+		metric_key TEXT NOT NULL,
+		value REAL,
+		display TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL,
+		confidence TEXT NOT NULL DEFAULT 'none',
+		definition_version INTEGER NOT NULL DEFAULT 1,
+		payload TEXT NOT NULL DEFAULT '{}',
+		computed_at TEXT NOT NULL,
+		PRIMARY KEY (day, metric_key)
+	)
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_kpi_snapshots_metric ON kpi_snapshots(metric_key, day)`); } catch {}
+// The monthly series, from 2025-04 to the run's month, rewritten by every run.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_series (
+		metric_key TEXT NOT NULL,
+		period TEXT NOT NULL,
+		value REAL,
+		display TEXT NOT NULL DEFAULT '',
+		coverage REAL,
+		computed_at TEXT NOT NULL,
+		PRIMARY KEY (metric_key, period)
+	)
+`);
+// A Super Admin's "approved for public use" per metric. It counts only while
+// definition_version and settings_hash still match the catalog and the settings
+// the metric reads (kpiCatalog.approvalIsValid()); no row means not approved.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_metric_approvals (
+		metric_key TEXT PRIMARY KEY,
+		approved INTEGER NOT NULL DEFAULT 0,
+		definition_version INTEGER NOT NULL,
+		settings_hash TEXT NOT NULL DEFAULT '',
+		approved_by TEXT NOT NULL DEFAULT '',
+		approved_at TEXT NOT NULL
+	)
+`);
+// The weight read off a load's rate-con PDF, once per load. load_id is the
+// normalised key (lowercase, leading '#' dropped). No file name and no text
+// from the document is kept. status: ok | no_weight | conflict | no_text |
+// too_large | not_found | error; not_found and error are tried again after
+// 30 days, every other status is final.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_load_weights (
+		load_id TEXT PRIMARY KEY,
+		weight_lb REAL,
+		source TEXT NOT NULL DEFAULT 'ratecon_pdf',
+		status TEXT NOT NULL,
+		file_id TEXT NOT NULL DEFAULT '',
+		file_size INTEGER,
+		checked_at TEXT NOT NULL
+	)
+`);
+// One row per email slot: 'preview' (sent once) and 'digest:YYYY-MM-DD' (that
+// Monday). The row is CLAIMED with INSERT OR IGNORE before the email is sent, so
+// a restart between the claim and the send can never send it twice. status:
+// claimed | sent | failed | no_recipient | missed | seeded.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS kpi_digest_sends (
+		slot_key TEXT PRIMARY KEY,
+		status TEXT NOT NULL,
+		recipients_count INTEGER NOT NULL DEFAULT 0,
+		claimed_at TEXT NOT NULL,
+		sent_at TEXT
+	)
+`);
+// A run still marked 'running' at start-up belonged to a process that stopped
+// mid-run; nothing will ever finish it.
+try {
+	db.prepare("UPDATE kpi_runs SET status = 'failed', finished_at = ?, errors = ? WHERE status = 'running'")
+		.run(new Date().toISOString(), JSON.stringify([{ metric: null, code: "INTERRUPTED" }]));
+} catch {
+	console.error("[kpi] could not close runs interrupted by the last stop");
+}
+
+const KPI_SNAPSHOT_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_SNAPSHOT_ENABLED ?? "").trim());
+const KPI_DIGEST_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_DIGEST_ENABLED ?? "").trim());
+
+// The run's time box, and the Drive phase's share of it.
+const KPI_RUN_TIME_LIMIT_MS = 4 * 60 * 1000;
+const KPI_DRIVE_TIME_LIMIT_MS = 2 * 60 * 1000;
+// One Drive request (a list or a download).
+const KPI_DRIVE_TIMEOUT_MS = 20 * 1000;
+// Rate-con PDFs read per scheduled run, and how long a not_found / error answer
+// stands before that load is tried again.
+const KPI_WEIGHT_MAX_PER_RUN = 40;
+const KPI_WEIGHT_RETRY_MS = 30 * 24 * 60 * 60 * 1000;
+// After a failed scheduled run: wait this long, and stop for the day after this
+// many failures, so a Sheets outage is not retried every minute.
+const KPI_RETRY_AFTER_FAILURE_MS = 30 * 60 * 1000;
+const KPI_FAILED_RUNS_PER_DAY = 3;
+const KPI_BOOT_DELAY_MS = 10 * 60 * 1000;
+const KPI_TICK_MS = 60 * 1000;
+const KPI_PAYLOAD_MAX_BYTES = 4096;
+const KPI_DELIVERED_RE = /^(delivered|completed|pod received)$/i;
+const KPI_SETTINGS_KEY = "kpi.settings";
+const KPI_DERIVED_KEY = "kpi.derived";
+const KPI_SETTING_FIELDS = ["aiDispatchStart", "dedicatedStart", "baselineMpg", "recipients"];
+const KPI_MAX_RECIPIENTS = 10;
+const KPI_SNAPSHOT_STATUSES = ["ok", "partial", "missing", "not_tracked"];
+const KPI_CONFIDENCES = ["high", "medium", "low", "none"];
+
+// Single flight: one run at a time, whoever starts it. kpiCurrentRunId is the
+// running run's id, set before the run's first await so the recompute route can
+// answer with it.
+let kpiRunning = false;
+let kpiCurrentRunId = null;
+// True once the scheduler below has started in this process.
+let kpiJobStarted = false;
+
+// A real calendar date "YYYY-MM-DD" (2026-02-31 is not one).
+function kpiIsDay(v) {
+	if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+	const [y, m, d] = v.split("-").map(Number);
+	return new Date(Date.UTC(y, m - 1, d, 12)).toISOString().slice(0, 10) === v;
+}
+
+// A date the KPI page may set: a real calendar date from 2020 to 2100.
+function kpiSettingDay(v) {
+	return kpiIsDay(v) && v >= "2020-01-01" && v <= "2100-12-31";
+}
+
+// The business day (APP_TIMEZONE) of a stored instant: SQLite's
+// "YYYY-MM-DD HH:MM:SS" (UTC, no zone) or an ISO string with Z or an offset.
+// null when the value is neither.
+function kpiInstantDay(value, timeZone) {
+	const s = String(value ?? "").trim().slice(0, 40);
+	const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?\s?(Z|[+-]\d{2}:?\d{2})?$/i);
+	if (!m) return null;
+	const zone = !m[5] ? "Z" : (/^[+-]\d{4}$/.test(m[5]) ? `${m[5].slice(0, 3)}:${m[5].slice(3)}` : m[5].toUpperCase());
+	const ms = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4] || "00"}${zone}`);
+	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), timeZone) : null;
+}
+
+function kpiYield() {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
+// `promise`, or a TIME_LIMIT rejection once `ms` have passed. The losing promise
+// is left to settle on its own (Promise.race has subscribed to it, so a late
+// rejection is not unhandled).
+function kpiWithin(promise, ms) {
+	let timer = null;
+	const limit = new Promise((resolve, reject) => {
+		timer = setTimeout(() => reject(Object.assign(new Error("time limit"), { kpiCode: "TIME_LIMIT" })), Math.max(0, ms));
+	});
+	return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+function kpiStop(code) {
+	return Object.assign(new Error(code), { kpiCode: code });
+}
+
+// The page's settings, normalised. Anything unreadable falls back to "not set".
+function kpiNormalizeSettings(raw) {
+	const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+	const day = (v) => (kpiSettingDay(v) ? v : null);
+	const mpg = typeof r.baselineMpg === "number" && Number.isFinite(r.baselineMpg) && r.baselineMpg >= 3 && r.baselineMpg <= 15 ? r.baselineMpg : null;
+	const recipients = [];
+	for (const e of Array.isArray(r.recipients) ? r.recipients : []) {
+		const v = typeof e === "string" ? e.trim().toLowerCase() : "";
+		if (v && publicFormInput.checkPublicEmail(v).ok && !recipients.includes(v) && recipients.length < KPI_MAX_RECIPIENTS) recipients.push(v);
+	}
+	return { aiDispatchStart: day(r.aiDispatchStart), dedicatedStart: day(r.dedicatedStart), baselineMpg: mpg, recipients };
+}
+
+function kpiReadSettings() {
+	let raw = null;
+	try {
+		const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(KPI_SETTINGS_KEY);
+		raw = row ? JSON.parse(row.value) : null;
+	} catch {
+		raw = null;
+	}
+	return kpiNormalizeSettings(raw);
+}
+
+// The AI dispatch start the last successful run derived from the data.
+function kpiReadDerived() {
+	let raw = null;
+	try {
+		const row = db.prepare("SELECT value FROM server_state WHERE key = ?").get(KPI_DERIVED_KEY);
+		raw = row ? JSON.parse(row.value) : null;
+	} catch {
+		raw = null;
+	}
+	const a = raw && raw.aiDispatchStart && typeof raw.aiDispatchStart === "object" ? raw.aiDispatchStart : {};
+	return {
+		aiDispatchStart: {
+			value: kpiIsDay(a.value) ? a.value : null,
+			evidence: typeof a.evidence === "string" ? a.evidence.slice(0, 300) : "",
+		},
+	};
+}
+
+// A PUT /api/admin/kpis/settings body -> { patch } or { error, field }. Own keys
+// only, each one on the list; anything else (a __proto__ or constructor key
+// included) is refused, never ignored.
+function kpiSettingsPatch(body) {
+	if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "Send the KPI settings as an object.", field: null };
+	const patch = {};
+	for (const k of Object.keys(body)) {
+		if (!KPI_SETTING_FIELDS.includes(k)) return { error: "That is not a KPI setting.", field: String(k).slice(0, 40) };
+		const v = body[k];
+		if (k === "aiDispatchStart" || k === "dedicatedStart") {
+			if (v !== null && !kpiSettingDay(v)) return { error: `${k} must be a date (YYYY-MM-DD) or empty.`, field: k };
+			patch[k] = v;
+		} else if (k === "baselineMpg") {
+			if (v !== null && !(typeof v === "number" && Number.isFinite(v) && v >= 3 && v <= 15)) {
+				return { error: "baselineMpg must be a number from 3 to 15, or empty.", field: k };
+			}
+			patch[k] = v;
+		} else {
+			if (!Array.isArray(v) || v.length > 50) return { error: `recipients must be a list of at most ${KPI_MAX_RECIPIENTS} email addresses.`, field: k };
+			const list = [];
+			for (const e of v) {
+				const addr = typeof e === "string" ? e.trim().toLowerCase() : "";
+				if (!addr || !publicFormInput.checkPublicEmail(addr).ok) return { error: "Each recipient must be one valid email address.", field: k };
+				if (!list.includes(addr)) list.push(addr);
+			}
+			if (list.length > KPI_MAX_RECIPIENTS) return { error: `recipients must be a list of at most ${KPI_MAX_RECIPIENTS} email addresses.`, field: k };
+			patch[k] = list;
+		}
+	}
+	return { patch };
+}
+
+// Job Tracking -> the loads and arrivals lib/kpi-metrics.js reads. `jt` is a
+// liveJobTrackingView() (cancelled and soft-deleted loads already dropped; its
+// rows are copies). Columns are found by header, as the Financials ledger finds
+// them. A load's day is its Completion Date, else its Drop-off Appointment, else
+// its Pickup Appointment, read by sheetDayKey(). Every cell is cut to a bound
+// length before any regex reads it. Keys are lowercased internal keys that never
+// leave the server.
+function kpiSheetLoads(jt) {
+	const headers = (jt && jt.headers) || [];
+	const rows = (jt && jt.data) || [];
+	const loadIdCol = findCol(headers, /load.?id|job.?id/i);
+	const statusCol = findCol(headers, /^(job[\s._-]?)?status$/i) || findCol(headers, /status/i);
+	const completionCol = findCol(headers, /completion.*date/i);
+	const dropoffCol = findCol(headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+	const pickupCol = findCol(headers, /pickup.*appo|pickup.*date/i);
+	const contractCol = findCol(headers, /^\s*contract.?id\s*$/i);
+	const driverCol = findCol(headers, /^driver$/i);
+	const truckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
+	const detailsCol = findCol(headers, /^\s*details\s*$/i);
+	const cell = (r, col, max) => (col ? String(r[col] ?? "") : "").slice(0, max);
+	const dayOf = (r, col) => {
+		const d = col ? sheetDayKey(cell(r, col, 200)) : "";
+		return kpiIsDay(d) ? d : "";
+	};
+	const loads = [];
+	const arrivals = [];
+	for (const r of rows) {
+		const loadId = cell(r, loadIdCol, 200).trim().toLowerCase().replace(/^#/, "");
+		const status = cell(r, statusCol, 200).trim();
+		const day = dayOf(r, completionCol) || dayOf(r, dropoffCol) || dayOf(r, pickupCol) || null;
+		loads.push({
+			loadId,
+			status,
+			day,
+			// No Contract ID column at all tells nothing about the AI path.
+			contractIdBlank: contractCol ? cell(r, contractCol, 200).trim() === "" : false,
+			driverKey: cell(r, driverCol, 200).trim().toLowerCase(),
+			truckKey: cell(r, truckCol, 200).trim().toLowerCase(),
+			detailsText: cell(r, detailsCol, 2000),
+		});
+		if (KPI_DELIVERED_RE.test(status)) arrivals.push({ loadId, appointmentText: cell(r, dropoffCol, 200), deliveredDay: day });
+	}
+	return { loads, arrivals };
+}
+
+// The shared cache object goes straight into liveJobTrackingView() and is
+// never read or written here otherwise (scripts/test-jt-cache-isolation.js
+// sweeps this function as a holder of the raw cache).
+async function kpiReadSheet() {
+	const cached = await getJobTrackingCached();
+	return kpiSheetLoads(liveJobTrackingView(cached));
+}
+
+// Gross load revenue per month from the Financials books: every "revenue" item
+// plus the "Settlement adjustment" items that adjust revenue, so a closed month
+// reads exactly as it settled. A month with no such item has no entry (no
+// records is not $0).
+function kpiRevenueByMonth(books) {
+	const cents = new Map();
+	for (const it of (books && Array.isArray(books.items) ? books.items : [])) {
+		const isRevenue = it && (it.kind === "revenue" || (it.kind === "settlement_adjustment" && it.adjusts === "revenue"));
+		if (!isRevenue || !/^\d{4}-\d{2}$/.test(String(it.month || ""))) continue;
+		cents.set(it.month, (cents.get(it.month) || 0) + (Number(it.cents) || 0));
+	}
+	return [...cents.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([period, c]) => ({ period, value: c / 100 }));
+}
+
+// Everything the metrics read from SQLite, in one synchronous pass per table.
+// Named columns only: expenses also holds receipt photos (photo_data) and the
+// OCR'd receipt text (receipt_details), and neither may be loaded here.
+// opts: { asOfDay, timeZone }.
+function kpiGatherDbInputs(db, opts) {
+	const tz = opts.timeZone;
+	const dayOf = (v) => kpiInstantDay(v, tz);
+	const key = (id) => String(id ?? "").trim().toLowerCase().replace(/^#/, "");
+	const finite = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+
+	const eldDaily = db.prepare(
+		"SELECT local_day AS day, truck_id, SUM(miles) AS miles FROM eld_miles_daily GROUP BY local_day, truck_id",
+	).all().filter((r) => kpiIsDay(r.day)).map((r) => ({ day: r.day, truckId: String(r.truck_id ?? ""), miles: Number(r.miles) || 0 }));
+
+	const withDevice = new Set(db.prepare("SELECT DISTINCT truck_id FROM eld_device_assignments").all().map((r) => String(r.truck_id)));
+	const trucks = db.prepare(
+		"SELECT id, status, created_at, in_service_date, retired_at, routemate_vehicle_id FROM trucks",
+	).all().map((t) => {
+		const inService = String(t.in_service_date || "").trim();
+		const retired = String(t.retired_at || "").trim();
+		return {
+			id: String(t.id),
+			status: String(t.status || ""),
+			createdDay: dayOf(t.created_at),
+			inServiceDay: kpiIsDay(inService) ? inService : null,
+			retiredDay: kpiIsDay(retired) ? retired : null,
+			hasEld: String(t.routemate_vehicle_id || "").trim() !== "" || withDevice.has(String(t.id)),
+		};
+	});
+
+	const fleetHistory = db.prepare(
+		"SELECT day, value FROM kpi_snapshots WHERE metric_key = 'fleet_trucks' AND day < ? AND value IS NOT NULL ORDER BY day",
+	).all(opts.asOfDay).map((r) => ({ day: r.day, value: Number(r.value) }));
+
+	// Fuel receipts by their own date (the purchase day), status as stored:
+	// lib/kpi-metrics.js applies the Rejected filter (EXPENSE_PNL_FILTER).
+	const fuelReceipts = db.prepare(
+		"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'",
+	).all().map((r) => {
+		const d = String(r.date || "").slice(0, 10);
+		return {
+			day: kpiIsDay(d) ? d : null,
+			amount: Number(r.amount) || 0,
+			gallons: Number(r.gallons) > 0 ? Number(r.gallons) : null,
+			status: String(r.status ?? ""),
+		};
+	});
+
+	// AI and automation work, as the business day each piece was done.
+	const days = (sql) => db.prepare(sql).all().map((r) => dayOf(r.at)).filter(Boolean);
+	const activity = {
+		aiReceipts: days("SELECT created_at AS at FROM expenses WHERE COALESCE(receipt_details, '') != ''"),
+		aiExpenseInsights: days("SELECT timestamp AS at FROM audit_trail WHERE action IN ('expense_ai_insights', 'expense_ai_query')"),
+		geofenceStatuses: days("SELECT changed_at AS at FROM load_status_history WHERE source = 'geofence'"),
+		// The baseline row a first start seeds is a marker, not a run.
+		invoiceAutogenRuns: days("SELECT ran_at AS at FROM invoice_autogen_runs WHERE COALESCE(summary, '') NOT LIKE 'baseline%'"),
+	};
+
+	const ratecon = db.prepare("SELECT load_id, weight_lb, status FROM kpi_load_weights").all()
+		.map((r) => ({ loadId: r.load_id, status: String(r.status || ""), weightLb: finite(r.weight_lb) }));
+
+	const receiverEvents = new Map();
+	for (const r of db.prepare(
+		"SELECT load_id, changed_at, source FROM load_status_history WHERE LOWER(new_status) = 'at receiver' ORDER BY changed_at",
+	).all()) {
+		const k = key(r.load_id);
+		if (!k) continue;
+		if (!receiverEvents.has(k)) receiverEvents.set(k, []);
+		receiverEvents.get(k).push({ at: String(r.changed_at || ""), source: String(r.source || "") });
+	}
+
+	const loadEld = new Map();
+	for (const r of db.prepare(
+		"SELECT load_id, loaded_miles, deadhead_miles, basis, loaded_basis, deadhead_basis, dest_arrive_ms, overlap_load_ids, in_progress FROM load_eld_miles",
+	).all()) {
+		const k = key(r.load_id);
+		if (!k) continue;
+		loadEld.set(k, {
+			// 0 is the column's "not observed".
+			eldArriveMs: Number(r.dest_arrive_ms) > 0 ? Number(r.dest_arrive_ms) : null,
+			loadedMiles: finite(r.loaded_miles),
+			deadheadMiles: finite(r.deadhead_miles),
+			basis: String(r.basis || ""),
+			loadedBasis: String(r.loaded_basis || ""),
+			deadheadBasis: String(r.deadhead_basis || ""),
+			inProgress: Number(r.in_progress) === 1,
+			overlap: String(r.overlap_load_ids || "").trim() !== "",
+		});
+	}
+
+	const destLng = new Map();
+	for (const r of db.prepare("SELECT load_id, dest_lng FROM load_coordinates").all()) {
+		const k = key(r.load_id);
+		if (k) destLng.set(k, finite(r.dest_lng));
+	}
+
+	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng };
+}
+
+// The inputs lib/kpi-metrics.js computeKpis() takes. Load miles are kept for
+// live loads only (a cancelled or deleted load's miles are not the fleet's work)
+// and take that load's day.
+function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn, revenueByMonth }) {
+	const loadsByKey = new Map(sheet.loads.filter((l) => l.loadId).map((l) => [l.loadId, l]));
+	const arrivals = sheet.arrivals.map((a) => {
+		const eld = dbIn.loadEld.get(a.loadId);
+		return {
+			loadId: a.loadId,
+			appointmentText: a.appointmentText,
+			destLng: dbIn.destLng.has(a.loadId) ? dbIn.destLng.get(a.loadId) : null,
+			eldArriveMs: eld ? eld.eldArriveMs : null,
+			receiverEvents: dbIn.receiverEvents.get(a.loadId) || [],
+			deliveredDay: a.deliveredDay,
+		};
+	});
+	const loadMiles = [];
+	for (const [k, e] of dbIn.loadEld) {
+		const load = loadsByKey.get(k);
+		if (!load) continue;
+		loadMiles.push({
+			loadId: k, day: load.day, loadedMiles: e.loadedMiles, deadheadMiles: e.deadheadMiles,
+			basis: e.basis, loadedBasis: e.loadedBasis, deadheadBasis: e.deadheadBasis, inProgress: e.inProgress, overlap: e.overlap,
+		});
+	}
+	return {
+		asOfDay,
+		settings: { aiDispatchStart: settings.aiDispatchStart, dedicatedStart: settings.dedicatedStart, baselineMpg: settings.baselineMpg },
+		loads: sheet.loads,
+		ratecon: dbIn.ratecon,
+		revenueByMonth,
+		eldDaily: dbIn.eldDaily,
+		trucks: dbIn.trucks,
+		fleetHistory: dbIn.fleetHistory,
+		fuelReceipts: dbIn.fuelReceipts,
+		arrivals,
+		loadMiles,
+		activity: dbIn.activity,
+	};
+}
+
+// A rate-con PDF -> what its text says about the load's weight.
+function kpiWeightFromPdf(buffer, fileId) {
+	const size = buffer.length;
+	if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", weightLb: null, fileId, fileSize: size };
+	const text = brokerInvoice.extractPdfText(buffer);
+	const cls = kpiWeight.classifyPdfText(text, size);
+	if (cls !== "ok") return { status: cls, weightLb: null, fileId, fileSize: size };
+	const w = kpiWeight.parseWeight(text);
+	if (w.status === "ok") return { status: "ok", weightLb: w.weightLb, fileId, fileSize: size };
+	return { status: w.status === "conflict" ? "conflict" : "no_weight", weightLb: null, fileId, fileSize: size };
+}
+
+// One load's rate-con: the stored RATECON document first, then, only where the
+// rate-con Drive folder is configured, ONE Drive list by file name and the
+// newest matching file (never a search by content, never getRateConBytes()).
+// `counter.driveFetches` counts this function's Drive requests.
+async function kpiRateConWeight(loadId, counter, deadlineMs) {
+	const doc = db.prepare(
+		`SELECT id, load_id, type, file_name, drive_file_id, drive_url FROM documents
+		 WHERE LOWER(TRIM(load_id)) IN (?, ?) AND UPPER(type) IN (${RATECON_DOC_TYPES.map(() => "?").join(", ")}) AND deleted_at IS NULL
+		 ORDER BY uploaded_at DESC LIMIT 1`,
+	).get(loadId, `#${loadId}`, ...RATECON_DOC_TYPES);
+	if (doc) {
+		const buffer = await fetchDocumentBytes(doc);
+		if (buffer && buffer.length) return kpiWeightFromPdf(buffer, `document:${doc.id}`);
+	}
+	const safe = String(loadId).replace(/[^A-Za-z0-9]/g, "");
+	if (RATECON_DRIVE_FOLDER_ID && safe) {
+		const drive = await getDrive();
+		const timeout = Math.max(1000, Math.min(KPI_DRIVE_TIMEOUT_MS, deadlineMs - Date.now()));
+		counter.driveFetches++;
+		const list = await drive.files.list({
+			q: `'${RATECON_DRIVE_FOLDER_ID}' in parents and trashed = false and name contains '${safe}'`,
+			fields: "files(id,name,size,createdTime)",
+			orderBy: "createdTime desc",
+			pageSize: 10,
+			supportsAllDrives: true,
+			includeItemsFromAllDrives: true,
+		}, { timeout });
+		// Our keys are lowercased; the file name is compared the same way.
+		const files = ((list && list.data && list.data.files) || [])
+			.filter((f) => rcIndexShared.filenameCarriesLoadId(String(f.name || "").toLowerCase(), loadId))
+			.sort((a, b) => String(b.createdTime || "").localeCompare(String(a.createdTime || "")));
+		const newest = files[0];
+		if (!newest) return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
+		const size = Number(newest.size);
+		if (!(size > 0)) return { status: "error", weightLb: null, fileId: String(newest.id || ""), fileSize: null };
+		if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", weightLb: null, fileId: String(newest.id || ""), fileSize: size };
+		counter.driveFetches++;
+		const resp = await drive.files.get(
+			{ fileId: newest.id, alt: "media", supportsAllDrives: true },
+			{ responseType: "arraybuffer", timeout },
+		);
+		return kpiWeightFromPdf(Buffer.from(resp.data), String(newest.id || ""));
+	}
+	return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
+}
+
+// The weight phase of a scheduled run: delivered live loads whose Details state
+// no weight and that have no answer on file yet (or a not_found / error answer
+// older than 30 days), newest first, at most KPI_WEIGHT_MAX_PER_RUN, until
+// `deadlineMs`. Returns { driveFetches, checked, codes }.
+async function kpiBackfillWeights(deadlineMs, loads) {
+	const out = { driveFetches: 0, checked: 0, codes: new Set() };
+	const nowMs = Date.now();
+	const known = new Map(db.prepare("SELECT load_id, status, checked_at FROM kpi_load_weights").all().map((r) => [r.load_id, r]));
+	const candidates = [];
+	for (const load of loads) {
+		if (!load.loadId || !KPI_DELIVERED_RE.test(load.status)) continue;
+		const row = known.get(load.loadId);
+		if (row) {
+			const retry = (row.status === "not_found" || row.status === "error") && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS);
+			if (!retry) continue;
+		}
+		if (kpiWeight.parseWeight(load.detailsText).status === "ok") continue;
+		candidates.push(load);
+	}
+	candidates.sort((a, b) => String(b.day || "").localeCompare(String(a.day || "")));
+	const upsert = db.prepare(`
+		INSERT INTO kpi_load_weights (load_id, weight_lb, source, status, file_id, file_size, checked_at)
+		VALUES (?, ?, 'ratecon_pdf', ?, ?, ?, ?)
+		ON CONFLICT(load_id) DO UPDATE SET
+			weight_lb = excluded.weight_lb, source = excluded.source, status = excluded.status,
+			file_id = excluded.file_id, file_size = excluded.file_size, checked_at = excluded.checked_at
+	`);
+	for (const load of candidates.slice(0, KPI_WEIGHT_MAX_PER_RUN)) {
+		if (Date.now() >= deadlineMs) {
+			out.codes.add("RATECON_TIME_LIMIT");
+			break;
+		}
+		let result;
+		try {
+			result = await kpiRateConWeight(load.loadId, out, deadlineMs);
+		} catch {
+			result = { status: "error", weightLb: null, fileId: "", fileSize: null };
+			out.codes.add("RATECON_FETCH_FAILED");
+		}
+		upsert.run(load.loadId, Number.isFinite(result.weightLb) ? result.weightLb : null, result.status, result.fileId || "", Number.isFinite(result.fileSize) ? result.fileSize : null, new Date().toISOString());
+		out.checked++;
+		await kpiYield();
+	}
+	return out;
+}
+
+// One metric's stored payload, cut to KPI_PAYLOAD_MAX_BYTES: the breakdown goes
+// first, then everything but the current figure and its coverage.
+function kpiPayload(m, note) {
+	const full = {
+		current: m.current ?? null, totals: m.totals ?? [], comparisons: m.comparisons ?? [], beforeAfter: m.beforeAfter ?? [],
+		coverage: m.coverage ?? null, warnings: m.warnings ?? [], assumptions: m.assumptions ?? [], breakdown: m.breakdown ?? null,
+		missingReason: m.missingReason ?? null,
+	};
+	const tries = [full, { ...full, breakdown: null }, { current: full.current, coverage: full.coverage, missingReason: full.missingReason }];
+	for (let i = 0; i < tries.length; i++) {
+		const text = JSON.stringify(tries[i]);
+		if (Buffer.byteLength(text, "utf8") <= KPI_PAYLOAD_MAX_BYTES) {
+			if (i > 0) note(m.key, "PAYLOAD_TRIMMED");
+			return text;
+		}
+	}
+	note(m.key, "PAYLOAD_TRIMMED");
+	return "{}";
+}
+
+// Store one run's results for business day `day`, in ONE transaction: that
+// day's snapshot rows (upserted), the whole series (replaced) and the derived
+// AI dispatch start. Returns the number of metrics stored.
+function kpiStoreResult(day, result, note) {
+	const computedAt = new Date().toISOString();
+	const latest = db.prepare("SELECT MAX(day) AS day FROM kpi_snapshots").get();
+	if (latest && latest.day && latest.day > day) throw kpiStop("CLOCK_BEHIND");
+	const snapRows = [];
+	const seriesRows = [];
+	for (const m of (result && Array.isArray(result.metrics) ? result.metrics : [])) {
+		const meta = m && kpiCatalog.METRIC_KEYS.includes(m.key) ? kpiCatalog.metricByKey(m.key) : null;
+		if (!meta) {
+			note(null, "UNKNOWN_METRIC");
+			continue;
+		}
+		snapRows.push([
+			day, m.key,
+			Number.isFinite(m.value) ? m.value : null,
+			typeof m.display === "string" ? m.display.slice(0, 120) : "",
+			KPI_SNAPSHOT_STATUSES.includes(m.status) ? m.status : "missing",
+			KPI_CONFIDENCES.includes(m.confidence) ? m.confidence : "none",
+			Number(meta.definitionVersion) || 1,
+			kpiPayload(m, note),
+			computedAt,
+		]);
+		for (const s of Array.isArray(m.series) ? m.series : []) {
+			if (!s || !/^\d{4}-\d{2}$/.test(String(s.period || ""))) continue;
+			seriesRows.push([
+				m.key, s.period,
+				Number.isFinite(s.value) ? s.value : null,
+				typeof s.display === "string" ? s.display.slice(0, 60) : "",
+				Number.isFinite(s.coverage) ? s.coverage : null,
+				computedAt,
+			]);
+		}
+	}
+	const a = result && result.derived && result.derived.aiDispatchStart ? result.derived.aiDispatchStart : {};
+	const derived = { aiDispatchStart: { value: kpiIsDay(a.value) ? a.value : null, evidence: typeof a.evidence === "string" ? a.evidence.slice(0, 300) : "" } };
+	const snap = db.prepare(`
+		INSERT INTO kpi_snapshots (day, metric_key, value, display, status, confidence, definition_version, payload, computed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(day, metric_key) DO UPDATE SET
+			value = excluded.value, display = excluded.display, status = excluded.status, confidence = excluded.confidence,
+			definition_version = excluded.definition_version, payload = excluded.payload, computed_at = excluded.computed_at
+	`);
+	const series = db.prepare("INSERT INTO kpi_series (metric_key, period, value, display, coverage, computed_at) VALUES (?, ?, ?, ?, ?, ?)");
+	db.transaction(() => {
+		for (const r of snapRows) snap.run(...r);
+		db.prepare("DELETE FROM kpi_series").run();
+		for (const r of seriesRows) series.run(...r);
+		db.prepare("INSERT OR REPLACE INTO server_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(KPI_DERIVED_KEY, JSON.stringify(derived));
+	})();
+	return snapRows.length;
+}
+
+// One run, start to finish: gather, compute, store. kind: 'nightly' | 'boot' |
+// 'manual'. Single flight: a second call while one runs returns null at once.
+// The run row is inserted BEFORE the first await, so kpiCurrentRunId holds its
+// id by the time this returns its promise. A manual run skips the Drive phase.
+// Resolves { runId, status }; never rejects for a failed run (that is recorded
+// on the run row as codes).
+async function runKpiSnapshot(kind) {
+	if (kpiRunning) return null;
+	kpiRunning = true;
+	const startedMs = Date.now();
+	const deadlineMs = startedMs + KPI_RUN_TIME_LIMIT_MS;
+	const day = appTime.dayInZone(new Date(startedMs), APP_TIMEZONE);
+	const errors = [];
+	const note = (metric, code) => {
+		if (!errors.some((e) => e.metric === metric && e.code === code)) errors.push({ metric, code });
+	};
+	let runId = null;
+	let status = "failed";
+	let stored = 0;
+	let driveFetches = 0;
+	try {
+		runId = Number(db.prepare("INSERT INTO kpi_runs (kind, day, started_at, status, errors, drive_fetches) VALUES (?, ?, ?, 'running', '[]', 0)")
+			.run(kind, day, new Date(startedMs).toISOString()).lastInsertRowid);
+		kpiCurrentRunId = runId;
+		notifyChange("kpis");
+		const settings = kpiReadSettings();
+
+		let sheet;
+		try {
+			sheet = await kpiWithin(kpiReadSheet(), deadlineMs - Date.now());
+		} catch (e) {
+			throw kpiStop(e && e.kpiCode === "TIME_LIMIT" ? "TIME_LIMIT" : "SHEET_READ_FAILED");
+		}
+		await kpiYield();
+
+		let revenueByMonth = [];
+		try {
+			revenueByMonth = kpiRevenueByMonth(await kpiWithin(buildFinancialsLedger(), deadlineMs - Date.now()));
+		} catch (e) {
+			note("revenue", e && e.kpiCode === "TIME_LIMIT" ? "TIME_LIMIT" : "LEDGER_READ_FAILED");
+		}
+		await kpiYield();
+
+		if (kind !== "manual") {
+			try {
+				const w = await kpiBackfillWeights(Math.min(Date.now() + KPI_DRIVE_TIME_LIMIT_MS, deadlineMs), sheet.loads);
+				driveFetches = w.driveFetches;
+				for (const code of w.codes) note("freight_tons_stated", code);
+			} catch {
+				note("freight_tons_stated", "RATECON_PHASE_FAILED");
+			}
+			await kpiYield();
+		}
+
+		if (Date.now() >= deadlineMs) throw kpiStop("TIME_LIMIT");
+		let inputs;
+		try {
+			const dbIn = kpiGatherDbInputs(db, { asOfDay: day, timeZone: APP_TIMEZONE });
+			inputs = kpiAssembleInputs({ asOfDay: day, settings, sheet, dbIn, revenueByMonth });
+		} catch {
+			throw kpiStop("DB_READ_FAILED");
+		}
+		await kpiYield();
+
+		if (Date.now() >= deadlineMs) throw kpiStop("TIME_LIMIT");
+		let result;
+		try {
+			result = kpiMetrics.computeKpis(inputs);
+		} catch {
+			throw kpiStop("COMPUTE_FAILED");
+		}
+		// A metric whose formula failed comes back 'missing' with a code here; the
+		// run still stores every other metric and is marked partial.
+		for (const e of result && Array.isArray(result.errors) ? result.errors : []) {
+			const metric = e && kpiCatalog.METRIC_KEYS.includes(e.metric) ? e.metric : null;
+			note(metric, e && typeof e.code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(e.code) ? e.code : "KPI_COMPUTE_FAILED");
+		}
+		await kpiYield();
+
+		try {
+			stored = kpiStoreResult(day, result, note);
+		} catch (e) {
+			throw kpiStop(e && e.kpiCode ? e.kpiCode : "WRITE_FAILED");
+		}
+		status = errors.length ? "partial" : "ok";
+	} catch (e) {
+		note(null, e && e.kpiCode ? e.kpiCode : "RUN_FAILED");
+		status = "failed";
+	} finally {
+		const finishedMs = Date.now();
+		if (runId) {
+			try {
+				db.prepare("UPDATE kpi_runs SET finished_at = ?, status = ?, duration_ms = ?, errors = ?, drive_fetches = ? WHERE id = ?")
+					.run(new Date(finishedMs).toISOString(), status, finishedMs - startedMs, JSON.stringify(errors), driveFetches, runId);
+			} catch {
+				console.error("[kpi] could not record the end of a run");
+			}
+		}
+		kpiRunning = false;
+		kpiCurrentRunId = null;
+		notifyChange("kpis");
+		console.log(`[kpi] ${kind} run for ${day}: ${status} in ${finishedMs - startedMs} ms — ${stored} metric(s) stored, ` +
+			`${driveFetches} Drive request(s)${errors.length ? `; codes: ${errors.map((x) => x.code).join(", ")}` : ""}`);
+	}
+	return { runId, status };
+}
+
+// The schedule in words, for the admin page. The Central times hold only for the
+// default business zone (US Eastern, one hour ahead of Central all year), so any
+// other zone is named as itself.
+function kpiScheduleText(tz) {
+	if (tz === appTime.DEFAULT_APP_TIMEZONE) {
+		return { snapshot: "Daily at 4:00 AM Eastern (3:00 AM Central)", digest: "Mondays at 9:00 AM Eastern (8:00 AM Central)" };
+	}
+	return { snapshot: `Daily at 4:00 AM (${tz})`, digest: `Mondays at 9:00 AM (${tz})` };
+}
+
+function kpiParseErrors(text) {
+	let list = [];
+	try { list = JSON.parse(text || "[]"); } catch { list = []; }
+	return (Array.isArray(list) ? list : []).filter((e) => e && typeof e.code === "string")
+		.map((e) => ({ metric: typeof e.metric === "string" ? e.metric : null, code: e.code }));
+}
+
+// The job block of GET /api/admin/kpis.
+function kpiJobState(nowMs) {
+	const last = db.prepare("SELECT id, kind, status, started_at, finished_at, duration_ms, errors FROM kpi_runs ORDER BY id DESC LIMIT 1").get();
+	const preview = db.prepare("SELECT status, claimed_at, sent_at FROM kpi_digest_sends WHERE slot_key = 'preview'").get();
+	const digest = db.prepare("SELECT slot_key, status, claimed_at, sent_at FROM kpi_digest_sends WHERE substr(slot_key, 1, 7) = 'digest:' ORDER BY slot_key DESC LIMIT 1").get();
+	const snapshotOn = kpiJobStarted;
+	const digestOn = kpiJobStarted && KPI_DIGEST_ENABLED;
+	const texts = kpiScheduleText(APP_TIMEZONE);
+	return {
+		enabled: { snapshot: snapshotOn, digest: digestOn },
+		snapshotSchedule: texts.snapshot,
+		digestSchedule: texts.digest,
+		lastRun: last ? {
+			id: last.id, kind: last.kind, status: last.status, startedAt: last.started_at, finishedAt: last.finished_at || null,
+			durationMs: last.duration_ms == null ? null : last.duration_ms, errors: kpiParseErrors(last.errors),
+		} : null,
+		nextSnapshotAt: snapshotOn ? kpiSchedule.nextSnapshotAt(nowMs, APP_TIMEZONE) : null,
+		nextDigestAt: digestOn ? kpiSchedule.nextDigestAt(nowMs, APP_TIMEZONE) : null,
+		preview: { status: preview ? preview.status : "pending", at: preview ? (preview.sent_at || preview.claimed_at || null) : null },
+		lastDigest: digest ? { slotKey: digest.slot_key, status: digest.status, at: digest.sent_at || digest.claimed_at || null } : null,
+	};
+}
+
+// The server's own check on what lib/kpi-metrics.js reports as approved: a
+// metric is shown approved ONLY when its stored row is valid for today's
+// definition and settings. No row, or a stale one, is never approved, whatever
+// the response builder says. It can only turn an approval off.
+function kpiEnforceApprovals(response, approvals, settings) {
+	const rows = new Map(approvals.map((r) => [r.metric_key, r]));
+	for (const m of response && Array.isArray(response.metrics) ? response.metrics : []) {
+		if (!m || typeof m !== "object") continue;
+		const row = rows.get(m.key);
+		const valid = Boolean(row) && kpiCatalog.approvalIsValid(row, m.key, settings);
+		if (!m.approval || typeof m.approval !== "object") m.approval = { approved: false, by: null, at: null, stale: false };
+		else if (!valid && m.approval.approved !== false) m.approval = { ...m.approval, approved: false };
+	}
+	if (response && response.settings && typeof response.settings === "object") {
+		response.settings.defaultRecipientConfigured = Boolean(ADMIN_NOTIFY_EMAIL);
+	}
+	return response;
+}
+
+// GET /api/admin/kpis's answer, from stored rows only (nothing is computed
+// here). The digest is built from this same object.
+function kpiResponse(nowMs) {
+	const settings = kpiReadSettings();
+	const latest = db.prepare("SELECT MAX(day) AS day FROM kpi_snapshots").get();
+	const latestDay = (latest && latest.day) || null;
+	const snapshots = latestDay
+		? db.prepare("SELECT day, metric_key, value, display, status, confidence, definition_version, payload, computed_at FROM kpi_snapshots WHERE day = ?").all(latestDay)
+		: [];
+	const series = db.prepare("SELECT metric_key, period, value, display, coverage, computed_at FROM kpi_series ORDER BY metric_key, period").all();
+	const approvals = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals").all();
+	const response = kpiMetrics.buildKpiResponse({
+		asOfDay: latestDay || appTime.dayInZone(new Date(nowMs), APP_TIMEZONE),
+		timeZone: APP_TIMEZONE,
+		generatedAt: new Date(nowMs).toISOString(),
+		job: kpiJobState(nowMs),
+		// The saved settings, exactly as approvals hash them (settingsHashFor()).
+		settings,
+		defaultRecipientConfigured: Boolean(ADMIN_NOTIFY_EMAIL),
+		derived: kpiReadDerived(),
+		snapshots,
+		series,
+		approvals,
+	});
+	return kpiEnforceApprovals(response, approvals, settings);
+}
+
+// Claim an email slot, then send it. The claim (INSERT OR IGNORE) comes first and
+// is the only way in: a slot already claimed, by this process before a restart
+// or by anything else, is never sent again. It counts as sent only when
+// sendEmail() says the message was handed to Gmail. Returns the slot's status.
+async function kpiClaimAndSend({ slotKey, recipients, preview, nowMs }) {
+	const claim = db.prepare("INSERT OR IGNORE INTO kpi_digest_sends (slot_key, status, recipients_count, claimed_at) VALUES (?, 'claimed', ?, ?)")
+		.run(slotKey, recipients.length, new Date(nowMs).toISOString());
+	if (!claim.changes) return "already_claimed";
+	const finish = (status, sentAt) => {
+		db.prepare("UPDATE kpi_digest_sends SET status = ?, sent_at = ? WHERE slot_key = ?").run(status, sentAt, slotKey);
+		notifyChange("kpis");
+		return status;
+	};
+	if (!recipients.length) return finish("no_recipient", null);
+	let sent = false;
+	try {
+		const digest = kpiDigest.buildDigest({ response: kpiResponse(nowMs), preview, asOfDay: appTime.dayInZone(new Date(nowMs), APP_TIMEZONE) });
+		const to = recipients.join(", ");
+		sent = (await sendEmail(to, digest.subject, digest.html)) === true;
+	} catch {
+		sent = false;
+	}
+	const status = finish(sent ? "sent" : "failed", sent ? new Date().toISOString() : null);
+	console.log(`[kpi] ${preview ? "preview" : "weekly"} digest ${slotKey === "preview" ? "" : `${slotKey} `}${status} (${recipients.length} recipient(s))`);
+	return status;
+}
+
+// The one-time preview: after the first successful run, one digest marked
+// "PREVIEW – not approved for public use" to ADMIN_NOTIFY_EMAIL ONLY (never the
+// page's recipients). Its slot is claimed once; a failed preview stays failed.
+async function kpiMaybeSendPreview(nowMs) {
+	if (!db.prepare("SELECT 1 FROM kpi_runs WHERE status IN ('ok', 'partial') LIMIT 1").get()) return null;
+	if (db.prepare("SELECT 1 FROM kpi_digest_sends WHERE slot_key = 'preview'").get()) return null;
+	const recipients = ADMIN_NOTIFY_EMAIL ? [ADMIN_NOTIFY_EMAIL] : [];
+	return kpiClaimAndSend({ slotKey: "preview", recipients, preview: true, nowMs });
+}
+
+// The weekly digest: this week's Monday slot when it is due (within 6 h of
+// 09:00), to the page's recipients, else ADMIN_NOTIFY_EMAIL. A slot past its
+// catch-up window is recorded as missed and never sent.
+async function kpiMaybeSendDigest(nowMs) {
+	const last = db.prepare("SELECT MAX(slot_key) AS k FROM kpi_digest_sends WHERE substr(slot_key, 1, 7) = 'digest:'").get();
+	const due = kpiSchedule.digestDue({ nowMs, tz: APP_TIMEZONE, lastSlotKey: (last && last.k) || null });
+	if (due.missed) {
+		db.prepare("INSERT OR IGNORE INTO kpi_digest_sends (slot_key, status, recipients_count, claimed_at) VALUES (?, 'missed', 0, ?)")
+			.run(due.slotKey, new Date(nowMs).toISOString());
+		console.log(`[kpi] weekly digest ${due.slotKey} missed (more than 6 h past its slot); not sent late`);
+		notifyChange("kpis");
+		return "missed";
+	}
+	if (!due.due) return null;
+	const settings = kpiReadSettings();
+	const recipients = settings.recipients.length ? settings.recipients : (ADMIN_NOTIFY_EMAIL ? [ADMIN_NOTIFY_EMAIL] : []);
+	return kpiClaimAndSend({ slotKey: due.slotKey, recipients, preview: false, nowMs });
+}
+
+// First start: this week's digest slot, when its time has already passed, is
+// recorded as 'seeded', so a deploy later in the week (Monday afternoon
+// included) never sends a late "Monday" digest. Runs only while no digest slot
+// has ever been recorded.
+function kpiSeedDigestMarker(nowMs) {
+	if (db.prepare("SELECT 1 FROM kpi_digest_sends WHERE substr(slot_key, 1, 7) = 'digest:' LIMIT 1").get()) return;
+	const slot = kpiSchedule.digestSlot(nowMs, APP_TIMEZONE);
+	if (nowMs < slot.slotMs) return;
+	db.prepare("INSERT OR IGNORE INTO kpi_digest_sends (slot_key, status, recipients_count, claimed_at) VALUES (?, 'seeded', 0, ?)")
+		.run(slot.slotKey, new Date(nowMs).toISOString());
+}
+
+// May a scheduled run for business day `day` start now? Not while a failure from
+// the last KPI_RETRY_AFTER_FAILURE_MS stands, and not after
+// KPI_FAILED_RUNS_PER_DAY failures that day.
+function kpiMayRetry(day, nowMs) {
+	const failed = db.prepare("SELECT COUNT(*) AS n, MAX(started_at) AS last FROM kpi_runs WHERE day = ? AND status = 'failed' AND kind IN ('nightly', 'boot')").get(day);
+	if (!failed || !failed.n) return true;
+	if (failed.n >= KPI_FAILED_RUNS_PER_DAY) return false;
+	return !(nowMs - Date.parse(failed.last) < KPI_RETRY_AFTER_FAILURE_MS);
+}
+
+// One scheduler tick: the snapshot when it is due, then (KPI_DIGEST_ENABLED)
+// the one-time preview and the weekly digest.
+async function kpiTick(kind) {
+	if (kpiRunning) return;
+	const nowMs = Date.now();
+	const last = db.prepare("SELECT MAX(day) AS day FROM kpi_runs WHERE status IN ('ok', 'partial') AND kind IN ('nightly', 'boot')").get();
+	const due = kpiSchedule.snapshotDue({ nowMs, tz: APP_TIMEZONE, lastSnapshotDay: (last && last.day) || null });
+	if (due.due && kpiMayRetry(due.day, nowMs)) await runKpiSnapshot(kind);
+	if (KPI_DIGEST_ENABLED) {
+		await kpiMaybeSendPreview(Date.now());
+		await kpiMaybeSendDigest(Date.now());
+	}
+}
+
+if (KPI_SNAPSHOT_ENABLED && startsJob("KPI snapshot")) {
+	kpiJobStarted = true;
+	try {
+		kpiSeedDigestMarker(Date.now());
+	} catch {
+		console.error("[kpi] could not record this week's digest slot at start-up");
+	}
+	// ⚠️ THE REJECTION HANDLER LOGS — deliberately not `.catch(() => {})`, for the
+	// reason given at the ELD feed-silence sweep: kpiTick() owns its failures, so
+	// anything arriving here is a defect in that guard and must be visible. It
+	// logs the error's name, not its message (no raw error text in the logs).
+	const kpiTickSafely = (kind) => {
+		kpiTick(kind).catch((e) => {
+			console.error(`[kpi] tick threw outside its own guard (${(e && e.name) || "error"})`);
+		});
+	};
+	// The first tick waits 10 minutes, clear of the deploy's start-up burst; it is
+	// the boot run (the same business day's catch-up), and the 1-minute tick
+	// starts after it.
+	setTimeout(() => {
+		kpiTickSafely("boot");
+		setInterval(() => kpiTickSafely("nightly"), KPI_TICK_MS);
+	}, KPI_BOOT_DELAY_MS);
+	console.log(`[kpi] enabled — snapshot daily at 04:00 ${APP_TIMEZONE} (03:00 US Central), ` +
+		(KPI_DIGEST_ENABLED ? `digest Mondays at 09:00 ${APP_TIMEZONE} (08:00 US Central)` : "digest off (KPI_DIGEST_ENABLED)"));
+} else if (!KPI_SNAPSHOT_ENABLED) {
+	console.log("[kpi] off (KPI_SNAPSHOT_ENABLED) — no nightly KPI snapshot or digest is scheduled");
+}
+
+// GET /api/admin/kpis — the stored KPI figures, the job's state and the page's
+// settings (lib/kpi-metrics.js buildKpiResponse()). Super Admin only. Reads
+// stored rows; never computes.
+app.get("/api/admin/kpis", requireRole("Super Admin"), (req, res) => {
+	try {
+		res.json(kpiResponse(Date.now()));
+	} catch {
+		console.error("[kpi] GET /api/admin/kpis could not build its answer");
+		res.status(500).json({ error: "The KPI figures could not be read.", code: "KPI_READ_FAILED" });
+	}
+});
+
+// PUT /api/admin/kpis/approvals/:key — approve a metric for public use, or take
+// the approval back. The body names the definitionVersion the admin reviewed; a
+// definition that has changed since is refused (409), so nobody approves wording
+// they never saw. The approval also records the settings the metric reads
+// (settings_hash), and lapses when they change.
+app.put("/api/admin/kpis/approvals/:key", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const key = String(req.params.key || "");
+		if (!kpiCatalog.METRIC_KEYS.includes(key)) return res.status(404).json({ error: "There is no such KPI.", code: "UNKNOWN_METRIC" });
+		const body = req.body;
+		if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.approved !== "boolean" ||
+			!Number.isInteger(body.definitionVersion) || body.definitionVersion < 1) {
+			return res.status(400).json({ error: "Send approved (true or false) and the definitionVersion you reviewed.", code: "INVALID_APPROVAL" });
+		}
+		const meta = kpiCatalog.metricByKey(key);
+		if (body.definitionVersion !== meta.definitionVersion) {
+			return res.status(409).json({ error: "This KPI's definition has changed since the page loaded. Reload it and review the new definition.", code: "DEFINITION_CHANGED" });
+		}
+		const settings = kpiReadSettings();
+		const before = db.prepare("SELECT metric_key, approved, definition_version, settings_hash, approved_by, approved_at FROM kpi_metric_approvals WHERE metric_key = ?").get(key);
+		const wasApproved = Boolean(before) && kpiCatalog.approvalIsValid(before, key, settings);
+		const at = new Date().toISOString();
+		const by = String(req.session.user.username || "");
+		db.prepare(`
+			INSERT INTO kpi_metric_approvals (metric_key, approved, definition_version, settings_hash, approved_by, approved_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(metric_key) DO UPDATE SET
+				approved = excluded.approved, definition_version = excluded.definition_version, settings_hash = excluded.settings_hash,
+				approved_by = excluded.approved_by, approved_at = excluded.approved_at
+		`).run(key, body.approved ? 1 : 0, meta.definitionVersion, kpiCatalog.settingsHashFor(key, settings), by, at);
+		logAudit(req, "kpi_approval_set", "kpi", key,
+			auditText(`${key}: ${wasApproved ? "approved" : "not approved"} → ${body.approved ? "approved" : "not approved"} (definition v${meta.definitionVersion})`, 300));
+		notifyChange("kpis");
+		res.json({ key, approval: { approved: body.approved, by, at, stale: false } });
+	} catch {
+		console.error("[kpi] PUT /api/admin/kpis/approvals could not save");
+		res.status(500).json({ error: "The approval could not be saved.", code: "KPI_APPROVAL_FAILED" });
+	}
+});
+
+// PUT /api/admin/kpis/settings — the page's settings, partial: aiDispatchStart
+// (overrides the derived date), dedicatedStart, baselineMpg (3 to 15) and the
+// digest recipients (at most 10). null clears a date or the baseline.
+app.put("/api/admin/kpis/settings", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	try {
+		const parsed = kpiSettingsPatch(req.body);
+		if (parsed.error) return res.status(400).json({ error: parsed.error, code: "INVALID_KPI_SETTINGS", field: parsed.field });
+		const before = kpiReadSettings();
+		const next = kpiNormalizeSettings({ ...before, ...parsed.patch });
+		const shown = (k, v) => (k === "recipients" ? `${v.length} address${v.length === 1 ? "" : "es"}` : (v === null ? "not set" : String(v)));
+		const changed = KPI_SETTING_FIELDS.filter((k) => JSON.stringify(before[k]) !== JSON.stringify(next[k]));
+		if (changed.length) {
+			db.prepare(
+				`INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)
+				 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`
+			).run(KPI_SETTINGS_KEY, JSON.stringify(next), new Date().toISOString(), req.session.user.username || "");
+			logAudit(req, "kpi_settings_update", "kpi", "settings",
+				auditText(changed.map((k) => `${k}: ${shown(k, before[k])} → ${shown(k, next[k])}`).join("; "), 2000));
+			notifyChange("kpis");
+		}
+		res.json({ settings: kpiResponse(Date.now()).settings, changed });
+	} catch {
+		console.error("[kpi] PUT /api/admin/kpis/settings could not save");
+		res.status(500).json({ error: "The KPI settings could not be saved.", code: "KPI_SETTINGS_FAILED" });
+	}
+});
+
+// POST /api/admin/kpis/recompute — run the snapshot now, in the background (202
+// with the run's id; the page follows it through GET and the kpis:changed
+// event). Single flight: 409 while any run is in progress. A manual run never
+// calls Drive. Order is requireRole -> refuseCrossOrigin -> limiter, so a
+// refused request never spends the budget.
+const kpiRecomputeLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 6,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many KPI recomputes. Try again in a few minutes.", code: "KPI_RECOMPUTE_RATE_LIMITED" },
+	standardHeaders: true,
+});
+app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOrigin, kpiRecomputeLimiter, (req, res) => {
+	try {
+		if (kpiRunning) return res.status(409).json({ error: "A KPI run is already in progress.", code: "KPI_RUN_IN_PROGRESS" });
+		const run = runKpiSnapshot("manual");
+		const runId = kpiCurrentRunId;
+		run.catch(() => { console.error("[kpi] a manual run threw outside its own guard"); });
+		if (!runId) return res.status(500).json({ error: "The KPI run could not start.", code: "KPI_RUN_NOT_STARTED" });
+		logAudit(req, "kpi_recompute", "kpi", String(runId), "Manual KPI recompute started");
+		res.status(202).json({ runId, status: "running" });
+	} catch {
+		console.error("[kpi] POST /api/admin/kpis/recompute could not start");
+		res.status(500).json({ error: "The KPI run could not start.", code: "KPI_RUN_NOT_STARTED" });
+	}
+});
+
+// ============================================================
 // SPA Catch-All — Serve Vue app for all non-API routes
 // ============================================================
 app.get("*", (req, res) => {
