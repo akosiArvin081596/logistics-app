@@ -224,6 +224,11 @@ function battery(mods) {
 	t(W.classifyPdfText(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n${"0 0 m 200 200 l S ".repeat(20)}`, 2000) === "no_text", "§5 the raw-file fallback is no_text");
 	t(W.classifyPdfText(Buffer.from(Array.from({ length: 2000 }, (_, i) => 0x80 + (i % 120))).toString("latin1"), 2000) === "no_text", "§5 binary is no_text");
 	t(W.classifyPdfText(`${prose}${"\u0001".repeat(10)}`, 2000) === "ok", "§5 a few control characters in real text are fine");
+	// Real rate cons' text strings carry font bytes: measured median 41% printable.
+	const fontBytes = Buffer.from(Array.from({ length: 900 }, (_, i) => 0x80 + (i % 100))).toString("latin1");
+	t(W.classifyPdfText(`${fontBytes} ${prose} ${fontBytes}`, 5000) === "ok", "§5 real text among font bytes (under half printable) is read");
+	t(W.classifyPdfText(`${fontBytes} Rate Load ${"x7Q!".repeat(40)} ${fontBytes}`, 5000) === "no_text", "§5 noise with fewer than MIN_RATECON_WORDS rate-con words is no_text");
+	t(W.MIN_RATECON_WORDS === 4, "§5 four distinct rate-con words make text readable");
 
 	// §6 PDFs through the real extractor, and Details cells
 	const tText = extractPdfText(PDF_TEXT);
@@ -270,6 +275,8 @@ console.log("\n§8 mutants");
 const MUTANTS = [
 	["unit made optional (a ZIP read as pounds)", "§2", { weight: [["const UNIT_RE = new RegExp(`${NUM}${UNIT}`, \"gi\");", "const UNIT_RE = new RegExp(`${NUM}${UNIT}?`, \"gi\");"]] }],
 	["thousands separator dropped", "§1", { weight: [["const whole = Number(intPart.replace(/,/g, \"\"));", "const whole = parseFloat(intPart);"]] }],
+	["one rate-con word is enough", "§5", { weight: [["const MIN_RATECON_WORDS = 4;", "const MIN_RATECON_WORDS = 1;"]] }],
+	["a printable-share test reads real rate cons as binary", "§5", { weight: [["if (visible < MIN_PRINTABLE_CHARS) return \"no_text\";", "if (visible < MIN_PRINTABLE_CHARS || visible / s.length < 0.85) return \"no_text\";"]] }],
 	["kg not converted", "§1", { weight: [["const LB_PER_KG = 2.20462;", "const LB_PER_KG = 1;"]] }],
 	["plausibility bounds removed", "§2", { weight: [["return typeof lb === \"number\" && Number.isFinite(lb) && lb >= MIN_PLAUSIBLE_LB && lb <= MAX_PLAUSIBLE_LB;", "return typeof lb === \"number\" && Number.isFinite(lb) && lb > 0;"]] }],
 	["the first number beats the labelled weight", "§1", { weight: [["const pool = labelled.length ? labelled : all;", "const pool = all.slice(0, 1);"]] }],

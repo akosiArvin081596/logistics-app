@@ -60719,6 +60719,9 @@ db.exec(`
 		checked_at TEXT NOT NULL
 	)
 `);
+// The text rule a row's status was judged under (KPI_TEXT_RULE). Rows judged
+// before #464's follow-up read as rule 1.
+try { db.exec("ALTER TABLE kpi_load_weights ADD COLUMN text_rule INTEGER NOT NULL DEFAULT 1"); } catch {}
 // One row per email slot: 'preview' (sent once) and 'digest:YYYY-MM-DD' (that
 // Monday). The row is CLAIMED with INSERT OR IGNORE before the email is sent, so
 // a restart between the claim and the send can never send it twice. status:
@@ -60756,6 +60759,10 @@ const KPI_WEIGHT_MAX_PER_RUN = 40;
 // maxInflatedBytes): a 3 MB file that inflates to gigabytes stops here.
 const KPI_PDF_TEXT_MAX_BYTES = 8 * 1024 * 1024;
 const KPI_WEIGHT_RETRY_MS = 30 * 24 * 60 * 60 * 1000;
+// Which lib/kpi-weight.js classifyPdfText() rule a 'no_text' answer came from.
+// Rule 1 (the first nightly run, 2026-10-09) called every real rate con
+// unreadable; a 'no_text' row from an earlier rule is read again.
+const KPI_TEXT_RULE = 2;
 // After a failed scheduled run: wait this long, and stop for the day after this
 // many failures, so a Sheets outage is not retried every minute.
 const KPI_RETRY_AFTER_FAILURE_MS = 30 * 60 * 1000;
@@ -61213,13 +61220,14 @@ async function kpiBackfillWeights(deadlineMs, loads, day) {
 		.all(new Date(nowMs - 2 * 86400000).toISOString())
 		.filter((r) => kpiInstantDay(r.checked_at, APP_TIMEZONE) === day).length;
 	const budget = Math.max(0, KPI_WEIGHT_MAX_PER_RUN - checkedToday);
-	const known = new Map(db.prepare("SELECT load_id, status, checked_at FROM kpi_load_weights").all().map((r) => [r.load_id, r]));
+	const known = new Map(db.prepare("SELECT load_id, status, checked_at, text_rule FROM kpi_load_weights").all().map((r) => [r.load_id, r]));
 	const candidates = [];
 	for (const load of loads) {
 		if (!load.loadId || !KPI_DELIVERED_RE.test(load.status)) continue;
 		const row = known.get(load.loadId);
 		if (row) {
-			const retry = (row.status === "not_found" || row.status === "error") && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS);
+			const retry = ((row.status === "not_found" || row.status === "error") && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS))
+				|| (row.status === "no_text" && (Number(row.text_rule) || 1) < KPI_TEXT_RULE);
 			if (!retry) continue;
 		}
 		if (kpiWeight.parseWeight(load.detailsText).status === "ok") continue;
@@ -61227,11 +61235,11 @@ async function kpiBackfillWeights(deadlineMs, loads, day) {
 	}
 	candidates.sort((a, b) => String(b.day || "").localeCompare(String(a.day || "")));
 	const upsert = db.prepare(`
-		INSERT INTO kpi_load_weights (load_id, weight_lb, source, status, file_id, file_size, checked_at)
-		VALUES (?, ?, 'ratecon_pdf', ?, ?, ?, ?)
+		INSERT INTO kpi_load_weights (load_id, weight_lb, source, status, file_id, file_size, checked_at, text_rule)
+		VALUES (?, ?, 'ratecon_pdf', ?, ?, ?, ?, ${KPI_TEXT_RULE})
 		ON CONFLICT(load_id) DO UPDATE SET
 			weight_lb = excluded.weight_lb, source = excluded.source, status = excluded.status,
-			file_id = excluded.file_id, file_size = excluded.file_size, checked_at = excluded.checked_at
+			file_id = excluded.file_id, file_size = excluded.file_size, checked_at = excluded.checked_at, text_rule = excluded.text_rule
 	`);
 	for (const load of candidates.slice(0, budget)) {
 		if (Date.now() >= deadlineMs) {
