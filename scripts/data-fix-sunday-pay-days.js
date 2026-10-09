@@ -585,11 +585,24 @@ function driverLine(db, day, kase, ev, own) {
 	// on a later week: an earlier run may have kept the claw-back off the later
 	// invoice on purpose (a Total Due below $0, say), which nothing records, so
 	// the line needs a decision instead.
-	const passedOver = [];
-	for (const r of candidates) {
-		if (open(r)) break;
-		passedOver.push(`${r.invoice_number} (week ${r.week_start} to ${r.week_end}) is ${r.status}${String(r.paid_at || "").trim() ? `, paid ${r.paid_at}` : ""}`);
-	}
+	// A deleted weekly invoice for an October week before the first open one
+	// counts as passed over too: deleting the earliest week must not move the
+	// claw-back to a later one either. (A deleted invoice whose week has a live
+	// one in its place is the same week as that live one, which is either the
+	// home itself or passed over in its own right.)
+	const firstOpen = candidates.find(open) || null;
+	const deletedEarlier = db.prepare(
+		`SELECT invoice_number, driver, week_start, week_end, deleted_at
+		   FROM invoices WHERE COALESCE(deleted_at, '') != '' AND is_manual = 0 AND week_start >= ? AND week_end <= ? ORDER BY week_start, id`
+	).all(`${month}-01`, lastDayOf(month))
+		.filter((r) => normalizeName(r.driver) === ev.driverKey && (!firstOpen || r.week_start < firstOpen.week_start));
+	const passedOver = [
+		...candidates.slice(0, firstOpen ? candidates.indexOf(firstOpen) : candidates.length).map((r) => ({
+			week: r.week_start,
+			text: `${r.invoice_number} (week ${r.week_start} to ${r.week_end}) is ${r.status}${String(r.paid_at || "").trim() ? `, paid ${r.paid_at}` : ""}`,
+		})),
+		...deletedEarlier.map((r) => ({ week: r.week_start, text: `${r.invoice_number} (week ${r.week_start} to ${r.week_end}) was deleted ${r.deleted_at}` })),
+	].sort((a, b) => (a.week < b.week ? -1 : a.week > b.week ? 1 : 0)).map((p) => p.text);
 	if (passedOver.length) {
 		line.status = "skip";
 		line.reasons.push(`Skipped (uncertain): ${passedOver.join("; ")}. Posting the claw-back now would pass ${passedOver.length === 1 ? "it" : "them"} over and land on a later week's invoice, and this script never moves a claw-back on its own. Nothing is written for this line; it needs a decision first (which invoice takes it, or posting it by hand).`);
@@ -598,11 +611,13 @@ function driverLine(db, day, kase, ev, own) {
 	if (!candidates.length) {
 		const w = firstInvoiceWeek(month);
 		line.status = "skip";
-		// The one skip that only waits: a re-run once the invoice exists is safe.
+		// The one skip that only waits: a re-run once the invoice exists is safe
+		// (the report says so only when no other line needs a decision).
 		line.waiting = true;
+		line.rerunWhen = "once that invoice exists";
 		line.reasons.push(`Skipped: ${ev.driverName} has no weekly invoice for a week inside ${monthLabel(month)} yet. ` +
 			`The weekly batch creates each week's invoice on the evening of the Friday that ends it; the first week inside ${monthLabel(month)} is ${w.start} to ${w.end}. ` +
-			"Nothing is written for this line; re-run this command once that invoice exists.");
+			"Nothing is written for this line.");
 		return line;
 	}
 	const home = candidates[0];
@@ -614,8 +629,14 @@ function driverLine(db, day, kase, ev, own) {
 		return line;
 	}
 	// The home's adjustment, if any, is this script's own (the check above refused
-	// any other), so it is combined.
+	// any other), so it is combined. Checked again here so no change to that check
+	// can let this line overwrite someone's adjustment and its note.
 	const existing = existingAdjustment(home.invoice_number, home.adjustment, home.adjustment_note, own, "driver");
+	if (!existing.ok) {
+		line.status = "skip";
+		line.reasons.push(`Skipped (uncertain): ${home.invoice_number} carries ${usd(toCents(home.adjustment))} (note: ${JSON.stringify(home.adjustment_note || "")}) that this script did not write; writing would replace it. Nothing is written for this line; check by hand or ask.`);
+		return line;
+	}
 	line.combine = existing.combine;
 	line.before = { adjustment: toCents(home.adjustment), note: home.adjustment_note || "", totalDue: toCents(home.total_earnings) + toCents(home.adjustment) };
 	const newNote = combineNote(existing.combine ? home.adjustment_note : "", line.note);
@@ -694,7 +715,8 @@ function investorLine(db, day, kase, ev, own, ctx) {
 		line.status = "skip";
 		// The one skip that only waits: a re-run once the row exists is safe.
 		line.waiting = true;
-		line.reasons.push(`Skipped: investor ${kase.ownerId} has no ${monthLabel(month)} payout row yet. The app creates it, as an owed row, on the first payouts read (a Super Admin opening the Payouts console, or the investor's portal) on or after ${nextMonthStart}, once ${monthLabel(month)} has ended; if nothing reads payouts before the close, the close creates and locks it in one step. This script does not create it: a row for a month still in progress would show on both screens and could be marked paid before the month's own figure exists, and the adjust route never creates a row either. Nothing is written for this line; re-run this command between ${nextMonthStart} and ${closesAfter} (${monthLabel(month)}'s books close after ${closesAfter}, with the ${ctx.graceDays}-day grace).`);
+		line.rerunWhen = `between ${nextMonthStart} and ${closesAfter} (${monthLabel(month)}'s books close after ${closesAfter}, with the ${ctx.graceDays}-day grace)`;
+		line.reasons.push(`Skipped: investor ${kase.ownerId} has no ${monthLabel(month)} payout row yet. The app creates it, as an owed row, on the first payouts read (a Super Admin opening the Payouts console, or the investor's portal) on or after ${nextMonthStart}, once ${monthLabel(month)} has ended; if nothing reads payouts before the close, the close creates and locks it in one step. This script does not create it: a row for a month still in progress would show on both screens and could be marked paid before the month's own figure exists, and the adjust route never creates a row either. Nothing is written for this line.`);
 		return line;
 	}
 	line.home = row;
@@ -914,6 +936,10 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 		say(`- Rates on record: the driver ${r(ev.rates.driver)}; truck ${kase.truck} ${r(ev.rates.truck)}. For information; the line amounts come from the invoice and the ledger.`);
 	}
 	for (const n of ev.notes) say(`- Note: ${n}`);
+	// Skips that need a decision, not just a row to appear: no command is
+	// offered to re-run them, nor a line waiting beside them.
+	const blocked = plan.lines.map((l, i) => (l.status === "skip" && !l.waiting ? i + 1 : 0)).filter(Boolean);
+	const blockedText = `line ${blocked.join(" and line ")} ${blocked.length === 1 ? "needs" : "need"} a decision first (see above)`;
 	plan.lines.forEach((line, i) => {
 		say();
 		say(`Line ${i + 1} of ${plan.lines.length}: ${line.title}${line.cents !== undefined ? `, ${usd(line.cents)}` : ""}`);
@@ -960,15 +986,16 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 		for (const reason of line.reasons) say(`- ${reason}`);
 		if (line.status === "skip" && !line.waiting) {
 			say("- Do not re-run this command for this line: it is not waiting for a row to be created. It needs a decision first; resolve it by hand or ask.");
+		} else if (line.status === "skip" && blocked.length) {
+			say(`- Once what it waits for exists, ask before re-running this command: ${blockedText}.`);
+		} else if (line.status === "skip") {
+			say(`- Re-run this command ${line.rerunWhen}.`);
 		}
 	});
 	say();
 	const toWrite = plan.lines.filter((l) => l.status === "write").length;
 	const skippedLines = plan.lines.filter((l) => l.status === "skip");
 	const skipped = skippedLines.length;
-	// Skips that need a decision, not just a row to appear: no command is
-	// offered to re-run them.
-	const blocked = plan.lines.map((l, i) => (l.status === "skip" && !l.waiting ? i + 1 : 0)).filter(Boolean);
 	const applied = plan.lines.filter((l) => l.status === "applied").length;
 	const parts = [];
 	if (dryRun) parts.push(`${toWrite} line(s) would be written${kase.approved ? "" : " once approved"}`);
@@ -977,7 +1004,6 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 	if (applied) parts.push(`${applied} already applied`);
 	if (plan.lines.some((l) => l.status === "nothing")) parts.push("1 with nothing to post");
 	say(`Result: ${parts.join(", ")}.${dryRun ? " Nothing was written." : ""}`);
-	const blockedText = `line ${blocked.join(" and line ")} ${blocked.length === 1 ? "needs" : "need"} a decision first (see above)`;
 	if (!kase.approved) {
 		say(`This case is not approved, so it has no apply command: ${kase.approvalStatus}.`);
 	} else if (dryRun) {

@@ -54,6 +54,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
+const { createRequire } = require("module");
 
 const ROOT = path.join(__dirname, "..");
 const SCRIPT = path.join(__dirname, "data-fix-sunday-pay-days.js");
@@ -191,8 +192,8 @@ function buildFixture(name, opts = {}) {
 	if (o.manualAdjustment) {
 		db.prepare(
 			`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, total_earnings, status, adjustment, adjustment_note, adjusted_by, is_manual)
-			 VALUES (660, 'INV-SK-MANUAL-01', ?, '2026-10-01', '2026-10-05', 0, 'Submitted', ?, ?, 'super_admin', 1)`
-		).run(DRIVER, o.manualAdjustment.amount, o.manualAdjustment.note);
+			 VALUES (660, 'INV-SK-MANUAL-01', ?, ?, ?, 0, 'Submitted', ?, ?, 'super_admin', 1)`
+		).run(DRIVER, o.manualAdjustment.start || "2026-10-01", o.manualAdjustment.end || "2026-10-05", o.manualAdjustment.amount, o.manualAdjustment.note);
 	}
 	if (o.novemberAdjustment) {
 		db.prepare("INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, adjustment, adjustment_note, adjusted_by) VALUES (35, 5, '2026-11', 0, '2026-12-25', 'owed', ?, ?, 'super_admin')")
@@ -386,9 +387,9 @@ console.log("§5 a missing October home is skipped");
 	const r = noWrite(buildFixture("no-home", { w40: null, october: false }), APPLY_27);
 	check(r.unchanged, "the apply exits 0 and writes nothing", r.err || r.out.slice(-300));
 	check(/Skipped: Pat Sample has no weekly invoice for a week inside October 2026 yet\./.test(r.out) &&
-		/the first week inside October 2026 is 2026-10-03 to 2026-10-09/.test(r.out) && /re-run this command once that invoice exists/.test(r.out),
+		/the first week inside October 2026 is 2026-10-03 to 2026-10-09/.test(r.out) && /- Re-run this command once that invoice exists\./.test(r.out),
 		"the driver line says its home does not exist yet and when to re-run");
-	check(/Skipped: investor 5 has no October 2026 payout row yet\./.test(r.out) && /re-run this command between 2026-11-01 and 2026-11-07/.test(r.out),
+	check(/Skipped: investor 5 has no October 2026 payout row yet\./.test(r.out) && /- Re-run this command between 2026-11-01 and 2026-11-07/.test(r.out),
 		"the investor line says its row does not exist yet and when to re-run");
 	check(/0 line\(s\) written/.test(r.out) && /Re-run command for the skipped line\(s\)/.test(r.out), "it counts nothing written and prints the re-run command");
 }
@@ -594,6 +595,60 @@ console.log("§13 a re-run never takes the day back twice or moves a claw-back")
 	check(nr.code === 0 && octAdj(nov) === 0 && invAdj(nov) === -300 &&
 		/payout row 35 \(November 2026, owed\) carries \+\$150\.00 \(note: "Sunday 9\/27 credit by hand", by super_admin\)\. That adjustment was not written by this script/.test(nr.out),
 		"a hand credit on another payout row: the investor line is skipped; the driver line still applies", nr.out.slice(-600));
+
+	// Invoices outside October count too: a hand claw-back on a week that
+	// straddles into November, or on a manual invoice starting in September.
+	const w44 = buildFixture("w44-adjusted", { october: false });
+	setInvoice(w44, `INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, total_earnings, status, adjustment, adjustment_note, adjusted_by)
+		VALUES (670, 'INV-SK-2026W44-01', '${DRIVER}', '2026-10-31', '2026-11-06', 1500, 'Submitted', -300, 'Sunday 9/27 by hand', 'super_admin')`);
+	const r44 = noWrite(w44, APPLY_27);
+	check(r44.unchanged && invAdj(w44) === 0 && /INV-SK-2026W44-01 \(week 2026-10-31 to 2026-11-06, Submitted\) carries -\$300\.00/.test(r44.out),
+		"a hand claw-back on the 10/31-11/06 invoice: W40 stays at $0 and the line is skipped", r44.out.slice(-500));
+	const early = noWrite(buildFixture("manual-september", { october: false, manualAdjustment: { amount: -300, note: "Sunday 9/27 by hand", start: "2026-09-20", end: "2026-10-05" } }), APPLY_27);
+	check(early.unchanged && /INV-SK-MANUAL-01 \(manual invoice 2026-09-20 to 2026-10-05, Submitted\) carries -\$300\.00/.test(early.out),
+		"a hand claw-back on a manual invoice starting before 10/01: the line is skipped", early.out.slice(-500));
+
+	// A deleted earliest October invoice: the claw-back is not moved to W41.
+	const del = buildFixture("deleted-w40", { w40Total: 200, w41: true });
+	run([...APPLY_27, `--db=${del}`]);
+	setInvoice(del, "UPDATE invoices SET deleted_at = '2026-10-17T12:00:00.000Z', deleted_by = 'super_admin' WHERE id = 640");
+	const beforeDel = tablesHash(del);
+	const rd = run([...APPLY_27, `--db=${del}`]);
+	check(rd.code === 0 && invAdj(del, 650) === 0 && tablesHash(del) === beforeDel &&
+		/INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) was deleted 2026-10-17T12:00:00\.000Z\. Posting the claw-back now would pass it over/.test(rd.out),
+		"a re-run after the earliest October invoice is deleted writes nothing and names it", rd.out.slice(-600));
+	const delOnly = buildFixture("deleted-w40-alone", { october: false });
+	setInvoice(delOnly, "UPDATE invoices SET deleted_at = '2026-10-17T12:00:00.000Z' WHERE id = 640");
+	const ro2 = noWrite(delOnly, APPLY_27);
+	check(ro2.unchanged && /was deleted 2026-10-17T12:00:00\.000Z/.test(ro2.out) && !/Re-run this command once that invoice exists/.test(ro2.out),
+		"a deleted earliest invoice with no later one yet needs a decision, not a re-run");
+	const regen = buildFixture("deleted-w40-regenerated", { october: false });
+	setInvoice(regen, "UPDATE invoices SET deleted_at = '2026-10-17T12:00:00.000Z' WHERE id = 640");
+	setInvoice(regen, `INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, render_data)
+		VALUES (641, 'INV-SK-2026W40-02', '${DRIVER}', '2026-10-03', '2026-10-09', 5, 300, 1500, 'Submitted', '{}')`);
+	const rg = run([...APPLY_27, `--db=${regen}`]);
+	check(rg.code === 0 && invAdj(regen, 641) === -300 && invAdj(regen) === 0, "a deleted invoice whose week has a live one in its place does not block: the live one is the home", rg.out.slice(-500));
+
+	// The home check stays even if the check of all the driver's invoices
+	// misses an adjustment (here: that check edited to find none).
+	const FOREIGN_COND = "AND week_end >= ? AND COALESCE(adjustment, 0) != 0 ORDER BY week_start, id";
+	const src = fs.readFileSync(SCRIPT, "utf8");
+	check(src.split(FOREIGN_COND).length === 2, "the driver's adjustment check is where the variant below edits it");
+	const variant = { exports: {} };
+	new Function("require", "module", "exports", "__dirname", "__filename", src.replace(/^#!.*\n/, "").replace(FOREIGN_COND, "AND week_end >= ? AND 0 ORDER BY week_start, id"))(
+		createRequire(SCRIPT), variant, variant.exports, path.dirname(SCRIPT), SCRIPT);
+	const safety = buildFixture("home-safety", { w40Adjustment: { amount: 50, note: "fuel advance repaid" } });
+	const hs = variant.exports.openDatabase(safety, { dryRun: true });
+	const sp = variant.exports.buildPlan(hs, "2026-09-27", variant.exports.CASES["2026-09-27"]);
+	hs.close();
+	check(sp.lines[0].status === "skip" && /INV-SK-2026W40-01 carries \+\$50\.00 \(note: "fuel advance repaid"\) that this script did not write; writing would replace it/.test(sp.lines[0].reasons.join(" ")),
+		"with that check missing the adjustment, the home check still refuses to overwrite it", JSON.stringify(sp.lines[0].status));
+
+	// A line that waits beside a line that needs a decision is not told to re-run.
+	const mixed = run([...APPLY_27, `--db=${buildFixture("mixed", { w40Adjustment: { amount: 50, note: "fuel advance repaid" }, october: false })}`]);
+	check(!/Re-run this command between/i.test(mixed.out) && /- Once what it waits for exists, ask before re-running this command: line 1 needs a decision first \(see above\)\./.test(mixed.out) &&
+		/No re-run command: line 1 needs a decision first/.test(mixed.out),
+		"a waiting line beside a line that needs a decision says to ask, as the footer does", mixed.out.slice(-700));
 
 	// Repro 2: W40's Total Due cannot take the claw-back; W41 exists. No re-run
 	// is offered; and if W40 is approved later, a re-run is refused by code
