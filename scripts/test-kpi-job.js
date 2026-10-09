@@ -392,7 +392,7 @@ const storageSection = section(async (t, block = BLOCK) => {
 	t(cols("kpi_snapshots") === "day,metric_key,value,display,status,confidence,definition_version,payload,computed_at" && pk("kpi_snapshots") === "day,metric_key", "§1 kpi_snapshots: the contract's columns, (day, metric_key) the key");
 	t(cols("kpi_series") === "metric_key,period,value,display,coverage,computed_at" && pk("kpi_series") === "metric_key,period", "§1 kpi_series: (metric_key, period) the key");
 	t(cols("kpi_metric_approvals") === "metric_key,approved,definition_version,settings_hash,approved_by,approved_at" && pk("kpi_metric_approvals") === "metric_key", "§1 kpi_metric_approvals: metric_key the key");
-	t(cols("kpi_load_weights") === "load_id,weight_lb,source,status,file_id,file_size,checked_at" && pk("kpi_load_weights") === "load_id", "§1 kpi_load_weights: load_id the key, no column for a name or text");
+	t(cols("kpi_load_weights") === "load_id,weight_lb,source,status,file_id,file_size,checked_at,text_rule" && pk("kpi_load_weights") === "load_id", "§1 kpi_load_weights: load_id the key, no column for a name or text");
 	t(cols("kpi_digest_sends") === "slot_key,status,recipients_count,claimed_at,sent_at" && pk("kpi_digest_sends") === "slot_key", "§1 kpi_digest_sends: slot_key the key");
 	const dflt = all(w, "PRAGMA table_info(kpi_metric_approvals)").find((c) => c.name === "approved").dflt_value;
 	t(dflt === "0", "§1 an approval row defaults to not approved");
@@ -606,6 +606,23 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 	t(all(broken, "SELECT status FROM kpi_load_weights").every((x) => x.status === "error"), "§6 ...and the loads are marked error, to be tried again later");
 	const everything = JSON.stringify(all(broken, "SELECT * FROM kpi_runs")) + JSON.stringify(all(broken, "SELECT * FROM kpi_load_weights")) + broken.log.logs.join("\n");
 	t(!everything.includes("/srv/private") && !everything.includes(BROKER), "§6 ...and the error's text is stored and logged nowhere");
+});
+
+// ─────────────────────────────────────────── §6c a 'no_text' from an earlier text rule
+const textRuleSection = section(async (t, block = BLOCK) => {
+	const yesterday = new Date(Date.parse("2026-10-08T12:00:00Z")).toISOString();
+	const w = world({ block, sheet: weightSheet(3), drive: { files: driveFiles } });
+	// Runs the block once so its DDL (the text_rule column included) exists.
+	await w.k.runKpiSnapshot("manual");
+	const ins = w.db.prepare("INSERT OR REPLACE INTO kpi_load_weights (load_id, status, checked_at, text_rule) VALUES (?, 'no_text', ?, ?)");
+	ins.run("512000001", yesterday, 1);
+	ins.run("512000002", yesterday, 2);
+	ins.run("512000003", yesterday, 2);
+	await w.k.runKpiSnapshot("nightly");
+	const listed = w.log.drive.filter((d) => d.op === "list").map((d) => d.q.match(/'(\d+)'$/)[1]);
+	t(listed.join() === "512000001", `§6c a 'no_text' judged under the earlier rule is read again; one under the current rule is not (${listed})`);
+	const r = w.db.prepare("SELECT status, weight_lb, text_rule FROM kpi_load_weights WHERE load_id = '512000001'").get();
+	t(r.status === "ok" && r.weight_lb === 42000 && r.text_rule === 2, "§6c ...and its new answer is stored under the current rule");
 });
 
 // ─────────────────────────────────────────── §6b the weight phase's limits
@@ -845,7 +862,7 @@ const failed = (results) => results.some((x) => !x.ok);
 (async () => {
 	const sections = [
 		["§1 storage", storageSection], ["§2 gathering", gatherSection], ["§3 the sheet", sheetSection], ["§4 revenue", revenueSection],
-		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection], ["§6b the weight phase's limits", weightLimitsSection],
+		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection], ["§6b the weight phase's limits", weightLimitsSection], ["§6c an earlier text rule's no_text", textRuleSection],
 		["§7 the time box", timeSection], ["§8 emails", emailSection], ["§8 the first-start digest marker", seedSection],
 		["§9 the scheduler", schedulerSection], ["§10 aggregates only", aggregateSection],
 	];
@@ -862,6 +879,7 @@ const failed = (results) => results.some((x) => !x.ok);
 		["the preview latch set although sendEmail() returned false", emailSection, swap(BLOCK, `const status = finish(sent ? "sent" : "failed", sent ? new Date().toISOString() : null);`, `const status = finish("sent", new Date().toISOString());`)],
 		["the preview sent to the page's recipients", emailSection, swap(BLOCK, "const recipients = ADMIN_NOTIFY_EMAIL ? [ADMIN_NOTIFY_EMAIL] : [];\n\treturn kpiClaimAndSend({ slotKey: \"preview\"", "const recipients = kpiReadSettings().recipients;\n\treturn kpiClaimAndSend({ slotKey: \"preview\"")],
 		["no first-start digest marker", seedSection, swap(BLOCK, "\t\tkpiSeedDigestMarker(Date.now());\n", "")],
+		["a no_text from an earlier text rule never read again", textRuleSection, swap(BLOCK, "\n\t\t\t\t|| (row.status === \"no_text\" && (Number(row.text_rule) || 1) < KPI_TEXT_RULE);", ";")],
 		["a 41st Drive load", weightSection, swap(BLOCK, "candidates.slice(0, budget)", "candidates.slice(0, budget + 1)")],
 		["the 40 counted per run, not per business day", weightLimitsSection, swap(BLOCK, "KPI_WEIGHT_MAX_PER_RUN - checkedToday", "KPI_WEIGHT_MAX_PER_RUN - 0")],
 		["a load not recorded before its rate-con is fetched", weightLimitsSection, swap(BLOCK, "upsert.run(load.loadId, null, \"error\", \"\", null, new Date().toISOString());\n", "")],
