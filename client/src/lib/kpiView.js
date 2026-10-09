@@ -282,12 +282,12 @@ export function approvalConfirmText(label, approve) {
   return approve
     ? {
         title: `Approve “${name}” for public use?`,
-        body: 'Sheila and the data room may use this figure. The approval resets by itself when the definition or the settings it uses change.',
+        body: 'Social posts and the investor data room may use this figure. The approval resets by itself when the definition or the settings it uses change.',
         action: 'Approve for public use',
       }
     : {
         title: `Withdraw approval for “${name}”?`,
-        body: 'Sheila and the data room may no longer use this figure.',
+        body: 'Social posts and the investor data room may no longer use this figure.',
         action: 'Withdraw approval',
       }
 }

@@ -499,7 +499,7 @@ function viewChecks(v) {
     same('only true approves', ['true', 1, 'yes', null, undefined].map((approved) => v.approvalView({ approved }).answer), ['No', 'No', 'No', 'No', 'No'])
     same('no approval object', v.approvalView(undefined), { approved: false, answer: 'No', stale: false, staleNote: '', by: '', at: '' })
     const yes = v.approvalConfirmText('Loads delivered', true)
-    check('approve dialog says what it means', yes.body.includes('Sheila and the data room may use this figure') && yes.title.includes('Loads delivered'))
+    check('approve dialog says what it means', yes.body.includes('Social posts and the investor data room may use this figure') && yes.title.includes('Loads delivered'))
     const no = v.approvalConfirmText('Loads delivered', false)
     check('withdraw dialog says what it means', no.body.includes('may no longer use this figure') && no.action === 'Withdraw approval')
   })
