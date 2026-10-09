@@ -80,10 +80,11 @@ function ok(name, cond) {
 
 // The admin inbox the middleware is given, as server.js passes ADMIN_NOTIFY_EMAIL.
 const ADMIN = "admin@example.test";
-// From a fake sender's calls (each the sendEmail arguments): the submission emails
-// (Reply-To the submitter) and the daily cap's admin alerts (no Reply-To, §9).
-const submissionsIn = (calls) => calls.filter((a) => a[4] && a[4].replyTo);
-const alertsIn = (calls) => calls.filter((a) => !(a[4] && a[4].replyTo));
+// From a fake sender's calls (each the sendEmail arguments), told apart by subject:
+// the submission emails ("Investor RFI: …" / "Call request: …") and the daily cap's
+// admin alerts ("Website forms…", §9).
+const submissionsIn = (calls) => calls.filter((a) => /^(\[STAGING\] )?(Investor RFI|Call request): /.test(a[1]));
+const alertsIn = (calls) => calls.filter((a) => /^(\[STAGING\] )?Website forms/.test(a[1]));
 const STAGING = "https://staging-logisx.logisx.com";
 const PROD = "https://logisx.com";
 const VALID = Object.freeze({
@@ -930,10 +931,21 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	// One run against a lib (the real one here, mutants in §5): a clock the test moves,
 	// the per-address limits out of the way (§8 tests them), and a fake sender that
 	// records every call; `alertResult` is what it answers for the alerts.
-	const capScenario = async (lib, { cap = 5, alertResult = true, defaultCap = false } = {}) => {
+	// `alertResult` true or false is what the alert send resolves to; "throw" throws
+	// synchronously and "reject" returns a rejected promise.
+	const capScenario = async (lib, { cap = 5, alertResult = true, defaultCap = false, origin = PROD } = {}) => {
 		let clock = new Date(NOW);
 		const calls = [];
-		const sendEmail = async (...a) => { calls.push(a); return a[4] && a[4].replyTo ? true : alertResult; };
+		const sendEmail = (...a) => {
+			calls.push(a);
+			if (/^(\[STAGING\] )?(Investor RFI|Call request): /.test(a[1])) return Promise.resolve(true);
+			if (alertResult === "throw") throw new Error("smtp down");
+			if (alertResult === "reject") return Promise.reject(new Error("smtp down"));
+			return Promise.resolve(alertResult);
+		};
+		let unhandled = 0;
+		const onUnhandled = () => { unhandled++; };
+		process.on("unhandledRejection", onUnhandled);
 		const app = express();
 		app.use(lib.INVESTOR_RFI_PATH, ...lib.createBodyParsers());
 		app.post(lib.INVESTOR_RFI_PATH, ...lib.createInvestorRfiMiddleware({
@@ -945,7 +957,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		const realError = console.error;
 		console.error = (...a) => { lines.push(a.map(String).join(" ")); };
 		const settle = () => new Promise((r) => setImmediate(r));
-		const submit = async (i) => (await request(server, asJson(PROD, i % 2 ? CALL : VALID))).status;
+		const submit = async (i) => (await request(server, asJson(origin, i % 2 ? CALL : VALID))).status;
 		const n = (defaultCap ? lib.RFI_DAILY_SEND_CAP : cap) + 2;
 		const out = { statuses: [], alertsAfter: [] };
 		try {
@@ -953,15 +965,24 @@ const asForm = (origin, payload, { referer } = {}) => ({
 			for (let i = 0; i < n; i++) { out.statuses.push(await submit(i)); await settle(); out.alertsAfter.push(alertsIn(calls).length); }
 			out.submissions = submissionsIn(calls).length;
 			out.alerts = alertsIn(calls).map((a) => ({ to: a[0], subject: a[1], html: a[2], opts: a[4] }));
+			// Past UTC midnight but still the same business day on the Eastern clock
+			// (2026-10-08 01:00 UTC is 21:00 on Oct 7 in New York): the cap is still full,
+			// and no alert may go out again.
+			clock = new Date("2026-10-08T01:00:00.000Z");
+			await submit(0); await settle();
+			out.sameBusinessDayAlerts = alertsIn(calls).length - out.alerts.length;
 			// 25 hours on: a new business day, and the 24-hour window has emptied.
 			clock = new Date(NOW.getTime() + 25 * 3600 * 1000);
 			for (let i = 0; i < n; i++) { await submit(i); await settle(); }
-			out.day2Alerts = alertsIn(calls).length - out.alerts.length;
+			out.day2Alerts = alertsIn(calls).length - out.alerts.length - out.sameBusinessDayAlerts;
+			await new Promise((r) => setTimeout(r, 20));
 		} finally {
 			console.error = realError;
+			process.off("unhandledRejection", onUnhandled);
 			server.close();
 		}
 		out.lines = lines;
+		out.unhandled = unhandled;
 		return out;
 	};
 	{
@@ -977,7 +998,21 @@ const asForm = (origin, payload, { referer } = {}) => ({
 			paused && paused.to === ADMIN && paused.subject === "Website forms paused until tomorrow: daily email limit reached" && !(paused.opts && paused.opts.replyTo) && paused.html.includes("paused until tomorrow"));
 		const typed = [VALID.fullName, VALID.email, VALID.phone, VALID.company, CALL.fullName, CALL.email, CALL.phone, "jane.sample", "carl.callback"];
 		ok("§9 neither alert carries anything a visitor typed", c.alerts.every((a) => typed.every((t) => !a.subject.includes(t) && !a.html.includes(t))));
+		ok("§9 past UTC midnight, still the same business day (APP_TIMEZONE): no alert again", c.sameBusinessDayAlerts === 0);
 		ok("§9 the next business day, the warning and the pause alert can each come once more", c.day2Alerts === 2);
+	}
+	{
+		// Submissions labelled as staging by their Origin (which a non-browser client can
+		// forge) must not label this process's alerts.
+		const c = await capScenario(rfi, { origin: STAGING });
+		ok("§9 a staging Origin doesn't label the alerts: no '[STAGING]' on either",
+			c.alerts.length === 2 && c.alerts.every((a) => !a.subject.includes("[STAGING]") && !a.html.includes("[STAGING]")));
+	}
+	for (const mode of ["throw", "reject"]) {
+		const c = await capScenario(rfi, { alertResult: mode });
+		ok(`§9 an alert send that ${mode === "throw" ? "throws" : "rejects"} changes nothing for the visitor, is logged as its outcome, and leaves no unhandled rejection`,
+			c.statuses.join() === "200,200,200,200,200,503,503" && c.submissions === 5 && c.unhandled === 0 &&
+			c.lines.includes("investor-rfi: the daily-cap warning alert was not sent") && c.lines.includes("investor-rfi: the daily-cap paused alert was not sent"));
 	}
 	{
 		const c = await capScenario(rfi, { alertResult: false });
@@ -1085,8 +1120,21 @@ const asForm = (origin, payload, { referer } = {}) => ({
 			(c) => c.alertsAfter[5] !== 2],
 		["the alerts never sent again on a new day", LIB_SRC.replace("const day = businessDate(now());", 'const day = "always";'),
 			(c) => c.day2Alerts !== 2],
+		["the day counted in UTC, not on the business clock", LIB_SRC.replace("const day = businessDate(now());", "const day = now().toISOString().slice(0, 10);"),
+			(c) => c.sameBusinessDayAlerts !== 0],
 	]) {
 		ok(`MUTANT: ${label} is caught by §9`, src !== LIB_SRC && slips(await capScenario(loadLib(src))));
+	}
+	{
+		const src = LIB_SRC.replace("buildCapPausedEmail({ cap: dailySendCap, at: now(), to: rfiTo })",
+			'({ ...buildCapPausedEmail({ cap: dailySendCap, at: now(), to: rfiTo }), subject: (res.locals.rfiStaging ? "[STAGING] " : "") + "Website forms paused until tomorrow: daily email limit reached" })');
+		const c = src !== LIB_SRC ? await capScenario(loadLib(src), { origin: STAGING }) : null;
+		ok("MUTANT: the alert labelled from the request's Origin is caught by §9", !!c && c.alerts.some((a) => a.subject.includes("[STAGING]")));
+	}
+	{
+		const src = LIB_SRC.replace(".then((ok) => { if (!ok) failed(); }, failed)\n\t\t\t\t.catch(() => {});", ".then((ok) => { if (!ok) failed(); });");
+		const c = src !== LIB_SRC ? await capScenario(loadLib(src), { alertResult: "reject" }) : null;
+		ok("MUTANT: a rejected alert send left unhandled is caught by §9", !!c && c.unhandled > 0);
 	}
 	const anyKind = loadLib(LIB_SRC.replace('if (!kind) return refusal("INVALID_FIELD", "kind", MESSAGES.invalid);', ""));
 	ok("MUTANT: an unchecked kind is caught by §6", anyKind.checkWebsiteForm({ ...VALID, kind: "meeting" }).ok === true);
