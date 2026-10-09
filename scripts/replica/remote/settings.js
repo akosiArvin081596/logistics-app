@@ -8,7 +8,8 @@
 // lib/replica-rules.js (classifySetting): a name containing KEY, SECRET, TOKEN,
 // PASS, CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is a secret and is never
 // copied, nor is a value that is a URL carrying credentials or looks like a key,
-// nor a runtime setting replica:start sets itself (NODE_ENV, PORT, ...). It is an
+// nor a runtime setting replica:start sets itself (NODE_ENV, PORT, ...), nor a
+// production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS). It is an
 // allowlist too: only names the running app reads (process.env.NAME in
 // <app dir>/server.js and lib/) are copied, so a name nothing reads, whatever it
 // holds, stays on the server. The rest is written, file mode 600, and only

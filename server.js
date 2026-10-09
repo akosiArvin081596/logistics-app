@@ -43458,6 +43458,20 @@ if (MISSING_INVOICE_TO_SETTINGS.length) {
 	);
 }
 
+// The payout bank's routing and account numbers printed on every invoice
+// (INVOICE_BANK_ROUTING, INVOICE_BANK_ACCOUNT) have no default in code either;
+// see INVOICE_BANK_SETTINGS in lib/broker-invoice.js. A missing one prints
+// "Bank details not set" in its slot and never refuses a draft. Logged once per
+// process start, never per request.
+const MISSING_INVOICE_BANK_SETTINGS = brokerInvoice.missingInvoiceBankSettings();
+if (MISSING_INVOICE_BANK_SETTINGS.length) {
+	console.warn(
+		`[invoice-bank] ⚠️ ${MISSING_INVOICE_BANK_SETTINGS.join(" and ")} ${MISSING_INVOICE_BANK_SETTINGS.length === 1 ? "is" : "are"} ` +
+		`not set — the invoice's Payment Method block prints "${brokerInvoice.BANK_DETAILS_NOT_SET}" in ` +
+		`${MISSING_INVOICE_BANK_SETTINGS.length === 1 ? "that slot" : "those slots"}. Drafts are still made.`,
+	);
+}
+
 // ⚠️ THE GUARDS WERE ON THE WRONG ROUTE. This one had `requireRole` and nothing
 // else, while its own preview sibling below — which does, by its own header
 // comment, "zero Sheets, zero Drive, zero Gemini, zero DB writes" — carried a

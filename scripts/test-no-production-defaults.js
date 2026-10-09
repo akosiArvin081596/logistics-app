@@ -21,8 +21,11 @@
  *      200 and mails the applicant, with no admin email; the investor RFI form
  *      answers 503 SEND_FAILED with its existing text and sends nothing.
  *      Without BISON_INVOICE_EMAIL / DEFAULT_INVOICE_EMAIL it logs one
- *      [invoice-draft] warning naming each missing one. With the settings,
- *      no warning, and the admin email and the RFI go to the named inbox.
+ *      [invoice-draft] warning naming each missing one. Without
+ *      INVOICE_BANK_ROUTING / INVOICE_BANK_ACCOUNT (or blank) it logs one
+ *      [invoice-bank] warning naming each missing one and never a value. With
+ *      the settings, no warning, and the admin email and the RFI go to the
+ *      named inbox.
  *   §3 each of the five admin sends, run on its own: skipped without the
  *      setting, one email to it with it.
  *   §4 invoice drafts: resolveInvoiceTo() answers "" for a missing setting,
@@ -32,7 +35,9 @@
  *      stubbed, refuses a draft with an empty To (503
  *      INVOICE_RECIPIENT_UNCONFIGURED) before an invoice number is used or
  *      anything is rendered, drafted, recorded or audited; the ?dryRun=1
- *      preview still answers; a reviewer-typed recipient still drafts.
+ *      preview still answers; a reviewer-typed recipient still drafts. The
+ *      payout bank settings never refuse a draft: unset, it is made and its
+ *      invoice prints "Bank details not set" in both bank slots.
  *   §5 the n8n scripts: without N8N_BASE_URL or N8N_WORKFLOW_ID each exits 2
  *      with one line naming what is missing, before any network call; with
  *      both, every call goes to the named instance and workflow;
@@ -354,6 +359,8 @@ async function mailsAfter(want, ms = 3000) {
 const count = (text, re) => (String(text).match(new RegExp(re.source, "g")) || []).length;
 const ADMIN_WARNING = /\[admin-notify\][^\n]*ADMIN_NOTIFY_EMAIL is not set/;
 const DRAFT_WARNING = /\[invoice-draft\][^\n]*/;
+const BANK_WARNING = /\[invoice-bank\][^\n]*/;
+const BANK_TEST = Object.freeze({ INVOICE_BANK_ROUTING: "000000000", INVOICE_BANK_ACCOUNT: "0000000000" });
 const APPLY = Object.freeze({
 	full_name: "Nopd Applicant", email: "applicant@example.test", phone: "(555) 010-0100", dob: "1990-01-01",
 	address: "1 Test Way", ssn: "123-45-6789", drivers_license: "D1234567", position: "Company Driver", experience: "5",
@@ -365,7 +372,7 @@ const SEND_FAILED_TEXT = (readSource("lib/investor-rfi.js").match(/send_failed: 
 
 // ------------------------------------------------------------- §4 helpers
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
-const INVOICE_ENV = ["BISON_INVOICE_EMAIL", "DEFAULT_INVOICE_EMAIL"];
+const INVOICE_ENV = ["BISON_INVOICE_EMAIL", "DEFAULT_INVOICE_EMAIL", "INVOICE_BANK_ROUTING", "INVOICE_BANK_ACCOUNT"];
 function withInvoiceEnv(values, fn) {
 	const saved = Object.fromEntries(INVOICE_ENV.map((k) => [k, process.env[k]]));
 	for (const k of INVOICE_ENV) {
@@ -424,7 +431,7 @@ function draftHarness(L) {
 	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, type TEXT, file_name TEXT, uploaded_at TEXT, deleted_at TEXT)");
 	const addPod = db.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES (?, 'POD', ?, '2026-09-28T15:00:00Z')");
 	for (const row of DRAFT_SHEET.slice(1)) addPod.run(row[0], `${row[0]}_POD.pdf`);
-	const seen = { minted: 0, renders: 0, drafts: [], posts: [], audits: [] };
+	const seen = { minted: 0, renders: 0, html: [], drafts: [], posts: [], audits: [] };
 	const h = L.helpers;
 	const helpers = new Function("db", "brokerInvoice", "console", `${h.text}\nreturn { ${h.names.join(", ")} };`)(db, brokerInvoice, QUIET);
 	const scope = {
@@ -443,7 +450,7 @@ function draftHarness(L) {
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => "10092026-1",
 		nextInvoiceNumber: () => { seen.minted++; return "10092026-1"; },
-		renderHtmlToPdf: async () => { seen.renders++; return Buffer.from("%PDF-1.4 invoice"); },
+		renderHtmlToPdf: async (html) => { seen.renders++; seen.html.push(String(html)); return Buffer.from("%PDF-1.4 invoice"); },
 		logAudit: (req, action) => seen.audits.push(action),
 		appendGmailDraft: async (msg) => { seen.drafts.push(msg); },
 		sentIfRendererBusy: () => false,
@@ -660,6 +667,9 @@ function runScript(rel, args, env) {
 				const draftWarn = s.output().match(DRAFT_WARNING);
 				check("§2 no settings: one [invoice-draft] warning naming both AP settings",
 					count(s.output(), DRAFT_WARNING) === 1 && !!draftWarn && /BISON_INVOICE_EMAIL/.test(draftWarn[0]) && /DEFAULT_INVOICE_EMAIL/.test(draftWarn[0]));
+				const bankWarn = s.output().match(BANK_WARNING);
+				check("§2 no settings: one [invoice-bank] warning naming both bank settings",
+					count(s.output(), BANK_WARNING) === 1 && !!bankWarn && /INVOICE_BANK_ROUTING/.test(bankWarn[0]) && /INVOICE_BANK_ACCOUNT/.test(bankWarn[0]));
 				const a = s.up ? await post(s.port, "/api/public/apply", APPLY) : { status: 0, json: null };
 				check(`§2 no ADMIN_NOTIFY_EMAIL: a driver application still answers 200 { success, id } (got ${a.status})`,
 					a.status === 200 && a.json && a.json.success === true && Number.isInteger(Number(a.json.id)));
@@ -675,16 +685,18 @@ function runScript(rel, args, env) {
 				const rfiMail = mails().filter((x) => /Investor RFI/.test(x.subject || ""));
 				check(`§2 …and sends nothing (${rfiMail.map((x) => x.to).join(", ") || "none"})`, rfiMail.length === 0);
 				check(`§2 still one [admin-notify] warning after the requests: once per start, never per request (got ${count(s.output(), ADMIN_WARNING)})`, count(s.output(), ADMIN_WARNING) === 1);
+				check(`§2 still one [invoice-bank] warning after the requests (got ${count(s.output(), BANK_WARNING)})`, count(s.output(), BANK_WARNING) === 1);
 				check(`§2 no connection and no Google call beyond the stubbed sheet reads (${network().filter((l) => !/^google (sheets|auth)/.test(l)).join("; ") || "none"})`,
 					network().filter((l) => !/^google (sheets|auth)/.test(l)).length === 0);
 			} finally {
 				await s.stop();
 			}
 
-			const b = await bootServer({ ADMIN_NOTIFY_EMAIL: ADMIN, BISON_INVOICE_EMAIL: BISON_TO, DEFAULT_INVOICE_EMAIL: DEFAULT_TO });
+			const b = await bootServer({ ADMIN_NOTIFY_EMAIL: ADMIN, BISON_INVOICE_EMAIL: BISON_TO, DEFAULT_INVOICE_EMAIL: DEFAULT_TO, ...BANK_TEST });
 			try {
 				check("§2 all settings: the server starts", b.up);
 				check("§2 all settings: no [admin-notify] and no [invoice-draft] warning", b.up && !ADMIN_WARNING.test(b.output()) && !DRAFT_WARNING.test(b.output()));
+				check("§2 all settings: no [invoice-bank] warning", b.up && !BANK_WARNING.test(b.output()));
 				const a = b.up ? await post(b.port, "/api/public/apply", APPLY) : { status: 0, json: null };
 				check(`§2 all settings: a driver application answers 200 (got ${a.status})`, a.status === 200 && a.json && a.json.success === true);
 				const ms = await mailsAfter((list) => list.some((x) => /^New Driver Application/.test(x.subject || "")) && list.some((x) => x.to === APPLY.email));
@@ -700,13 +712,17 @@ function runScript(rel, args, env) {
 				await b.stop();
 			}
 
-			const c = await bootServer({ ADMIN_NOTIFY_EMAIL: "   ", DEFAULT_INVOICE_EMAIL: DEFAULT_TO });
+			const c = await bootServer({ ADMIN_NOTIFY_EMAIL: "   ", DEFAULT_INVOICE_EMAIL: DEFAULT_TO, INVOICE_BANK_ROUTING: BANK_TEST.INVOICE_BANK_ROUTING, INVOICE_BANK_ACCOUNT: "  " });
 			try {
 				check("§2 a blank ADMIN_NOTIFY_EMAIL, only DEFAULT_INVOICE_EMAIL: the server starts", c.up);
 				check(`§2 …a blank ADMIN_NOTIFY_EMAIL counts as unset: one [admin-notify] warning (got ${count(c.output(), ADMIN_WARNING)})`, count(c.output(), ADMIN_WARNING) === 1);
 				const w = (c.output().match(DRAFT_WARNING) || [""])[0];
 				check("§2 …one [invoice-draft] warning, naming BISON_INVOICE_EMAIL only",
 					count(c.output(), DRAFT_WARNING) === 1 && /BISON_INVOICE_EMAIL/.test(w) && !/DEFAULT_INVOICE_EMAIL/.test(w));
+				const bw = (c.output().match(BANK_WARNING) || [""])[0];
+				check("§2 …a blank INVOICE_BANK_ACCOUNT counts as unset: one [invoice-bank] warning, naming INVOICE_BANK_ACCOUNT only",
+					count(c.output(), BANK_WARNING) === 1 && /INVOICE_BANK_ACCOUNT/.test(bw) && !/INVOICE_BANK_ROUTING/.test(bw));
+				check("§2 …and the server never prints a bank setting's value", !c.output().includes(BANK_TEST.INVOICE_BANK_ROUTING));
 			} finally {
 				await c.stop();
 			}
@@ -784,6 +800,9 @@ function runScript(rel, args, env) {
 				const r = await h.call("563367203");
 				check(`§4 set, another broker: one draft, to DEFAULT_INVOICE_EMAIL (got ${r.status}, ${h.seen.drafts.map((d) => d.to).join(", ") || "no draft"})`,
 					r.status === 200 && h.seen.drafts.length === 1 && h.seen.drafts[0].to === DEFAULT_TO && h.seen.minted === 1);
+				const notSet = (html) => html.split(`</strong> ${brokerInvoice.BANK_DETAILS_NOT_SET}</div>`).length - 1;
+				check(`§4 …with INVOICE_BANK_ROUTING / INVOICE_BANK_ACCOUNT unset the draft is still made, and its invoice prints "Bank details not set" in both bank slots (${h.seen.html.map(notSet).join(", ") || "no render"})`,
+					h.seen.html.length === 1 && notSet(h.seen.html[0]) === 2);
 				const hb = draftHarness(L);
 				const rb = await hb.call("30080873", { body: { orderNumber: "7007280", poNumber: "4471" } });
 				check(`§4 set, a Bison load: one draft, to BISON_INVOICE_EMAIL (got ${rb.status}, ${hb.seen.drafts.map((d) => d.to).join(", ") || "no draft"})`,

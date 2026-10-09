@@ -130,6 +130,14 @@ function renderingSection() {
 	// (commit 755f37c) and confirmed identical from the notes-aware one (718e386),
 	// so every invoice issued before notes existed re-renders to the same bytes.
 	//
+	// It moved once since, on purpose: the payout bank's routing and account
+	// numbers left the code for INVOICE_BANK_ROUTING / INVOICE_BANK_ACCOUNT, read
+	// at each render (lib/broker-invoice.js INVOICE_BANK_SETTINGS). The golden
+	// render below sets both to obvious test values (GOLDEN_BANK), so the pin is
+	// never a hash of a real bank number. The new hash was checked to be main's
+	// (c41056d) render of this fixture with ONLY those two slots changed to these
+	// values: every other byte of the document is as before.
+	//
 	// The fixture is fully specified on purpose — literal invoiceTo, MM/DD/YYYY
 	// dates (formatDate passes them through without a time zone) — so nothing
 	// but the template decides the output. The hash also covers the embedded
@@ -141,7 +149,8 @@ function renderingSection() {
 	// print the new hash on their "actual" line (all three must agree). Paste it
 	// here and say in the commit message why the invoice changed. Never update it
 	// to make a change that was not supposed to touch the invoice pass.
-	const NO_NOTE_INVOICE_SHA256 = "f83cafa7fb8a24fd022a2ea3d627a8d8fee7421585e471230b6193a476412cf0";
+	const NO_NOTE_INVOICE_SHA256 = "971f4929d0d17850f3efda3f4f33744df1afc03005e8b3d4b2d39ab162d12e36";
+	const GOLDEN_BANK = Object.freeze({ INVOICE_BANK_ROUTING: "000000000", INVOICE_BANK_ACCOUNT: "0000000000" });
 	const GOLDEN_FIXTURE = Object.freeze({
 		invoiceId: "08142026-1",
 		invoiceDate: "08/14/2026",
@@ -153,11 +162,20 @@ function renderingSection() {
 		total: "$3,000.00",
 	});
 	const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
-	ok(brokerInvoice.buildInvoiceHtml(GOLDEN_FIXTURE).includes("data:image/png;base64,"),
-		"§1 (control) the golden render embeds logo.png — the file was found, so the hash is not the URL fallback's");
-	for (const [label, extra] of [["no notes key", {}], ["notes \"\"", { notes: "" }], ["notes \"  \\n \"", { notes: "  \n " }]]) {
-		eq(sha256(brokerInvoice.buildInvoiceHtml({ ...GOLDEN_FIXTURE, ...extra })), NO_NOTE_INVOICE_SHA256,
-			`§1 GOLDEN: ${label} renders the pinned pre-notes invoice (sha256)`);
+	const savedBank = Object.keys(GOLDEN_BANK).map((k) => [k, process.env[k]]);
+	Object.assign(process.env, GOLDEN_BANK);
+	try {
+		ok(brokerInvoice.buildInvoiceHtml(GOLDEN_FIXTURE).includes("data:image/png;base64,"),
+			"§1 (control) the golden render embeds logo.png — the file was found, so the hash is not the URL fallback's");
+		for (const [label, extra] of [["no notes key", {}], ["notes \"\"", { notes: "" }], ["notes \"  \\n \"", { notes: "  \n " }]]) {
+			eq(sha256(brokerInvoice.buildInvoiceHtml({ ...GOLDEN_FIXTURE, ...extra })), NO_NOTE_INVOICE_SHA256,
+				`§1 GOLDEN: ${label} renders the pinned pre-notes invoice (sha256)`);
+		}
+	} finally {
+		for (const [k, v] of savedBank) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
 	}
 
 	// Notes are PDF-only (owner decision): the cover email must not move, even
