@@ -13,8 +13,8 @@
 //      the reason below;
 //   2. add the receipts to the invoice in place: the same row and number; its
 //      receipt record (expense_ids, expenses_total) becomes what the invoice
-//      generator records for a receipt in the week: the receipt's id, and the
-//      sum of the receipts' amounts. Each receipt must pass the generator's own
+//      generator records for the receipts in the week: their ids in date order,
+//      and the sum of their amounts. Each receipt must pass the generator's own
 //      test (dated in the week, the invoice's driver, EXPENSE_PNL_FILTER) and be
 //      Approved and on no other invoice. Total Due, the day lines, the status
 //      and the dates stay as issued: the driver's pay is a daily rate, and
@@ -27,10 +27,15 @@
 //      Financials figure must come out the same; anything else rolls the whole
 //      transaction back and nothing is written.
 // After the commit, the invoice's PDF is re-rendered from its stored snapshot by
-// the server's own rerenderInvoicePdfFromStoredData().
+// the server's own rerenderInvoicePdfFromStoredData(). The day-rate template
+// prints no receipts, so the document reads the same; the receipts show where
+// the app shows them ("Receipts filed", "Expenses (ref)").
 //
 // Refused or stopped, writing nothing, when: the invoice is paid, processing,
-// rejected, deleted or manual, or its week does not hold the receipts; its
+// rejected, deleted or manual, is not a day-rate invoice (an owner-operator
+// invoice deducts fuel and maintenance from pay), or its week does not hold the
+// receipts; a receipt is not in September's frozen ledger (the payout would
+// move); its
 // recorded receipts total is not the sum of its receipts; a receipt is not
 // Approved, not the driver's, not in the week, not the amount the client named,
 // or on any invoice already; September is not finalized (or was reopened by
@@ -44,7 +49,7 @@
 // script's audit row and September finalized by it, writes nothing to the
 // database, and re-renders the PDF from its stored snapshot. Every change is
 // logged in audit_trail as a system change (user 0, username this script, role
-// "system"); the reopen and the close write their own audit rows too.
+// "system"); the reopen route writes its own audit row too.
 //
 // --dry-run never opens the database for writing: it copies it into a fresh
 // owner-only folder under the temp directory (SQLite's online backup), runs the
@@ -152,6 +157,8 @@ function plan(db, api) {
 	if (Number(row.is_manual)) throw new Refusal(`${name} is a manual invoice`);
 	if (row.paid_at || ["Paid", "Processing"].includes(row.status)) throw new Refusal(`${name} is ${row.paid_at ? "paid" : row.status}; a paid invoice is corrected in the open month`);
 	if (!["Draft", "Submitted", "Approved"].includes(row.status)) throw new Refusal(`${name} is ${row.status}`);
+	const render = parseJson(row.render_data || "", null);
+	if (!render || render.__templateName !== "service_invoice") throw new Refusal(`${name} is not a day-rate invoice; receipts on an owner-operator invoice change its pay`);
 	const ids = idsOf(row);
 	if (!ids) throw new Refusal(`${name}'s receipt list is not readable`);
 	const driver = api.normalizeDriverName(row.driver);
@@ -207,10 +214,18 @@ function plan(db, api) {
 	if (!freeze) throw new Refusal("September has no active Financials freeze");
 	const closedWith = api.closedMonthSettings().get(period);
 	if (JSON.stringify(closedWith) !== JSON.stringify(api.financialsSettings())) throw new Refusal("the Financials settings changed since September closed; finalizing again would freeze it under different settings");
-	// Already in September's ledger: a frozen trip item names each receipt.
+	// Already in September's ledger: a frozen trip item names each receipt, so the
+	// payout cannot move. One that isn't would change it on the close.
 	const inLedger = receipts.map((r) => !!db.prepare("SELECT 1 FROM financials_ledger_items WHERE period = ? AND expense_id = ? LIMIT 1").get(period, r.id));
+	const outside = receipts.filter((r, i) => !inLedger[i]).map((r) => `#${r.id}`);
+	if (outside.length) throw new Refusal(`receipt(s) ${outside.join(", ")} are not in September's frozen ledger, so finalizing again would move the payout; this script corrects the invoice's receipt record only`);
 
-	const after = { ids: [...ids, ...receipts.map((r) => r.id)], total: (othersCents + receiptsCents) / 100 };
+	// The generator records a week's receipts in date order (ORDER BY date):
+	// the new ones go in at their date, after any already there that day.
+	const dateOf = (id) => db.prepare("SELECT date FROM expenses WHERE id = ?").get(id).date;
+	const ranked = [...ids.map((id, i) => ({ id, date: dateOf(id), rank: i })), ...receipts.map((r, i) => ({ id: r.id, date: r.date, rank: ids.length + i }))];
+	ranked.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.rank - b.rank));
+	const after = { ids: ranked.map((x) => x.id), total: (othersCents + receiptsCents) / 100 };
 	return { alreadyApplied: false, lock, row, driver, receipts, inLedger, payout, before: { ids, total: recorded / 100 }, after };
 }
 
@@ -510,6 +525,7 @@ async function main() {
 		}
 		say("Checked:");
 		say(describePlan(p));
+		if (apply && cents(p.after.total) !== cents(expectTotal)) throw new Refusal(`${CORRECTION.invoiceNumber}'s receipts total would be ${usd(p.after.total)}, not the ${usd(expectTotal)} --expect-receipts-total names; nothing was written`);
 		if (apply) say(`Backup: ${await backupNextTo(dbFile, world.db, Database)}`);
 		const r = await correct(world, p, { expectTotal });
 		say(dryRun ? "On the temporary copy (committed there):" : "Applied (committed):");

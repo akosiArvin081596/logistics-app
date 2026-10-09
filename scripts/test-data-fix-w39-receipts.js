@@ -76,7 +76,7 @@ function fixture(mutate) {
 	const db = new Database(file);
 	db.exec(SCHEMA);
 	const inv = db.prepare(`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, expense_ids, render_data)
-		VALUES (@id, @invoice_number, @driver, @week_start, @week_end, 5, 300, 1500, @expenses_total, @status, @pdf_file_name, @expense_ids, '{"totalDue":1500}')`);
+		VALUES (@id, @invoice_number, @driver, @week_start, @week_end, 5, 300, 1500, @expenses_total, @status, @pdf_file_name, @expense_ids, '{"totalDue":1500,"__templateName":"service_invoice"}')`);
 	inv.run({ id: 608, invoice_number: NAME, driver: "test driver", week_start: "2026-09-26", week_end: "2026-10-02", expenses_total: 120.5, status: "Approved", pdf_file_name: `${NAME}.pdf`, expense_ids: "[247,253]" });
 	inv.run({ id: 640, invoice_number: "INV-SK-2026W40-01", driver: "test driver", week_start: "2026-10-03", week_end: "2026-10-09", expenses_total: 0, status: "Submitted", pdf_file_name: "INV-SK-2026W40-01.pdf", expense_ids: "[]" });
 	const exp = db.prepare("INSERT INTO expenses (id, driver, type, amount, date, status, owner_id) VALUES (?, ?, ?, ?, ?, ?, 5)");
@@ -104,7 +104,7 @@ const fresh = planOf(fixture());
 	const p = fresh.p;
 	check("§1 a fresh plan", p && !p.alreadyApplied, fresh.err && fresh.err.message);
 	if (p) {
-		check("§1 the receipts follow the invoice's own", JSON.stringify(p.after.ids) === "[247,253,254,255]", JSON.stringify(p.after.ids));
+		check("§1 the receipts go in at their date, as the generator orders them", JSON.stringify(p.after.ids) === "[247,254,255,253]", JSON.stringify(p.after.ids));
 		check("§1 the receipts total is the sum", p.after.total === 141 && p.before.total === 120.5, `${p.before.total} -> ${p.after.total}`);
 		check("§1 both receipts are in September's ledger", p.inLedger.every(Boolean));
 		check("§1 the driver is read from the invoice", p.driver === "test driver");
@@ -129,18 +129,28 @@ const refusals = [
 	["a reopened month", (db) => db.prepare("UPDATE period_locks SET status = 'reopened', reopen_reason = 'other' WHERE period = '2026-09'").run(), /2026-09 is reopened/],
 	["a PDF file another invoice names", (db) => db.prepare("UPDATE invoices SET pdf_file_name = ? WHERE id = 640").run(`${NAME.toLowerCase()}.pdf`), /PDF file is also INV-SK-2026W40-01's/],
 	["a month never finalized", (db) => db.prepare("DELETE FROM period_locks").run(), /2026-09 is not finalized/],
+	["an owner-operator invoice", (db) => db.prepare("UPDATE invoices SET render_data = '{\"__templateName\":\"service_invoice_owner_op\"}' WHERE id = 608").run(), /not a day-rate invoice/],
+	["an invoice with no snapshot", (db) => db.prepare("UPDATE invoices SET render_data = '{}' WHERE id = 608").run(), /not a day-rate invoice/],
+	["a receipt outside September's frozen ledger", (db) => db.prepare("DELETE FROM financials_ledger_items WHERE expense_id = 255").run(), /#255 are not in September's frozen ledger/],
+	["one of the two receipts already on the invoice", (db) => db.prepare("UPDATE invoices SET expense_ids = '[247,253,254]', expenses_total = 125.75 WHERE id = 608").run(), /part of this correction is on record/],
 ];
 for (const [name, mutate, re] of refusals) {
 	const r = planOf(fixture(mutate));
 	check(`§1 refuses: ${name}`, r.err instanceof fix.Refusal && re.test(r.err.message), r.err ? r.err.message : "planned");
 }
 {
+	for (const status of ["Draft", "Submitted"]) {
+		const ok = planOf(fixture((db) => db.prepare("UPDATE invoices SET status = ? WHERE id = 608").run(status)));
+		check(`§1 a ${status} invoice is corrected too`, ok.p && !ok.p.alreadyApplied, ok.err && ok.err.message);
+	}
+	const deletedOther = planOf(fixture((db) => db.prepare("UPDATE invoices SET expense_ids = '[254]', expenses_total = 5.25, deleted_at = '2026-10-05' WHERE id = 640").run()));
+	check("§1 a receipt on a deleted invoice only is allowed", deletedOther.p && !deletedOther.p.alreadyApplied, deletedOther.err && deletedOther.err.message);
 	const changed = planOf(fixture(), api({ ...SETTINGS, overheadMonthly: 500 }));
 	check("§1 refuses changed Financials settings", changed.err instanceof fix.Refusal && /settings changed/.test(changed.err.message), changed.err && changed.err.message);
 	// After a full apply: the receipts on the invoice with this script's audit
 	// row, September finalized again by it.
 	const applied = (db, { audit = true, receipts = true } = {}) => {
-		if (receipts) db.prepare("UPDATE invoices SET expense_ids = '[247,253,254,255]', expenses_total = 141 WHERE id = 608").run();
+		if (receipts) db.prepare("UPDATE invoices SET expense_ids = '[247,254,255,253]', expenses_total = 141 WHERE id = 608").run();
 		if (audit) db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('t', 0, ?, 'system', 'correct_invoice', 'invoice', '608', ?)").run(fix.ACTOR, `x [${fix.REF}]`);
 		db.prepare("UPDATE period_locks SET finalized_by = ?, reopened_at = 't', reopened_by = ?, reopen_reason = ? WHERE period = '2026-09'").run(fix.ACTOR, fix.ACTOR, fix.CORRECTION.reason);
 	};
