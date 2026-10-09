@@ -43,10 +43,11 @@
  *       without its date-range sentence
  *   §9  THE FLEET REPORT AT MONTH END. computeInvestorMonthlyEarnings() builds its
  *       months up to the SERVER's month, which on a UTC clock is already the next
- *       one from 19:00 CDT on the last day of a month. Recreated with the REAL
+ *       one from 8 PM EDT on the last day of a month. Recreated with the REAL
  *       computeInvestorMonthlyEarnings() under a stubbed clock (TZ=UTC,
- *       2026-09-30 20:30 CDT): its array ends in October while Houston is still in
- *       September. The fleet reader stops at Houston's month; its mutant (no
+ *       2026-09-30 21:30 EDT): its array ends in October while the business clock
+ *       (APP_TIMEZONE) is still in September. The fleet reader stops at the
+ *       business month; its mutant (no
  *       filter) prints October in the report's months and note.
  *   §10 THE DATE RANGE IS CHECKED FIRST. The handler, lifted whole: a date that is
  *       not a real YYYY-MM-DD day, or a start after the end, answers 400 before the
@@ -130,7 +131,7 @@ const SOURCES = Object.fromEntries(NAMES.map((n) => [n, extractFn(n)]));
 // the ledger reconcile, the carry walk, the report's reader — is the shipped code.
 function load(deps) {
 	return new Function("deps", "investorPayoutBasis", `
-		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, currentMonthKeyCT,
+		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, appMonthKey,
 			recordPayoutChange, getInvestorDriverSet, findCol, settlementGraceDays, periodPhase, graceEndsAt,
 			investorReportOptions, payoutRules } = deps;
 		${NAMES.map((n) => SOURCES[n]).join("\n")}
@@ -201,7 +202,7 @@ function world({ locked = [] } = {}) {
 		},
 		isLocked: (p) => lockedSet.has(p),
 		periodWriteLocked: (p) => lockedSet.has(p),
-		currentMonthKeyCT: () => CURRENT,
+		appMonthKey: () => CURRENT,
 		recordPayoutChange: (x) => history.push(x),
 		getInvestorDriverSet: () => new Set(),
 		findCol: (headers, re) => (headers || []).find((h) => re.test(h)) || null,
@@ -251,7 +252,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		ok(/payout: p\.effectiveAmount,/.test(reader), "a completed month reads the ledger row's effectiveAmount");
 		ok(/payout: currentMonth\.payableIfClosedNow,/.test(reader), "the open month reads currentMonth.payableIfClosedNow");
 		ok(/computeInvestorMonthlyEarnings\(\{/.test(reader) && /const months = monthlyEarnings\.filter\(\(m\) => m\.month <= currentMonthKey\);\s*const carryByPeriod = computeLossCarryForward\(months\);/.test(reader),
-			"the fleet path runs the shared monthly computation and the shared carry walk, up to Houston's month (§9)");
+			"the fleet path runs the shared monthly computation and the shared carry walk, up to the business month (§9)");
 		for (const [n, src] of [["investorReportPayoutEntries", reader], ["summarizeReportPayout", stripComments(SOURCES.summarizeReportPayout)]]) {
 			ok(!/resolveInvestorSplitPct|investorSplit|splitPct|\/ 100/.test(src), `${n}() applies no split of its own`);
 			ok(!/let deficit/.test(src), `${n}() carries no copy of the carry-forward walk`);
@@ -529,11 +530,11 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 	}
 
 	// ============================================= §9 fleet report at month end
-	section("§9 the fleet report at month end stops at Houston's month (the real monthly computation, a stubbed clock)");
+	section("§9 the fleet report at month end stops at the business month (the real monthly computation, a stubbed clock)");
 	{
 		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
 			"summarizeReportPayout", "reportPayoutNote", "periodLabel", "findCol", "pickAddressColumn", "moneySheetDate",
-			"houstonDay", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
+			"appDay", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
 		const ME = Object.fromEntries(ME_NAMES.map((n) => [n, extractFn(n)]));
 		const JT = {
 			headers: ["Load ID", "Driver", "Job Status", "  Payment  ", "Assigned Date", "Owner ID", "Truck"],
@@ -556,6 +557,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		const run = async (iso, readerSrc = ME.investorReportPayoutEntries) => {
 			const deps = {
 				Date: clockAt(iso),
+				APP_TIMEZONE: require("../lib/app-time").appTimeZone(),
 				RFC2822_MONTHS: ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"],
 				db: { prepare: () => ({ all: () => [], get: () => undefined }) },
 				getJobTrackingCached: async () => JT,
@@ -593,11 +595,11 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		const tz = process.env.TZ;
 		process.env.TZ = "UTC"; // the production server's clock
 		try {
-			const r = await run("2026-10-01T01:30:00Z"); // 2026-09-30 20:30 CDT
-			eq(r.earnings.currentMonthKey, "2026-09", "month end: Houston is still in September");
+			const r = await run("2026-10-01T01:30:00Z"); // 2026-09-30 21:30 EDT
+			eq(r.earnings.currentMonthKey, "2026-09", "month end: the business clock is still in September");
 			eq(r.earnings.monthlyEarnings.map((m) => m.month), ["2026-08", "2026-09", "2026-10"],
 				"…while the shared computation's months already run to October, the server's month (its input, as it ships)");
-			eq(r.entries.map((e) => e.month), ["2026-08", "2026-09"], "the fleet reader stops at Houston's month");
+			eq(r.entries.map((e) => e.month), ["2026-08", "2026-09"], "the fleet reader stops at the business month");
 			eq(r.all.inProgressMonth, "2026-09", "…September is the month in progress");
 			ok(r.note.startsWith("Investor Payout is the total of the fleet-wide monthly investor shares for August 2026 – September 2026. September 2026 is still in progress"),
 				"…and the note names August – September");

@@ -134,6 +134,7 @@ import {
   prepareChatAttachment,
   uploadChatAttachment,
 } from '../../lib/chatAttachment'
+import { fmtAppInstant } from '../../utils/datetime'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 
@@ -254,15 +255,11 @@ function selectConversation(c) {
   store.selectConversation(c.driver, c.loadId || '')
 }
 
-// Conversation-list "last message" time. Houston rule: pinned to
-// America/Chicago with a visible zone label so the owner (Houston) and the
-// developer (Manila) share one login and still read the same clock.
+// Conversation-list "last message" time. Pinned to the app zone (APP_TIMEZONE,
+// US Eastern) with a visible zone label so the owner (US) and the developer
+// (Manila) share one login and still read the same clock.
 function formatTime(ts) {
-  const t = new Date(ts)
-  return isNaN(t) ? '' : t.toLocaleTimeString('en-US', {
-    hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(ts, { hour: 'numeric', minute: '2-digit', fallback: '' })
 }
 
 async function sendMessage() {

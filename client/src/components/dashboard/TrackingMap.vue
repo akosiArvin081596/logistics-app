@@ -212,7 +212,7 @@ import { useSocket } from '../../composables/useSocket'
 import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
 import { normDriver } from '../../lib/driverName'
-import { fmtArrivalClock } from '../../utils/datetime'
+import { fmtAppInstant, fmtArrivalClock } from '../../utils/datetime'
 import {
   stopPrice,
   priceText,
@@ -1110,11 +1110,11 @@ function buildDriverPopupContent(loc) {
   // → injection-safe.
   if (loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
     const epoch = loc._etaEpochMs || (Date.now() + Number(loc.etaMinutes) * 60000)
-    // Houston rule (America/Chicago + a visible zone label) lives in
+    // The app-zone rule (APP_TIMEZONE + a visible zone label) lives in
     // fmtArrivalClock, shared with the glance panel above and the route map's
     // arrival line. An ETA is the one number a dispatcher relays verbally — an
     // unlabelled "3:40 PM" rendered in the viewer's zone is how a Manila
-    // session quotes a Houston customer a time 13 hours off.
+    // session quotes a US customer a time half a day off.
     const clock = fmtArrivalClock(epoch)
     const dur = formatMinutes(Number(loc.etaMinutes))
     const late = loc.etaStatus === 'delayed'
@@ -1926,15 +1926,12 @@ function onLocationUpdate(payload) {
 }
 
 // Last-GPS-ping time in the marker InfoWindow. `loc.timestamp` is a true
-// instant (ISO-Z off the ELD feed). Houston rule: America/Chicago + a visible
-// zone label so "how fresh is this ping" reads the same for every viewer.
+// instant (ISO-Z off the ELD feed). The app zone (APP_TIMEZONE) + a visible zone
+// label so "how fresh is this ping" reads the same for every viewer. It goes
+// into the InfoWindow's HTML, so anything unreadable is left out rather than
+// echoed.
 function formatTime(ts) {
-  if (!ts) return ''
-  const d = new Date(ts)
-  return isNaN(d) ? ts : d.toLocaleTimeString('en-US', {
-    hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(ts, { hour: 'numeric', minute: '2-digit', fallback: '' })
 }
 
 // Fix tile rendering when tab becomes visible

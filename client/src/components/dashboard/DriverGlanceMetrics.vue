@@ -79,9 +79,9 @@ const fuel = computed(() =>
 )
 const fuelLow = computed(() => fuel.value != null && fuel.value <= 25)
 
-// Absolute arrival time — "Jul 25, 3:40 PM CDT". Prefer the epoch stamped when
+// Absolute arrival time — "Jul 25, 3:40 PM EDT". Prefer the epoch stamped when
 // the data arrived (stable) over recomputing from etaMinutes each render.
-// Houston rule (pinned to America/Chicago, zone label always shown) lives in
+// The app-zone rule (APP_TIMEZONE, US Eastern, zone label always shown) lives in
 // fmtArrivalClock, shared with the tracking map's info window and the route
 // map's arrival line so the three cannot drift apart. The label is load-bearing
 // here — this string is read aloud to brokers and customers, and `.glance-eta`
@@ -102,7 +102,7 @@ const etaDur = computed(() => {
   return `in ${formatMinutes(r)}`
 })
 
-// Same Houston rule and same stamp-the-epoch pattern as the delivery clock
+// Same app-zone rule and same stamp-the-epoch pattern as the delivery clock
 // above, so the two legs cannot drift apart in format or in zone.
 const pickupClock = computed(() => fmtArrivalClock(props.pickupEtaEpochMs))
 const pickupRemainingMin = computed(() => {

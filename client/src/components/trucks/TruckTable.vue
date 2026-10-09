@@ -701,7 +701,7 @@ function odometerText(truck) {
 }
 
 // When the reading was taken. An ISO-Z instant from the ELD, so fmtTimestamp
-// renders it in Houston WITH a zone label — the house rule for any value that
+// renders it in the app zone WITH a zone label — the house rule for any value that
 // carries its own zone. Blank (and the row omits the line) on an older server.
 function odometerAt(truck) {
   const at = truck?.OdometerAt ?? truck?.odometer_at ?? ''
@@ -1007,7 +1007,7 @@ function eldVehicleNumber(truck) {
 }
 
 // The device's last GPS fix (epoch ms) as an ISO-Z instant, so the datetime
-// helpers render it in Houston time; '' when there is none.
+// helpers render it in the app zone's time; '' when there is none.
 function fixIso(ms) {
   if (ms == null || ms === '') return ''
   const d = new Date(Number(ms))

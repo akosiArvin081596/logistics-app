@@ -369,7 +369,7 @@ function routeWorld(db, verb, route, deps = {}) {
 			errors,
 			expose: ["alertEldFeedSilence"],
 			deps: {
-				todayKeyCT: () => "2026-10-01",
+				appTodayKey: () => "2026-10-01",
 				process: { env: { GMAIL_USER: "ops@example.invalid" } },
 				sendEmail: async (to, subject, html) => { rec.emails.push({ subject, html }); return true; },
 				insertDispatchNotification: { run: (type, title, body) => rec.notes.push({ title, body }) },

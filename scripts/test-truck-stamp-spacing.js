@@ -325,10 +325,10 @@ function mountExpense(db, routeSrc, helperOver) {
 		spendGeocodeBudget: () => false,
 		geocodeAddress: async () => null,
 		getStateFromCoords,
-		currentMonthKeyCT: () => "2026-09",
+		appMonthKey: () => "2026-09",
 		// The 2026-10 payout rules, as they ship: off.
 		payoutRules: () => ({ datedAttribution: false, datedRates: false, futureReceipts: false, frozenCarry: false }),
-		todayKeyCT: () => "2026-09-15",
+		appTodayKey: () => "2026-09-15",
 		periodLocksReadable: () => true,
 		periodWriteLocked: () => false,
 		logAudit: (req, action) => { audits.push(action); },

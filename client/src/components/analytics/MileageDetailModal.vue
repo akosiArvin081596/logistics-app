@@ -127,6 +127,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import MetricInfoDialog from '../investor/MetricInfoDialog.vue'
+import { fmtAppInstant } from '../../utils/datetime'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -155,10 +156,11 @@ function dayLabel(day) {
   const d = new Date(String(day) + 'T12:00:00Z')
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
+// First and last reading of a truck-local day, on the app's clock with its zone
+// label: the row's day is where the truck was, so the label is what says which
+// clock these times are on.
 function hhmm(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Chicago' })
+  return iso ? fmtAppInstant(iso, { fallback: null, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : null
 }
 function timeRange(d) {
   const a = hhmm(d.firstAt), b = hhmm(d.lastAt)

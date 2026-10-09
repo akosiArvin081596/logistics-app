@@ -75,7 +75,7 @@ import { Table2 } from 'lucide-vue-next'
 import { useFinancialsStore } from '../stores/financials'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { useToast } from '../composables/useToast'
-import { houstonToday, fmtYmd } from '../utils/datetime'
+import { appToday, fmtYmd } from '../utils/datetime'
 import {
   GRANULARITIES, GROUPINGS,
   readSelection, reportSearch, selectionError, selectionQuery,
@@ -100,7 +100,7 @@ const toast = useToast()
 // The selection lives in the URL query so a view can be shared or reloaded.
 // Presets ("Last month") are read against the carrier's day, like the server.
 const ownRoute = route.name
-const selection = computed(() => readSelection(route.query, houstonToday()))
+const selection = computed(() => readSelection(route.query, appToday()))
 const selectionErr = computed(() => selectionError(selection.value))
 const search = computed(() => (selectionErr.value ? '' : reportSearch(selection.value)))
 const exportHref = computed(() => (search.value ? `/api/financials/report.csv?${search.value}` : ''))

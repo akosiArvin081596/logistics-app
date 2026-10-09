@@ -161,7 +161,7 @@ const MODULE_EXPORTS = [
 	"resolveDailyRate", "getDriverPayStructures", "directoryDefaultRow", "directoryCreateLockBlockers",
 ];
 function buildModule(db) {
-	return new Function("db", "todayKeyCT", "periodLocksReadable", "investorsHoldingDriver",
+	return new Function("db", "appTodayKey", "periodLocksReadable", "investorsHoldingDriver",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-09-26",
 		// The lock table's positive control is its own runner's subject; the

@@ -107,16 +107,16 @@ const FNS = [
 	"assignDriverToTruck", "syncOpenCarrierPairing", "getInvestorDriverSet", "driverNameHeldByOtherSpelling",
 	"driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName", "isBuiltInPropertyName",
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads", "liveJobTrackingView",
-	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "houstonDay", "getAllExcludedDriverDays",
+	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"resolveDailyRate", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward", "resolveInvestorSplitPct",
 	"lastFridayOfFollowingMonth", "periodLabel", "payoutRowBreakdown", "frozenPayoutBreakdown",
-	"payoutBasisContext", "isLocked", "periodLockStmt", "periodLocksReadable", "periodWriteLocked", "todayKeyCT",
-	"currentMonthKeyCT", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
+	"payoutBasisContext", "isLocked", "periodLockStmt", "periodLocksReadable", "periodWriteLocked", "appTodayKey",
+	"appMonthKey", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
-	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
+	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
 	"financialsReportQuery", "buildFinancialsReport", "getLoadMilesIndex",
 ];
 const BODY = [
@@ -180,6 +180,7 @@ function buildWorld() {
 	const routes = {};
 	const errors = [];
 	const deps = {
+		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
 		app: { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; } },
 		requireRole: () => (req, res, next) => next && next(),

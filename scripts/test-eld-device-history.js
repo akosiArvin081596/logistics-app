@@ -199,7 +199,7 @@ const ROLLUP_SRC = [
 	fn("rollupEldMilesDaily", { optional: true }),
 ].join("");
 const ROUTE_SRC = lift(/\napp\.get\("\/api\/analytics\/mileage",[\s\S]*?\n}\);\n/g, "GET /api/analytics/mileage");
-const UTIL_SRC = [fn("getWeekRange"), fn("houstonDay")].join("");
+const UTIL_SRC = [fn("getWeekRange"), fn("appDay")].join("");
 check("§3.0 the per-load measurement reads the device the truck held then",
 	/deviceResolver\.vehicleForTruckAt\(truck\.truck_id, win\.endMs\)/.test(fn("measureLoadEldMiles")), true);
 
@@ -241,6 +241,7 @@ check("§3.0 the per-load measurement reads the device the truck held then",
 	const app = { get: (p, ...h) => { app.handler = h[h.length - 1]; } };
 	const routeDeps = {
 		app, db, eldMiles, Date: FakeDate, requireRole: () => null, mileageAnalyticsLimiter: null,
+		APP_TIMEZONE: require("../lib/app-time").appTimeZone(),
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: () => {}, error: (...a) => { throw new Error(a.join(" ")); } },
 	};

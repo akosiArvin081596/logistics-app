@@ -14,7 +14,7 @@
 
     <!-- Deadline warning -->
     <div v-if="isCurrentWeek && pastDeadline" class="card deadline-warning">
-      The submission deadline (Friday 6:30 PM CST) has passed for this week.
+      The submission deadline (Friday 6:30 PM {{ zoneLabel }}) has passed for this week.
     </div>
 
     <!-- Generate button -->
@@ -84,7 +84,7 @@ import { ref, computed } from 'vue'
 import { Popup as VanPopup } from 'vant'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
-import { houstonToday, satFriWeekOf, shiftYmd } from '../../utils/datetime'
+import { appTimeZone, appToday, isAfterAppTime, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
 
 const driverStore = useDriverStore()
@@ -100,25 +100,30 @@ const selectedInvoice = ref(null)
 const weekOffset = ref(0)
 
 // The Saturday-to-Friday week `weekOffset` weeks back, as 'YYYY-MM-DD' keys,
-// counted from today in HOUSTON, never the phone's clock: weekEnd is the week
-// POST /api/invoices/generate bills, so it must be the week the server's own
-// "now" (getWeekRange()), the Friday 6:30 PM cutoff below and the Friday batch
-// all count in, and those are Houston days. A phone in another zone must not
-// roll to next Saturday while the business is still on Friday. Calendar
-// arithmetic only; no Date ever holds these days.
-const weekRange = computed(() => satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset.value)))
+// counted from today in the app zone (APP_TIMEZONE, US Eastern), never the
+// phone's clock: weekEnd is the week POST /api/invoices/generate bills, so it
+// must be the week the server's own "now" (getWeekRange()), the Friday 6:30 PM
+// cutoff below and the Friday batch all count in, and those are app-zone days.
+// A phone in another zone must not roll to next Saturday while the business is
+// still on Friday. Calendar arithmetic only; no Date ever holds these days.
+const weekRange = computed(() => satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset.value)))
 
 const weekStart = computed(() => weekRange.value.start)
 const weekEnd = computed(() => weekRange.value.end)
 const isCurrentWeek = computed(() => weekOffset.value === 0)
 
-const pastDeadline = computed(() => {
-  // Deadline is Friday 6:30 PM CST. Compare current CST clock against the
-  // deadline expressed in the same parsed-local frame so the cutoff fires
-  // at the correct moment regardless of the viewer's browser timezone.
-  const cstNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
-  const deadline = new Date(weekEnd.value + 'T18:30:00')
-  return cstNow > deadline
+// The deadline is the week's Friday at 6:30 PM on the app zone's clock, the
+// server's isAfterDeadline() rule, whatever zone the phone is set to. Its label
+// is the zone's generic name ("ET" for US Eastern), never a fixed string. Older
+// phones (Safari before 15.4) refuse 'shortGeneric' outright, so they get the
+// short name ("EDT"/"EST") instead of an exception that would blank the tab.
+const pastDeadline = computed(() => isAfterAppTime(weekEnd.value, '18:30'))
+function zoneName(style) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: appTimeZone(), timeZoneName: style })
+    .formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || ''
+}
+const zoneLabel = computed(() => {
+  try { return zoneName('shortGeneric') } catch { return zoneName('short') }
 })
 
 const invoices = computed(() => driverStore.invoices || [])

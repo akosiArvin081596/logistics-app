@@ -253,7 +253,7 @@
                  'YYYY-MM-DD' while paidAt is a real ISO instant (new
                  Date().toISOString() at the moment the payout was marked paid).
                  fmtDate is fmtYmd, which branches on the shape — so this goes
-                 down the timestamp branch and renders in Houston, and the due
+                 down the timestamp branch and renders in the app zone, and the due
                  date beside it is still printed verbatim rather than rolling
                  back a day in a US timezone. Em-dash, never a blank cell: an
                  unpaid row has no date and must not look like a missing value. -->

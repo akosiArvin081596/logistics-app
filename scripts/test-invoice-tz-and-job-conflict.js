@@ -21,9 +21,11 @@
  *      every day must reproduce today's UTC (production) answer byte for byte.
  *
  *   3. isAfterDeadline() used the toLocaleString -> new Date() round trip that
- *      the comment beside houstonStamp() condemns. LATENT, and this suite says
+ *      the comment beside appStamp() condemns. LATENT, and this suite says
  *      so rather than overclaiming: replayed against the true instant of 18:30
- *      America/Chicago it disagreed 0 times in all 418 IANA zones. What section
+ *      America/Chicago (the business zone then) it disagreed 0 times in all 418
+ *      IANA zones. The cutoff is on the business clock, APP_TIMEZONE, since the
+ *      client's 2026-10-08 decision. What section
  *      4 does prove is that the OLD form's verdict is a function of whatever the
  *      runtime's ICU emits — an unparseable rendering makes it return "not late"
  *      forever, silently — and that the new form cannot be, because it never
@@ -93,7 +95,8 @@ const ACTIVE_JOB_BLOCK = extractAt(ACTIVE_JOB_ANCHOR, "one-active-job block");
 // -YYYYWww half, so an empty table keeps the suffix at -01 throughout. (What the
 // suffix does against real rows is scripts/test-invoice-driver-name-matching.js.)
 const dbStub = { prepare: () => ({ get: () => undefined, all: () => [] }) };
-const S = new Function("db", [
+const APP_TZ = require("../lib/app-time").appTimeZone();
+const S = new Function("db", "APP_TIMEZONE", [
 	extract("generateInvoiceNumber"),
 	extract("invoiceNumberHolders"),
 	extract("invoicePdfFileName"),
@@ -101,7 +104,7 @@ const S = new Function("db", [
 	extract("normalizeDriverName"),
 	extractConst("normLoadKey"),
 	"return { generateInvoiceNumber, isAfterDeadline, normalizeDriverName, normLoadKey };",
-].join("\n"))(dbStub);
+].join("\n"))(dbStub, APP_TZ);
 const { generateInvoiceNumber, normalizeDriverName, normLoadKey } = S;
 
 // isAfterDeadline calls `new Date()` for "now". Re-bind it in its own scope so a
@@ -111,7 +114,7 @@ function afterDeadlineAt(weekEndDate, nowMs, DateImpl) {
 	const D = DateImpl || class extends Date {
 		constructor(...a) { return a.length ? new Date(...a) : new Date(nowMs); }
 	};
-	return new Function("Date", `${ISO_AFTER_DEADLINE_SRC}\nreturn isAfterDeadline;`)(D)(weekEndDate);
+	return new Function("Date", "APP_TIMEZONE", `${ISO_AFTER_DEADLINE_SRC}\nreturn isAfterDeadline;`)(D, APP_TZ)(weekEndDate);
 }
 
 // The shipped block, wrapped so `return res.status(409)...` is capturable.
@@ -369,20 +372,24 @@ check("the fix reads 2026-08-09 (a Sunday) as 2026W33", weekOf("2026-08-09"), "2
 check("the fix reads 2026-08-08 (its Saturday) as 2026W32", weekOf("2026-08-08"), "2026W32");
 
 // ==================================================== 4. the submission deadline
-section("4. isAfterDeadline() is Friday 18:30 America/Chicago, whatever the server");
+section("4. isAfterDeadline() is Friday 18:30 on the business clock (APP_TIMEZONE, US Eastern), whatever the server");
 
-// Friday 2026-08-07 18:30:00 CDT === 2026-08-07T23:30:00Z.
+// Friday 2026-08-07 18:30:00 EDT === 2026-08-07T22:30:00Z.
 check("one minute before the cutoff is not late",
-	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T23:29:00Z")), false);
+	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T22:29:00Z")), false);
 check("one minute after the cutoff is late",
-	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T23:31:00Z")), true);
+	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T22:31:00Z")), true);
 check("the cutoff second itself is not yet late",
-	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T23:30:00Z")), false);
-// CST (UTC-6) in winter: 2026-01-09 18:30 CST === 2026-01-10T00:30:00Z.
-check("winter (CST) — one minute before",
-	afterDeadlineAt("2026-01-09", Date.parse("2026-01-10T00:29:00Z")), false);
-check("winter (CST) — one minute after",
-	afterDeadlineAt("2026-01-09", Date.parse("2026-01-10T00:31:00Z")), true);
+	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T22:30:00Z")), false);
+// The cutoff is 6:30 PM Eastern: 6:00 PM Central (7:00 PM EDT) is late, though it
+// was on time under the Houston rule, which closed at 6:30 PM Central.
+check("6:00 PM Central (7:00 PM EDT) is late",
+	afterDeadlineAt("2026-08-07", Date.parse("2026-08-07T23:00:00Z")), true);
+// EST (UTC-5) in winter: 2026-01-09 18:30 EST === 2026-01-09T23:30:00Z.
+check("winter (EST) — one minute before",
+	afterDeadlineAt("2026-01-09", Date.parse("2026-01-09T23:29:00Z")), false);
+check("winter (EST) — one minute after",
+	afterDeadlineAt("2026-01-09", Date.parse("2026-01-09T23:31:00Z")), true);
 check("a week ending days ago is late", afterDeadlineAt("2026-07-31", Date.parse("2026-08-07T12:00:00Z")), true);
 check("a week ending days ahead is not", afterDeadlineAt("2026-08-14", Date.parse("2026-08-07T12:00:00Z")), false);
 // Malformed input kept its pre-fix answer: Invalid Date compared false ("not late").

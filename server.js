@@ -134,10 +134,11 @@ const publicFormInput = require("./lib/public-form-input");
 // and its "Schedule a call" form (kind: "call").
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
-// The one zone an instant becomes a date in when no business rule pins one
-// (a document's "today"); never the server's own UTC clock. lib/app-time.js
+// The business time zone, APP_TIMEZONE (default US Eastern): every "today", month,
+// invoice week, Friday cutoff and sheet stamp is on its clock, never the server's
+// own UTC clock. lib/app-time.js
 const appTime = require("./lib/app-time");
-const APP_TIMEZONE = appTime.resolveAppTimeZone(process.env.APP_TIMEZONE, (msg) => console.warn(msg));
+const APP_TIMEZONE = appTime.appTimeZone();
 
 // Where the files the app writes at runtime live: uploads/, storage/ and
 // evidence-archive/, and every stored "/uploads/…" path resolves against it.
@@ -1925,12 +1926,12 @@ function investorJobRowTest(headers, investorOwnerId, investorDriverSet) {
 //
 // ⚠️ THOSE COLUMNS HOLD ISO **UTC INSTANTS** ('2026-08-01T02:30:00.000Z'), which is
 // the opposite of in_service_date/retired_at. A bare .slice(0,7) reads '2026-08' for
-// a moment that is 2026-07-31 21:30 in Houston, so an assignment made in the evening
+// a moment that is 2026-07-31 22:30 Eastern, so an assignment made in the evening
 // on the last day of a month lands one month FORWARD — and that month is a money
-// boundary. They therefore go through houstonDay(), the same clock every other
+// boundary. They therefore go through appDay(), the business clock every other
 // settlement figure uses. Bare 'YYYY-MM-DD' input is sliced as a string and never
 // parsed, because new Date('2026-08-01') is UTC midnight = the previous day in
-// Houston — the exact inversion documented above truckChargeFromMonth().
+// every US zone — the exact inversion documented above truckChargeFromMonth().
 //
 // "" on unparseable input, which every caller below reads as "this bound contributes
 // nothing" and then falls back to the truck's own billing window. Never as
@@ -1941,7 +1942,7 @@ function assignmentMonthKey(ts) {
 	if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(0, 7);
 	const d = new Date(s);
 	if (isNaN(d)) return "";
-	return houstonDay(d).slice(0, 7);
+	return appDay(d).slice(0, 7);
 }
 
 // Intersect two ['YYYY-MM' | "", 'YYYY-MM' | ""] month intervals.
@@ -2431,14 +2432,14 @@ const insertInvoiceSeqStmt = db.prepare(`
 	ON CONFLICT(day) DO UPDATE SET n = n + 1
 	RETURNING n
 `);
-// MMDDYYYY key. Houston, not server-local: this string is the visible invoice
-// number on the broker PDF, the email subject, and the filename, and the VPS runs
-// UTC — so an invoice raised 8:30 PM Houston on Jul 31 went out as 08012026-1,
-// the wrong day AND the wrong month for broker aging terms. It also rolled the
-// per-day counter at 7 PM Houston instead of midnight.
+// MMDDYYYY key. The business day (APP_TIMEZONE), not server-local: this string is
+// the visible invoice number on the broker PDF, the email subject, and the
+// filename, and the VPS runs UTC — so an invoice raised 9:30 PM Eastern on Jul 31
+// went out as 08012026-1, the wrong day AND the wrong month for broker aging
+// terms. It also rolled the per-day counter at 8 PM Eastern instead of midnight.
 function invoiceSeqDayKey(date = new Date()) {
 	const d = date instanceof Date ? date : new Date(date);
-	const [y, m, day] = houstonDay(d).split("-");
+	const [y, m, day] = appDay(d).split("-");
 	return `${m}${day}${y}`;
 }
 
@@ -2611,11 +2612,11 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_rm_fuel_vid ON routemate_fuel_dail
 //
 //  1. THE DAY BOUNDARY. routemate_fuel_daily buckets by Date.UTC(). Driver pay
 //     does not — getEldTravelDaysByVehicle() buckets by the TRUCK'S LOCAL day,
-//     and the invoice week is built on Central midnight. A Friday-evening run
-//     in Texas is Saturday in UTC, so a UTC-day mileage table drops it into the
-//     next billing week while the pay day stayed in this one. Miles-per-driver
+//     and the invoice week counts those same truck-local days. A Friday-evening
+//     run in Texas is Saturday in UTC, so a UTC-day mileage table drops it into
+//     the next billing week while the pay day stayed in this one. Miles-per-driver
 //     and that driver's invoice would then disagree at EVERY week seam. The
-//     same class of bug is already recorded at centralMidnightMs().
+//     same class of bug is recorded at the invoice generator's ELD ping window.
 //  2. NO DRIVER DIMENSION, and it cannot be added afterwards. Trucks change
 //     hands mid-day (truck_assignments stores full ISO instants), so
 //     attribution has to happen while the ping INSTANTS still exist — i.e.
@@ -2820,12 +2821,13 @@ try {
 // the fix BEFORE the first rise, which is stable across re-scans as long as the
 // scan window starts before it — hence the overlap in fuelEventsScanWindow().
 //
-// local_day is the HOUSTON business day (America/Chicago), NOT the truck's local
+// local_day is the BUSINESS day (APP_TIMEZONE, US Eastern), NOT the truck's local
 // day. There are two day conventions in this file and they are not
 // interchangeable: getEldTravelDaysByVehicle buckets by usTzForLongitude(lng)
 // because a driver's worked day belongs where the driver was, while everything
-// business-facing — month close, invoice dating, settlement periods — is
-// Central. A refuel episode is matched against expenses.date and reported to
+// business-facing — month close, invoice dating, settlement periods — is on the
+// business clock. (Rows detected before the client's 2026-10-08 decision carry
+// Houston's day, as written.) A refuel episode is matched against expenses.date and reported to
 // dispatch, so it is business-facing. Bucketing a fill in Arizona to
 // America/Phoenix would put it on a different day from the receipt that paid
 // for it. (usTzForLongitude is right below this in the file; it does not apply
@@ -3258,7 +3260,7 @@ function eldFeedVerdicts(nowMs) {
 		staleHours: ELD_STALE_HOURS,
 		minFixes24h: ELD_STALE_MIN_FIXES,
 		unlinkedLookbackHours: ELD_UNLINKED_LOOKBACK_HOURS,
-		todayKey: todayKeyCT(),
+		todayKey: appTodayKey(),
 	});
 	// Carry provenance through so the health endpoints can say which provider
 	// last wrote for this id.
@@ -3400,7 +3402,7 @@ function eldFeedAlertContext(v, nowMs) {
 	if (v.state === "orphan") {
 		const token = String(mirrorRow(vid).vehicle_id || "").trim();
 		if (!token) return out;
-		const today = todayKeyCT();
+		const today = appTodayKey();
 		const matches = db.prepare("SELECT unit_number, routemate_vehicle_id, retired_at FROM trucks").all()
 			.filter((t) => !eldFeedHealth.isRetiredOn(t.retired_at, today) && unitNumberToken(t.unit_number) === token);
 		if (matches.length !== 1) return out;
@@ -6331,7 +6333,7 @@ function backfillLegacyExpenseTrucks(health) {
 		// so truck_unit stayed blank and owner_id stayed 0 — which drops those
 		// receipts out of the investor's P&L entirely and over-states their
 		// profit by every first-day receipt in their fleet's history. And
-		// 22:30Z is 17:30 Houston, so this fired on ordinary afternoon
+		// 22:30Z is 18:30 Eastern, so this fired on ordinary afternoon
 		// assignments, not only on evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
@@ -13453,7 +13455,7 @@ function earliestEditableBasisMonth(ownerId) {
 	const row = db.prepare(
 		"SELECT MAX(period) AS p FROM investor_payouts WHERE owner_id = ? AND (status IN ('processing', 'paid') OR COALESCE(finalized_at, '') != '')"
 	).get(ownerId);
-	if (!periodLocksReadable()) return currentMonthKeyCT();
+	if (!periodLocksReadable()) return appMonthKey();
 	const settled = row && investorPayoutBasis.isMonthKey(row.p) ? row.p : "";
 	const closed = lockedPeriodsDesc().find((p) => investorPayoutBasis.isMonthKey(p)) || "";
 	const last = settled > closed ? settled : closed;
@@ -13476,7 +13478,7 @@ function signedPaymentTermsOf(applicationId) {
 
 // Called INSIDE the acceptance's transaction, once the investor's account and
 // record exist: when the application's signed master agreement is a lease with a
-// whole-dollar amount, record it as the payout basis from the current Houston
+// whole-dollar amount, record it as the payout basis from the current business
 // month (source 'signed_terms'). A lease signed with cents, or a snapshot that
 // cannot be read, records nothing and says why in the audit trail; the investor
 // is then paid the Split % until an admin sets the basis. Returns the
@@ -13498,7 +13500,7 @@ function recordSignedPayoutBasis(req, { applicationId, ownerId, investorId }) {
 			`No payout basis recorded for owner ${ownerId}: the lease signed on application ${applicationId} is ${investorPaymentTerms.formatMoneyCents(terms.leaseAmountCents)} a month, not whole dollars [LEASE_AMOUNT_WHOLE_DOLLARS]; the Split % applies until a basis is set`);
 		return { recorded: false, reason: "LEASE_AMOUNT_WHOLE_DOLLARS" };
 	}
-	const effectiveMonth = currentMonthKeyCT();
+	const effectiveMonth = appMonthKey();
 	const leaseAmount = terms.leaseAmountCents / 100;
 	const actor = (req.session && req.session.user && req.session.user.username) || "system";
 	db.prepare(
@@ -13547,7 +13549,7 @@ function buildPayoutBasisView(investor) {
 	const config = {};
 	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => (config[r.key] = r.value));
 	if (ownerId) db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(ownerId).forEach((r) => (config[r.key] = r.value));
-	const governing = investorPayoutBasis.governingBasisRow(rows, currentMonthKeyCT());
+	const governing = investorPayoutBasis.governingBasisRow(rows, appMonthKey());
 	const current = !governing
 		? { type: "split", splitPct: resolveInvestorSplitPct(config), effectiveMonth: null, source: "default" }
 		: governing.basis_type === "lease"
@@ -13613,7 +13615,7 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 		const basisAudit = { action: "update_payout_basis_blocked", entity: "investor", entityId: String(investor.id), subject: `payout basis for owner ${ownerId}` };
 		if (!periodLocksReadable()) return periodLockUnreadableResponse(req, res, "Changing a payout basis", basisAudit);
 		const earliestEditableMonth = earliestEditableBasisMonth(ownerId);
-		const read = investorPayoutBasis.readBasisInput(req.body, { currentMonth: currentMonthKeyCT(), earliestEditableMonth });
+		const read = investorPayoutBasis.readBasisInput(req.body, { currentMonth: appMonthKey(), earliestEditableMonth });
 		if (!read.ok) {
 			if (read.code === "BASIS_MONTH_CLOSED") {
 				logAuditRefusal(req, basisAudit.action, basisAudit.entity, basisAudit.entityId,
@@ -15635,7 +15637,7 @@ app.get("/api/onboarding/documents/:docKey/pdf", requireAuth, onboardingPreviewL
 
 // === INVOICE ENDPOINTS ===
 
-// Helper: compute LogisX week range (Saturday–Friday) in CST
+// Helper: compute LogisX week range (Saturday–Friday) on the business calendar
 function getWeekRange(referenceDate) {
 	// A BARE CALENDAR DAY ("2026-09-26") IS A DATE, NOT AN INSTANT, so its Sat–Fri
 	// week is calendar arithmetic with no zone in it. Sent down the instant path
@@ -15644,7 +15646,7 @@ function getWeekRange(referenceDate) {
 	// server, UTC included. Any other weekday stays inside its own week, which is
 	// why the batch's Friday week-ends never showed it. Only a real day takes this
 	// branch; an instant, a Date, nothing ("now") or a non-day such as "2026-02-30"
-	// keeps its Houston-day path exactly as before (scripts/test-calendar-day-zones.js).
+	// takes the instant path below (scripts/test-calendar-day-zones.js).
 	const bare = typeof referenceDate === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(referenceDate.trim()) : null;
 	if (bare) {
 		const [y, m, dd] = [Number(bare[1]), Number(bare[2]), Number(bare[3])];
@@ -15655,40 +15657,32 @@ function getWeekRange(referenceDate) {
 			return { weekStart: key(sat), weekEnd: key(sat + 6 * 86400000) };
 		}
 	}
-	const d = referenceDate ? new Date(referenceDate) : new Date();
-	// Convert to CST (America/Chicago)
-	const cstStr = d.toLocaleString("en-US", { timeZone: "America/Chicago" });
-	const cst = new Date(cstStr);
-	const day = cst.getDay(); // 0=Sun..6=Sat
-	// Find the most recent Saturday
-	const satOffset = day === 6 ? 0 : day + 1;
-	const weekStart = new Date(cst);
-	weekStart.setDate(cst.getDate() - satOffset);
-	weekStart.setHours(0, 0, 0, 0);
-	// Friday = Saturday + 6
-	const weekEnd = new Date(weekStart);
-	weekEnd.setDate(weekStart.getDate() + 6);
-	weekEnd.setHours(23, 59, 59, 999);
-	// LOCAL getters, NOT toISOString(). weekStart/weekEnd are server-LOCAL Dates
-	// (built by setHours(0,0,0,0) / (23,59,59,999) above), so serializing them
-	// through UTC asks a different question than the one that was computed. A
-	// local midnight lands on the PREVIOUS UTC day for any zone east of UTC, so
-	// this returned a Fri–Thu window there instead of Sat–Fri — the whole billing
-	// week off by one, silently. Benign on the UTC VPS and in the Americas (a
-	// negative offset keeps local midnight on the same UTC day), which is exactly
-	// why it survived: it is correct in both places anyone has ever run it.
+	// An instant ("now" included) belongs to the week of its BUSINESS day: the
+	// calendar day it falls on in APP_TIMEZONE, read from the zone database with
+	// formatToParts (never a re-parsed locale string), then the same calendar
+	// arithmetic as a bare day. An unparseable value has no day and no week: it
+	// answers "NaN-NaN-NaN" exactly as the old toLocaleString round trip did, so a
+	// caller that never validated its input sees no change.
 	//
-	// These strings are the week identity end to end — they are compared against
+	// These strings are the week identity end to end: they are compared against
 	// sheetDayKey() day-keys to decide week membership, clip the active-day window,
-	// bound the expense query, and are stored in invoices.week_start/week_end. So
-	// they must mean a wall-clock calendar day, which is what the local getters read.
-	const p2 = (n) => String(n).padStart(2, "0");
-	const fmt = (dt) => dt.getFullYear() + "-" + p2(dt.getMonth() + 1) + "-" + p2(dt.getDate());
-	return { weekStart: fmt(weekStart), weekEnd: fmt(weekEnd) };
+	// bound the expense query, and are stored in invoices.week_start/week_end.
+	const d = referenceDate ? new Date(referenceDate) : new Date();
+	if (isNaN(d.getTime())) return { weekStart: "NaN-NaN-NaN", weekEnd: "NaN-NaN-NaN" };
+	const p = {};
+	for (const x of new Intl.DateTimeFormat("en-US", {
+		timeZone: APP_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit",
+	}).formatToParts(d)) p[x.type] = x.value;
+	const y = Number(p.year), m = Number(p.month), dd = Number(p.day);
+	const sat = Date.UTC(y, m - 1, dd - ((new Date(Date.UTC(y, m - 1, dd)).getUTCDay() + 1) % 7));
+	const key = (ms) => new Date(ms).toISOString().slice(0, 10);
+	return { weekStart: key(sat), weekEnd: key(sat + 6 * 86400000) };
 }
 
-// Is it past the submission cutoff — Friday 6:30 PM Central (per CEO policy) —
-// for the week ending `weekEndDate` ('YYYY-MM-DD', as produced by getWeekRange)?
+// Is it past the submission cutoff — Friday 6:30 PM on the business clock,
+// APP_TIMEZONE (US Eastern; per CEO policy, Central until the client's 2026-10-08
+// decision) — for the week ending `weekEndDate` ('YYYY-MM-DD', as produced by
+// getWeekRange)?
 //
 // WHY IT LOOKS LIKE THIS. The previous form was
 //   new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }))
@@ -15701,7 +15695,7 @@ function getWeekRange(referenceDate) {
 // is a robustness fix, not a bug fix; nothing about the returned verdict changes.
 //
 // It is replaced anyway because it is the exact round-trip the comment beside
-// houstonStamp() below condemns as "locale-fragile and wrong across a DST
+// appStamp() below condemns as "locale-fragile and wrong across a DST
 // transition", and both halves of that are real:
 //   - LOCALE. The verdict depends on whether V8's date parser accepts whatever
 //     the runtime's ICU emits. ICU 72 (Node 18.13+) changed en-US to put a
@@ -15714,8 +15708,8 @@ function getWeekRange(referenceDate) {
 //     is only non-strict there.
 //
 // formatToParts asks the zone database directly, never re-parses its own output,
-// and is DST-safe by construction — the same pattern houstonStamp / houstonDay /
-// todayKeyCT already use. No third date convention is introduced.
+// and is DST-safe by construction — the same pattern appStamp / appDay /
+// appTodayKey already use. No third date convention is introduced.
 //
 // The comparison is a plain string compare, which is exact here because both
 // operands are the same fixed-width 'YYYY-MM-DDTHH:MM:SS' shape, whose
@@ -15727,37 +15721,37 @@ function isAfterDeadline(weekEndDate) {
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(String(weekEndDate || ""))) return false;
 	const p = {};
 	for (const x of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/Chicago",
+		timeZone: APP_TIMEZONE,
 		year: "numeric", month: "2-digit", day: "2-digit",
 		hour: "2-digit", minute: "2-digit", second: "2-digit",
 		hourCycle: "h23",
 	}).formatToParts(new Date())) p[x.type] = x.value;
-	const nowCT = `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}`;
-	return nowCT > `${weekEndDate}T18:30:00`;
+	const nowApp = `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}`;
+	return nowApp > `${weekEndDate}T18:30:00`;
 }
 
-// NOTE: a SHEET_STAMP_TZ_CUTOVER constant lived here. It let readers tell a
-// legacy UTC stamp from a Houston one so the day could be corrected. Day
-// bucketing is now LITERAL everywhere (see sheetDayKey), so nothing on the
-// server needs the distinction. The client keeps its own copy purely to resolve
-// a stamp to a true INSTANT for sorting and ETA math, which is unaffected.
+// The date of a sheet stamp is read LITERALLY everywhere on the server (see
+// sheetDayKey): the business day a stamp was written with is the day it counts
+// on, whichever clock wrote it. The one server reader that needs a stamp's true
+// INSTANT, the ELD ping window in lib/load-haul.js, reads its clock from the
+// stamp's date (closeOutStampZone(), lib/app-time.js SHEET_STAMP_APP_ZONE_FROM).
 
-
-// "Now" as a Houston wall-clock stamp, in the EXACT legacy format:
-// MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second, UNPADDED hour.
+// "Now" as a sheet stamp on the business clock (APP_TIMEZONE), in the EXACT
+// legacy format: MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second,
+// UNPADDED hour.
 //
 // WHY: this used to be built from new Date() getters, which on the UTC VPS
-// produced a UTC wall-clock. Houston is UTC-5/-6, so any load delivered in the
-// evening was stamped with the NEXT day's date. Measured on production: 23 of
-// 268 status changes (9%) were mis-dated, which put $1,100 of June revenue into
-// July. The date part of this string is what decides a load's revenue month,
-// invoice week, and driver-pay day, so the zone here is a money question, not a
-// display one.
+// produced a UTC wall-clock, so any load delivered in the US evening was stamped
+// with the NEXT day's date. Measured on production: 23 of 268 status changes (9%)
+// were mis-dated, which put $1,100 of June revenue into July. The date part of
+// this string is what decides a load's revenue month, invoice week, and
+// driver-pay day, so the zone here is a money question, not a display one. From
+// 2026-08-03 it was Houston's clock; from the client's 2026-10-08 decision it is
+// APP_TIMEZONE's (US Eastern). Stamps already written keep the day they carry.
 //
-// Intl/formatToParts rather than the toLocaleString->new Date() round-trip used
-// by getWeekRange above: that older trick re-parses a localized string and is
-// both locale-fragile and wrong across a DST transition. formatToParts asks the
-// zone database directly and is DST-safe by construction.
+// Intl/formatToParts asks the zone database directly and is DST-safe by
+// construction; a toLocaleString -> new Date() round trip is locale-fragile and
+// wrong across a DST transition.
 //
 // The format is preserved byte-for-byte on purpose. Every server-side parser of
 // this column (parseInvoiceDate, the three parseSheetDate copies) matches
@@ -15765,9 +15759,9 @@ function isAfterDeadline(weekEndDate) {
 // discarding the time — so they keep working untouched and simply see the
 // correct date. Appending a zone suffix would have been self-describing but
 // risks every unknown downstream consumer (n8n, the archive sheet, exports).
-function houstonStamp(d = new Date()) {
+function appStamp(d = new Date()) {
 	const p = new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/Chicago",
+		timeZone: APP_TIMEZONE,
 		year: "numeric", month: "2-digit", day: "2-digit",
 		hour: "2-digit", minute: "2-digit", second: "2-digit",
 		hourCycle: "h23",
@@ -15778,19 +15772,35 @@ function houstonStamp(d = new Date()) {
 	return `${p.month}/${p.day}/${p.year} ${parseInt(p.hour, 10)}:${p.minute}:${p.second}`;
 }
 
-// Today's date in Houston as "YYYY-MM-DD".
+// The business day (APP_TIMEZONE) an instant falls on, "YYYY-MM-DD"; today's by
+// default.
 //
-// Replaces new Date().toISOString().split("T")[0], which is the UTC day: after
-// 7 PM Houston (6 PM in winter) that is already TOMORROW. It stamps a new
-// load's "Assigned Date" — and per the financials convention revenue counts in
-// the month a load was ASSIGNED — so an evening load booked on the 31st was
-// being credited to the following month before anyone touched it.
-function houstonDay(d = new Date()) {
+// Replaces new Date().toISOString().split("T")[0], which is the UTC day: from
+// 8 PM Eastern (7 PM in winter) that is already TOMORROW. It stamps a new load's
+// "Assigned Date" — and per the financials convention revenue counts in the month
+// a load was ASSIGNED — so an evening load booked on the 31st was being credited
+// to the following month before anyone touched it.
+function appDay(d = new Date()) {
 	// en-CA renders as YYYY-MM-DD, which is exactly the shape we want.
 	return new Intl.DateTimeFormat("en-CA", {
-		timeZone: "America/Chicago",
+		timeZone: APP_TIMEZONE,
 		year: "numeric", month: "2-digit", day: "2-digit",
 	}).format(d);
+}
+
+// The instant that stands for a business day ("YYYY-MM-DD") when a question is
+// asked "on a day": noon on the business clock, far from both of its midnights.
+// A day before the business clock moved to APP_TIMEZONE keeps the instant it was
+// always read at, 17:00 UTC (noon Central daylight time), so no closed month's
+// answer moves: a truck handed over between 16:00 and 17:00 UTC that day still
+// counts for the driver who took it. NaN for anything that is not a day.
+function appNoonMs(day) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+	if (!m) return NaN;
+	const noonUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], 17, 0, 0);
+	if (new Date(noonUtc).toISOString().slice(0, 10) !== m[0]) return NaN;
+	if (m[0] < appTime.SHEET_STAMP_APP_ZONE_FROM) return noonUtc;
+	return appTime.wallClockToMs(APP_TIMEZONE, +m[1], +m[2], +m[3], 12, 0, 0);
 }
 
 // ============================================================
@@ -15894,7 +15904,7 @@ function generateInvoiceNumber(driverName, weekStart, opts) {
 	// and a future regeneration of a past week reproduces the number that was
 	// minted. This is `graceEndsAt()`'s convention (Date.UTC for bare-day-key
 	// math), not a new one; the Intl/formatToParts pattern is for the other
-	// question — "what is the wall clock in Houston now?" — and using it here
+	// question — "what is the business wall clock now?" — and using it here
 	// would convert the day and change the number.
 	// (Despite the old comment, this is not an ISO-8601 week: it counts
 	// Sunday-start weeks from Jan 1. Preserved exactly, for the same reason.)
@@ -16119,7 +16129,7 @@ function recordPayRateChanges() {
 }
 
 // The rates in effect on a day: { at(subject, key, day) } → the latest rate whose
-// Houston day is on or before `day`; a day before recording began reads the
+// business day (APP_TIMEZONE) is on or before `day`; a day before recording began reads the
 // earliest row (the rate in force when recording started). Read-only: a rate
 // with no history yet counts for every day, and one that differs from its latest
 // row (saved by a path that did not record it) counts from today, both in memory.
@@ -16130,10 +16140,10 @@ function loadPayRateIndex() {
 		const k = `${r.subject}:${r.subject_key}`;
 		if (!idx.has(k)) idx.set(k, []);
 		const d = new Date(r.effective_from);
-		idx.get(k).push({ day: isNaN(d) ? "" : houstonDay(d), rate: Number(r.rate) || 0 });
+		idx.get(k).push({ day: isNaN(d) ? "" : appDay(d), rate: Number(r.rate) || 0 });
 		latest.set(k, Number(r.rate) || 0);
 	}
-	const today = houstonDay(new Date());
+	const today = appDay(new Date());
 	for (const [subject, key, rate] of currentPayRates()) {
 		const k = `${subject}:${key}`;
 		if (!idx.has(k)) idx.set(k, [{ day: "", rate }]);
@@ -16252,22 +16262,20 @@ const EXPENSE_PERIOD_EXPR =
 // guard below is inert and the ledger is byte-identical to before.
 const PERIOD_FINALIZE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PERIOD_FINALIZE_ENABLED ?? "").trim());
 
-// 'YYYY-MM-DD' for the current America/Chicago calendar day. Central, not
+// 'YYYY-MM-DD' for the current business day (APP_TIMEZONE, US Eastern), not
 // server-local: the close deadline is shown to the client in business time, and a
 // lock that fires a day off from what the UI promised is its own support ticket.
 //
-// This used to run on America/New_York. The carrier is in HOUSTON, and Eastern is
-// one hour AHEAD of Central, so the ET day flipped first and the books froze at
-// 23:00 Houston on the final grace day rather than midnight — a receipt logged at
-// 23:15 on day 7 missed the window the UI had promised. It also posted a receipt
-// logged 23:30 on the last day of a month into the NEXT month. Central is the zone
-// houstonDay, getWeekRange, isAfterDeadline and houstonStamp already use; ET was
-// the outlier. (This sentence used to name BUSINESS_DAY_TZ, a constant that has
-// since been deleted — sheetDayKey reads the sheet literally and needs no zone.)
-function todayKeyCT() {
+// It is the zone appDay, getWeekRange, isAfterDeadline and appStamp use, so the
+// books freeze at midnight on the business clock on the final grace day, and a
+// receipt logged before that midnight on a month's last day posts into that
+// month. (It ran on Houston's clock from 2026-08-04 until the client's 2026-10-08
+// decision moved every business rule to Eastern; sheetDayKey reads the sheet
+// literally and needs no zone.)
+function appTodayKey() {
 	const p = {};
 	for (const x of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit",
+		timeZone: APP_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit",
 	}).formatToParts(new Date())) p[x.type] = x.value;
 	return `${p.year}-${p.month}-${p.day}`;
 }
@@ -16276,8 +16284,8 @@ function todayKeyCT() {
 // misses its own month's close gets posted into. Never a future month: posting
 // forward would put an expense in a period with no earnings row to absorb it and
 // break the ledger's reconciliation identity.
-function currentMonthKeyCT() {
-	return todayKeyCT().slice(0, 7);
+function appMonthKey() {
+	return appTodayKey().slice(0, 7);
 }
 
 // Configured grace window, clamped to something sane. 0 = close at month end
@@ -16294,7 +16302,7 @@ function settlementGraceDays() {
 // LAST DAY the books stay open for `period`, inclusive, as 'YYYY-MM-DD'.
 // '2026-07' + 7 -> '2026-08-07', so the lock fires on the 8th.
 // Date.UTC(y, m, 0) is day zero of the NEXT month = the last day of this one;
-// noon UTC dodges the DST edges, same trick as mostRecentInvoiceFridayCT().
+// noon UTC dodges the DST edges, same trick as mostRecentInvoiceFriday().
 function graceEndsAt(period, days) {
 	const [y, m] = String(period).split("-").map(Number);
 	if (!Number.isFinite(y) || !Number.isFinite(m)) return "";
@@ -16306,7 +16314,7 @@ function graceEndsAt(period, days) {
 // Is `period`'s grace window over? Pure clock arithmetic — no DB, no Sheets.
 function isPastGrace(period, days) {
 	const ends = graceEndsAt(period, days);
-	return !!ends && todayKeyCT() > ends;
+	return !!ends && appTodayKey() > ends;
 }
 
 // LAZY, not a module-scope prepare — and this is a correctness fix, not style.
@@ -16383,7 +16391,7 @@ function periodWriteLocked(period) {
 function isPending(period) {
 	if (!PERIOD_FINALIZE_ENABLED) return false;
 	const p = String(period || "");
-	return !!p && p < currentMonthKeyCT() && !isLocked(p);
+	return !!p && p < appMonthKey() && !isLocked(p);
 }
 
 // JS mirror of EXPENSE_PERIOD_EXPR for a row already in hand — same precedence
@@ -16421,7 +16429,7 @@ function periodPhase(period) {
 	if (!periodLocksReadable()) return "";
 	if (isLocked(p)) return "finalized";
 	if (!PERIOD_FINALIZE_ENABLED) return "";
-	return p >= currentMonthKeyCT() ? "accruing" : "pending";
+	return p >= appMonthKey() ? "accruing" : "pending";
 }
 
 // ⚠️ THE KEY AN EXPENSE'S DRIVER IS SUMMED UNDER, in every P&L map a caller
@@ -16521,8 +16529,8 @@ function getDeductibleExpensesByDriverMonth(periodExpr = EXPENSE_PERIOD_EXPR) {
 // Map a longitude to a continental-US IANA timezone. Real zone boundaries follow
 // state lines, but a longitude band lands the right zone for the vast majority of
 // trips and — crucially — the IANA name carries DST rules, so the day formatter
-// handles CST↔CDT transitions automatically. Falls back to Central (the same zone
-// the invoice-week boundaries use, see getWeekRange) when longitude is unknown.
+// handles DST transitions automatically. Falls back to the business zone
+// (APP_TIMEZONE, the clock the invoice weeks use) when longitude is unknown.
 // NOTE: this is US-centric; revisit if the fleet ever runs outside the lower 48.
 // ⚠️ THESE NOW LIVE IN lib/eld-miles.js AND ARE RE-EXPORTED HERE UNCHANGED.
 // The mileage rollup, its backfill script and this driver-pay path must bucket a
@@ -16942,11 +16950,12 @@ function invoiceWeekColumns(headers) {
 //
 // sheetDayKey, NOT new Date(raw).toISOString() — this is the site sheetDayKey's
 // own header calls out by name ("invoice-week filter … an outright conversion to
-// UTC. Same shift."). weekStart/weekEnd are HOUSTON calendar days from
+// UTC. Same shift."). weekStart/weekEnd are business calendar days from
 // getWeekRange; turning the cell into a UTC day shifted an RFC-2822 evening
-// delivery forward a day, so a Friday 20:15 Houston delivery fell out of its week
+// delivery forward a day, so a Friday 20:15 Central delivery fell out of its week
 // and the driver was paid one load short. Literal is the right semantic: since the
-// 2026-08-03 cutover the server stamps Houston time, so the day written in the
+// 2026-08-03 cutover the server stamps the business clock (Houston's until the
+// client's 2026-10-08 decision, APP_TIMEZONE's after), so the day written in the
 // cell IS the business day.
 function invoiceCompletionDay(row, cols) {
 	return (cols.dateCol && sheetDayKey(row[cols.dateCol]))
@@ -17240,7 +17249,7 @@ async function generateInvoiceHandler(req, res) {
 		//
 		// WHY sheetDayKey AND NOT moneySheetDate. They are both shared resolvers and
 		// they agree on every shape except one: an ISO stamp with a trailing offset
-		// ("…T19:16:37Z"), which sheetDayKey converts to the Houston business day and
+		// ("…T19:16:37Z"), which sheetDayKey converts to the business day and
 		// moneySheetDate reads literally. sheetDayKey is the right one HERE because
 		// this handler's week filter already uses it — invoiceCompletionDay(), which
 		// driversWithCompletedLoadsInWeek() shares through invoiceWeekVerdict() —
@@ -17299,26 +17308,18 @@ async function generateInvoiceHandler(req, res) {
 		const unitToVid = {};
 		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
 			.all().forEach(t => { unitToVid[t.u] = t.vid; });
-		// Central midnight, not server-local midnight. getEldTravelDaysByVehicle
-		// buckets each ping into the TRUCK'S local day, but this window was built
-		// with new Date("...T00:00:00"), which on the UTC VPS is UTC midnight — so
-		// the window sat ~5-6 h ahead of the buckets it feeds. Pings from Friday
-		// 19:00-23:59 Central on the LAST day of the billing week fell past
-		// weekEndMs and were never fetched, so a truck that moved only on Friday
-		// evening silently lost that active day — one daily rate ($250 default).
-		const centralMidnightMs = (ymd) => {
-			const guess = Date.parse(ymd + "T00:00:00Z");
-			const parts = new Intl.DateTimeFormat("en-US", {
-				timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23",
-			}).formatToParts(new Date(guess));
-			const h = Number(parts.find((x) => x.type === "hour").value);
-			// h is how far Central already is into the day at UTC midnight; adding
-			// (24 - h) walks forward to the next Central midnight. DST-safe because
-			// the offset is read from the zone database at that very instant.
-			return guess + ((24 - h) % 24) * 3600 * 1000;
-		};
-		const weekStartMs = centralMidnightMs(weekStart);
-		const weekEndMs = centralMidnightMs(computedWeekEnd) + 24 * 3600 * 1000;
+		// The window only bounds which pings are READ: getEldTravelDaysByVehicle
+		// buckets each ping into the TRUCK'S local day, and loadWindowDays below
+		// keeps only days inside the week. So the window must hold every truck-local
+		// day of the week, wherever the truck was: from UTC midnight on the
+		// Saturday (8 PM Eastern the evening before) to noon UTC the day after the
+		// Friday (4 AM Pacific Saturday at the latest). A window cut at one zone's
+		// midnight dropped pings of trucks in the zones west of it: built at UTC
+		// midnight it lost Friday 19:00-23:59 Central (one daily rate, $250 by
+		// default), and Central midnight still lost a Mountain or Pacific Friday
+		// evening. Pings outside the week land on days nothing counts.
+		const weekStartMs = Date.parse(weekStart + "T00:00:00Z");
+		const weekEndMs = Date.parse(computedWeekEnd + "T00:00:00Z") + 36 * 3600 * 1000;
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
 
 		const activeDaySet = new Set();
@@ -17461,8 +17462,8 @@ async function generateInvoiceHandler(req, res) {
 		const payPercentage = payStruct.payPercentage;
 
 		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
-		// at 8 PM Eastern, which UTC already calls Saturday, and the template prints
-		// this beside a literal "Friday,".
+		// at 7 PM Eastern, which UTC calls Saturday in winter (7 PM EST is 00:00
+		// UTC), and the template prints this beside a literal "Friday,".
 		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -17622,7 +17623,8 @@ async function generateInvoiceHandler(req, res) {
 // Approval stays 100% manual — nothing is ever auto-approved or auto-paid.
 //
 // Idempotent per week via the invoice_autogen_runs marker (keyed on the billing
-// Friday). A per-minute tick fires once the current week's Friday 7 PM Central has
+// Friday). A per-minute tick fires once the current week's Friday 7 PM (business
+// clock, APP_TIMEZONE) has
 // passed; a boot-time run covers a restart across the trigger. On first-ever
 // startup a baseline marker is seeded so the feature never retroactively bills
 // past weeks — the first real run is the NEXT Friday. Kill switch:
@@ -17650,32 +17652,28 @@ const INVOICE_AUTOGEN_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.INV
 const INVOICE_AUTOGEN_MAX_ATTEMPTS = 3;              // retries for a week with unbilled drivers
 const INVOICE_AUTOGEN_RETRY_MS = 15 * 60 * 1000;     // min gap between attempts
 
-// Most recent Friday (YYYY-MM-DD, America/Chicago) whose 7:00 PM CT has passed.
-// Identifies the billing week to run: on Friday >= 19:00 CT it's today; any
-// other time it's the previous Friday. DST-aware via Intl (always 7 PM in Houston).
+// Most recent Friday (YYYY-MM-DD, business calendar) whose 7:00 PM on the
+// business clock (APP_TIMEZONE, US Eastern) has passed. Identifies the billing
+// week to run: on Friday >= 19:00 it's today; any other time it's the previous
+// Friday. DST-aware via Intl.
 //
-// WAS 4:00 PM America/New_York, i.e. 3:00 PM Houston — and that was wrong twice
-// over. The zone was the outlier (everything else in this app is Central), and
-// more importantly the batch CLOSED THE BILLING WEEK BEFORE DRIVERS WERE DONE:
-// isAfterDeadline lets a driver submit until 6:30 PM Central on Friday, so
-// anyone submitting between 3:00 and 6:30 PM had already missed the run and
-// billed into the following week.
-//
-// 19:00 is therefore not a cosmetic move to Central — it is deliberately AFTER
-// the 18:30 driver cutoff, with a half-hour of slack. If that cutoff ever moves,
-// this must move with it; they are a pair, not two independent settings.
-function mostRecentInvoiceFridayCT() {
+// 19:00 is deliberately AFTER the 18:30 driver cutoff (isAfterDeadline, the same
+// clock), with a half-hour of slack: a batch that closed the billing week before
+// drivers were done (it once ran at 3:00 PM Houston against a 6:30 PM cutoff)
+// billed late submitters into the following week. They are a pair, not two
+// independent settings: if the cutoff ever moves, this must move with it.
+function mostRecentInvoiceFriday() {
 	const parts = {};
 	for (const p of new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/Chicago", weekday: "short",
-		year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
+		timeZone: APP_TIMEZONE, weekday: "short",
+		year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
 	}).formatToParts(new Date())) parts[p.type] = p.value;
 	const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 	const wd = WD[parts.weekday];
 	const hour = parseInt(parts.hour, 10);
 	let daysAgo = (wd - 5 + 7) % 7;                 // 0 when today is Friday
-	if (daysAgo === 0 && hour < 19) daysAgo = 7;    // Friday before 7 PM CT -> last Friday
-	// Date-only arithmetic on the ET calendar day (noon UTC dodges DST edges).
+	if (daysAgo === 0 && hour < 19) daysAgo = 7;    // Friday before 7 PM -> last Friday
+	// Date-only arithmetic on the business calendar day (noon UTC dodges DST edges).
 	const d = new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00Z`);
 	d.setUTCDate(d.getUTCDate() - daysAgo);
 	return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
@@ -18289,7 +18287,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0 } = {}) {
 let invoiceAutogenRunning = false;
 async function maybeRunWeeklyInvoiceBatch() {
 	if (!INVOICE_AUTOGEN_ENABLED || invoiceAutogenRunning) return;
-	const weekEnd = mostRecentInvoiceFridayCT();
+	const weekEnd = mostRecentInvoiceFriday();
 	const marker = db.prepare("SELECT attempts, failed, ran_at FROM invoice_autogen_runs WHERE week_end = ?").get(weekEnd);
 	let attemptNum = 1;
 	if (marker) {
@@ -18313,14 +18311,14 @@ async function maybeRunWeeklyInvoiceBatch() {
 if (INVOICE_AUTOGEN_ENABLED && startsJob("weekly invoice batch")) {
 	// First-ever startup: seed a baseline marker (recorded as a clean, exhausted
 	// run) for the most recent billing Friday so the feature NEVER retroactively
-	// bills a pre-feature week. First real run is the next Friday 7 PM Central.
+	// bills a pre-feature week. First real run is the next Friday 7 PM, business clock.
 	try {
 		const hasRuns = db.prepare("SELECT 1 FROM invoice_autogen_runs LIMIT 1").get();
 		if (!hasRuns) {
 			db.prepare(
 				"INSERT OR IGNORE INTO invoice_autogen_runs (week_end, ran_at, attempts, failed, summary) VALUES (?, ?, ?, 0, ?)",
-			).run(mostRecentInvoiceFridayCT(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
-			console.log("[invoice-autogen] baseline seeded; first run is the next Friday 7 PM Central");
+			).run(mostRecentInvoiceFriday(), new Date().toISOString(), INVOICE_AUTOGEN_MAX_ATTEMPTS, "baseline (feature enabled — no retroactive run)");
+			console.log(`[invoice-autogen] baseline seeded; first run is the next Friday 7 PM ${APP_TIMEZONE}`);
 		}
 	} catch (e) { console.error("[invoice-autogen] baseline seed failed:", e.message); }
 
@@ -18336,7 +18334,7 @@ if (INVOICE_AUTOGEN_ENABLED && startsJob("weekly invoice batch")) {
 		const undatedSeedTick = setTimeout(() => { runUndatedLoadAlerts({ seedOnly: true }).catch(() => {}); }, INVOICE_UNDATED_SEED_DELAY_MS);
 		if (undatedSeedTick && typeof undatedSeedTick.unref === "function") undatedSeedTick.unref();
 	}
-	console.log("[invoice-autogen] enabled — Fridays 7:00 PM America/Chicago (after the 6:30 PM driver cutoff)");
+	console.log(`[invoice-autogen] enabled — Fridays 7:00 PM ${APP_TIMEZONE} (after the 6:30 PM driver cutoff)`);
 }
 
 // ============================================================
@@ -19205,9 +19203,9 @@ function detectAndPersistFuelEvents({ days = FUEL_EVENTS_SCAN_DAYS, persist = tr
 				unit: t.unit_number,
 				start_ms: e.startMs,
 				end_ms: e.endMs,
-				// Houston business day — see the fuel_events DDL comment for why
+				// Business day (APP_TIMEZONE) — see the fuel_events DDL comment for why
 				// this is NOT usTzForLongitude/truck-local.
-				local_day: houstonDay(new Date(e.startMs)),
+				local_day: appDay(new Date(e.startMs)),
 				pct_before: e.pctBefore,
 				pct_after: e.pctAfter,
 				rise: e.rise,
@@ -19278,7 +19276,7 @@ function fuelMatchDistanceKm(a, b) {
 }
 
 // 'YYYY-MM-DD' +/- n days, on the calendar (no zone math — both sides are
-// already bare Houston days by this point).
+// already bare calendar days by this point).
 function shiftDayKey(day, n) {
 	const d = new Date(day + "T12:00:00Z");
 	d.setUTCDate(d.getUTCDate() + n);
@@ -19348,7 +19346,7 @@ function isDefReceipt(r) {
 
 // Match episodes to fuel receipts, ONE-TO-ONE, over the match window.
 //
-// Greedy over a cost that ranks: exact Houston day first, then physical
+// Greedy over a cost that ranks: exact business day first, then physical
 // proximity, then how well the gallons fit the truck's own typical
 // gallons-per-point. Greedy rather than a full assignment solve because the
 // candidate sets are tiny (a truck-day), and because the ambiguity guard below
@@ -19356,7 +19354,7 @@ function isDefReceipt(r) {
 //
 // The +/-1 day fallback exists because a receipt's printed date is the STATION'S
 // local date: an evening fill in a western state can legitimately print the day
-// before the Houston day we bucketed the episode into. An exact-day candidate
+// before the business day we bucketed the episode into. An exact-day candidate
 // always outranks an adjacent-day one (the 1000-point term dwarfs everything
 // else), so the fallback can never steal a match from an exact hit.
 // `writeReceipts` is separate from `persist` on purpose: a dry run still records
@@ -19376,7 +19374,7 @@ function matchFuelEventsToReceipts({ days = FUEL_EVENTS_MATCH_DAYS, persist = tr
 	// set — and since the pass below CLEARS existing links before re-deriving
 	// them, the match would not merely fail to form, it would be erased and never
 	// come back as the window slid forward.
-	const sinceDay = shiftDayKey(houstonDay(), -days);
+	const sinceDay = shiftDayKey(appDay(), -days);
 	const receiptSinceDay = shiftDayKey(sinceDay, -1);
 
 	const events = providedEvents
@@ -19682,7 +19680,7 @@ function fuelEventsAnalytics({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 // `atMs`, which says what the number is instead of leaving the reader to guess
 // between epoch ms and an ISO string.
 //
-// All days are HOUSTON (America/Chicago) business days; all *Ms fields are epoch
+// All days are business days (APP_TIMEZONE); all *Ms fields are epoch
 // milliseconds UTC.
 function fuelEventWire(e) {
 	return {
@@ -20319,7 +20317,7 @@ if (EXPENSE_DUPLICATE_ALERT_ENABLED && startsJob("duplicate-receipt alert sweep"
 function fuelReconciliationSnapshot({ days = FUEL_EVENTS_MATCH_DAYS } = {}) {
 	const everRan = db.prepare("SELECT 1 FROM fuel_events LIMIT 1").get();
 	if (!everRan) return null;
-	const sinceDay = shiftDayKey(houstonDay(), -days);
+	const sinceDay = shiftDayKey(appDay(), -days);
 
 	const unmatchedFills = db.prepare(`
 		SELECT fe.id, fe.routemate_vehicle_id, fe.local_day, fe.start_ms, fe.end_ms,
@@ -20725,9 +20723,9 @@ function fuelEventsPayload(r, { dryRun }) {
 		dryRun,
 		scanDays: FUEL_EVENTS_SCAN_DAYS,
 		matchDays: FUEL_EVENTS_MATCH_DAYS,
-		// Every localDay below is a HOUSTON (America/Chicago) business day;
-		// every *Ms field is epoch milliseconds UTC.
-		timezone: "America/Chicago",
+		// Every localDay below is a business day (APP_TIMEZONE); every *Ms field
+		// is epoch milliseconds UTC.
+		timezone: APP_TIMEZONE,
 		detected: r.detected.length,
 		// Stale rows the re-detect removed. Always 0 on the dry run, which persists
 		// nothing — so a non-zero value here is proof a real sweep cleaned up.
@@ -20755,7 +20753,7 @@ function fuelEventsPayload(r, { dryRun }) {
 			eldOdometer: m.e.odometer || null,
 			...fuelReceiptWire(m.r),
 			// fuelReceiptWire sets localDay to the RECEIPT's printed date; the
-			// episode's Houston day is the authoritative one for this row, so it
+			// episode's business day is the authoritative one for this row, so it
 			// is restored here and the receipt's own date kept separately.
 			localDay: m.e.local_day,
 			receiptDate: m.r.date,
@@ -25631,14 +25629,14 @@ app.get("/api/investors", requireRole("Super Admin"), (req, res) => {
 		LEFT JOIN users u ON u.id = i.user_id
 		ORDER BY i.full_name ASC
 	`).all();
-	// Each investor's payout basis for the current Houston month: the lease, or
+	// Each investor's payout basis for the current business month: the lease, or
 	// null for the split. Shown with the flag off too (see the basis routes).
 	const basisRowsByOwner = new Map();
 	for (const b of db.prepare("SELECT owner_id, effective_month, basis_type, lease_amount_cents FROM investor_payout_basis ORDER BY owner_id, effective_month").all()) {
 		if (!basisRowsByOwner.has(b.owner_id)) basisRowsByOwner.set(b.owner_id, []);
 		basisRowsByOwner.get(b.owner_id).push(b);
 	}
-	const basisMonth = currentMonthKeyCT();
+	const basisMonth = appMonthKey();
 	const leaseBasisOf = (userId) => {
 		const row = investorPayoutBasis.governingBasisRow(basisRowsByOwner.get(userId) || [], basisMonth);
 		const cents = investorPayoutBasis.leaseCentsOf(row);
@@ -26034,11 +26032,11 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			// Bare 'YYYY-MM-DD' (or "" when unknown) — deliberately NOT run through
 			// TRUCK_CREATED_AT's strftime. This is a calendar date, not a UTC
 			// instant, and re-emitting it as ...T00:00:00Z is exactly how it would
-			// display a day early in Houston. Empty means "falls back to CreatedAt".
+			// display a day early in every US zone. Empty means "falls back to CreatedAt".
 			InServiceDate: t.in_service_date || '',
 			// The mirror bound. Same bare-string passthrough as InServiceDate — never
 			// run through strftime or new Date, which would shift a bare date back a
-			// day in Houston (see truckChargeUntilMonth).
+			// day in every US zone (see truckChargeUntilMonth).
 			RetiredAt: t.retired_at || '',
 			Photo: t.photo || '',
 			InsuranceMonthly: t.insurance_monthly || 0,
@@ -26175,7 +26173,7 @@ function parseInServiceDate(raw) {
 	}
 	// Month arithmetic on a month index, so the cap can't be built with a Date
 	// (same bare-date/UTC trap truckChargeFromMonth documents).
-	const today = todayKeyCT();
+	const today = appTodayKey();
 	const capIdx = parseInt(today.slice(0, 4), 10) * 12 + (parseInt(today.slice(5, 7), 10) - 1) + IN_SERVICE_MAX_MONTHS_AHEAD;
 	const cap = `${Math.floor(capIdx / 12)}-${String((capIdx % 12) + 1).padStart(2, "0")}`;
 	if (day.slice(0, 7) > cap) {
@@ -26213,7 +26211,7 @@ function parseRetiredAt(raw) {
 	if (mo < 1 || mo > 12 || dd < 1 || dd > 31) {
 		return { error: "retired_at must be a real calendar date (YYYY-MM-DD)" };
 	}
-	const today = todayKeyCT();
+	const today = appTodayKey();
 	const capIdx = parseInt(today.slice(0, 4), 10) * 12 + (parseInt(today.slice(5, 7), 10) - 1) + IN_SERVICE_MAX_MONTHS_AHEAD;
 	const cap = `${Math.floor(capIdx / 12)}-${String((capIdx % 12) + 1).padStart(2, "0")}`;
 	if (day.slice(0, 7) > cap) {
@@ -26565,7 +26563,7 @@ function driverPayLockedMonths(driverName, locked, history) {
 	for (const r of rows) {
 		// start_date is an ISO string ('2026-05-13T10:47:01.338Z'), so a bare slice
 		// is the month. Never round-trip through Date(): a bare or UTC-midnight
-		// value reads back one month early in Houston, the same off-by-one-month
+		// value reads back one month early in every US zone, the same off-by-one-month
 		// that truckChargeFromMonth documents.
 		const from = String(r.start_date || "").slice(0, 7);
 		if (!/^\d{4}-\d{2}$/.test(from)) return locked.slice(); // unreadable → cannot bound it
@@ -35046,11 +35044,11 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 
 		const now = new Date();
 		const logId = `LOG-${now.getTime()}`;
-		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
-		// getter-based build stamped evening deliveries with tomorrow's date.
-		// See houstonStamp() — the date part here decides revenue month,
+		// Business wall-clock (APP_TIMEZONE), NOT server-local: this box runs UTC,
+		// so the old getter-based build stamped evening deliveries with tomorrow's date.
+		// See appStamp() — the date part here decides revenue month,
 		// invoice week, and driver-pay day.
-		const dateTime = houstonStamp(now);
+		const dateTime = appStamp(now);
 
 		if (response === "accepted") {
 			// Update Job Status to "Assigned" in the sheet, using the SAME headers
@@ -35366,14 +35364,14 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1),
 		);
 		weekStart.setHours(0, 0, 0, 0);
-		// Month boundary on the HOUSTON calendar, not the server's. This was
+		// Month boundary on the business calendar (APP_TIMEZONE), not the server's. This was
 		// new Date(now.getFullYear(), now.getMonth(), 1), and those getters are
 		// server-local — UTC on the VPS. So for the last 5-6 hours of every month
-		// (from 19:00 CDT / 18:00 CST on the final day) the dashboard had already
+		// (from 8 PM EDT / 7 PM EST on the final day) the dashboard had already
 		// rolled to the NEXT month and showed 0 completed, while /api/investor and
-		// /api/financials — which key off houstonDay() — were still counting the
+		// /api/financials — which key off appDay() — were still counting the
 		// month the owner was actually still working. Same basis, same numbers.
-		const [hYear, hMonth] = houstonDay(now).slice(0, 7).split("-").map(Number);
+		const [hYear, hMonth] = appDay(now).slice(0, 7).split("-").map(Number);
 		const monthStart = new Date(hYear, hMonth - 1, 1);
 
 		const completedThisWeek = completedJobs.filter((r) => {
@@ -38031,11 +38029,11 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 
 		// Build batch update for status column + date column
 		const now = new Date();
-		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
-		// getter-based build stamped evening deliveries with tomorrow's date.
-		// See houstonStamp() — the date part here decides revenue month,
+		// Business wall-clock (APP_TIMEZONE), NOT server-local: this box runs UTC,
+		// so the old getter-based build stamped evening deliveries with tomorrow's date.
+		// See appStamp() — the date part here decides revenue month,
 		// invoice week, and driver-pay day.
-		const dateTime = houstonStamp(now);
+		const dateTime = appStamp(now);
 
 		// PERIOD GUARD — on the FINAL resolved row, after the re-resolution above,
 		// so it judges the row that actually gets written and not the one the
@@ -38322,11 +38320,11 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		}
 
 		const now = new Date();
-		// Houston wall-clock, NOT server-local: this box runs UTC, so the old
-		// getter-based build stamped evening deliveries with tomorrow's date.
-		// See houstonStamp() — the date part here decides revenue month,
+		// Business wall-clock (APP_TIMEZONE), NOT server-local: this box runs UTC,
+		// so the old getter-based build stamped evening deliveries with tomorrow's date.
+		// See appStamp() — the date part here decides revenue month,
 		// invoice week, and driver-pay day.
-		const dateTime = houstonStamp(now);
+		const dateTime = appStamp(now);
 		// Reverting away from a completed status: clear the Completion Date so the
 		// column doesn't lie. Setting to a completed status: populate it.
 		const isCompletion = /^(delivered|completed|pod received)$/i.test(canonicalStatus);
@@ -38557,12 +38555,13 @@ const exportLimiter = rateLimit({
 // (the filter, driversWithCompletedLoadsInWeek and parseInvoiceDate) resolves
 // through sheetDayKey; the month path resolves through moneySheetDate. Those two
 // differ on exactly one shape — an ISO stamp with a trailing offset, which this
-// helper converts to the Houston day and moneySheetDate reads literally — and
+// helper converts to the business day and moneySheetDate reads literally — and
 // that split is deliberate: see the `Z` note above for why the week converts, and
 // moneySheetDate's header for why settled months do not.
 //
-// Cost is limited to history: since 2026-08-03 the server stamps Houston time,
-// so the stored date IS the business day and literal == correct. Only
+// Cost is limited to history: since 2026-08-03 the server stamps the business
+// clock (Houston's until 2026-10-08, APP_TIMEZONE's after), so the stored date IS
+// the business day and literal == correct. Only
 // pre-cutover evening loads read a day off, and for those the recorded date is
 // the one that was settled on.
 // Returns "YYYY-MM-DD", or "" when nothing is parseable.
@@ -38584,8 +38583,8 @@ function sheetDayKey(val) {
 		// is what toISOString() emits, and a 19:16 Houston Friday serializes as
 		// "…-08-08T00:16:37.000Z". This helper decides the invoice week, so that
 		// load silently leaves the week it was worked and nobody is short-paid
-		// loudly enough to notice. Convert to the Houston business day, which is
-		// what every other date in the money path already means.
+		// loudly enough to notice. Convert to the business day (APP_TIMEZONE), which
+		// is what every other date in the money path already means.
 		//
 		// NOTHING WRITING THIS COLUMN EMITS `Z` TODAY — this is latent, not live.
 		// It is fixed anyway because the failure is silent, in money, and the fix
@@ -38602,7 +38601,7 @@ function sheetDayKey(val) {
 		// restate closed months, which the client has ruled out ("if it is already
 		// closed and locked by the month then follow that date"). The `Z` shape has
 		// no such history: of the 69 `Z` values in the sheet (all `Assigned Date`,
-		// May–Nov 2025) every one lands 11:00–22:00 UTC, i.e. 05:00–17:00 Houston,
+		// May–Nov 2025) every one lands 11:00–22:00 UTC, i.e. 06:00–18:00 Eastern,
 		// so not one has ever fallen in the 00:00–05:59 UTC window where the day
 		// flips. Nothing was settled on the wrong day, so fixing it restates
 		// nothing — it only stops the next `Z` writer from being wrong.
@@ -38613,7 +38612,7 @@ function sheetDayKey(val) {
 		const at = new Date(`${literal}T${p2(iso[4])}:${iso[5]}:${iso[6] ? p2(iso[6]) : "00"}${tz}`);
 		// Degrade to the literal day, never to "". An unparseable oddity must not
 		// turn a dated row into an undated one on a path that pays people.
-		return Number.isNaN(at.getTime()) ? literal : houstonDay(at);
+		return Number.isNaN(at.getTime()) ? literal : appDay(at);
 	}
 
 	const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:,?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
@@ -40882,7 +40881,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 			} else if (!safeState && driverTruck?.routemate_vehicle_id) {
 				// Window = user-entered day: [00:00Z − 6h, 00:00Z + 30h] covers the
 				// full local day in every US zone; pick the ping closest to 18:00Z
-				// (≈ noon Central) as the "midday" position.
+				// (midday across the continental US zones) as the "midday" position.
 				const dayMs = Date.parse(`${date}T00:00:00Z`);
 				if (Number.isFinite(dayMs)) {
 					const pings = db.prepare(
@@ -40934,12 +40933,12 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// is the reversible direction. The `!== openPeriod` test keeps that from
 		// degenerating into stamping every receipt with its own month.
 		const naturalPeriod = String(date || "").slice(0, 7);
-		const openPeriod = currentMonthKeyCT();
+		const openPeriod = appMonthKey();
 		const lockUnreadable = !periodLocksReadable();
 		// The futureReceipts payout rule (payoutRules(), off unless switched on): a
 		// receipt dated after today books to the month it is submitted in, this
 		// open month, and is recorded for review. Its `date` stays as entered.
-		const futureDated = payoutRules().futureReceipts && /^\d{4}-\d{2}-\d{2}/.test(String(date || "")) && String(date).slice(0, 10) > todayKeyCT();
+		const futureDated = payoutRules().futureReceipts && /^\d{4}-\d{2}-\d{2}/.test(String(date || "")) && String(date).slice(0, 10) > appTodayKey();
 		const postedPeriod = futureDated
 			? openPeriod
 			: (naturalPeriod && naturalPeriod !== openPeriod && periodWriteLocked(naturalPeriod) ? openPeriod : "");
@@ -41028,7 +41027,7 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		// between months. Also on the audit trail: this is a settlement decision.
 		if (futureDated) {
 			logAudit(req, "receipt_future_dated", "expense", String(result.lastInsertRowid),
-				`Receipt dated ${date}, after the day it was submitted (${todayKeyCT()}): booked to ${postedPeriod}; for review ($${parsedAmount}, ${driver})`);
+				`Receipt dated ${date}, after the day it was submitted (${appTodayKey()}): booked to ${postedPeriod}; for review ($${parsedAmount}, ${driver})`);
 		} else if (postedPeriod) {
 			logAudit(req, "expense_posted_to_open_period", "expense", String(result.lastInsertRowid),
 				`Receipt dated ${date} — ${naturalPeriod} ${lockUnreadable
@@ -42011,9 +42010,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		try { dropoffCoords = dropoffAddress ? await geocodeAddress(dropoffAddress) : null; } catch { /* non-critical */ }
 
 		// ---- 4) Append the Job Tracking row (n8n "JOB DETAILS ENTRY") ----
-		// Houston day, not the UTC day — this lands in "Assigned Date", which
-		// decides the load's revenue month. See houstonDay().
-		const today = houstonDay();
+		// Business day, not the UTC day — this lands in "Assigned Date", which
+		// decides the load's revenue month. See appDay().
+		const today = appDay();
 		const values = rateconLoad.buildJobTrackingRow(headers, fields, {
 			today,
 			ownerId: 0,
@@ -43018,7 +43017,7 @@ function rememberRateConMatch(loadKey, file, verdict, req) {
 
 // MM/DD/YYYY out of a bare `YYYY-MM-DD`, by STRING SURGERY.
 //
-// ⚠️ NEVER `new Date(iso)`. It is UTC midnight, and rendered in America/Chicago
+// ⚠️ NEVER `new Date(iso)`. It is UTC midnight, and rendered in any US zone
 // it prints the day BEFORE: formatDate(new Date("2026-08-14")) returns
 // "08/13/2026". `<input type="date">` emits exactly this shape, so building a
 // Date from it would date EVERY edited invoice one day early — on the document
@@ -43939,7 +43938,7 @@ app.post(
 			}
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
-			//    button-click date (today, printed as the Houston date). deliveryDate is the
+			//    button-click date (today, printed as the business date). deliveryDate is the
 			//    load's ACTUAL delivery/completion date from the sheet — never
 			//    today, never the rate-con scheduled date.
 			const today = new Date();
@@ -45294,8 +45293,8 @@ app.get("/api/investor/load-report", requireRole("Super Admin", "Investor"), asy
 			let key, label, start, end;
 			if (period === "weekly") {
 				// The day key, not `dt`: `dt` is the row's LOCAL midnight, which on the
-				// UTC VPS is UTC midnight, and getWeekRange() reads an instant in
-				// Central — a Saturday load landed in the week before.
+				// UTC VPS is UTC midnight, and getWeekRange() reads an instant on the
+				// business clock — a Saturday load landed in the week before.
 				const wr = getWeekRange(dayKey);
 				key = wr.weekStart; start = wr.weekStart; end = wr.weekEnd; label = `${wr.weekStart} to ${wr.weekEnd}`;
 			} else {
@@ -48691,13 +48690,13 @@ function buildHaulTruckResolver() {
 
 // Which truck a driver held on a day, and its owner, from the dated
 // truck_assignments (buildHaulTruckResolver()): null when no assignment covered
-// the day. Noon Central stands for the day.
+// the day. Noon on the business clock stands for the day (appNoonMs()).
 function buildHeldTruckIndex() {
 	const held = buildHaulTruckResolver();
 	const trucks = new Map(db.prepare("SELECT id, unit_number, owner_id, driver_pay_daily FROM trucks").all().map((t) => [t.id, t]));
 	const truckAt = (driver, day) => {
 		if (!driver || !day) return null;
-		const h = held.forDriverAt(driver, Date.parse(`${day}T17:00:00Z`));
+		const h = held.forDriverAt(driver, appNoonMs(day));
 		return h ? trucks.get(h.truck_id) || null : null;
 	};
 	return {
@@ -50568,12 +50567,12 @@ const MAPS_KEY_HANDOUT_PREFIX = "maps_key_handouts:";
 // hidden in a calculation so the estimate can never silently drift from reality.
 const MAPS_DYNAMIC_LOAD_USD_PER_1K = Number(process.env.MAPS_DYNAMIC_LOAD_USD_PER_1K || 7);
 
-// Bucketed by the HOUSTON business day, not UTC — every other daily figure in
-// this app is Central, and a UTC bucket would disagree with all of them at the
-// seam. Reuses houstonDay() rather than re-deriving the rule.
+// Bucketed by the business day (APP_TIMEZONE), not UTC — every other daily
+// figure in this app is on that clock, and a UTC bucket would disagree with all
+// of them at the seam. Reuses appDay() rather than re-deriving the rule.
 function bumpMapsKeyHandout() {
 	try {
-		const key = MAPS_KEY_HANDOUT_PREFIX + houstonDay();
+		const key = MAPS_KEY_HANDOUT_PREFIX + appDay();
 		db.prepare(
 			`INSERT INTO server_state (key, value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP)
 			 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT),
@@ -50604,7 +50603,7 @@ app.get("/api/admin/maps-key-usage", requireRole("Super Admin"), (req, res) => {
 			day: r.key.slice(MAPS_KEY_HANDOUT_PREFIX.length),
 			handouts: parseInt(r.value, 10) || 0,
 		}));
-		const today = houstonDay();
+		const today = appDay();
 		const total = days.reduce((a, d) => a + d.handouts, 0);
 		const perDay = days.length ? total / days.length : 0;
 		res.json({
@@ -51492,12 +51491,12 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 	const jtDropCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 
 	const now = new Date();
-	// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
-	// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
-	// final 5-6 hours of every month the portal showed the NEXT month accruing at
-	// $0 and treated the just-ended one as complete. houstonDay() is the same
-	// Central basis the stamps and the close lifecycle now use.
-	const currentMonthKey = houstonDay(now).slice(0, 7);
+	// Business month (APP_TIMEZONE), not server-local: on the UTC VPS a plain
+	// getMonth() flips at 8 PM EDT / 7 PM EST on the last day of the month, so for
+	// the final hours of every month the portal showed the NEXT month accruing at
+	// $0 and treated the just-ended one as complete. appDay() is the same
+	// business clock the stamps and the close lifecycle use.
+	const currentMonthKey = appDay(now).slice(0, 7);
 
 	// ELD travel-day index per in-scope truck (same as GET /api/investor).
 	// Read by the sheet's Truck cell, so a null-prototype object.
@@ -52084,7 +52083,7 @@ function financialsExtraItems(months, settings, which = { reserve: true, depreci
 const FINANCIALS_GRANULARITIES = new Set(["day", "week", "month", "quarter", "year"]);
 const FINANCIALS_GROUPINGS = new Set(["fleet", "truck", "driver", "load", "pickupState", "deliveryState", "owner"]);
 function financialsReportQuery(q) {
-	const today = houstonDay(new Date());
+	const today = appDay(new Date());
 	// A real calendar day (2026-02-31 is refused) in the years the app handles.
 	const isDay = (v) => {
 		if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -52138,7 +52137,7 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 	}
 	// Financials' own lines run from the books' first month to this one: no
 	// overhead before there are books, and none for months still to come.
-	const thisMonth = houstonDay(new Date()).slice(0, 7);
+	const thisMonth = appDay(new Date()).slice(0, 7);
 	const firstMonth = books.months.length ? books.months[0] : thisMonth;
 	const openMonths = months.filter((mk) => !books.lockedPeriods.has(mk) && mk >= firstMonth && mk <= thisMonth);
 	const extras = ledgerOnly ? [] : [
@@ -52163,7 +52162,7 @@ async function buildFinancialsReport({ from, to, granularity, groupBy, books: gi
 		const t = String(item.truck || "").trim();
 		if (t) return truckLabel(t);
 		if (item.driver && item.day) {
-			const held = heldTruck.forDriverAt(item.driver, Date.parse(`${item.day}T17:00:00Z`));
+			const held = heldTruck.forDriverAt(item.driver, appNoonMs(item.day));
 			if (held && held.unit) return held.unit;
 		}
 		return "";
@@ -52410,14 +52409,14 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const refreshAmount = db.prepare(
 		"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
 	);
-	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
-	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
-	// runs on America/Chicago — so on a UTC server they disagree for the first
-	// few hours of each month. Taking the stricter of the two keeps row existence
+	// A month is "completed" only if BOTH month keys agree it is: currentMonthKey
+	// (computeInvestorMonthlyEarnings, from gatherLedgerScopeFacts) and the close
+	// lifecycle's appMonthKey(). Both read the business clock (APP_TIMEZONE) now;
+	// the first was once server-local, which on a UTC server disagreed for the
+	// first hours of each month. Taking the stricter of the two keeps row existence
 	// and `phase` from contradicting each other (a row that exists but reports
-	// 'accruing', which is settleable while the UI calls it pending). Whichever
-	// way the server's zone leans, the AND is always the conservative choice.
-	const ctMonthKey = currentMonthKeyCT();
+	// 'accruing', which is settleable while the UI calls it pending).
+	const ctMonthKey = appMonthKey();
 	const reconcile = db.transaction((months) => {
 		for (const m of months) {
 			if (m.isCurrentMonth || m.month >= currentMonthKey || m.month >= ctMonthKey) continue; // only completed past months
@@ -52636,7 +52635,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 		//
 		// periodPhase() is the one that knows about the flag, so it wins. In
 		// production (flag ON, lock table readable) it returns "accruing" for the
-		// current month by its own final line — `p >= currentMonthKeyCT()` — so the
+		// current month by its own final line — `p >= appMonthKey()` — so the
 		// live payload is UNCHANGED and only the flag-off/unreadable cases move,
 		// which are the cases that were disagreeing.
 		phase: periodPhase(currentMonthKey),
@@ -52754,7 +52753,7 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 
 // The month keys a report range covers, from the raw `start` / `end` query
 // strings (the client's <input type="date"> values). Sliced as strings on
-// purpose: new Date('2026-08-01') is UTC midnight, i.e. 2026-07-31 in Houston,
+// purpose: new Date('2026-08-01') is UTC midnight, i.e. 2026-07-31 in every US zone,
 // which would pull a whole month into the range (see truckChargeFromMonth). ""
 // is UNBOUNDED, like every other month bound in this file; an unreadable value is
 // unbounded too, which is how the report's own date filter has always treated
@@ -52830,9 +52829,9 @@ async function investorReportPayoutEntries({ ownerId, sessionUser, carrierDB, gl
 	const { monthlyEarnings, currentMonthKey } = await computeInvestorMonthlyEarnings({
 		user: sessionUser, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, config,
 	});
-	// Nothing after Houston's current month. computeInvestorMonthlyEarnings() builds
-	// its months up to the SERVER's month, which on the UTC box is already the next
-	// one from 19:00 CDT (18:00 CST) on the last day of every month; the ledger never
+	// Nothing after the current business month. computeInvestorMonthlyEarnings()
+	// builds its months up to the SERVER's month, which on the UTC box is already the
+	// next one from 8 PM EDT (7 PM EST) on the last day of every month; the ledger never
 	// settles that month and the report does not print it.
 	const months = monthlyEarnings.filter((m) => m.month <= currentMonthKey);
 	const carryByPeriod = computeLossCarryForward(months);
@@ -53505,12 +53504,12 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// ---- Monthly Earnings Breakdown (exact calendar month) ----
 		const monthlyEarnings = [];
 		{
-			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
-			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
-			// final 5-6 hours of every month the portal showed the NEXT month accruing at
-			// $0 and treated the just-ended one as complete. houstonDay() is the same
-			// Central basis the stamps and the close lifecycle now use.
-			const currentMonthKey = houstonDay(now).slice(0, 7);
+			// Business month (APP_TIMEZONE), not server-local: on the UTC VPS a plain
+			// getMonth() flips at 8 PM EDT / 7 PM EST on the last day of the month, so for
+			// the final hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. appDay() is the same
+			// business clock the stamps and the close lifecycle use.
+			const currentMonthKey = appDay(now).slice(0, 7);
 			// Investor take-home = configurable split of net profit (default 50%),
 			// or the month's lease under a lease payout basis. Read from
 			// investor_config.investor_split_pct (per-investor override already
@@ -53837,7 +53836,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// filter, so INACTIVE trucks are already counted in these tiles. That is a
 		// separate inconsistency with the status-filtered monthly math; fixing it
 		// would move a displayed number for reasons unrelated to retirement.
-		const rateMonthKey = houstonDay(now).slice(0, 7);
+		const rateMonthKey = appDay(now).slice(0, 7);
 		const fixedRateTrucks = allOwnedTrucks.filter((t) => {
 			const until = truckChargeUntilMonth(t);
 			return !until || until >= rateMonthKey;
@@ -54340,9 +54339,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const myPendingRe = /^(dispatched|assigned|heading to shipper)$/i;
 		const myActiveRe = /^(in transit|picked up|at shipper|at receiver|loading|unloading)$/i;
 		const investorSplit = resolveInvestorSplitPct(config) / 100;
-		// The current Houston month's basis. Under a fixed monthly lease no load
+		// The current business month's basis. Under a fixed monthly lease no load
 		// carries a share of anything, so `yourShare` is null and the portal says so.
-		const leaseNow = investorPayoutBasis.leaseBasisForMonth(payoutBasis, houstonDay(now).slice(0, 7));
+		const leaseNow = investorPayoutBasis.leaseBasisForMonth(payoutBasis, appDay(now).slice(0, 7));
 		const myLoadsOriginCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
 		const myLoadsDestCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		function shapeMyLoad(r) {
@@ -55771,7 +55770,7 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 	try {
 		const graceDays = settlementGraceDays();
 		const locks = db.prepare("SELECT * FROM period_locks ORDER BY period DESC").all();
-		const cur = currentMonthKeyCT();
+		const cur = appMonthKey();
 
 		// Periods that have payout rows but no lock yet — i.e. accruing or pending.
 		//
@@ -55871,7 +55870,7 @@ app.get("/api/periods", requireRole("Super Admin"), (req, res) => {
 		//
 		// String month arithmetic, never a Date round-trip — same rule
 		// truckChargeFromMonth() states, for the same reason (a bare or UTC-midnight
-		// value reads back one month early in Houston). The iteration cap is a
+		// value reads back one month early in every US zone). The iteration cap is a
 		// termination guarantee, not a policy: the anchor is validated below, so the
 		// loop is already finite, and 600 is 50 years of months.
 		//
@@ -55995,7 +55994,7 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 			return res.status(503).json({ error: "Period close is not enabled on this server.", code: "FEATURE_DISABLED" });
 		}
 		// A month still in progress has no final number to freeze.
-		if (period >= currentMonthKeyCT()) {
+		if (period >= appMonthKey()) {
 			return res.status(409).json({
 				error: `${periodLabel(period)} is still in progress — it can't be finalized until the month ends.`,
 				code: "PERIOD_ACCRUING",
@@ -56085,7 +56084,7 @@ async function payoutRulesDryRun() {
 			}
 			changes.push({
 				ownerId: inv.ownerId, investor: inv.name, period,
-				payoutStatus: rowStatus.get(`${inv.ownerId}:${period}`) || (period === currentMonthKeyCT() ? "accruing" : "no row yet"),
+				payoutStatus: rowStatus.get(`${inv.ownerId}:${period}`) || (period === appMonthKey() ? "accruing" : "no row yet"),
 				current: cur.payable, withRules: next.payable, delta, byRule, figureChanges,
 			});
 		}
@@ -56621,7 +56620,7 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 			locksReadable,
 			lockedPeriods,
 			lockedCount: lockedPeriods.length,
-			currentPeriod: currentMonthKeyCT(),
+			currentPeriod: appMonthKey(),
 			auditReadable,
 			// Total rows in audit_trail, so "no refusals" can be told apart from "the
 			// table is empty" without a second call.
@@ -57054,7 +57053,7 @@ const PERIOD_CLOSE_MAX_RETRIES = 10;
 // through years of empty calendar.
 function periodsDueForClose() {
 	const graceDays = settlementGraceDays();
-	const cur = currentMonthKeyCT();
+	const cur = appMonthKey();
 	return db.prepare(
 		"SELECT DISTINCT period FROM investor_payouts WHERE period NOT IN (SELECT period FROM period_locks) ORDER BY period ASC"
 	).all()
@@ -57181,7 +57180,7 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 		const seeded = db.prepare("SELECT COUNT(*) AS c FROM period_locks").get().c;
 		if (seeded === 0) {
 			const graceDays = settlementGraceDays();
-			const cur = currentMonthKeyCT();
+			const cur = appMonthKey();
 			const historical = db.prepare("SELECT DISTINCT period FROM investor_payouts ORDER BY period ASC").all()
 				.map((r) => r.period)
 				// The seed is the SECOND writer of period_locks (it INSERTs directly
@@ -57216,7 +57215,7 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 	};
 	setInterval(periodCloseTick, 60 * 1000);
 	setTimeout(periodCloseTick, 95 * 1000);
-	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (America/Chicago)`);
+	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (${APP_TIMEZONE})`);
 }
 
 // GET /api/financials/report — Financials for any range, by day, week (Saturday
@@ -57378,7 +57377,7 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		const now = new Date();
-		const today = houstonDay(now);
+		const today = appDay(now);
 		const books = await buildFinancialsLedger();
 		if (!range) {
 			const first = books.months.length ? books.months[0] : today.slice(0, 7);
@@ -57579,11 +57578,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 		// date (they measure the world, not the books).
 		let monthDetail = null;
 		if (monthParam) {
-			// Houston month, not server-local: on the UTC VPS a plain getMonth() flips at
-			// 19:00 (CDT) / 18:00 (CST) Houston on the last day of the month, so for the
-			// final 5-6 hours of every month the portal showed the NEXT month accruing at
-			// $0 and treated the just-ended one as complete. houstonDay() is the same
-			// Central basis the stamps and the close lifecycle now use.
+			// Business month (APP_TIMEZONE), not server-local: on the UTC VPS a plain
+			// getMonth() flips at 8 PM EDT / 7 PM EST on the last day of the month, so for
+			// the final hours of every month the portal showed the NEXT month accruing at
+			// $0 and treated the just-ended one as complete. appDay() is the same
+			// business clock the stamps and the close lifecycle use.
 			const currentMonthKey = finCurrentMonthKey;
 			const yearN = parseInt(monthParam.slice(0, 4), 10);
 			const monthN = parseInt(monthParam.slice(5, 7), 10);
@@ -58634,7 +58633,7 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 		// getWeekRange() reads a bare 'YYYY-MM-DD' as its own calendar day (#442);
 		// before that it read UTC midnight, so a Saturday resolved to the week
 		// before. The midday anchor below takes its instant path and lands on the
-		// same Houston day either way.
+		// same business day either way.
 		const weekly = {};
 		for (const e of fuelExpenses) {
 			const day = String(e.date || "").slice(0, 10);
@@ -59107,17 +59106,17 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 
 // GET /api/expenses/ai/insights — AI-generated spending insights, cached for
 // up to 6h. The cache key folds in MAX(id) + COUNT(*) + the current business
-// day (America/Chicago — same zone the invoice weeks use), so any expense
+// day (APP_TIMEZONE — same zone the invoice weeks use), so any expense
 // insert/delete or a day rollover regenerates without needing a timer.
 let expenseInsightsCache = { key: "", at: 0, data: null };
 // Key folds in MAX(id) + COUNT + Pending/Rejected counts + the business day
-// (America/Chicago), so any insert/delete, approve/reject, or day rollover
+// (APP_TIMEZONE), so any insert/delete, approve/reject, or day rollover
 // regenerates without a timer.
 function computeInsightsCacheKey() {
 	const stat = db.prepare(
 		"SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(status = 'Pending'), 0) AS p, COALESCE(SUM(status = 'Rejected'), 0) AS r FROM expenses"
 	).get();
-	return `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${localDayInTz(Date.now(), "America/Chicago")}`;
+	return `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${appDay()}`;
 }
 // Serve a fresh cache hit BEFORE the rate limiter, so a tab-open that hits the
 // 6h cache costs neither a Gemini call nor an expenseAiLimiter token (cached
@@ -59135,7 +59134,7 @@ function insightsCacheGate(req, res, next) {
 app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), insightsCacheGate, expenseAiLimiter, async (req, res) => {
 	try {
 		const key = req._insightsKey || computeInsightsCacheKey();
-		const aggregates = buildInsightsAggregates(db);
+		const aggregates = buildInsightsAggregates(db, APP_TIMEZONE);
 		let insights;
 		try {
 			insights = await expenseAi.generateInsights(aggregates);
@@ -59428,11 +59427,11 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 		// who marked the right one.
 		if (!fee) return res.status(404).json({ error: "Compliance fee not found" });
 
-		// Houston day: paid_date is the month bucket for the investor compliance
+		// Business day: paid_date is the month bucket for the investor compliance
 		// deduction. Validate it, because an unparseable value is not merely
 		// untidy — strftime() answers NULL on it, so the fee drops out of EVERY
 		// month's total and silently stops being deducted at all.
-		const paidDate = String(req.body.paidDate || "").trim() || houstonDay();
+		const paidDate = String(req.body.paidDate || "").trim() || appDay();
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(paidDate)) {
 			return res.status(400).json({ error: "paidDate must be YYYY-MM-DD" });
 		}
@@ -59538,7 +59537,7 @@ app.get("/api/analytics/mileage",
 	(req, res) => {
 	try {
 		const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-		const to = DAY_RE.test(String(req.query.to || "")) ? String(req.query.to) : houstonDay();
+		const to = DAY_RE.test(String(req.query.to || "")) ? String(req.query.to) : appDay();
 		// Default window: 12 Sat-Fri billing weeks, snapped to a week start so a
 		// bucket is never half-populated.
 		const defaultFrom = getWeekRange(
@@ -59567,10 +59566,10 @@ app.get("/api/analytics/mileage",
 
 		// getWeekRange() now reads a bare 'YYYY-MM-DD' as its own calendar day
 		// (#442). It used to parse one as UTC MIDNIGHT and convert to
-		// America/Chicago, 19:00 the PREVIOUS day, so a Saturday resolved to the
+		// a US zone, the evening of the PREVIOUS day, so a Saturday resolved to the
 		// week BEFORE the one it starts; this route passes week STARTS, which is
 		// why it anchors at T12:00:00Z. The anchor takes the instant path and lands
-		// on the same Houston day, far from both midnights in every US zone.
+		// on the same business day, far from both midnights in every US zone.
 		const weekRangeOf = (day) => getWeekRange(String(day).slice(0, 10) + "T12:00:00Z");
 		// week key = the Sat-Fri billing week this day falls in, so miles line up
 		// with the invoice that pays for them.
@@ -60213,10 +60212,10 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 					};
 
 					if (jtDriverCol && jtLoadIdCol && jtAssignedCol) {
-						// Houston day, not the UTC day — after 7 PM Houston the UTC
+						// Business day, not the UTC day — after 8 PM Eastern the UTC
 						// day is already tomorrow, so this compared candidate loads
 						// against a date that hadn't happened yet.
-						const todayIso = houstonDay();
+						const todayIso = appDay();
 						const candidates = [];
 						for (const row of jtData) {
 							const drv = String(row[jtDriverCol] || "").toLowerCase().trim();

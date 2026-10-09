@@ -178,7 +178,7 @@ function makeApp() {
 	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Hal History', '2026-05-04T12:00:00.000Z')").run();
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 
-	const m = new Function("db", "todayKeyCT", "periodLocksReadable", "investorsHoldingDriver",
+	const m = new Function("db", "appTodayKey", "periodLocksReadable", "investorsHoldingDriver",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-03",
 		() => S.locksReadable,

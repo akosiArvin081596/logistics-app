@@ -82,7 +82,7 @@ export function expenseWindowDays(win) {
  *   note  { title, body } — a delivered load that takes receipts, and until when
  *   hint  string          — a delivered load that no longer does, and what to do
  * Nothing for an active load: the form is where it always was.
- * Instants are Houston time with a zone label (utils/datetime.js — the app rule).
+ * Instants are app-zone time with a zone label (utils/datetime.js — the app rule).
  */
 export function expenseWindowCopy(win) {
   const days = expenseWindowDays(win)

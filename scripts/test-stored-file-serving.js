@@ -165,7 +165,7 @@ const CountingBuffer = Object.assign(Object.create(Buffer), {
 	},
 });
 function buildModule() {
-	return new Function("imageLimits", "todayKeyCT", "Buffer", "crypto",
+	return new Function("imageLimits", "appTodayKey", "Buffer", "crypto",
 		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
 	)(imageLimits, () => "2026-09-26", CountingBuffer, crypto);
 }

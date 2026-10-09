@@ -52,7 +52,7 @@ function lift(re, label) {
 	return all[0][0];
 }
 
-const NOW = Date.parse("2026-10-02T17:00:00Z"); // noon in Houston
+const NOW = Date.parse("2026-10-02T17:00:00Z"); // 1 PM Eastern
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -62,10 +62,18 @@ const iso = (ms) => new Date(ms).toISOString();
 console.log("§1 parseSheetInstant()");
 {
 	const p = (v, o) => { const r = loadHaul.parseSheetInstant(v, o); return r && [iso(r.ms), r.day, r.dateOnly]; };
-	check("§1.1 houstonStamp() output is Houston wall-clock time (CDT, UTC-5)",
+	check("§1.1 a stamp written before the business clock moved (2026-10-09) is Houston wall-clock time (CDT, UTC-5)",
 		p("9/15/2026 14:23:05"), ["2026-09-15T19:23:05.000Z", "2026-09-15", false]);
-	check("§1.2 ...and in winter (CST, UTC-6)", p("12/15/2026 9:05:00"), ["2026-12-15T15:05:00.000Z", "2026-12-15", false]);
-	check("§1.3 a bare date is the END of that Houston day", p("2026-09-15"), ["2026-09-16T04:59:59.999Z", "2026-09-15", true]);
+	check("§1.2 ...and in winter (CST, UTC-6)", p("12/15/2025 9:05:00"), ["2025-12-15T15:05:00.000Z", "2025-12-15", false]);
+	check("§1.2a from 2026-10-09 a stamp is on the business clock, APP_TIMEZONE (EDT, UTC-4)",
+		[p("10/09/2026 9:05:00"), p("10/08/2026 9:05:00")],
+		[["2026-10-09T13:05:00.000Z", "2026-10-09", false], ["2026-10-08T14:05:00.000Z", "2026-10-08", false]]);
+	check("§1.2b ...and in winter (EST, UTC-5), across the Nov 1 change",
+		[p("12/15/2026 9:05:00"), p("11/1/2026 1:30:00"), p("11/1/2026 3:00:00")],
+		[["2026-12-15T14:05:00.000Z", "2026-12-15", false], ["2026-11-01T05:30:00.000Z", "2026-11-01", false], ["2026-11-01T08:00:00.000Z", "2026-11-01", false]]);
+	check("§1.3 a bare date is the END of that day on the clock that wrote it",
+		[p("2026-09-15"), p("2026-10-15")],
+		[["2026-09-16T04:59:59.999Z", "2026-09-15", true], ["2026-10-16T03:59:59.999Z", "2026-10-15", true]]);
 	check("§1.4 two-digit years, as parseSheetDate reads them", p("9/15/26"), ["2026-09-16T04:59:59.999Z", "2026-09-15", true]);
 	check("§1.5 AM/PM", [p("9/15/2026 2:30 PM")[0], p("9/15/2026 12:10 AM")[0]], ["2026-09-15T19:30:00.000Z", "2026-09-15T05:10:00.000Z"]);
 	check("§1.6 an ISO instant with its zone is that instant", p("2026-09-15T19:23:05Z"), ["2026-09-15T19:23:05.000Z", "2026-09-15", false]);

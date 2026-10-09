@@ -23,7 +23,7 @@
 "use strict";
 
 const audit = require("./audit-job-tracking-damage.js");
-const { assertLockTableFresh, previousMonthKeyCT, columnLetter, S } = audit;
+const { assertLockTableFresh, previousMonthKey, columnLetter, S } = audit;
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -48,7 +48,7 @@ const STALE_LOCAL_LOCKS = MONTHS_2025_2026.slice(0, 14).map(lock); // 14, newest
 // A fixed clock inside August 2026, the month the repair actually ran in.
 const AUG_2026 = new Date("2026-08-11T12:00:00Z");
 
-eq(previousMonthKeyCT(AUG_2026), "2026-07", "previous month in CT from mid-August 2026");
+eq(previousMonthKey(AUG_2026), "2026-07", "previous business month (APP_TIMEZONE) from mid-August 2026");
 eq(assertLockTableFresh(PRODUCTION_LOCKS, AUG_2026).fresh, true, "production's 15 locks are FRESH");
 eq(assertLockTableFresh(PRODUCTION_LOCKS, AUG_2026).newest, "2026-07", "production's newest lock");
 eq(assertLockTableFresh(STALE_LOCAL_LOCKS, AUG_2026).fresh, false, "the repo-local 14-lock snapshot is STALE");
@@ -65,11 +65,11 @@ eq(assertLockTableFresh(
 	STALE_LOCAL_LOCKS.concat([{ period: "2026-07", status: "reopened" }]), AUG_2026).locked.includes("2026-07"),
 	false, "a REOPENED period is not reported as locked");
 
-// On the 1st of a month the CT/UTC answers differ; the CT one is the business
+// On the 1st of a month the business-zone/UTC answers differ; the business-zone one is the
 // month-end basis, and using UTC here would be the permissive direction.
-eq(previousMonthKeyCT(new Date("2026-09-01T02:00:00Z")), "2026-07",
-	"01 Sep 02:00Z is still 31 Aug in CT, so the previous CT month is July");
-eq(previousMonthKeyCT(new Date("2026-01-05T12:00:00Z")), "2025-12", "January rolls back across the year boundary");
+eq(previousMonthKey(new Date("2026-09-01T02:00:00Z")), "2026-07",
+	"01 Sep 02:00Z is still 31 Aug on the business clock, so the previous month is July");
+eq(previousMonthKey(new Date("2026-01-05T12:00:00Z")), "2025-12", "January rolls back across the year boundary");
 
 // ── 2. the row-shape trap ───────────────────────────────────────────────────
 section("2. header-keyed rows vs positional arrays");

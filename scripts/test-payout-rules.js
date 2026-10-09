@@ -99,16 +99,16 @@ const FNS = [
 	// What they call, shipped as is.
 	"driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName",
 	"isBuiltInPropertyName", "driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
-	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "houstonDay", "getAllExcludedDriverDays",
+	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey", "resolveDailyRate",
 	"getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey", "intersectMonthWindow",
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "truckMonthlyFixed",
 	"computeLossCarryForward", "resolveInvestorSplitPct", "lastFridayOfFollowingMonth", "periodLabel",
 	"payoutRowBreakdown", "frozenPayoutBreakdown", "payoutBasisContext", "isLocked", "periodLockStmt",
-	"periodLocksReadable", "periodWriteLocked", "todayKeyCT", "currentMonthKeyCT", "settlementGraceDays",
+	"periodLocksReadable", "periodWriteLocked", "appTodayKey", "appMonthKey", "settlementGraceDays",
 	"graceEndsAt", "periodPhase", "isPlausibleLockPeriod", "getCarrierDBFromSQLite", "recordPayoutChange",
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
-	"closingFingerprint", "buildHeldTruckIndex", "buildHaulTruckResolver", "loadPayRateIndex", "currentPayRates", "recordPayRateChanges", "stampFutureReceipts", "futureAwarePeriodExpr", "payoutRulesDryRun", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
+	"closingFingerprint", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "loadPayRateIndex", "currentPayRates", "recordPayRateChanges", "stampFutureReceipts", "futureAwarePeriodExpr", "payoutRulesDryRun", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
@@ -187,6 +187,7 @@ function buildWorld({ onSheetRead = null, env = {} } = {}) {
 	const refusals = [];
 	const notices = [];
 	const deps = {
+		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, Date: Clock,
 		app: {
 			post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; },

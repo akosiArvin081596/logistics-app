@@ -123,7 +123,7 @@ function liftConst(head, close = null) {
 }
 
 // Everything the guard and the route call from module scope, verbatim. Only the
-// clock (todayKeyCT) and periodLocksReadable() are stubbed; the lock table itself
+// clock (appTodayKey) and periodLocksReadable() are stubbed; the lock table itself
 // is real and read by the real lockedPeriodsDesc().
 const FUNCTIONS = [
 	// the subject
@@ -165,7 +165,7 @@ const PHOTO_CHECK = new Function("imageLimits",
 
 const TODAY = "2026-09-25";
 function buildModule(db) {
-	return new Function("db", "todayKeyCT", "periodLocksReadable", "investorPayoutBasis",
+	return new Function("db", "appTodayKey", "periodLocksReadable", "investorPayoutBasis",
 		`"use strict";\n${CONSTS}\n${FUNCTIONS.map((n) => FN_SRC[n]).join("\n")}\nreturn { ${FUNCTIONS.join(", ")}, TRUCK_AMOUNT_FIELDS };`
 	)(db, () => TODAY, () => true, require("../lib/investor-payout-basis"));
 }

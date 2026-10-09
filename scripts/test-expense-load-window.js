@@ -13,7 +13,7 @@
  *
  * THE DECISIONS PINNED HERE (reasoning in lib/expense-window.js):
  *   • 7 days is ELAPSED time, 7 × 24 h, INCLUSIVE: open at exactly +7 d, closed
- *     1 ms later. Not Central calendar days.
+ *     1 ms later. Not business calendar days.
  *   • "Delivered at" = when the load ENTERED Delivered / Completed / POD Received
  *     in load_status_history (the driver's tap) — not the latest completed row.
  *   • No recorded delivery time → NOT eligible ('unknown').
@@ -122,7 +122,7 @@ function mutate(src, from, to) {
 // The lib, rebuilt from (possibly mutated) source.
 function buildLib(src = LIB_SRC) {
 	const module = { exports: {} };
-	new Function("module", "exports", "require", src)(module, module.exports, require);
+	new Function("module", "exports", "require", src)(module, module.exports, require("module").createRequire(LIB_PATH));
 	return module.exports;
 }
 
@@ -280,7 +280,7 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 	ok("day 7 + 1 ms: CLOSED", w.eligible === false && w.state === "closed" && w.closesAt === "2026-09-23T15:00:00.000Z");
 	ok("day 8: CLOSED", at(T + 8 * DAY).eligible === false && at(T + 8 * DAY).state === "closed");
 	ok("a delivery 'in the future' (clock skew) is inside the window, not outside it", at(T - 60 * 1000).eligible === true);
-	ok("ELAPSED time, not Central calendar days: 10:00 AM CDT on day 7 is the end, not midnight",
+	ok("ELAPSED time, not business calendar days: 11:00 AM EDT on day 7 is the end, not midnight",
 		at(Date.parse("2026-09-23T15:00:00Z")).eligible === true && at(Date.parse("2026-09-23T15:00:01Z")).eligible === false);
 
 	for (const missing of [null, undefined, "", "   ", "not a date", "9/16/2026", "9/16/2026 10:00:00", NaN, {}]) {
@@ -362,8 +362,8 @@ const PHOTO_FAILURE_RE = new Function(`return ${PHOTO_RE_SRC}`)();
 		cancelled: lib.refusalMessage(judge("Cancelled", null, T), "564157463"),
 		none: lib.refusalMessage(judge("Unassigned", null, T), "564157463"),
 	};
-	ok("closed: names the load and the closing time in CENTRAL, with its zone label",
-		sentences.closed.includes("load 564157463") && sentences.closed.includes("Sep 23, 2026, 10:00 AM CDT") && /7 days after it was delivered/.test(sentences.closed));
+	ok("closed: names the load and the closing time on the business clock (US Eastern), with its zone label",
+		sentences.closed.includes("load 564157463") && sentences.closed.includes("Sep 23, 2026, 11:00 AM EDT") && /7 days after it was delivered/.test(sentences.closed));
 	ok("unknown: says there is no record of the delivery", /no record of when load 564157463 was delivered/.test(sentences.unknown));
 	ok("cancelled: says so", /^Load 564157463 was cancelled/.test(sentences.cancelled));
 	for (const [k, s] of Object.entries(sentences)) {

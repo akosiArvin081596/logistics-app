@@ -236,7 +236,7 @@ function buildModule(db, src = {}, stubs = {}) {
 const TARGETS = new Function(`${TARGETS_SRC}\nreturn DRIVER_RENAME_TARGETS;`)();
 const colLetter = new Function(`${COL_LETTER_SRC}\nreturn colLetter;`)();
 const directoryChangedColumns = new Function(`${DIR_CHANGED_SRC}\nreturn directoryChangedColumns;`)();
-const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
+const truckParse = new Function("DRIVER_PAY_DAILY_MAX", "appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD",
 	`${TRUCK_PARSE_SRC}\nreturn { parseDriverPayDaily, parseInServiceDate, parseRetiredAt, parseAdminFeePct, TRUCK_AMOUNT_FIELDS, parseTruckAmounts, parseUnitNumber, isUnitNumberTaken };`)(10000, () => "2026-09-24", 24);
 const truckMonthlyFixed = new Function(`${FIXED_COST_SRC}\nreturn truckMonthlyFixed;`)();
 // The photo check both truck routes run, verbatim (its own subject is

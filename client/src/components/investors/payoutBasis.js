@@ -149,7 +149,7 @@ export function addMonths(month, n) {
 }
 
 // The months the form accepts: from the month after the last settled one (or
-// unbounded), to twelve months after the current Houston month. `today` is
+// unbounded), to twelve months after the current app-zone month. `today` is
 // 'YYYY-MM-DD'. The form starts on this month, or on the first editable one.
 export function monthBounds(today, earliestEditableMonth) {
   const current = String(today || '').slice(0, 7)

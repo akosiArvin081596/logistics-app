@@ -405,19 +405,19 @@ function formatEta(minutes) {
 // precisely why fmtSheetMoment is the entire body, since it splits on the value
 // itself rather than on the caller:
 //
-//   ZONED, real instants → converted to Houston and labelled
+//   ZONED, real instants → converted to the app zone (US Eastern) and labelled
 //     eta.expectedAt (server .toISOString()), actualPickup, actualDelivery
 //     (strftime('…Z', changed_at))
 //   BARE sheet text, no zone → printed exactly as written, unlabelled
 //     scheduledPickup, scheduledDelivery (appointments), deliveredAt (the raw
 //     'Status Update Date' cell)
 //
-// The bare three used to be converted too, which shifted an appointment by the
-// Houston offset and, for a post-cutover stamp that is ALREADY Houston, applied
-// a second conversion that rolls an evening delivery back a day. The zoned
-// three used to render in the VIEWER's zone, so this public page told an
-// out-of-state customer a delivery time in their own zone while the carrier
-// read Houston. Both are gone by construction.
+// The bare three used to be converted too, which shifted an appointment by a
+// zone offset and, for a stamp already written in business time, applied a
+// second conversion that rolls an evening delivery back a day. The zoned three
+// used to render in the VIEWER's zone, so this public page told an out-of-state
+// customer a delivery time in their own zone while the carrier read business
+// time. Both are gone by construction.
 //
 // fallback '' (not '—') keeps the template's `formatFriendlyDate(x) || '—'`
 // working as before.

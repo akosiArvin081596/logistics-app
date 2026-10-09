@@ -803,8 +803,8 @@ function statusClass(s) {
 }
 
 // MIXED INPUT: dueDate/graceEndsAt are bare 'YYYY-MM-DD' (new Date() would render
-// the previous day in Houston), paidAt/reopenedAt are ISO instants that should
-// convert to the viewer's zone. fmtYmd branches on the shape.
+// the previous day in US zones), paidAt/reopenedAt are ISO instants shown as
+// their app-zone date. fmtYmd branches on the shape.
 const fmtDate = (d) => fmtYmd(d)
 
 async function loadPayouts() {

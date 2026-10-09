@@ -59,6 +59,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { fmtAppInstant } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 
 const props = defineProps({
@@ -99,18 +100,14 @@ function isSent(m) {
 }
 
 // `messages.timestamp` is a true instant (server writes new Date().toISOString()),
-// so it renders in whatever zone the phone is set to. Houston rule: the carrier
-// runs on Houston time, so pin to America/Chicago and ALWAYS show the zone —
-// a driver on the road in Phoenix or Denver must be able to see that "8:05 AM"
-// is dispatch's clock, not theirs. Dropping the label is what makes it a lie.
+// so left alone it renders in whatever zone the phone is set to. The carrier
+// runs on the app zone's time (APP_TIMEZONE, US Eastern), so pin to it and
+// ALWAYS show the zone — a driver on the road in Phoenix or Denver must be able
+// to see that "8:05 AM" is dispatch's clock, not theirs. Dropping the label is
+// what makes it a lie.
 function formatTime(str) {
   if (!str) return ''
-  const d = new Date(str)
-  if (isNaN(d)) return str
-  return d.toLocaleTimeString('en-US', {
-    hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(str, { hour: 'numeric', minute: '2-digit', fallback: str })
 }
 
 async function handleSend() {

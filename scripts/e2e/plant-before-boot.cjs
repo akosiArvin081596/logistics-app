@@ -79,7 +79,7 @@ if (holders) {
 }
 
 const norm = (s) => String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-const dayCT = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const dayApp = new Intl.DateTimeFormat("en-CA", { timeZone: require("../../lib/app-time.js").appTimeZone(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const db = new Database(dbAbs, { fileMustExist: true });
 db.pragma("busy_timeout = 5000");
 let outcome = { code: 0, msg: "" };
@@ -127,7 +127,7 @@ function run() {
 			"--force replaces it; --remove deletes it." };
 	}
 
-	const month = dayCT.slice(0, 7);
+	const month = dayApp.slice(0, 7);
 	const lock = db.prepare("SELECT status FROM period_locks WHERE period = ?").get(month);
 	if (lock && String(lock.status) === "locked") return { code: 2, msg: `refusing: ${month} is finalized (period_locks), and the backfill leaves finalized months alone` };
 
@@ -162,8 +162,8 @@ function run() {
 		if (db.prepare("SELECT driver_name FROM users WHERE COALESCE(driver_name, '') != ''").all().filter((x) => norm(x.driver_name) === norm(name)).length !== 1) { why.push(`#${u.id} shares its name`); continue; }
 		if (heldBy(variant)) { why.push(`#${u.id} doubled spelling is held`); continue; }
 		if (assignedUnder.get(variant).n) { why.push(`#${u.id} has an assignment under the doubled spelling`); continue; }
-		const a = covering.get(name, dayCT, dayCT);
-		if (!a || !String(a.unit_number || "").trim()) { why.push(`#${u.id} no assignment covers ${dayCT}`); continue; }
+		const a = covering.get(name, dayApp, dayApp);
+		if (!a || !String(a.unit_number || "").trim()) { why.push(`#${u.id} no assignment covers ${dayApp}`); continue; }
 		if (a.driver_name !== name) { why.push(`#${u.id} covering assignment spelled differently`); continue; }
 		pick = { user: u, variant, assignment: a };
 		break;
@@ -178,12 +178,12 @@ function run() {
 	const id = db.prepare(`
 		INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date, status, truck_unit, owner_id)
 		VALUES (?, ?, ?, 'Other', 0.01, ?, ?, 'Pending', '', 0)
-	`).run(new Date().toISOString(), pick.user.driver_name, B1_LOAD, `${B1_DESC_PREFIX}${stamp}`, dayCT).lastInsertRowid;
+	`).run(new Date().toISOString(), pick.user.driver_name, B1_LOAD, `${B1_DESC_PREFIX}${stamp}`, dayApp).lastInsertRowid;
 	const a = pick.assignment;
 	const changed = db.prepare("UPDATE truck_assignments SET driver_name = ? WHERE id = ? AND driver_name = ?").run(pick.variant, a.id, pick.user.driver_name).changes;
 	if (changed !== 1) throw new Error(`could not re-spell assignment #${a.id}`);
 	fs.writeFileSync(path.join(WORK, B1_PLANT_FILE), JSON.stringify({ expenseId: Number(id), assignmentId: a.id, userId: pick.user.id }) + "\n", { mode: 0o600 });
-	console.log(`planted B1: expense #${id}, dated ${dayCT}, truck_unit blank, driver = user #${pick.user.id}'s own account spelling`);
+	console.log(`planted B1: expense #${id}, dated ${dayApp}, truck_unit blank, driver = user #${pick.user.id}'s own account spelling`);
 	console.log(`the assignment covering that date: #${a.id} -> truck #${a.truck_id} (unit ${a.unit_number}, owner #${a.owner_id}), re-spelled in this copy with its space doubled`);
 	console.log("next: boot the server on this DB (boot-server.sh), then run ONLY=moneypath (STEPS=B1 for B1 alone)");
 }

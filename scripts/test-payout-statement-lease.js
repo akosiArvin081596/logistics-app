@@ -27,9 +27,9 @@
  *       printed as the calendar date of its UTC text, a loss month composed
  *       without the loss it carried forward, and the change note silenced on
  *       every loss month
- *   §6  every date prints the same under any server clock (UTC, Houston, Manila
- *       and both ends of the offset range, each in its own process): a bare
- *       YYYY-MM-DD as that very date, an instant as its Houston date; the split
+ *   §6  every date prints the same under any server clock (UTC, Eastern, Central,
+ *       Manila and both ends of the offset range, each in its own process): a
+ *       bare YYYY-MM-DD as that very date, an instant as its business date; the split
  *       pins and a lease page hold under every clock
  *   §7  a split month that ran at a loss (the August 2026 row QA captured on
  *       staging) composes to the $0 it settled at: share, less an earlier loss
@@ -199,10 +199,10 @@ const SPLIT_PIN = {
 // Every date the statement prints is one of two kinds. A bare YYYY-MM-DD (the
 // due date, a load's or an expense's date, a correction date stored without a
 // time) is a calendar date and prints as itself. An instant (paid_at,
-// finalized_at, adjusted_at, the issue date) prints its Houston date, so an
-// instant in the Houston evening prints the day BEFORE its UTC date. The days
-// straddle the year's ends and both clock changes; the instants fall in summer
-// (UTC-5) and in winter (UTC-6).
+// finalized_at, adjusted_at, the issue date) prints its business date
+// (APP_TIMEZONE, US Eastern), so an instant in the Eastern evening prints the day
+// BEFORE its UTC date. The days straddle the year's ends and both clock changes;
+// the instants fall in summer (UTC-4) and in winter (UTC-5).
 const DATE_DETAIL = {
 	revenueLoads: [
 		{ loadId: "700000001", date: "2026-03-08", driver: "Driver One", truck: "91", pickup: "Laredo, TX", dropoff: "Irving, TX", amount: 1000 },
@@ -216,12 +216,12 @@ const DATE_DETAIL = {
 const DATE_ROWS = {
 	"dates: final": {
 		...BASE, generatedAt: new Date("2026-08-15T03:00:00.000Z"),
-		status: "owed", finalizedAt: "2026-07-08T04:59:00.000Z", dueDate: "2026-07-31",
+		status: "owed", finalizedAt: "2026-07-08T03:59:00.000Z", dueDate: "2026-07-31",
 		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, adjustment: 0, amount: 8790, effectiveAmount: 8790, detail: DATE_DETAIL,
 	},
 	"dates: paid, corrected, instants": {
 		...BASE, period: "2025-11", periodLabel: "November 2025",
-		status: "paid", paidAt: "2026-01-01T05:30:00.000Z", paidBy: "super_admin",
+		status: "paid", paidAt: "2026-01-01T04:30:00.000Z", paidBy: "super_admin",
 		adjustment: -100, adjustmentNote: "Toll", adjustedAfterPaid: true, adjustedAt: "2026-08-10T03:00:00.000Z",
 		breakdown: FROZEN, lossCarriedIn: 0, lossDeferred: 0, amount: 8790, effectiveAmount: 8690, detail: {},
 	},
@@ -234,8 +234,8 @@ const DATE_ROWS = {
 // [what, where it prints, what every clock must print there]
 const DATE_EXPECT = {
 	"dates: final": [
-		["issued, an instant at 03:00Z (the evening before in Houston)", /Issued: <strong>([^<]*)</, "08/14/2026"],
-		["finalized, an instant at 04:59Z in summer (23:59 CDT the day before)", /Finalized<\/span><span class="v">([^<]*)/, "07/07/2026"],
+		["issued, an instant at 03:00Z (the evening before on the business clock)", /Issued: <strong>([^<]*)</, "08/14/2026"],
+		["finalized, an instant at 03:59Z in summer (23:59 EDT the day before)", /Finalized<\/span><span class="v">([^<]*)/, "07/07/2026"],
 		["payment due, a bare date, in the band", /Payment due<\/span><span class="v">([^<]*)/, "07/31/2026"],
 		["payment due, a bare date, under the amount", /Payment due (\d\d\/\d\d\/\d{4})\./, "07/31/2026"],
 		["a load dated on the spring clock change", /<td class="mono">700000001<\/td>\s*<td>([^<]*)/, "03/08/2026"],
@@ -244,7 +244,7 @@ const DATE_EXPECT = {
 		["an expense dated the last day of the year", /<td>([^<]*)<\/td>\s*<td>Tolls<\/td>/, "12/31/2026"],
 	],
 	"dates: paid, corrected, instants": [
-		["paid on, an instant at 05:30Z in winter (23:30 CST the day before), in the band", /Paid on<\/span><span class="v">([^<]*)/, "12/31/2025"],
+		["paid on, an instant at 04:30Z in winter (23:30 EST the day before), in the band", /Paid on<\/span><span class="v">([^<]*)/, "12/31/2025"],
 		["paid on, the same instant, under the amount", /paid on (\d\d\/\d\d\/\d{4}) &middot;/, "12/31/2025"],
 		["correction recorded, an instant at 03:00Z", /correction recorded (\d\d\/\d\d\/\d{4})/, "08/09/2026"],
 	],
@@ -515,9 +515,9 @@ section("§5 MUTANTS — each must be caught");
 // ---------------------------------------------------------------- §6
 section("§6 every date prints the same under any server clock");
 {
-	// Houston itself, the production server's UTC, a developer's Manila, and the
-	// two ends of the offset range (UTC+14, UTC-11).
-	const CLOCKS = ["UTC", "America/Chicago", "Asia/Manila", "Pacific/Kiritimati", "Pacific/Pago_Pago"];
+	// The business zone itself, Central, the production server's UTC, a
+	// developer's Manila, and the two ends of the offset range (UTC+14, UTC-11).
+	const CLOCKS = ["UTC", "America/New_York", "America/Chicago", "Asia/Manila", "Pacific/Kiritimati", "Pacific/Pago_Pago"];
 	const LEASE_NAME = "lease: a full month";
 	const rows = { ...SPLIT_ROWS, ...DATE_ROWS, [LEASE_NAME]: leaseRow() };
 	// Rows cross to the child as JSON; generatedAt goes back to the Date the route passes.

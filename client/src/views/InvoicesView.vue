@@ -356,6 +356,7 @@ import { useInvoicesStore } from '../stores/invoices'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { appToday, fmtAppInstant } from '../utils/datetime'
 import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -685,13 +686,13 @@ function exportCsv() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  // The HOUSTON day. en-CA gives the YYYY-MM-DD shape; the timeZone is what
-  // makes it the business day rather than the exporter's. toISOString() would be
-  // UTC (tomorrow's date after 7pm Houston), and plain en-CA is whoever ran it —
-  // so a file pulled at 09:00 Manila was already stamped a day ahead in Houston
-  // terms. Two people share this login from two countries; the filename has to
-  // mean the same thing to both.
-  a.download = `invoices-${new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' })}.csv`
+  // The app zone's day (APP_TIMEZONE, US Eastern): the business day rather than
+  // the exporter's. toISOString() would be UTC (tomorrow's date after 8pm
+  // Eastern), and the browser's own day is whoever ran it — so a file pulled at
+  // 09:00 Manila was already stamped a day ahead in US terms. Two people share
+  // this login from two countries; the filename has to mean the same thing to
+  // both.
+  a.download = `invoices-${appToday()}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -703,27 +704,20 @@ function fmtMoney(n) {
 }
 // Both of these take a true instant — submitted_at / approved_at / paid_at /
 // adjusted_at / deleted_at are all written server-side as new Date().toISOString().
-// Houston rule: America/Chicago with a visible zone label, never the viewer's zone.
+// The app zone (APP_TIMEZONE, US Eastern) with a visible zone label, never the
+// viewer's zone.
 //
 // The pin matters MORE for the date-only formatter than for the datetime one:
-// an instant late in the Houston evening rendered date-only in a zone ahead of
-// Central shows TOMORROW's date, so an invoice submitted Fri Aug 7 reads
-// "Aug 8" — the wrong billing week — on a Manila session of the shared login.
-// The ", CDT" the label adds to a bare date is deliberate: it says which zone's
-// calendar day this is, which is the whole point of pinning it.
+// an instant late in the Eastern evening rendered date-only in a zone ahead of
+// it shows TOMORROW's date, so an invoice submitted Fri Aug 7 reads "Aug 8" —
+// the wrong billing week — on a Manila session of the shared login. The ", EDT"
+// the label adds to a bare date is deliberate: it says which zone's calendar day
+// this is, which is the whole point of pinning it.
 function formatDate(d) {
-  if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(d, { month: 'short', day: 'numeric', year: 'numeric', fallback: '' })
 }
 function formatDateTime(d) {
-  if (!d) return ''
-  return new Date(d).toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(d, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', fallback: '' })
 }
 function formatWeek(start, end) {
   if (!start || !end) return ''

@@ -30,7 +30,7 @@
  *      a gate applied to the already-mangled value.
  *
  *   §3 THE OFF-BY-ONE. `new Date("2026-08-14")` is UTC midnight, and rendered
- *      through mdy() in America/Chicago it prints "08/13/2026".
+ *      through mdy() on the business clock (any US zone) it prints "08/13/2026".
  *      brokerInvoice.formatDate() used to fall back to exactly that, so the
  *      `<input type="date">` shape — and Job Tracking's Status Update Date on a
  *      load created by drag-and-drop or the New Job form — printed one day
@@ -243,10 +243,11 @@ section("0. The landmines are real (control assertions against lib/broker-invoic
 	eq(brokerInvoice.formatMoney(0.001), "$0.00",
 		"§0 formatMoney renders 0.001 as $0.00 — positive, yet prints zero (why the floor is 0.01, not > 0)");
 	// The date trap lives one layer down now: formatDate reads an ISO day as
-	// text, but a Date built from one is still UTC midnight — 7 PM the day before
-	// in Houston. That is the landmine isoToMdy and formatDate both step around.
+	// text, but a Date built from one is still UTC midnight — 8 PM the day before
+	// on the business clock (US Eastern). That is the landmine isoToMdy and
+	// formatDate both step around.
 	eq(brokerInvoice.formatDate(new Date("2026-08-14")), "08/13/2026",
-		"§0 a Date built from an ISO day LOSES A DAY once rendered in Houston");
+		"§0 a Date built from an ISO day LOSES A DAY once rendered on the business clock");
 	eq(brokerInvoice.formatDate("2026-08-14"), "08/14/2026",
 		"§0 formatDate reads the same ISO day as TEXT (the <input type=\"date\"> / Status Update Date shape)");
 }
@@ -322,7 +323,7 @@ section("3. Dates — string surgery, never new Date()");
 
 	// formatDate on the shapes a Job Tracking date cell actually holds. A DAY
 	// (no zone) is read as written; an INSTANT (Z, an offset, an RFC-2822 zone,
-	// a Date) is still rendered on the Houston day it fell on.
+	// a Date) is rendered on the business day (APP_TIMEZONE, US Eastern) it fell on.
 	for (const v of ["2026-01-01", "2026-12-31", "2026-03-08", "2026-11-01", "2024-02-29"]) {
 		eq(brokerInvoice.formatDate(v), isoToMdy(v), `§3 formatDate agrees with isoToMdy on the boundary day ${v}`);
 	}
@@ -342,19 +343,21 @@ section("3. Dates — string surgery, never new Date()");
 	eq(brokerInvoice.formatDate("2026-08-14T00:00:00.000"), "08/14/2026", "§3 formatDate: fractional seconds, no offset");
 	eq(brokerInvoice.formatDate("2026-08-14 00:30"), "08/14/2026", "§3 formatDate: a space-separated no-offset date-time");
 	eq(brokerInvoice.formatDate("  2026-08-14  "), "08/14/2026", "§3 formatDate: surrounding whitespace is trimmed");
-	// Instants keep the Houston conversion — each pair straddles Houston midnight.
+	// Instants take the business-day conversion — each pair straddles Eastern midnight.
 	eq(brokerInvoice.formatDate("2026-08-14T02:00:00Z"), "08/13/2026",
-		"§3 formatDate: 02:00 UTC is still the PREVIOUS Houston day (a real instant)");
-	eq(brokerInvoice.formatDate("2026-08-14T04:30:00+00:00"), "08/13/2026",
-		"§3 formatDate: a +00:00 offset is an instant, converted to Houston");
+		"§3 formatDate: 02:00 UTC is still the PREVIOUS business day (a real instant)");
+	eq(brokerInvoice.formatDate("2026-08-14T03:30:00+00:00"), "08/13/2026",
+		"§3 formatDate: a +00:00 offset is an instant, converted to the business clock (11:30 PM EDT)");
+	eq(brokerInvoice.formatDate("2026-08-14T04:30:00+00:00"), "08/14/2026",
+		"§3 formatDate: 11:30 PM Central is already the next day on the business clock (12:30 AM EDT)");
 	eq(brokerInvoice.formatDate("2026-08-14T00:30:00-05:00"), "08/14/2026",
-		"§3 formatDate: a -05:00 offset (Houston's own in August) keeps its day");
+		"§3 formatDate: a -05:00 offset (Central daylight time) keeps its day");
 	eq(brokerInvoice.formatDate("Date: Fri, 14 Aug 2026 00:30:00 -0500"), "08/14/2026",
 		"§3 formatDate: an RFC-2822 'Date: … -0500' header is converted, and lands on the 14th");
 	eq(brokerInvoice.formatDate("Fri, 14 Aug 2026 00:30:00 +0000"), "08/13/2026",
-		"§3 formatDate: an RFC-2822 '+0000' is still converted — the 13th in Houston");
+		"§3 formatDate: an RFC-2822 '+0000' is still converted — the 13th on the business clock");
 	eq(brokerInvoice.formatDate(new Date("2026-08-01T01:30:00Z")), "07/31/2026",
-		"§3 formatDate: a Date is still rendered on its Houston day (the Invoice Date rule)");
+		"§3 formatDate: a Date is rendered on its business day (the Invoice Date rule)");
 	// MM/DD/YYYY input is unchanged, time of day or not.
 	eq(brokerInvoice.formatDate("08/14/2026 0:15:00"), "08/14/2026", "§3 formatDate: 'MM/DD/YYYY H:MM:SS' keeps its day");
 	eq(brokerInvoice.formatDate("8/4/2026 23:59:59"), "08/04/2026", "§3 formatDate: 'M/D/YYYY H:MM:SS' is zero-padded, day kept");
@@ -1075,7 +1078,7 @@ for (const mut of MUTANTS) {
 
 // The day-vs-instant rule inside lib/broker-invoice.js itself. §3's formatDate
 // assertions are all that stands between these and a broker invoice dated one
-// day early (L1), or an instant printed on its UTC day rather than its Houston
+// day early (L1), or an instant printed on its UTC day rather than its business
 // one (L2). The library is loaded from its own source with its own `require`, so
 // every module-scope line runs exactly as it ships.
 const LIB = path.join(__dirname, "..", "lib", "broker-invoice.js");

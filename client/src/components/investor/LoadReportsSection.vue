@@ -574,7 +574,7 @@ function termMoney(t) {
 // dueDate / graceEndsAt are bare 'YYYY-MM-DD'; paidAt is a real ISO instant.
 // fmtYmd branches on the shape, so a bare date is printed verbatim (never through
 // new Date(), which renders the previous day in US timezones) while a timestamp
-// is rendered in Houston.
+// is rendered as its app-zone date.
 function fmtDate(d) {
   return fmtYmd(d)
 }

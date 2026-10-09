@@ -239,7 +239,7 @@ const MODULE_EXPORTS = [
 // guard broken.
 let VARIANT = { moduleSrc: MODULE_SRC, routes: ROUTES };
 function buildModule(db) {
-	return new Function("db", "todayKeyCT",
+	return new Function("db", "appTodayKey",
 		`"use strict";\n${VARIANT.moduleSrc}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(db, () => "2026-09-26");
 }
 // The photo check the two routes run, verbatim (its own subject is

@@ -269,9 +269,9 @@ export function normalizeUnmatchedFill(raw) {
 /**
  * A fuel receipt with no detected tank rise behind it.
  *
- * NOTE the date key: this is `localDay` (the Houston business day), NOT `date`.
- * The receipt's own `date` column is what feeds it server-side, but the wire
- * name is `localDay` on both reconciliation lists so they read alike. Binding
+ * NOTE the date key: this is `localDay`, NOT `date`. The receipt's own `date`
+ * column is what feeds it server-side, but the wire name is `localDay` on both
+ * reconciliation lists so they read alike. Binding
  * this to `date` renders an em dash on every row — silently, since a missing
  * date looks exactly like a receipt with no date.
  *
@@ -420,7 +420,7 @@ export function normalizeOdometerConflict(raw) {
     // The EXPENSE id, not the fuel-event id — this row's fix is editing the
     // receipt, so it is what opens the detail modal.
     id: raw?.id ?? null,
-    // The episode's Houston business day. `receiptDate` is the receipt's own
+    // The episode's day, the truck's local day. `receiptDate` is the receipt's own
     // date column and can differ by a day on an adjacent-day match, so both are
     // carried and the table shows the receipt's own date next to the reading it
     // belongs to.

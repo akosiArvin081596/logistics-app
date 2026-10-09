@@ -193,7 +193,7 @@ function buildServer({ flag = false, env = {}, basisModule = investorPayoutBasis
 		db, crypto,
 		requireRole: () => noop, refuseCrossOrigin: noop,
 		investorPaymentTerms, investorPayoutBasis: basisModule,
-		currentMonthKeyCT: () => CURRENT_MONTH,
+		appMonthKey: () => CURRENT_MONTH,
 		notifyChange: (d) => calls.notify.push(d),
 		sendEmail: (to, subject) => { calls.mail.push({ to, subject }); return Promise.resolve(true); },
 		// The admin inbox, as server.js reads ADMIN_NOTIFY_EMAIL (no default in code).
@@ -298,7 +298,7 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 			});
 			return { monthlyEarnings, currentMonthKey: LEDGER_CURRENT, detail: null };
 		},
-		isLocked: locked, periodWriteLocked: locked, currentMonthKeyCT: () => LEDGER_CURRENT,
+		isLocked: locked, periodWriteLocked: locked, appMonthKey: () => LEDGER_CURRENT,
 		recordPayoutChange: () => {}, getInvestorDriverSet: () => new Set(), findCol: (h, re) => (h || []).find((x) => re.test(x)) || null,
 		settlementGraceDays: () => 7, periodPhase: () => "", graceEndsAt: () => "",
 		isPlausibleLockPeriod: (p) => investorPayoutBasis.isMonthKey(p),

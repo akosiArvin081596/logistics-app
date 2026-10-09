@@ -286,6 +286,7 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { usePagination } from '../composables/usePagination'
+import { fmtAppInstant } from '../utils/datetime'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -520,15 +521,12 @@ async function performDelete() {
 
 // Only ever called with `created_at`, which the server emits as ISO-Z
 // (strftime('%Y-%m-%dT%H:%M:%SZ', ja.created_at)) — a true instant, so it was
-// rendering in the viewer's zone. Houston rule: America/Chicago + a visible
-// zone label. Date-only + a zone ahead of Central is the "applied tomorrow"
-// bug: an application submitted 8 PM Houston showed the NEXT day from Manila.
+// rendering in the viewer's zone. The app zone (APP_TIMEZONE, US Eastern) + a
+// visible zone label. Date-only + a zone ahead of the app zone is the "applied
+// tomorrow" bug: an application submitted 8 PM Eastern showed the NEXT day from
+// Manila.
 function formatDate(d) {
-  if (!d) return ''
-  return new Date(d).toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(d, { month: 'short', day: 'numeric', year: 'numeric', fallback: '' })
 }
 
 // The last four DIGITS, so a stored "123-45-6789 " still shows 6789.

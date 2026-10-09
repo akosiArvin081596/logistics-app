@@ -39,7 +39,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-const ZONES = ["America/New_York", "Asia/Manila", "UTC"];
+const ZONES = ["America/New_York", "America/Chicago", "Asia/Manila", "UTC"];
 const CHILD = process.env.CALENDAR_ZONES_CHILD === "1";
 
 // ---------------------------------------------------------------- extraction
@@ -56,10 +56,11 @@ function lift(name) {
 	}
 	return SRC.slice(at, i + 1);
 }
-const lifted = ["shiftDayKey", "houstonDay", "moneySheetDate", "getWeekRange"].map(lift).join("\n");
+const lifted = ["shiftDayKey", "appDay", "moneySheetDate", "getWeekRange"].map(lift).join("\n");
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-const { getWeekRange, moneySheetDate, shiftDayKey, houstonDay } =
-	new Function("RFC2822_MONTHS", `${lifted}; return { getWeekRange, moneySheetDate, shiftDayKey, houstonDay };`)(RFC2822_MONTHS);
+const APP_TIMEZONE = require("../lib/app-time").appTimeZone();
+const { getWeekRange, moneySheetDate, shiftDayKey, appDay } =
+	new Function("RFC2822_MONTHS", "APP_TIMEZONE", `${lifted}; return { getWeekRange, moneySheetDate, shiftDayKey, appDay };`)(RFC2822_MONTHS, APP_TIMEZONE);
 
 // The load report's weekly key for one sheet cell, exactly as the route builds it.
 const reportRouteAt = SRC.indexOf('app.get("/api/investor/load-report"');
@@ -99,11 +100,11 @@ eq(new Date("2026-09-28T12:00:00").getDay(), 1, "invoice grid places 2026-09-28 
 eq(loadReportWeek("9/26/2026"), week("2026-09-26", "2026-10-02"), "load report: a Saturday 9/26 load is in the week of 9/26");
 eq(loadReportWeek("9/28/2026 15:15"), week("2026-09-26", "2026-10-02"), "load report: a Monday 9/28 load is in the week of 9/26");
 
-// 2. Late evening in the East is already tomorrow in Manila. Instants keep taking
-// their Houston day (the business-day rule is unchanged by this fix).
+// 2. Late evening in the East is already tomorrow in Manila. Instants take their
+// business day (APP_TIMEZONE, US Eastern).
 eq(getWeekRange("2026-09-28T23:30:00-04:00"), week("2026-09-26", "2026-10-02"), "Mon 11:30 PM EDT (Tue in Manila)");
 eq(getWeekRange("2026-10-02T23:30:00-04:00"), week("2026-09-26", "2026-10-02"), "Fri 11:30 PM EDT (Sat in Manila) stays in its week");
-eq(houstonDay(new Date("2026-09-28T23:30:00-04:00")), "2026-09-28", "Mon 11:30 PM EDT is still Monday in Houston");
+eq(appDay(new Date("2026-09-28T23:30:00-04:00")), "2026-09-28", "Mon 11:30 PM EDT is still Monday on the business clock");
 
 // 3. Month end: September 30 is a Wednesday inside the Sep 26 week; October 31 is
 // a Saturday that starts its own week.
@@ -112,7 +113,7 @@ eq(getWeekRange("2026-09-30"), week("2026-09-26", "2026-10-02"), "week of Wed 20
 eq(getWeekRange("2026-10-01"), week("2026-09-26", "2026-10-02"), "week of Thu 2026-10-01");
 eq(getWeekRange("2026-10-31"), week("2026-10-31", "2026-11-06"), "week of Sat 2026-10-31 (month end)");
 eq(loadReportWeek("10/31/2026 8:00"), week("2026-10-31", "2026-11-06"), "load report: Sat 10/31 load in the week of 10/31");
-eq(houstonDay(new Date("2026-09-30T23:30:00-04:00")), "2026-09-30", "Sep 30 11:30 PM EDT is still September in Houston");
+eq(appDay(new Date("2026-09-30T23:30:00-04:00")), "2026-09-30", "Sep 30 11:30 PM EDT is still September on the business clock");
 
 // 4. Daylight time ends on Sunday 2026-11-01 (01:00-02:00 happens twice).
 eq(weekday("2026-11-01"), "Sunday", "2026-11-01 is a Sunday");
@@ -120,8 +121,8 @@ eq(getWeekRange("2026-11-01"), week("2026-10-31", "2026-11-06"), "week of Sun 20
 eq(getWeekRange("2026-11-07"), week("2026-11-07", "2026-11-13"), "week of Sat 2026-11-07 (first full week of standard time)");
 eq(shiftDayKey("2026-10-31", 1), "2026-11-01", "Oct 31 + 1 day");
 eq(shiftDayKey("2026-11-01", 1), "2026-11-02", "Nov 1 + 1 day");
-eq(houstonDay(new Date("2026-11-01T01:30:00-04:00")), "2026-11-01", "1:30 AM EDT on Nov 1");
-eq(houstonDay(new Date("2026-11-01T01:30:00-05:00")), "2026-11-01", "1:30 AM EST on Nov 1 (the repeated hour)");
+eq(appDay(new Date("2026-11-01T01:30:00-04:00")), "2026-11-01", "1:30 AM EDT on Nov 1");
+eq(appDay(new Date("2026-11-01T01:30:00-05:00")), "2026-11-01", "1:30 AM EST on Nov 1 (the repeated hour)");
 eq(getWeekRange("2026-11-01T23:30:00-05:00"), week("2026-10-31", "2026-11-06"), "Sun 11:30 PM EST, already Monday in UTC");
 
 // 5. Values that are not a real calendar day keep their old meaning.
@@ -237,8 +238,10 @@ const OLD_GET_WEEK_RANGE = `function getWeekRange(referenceDate) {
 	const fmt = (dt) => dt.getFullYear() + "-" + p2(dt.getMonth() + 1) + "-" + p2(dt.getDate());
 	return { weekStart: fmt(weekStart), weekEnd: fmt(weekEnd) };
 }`;
+// The zones #442 was measured in. Under TZ=America/Chicago the old code's local
+// midnight was the business midnight of the time, so only its bare-day cases broke.
 console.log("\nThe pre-fix getWeekRange() must fail the Saturday cases:");
-for (const zone of ZONES) {
+for (const zone of ["America/New_York", "Asia/Manila", "UTC"]) {
 	const broken = Number(execFileSync(process.execPath, ["-e", `
 		${OLD_GET_WEEK_RANGE}
 		let n = 0;

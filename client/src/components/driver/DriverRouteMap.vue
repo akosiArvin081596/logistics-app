@@ -93,7 +93,7 @@ const props = defineProps({
   // map. v-model-friendly: emit('update:selectedAltIdx', i).
   selectedAltIdx: { type: Number, default: 0 },
   // Show the absolute arrival clock ("Estimated arrival at drop-off · Fri,
-  // Aug 15, 3:45 PM CDT") under the chip row. OPT-IN, because only the caller
+  // Aug 15, 3:45 PM EDT") under the chip row. OPT-IN, because only the caller
   // knows whether an arrival prediction means anything: JobBoardTab renders
   // unassigned loads
   // (no truck is en route, so the figure is "if you dispatched right now") and
