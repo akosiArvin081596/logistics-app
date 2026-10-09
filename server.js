@@ -57254,7 +57254,8 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 // time (against the rate-con email's own Date header, mailbox read-only) and an
 // approved receipt on no invoice for more than 7 days, by one email to
 // ADMIN_NOTIFY_EMAIL (none when it is unset) and one log line. It writes only its
-// own table, integrity_check_loads; never the sheet, an invoice, a payout or any
+// own two tables, integrity_check_loads and integrity_check_receipts (the receipts
+// it named, so each is named once); never the sheet, an invoice, a payout or any
 // other row. A KILL SWITCH that defaults ON (the !/^(false|0|no|off)$/i shape): it
 // moves no money. A replica starts no job (startsJob()). scripts/integrity-check.js
 // --print runs the same checks by hand, read-only.

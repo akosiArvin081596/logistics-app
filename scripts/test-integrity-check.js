@@ -22,9 +22,10 @@
  *   §3 check 4: an approved receipt submitted more than 7 days ago on no live
  *      invoice is reported; one on an invoice, one only on a deleted invoice,
  *      a rejected or pending one, a recent one, and one booked to a closed
- *      month are not (a reopened month is open); each receipt is listed once:
- *      after the first run only those whose 7-day mark passed since the
- *      previous run, the older ones still open counted in one line (§3b)
+ *      month are not (a reopened month is open); each receipt is named once
+ *      (the job's reported list): later runs count those named before in one
+ *      line, a late approval or an invoice deleted later is named on the next
+ *      run, and a failed send records nothing (§3b)
  *   §4 the schedule: 8:00 AM US Eastern on the business clock, across the end
  *      of daylight time on 2026-11-01 (12:00 UTC before, 13:00 UTC after), the
  *      start of it in March, once per day; a failed run is retried after 15
@@ -309,8 +310,17 @@ async function section2() {
 	await run(db3, jt([{ id: "1", pickup: "p", assigned: "" }]), { now: new Date("2026-10-09T12:00:30Z") });
 	const broken = await run(db3, jt([{ id: "1", pickup: "p", assigned: "10/9/2026, 9:21:43 AM" }]), { readRateConEmails: async () => { throw new Error("IMAP timeout"); } });
 	ok("an unreadable mailbox: check 3 is skipped with the reason", /IMAP timeout/.test(broken.result.report.zone.skipped || ""), broken.result.report.zone);
-	ok("...and checks 1, 2 and 4 still run (the receipt newly past 7 days is reported)",
-		broken.result.report.receipts.stale.map((r) => r.id).join() === "2" && broken.result.report.receipts.olderOpen === 1, broken.result.report.receipts);
+	ok("...and checks 1, 2 and 4 still run (the receipt now past 7 days is named, the one named before counted)",
+		broken.result.report.receipts.stale.map((r) => r.id).join() === "2" && broken.result.report.receipts.reportedOpen === 1, broken.result.report.receipts);
+	const dbAmb = makeDb();
+	await run(dbAmb, jt([{ id: "1", pickup: "p", assigned: "" }, { id: "2", pickup: "p", assigned: "" }]), { now: new Date("2026-10-09T12:00:30Z") });
+	const amb = await run(dbAmb, jt([{ id: "1", pickup: "p", assigned: "10/9/2026, 9:21:43 AM" }, { id: "2", pickup: "p", assigned: "10/9/2026, 11:11:11 AM" }]), {
+		readRateConEmails: async () => [{ date: "Fri, 09 Oct 2026 09:21:43 -0400" }, { date: "Fri, 09 Oct 2026 10:21:43 -0400" }],
+	});
+	const ambNotes = amb.result.report.notes.join("\n");
+	ok("an ambiguous stamp's note: could not be matched to one rate-con email",
+		/1 new Assigned Date could not be matched to one rate-con email[^\n]*load 1\b/.test(ambNotes) && !/matched no rate-con email[^\n]*load 1\b/.test(ambNotes), ambNotes);
+	ok("...a stamp no email fits keeps its own note: matched no rate-con email", /1 new Assigned Date matched no rate-con email[^\n]*load 2\b/.test(ambNotes), ambNotes);
 	const db4 = makeDb();
 	let read = false;
 	const base = await run(db4, jt([{ id: "1", pickup: "p", assigned: "10/9/2026, 9:21:43 AM" }]), { readRateConEmails: async () => { read = true; return emails; } });
@@ -355,41 +365,68 @@ async function section3() {
 	ok("exactly those", ids.join() === "10,12,17,19", ids);
 	ok("each carries its age in days and its month", r.stale.find((x) => x.id === 10).days === 8 && r.stale.find((x) => x.id === 10).period === "2026-10", r.stale.find((x) => x.id === 10));
 	ok("an invoice whose expense list is unreadable is counted", r.unreadableInvoices === 1, r.unreadableInvoices);
-	ok("no previous run (the first): every receipt past 7 days is listed, none counted as older", r.olderOpen === 0, r.olderOpen);
+	ok("nothing reported before: every receipt past 7 days is listed, none counted", r.reportedOpen === 0, r.reportedOpen);
 
-	// Each receipt is listed once: after the first run, only receipts whose
-	// 7-day mark passed since the previous run (created_at in
-	// [previous run - 7 d, now - 7 d)); the rest still open are only counted.
-	const since = "2026-10-09T12:00:30.000Z";
-	const r2 = ic.staleApprovedReceipts(db, { now, expensePeriodExpr: EXPENSE_PERIOD_EXPR, since });
-	ok("since the previous run: only receipts whose 7-day mark passed in between are listed",
-		r2.stale.map((x) => x.id).sort((a, b) => a - b).join() === "10,12", r2.stale.map((x) => x.id));
-	ok("...a receipt exactly 7 days old at the previous run (not listed then) is listed now", r2.stale.some((x) => x.id === 10));
-	ok("...the older ones still open are counted, not listed", r2.olderOpen === 2, r2.olderOpen);
+	// Each receipt is named once: the job's reported list (its own
+	// *_alerts-style ledger) holds every receipt a recorded run named.
+	const r2 = ic.staleApprovedReceipts(db, { now, expensePeriodExpr: EXPENSE_PERIOD_EXPR, reported: new Set([10, 11, 17]) });
+	ok("receipts on the reported list are not named again", r2.stale.map((x) => x.id).sort((a, b) => a - b).join() === "12,19", r2.stale.map((x) => x.id));
+	ok("...those still open are counted (a reported one now on an invoice is not)", r2.reportedOpen === 2, r2.reportedOpen);
 
-	console.log("§3b check 4 through the runner: each receipt once");
+	console.log("§3b check 4 through the runner: each receipt named once");
 	const dbOnce = makeDb();
 	addExpense(dbOnce, { id: 41, status: "Approved", date: "2026-09-20", createdAt: "2026-09-20 10:00:00" });
 	addExpense(dbOnce, { id: 42, status: "Approved", date: "2026-10-02", createdAt: "2026-10-02 20:00:00" });
+	addExpense(dbOnce, { id: 43, status: "Pending", date: "2026-10-01", createdAt: "2026-10-01 15:00:00" });
 	const sheetOnce = jt([{ id: "1", pickup: "p", assigned: "" }]);
+	const reportedRows = () => dbOnce.prepare(`SELECT expense_id FROM ${ic.RECEIPTS_TABLE} ORDER BY expense_id`).all().map((x) => x.expense_id).join();
 	const m1 = mailSpy();
 	const run1 = await run(dbOnce, sheetOnce, { sendEmail: m1, now: new Date("2026-10-09T12:00:30Z") });
-	ok("run 1 (first): the receipt past 7 days (#41) is listed, the 6-day-old one (#42) is not",
-		run1.result.report.receipts.stale.map((x) => x.id).join() === "41" && m1.calls.length === 1 && /#41/.test(m1.calls[0].html) && !/#42/.test(m1.calls[0].html));
+	ok("run 1 (first): the receipt past 7 days (#41) is named, the 6-day-old one (#42) and the pending one (#43) are not",
+		run1.result.report.receipts.stale.map((x) => x.id).join() === "41" && m1.calls.length === 1 && /#41/.test(m1.calls[0].html) && !/#4[23]/.test(m1.calls[0].html));
+	ok("run 1: the first run's log line does not say \"newly\"", run1.logger.lines.length === 1 && !/newly/i.test(run1.logger.lines[0].text), run1.logger.lines);
+	ok("run 1: #41 is on the reported list, with when", reportedRows() === "41" &&
+		dbOnce.prepare(`SELECT reported_at FROM ${ic.RECEIPTS_TABLE} WHERE expense_id = 41`).get().reported_at === "2026-10-09T12:00:30.000Z");
 	const m2 = mailSpy();
 	const run2 = await run(dbOnce, sheetOnce, { sendEmail: m2, now: new Date("2026-10-10T12:00:30Z") });
-	ok("run 2: #42 (its 7-day mark passed since run 1) is listed and #41 is not repeated",
+	ok("run 2: #42 (now past 7 days) is named and #41 is not repeated",
 		run2.result.report.receipts.stale.map((x) => x.id).join() === "42" && m2.calls.length === 1 && /#42/.test(m2.calls[0].html) && !/#41/.test(m2.calls[0].html), m2.calls.map((c) => c.subject));
-	ok("run 2: one line counts the older receipt still open, with no id",
-		/1 approved receipt reported on an earlier day is still on no invoice\./.test(m2.calls[0].html) && run2.result.report.receipts.olderOpen === 1);
-	ok("run 2: the subject counts only what is new (1 issue)", /: 1 issue$/.test(m2.calls[0].subject), m2.calls[0].subject);
+	ok("run 2: one line counts the reported receipt still open, with no id",
+		/1 approved receipt reported earlier is still on no invoice\./.test(m2.calls[0].html) && run2.result.report.receipts.reportedOpen === 1);
+	ok("run 2: the subject counts only what is named (1 issue)", /: 1 issue$/.test(m2.calls[0].subject), m2.calls[0].subject);
 	const m3 = mailSpy();
 	const run3 = await run(dbOnce, sheetOnce, { sendEmail: m3, now: new Date("2026-10-11T12:00:30Z") });
-	ok("run 3: nothing new, so no email (the count alone sends nothing)", m3.calls.length === 0 && run3.result.report.findings === 0);
-	ok("run 3: its one log line counts the 2 still open, with no ids",
-		run3.logger.lines.length === 1 && /2 reported earlier still on no invoice/.test(run3.logger.lines[0].text) && !/#4[12]/.test(run3.logger.lines[0].text), run3.logger.lines);
-	ok("across the three runs each receipt was emailed once",
-		[...m1.calls, ...m2.calls, ...m3.calls].map((c) => (c.html.match(/#4\d/g) || []).join()).join("|") === "#41|#42");
+	ok("run 3: nothing to name, so no email (the count alone sends nothing)", m3.calls.length === 0 && run3.result.report.findings === 0);
+	ok("run 3: its one log line counts the 2 reported earlier, with no ids",
+		run3.logger.lines.length === 1 && /2 reported earlier still on no invoice/.test(run3.logger.lines[0].text) && !/#4\d/.test(run3.logger.lines[0].text), run3.logger.lines);
+
+	// Late approval: submitted 10-01 (past its 7-day mark on 10-08) but Pending
+	// until 10-11. A submission-time window never names it; the list does.
+	dbOnce.prepare("UPDATE expenses SET status = 'Approved' WHERE id = 43").run();
+	const failedSend = await run(dbOnce, sheetOnce, { sendEmail: mailSpy(false), now: new Date("2026-10-12T12:00:30Z") });
+	ok("a failed send names #43 but records nothing on the reported list", failedSend.result.ok === false &&
+		failedSend.result.report.receipts.stale.map((x) => x.id).join() === "43" && reportedRows() === "41,42");
+	const m4 = mailSpy();
+	const run4 = await run(dbOnce, sheetOnce, { sendEmail: m4, now: new Date("2026-10-12T12:15:30Z") });
+	ok("late approval: #43 (submitted 10-01, approved 10-11) is named on the next run",
+		run4.result.report.receipts.stale.map((x) => x.id).join() === "43" && m4.calls.length === 1 && /#43/.test(m4.calls[0].html) && !/#4[12]/.test(m4.calls[0].html));
+	ok("...with the 2 reported earlier counted", /2 approved receipts reported earlier are still on no invoice\./.test(m4.calls[0].html), m4.calls[0].text);
+	const m5 = mailSpy();
+	const run5 = await run(dbOnce, sheetOnce, { sendEmail: m5, now: new Date("2026-10-13T12:00:30Z") });
+	ok("...and only once: the next run counts it, names nothing, sends nothing", m5.calls.length === 0 && run5.result.report.receipts.reportedOpen === 3 && reportedRows() === "41,42,43");
+	ok("across the runs each receipt was emailed once",
+		[...m1.calls, ...m2.calls, ...m3.calls, ...m4.calls, ...m5.calls].map((c) => (c.html.match(/#4\d/g) || []).join()).join("|") === "#41|#42|#43");
+
+	// Becomes reportable after its 7-day mark another way: its invoice is
+	// soft-deleted later. Named once then.
+	const dbLate = makeDb();
+	addExpense(dbLate, { id: 51, status: "Approved", date: "2026-09-20", createdAt: "2026-09-20 10:00:00" });
+	dbLate.prepare("INSERT INTO invoices (invoice_number, status, expense_ids, deleted_at) VALUES ('INV-L', 'Draft', '[51]', '')").run();
+	await run(dbLate, sheetOnce, { now: new Date("2026-10-09T12:00:30Z") });
+	dbLate.prepare("UPDATE invoices SET deleted_at = '2026-10-09T15:00:00Z' WHERE invoice_number = 'INV-L'").run();
+	const m6 = mailSpy();
+	const late = await run(dbLate, sheetOnce, { sendEmail: m6, now: new Date("2026-10-10T12:00:30Z") });
+	ok("a receipt whose invoice is deleted after its 7-day mark is named on the next run", late.result.report.receipts.stale.map((x) => x.id).join() === "51" && m6.calls.length === 1);
 	let threw = false;
 	try { ic.staleApprovedReceipts(db, { now }); } catch { threw = true; }
 	ok("the month rule is required (server.js passes EXPENSE_PERIOD_EXPR)", threw);
@@ -470,7 +507,8 @@ async function section5() {
 	ok("the subject counts the findings", /2 issues/.test(spy.calls[0].subject), spy.calls[0].subject);
 	ok("the email names receipt #7 and its age", /#7/.test(spy.calls[0].html) && /days/.test(spy.calls[0].html));
 	ok("a run writes no business table", businessRows(db) === before);
-	ok("its only table is its own", tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === ic.STATE_TABLE, tables(db));
+	ok("its only tables are its own (the load state and the reported list)",
+		tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === [ic.STATE_TABLE, ic.RECEIPTS_TABLE].sort().join(), tables(db));
 	ok("result.emailed", result.emailed === true);
 
 	const db2 = makeDb();
@@ -596,7 +634,10 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own table",
-		writes.length > 0 && writes.every((w) => /\$\{STATE_TABLE\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+	const commitAt = lib.indexOf("function commitState(");
+	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
+	ok("the reported list is written in the same transaction as the load state", /upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
@@ -646,12 +687,13 @@ async function section7() {
 		ok("it prints the email it would send, to ADMIN_NOTIFY_EMAIL", new RegExp(`To: ${ADMIN.replace(/\./g, "\\.")}`).test(first.stdout) && /Subject: /.test(first.stdout) && /not sent/i.test(first.stdout), first.stdout);
 		ok("the database file is unchanged", sha(dbFile) === h0);
 		const check = new Database(dbFile, { readonly: true });
-		ok("no state table was created", !tables(check).includes(ic.STATE_TABLE));
+		ok("no state table and no reported list were created", !tables(check).includes(ic.STATE_TABLE) && !tables(check).includes(ic.RECEIPTS_TABLE), tables(check));
 		check.close();
 
 		// With state from an earlier run, checks 1-3 compare against it.
 		const w = new Database(dbFile);
 		ic.ensureStateTable(w);
+		w.prepare(`INSERT INTO ${ic.RECEIPTS_TABLE} (expense_id, reported_at) VALUES (31, ?)`).run(new Date(Date.now() - 86400000).toISOString());
 		w.prepare(`INSERT INTO ${ic.STATE_TABLE} (load_id, pickup_appointment, assigned_date, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`)
 			.run("222", "10/20/2026", "10/8/2026", "2026-10-08T12:00:30.000Z", new Date(Date.now() - 86400000).toISOString());
 		w.prepare(`INSERT INTO ${ic.STATE_TABLE} (load_id, pickup_appointment, assigned_date, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`)
@@ -665,8 +707,8 @@ async function section7() {
 		ok("with state: the blanked Pickup Appointment (111) is printed", /111/.test(second.stdout) && /Pickup Appointment/.test(second.stdout), second.stdout);
 		ok("with state: the changed Assigned Date (222) is printed", /222/.test(second.stdout) && /10\/8\/2026/.test(second.stdout));
 		ok("with state: the Central stamp (111) is printed", /111: Assigned Date "10\/9\/2026, 8:30:10 AM" is the rate-con email's time at UTC-05:00, 1 hour behind Eastern/.test(second.stdout), second.stdout);
-		ok("with state: receipt #31 (listed by the first run) is not listed again, only counted",
-			!/#31/.test(second.stdout) && /1 approved receipt reported on an earlier day is still on no invoice/.test(second.stdout), second.stdout);
+		ok("with state: receipt #31 (on the reported list) is not named again, only counted",
+			!/#31/.test(second.stdout) && /1 approved receipt reported earlier is still on no invoice/.test(second.stdout), second.stdout);
 		ok("with state: the database file is still unchanged (no state write)", sha(dbFile) === h1);
 		const noMail = cli(["--print", ...base]);
 		ok("without --mailbox or --emails-json: check 3 says the mailbox was not read", /mailbox/i.test(noMail.stdout) && noMail.status === 0, noMail.stdout);
