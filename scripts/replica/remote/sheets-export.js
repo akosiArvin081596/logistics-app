@@ -7,9 +7,12 @@
 //
 // It signs in with its own client, scoped to spreadsheets.readonly, using the
 // service-account key already on the server (<app dir>/service-account-key.json);
-// the key is read here and never leaves the server. The spreadsheet IDs are the
-// ones the running app uses: SPREADSHEET_ID / ARCHIVE_SPREADSHEET_ID from
-// <app dir>/.env, else the defaults in <app dir>/server.js.
+// the key is read here and never leaves the server. The spreadsheet IDs are
+// SPREADSHEET_ID / ARCHIVE_SPREADSHEET_ID from <app dir>/.env. Only production's
+// own folder (the PRODUCTION_DIR its lib/sheet-id.js names) falls back to the
+// defaults in its code, as the server does; any other folder that names no
+// SPREADSHEET_ID exits 2 before any network call, and an unnamed archive is
+// skipped.
 //
 // Per spreadsheet: its properties and every tab's properties (sheetId, title,
 // index, grid size), every GRID tab's values as Google displays them
@@ -27,16 +30,22 @@ function arg(name) {
 	return hit ? hit.slice(name.length + 3) : undefined;
 }
 
-// The ID the app resolves: the .env value, else production's own default. The
-// main sheet's default is lib/sheet-id.js's PRODUCTION_SPREADSHEET_ID (an older
-// server.js carried it as a literal); the archive's is still in server.js.
+// The IDs the app resolves, the way lib/sheet-id.js resolves the server's
+// sheet: the .env value, else production's own default, but only for
+// production's own folder, the PRODUCTION_DIR its lib/sheet-id.js names. The
+// main sheet's default is lib/sheet-id.js's PRODUCTION_SPREADSHEET_ID; the
+// archive's is still in server.js. Any other folder gets no default: an
+// unnamed main sheet is refused (exit 2) and an unnamed archive is skipped.
 function spreadsheetIds(appDir, dotenv) {
 	const envFile = path.join(appDir, ".env");
 	const env = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
 	const src = fs.readFileSync(path.join(appDir, "server.js"), "utf8");
 	const libFile = path.join(appDir, "lib", "sheet-id.js");
 	const lib = fs.existsSync(libFile) ? fs.readFileSync(libFile, "utf8") : "";
+	const prodDir = (lib.match(/^const PRODUCTION_DIR = "([^"]+)";$/m) || [])[1];
+	const isProductionDir = !!prodDir && path.resolve(appDir) === path.resolve(prodDir);
 	const fallback = (name) => {
+		if (!isProductionDir) return "";
 		const m = src.match(new RegExp(`const ${name} = process\\.env\\.${name} \\|\\| "([A-Za-z0-9_-]+)"`));
 		if (m) return m[1];
 		const l = name === "SPREADSHEET_ID" ? lib.match(/^const PRODUCTION_SPREADSHEET_ID = "([A-Za-z0-9_-]+)";$/m) : null;
@@ -46,7 +55,14 @@ function spreadsheetIds(appDir, dotenv) {
 		main: (env.SPREADSHEET_ID || "").trim() || fallback("SPREADSHEET_ID"),
 		archive: (env.ARCHIVE_SPREADSHEET_ID || "").trim() || fallback("ARCHIVE_SPREADSHEET_ID"),
 	};
-	if (!ids.main) throw new Error("could not resolve the app's SPREADSHEET_ID");
+	if (!ids.main) {
+		const err = new Error(isProductionDir
+			? "could not resolve the app's SPREADSHEET_ID"
+			: `${appDir} names no SPREADSHEET_ID in its .env, and only production's own folder ` +
+				`(${prodDir || "the PRODUCTION_DIR its lib/sheet-id.js names"}) uses production's sheet without one`);
+		err.exitCode = isProductionDir ? 1 : 2;
+		throw err;
+	}
 	return ids;
 }
 
@@ -85,9 +101,8 @@ async function main() {
 	const out = arg("out");
 	if (!appDir || !out) throw new Error("usage: sheets-export.js --app=<app dir> --out=<sheets.json>");
 	const req = (m) => require(path.join(appDir, "node_modules", m));
-	const dotenv = req("dotenv");
+	const ids = spreadsheetIds(appDir, req("dotenv"));
 	const { google } = req("googleapis");
-	const ids = spreadsheetIds(appDir, dotenv);
 	const auth = new google.auth.GoogleAuth({
 		keyFile: path.join(appDir, "service-account-key.json"),
 		scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
@@ -115,7 +130,7 @@ async function main() {
 if (require.main === module) {
 	main().catch((err) => {
 		console.error(`sheets-export: ${err.message}`);
-		process.exit(1);
+		process.exit(err.exitCode || 1);
 	});
 }
 
