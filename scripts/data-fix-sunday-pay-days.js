@@ -5,9 +5,11 @@
 // The closed month stays exactly as recorded. The correction is posted on the
 // open month that follows, as two lines, each through the column its own screen
 // and route write:
-//   1. the driver's pay: an adjustment on his earliest weekly invoice for a week
-//      inside that month, only while it is still Draft or Submitted; a later
-//      week's invoice is never used in its place (invoices.adjustment,
+//   1. the driver's pay: an adjustment on the driver's earliest weekly invoice
+//      for a week inside that month, only while it is still Draft or Submitted;
+//      a later week's invoice is never used in its place, so an earlier October
+//      week's invoice that is past Draft or Submitted, or deleted, stops the line
+//      for a decision (invoices.adjustment,
 //      the column PUT /api/invoices/:id/adjust sets; the PDF Total Due, the
 //      Invoices screen and the payment report read total_earnings + adjustment);
 //   2. the investor's payout: an adjustment on the investor's payout row for that
