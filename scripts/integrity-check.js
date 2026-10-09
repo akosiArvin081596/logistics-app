@@ -67,6 +67,11 @@ async function main() {
 	} catch (err) {
 		refuse(err.message);
 	}
+	// sheetFor() reads the same settings; without a sheet there is nothing to
+	// check, which is a refusal, not an error.
+	if (typeof args["values-json"] !== "string" && args["sheet-id"] === "env" && !String(env.SPREADSHEET_ID || "").trim()) {
+		refuse("--sheet-id=env: the app's settings name no SPREADSHEET_ID; name the sheet with --sheet-id=<id>");
+	}
 
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const Database = appRequire("better-sqlite3");

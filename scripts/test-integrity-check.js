@@ -14,28 +14,33 @@
  *   §2 check 3: a new n8n Assigned Date is matched to the rate-con email's own
  *      Date header to the second: Eastern is fine, Central (n8n's zone until
  *      2026-10-09) and UTC are reported, no matching email is "unmatched" and
- *      never reported, a stamp in the repeated hour of 2026-11-01 is Eastern,
+ *      never reported, nor is a stamp equal to one email's Eastern time and
+ *      another's offset time; a stamp in the repeated hour of 2026-11-01 is Eastern,
  *      the app's own stamp shape and date-only values are not checked, the
  *      shape this Node's toLocaleString produces parses; no mailbox, an
  *      unreadable mailbox and the baseline skip check 3 and the rest still run
  *   §3 check 4: an approved receipt submitted more than 7 days ago on no live
  *      invoice is reported; one on an invoice, one only on a deleted invoice,
  *      a rejected or pending one, a recent one, and one booked to a closed
- *      month are not (a reopened month is open)
+ *      month are not (a reopened month is open); each receipt is listed once:
+ *      after the first run only those whose 7-day mark passed since the
+ *      previous run, the older ones still open counted in one line (§3b)
  *   §4 the schedule: 8:00 AM US Eastern on the business clock, across the end
  *      of daylight time on 2026-11-01 (12:00 UTC before, 13:00 UTC after), the
  *      start of it in March, once per day; a failed run is retried after 15
  *      minutes, at most 3 times a day
  *   §5 email: only to the inbox it is given (ADMIN_NOTIFY_EMAIL in server.js),
  *      one email per run with findings, none when clean; unset, nothing is sent
- *      and the log says so; a failed send records nothing so the run repeats;
- *      a clean run logs exactly one line; it writes no table but its own
+ *      and the log says so; a failed send records nothing so the run repeats
+ *      (a failed first run never says the baseline was taken); a clean run
+ *      logs exactly one line; it writes no table but its own
  *   §6 server.js: the kill switch defaults on; the job asks startsJob(), so a
  *      replica starts nothing; outside one it ticks every minute and catches up
  *      after boot, reads Job Tracking through getJobTrackingCached(), and mails
  *      ADMIN_NOTIFY_EMAIL with the shared sendEmail; .env.example documents it
  *   §7 scripts/integrity-check.js: refuses without --print, --db or a named
- *      sheet (no default), opens the database read-only, prints what it would
+ *      sheet (no default; --sheet-id=env with no SPREADSHEET_ID is a refusal,
+ *      exit 2), opens the database read-only, prints what it would
  *      send, writes nothing (the file is byte-identical, no state table is
  *      created) and never sends mail
  *
@@ -267,6 +272,15 @@ async function section2() {
 	ok("a stamp no email matches is unmatched, never reported", c.unmatched.map((x) => x.id).join() === "4" && !wrong["4"], c.unmatched);
 	ok("the app's own stamp shape is not checked", c.notN8n === 1 && ![...c.ok, ...c.wrong, ...c.unmatched].some((x) => x.id === "5"));
 	ok("a stamp in the repeated hour of 2026-11-01 (1:30 AM EST) is Eastern, not Central", c.ok.some((x) => x.id === "7") && !wrong["7"]);
+	// One email's Eastern time and another's Central time can be the same wall
+	// clock (emails exactly an hour apart): which one n8n used is unknown.
+	const both = ic.classifyStamps([{ id: "b", assigned: "10/9/2026, 9:21:43 AM" }],
+		[{ date: "Fri, 09 Oct 2026 09:21:43 -0400" }, { date: "Fri, 09 Oct 2026 10:21:43 -0400" }], { appZone: zone });
+	ok("a stamp equal to one email's Eastern time and another's offset time is unmatched, neither fine nor reported",
+		both.unmatched.map((x) => x.id).join() === "b" && both.ok.length === 0 && both.wrong.length === 0, both);
+	const eastOnly = ic.classifyStamps([{ id: "e", assigned: "10/9/2026, 9:21:43 AM" }],
+		[{ date: "Fri, 09 Oct 2026 09:21:43 -0400" }, { date: "Fri, 09 Oct 2026 10:21:44 -0400" }], { appZone: zone });
+	ok("...one second apart is no longer ambiguous: fine", eastOnly.ok.length === 1, eastOnly);
 
 	// Through the runner: only NEW stamps (a new load, a changed Assigned Date) are checked.
 	const db = makeDb();
@@ -291,10 +305,12 @@ async function section2() {
 	ok("...and the run still completes", noMailbox.result.ok === true);
 	const db3 = makeDb();
 	addExpense(db3, { id: 1, status: "Approved", date: "2026-09-25", createdAt: "2026-09-25 10:00:00" });
+	addExpense(db3, { id: 2, status: "Approved", date: "2026-10-02", createdAt: "2026-10-02 20:00:00" });
 	await run(db3, jt([{ id: "1", pickup: "p", assigned: "" }]), { now: new Date("2026-10-09T12:00:30Z") });
 	const broken = await run(db3, jt([{ id: "1", pickup: "p", assigned: "10/9/2026, 9:21:43 AM" }]), { readRateConEmails: async () => { throw new Error("IMAP timeout"); } });
 	ok("an unreadable mailbox: check 3 is skipped with the reason", /IMAP timeout/.test(broken.result.report.zone.skipped || ""), broken.result.report.zone);
-	ok("...and checks 1, 2 and 4 still run (the receipt is reported)", broken.result.report.receipts.stale.length === 1);
+	ok("...and checks 1, 2 and 4 still run (the receipt newly past 7 days is reported)",
+		broken.result.report.receipts.stale.map((r) => r.id).join() === "2" && broken.result.report.receipts.olderOpen === 1, broken.result.report.receipts);
 	const db4 = makeDb();
 	let read = false;
 	const base = await run(db4, jt([{ id: "1", pickup: "p", assigned: "10/9/2026, 9:21:43 AM" }]), { readRateConEmails: async () => { read = true; return emails; } });
@@ -339,6 +355,41 @@ async function section3() {
 	ok("exactly those", ids.join() === "10,12,17,19", ids);
 	ok("each carries its age in days and its month", r.stale.find((x) => x.id === 10).days === 8 && r.stale.find((x) => x.id === 10).period === "2026-10", r.stale.find((x) => x.id === 10));
 	ok("an invoice whose expense list is unreadable is counted", r.unreadableInvoices === 1, r.unreadableInvoices);
+	ok("no previous run (the first): every receipt past 7 days is listed, none counted as older", r.olderOpen === 0, r.olderOpen);
+
+	// Each receipt is listed once: after the first run, only receipts whose
+	// 7-day mark passed since the previous run (created_at in
+	// [previous run - 7 d, now - 7 d)); the rest still open are only counted.
+	const since = "2026-10-09T12:00:30.000Z";
+	const r2 = ic.staleApprovedReceipts(db, { now, expensePeriodExpr: EXPENSE_PERIOD_EXPR, since });
+	ok("since the previous run: only receipts whose 7-day mark passed in between are listed",
+		r2.stale.map((x) => x.id).sort((a, b) => a - b).join() === "10,12", r2.stale.map((x) => x.id));
+	ok("...a receipt exactly 7 days old at the previous run (not listed then) is listed now", r2.stale.some((x) => x.id === 10));
+	ok("...the older ones still open are counted, not listed", r2.olderOpen === 2, r2.olderOpen);
+
+	console.log("§3b check 4 through the runner: each receipt once");
+	const dbOnce = makeDb();
+	addExpense(dbOnce, { id: 41, status: "Approved", date: "2026-09-20", createdAt: "2026-09-20 10:00:00" });
+	addExpense(dbOnce, { id: 42, status: "Approved", date: "2026-10-02", createdAt: "2026-10-02 20:00:00" });
+	const sheetOnce = jt([{ id: "1", pickup: "p", assigned: "" }]);
+	const m1 = mailSpy();
+	const run1 = await run(dbOnce, sheetOnce, { sendEmail: m1, now: new Date("2026-10-09T12:00:30Z") });
+	ok("run 1 (first): the receipt past 7 days (#41) is listed, the 6-day-old one (#42) is not",
+		run1.result.report.receipts.stale.map((x) => x.id).join() === "41" && m1.calls.length === 1 && /#41/.test(m1.calls[0].html) && !/#42/.test(m1.calls[0].html));
+	const m2 = mailSpy();
+	const run2 = await run(dbOnce, sheetOnce, { sendEmail: m2, now: new Date("2026-10-10T12:00:30Z") });
+	ok("run 2: #42 (its 7-day mark passed since run 1) is listed and #41 is not repeated",
+		run2.result.report.receipts.stale.map((x) => x.id).join() === "42" && m2.calls.length === 1 && /#42/.test(m2.calls[0].html) && !/#41/.test(m2.calls[0].html), m2.calls.map((c) => c.subject));
+	ok("run 2: one line counts the older receipt still open, with no id",
+		/1 approved receipt reported on an earlier day is still on no invoice\./.test(m2.calls[0].html) && run2.result.report.receipts.olderOpen === 1);
+	ok("run 2: the subject counts only what is new (1 issue)", /: 1 issue$/.test(m2.calls[0].subject), m2.calls[0].subject);
+	const m3 = mailSpy();
+	const run3 = await run(dbOnce, sheetOnce, { sendEmail: m3, now: new Date("2026-10-11T12:00:30Z") });
+	ok("run 3: nothing new, so no email (the count alone sends nothing)", m3.calls.length === 0 && run3.result.report.findings === 0);
+	ok("run 3: its one log line counts the 2 still open, with no ids",
+		run3.logger.lines.length === 1 && /2 reported earlier still on no invoice/.test(run3.logger.lines[0].text) && !/#4[12]/.test(run3.logger.lines[0].text), run3.logger.lines);
+	ok("across the three runs each receipt was emailed once",
+		[...m1.calls, ...m2.calls, ...m3.calls].map((c) => (c.html.match(/#4\d/g) || []).join()).join("|") === "#41|#42");
 	let threw = false;
 	try { ic.staleApprovedReceipts(db, { now }); } catch { threw = true; }
 	ok("the month rule is required (server.js passes EXPENSE_PERIOD_EXPR)", threw);
@@ -408,7 +459,8 @@ async function section4() {
 async function section5() {
 	console.log("§5 email and logging");
 	const db = makeDb();
-	addExpense(db, { id: 7, status: "Approved", date: "2026-09-25", createdAt: "2026-09-25 10:00:00", amount: 88.25 });
+	// Submitted 2026-10-03 10:00 UTC: 6 days old at the first run, past 7 at the second.
+	addExpense(db, { id: 7, status: "Approved", date: "2026-10-03", createdAt: "2026-10-03 10:00:00", amount: 88.25 });
 	await run(db, jt([{ id: "1", pickup: "p", assigned: "" }]), { now: new Date("2026-10-09T12:00:30Z"), sendEmail: mailSpy() });
 	const before = businessRows(db);
 	const spy = mailSpy();
@@ -437,6 +489,16 @@ async function section5() {
 	const again = mailSpy();
 	await run(db3, jt([{ id: "1", pickup: "", assigned: "" }]), { sendEmail: again });
 	ok("...so the next attempt reports the same finding", again.calls.length === 1 && /Pickup Appointment/.test(again.calls[0].html));
+
+	// A failed FIRST run: no baseline was taken, so its line must not say one was.
+	const db6 = makeDb();
+	addExpense(db6, { id: 9, status: "Approved", date: "2026-09-25", createdAt: "2026-09-25 10:00:00" });
+	const failedBase = await run(db6, jt([{ id: "1", pickup: "p", assigned: "" }]), { sendEmail: mailSpy(false) });
+	const baseLine = failedBase.logger.lines.map((l) => l.text).join("\n");
+	ok("a failed first run: an error that says the run is not recorded", failedBase.result.ok === false && failedBase.logger.lines.length === 1 &&
+		failedBase.logger.lines[0].level === "error" && /not recorded/.test(baseLine), failedBase.logger.lines);
+	ok("...and never that the baseline was taken", !/baseline taken/i.test(baseLine) && /baseline not taken/i.test(baseLine), baseLine);
+	ok("...and nothing is in the state table", ic.lastRunAt(db6) === null);
 
 	const db4 = makeDb();
 	await run(db4, jt([{ id: "1", pickup: "p", assigned: "" }]), { now: new Date("2026-10-09T12:00:30Z") });
@@ -572,6 +634,9 @@ async function section7() {
 		const elsewhere = cli(["--print", `--db=${path.join(ROOT, "scripts", "no-such.db")}`, `--values-json=${path.join(tmp, "values.json")}`]);
 		ok("a database outside the app directory or the temp directory: refused, exit 2", elsewhere.status === 2 && /refusing/.test(elsewhere.stderr), elsewhere.stderr);
 		ok("...and nothing was created there", !fs.existsSync(path.join(ROOT, "scripts", "no-such.db")));
+		const envSheet = cli(["--print", `--db=${dbFile}`, "--sheet-id=env", `--env-file=${path.join(tmp, "settings.env")}`]);
+		ok("--sheet-id=env when the settings name no SPREADSHEET_ID: refused, exit 2, one line, no stack",
+			envSheet.status === 2 && /SPREADSHEET_ID/.test(envSheet.stderr) && !/\n\s+at /.test(envSheet.stderr) && envSheet.stderr.trim().split("\n").length === 1, envSheet.stderr);
 
 		const h0 = sha(dbFile);
 		const first = cli(["--print", ...base]);
@@ -600,6 +665,8 @@ async function section7() {
 		ok("with state: the blanked Pickup Appointment (111) is printed", /111/.test(second.stdout) && /Pickup Appointment/.test(second.stdout), second.stdout);
 		ok("with state: the changed Assigned Date (222) is printed", /222/.test(second.stdout) && /10\/8\/2026/.test(second.stdout));
 		ok("with state: the Central stamp (111) is printed", /111: Assigned Date "10\/9\/2026, 8:30:10 AM" is the rate-con email's time at UTC-05:00, 1 hour behind Eastern/.test(second.stdout), second.stdout);
+		ok("with state: receipt #31 (listed by the first run) is not listed again, only counted",
+			!/#31/.test(second.stdout) && /1 approved receipt reported on an earlier day is still on no invoice/.test(second.stdout), second.stdout);
 		ok("with state: the database file is still unchanged (no state write)", sha(dbFile) === h1);
 		const noMail = cli(["--print", ...base]);
 		ok("without --mailbox or --emails-json: check 3 says the mailbox was not read", /mailbox/i.test(noMail.stdout) && noMail.status === 0, noMail.stdout);
