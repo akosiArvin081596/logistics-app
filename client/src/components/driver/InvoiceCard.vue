@@ -7,7 +7,9 @@
         <div class="inv-week">{{ invoice.week_start }} to {{ invoice.week_end }}</div>
       </div>
       <div class="inv-right">
-        <div class="inv-amount">${{ (invoice.total_earnings || 0).toFixed(2) }}</div>
+        <!-- total_due: the server's total with any admin adjustment, the PDF's
+             "Total Due". -->
+        <div class="inv-amount">${{ (invoice.total_due || 0).toFixed(2) }}</div>
         <div class="inv-amount-label">your pay</div>
         <div :class="['inv-status', statusColor]">{{ invoice.status }}</div>
       </div>

@@ -21852,10 +21852,16 @@ function parsePaymentReportParams(req) {
 	return { payee, from, to };
 }
 
+// An invoice's total due: the computed total_earnings plus the admin
+// adjustment, to the cent. It is the number the PDF "Total Due" shows, and the
+// one figure the payment report and the driver app's invoice list serve.
+function invoiceTotalDue(row) {
+	return Math.round(((row.total_earnings || 0) + (row.adjustment || 0)) * 100) / 100;
+}
+
 // Aggregates every live (non-deleted) invoice for the payee whose billing
-// period OVERLAPS [from, to]. total_due = total_earnings + admin adjustment —
-// the same number the PDF "Total Due" shows. Rejected invoices are listed but
-// excluded from payable totals.
+// period OVERLAPS [from, to]. total_due is invoiceTotalDue(). Rejected
+// invoices are listed but excluded from payable totals.
 function buildPaymentReport(payee, from, to) {
 	// The payee in any stored spelling (normalizeDriverName(), in JS), so a
 	// driver's invoices stored under two spellings are one payee's.
@@ -21872,7 +21878,7 @@ function buildPaymentReport(payee, from, to) {
 	const round2 = (n) => Math.round(n * 100) / 100;
 	const invoices = rows.map((r) => ({
 		...r,
-		total_due: round2((r.total_earnings || 0) + (r.adjustment || 0)),
+		total_due: invoiceTotalDue(r),
 	}));
 	const sumDue = (list) => round2(list.reduce((s, r) => s + r.total_due, 0));
 	const paid = invoices.filter((r) => r.status === "Paid");
@@ -37275,15 +37281,17 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// Recent invoices (soft-deleted ones are hidden from drivers) — this
 		// driver's in any stored spelling, the same normalizeDriverName() match
 		// this route applies to its loads above. `driver` is read only to match
-		// and is not returned, so the rows keep their shape.
+		// and is not returned. `total_due` is the invoice's total with its admin
+		// adjustment (invoiceTotalDue(), the PDF's "Total Due"): the figure the
+		// driver app shows.
 		const driverInvoices = db.prepare(
-			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, submitted_at,
+			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, adjustment, expenses_total, status, submitted_at,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 			 FROM invoices WHERE deleted_at = '' ORDER BY created_at DESC`
 		).all()
 			.filter((r) => normalizeDriverName(r.driver) === driverNameNorm)
 			.slice(0, 20)
-			.map(({ driver: _driver, ...rest }) => rest);
+			.map(({ driver: _driver, ...rest }) => ({ ...rest, total_due: invoiceTotalDue(rest) }));
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
 		// pre-fill its navigation handoff and render static-map thumbnails

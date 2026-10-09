@@ -101,7 +101,8 @@ const helpers = new Function([
 	liftConstLine("BROKER_WITHHELD_RE"),
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),
-	"return { normalizeDriverName, findCol, sanitizeBrokerColumns };",
+	liftFn("invoiceTotalDue"),
+	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue };",
 ].join("\n"))();
 // The route finds the driver's directory row through findDirectoryRowForDriver(),
 // which reads `db`, so it is built over whichever db a route runs on.
