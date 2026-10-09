@@ -88,7 +88,7 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
 const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
@@ -99,7 +99,7 @@ const FNS = [
 	// What they call, shipped as is.
 	"driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName",
 	"isBuiltInPropertyName", "driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
-	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays",
+	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey", "resolveDailyRate",
 	"getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey", "intersectMonthWindow",
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "truckMonthlyFixed",
@@ -203,7 +203,7 @@ function buildWorld({ onSheetRead = null, env = {} } = {}) {
 		},
 		getEldTravelDaysByVehicleCached: () => Object.create(null),
 		resolveCityState: () => "",
-		loadHaul: require(path.join(ROOT, "lib", "load-haul.js")),
+		loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require(path.join(ROOT, "lib", "load-haul.js")),
 		insertDispatchNotification: { run: (type, title, body) => notices.push({ type, title, body }) },
 		process: { env },
 		console: { log() {}, warn: (m) => warnings.push(String(m)), error: (...a) => errors.push(a.map(String).join(" ")) },

@@ -84,7 +84,7 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
@@ -92,7 +92,7 @@ const FNS = [
 	"assignDriverToTruck", "syncOpenCarrierPairing", "getInvestorDriverSet", "driverNameHeldByOtherSpelling",
 	"driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName", "isBuiltInPropertyName",
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
-	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays",
+	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey",
 	"resolveDailyRate", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",

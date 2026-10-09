@@ -96,6 +96,7 @@ const investorPaymentTerms = require("./lib/investor-payment-terms");
 const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
 const financialsCalc = require("./lib/financials-calc");
+const loadPayDays = require("./lib/load-pay-days");
 const financialsReport = require("./lib/financials-report");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
@@ -5272,6 +5273,12 @@ const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.
 // (GET /api/admin/payout-rules/dry-run) compares them with every rule off.
 const PAYOUT_RULES_V2_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PAYOUT_RULES_V2_ENABLED ?? "").trim());
 const PAYOUT_RULE_KEYS = ["datedAttribution", "datedRates", "futureReceipts", "frozenCarry"];
+// A day before a load's dispatch stops paying for that load when the truck moved
+// under 50 km that day and never reached the pickup (lib/load-pay-days.js), in
+// open months only. Dormant until the owner approves it, like the rules above.
+// preDispatchPayDayFilter() is the one place it is switched; the three pay paths
+// take the filter it returns. Enable with true/1/yes/on.
+const PRE_DISPATCH_PAY_DAY_RULE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PRE_DISPATCH_PAY_DAY_RULE_ENABLED ?? "").trim());
 function payoutRules(overrides = null) {
 	const out = {};
 	for (const k of PAYOUT_RULE_KEYS) out[k] = overrides && typeof overrides[k] === "boolean" ? overrides[k] : PAYOUT_RULES_V2_ENABLED;
@@ -17322,6 +17329,10 @@ async function generateInvoiceHandler(req, res) {
 		const weekStartMs = Date.parse(weekStart + "T00:00:00Z");
 		const weekEndMs = Date.parse(computedWeekEnd + "T00:00:00Z") + 36 * 3600 * 1000;
 		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
+		// The pre-dispatch rule (off unless enabled) and the month each load's days
+		// settle in, read as the ledger reads it (the load's Assigned month).
+		const preDispatch = preDispatchPayDayFilter();
+		const monthCols = preDispatch ? jobTrackingMonthCols(headers) : null;
 
 		const activeDaySet = new Set();
 		const dayLoadMap = {}; // date string → [load IDs]
@@ -17352,12 +17363,18 @@ async function generateInvoiceHandler(req, res) {
 			// ELD actually covered this window (≥1 ping). Uncovered windows (truck
 			// not linked, or load predates/outside the feed) fall back to the full
 			// scheduled window so pay isn't zeroed; a covered-but-parked day is dropped.
+			// lib/load-pay-days.js payDaysForLoad() is the copy the investor view and
+			// the ledger share, the pre-dispatch rule included.
 			const truckUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
 			const vid = truckUnit ? unitToVid[truckUnit] : null;
 			const eld = vid ? eldByVid[vid] : null;
-			const covered = eld && loadWindowDays.some(d => eld.coverage.has(d));
-			const countedDays = covered ? loadWindowDays.filter(d => eld.travel.has(d)) : loadWindowDays;
 			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+			const { days: countedDays } = loadPayDays.payDaysForLoad(
+				loadWindowDays, eld,
+				// loadWindowDays is clipped to the week; the rule reads the whole window.
+				{ loadId: String(lid).trim(), vid, settleMonth: monthCols ? loadAssignedMonthKey(load, monthCols) : "", windowStart: fmtLocalDate(start) },
+				preDispatch,
+			);
 			for (const ds of countedDays) {
 				activeDaySet.add(ds);
 				if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
@@ -36253,6 +36270,22 @@ function liveJobTrackingView(jt) {
 	};
 }
 
+// The pre-dispatch pay-day filter for one request (lib/load-pay-days.js), or null
+// while PRE_DISPATCH_PAY_DAY_RULE_ENABLED is off. POST /api/invoices/generate, GET
+// /api/investor and the payout ledger (gatherLedgerScopeFacts()) each pass it to
+// payDaysForLoad(), so the three move together. A month counts as open only when
+// period_locks is readable and the month is not finalized: an unreadable lock
+// table keeps every day.
+function preDispatchPayDayFilter() {
+	if (!PRE_DISPATCH_PAY_DAY_RULE_ENABLED) return null;
+	return loadPayDays.createPreDispatchFilter({
+		db,
+		enabled: true,
+		monthOpen: (mk) => periodLocksReadable() && !isLocked(mk),
+		radiusM: GEOFENCE_RADIUS,
+	});
+}
+
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
 // for every admin override. Consumed by /api/investor, /api/financials, and
 // /api/invoices/generate so a Super-Admin override drops or adds the day
@@ -51621,6 +51654,9 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		rows,
 		unitToVid,
 		eldByVid,
+		// The pre-dispatch rule (off unless enabled), the filter GET /api/investor
+		// and the weekly invoice pass to payDaysForLoad() too.
+		preDispatch: preDispatchPayDayFilter(),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -53189,6 +53225,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			db.prepare(vidQuery).all(...(investorDriverSet ? [user.id] : [])).forEach(t => { unitToVid[t.u] = t.vid; });
 		}
 		const eldByVid = getEldTravelDaysByVehicleCached(Object.values(unitToVid), 0, Date.now() + 86400000);
+		// The pre-dispatch rule (off unless enabled), shared with the ledger and
+		// the weekly invoice through payDaysForLoad().
+		const preDispatch = preDispatchPayDayFilter();
 		// Per-driver-per-month ELD-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est} } }
 		const driverDaySource = Object.create(null);
 		const daySrcLabel = (o) => o ? (o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated") : "estimated";
@@ -53284,9 +53323,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					// Intersect with real travel days ONLY when the ELD covered this
 					// load's window (≥1 ping). Uncovered windows (load predates the
 					// feed, or no link) fall back to the full window so historical pay
-					// isn't zeroed; a covered-but-parked window stays 0.
-					const covered = eld && windowDays.some(d => eld.coverage.has(d));
-					const eldCounted = covered ? windowDays.filter(d => eld.travel.has(d)) : windowDays;
+					// isn't zeroed; a covered-but-parked window stays 0. The rule is
+					// lib/load-pay-days.js payDaysForLoad(), shared with the ledger and
+					// the weekly invoice, the pre-dispatch rule included.
+					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+					const { covered, days: eldCounted } = loadPayDays.payDaysForLoad(
+						windowDays, eld, { loadId: lid, vid, settleMonth: assignedMonthKey || "" }, preDispatch,
+					);
 					// Drop admin-removed days last. The ELD/estimated source flag
 					// still reflects the underlying day source — an override is a
 					// manual adjustment, not a change to how the day was originally
@@ -53296,7 +53339,6 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const skipSet = ovr ? ovr.remove : null;
 					const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
 					const srcKey = covered ? "eld" : "est";
-					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 					const displayDriver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
 					if (displayDriver && !driverDisplayName[driver]) driverDisplayName[driver] = displayDriver;
 					// All-time set (for totals)

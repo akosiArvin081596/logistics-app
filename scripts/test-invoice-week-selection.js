@@ -122,7 +122,7 @@ const SHARED_FNS = [
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
-	"resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "generateInvoiceNumber", "isAfterDeadline",
+	"resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
 	// The handler's driver identity, pay lookups and guarded write (see
 	// scripts/test-invoice-driver-name-matching.js for what they decide).
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "invoiceWriteRefusal",
@@ -134,7 +134,7 @@ const SHARED_FNS = [
 	"listUndatedCompletedLoads",
 ];
 const SHARED_CONSTS = [
-	"RFC2822_MONTHS", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
+	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
@@ -172,7 +172,7 @@ function buildWorld(db, opts = {}) {
 	const sheet = { values: opts.sheetValues || [] };
 	const deps = {
 		db,
-		normalizeLoadId,
+		normalizeLoadId, loadPayDays: require("../lib/load-pay-days.js"),
 		localDayInTz: eldMiles.localDayInTz,
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).

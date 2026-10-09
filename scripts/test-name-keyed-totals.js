@@ -121,7 +121,7 @@ function liftDecl(src, kind, name) {
 	return src.slice(start, end);
 }
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
 	// The fuel-gallons recovery's thresholds (§3b).
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
@@ -134,7 +134,7 @@ const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
 	// Under test.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
-	"getDriverPayStructures", "getAllExcludedDriverDays", "expenseDriverKey", "foldExpenseTotalsByDriver",
+	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeDriverQueues", "computeInvestorMonthlyEarnings",
 	"gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows",
 	// Financials' books (GET /api/financials reads them).
@@ -460,7 +460,7 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		financialsCalc,
 		// The dated truck assignments the books read for a closed month's
 		// blank-Owner-ID loads; this fixture closes no month.
-		loadHaul: require("../lib/load-haul"),
+		loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require("../lib/load-haul"),
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth,
 		payoutBasisContext: () => null,

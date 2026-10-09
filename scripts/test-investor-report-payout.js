@@ -565,6 +565,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				resolveCityState: () => "",
 				getEldTravelDaysByVehicleCached: () => ({}),
 				getAllExcludedDriverDays: () => ({}),
+				// The pre-dispatch pay-day rule, off as it ships.
+				preDispatchPayDayFilter: () => null,
 				getDriverPayStructures: () => ({}),
 				getDeductibleExpensesByDriverMonth: () => ({}),
 				resolveDailyRate: (perDriver, perTruck) => perDriver || perTruck || 250,
