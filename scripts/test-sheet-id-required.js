@@ -209,13 +209,35 @@ try {
 			return d;
 		};
 		const ARCHIVE = 'const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "archive-literal-id-0123456789";\n';
-		const current = app({ "server.js": ARCHIVE, "lib/sheet-id.js": readSource("lib", "sheet-id.js"), ".env": "" });
+		const LIB = readSource("lib", "sheet-id.js");
+		// Production's own folder: the PRODUCTION_DIR its lib/sheet-id.js names.
+		const productionApp = (env) => {
+			const d = app({ "server.js": ARCHIVE, ".env": env });
+			fs.mkdirSync(path.join(d, "lib"));
+			fs.writeFileSync(path.join(d, "lib", "sheet-id.js"),
+				LIB.replace(/^const PRODUCTION_DIR = "[^"]+";$/m, `const PRODUCTION_DIR = ${JSON.stringify(d)};`));
+			return d;
+		};
+		const production = productionApp("");
+		const productionNamed = productionApp(`SPREADSHEET_ID=${TEST_ID}\n`);
+		const other = app({ "server.js": ARCHIVE, "lib/sheet-id.js": LIB, ".env": "" });
 		const older = app({ "server.js": `const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "older-literal-id-0123456789";\n${ARCHIVE}`, ".env": "" });
-		const named = app({ "server.js": ARCHIVE, "lib/sheet-id.js": readSource("lib", "sheet-id.js"), ".env": `SPREADSHEET_ID=${TEST_ID}\n` });
-		const ids = (d) => { try { return exp.spreadsheetIds(d, dotenv); } catch (e) { return { error: e.message }; } };
-		check("§6 the replica export reads production's sheet from lib/sheet-id.js", !!exp && ids(current).main === PROD_ID && ids(current).archive === "archive-literal-id-0123456789");
-		check("§6 …and still reads an older server.js's literal", !!exp && ids(older).main === "older-literal-id-0123456789");
-		check("§6 …and an app's own SPREADSHEET_ID first", !!exp && ids(named).main === TEST_ID);
+		const named = app({ "server.js": ARCHIVE, "lib/sheet-id.js": LIB, ".env": `SPREADSHEET_ID=${TEST_ID}\n` });
+		const ids = (d) => { try { return exp.spreadsheetIds(d, dotenv); } catch (e) { return { error: e.message, exitCode: e.exitCode }; } };
+		check("§6 the replica export reads production's sheets in production's own folder (lib/sheet-id.js's PRODUCTION_DIR)",
+			!!exp && LIB.includes("const PRODUCTION_DIR = ") && ids(production).main === PROD_ID && ids(production).archive === "archive-literal-id-0123456789");
+		check("§6 …production's folder still takes its own SPREADSHEET_ID first", !!exp && ids(productionNamed).main === TEST_ID);
+		check("§6 …any other folder that names no SPREADSHEET_ID is refused with exit 2",
+			!!exp && ids(other).exitCode === 2 && !ids(other).main && !String(ids(other).error).includes(PROD_ID));
+		check("§6 …and an older server.js's literal is no default outside production's folder", !!exp && ids(older).exitCode === 2);
+		check("§6 …an app's own SPREADSHEET_ID comes first, and an unnamed archive gets no default",
+			!!exp && ids(named).main === TEST_ID && ids(named).archive === "");
+		fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(other, "node_modules"));
+		const out = path.join(tmp, "sheets-refused.json");
+		const refused = run(path.join("scripts", "replica", "remote", "sheets-export.js"), [`--app=${other}`, `--out=${out}`]);
+		check("§6 the export run against another folder exits 2, writes nothing and calls nothing",
+			refused.code === 2 && refused.calls.length === 0 && !fs.existsSync(out)
+			&& /SPREADSHEET_ID/.test(refused.out) && !refused.out.includes(PROD_ID));
 
 		const C = requireOrNull(path.join(ROOT, "scripts", "replica", "common.js"));
 		const sheetsJson = path.join(tmp, "sheets.json");
