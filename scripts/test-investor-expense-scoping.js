@@ -112,7 +112,7 @@ function extractConst(name) {
 }
 
 const FNS = [
-	"houstonDay",
+	"appDay",
 	"truckChargeFromMonth",
 	"truckChargeUntilMonth",
 	"assignmentMonthKey",
@@ -129,7 +129,8 @@ const FNS = [
 // database rather than a stub that could agree with a broken query.
 function loadShipped(db, mutate = (s) => s) {
 	const body = FNS.map(extract).join("\n\n");
-	const consts = `const EXPENSE_PNL_FILTER = ${extractConst("EXPENSE_PNL_FILTER")};\n` +
+	const consts = `const APP_TIMEZONE = ${JSON.stringify(require("../lib/app-time").appTimeZone())};\n` +
+		`const EXPENSE_PNL_FILTER = ${extractConst("EXPENSE_PNL_FILTER")};\n` +
 		`const EXPENSE_PERIOD_EXPR = ${extractConst("EXPENSE_PERIOD_EXPR")};\n`;
 	const src = mutate(`${consts}${body}\nreturn { ${FNS.join(", ")}, EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR };`);
 	return new Function("db", src)(db);
@@ -912,7 +913,7 @@ const MUTANTS = [
 	},
 	{
 		name: "M4 assignment stamps sliced as UTC instead of Houston-localised",
-		mutate: (s) => s.replace("return houstonDay(d).slice(0, 7);", "return s.slice(0, 7);"),
+		mutate: (s) => s.replace("return appDay(d).slice(0, 7);", "return s.slice(0, 7);"),
 		expect: (lib) => lib.assignmentMonthKey("2026-08-01T02:30:00.000Z") !== "2026-07",
 	},
 	{

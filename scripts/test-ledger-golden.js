@@ -92,7 +92,7 @@ const FNS = [
 	"assignDriverToTruck", "syncOpenCarrierPairing", "getInvestorDriverSet", "driverNameHeldByOtherSpelling",
 	"driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName", "isBuiltInPropertyName",
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
-	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "houstonDay", "getAllExcludedDriverDays",
+	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey",
 	"resolveDailyRate", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
@@ -171,6 +171,7 @@ function buildWorld() {
 	}
 	const errors = [];
 	const deps = {
+		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, Date: Clock,
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
 		getEldTravelDaysByVehicleCached: () => ({

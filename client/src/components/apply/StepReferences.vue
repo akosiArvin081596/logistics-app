@@ -63,14 +63,14 @@
 </template>
 
 <script setup>
-import { houstonToday } from '../../utils/datetime'
+import { appToday } from '../../utils/datetime'
 import { onMounted } from 'vue'
 const props = defineProps({ form: { type: Object, required: true } })
 onMounted(() => {
-  // The applicant's LOCAL day, not toISOString()'s UTC day: this is a legal
-  // signature date printed on the PDF, and after 7pm Houston the UTC day is
-  // already tomorrow — a date they did not sign on.
-  props.form.signature_date = houstonToday()
+  // The app zone's day (APP_TIMEZONE, US Eastern), not toISOString()'s UTC day:
+  // this is a legal signature date printed on the PDF, and after 8pm Eastern the
+  // UTC day is already tomorrow — a date they did not sign on.
+  props.form.signature_date = appToday()
 })
 </script>
 

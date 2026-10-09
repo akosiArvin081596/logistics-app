@@ -331,6 +331,7 @@ import { useSocketRefresh } from '../composables/useSocketRefresh'
 import PaymentTermsSummary from '../components/investors/PaymentTermsSummary.vue'
 import { acceptBasisLine } from '../components/investors/payoutBasis'
 import { formatMoneyCents } from '../lib/paymentTerms'
+import { fmtAppInstant } from '../utils/datetime'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -631,9 +632,9 @@ const SQLITE_UTC_STAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/
 //      which is UTC but serialises zone-less, and GET /api/investor-outreach/log
 //      returns it via `SELECT *` with no strftime('...Z') wrapper (see the
 //      "SQLite timestamps on the wire" convention). `new Date()` then reads it
-//      as LOCAL, so the same row parsed to a different instant in Houston and
+//      as LOCAL, so the same row parsed to a different instant in New York and
 //      in Manila. Normalise to UTC first.
-//   2. RENDER. Houston rule: format in America/Chicago with a visible zone
+//   2. RENDER. In the app zone (APP_TIMEZONE, US Eastern) with a visible zone
 //      label, never the viewer's zone.
 //
 // If that endpoint is ever fixed to emit ISO-Z, the regex simply stops matching
@@ -642,10 +643,7 @@ function formatDate(d) {
   if (!d) return ''
   const s = String(d).trim()
   const dt = new Date(SQLITE_UTC_STAMP_RE.test(s) ? `${s.replace(' ', 'T')}Z` : s)
-  return isNaN(dt.getTime()) ? s : dt.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(dt, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', fallback: s })
 }
 
 onMounted(() => { load(); loadOutreachLog(); openLinkedApplication() })

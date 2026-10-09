@@ -96,7 +96,7 @@ function documentsSchema(src) {
 // Load lib/broker-invoice.js from (possibly mutated) source text.
 function loadLib(text) {
 	const mod = { exports: {} };
-	new Function("module", "exports", "require", "__dirname", "__filename", text)(mod, mod.exports, require, path.dirname(LIB), LIB);
+	new Function("module", "exports", "require", "__dirname", "__filename", text)(mod, mod.exports, require("module").createRequire(LIB), path.dirname(LIB), LIB);
 	return mod.exports;
 }
 function mutate(src, from, to, label) {

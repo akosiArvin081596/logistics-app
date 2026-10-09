@@ -25,8 +25,8 @@
  *   §5 DISCRIMINATION — defang a guard, require the assertion to flip
  *   §6 call requests (kind "call", the website's "Schedule a call" form):
  *      kind absent / "" / "rfi" answers exactly as the RFI, any other kind is
- *      refused; phone, preferredDate (a real date, today to 120 days ahead in
- *      Central, with `now` fixed), timeWindow, timeZone and topic are required
+ *      refused; phone, preferredDate (a real date, today to 120 days ahead on
+ *      the business clock, APP_TIMEZONE, with `now` fixed), timeWindow, timeZone and topic are required
  *      and checked; the email's subject, heading, rows, labels and escaping;
  *      over HTTP: one email per valid call (JSON and form), the call
  *      redirects (sent, refusals, honeypot, rate limit, daily cap, failed
@@ -358,11 +358,13 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	}
 
 	// --- §6 call requests (kind "call") ---------------------------------------------
-	// "Today" is fixed by `now`: 2026-10-07T15:04:05Z is 10:04 CDT on Wed Oct 7 in
-	// Central, the same instant buildApp() gives the route.
+	// "Today" is fixed by `now`: 2026-10-07T15:04:05Z is 11:04 EDT on Wed Oct 7 on
+	// the business clock (APP_TIMEZONE, US Eastern), the same instant buildApp()
+	// gives the route.
 	const NOW = new Date("2026-10-07T15:04:05.000Z");
-	const LATE_EVENING = new Date("2026-10-08T03:00:00.000Z"); // 22:00 CDT, still Oct 7 in Central
-	const AFTER_MIDNIGHT = new Date("2026-10-08T06:00:00.000Z"); // 01:00 CDT, Oct 8 in Central
+	const LATE_EVENING = new Date("2026-10-08T03:00:00.000Z"); // 23:00 EDT, still Oct 7 on the business clock
+	const AFTER_MIDNIGHT = new Date("2026-10-08T06:00:00.000Z"); // 02:00 EDT, Oct 8 on the business clock
+	const LATE_CENTRAL = new Date("2026-10-08T04:30:00.000Z"); // 23:30 CDT Oct 7, already 00:30 EDT Oct 8
 	const CALL = Object.freeze({
 		kind: "call",
 		fullName: "Carl O. Callback",
@@ -440,12 +442,14 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok(`§6 ${rfi.CALL_MAX_DAYS_AHEAD} days out (2027-02-04) passes`, checkCall({ ...CALL, preferredDate: "2027-02-04" }).ok === true);
 	ok(`§6 ${rfi.CALL_MAX_DAYS_AHEAD + 1} days out (2027-02-05) → INVALID_FIELD`, refusedAs(checkCall({ ...CALL, preferredDate: "2027-02-05" }), "INVALID_FIELD", "preferredDate"));
 	ok("§6 a date with surrounding spaces is trimmed", checkCall({ ...CALL, preferredDate: " 2026-10-15 " }).value.preferredDate === "2026-10-15");
-	ok("§6 'today' is Central: at 22:00 CDT (already Oct 8 in UTC) Oct 7 still passes",
+	ok("§6 'today' is the business clock: at 11:00 PM EDT (already Oct 8 in UTC) Oct 7 still passes",
 		checkCall({ ...CALL, preferredDate: "2026-10-07" }, LATE_EVENING).ok === true);
 	ok("§6 ... and the 121st day is still refused then",
 		refusedAs(checkCall({ ...CALL, preferredDate: "2027-02-05" }, LATE_EVENING), "INVALID_FIELD", "preferredDate"));
-	ok("§6 after midnight Central, the day before is refused",
+	ok("§6 after midnight Eastern, the day before is refused",
 		refusedAs(checkCall({ ...CALL, preferredDate: "2026-10-07" }, AFTER_MIDNIGHT), "INVALID_FIELD", "preferredDate"));
+	ok("§6 11:30 PM Central is already the next day on the business clock: Oct 7 is refused",
+		refusedAs(checkCall({ ...CALL, preferredDate: "2026-10-07" }, LATE_CENTRAL), "INVALID_FIELD", "preferredDate"));
 	ok("§6 checkCallRequest takes `now` too", rfi.checkCallRequest({ ...CALL, preferredDate: "2026-10-07" }, { now: AFTER_MIDNIGHT }).field === "preferredDate");
 
 	const CHOICES = { timeWindow: rfi.CALL_TIME_WINDOWS, timeZone: rfi.CALL_TIME_ZONES, topic: rfi.CALL_TOPICS };
@@ -491,7 +495,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		hasRow(callProd.html, "Time zone", "Mountain") &&
 		hasRow(callProd.html, "Message", '<div style="white-space:pre-wrap;line-height:1.5">Afternoons suit me best.\nThanks.</div>') &&
 		hasRow(callProd.html, "Consent", "Agreed to be contacted by LogisX about this request and has read the Privacy Policy") &&
-		hasRow(callProd.html, "Submitted", "Oct 7, 2026, 10:04 AM CDT (2026-10-07T15:04:05Z)"));
+		hasRow(callProd.html, "Submitted", "Oct 7, 2026, 11:04 AM EDT (2026-10-07T15:04:05Z)"));
 	ok("§6 ... in the contract's order, with no Company row",
 		(() => { const at2 = ["Name", "Email", "Phone", "Topic", "Preferred date", "Time window", "Time zone", "Message", "Consent", "Submitted"].map((l) => callProd.html.indexOf(`>${l}</td>`)); return at2.every((v, i) => v > 0 && (i === 0 || v > at2[i - 1])) && !callProd.html.includes(">Company</td>"); })());
 	ok("§6 the call email keeps the RFI's layout and footer",
@@ -782,7 +786,7 @@ const asForm = (origin, payload, { referer } = {}) => ({
 		optionalPhone.checkWebsiteForm({ ...CALL, phone: "" }, { now: NOW }).ok === true);
 	const anyKind = loadLib(LIB_SRC.replace('if (!kind) return refusal("INVALID_FIELD", "kind", MESSAGES.invalid);', ""));
 	ok("MUTANT: an unchecked kind is caught by §6", anyKind.checkWebsiteForm({ ...VALID, kind: "meeting" }).ok === true);
-	const utcToday = loadLib(LIB_SRC.replace("calendarDayNumber(centralDate(now))", "calendarDayNumber(now.toISOString().slice(0, 10))"));
+	const utcToday = loadLib(LIB_SRC.replace("calendarDayNumber(businessDate(now))", "calendarDayNumber(now.toISOString().slice(0, 10))"));
 	ok("MUTANT: a UTC 'today' is caught by §6",
 		utcToday.checkWebsiteForm({ ...CALL, preferredDate: "2026-10-07" }, { now: LATE_EVENING }).ok === false);
 	const noUpperBound = loadLib(LIB_SRC.replace(" || day > today + CALL_MAX_DAYS_AHEAD", ""));

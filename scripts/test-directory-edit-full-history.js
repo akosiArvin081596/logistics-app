@@ -176,7 +176,7 @@ function makeApp() {
 	ins.run(4, "Nobody Yet", "", "555-0103", "fixed", 0, 0);                 // no record anywhere
 	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (1, 'Pct Sept', '2026-09-10T12:00:00.000Z')").run();
 
-	const m = new Function("db", "todayKeyCT", "periodLocksReadable", "investorsHoldingDriver",
+	const m = new Function("db", "appTodayKey", "periodLocksReadable", "investorsHoldingDriver",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
 		db, () => "2026-10-04",
 		() => S.locksReadable,

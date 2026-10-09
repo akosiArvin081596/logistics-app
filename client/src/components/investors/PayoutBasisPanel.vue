@@ -188,7 +188,7 @@ import { useApi } from '../../composables/useApi'
 import { replyLost } from '../../lib/saveOutcome'
 import { monthLabel } from '../../lib/monthLabel'
 import { LIMITS, MESSAGES } from '../../lib/paymentTerms'
-import { fmtTimestamp, houstonToday } from '../../utils/datetime'
+import { appToday, fmtTimestamp } from '../../utils/datetime'
 import {
   LEASE_LABEL,
   NOTE_MAX,
@@ -261,7 +261,7 @@ const schedule = computed(() => (Array.isArray(view.value?.schedule) ? view.valu
 const history = computed(() => (Array.isArray(view.value?.history) ? view.value.history : []))
 const status = computed(() => basisStatus(view.value))
 const currentText = computed(() => currentBasisText(view.value?.current))
-const bounds = computed(() => monthBounds(houstonToday(), view.value?.earliestEditableMonth))
+const bounds = computed(() => monthBounds(appToday(), view.value?.earliestEditableMonth))
 const monthHint = computed(() => {
   const last = monthLabel(bounds.value.max)
   return bounds.value.min

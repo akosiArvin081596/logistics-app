@@ -59,7 +59,10 @@ import net from 'node:net'
 import path from 'node:path'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import paths from './paths.cjs'
+
+const APP_ZONE = createRequire(import.meta.url)('../../lib/app-time.js').appTimeZone()
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROD_SHEET = '1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo'
@@ -318,13 +321,13 @@ function normJson(v) {
   if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[k] = normJson(v[k]); return o }
   return v
 }
-// N2: each day this run has touched, in the process's zone and in Houston's, in the
-// formats the documents print their generation date with.
+// N2: each day this run has touched, in the process's zone and in the business zone
+// (APP_TIMEZONE), in the formats the documents print their generation date with.
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 function runDayStrings() {
   const out = new Set()
   for (const t of [RUN_START, new Date()]) {
-    for (const timeZone of [undefined, 'America/Chicago']) {
+    for (const timeZone of [undefined, APP_ZONE]) {
       const o = timeZone ? { timeZone } : {}
       out.add(new Intl.DateTimeFormat('en-US', { ...o, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(t))
       out.add(new Intl.DateTimeFormat('en-US', { ...o, year: 'numeric', month: 'long', day: 'numeric' }).format(t))

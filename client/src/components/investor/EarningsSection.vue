@@ -808,7 +808,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { formatCurrency as fmt } from '../../utils/format'
-import { houstonToday } from '../../utils/datetime'
+import { appToday } from '../../utils/datetime'
 import { monthLabel } from '../../lib/monthLabel'
 import { earningsCarryTerms, CARRY_EXPLAIN, leaseBasisOf, hasLeaseMonth, leaseNotes, extraCostsOf } from '../../lib/payoutPeriod'
 import { LEASE_LABEL, leaseSubLine, leaseExplain } from '../../lib/leasePayoutText'
@@ -1094,9 +1094,9 @@ async function restoreDay(row) {
 
 function askAdd(driverKey, driverDetail) {
   // Default to today if it's in the selected month, otherwise to the 1st.
-  // Today in Houston (the business day), not the viewer's clock: this day is
-  // posted to /api/admin/excluded-days as a driver pay day.
-  const todayStr = houstonToday()
+  // Today in the app zone (the business day), not the viewer's clock: this day
+  // is posted to /api/admin/excluded-days as a driver pay day.
+  const todayStr = appToday()
   const inMonth = todayStr >= monthBounds.value.min && todayStr <= monthBounds.value.max
   addDate.value = inMonth ? todayStr : monthBounds.value.min
   addReason.value = ''

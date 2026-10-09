@@ -391,7 +391,7 @@
 </template>
 
 <script setup>
-import { houstonToday, fmtYmd } from '../../utils/datetime'
+import { appToday, fmtYmd } from '../../utils/datetime'
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { Form as VanForm, Field as VanField, CellGroup as VanCellGroup, Button as VanButton, Uploader as VanUploader, Picker as VanPicker, Popup as VanPopup } from 'vant'
 import { useToast } from '../../composables/useToast'
@@ -528,7 +528,7 @@ watch(dropError, (msg) => {
 const form = reactive({
   type: 'Fuel',
   amount: '',
-  date: houstonToday(),
+  date: appToday(),
   // The load this form was opened from, preselected. See the watcher below.
   loadId: props.presetLoadId || '',
   vendor: '',
@@ -564,7 +564,7 @@ watch(
 // The expense date decides which MONTH the money lands in, and both ways of
 // getting it wrong here were silent.
 //
-// (1) `houstonToday()` is read once, at component creation. The driver app is a
+// (1) `appToday()` is read once, at component creation. The driver app is a
 //     phone screen that stays open for hours, so a form opened at 11 PM still
 //     offers YESTERDAY at 12:05 AM — and at month end that is a different
 //     period entirely. `defaultedDate` tracks the value THIS form put in the
@@ -598,7 +598,7 @@ function isPristineEntry() {
 
 function refreshDefaultDate() {
   if (dateTouched.value || !isPristineEntry()) return
-  const today = houstonToday()
+  const today = appToday()
   if (today === form.date) return
   // Set the guard BEFORE the field: the watcher above compares against it, so
   // this assignment must not read as the driver typing.
@@ -1258,7 +1258,7 @@ function resetAfterSubmit(keepLoadId) {
   // stop filed both in March 2025 — and a form left open across midnight kept
   // yesterday. Recomputing here fixes both, and `dateTouched` has to go with it
   // or the field would never accept a fresh default again.
-  defaultedDate.value = houstonToday()
+  defaultedDate.value = appToday()
   form.date = defaultedDate.value
   dateTouched.value = false
   dateConfirmed.value = ''

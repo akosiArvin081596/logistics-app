@@ -125,10 +125,10 @@
 import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
-// Shared Houston-zoned instant formatter — already pins output to
-// America/Chicago with a zone label and guards against bare wall-clock input,
-// so this column does not hand-roll a fourth copy of that option bag.
-import { fmtTimestamp } from '@/utils/datetime'
+// Shared app-zone instant formatters — they pin output to APP_TIMEZONE with a
+// zone label and guard against bare wall-clock input, so these columns do not
+// hand-roll their own copies of that option bag.
+import { fmtAppInstant, fmtTimestamp } from '@/utils/datetime'
 
 defineProps({
   users: { type: Array, default: () => [] },
@@ -203,17 +203,12 @@ function avatarClass(role) {
 }
 
 // `user.CreatedAt` is a true instant \u2014 /api/users emits it as ISO-Z
-// (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Houston rule: render in
-// America/Chicago with a visible zone label so the "Created" column shows the
-// Houston calendar day rather than the viewer's.
+// (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Rendered in the app zone
+// (APP_TIMEZONE, US Eastern) with a visible zone label so the "Created" column
+// shows the business calendar day rather than the viewer's.
 function formatDate(dateStr) {
   if (!dateStr) return '\u2014'
-  const d = new Date(dateStr)
-  if (isNaN(d.getTime())) return dateStr
-  return d.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(dateStr, { month: 'short', day: 'numeric', year: 'numeric', fallback: dateStr })
 }
 
 // "Last Sign-In". Hybrid on purpose, matching AdminToolsView's formatRmTs and

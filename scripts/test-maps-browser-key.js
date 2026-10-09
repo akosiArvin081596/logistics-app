@@ -276,14 +276,14 @@ console.log("\n§3  the warning is logged once per start, never per request");
 // ===========================================================================
 console.log("\n§4  GET /api/admin/maps-key-usage (Super Admin) carries no key");
 // ===========================================================================
-const houstonDay = inject(liftFn("houstonDay"), {}, "return houstonDay;");
+const appDay = inject(liftFn("appDay"), { APP_TIMEZONE: require("../lib/app-time").appTimeZone() }, "return appDay;");
 for (const name of ["set", "unset"]) {
 	const { keys, cap } = boot(CONFIGS[name]);
 	const db = new Database(":memory:");
 	db.exec("CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)");
-	db.prepare("INSERT INTO server_state (key, value) VALUES (?, '3')").run(`maps_key_handouts:${houstonDay()}`);
+	db.prepare("INSERT INTO server_state (key, value) VALUES (?, '3')").run(`maps_key_handouts:${appDay()}`);
 	const handler = buildRoute("get", "/api/admin/maps-key-usage", {
-		requireRole: () => null, db, houstonDay, console: cap.console,
+		requireRole: () => null, db, appDay, console: cap.console,
 		MAPS_KEY_HANDOUT_PREFIX: "maps_key_handouts:", MAPS_DYNAMIC_LOAD_USD_PER_1K: 7,
 		GOOGLE_MAPS_API_KEY: keys.GOOGLE_MAPS_API_KEY,
 		GOOGLE_MAPS_BROWSER_KEY: keys.GOOGLE_MAPS_BROWSER_KEY,

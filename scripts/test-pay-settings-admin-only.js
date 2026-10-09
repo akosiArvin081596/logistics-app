@@ -227,7 +227,7 @@ const MODULE_EXPORTS = [
 ];
 function buildModule(db, src = {}) {
 	const s = { ...PIECES, ...src };
-	return new Function("db", "todayKeyCT",
+	return new Function("db", "appTodayKey",
 		`"use strict";\n${s.audit}\n${s.payRule}\n${s.names}\n${s.directory}\n${s.directoryPay}\n${s.truckParse}\n` +
 		`return { ${MODULE_EXPORTS.join(", ")} };`)(db, () => "2026-09-24");
 }

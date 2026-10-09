@@ -267,10 +267,11 @@ export const useDriverStore = defineStore('driver', {
           // Try date-based sort first
           if (sortDateCol) {
             // 'Status Update Date' / 'Completion Date' are bare wall-clock
-            // stamps with TWO ERAS (UTC before the 2026-08-03 cutover, Houston
-            // after). sheetSortKey keys them the way they are DISPLAYED —
-            // verbatim — so this list stays in the order the driver reads off
-            // the rows, rather than an era-resolved instant nothing renders.
+            // stamps with THREE ERAS (UTC before 2026-08-03, Houston to
+            // 2026-10-08, the app zone after). sheetSortKey keys them the way
+            // they are DISPLAYED — verbatim — so this list stays in the order
+            // the driver reads off the rows, rather than an era-resolved
+            // instant nothing renders.
             // (The .replace()s strip an appointment window's "-HH:MM" tail and
             // a "Date:" prefix so the raw cell matches a stamp shape at all.)
             const clean = (r) => (r[sortDateCol] || '').replace(/(\d{1,2}:\d{2})\s*-\s*\d{1,2}:\d{2}/, '$1').replace(/^Date:\s*/i, '').trim()

@@ -433,6 +433,7 @@ import { useInvestorStore } from '../stores/investor'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
+import { fmtAppInstant } from '../utils/datetime'
 import ConfigPanel from '../components/investor/ConfigPanel.vue'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
 
@@ -640,15 +641,12 @@ async function fixStale(issue) {
 }
 
 // GPS ping first/last seen on the stale-location scan. `driver_locations.timestamp`
-// is a true instant (ISO-Z). Houston rule: America/Chicago + a visible zone
-// label, so the window an admin is about to retag is stated in Houston time.
+// is a true instant (ISO-Z). The app zone (APP_TIMEZONE, US Eastern) + a visible
+// zone label, so the window an admin is about to retag is stated in business
+// time.
 function formatDate(ts) {
   if (!ts) return ''
-  const d = new Date(ts)
-  return isNaN(d) ? ts : d.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  })
+  return fmtAppInstant(ts, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', fallback: ts })
 }
 
 // Preview BEFORE confirming. The old flow asked "Rename X to Y everywhere?"

@@ -195,7 +195,7 @@
 </template>
 
 <script setup>
-import { houstonToday } from '../utils/datetime'
+import { appToday } from '../utils/datetime'
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
@@ -215,10 +215,10 @@ const submitting = ref(false)
 const errorMsg = ref('')
 const duplicateWarning = ref('')
 
-// en-CA yields YYYY-MM-DD in local time — not toISOString(), which is UTC and
-// pre-fills tomorrow's pickup date after 7pm Houston. That date drives the
+// The app zone's day as YYYY-MM-DD — not toISOString(), which is UTC and
+// pre-fills tomorrow's pickup date after 8pm Eastern. That date drives the
 // driver-pay active-day window, so an off-by-one shifts pay.
-const today = houstonToday()
+const today = appToday()
 
 const form = reactive({
   loadId: '',

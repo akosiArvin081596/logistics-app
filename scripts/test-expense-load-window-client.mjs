@@ -55,7 +55,7 @@ function check(label, actual, expected) {
 }
 
 const DAY = 24 * 60 * 60 * 1000
-const T = Date.parse('2026-09-16T15:00:00Z') // delivered: 10:00 AM CDT
+const T = Date.parse('2026-09-16T15:00:00Z') // delivered: 11:00 AM EDT
 const CLOSES = T + 7 * DAY
 // What GET /api/driver/:driverName ships, built by the server's own function.
 const verdictAt = (status, deliveredAt, now) => server.expenseWindow({ status, deliveredAt, now })
@@ -128,12 +128,12 @@ const brief = (w) => [w.eligible, w.state]
 {
   const open = expenseWindowCopy(liveExpenseWindow(OPEN, { now: T + DAY }))
   check('open: the note, in the owner-approved words', open.note && open.note.title, 'Adding a receipt to a delivered load')
-  check('open: "allowed for 7 days after delivery", and until when — Houston time, labelled',
-    /^Allowed for 7 days after delivery\. Open until Wed, Sep 23, 10:00 AM CDT\.$/.test(open.note && open.note.body), true)
+  check('open: "allowed for 7 days after delivery", and until when — app-zone time, labelled',
+    /^Allowed for 7 days after delivery\. Open until Wed, Sep 23, 11:00 AM EDT\.$/.test(open.note && open.note.body), true)
   check('open: no hint', open.hint, null)
   const closed = expenseWindowCopy(liveExpenseWindow(OPEN, { now: T + 8 * DAY }))
   check('closed: a hint that says when and who to ask',
-    closed.hint, 'The 7-day window for adding receipts to this load closed Sep 23, 2026, 10:00 AM CDT. Ask dispatch to add one.')
+    closed.hint, 'The 7-day window for adding receipts to this load closed Sep 23, 2026, 11:00 AM EDT. Ask dispatch to add one.')
   check('closed: no note', closed.note, null)
   const unknown = expenseWindowCopy(liveExpenseWindow(verdictAt('Delivered', null, T), { now: T }))
   check('unknown: the hint says there is no record, and to ask dispatch', /no record of when this load was delivered.*Ask dispatch/.test(unknown.hint), true)
@@ -429,7 +429,7 @@ async function compileSetup(rel, { source, stubs = {}, hooks = {} } = {}) {
   h = await expensesHtml(load('564157463', 'Delivered', verdictAt('Delivered', now - 2 * DAY, now)))
   check('R2 delivered 2 days ago: the note ("Adding a receipt to a delivered load — allowed for 7 days…") above the form',
     [h.includes(NOTE), h.includes(FORM), h.indexOf(NOTE) < h.indexOf(FORM), h.includes(EMPTY)], [true, true, true, false])
-  check('R2 …with its closing time in Houston time, labelled', /Open until \w{3}, \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M C[DS]T\.<\/span>/.test(h), true)
+  check('R2 …with its closing time in app-zone time, labelled', /Open until \w{3}, \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M E[DS]T\.<\/span>/.test(h), true)
   h = await expensesHtml(load('564157463', 'Delivered', verdictAt('Delivered', now - 8 * DAY, now)))
   check('R3 delivered 8 days ago: the hint and "No expenses" — no form',
     [/<div class="expense-window-hint" role="note">\s*The 7-day window for adding receipts to this load closed .+ Ask dispatch to add one\.\s*<\/div>/.test(h), h.includes(EMPTY), h.includes('data-stub="ExpenseForm"')], [true, true, false])

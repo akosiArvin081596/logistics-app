@@ -145,7 +145,7 @@ function row(headers, cells) {
 }
 
 // The delta the route builds: status + Status Update Date + Completion Date.
-// `TODAY` stands in for houstonStamp(new Date()) — the route always stamps NOW,
+// `TODAY` stands in for appStamp(new Date()) — the route always stamps NOW,
 // which is why the after-state can only ever land in the current month.
 const TODAY = "2026-08-09 11:04:22";
 function edits(headers, status, stamp = TODAY) {

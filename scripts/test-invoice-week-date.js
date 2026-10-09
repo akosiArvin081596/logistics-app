@@ -53,13 +53,13 @@ const extract = (name) => extractAt(`\nfunction ${name}(`, `${name}()`);
 const extractNested = (name) => extractAt(`\n\t\tfunction ${name}(`, `${name}()`);
 
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-const S = new Function("RFC2822_MONTHS", [
-	extract("houstonDay"),
+const S = new Function("RFC2822_MONTHS", "APP_TIMEZONE", [
+	extract("appDay"),
 	extract("sheetDayKey"),
 	extract("getWeekRange"),
 	extractNested("parseInvoiceDate"),
-	"return { houstonDay, sheetDayKey, getWeekRange, parseInvoiceDate };",
-].join("\n"))(RFC2822_MONTHS);
+	"return { appDay, sheetDayKey, getWeekRange, parseInvoiceDate };",
+].join("\n"))(RFC2822_MONTHS, require("../lib/app-time").appTimeZone());
 const { sheetDayKey, getWeekRange, parseInvoiceDate } = S;
 
 // The formatter the invoice reads the result back through (server.js fmtLocalDate).
@@ -177,7 +177,10 @@ for (const v of corpus) {
 // ======================================================= 4. getWeekRange
 section("4. getWeekRange returns the Sat–Fri window as wall-clock days");
 eq(getWeekRange("2025-08-08T12:00:00-05:00"), { weekStart: "2025-08-02", weekEnd: "2025-08-08" }, "Friday midday");
-eq(getWeekRange("2025-08-08T23:59:00-05:00"), { weekStart: "2025-08-02", weekEnd: "2025-08-08" }, "Friday one minute to midnight");
+eq(getWeekRange("2025-08-08T23:59:00-04:00"), { weekStart: "2025-08-02", weekEnd: "2025-08-08" }, "Friday one minute to midnight (business clock, EDT)");
+// The business clock is US Eastern (APP_TIMEZONE): 11:59 PM Central on a Friday
+// is already Saturday, the first day of the next billing week.
+eq(getWeekRange("2025-08-08T23:59:00-05:00"), { weekStart: "2025-08-09", weekEnd: "2025-08-15" }, "Friday 11:59 PM Central is Saturday on the business clock: the NEXT week");
 eq(getWeekRange("2025-08-09T00:01:00-05:00"), { weekStart: "2025-08-09", weekEnd: "2025-08-15" }, "Saturday 00:01 starts the NEXT week");
 eq(getWeekRange("2025-08-02T00:00:00-05:00"), { weekStart: "2025-08-02", weekEnd: "2025-08-08" }, "Saturday midnight is a week start");
 eq(getWeekRange("2026-01-02T18:00:00-06:00"), { weekStart: "2025-12-27", weekEnd: "2026-01-02" }, "week spanning the year boundary");

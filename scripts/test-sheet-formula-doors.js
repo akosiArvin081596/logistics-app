@@ -364,7 +364,7 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 		GOOGLE_MAPS_API_KEY: "key-under-test",
 		fetch: async () => { dmCalls++; return { json: async () => DM_OK }; },
 		geocodeAddress: async () => null,
-		houstonDay: () => "2026-09-26",
+		appDay: () => "2026-09-26",
 		validateOwnerIdCell: () => null,
 		jtCacheInvalidate: () => {},
 		sheetRowCellWrites: H.sheetRowCellWrites,

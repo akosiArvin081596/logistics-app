@@ -262,6 +262,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
 import paths from './paths.cjs'
 import keychain from './keychain.cjs'
@@ -3697,8 +3698,9 @@ const normName = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' '
 // trailing space. Either folds back to the same name through normalizeDriverName().
 const spacingVariant = (s) => (/\s/.test(String(s).trim()) ? String(s).trim().replace(/\s+/, '  ') : `${String(s).trim()} `)
 const variantText = (s) => (/\s/.test(String(s).trim()) ? 'the name with its space doubled' : 'the name with a trailing space')
-// A day in the server's business zone (US Central), as YYYY-MM-DD.
-const dayCT = (d = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
+// A day in the server's business zone (APP_TIMEZONE, lib/app-time.js), as YYYY-MM-DD.
+const APP_ZONE = createRequire(import.meta.url)('../../lib/app-time.js').appTimeZone()
+const dayApp = (d = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: APP_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
 // STEPS=P1 selects P1a and P1b.
 const wantMp = (id) => !STEPS || [...STEPS].some((s) => id.toUpperCase().startsWith(s))
 const mpNotes = [] // what each case restored or deleted, for the MPc row
@@ -3918,7 +3920,7 @@ async function expenseStampCase() {
     }
     plant('trucks', 'assigned_driver', truck.id, spacingVariant(user.driver_name))
     const amount = Number((1 + (Date.now() % 89) / 100).toFixed(2))
-    const body = { loadId, type: 'Other', amount, date: dayCT(), description: `QA-TEST-E1-${stamp}` }
+    const body = { loadId, type: 'Other', amount, date: dayApp(), description: `QA-TEST-E1-${stamp}` }
     if (filer !== page) body.driver = user.driver_name
     const res = await api(filer, 'POST', '/api/expenses', body)
     if (res.status === 200 && res.json?.id) {
@@ -3999,7 +4001,7 @@ async function renameSpacingCase(page) {
     // Plant rows under the variant (ids recorded; deleted at the end).
     const nowIso = new Date().toISOString()
     planted.expenses = db.prepare("INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date) VALUES (?, ?, 'QA-TEST-N1', 'Other', 0.01, ?, ?)")
-      .run(nowIso, VARIANT, base, dayCT()).lastInsertRowid
+      .run(nowIso, VARIANT, base, dayApp()).lastInsertRowid
     noteCreated('expenses', planted.expenses)
     const tId = db.prepare('SELECT MIN(id) AS id FROM trucks').get().id
     planted.truck_assignments = db.prepare('INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, ?, ?)')
@@ -4007,7 +4009,7 @@ async function renameSpacingCase(page) {
     noteCreated('truck_assignments', planted.truck_assignments)
     // This week's Saturday to Friday: both months open, nothing paid, so the rename's
     // month-end check has nothing to refuse.
-    const sat = new Date(`${dayCT()}T12:00:00Z`)
+    const sat = new Date(`${dayApp()}T12:00:00Z`)
     sat.setUTCDate(sat.getUTCDate() - ((sat.getUTCDay() + 1) % 7))
     const fri = new Date(sat.getTime() + 6 * 86400000)
     planted.invoices = db.prepare("INSERT INTO invoices (invoice_number, driver, week_start, week_end, status) VALUES (?, ?, ?, ?, 'Draft')")
@@ -4121,7 +4123,7 @@ async function renameOntoOwnDirectorySpelling(page) {
     if (sheet.mine) throw new Error(`Job Tracking holds ${sheet.mine} row(s) for the throwaway driver`)
     const nowIso = new Date().toISOString()
     const addExpense = (name) => db.prepare("INSERT INTO expenses (timestamp, driver, load_id, type, amount, description, date) VALUES (?, ?, 'QA-TEST-N1B', 'Other', 0.01, ?, ?)")
-      .run(nowIso, name, base, dayCT()).lastInsertRowid
+      .run(nowIso, name, base, dayApp()).lastInsertRowid
     planted.expenseOld = addExpense(OLD)
     noteCreated('expenses', planted.expenseOld)
     planted.expenseDir = addExpense(DIR)
@@ -4405,7 +4407,7 @@ async function payDeductionSpacingCase(page) {
   // The current month, and the previous one while it is not finalized (early in a
   // month, no driver may have revenue in it yet).
   const isOpen = (mk) => String(db.prepare('SELECT status FROM period_locks WHERE period = ?').get(mk)?.status || '') !== 'locked'
-  const months = [dayCT().slice(0, 7), prevMonthKey(dayCT().slice(0, 7))].filter(isOpen)
+  const months = [dayApp().slice(0, 7), prevMonthKey(dayApp().slice(0, 7))].filter(isOpen)
   if (!months.length) return record({ step: 'E2', title, expected, observed: 'SKIPPED — this month and the last are finalized, and the step needs an open month', verdict: 'SKIP', shot: '' })
   const desc = `QA-TEST-E2-${stamp}`
   let observed = ''; let v = 'FAIL'; let s = ''
@@ -4435,7 +4437,7 @@ async function payDeductionSpacingCase(page) {
       return
     }
     // The receipt's date: today in the current month, else the month's last day.
-    const receiptDate = month === dayCT().slice(0, 7) ? dayCT() : lastDayOf(month)
+    const receiptDate = month === dayApp().slice(0, 7) ? dayApp() : lastDayOf(month)
     let pick = usable.find(({ r }) => r.payType === 'percentage' && r.pay > 0)
     const switched = !pick
     if (switched) {
@@ -4479,7 +4481,7 @@ async function payDeductionSpacingCase(page) {
     const uiAgrees = !!uiB && !!uiA && parseMoney(uiB.pay) === rowB.pay && parseMoney(uiA.pay) === rowA.pay
     const share = Math.round((drop / expectedDrop) * 100)
     v = counted ? verdict(Math.abs(drop - expectedDrop) <= 1) : 'INFO'
-    observed = `${monthName(month)}${month === dayCT().slice(0, 7) ? ' (the current month)' : ' (the previous month, still open)'}, directory row #${pick.d.id}: ` +
+    observed = `${monthName(month)}${month === dayApp().slice(0, 7) ? ' (the current month)' : ' (the previous month, still open)'}, directory row #${pick.d.id}: ` +
       `${switched ? `fixed pay with revenue in the month, switched to percentage ${pct} % in the copy for this step` : 'percentage pay, as stored'}; ` +
       `a Fuel receipt of ${amountText} planted under ${variantText(pick.d.driver_name)}, dated ${receiptDate} (#${expenseId}); ` +
       `the month's Fuel Spend rose by ${amount === E2_AMOUNT ? `$${fuelRise}` : 'the planted amount'}${counted ? ' (the receipt counts in the month)' : ' — NOT by the planted amount, so the receipt is not in the month and there is nothing to judge'}; ` +
@@ -4868,7 +4870,7 @@ const jtMonthKey = (s) => {
   const iso = String(s).match(/(\d{4})-(\d{2})-\d{2}/)
   if (iso) return `${iso[1]}-${iso[2]}`
   const d = new Date(String(s).replace(/^Date:\s*/i, ''))
-  return isNaN(d) ? '' : dayCT(d).slice(0, 7)
+  return isNaN(d) ? '' : dayApp(d).slice(0, 7)
 }
 // The local Job Tracking sheet, opened with the service account (formulas as
 // formulas), exactly as F1 and RC1 do. Refuses production's sheet.
@@ -5174,7 +5176,7 @@ async function namesSection() {
     const completedRe = /^(delivered|completed|pod received)$/i
     const activeRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
     const num = (x) => parseFloat(String(x).replace(/[$,]/g, '')) || 0
-    const curMonth = dayCT().slice(0, 7)
+    const curMonth = dayApp().slice(0, 7)
     const recOf = (r, i) => ({
       rowIndex: i + 2, lid: String(r[cols.id] ?? '').trim(),
       st: cols.status >= 0 ? String(r[cols.status] ?? '').trim() : '',
@@ -6639,7 +6641,7 @@ async function invoiceSection() {
           // approve's rule, the last approved note.
           try {
             const r = await ownApi('POST', invPath(cand.id, 'invoice-preview'),
-              { invoiceId: `QA-I8-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850' })
+              { invoiceId: `QA-I8-${stamp.slice(-6)}`, invoiceDate: dayApp(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850' })
             const p8 = r.json?.invoicePdfBase64 ? await pdfText(r.json.invoicePdfBase64) : null
             const n8 = p8 ? notesAfterLabel(p8, want.length) : null
             const good = r.status === 200 && !!n8 && n8.label && JSON.stringify(n8.after) === JSON.stringify(want)
@@ -6697,7 +6699,7 @@ async function invoiceSection() {
     if (wantInv('I9')) {
       const lid = id() || S.list[0]?.id || 'QA-I9'
       // An Order # every build accepts, so each refusal below is the one field under test.
-      const base = { invoiceId: `QA-I9-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
+      const base = { invoiceId: `QA-I9-${stamp.slice(-6)}`, invoiceDate: dayApp(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
       const cases = [
         { step: 'I9', title: 'POST invoice-preview, a valid body (the control)', body: base, want: { status: 200 } },
         { step: 'I9a', title: `POST invoice-preview with notes of ${INV_NOTES_MAX + 1} characters`, body: { ...base, notes: 'n'.repeat(INV_NOTES_MAX + 1) }, want: { status: 400, code: 'INVOICE_NOTES_TOO_LONG' } },
@@ -6880,7 +6882,7 @@ async function invoiceSection() {
     // so nothing is created.
     if (wantInv('I13')) {
       const lid = id() || S.list[0]?.id || 'QA-I13'
-      const base = { invoiceId: `QA-I13-${stamp.slice(-6)}`, invoiceDate: dayCT(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
+      const base = { invoiceId: `QA-I13-${stamp.slice(-6)}`, invoiceDate: dayApp(), total: '100.00', recipientEmail: 'qa-e2e@example.com', orderNumber: '7101850', notes: '' }
       const bad = [
         { step: 'I13a', what: 'emailBody "" (empty)', value: '', code: 'INVOICE_EMAIL_BODY_EMPTY' },
         { step: 'I13b', what: 'an emailBody of blanks and line breaks only', value: ' \n\t \n ', code: 'INVOICE_EMAIL_BODY_EMPTY' },
@@ -10598,7 +10600,7 @@ async function reportSection() {
     if (want('R3')) {
       R3.ran = true
       try {
-        const pm = prevMonthKey(dayCT().slice(0, 7))
+        const pm = prevMonthKey(dayApp().slice(0, 7))
         const yr = pm.slice(0, 4)
         const probes = [
           { label: 'start=junk', q: `start=junk&end=${pm}-20`, code: 'INVALID_DATE', field: 'start' },
@@ -11432,7 +11434,7 @@ async function leaseSection() {
     await step('LP', `Super Admin, /investors → the QA-LEASE investor → Payout Basis: Edit, the same ${leaseMoney(LEASE_AMOUNT)} lease from the first editable month with a note, Save`,
       `While lease payouts are off the panel says "${LEASE_STATUS_OFF}"; the form's PUT 200; one more Change history line, naming the note; the schedule: the lease from ${LEASE_MONTHS.profit}, then the same lease from the first editable month`, async () => {
         needFeature(); needOwner()
-        const firstEditable = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.earliestEditableMonth || dayCT().slice(0, 7)
+        const firstEditable = (await api(page, 'GET', `/api/investors/${S.investorId}/payout-basis`)).json?.earliestEditableMonth || dayApp().slice(0, 7)
         const panel = await leaseBasisPanel(page, NAME)
         const status = squash(await panel.locator(TD('payout-basis-status')).innerText().catch(() => ''), 160)
         const before = await leaseHistory(panel)
@@ -11551,7 +11553,7 @@ async function leaseSection() {
       'The first read creates no payout row in any closed month and records the latest closed month once for review (late_item_closed_month); the second read answers exactly as the first and records nothing new', async () => {
         needFeature(); needOwner()
         if (!S.truck) throw new Error('not reached: the acceptance made no truck')
-        const cur = dayCT().slice(0, 7)
+        const cur = dayApp().slice(0, 7)
         const closed = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' AND period >= ? AND period < ? ORDER BY period DESC LIMIT 1").get(LEASE_MONTHS.profit, cur)?.period
         if (!closed) throw skip(`the copy has no finalized month from ${LEASE_MONTHS.profit} to before ${cur}`)
         const earlier = db.prepare('SELECT COUNT(*) AS n FROM investor_payouts WHERE owner_id = ?').get(S.owner).n

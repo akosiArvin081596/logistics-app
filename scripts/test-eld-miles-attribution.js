@@ -12,7 +12,7 @@
 //      so a UTC-day bucketer drops it into the NEXT billing week while driver
 //      pay — which buckets truck-local — kept it in this one. The whole suite is
 //      therefore re-run under a different TZ and must produce identical output.
-//      The same class of bug is already recorded at centralMidnightMs().
+//      The same class of bug is recorded at the invoice generator's ELD ping window.
 //
 //   2. end_date === '' MEANS STILL OPEN. Reading that empty string as an end
 //      DATE rather than as UNBOUNDED silently strips every CURRENT driver of

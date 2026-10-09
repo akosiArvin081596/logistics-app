@@ -128,7 +128,7 @@ function mutate(src, from, to, label) {
 }
 function loadLib(text) {
 	const mod = { exports: {} };
-	new Function("module", "exports", "require", "__dirname", "__filename", text)(mod, mod.exports, require, path.dirname(LIB_PATH), LIB_PATH);
+	new Function("module", "exports", "require", "__dirname", "__filename", text)(mod, mod.exports, require("module").createRequire(LIB_PATH), path.dirname(LIB_PATH), LIB_PATH);
 	return mod.exports;
 }
 

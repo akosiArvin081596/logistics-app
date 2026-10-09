@@ -71,6 +71,7 @@ const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
 // The staging sheet is *titled* "logisx-production" and is not production, so a
 // title check reads as the opposite of the truth. Only the ID is authoritative.
 const sheetIdLib = require("../lib/sheet-id");
+const appTime = require("../lib/app-time");
 const PRODUCTION_SHEET_ID = sheetIdLib.PRODUCTION_SPREADSHEET_ID;
 const LOCAL_COPY_SHEET_ID = "156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0";
 const SHEET_TAB = "Job Tracking";
@@ -131,12 +132,12 @@ function loadLocks(dbPath) {
 	return rows;
 }
 
-// Previous calendar month in America/Chicago — the business timezone the close
-// calendar runs on (currentMonthKeyCT in server.js). Deliberately not UTC: on
-// the 1st of a month the two disagree, in the permissive direction.
-function previousMonthKeyCT(now = new Date()) {
+// Previous calendar month on the business clock (APP_TIMEZONE, lib/app-time.js)
+// — the zone the close calendar runs on (appMonthKey in server.js). Deliberately
+// not UTC: on the 1st of a month the two disagree, in the permissive direction.
+function previousMonthKey(now = new Date()) {
 	const parts = new Intl.DateTimeFormat("en-US", {
-		timeZone: "America/Chicago", year: "numeric", month: "2-digit",
+		timeZone: appTime.appTimeZone(), year: "numeric", month: "2-digit",
 	}).formatToParts(now);
 	const y = +parts.find((p) => p.type === "year").value;
 	const m = +parts.find((p) => p.type === "month").value;
@@ -150,7 +151,7 @@ function previousMonthKeyCT(now = new Date()) {
 function assertLockTableFresh(lockRows, now = new Date()) {
 	const locked = lockRows.filter((r) => r.status === "locked").map((r) => r.period).sort();
 	const newest = locked[locked.length - 1] || "(none)";
-	const expect = previousMonthKeyCT(now);
+	const expect = previousMonthKey(now);
 	return { locked, newest, expect, fresh: newest >= expect };
 }
 
@@ -394,7 +395,7 @@ async function runAudit(opts = {}) {
 }
 
 module.exports = {
-	runAudit, loadLocks, assertLockTableFresh, previousMonthKeyCT,
+	runAudit, loadLocks, assertLockTableFresh, previousMonthKey,
 	withTimeout, columnLetter, readJobTracking,
 	PRODUCTION_SHEET_ID, LOCAL_COPY_SHEET_ID, SHEET_TAB, ROOT, S,
 };

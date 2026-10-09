@@ -58,6 +58,7 @@ import { useDashboardStore } from '../stores/dashboard'
 import { useSocket } from '../composables/useSocket'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
+import { fmtAppInstant } from '../utils/datetime'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -138,15 +139,11 @@ const driverOptions = computed(() => {
 
 const lastUpdated = computed(() => {
   if (!store.timestamp) return 'Loading...'
-  // Houston, like every other time in this app. A bare toLocaleTimeString()
-  // renders in the viewer's zone AND omits the label, so on a shared login the
-  // same refresh read 8:05 AM to one person and 9:05 PM to the other, with
-  // nothing on screen to explain the gap.
-  return 'Updated ' + new Date(store.timestamp).toLocaleTimeString('en-US', {
-    timeZone: 'America/Chicago',
-    hour: 'numeric', minute: '2-digit', second: '2-digit',
-    hour12: true, timeZoneName: 'short',
-  })
+  // The app zone (APP_TIMEZONE, US Eastern), like every other time in this app.
+  // A bare toLocaleTimeString() renders in the viewer's zone AND omits the
+  // label, so on a shared login the same refresh read 8:05 AM to one person and
+  // 9:05 PM to the other, with nothing on screen to explain the gap.
+  return 'Updated ' + fmtAppInstant(store.timestamp, { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })
 })
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }

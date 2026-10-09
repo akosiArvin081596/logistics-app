@@ -16,7 +16,7 @@
  * measurement and visibility so that cap can be sized from data.
  *
  * WHAT IS ASSERTED:
- *   §1 the day bucket is HOUSTON, not UTC (executed against real timestamps)
+ *   §1 the day bucket is the business day (APP_TIMEZONE), not UTC (executed against real timestamps)
  *   §2 the upsert actually counts (executed against a real in-memory DB)
  *   §3 the counter cannot throw into the response path
  *   §4 route wiring — limiter, role gate, ordering
@@ -63,17 +63,17 @@ function routeSource(verb, routePath) {
 	throw new Error(`unbalanced parens extracting ${routePath}`);
 }
 
-const HOUSTON_DAY_SRC = liftFn("houstonDay");
+const APP_DAY_SRC = liftFn("appDay");
 const BUMP_SRC = liftFn("bumpMapsKeyHandout");
 const CONFIG_ROUTE = routeSource("get", "/api/config/maps-key");
 const USAGE_ROUTE = routeSource("get", "/api/admin/maps-key-usage");
 
-const houstonDay = new Function(`${HOUSTON_DAY_SRC}\nreturn houstonDay;`)();
+const appDay = new Function("APP_TIMEZONE", `${APP_DAY_SRC}\nreturn appDay;`)(require("../lib/app-time").appTimeZone());
 
-// Build bumpMapsKeyHandout against an injected db + houstonDay, so §2/§3 execute
+// Build bumpMapsKeyHandout against an injected db + appDay, so §2/§3 execute
 // the REAL statement rather than a restatement of it.
-function buildBump(src = BUMP_SRC, db, dayFn = houstonDay) {
-	return new Function("db", "houstonDay", "MAPS_KEY_HANDOUT_PREFIX",
+function buildBump(src = BUMP_SRC, db, dayFn = appDay) {
+	return new Function("db", "appDay", "MAPS_KEY_HANDOUT_PREFIX",
 		`${src}\nreturn bumpMapsKeyHandout;`)(db, dayFn, "maps_key_handouts:");
 }
 function freshDb() {
@@ -84,18 +84,18 @@ function freshDb() {
 }
 
 // ===========================================================================
-console.log("\n§1  the day bucket is HOUSTON, not UTC");
+console.log("\n§1  the day bucket is the business day (APP_TIMEZONE), not UTC");
 // ===========================================================================
-// 03:30 UTC on the 20th is still the 19th in Central (UTC-5 CDT). A UTC bucket
+// 03:30 UTC on the 20th is still the 19th in Eastern (11:30 PM EDT). A UTC bucket
 // would file this under the wrong business day, disagreeing with every other
 // daily figure in the app at the seam.
 const lateNight = new Date("2026-09-20T03:30:00Z");
-ok("03:30Z on the 20th buckets as the 19th in Central",
-	houstonDay(lateNight) === "2026-09-19");
-ok("it does NOT bucket as the UTC day", houstonDay(lateNight) !== "2026-09-20");
-ok("midday is unambiguous", houstonDay(new Date("2026-09-19T17:00:00Z")) === "2026-09-19");
+ok("03:30Z on the 20th buckets as the 19th on the business clock",
+	appDay(lateNight) === "2026-09-19");
+ok("it does NOT bucket as the UTC day", appDay(lateNight) !== "2026-09-20");
+ok("midday is unambiguous", appDay(new Date("2026-09-19T17:00:00Z")) === "2026-09-19");
 ok("the format is YYYY-MM-DD (sorts lexically, which the LIKE query relies on)",
-	/^\d{4}-\d{2}-\d{2}$/.test(houstonDay(new Date())));
+	/^\d{4}-\d{2}-\d{2}$/.test(appDay(new Date())));
 
 // ===========================================================================
 console.log("\n§2  the upsert actually counts");
@@ -199,9 +199,9 @@ console.log("\n§7  DISCRIMINATION — defang each clause, require the assertion
 // ===========================================================================
 {
 	const utcBucket = new Function(`
-		function houstonDay(d = new Date()) { return d.toISOString().slice(0, 10); }
-		return houstonDay;`)();
-	ok("MUTANT: a UTC bucket files late-evening Central traffic on the wrong day",
+		function appDay(d = new Date()) { return d.toISOString().slice(0, 10); }
+		return appDay;`)();
+	ok("MUTANT: a UTC bucket files late-evening Eastern traffic on the wrong day",
 		utcBucket(lateNight) === "2026-09-20");
 }
 {

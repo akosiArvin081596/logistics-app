@@ -88,7 +88,7 @@ const FNS = [
 	"getDriverPayStructures", "getAllExcludedDriverDays", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules",
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"houstonDay", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
@@ -176,6 +176,7 @@ async function investorView(rows = ROWS, opts = {}) {
 	let handler = null;
 	const passthrough = (req, res, next) => (next ? next() : undefined);
 	const deps = {
+		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, geolib, fuelModel, normalizeLoadId, loadMilesLib: require("../lib/load-miles"), Date: FixedDate,
 		app: { get: (p, ...h) => { handler = h[h.length - 1]; } },
 		requireRole: () => passthrough,

@@ -218,7 +218,7 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 	const body = FNS.map(extract).join("\n\n");
 	const src = mutate(`${preamble}${body}\nreturn { ${FNS.join(", ")}, eldFeedSweepHealth };`);
 	const built = new Function(
-		"db", "eldFeedHealth", "todayKeyCT", "sendEmail", "insertDispatchNotification", "io", "console", "process",
+		"db", "eldFeedHealth", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "console", "process",
 		src,
 	)(db, opts.lib || feedLib, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
 		{ env: { GMAIL_USER: "ops@example.invalid" } });

@@ -41,8 +41,9 @@
            here always agrees with the money. Loads delivered before 2026-08-03
            were stamped in UTC off the VPS, so a late-evening delivery from that
            era is recorded on the following day and filters there too; that is
-           the date it was settled on. Loads from 2026-08-03 on are stamped in
-           Houston time, so recorded and actual are the same thing. -->
+           the date it was settled on. Loads from 2026-08-03 to 2026-10-08 are
+           stamped in Houston time and loads from 2026-10-09 on in the app zone
+           (US Eastern), so each is recorded on its business day of the time. -->
       <div class="cl-field">
         <label class="cl-label" for="cl-from">Delivered <span class="cl-tz">(as recorded)</span></label>
         <div class="cl-dates">
@@ -254,7 +255,7 @@ import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { normDriver } from '../../lib/driverName'
-import { fmtSheetMoment, sheetSortKey, fmtTimestamp } from '@/utils/datetime'
+import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
@@ -297,23 +298,10 @@ const driverOptions = computed(() => {
 })
 const driverLabel = computed(() => (driverOptions.value.find(o => o.key === driverFilter.value) || {}).label || '')
 
-// THE DAY BASIS IS AMERICA/CHICAGO — NOT the viewer's timezone. Please don't
-// "fix" this back to local time. The company operates out of Houston, so the
-// business day IS the Central day; pinning it is what makes the rows on screen,
-// the range filter, and the downloaded CSV agree for everyone, wherever they
-// open the dashboard. Viewer-local would only line up for people sitting in one
-// zone, and the sheet stamp is a UTC wall-clock written by the VPS, so an
-// overnight delivery ("7/1/2026 4:16:50" = Jun 30, 11:16 PM CDT) lands on a
-// different calendar day depending on who is looking. The server-side export
-// buckets on the same Central day.
-// Sheet timestamp → 'YYYY-MM-DD' in Central; '' when blank or unparseable.
-//
-// Delegates to the shared helper because this column now has TWO eras: stamps
-// written before 2026-08-04 are a UTC wall clock and must be converted, while
-// stamps written after are already a Houston wall clock and must NOT be — a
-// second conversion would move an evening delivery back a day and drop it out
-// of a range filter that should have matched it.
-// Sheet timestamp -> 'YYYY-MM-DD', taken VERBATIM off the front of the cell.
+// Sheet timestamp -> 'YYYY-MM-DD', taken VERBATIM off the front of the cell;
+// '' when blank or unparseable. The rows on screen, the range filter, the
+// downloaded CSV and the server-side export all read this same recorded day, for
+// everyone, wherever they open the dashboard.
 //
 // Deliberately NOT timezone-corrected. Every money path (the P&L, the investor
 // payout, invoicing) reads this column's date part literally, so converting it
@@ -326,11 +314,12 @@ const driverLabel = computed(() => (driverOptions.value.find(o => o.key === driv
 // closed month (client rule — "if it is already closed and locked by the month
 // then follow that date"). So the screen defers to the books.
 //
-// This costs nothing going forward. Since 2026-08-03 the server stamps Houston
-// time, so the stored date IS the true business day and literal == correct.
-// Only pre-cutover evening loads differ, and for those the recorded date is
-// what was settled on.
-const centralDay = (v) => {
+// This costs nothing going forward. Since 2026-08-03 the server stamps business
+// time (Houston to 2026-10-08, the app zone, US Eastern, from 2026-10-09), so
+// the stored date IS the business day of its time and literal == correct. Only
+// pre-cutover evening loads differ, and for those the recorded date is what was
+// settled on.
+const recordedDay = (v) => {
   const m = String(v || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
   if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
   const iso = String(v || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/)
@@ -351,7 +340,7 @@ const exportMatches = computed(() => {
       // compare against the raw <input type="date"> values — no Date is built
       // from a date-only string on either side, which sidesteps the
       // new Date('2026-07-15')-is-UTC-midnight class of bug outright.
-      const day = centralDay(j[col])
+      const day = recordedDay(j[col])
       // Blank completion date (pre-tracking / imported load) can't be shown to
       // fall inside the window, so a date filter excludes it rather than guess.
       if (!day) return false
@@ -603,19 +592,20 @@ const displayCols = computed(() => {
 })
 function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 // Delivery date/time. The stored value is a bare wall clock, so fmtSheetMoment
-// prints it WITHOUT conversion — the same basis as centralDay() above, so the
+// prints it WITHOUT conversion — the same basis as recordedDay() above, so the
 // date in this column can never disagree with the date the row filters,
 // exports, and gets paid on.
 //
-// It used to resolve the stamp to a true instant and re-render it in Central.
+// It used to resolve the stamp to a true instant and re-render it in Houston.
 // That was more "correct" in isolation and wrong in context: it silently
 // disagreed with the accounting for pre-cutover evening loads. One column that
 // matches the books beats two columns that argue.
 //
-// A bare stamp gets no zone label either, because the stored value only carries
-// one for loads written after 2026-08-03 (Houston) — asserting "CDT" over a
-// legacy UTC stamp would be a confident lie. fmtSheetMoment labels only a value
-// that actually carries a zone, so that stays true without a special case here.
+// A bare stamp gets no zone label either, because the stored text names no
+// zone and its zone depends on its era (UTC, Houston, then the app zone) —
+// asserting "EDT" over a legacy UTC stamp would be a confident lie.
+// fmtSheetMoment labels only a value that actually carries a zone, so that
+// stays true without a special case here.
 const fmtDeliveryDate = (v) => fmtSheetMoment(v)
 // Document upload time. GET /api/documents/:loadId serves uploaded_at as ISO with
 // 'Z', so this is a true instant. Never swap in a raw SQLite stamp: those are UTC
@@ -656,26 +646,20 @@ const podUrl = computed(() => {
   const pod = loadDocs.value.find(d => (d.type || '').toUpperCase() === 'POD')
   return pod && pod.drive_url ? pod.drive_url : null
 })
-// When the Gmail draft for this load's invoice was created. Houston rule:
-// America/Chicago with a visible zone label, never the viewer's zone — the
-// carrier runs on Houston time and the owner/developer share one login.
+// When the Gmail draft for this load's invoice was created: the app zone
+// (APP_TIMEZONE, US Eastern) with a visible zone label, never the viewer's zone
+// — the owner and the developer share one login. created_at is ISO ...Z (see
+// load_invoice_drafts).
 //
-// Locale pinned to 'en-US' alongside the zone: with the default locale an
-// en-GB/fil-PH browser renders timeZoneName as "GMT-5" rather than "CDT", and
-// the label only does its job if it reads as Houston time at a glance.
-//
-// NOTE: scoped strictly to this draft timestamp. `centralDay` / `fmtDeliveryDate`
+// NOTE: scoped strictly to this draft timestamp. `recordedDay` / `fmtDeliveryDate`
 // in this file handle sheet-sourced wall-clock dates, which are a different
 // problem — do not fold them into this pattern.
 function fmtDraftDate(ts) {
   if (!ts) return ''
-  const d = new Date(ts) // created_at is ISO ...Z (see load_invoice_drafts)
-  if (isNaN(d.getTime())) return String(ts)
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'numeric', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-    timeZone: 'America/Chicago', timeZoneName: 'short',
-  }).format(d)
+  return fmtAppInstant(ts, {
+    month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+    fallback: String(ts),
+  })
 }
 const approvedLineStyle = {
   marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',

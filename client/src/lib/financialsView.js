@@ -78,7 +78,7 @@ const lastOf = (y, m) => `${y}-${pad2(m)}-${pad2(lastDayOfMonth(y, m))}`
 
 /**
  * The dates a quick pick covers, ending today where the period is still running.
- * `today` is the carrier's day ('YYYY-MM-DD', America/Chicago: houstonToday()).
+ * `today` is the carrier's day ('YYYY-MM-DD' in the app zone: appToday()).
  * "Last 12 months" is the server's own default: the 1st of the month eleven
  * months back through today. Returns null for 'custom' or an unknown key.
  */

@@ -97,7 +97,7 @@ const REAL = [
 // The only stubs: the clock (so the horizon cap is deterministic) and the
 // constant it reads. Stubbing the month math would test nothing.
 let TODAY_CT = "2026-08-09";
-const todayKeyCT = () => TODAY_CT;
+const appTodayKey = () => TODAY_CT;
 const IN_SERVICE_MAX_MONTHS_AHEAD = (() => {
 	const m = SRC.match(/const IN_SERVICE_MAX_MONTHS_AHEAD = (\d+);/);
 	if (!m) throw new Error("IN_SERVICE_MAX_MONTHS_AHEAD not found in server.js");
@@ -105,9 +105,9 @@ const IN_SERVICE_MAX_MONTHS_AHEAD = (() => {
 })();
 
 const M = new Function(
-	"todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD",
+	"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD",
 	`${REAL.map(extract).join("\n")}\nreturn { ${REAL.join(", ")} };`
-)(todayKeyCT, IN_SERVICE_MAX_MONTHS_AHEAD);
+)(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD);
 
 const {
 	truckChargeFromMonth, truckChargeUntilMonth, truckChargedInMonth,
@@ -554,10 +554,10 @@ const NO_FEES = { maintenance: [], compliance: [] };
 let FEES = NO_FEES;
 function buildGuard(guardSrc = GUARD_SRC, basis = PAYOUT_BASIS) {
 	return new Function(
-		"todayKeyCT", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
+		"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD", "periodLocksReadable", "lockedPeriodsDesc",
 		"truckFeeLockedRows", "driverPayLockedMonths", "investorPayoutBasis",
 		`${AMOUNT_FIELDS_SRC}\n${REAL.map(extract).join("\n")}\n${guardSrc}\nreturn truckEditLockBlockers;`
-	)(todayKeyCT, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(), () => FEES, () => [], basis);
+	)(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD, () => true, () => LOCKED.slice(), () => FEES, () => [], basis);
 }
 
 // ======================================== §9 THE GUARD'S FIGURE, ONE SAVE, TWO FIELDS

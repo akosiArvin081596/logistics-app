@@ -175,7 +175,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, useId } from 'vue'
 import { INVITE_STATUS_FILTERS, useInvestorInvitesStore } from '../../stores/investorInvites'
 import { useSocketRefresh } from '../../composables/useSocketRefresh'
-import { fmtTimestamp } from '../../utils/datetime'
+import { fmtAppDate, fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
 import SkeletonLoader from '../shared/SkeletonLoader.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
@@ -225,12 +225,9 @@ function applicationLink(inv) {
     : { path: '/investor-applications' }
 }
 
-const dayFormat = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/Chicago', month: 'short', day: 'numeric', year: 'numeric',
-})
+// The app-zone date of an ISO instant; the full time is in the cell's title.
 function fmtDay(iso) {
-  const dt = new Date(iso || '')
-  return iso && !isNaN(dt.getTime()) ? dayFormat.format(dt) : '—'
+  return fmtAppDate(iso)
 }
 
 // ---- Create / edit -------------------------------------------------------

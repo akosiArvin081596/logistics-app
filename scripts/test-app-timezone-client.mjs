@@ -15,14 +15,15 @@
 // report asked for the ELD pings between the VIEWER's midnights; a pickup stored as
 // '2026-09-28' fell outside a Sep 28 date filter on every US phone.
 //
-// HOW. The corpus runs in three child processes, TZ=America/New_York, Asia/Manila
-// and UTC, and every child must pass and print byte-identical results: a value that
-// still depends on the machine's zone cannot do both. Each child also runs the
-// PRE-FIX code of the screens it covers, at the same pinned instants, and the parent
-// requires those results to DIFFER by zone. That proves the three zones would have
-// caught the bug, so a run that agrees is not agreeing by accident. Last, the parent
-// checks that each fixed site calls the helpers (and imports them: an unimported
-// helper in a <script setup> builds fine and throws at runtime).
+// HOW. The corpus runs in four child processes, TZ=America/New_York,
+// America/Chicago, Asia/Manila and UTC, and every child must pass and print
+// byte-identical results: a value that still depends on the machine's zone cannot
+// do both. Each child also runs the PRE-FIX code of the screens it covers, at the
+// same pinned instants, and the parent requires those results to DIFFER by zone.
+// That proves the four zones would have caught the bug, so a run that agrees is
+// not agreeing by accident. Last, the parent checks that each fixed site calls the
+// helpers (and imports them: an unimported helper in a <script setup> builds fine
+// and throws at runtime).
 //
 // The helpers take a pinned instant where the screens use the clock (appToday(now)),
 // so nothing here depends on when it runs.
@@ -35,6 +36,7 @@ import fs from 'fs'
 import path from 'path'
 import { execFileSync } from 'child_process'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { createRequire } from 'module'
 
 const SELF = fileURLToPath(import.meta.url)
 const ROOT = path.join(path.dirname(SELF), '..')
@@ -44,6 +46,7 @@ const CHILD_FLAG = 'APP_TZ_CLIENT_CHILD'
 // child that silently ran in some other zone is caught.
 const ZONES = [
   ['America/New_York', 240],
+  ['America/Chicago', 300],
   ['Asia/Manila', -480],
   ['UTC', 0],
 ]
@@ -53,9 +56,24 @@ const NEEDED = [
   'appDayStartIso', 'appDayEndIso', 'shiftYmd', 'shiftYm', 'satFriWeekOf',
 ]
 
-// The server's getWeekRange(), lifted from server.js as it ships (it is
-// self-contained), so the driver tab's week can be compared with the week the
-// server itself counts in.
+// The Saturday-to-Friday week of the instant `ms` on the US Eastern calendar,
+// worked out apart from utils/datetime.js: the weekday comes from Intl's own
+// `weekday` field, the dates from plain UTC arithmetic. It is the week the
+// driver tab and the server's "now" week both count in under APP_TIMEZONE's
+// default.
+function easternWeekAt(ms) {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short' })
+    .formatToParts(new Date(ms)).reduce((acc, x) => ((acc[x.type] = x.value), acc), {})
+  const sinceSaturday = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'].indexOf(p.weekday)
+  const start = Date.UTC(+p.year, +p.month - 1, +p.day - sinceSaturday)
+  const key = (t) => new Date(t).toISOString().slice(0, 10)
+  return { start: key(start), end: key(start + 6 * 86400000) }
+}
+
+// The server's getWeekRange(), lifted from server.js as it ships, on the server's
+// own business zone (APP_TIMEZONE through lib/app-time.js, which is what the
+// lifted function reads), so the driver tab's week can be compared with the week
+// the server itself counts in.
 function serverGetWeekRange() {
   const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
   const at = src.indexOf('function getWeekRange(referenceDate)')
@@ -65,7 +83,8 @@ function serverGetWeekRange() {
     if (src[i] === '{') depth++
     else if (src[i] === '}' && --depth === 0) break
   }
-  return new Function(`${src.slice(at, i + 1)}\nreturn getWeekRange`)()
+  const appTime = createRequire(import.meta.url)('../lib/app-time.js')
+  return new Function('APP_TIMEZONE', `${src.slice(at, i + 1)}\nreturn getWeekRange`)(appTime.appTimeZone())
 }
 
 // ══ The corpus: runs inside each child ═══════════════════════════════════════
@@ -167,12 +186,12 @@ async function corpus() {
   check('4.7 hours in a day: 23 / 24 / 25',
     ['2026-03-08', '2026-09-28', '2026-11-01'].map((d) => (Date.parse(dt.appDayEndIso(d)) + 1 - Date.parse(dt.appDayStartIso(d))) / 3600000), [23, 24, 25])
 
-  // ── 5. Houston helpers are untouched (their private code is now shared) ──────
+  // ── 5. The zoned helpers share this zone (test-app-zone-switch-client.mjs has the rest) ─
   const iso = (d) => (d ? d.toISOString() : null)
-  check('5.1 parseSheetStamp resolves Houston wall clocks exactly as before',
+  check('5.1 parseSheetStamp resolves each era: UTC before 2026-08-03, Houston to 2026-10-08, the app zone after',
     ['08/04/2026 8:05:07', '11/01/2026 01:30:00', '03/14/2027 02:30:00', '11/01/2026 23:30', '07/01/2026 00:12:00'].map((s) => iso(dt.parseSheetStamp(s))),
-    ['2026-08-04T13:05:07.000Z', '2026-11-01T06:30:00.000Z', '2027-03-14T07:30:00.000Z', '2026-11-02T05:30:00.000Z', '2026-07-01T00:12:00.000Z'])
-  check('5.2 fmtTimestamp still renders Houston', dt.fmtTimestamp('2026-08-04T13:05:07Z'), 'Aug 4, 2026, 8:05 AM CDT')
+    ['2026-08-04T13:05:07.000Z', '2026-11-01T05:30:00.000Z', '2027-03-14T06:30:00.000Z', '2026-11-02T04:30:00.000Z', '2026-07-01T00:12:00.000Z'])
+  check('5.2 fmtTimestamp renders the app zone', dt.fmtTimestamp('2026-08-04T13:05:07Z'), 'Aug 4, 2026, 9:05 AM EDT')
 
   // ── 6. setAppTimeZone: the server's setting, when the browser knows the zone ─
   check('6.1 setAppTimeZone(America/Chicago) takes it', [dt.setAppTimeZone('America/Chicago'), dt.appTimeZone()], ['America/Chicago', 'America/Chicago'])
@@ -186,10 +205,10 @@ async function corpus() {
     ['-0400', '+05:00', 'EST', 'utc', 'GMT'].map((v) => dt.setAppTimeZone(v)), Array(5).fill('America/Chicago'))
   check('6.5c "UTC" is', [dt.setAppTimeZone('UTC'), dt.appDayOf('2026-09-29T03:30:00Z'), dt.setAppTimeZone('America/Chicago')],
     ['UTC', '2026-09-29', 'America/Chicago'])
-  check('6.5d houstonToday(now) is the Houston day of a pinned instant, whatever the setting',
-    [dt.houstonToday(at('2026-10-03T04:30:00Z')), dt.houstonToday(new Date('2026-10-03T05:30:00Z'))], ['2026-10-02', '2026-10-03'])
+  check('6.5d Chicago: appToday(now) is the Chicago day of a pinned instant',
+    [dt.appToday(at('2026-10-03T04:30:00Z')), dt.appToday(new Date('2026-10-03T05:30:00Z'))], ['2026-10-02', '2026-10-03'])
   check('6.6 the setting decides, whatever the zone (Manila)', [dt.setAppTimeZone('Asia/Manila'), dt.appDayOf('2026-09-28T23:30:00-04:00')], ['Asia/Manila', '2026-09-29'])
-  check('6.7 ...and Houston pins stay Houston', [dt.fmtTimestamp('2026-08-04T13:05:07Z'), dt.fmtYmd('2026-09-28')], ['Aug 4, 2026, 8:05 AM CDT', 'Sep 28, 2026'])
+  check('6.7 ...and the time formatters follow it (a calendar date does not move)', [dt.fmtTimestamp('2026-08-04T13:05:07Z'), dt.fmtYmd('2026-09-28')], ['Aug 4, 2026, 9:05 PM GMT+8', 'Sep 28, 2026'])
   dt.setAppTimeZone('America/Havana') // its DST skips midnight itself: 00:00 -> 01:00
   check('6.8 a zone west of UTC whose DST skips midnight: the day starts at 01:00', [dt.appDayStartIso('2026-03-08'), dt.appDayEndIso('2026-03-07')],
     ['2026-03-08T05:00:00.000Z', '2026-03-08T04:59:59.999Z'])
@@ -202,42 +221,44 @@ async function corpus() {
   check('6.10 back to the default', dt.setAppTimeZone('America/New_York'), 'America/New_York')
 
   // ── 7. The fixed screens, as each one now computes ───────────────────────────
-  // InvoiceTab.vue: weekRange = satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset)).
-  // The week counts in Houston, like the server's own "now" week, the Friday
-  // 6:30 PM cutoff and the Friday batch it has to agree with.
-  const invoiceWeek = (now, back) => dt.satFriWeekOf(dt.shiftYmd(dt.houstonToday(at(now)), -7 * back))
+  // InvoiceTab.vue: weekRange = satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset)).
+  // The week counts in the app zone, like the server's own "now" week, the
+  // Friday 6:30 PM cutoff and the Friday batch it has to agree with.
+  const invoiceWeek = (now, back) => dt.satFriWeekOf(dt.shiftYmd(dt.appToday(at(now)), -7 * back))
   check('7.1 invoice week at Fri 23:30 EDT (Saturday in Manila and UTC): this week and last',
     [invoiceWeek('2026-10-03T03:30:00Z', 0), invoiceWeek('2026-10-03T03:30:00Z', 1)],
     [WEEK_0926, { start: '2026-09-19', end: '2026-09-25' }])
-  check('7.1b invoice week at Fri 23:30 CDT (already Saturday in New York): still this week',
-    invoiceWeek('2026-10-03T04:30:00Z', 0), WEEK_0926)
-  // The tab's week and the server's own "now" week (getWeekRange() with an
-  // instant, lifted from server.js) agree at every quarter hour across Friday
-  // night into Saturday, in summer time and on both sides of each switch.
+  check('7.1b invoice week at Fri 23:30 CDT (already Sat 00:30 in New York): the next week',
+    invoiceWeek('2026-10-03T04:30:00Z', 0), { start: '2026-10-03', end: '2026-10-09' })
+  // The tab's week, the server's own week (getWeekRange() of the instant) and the
+  // Eastern week worked out apart (easternWeekAt) agree at every quarter hour
+  // across Friday night into Saturday, in summer time and on both sides of each
+  // switch.
   const serverWeekAt = serverGetWeekRange()
   const seams = ['2026-10-02', '2026-10-30', '2026-11-06', '2027-03-12', '2027-03-19']
   const disagree = []
   for (const friday of seams) {
     const from = Date.parse(`${friday}T12:00:00Z`)
     for (let t = from; t < from + 30 * 3600 * 1000; t += 15 * 60 * 1000) {
-      const tab = dt.satFriWeekOf(dt.houstonToday(t))
+      const tab = dt.satFriWeekOf(dt.appToday(t))
+      const ref = easternWeekAt(t)
       const srv = serverWeekAt(new Date(t))
-      if (tab.start !== srv.weekStart || tab.end !== srv.weekEnd) disagree.push(new Date(t).toISOString())
+      if (tab.start !== ref.start || tab.end !== ref.end || srv.weekStart !== tab.start || srv.weekEnd !== tab.end) disagree.push(new Date(t).toISOString())
     }
   }
-  check('7.1c the tab\'s week is the server\'s week at every quarter hour of five Friday-to-Saturday seams', disagree, [])
+  check('7.1c the tab\'s week is the server\'s week and the Eastern week at every quarter hour of five Friday-to-Saturday seams', disagree, [])
   check('7.2 invoice week on Thu Oct 8: 0, 1 and 6 weeks back',
     [0, 1, 6].map((k) => invoiceWeek('2026-10-08T16:00:00Z', k)),
     [{ start: '2026-10-03', end: '2026-10-09' }, WEEK_0926, { start: '2026-08-22', end: '2026-08-28' }])
   check('7.3 invoice week at Fri 23:30 EST, after the clocks went back',
     [invoiceWeek('2026-11-07T04:30:00Z', 0), invoiceWeek('2026-11-07T04:30:00Z', 1)],
     [{ start: '2026-10-31', end: '2026-11-06' }, { start: '2026-10-24', end: '2026-10-30' }])
-  // EarningsSection.vue "+ Add day": today (Houston, a pay day) when it is in the
-  // selected month, else the 1st.
-  const addDay = (now, min, max) => { const t = dt.houstonToday(at(now)); return t >= min && t <= max ? t : min }
+  // EarningsSection.vue "+ Add day": today (the app zone's, a pay day) when it is
+  // in the selected month, else the 1st.
+  const addDay = (now, min, max) => { const t = dt.appToday(at(now)); return t >= min && t <= max ? t : min }
   check('7.4 "+ Add day" at 23:30 EDT on Sep 30 defaults to Sep 30', addDay('2026-10-01T03:30:00Z', '2026-09-01', '2026-09-30'), '2026-09-30')
-  check('7.4b "+ Add day" at 23:30 CDT on Sep 30 (Oct 1 in New York) still defaults to Sep 30',
-    addDay('2026-10-01T04:30:00Z', '2026-09-01', '2026-09-30'), '2026-09-30')
+  check('7.4b "+ Add day" at 23:30 CDT on Sep 30 (already Oct 1 in New York) is past September: the 1st',
+    addDay('2026-10-01T04:30:00Z', '2026-09-01', '2026-09-30'), '2026-09-01')
   // ExpensesTab.vue IFTA range: the From day's start to the To day's end.
   check('7.5 IFTA range for September', [dt.appDayStartIso('2026-09-01'), dt.appDayEndIso('2026-09-30')], ['2026-09-01T04:00:00.000Z', '2026-10-01T03:59:59.999Z'])
   // stores/driver.js date filter: the pickup cell read as a calendar date first.
@@ -359,7 +380,7 @@ if (process.env[CHILD_FLAG]) {
   process.exit(0)
 }
 
-// ══ The parent: three zones, one answer ══════════════════════════════════════
+// ══ The parent: four zones, one answer ═══════════════════════════════════════
 let failed = 0
 const fail = (msg) => {
   failed++
@@ -392,8 +413,8 @@ const done = runs.filter((r) => r.report)
 if (done.length === ZONES.length) {
   const [first, ...rest] = done.map((r) => JSON.stringify(r.report.checks))
   const same = rest.every((s) => s === first)
-  if (!same) fail('the three zones did not print identical results (a value still depends on the machine zone)')
-  console.log(`  identical results in all three zones: ${same ? 'yes' : 'NO'}`)
+  if (!same) fail('the four zones did not print identical results (a value still depends on the machine zone)')
+  console.log(`  identical results in all four zones: ${same ? 'yes' : 'NO'}`)
 
   console.log('\nThe pre-fix code at the same instants (each must differ by zone):')
   for (const key of Object.keys(done[0].report.preFix)) {
@@ -406,13 +427,13 @@ if (done.length === ZONES.length) {
 
 // ══ The fixed sites call the helpers ═════════════════════════════════════════
 // `has` must appear and `gone` must not; `imports` must be named in the file's
-// import from utils/datetime. pastDeadline stays a Houston rule on purpose.
+// import from utils/datetime.
 const SITES = [
-  ['client/src/components/driver/InvoiceTab.vue', ['houstonToday', 'satFriWeekOf', 'shiftYmd'],
-    ['satFriWeekOf(shiftYmd(houstonToday(), -7 * weekOffset.value))', "timeZone: 'America/Chicago'"],
-    ['now.getTime() - weekOffset.value * 7 * 86400000', 'fmtLocalYMD', 'appToday()']],
-  ['client/src/components/investor/EarningsSection.vue', ['houstonToday'], ['const todayStr = houstonToday()'],
-    ['${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}', 'appToday()']],
+  ['client/src/components/driver/InvoiceTab.vue', ['appToday', 'satFriWeekOf', 'shiftYmd'],
+    ['satFriWeekOf(shiftYmd(appToday(), -7 * weekOffset.value))'],
+    ['now.getTime() - weekOffset.value * 7 * 86400000', 'fmtLocalYMD', 'houstonToday']],
+  ['client/src/components/investor/EarningsSection.vue', ['appToday'], ['const todayStr = appToday()'],
+    ['${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}', 'houstonToday']],
   ['client/src/components/invoices/PaymentReportDialog.vue', ['appDayOf', 'fmtYmd'], ['fmtYmd(appDayOf(inv.paid_at))'], ['fmtYmd(inv.paid_at)']],
   ['client/src/components/dashboard/ExpensesTab.vue', ['appDayStartIso', 'appDayEndIso'],
     ['appDayStartIso(iftaStart.value)', 'appDayEndIso(iftaEnd.value)'],

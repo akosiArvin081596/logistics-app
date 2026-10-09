@@ -31,6 +31,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { fmtAppDate } from '../../utils/datetime'
 import PaymentTermsSummary from './PaymentTermsSummary.vue'
 
 const props = defineProps({
@@ -46,17 +47,14 @@ const error = ref('')
 let ticket = 0
 
 // A bare SQLite CURRENT_TIMESTAMP is UTC with no zone marker; older document
-// rows may carry one. Read it as UTC, never as the viewer's local time.
+// rows may carry one. Read it as UTC, never as the viewer's local time, and show
+// its date in the app zone.
 const SQLITE_UTC_STAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/
-const dayFormat = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/Chicago', month: 'short', day: 'numeric', year: 'numeric',
-})
 
 function signedDay(value) {
   const s = String(value || '').trim()
   if (!s) return ''
-  const dt = new Date(SQLITE_UTC_STAMP_RE.test(s) ? `${s.replace(' ', 'T')}Z` : s)
-  return isNaN(dt.getTime()) ? '' : dayFormat.format(dt)
+  return fmtAppDate(new Date(SQLITE_UTC_STAMP_RE.test(s) ? `${s.replace(' ', 'T')}Z` : s), { fallback: '' })
 }
 
 const lockText = computed(() => {
