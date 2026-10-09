@@ -57245,6 +57245,50 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 	console.log(`[period-close] enabled — months finalize ${settlementGraceDays()} day(s) after they end (${APP_TIMEZONE})`);
 }
 
+// ============================================================
+// DAILY INTEGRITY CHECK (lib/integrity-check.js)
+// ============================================================
+// Every day at 8:00 AM on the business clock (APP_TIMEZONE) it reads Job Tracking
+// (getJobTrackingCached()) and app.db and reports a Pickup Appointment that went
+// blank, an Assigned Date that changed, a new n8n Assigned Date not in Eastern
+// time (against the rate-con email's own Date header, mailbox read-only) and an
+// approved receipt on no invoice for more than 7 days, by one email to
+// ADMIN_NOTIFY_EMAIL (none when it is unset) and one log line. It writes only its
+// own table, integrity_check_loads; never the sheet, an invoice, a payout or any
+// other row. A KILL SWITCH that defaults ON (the !/^(false|0|no|off)$/i shape): it
+// moves no money. A replica starts no job (startsJob()). scripts/integrity-check.js
+// --print runs the same checks by hand, read-only.
+const INTEGRITY_CHECK_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.INTEGRITY_CHECK_ENABLED ?? "").trim());
+const integrityCheck = require("./lib/integrity-check");
+if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
+	const integrityTick = integrityCheck.dailyTicker({
+		db,
+		timeZone: APP_TIMEZONE,
+		run: (now) => integrityCheck.runIntegrityCheck({
+			db,
+			now,
+			write: true,
+			readJobTracking: getJobTrackingCached,
+			readRateConEmails: integrityCheck.rateConEmailReader({
+				user: process.env.GMAIL_USER,
+				pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD, // none in a replica: no mailbox is read
+				mailbox: RATECON_RECONCILE_MAILBOX,
+			}),
+			expensePeriodExpr: EXPENSE_PERIOD_EXPR,
+			sendEmail,
+			to: ADMIN_NOTIFY_EMAIL,
+			emailHtml: ({ heading, bodyHtml }) => invoiceEmailHtml({ heading, bodyHtml }),
+		}),
+	});
+	// The ticker never rejects; a rejection here is a defect in its own guard.
+	const integrityCheckTick = () => {
+		integrityTick().catch((e) => console.error("[integrity-check] tick threw outside its own guard:", (e && e.message) || e));
+	};
+	setInterval(integrityCheckTick, 60 * 1000);
+	setTimeout(integrityCheckTick, 100 * 1000);
+	console.log(`[integrity-check] enabled — daily 8:00 AM ${APP_TIMEZONE}; reports to ADMIN_NOTIFY_EMAIL`);
+}
+
 // GET /api/financials/report — Financials for any range, by day, week (Saturday
 // to Friday), month, quarter or year, grouped by the fleet, truck, driver, load,
 // pickup or delivery state, or owner. Every figure comes from the same books as
