@@ -21530,6 +21530,18 @@ function sanitizeManualInvoiceRows(raw, label) {
 	return { items };
 }
 
+// A manual invoice's totals from its sanitized rows (sanitizeManualInvoiceRows()):
+// the line items' subtotal, the deductions and the total due (the subtotal less
+// the deductions), each to the cent. The one definition: the create stores and
+// prints these, and the New Manual Invoice dialog's totals strip shows them
+// (POST /api/invoices/manual/totals).
+function manualInvoiceTotals(items, deductions) {
+	const round2 = (n) => Math.round(n * 100) / 100;
+	const subtotal = round2(items.reduce((s, i) => s + i.amount, 0));
+	const deductionsTotal = round2(deductions.reduce((s, i) => s + i.amount, 0));
+	return { subtotal, deductionsTotal, totalDue: round2(subtotal - deductionsTotal) };
+}
+
 // ---------------------------------------------------------------------------
 // Invoice payee directory — contact details we ALREADY hold, so a manual
 // invoice never asks anyone to retype an address that's on file.
@@ -21698,10 +21710,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		}
 		const notes = (body.notes || "").toString().trim().slice(0, 500);
 
-		const round2 = (n) => Math.round(n * 100) / 100;
-		const subtotal = round2(itemsRes.items.reduce((s, i) => s + i.amount, 0));
-		const deductionsTotal = round2(dedRes.items.reduce((s, i) => s + i.amount, 0));
-		const totalDue = round2(subtotal - deductionsTotal);
+		const { subtotal, deductionsTotal, totalDue } = manualInvoiceTotals(itemsRes.items, dedRes.items);
 		const adminName = req.session.user.username || "";
 
 		// Manual numbers reuse the weekly scheme with an INV-M- prefix so they're
@@ -21776,10 +21785,32 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			`${invoiceNumber} for ${payee} (${periodStart} – ${periodEnd}), ${itemsRes.items.length} item(s), total $${totalDue.toFixed(2)}`
 		);
 		notifyChange("invoices");
-		res.json({ success: true, invoice });
+		// With its total_due: the Invoices screen opens the new invoice from this row.
+		res.json({ success: true, invoice: { ...invoice, total_due: invoiceTotalDue(invoice) } });
 	} catch (err) {
 		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
 		console.error("Manual invoice error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
+// POST /api/invoices/manual/totals — the New Manual Invoice dialog's totals
+// strip for the rows as typed: the subtotal, deductions and total due the
+// create above would store for them, from the same sanitizeManualInvoiceRows()
+// and manualInvoiceTotals(), so the dialog shows the server's figures and adds
+// nothing itself. Read-only: nothing is written, numbered, rendered or audited.
+// Rows the create would refuse answer 200 { complete: false, error } (a preview
+// of an unfinished form is not a failed request); the create still refuses them.
+app.post("/api/invoices/manual/totals", requireRole("Super Admin"), (req, res) => {
+	try {
+		const body = req.body || {};
+		const itemsRes = sanitizeManualInvoiceRows(body.lineItems, "lineItems");
+		const dedRes = sanitizeManualInvoiceRows(body.deductions, "deductions");
+		const error = itemsRes.error || dedRes.error || (itemsRes.items.length ? "" : "At least one line item is required");
+		if (error) return res.json({ complete: false, error });
+		res.json({ complete: true, ...manualInvoiceTotals(itemsRes.items, dedRes.items) });
+	} catch (err) {
+		console.error("Manual invoice totals error:", err.message);
 		res.status(500).json({ error: err.message });
 	}
 });
@@ -21821,7 +21852,11 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 				"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE deleted_at = '' ORDER BY created_at DESC"
 			).all().filter((r) => driverOwnsInvoice(user, r));
 		}
-		res.json({ invoices });
+		// Each row's total_due is invoiceTotalDue() (the PDF's "Total Due"), and
+		// `summary` is the status cards over the rows listed here
+		// (invoiceListSummary()): the Invoices screen shows both and adds nothing.
+		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r) }));
+		res.json({ invoices, summary: invoiceListSummary(invoices) });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
 	}
@@ -21858,6 +21893,24 @@ function parsePaymentReportParams(req) {
 // one figure the payment report and the driver app's invoice list serve.
 function invoiceTotalDue(row) {
 	return Math.round(((row.total_earnings || 0) + (row.adjustment || 0)) * 100) / 100;
+}
+
+// The admin Invoices screen's status cards, sent with GET /api/invoices: per
+// status, how many of the listed invoices are live and what they come to at
+// their total due (invoiceTotalDue(), the adjustment included), summed to the
+// cent as the payment report sums. A soft-deleted row is listed in the "show
+// deleted" view but never counted, as the cards never counted one. The screen
+// displays these figures and computes none.
+function invoiceListSummary(rows) {
+	const summary = {};
+	for (const status of ["Draft", "Submitted", "Approved", "Processing", "Paid", "Rejected"]) {
+		const live = rows.filter((r) => !r.deleted_at && r.status === status);
+		summary[status] = {
+			count: live.length,
+			total_due: Math.round(live.reduce((s, r) => s + invoiceTotalDue(r), 0) * 100) / 100,
+		};
+	}
+	return summary;
 }
 
 // Aggregates every live (non-deleted) invoice for the payee whose billing
@@ -22432,7 +22485,7 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 		const final = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(invoice.id);
-		res.json({ success: true, invoice: final, pdfMode });
+		res.json({ success: true, invoice: { ...final, total_due: invoiceTotalDue(final) }, pdfMode });
 	} catch (err) {
 		console.error("Invoice adjust error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -22525,7 +22578,7 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 		const fresh = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(invoice.id);
-		res.json({ success: true, invoice: fresh });
+		res.json({ success: true, invoice: { ...fresh, total_due: invoiceTotalDue(fresh) } });
 	} catch (err) {
 		console.error("Invoice revert error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -22597,7 +22650,7 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		const fresh = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(invoice.id);
-		res.json({ success: true, invoice: fresh });
+		res.json({ success: true, invoice: { ...fresh, total_due: invoiceTotalDue(fresh) } });
 	} catch (err) {
 		console.error("Invoice restore error:", err.message);
 		res.status(500).json({ error: err.message });

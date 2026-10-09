@@ -4,28 +4,22 @@ import { useApi } from '../composables/useApi'
 const api = useApi()
 
 // Soft-deleted rows are only present when the admin opted into the
-// "show deleted" view — KPI math must always ignore them.
+// "show deleted" view — byStatus ignores them, as the server's summary does.
 const live = (s) => s.invoices.filter(i => !i.deleted_at)
 
 export const useInvoicesStore = defineStore('invoices', {
   state: () => ({
     invoices: [],
+    // The status cards' figures, as GET /api/invoices sends them: per status,
+    // { count, total_due } over the live invoices listed, adjustments included
+    // (invoiceListSummary() in server.js). Displayed, never recomputed here.
+    summary: null,
     isLoading: false,
     showDeleted: false,
   }),
 
   getters: {
     byStatus: (s) => (status) => live(s).filter(i => i.status === status),
-    draftCount:      (s) => live(s).filter(i => i.status === 'Draft').length,
-    submittedCount:  (s) => live(s).filter(i => i.status === 'Submitted').length,
-    approvedCount:   (s) => live(s).filter(i => i.status === 'Approved').length,
-    processingCount: (s) => live(s).filter(i => i.status === 'Processing').length,
-    paidCount:       (s) => live(s).filter(i => i.status === 'Paid').length,
-    rejectedCount:   (s) => live(s).filter(i => i.status === 'Rejected').length,
-    totalSubmitted:  (s) => live(s).filter(i => i.status === 'Submitted').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
-    totalApproved:   (s) => live(s).filter(i => i.status === 'Approved').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
-    totalProcessing: (s) => live(s).filter(i => i.status === 'Processing').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
-    totalPaid:       (s) => live(s).filter(i => i.status === 'Paid').reduce((sum, i) => sum + (i.total_earnings || 0), 0),
   },
 
   actions: {
@@ -35,6 +29,7 @@ export const useInvoicesStore = defineStore('invoices', {
         const url = this.showDeleted ? '/api/invoices?include_deleted=true' : '/api/invoices'
         const res = await api.get(url)
         this.invoices = res.invoices || []
+        this.summary = res.summary || null
       } finally {
         this.isLoading = false
       }
