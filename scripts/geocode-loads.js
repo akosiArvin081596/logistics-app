@@ -2,8 +2,12 @@
 /**
  * Backfill origin/destination coordinates for rows in "Job Tracking".
  *
- * Usage: node scripts/geocode-loads.js <connect.sid cookie value>
+ * Usage: LOGISX_BASE_URL=<origin> node scripts/geocode-loads.js <connect.sid cookie value>
  *        LOGISX_BASE_URL=http://localhost:3000 node scripts/geocode-loads.js <cookie>
+ *
+ * LOGISX_BASE_URL is required: the server whose load_coordinates cache is filled
+ * (and whose Maps key pays for each geocode). There is no default; without it the
+ * script exits 2 before any network call.
  *
  * ⚠️ THIS SCRIPT NO LONGER WRITES TO THE SHEET, AND MUST NOT GO BACK TO DOING SO.
  *
@@ -37,11 +41,15 @@
  * spreadsheet.
  */
 
-const BASE = process.env.LOGISX_BASE_URL || "https://app.logisx.com";
+const BASE = String(process.env.LOGISX_BASE_URL ?? "").trim().replace(/\/+$/, "");
 const COOKIE = process.argv[2];
+const USAGE = "Usage: LOGISX_BASE_URL=<origin> node scripts/geocode-loads.js <connect.sid cookie value>";
+if (!BASE) {
+  console.error(`geocode-loads.js: LOGISX_BASE_URL is not set; name the server to geocode on (local, staging or production). There is no default.\n${USAGE}`);
+  process.exit(2);
+}
 if (!COOKIE) {
-  console.error("Usage: node scripts/geocode-loads.js <connect.sid cookie value>");
-  console.error("       LOGISX_BASE_URL=<url> to target staging/local instead of production.");
+  console.error(USAGE);
   process.exit(1);
 }
 

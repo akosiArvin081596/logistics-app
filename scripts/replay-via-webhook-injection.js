@@ -18,21 +18,27 @@
  *        --data @scripts/.wf-backup-<ts>.json \
  *        "$N8N_BASE_URL/api/v1/workflows/$N8N_WORKFLOW_ID"
  *
- * Usage: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_API_KEY=... node scripts/replay-via-webhook-injection.js [messageId]
- *  (no defaults: without N8N_BASE_URL or N8N_WORKFLOW_ID it exits 2)
- *  default messageId = 19df41c0f90151db (RE: Bison #6942913, exec 2067)
+ * Usage: N8N_BASE_URL=... N8N_WORKFLOW_ID=... N8N_GMAIL_CREDENTIAL_ID=... N8N_API_KEY=... \
+ *          node scripts/replay-via-webhook-injection.js <messageId>
+ *  No defaults: without N8N_BASE_URL, N8N_WORKFLOW_ID, N8N_GMAIL_CREDENTIAL_ID (the
+ *  n8n Gmail credential the injected Gmail node uses) or the Gmail message ID it
+ *  exits 2, before any network call.
  */
 
 const fs = require('fs');
 const path = require('path');
-const { requireN8nSettings } = require('./lib/n8n-settings');
+const { requireN8nSettings, requireN8nGmailCredential } = require('./lib/n8n-settings');
 
 const { base: N8N_BASE, workflowId: WORKFLOW_ID } = requireN8nSettings('replay-via-webhook-injection.js');
+const GMAIL_CREDENTIAL_ID = requireN8nGmailCredential('replay-via-webhook-injection.js');
 const API_KEY = process.env.N8N_API_KEY;
 if (!API_KEY) { console.error('N8N_API_KEY env var required'); process.exit(1); }
 
-const TARGET_MSG = process.argv[2] || '19df41c0f90151db';
-const GMAIL_CRED = { gmailOAuth2: { id: 'oymS9U543xCU6JOB', name: 'Gmail account 7' } };
+const TARGET_MSG = (process.argv[2] || '').trim();
+if (!TARGET_MSG) {
+	console.error('replay-via-webhook-injection.js: name the Gmail message to replay. Usage: ... node scripts/replay-via-webhook-injection.js <messageId>. There is no default.');
+	process.exit(2);
+}
 
 const INJECTED_NAMES = ['Replay Webhook', 'Replay Get Email'];
 
@@ -91,6 +97,11 @@ function buildPutPayload(wf) {
 		const emailInput = wf.nodes.find(n => n.name === 'Email Input');
 		if (!emailInput) throw new Error('Email Input node missing — refusing to inject.');
 
+		// The credential's label as the workflow's own Gmail nodes carry it; n8n
+		// resolves a node's credential by id, so the id stands in when none does.
+		const sameCredential = wf.nodes.find(n => n.credentials?.gmailOAuth2?.id === GMAIL_CREDENTIAL_ID);
+		const gmailCredentialName = sameCredential?.credentials.gmailOAuth2.name || GMAIL_CREDENTIAL_ID;
+
 		const replayWebhook = {
 			id: uuid(),
 			name: 'Replay Webhook',
@@ -107,7 +118,7 @@ function buildPutPayload(wf) {
 			typeVersion: 2.1,
 			position: [emailInput.position[0] - 224, emailInput.position[1] + 200],
 			parameters: { operation: 'get', messageId: TARGET_MSG, simple: false, options: { downloadAttachments: true } },
-			credentials: GMAIL_CRED,
+			credentials: { gmailOAuth2: { id: GMAIL_CREDENTIAL_ID, name: gmailCredentialName } },
 		};
 
 		// Inject + wire to Email Input

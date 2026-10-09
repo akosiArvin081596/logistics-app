@@ -28,7 +28,7 @@ Live in `scripts/`:
 | `reset-super-admin-password.js` | Reset the Super Admin password against a SQLite DB (defaults to the one beside the repo; pass a path to override). Reads the plaintext from **`NEW_PASSWORD`**, never argv, so it stays out of shell history — `NEW_PASSWORD='…' node scripts/reset-super-admin-password.js`. Minimum 16 chars; clears all `sessions` on success. Fixes a forgotten password only: it refuses when no `super_admin` row exists, so it is not a recovery path from a *zero*-Super-Admin state. |
 | `prepare-test-fixtures.js` | Set known passwords on the accounts that already own the test data, so `test-suite.js` can log in. Requires `--yes-local-db`; refuses deployed paths. Does NOT wipe — loads live in Google Sheets, so a truncate destroys the fixture chain. |
 | `seed-staging.js` | Seed a local DB with the multi-role test accounts and trucks. Needs `SEED_STAGING_PASSWORD` (the accounts' password; no default, it refuses to run without one). |
-| `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". |
+| `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". Needs `LOGISX_BASE_URL` (the server whose coordinate cache it fills; no default, it exits 2 without one) and a session cookie: `LOGISX_BASE_URL=<origin> node scripts/geocode-loads.js <cookie>`. |
 | `generate-timeline-docx.py` | One-off Python script to render `.docx` session timelines (requires `python-docx`). |
 | `docs/generate-docs.js` | Build the technical and user PDFs. |
 | `docs/capture-screenshots.js` | Capture the UI screenshots used by the user manual. |

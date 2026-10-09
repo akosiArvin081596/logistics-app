@@ -40,6 +40,20 @@
  *   §6 scripts/repair-job-tracking-addresses.js: --sheet-id is required (exit
  *      2 before any Google call), and production's ID is still labelled
  *      "(PRODUCTION)".
+ *   §7 scripts name their target (source, scripts other than the test/check
+ *      runners and fixtures): the production app's URL and production's app
+ *      directory are never a fallback, a default parameter, an argument
+ *      default or an environment assignment, nor a shell ${VAR:-…} default
+ *      (except a variable named for production itself, replica:pull's
+ *      LOGISX_PROD_APP_DIR, whose host has no default); no script carries a
+ *      production Gmail message ID or the n8n Gmail credential in code.
+ *   §8 each script that had such a default, run without its setting:
+ *      geocode-loads.js (LOGISX_BASE_URL), replay-via-webhook-injection.js
+ *      (the message ID argument and N8N_GMAIL_CREDENTIAL_ID), rescue-load.js
+ *      (N8N_GMAIL_CREDENTIAL_ID, which the replay it hands over to needs) and
+ *      secure-backups.sh (--app-dir / APP_DIR) exit 2 with one line naming
+ *      what is missing, before any network call or command; with it, they run
+ *      against what was named.
  *
  * Hermetic: every child runs in a fresh mkdtemp folder (no .env) with
  * googleapis and nodemailer replaced by recording stubs, fetch replaced by one
@@ -86,6 +100,17 @@ const PROD_SHEET_ID = (() => {
 	try { return String(require(path.join(ROOT, "lib", "sheet-id.js")).PRODUCTION_SPREADSHEET_ID || ""); } catch { return ""; }
 })();
 const SHEET = { kind: "the production sheet", form: "sheet" };
+// What a script targets (§7, §8): the app, a Gmail message and the n8n Gmail
+// credential by their SHA-256 too; production's app directory is lib/sheet-id.js's
+// PRODUCTION_DIR, read at run time.
+const APP_HOST = { kind: "the production app", sha: "b31e82745c41b0bcf550bfae447352961debb51712bf6483b6695c8088d38be4", form: "host" };
+const GMAIL_MESSAGE = { kind: "a production Gmail message", sha: "81a05b65791d8578cec47f6121dad39d24e4295cd5ebc6d27645b47ab46ab3d3", form: "id16" };
+const GMAIL_CREDENTIAL = { kind: "the n8n Gmail credential", sha: "5e3212b1c0d295cb61cede1ac5ded336c87f8cea044a89b839c3fe8e68dc87d0", form: "id16" };
+const PROD_DIR = (() => {
+	try { return String(require(path.join(ROOT, "lib", "sheet-id.js")).PRODUCTION_DIR || ""); } catch { return ""; }
+})();
+const APP_DIRECTORY = { kind: "the production app directory", form: "dir" };
+const TARGETS = [APP_HOST, GMAIL_MESSAGE, GMAIL_CREDENTIAL, APP_DIRECTORY];
 
 const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const TOKEN_RE = {
@@ -93,17 +118,20 @@ const TOKEN_RE = {
 	host: /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g,
 	id16: /[A-Za-z0-9]+/g,
 	sheet: /[A-Za-z0-9_-]+/g,
+	dir: /\/[A-Za-z0-9_.\/-]+/g,
 };
-// Is `token` (one whole token of its form) the production value `p`?
+// Is `token` (one whole token of its form) the production value `p`? A path is
+// production's when it is the app directory or anything under it.
 function isProd(p, token) {
 	if (p.form === "sheet") return !!PROD_SHEET_ID && token === PROD_SHEET_ID;
+	if (p.form === "dir") return !!PROD_DIR && (token === PROD_DIR || token.startsWith(`${PROD_DIR}/`));
 	if (p.form === "id16") return token.length === 16 && sha256(token) === p.sha;
 	return sha256(token.toLowerCase()) === p.sha;
 }
 // The production values inside `text`, as [{ p, token }].
 function prodIn(text) {
 	const hits = [];
-	for (const p of [...PROD, SHEET]) {
+	for (const p of [...PROD, SHEET, ...TARGETS]) {
 		for (const m of String(text).matchAll(TOKEN_RE[p.form])) if (isProd(p, m[0])) hits.push({ p, token: m[0] });
 	}
 	return hits;
@@ -529,16 +557,19 @@ function runStatement(statement, values) {
 }
 
 // ------------------------------------------------------------- §5 helpers
+const N8N_CREDENTIAL = { N8N_GMAIL_CREDENTIAL_ID: "gmail-credential-under-test" };
+const MESSAGE_ID = "message-under-test";
+// [script, its arguments, the other settings it needs (§8 runs without them)]
 const N8N_SCRIPTS = [
-	["patch-agent-guard.js", []],
-	["patch-awaiting-ratecon.js", []],
-	["patch-completeness-gate.js", []],
-	["patch-mark-read.js", []],
-	["patch-protect-dispatch-fields.js", []],
-	["stage-n8n-details-fix.js", []],
-	["rescue-load.js", ["123456"]],
-	["replay-via-webhook-injection.js", []],
-	["verify-n8n-behaviour.js", []],
+	["patch-agent-guard.js", [], {}],
+	["patch-awaiting-ratecon.js", [], {}],
+	["patch-completeness-gate.js", [], {}],
+	["patch-mark-read.js", [], {}],
+	["patch-protect-dispatch-fields.js", [], {}],
+	["stage-n8n-details-fix.js", [], {}],
+	["rescue-load.js", ["123456"], N8N_CREDENTIAL],
+	["replay-via-webhook-injection.js", [MESSAGE_ID], N8N_CREDENTIAL],
+	["verify-n8n-behaviour.js", [], {}],
 ];
 function runScript(rel, args, env) {
 	const cwd = fs.mkdtempSync(path.join(tmp, "cwd-"));
@@ -546,6 +577,24 @@ function runScript(rel, args, env) {
 	const r = spawnSync(process.execPath, [path.join(ROOT, rel), ...args], { cwd, env: childEnv(cwd, env), encoding: "utf8", timeout: 20_000 });
 	return { code: r.status, stdout: r.stdout || "", stderr: r.stderr || "", out: `${r.stdout || ""}${r.stderr || ""}`, calls: callLines() };
 }
+
+// ------------------------------------------------------------- §8 helpers
+// A shell script under bash. With `stubbed`, every command it could read or
+// change files or reach the network with is a stub on PATH that only records
+// its name, so "nothing ran" is observable.
+const STUB_BIN = path.join(tmp, "stub-bin");
+fs.mkdirSync(STUB_BIN);
+for (const cmd of ["chmod", "chown", "mv", "cp", "rm", "mkdir", "install", "find", "stat", "ls", "numfmt", "ssh", "scp", "rsync", "curl", "wget"]) {
+	fs.writeFileSync(path.join(STUB_BIN, cmd), `#!/bin/sh\necho "command ${cmd}" >> ${JSON.stringify(log)}\n`, { mode: 0o755 });
+}
+function runShell(rel, args, env, { stubbed = true } = {}) {
+	const cwd = fs.mkdtempSync(path.join(tmp, "sh-"));
+	fs.rmSync(log, { force: true });
+	const PATH = stubbed ? `${STUB_BIN}${path.delimiter}${process.env.PATH}` : process.env.PATH;
+	const r = spawnSync("bash", [path.join(ROOT, rel), ...args], { cwd, env: { PATH, HOME: cwd, TMPDIR: cwd, ...env }, encoding: "utf8", timeout: 20_000 });
+	return { code: r.status, stdout: r.stdout || "", stderr: r.stderr || "", out: `${r.stdout || ""}${r.stderr || ""}`, calls: callLines() };
+}
+const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.sep).some((s) => s === "fixtures" || s === "artifacts");
 
 (async () => {
 	try {
@@ -604,7 +653,7 @@ function runScript(rel, args, env) {
 			for (const f of SCRIPT_SH) {
 				readSource(f).split("\n").forEach((line, n) => {
 					const codePart = line.replace(/(^|\s)#.*$/, "");
-					const hs = prodIn(codePart);
+					const hs = prodIn(codePart).filter((h) => !TARGETS.includes(h.p));
 					if (hs.some((h) => h.p === N8N_HOST || h.p === N8N_WORKFLOW)) shellBad.push(`${f}:${n + 1}`);
 					if (hs.length && /\$\{[A-Za-z_][\w]*:?[-=]/.test(codePart) && hs.some((h) => new RegExp(`:?[-=]${h.token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(codePart))) shellBad.push(`${f}:${n + 1}`);
 				});
@@ -793,7 +842,7 @@ function runScript(rel, args, env) {
 
 		await section("§5 the n8n scripts", () => {
 			const KEY = { N8N_API_KEY: "n8n-key-under-test" };
-			for (const [name, args] of N8N_SCRIPTS) {
+			for (const [name, args, needs] of N8N_SCRIPTS) {
 				const rel = path.join("scripts", name);
 				const cases = [
 					["neither setting", {}, ["N8N_BASE_URL", "N8N_WORKFLOW_ID"]],
@@ -801,14 +850,14 @@ function runScript(rel, args, env) {
 					["no N8N_BASE_URL", { N8N_WORKFLOW_ID: N8N_WF }, ["N8N_BASE_URL"]],
 				];
 				for (const [label, env, names] of cases) {
-					const r = runScript(rel, args, { ...KEY, ...env });
+					const r = runScript(rel, args, { ...KEY, ...needs, ...env });
 					const lines = r.stderr.split("\n").filter((l) => l.trim());
 					check(`§5 ${name}, ${label}: exit 2 (got ${r.code})`, r.code === 2);
 					check(`§5 ${name}, ${label}: one line, naming ${names.join(" and ")} (${redact(lines.join(" | ")).slice(0, 160)})`,
 						lines.length === 1 && names.every((n) => lines[0].includes(n)) && ["N8N_BASE_URL", "N8N_WORKFLOW_ID"].filter((n) => !names.includes(n)).every((n) => !lines[0].includes(`${n} is`)));
 					check(`§5 ${name}, ${label}: before any network call (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
 				}
-				const r = runScript(rel, args, { ...KEY, N8N_BASE_URL: N8N_URL, N8N_WORKFLOW_ID: N8N_WF });
+				const r = runScript(rel, args, { ...KEY, ...needs, N8N_BASE_URL: N8N_URL, N8N_WORKFLOW_ID: N8N_WF });
 				check(`§5 ${name}, both set: not refused for them (exit ${r.code})`, r.code !== 2 && !/N8N_(BASE_URL|WORKFLOW_ID)[^\n]*not set/.test(r.out));
 				const fetches = r.calls.filter((l) => l.startsWith("network fetch ")).map((l) => l.slice("network fetch ".length));
 				const other = r.calls.filter((l) => !l.startsWith("network fetch "));
@@ -850,6 +899,121 @@ function runScript(rel, args, env) {
 			const p = run([`--sheet-id=${PROD_SHEET_ID}`]);
 			check("§6 --sheet-id=<production's>: labelled (PRODUCTION)", !!PROD_SHEET_ID && /sheet\s+\S+\s+\(PRODUCTION\)/.test(p.out));
 			check(`§6 …and no Google call before its other refusals (${p.calls.join("; ") || "none"})`, p.calls.length === 0);
+		});
+
+		await section("§7 scripts name their target", () => {
+			check(`§7 production's app directory is readable from lib/sheet-id.js (${PROD_DIR ? "yes" : "no"})`, !!PROD_DIR);
+			const hits = [];
+			for (const f of SCRIPT_JS) {
+				const text = readSource(f);
+				let l = { literals: [], code: text };
+				try { l = lex(text); } catch { l = { literals: [], code: text }; }
+				for (const lit of l.literals) {
+					for (const h of prodIn(lit.content)) {
+						if (!TARGETS.includes(h.p)) continue;
+						hits.push({ f, line: lineOf(text, lit.start), p: h.p, bare: isBare(h.p, lit.content), before: before(l.code, lit.start), runner: isRunner(f) });
+					}
+				}
+			}
+			const where = (list) => [...new Set(list.map((x) => `${x.f}:${x.line}`))].join(", ") || "none";
+			// A constant naming production (a refusal list, a label) stays allowed.
+			for (const p of [APP_HOST, APP_DIRECTORY]) {
+				for (const shape of ["fallback", "default parameter", "argument default", "environment assignment"]) {
+					const bad = hits.filter((x) => !x.runner && x.p === p && x.bare && SHAPES[shape].test(x.before));
+					check(`§7 scripts/: ${p.kind} is never a ${shape} (${where(bad)})`, bad.length === 0);
+				}
+			}
+			for (const p of [GMAIL_MESSAGE, GMAIL_CREDENTIAL]) {
+				const any = hits.filter((x) => x.p === p);
+				check(`§7 scripts/: ${p.kind} is in no code (${where(any)})`, any.length === 0);
+			}
+			const shellBad = [];
+			for (const f of SCRIPT_SH.filter((s) => !isRunner(s))) {
+				readSource(f).split("\n").forEach((line, n) => {
+					const codePart = line.replace(/(^|\s)#.*$/, "");
+					for (const m of codePart.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=]([^}]*)\}/g)) {
+						if (/PROD/.test(m[1])) continue;
+						if (prodIn(m[2]).some((h) => h.p === APP_HOST || h.p === APP_DIRECTORY)) shellBad.push(`${f}:${n + 1}`);
+					}
+				});
+			}
+			check(`§7 scripts/*.sh: neither ${APP_HOST.kind} nor ${APP_DIRECTORY.kind} is a \${VAR:-…} default, but for a variable named for production (${shellBad.join(", ") || "none"})`,
+				shellBad.length === 0);
+		});
+
+		await section("§8 each script that had a production default, run without its setting", () => {
+			const geocode = path.join("scripts", "geocode-loads.js");
+			for (const [label, args, env] of [
+				["no LOGISX_BASE_URL", ["cookie-under-test"], {}],
+				["a blank LOGISX_BASE_URL", ["cookie-under-test"], { LOGISX_BASE_URL: " \t" }],
+				["no LOGISX_BASE_URL and no cookie", [], {}],
+			]) {
+				const r = runScript(geocode, args, env);
+				check(`§8 geocode-loads.js, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 geocode-loads.js, ${label}: says LOGISX_BASE_URL is needed (${redact(r.stderr.split("\n")[0] || "").slice(0, 160)})`,
+					/LOGISX_BASE_URL is not set/.test(r.stderr));
+				check(`§8 geocode-loads.js, ${label}: before any network call (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
+			}
+			const SERVER_URL = "https://logisx.example.test";
+			const g = runScript(geocode, ["cookie-under-test"], { LOGISX_BASE_URL: `${SERVER_URL}/` });
+			const gf = g.calls.filter((l) => l.startsWith("network fetch ")).map((l) => l.slice("network fetch ".length));
+			check(`§8 geocode-loads.js, LOGISX_BASE_URL set: not refused for it (exit ${g.code})`, g.code !== 2 && !/LOGISX_BASE_URL is not set/.test(g.out));
+			check(`§8 …every call goes to the named server (${gf.join("; ") || "none"})`,
+				gf.length >= 1 && gf.every((u) => u.startsWith(`${SERVER_URL}/api/`)) && g.calls.length === gf.length);
+
+			const N8N = { N8N_API_KEY: "n8n-key-under-test", N8N_BASE_URL: N8N_URL, N8N_WORKFLOW_ID: N8N_WF };
+			const replay = path.join("scripts", "replay-via-webhook-injection.js");
+			const rescue = path.join("scripts", "rescue-load.js");
+			for (const [rel, label, args, env, want] of [
+				[replay, "no message ID", [], N8N_CREDENTIAL, /name the Gmail message to replay/],
+				[replay, "a blank message ID", ["  "], N8N_CREDENTIAL, /name the Gmail message to replay/],
+				[replay, "no N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], {}, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[replay, "a blank N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], { N8N_GMAIL_CREDENTIAL_ID: "  " }, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[rescue, "no N8N_GMAIL_CREDENTIAL_ID", ["123456"], {}, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+			]) {
+				const name = path.basename(rel);
+				const r = runScript(rel, args, { ...N8N, ...env });
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 ${name}, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 ${name}, ${label}: one line, naming what is missing (${redact(lines.join(" | ")).slice(0, 160)})`, lines.length === 1 && want.test(lines[0]));
+				check(`§8 ${name}, ${label}: before any network call (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
+			}
+
+			const secure = path.join("scripts", "secure-backups.sh");
+			for (const [label, args, env] of [
+				["no --app-dir or APP_DIR", [], {}],
+				["no --app-dir or APP_DIR, --apply", ["--apply"], {}],
+				["no --app-dir or APP_DIR, --apply --adopt-strays", ["--apply", "--adopt-strays"], {}],
+				["a blank APP_DIR, --apply", ["--apply"], { APP_DIR: "  " }],
+				["an empty --app-dir=, --apply", ["--app-dir=", "--apply"], {}],
+			]) {
+				const r = runShell(secure, args, env);
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 secure-backups.sh, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 secure-backups.sh, ${label}: one line naming --app-dir and APP_DIR (${redact(lines.join(" | ")).slice(0, 160)})`,
+					lines.length === 1 && lines[0].includes("--app-dir") && lines[0].includes("APP_DIR"));
+				check(`§8 secure-backups.sh, ${label}: before it reads or changes anything (${r.calls.join("; ") || "no command"}, ${r.stdout.trim() ? "a report" : "no report"})`,
+					r.calls.length === 0 && !r.stdout.trim());
+			}
+			// Named, a dry run of a scratch tree: it reads what it was given and changes nothing.
+			const tree = fs.mkdtempSync(path.join(tmp, "app-"));
+			const backups = path.join(tree, "backups");
+			fs.mkdirSync(backups);
+			fs.chmodSync(backups, 0o755);
+			const snap = path.join(backups, "app.db.20260101_020000.gz");
+			fs.writeFileSync(snap, "snapshot");
+			fs.chmodSync(snap, 0o644);
+			const envSnaps = path.join(tmp, "env-snapshots-under-test");
+			for (const [label, args, env] of [
+				["--app-dir=<a scratch tree>", [`--app-dir=${tree}`, `--env-snapshots-dir=${envSnaps}`], {}],
+				["APP_DIR=<a scratch tree>", [`--env-snapshots-dir=${envSnaps}`], { APP_DIR: tree }],
+			]) {
+				const r = runShell(secure, args, env, { stubbed: false });
+				check(`§8 secure-backups.sh, ${label}: a dry run of that directory (exit ${r.code})`,
+					r.code === 0 && r.out.includes(`app dir:       ${tree}`) && /DRY RUN/.test(r.out) && /WOULD\s+chmod 600 app\.db\./.test(r.out));
+				check(`§8 secure-backups.sh, ${label}: …that changes nothing`,
+					(fs.statSync(snap).mode & 0o777) === 0o644 && (fs.statSync(backups).mode & 0o777) === 0o755 && !fs.existsSync(envSnaps));
+			}
 		});
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });

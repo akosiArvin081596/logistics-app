@@ -4,7 +4,8 @@
 // reach the live instance and the live ingestion workflow; now it stops, exit
 // 2 with one line naming what is missing, before any network call.
 //
-// Pure apart from requireN8nSettings(), which ends the process.
+// Pure apart from requireN8nSettings() and requireN8nGmailCredential(), which
+// end the process.
 // scripts/test-no-production-defaults.js runs every script that uses it.
 "use strict";
 
@@ -34,4 +35,18 @@ function requireN8nSettings(script, env = process.env) {
 	return { base: s.base, workflowId: s.workflowId };
 }
 
-module.exports = { N8N_SETTINGS, readN8nSettings, requireN8nSettings };
+// The n8n credential a replay's temporary Gmail node signs in with:
+// N8N_GMAIL_CREDENTIAL_ID, the credential's id in that n8n instance. No default
+// either: the id, or exit 2 with one line on stderr, before any network call.
+function requireN8nGmailCredential(script, env = process.env) {
+	const id = String((env && env.N8N_GMAIL_CREDENTIAL_ID) ?? "").trim();
+	if (!id) {
+		console.error(
+			`${script}: N8N_GMAIL_CREDENTIAL_ID is not set; name the n8n Gmail credential the replay's Gmail node uses. There is no default.`,
+		);
+		process.exit(2);
+	}
+	return id;
+}
+
+module.exports = { N8N_SETTINGS, readN8nSettings, requireN8nSettings, requireN8nGmailCredential };
