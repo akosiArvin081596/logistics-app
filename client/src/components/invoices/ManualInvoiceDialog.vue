@@ -103,12 +103,13 @@
           <textarea v-model="form.notes" rows="2" class="f-input" style="resize:vertical;" placeholder="Optional note shown on the PDF" maxlength="500"></textarea>
         </div>
 
-        <!-- Totals -->
+        <!-- Totals: the server's figures for the rows as typed -->
         <div class="totals-strip">
-          <div><span class="t-label">Subtotal</span><span class="t-value">${{ fmtMoney(subtotal) }}</span></div>
-          <div><span class="t-label">Deductions</span><span class="t-value text-red-600">-${{ fmtMoney(deductionsTotal) }}</span></div>
-          <div class="t-total"><span class="t-label">Total due</span><span class="t-value text-emerald-700 font-bold">${{ fmtMoney(totalDue) }}</span></div>
+          <div><span class="t-label">Subtotal</span><span class="t-value">{{ totalText('subtotal') }}</span></div>
+          <div><span class="t-label">Deductions</span><span class="t-value text-red-600">{{ totalText('deductionsTotal', '-') }}</span></div>
+          <div class="t-total"><span class="t-label">Total due</span><span class="t-value text-emerald-700 font-bold">{{ totalText('totalDue') }}</span></div>
         </div>
+        <div v-if="totalsIncomplete" class="text-[11px] text-gray-400 -mt-2">Totals show once every row has a description and an amount.</div>
 
         <div v-if="errorMsg" class="text-[12px] text-red-600 font-semibold">{{ errorMsg }}</div>
       </div>
@@ -124,7 +125,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useInvoicesStore } from '../../stores/invoices'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -331,10 +332,53 @@ watch(() => props.open, (isOpen) => {
   }
 })
 
-const sum = (rows) => rows.reduce((s, r) => s + (Number(r.amount) || 0), 0)
-const subtotal = computed(() => sum(form.value.lineItems))
-const deductionsTotal = computed(() => sum(form.value.deductions))
-const totalDue = computed(() => subtotal.value - deductionsTotal.value)
+// The rows as the server takes them, for the create and for the totals.
+function rowsForServer(rows) {
+  return rows.map(r => ({
+    date: r.date || '',
+    description: String(r.description || '').trim(),
+    amount: Number(r.amount) || 0,
+  }))
+}
+
+// The totals strip shows the server's figures for the rows as typed
+// (POST /api/invoices/manual/totals: manualInvoiceTotals(), the same totals the
+// create stores and prints), never a sum made here. `totals` is null while the
+// server is asked (a moment after the last keystroke) and while the rows are not
+// complete; the strip then shows dashes. A reply to an older version of the rows
+// is dropped.
+const totals = ref(null)
+const totalsIncomplete = ref(false)
+let totalsAsked = 0
+let totalsTimer = null
+async function refreshTotals() {
+  const asked = ++totalsAsked
+  try {
+    const res = await api.post('/api/invoices/manual/totals', {
+      lineItems: rowsForServer(form.value.lineItems),
+      deductions: rowsForServer(form.value.deductions),
+    })
+    if (asked !== totalsAsked) return
+    totals.value = res.complete ? res : null
+    totalsIncomplete.value = !res.complete
+  } catch {
+    if (asked !== totalsAsked) return
+    totals.value = null
+    totalsIncomplete.value = false
+  }
+}
+watch(() => [form.value.lineItems, form.value.deductions], () => {
+  totals.value = null
+  totalsAsked++
+  clearTimeout(totalsTimer)
+  if (props.open) totalsTimer = setTimeout(refreshTotals, 300)
+}, { deep: true })
+onBeforeUnmount(() => clearTimeout(totalsTimer))
+
+// One figure of the strip as the server sent it, or a dash while there is none.
+function totalText(key, sign = '') {
+  return totals.value && typeof totals.value[key] === 'number' ? sign + '$' + fmtMoney(totals.value[key]) : '—'
+}
 
 function addRow(kind) {
   form.value[kind] = [...form.value[kind], { date: '', description: '', amount: null }]
@@ -368,11 +412,6 @@ async function create() {
   busy.value = true
   try {
     const f = form.value
-    const mapRows = (rows) => rows.map(r => ({
-      date: r.date || '',
-      description: String(r.description || '').trim(),
-      amount: Number(r.amount) || 0,
-    }))
     const res = await store.createManual({
       payee: f.payee.trim(),
       payeeRole: f.payeeRole.trim(),
@@ -380,8 +419,8 @@ async function create() {
       payeePhone: f.payeePhone.trim(),
       periodStart: f.periodStart,
       periodEnd: f.periodEnd,
-      lineItems: mapRows(f.lineItems),
-      deductions: mapRows(f.deductions),
+      lineItems: rowsForServer(f.lineItems),
+      deductions: rowsForServer(f.deductions),
       notes: f.notes.trim(),
     })
     toast(`Invoice ${res?.invoice?.invoice_number || ''} created`, 'success')

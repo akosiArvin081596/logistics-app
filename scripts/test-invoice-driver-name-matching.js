@@ -122,7 +122,8 @@ const SHARED_FNS = [
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
 	"truckDailyRateCandidates", "findDriverNameClashes", "canonicalDriverName", "driverOwnsInvoice",
-	"invoiceTotalDue", "buildPaymentReport", "sanitizeManualInvoiceRows", "assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
+	"invoiceTotalDue", "invoiceListSummary", "buildPaymentReport", "sanitizeManualInvoiceRows", "manualInvoiceTotals",
+	"assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
 	// The P&L's deduction and the key it folds a driver's spellings to — which,
 	// like getAllExcludedDriverDays(), reads a name through these two.
 	"isBuiltInPropertyName", "driverNameForTotals",

@@ -78,7 +78,7 @@
               <TableCell class="text-[12px] text-gray-600 whitespace-nowrap">{{ formatWeek(inv.week_start, inv.week_end) }}</TableCell>
               <TableCell class="text-[13px] text-gray-600 text-right">{{ inv.loads_count }}</TableCell>
               <TableCell class="text-[13px] font-semibold text-emerald-700 text-right">
-                ${{ fmtMoney(inv.total_earnings) }}
+                {{ dueText(inv.total_due) }}
                 <span v-if="hasAdjustment(inv)" :class="adjBadgeClass(inv)" :title="adjTooltip(inv)">
                   {{ formatAdj(inv.adjustment) }}
                 </span>
@@ -159,7 +159,7 @@
                 </div>
                 <div class="meta-row" style="border-top:1px solid #e8edf2; padding-top:0.4rem; margin-top:0.2rem;">
                   <span class="meta-label font-bold">Total due</span>
-                  <span class="font-bold text-emerald-700 text-[15px]">${{ fmtMoney((selectedInvoice.total_earnings || 0) + (selectedInvoice.adjustment || 0)) }}</span>
+                  <span class="font-bold text-emerald-700 text-[15px]">{{ dueText(selectedInvoice.total_due) }}</span>
                 </div>
               </template>
               <div v-if="selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">{{ selectedInvoice.is_manual ? 'Deductions (in total)' : 'Expenses (ref)' }}</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
@@ -286,15 +286,16 @@
                 class="reject-textarea"
                 placeholder="e.g. Performance bonus / Advance recoupment / Damage deduction"
               ></textarea>
+              <!-- The server's figures and the amount as typed, with no sum: the
+                   new total due is worked out by the server when the adjustment
+                   is saved, and this panel and the row then show it. -->
               <div class="adjust-preview" v-if="selectedInvoice">
                 Computed: <strong>${{ fmtMoney(selectedInvoice.total_earnings) }}</strong>
-                <span v-if="Number(adjustAmount) !== 0">
-                  &nbsp;{{ Number(adjustAmount) > 0 ? '+' : '-' }} <strong>${{ fmtMoney(Math.abs(Number(adjustAmount) || 0)) }}</strong>
-                  &nbsp;=&nbsp;
-                  <strong class="text-emerald-700">
-                    ${{ fmtMoney((selectedInvoice.total_earnings || 0) + (Number(adjustAmount) || 0)) }}
-                  </strong>
-                </span>
+                <span v-if="Number(adjustAmount) !== 0">&nbsp;· Adjustment entered: <strong>{{ formatAdj(adjustAmount) }}</strong></span>
+                <div class="mt-1">
+                  Current total due: <strong class="text-emerald-700">{{ dueText(selectedInvoice.total_due) }}</strong>.
+                  The new total is calculated when you save.
+                </div>
               </div>
               <div class="flex gap-2 mt-2">
                 <Button variant="outline" class="flex-1 text-[12px]" :disabled="adjustBusy" @click="cancelAdjust">Cancel</Button>
@@ -422,13 +423,20 @@ watch([activeFilter, driverFilter, weekFilter, () => store.showDeleted], () => g
 // Clamp: if the list shrinks below the current page, snap back into range.
 watch(totalPages, (tp) => { if (page.value > tp) goTo(tp) })
 
-const kpiCards = computed(() => [
-  { label: 'Submitted',  value: store.submittedCount, sub: `$${fmtMoney(store.totalSubmitted)} pending review`, icon: '&#128228;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Submitted' },
-  { label: 'Approved',   value: store.approvedCount,  sub: `$${fmtMoney(store.totalApproved)} ready to pay`,   icon: '&#10003;',  theme: 'kpi-blue',    iconTheme: 'kpi-icon-blue',    filter: 'Approved' },
-  { label: 'Processing', value: store.processingCount, sub: `$${fmtMoney(store.totalProcessing)} payment in flight`, icon: '&#8644;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Processing' },
-  { label: 'Paid',       value: store.paidCount,      sub: `$${fmtMoney(store.totalPaid)} settled`,            icon: '&#128176;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Paid' },
-  { label: 'Rejected',   value: store.rejectedCount,  sub: 'Need correction',                                   icon: '&#10007;',  theme: 'kpi-violet',  iconTheme: 'kpi-icon-violet',  filter: 'Rejected' },
-])
+// The status cards show the server's count and total due per status (the
+// summary GET /api/invoices sends, adjustments included), or a dash until it
+// has arrived. Nothing is counted or added here.
+const kpiCards = computed(() => {
+  const count = (status) => store.summary?.[status]?.count ?? '—'
+  const total = (status) => dueText(store.summary?.[status]?.total_due)
+  return [
+    { label: 'Submitted',  value: count('Submitted'),  sub: `${total('Submitted')} pending review`,    icon: '&#128228;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Submitted' },
+    { label: 'Approved',   value: count('Approved'),   sub: `${total('Approved')} ready to pay`,       icon: '&#10003;',  theme: 'kpi-blue',    iconTheme: 'kpi-icon-blue',    filter: 'Approved' },
+    { label: 'Processing', value: count('Processing'), sub: `${total('Processing')} payment in flight`, icon: '&#8644;', theme: 'kpi-amber',   iconTheme: 'kpi-icon-amber',   filter: 'Processing' },
+    { label: 'Paid',       value: count('Paid'),       sub: `${total('Paid')} settled`,                icon: '&#128176;', theme: 'kpi-emerald', iconTheme: 'kpi-icon-emerald', filter: 'Paid' },
+    { label: 'Rejected',   value: count('Rejected'),   sub: 'Need correction',                         icon: '&#10007;',  theme: 'kpi-violet',  iconTheme: 'kpi-icon-violet',  filter: 'Rejected' },
+  ]
+})
 
 function handleKpiClick(filter) {
   activeFilter.value = activeFilter.value === filter ? null : filter
@@ -482,10 +490,8 @@ function adjBadgeClass(inv) {
   return base + (n > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')
 }
 function adjTooltip(inv) {
-  const n = Number(inv.adjustment || 0)
   const note = inv.adjustment_note || '(no reason given)'
-  const newTotal = (inv.total_earnings || 0) + n
-  return `Admin adjustment: ${formatAdj(n)} (${note})\nNew total: $${fmtMoney(newTotal)}`
+  return `Computed: $${fmtMoney(inv.total_earnings)}\nAdmin adjustment: ${formatAdj(inv.adjustment)} (${note})\nTotal due: ${dueText(inv.total_due)}`
 }
 
 function openAdjust() {
@@ -701,6 +707,12 @@ function exportCsv() {
 function fmtMoney(n) {
   const num = Number(n || 0)
   return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+// A total due exactly as the server sent it (total_due, or a status card's
+// total: invoiceTotalDue() in server.js, total_earnings plus the admin
+// adjustment), or a dash when there is none. Never a figure worked out here.
+function dueText(v) {
+  return typeof v === 'number' ? '$' + fmtMoney(v) : '—'
 }
 // Both of these take a true instant — submitted_at / approved_at / paid_at /
 // adjusted_at / deleted_at are all written server-side as new Date().toISOString().
