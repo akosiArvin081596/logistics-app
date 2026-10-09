@@ -2,27 +2,39 @@
 /**
  * scripts/data-fix-sunday-pay-days.js, end to end on small file databases
  * under a temp directory (the production schema of the tables it reads and
- * writes, with a fictional driver):
+ * writes, with a fictional driver), through its command line and, where a
+ * command line cannot reach, its exported parts:
  *
- *   §1 the dry run opens the database read-only and writes nothing (file bytes
- *      and every table unchanged), and prints both lines with exact amounts;
+ *   §1 the dry run's handle is read-only (a write through it throws) and the
+ *      run writes nothing (file bytes and every table unchanged); it prints
+ *      both lines with exact amounts and the corrections already on record;
  *   §2 the apply writes exactly the two lines (the invoice adjustment, the
  *      payout adjustment and its history row) and two system audit rows, with
  *      the exact amounts; the closed month's rows do not move;
  *   §3 a second apply writes nothing and says the lines are already applied;
- *   §4 the two days are independent: each applies on its own, and the second
- *      combines with the first on the same targets (sum, appended note), its
- *      investor amount replayed after the first (so a rate whose half is not
- *      whole dollars splits 138 + 137, never 138 + 138);
- *   §5 a missing October home (no invoice yet, no payout row yet) is skipped
- *      with when to re-run, and nothing is written;
+ *   §4 the two days are independent and combine on the same targets; the
+ *      second day's investor amount is replayed after the first (138 + 137 at
+ *      $275 a day); tokens are grouped by owner as well as period;
+ *   §5 a missing October home is skipped with when to re-run;
  *   §6 a paid invoice, a paid payout and a closed October are refused;
- *   §7 an amount mismatch between the invoice and the ledger, a replay that
- *      does not reproduce the settlement, and an adjustment the script did not
- *      write are skipped;
- *   §8 refusals: an unlisted day, an apply without (or with the wrong)
- *      --approval, an unknown option, a database outside the temp directory,
- *      a source month that is not closed.
+ *   §7 uncertain amounts are skipped: an invoice/ledger mismatch, a replay that
+ *      does not reproduce the settlement (and the dry run does not call it
+ *      exact), an adjustment the script did not write;
+ *   §8 a day already corrected by hand (an adjustment on the source invoice or
+ *      on the closed month's payout row), a rejected or deleted source
+ *      invoice, a Settlement adjustment among the frozen items, a ledger not
+ *      frozen by the close: nothing is written;
+ *   §9 the settlement replay: a loss carried in reproduces and posts; a month
+ *      that absorbed its whole share, a loss month and a changed loss carried
+ *      past the month are skipped; a lease month posts nothing;
+ *   §10 the route's limits: a Total Due below $0 (the claw-back is not moved to
+ *      another invoice), the $10,000 cap, never inverted, the note length;
+ *   §11 all or nothing: a failure on the second write rolls back the first and
+ *      its audit row; closed-month triggers that cannot be installed refuse the
+ *      run before any write;
+ *   §12 refusals: an unapproved case (even with its --approval), an unlisted
+ *      day, a missing or wrong --approval, an unknown option, a database
+ *      outside the temp directory, a source month that is not closed.
  *
  * Pure: a temp directory, child processes of the script itself, no server, no
  * network. Run: node scripts/test-data-fix-sunday-pay-days.js  # exits 1 on failure
@@ -48,6 +60,8 @@ function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }
 
 let Database;
 try { Database = require("better-sqlite3"); } catch (e) { die(`better-sqlite3 did not load (${e.message}); run npm ci under the .nvmrc Node`); }
+const fix = require(SCRIPT);
+const financialsCalc = require("../lib/financials-calc");
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "sunday-fix-test-"));
 process.on("exit", () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
@@ -76,11 +90,21 @@ function renderData(totals, loads) {
 	return JSON.stringify({ driverName: "Pat Sample", totalDue: totals.reduce((a, b) => a + b, 0), days, adjustment: 0, adjustmentNote: "", __templateName: "service_invoice" });
 }
 
-// opts: rate (the daily rate), october ("row" | null), w40 (status | null),
-// lockOctober, ledgerSundayCents (the 9/27 item), shareSkew (added to the
-// settled monthShare), septemberLocked, w40Adjustment.
+const auditRow = (db, details) => db.prepare(
+	"INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('2026-10-10T12:00:00.000Z', 0, ?, 'system', 'adjust_invoice', 'invoice', '640', ?)"
+).run(ACTOR, details);
+
 function buildFixture(name, opts = {}) {
-	const o = { rate: 300, october: "row", w40: "Submitted", lockOctober: false, ledgerSundayCents: null, shareSkew: 0, septemberLocked: true, w40Adjustment: null, octoberStatus: "owed", ...opts };
+	const o = {
+		rate: 300, extraRevenueCents: 0, extraFixedCents: 0,
+		october: true, octoberStatus: "owed", octoberAmount: 4321, octoberAdjustment: null,
+		w40: "Submitted", w40Total: null, w40Adjustment: null, w41: false,
+		lockOctober: false, ledgerSundayCents: null, shareSkew: 0, septemberLocked: true,
+		w39Adjustment: 0, w39Status: "Submitted", w39Deleted: false, septAdjustment: 0,
+		settlementAdj: null, freezeSource: "close", carriedIn: 0, lease: false,
+		failPayoutUpdate: false, payoutsAsView: false, ownLines: [],
+		...opts,
+	};
 	const dir = fs.mkdtempSync(path.join(TMP, `${name}-`));
 	const file = path.join(dir, "app.db");
 	const db = new Database(file);
@@ -95,50 +119,74 @@ function buildFixture(name, opts = {}) {
 
 	// The frozen September ledger for owner 5.
 	const items = [
-		["revenue", "2026-09-14", 1200000, "567844619"],
-		["revenue", "2026-09-28", 345679, "569820951"],
-		["driver_pay", "2026-09-13", rc, "567484733"],
-		["driver_pay", "2026-09-14", rc, "567844619"],
-		["driver_pay", "2026-09-27", o.ledgerSundayCents == null ? rc : o.ledgerSundayCents, "569820951"],
-		["driver_pay", "2026-09-28", rc, "569820951"],
-		["fixed", "", 304333, ""],
-		["trip", "2026-09-20", 100125, "567850506"],
+		{ kind: "revenue", day: "2026-09-14", cents: 1200000 + o.extraRevenueCents, load: "567844619" },
+		{ kind: "revenue", day: "2026-09-28", cents: 345679, load: "569820951" },
+		{ kind: "driver_pay", day: "2026-09-13", cents: rc, load: "567484733" },
+		{ kind: "driver_pay", day: "2026-09-14", cents: rc, load: "567844619" },
+		{ kind: "driver_pay", day: "2026-09-27", cents: o.ledgerSundayCents == null ? rc : o.ledgerSundayCents, load: "569820951" },
+		{ kind: "driver_pay", day: "2026-09-28", cents: rc, load: "569820951" },
+		{ kind: "fixed", day: "", cents: 304333 + o.extraFixedCents, load: "" },
+		{ kind: "trip", day: "2026-09-20", cents: 100125, load: "567850506" },
 	];
-	const ins = db.prepare("INSERT INTO financials_ledger_items (period, owner_id, kind, day, cents, load_id, driver, truck, pay_type, freeze_id, frozen_at) VALUES ('2026-09', 5, ?, ?, ?, ?, ?, ?, ?, ?, '2026-10-08T05:00:25.792Z')");
-	for (const [kind, day, cents, load] of items) {
-		ins.run(kind, day, cents, load, kind === "fixed" ? "" : DRIVER, "Logisx-#91", kind === "driver_pay" ? "fixed" : "", FREEZE);
+	if (o.settlementAdj) items.push({ kind: "settlement_adjustment", adjusts: o.settlementAdj.adjusts, day: "", cents: o.settlementAdj.cents, load: "" });
+	const ins = db.prepare("INSERT INTO financials_ledger_items (period, owner_id, kind, adjusts, day, cents, load_id, driver, truck, pay_type, freeze_id, frozen_at) VALUES ('2026-09', 5, ?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-10-08T05:00:25.792Z')");
+	for (const it of items) {
+		const named = it.kind !== "fixed" && it.kind !== "settlement_adjustment";
+		ins.run(it.kind, it.adjusts || "", it.day, it.cents, it.load, named ? DRIVER : "", "Logisx-#91", it.kind === "driver_pay" ? "fixed" : "", FREEZE);
 	}
-	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, item_count) VALUES (?, '2026-09', 'close', '2026-10-08T05:00:25.792Z', ?)").run(FREEZE, items.length);
-	const sum = (k) => items.filter((i) => i[0] === k).reduce((s, i) => s + i[2], 0) / 100;
-	const fig = { revenue: sum("revenue"), driverPay: sum("driver_pay"), fixedCosts: sum("fixed"), tripExpenses: sum("trip"), maintFundCost: 0, complianceCost: 0 };
-	fig.netProfit = fig.revenue - fig.driverPay - fig.fixedCosts - fig.tripExpenses;
-	const share = Math.round(fig.netProfit * 0.5) + o.shareSkew;
+	db.prepare("INSERT INTO financials_ledger_freezes (freeze_id, period, source, frozen_at, item_count) VALUES (?, '2026-09', ?, '2026-10-08T05:00:25.792Z', ?)").run(FREEZE, o.freezeSource, items.length);
+	const fig = financialsCalc.monthFiguresFromItems(items.map((i) => ({ ...i, month: "2026-09" })))["2026-09"];
+	let breakdown, amount;
+	if (o.lease) {
+		amount = 3000;
+		breakdown = { ...fig, splitPct: null, monthShare: 3000, payoutBasis: { type: "lease", leaseAmount: 3000, paidAmount: 3000, coveredDays: 30, daysInMonth: 30, reason: null } };
+	} else {
+		const share = Math.round(fig.netProfit * 0.5) + o.shareSkew;
+		const carried = share > 0 ? o.carriedIn : 0;
+		amount = share > 0 ? share - carried : 0;
+		breakdown = { ...fig, splitPct: 50, monthShare: share, lossCarriedIn: carried, lossDeferred: share < 0 ? -share : 0 };
+	}
 	db.prepare(
-		`INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, finalized_at, finalized_amount, finalized_breakdown)
-		 VALUES (27, 5, '2026-09', ?, '2026-10-30', 'owed', '2026-10-08T05:00:25.792Z', ?, ?)`
-	).run(share, share, JSON.stringify({ ...fig, splitPct: 50, monthShare: share, lossCarriedIn: 0, lossDeferred: 0 }));
+		`INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, finalized_at, finalized_amount, finalized_breakdown, adjustment)
+		 VALUES (27, 5, '2026-09', ?, '2026-10-30', 'owed', '2026-10-08T05:00:25.792Z', ?, ?, ?)`
+	).run(amount, amount, JSON.stringify(breakdown), o.septAdjustment);
 	if (o.october) {
-		db.prepare("INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status) VALUES (31, 5, '2026-10', 4321, '2026-11-27', ?)").run(o.octoberStatus);
+		const adj = o.octoberAdjustment;
+		db.prepare("INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, adjustment, adjustment_note, adjusted_by) VALUES (31, 5, '2026-10', ?, '2026-11-27', ?, ?, ?, ?)")
+			.run(o.octoberAmount, o.octoberStatus, adj ? adj.amount : 0, adj ? adj.note : "", adj ? ACTOR : "");
 	}
 
 	const insInv = db.prepare(
-		`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, load_ids, render_data, paid_at, adjustment, adjustment_note, adjusted_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, load_ids, render_data, paid_at, adjustment, adjustment_note, adjusted_by, deleted_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	);
 	const sixDays = [0, r, r, r, r, r, r];
 	insInv.run(537, "INV-SK-2026W37-01", DRIVER, "2026-09-12", "2026-09-18", 6, r, 6 * r, "Submitted",
 		JSON.stringify(["#540935268", "567484733", "567844619", "568073441", "567850506"]),
-		renderData(sixDays, ["", "567844619", "567844619", "567844619", "568073441, 567850506", "568073441, 567850506", "567850506"]), "", 0, "", "");
-	insInv.run(608, "INV-SK-2026W39-01", DRIVER, "2026-09-26", "2026-10-02", 6, r, 6 * r, "Submitted",
+		renderData(sixDays, ["", "567844619", "567844619", "567844619", "568073441, 567850506", "568073441, 567850506", "567850506"]), "", 0, "", "", "");
+	insInv.run(608, "INV-SK-2026W39-01", DRIVER, "2026-09-26", "2026-10-02", 6, r, 6 * r, o.w39Status,
 		JSON.stringify(["569246552", "569820951", "569139441", "570008279"]),
-		renderData(sixDays, ["", "569820951", "569820951, 569139441", "569820951, 569139441, 570008279", "570008279", "570008279", "570008279"]), "", 0, "", "");
+		renderData(sixDays, ["", "569820951", "569820951, 569139441", "569820951, 569139441, 570008279", "570008279", "570008279", "570008279"]), "",
+		o.w39Adjustment, o.w39Adjustment ? "late deduction" : "", o.w39Adjustment ? "super_admin" : "", o.w39Deleted ? "2026-10-05T10:00:00.000Z" : "");
 	if (o.w40) {
 		const adj = o.w40Adjustment;
-		insInv.run(640, "INV-SK-2026W40-01", DRIVER, "2026-10-03", "2026-10-09", 5, r, 5 * r, o.w40,
+		const total = o.w40Total == null ? 5 * r : o.w40Total;
+		insInv.run(640, "INV-SK-2026W40-01", DRIVER, "2026-10-03", "2026-10-09", 5, r, total, o.w40,
 			JSON.stringify(["570351713"]), renderData([0, 0, r, r, r, r, r], ["", "", "570351713", "570351713", "570351713", "570351713", "570351713"]),
-			o.w40 === "Paid" ? "2026-10-12T15:00:00.000Z" : "", adj ? adj.amount : 0, adj ? adj.note : "", adj ? "super_admin" : "");
+			o.w40 === "Paid" ? "2026-10-12T15:00:00.000Z" : "", adj ? adj.amount : 0, adj ? adj.note : "", adj ? (adj.by || "super_admin") : "", "");
 	}
+	if (o.w41) {
+		insInv.run(650, "INV-SK-2026W41-01", DRIVER, "2026-10-10", "2026-10-16", 5, r, 5 * r, "Submitted",
+			JSON.stringify(["570400000"]), renderData([0, 0, r, r, r, r, r], ["", "", "570400000", "570400000", "570400000", "570400000", "570400000"]), "", 0, "", "", "");
+	}
+	for (const details of o.ownLines) auditRow(db, details);
 	db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('2026-09-28T19:59:42.061Z', 1, 'super_admin', 'Super Admin', 'dispatch_load', 'load', '569820951', 'Assigned driver Pat Sample to load 569820951')").run();
+	if (o.failPayoutUpdate) {
+		db.exec("CREATE TRIGGER test_fail_payout_update BEFORE UPDATE ON investor_payouts BEGIN SELECT RAISE(ABORT, 'forced failure on the second write'); END;");
+	}
+	if (o.payoutsAsView) {
+		db.exec("ALTER TABLE investor_payouts RENAME TO investor_payouts_data; CREATE VIEW investor_payouts AS SELECT * FROM investor_payouts_data;");
+	}
 	db.close();
 	return file;
 }
@@ -158,6 +206,7 @@ function tableDump(file) {
 }
 const hashOf = (x) => crypto.createHash("sha256").update(typeof x === "string" || Buffer.isBuffer(x) ? x : JSON.stringify(x)).digest("hex");
 const fileHash = (file) => hashOf(fs.readFileSync(file));
+const tablesHash = (file) => hashOf(tableDump(file));
 function rowOf(file, sql, ...params) {
 	const db = new Database(file, { readonly: true });
 	const row = db.prepare(sql).get(...params);
@@ -176,31 +225,54 @@ const septemberRows = (file) => hashOf({
 	freezes: rowsOf(file, "SELECT * FROM financials_ledger_freezes"),
 	invoices: rowsOf(file, "SELECT * FROM invoices WHERE id IN (537, 608)"),
 });
+const invAdj = (file, id = 640) => rowOf(file, "SELECT adjustment FROM invoices WHERE id = ?", id).adjustment;
+const octAdj = (file) => rowOf(file, "SELECT adjustment FROM investor_payouts WHERE id = 31").adjustment;
+
+// C2 is not approved, so its apply runs only through the module with an
+// approved copy of the case: the combination logic is pinned without any
+// command-line way to apply an unapproved case.
+const C2_APPROVED = { ...fix.CASES["2026-09-13"], approved: true };
+function applyModule(file, day, kase, approval) {
+	const db = fix.openDatabase(file, { dryRun: false });
+	try { return fix.applyCase(db, day, kase, approval); } finally { db.close(); }
+}
 
 const APPLY_27 = ["--day", "2026-09-27", "--approval", "C1"];
-const APPLY_13 = ["--day", "2026-09-13", "--approval", "C2"];
+const DRY_27 = ["--day", "2026-09-27", "--dry-run"];
+
+// A run that must write nothing: exit code, tables unchanged, and the output.
+function noWrite(file, args, expectCode = 0) {
+	const before = tablesHash(file);
+	const r = run([...args, `--db=${file}`]);
+	return { ...r, unchanged: tablesHash(file) === before && r.code === expectCode };
+}
 
 // ═══════════════════════════════════════════════════ §1 the dry run
-console.log("§1 the dry run writes nothing");
+console.log("§1 the dry run's handle is read-only and it writes nothing");
 {
 	const file = buildFixture("dry");
+	const h = fix.openDatabase(file, { dryRun: true });
+	let threw = "";
+	try { h.prepare("UPDATE invoices SET adjustment = 1 WHERE id = 640").run(); } catch (e) { threw = e.message; }
+	check(h.readonly === true && /readonly/i.test(threw), "the dry run's handle is read-only: a write through it throws", `${h.readonly} ${threw}`);
+	h.close();
 	const beforeFile = fileHash(file);
-	const beforeTables = hashOf(tableDump(file));
-	const r = run(["--day", "2026-09-27", "--dry-run", `--db=${file}`]);
+	const beforeTables = tablesHash(file);
+	const r = run([...DRY_27, `--db=${file}`]);
 	check(r.code === 0, "the dry run exits 0", r.err || r.out.slice(-400));
-	check(fileHash(file) === beforeFile && hashOf(tableDump(file)) === beforeTables, "the database file and every table are unchanged");
-	check(/Mode: DRY RUN/.test(r.out) && /Nothing was written\./.test(r.out), "it says it is a dry run and wrote nothing");
+	check(fileHash(file) === beforeFile && tablesHash(file) === beforeTables, "the database file and every table are unchanged");
+	check(/Mode: DRY RUN\. The database handle is read-only; nothing is written\./.test(r.out) && /Nothing was written\./.test(r.out), "it says its handle is read-only and it wrote nothing");
 	check(/Line 1 of 2: Pat Sample's driver pay, -\$300\.00/.test(r.out) && /Line 2 of 2: investor 5's payout, \+\$150\.00/.test(r.out),
 		"it prints both lines with their exact signed amounts", r.out.split("\n").filter((l) => /^Line/.test(l)).join(" | "));
-	check(/Before: adjustment \+\$0\.00, Total Due \+\$1,500\.00\. After: adjustment -\$300\.00, Total Due \+\$1,200\.00\./.test(r.out),
-		"it prints the invoice's before and after");
+	check(/Before: adjustment \+\$0\.00, Total Due \+\$1,500\.00\. After: adjustment -\$300\.00, Total Due \+\$1,200\.00\./.test(r.out), "it prints the invoice's before and after");
 	check(/Before: amount \+\$4,321\.00, adjustment \+\$0\.00, effective payout \+\$4,321\.00\. After: amount \+\$4,321\.00, adjustment \+\$150\.00, effective payout \+\$4,471\.00\./.test(r.out),
 		"it prints the payout row's before and after");
-	check(/x 0\.50 = \+\$5,106\.105, rounded to \+\$5,106\.00/.test(r.out) && /\+\$5,256\.00 - \+\$5,106\.00 = \+\$150\.00/.test(r.out),
+	check(/x 0\.50 = \+\$5,106\.105, rounded to \+\$5,106\.00/.test(r.out) && /That is the settled row exactly/.test(r.out) && /\+\$5,256\.00 - \+\$5,106\.00 = \+\$150\.00/.test(r.out),
 		"it shows the settlement arithmetic, with its rounding");
+	check(/Corrections already on record: INV-SK-2026W39-01 carries an adjustment of \+\$0\.00; September 2026's payout row 27 for investor 5 carries an adjustment of \+\$0\.00\./.test(r.out),
+		"it prints the adjustments already on the source invoice and the closed month's payout row");
 	check(/2 line\(s\) would be written/.test(r.out) && /--day 2026-09-27 --approval C1/.test(r.out), "it counts the lines and prints the apply command");
-	const again = run(["--day", "2026-09-27", "--dry-run", `--db=${file}`]);
-	check(again.out === r.out, "a second dry run prints the same plan");
+	check(run([...DRY_27, `--db=${file}`]).out === r.out, "a second dry run prints the same plan");
 }
 
 // ═══════════════════════════════════════════════════ §2 the apply, §3 a second apply
@@ -229,58 +301,67 @@ console.log("§2 the apply writes exactly the two lines; §3 a second apply is a
 		audits[0].details.includes("INV-SK-2026W40-01: adjustment 0.00 → -300.00") && audits[0].details.includes("approval C1") && audits[0].details.includes("[SPD-20260927 driver -300.00 INV-SK-2026W40-01]"),
 		"the invoice audit row: the route's action and shape, the approval and the reference", audits[0] && audits[0].details);
 	check(audits[1].action === "investor_payout_adjust" && audits[1].entity === "investor_payout" && audits[1].entity_id === "31" &&
-		audits[1].details.includes("owner 5 2026-10: adjustment 0.00 -> 150.00") && audits[1].details.includes("[SPD-20260927 investor +150.00 2026-10]"),
-		"the payout audit row: the route's action and shape and the reference", audits[1] && audits[1].details);
+		audits[1].details.includes("owner 5 2026-10: adjustment 0.00 -> 150.00") && audits[1].details.includes("[SPD-20260927 investor +150.00 5:2026-10]"),
+		"the payout audit row: the route's action and shape, and a reference keyed by owner and period", audits[1] && audits[1].details);
 	check(septemberRows(file) === sept, "September's payout row, its frozen ledger and its invoices did not move");
 	check(/2 line\(s\) written \(audit rows \d+, \d+\)/.test(r.out) && /Mode: APPLY/.test(r.out), "the apply reports what it wrote");
 
-	const before = hashOf(tableDump(file));
-	const again = run([...APPLY_27, `--db=${file}`]);
-	check(again.code === 0 && hashOf(tableDump(file)) === before, "a second apply writes nothing", again.err || again.out.slice(-300));
+	const again = noWrite(file, APPLY_27);
+	check(again.unchanged, "a second apply writes nothing", again.err || again.out.slice(-300));
 	check((again.out.match(/Already applied/g) || []).length === 2 && /2 already applied/.test(again.out) && /still carries it/.test(again.out),
 		"it says both lines are already applied and still in place");
 }
 
 // ═══════════════════════════════════════════════════ §4 independent days
-console.log("§4 9/13 and 9/27 are independent");
+console.log("§4 9/13 and 9/27 are independent, combine, and replay in order");
 {
 	const file = buildFixture("independent");
-	const r13 = run([...APPLY_13, `--db=${file}`]);
-	check(r13.code === 0, "9/13 applies on its own", r13.err || r13.out.slice(-300));
-	let inv = rowOf(file, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
-	let oct = rowOf(file, "SELECT adjustment, adjustment_note FROM investor_payouts WHERE id = 31");
-	check(inv.adjustment === -300 && /Ref SPD-20260913$/.test(inv.adjustment_note) && !/SPD-20260927/.test(inv.adjustment_note) && oct.adjustment === 150,
-		"9/13's lines carry only 9/13's reference", JSON.stringify({ inv, oct }));
-	check(/names load 567844619 and the frozen ledger's day names load 567484733/.test(r13.out), "the dry run explains 9/13's two load numbers");
-	const dry27 = run(["--day", "2026-09-27", "--dry-run", `--db=${file}`]);
-	check(/2 line\(s\) would be written/.test(dry27.out) && !/Already applied/.test(dry27.out), "9/27 is not marked applied by 9/13", dry27.out.slice(-300));
-	check(/already carries this script's own earlier line/.test(dry27.out) && /Already corrected by this script on the investor's side: 2026-09-13/.test(dry27.out),
-		"9/27 combines with 9/13's lines and replays after 9/13");
 	const r27 = run([...APPLY_27, `--db=${file}`]);
-	inv = rowOf(file, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
-	oct = rowOf(file, "SELECT adjustment, adjustment_note FROM investor_payouts WHERE id = 31");
-	check(r27.code === 0 && inv.adjustment === -600 && /Ref SPD-20260913 \| Sunday 9\/27\/2026 .* Ref SPD-20260927$/.test(inv.adjustment_note),
+	check(r27.code === 0 && invAdj(file) === -300 && octAdj(file) === 150, "9/27 applies on its own", r27.err || r27.out.slice(-300));
+	const ro = fix.openDatabase(file, { dryRun: true });
+	const dry13 = fix.buildPlan(ro, "2026-09-13", fix.CASES["2026-09-13"]);
+	ro.close();
+	check(dry13.lines.every((l) => l.status === "write") && !dry13.lines.some((l) => l.status === "applied"), "9/13 is not marked applied by 9/27");
+	const res = applyModule(file, "2026-09-13", C2_APPROVED, "C2");
+	const inv = rowOf(file, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
+	const oct = rowOf(file, "SELECT adjustment, adjustment_note FROM investor_payouts WHERE id = 31");
+	check(res.written.length === 2 && inv.adjustment === -600 && /Ref SPD-20260927 \| Sunday 9\/13\/2026 .* Ref SPD-20260913$/.test(inv.adjustment_note),
 		"the invoice sums both days and appends the note", JSON.stringify(inv));
-	check(oct.adjustment === 300 && /Ref SPD-20260913 \| Correction .* Ref SPD-20260927$/.test(oct.adjustment_note), "the payout sums both days", JSON.stringify(oct));
+	check(oct.adjustment === 300 && /Ref SPD-20260927 \| Correction .* Ref SPD-20260913$/.test(oct.adjustment_note), "the payout sums both days", JSON.stringify(oct));
 	check(rowsOf(file, "SELECT id FROM audit_trail WHERE username = ?", ACTOR).length === 4, "four audit rows, one per line per day");
+	const text = fix.render(res.plan, { dbFile: file, dryRun: false, readonlyHandle: false, written: res.written, applyCommand: "" });
+	check(/names load 567844619 and the frozen ledger's day names load 567484733/.test(text) && /Already corrected by this script on the investor's side: 2026-09-27/.test(text),
+		"9/13 explains its two load numbers and replays after 9/27");
+
+	const solo = buildFixture("solo-13");
+	applyModule(solo, "2026-09-13", C2_APPROVED, "C2");
+	const soloInv = rowOf(solo, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
+	check(soloInv.adjustment === -300 && /Ref SPD-20260913$/.test(soloInv.adjustment_note) && !/SPD-20260927/.test(soloInv.adjustment_note), "9/13 alone carries only its own reference");
+	const dry27 = run([...DRY_27, `--db=${solo}`]);
+	check(/2 line\(s\) would be written/.test(dry27.out) && /already carries this script's own earlier line/.test(dry27.out), "9/27 then combines with 9/13's lines", dry27.out.slice(-300));
 
 	// A rate whose half is not whole dollars: the second day replays after the first.
 	const odd = buildFixture("odd-rate", { rate: 275 });
-	const a = run([...APPLY_27, `--db=${odd}`]);
-	const first = rowOf(odd, "SELECT adjustment FROM investor_payouts WHERE id = 31").adjustment;
-	const b = run([...APPLY_13, `--db=${odd}`]);
-	const both = rowOf(odd, "SELECT adjustment FROM investor_payouts WHERE id = 31").adjustment;
-	check(a.code === 0 && b.code === 0 && first === 138 && both === 275, "at $275 a day: 9/27 +138, then 9/13 +137, together +275 (the joint replay)", JSON.stringify({ first, both }));
-	check(/Already corrected by this script on the investor's side: 2026-09-27/.test(b.out) && /= \+\$137\.00 for investor 5/.test(b.out), "the second day's arithmetic shows the replay after the first");
+	run([...APPLY_27, `--db=${odd}`]);
+	const first = octAdj(odd);
+	const second = applyModule(odd, "2026-09-13", C2_APPROVED, "C2");
+	check(first === 138 && octAdj(odd) === 275 && second.plan.lines[1].cents === 13700, "at $275 a day: 9/27 +138, then 9/13 +137, together +275 (the joint replay)", JSON.stringify({ first, both: octAdj(odd) }));
+
+	// Tokens are grouped by owner and period: another owner's lines are not this owner's.
+	const other = buildFixture("other-owner", { ownLines: [
+		"other owner [SPD-20260913 investor +150.00 41:2026-10]",
+		"other owner [SPD-20260927 investor +150.00 41:2026-10]",
+	] });
+	const dryOther = run([...DRY_27, `--db=${other}`]);
+	check(/2 line\(s\) would be written/.test(dryOther.out) && !/Already applied/.test(dryOther.out) && !/Already corrected by this script/.test(dryOther.out),
+		"another owner's lines for the same period are neither applied nor prior here", dryOther.out.slice(-300));
 }
 
 // ═══════════════════════════════════════════════════ §5 a missing October home
 console.log("§5 a missing October home is skipped");
 {
-	const file = buildFixture("no-home", { w40: null, october: null });
-	const before = hashOf(tableDump(file));
-	const r = run([...APPLY_27, `--db=${file}`]);
-	check(r.code === 0 && hashOf(tableDump(file)) === before, "the apply exits 0 and writes nothing", r.err || r.out.slice(-300));
+	const r = noWrite(buildFixture("no-home", { w40: null, october: false }), APPLY_27);
+	check(r.unchanged, "the apply exits 0 and writes nothing", r.err || r.out.slice(-300));
 	check(/Skipped: Pat Sample has no weekly invoice for a week inside October 2026 that is still Draft or Submitted\./.test(r.out) &&
 		/the first week inside October 2026 is 2026-10-03 to 2026-10-09/.test(r.out) && /re-run this command once that invoice exists/.test(r.out),
 		"the driver line says its home does not exist yet and when to re-run");
@@ -292,53 +373,148 @@ console.log("§5 a missing October home is skipped");
 // ═══════════════════════════════════════════════════ §6 closed or paid targets
 console.log("§6 a paid invoice, a paid payout and a closed October are refused");
 {
-	const paid = buildFixture("paid", { w40: "Paid", octoberStatus: "paid" });
-	const before = hashOf(tableDump(paid));
-	const r = run([...APPLY_27, `--db=${paid}`]);
-	check(r.code === 0 && hashOf(tableDump(paid)) === before, "nothing is written", r.err || r.out.slice(-300));
+	const r = noWrite(buildFixture("paid", { w40: "Paid", octoberStatus: "paid" }), APPLY_27);
+	check(r.unchanged, "nothing is written", r.err || r.out.slice(-300));
 	check(/passed over: INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Paid, paid 2026-10-12T15:00:00.000Z/.test(r.out), "the paid invoice is passed over, by name");
 	check(/payout row 31 \(October 2026\) is paid; the correction has to land before it is settled/.test(r.out), "the paid payout row is refused");
-
-	const closed = buildFixture("closed", { lockOctober: true });
-	const before2 = hashOf(tableDump(closed));
-	const r2 = run([...APPLY_27, `--db=${closed}`]);
-	check(r2.code === 0 && hashOf(tableDump(closed)) === before2, "a closed October: nothing is written", r2.err || r2.out.slice(-300));
-	check((r2.out.match(/October 2026 is closed, so/g) || []).length === 2, "both lines say October is closed", r2.out.slice(-600));
+	const r2 = noWrite(buildFixture("closed", { lockOctober: true }), APPLY_27);
+	check(r2.unchanged && (r2.out.match(/October 2026 is closed, so/g) || []).length === 2, "a closed October: both lines refused, nothing written", r2.out.slice(-600));
 }
 
 // ═══════════════════════════════════════════════════ §7 uncertain amounts
 console.log("§7 uncertain amounts are skipped");
 {
-	const mismatch = buildFixture("mismatch", { ledgerSundayCents: 25000 });
-	const before = hashOf(tableDump(mismatch));
-	const r = run([...APPLY_27, `--db=${mismatch}`]);
-	check(r.code === 0 && hashOf(tableDump(mismatch)) === before, "an invoice/ledger mismatch writes nothing", r.err || r.out.slice(-300));
-	check((r.out.match(/the amounts disagree: INV-SK-2026W39-01 bills the day at \+\$300\.00, the frozen ledger pays it \+\$250\.00\./g) || []).length === 2,
-		"both lines say the amounts disagree");
+	const r = noWrite(buildFixture("mismatch", { ledgerSundayCents: 25000 }), APPLY_27);
+	check(r.unchanged && (r.out.match(/the amounts disagree: INV-SK-2026W39-01 bills the day at \+\$300\.00, the frozen ledger pays it \+\$250\.00\./g) || []).length === 2,
+		"an invoice/ledger mismatch: both lines skipped, nothing written");
 
 	const skew = buildFixture("skew", { shareSkew: 1 });
-	const r2 = run([...APPLY_27, `--db=${skew}`]);
-	check(r2.code === 0 && rowOf(skew, "SELECT adjustment FROM investor_payouts WHERE id = 31").adjustment === 0 && /the replay does not reproduce September 2026 as settled/.test(r2.out),
-		"a replay that does not reproduce the settlement skips the investor line");
-	check(rowOf(skew, "SELECT adjustment FROM invoices WHERE id = 640").adjustment === -300, "the driver line still applies on its own");
+	const dry = run([...DRY_27, `--db=${skew}`]);
+	check(/the replay does not reproduce September 2026 as settled/.test(dry.out) && !/That is the settled row exactly/.test(dry.out),
+		"a replay that does not reproduce the settlement is skipped, and the dry run does not call it exact");
+	run([...APPLY_27, `--db=${skew}`]);
+	check(octAdj(skew) === 0 && invAdj(skew) === -300, "the investor line is skipped; the driver line still applies on its own");
 
 	const foreign = buildFixture("foreign", { w40Adjustment: { amount: 50, note: "fuel advance repaid" } });
 	const r3 = run([...APPLY_27, `--db=${foreign}`]);
 	const inv = rowOf(foreign, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
-	check(r3.code === 0 && inv.adjustment === 50 && inv.adjustment_note === "fuel advance repaid", "an adjustment the script did not write is left alone", JSON.stringify(inv));
-	check(/already has an adjustment of \+\$50\.00 that this script did not write/.test(r3.out) && rowOf(foreign, "SELECT adjustment FROM investor_payouts WHERE id = 31").adjustment === 150,
-		"the driver line says why; the investor line still applies");
+	check(r3.code === 0 && inv.adjustment === 50 && inv.adjustment_note === "fuel advance repaid" && /already has an adjustment of \+\$50\.00 that this script did not write/.test(r3.out),
+		"an adjustment the script did not write is left alone, and the reason is given", JSON.stringify(inv));
+	check(octAdj(foreign) === 150, "the investor line still applies");
 }
 
-// ═══════════════════════════════════════════════════ §8 refusals
-console.log("§8 refusals");
+// ═══════════════════════════════════════════════════ §8 already corrected, or not certain
+console.log("§8 a day corrected by hand, a rejected or deleted source, a Settlement adjustment, another freeze");
+{
+	const w39 = noWrite(buildFixture("w39-adjusted", { w39Adjustment: -300 }), APPLY_27);
+	check(w39.unchanged && (w39.out.match(/INV-SK-2026W39-01 already carries an adjustment of -\$300\.00 \(note: "late deduction", by super_admin\): the day may already have been corrected by hand\./g) || []).length === 2,
+		"the source invoice already adjusted: both lines skipped, nothing written", w39.out.slice(-500));
+	const w39dry = run([...DRY_27, `--db=${buildFixture("w39-adjusted-dry", { w39Adjustment: -300 })}`]);
+	check(/Corrections already on record: INV-SK-2026W39-01 carries an adjustment of -\$300\.00; September 2026's payout row 27 for investor 5 carries an adjustment of \+\$0\.00\./.test(w39dry.out),
+		"the dry run prints both values");
+	const sept = noWrite(buildFixture("sept-adjusted", { septAdjustment: 150 }), APPLY_27);
+	check(sept.unchanged && (sept.out.match(/September 2026's payout row 27 for investor 5 already carries an adjustment of \+\$150\.00/g) || []).length === 2,
+		"the closed month's payout row already adjusted: both lines skipped, nothing written", sept.out.slice(-500));
+	const rejected = noWrite(buildFixture("w39-rejected", { w39Status: "Rejected" }), APPLY_27);
+	check(rejected.unchanged && /INV-SK-2026W39-01 is Rejected, so the day may never have been paid on it\./.test(rejected.out), "a rejected source invoice: nothing written");
+	const deleted = noWrite(buildFixture("w39-deleted", { w39Deleted: true }), APPLY_27);
+	check(deleted.unchanged && /INV-SK-2026W39-01 is deleted \(2026-10-05T10:00:00\.000Z\)/.test(deleted.out), "a deleted source invoice: nothing written");
+
+	const settleAdj = buildFixture("settlement-adjustment", { settlementAdj: { adjusts: "driver_pay", cents: -30000 } });
+	const sa = run([...APPLY_27, `--db=${settleAdj}`]);
+	check(sa.code === 0 && octAdj(settleAdj) === 0 && /include 1 Settlement adjustment line\(s\) \(driver_pay -\$300\.00\), so the settled figures are not the line items/.test(sa.out),
+		"a Settlement adjustment among the frozen items: the investor line is skipped and says why", sa.out.slice(-600));
+	const oneTime = noWrite(buildFixture("one-time-freeze", { freezeSource: "one-time" }), APPLY_27);
+	check(oneTime.unchanged && /ledger was frozen by "one-time", not by the month's own close/.test(oneTime.out), "a ledger not frozen by the month's own close: nothing written");
+}
+
+// ═══════════════════════════════════════════════════ §9 the settlement replay
+console.log("§9 the settlement replay: carry, loss months, leases");
+{
+	const carry = buildFixture("carry-in", { carriedIn: 1000 });
+	const dry = run([...DRY_27, `--db=${carry}`]);
+	check(/loss carried in \+\$1,000\.00, deferred \+\$0\.00; payout \+\$4,106\.00\. That is the settled row exactly/.test(dry.out) && /\+\$4,256\.00 - \+\$4,106\.00 = \+\$150\.00/.test(dry.out),
+		"a loss carried in: the replay reproduces the settled payout and the difference", dry.out.slice(-900));
+	run([...APPLY_27, `--db=${carry}`]);
+	check(octAdj(carry) === 150, "and the apply posts it");
+
+	const whole = noWrite(buildFixture("whole-share", { carriedIn: 5106 }), DRY_27);
+	check(whole.unchanged && /absorbed \+\$5,106\.00 of earlier losses out of a share of \+\$5,106\.00; the loss carried into it is not known exactly/.test(whole.out),
+		"a month that absorbed its whole share is skipped");
+	const loss = noWrite(buildFixture("loss-month", { extraFixedCents: 2000000 }), DRY_27);
+	check(loss.unchanged && /settled a share of -\$4,894\.00; a loss month moves the loss carried into open months/.test(loss.out), "a loss month is skipped", loss.out.slice(-400));
+	const moved = fix.compareSettlements({ deficitOut: 0, payable: 0 }, { deficitOut: 40, payable: 0 }, "2026-09");
+	const same = fix.compareSettlements({ deficitOut: 0, payable: 5106 }, { deficitOut: 0, payable: 5256 }, "2026-09");
+	check(/changes the loss carried past September 2026 \(\+\$0\.00 to \+\$40\.00\)/.test(moved.problem || "") && moved.cents === undefined && same.cents === 15000 && !same.problem,
+		"a changed loss carried past the month is refused; an unchanged one gives the payout difference", JSON.stringify({ moved, same }));
+	const leaseFile = buildFixture("lease-month", { lease: true });
+	const lr = run([...APPLY_27, `--db=${leaseFile}`]);
+	check(lr.code === 0 && /Nothing to post: September 2026 was settled as a lease, which pays as settled whatever its costs\./.test(lr.out) && octAdj(leaseFile) === 0 && invAdj(leaseFile) === -300,
+		"a lease month posts nothing to the investor; the driver line still applies", lr.out.slice(-400));
+}
+
+// ═══════════════════════════════════════════════════ §10 the route's limits
+console.log("§10 the route's limits");
+{
+	const neg = buildFixture("negative-total", { w40Total: 200, w41: true });
+	const r = run([...APPLY_27, `--db=${neg}`]);
+	check(r.code === 0 && invAdj(neg) === 0 && invAdj(neg, 650) === 0 &&
+		/would take INV-SK-2026W40-01's Total Due from \+\$200\.00 to -\$100\.00, below \$0\. The claw-back is not moved to another invoice\./.test(r.out),
+		"a Total Due below $0 is skipped, and the claw-back is not moved to the next invoice", r.out.slice(-500));
+	check(octAdj(neg) === 150, "the investor line still applies");
+
+	const cap = noWrite(buildFixture("cap", { rate: 20100, extraRevenueCents: 10000000 }), APPLY_27);
+	check(cap.unchanged && /the adjustment would be -\$20,100\.00, beyond the route's \$10,000 cap/.test(cap.out) && /the adjustment would be \+\$10,050\.00, which the route would not take/.test(cap.out),
+		"amounts beyond the $10,000 cap are skipped on both lines", cap.out.slice(-600));
+	const invert = buildFixture("invert", { octoberAmount: -500 });
+	const ir = run([...APPLY_27, `--db=${invert}`]);
+	check(ir.code === 0 && octAdj(invert) === 0 && /\+\$150\.00 would take the -\$500\.00 payout below \$0, which the route refuses/.test(ir.out),
+		"never inverted: the payout row is not written, and the reason is given", ir.out.slice(-400));
+	const longNote = buildFixture("note-length", {
+		w40Adjustment: { amount: -300, note: `${"x".repeat(450)} Ref SPD-20260913`, by: ACTOR },
+		octoberAdjustment: { amount: 150, note: `${"y".repeat(450)} Ref SPD-20260913` },
+		ownLines: [
+			"seeded [SPD-20260913 driver -300.00 INV-SK-2026W40-01]",
+			"seeded [SPD-20260913 investor +150.00 5:2026-10]",
+		],
+	});
+	const nl = noWrite(longNote, APPLY_27);
+	check(nl.unchanged && (nl.out.match(/the combined note would be \d+ characters, beyond the route's 500/g) || []).length === 2,
+		"a combined note over 500 characters is skipped on both lines", nl.out.slice(-600));
+}
+
+// ═══════════════════════════════════════════════════ §11 all or nothing
+console.log("§11 all or nothing");
+{
+	const failing = buildFixture("rollback", { failPayoutUpdate: true });
+	const before = tablesHash(failing);
+	const r = run([...APPLY_27, `--db=${failing}`]);
+	check(r.code === 1 && /forced failure on the second write\. Nothing was written\./.test(r.err), "a failure on the second write exits 1", `${r.code} ${r.err}`);
+	check(tablesHash(failing) === before && invAdj(failing) === 0 && rowsOf(failing, "SELECT id FROM audit_trail WHERE username = ?", ACTOR).length === 0,
+		"the first write and its audit row are rolled back: nothing was written");
+	const view = buildFixture("no-triggers", { payoutsAsView: true });
+	const v = noWrite(view, APPLY_27, 2);
+	check(v.unchanged && /REFUSED: the closed-month triggers could not be installed on this connection/.test(v.err) && invAdj(view) === 0,
+		"closed-month triggers that cannot be installed: refused before any write", `${v.code} ${v.err}`);
+}
+
+// ═══════════════════════════════════════════════════ §12 refusals
+console.log("§12 refusals");
 {
 	const file = buildFixture("refusals");
-	const before = hashOf(tableDump(file));
+	const before = tablesHash(file);
+	const c2 = run(["--day", "2026-09-13", "--approval", "C2", `--db=${file}`]);
+	check(c2.code === 2 && /2026-09-13 is not approved \(decision C2, not approved/.test(c2.err), "an unapproved case is refused even with its --approval", `${c2.code} ${c2.err}`);
+	let threw = null;
+	try { applyModule(file, "2026-09-13", fix.CASES["2026-09-13"], "C2"); } catch (e) { threw = e; }
+	check(threw instanceof fix.Refusal && /not approved/.test(threw.message), "applyCase refuses an unapproved case too");
+	const c2dry = run(["--day", "2026-09-13", "--dry-run", `--db=${file}`]);
+	check(c2dry.code === 0 && /2 line\(s\) would be written/.test(c2dry.out) && /This case is not approved, so it has no apply command/.test(c2dry.out) && !/Apply command:/.test(c2dry.out),
+		"an unapproved case still dry-runs, with no apply command");
 	const cases = [
 		[["--day", "2026-09-20", "--dry-run", `--db=${file}`], /not a listed case/, "an unlisted day"],
 		[["--day", "2026-09-27", `--db=${file}`], /needs --approval C1/, "an apply without --approval"],
-		[["--day", "2026-09-13", "--approval", "C1", `--db=${file}`], /needs --approval C2/, "an apply with another case's approval"],
+		[["--day", "2026-09-27", "--approval", "C2", `--db=${file}`], /needs --approval C1/, "an apply with another case's approval"],
 		[["--day", "2026-09-27", "--dryrun", `--db=${file}`], /unknown option --dryrun/, "a mistyped --dry-run"],
 		[["--day", "2026-09-27", "--dry-run=yes", `--db=${file}`], /takes no value/, "--dry-run with a value"],
 		[["--day", "2026-09-27", "--dry-run", `--db=${path.join(ROOT, "scripts", "fixtures", "app.db")}`], /opens its own app directory's database/, "a database outside the app directory and the temp directory"],
@@ -347,12 +523,9 @@ console.log("§8 refusals");
 		const r = run(args);
 		check(r.code === 2 && re.test(r.err), `refused: ${label}`, `${r.code} ${r.err}`);
 	}
-	check(hashOf(tableDump(file)) === before, "no refusal wrote anything");
-
-	const open = buildFixture("open-september", { septemberLocked: false });
-	const before2 = hashOf(tableDump(open));
-	const r = run([...APPLY_27, `--db=${open}`]);
-	check(r.code === 2 && /REFUSED: September 2026 is not closed/.test(r.out) && hashOf(tableDump(open)) === before2, "a September that is not closed is refused, nothing written", r.out.slice(-300));
+	check(tablesHash(file) === before, "no refusal wrote anything");
+	const open = noWrite(buildFixture("open-september", { septemberLocked: false }), APPLY_27, 2);
+	check(open.unchanged && /REFUSED: September 2026 is not closed/.test(open.out), "a September that is not closed is refused, nothing written", open.out.slice(-300));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

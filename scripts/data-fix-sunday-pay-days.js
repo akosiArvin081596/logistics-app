@@ -25,18 +25,26 @@
 //     lib/investor-payout-basis.js (settleInvestorMonths(), its rounding and its
 //     loss carry-forward) from the frozen line items with that one driver-pay day
 //     removed, minus the payout recomputed with it. The replay must first
-//     reproduce the settled row exactly.
-// Anything uncertain is skipped and said: amounts that disagree, a replay that
-// does not reproduce the settlement, a missing or closed target, a target that
-// already carries an adjustment this script did not write, a settled target.
-// A line whose home does not exist yet is skipped with when to re-run; this
-// script never creates an invoice or a payout row.
+//     reproduce the settled row exactly, from items the month's own close froze
+//     with no Settlement adjustment among them.
+// Anything uncertain is skipped and said: amounts that disagree, a source
+// invoice or settled payout that already carries an adjustment (the day may
+// have been corrected by hand), a replay that does not reproduce the
+// settlement, a missing or closed target, a target that already carries an
+// adjustment this script did not write, a settled target, a Total Due that
+// would go below $0. A line whose home does not exist yet is skipped with when
+// to re-run; this script never creates an invoice or a payout row.
+//
+// Only an approved case applies: each case says whether the owner approved it,
+// and changing that is a reviewed change to this file. An unapproved case runs
+// its dry run only. Applying also needs --approval naming the case's decision.
 //
 // Idempotent: each line carries its reference (for example "Ref SPD-20260927")
 // in its adjustment note and a token in its audit row; a line already applied
 // is reported and never written again. All writes of one run are one SQLite
 // transaction. The closed-month triggers of server.js are installed on this
-// script's connection as a floor under its own checks.
+// script's connection as a floor under its own checks; if they cannot be
+// installed, nothing is written.
 //
 // It reads and writes SQLite only: no Google Sheets, no network, no .env. The
 // invoice PDF is not re-rendered (that needs the server's renderer); the output
@@ -53,6 +61,9 @@
 //                app directory's own or a copy under the temp directory.
 // Exit codes: 0 done (written or skipped, as printed), 1 error (nothing
 // written), 2 refused (nothing written).
+//
+// Required as a module (by its test runner) it runs nothing and exports its
+// parts.
 
 "use strict";
 
@@ -76,15 +87,19 @@ const FIGURE_LABELS = [
 	["revenue", "revenue"], ["driverPay", "driver pay"], ["fixedCosts", "fixed costs"],
 	["tripExpenses", "trip expenses"], ["maintFundCost", "maintenance fund"], ["complianceCost", "compliance"],
 ];
+// A line's token in its audit row. The target is the invoice number (driver)
+// or "<owner id>:<period>" (investor).
 const TOKEN_RE = /\[(SPD-\d{8}) (driver|investor) ([+-]\d+\.\d{2}) ([^\]\s]+)\]/g;
 
 // The listed, explained cases. The driver is not named here (this repository is
 // public): it is read from the source invoice, and the ledger day must be the
-// same driver's.
+// same driver's. `approved` is the owner's decision; only an approved case
+// applies, and marking one approved is a reviewed change to this file.
 const CASES = Object.freeze({
 	"2026-09-27": Object.freeze({
 		ref: "SPD-20260927",
 		approval: "C1",
+		approved: true,
 		approvalStatus: "decision C1, approved by the owner",
 		sourceMonth: "2026-09",
 		targetMonth: "2026-10",
@@ -100,7 +115,8 @@ const CASES = Object.freeze({
 	"2026-09-13": Object.freeze({
 		ref: "SPD-20260913",
 		approval: "C2",
-		approvalStatus: "decision C2, not approved as of 2026-10-09: apply it only once the owner has approved it",
+		approved: false,
+		approvalStatus: "decision C2, not approved as of 2026-10-09: dry run only. Applying it needs a reviewed change to this script that marks C2 approved",
 		sourceMonth: "2026-09",
 		targetMonth: "2026-10",
 		sourceInvoice: "INV-SK-2026W37-01",
@@ -113,6 +129,9 @@ const CASES = Object.freeze({
 		loadsDiffer: "The invoice's Sunday line names load 567844619 and the frozen ledger's day names load 567484733. Both loads have a stored pickup of Sunday 9/13 and both are on the invoice: the invoice lists the loads it billed that day, the ledger names the first load in the sheet that claimed the day. It is one driver-day, paid once on each side.",
 	}),
 });
+
+// A refusal: nothing was written, exit 2.
+class Refusal extends Error {}
 
 // ---------------------------------------------------------------- helpers
 
@@ -184,11 +203,7 @@ function firstInvoiceWeek(month) {
 function graceEndsAt(month, days) {
 	return addDays(lastDayOf(month), Math.max(0, Number(days) || 0));
 }
-
-function refuse(msg) {
-	console.error(`REFUSED: ${msg}`);
-	process.exit(2);
-}
+const payoutTarget = (ownerId, period) => `${ownerId}:${period}`;
 
 // --day/--db/--approval take a value (--flag=value or --flag value); --dry-run
 // and --help take none. Anything else is refused, so a mistyped --dry-run can
@@ -265,23 +280,38 @@ function rateOnRecord(db, subject, key, day) {
 	}
 }
 
-// The day as billed on the source invoice, and as paid in the frozen ledger.
+// The day as billed on the source invoice, and as paid in the frozen ledger;
+// and whether either side already carries a correction.
 function readEvidence(db, day, kase) {
 	const ev = { problems: [], notes: [] };
 	const weekday = weekdayOf(day);
 	if (weekday !== "Sunday") ev.problems.push(`${day} is a ${weekday}, not a Sunday.`);
 
+	// The closed month's payout row, read here so a correction already on it
+	// stops both lines.
+	ev.sourcePayout = db.prepare("SELECT id, amount, adjustment, adjustment_note, adjusted_by FROM investor_payouts WHERE owner_id = ? AND period = ?").get(kase.ownerId, kase.sourceMonth) || null;
+	if (ev.sourcePayout && toCents(ev.sourcePayout.adjustment) !== 0) {
+		ev.problems.push(`${monthLabel(kase.sourceMonth)}'s payout row ${ev.sourcePayout.id} for investor ${kase.ownerId} already carries an adjustment of ${usd(toCents(ev.sourcePayout.adjustment))}` +
+			` (note: ${JSON.stringify(ev.sourcePayout.adjustment_note || "")}, by ${ev.sourcePayout.adjusted_by || "unknown"}): the day may already have been corrected by hand.`);
+	}
+
 	const invoices = db.prepare(
-		`SELECT id, invoice_number, driver, week_start, week_end, status, paid_at, total_earnings, rate_per_load, adjustment, load_ids, render_data
-		   FROM invoices WHERE deleted_at = '' AND is_manual = 0 AND invoice_number = ?`
+		`SELECT id, invoice_number, driver, week_start, week_end, status, paid_at, total_earnings, rate_per_load, adjustment, adjustment_note, adjusted_by, load_ids, render_data, deleted_at
+		   FROM invoices WHERE is_manual = 0 AND invoice_number = ?`
 	).all(kase.sourceInvoice);
 	if (invoices.length !== 1) {
-		ev.problems.push(`expected one live weekly invoice ${kase.sourceInvoice}, found ${invoices.length}.`);
+		ev.problems.push(`expected one weekly invoice ${kase.sourceInvoice}, found ${invoices.length}.`);
 		return ev;
 	}
 	const inv = invoices[0];
 	ev.invoice = inv;
 	ev.driverKey = normalizeName(inv.driver);
+	if (String(inv.deleted_at || "").trim()) ev.problems.push(`${kase.sourceInvoice} is deleted (${inv.deleted_at}); what was billed for the day is not certain.`);
+	if (inv.status === "Rejected") ev.problems.push(`${kase.sourceInvoice} is Rejected, so the day may never have been paid on it.`);
+	if (toCents(inv.adjustment) !== 0) {
+		ev.problems.push(`${kase.sourceInvoice} already carries an adjustment of ${usd(toCents(inv.adjustment))}` +
+			` (note: ${JSON.stringify(inv.adjustment_note || "")}, by ${inv.adjusted_by || "unknown"}): the day may already have been corrected by hand.`);
+	}
 	if (!(inv.week_start <= day && day <= inv.week_end)) {
 		ev.problems.push(`${kase.sourceInvoice} bills ${inv.week_start} to ${inv.week_end}, which does not include ${day}.`);
 		return ev;
@@ -289,8 +319,8 @@ function readEvidence(db, day, kase) {
 	const sameWeek = db.prepare(
 		"SELECT id, invoice_number, driver FROM invoices WHERE deleted_at = '' AND is_manual = 0 AND week_start <= ? AND week_end >= ?"
 	).all(day, day).filter((r) => normalizeName(r.driver) === ev.driverKey);
-	if (sameWeek.length !== 1) {
-		ev.problems.push(`the driver has ${sameWeek.length} live weekly invoices covering ${day} (${sameWeek.map((r) => r.invoice_number).join(", ")}); expected only ${kase.sourceInvoice}.`);
+	if (sameWeek.length !== 1 || sameWeek[0].invoice_number !== kase.sourceInvoice) {
+		ev.problems.push(`the driver has ${sameWeek.length} live weekly invoices covering ${day} (${sameWeek.map((r) => r.invoice_number).join(", ") || "none"}); expected only ${kase.sourceInvoice}.`);
 	}
 	let render = null;
 	try { render = JSON.parse(inv.render_data || "null"); } catch { render = null; }
@@ -333,6 +363,13 @@ function readEvidence(db, day, kase) {
 		return ev;
 	}
 	ev.freeze = freezes[0];
+	// Only the month's own close freezes the items it settled from. Any other
+	// freeze (the one-time freeze of months closed before the ledger existed) was
+	// taken later from a recompute, so its items say nothing certain about what
+	// was paid.
+	if (ev.freeze.source !== "close") {
+		ev.problems.push(`${monthLabel(kase.sourceMonth)}'s ledger was frozen by "${ev.freeze.source}", not by the month's own close, so its items are a later recompute rather than what settled.`);
+	}
 	const items = db.prepare(
 		`SELECT id, owner_id, kind, day, cents, load_id, driver, truck, pay_type, freeze_id FROM financials_ledger_items
 		  WHERE period = ? AND freeze_id = ? AND kind = 'driver_pay' AND day = ?`
@@ -387,6 +424,16 @@ function settleMonth(items, month, splitFraction, deficitIn) {
 	};
 }
 
+// The investor line from the two settlements: the payout difference, or why it
+// cannot be posted. A change in the loss carried past the month would move
+// open months, which are not replayed here.
+function compareSettlements(base, next, month) {
+	if (base.deficitOut !== next.deficitOut) {
+		return { problem: `removing the day changes the loss carried past ${monthLabel(month)} (${usd(base.deficitOut * 100)} to ${usd(next.deficitOut * 100)}), which moves open months this script cannot replay.` };
+	}
+	return { cents: (next.payable - base.payable) * 100 };
+}
+
 // The investor line's amount: the settled payout recomputed without the day,
 // minus it recomputed with it (without any day this script already corrected).
 function replayInvestor(db, day, kase, ev, own) {
@@ -413,6 +460,16 @@ function replayInvestor(db, day, kase, ev, own) {
 	).all(kase.sourceMonth, kase.ownerId, ev.freeze.freeze_id);
 	out.itemCount = items.length;
 	if (!items.some((i) => i.id === ev.item.id)) { out.problems.push(`ledger item ${ev.item.id} is not among investor ${kase.ownerId}'s frozen items.`); return out; }
+	// A Settlement adjustment means the settled figures are not the line items:
+	// the items then "add up" to the settlement whether or not it counted this
+	// day, so removing the day could credit a day the settlement never paid.
+	const settlementAdjustments = items.filter((i) => i.kind === "settlement_adjustment");
+	if (settlementAdjustments.length) {
+		out.problems.push(`the frozen ${monthLabel(kase.sourceMonth)} items for investor ${kase.ownerId} include ${settlementAdjustments.length} Settlement adjustment line(s) (` +
+			settlementAdjustments.map((i) => `${i.adjusts || "unknown"} ${usd(i.cents)}`).join(", ") +
+			"), so the settled figures are not the line items and whether the settlement paid this day cannot be told from them.");
+		return out;
+	}
 
 	// The settled carry terms. The deficit carried into the month is known
 	// exactly only when the month absorbed less than its whole share.
@@ -435,16 +492,17 @@ function replayInvestor(db, day, kase, ev, own) {
 	out.asSettled = asSettled;
 	out.settledPayout = payableSettled;
 	if (mismatches.length) { out.problems.push(`the replay does not reproduce ${monthLabel(kase.sourceMonth)} as settled: ${mismatches.join("; ")}.`); return out; }
+	out.reproduced = true;
 
-	// Days this script already corrected on the investor's side come out of
+	// Days this script already corrected on this investor's side come out of
 	// the base too, so the corrections add up to the joint replay.
-	const priorRefs = [...new Set(own.filter((l) => l.kind === "investor" && l.ref !== kase.ref).map((l) => l.ref))];
+	const mine = own.filter((l) => l.kind === "investor" && l.ref !== kase.ref && l.target.startsWith(`${kase.ownerId}:`));
 	const prior = [];
-	for (const ref of priorRefs) {
+	for (const ref of [...new Set(mine.map((l) => l.ref))]) {
 		const pday = dayOfRef(ref);
 		const pk = CASES[pday];
 		const pItem = pk ? items.find((i) => i.kind === "driver_pay" && i.day === pday && normalizeName(i.driver) === ev.driverKey && String(i.load_id) === pk.ledgerLoad) : null;
-		if (!pItem) { out.problems.push(`this script already posted ${ref} on the investor's side, but its day is not one frozen item of this ledger.`); return out; }
+		if (!pItem) { out.problems.push(`this script already posted ${ref} on investor ${kase.ownerId}'s side, but its day is not one frozen item of this ledger.`); return out; }
 		prior.push({ ref, day: pday, item: pItem });
 	}
 	out.prior = prior;
@@ -453,11 +511,9 @@ function replayInvestor(db, day, kase, ev, own) {
 	const next = settleMonth(without([...prior.map((p) => p.item.id), ev.item.id]), kase.sourceMonth, splitFraction, deficitIn);
 	out.base = base;
 	out.next = next;
-	if (base.deficitOut !== next.deficitOut) {
-		out.problems.push(`removing the day changes the loss carried past ${monthLabel(kase.sourceMonth)} (${usd(base.deficitOut * 100)} to ${usd(next.deficitOut * 100)}), which moves open months this script cannot replay.`);
-		return out;
-	}
-	out.cents = (next.payable - base.payable) * 100;
+	const cmp = compareSettlements(base, next, kase.sourceMonth);
+	if (cmp.problem) { out.problems.push(cmp.problem); return out; }
+	out.cents = cmp.cents;
 	return out;
 }
 
@@ -488,6 +544,7 @@ function driverLine(db, day, kase, ev, own) {
 	const done = own.find((l) => l.kind === "driver" && l.ref === kase.ref);
 	if (done) {
 		const holder = db.prepare("SELECT id, invoice_number, adjustment, adjustment_note FROM invoices WHERE deleted_at = '' AND invoice_number = ?").get(done.target);
+		line.cents = done.cents;
 		line.status = "applied";
 		line.reasons.push(`Already applied: ${usd(done.cents)} on ${done.target} (audit row ${done.auditId}, ${done.timestamp}).` +
 			(holder && String(holder.adjustment_note || "").includes(`Ref ${kase.ref}`)
@@ -532,6 +589,11 @@ function driverLine(db, day, kase, ev, own) {
 	const newNote = combineNote(existing.combine ? home.adjustment_note : "", line.note);
 	const newAdj = line.before.adjustment + line.cents;
 	line.after = { adjustment: newAdj, note: newNote, totalDue: toCents(home.total_earnings) + newAdj };
+	if (line.after.totalDue < 0) {
+		line.status = "skip";
+		line.reasons.push(`Skipped: ${usd(line.cents)} would take ${home.invoice_number}'s Total Due from ${usd(line.before.totalDue)} to ${usd(line.after.totalDue)}, below $0. The claw-back is not moved to another invoice. Nothing is written for this line; post it by hand where the owner decides, or ask.`);
+		return line;
+	}
 	if (Math.abs(newAdj) > ADJUST_CAP_CENTS) {
 		line.status = "skip";
 		line.reasons.push(`Skipped: the adjustment would be ${usd(newAdj)}, beyond the route's $10,000 cap. Nothing is written for this line.`);
@@ -551,12 +613,14 @@ function driverLine(db, day, kase, ev, own) {
 
 function investorLine(db, day, kase, ev, own, ctx) {
 	const line = { kind: "investor", title: `investor ${kase.ownerId}'s payout`, reasons: [] };
-	const done = own.find((l) => l.kind === "investor" && l.ref === kase.ref);
+	const month = kase.targetMonth;
+	const targetKey = payoutTarget(kase.ownerId, month);
+	const done = own.find((l) => l.kind === "investor" && l.ref === kase.ref && l.target.startsWith(`${kase.ownerId}:`));
 	if (done) {
-		const holder = db.prepare("SELECT id, adjustment, adjustment_note FROM investor_payouts WHERE owner_id = ? AND period = ?").get(kase.ownerId, done.target);
+		const holder = db.prepare("SELECT id, adjustment, adjustment_note FROM investor_payouts WHERE owner_id = ? AND period = ?").get(kase.ownerId, done.target.slice(done.target.indexOf(":") + 1));
 		line.cents = done.cents;
 		line.status = "applied";
-		line.reasons.push(`Already applied: ${usd(done.cents)} on investor ${kase.ownerId}'s ${done.target} payout (audit row ${done.auditId}, ${done.timestamp}).` +
+		line.reasons.push(`Already applied: ${usd(done.cents)} on investor ${kase.ownerId}'s ${done.target.slice(done.target.indexOf(":") + 1)} payout (audit row ${done.auditId}, ${done.timestamp}).` +
 			(holder && String(holder.adjustment_note || "").includes(`Ref ${kase.ref}`)
 				? ` The row still carries it (adjustment ${usd(toCents(holder.adjustment))}).`
 				: " The row no longer carries its note: the line was changed after it was applied. Review it on the Payouts console; this script writes it only once."));
@@ -570,7 +634,6 @@ function investorLine(db, day, kase, ev, own, ctx) {
 		return line;
 	}
 	line.cents = replay.cents;
-	const month = kase.targetMonth;
 	line.note = `Correction to ${monthLabel(kase.sourceMonth)}: ${weekdayOf(day)} ${monthDay(day)} driver pay ($${plain(ev.dayCents)}, load ${kase.ledgerLoad}, truck ${kase.truck}) removed; your share ${signedDollars(line.cents)}. Ref ${kase.ref}`;
 	if (replay.leaseMonth || line.cents === 0) {
 		line.status = "nothing";
@@ -599,7 +662,7 @@ function investorLine(db, day, kase, ev, own, ctx) {
 		line.reasons.push(`Skipped: payout row ${row.id} (${monthLabel(month)}) is ${row.status}${row.finalized_at ? `, finalized ${row.finalized_at}` : ""}; the correction has to land before it is settled. Nothing is written for this line.`);
 		return line;
 	}
-	const existing = existingAdjustment(month, row.adjustment, row.adjustment_note, own, "investor");
+	const existing = existingAdjustment(targetKey, row.adjustment, row.adjustment_note, own, "investor");
 	if (!existing.ok) {
 		line.status = "skip";
 		line.reasons.push(`Skipped: payout row ${row.id} already has an adjustment of ${usd(toCents(row.adjustment))} that this script did not write (note: ${JSON.stringify(row.adjustment_note || "")}). The adjust route replaces an adjustment rather than adding to it, so writing this line would erase it. Nothing is written for this line; post ${usd(line.cents)} by hand on the Payouts console together with the existing adjustment, or ask.`);
@@ -706,7 +769,7 @@ function writePlan(db, plan, approval, nowIso) {
 				`Data fix ${kase.ref}, approval ${approval} (${kase.approvalStatus}): ${monthLabel(kase.sourceMonth)} settled at $${plain(rp.settledPayout * 100)} with ${weekdayOf(day)} ${day}'s $${plain(ev.dayCents)} driver pay ` +
 				`(ledger item ${ev.item.id}, load ${ev.item.load_id}); the same settlement without that day pays $${plain(rp.next.payable * 100)} against $${plain(rp.base.payable * 100)}, ` +
 				`so ${usd(line.cents)} is posted on ${monthLabel(kase.targetMonth)}. ${monthLabel(kase.sourceMonth)} stays as settled. ` +
-				`[${kase.ref} investor ${signed2(line.cents)} ${r.period}]`;
+				`[${kase.ref} investor ${signed2(line.cents)} ${payoutTarget(r.owner_id, r.period)}]`;
 			const a = audit.run(nowIso, ACTOR, "investor_payout_adjust", "investor_payout", String(r.id), details);
 			written.push({ line, table: "investor_payouts", id: r.id, auditId: Number(a.lastInsertRowid) });
 		}
@@ -731,16 +794,49 @@ function installClosedMonthTriggers(db) {
 	install(db);
 }
 
+// The handle a run uses: read-only for a dry run, and checked.
+function openDatabase(file, { dryRun }) {
+	const Database = require("better-sqlite3");
+	const db = new Database(file, { readonly: dryRun, fileMustExist: true });
+	if (dryRun && !db.readonly) {
+		db.close();
+		throw new Error("the dry run's database handle is not read-only");
+	}
+	db.pragma("busy_timeout = 10000");
+	return db;
+}
+
+// One apply: an approved case only, the closed-month triggers installed first,
+// every write in one IMMEDIATE transaction with the plan computed inside it.
+// Throws Refusal (nothing written) or an error (rolled back).
+function applyCase(db, day, kase, approval, { install = installClosedMonthTriggers, nowIso = new Date().toISOString() } = {}) {
+	if (!kase.approved) throw new Refusal(`${day} is not approved (${kase.approvalStatus}); only its dry run may run. Nothing was written.`);
+	if (approval !== kase.approval) throw new Refusal(`applying ${day} needs --approval ${kase.approval} (${kase.approvalStatus}). Nothing was written.`);
+	try {
+		install(db);
+	} catch (err) {
+		throw new Refusal(`the closed-month triggers could not be installed on this connection (${err.message}); nothing was written`);
+	}
+	const run = db.transaction(() => {
+		const plan = buildPlan(db, day, kase);
+		const written = plan.refused ? [] : writePlan(db, plan, approval, nowIso);
+		return { plan, written };
+	});
+	return run.immediate();
+}
+
 // ---------------------------------------------------------------- the report
 
-function render(plan, { dbFile, dryRun, written, applyCommand }) {
+function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand }) {
 	const { kase, day, ev } = plan;
 	const out = [];
 	const say = (s = "") => out.push(s);
 	say(`Data fix ${kase.ref}: ${weekdayOf(day)} ${day} was not a pay day`);
 	say(`Approval: ${kase.approvalStatus}.`);
 	say(`Database: ${dbFile}`);
-	say(dryRun ? "Mode: DRY RUN. The database is open read-only; nothing is written." : "Mode: APPLY. Every write of this run is one transaction.");
+	say(dryRun
+		? `Mode: DRY RUN. ${readonlyHandle ? "The database handle is read-only" : "The database handle is NOT read-only"}; nothing is written.`
+		: "Mode: APPLY. Every write of this run is one transaction.");
 	say();
 	say(`Why: ${kase.why}`);
 	if (plan.refused) {
@@ -760,10 +856,15 @@ function render(plan, { dbFile, dryRun, written, applyCommand }) {
 		}
 	}
 	if (ev.item) {
-		say(`- The frozen ${monthLabel(kase.sourceMonth)} ledger (freeze ${ev.freeze.freeze_id}) holds one driver-pay day for ${ev.driverName} on ${day}: item ${ev.item.id}, ${usd(ev.item.cents)}, ${ev.item.pay_type} pay, load ${ev.item.load_id}, truck ${ev.item.truck}, owner ${ev.item.owner_id}.`);
+		say(`- The frozen ${monthLabel(kase.sourceMonth)} ledger (freeze ${ev.freeze.freeze_id}, by the ${ev.freeze.source}) holds one driver-pay day for ${ev.driverName} on ${day}: item ${ev.item.id}, ${usd(ev.item.cents)}, ${ev.item.pay_type} pay, load ${ev.item.load_id}, truck ${ev.item.truck}, owner ${ev.item.owner_id}.`);
 	}
 	if (kase.loadsDiffer) say(`- ${kase.loadsDiffer}`);
 	if (!ev.problems.length) say(`- The two agree: the day was paid ${usd(ev.dayCents)}.`);
+	if (ev.invoice || ev.sourcePayout) {
+		const invAdj = ev.invoice ? `${kase.sourceInvoice} carries an adjustment of ${usd(toCents(ev.invoice.adjustment))}` : `${kase.sourceInvoice} was not found`;
+		const payAdj = ev.sourcePayout ? `${monthLabel(kase.sourceMonth)}'s payout row ${ev.sourcePayout.id} for investor ${kase.ownerId} carries an adjustment of ${usd(toCents(ev.sourcePayout.adjustment))}` : `investor ${kase.ownerId} has no ${monthLabel(kase.sourceMonth)} payout row`;
+		say(`- Corrections already on record: ${invAdj}; ${payAdj}. Either one non-zero would mean the day may already have been corrected by hand, and nothing would be written.`);
+	}
 	if (ev.rates) {
 		const r = (x) => (x ? `${usd(toCents(x.rate))} a day${x.seeded ? ` (recorded from ${String(x.effective_from).slice(0, 10)}, the rate in force when recording began)` : ` (from ${String(x.effective_from).slice(0, 10)})`}` : "not on record");
 		say(`- Rates on record: the driver ${r(ev.rates.driver)}; truck ${kase.truck} ${r(ev.rates.truck)}. For information; the line amounts come from the invoice and the ledger.`);
@@ -781,13 +882,16 @@ function render(plan, { dbFile, dryRun, written, applyCommand }) {
 			const figs = (f) => FIGURE_LABELS.map(([k, label]) => `${label} ${usd(toCents(f[k]))}`).join(", ");
 			const split = (s) => `split ${rp.splitPct}%: ${usd(toCents(s.figures.netProfit))} x ${(rp.splitPct / 100).toFixed(2)} = ${usd3(s.exactShare)}, rounded to ${usd(s.share * 100)}; loss carried in ${usd(s.carriedIn * 100)}, deferred ${usd(s.deferred * 100)}; payout ${usd(s.payable * 100)}`;
 			say(`- ${monthLabel(kase.sourceMonth)} as settled (payout row ${rp.row.id}, owner ${kase.ownerId}, from its ${rp.itemCount} frozen line items): ${figs(rp.asSettled.figures)}; net profit ${usd(toCents(rp.asSettled.figures.netProfit))}. ` +
-				`The payout function (lib/investor-payout-basis.js settleInvestorMonths()) gives ${split(rp.asSettled)}. That is the settled row exactly (amount ${usd(toCents(rp.row.amount))}, finalized ${usd(toCents(rp.row.finalized_amount))}).`);
+				`The payout function (lib/investor-payout-basis.js settleInvestorMonths()) gives ${split(rp.asSettled)}.` +
+				(rp.reproduced ? ` That is the settled row exactly (amount ${usd(toCents(rp.row.amount))}, finalized ${usd(toCents(rp.row.finalized_amount))}).` : ""));
 			if (rp.prior && rp.prior.length) {
 				say(`- Already corrected by this script on the investor's side: ${rp.prior.map((p) => `${p.day} (${p.ref}, item ${p.item.id})`).join(", ")}. Without ${rp.prior.length === 1 ? "that day" : "those days"}: net profit ${usd(toCents(rp.base.figures.netProfit))}; ${split(rp.base)}.`);
 			}
 			if (rp.next) {
 				say(`- Without ${weekdayOf(day)} ${day}${rp.prior && rp.prior.length ? " as well" : ""} (item ${ev.item.id}, driver pay ${usd(ev.item.cents)}): driver pay ${usd(toCents(rp.next.figures.driverPay))}, net profit ${usd(toCents(rp.next.figures.netProfit))}; ${split(rp.next)}.`);
-				say(`- Difference: ${usd(rp.next.payable * 100)} - ${usd(rp.base.payable * 100)} = ${usd((rp.next.payable - rp.base.payable) * 100)} for investor ${kase.ownerId}. The loss carried past ${monthLabel(kase.sourceMonth)} is ${usd(rp.next.deficitOut * 100)} either way, so no later month's carry-forward moves.`);
+				if (rp.cents !== undefined) {
+					say(`- Difference: ${usd(rp.next.payable * 100)} - ${usd(rp.base.payable * 100)} = ${usd((rp.next.payable - rp.base.payable) * 100)} for investor ${kase.ownerId}. The loss carried past ${monthLabel(kase.sourceMonth)} is ${usd(rp.next.deficitOut * 100)} either way, so no later month's carry-forward moves.`);
+				}
 			}
 			say(`- Home: investor ${kase.ownerId}'s ${monthLabel(kase.targetMonth)} payout row (the adjust route's column, investor_payouts.adjustment; effective payout = amount + adjustment, read by the Payouts console, the investor portal and the month's statement).`);
 		}
@@ -822,7 +926,9 @@ function render(plan, { dbFile, dryRun, written, applyCommand }) {
 	if (applied) parts.push(`${applied} already applied`);
 	if (plan.lines.some((l) => l.status === "nothing")) parts.push("1 with nothing to post");
 	say(`Result: ${parts.join(", ")}.${dryRun ? " Nothing was written." : ""}`);
-	if (dryRun || skipped) {
+	if (!kase.approved) {
+		say(`This case is not approved, so it has no apply command: ${kase.approvalStatus}.`);
+	} else if (dryRun || skipped) {
 		say(dryRun ? "Apply command:" : "Re-run command for the skipped line(s):");
 		say(`  ${applyCommand}`);
 	}
@@ -832,11 +938,15 @@ function render(plan, { dbFile, dryRun, written, applyCommand }) {
 // ---------------------------------------------------------------- main
 
 function main() {
+	const refuse = (msg) => {
+		console.error(`REFUSED: ${msg}`);
+		process.exit(2);
+	};
 	let args;
 	try { args = parseCli(process.argv.slice(2)); } catch (err) { refuse(err.message); }
 	if (args.help) {
 		console.log("Usage: node scripts/data-fix-sunday-pay-days.js --day <YYYY-MM-DD> (--dry-run | --approval <decision>) [--db=app.db]");
-		console.log(`Days: ${Object.entries(CASES).map(([d, k]) => `${d} (${k.approval})`).join(", ")}`);
+		console.log(`Days: ${Object.entries(CASES).map(([d, k]) => `${d} (${k.approval}, ${k.approved ? "approved" : "not approved"})`).join(", ")}`);
 		return;
 	}
 	const day = args.day;
@@ -844,6 +954,7 @@ function main() {
 	const kase = Object.prototype.hasOwnProperty.call(CASES, day) ? CASES[day] : null;
 	if (!kase) refuse(`--day ${day} is not a listed case; this script corrects only ${Object.keys(CASES).join(" and ")}`);
 	const dryRun = args["dry-run"] === true;
+	if (!dryRun && !kase.approved) refuse(`${day} is not approved (${kase.approvalStatus}); only its dry run may run. Nothing was written.`);
 	if (!dryRun && args.approval !== kase.approval) {
 		refuse(`applying ${day} needs --approval ${kase.approval} (${kase.approvalStatus}); without --dry-run this run would write`);
 	}
@@ -851,40 +962,34 @@ function main() {
 	try { ({ file: dbFile } = dbScope(args.db || path.join(ROOT, "app.db"), ROOT)); } catch (err) { refuse(err.message); }
 	if (!fs.existsSync(dbFile)) refuse(`no database at ${dbFile}`);
 
-	const Database = require("better-sqlite3");
-	const db = new Database(dbFile, { readonly: dryRun, fileMustExist: true });
-	if (dryRun && !db.readonly) throw new Error("the dry run's database handle is not read-only");
-	db.pragma("busy_timeout = 10000");
+	const db = openDatabase(dbFile, { dryRun });
+	const readonlyHandle = db.readonly;
 	const applyCommand = `cd ${ROOT} && ${process.execPath} scripts/data-fix-sunday-pay-days.js --day ${day} --approval ${kase.approval} --db=${dbFile}`;
-
 	let plan;
 	let written = [];
-	if (dryRun) {
-		plan = buildPlan(db, day, kase);
-	} else {
-		try {
-			installClosedMonthTriggers(db);
-		} catch (err) {
-			db.close();
-			console.error(`REFUSED: the closed-month triggers could not be installed on this connection (${err.message}); nothing was written`);
-			process.exit(2);
-		}
-		const nowIso = new Date().toISOString();
-		const run = db.transaction(() => {
-			const p = buildPlan(db, day, kase);
-			const w = p.refused ? [] : writePlan(db, p, args.approval, nowIso);
-			return { p, w };
-		});
-		({ p: plan, w: written } = run.immediate());
+	try {
+		if (dryRun) plan = buildPlan(db, day, kase);
+		else ({ plan, written } = applyCase(db, day, kase, args.approval));
+	} catch (err) {
+		db.close();
+		if (err instanceof Refusal) refuse(err.message);
+		throw err;
 	}
 	db.close();
-	console.log(render(plan, { dbFile, dryRun, written, applyCommand }));
+	console.log(render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand }));
 	if (plan.refused) process.exit(2);
 }
 
-try {
-	main();
-} catch (err) {
-	console.error(`ERROR: ${err.message}. Nothing was written.`);
-	process.exit(1);
+if (require.main === module) {
+	try {
+		main();
+	} catch (err) {
+		console.error(`ERROR: ${err.message}. Nothing was written.`);
+		process.exit(1);
+	}
 }
+
+module.exports = {
+	ACTOR, CASES, Refusal,
+	openDatabase, buildPlan, applyCase, settleMonth, compareSettlements, render,
+};
