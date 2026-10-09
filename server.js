@@ -6674,6 +6674,36 @@ app.use(refreshPasswordChangeFlag);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
+// The columns an update from n8n may write, in the order the route reads them.
+const N8N_JOB_COLUMNS = [
+	["details", "details"], ["driver", "driver"], ["pickup_info", "pickup_info"],
+	["pickup_appointment", "pickup_appointment"], ["pickup_address", "pickup_address"],
+	["dropoff_info", "dropoff_info"], ["dropoff_appointment", "dropoff_appointment"],
+	["dropoff_address", "dropoff_address"], ["_payment_", "payment"],
+	["broker_contact_name", "broker_contact_name"], ["phone_number", "phone_number"],
+	["email", "email"], ["assigned_date", "assigned_date"], ["documents", "documents"],
+	["contract_id", "contract_id"], ["trailer_number", "trailer_number"],
+	["job_status", "job_status"], ["truck", "truck"],
+];
+
+// What a later message for a load already on file may change: [column, value]
+// pairs. A broker sends several emails per load (a confirmation, then "Booked
+// Load #", re-sends, order updates), and a later one often leaves fields out.
+// So a blank (missing, null, or only spaces) never replaces a stored value, and
+// Assigned Date, which decides the month a load's revenue and pay count in, is
+// written once, when the load is first assigned, and never re-stamped (client,
+// 2026-10-09).
+function n8nJobUpdates(stored, body) {
+	const out = [];
+	for (const [col, field] of N8N_JOB_COLUMNS) {
+		const val = body[field];
+		if (val === undefined || val === null || String(val).trim() === "") continue;
+		if (col === "assigned_date" && String((stored && stored.assigned_date) || "").trim() !== "") continue;
+		out.push([col, val]);
+	}
+	return out;
+}
+
 app.post("/api/n8n/job", (req, res) => {
 	const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
 	if (!webhookSecret || req.headers["x-webhook-secret"] !== webhookSecret) {
@@ -6689,32 +6719,12 @@ app.post("/api/n8n/job", (req, res) => {
 		if (!load_id) return res.status(400).json({ error: "load_id is required" });
 
 		// Upsert: update if load_id exists, insert if not
-		const existing = db.prepare("SELECT id FROM sheet_job_tracking WHERE load_id = ?").get(load_id);
+		const existing = db.prepare("SELECT id, assigned_date FROM sheet_job_tracking WHERE load_id = ?").get(load_id);
 		if (existing) {
-			const sets = [];
-			const params = [];
-			const maybeSet = (col, val) => { if (val !== undefined && val !== null) { sets.push(`${col} = ?`); params.push(val); } };
-			maybeSet("details", details);
-			maybeSet("driver", driver);
-			maybeSet("pickup_info", pickup_info);
-			maybeSet("pickup_appointment", pickup_appointment);
-			maybeSet("pickup_address", pickup_address);
-			maybeSet("dropoff_info", dropoff_info);
-			maybeSet("dropoff_appointment", dropoff_appointment);
-			maybeSet("dropoff_address", dropoff_address);
-			maybeSet("_payment_", payment);
-			maybeSet("broker_contact_name", broker_contact_name);
-			maybeSet("phone_number", phone_number);
-			maybeSet("email", email);
-			maybeSet("assigned_date", assigned_date);
-			maybeSet("documents", documents);
-			maybeSet("contract_id", contract_id);
-			maybeSet("trailer_number", trailer_number);
-			maybeSet("job_status", job_status);
-			maybeSet("truck", truck);
-			if (sets.length > 0) {
-				params.push(existing.id);
-				db.prepare(`UPDATE sheet_job_tracking SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+			const updates = n8nJobUpdates(existing, req.body);
+			if (updates.length > 0) {
+				db.prepare(`UPDATE sheet_job_tracking SET ${updates.map(([col]) => `${col} = ?`).join(", ")} WHERE id = ?`)
+					.run(...updates.map(([, val]) => val), existing.id);
 			}
 			res.json({ success: true, action: "updated", id: existing.id });
 		} else {
@@ -7195,6 +7205,16 @@ function n8nDistanceAuthorized(req) {
 		(extractSecret && safeEqual(presented, extractSecret))
 	);
 }
+// The limiter key for the n8n routes gated by n8nDistanceAuthorized(): one
+// bucket for the valid secret (by its hash), per-IP for everything else. See
+// n8nDistanceLimiter for why.
+function n8nLimiterKey(req) {
+	if (n8nDistanceAuthorized(req)) {
+		const presented = String(req.headers["x-webhook-secret"]);
+		return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
+	}
+	return `ip:${ipKeyGenerator(req.ip)}`;
+}
 const n8nDistanceLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
@@ -7213,13 +7233,7 @@ const n8nDistanceLimiter = rateLimit({
 	//
 	// The hash is so the bucket name can never become the secret in a heap dump or
 	// an error string.
-	keyGenerator: (req) => {
-		if (n8nDistanceAuthorized(req)) {
-			const presented = String(req.headers["x-webhook-secret"]);
-			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
-		}
-		return `ip:${ipKeyGenerator(req.ip)}`;
-	},
+	keyGenerator: (req) => n8nLimiterKey(req),
 	message: { error: "Too many distance requests. Try again later." },
 	standardHeaders: true,
 });
@@ -7283,6 +7297,124 @@ async function ingestDuplicateTripwire(loadId) {
 		console.error("[ingest-dupe] duplicate check failed (ingestion unaffected):", (e && e.message) || e);
 	}
 }
+
+// POST /api/n8n/keep-stored-values — called by the n8n Dispatch workflow just
+// before "JOB DETAILS ENTRY", which writes a load's whole Job Tracking row on
+// every rate-con email (appendOrUpdate on Load ID). A broker sends several
+// emails per load (a confirmation, then "Booked Load #", re-sends, order
+// updates), and a later one often leaves fields out; written as they came, they
+// blanked a stored Pickup Appointment and re-stamped Assigned Date, which moved
+// a load's revenue and pay into another month. n8n sends the values it would
+// write; this answers the values to write instead (keepStoredSheetValues()).
+//
+// - Same dual-secret gate as /api/n8n/load-distance, with its own limiter of
+//   the same shape (a load costs one call here and one there).
+// - Writes NOTHING. It reads Job Tracking fresh (not the 60 s cache: two emails
+//   for one load can arrive within a minute) and takes the row the app itself
+//   reads as the load: the last one whose Load ID is the same load
+//   (normLoadKey(), as deduplicateLoads() keys it). When n8n's appendOrUpdate
+//   matches no row by its exact text and appends one, that new row is the one
+//   the app then reads, and it carries the stored values too.
+// - `fallbacks` ({ column: value }) fills a column only when the answer would
+//   otherwise be blank, i.e. for a load with nothing stored there: a value
+//   derived from another field (the load number standing in for a missing BOL)
+//   must never replace a stored one.
+// - A sheet that can't be read answers 503, so n8n routes to its failure alert
+//   instead of writing what it was given.
+// - Two overlapping runs for one load could both read before either writes;
+//   within one run "Dedupe Loads In Batch" collapses a load's items.
+const KEEP_STORED_MAX_COLUMNS = 60;
+const KEEP_STORED_MAX_VALUE = 20000;
+const n8nKeepStoredLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 60,
+	keyGenerator: (req) => n8nLimiterKey(req),
+	message: { error: "Too many keep-stored-values requests. Try again later." },
+	standardHeaders: true,
+});
+let n8nKeepStoredUnauthorized = 0;
+let n8nKeepStoredUnauthorizedLoggedAt = 0;
+
+// The values a later email may write to a load already in Job Tracking, by
+// sheet column: a blank (missing, null or only spaces) never replaces a stored
+// value, and a stored Assigned Date is kept, because it is set once, when the
+// load is first assigned, and never re-stamped (client, 2026-10-09). Any other
+// value is written as sent; a column still blank takes its `fallbacks` value.
+// `stored` is the row by header, or null for a new load. Returns
+// { values, kept } (kept: the columns whose stored value won).
+function keepStoredSheetValues(stored, values, fallbacks = {}) {
+	const blank = (v) => v === undefined || v === null || String(v).trim() === "";
+	const storedOf = (col) => {
+		if (!stored) return "";
+		if (Object.prototype.hasOwnProperty.call(stored, col)) return stored[col] == null ? "" : String(stored[col]);
+		const want = String(col).trim().toLowerCase();
+		const hit = Object.keys(stored).find((h) => String(h).trim().toLowerCase() === want);
+		return hit === undefined || stored[hit] == null ? "" : String(stored[hit]);
+	};
+	const out = {};
+	const kept = [];
+	for (const [col, val] of Object.entries(values)) {
+		const have = storedOf(col);
+		const assigned = String(col).trim().toLowerCase() === "assigned date";
+		if (!blank(have) && (blank(val) || assigned)) {
+			out[col] = have;
+			if (String(val == null ? "" : val) !== have) kept.push(col);
+		} else if (blank(val) && Object.prototype.hasOwnProperty.call(fallbacks, col) && !blank(fallbacks[col])) {
+			out[col] = fallbacks[col];
+		} else {
+			out[col] = val == null ? "" : val;
+		}
+	}
+	return { values: out, kept };
+}
+
+// A `values` or `fallbacks` body object: at most 60 columns of text.
+function keepStoredColumnsOk(obj) {
+	if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+	const entries = Object.entries(obj);
+	return entries.length <= KEEP_STORED_MAX_COLUMNS
+		&& entries.every(([, v]) => v === null || v === undefined || ((typeof v !== "object") && String(v).length <= KEEP_STORED_MAX_VALUE));
+}
+
+app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) => {
+	if (!n8nDistanceAuthorized(req)) {
+		n8nKeepStoredUnauthorized++;
+		const now = Date.now();
+		if (now - n8nKeepStoredUnauthorizedLoggedAt > 60_000) {
+			n8nKeepStoredUnauthorizedLoggedAt = now;
+			console.warn(`n8n keep-stored-values: ${n8nKeepStoredUnauthorized} unauthorized attempt(s), most recent from ${req.ip || "unknown ip"}`);
+		}
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	const body = req.body || {};
+	const loadId = typeof body.loadId === "string" || typeof body.loadId === "number" ? String(body.loadId).trim() : "";
+	const fallbacks = body.fallbacks === undefined ? {} : body.fallbacks;
+	if (!normLoadKey(loadId)) return res.status(400).json({ error: "loadId is required" });
+	if (!keepStoredColumnsOk(body.values) || !keepStoredColumnsOk(fallbacks)) {
+		return res.status(400).json({ error: "values and fallbacks must each be at most 60 columns of text" });
+	}
+	try {
+		const sheets = await getSheets();
+		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		const rows = (resp && resp.data && resp.data.values) || [];
+		const headers = rows[0] || [];
+		const idCol = headers.findIndex((h) => String(h).trim().toLowerCase() === "load id");
+		if (idCol === -1) throw new Error("Job Tracking has no Load ID column");
+		const key = normLoadKey(loadId);
+		const matches = rows.slice(1).filter((r) => normLoadKey(r[idCol]) === key);
+		const match = matches.length ? matches[matches.length - 1] : null;
+		let stored = null;
+		if (match) {
+			stored = {};
+			headers.forEach((h, i) => { stored[h] = match[i] == null ? "" : match[i]; });
+		}
+		const out = keepStoredSheetValues(stored, body.values, fallbacks);
+		res.json({ loadId, found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept });
+	} catch (err) {
+		console.error("n8n keep-stored-values:", err.message);
+		res.status(503).json({ error: "Job Tracking could not be read, so nothing should be written", code: "JOB_TRACKING_UNREADABLE" });
+	}
+});
 
 app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
