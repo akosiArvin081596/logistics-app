@@ -80,12 +80,12 @@ function liftDecl(kind, name) {
 	if (/=\s*$/.test(SRC.slice(start, end))) end = SRC.indexOf("\n", end + 1);
 	return SRC.slice(start, end);
 }
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE",
 	"RFC2822_MONTHS", "BROKER_WITHHELD_RE"];
 const LETS = ["lastPayStructShadowWarnMs"];
 const FNS = [
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
-	"getDriverPayStructures", "getAllExcludedDriverDays", "expenseDriverKey", "foldExpenseTotalsByDriver",
+	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules",
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
 	"appDay", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
@@ -187,7 +187,7 @@ async function investorView(rows = ROWS, opts = {}) {
 		investorReportOptions: require("../lib/investor-report-options"),
 		investorPayoutBasis: require("../lib/investor-payout-basis"),
 		financialsCalc: require("../lib/financials-calc.js"),
-		loadHaul: require("../lib/load-haul"),
+		loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require("../lib/load-haul"),
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth: require("../lib/eld-feed-health"),
 		payoutBasisContext: () => null,
