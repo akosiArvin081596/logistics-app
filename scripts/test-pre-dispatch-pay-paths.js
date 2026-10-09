@@ -357,8 +357,15 @@ const ruleWarnings = (w) => w.filter((x) => /PRE_DISPATCH_PAY_DAY_RULE/.test(x))
 		check(`investor view: the same days with ${label}`, locked.investor, on.investor);
 		check(`payout ledger: the same days with ${label}`, locked.ledger, on.ledger);
 		const closedWarnings = locked.warnings.filter((x) => /latest closed month/.test(x));
-		check(`${label}: ${locks.includes("2026-10") ? "one boot warning that FROM (2026-10) is at or before the latest closed month" : "no closed-month warning (FROM is after it)"}`,
+		check(`${label}: ${locks.includes("2026-10") ? "one start-up notice that FROM (2026-10) is at or before the latest closed month" : "no closed-month notice (FROM is after it)"}`,
 			closedWarnings.length, locks.includes("2026-10") ? 1 : 0);
+		if (locks.includes("2026-10")) {
+			const text = closedWarnings[0] || "";
+			check(`${label}: the notice says it is expected and never to change FROM once the rule has run`,
+				/expected once PRE_DISPATCH_PAY_DAY_RULE_FROM's month has closed with the rule on/.test(text) && /never change PRE_DISPATCH_PAY_DAY_RULE_FROM once the rule has run/i.test(text), true);
+			check(`${label}: the notice never advises moving FROM`,
+				/set it to|has not closed|move (it|FROM|PRE_DISPATCH_PAY_DAY_RULE_FROM)|change (it|FROM|PRE_DISPATCH_PAY_DAY_RULE_FROM) to|later month|should be/i.test(text), false);
+		}
 	}
 
 	section("§3 flag on, FROM unset or not a month: the rule is off, one warning per start");

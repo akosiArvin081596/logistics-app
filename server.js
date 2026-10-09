@@ -36298,9 +36298,11 @@ function preDispatchPayDayFilter() {
 	});
 }
 
-// One warning at boot when PRE_DISPATCH_PAY_DAY_RULE_FROM is at or before the
-// latest closed month. The rule is not switched off: whether it applies never
-// reads a lock. Read once, here, where period_locks exists.
+// One notice at boot when PRE_DISPATCH_PAY_DAY_RULE_FROM is at or before the
+// latest closed month (lib/load-pay-days.js fromMonthClosedWarning()): expected
+// on every start once FROM's own month has closed with the rule on. The rule is
+// not switched off: whether it applies never reads a lock. Read once, here,
+// where period_locks exists.
 function warnPreDispatchFromClosedMonth() {
 	if (!PRE_DISPATCH_PAY_DAY_RULE_ENABLED || !PRE_DISPATCH_PAY_DAY_RULE_FROM) return;
 	let latest = "";

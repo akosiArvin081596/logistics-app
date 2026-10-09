@@ -84,8 +84,17 @@ section("§1 the pure pieces");
 	warned.length = 0;
 	check("FROM: with the flag off nothing is said", [lpd.ruleFromMonth(false, "", warn), warned.length], [null, 0]);
 	const closedMsg = (from, latest) => lpd.fromMonthClosedWarning(from, latest);
-	check("closed-month warning: FROM at or before the latest closed month warns, naming that month",
+	check("closed-month notice: FROM at or before the latest closed month gives a notice, naming that month",
 		[closedMsg("2026-09", "2026-09"), closedMsg("2026-08", "2026-09")].map((m) => !!m && /PRE_DISPATCH_PAY_DAY_RULE_FROM/.test(m) && m.includes("2026-09")), [true, true]);
+	// The notice comes back on every start once FROM's own month has closed with
+	// the rule running: it must say that is expected and never ask for FROM to be
+	// moved (a later FROM would change closed months' live figures).
+	const notice = closedMsg("2026-10", "2026-10") || "";
+	check("closed-month notice: says this is expected once FROM's month has closed with the rule on",
+		/expected once PRE_DISPATCH_PAY_DAY_RULE_FROM's month has closed with the rule on/.test(notice), true);
+	check("closed-month notice: says never to change FROM once the rule has run", /never change PRE_DISPATCH_PAY_DAY_RULE_FROM once the rule has run/i.test(notice), true);
+	check("closed-month notice: never advises moving FROM",
+		/set it to|has not closed|move (it|FROM|PRE_DISPATCH_PAY_DAY_RULE_FROM)|change (it|FROM|PRE_DISPATCH_PAY_DAY_RULE_FROM) to|later month|should be/i.test(notice), false);
 	check("closed-month warning: FROM after it, no closed month, or no FROM says nothing",
 		[closedMsg("2026-10", "2026-09"), closedMsg("2026-10", ""), closedMsg("", "2026-09"), closedMsg("2026-10", null)], [null, null, null, null]);
 	const win = ["2026-10-04", "2026-10-05", "2026-10-06"];
