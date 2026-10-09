@@ -7579,7 +7579,9 @@ function invoiceEmailHtml({ heading, bodyHtml, ctaText = "", ctaHref = "" }) {
 }
 
 // Build a status-change email body. Called by the approve endpoint on every
-// transition so the driver stays in the loop automatically.
+// transition so the driver stays in the loop automatically. The Total is the
+// invoice's total due (invoiceTotalDue(): the adjustment included), the figure
+// its PDF, the driver app and the payment report show.
 function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 	const statusLabel = newStatus;
 	const headline = {
@@ -7601,7 +7603,7 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 			<div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.04em">New Status</div>
 			<div style="font-size:22px;font-weight:700;color:${statusColor};margin-top:4px">${statusLabel}</div>
 		</div>
-		<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:14px"><b>Total:</b> $${Number(invoice.total_earnings || 0).toFixed(2)}</p>
+		<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:14px"><b>Total:</b> $${invoiceTotalDue(invoice).toFixed(2)}</p>
 		${noteBlock}
 	`;
 	return invoiceEmailHtml({
@@ -22167,6 +22169,14 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 				const submitLine = invoice.is_manual
 					? `Manual invoice for <b>${escHtml(invoice.driver)}</b> was submitted for the period ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.`
 					: `Driver <b>${escHtml(invoice.driver)}</b> just submitted an invoice for the week of ${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}.`;
+				// The summary reads like the attached PDF: the Total is the invoice's
+				// total due (invoiceTotalDue()), and the admin adjustment gets its own
+				// line above it only when there is one, as on the PDF. An invoice
+				// without one emails exactly what it did before.
+				const adjustment = Number(invoice.adjustment || 0);
+				const adjustmentLine = Number.isFinite(adjustment) && adjustment !== 0
+					? `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Admin adjustment${invoice.adjustment_note ? ` <em>${escHtml(invoice.adjustment_note)}</em>` : ""}</span><b>${adjustment > 0 ? "+" : "-"}$${Math.abs(adjustment).toFixed(2)}</b></div>`
+					: "";
 				const html = invoiceEmailHtml({
 					heading: `New Invoice: ${escHtml(invoice.invoice_number)}`,
 					bodyHtml: `
@@ -22175,8 +22185,8 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Invoice</span><b>${escHtml(invoice.invoice_number)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Payee" : "Driver"}</span><b>${escHtml(invoice.driver)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Week</span><b>${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Line items" : "Loads"}</span><b>${Number(invoice.loads_count || 0)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${Number(invoice.total_earnings || 0).toFixed(2)}</b></div>
+							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Line items" : "Loads"}</span><b>${Number(invoice.loads_count || 0)}</b></div>${adjustmentLine}
+							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${invoiceTotalDue(invoice).toFixed(2)}</b></div>
 						</div>
 						<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:13px">The full invoice PDF is attached. Log in to the admin dashboard to approve, reject, or mark as paid.</p>
 					`,
