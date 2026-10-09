@@ -7205,6 +7205,16 @@ function n8nDistanceAuthorized(req) {
 		(extractSecret && safeEqual(presented, extractSecret))
 	);
 }
+// The limiter key for the n8n routes gated by n8nDistanceAuthorized(): one
+// bucket for the valid secret (by its hash), per-IP for everything else. See
+// n8nDistanceLimiter for why.
+function n8nLimiterKey(req) {
+	if (n8nDistanceAuthorized(req)) {
+		const presented = String(req.headers["x-webhook-secret"]);
+		return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
+	}
+	return `ip:${ipKeyGenerator(req.ip)}`;
+}
 const n8nDistanceLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
@@ -7223,13 +7233,7 @@ const n8nDistanceLimiter = rateLimit({
 	//
 	// The hash is so the bucket name can never become the secret in a heap dump or
 	// an error string.
-	keyGenerator: (req) => {
-		if (n8nDistanceAuthorized(req)) {
-			const presented = String(req.headers["x-webhook-secret"]);
-			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
-		}
-		return `ip:${ipKeyGenerator(req.ip)}`;
-	},
+	keyGenerator: (req) => n8nLimiterKey(req),
 	message: { error: "Too many distance requests. Try again later." },
 	standardHeaders: true,
 });
@@ -7324,15 +7328,7 @@ const KEEP_STORED_MAX_VALUE = 20000;
 const n8nKeepStoredLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60,
-	// Keyed like n8nDistanceLimiter (see there): one bucket for the valid
-	// secret, per-IP for everything else.
-	keyGenerator: (req) => {
-		if (n8nDistanceAuthorized(req)) {
-			const presented = String(req.headers["x-webhook-secret"]);
-			return "n8n:" + crypto.createHash("sha256").update(presented).digest("hex").slice(0, 16);
-		}
-		return `ip:${ipKeyGenerator(req.ip)}`;
-	},
+	keyGenerator: (req) => n8nLimiterKey(req),
 	message: { error: "Too many keep-stored-values requests. Try again later." },
 	standardHeaders: true,
 });

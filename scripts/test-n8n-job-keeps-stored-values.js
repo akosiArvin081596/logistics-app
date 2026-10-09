@@ -20,11 +20,10 @@
  *   §3 POST /api/n8n/keep-stored-values (what n8n's JOB DETAILS ENTRY writes),
  *      lifted with a stand-in Job Tracking: for a load already on file, a blank
  *      value comes back as the stored one and the stored Assigned Date always
- *      comes back; non-blank values come back as sent; a load matched by a
- *      different Load ID text (as appendOrUpdate would not match it) and a new
- *      load get their values back as sent, a fallback filling only a column
- *      that would be blank; the row is the one the app reads as the load ("#X"
- *      or "x" is the same load, the last of two rows wins); a header found by
+ *      comes back; non-blank values come back as sent; a new load gets its
+ *      values back as sent, a fallback filling only a column that would be
+ *      blank; the row is the one the app reads as the load ("#X", "x" or edge
+ *      spaces are the same load, the last of two rows wins); a header found by
  *      its trimmed name; without the secret 401; a bad body 400; a sheet that
  *      can't be read 503 (n8n then alerts and writes nothing); its own limiter;
  *      it never writes the sheet.
@@ -199,6 +198,10 @@ if (!process.env.SERVER_JS) {
 			const sent = await post({ loadId: "900000002", values: { Documents: "BOL-1" }, fallbacks: { Documents: "900000002" } });
 			check("§3 a value sent beats its fallback", sent.body.values.Documents === "BOL-1");
 
+			sheetValues = [HEADERS, ["", "X900000001", ...STORED.slice(2)]];
+			const upper = await post({ loadId: "x900000001", values: { "Pickup Appointment": "" } });
+			check("§3 letter case is the same load", upper.body.found === true && upper.body.values["Pickup Appointment"] === "9/30/2026 06:00", JSON.stringify(upper.body));
+			sheetValues = [HEADERS, STORED];
 			for (const [name, id] of [["a leading #", "#900000001"], ["edge spaces", " 900000001 "]]) {
 				const x = await post({ loadId: id, values: { "Pickup Appointment": "" } });
 				check(`§3 ${name} is the same load`, x.body.found === true && x.body.values["Pickup Appointment"] === "9/30/2026 06:00", JSON.stringify(x.body));
@@ -221,7 +224,8 @@ if (!process.env.SERVER_JS) {
 			check("§3 a sheet that can't be read: 503, so n8n alerts and writes nothing", down.status === 503 && down.body.code === "JOB_TRACKING_UNREADABLE");
 			check("§3 it never writes the sheet", calls.every(([k]) => k === "get") && calls.every(([, range]) => range === "Job Tracking"), JSON.stringify(calls));
 			const limiter = /const n8nKeepStoredLimiter = rateLimit\(\{[\s\S]*?\n\}\);/.exec(SRC);
-			check("§3 it has its own limiter, keyed like load-distance's", limiter && /n8nDistanceAuthorized\(req\)/.test(limiter[0]) && /keep-stored-values requests/.test(limiter[0]) && !/distance requests/.test(limiter[0]));
+			const distance = /const n8nDistanceLimiter = rateLimit\(\{[\s\S]*?\n\}\);/.exec(SRC);
+			check("§3 it has its own limiter, keyed like load-distance's", limiter && distance && /keyGenerator: \(req\) => n8nLimiterKey\(req\)/.test(limiter[0]) && /keyGenerator: \(req\) => n8nLimiterKey\(req\)/.test(distance[0]) && /keep-stored-values requests/.test(limiter[0]));
 			console.log(`test-n8n-job-keeps-stored-values: ${passes} passed, ${failures} failed`);
 			process.exit(failures ? 1 : 0);
 		})().catch((err) => { console.error(err); process.exit(1); });
