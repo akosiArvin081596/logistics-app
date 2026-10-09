@@ -209,6 +209,13 @@ function battery(mods) {
 	t(Date.now() - tb < TIMING_BUDGET_MS && !/Weight: 42,000/.test(capped), "§4 a stream that inflates past the cap is not inflated (kept as its raw bytes)");
 	t(capped.length <= 1024 * 1024, "§4 the text handed back is cut to the cap");
 	t(/Weight: 42,000/.test(extractPdfText(bomb)), "§4 ...and without the cap (the invoice routes) nothing changes");
+	const streamOf = (body) => {
+		const z = zlib.deflateSync(Buffer.from(body, "latin1"));
+		return Buffer.concat([Buffer.from(`9 0 obj\n<< /Length ${z.length} /Filter /FlateDecode >>\nstream\n`, "latin1"), z, Buffer.from("\nendstream\nendobj\n", "latin1")]);
+	};
+	const bombThenText = Buffer.concat([Buffer.from("%PDF-1.4\n", "latin1"), streamOf("(x) Tj\n".repeat(400000)), streamOf("BT (Weight: 42,000 lbs) Tj ET")]);
+	t(!/Weight: 42,000/.test(extractPdfText(bombThenText, { maxInflatedBytes: 1024 * 1024 })), "§4 a stream past the budget spends all of it: no later stream is inflated");
+	t(/Weight: 42,000/.test(extractPdfText(bombThenText)), "§4 ...while without the cap both streams are read");
 
 	// §5 classifyPdfText
 	const prose = "ZED SENTINEL FREIGHT RATE CONFIRMATION Pickup Atlanta GA Delivery Dallas TX Commodity paper rolls Weight 42,000 LBS Rate $2,450.00";

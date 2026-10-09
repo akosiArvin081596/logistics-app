@@ -61165,7 +61165,8 @@ async function kpiRateConWeight(loadId, counter, deadlineMs) {
 	// other numbers) is never looked up, and a name must carry the id as a whole
 	// token, not inside a longer number.
 	const safe = String(loadId).replace(/[^A-Za-z0-9]/g, "");
-	if (RATECON_DRIVE_FOLDER_ID && safe.length >= rcIndexShared.MIN_LOAD_ID_LEN) {
+	if (safe.length < rcIndexShared.MIN_LOAD_ID_LEN) return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
+	if (RATECON_DRIVE_FOLDER_ID && safe) {
 		const drive = await getDrive();
 		const timeout = Math.max(1000, Math.min(KPI_DRIVE_TIMEOUT_MS, deadlineMs - Date.now()));
 		counter.driveFetches++;

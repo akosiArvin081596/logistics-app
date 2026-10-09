@@ -868,7 +868,7 @@ const failed = (results) => results.some((x) => !x.ok);
 		["a Drive download not capped", weightLimitsSection, swap(BLOCK, "{ responseType: \"arraybuffer\", timeout, maxContentLength: kpiWeight.MAX_PDF_BYTES }", "{ responseType: \"arraybuffer\", timeout }")],
 		["a stored Drive file downloaded before its size is checked", weightLimitsSection, swap(BLOCK, "if (size > max) return { status: \"too_large\", fileSize: size };\n\tcounter.driveFetches++;", "counter.driveFetches++;")],
 		["the PDF text not capped", weightLimitsSection, swap(BLOCK, "extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES })", "extractPdfText(buffer)")],
-		["a short load id looked up by file name", weightLimitsSection, swap(BLOCK, "safe.length >= rcIndexShared.MIN_LOAD_ID_LEN", "safe.length > 0")],
+		["a short load id looked up by file name", weightLimitsSection, swap(BLOCK, "if (safe.length < rcIndexShared.MIN_LOAD_ID_LEN) return", "if (false) return")],
 		["a file name matched inside a longer number", weightLimitsSection, swap(BLOCK, "\n\t\t\t\t&& rcIndexShared.textHasToken(String(f.name || \"\").toLowerCase(), safe.toLowerCase()))", ")")],
 		["the not-found cache ignored", weightCacheSection, swap(BLOCK, " && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS)", "")],
 		["the Drive phase's time limit ignored", timeSection, swap(BLOCK, "if (Date.now() >= deadlineMs) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");", "if (false) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");")],
