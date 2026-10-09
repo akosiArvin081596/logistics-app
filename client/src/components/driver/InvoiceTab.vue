@@ -114,10 +114,17 @@ const isCurrentWeek = computed(() => weekOffset.value === 0)
 
 // The deadline is the week's Friday at 6:30 PM on the app zone's clock, the
 // server's isAfterDeadline() rule, whatever zone the phone is set to. Its label
-// is the zone's generic name ("ET" for US Eastern), never a fixed string.
+// is the zone's generic name ("ET" for US Eastern), never a fixed string. Older
+// phones (Safari before 15.4) refuse 'shortGeneric' outright, so they get the
+// short name ("EDT"/"EST") instead of an exception that would blank the tab.
 const pastDeadline = computed(() => isAfterAppTime(weekEnd.value, '18:30'))
-const zoneLabel = computed(() => new Intl.DateTimeFormat('en-US', { timeZone: appTimeZone(), timeZoneName: 'shortGeneric' })
-  .formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || '')
+function zoneName(style) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: appTimeZone(), timeZoneName: style })
+    .formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || ''
+}
+const zoneLabel = computed(() => {
+  try { return zoneName('shortGeneric') } catch { return zoneName('short') }
+})
 
 const invoices = computed(() => driverStore.invoices || [])
 

@@ -286,7 +286,7 @@ if (centralWords.length) fail(`Central or Houston wording on screen:\n        ${
 // appear and `gone` must not.
 const SITES = [
   ['client/src/components/driver/InvoiceTab.vue', ['appTimeZone', 'appToday', 'isAfterAppTime', 'satFriWeekOf', 'shiftYmd'],
-    ["isAfterAppTime(weekEnd.value, '18:30')", 'Friday 6:30 PM {{ zoneLabel }}', "timeZoneName: 'shortGeneric'"], ['toLocaleString(', '6:30 PM CST', '6:30 PM ET)']],
+    ["isAfterAppTime(weekEnd.value, '18:30')", 'Friday 6:30 PM {{ zoneLabel }}', "zoneName('shortGeneric')", "catch { return zoneName('short') }"], ['toLocaleString(', '6:30 PM CST', '6:30 PM ET)']],
   ['client/src/components/data-manager/AddRowModal.vue', ['fmtAppDate'],
     ["'Assigned Date': appDayText", "'Status Update Date': appDayText"], ['toLocaleDateString(']],
   ['client/src/components/shared/StatusTimeline.vue', ['fmtTimestamp', 'viewerZoneNote'],
