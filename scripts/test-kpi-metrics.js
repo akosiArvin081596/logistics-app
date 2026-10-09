@@ -10,7 +10,7 @@
  *     0), MoM / YoY / trailing-3-month YoY, a zero base 'missing'.
  * §3  freight: stated tons (lb / 2,000), details before the rate con, coverage,
  *     the estimate (average stated weight) and its 20-load floor.
- * §4  revenue: per month from the ledger, gaps, YoY.
+ * §4  revenue: each delivered load's Payment, per month; gaps, YoY, coverage.
  * §5  ELD miles and truck utilization: distinct truck-days, service dates, the
  *     before/after windows (equal, never overlapping, event day = after).
  * §6  paid-mile share: full-ELD loads only, an unmeasured leg is never 0.
@@ -88,6 +88,7 @@ function load(day, status, o) {
 		loadId: x.id || nextId(), status, day, contractIdBlank: !!x.ai,
 		driverKey: x.driver === undefined ? DRIVER("a") : x.driver, truckKey: "zed-sentinel-truck",
 		detailsText: x.details === undefined ? W40 : x.details,
+		revenue: x.revenue === undefined ? null : x.revenue,
 	};
 }
 
@@ -145,11 +146,21 @@ function world(over) {
 	add("2024-12-01", "Delivered", { driver: DRIVER("h") });
 	add("2026-12-01", "Delivered", { driver: DRIVER("h") });
 
-	const revenueByMonth = [
-		["2025-04", 9000], ["2025-05", 11000], ["2025-06", 6000], ["2025-07", 14000], ["2025-08", 12500], ["2025-09", 17400],
-		["2025-10", 0], ["2025-11", 15000], ["2026-04", 30000], ["2026-05", 35000], ["2026-06", 41000], ["2026-07", 44000],
-		["2026-08", 42250.5], ["2026-09", 53344.12], ["2026-10", 8000],
-	].map(([period, value]) => ({ period, value }));
+	// Revenue: each delivered, dated load's Payment, in load order per month, so
+	// the months add up to round figures; undated loads carry one too (it must
+	// stay out of the months).
+	const REVENUE = {
+		"2025-04": [4500, 4500], "2025-05": [5500, 5500], "2025-06": [6000], "2025-07": [7000, 7000], "2025-08": [6250, 6250],
+		"2025-09": [4350, 4350, 4350, 4350], "2025-11": [7500, 7500], "2026-04": [7500, 7500, 7500, 7500],
+		"2026-05": [12000, 11500, 11500], "2026-06": [14000, 13500, 13500], "2026-07": [15000, 14500, 14500],
+		"2026-08": [14250.5, 14000, 14000], "2026-09": [9000, 9000, 9000, 9000, 9000, 8344.12], "2026-10": [4000, 4000],
+	};
+	for (const l of loads) {
+		if (!/^(delivered|completed|pod received)$/i.test(String(l.status).trim())) continue;
+		const list = l.day && l.day >= "2025-04-01" && l.day <= (o.asOfDay || AS_OF) ? REVENUE[l.day.slice(0, 7)] : null;
+		l.revenue = list && list.length ? list.shift() : 5000;
+	}
+	if (o.unpaid) for (const l of loads) if (l.day === o.unpaid) l.revenue = 0;
 
 	// ELD: truck 1 every day from 2026-05-28 (weekdays 400 mi, weekends 0.5 mi of
 	// yard moves), truck 2 weekdays from 2026-06-15 (300 mi), and a second row
@@ -225,7 +236,7 @@ function world(over) {
 	return {
 		asOfDay: o.asOfDay || AS_OF,
 		settings: { aiDispatchStart: null, dedicatedStart: "2026-08-30", baselineMpg: 6.5, ...(o.settings || {}) },
-		loads, ratecon, revenueByMonth, eldDaily, trucks,
+		loads, ratecon, eldDaily, trucks,
 		fleetHistory: [{ day: "2026-08-31", value: 5 }],
 		fuelReceipts, arrivals, loadMiles, activity,
 	};
@@ -376,10 +387,13 @@ function battery(mods) {
 		t(m.value === 53344.12 && m.display === "$53,344", "§4 September 2026 revenue", `${m.value} ${m.display}`);
 		t(cmp(m, "yoy").deltaPct === 206.6 && cmp(m, "yoy").baseValue === 17400, "§4 YoY vs September 2025", JSON.stringify(cmp(m, "yoy")));
 		t(close(cmp(m, "t3m_yoy").value, 139594.62, 0.01) && cmp(m, "t3m_yoy").baseValue === 43900, "§4 trailing 3 months", JSON.stringify(cmp(m, "t3m_yoy")));
-		t(ser(m, "2026-02").display === "No records", "§4 a month with no ledger entry is No records");
+		t(ser(m, "2026-02").display === "No records", "§4 a month with no delivered loads is No records");
 		const m2 = get(out2, "revenue");
-		t(cmp(m2, "yoy").status === "missing" && cmp(m2, "yoy").baseValue === 0, "§4 October 2025's $0 is no base for a YoY");
-		t(m.coverage.ratio === 1, "§4 every month with deliveries has revenue");
+		t(cmp(m2, "yoy").status === "missing" && cmp(m2, "yoy").baseValue === null, "§4 October 2025 had no delivered load: no base for a YoY");
+		t(m.coverage.ratio === 1 && m.coverage.what === "delivered loads with a revenue figure", "§4 every delivered load has a revenue figure");
+		const unpaid = get(M.computeKpis(world({ unpaid: "2026-09-29" })), "revenue");
+		t(unpaid.value === 45000 && unpaid.coverage.num === unpaid.coverage.den - 1 && ser(unpaid, "2026-09").coverage === 0.8333,
+			"§4 a delivered load with no Payment adds nothing and lowers the coverage", JSON.stringify({ v: unpaid.value, c: unpaid.coverage, s: ser(unpaid, "2026-09") }));
 	}
 
 	// §5 miles and utilization
@@ -610,6 +624,7 @@ const MUTANTS = [
 	["YoY on a zero base", "§1", { metrics: [["if (v == null || b == null || b === 0) {", "if (v == null || b == null) {"]] }],
 	["gap months read as 0", "§2", { metrics: [["if (!m.rows) return { value: null, display: NO_RECORDS, coverage, present: false };", "if (!m.rows) return { value: 0, display: formatDisplay(unit, 0), coverage, present: true };"]] }],
 	["2,204.6 lb per ton", "§3", { metrics: [["return lb / catalog.LB_PER_TON;", "return lb / 2204.6;"]] }],
+	["a $0 Payment counted as a revenue figure", "§4", { metrics: [["revenue: delivered && isNum(l.revenue) && l.revenue > 0 ? l.revenue : null,", "revenue: delivered && isNum(l.revenue) ? l.revenue : null,"]] }],
 	["CO2 factor 10.21", "§9", { metrics: [["const kgPerGallon = catalog.CO2_KG_PER_GALLON_DIESEL;", "const kgPerGallon = 10.21;"]] }],
 	["rejected receipts counted", "§9", { metrics: [["String(r.status == null ? \"\" : r.status) !== \"Rejected\"", "true"]] }],
 	["$/gal over all spend", "§9", { metrics: [["const pricePerGallon = fw.spendGal / fw.gal;", "const pricePerGallon = fw.spendAll / fw.gal;"]] }],

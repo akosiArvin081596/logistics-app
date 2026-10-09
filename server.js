@@ -60609,9 +60609,9 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 // definition and settings it was reviewed under.
 //
 // WHAT IT READS, all read-only: Job Tracking (one liveJobTrackingView() read per
-// run), the Financials books (buildFinancialsLedger(), so revenue matches the
-// Financials page and closed months stay as settled), and SQLite (ELD miles,
-// trucks, fuel receipts, status history, load miles, audit rows). The formulas
+// run; revenue is each delivered load's Payment cell, as the dashboard reads it)
+// and SQLite (ELD miles, trucks, fuel receipts, status history, load miles,
+// audit rows). The formulas
 // live in lib/kpi-metrics.js; this block only gathers, stores and serves.
 //
 // WHAT IT WRITES: its own kpi_* tables, app_settings 'kpi.settings' (the page's
@@ -60912,6 +60912,7 @@ function kpiSheetLoads(jt) {
 	const driverCol = findCol(headers, /^driver$/i);
 	const truckCol = findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i);
 	const detailsCol = findCol(headers, /^\s*details\s*$/i);
+	const paymentCol = brokerInvoice.findPaymentColumn(headers);
 	const cell = (r, col, max) => (col ? String(r[col] ?? "") : "").slice(0, max);
 	const dayOf = (r, col) => {
 		const d = col ? sheetDayKey(cell(r, col, 200)) : "";
@@ -60932,6 +60933,7 @@ function kpiSheetLoads(jt) {
 			driverKey: cell(r, driverCol, 200).trim().toLowerCase(),
 			truckKey: cell(r, truckCol, 200).trim().toLowerCase(),
 			detailsText: cell(r, detailsCol, 2000),
+			revenue: paymentCol ? brokerInvoice.parseMoney(cell(r, paymentCol, 200)) : null,
 		});
 		if (KPI_DELIVERED_RE.test(status)) arrivals.push({ loadId, appointmentText: cell(r, dropoffCol, 200), deliveredDay: day });
 	}
@@ -60944,20 +60946,6 @@ function kpiSheetLoads(jt) {
 async function kpiReadSheet() {
 	const cached = await getJobTrackingCached();
 	return kpiSheetLoads(liveJobTrackingView(cached));
-}
-
-// Gross load revenue per month from the Financials books: every "revenue" item
-// plus the "Settlement adjustment" items that adjust revenue, so a closed month
-// reads exactly as it settled. A month with no such item has no entry (no
-// records is not $0).
-function kpiRevenueByMonth(books) {
-	const cents = new Map();
-	for (const it of (books && Array.isArray(books.items) ? books.items : [])) {
-		const isRevenue = it && (it.kind === "revenue" || (it.kind === "settlement_adjustment" && it.adjusts === "revenue"));
-		if (!isRevenue || !/^\d{4}-\d{2}$/.test(String(it.month || ""))) continue;
-		cents.set(it.month, (cents.get(it.month) || 0) + (Number(it.cents) || 0));
-	}
-	return [...cents.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([period, c]) => ({ period, value: c / 100 }));
 }
 
 // Everything the metrics read from SQLite, in one synchronous pass per table.
@@ -61062,7 +61050,7 @@ function kpiGatherDbInputs(db, opts) {
 // The inputs lib/kpi-metrics.js computeKpis() takes. Load miles are kept for
 // live loads only (a cancelled or deleted load's miles are not the fleet's work)
 // and take that load's day.
-function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn, revenueByMonth }) {
+function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 	const loadsByKey = new Map(sheet.loads.filter((l) => l.loadId).map((l) => [l.loadId, l]));
 	const arrivals = sheet.arrivals.map((a) => {
 		const eld = dbIn.loadEld.get(a.loadId);
@@ -61089,7 +61077,6 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn, revenueByMonth }) {
 		settings: { aiDispatchStart: settings.aiDispatchStart, dedicatedStart: settings.dedicatedStart, baselineMpg: settings.baselineMpg },
 		loads: sheet.loads,
 		ratecon: dbIn.ratecon,
-		revenueByMonth,
 		eldDaily: dbIn.eldDaily,
 		trucks: dbIn.trucks,
 		fleetHistory: dbIn.fleetHistory,
@@ -61314,14 +61301,6 @@ async function runKpiSnapshot(kind) {
 		}
 		await kpiYield();
 
-		let revenueByMonth = [];
-		try {
-			revenueByMonth = kpiRevenueByMonth(await kpiWithin(buildFinancialsLedger(), deadlineMs - Date.now()));
-		} catch (e) {
-			note("revenue", e && e.kpiCode === "TIME_LIMIT" ? "TIME_LIMIT" : "LEDGER_READ_FAILED");
-		}
-		await kpiYield();
-
 		if (kind !== "manual") {
 			try {
 				const w = await kpiBackfillWeights(Math.min(Date.now() + KPI_DRIVE_TIME_LIMIT_MS, deadlineMs), sheet.loads);
@@ -61337,7 +61316,7 @@ async function runKpiSnapshot(kind) {
 		let inputs;
 		try {
 			const dbIn = kpiGatherDbInputs(db, { asOfDay: day, timeZone: APP_TIMEZONE });
-			inputs = kpiAssembleInputs({ asOfDay: day, settings, sheet, dbIn, revenueByMonth });
+			inputs = kpiAssembleInputs({ asOfDay: day, settings, sheet, dbIn });
 		} catch {
 			throw kpiStop("DB_READ_FAILED");
 		}

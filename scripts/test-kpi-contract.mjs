@@ -19,6 +19,9 @@
 //   4. The page's components work out no figure (no toFixed, toLocaleString or
 //      Math on a KPI value), and the route and sidebar entry are Super Admin only.
 //   5. MUTANTS of kpiView.js, each a plausible regression, must each fail §3.
+//   6. The server's own answer has the same shape: lib/kpi-metrics.js
+//      computeKpis() on small fake inputs, stored the way server.js
+//      kpiStoreResult() stores it, then buildKpiResponse(), passes the §1 check.
 //
 // The figures in the fixture are FAKE. No network, no server, no database, no Vue.
 //
@@ -27,6 +30,7 @@
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { createRequire } from 'module'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -288,6 +292,49 @@ function shapeErrors(r) {
     breakIt(copy)
     check(`shape check refuses: ${name}`, shapeErrors(copy).length > 0, 'the broken copy passed')
   }
+  report(results)
+}
+
+// ══ 6. The server's own answer ════════════════════════════════════════════════
+{
+  const { results, check } = collector()
+  const require = createRequire(import.meta.url)
+  const M = require('../lib/kpi-metrics.js')
+  const day = '2026-10-09'
+  const loads = []
+  const add = (d, status, extra) => loads.push({ loadId: `T-${loads.length + 1}`, status, day: d, contractIdBlank: loads.length % 2 === 0, driverKey: `zed sentinel ${loads.length % 3}`, truckKey: 'zed-1', detailsText: 'Weight: 40,000 lbs', revenue: 2500, ...extra })
+  for (const d of ['2025-09-04', '2025-09-18', '2025-10-02', '2026-04-14', '2026-05-12', '2026-06-09', '2026-07-07', '2026-08-04', '2026-09-01', '2026-09-15', '2026-10-06']) add(d, 'Delivered')
+  add('2026-09-20', 'In Transit', { revenue: 0 })
+  const eldDaily = []
+  for (let i = 1; i <= 30; i++) eldDaily.push({ day: `2026-09-${String(i).padStart(2, '0')}`, truckId: 'zed-1', miles: i % 7 === 0 ? 0 : 350 })
+  const inputs = {
+    asOfDay: day,
+    settings: { aiDispatchStart: null, dedicatedStart: null, baselineMpg: null },
+    loads, ratecon: [], eldDaily,
+    trucks: [{ id: 'zed-1', status: 'Active', createdDay: '2026-04-15', inServiceDay: null, retiredDay: null, hasEld: true }],
+    fleetHistory: [],
+    fuelReceipts: [{ day: '2026-09-10', amount: 500, gallons: 100, status: 'Approved' }, { day: '2026-09-20', amount: 520, gallons: 104, status: '' }],
+    arrivals: [{ loadId: 'T-10', appointmentText: '09/15/2026 14:00', destLng: -95.3, eldArriveMs: Date.parse('2026-09-15T18:00:00Z'), receiverEvents: [], deliveredDay: '2026-09-15' }],
+    loadMiles: [], activity: { aiReceipts: ['2026-09-10'], aiExpenseInsights: [], geofenceStatuses: ['2026-09-15'], invoiceAutogenRuns: [] },
+  }
+  const out = M.computeKpis(inputs)
+  const computedAt = '2026-10-09T08:00:00.000Z'
+  const snapshots = out.metrics.map((m) => ({
+    day, metric_key: m.key, value: Number.isFinite(m.value) ? m.value : null, display: m.display, status: m.status, confidence: m.confidence,
+    definition_version: 1, computed_at: computedAt,
+    payload: JSON.stringify({ current: m.current, totals: m.totals, comparisons: m.comparisons, beforeAfter: m.beforeAfter, coverage: m.coverage, warnings: m.warnings, assumptions: m.assumptions, breakdown: m.breakdown, missingReason: m.missingReason }),
+  }))
+  const series = out.metrics.flatMap((m) => m.series.map((x) => ({ metric_key: m.key, period: x.period, value: x.value, display: x.display, coverage: x.coverage, computed_at: computedAt })))
+  const job = { enabled: { snapshot: true, digest: true }, snapshotSchedule: 'Daily at 4:00 AM Eastern (3:00 AM Central)', digestSchedule: 'Mondays at 9:00 AM Eastern (8:00 AM Central)',
+    lastRun: { id: 1, kind: 'nightly', status: 'ok', startedAt: computedAt, finishedAt: computedAt, durationMs: 900, errors: [] },
+    nextSnapshotAt: '2026-10-10T08:00:00.000Z', nextDigestAt: '2026-10-12T13:00:00.000Z', preview: { status: 'pending', at: null }, lastDigest: null }
+  const response = M.buildKpiResponse({ asOfDay: day, timeZone: 'America/New_York', generatedAt: computedAt, job,
+    settings: { aiDispatchStart: null, dedicatedStart: null, baselineMpg: null, recipients: [] }, defaultRecipientConfigured: true,
+    derived: out.derived, snapshots, series, approvals: [] })
+  const errors = shapeErrors(JSON.parse(JSON.stringify(response)))
+  check('§6 the server-built answer has the contract shape', errors.length === 0, errors.slice(0, 8).join('\n        '))
+  check('§6 no metric is approved by default', response.metrics.every((m) => m.approval.approved === false))
+  check('§6 no load id or driver key in the answer', !/T-\d|zed sentinel/.test(JSON.stringify(response)))
   report(results)
 }
 

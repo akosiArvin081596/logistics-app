@@ -11,7 +11,7 @@
  * Real libraries: lib/kpi-schedule.js, lib/kpi-digest.js, lib/app-time.js,
  * lib/broker-invoice.js extractPdfText() (the test PDFs are deflate streams
  * built here), lib/ratecon-drive-index.js. Fakes: the clock (a Date whose "now"
- * the test moves), the sheet (a deep-frozen cache object), the books, Drive,
+ * the test moves), the sheet (a deep-frozen cache object), Drive,
  * fetchDocumentBytes(), sendEmail(), the timers the scheduler starts, and
  * Backend A's lib/kpi-catalog.js / kpi-metrics.js / kpi-weight.js
  * (contract-shaped fakes, so this runner does not depend on them).
@@ -30,8 +30,8 @@
  *    blank; caps of 2000 / 200 characters; keys lowercased; arrivals are
  *    delivered loads; the shared cache is never written (it is deep-frozen and
  *    the run is strict).
- * §4 kpiRevenueByMonth(): revenue plus revenue settlement adjustments, per
- *    month; no entry for a month with no records.
+ * §4 revenue: kpiSheetLoads() reads each load's Payment cell with
+ *    brokerInvoice.parseMoney(); no Payment column, no revenue.
  * §5 a nightly run end to end: the run row, the inputs computeKpis() gets, the
  *    day's snapshot rows, the series, the derived date; an earlier day's rows
  *    untouched, the same day's replaced; kpis:changed emitted.
@@ -277,7 +277,7 @@ function fakeLibs(log) {
 }
 
 // ── the world ───────────────────────────────────────────────────────────────
-// opts: block, env, now (ISO), startsJob, folder, admin, sheet, books, drive
+// opts: block, env, now (ISO), startsJob, folder, admin, sheet, drive
 // ({ files(safe) -> [...], advanceMs, throws }), docs (id -> Buffer), sendResult,
 // db (reuse a database: a restart), seed.
 function world(opts = {}) {
@@ -295,9 +295,8 @@ function world(opts = {}) {
 	}
 	if (opts.before) opts.before(db);
 	const cache = deepFreeze(opts.sheet || baseSheet());
-	const books = opts.books || { items: [{ kind: "revenue", month: "2026-09", cents: 5334400 }, { kind: "driver_pay", month: "2026-09", cents: 100 }] };
 	const drive = opts.drive || {};
-	const control = { sheetThrows: false, ledgerAdvanceMs: 0, sendResult: opts.sendResult === undefined ? true : opts.sendResult };
+	const control = { sheetThrows: false, sheetAdvanceMs: 0, sendResult: opts.sendResult === undefined ? true : opts.sendResult };
 	const deps = {
 		require: (p) => {
 			const map = {
@@ -319,8 +318,7 @@ function world(opts = {}) {
 		APP_TIMEZONE: "America/New_York",
 		publicFormInput: require(path.join(ROOT, "lib", "public-form-input.js")),
 		normalizeLoadId: require(path.join(ROOT, "lib", "ratecon-load.js")).normalizeLoadId,
-		getJobTrackingCached: async () => { log.sheetReads++; if (control.sheetThrows) throw new Error(`Sheets down near ${BROKER}`); return cache; },
-		buildFinancialsLedger: async () => { clock.ms += control.ledgerAdvanceMs; return books; },
+		getJobTrackingCached: async () => { log.sheetReads++; clock.ms += control.sheetAdvanceMs; if (control.sheetThrows) throw new Error(`Sheets down near ${BROKER}`); return cache; },
 		fetchDocumentBytes: async (doc) => { log.docs.push(doc.id); return (opts.docs || {})[doc.id] || null; },
 		getDrive: async () => ({
 			files: {
@@ -349,7 +347,7 @@ function world(opts = {}) {
 		rateLimit: () => (req, res, next) => next(), ipKeyGenerator: (ip) => ip,
 	};
 	const names = Object.keys(deps);
-	const body = `"use strict";\n${HELPERS}\n${opts.block || BLOCK}\nreturn { runKpiSnapshot, kpiTick, kpiResponse, kpiClaimAndSend, kpiMaybeSendPreview, kpiMaybeSendDigest, kpiGatherDbInputs, kpiSheetLoads, kpiRevenueByMonth, liveJobTrackingView, state: () => ({ kpiRunning, kpiCurrentRunId, kpiJobStarted }) };`;
+	const body = `"use strict";\n${HELPERS}\n${opts.block || BLOCK}\nreturn { runKpiSnapshot, kpiTick, kpiResponse, kpiClaimAndSend, kpiMaybeSendPreview, kpiMaybeSendDigest, kpiGatherDbInputs, kpiSheetLoads, liveJobTrackingView, state: () => ({ kpiRunning, kpiCurrentRunId, kpiJobStarted }) };`;
 	const k = new Function(...names, body)(...names.map((n) => deps[n]));
 	const at = (iso) => { clock.ms = Date.parse(iso); };
 	return { db, k, log, clock, at, control, cache, settings: (s) => db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('kpi.settings', ?)").run(JSON.stringify(s)) };
@@ -448,15 +446,17 @@ const sheetSection = section(async (t, block = BLOCK) => {
 
 // ─────────────────────────────────────────── §4 revenue
 const revenueSection = section(async (t, block = BLOCK) => {
-	const w = world({ block });
-	const r = w.k.kpiRevenueByMonth({ items: [
-		{ kind: "revenue", month: "2025-04", cents: 150000 }, { kind: "revenue", month: "2025-04", cents: 50 },
-		{ kind: "revenue", month: "2026-09", cents: 5334400 }, { kind: "settlement_adjustment", adjusts: "revenue", month: "2026-09", cents: -400 },
-		{ kind: "settlement_adjustment", adjusts: "driverPay", month: "2026-09", cents: 99999 }, { kind: "driver_pay", month: "2025-05", cents: 1000 },
-		{ kind: "revenue", month: "bad", cents: 1 },
-	] });
-	t(JSON.stringify(r) === JSON.stringify([{ period: "2025-04", value: 1500.5 }, { period: "2026-09", value: 53340 }]), `§4 revenue + revenue adjustments per month; no entry where none (${JSON.stringify(r)})`);
-	t(JSON.stringify(w.k.kpiRevenueByMonth(null)) === "[]", "§4 no books: no months");
+	const w = world({ block, sheet: { headers: HEADERS, data: [
+		row(0, { "Load ID": "R-1", Status: "Delivered", "Completion Date": "2026-09-10", "  Payment  ": " $ 1,834.50 " }),
+		row(1, { "Load ID": "R-2", Status: "Delivered", "Completion Date": "2026-09-11", "  Payment  ": "" }),
+		row(2, { "Load ID": "R-3", Status: "Delivered", "Completion Date": "2026-09-12", "  Payment  ": "n/a" }),
+	] } });
+	const { loads } = w.k.kpiSheetLoads(w.k.liveJobTrackingView(w.cache));
+	const by = (id) => loads.find((l) => l.loadId === id);
+	t(by("r-1").revenue === 1834.5, `§4 the Payment cell read as money (${by("r-1").revenue})`);
+	t(by("r-2").revenue === 0 && by("r-3").revenue === 0, "§4 a blank or unreadable Payment is 0 (lib/kpi-metrics.js counts only a figure above 0)");
+	const none = w.k.kpiSheetLoads({ headers: ["Load ID", "Status"], data: [{ "Load ID": "9", Status: "Delivered" }] }).loads[0];
+	t(none.revenue === null, "§4 no Payment column: no revenue figure at all");
 });
 
 // ─────────────────────────────────────────── §5 a nightly run
@@ -471,9 +471,9 @@ const runSection = section(async (t, block = BLOCK) => {
 	t(out.status === "ok" && run.status === "ok" && run.kind === "nightly" && run.day === "2026-10-09" && run.errors === "[]" && run.finished_at && run.duration_ms >= 0, `§5 the run row: ok, nightly, the business day (${run && run.status} ${run && run.errors})`);
 	t(/Z$/.test(run.started_at) && /Z$/.test(run.finished_at), "§5 timestamps are ISO Z");
 	const inputs = w.log.inputs[0];
-	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "revenueByMonth", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "loadMiles", "activity"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
+	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "loadMiles", "activity"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
 	t(inputs.asOfDay === "2026-10-09" && JSON.stringify(inputs.settings) === JSON.stringify({ aiDispatchStart: "2026-04-01", dedicatedStart: null, baselineMpg: 8 }), "§5 asOfDay and the settings (no recipients)");
-	t(JSON.stringify(inputs.revenueByMonth) === JSON.stringify([{ period: "2026-09", value: 53344 }]), "§5 revenue from the books");
+	t(inputs.loads.find((l) => l.loadId === "l-1002").revenue === 0 && !("revenueByMonth" in inputs), "§5 revenue rides on each load; no books are read");
 	const a2 = inputs.arrivals.find((a) => a.loadId === "l-1002");
 	t(a2 && a2.destLng === -95.3 && a2.eldArriveMs === Date.parse("2026-09-12T13:00:00Z") && a2.receiverEvents.length === 1 && a2.receiverEvents[0].source === "geofence", "§5 an arrival joined to its coordinates, ELD arrival and receiver events");
 	t(inputs.loadMiles.map((m) => m.loadId).sort().join() === "l-1002,l-1003" && inputs.loadMiles.find((m) => m.loadId === "l-1002").day === "2026-09-12", "§5 load miles for live loads only (a cancelled load's dropped), with the load's day");
@@ -601,7 +601,7 @@ const timeSection = section(async (t, block = BLOCK) => {
 	t(lists === 3 && run.status === "partial" && JSON.parse(run.errors).some((e) => e.code === "RATECON_TIME_LIMIT"), `§7 the Drive phase stops at 2 minutes (${lists} loads at 40 s each), RATECON_TIME_LIMIT`);
 	t(one(slow, "SELECT COUNT(*) AS n FROM kpi_snapshots").n === 16, "§7 ...and the run still stores its figures");
 	const late = world({ block });
-	late.control.ledgerAdvanceMs = 5 * 60 * 1000;
+	late.control.sheetAdvanceMs = 5 * 60 * 1000;
 	const o2 = await late.k.runKpiSnapshot("nightly");
 	const r2 = one(late, "SELECT status, errors FROM kpi_runs WHERE id = ?", o2.runId);
 	t(r2.status === "failed" && JSON.parse(r2.errors).some((e) => e.code === "TIME_LIMIT") && late.log.inputs.length === 0 && one(late, "SELECT COUNT(*) AS n FROM kpi_snapshots").n === 0,
