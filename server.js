@@ -15732,8 +15732,9 @@ function isAfterDeadline(weekEndDate) {
 
 // The date of a sheet stamp is read LITERALLY everywhere on the server (see
 // sheetDayKey): the business day a stamp was written with is the day it counts
-// on, whichever clock wrote it. The few places that need a stamp's true INSTANT
-// (an ELD ping window) ask lib/app-time.js sheetStampZone() which clock that was.
+// on, whichever clock wrote it. The one server reader that needs a stamp's true
+// INSTANT, the ELD ping window in lib/load-haul.js, reads its clock from the
+// stamp's date (closeOutStampZone(), lib/app-time.js SHEET_STAMP_APP_ZONE_FROM).
 
 // "Now" as a sheet stamp on the business clock (APP_TIMEZONE), in the EXACT
 // legacy format: MM/DD/YYYY H:MM:SS — zero-padded month/day/minute/second,
@@ -17461,8 +17462,8 @@ async function generateInvoiceHandler(req, res) {
 		const payPercentage = payStruct.payPercentage;
 
 		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
-		// at 8 PM Eastern, which UTC already calls Saturday, and the template prints
-		// this beside a literal "Friday,".
+		// at 7 PM Eastern, which UTC calls Saturday in winter (7 PM EST is 00:00
+		// UTC), and the template prints this beside a literal "Friday,".
 		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -52408,13 +52409,13 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 	const refreshAmount = db.prepare(
 		"UPDATE investor_payouts SET amount = ? WHERE owner_id = ? AND period = ?"
 	);
-	// A month is "completed" only if BOTH clocks agree it is. currentMonthKey is
-	// server-local (computeInvestorMonthlyEarnings), while the close lifecycle
-	// runs on the business clock (APP_TIMEZONE) — so on a UTC server they disagree for the first
-	// few hours of each month. Taking the stricter of the two keeps row existence
+	// A month is "completed" only if BOTH month keys agree it is: currentMonthKey
+	// (computeInvestorMonthlyEarnings, from gatherLedgerScopeFacts) and the close
+	// lifecycle's appMonthKey(). Both read the business clock (APP_TIMEZONE) now;
+	// the first was once server-local, which on a UTC server disagreed for the
+	// first hours of each month. Taking the stricter of the two keeps row existence
 	// and `phase` from contradicting each other (a row that exists but reports
-	// 'accruing', which is settleable while the UI calls it pending). Whichever
-	// way the server's zone leans, the AND is always the conservative choice.
+	// 'accruing', which is settleable while the UI calls it pending).
 	const ctMonthKey = appMonthKey();
 	const reconcile = db.transaction((months) => {
 		for (const m of months) {

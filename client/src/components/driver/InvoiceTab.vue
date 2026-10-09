@@ -14,7 +14,7 @@
 
     <!-- Deadline warning -->
     <div v-if="isCurrentWeek && pastDeadline" class="card deadline-warning">
-      The submission deadline (Friday 6:30 PM ET) has passed for this week.
+      The submission deadline (Friday 6:30 PM {{ zoneLabel }}) has passed for this week.
     </div>
 
     <!-- Generate button -->
@@ -84,7 +84,7 @@ import { ref, computed } from 'vue'
 import { Popup as VanPopup } from 'vant'
 import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
-import { appToday, isAfterAppTime, satFriWeekOf, shiftYmd } from '../../utils/datetime'
+import { appTimeZone, appToday, isAfterAppTime, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
 
 const driverStore = useDriverStore()
@@ -112,9 +112,12 @@ const weekStart = computed(() => weekRange.value.start)
 const weekEnd = computed(() => weekRange.value.end)
 const isCurrentWeek = computed(() => weekOffset.value === 0)
 
-// The deadline is the week's Friday at 6:30 PM on the app zone's clock (ET), the
-// server's isAfterDeadline() rule, whatever zone the phone is set to.
+// The deadline is the week's Friday at 6:30 PM on the app zone's clock, the
+// server's isAfterDeadline() rule, whatever zone the phone is set to. Its label
+// is the zone's generic name ("ET" for US Eastern), never a fixed string.
 const pastDeadline = computed(() => isAfterAppTime(weekEnd.value, '18:30'))
+const zoneLabel = computed(() => new Intl.DateTimeFormat('en-US', { timeZone: appTimeZone(), timeZoneName: 'shortGeneric' })
+  .formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || '')
 
 const invoices = computed(() => driverStore.invoices || [])
 
