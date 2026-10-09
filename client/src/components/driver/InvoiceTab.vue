@@ -62,7 +62,7 @@
     <van-popup v-model:show="showActions" position="bottom" round :style="{ padding: '1rem' }">
       <div v-if="selectedInvoice" class="action-sheet">
         <div class="action-title">{{ selectedInvoice.invoice_number }}</div>
-        <div class="action-subtitle">${{ selectedInvoice.total_earnings?.toFixed(2) }} - {{ selectedInvoice.status }}</div>
+        <div class="action-subtitle">{{ typeof selectedInvoice.total_due === 'number' ? '$' + selectedInvoice.total_due.toFixed(2) : '—' }} - {{ selectedInvoice.status }}</div>
         <div class="action-buttons">
           <a :href="'/api/invoices/' + selectedInvoice.id + '/pdf'" target="_blank" class="action-btn">View PDF</a>
           <button

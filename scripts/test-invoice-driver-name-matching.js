@@ -122,7 +122,7 @@ const SHARED_FNS = [
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
 	"truckDailyRateCandidates", "findDriverNameClashes", "canonicalDriverName", "driverOwnsInvoice",
-	"buildPaymentReport", "sanitizeManualInvoiceRows", "assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
+	"invoiceTotalDue", "buildPaymentReport", "sanitizeManualInvoiceRows", "assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
 	// The P&L's deduction and the key it folds a driver's spellings to — which,
 	// like getAllExcludedDriverDays(), reads a name through these two.
 	"isBuiltInPropertyName", "driverNameForTotals",
@@ -269,7 +269,7 @@ function liftedFor(src) {
 			...ROUTES.map((h) => liftRoute(src, h)),
 			`return { ${[...SHARED_CONSTS, ...SHARED_FNS, ...ASYNC_FNS].join(", ")} };`,
 		].join("\n"),
-		driverAppList: new Function("db", "normalizeDriverName", "driverNameNorm", "driverName",
+		driverAppList: new Function("db", "normalizeDriverName", "driverNameNorm", "driverName", "invoiceTotalDue",
 			`${liftFragment(src, DRIVER_APP_LIST_ANCHOR, ";\n", "the driver app's invoice list")}\nreturn driverInvoices;`),
 		pnlTrucks: new Function("db", "normalizeDriverName",
 			`const investorDriverSet = null;\nconst user = { id: 0 };\n${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t}", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
@@ -353,7 +353,7 @@ function buildWorld(opts = {}) {
 	const w = new Function(...Object.keys(deps), lifted.body)(...Object.values(deps));
 	return Object.assign(w, {
 		db, root, invoicesDir, routes, rendered, emails, notes, logs, audits, sheet,
-		driverAppList: (name) => lifted.driverAppList(db, w.normalizeDriverName, w.normalizeDriverName(name), name),
+		driverAppList: (name) => lifted.driverAppList(db, w.normalizeDriverName, w.normalizeDriverName(name), name, w.invoiceTotalDue),
 		pnlTrucks: () => lifted.pnlTrucks(db, w.normalizeDriverName),
 		// `fold` defaults to the shipped foldExpenseTotalsByDriver(); passing
 		// OLD_perTruckExpenseMap runs origin/main's construction over the same query.

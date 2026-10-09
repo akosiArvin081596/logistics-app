@@ -7,7 +7,9 @@
         <div class="inv-week">{{ invoice.week_start }} to {{ invoice.week_end }}</div>
       </div>
       <div class="inv-right">
-        <div class="inv-amount">${{ (invoice.total_earnings || 0).toFixed(2) }}</div>
+        <!-- total_due: the server's total with any admin adjustment, the PDF's
+             "Total Due". A row without one shows a dash, never $0.00. -->
+        <div class="inv-amount">{{ typeof invoice.total_due === 'number' ? '$' + invoice.total_due.toFixed(2) : '—' }}</div>
         <div class="inv-amount-label">your pay</div>
         <div :class="['inv-status', statusColor]">{{ invoice.status }}</div>
       </div>
