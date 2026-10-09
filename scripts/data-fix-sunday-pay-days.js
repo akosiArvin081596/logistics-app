@@ -6,7 +6,8 @@
 // open month that follows, as two lines, each through the column its own screen
 // and route write:
 //   1. the driver's pay: an adjustment on his earliest weekly invoice for a week
-//      inside that month that is still Draft or Submitted (invoices.adjustment,
+//      inside that month, only while it is still Draft or Submitted; a later
+//      week's invoice is never used in its place (invoices.adjustment,
 //      the column PUT /api/invoices/:id/adjust sets; the PDF Total Due, the
 //      Invoices screen and the payment report read total_earnings + adjustment);
 //   2. the investor's payout: an adjustment on the investor's payout row for that
@@ -543,7 +544,7 @@ function existingAdjustment(targetKey, current, note, own, kind) {
 }
 
 function driverLine(db, day, kase, ev, own) {
-	const line = { kind: "driver", title: `${ev.driverName}'s driver pay`, reasons: [], passedOver: [] };
+	const line = { kind: "driver", title: `${ev.driverName}'s driver pay`, reasons: [] };
 	line.cents = -ev.dayCents;
 	line.note = `${weekdayOf(day)} ${shortDate(day)} is not a pay day: ${kase.noteWhy}. Its $${plain(ev.dayCents)} was paid on ${kase.sourceInvoice}. Ref ${kase.ref}`;
 	const done = own.find((l) => l.kind === "driver" && l.ref === kase.ref);
@@ -578,22 +579,33 @@ function driverLine(db, day, kase, ev, own) {
 		`SELECT id, invoice_number, driver, week_start, week_end, status, paid_at, total_earnings, adjustment, adjustment_note, render_data
 		   FROM invoices WHERE deleted_at = '' AND is_manual = 0 AND week_start >= ? AND week_end <= ? ORDER BY week_start, id`
 	).all(`${month}-01`, lastDayOf(month)).filter((r) => normalizeName(r.driver) === ev.driverKey);
-	let home = null;
+	const open = (r) => (r.status === "Draft" || r.status === "Submitted") && !String(r.paid_at || "").trim();
+	// The home is the earliest October invoice, and only while it is still open.
+	// An earlier one that is past Draft or Submitted is never passed over to land
+	// on a later week: an earlier run may have kept the claw-back off the later
+	// invoice on purpose (a Total Due below $0, say), which nothing records, so
+	// the line needs a decision instead.
+	const passedOver = [];
 	for (const r of candidates) {
-		if ((r.status === "Draft" || r.status === "Submitted") && !String(r.paid_at || "").trim()) { home = r; break; }
-		line.passedOver.push(`${r.invoice_number} (week ${r.week_start} to ${r.week_end}) is ${r.status}${String(r.paid_at || "").trim() ? `, paid ${r.paid_at}` : ""}`);
+		if (open(r)) break;
+		passedOver.push(`${r.invoice_number} (week ${r.week_start} to ${r.week_end}) is ${r.status}${String(r.paid_at || "").trim() ? `, paid ${r.paid_at}` : ""}`);
 	}
-	if (!home) {
+	if (passedOver.length) {
+		line.status = "skip";
+		line.reasons.push(`Skipped (uncertain): ${passedOver.join("; ")}. Posting the claw-back now would pass ${passedOver.length === 1 ? "it" : "them"} over and land on a later week's invoice, and this script never moves a claw-back on its own. Nothing is written for this line; it needs a decision first (which invoice takes it, or posting it by hand).`);
+		return line;
+	}
+	if (!candidates.length) {
 		const w = firstInvoiceWeek(month);
 		line.status = "skip";
 		// The one skip that only waits: a re-run once the invoice exists is safe.
 		line.waiting = true;
-		line.reasons.push(`Skipped: ${ev.driverName} has no weekly invoice for a week inside ${monthLabel(month)} that is still Draft or Submitted` +
-			(line.passedOver.length ? ` (passed over: ${line.passedOver.join("; ")})` : "") + ". " +
-			(candidates.length ? "" : `The weekly batch creates each week's invoice on the evening of the Friday that ends it; the first week inside ${monthLabel(month)} is ${w.start} to ${w.end}. `) +
+		line.reasons.push(`Skipped: ${ev.driverName} has no weekly invoice for a week inside ${monthLabel(month)} yet. ` +
+			`The weekly batch creates each week's invoice on the evening of the Friday that ends it; the first week inside ${monthLabel(month)} is ${w.start} to ${w.end}. ` +
 			"Nothing is written for this line; re-run this command once that invoice exists.");
 		return line;
 	}
+	const home = candidates[0];
 	line.home = home;
 	const lock = lockStatus(db, month);
 	if (lock && lock.status === "locked") {
@@ -907,7 +919,7 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 		say(`Line ${i + 1} of ${plan.lines.length}: ${line.title}${line.cents !== undefined ? `, ${usd(line.cents)}` : ""}`);
 		if (line.kind === "driver" && line.cents !== undefined) {
 			say(`- Amount: minus what the day was billed, ${usd(line.cents)}.`);
-			say(`- Home: ${ev.driverName}'s earliest weekly invoice for a week inside ${monthLabel(kase.targetMonth)} that is still Draft or Submitted (the adjust route's column, invoices.adjustment; the invoice PDF's Total Due, the Invoices screen, the payment report and Financials' invoiced column read total earnings + adjustment).`);
+			say(`- Home: ${ev.driverName}'s earliest weekly invoice for a week inside ${monthLabel(kase.targetMonth)}, only while it is still Draft or Submitted (the adjust route's column, invoices.adjustment; the invoice PDF's Total Due, the Invoices screen, the payment report and Financials' invoiced column read total earnings + adjustment).`);
 		}
 		if (line.kind === "investor" && line.replay && line.replay.asSettled) {
 			const rp = line.replay;
@@ -944,11 +956,6 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 				say(`- Note (the investor sees it in the portal and on the statement): ${JSON.stringify(line.after.note)}`);
 				say(`- ${dryRun ? "Would write" : "Written"}: investor_payouts row ${r.id} (adjustment, adjustment_note, adjusted_by "${ACTOR}", adjusted_at), one investor_payout_history row (adjustment, effective ${usd(line.before.amount + line.before.adjustment)} to ${usd(line.after.amount + line.after.adjustment)}), and one audit_trail row (investor_payout_adjust, system).`);
 			}
-		}
-		// The earlier October invoices the home rule passed over, shown whenever a
-		// home was found, so a run that lands on a later week says so.
-		if (line.kind === "driver" && line.home && line.passedOver && line.passedOver.length) {
-			say(`- Passed over (not Draft or Submitted, so not the home): ${line.passedOver.join("; ")}.`);
 		}
 		for (const reason of line.reasons) say(`- ${reason}`);
 		if (line.status === "skip" && !line.waiting) {

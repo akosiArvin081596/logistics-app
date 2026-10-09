@@ -37,11 +37,12 @@
  *      outside the temp directory, a source month that is not closed;
  *   §13 re-runs: a skip that needs a decision offers no re-run command and says
  *      not to re-run; a hand adjustment on any of the driver's invoices from
- *      the source week on (a passed-over paid one, a manual one) or on another
- *      of the investor's payout rows skips that line, so a re-run never takes
- *      the day back twice; passed-over invoices are printed beside a later
- *      target; skips that only wait keep their re-run command; a write that
- *      does not read back as written rolls the run back.
+ *      the source week on (a paid one, a manual one) or on another of the
+ *      investor's payout rows skips that line, so a re-run never takes the day
+ *      back twice; an earliest October invoice past Draft or Submitted is never
+ *      passed over for a later week (a re-run after it is approved, or a first
+ *      apply, stops for a decision); skips that only wait keep their re-run
+ *      command; a write that does not read back as written rolls the run back.
  *
  * Pure: a temp directory, child processes of the script itself, no server, no
  * network. Run: node scripts/test-data-fix-sunday-pay-days.js  # exits 1 on failure
@@ -384,7 +385,7 @@ console.log("§5 a missing October home is skipped");
 {
 	const r = noWrite(buildFixture("no-home", { w40: null, october: false }), APPLY_27);
 	check(r.unchanged, "the apply exits 0 and writes nothing", r.err || r.out.slice(-300));
-	check(/Skipped: Pat Sample has no weekly invoice for a week inside October 2026 that is still Draft or Submitted\./.test(r.out) &&
+	check(/Skipped: Pat Sample has no weekly invoice for a week inside October 2026 yet\./.test(r.out) &&
 		/the first week inside October 2026 is 2026-10-03 to 2026-10-09/.test(r.out) && /re-run this command once that invoice exists/.test(r.out),
 		"the driver line says its home does not exist yet and when to re-run");
 	check(/Skipped: investor 5 has no October 2026 payout row yet\./.test(r.out) && /re-run this command between 2026-11-01 and 2026-11-07/.test(r.out),
@@ -397,7 +398,8 @@ console.log("§6 a paid invoice, a paid payout and a closed October are refused"
 {
 	const r = noWrite(buildFixture("paid", { w40: "Paid", octoberStatus: "paid" }), APPLY_27);
 	check(r.unchanged, "nothing is written", r.err || r.out.slice(-300));
-	check(/passed over: INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Paid, paid 2026-10-12T15:00:00.000Z/.test(r.out), "the paid invoice is passed over, by name");
+	check(/Skipped \(uncertain\): INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Paid, paid 2026-10-12T15:00:00.000Z\. Posting the claw-back now would pass it over/.test(r.out) &&
+		/Do not re-run this command for this line/.test(r.out), "the paid earliest October invoice is named, and the line needs a decision", r.out.slice(-700));
 	check(/payout row 31 \(October 2026\) is paid; the correction has to land before it is settled/.test(r.out), "the paid payout row is refused");
 	const r2 = noWrite(buildFixture("closed", { lockOctober: true }), APPLY_27);
 	check(r2.unchanged && (r2.out.match(/October 2026 is closed, so/g) || []).length === 2, "a closed October: both lines refused, nothing written", r2.out.slice(-600));
@@ -573,6 +575,14 @@ console.log("§13 a re-run never takes the day back twice or moves a claw-back")
 	check(/INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09, Paid\) carries -\$300\.00 \(note: "Sunday 9\/27 taken back by hand", by super_admin\)/.test(again.out) && /Already applied: \+\$150\.00/.test(again.out),
 		"repro 1, re-run: it names the hand adjustment, even on a passed-over paid invoice", again.out.slice(-600));
 
+	// A hand claw-back on a later, already approved week counts while W40 is
+	// still open, whatever that later invoice's status.
+	const later = buildFixture("later-week-adjusted", { w41: true });
+	setInvoice(later, "UPDATE invoices SET adjustment = -300, adjustment_note = 'Sunday 9/27 by hand', adjusted_by = 'super_admin', status = 'Approved' WHERE id = 650");
+	const lw = run([...APPLY_27, `--db=${later}`]);
+	check(lw.code === 0 && invAdj(later) === 0 && /INV-SK-2026W41-01 \(week 2026-10-10 to 2026-10-16, Approved\) carries -\$300\.00/.test(lw.out),
+		"a hand claw-back on a later approved week: the open W40 is not clawed back again", lw.out.slice(-500));
+
 	// A manual invoice carrying the day taken back by hand counts too.
 	const manual = noWrite(buildFixture("manual-adjusted", { manualAdjustment: { amount: -300, note: "Sunday 9/27 by hand" }, october: false }), APPLY_27);
 	check(manual.unchanged && /INV-SK-MANUAL-01 \(manual invoice 2026-10-01 to 2026-10-05, Submitted\) carries -\$300\.00/.test(manual.out),
@@ -586,16 +596,27 @@ console.log("§13 a re-run never takes the day back twice or moves a claw-back")
 		"a hand credit on another payout row: the investor line is skipped; the driver line still applies", nr.out.slice(-600));
 
 	// Repro 2: W40's Total Due cannot take the claw-back; W41 exists. No re-run
-	// is offered; if W40 is approved later, a run says what it passed over.
+	// is offered; and if W40 is approved later, a re-run is refused by code
+	// rather than moving the claw-back to W41.
 	const two = buildFixture("repro-2", { w40Total: 200, w41: true });
 	const r2 = run([...APPLY_27, `--db=${two}`]);
 	check(r2.code === 0 && invAdj(two) === 0 && invAdj(two, 650) === 0 && /The claw-back is not moved to another invoice/.test(r2.out), "repro 2, first run: the Total Due skip", r2.out.slice(-400));
 	check(!/Re-run command/.test(r2.out) && /Do not re-run this command for this line/.test(r2.out) && /No re-run command: line 1 needs a decision first/.test(r2.out),
 		"repro 2, first run: no re-run command, and the skipped line says not to re-run");
 	setInvoice(two, "UPDATE invoices SET status = 'Approved' WHERE id = 640");
-	const d2 = run([...DRY_27, `--db=${two}`]);
-	check(/Target: INV-SK-2026W41-01/.test(d2.out) && /Passed over \(not Draft or Submitted, so not the home\): INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Approved\./.test(d2.out),
-		"repro 2, a later dry run: the passed-over W40 is printed beside the W41 target", d2.out.slice(-900));
+	const before2 = tablesHash(two);
+	const a2 = run([...APPLY_27, `--db=${two}`]);
+	check(a2.code === 0 && invAdj(two, 650) === 0 && tablesHash(two) === before2, "repro 2, a re-run after W40 is approved writes nothing: the claw-back is not moved to W41",
+		JSON.stringify({ w41: invAdj(two, 650) }));
+	check(/Skipped \(uncertain\): INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Approved\. Posting the claw-back now would pass it over and land on a later week's invoice/.test(a2.out) &&
+		!/Target: INV-SK-2026W41-01/.test(a2.out) && /No re-run command: line 1 needs a decision first/.test(a2.out),
+		"repro 2, the re-run names the passed-over W40 and needs a decision", a2.out.slice(-700));
+
+	// The intended cost: a first apply after W40 is already approved stops too.
+	const late = buildFixture("approved-first", { w40: "Approved", w41: true });
+	const lr = run([...APPLY_27, `--db=${late}`]);
+	check(lr.code === 0 && invAdj(late) === 0 && invAdj(late, 650) === 0 && octAdj(late) === 150 && /INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Approved\./.test(lr.out),
+		"a first apply after W40 is approved: the driver line stops for a decision, the investor line is written", lr.out.slice(-600));
 
 	// Waiting skips still get their re-run command.
 	const wait = run([...APPLY_27, `--db=${buildFixture("waiting", { w40: null, october: false })}`]);
