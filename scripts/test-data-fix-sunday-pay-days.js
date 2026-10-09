@@ -34,7 +34,14 @@
  *      run before any write;
  *   §12 refusals: an unapproved case (even with its --approval), an unlisted
  *      day, a missing or wrong --approval, an unknown option, a database
- *      outside the temp directory, a source month that is not closed.
+ *      outside the temp directory, a source month that is not closed;
+ *   §13 re-runs: a skip that needs a decision offers no re-run command and says
+ *      not to re-run; a hand adjustment on any of the driver's invoices from
+ *      the source week on (a passed-over paid one, a manual one) or on another
+ *      of the investor's payout rows skips that line, so a re-run never takes
+ *      the day back twice; passed-over invoices are printed beside a later
+ *      target; skips that only wait keep their re-run command; a write that
+ *      does not read back as written rolls the run back.
  *
  * Pure: a temp directory, child processes of the script itself, no server, no
  * network. Run: node scripts/test-data-fix-sunday-pay-days.js  # exits 1 on failure
@@ -103,6 +110,7 @@ function buildFixture(name, opts = {}) {
 		w39Adjustment: 0, w39Status: "Submitted", w39Deleted: false, septAdjustment: 0,
 		settlementAdj: null, freezeSource: "close", carriedIn: 0, lease: false,
 		failPayoutUpdate: false, payoutsAsView: false, ownLines: [],
+		manualAdjustment: null, novemberAdjustment: null, tamperNote: false,
 		...opts,
 	};
 	const dir = fs.mkdtempSync(path.join(TMP, `${name}-`));
@@ -179,10 +187,24 @@ function buildFixture(name, opts = {}) {
 		insInv.run(650, "INV-SK-2026W41-01", DRIVER, "2026-10-10", "2026-10-16", 5, r, 5 * r, "Submitted",
 			JSON.stringify(["570400000"]), renderData([0, 0, r, r, r, r, r], ["", "", "570400000", "570400000", "570400000", "570400000", "570400000"]), "", 0, "", "", "");
 	}
+	if (o.manualAdjustment) {
+		db.prepare(
+			`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, total_earnings, status, adjustment, adjustment_note, adjusted_by, is_manual)
+			 VALUES (660, 'INV-SK-MANUAL-01', ?, '2026-10-01', '2026-10-05', 0, 'Submitted', ?, ?, 'super_admin', 1)`
+		).run(DRIVER, o.manualAdjustment.amount, o.manualAdjustment.note);
+	}
+	if (o.novemberAdjustment) {
+		db.prepare("INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, adjustment, adjustment_note, adjusted_by) VALUES (35, 5, '2026-11', 0, '2026-12-25', 'owed', ?, ?, 'super_admin')")
+			.run(o.novemberAdjustment.amount, o.novemberAdjustment.note);
+	}
 	for (const details of o.ownLines) auditRow(db, details);
 	db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('2026-09-28T19:59:42.061Z', 1, 'super_admin', 'Super Admin', 'dispatch_load', 'load', '569820951', 'Assigned driver Pat Sample to load 569820951')").run();
 	if (o.failPayoutUpdate) {
 		db.exec("CREATE TRIGGER test_fail_payout_update BEFORE UPDATE ON investor_payouts BEGIN SELECT RAISE(ABORT, 'forced failure on the second write'); END;");
+	}
+	if (o.tamperNote) {
+		// Changes what was written, after the write: the read-back must refuse it.
+		db.exec("CREATE TRIGGER test_tamper_note AFTER UPDATE OF adjustment ON invoices BEGIN UPDATE invoices SET adjustment_note = 'tampered' WHERE id = NEW.id; END;");
 	}
 	if (o.payoutsAsView) {
 		db.exec("ALTER TABLE investor_payouts RENAME TO investor_payouts_data; CREATE VIEW investor_payouts AS SELECT * FROM investor_payouts_data;");
@@ -398,7 +420,8 @@ console.log("§7 uncertain amounts are skipped");
 	const foreign = buildFixture("foreign", { w40Adjustment: { amount: 50, note: "fuel advance repaid" } });
 	const r3 = run([...APPLY_27, `--db=${foreign}`]);
 	const inv = rowOf(foreign, "SELECT adjustment, adjustment_note FROM invoices WHERE id = 640");
-	check(r3.code === 0 && inv.adjustment === 50 && inv.adjustment_note === "fuel advance repaid" && /already has an adjustment of \+\$50\.00 that this script did not write/.test(r3.out),
+	check(r3.code === 0 && inv.adjustment === 50 && inv.adjustment_note === "fuel advance repaid" &&
+		/INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09, Submitted\) carries \+\$50\.00 \(note: "fuel advance repaid", by super_admin\)\. That adjustment was not written by this script/.test(r3.out),
 		"an adjustment the script did not write is left alone, and the reason is given", JSON.stringify(inv));
 	check(octAdj(foreign) === 150, "the investor line still applies");
 }
@@ -509,8 +532,8 @@ console.log("§12 refusals");
 	try { applyModule(file, "2026-09-13", fix.CASES["2026-09-13"], "C2"); } catch (e) { threw = e; }
 	check(threw instanceof fix.Refusal && /not approved/.test(threw.message), "applyCase refuses an unapproved case too");
 	const c2dry = run(["--day", "2026-09-13", "--dry-run", `--db=${file}`]);
-	check(c2dry.code === 0 && /2 line\(s\) would be written/.test(c2dry.out) && /This case is not approved, so it has no apply command/.test(c2dry.out) && !/Apply command:/.test(c2dry.out),
-		"an unapproved case still dry-runs, with no apply command");
+	check(c2dry.code === 0 && /Result: 2 line\(s\) would be written once approved\./.test(c2dry.out) && /This case is not approved, so it has no apply command/.test(c2dry.out) && !/Apply command:/.test(c2dry.out),
+		"an unapproved case still dry-runs: its lines would be written once approved, and it has no apply command");
 	const cases = [
 		[["--day", "2026-09-20", "--dry-run", `--db=${file}`], /not a listed case/, "an unlisted day"],
 		[["--day", "2026-09-27", `--db=${file}`], /needs --approval C1/, "an apply without --approval"],
@@ -526,6 +549,65 @@ console.log("§12 refusals");
 	check(tablesHash(file) === before, "no refusal wrote anything");
 	const open = noWrite(buildFixture("open-september", { septemberLocked: false }), APPLY_27, 2);
 	check(open.unchanged && /REFUSED: September 2026 is not closed/.test(open.out), "a September that is not closed is refused, nothing written", open.out.slice(-300));
+}
+
+// ═══════════════════════════════════════════════════ §13 re-runs
+console.log("§13 a re-run never takes the day back twice or moves a claw-back");
+{
+	const setInvoice = (file, sql, ...params) => { const db = new Database(file); db.prepare(sql).run(...params); db.close(); };
+
+	// Repro 1: W40 carries someone else's +$50, W41 exists. The first run skips
+	// the driver line and offers no re-run; the admin then takes the day back on
+	// W40 by hand and W40 is paid; a re-run must not claw it back again on W41.
+	const one = buildFixture("repro-1", { w40Adjustment: { amount: 50, note: "fuel advance repaid" }, w41: true });
+	const dry = run([...DRY_27, `--db=${one}`]);
+	check(/Apply command:/.test(dry.out) && /It writes only the other line\(s\): line 1 needs a decision first \(see above\), and is not to be re-run for it\./.test(dry.out),
+		"repro 1, dry run: the apply command says it writes only the investor line and is not to be re-run for the driver line", dry.out.slice(-500));
+	const first = run([...APPLY_27, `--db=${one}`]);
+	check(first.code === 0 && invAdj(one) === 50 && invAdj(one, 650) === 0 && octAdj(one) === 150, "repro 1, first run: the driver line is skipped, the investor line is written", first.out.slice(-400));
+	check(!/Re-run command/.test(first.out) && /Do not re-run this command for this line/.test(first.out) && /No re-run command: line 1 needs a decision first \(see above\)\. Ask before running this script for 2026-09-27 again\./.test(first.out),
+		"repro 1, first run: no re-run command, and the skipped line says not to re-run", first.out.slice(-500));
+	setInvoice(one, "UPDATE invoices SET adjustment = -300, adjustment_note = 'Sunday 9/27 taken back by hand', adjusted_by = 'super_admin', status = 'Paid', paid_at = '2026-10-16T15:00:00.000Z' WHERE id = 640");
+	const again = run([...APPLY_27, `--db=${one}`]);
+	check(again.code === 0 && invAdj(one, 650) === 0 && invAdj(one) === -300, "repro 1, re-run after the hand claw-back: W41 is not clawed back again", JSON.stringify({ w40: invAdj(one), w41: invAdj(one, 650) }));
+	check(/INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09, Paid\) carries -\$300\.00 \(note: "Sunday 9\/27 taken back by hand", by super_admin\)/.test(again.out) && /Already applied: \+\$150\.00/.test(again.out),
+		"repro 1, re-run: it names the hand adjustment, even on a passed-over paid invoice", again.out.slice(-600));
+
+	// A manual invoice carrying the day taken back by hand counts too.
+	const manual = noWrite(buildFixture("manual-adjusted", { manualAdjustment: { amount: -300, note: "Sunday 9/27 by hand" }, october: false }), APPLY_27);
+	check(manual.unchanged && /INV-SK-MANUAL-01 \(manual invoice 2026-10-01 to 2026-10-05, Submitted\) carries -\$300\.00/.test(manual.out),
+		"a manual invoice with a hand adjustment: the driver line is skipped, nothing written", manual.out.slice(-500));
+
+	// The investor's side: a hand correction on another month's payout row.
+	const nov = buildFixture("november-adjusted", { novemberAdjustment: { amount: 150, note: "Sunday 9/27 credit by hand" } });
+	const nr = run([...APPLY_27, `--db=${nov}`]);
+	check(nr.code === 0 && octAdj(nov) === 0 && invAdj(nov) === -300 &&
+		/payout row 35 \(November 2026, owed\) carries \+\$150\.00 \(note: "Sunday 9\/27 credit by hand", by super_admin\)\. That adjustment was not written by this script/.test(nr.out),
+		"a hand credit on another payout row: the investor line is skipped; the driver line still applies", nr.out.slice(-600));
+
+	// Repro 2: W40's Total Due cannot take the claw-back; W41 exists. No re-run
+	// is offered; if W40 is approved later, a run says what it passed over.
+	const two = buildFixture("repro-2", { w40Total: 200, w41: true });
+	const r2 = run([...APPLY_27, `--db=${two}`]);
+	check(r2.code === 0 && invAdj(two) === 0 && invAdj(two, 650) === 0 && /The claw-back is not moved to another invoice/.test(r2.out), "repro 2, first run: the Total Due skip", r2.out.slice(-400));
+	check(!/Re-run command/.test(r2.out) && /Do not re-run this command for this line/.test(r2.out) && /No re-run command: line 1 needs a decision first/.test(r2.out),
+		"repro 2, first run: no re-run command, and the skipped line says not to re-run");
+	setInvoice(two, "UPDATE invoices SET status = 'Approved' WHERE id = 640");
+	const d2 = run([...DRY_27, `--db=${two}`]);
+	check(/Target: INV-SK-2026W41-01/.test(d2.out) && /Passed over \(not Draft or Submitted, so not the home\): INV-SK-2026W40-01 \(week 2026-10-03 to 2026-10-09\) is Approved\./.test(d2.out),
+		"repro 2, a later dry run: the passed-over W40 is printed beside the W41 target", d2.out.slice(-900));
+
+	// Waiting skips still get their re-run command.
+	const wait = run([...APPLY_27, `--db=${buildFixture("waiting", { w40: null, october: false })}`]);
+	check(/Re-run command for the skipped line\(s\), once the row each one waits for exists:/.test(wait.out) && !/Do not re-run/.test(wait.out), "skips that only wait for their home keep the re-run command");
+
+	// The read-back after the writes: a row that does not read back as written
+	// rolls the whole run back.
+	const tamper = buildFixture("read-back", { tamperNote: true });
+	const before = tablesHash(tamper);
+	const t = run([...APPLY_27, `--db=${tamper}`]);
+	check(t.code === 1 && /invoices row 640 does not read back as written/.test(t.err) && tablesHash(tamper) === before,
+		"a write that does not read back as written: exit 1, nothing written", `${t.code} ${t.err}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

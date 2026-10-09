@@ -32,8 +32,13 @@
 // have been corrected by hand), a replay that does not reproduce the
 // settlement, a missing or closed target, a target that already carries an
 // adjustment this script did not write, a settled target, a Total Due that
-// would go below $0. A line whose home does not exist yet is skipped with when
-// to re-run; this script never creates an invoice or a payout row.
+// would go below $0, or an adjustment this script did not write on any of the
+// driver's invoices from the source week on (weekly or manual) or on any of the
+// investor's payout rows after the closed month, which may be this correction
+// posted by hand. A line whose home does not exist yet is skipped with when to
+// re-run; this script never creates an invoice or a payout row. A re-run
+// command is printed only when every skipped line is waiting for its home; any
+// other skip says not to re-run for it.
 //
 // Only an approved case applies: each case says whether the owner approved it,
 // and changing that is a reviewed change to this file. An unapproved case runs
@@ -553,6 +558,22 @@ function driverLine(db, day, kase, ev, own) {
 		return line;
 	}
 	const month = kase.targetMonth;
+	// An adjustment this script did not write, on any of the driver's live
+	// invoices from the source week on (weekly or manual, the home or one passed
+	// over): the day may already have been taken back by hand, and a later run
+	// cannot tell, so nothing is written. This also covers the home itself, whose
+	// adjustment the route would replace rather than add to.
+	const foreign = db.prepare(
+		`SELECT invoice_number, driver, week_start, week_end, status, is_manual, adjustment, adjustment_note, adjusted_by
+		   FROM invoices WHERE deleted_at = '' AND week_end >= ? AND COALESCE(adjustment, 0) != 0 ORDER BY week_start, id`
+	).all(ev.invoice.week_start)
+		.filter((r) => normalizeName(r.driver) === ev.driverKey && !existingAdjustment(r.invoice_number, r.adjustment, r.adjustment_note, own, "driver").ok);
+	if (foreign.length) {
+		line.status = "skip";
+		line.reasons.push(`Skipped (uncertain): ${foreign.map((r) => `${r.invoice_number} (${r.is_manual ? "manual invoice" : "week"} ${r.week_start} to ${r.week_end}, ${r.status}) carries ${usd(toCents(r.adjustment))} (note: ${JSON.stringify(r.adjustment_note || "")}, by ${r.adjusted_by || "unknown"})`).join("; ")}. ` +
+			`${foreign.length === 1 ? "That adjustment was" : "Those adjustments were"} not written by this script, so the day may already have been taken back by hand. Nothing is written for this line; check by hand or ask.`);
+		return line;
+	}
 	const candidates = db.prepare(
 		`SELECT id, invoice_number, driver, week_start, week_end, status, paid_at, total_earnings, adjustment, adjustment_note, render_data
 		   FROM invoices WHERE deleted_at = '' AND is_manual = 0 AND week_start >= ? AND week_end <= ? ORDER BY week_start, id`
@@ -565,6 +586,8 @@ function driverLine(db, day, kase, ev, own) {
 	if (!home) {
 		const w = firstInvoiceWeek(month);
 		line.status = "skip";
+		// The one skip that only waits: a re-run once the invoice exists is safe.
+		line.waiting = true;
 		line.reasons.push(`Skipped: ${ev.driverName} has no weekly invoice for a week inside ${monthLabel(month)} that is still Draft or Submitted` +
 			(line.passedOver.length ? ` (passed over: ${line.passedOver.join("; ")})` : "") + ". " +
 			(candidates.length ? "" : `The weekly batch creates each week's invoice on the evening of the Friday that ends it; the first week inside ${monthLabel(month)} is ${w.start} to ${w.end}. `) +
@@ -578,12 +601,9 @@ function driverLine(db, day, kase, ev, own) {
 		line.reasons.push(`Skipped: ${monthLabel(month)} is closed, so ${home.invoice_number} takes no adjustment. The approval names ${monthLabel(month)}; ask the owner where the correction goes now. Nothing is written for this line.`);
 		return line;
 	}
+	// The home's adjustment, if any, is this script's own (the check above refused
+	// any other), so it is combined.
 	const existing = existingAdjustment(home.invoice_number, home.adjustment, home.adjustment_note, own, "driver");
-	if (!existing.ok) {
-		line.status = "skip";
-		line.reasons.push(`Skipped: ${home.invoice_number} already has an adjustment of ${usd(toCents(home.adjustment))} that this script did not write (note: ${JSON.stringify(home.adjustment_note || "")}). The adjust route replaces an adjustment rather than adding to it, so writing this line would erase it. Nothing is written for this line; post ${usd(line.cents)} by hand on the Invoices screen together with the existing adjustment, or ask.`);
-		return line;
-	}
 	line.combine = existing.combine;
 	line.before = { adjustment: toCents(home.adjustment), note: home.adjustment_note || "", totalDue: toCents(home.total_earnings) + toCents(home.adjustment) };
 	const newNote = combineNote(existing.combine ? home.adjustment_note : "", line.note);
@@ -642,11 +662,26 @@ function investorLine(db, day, kase, ev, own, ctx) {
 			: "Nothing to post: the payout does not change without the day.");
 		return line;
 	}
+	// The driver line's rule on the investor's side: an adjustment this script
+	// did not write, on any of the investor's payout rows after the closed month
+	// (the target or another), may already be this correction posted by hand.
+	const foreign = db.prepare(
+		"SELECT id, period, status, adjustment, adjustment_note, adjusted_by FROM investor_payouts WHERE owner_id = ? AND period > ? AND COALESCE(adjustment, 0) != 0 ORDER BY period"
+	).all(kase.ownerId, kase.sourceMonth)
+		.filter((r) => !existingAdjustment(payoutTarget(kase.ownerId, r.period), r.adjustment, r.adjustment_note, own, "investor").ok);
+	if (foreign.length) {
+		line.status = "skip";
+		line.reasons.push(`Skipped (uncertain): ${foreign.map((r) => `payout row ${r.id} (${monthLabel(r.period)}, ${r.status}) carries ${usd(toCents(r.adjustment))} (note: ${JSON.stringify(r.adjustment_note || "")}, by ${r.adjusted_by || "unknown"})`).join("; ")}. ` +
+			`${foreign.length === 1 ? "That adjustment was" : "Those adjustments were"} not written by this script, so the correction may already have been posted by hand. Nothing is written for this line; check by hand or ask.`);
+		return line;
+	}
 	const row = db.prepare("SELECT * FROM investor_payouts WHERE owner_id = ? AND period = ?").get(kase.ownerId, month);
 	const closesAfter = graceEndsAt(month, ctx.graceDays);
 	const nextMonthStart = addDays(lastDayOf(month), 1);
 	if (!row) {
 		line.status = "skip";
+		// The one skip that only waits: a re-run once the row exists is safe.
+		line.waiting = true;
 		line.reasons.push(`Skipped: investor ${kase.ownerId} has no ${monthLabel(month)} payout row yet. The app creates it, as an owed row, on the first payouts read (a Super Admin opening the Payouts console, or the investor's portal) on or after ${nextMonthStart}, once ${monthLabel(month)} has ended; if nothing reads payouts before the close, the close creates and locks it in one step. This script does not create it: a row for a month still in progress would show on both screens and could be marked paid before the month's own figure exists, and the adjust route never creates a row either. Nothing is written for this line; re-run this command between ${nextMonthStart} and ${closesAfter} (${monthLabel(month)}'s books close after ${closesAfter}, with the ${ctx.graceDays}-day grace).`);
 		return line;
 	}
@@ -662,12 +697,9 @@ function investorLine(db, day, kase, ev, own, ctx) {
 		line.reasons.push(`Skipped: payout row ${row.id} (${monthLabel(month)}) is ${row.status}${row.finalized_at ? `, finalized ${row.finalized_at}` : ""}; the correction has to land before it is settled. Nothing is written for this line.`);
 		return line;
 	}
+	// The row's adjustment, if any, is this script's own (the check above refused
+	// any other), so it is combined.
 	const existing = existingAdjustment(targetKey, row.adjustment, row.adjustment_note, own, "investor");
-	if (!existing.ok) {
-		line.status = "skip";
-		line.reasons.push(`Skipped: payout row ${row.id} already has an adjustment of ${usd(toCents(row.adjustment))} that this script did not write (note: ${JSON.stringify(row.adjustment_note || "")}). The adjust route replaces an adjustment rather than adding to it, so writing this line would erase it. Nothing is written for this line; post ${usd(line.cents)} by hand on the Payouts console together with the existing adjustment, or ask.`);
-		return line;
-	}
 	line.combine = existing.combine;
 	const amountCents = toCents(row.amount);
 	const before = toCents(row.adjustment);
@@ -913,24 +945,49 @@ function render(plan, { dbFile, dryRun, readonlyHandle, written, applyCommand })
 				say(`- ${dryRun ? "Would write" : "Written"}: investor_payouts row ${r.id} (adjustment, adjustment_note, adjusted_by "${ACTOR}", adjusted_at), one investor_payout_history row (adjustment, effective ${usd(line.before.amount + line.before.adjustment)} to ${usd(line.after.amount + line.after.adjustment)}), and one audit_trail row (investor_payout_adjust, system).`);
 			}
 		}
+		// The earlier October invoices the home rule passed over, shown whenever a
+		// home was found, so a run that lands on a later week says so.
+		if (line.kind === "driver" && line.home && line.passedOver && line.passedOver.length) {
+			say(`- Passed over (not Draft or Submitted, so not the home): ${line.passedOver.join("; ")}.`);
+		}
 		for (const reason of line.reasons) say(`- ${reason}`);
+		if (line.status === "skip" && !line.waiting) {
+			say("- Do not re-run this command for this line: it is not waiting for a row to be created. It needs a decision first; resolve it by hand or ask.");
+		}
 	});
 	say();
 	const toWrite = plan.lines.filter((l) => l.status === "write").length;
-	const skipped = plan.lines.filter((l) => l.status === "skip").length;
+	const skippedLines = plan.lines.filter((l) => l.status === "skip");
+	const skipped = skippedLines.length;
+	// Skips that need a decision, not just a row to appear: no command is
+	// offered to re-run them.
+	const blocked = plan.lines.map((l, i) => (l.status === "skip" && !l.waiting ? i + 1 : 0)).filter(Boolean);
 	const applied = plan.lines.filter((l) => l.status === "applied").length;
 	const parts = [];
-	if (dryRun) parts.push(`${toWrite} line(s) would be written`);
+	if (dryRun) parts.push(`${toWrite} line(s) would be written${kase.approved ? "" : " once approved"}`);
 	else parts.push(`${written.length} line(s) written (audit rows ${written.map((w) => w.auditId).join(", ") || "none"})`);
 	if (skipped) parts.push(`${skipped} skipped`);
 	if (applied) parts.push(`${applied} already applied`);
 	if (plan.lines.some((l) => l.status === "nothing")) parts.push("1 with nothing to post");
 	say(`Result: ${parts.join(", ")}.${dryRun ? " Nothing was written." : ""}`);
+	const blockedText = `line ${blocked.join(" and line ")} ${blocked.length === 1 ? "needs" : "need"} a decision first (see above)`;
 	if (!kase.approved) {
 		say(`This case is not approved, so it has no apply command: ${kase.approvalStatus}.`);
-	} else if (dryRun || skipped) {
-		say(dryRun ? "Apply command:" : "Re-run command for the skipped line(s):");
-		say(`  ${applyCommand}`);
+	} else if (dryRun) {
+		if (toWrite || (skipped && !blocked.length)) {
+			say("Apply command:");
+			say(`  ${applyCommand}`);
+			if (blocked.length) say(`It writes only the other line(s): ${blockedText}, and is not to be re-run for ${blocked.length === 1 ? "it" : "them"}.`);
+		} else if (blocked.length) {
+			say(`No apply command: nothing would be written, and ${blockedText}.`);
+		}
+	} else if (skipped) {
+		if (!blocked.length) {
+			say("Re-run command for the skipped line(s), once the row each one waits for exists:");
+			say(`  ${applyCommand}`);
+		} else {
+			say(`No re-run command: ${blockedText}. Ask before running this script for ${day} again.`);
+		}
 	}
 	return out.join("\n");
 }
