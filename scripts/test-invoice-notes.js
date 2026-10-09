@@ -133,8 +133,8 @@ function renderingSection() {
 	// It moved once since, on purpose: the payout bank's routing and account
 	// numbers left the code for INVOICE_BANK_ROUTING / INVOICE_BANK_ACCOUNT, read
 	// at each render (lib/broker-invoice.js INVOICE_BANK_SETTINGS). The golden
-	// render below sets both to obvious test values (GOLDEN_BANK), so the pin is
-	// never a hash of a real bank number. The new hash was checked to be main's
+	// render below sets both to obvious test values (GOLDEN_BANK), so the pin does
+	// not depend on production's settings. The new hash was checked to be main's
 	// (c41056d) render of this fixture with ONLY those two slots changed to these
 	// values: every other byte of the document is as before.
 	//

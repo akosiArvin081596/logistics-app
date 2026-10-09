@@ -22,8 +22,8 @@
  *      hold one; scripts/replica/remote/settings.js leaves both out of the
  *      exported file.
  *
- * Obvious test values only (000000000 / 0000000000); this file holds no real
- * bank number and no hash of one. The booted server's [invoice-bank] warning
+ * Obvious test values only (000000000 / 0000000000), so nothing here depends
+ * on production's settings. The booted server's [invoice-bank] warning
  * is checked in scripts/test-no-production-defaults.js §2.
  * Plain node, no server, no network.
  *   node scripts/test-invoice-bank-settings.js
