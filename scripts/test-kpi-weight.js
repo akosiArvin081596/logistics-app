@@ -12,7 +12,7 @@
  * §3 two different plausible weights are a conflict (never the larger); repeats
  *    and a pound/kilogram pair of one weight are not.
  * §4 the 200,000-character cap comes before any regex, and a pathological text
- *    finishes in under 50 ms.
+ *    finishes in under TIMING_BUDGET_MS (200 ms).
  * §5 classifyPdfText(): too large, no text (short, binary, or the raw-file
  *    fallback extractPdfText() returns when it finds no strings), ok.
  * §6 fixtures: three tiny PDFs built here (deflate streams) through the real
@@ -35,6 +35,10 @@ const Module = require("module");
 
 const ROOT = path.join(__dirname, "..");
 const LIB = path.join(ROOT, "lib");
+// The same budget scripts/test-collapse-address-linear.js uses: generous enough
+// for a shared 2-core CI runner, far below what a backtracking regex takes on
+// 200 KB (seconds).
+const TIMING_BUDGET_MS = 200;
 const SOURCES = {
 	weight: fs.readFileSync(path.join(LIB, "kpi-weight.js"), "utf8"),
 	metrics: fs.readFileSync(path.join(LIB, "kpi-metrics.js"), "utf8"),
@@ -190,11 +194,11 @@ function battery(mods) {
 	for (const [i, unit] of PATHOLOGICAL_UNITS.entries()) {
 		const p200 = pathological(200000, unit);
 		const ms200 = timed(() => { W.parseWeight(p200); W.classifyPdfText(p200, 1000); });
-		t(ms200 < 50, `§4 200 KB of pathological text #${i + 1} (${JSON.stringify(unit.slice(0, 16))}…): under 50 ms`, `${ms200.toFixed(1)} ms`);
+		t(ms200 < TIMING_BUDGET_MS, `§4 200 KB of pathological text #${i + 1} (${JSON.stringify(unit.slice(0, 16))}…): under ${TIMING_BUDGET_MS} ms`, `${ms200.toFixed(1)} ms`);
 	}
 	const p8m = pathological(8 * 1024 * 1024);
 	const ms8m = timed(() => { W.parseWeight(p8m); W.classifyPdfText(p8m, 1000); });
-	t(ms8m < 50, "§4 8 MB of it: still under 50 ms, the cap cuts it first", `${ms8m.toFixed(1)} ms`);
+	t(ms8m < TIMING_BUDGET_MS, `§4 8 MB of it: still under ${TIMING_BUDGET_MS} ms, the cap cuts it first`, `${ms8m.toFixed(1)} ms`);
 
 	// §5 classifyPdfText
 	const prose = "ZED SENTINEL FREIGHT RATE CONFIRMATION Pickup Atlanta GA Delivery Dallas TX Commodity paper rolls Weight 42,000 LBS Rate $2,450.00";
