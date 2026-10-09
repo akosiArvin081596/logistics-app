@@ -211,6 +211,12 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    path: '/admin/kpis',
+    name: 'kpis',
+    component: () => import('../views/KpisView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/',
     redirect: '/login',
   },
