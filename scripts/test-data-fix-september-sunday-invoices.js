@@ -277,6 +277,10 @@ CREATE TABLE excluded_driver_days (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_
 		item.run(5, "2026-09-27", 30000, "569820951", fz);
 		item.run(5, "2026-09-14", 30000, "567844619", fz);
 		db.prepare("INSERT INTO investor_payouts (id, owner_id, period, amount, due_date, status, finalized_at, finalized_amount) VALUES (27, 5, '2026-09', 5046, '2026-10-30', 'owed', '2026-10-08T05:00:25Z', 5046)").run();
+		// Fixed creation stamps, like every other time here: created_at defaults to
+		// CURRENT_TIMESTAMP, which would make fixtures built in different seconds
+		// differ, and the plan fingerprint with them.
+		for (const t of ["invoices", "period_locks", "investor_payouts"]) db.prepare(`UPDATE ${t} SET created_at = '2026-10-08 05:00:25'`).run();
 		if (mutate) mutate(db);
 		db.close();
 		return file;

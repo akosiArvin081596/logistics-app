@@ -10499,9 +10499,11 @@ app.post("/api/public/apply", publicFormLimiter, (req, res) => {
 // "Schedule a call" form with kind: "call" (a phone, a date, a time window, a
 // time zone and a topic; same checks otherwise, its own email). Origin
 // allowlist (logisx.com and its staging site), a rate limit with
-// publicFormLimiter's numbers, at most 5 requests an hour per address, and a
-// daily cap on the emails it sends, all shared by the two forms, the
-// public-form-input checks (a phone must look like one), a honeypot, and one
+// publicFormLimiter's numbers, per address an hour at most 5 submissions that
+// pass the checks and 30 that don't, and a daily cap on the emails it sends
+// (with one admin alert a day at 80% of it and one when it is reached), all
+// shared by the two forms, the public-form-input checks (a phone must look like
+// one), a honeypot, and one
 // email to ADMIN_NOTIFY_EMAIL with Reply-To the submitter (without it, nothing
 // is sent and the visitor is told so). No database write and no submitter data
 // in logs. All of it lives in lib/investor-rfi.js; scripts/test-investor-rfi.js
