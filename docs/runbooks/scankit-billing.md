@@ -59,8 +59,14 @@ pm2 restart logistics-app --silent
 Use the admin health endpoint `GET /api/scankit/health` (Super Admin session). Locally/against a running server you can use the bundled diagnostic:
 
 ```bash
-node scripts/diag-scankit-health.js
+read -rs DIAG_PASS    # the Super Admin's password: typed, not echoed, not exported
+DIAG_HOST=127.0.0.1 DIAG_PORT=<the server's port> DIAG_USER=<a Super Admin> \
+  DIAG_PASS="$DIAG_PASS" node scripts/diag-scankit-health.js
+unset DIAG_PASS
 ```
+
+All four settings are required: the script has no default server or account, and without one
+it exits 2 with its usage before any request.
 
 It prints `enabled / hasKey / baseUrl / lastScan / noCreditsSince / errorsLast24h / lastError`. After a top-up, confirm on the **next successful scan**:
 

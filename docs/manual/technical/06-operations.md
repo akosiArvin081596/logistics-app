@@ -31,7 +31,7 @@ Live in `scripts/`:
 | `geocode-loads.js` | Backfill geocodes for rows in "Job Tracking". Needs `LOGISX_BASE_URL` (the server whose coordinate cache it fills; no default, it exits 2 without one) and a session cookie: `LOGISX_BASE_URL=<origin> node scripts/geocode-loads.js <cookie>`. |
 | `generate-timeline-docx.py` | One-off Python script to render `.docx` session timelines (requires `python-docx`). |
 | `docs/generate-docs.js` | Build the technical and user PDFs. |
-| `docs/capture-screenshots.js` | Capture the UI screenshots used by the user manual. |
+| `docs/capture-screenshots.js` | Capture the UI screenshots used by the user manual. Needs `--base=<url>` (the server to capture; no default, it exits 2 without one): `node scripts/docs/capture-screenshots.js --base=<origin>`. |
 
 Run scripts from the project root: `node scripts/<name>.js`. Each script is independent — no shared CLI framework, no shared config.
 

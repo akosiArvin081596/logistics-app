@@ -42,9 +42,10 @@ node scripts/docs/_seed-trucks.js
 # 4. Start the server (leave running in another terminal)
 npm start
 
-# 5. Run the capture, with the password the seed used
-SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" npm run docs:screenshots
-# or: SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" node scripts/docs/capture-screenshots.js --filter driver
+# 5. Run the capture against the server from step 4, with the password the seed
+#    used. --base=<url> is required: the capture has no default server.
+SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" npm run docs:screenshots -- --base=http://localhost:3000
+# or: SEED_STAGING_PASSWORD="$SEED_STAGING_PASSWORD" node scripts/docs/capture-screenshots.js --base=http://localhost:3000 --filter=driver
 ```
 
 Accounts the capture signs in as — on a **local** database, after step 2 above:

@@ -2,13 +2,16 @@
 # scripts/refresh-local.sh — bring THIS machine's checkout to origin/main and
 # rebuild app.db from the latest production snapshot, SANITIZED ON THE VPS.
 #
-# Run it from the repository root:
-#   ./scripts/refresh-local.sh                      # code + data
-#   ./scripts/refresh-local.sh --code-only          # skip the database
-#   ./scripts/refresh-local.sh --telemetry-all      # full-fidelity telemetry (bigger, slower)
-#   ./scripts/refresh-local.sh --telemetry-days 90  # a longer telemetry window (default 45)
-#   ./scripts/refresh-local.sh --scan-legacy        # look for pre-2026-08-09 unsanitized copies
-#   ./scripts/refresh-local.sh --help               # every option; anything else is refused
+# Run it from the repository root, naming the VPS that holds production's
+# nightly snapshots in VPS_HOST (user@host). It has no default: a database run
+# without it exits 2 with its usage before any command. VPS_KEY is the ssh
+# identity file (default ~/.ssh/abedubas_vps).
+#   VPS_HOST=<user@host> ./scripts/refresh-local.sh                      # code + data
+#   ./scripts/refresh-local.sh --code-only                               # skip the database (no VPS)
+#   VPS_HOST=<user@host> ./scripts/refresh-local.sh --telemetry-all      # full-fidelity telemetry (bigger, slower)
+#   VPS_HOST=<user@host> ./scripts/refresh-local.sh --telemetry-days 90  # a longer telemetry window (default 45)
+#   ./scripts/refresh-local.sh --scan-legacy                             # look for pre-2026-08-09 unsanitized copies (no VPS)
+#   ./scripts/refresh-local.sh --help                                    # every option; anything else is refused
 #
 # Every account on the refreshed copy gets a random password nobody knows.
 # Before running test-suite.js against it:
@@ -18,7 +21,7 @@
 # ENVIRONMENT, never argv, and without exporting it in your shell, where
 # everything you start afterwards would inherit it (scripts/README-env-refresh.md):
 #   unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD
-#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-local.sh
+#   REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" VPS_HOST=<user@host> ./scripts/refresh-local.sh
 #   unset REFRESH_OPERATOR_PASSWORD
 # It is applied here, at install, and is never sent to the VPS.
 #
@@ -81,8 +84,13 @@ unset REFRESH_OPERATOR_PASSWORD REFRESH_OPERATOR_USER
 OPERATOR_REQUESTED=0
 [ -z "$OPERATOR_PASSWORD$OPERATOR_USER" ] || OPERATOR_REQUESTED=1
 
-VPS_HOST="${VPS_HOST:-root@76.13.22.110}"
+# The VPS is named by the caller; nothing here falls back to one (checked below,
+# after the arguments, since --code-only and --scan-legacy never connect).
+VPS_HOST="${VPS_HOST-}"
 VPS_KEY="${VPS_KEY:-$HOME/.ssh/abedubas_vps}"
+# What a database run reads on that VPS, read-only: production's nightly
+# snapshots, and its node_modules for the sanitizer. They define the source of
+# this tool rather than default a setting.
 PROD_BACKUPS="/var/www/logistics-app/backups"
 PROD_APP_DIR="/var/www/logistics-app"
 PROD_PM2_NAME="logistics-app"   # the pm2 process whose build $PROD_APP_DIR/node_modules is
@@ -115,6 +123,8 @@ usage() {
   echo "usage: ./scripts/refresh-local.sh [--telemetry-days N | --telemetry-all] [--allow-mail] [--no-backup]"
   echo "       ./scripts/refresh-local.sh --code-only      # code only: the database is left alone"
   echo "       ./scripts/refresh-local.sh --scan-legacy    # report pre-2026-08-09 unsanitized copies"
+  echo "A database run needs VPS_HOST=<user@host> in the ENVIRONMENT: the VPS holding production's nightly"
+  echo "snapshots. It has no default. VPS_KEY is its ssh identity file (default ~/.ssh/abedubas_vps)."
   echo "Operator access: REFRESH_OPERATOR_PASSWORD [REFRESH_OPERATOR_USER] in the ENVIRONMENT, never"
   echo "as an argument (scripts/README-env-refresh.md, 'Signing in to a refreshed copy')."
 }
@@ -182,6 +192,14 @@ if [ "$CODE_ONLY" = "1" ] || [ "$SCAN_LEGACY" = "1" ]; then
   if [ -n "$OPERATOR_PASSWORD$OPERATOR_USER" ]; then
     say "WARNING: REFRESH_OPERATOR_PASSWORD / REFRESH_OPERATOR_USER are ignored with $ONLY_FLAG: operator access is applied only where a database is installed."
   fi
+elif [ -z "${VPS_HOST//[[:space:]]/}" ]; then
+  # A database run reads the snapshot from the VPS the caller names. Refused
+  # here, before any command: no git, npm, node or ssh has run yet.
+  {
+    echo "[refresh-local] REFUSED: VPS_HOST is not set: name the VPS that holds production's nightly snapshots (VPS_HOST=<user@host>). There is no default. Nothing was run."
+    usage
+  } >&2
+  exit 2
 fi
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

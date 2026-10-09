@@ -83,7 +83,10 @@ pm2 logs logistics-app --lines 500 | grep -E "load-ownership|receipt OCR"
 **3. ScanKit health — credits / enabled / errors:**
 
 ```bash
-node scripts/diag-scankit-health.js     # against a running server; prints the full health payload
+read -rs DIAG_PASS                        # a Super Admin's password, not echoed or exported
+DIAG_HOST=<host> DIAG_PORT=<port> DIAG_USER=<a Super Admin> DIAG_PASS="$DIAG_PASS" \
+  node scripts/diag-scankit-health.js     # against a running server; prints the full health payload
+unset DIAG_PASS                           # all four are required: no default server or account
 ```
 
 Or hit `GET /api/scankit/health` directly with a Super Admin session. Check:

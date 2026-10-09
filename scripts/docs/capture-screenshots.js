@@ -9,10 +9,11 @@
 //      run this script with the same SEED_STAGING_PASSWORD)
 //   4. npm start                (Express on :3000) — leave running in another shell
 //
-// Usage:
-//   node scripts/docs/capture-screenshots.js
-//   node scripts/docs/capture-screenshots.js --filter driver       (only "driver" role)
-//   node scripts/docs/capture-screenshots.js --base http://localhost:3000
+// Usage (--base=<url> names the server to capture and is required: there is no
+// default, and without it the script exits 2 with its usage before any request
+// or write):
+//   node scripts/docs/capture-screenshots.js --base=http://localhost:3000
+//   node scripts/docs/capture-screenshots.js --base=http://localhost:3000 --filter=driver   (only "driver" role)
 //
 // All screenshots land in docs/manual/assets/screenshots/. Existing files
 // are overwritten — re-running is safe.
@@ -22,9 +23,9 @@ const path = require("path");
 const { getBrowser, shutdownBrowser } = require("../../lib/pdf-browser");
 const manifest = require("./screenshot-manifest");
 
-const BASE =
-	(process.argv.find((a) => a.startsWith("--base="))?.split("=")[1]) ||
-	"http://localhost:3000";
+// Trimmed, trailing "/" dropped; "" when not given.
+const BASE = String(process.argv.find((a) => a.startsWith("--base="))?.slice("--base=".length) ?? "").trim().replace(/\/+$/, "");
+const USAGE = "usage: node scripts/docs/capture-screenshots.js --base=<url> [--filter=<role>]";
 
 const FILTER =
 	process.argv.find((a) => a.startsWith("--filter="))?.split("=")[1] || null;
@@ -151,6 +152,11 @@ async function checkServer() {
 }
 
 async function main() {
+	if (!BASE) {
+		console.error("capture-screenshots.js: --base=<url> is required: name the server to capture (the one you started for it). There is no default.");
+		console.error(USAGE);
+		process.exit(2);
+	}
 	ensureOutDir();
 
 	if (!(await checkServer())) {

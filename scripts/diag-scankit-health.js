@@ -11,27 +11,44 @@
 // healthy and, after a credit top-up, that `noCreditsSince` has cleared.
 // See docs/runbooks/scankit-billing.md.
 //
-// USAGE (against a RUNNING server — `npm start` or the live VPS via a tunnel):
+// USAGE (against a RUNNING server — a local `npm start`, or a deployed one via a
+// tunnel). It has no default server and no default account: name the server
+// (DIAG_HOST, DIAG_PORT) and the Super Admin to sign in as (DIAG_USER,
+// DIAG_PASS). Without any one of them it exits 2 with its usage, before any
+// request.
+// The password comes from the environment only, read without echo and never
+// exported:
 //
-//   node scripts/diag-scankit-health.js
-//
-// Defaults match test-suite.js: host localhost:3000, user admin / Password123!.
-// Override via env when pointing at staging or using non-default creds:
-//
-//   DIAG_HOST=127.0.0.1 DIAG_PORT=3000 \
-//   DIAG_USER=admin DIAG_PASS='your-password' \
-//   node scripts/diag-scankit-health.js
+//   read -rs DIAG_PASS
+//   DIAG_HOST=127.0.0.1 DIAG_PORT=<the server's port> DIAG_USER=<a Super Admin> \
+//   DIAG_PASS="$DIAG_PASS" node scripts/diag-scankit-health.js
+//   unset DIAG_PASS
 //
 // Exit codes:  0 = healthy   2 = reachable but degraded (no credits / disabled /
-//              errors)        1 = could not reach server, login failed, or the
+//              errors), or not run: a setting is missing (stderr names it,
+//              then the usage)   1 = could not reach server, login failed, or the
 //              /api/scankit/health endpoint is not deployed on this server yet.
 
 const http = require("http");
 
-const HOST = process.env.DIAG_HOST || "localhost";
-const PORT = parseInt(process.env.DIAG_PORT || "3000", 10);
-const USER = process.env.DIAG_USER || "admin";
-const PASS = process.env.DIAG_PASS || "Password123!";
+const SETTINGS = ["DIAG_HOST", "DIAG_PORT", "DIAG_USER", "DIAG_PASS"];
+const USAGE = "usage: DIAG_HOST=<host> DIAG_PORT=<port> DIAG_USER=<Super Admin> DIAG_PASS=<password> node scripts/diag-scankit-health.js";
+function refuse(problem) {
+  console.error(`diag-scankit-health.js: ${problem} There is no default.`);
+  console.error(USAGE);
+  process.exit(2);
+}
+// Each one set and not blank; a value is never repeated.
+const missing = SETTINGS.filter((name) => !String(process.env[name] ?? "").trim());
+if (missing.length) {
+  const names = missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} and ${missing[missing.length - 1]}`;
+  refuse(`${names} ${missing.length === 1 ? "is" : "are"} not set; name the server to probe and the Super Admin to sign in as.`);
+}
+const HOST = process.env.DIAG_HOST.trim();
+const PORT = /^\d{1,5}$/.test(process.env.DIAG_PORT.trim()) ? Number(process.env.DIAG_PORT.trim()) : 0;
+if (PORT < 1 || PORT > 65535) refuse("DIAG_PORT is not a port number (1-65535); name the server's port.");
+const USER = process.env.DIAG_USER.trim();
+const PASS = process.env.DIAG_PASS;
 
 // Mirrors test-suite.js's req() helper: JSON request, returns
 // { status, body, cookies, headers }. Parses JSON when possible, else raw text.
