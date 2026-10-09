@@ -4,13 +4,18 @@ Rebuilds **local** and **staging** from current `main` plus a trimmed, sanitized
 production data, so a change can be exercised against realistic data before it ships.
 
 ```bash
-# LOCAL — run from the repo root on your machine
-./scripts/refresh-local.sh
+# LOCAL — run from the repo root on your machine, naming the VPS
+VPS_HOST=<user@host> ./scripts/refresh-local.sh
 
 # STAGING — run ON the VPS, from /var/www/logisx-staging
 cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes           # stage it
 cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes --restart # and restart pm2
 ```
+
+`refresh-local.sh` reads production's nightly snapshot from the VPS named in `VPS_HOST`
+(`user@host`; `VPS_KEY` is the ssh identity file, default `~/.ssh/abedubas_vps`). It has no
+default: a database run without it exits 2 with its usage before running any command.
+`--code-only` and `--scan-legacy` never connect to the VPS, so they don't need it.
 
 **Every account on a refreshed copy gets a random password nobody knows.** To sign in, give one
 Super Admin a password through the environment, or — for `test-suite.js` on a local copy — run
@@ -202,7 +207,7 @@ the browser-automation login is also kept (below).
 unset REFRESH_OPERATOR_PASSWORD; read -rs REFRESH_OPERATOR_PASSWORD   # typed, not echoed, not in history, NOT exported
 cd /var/www/logisx-staging && REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-staging.sh --yes
 unset REFRESH_OPERATOR_PASSWORD
-# locally, the middle line is:  REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" ./scripts/refresh-local.sh
+# locally, the middle line is:  REFRESH_OPERATOR_PASSWORD="$REFRESH_OPERATOR_PASSWORD" VPS_HOST=<user@host> ./scripts/refresh-local.sh
 ```
 
 - **⚠️ Never `export` it.** An exported variable reaches every command the shell starts
@@ -258,7 +263,7 @@ The leak checks run on the result as usual. `--from-sanitized` (the local flow) 
 ### `test-suite.js` on a LOCAL copy — `prepare-test-fixtures.js`
 
 ```bash
-./scripts/refresh-local.sh
+VPS_HOST=<user@host> ./scripts/refresh-local.sh
 node scripts/prepare-test-fixtures.js --yes-local-db    # prints the exact test-suite.js command
 ```
 

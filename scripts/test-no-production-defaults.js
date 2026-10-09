@@ -51,20 +51,32 @@
  *      default or an environment assignment, nor a shell ${VAR:-…} default
  *      (except a variable named for production itself, replica:pull's
  *      LOGISX_PROD_APP_DIR, whose host has no default); no script carries a
- *      production Gmail message ID or the n8n Gmail credential in code.
+ *      production Gmail message ID, the n8n Gmail credential or the production
+ *      VPS (its address or hostname) in code; port 3000 on this machine (the
+ *      production app, when a script runs on the VPS) is never a fallback,
+ *      argument default or default parameter; diag-scankit-health.js has no
+ *      fallback for its target or account and no published password in code.
  *   §8 each script that had such a default, run without its setting:
  *      geocode-loads.js (LOGISX_BASE_URL), replay-via-webhook-injection.js
  *      (the message ID argument and N8N_GMAIL_CREDENTIAL_ID), rescue-load.js
  *      (N8N_GMAIL_CREDENTIAL_ID, which the replay it hands over to needs) and
  *      secure-backups.sh (--app-dir / APP_DIR) exit 2 with one line naming
  *      what is missing, before any network call or command; with it, they run
- *      against what was named.
+ *      against what was named. refresh-local.sh (VPS_HOST, for a database
+ *      run), diag-scankit-health.js (DIAG_HOST, DIAG_PORT, DIAG_USER,
+ *      DIAG_PASS) and docs/capture-screenshots.js (--base=<url>) exit 2 with a
+ *      line naming what is missing and their usage, before any command,
+ *      connection or write; with it, they go on against what was named.
  *
  * Hermetic: every child runs in a fresh mkdtemp folder (no .env) with
  * googleapis and nodemailer replaced by recording stubs, fetch replaced by one
  * that records and refuses, and every outbound connection and DNS lookup
- * refused (loopback only, for the booted server's own listener). example.test
- * addresses and fake IDs only; a failure never prints a production value.
+ * refused (loopback only, for the booted server's own listener; a child given
+ * NOPD_LOOPBACK_PORTS may reach only those loopback ports, so a script's
+ * default of this machine's port 3000 is recorded and refused too).
+ * refresh-local.sh runs under bash with only recording stubs on its PATH.
+ * example.test addresses and fake IDs only; a failure never prints a
+ * production value.
  *   node scripts/test-no-production-defaults.js
  */
 "use strict";
@@ -115,7 +127,14 @@ const PROD_DIR = (() => {
 	try { return String(require(path.join(ROOT, "lib", "sheet-id.js")).PRODUCTION_DIR || ""); } catch { return ""; }
 })();
 const APP_DIRECTORY = { kind: "the production app directory", form: "dir" };
-const TARGETS = [APP_HOST, GMAIL_MESSAGE, GMAIL_CREDENTIAL, APP_DIRECTORY];
+// The VPS production runs on, by its address and by its hostname: a script
+// reaches it only through a setting it is given (refresh-local.sh's VPS_HOST,
+// replica:pull's LOGISX_PROD_SSH).
+const VPS = [
+	{ kind: "the production VPS", sha: "d626e09650709966b2ce7110c34627be0d33185b951ab84e3aa1df8a4fc49054", form: "host" },
+	{ kind: "the production VPS", sha: "43dfbc38fcfc214c24a49942449fe711f3f16456dca89b80d054337d8da8e610", form: "host" },
+];
+const TARGETS = [APP_HOST, GMAIL_MESSAGE, GMAIL_CREDENTIAL, APP_DIRECTORY, ...VPS];
 
 const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const TOKEN_RE = {
@@ -315,9 +334,14 @@ Module._load = function (request, ...rest) {
 globalThis.fetch = async (url) => { note("network fetch " + String(url)); throw new Error("test: no network (fetch)"); };
 const loopback = (h) => h === "localhost" || h === "127.0.0.1" || h === "::1";
 const connect = net.Socket.prototype.connect;
+const loopbackPorts = process.env.NOPD_LOOPBACK_PORTS === undefined ? null : process.env.NOPD_LOOPBACK_PORTS.split(",").filter(Boolean);
 net.Socket.prototype.connect = function (...args) {
 	const a = Array.isArray(args[0]) ? args[0] : args;
 	const o = a[0] && typeof a[0] === "object" ? a[0] : { port: a[0], host: a[1] };
+	if (!o.path && loopback(o.host || "localhost") && loopbackPorts && !loopbackPorts.includes(String(o.port))) {
+		note("network connect " + (o.host || "localhost") + ":" + o.port);
+		throw new Error("test: no network (connect " + (o.host || "localhost") + ":" + o.port + ")");
+	}
 	if (o.path || loopback(o.host || "localhost")) return connect.apply(this, args);
 	note("network connect " + o.host);
 	throw new Error("test: no network (connect " + o.host + ")");
@@ -594,13 +618,50 @@ fs.mkdirSync(STUB_BIN);
 for (const cmd of ["chmod", "chown", "mv", "cp", "rm", "mkdir", "install", "find", "stat", "ls", "numfmt", "ssh", "scp", "rsync", "curl", "wget"]) {
 	fs.writeFileSync(path.join(STUB_BIN, cmd), `#!/bin/sh\necho "command ${cmd}" >> ${JSON.stringify(log)}\n`, { mode: 0o755 });
 }
-function runShell(rel, args, env, { stubbed = true } = {}) {
+// With `isolated`, PATH holds nothing but stubs that record their name and
+// arguments, and bash is started by its path: any command the script starts is
+// either recorded or fails as not found, so "nothing ran" is observable for a
+// script that reaches git, npm, node and ssh.
+const ISO_BIN = path.join(tmp, "iso-bin");
+fs.mkdirSync(ISO_BIN);
+for (const cmd of ["git", "npm", "node", "ssh", "scp", "rsync", "curl", "dirname", "basename", "grep", "head", "tail", "cut", "tr",
+	"sed", "awk", "cat", "du", "df", "find", "ls", "mktemp", "chmod", "rm", "mv", "cp", "mkdir", "stat", "gzip", "env"]) {
+	fs.writeFileSync(path.join(ISO_BIN, cmd), `#!/bin/sh\necho "command ${cmd} $*" >> ${JSON.stringify(log)}\n`, { mode: 0o755 });
+}
+function runShell(rel, args, env, { stubbed = true, isolated = false } = {}) {
 	const cwd = fs.mkdtempSync(path.join(tmp, "sh-"));
 	fs.rmSync(log, { force: true });
-	const PATH = stubbed ? `${STUB_BIN}${path.delimiter}${process.env.PATH}` : process.env.PATH;
-	const r = spawnSync("bash", [path.join(ROOT, rel), ...args], { cwd, env: { PATH, HOME: cwd, TMPDIR: cwd, ...env }, encoding: "utf8", timeout: 20_000 });
+	const PATH = isolated ? ISO_BIN : stubbed ? `${STUB_BIN}${path.delimiter}${process.env.PATH}` : process.env.PATH;
+	const r = spawnSync(isolated ? "/bin/bash" : "bash", [path.join(ROOT, rel), ...args], { cwd, env: { PATH, HOME: cwd, TMPDIR: cwd, ...env }, encoding: "utf8", timeout: 20_000 });
 	return { code: r.status, stdout: r.stdout || "", stderr: r.stderr || "", out: `${r.stdout || ""}${r.stderr || ""}`, calls: callLines() };
 }
+// A node script that has to reach a server this process runs: spawned, not
+// spawnSync'd, so the server can answer while the child waits.
+function runScriptAsync(rel, args, env) {
+	return new Promise((resolve) => {
+		const cwd = fs.mkdtempSync(path.join(tmp, "cwd-"));
+		fs.rmSync(log, { force: true });
+		const child = spawn(process.execPath, [path.join(ROOT, rel), ...args], { cwd, env: childEnv(cwd, env), stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (d) => { stdout += d; });
+		child.stderr.on("data", (d) => { stderr += d; });
+		const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve({ code, stdout, stderr, out: `${stdout}${stderr}`, calls: callLines() });
+		});
+	});
+}
+// refresh-env.js's list of the passwords published in this repository, read
+// from its source so this file names none of them.
+const PUBLISHED_PASSWORDS = (() => {
+	const m = readSource(path.join("scripts", "refresh-env.js")).match(/\nconst PUBLISHED_PASSWORDS = (\[[^\]\n]*\]);/);
+	try { return m ? JSON.parse(m[1]) : []; } catch { return []; }
+})();
+// Port 3000 on this machine: the production app, when a script runs on the VPS.
+const LOCAL_3000 = /^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\]):3000(?:\/\S*)?$|^3000$/i;
+const DIAG_SETTINGS = ["DIAG_HOST", "DIAG_PORT", "DIAG_USER", "DIAG_PASS"];
 const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.sep).some((s) => s === "fixtures" || s === "artifacts");
 
 (async () => {
@@ -958,9 +1019,48 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 			check(`§7 scripts/*.sh: neither ${APP_HOST.kind} nor ${APP_DIRECTORY.kind} is a \${VAR:-…} default, but for a variable named for production (${shellBad.join(", ") || "none"})`,
 				shellBad.length === 0);
+
+			// The VPS: in no script's code, JavaScript or shell (comments aside).
+			const vpsJs = hits.filter((x) => VPS.includes(x.p));
+			const vpsSh = [];
+			for (const f of SCRIPT_SH) {
+				readSource(f).split("\n").forEach((line, n) => {
+					if (prodIn(line.replace(/(^|\s)#.*$/, "")).some((h) => VPS.includes(h.p))) vpsSh.push(`${f}:${n + 1}`);
+				});
+			}
+			check(`§7 scripts/: the production VPS is in no code, JavaScript or shell (${[where(vpsJs), ...vpsSh].filter((s) => s !== "none").join(", ") || "none"})`,
+				vpsJs.length === 0 && vpsSh.length === 0);
+
+			// Port 3000 on this machine is never a script's default target.
+			const local3000 = [];
+			for (const f of SCRIPT_JS.filter((s) => !isRunner(s))) {
+				const text = readSource(f);
+				let l = { literals: [], code: text };
+				try { l = lex(text); } catch { l = { literals: [], code: text }; }
+				for (const lit of l.literals) {
+					if (!LOCAL_3000.test(lit.content.trim())) continue;
+					const b = before(l.code, lit.start);
+					if (["fallback", "default parameter", "argument default", "environment assignment"].some((s) => SHAPES[s].test(b))) local3000.push(`${f}:${lineOf(text, lit.start)}`);
+				}
+			}
+			check(`§7 scripts/: port 3000 on this machine (production's app, run on the VPS) is never a fallback, default parameter, argument default or environment assignment (${local3000.join(", ") || "none"})`,
+				local3000.length === 0);
+
+			// diag-scankit-health.js: its target and account come from the
+			// environment only, and no published password is in its code.
+			const diagRel = path.join("scripts", "diag-scankit-health.js");
+			const diagText = readSource(diagRel);
+			let diag = { literals: [], code: diagText };
+			try { diag = lex(diagText); } catch { diag = { literals: [], code: diagText }; }
+			check(`§7 diag-scankit-health.js is there (${diagText ? "yes" : "no"})`, !!diagText);
+			const diagFallback = DIAG_SETTINGS.filter((name) => new RegExp(`process\\.env\\.${name}\\s*(\\|\\||\\?\\?)`).test(diag.code));
+			check(`§7 diag-scankit-health.js: no fallback for ${DIAG_SETTINGS.join(", ")} (${diagFallback.join(", ") || "none"})`, diagFallback.length === 0);
+			check(`§7 refresh-env.js's published passwords are readable (${PUBLISHED_PASSWORDS.length})`, PUBLISHED_PASSWORDS.length > 0);
+			const diagPassword = diag.literals.filter((lit) => PUBLISHED_PASSWORDS.includes(lit.content)).map((lit) => `${diagRel}:${lineOf(diagText, lit.start)}`);
+			check(`§7 diag-scankit-health.js: no published password in its code (${diagPassword.join(", ") || "none"})`, diagPassword.length === 0);
 		});
 
-		await section("§8 each script that had a production default, run without its setting", () => {
+		await section("§8 each script that had a production default, run without its setting", async () => {
 			const geocode = path.join("scripts", "geocode-loads.js");
 			for (const [label, args, env] of [
 				["no LOGISX_BASE_URL", ["cookie-under-test"], {}],
@@ -1033,6 +1133,121 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 				check(`§8 secure-backups.sh, ${label}: …that changes nothing`,
 					(fs.statSync(snap).mode & 0o777) === 0o644 && (fs.statSync(backups).mode & 0o777) === 0o755 && !fs.existsSync(envSnaps));
 			}
+
+			// refresh-local.sh: a database run needs VPS_HOST, the VPS to read
+			// production's nightly snapshot from. Without it: exit 2, before git,
+			// npm, node or ssh.
+			const local = path.join("scripts", "refresh-local.sh");
+			const OPERATOR = "operator-password-under-test-0123";
+			for (const [label, args, env] of [
+				["no VPS_HOST", [], {}],
+				["a blank VPS_HOST", [], { VPS_HOST: " \t" }],
+				["no VPS_HOST, with database options", ["--telemetry-days", "90", "--allow-mail"], {}],
+				["no VPS_HOST, with an operator password in its environment", [], { REFRESH_OPERATOR_PASSWORD: OPERATOR }],
+			]) {
+				const r = runShell(local, args, env, { isolated: true });
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 refresh-local.sh, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 refresh-local.sh, ${label}: says VPS_HOST is needed, then its usage (${redact(lines[0] || "").slice(0, 160)})`,
+					lines.length >= 2 && /VPS_HOST is not set/.test(lines[0]) && lines.slice(1).some((l) => /^usage: /.test(l)));
+				check(`§8 refresh-local.sh, ${label}: before any command, git, npm, node or ssh included (${redact(r.calls.join("; ")).slice(0, 160) || "none"})`,
+					r.calls.length === 0 && !/not found/.test(r.out));
+				check(`§8 refresh-local.sh, ${label}: the operator password is never printed`, !r.out.includes(OPERATOR));
+			}
+			const named = runShell(local, [], { VPS_HOST: "stub@vps.invalid", VPS_KEY: "/dev/null" }, { isolated: true });
+			check(`§8 refresh-local.sh, VPS_HOST set: not refused for it (exit ${named.code})`, named.code !== 2 && !/VPS_HOST is not set/.test(named.out));
+			check(`§8 …it goes on to its own steps, the first command being the dirname that finds its checkout (${redact(named.calls.join("; ")).slice(0, 160) || "none"})`,
+				named.calls.length >= 1 && /^command dirname /.test(named.calls[0]));
+			for (const flag of ["--code-only", "--scan-legacy"]) {
+				const r = runShell(local, [flag], {}, { isolated: true });
+				check(`§8 refresh-local.sh ${flag}, no VPS_HOST: not refused for it, since it reads nothing from the VPS (exit ${r.code})`,
+					r.code !== 2 && !/VPS_HOST is not set/.test(r.out) && r.calls.length >= 1);
+				check(`§8 …and never reaches ssh or scp (${redact(r.calls.filter((c) => /^command (ssh|scp) /.test(c)).join("; ")) || "none"})`,
+					!r.calls.some((c) => /^command (ssh|scp) /.test(c)));
+			}
+
+			// diag-scankit-health.js: no default server, port, account or password.
+			const diagRel = path.join("scripts", "diag-scankit-health.js");
+			const DIAG = { DIAG_HOST: "127.0.0.1", DIAG_PORT: "9", DIAG_USER: "diag-user-under-test", DIAG_PASS: "diag-password-under-test" };
+			const without = (...names) => Object.fromEntries(Object.entries(DIAG).filter(([k]) => !names.includes(k)));
+			for (const [label, env, want] of [
+				["none of the four", {}, DIAG_SETTINGS],
+				["no DIAG_HOST", without("DIAG_HOST"), ["DIAG_HOST"]],
+				["no DIAG_PORT", without("DIAG_PORT"), ["DIAG_PORT"]],
+				["no DIAG_USER", without("DIAG_USER"), ["DIAG_USER"]],
+				["no DIAG_PASS", without("DIAG_PASS"), ["DIAG_PASS"]],
+				["a blank DIAG_HOST and DIAG_PASS", { ...DIAG, DIAG_HOST: "  ", DIAG_PASS: " \t" }, ["DIAG_HOST", "DIAG_PASS"]],
+				["a DIAG_PORT that is not a port", { ...DIAG, DIAG_PORT: "30x0" }, ["DIAG_PORT"]],
+				["a DIAG_PORT out of range", { ...DIAG, DIAG_PORT: "70000" }, ["DIAG_PORT"]],
+			]) {
+				const r = runScript(diagRel, [], { NOPD_LOOPBACK_PORTS: "", ...env });
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 diag-scankit-health.js, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 diag-scankit-health.js, ${label}: names ${want.join(", ")} and nothing else, then its usage (${redact(lines.join(" | ")).slice(0, 160)})`,
+					lines.length >= 2 && want.every((n) => lines[0].includes(n)) && DIAG_SETTINGS.filter((n) => !want.includes(n)).every((n) => !lines[0].includes(n)) &&
+					lines.slice(1).some((l) => /^usage: /.test(l)));
+				check(`§8 diag-scankit-health.js, ${label}: before any connection, this machine's included (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
+				check(`§8 diag-scankit-health.js, ${label}: no password is printed`, !r.out.includes(DIAG.DIAG_PASS));
+			}
+			// With all four, it signs in to the named server as the named account
+			// and reads the health from it.
+			const seen = { logins: [], health: [] };
+			const server = require("http").createServer((req, res) => {
+				let body = "";
+				req.on("data", (d) => { body += d; });
+				req.on("end", () => {
+					if (req.method === "POST" && req.url === "/api/auth/login") {
+						seen.logins.push(JSON.parse(body || "{}"));
+						res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "connect.sid=s%3Adiag-session; Path=/; HttpOnly" });
+						res.end(JSON.stringify({ success: true }));
+						return;
+					}
+					if (req.method === "GET" && req.url === "/api/scankit/health") {
+						seen.health.push(req.headers.cookie || "");
+						res.writeHead(200, { "Content-Type": "application/json" });
+						res.end(JSON.stringify({ enabled: true, hasKey: true, baseUrl: "https://scan.example.test", lastScan: "2026-10-09T14:00:00Z", noCreditsSince: null, errorsLast24h: 0, lastError: null }));
+						return;
+					}
+					res.writeHead(404);
+					res.end();
+				});
+			});
+			await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+			const port = server.address().port;
+			try {
+				const r = await runScriptAsync(diagRel, [], { ...DIAG, DIAG_PORT: String(port), NOPD_LOOPBACK_PORTS: String(port) });
+				check(`§8 diag-scankit-health.js, all four set: it runs to its answer, healthy (exit ${r.code})`, r.code === 0 && /Status: HEALTHY/.test(r.stdout));
+				check(`§8 …it signs in to the named server as the named account, with the named password (${seen.logins.map((l) => l.username).join(", ") || "no sign-in"})`,
+					seen.logins.length === 1 && seen.logins[0].username === DIAG.DIAG_USER && seen.logins[0].password === DIAG.DIAG_PASS);
+				check(`§8 …and reads the health there with that session (${seen.health.length} reads)`, seen.health.length === 1 && seen.health[0].includes("connect.sid=s%3Adiag-session"));
+				check(`§8 …no other connection (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
+				check("§8 …and never prints the password", !r.out.includes(DIAG.DIAG_PASS));
+			} finally {
+				await new Promise((resolve) => server.close(resolve));
+			}
+
+			// docs/capture-screenshots.js: --base=<url> names the server to capture.
+			const capture = path.join("scripts", "docs", "capture-screenshots.js");
+			for (const [label, args] of [
+				["no --base", []],
+				["an empty --base=", ["--base="]],
+				["a blank --base=", ["--base=  "]],
+				["--base and the URL as two arguments", ["--base", "http://capture.example.test"]],
+				["only --filter=driver", ["--filter=driver"]],
+			]) {
+				const r = runScript(capture, args, { NOPD_LOOPBACK_PORTS: "" });
+				const lines = r.stderr.split("\n").filter((l) => l.trim());
+				check(`§8 capture-screenshots.js, ${label}: exit 2 (got ${r.code})`, r.code === 2);
+				check(`§8 capture-screenshots.js, ${label}: says --base=<url> is needed, then its usage (${redact(lines.join(" | ")).slice(0, 160)})`,
+					lines.length >= 2 && /--base=<url> is required/.test(lines[0]) && lines.slice(1).some((l) => /^usage: /.test(l)));
+				check(`§8 capture-screenshots.js, ${label}: before any connection, this machine's included (${r.calls.join("; ") || "none"})`, r.calls.length === 0);
+			}
+			const CAPTURE_URL = "http://capture.example.test";
+			const c = runScript(capture, [`--base=${CAPTURE_URL}/`], { NOPD_LOOPBACK_PORTS: "" });
+			const cf = c.calls.filter((l) => l.startsWith("network fetch ")).map((l) => l.slice("network fetch ".length));
+			check(`§8 capture-screenshots.js, --base=<a server>: not refused for it (${redact(c.stderr.split("\n")[0] || "").slice(0, 120)})`, !/--base=<url> is required/.test(c.out));
+			check(`§8 …every call goes to the named server (${cf.join("; ") || "none"})`,
+				cf.length >= 1 && cf.every((u) => u.startsWith(`${CAPTURE_URL}/api/`)) && c.calls.length === cf.length);
 		});
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
