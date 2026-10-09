@@ -588,7 +588,9 @@ an incident, and the answer is credential rotation, not a script.
 
 ## Backup directory permissions
 
-`scripts/secure-backups.sh` — dry run by default, `--apply` to act, run on the VPS as root.
+`scripts/secure-backups.sh --app-dir=<dir>` — dry run by default, `--apply` to act, run on the
+VPS as root. The application directory is required (`--app-dir=<dir>` or `APP_DIR`); there is
+no default, and without it the script exits 2 before it reads or changes anything.
 It closes local read access to `backups/`, moves the `.env.pre-*` snapshots out of it, and
 accounts for the stray `app.db.bak*` copies in the application directory. See PR #231 for the
 retention half and the encryption-at-rest assessment.

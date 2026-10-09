@@ -3,12 +3,14 @@
 # get the .env snapshots out of it, and account for the stray database copies
 # sitting loose in the application directory.
 #
-#   ./scripts/secure-backups.sh                       # DRY RUN (default) — changes nothing
-#   ./scripts/secure-backups.sh --apply               # modes + move the .env snapshots
-#   ./scripts/secure-backups.sh --apply --adopt-strays  # ALSO move app.db.bak* into backups/
+#   ./scripts/secure-backups.sh --app-dir=<dir>                 # DRY RUN (default) — changes nothing
+#   ./scripts/secure-backups.sh --app-dir=<dir> --apply         # modes + move the .env snapshots
+#   ./scripts/secure-backups.sh --app-dir=<dir> --apply --adopt-strays  # ALSO move app.db.bak* into backups/
 #
+# The application directory (--app-dir=<dir>, or APP_DIR=<dir>) is required: there
+# is no default. Without it the script exits 2 before it reads or changes anything.
 # Run it on the VPS as root. It can also be run without landing a file:
-#   ssh <vps> 'bash -s -- --dry-run' < scripts/secure-backups.sh
+#   ssh <vps> 'bash -s -- --app-dir=<dir> --dry-run' < scripts/secure-backups.sh
 #
 # -----------------------------------------------------------------------------
 # WHAT THIS IS FOR
@@ -50,7 +52,7 @@
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/var/www/logistics-app}"
+APP_DIR="${APP_DIR-}"
 ENV_SNAP_DIR="${ENV_SNAP_DIR:-/root/logisx-env-snapshots}"
 DIR_MODE=700
 FILE_MODE=600
@@ -64,10 +66,14 @@ for a in "$@"; do
     --adopt-strays)  ADOPT=1 ;;
     --app-dir=*)     APP_DIR="${a#*=}" ;;
     --env-snapshots-dir=*) ENV_SNAP_DIR="${a#*=}" ;;
-    -h|--help) sed -n '2,50p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,51p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "unknown argument: $a" >&2; exit 2 ;;
   esac
 done
+if [ -z "${APP_DIR//[[:space:]]/}" ]; then
+  echo "[secure-backups] REFUSED: no application directory: pass --app-dir=<dir> (or set APP_DIR). There is no default." >&2
+  exit 2
+fi
 
 BACKUP_DIR="$APP_DIR/backups"
 say()  { echo "[secure-backups] $*"; }

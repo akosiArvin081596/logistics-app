@@ -122,7 +122,7 @@ function warnIfDirIsReadable(dir) {
 		if (mode & 0o077) {
 			log(`WARNING: ${dir} is mode 0${mode.toString(8)} — group/other can list every snapshot.`);
 			log("WARNING:   new files are written 0600, but the existing ones keep their modes.");
-			log("WARNING:   fix once with: scripts/secure-backups.sh --apply   (dry run by default)");
+			log(`WARNING:   fix once with: scripts/secure-backups.sh --app-dir=${path.dirname(dir)} --apply   (dry run by default)`);
 		}
 	} catch { /* not worth failing a backup over */ }
 }
