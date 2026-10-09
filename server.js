@@ -37281,9 +37281,11 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// Recent invoices (soft-deleted ones are hidden from drivers) — this
 		// driver's in any stored spelling, the same normalizeDriverName() match
 		// this route applies to its loads above. `driver` is read only to match
-		// and is not returned. `total_due` is the invoice's total with its admin
+		// and is not returned. `adjustment` is returned: the driver already sees
+		// it on the invoice PDF. `total_due` is the invoice's total with that
 		// adjustment (invoiceTotalDue(), the PDF's "Total Due"): the figure the
-		// driver app shows.
+		// driver app shows. scripts/test-driver-invoice-total-due.js pins the
+		// exact fields a row carries.
 		const driverInvoices = db.prepare(
 			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, adjustment, expenses_total, status, submitted_at,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at

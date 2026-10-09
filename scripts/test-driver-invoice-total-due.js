@@ -10,19 +10,23 @@
  * required: it opens SQLite, reads a key and listens on import) and run against
  * an in-memory SQLite:
  *   §1 THE ONE DEFINITION. invoiceTotalDue(row) is total_earnings plus the
- *      adjustment, rounded to the cent; a missing adjustment adds nothing.
+ *      adjustment, rounded to the cent; a missing adjustment adds nothing; an
+ *      adjustment larger than the earnings gives a negative total, as served.
  *   §2 THE DRIVER APP'S LIST (GET /api/driver/:driverName). Every row carries
  *      total_due, equal to invoiceTotalDue() and to the payment report's
  *      total_due for the same invoice, for a negative, a positive and no
- *      adjustment; total_earnings is still served unchanged and `driver` is
- *      still not returned.
+ *      adjustment, and for a negative total; total_earnings is still served
+ *      unchanged. A row carries exactly the listed fields (`adjustment` among
+ *      them, `driver` not), so a new field sent to the driver fails here.
  *   §3 THE PAYMENT REPORT is unchanged: its total_due and its summary still
  *      include the adjustment, through the same invoiceTotalDue().
  *   §4 THE DRIVER APP DISPLAYS THE SERVER FIGURE. The invoice card and the
- *      invoice action sheet show `total_due`; no driver-app file reads
- *      total_earnings or an adjustment, so no total is computed in the browser.
- *   §5 MUTANTS — the list dropping the adjustment, and the definition ignoring
- *      it, must each flip at least one assertion above.
+ *      invoice action sheet show `total_due`, and a dash (never $0.00) when a
+ *      row has none; no driver-app file reads total_earnings or an adjustment,
+ *      so no total is computed in the browser.
+ *   §5 MUTANTS — the list dropping the adjustment, the definition ignoring it,
+ *      and the list sending adjustment_note and adjusted_by must each flip at
+ *      least one assertion above.
  *
  * Pure: no server, no app.db, no network, no Sheets.
  * Run: node scripts/test-driver-invoice-total-due.js     # exits 1 on failure
@@ -66,7 +70,7 @@ function harness(src) {
 		rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'Draft', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP, paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
-		adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0)`);
+		adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0)`);
 	// §1 asserts invoiceTotalDue() exists; the other batteries run without it,
 	// so a tree that lacks it still shows what its driver list serves.
 	const hasTotalDue = src.includes("\nfunction invoiceTotalDue(");
@@ -107,6 +111,7 @@ function batteryDefinition(src) {
 		[invoiceTotalDue({ total_earnings: 900, adjustment: 0 }), invoiceTotalDue({ total_earnings: 900, adjustment: null }), invoiceTotalDue({ total_earnings: 900 })],
 		[900, 900, 900]);
 	t("§1 …rounded to the cent", invoiceTotalDue({ total_earnings: 0.1, adjustment: 0.2 }), 0.3);
+	t("§1 …an adjustment larger than the earnings gives a negative total", invoiceTotalDue({ total_earnings: 200, adjustment: -300 }), -100);
 	t("§1 …an empty row is $0", invoiceTotalDue({}), 0);
 	return out;
 }
@@ -114,11 +119,20 @@ function batteryDefinition(src) {
 const W40 = { start: "2026-09-26", end: "2026-10-02" };
 const W39 = { start: "2026-09-19", end: "2026-09-25" };
 const W38 = { start: "2026-09-12", end: "2026-09-18" };
+const W41 = { start: "2026-10-10", end: "2026-10-16" };
+// Every field a driver-list row carries. A field added to the route's SELECT
+// (adjustment_note, adjusted_by, ...) reaches the driver, so it fails here
+// until this list names it.
+const DRIVER_ROW_FIELDS = [
+	"adjustment", "created_at", "expenses_total", "id", "invoice_number", "loads_count",
+	"status", "submitted_at", "total_due", "total_earnings", "week_end", "week_start",
+];
 
 function seed(w) {
 	insertInvoice(w.db, { invoice_number: "INV-SK-2026W40-01", driver: "Soren King", week_start: W40.start, week_end: W40.end, total_earnings: 1500, adjustment: -300, adjustment_note: "Sunday corrected" });
 	insertInvoice(w.db, { invoice_number: "INV-SK-2026W39-01", driver: "soren  king", week_start: W39.start, week_end: W39.end, total_earnings: 1200, adjustment: 150.25, status: "Approved" });
 	insertInvoice(w.db, { invoice_number: "INV-SK-2026W38-01", driver: "SOREN KING", week_start: W38.start, week_end: W38.end, total_earnings: 1050, status: "Paid" });
+	insertInvoice(w.db, { invoice_number: "INV-SK-2026W41-01", driver: "Soren King", week_start: W41.start, week_end: W41.end, total_earnings: 200, adjustment: -300, status: "Draft" });
 	insertInvoice(w.db, { invoice_number: "INV-HR-2026W40-01", driver: "Hal Rowe", week_start: W40.start, week_end: W40.end, total_earnings: 800, adjustment: 50 });
 }
 
@@ -132,11 +146,12 @@ function batteryDriverList(src) {
 	const report = w.buildPaymentReport("Soren King", "2026-09-01", "2026-10-31");
 	const reportDue = Object.fromEntries(report.invoices.map((r) => [r.invoice_number, r.total_due]));
 	t("§2 the driver's own invoices, in every stored spelling",
-		list.map((r) => r.invoice_number).sort(), ["INV-SK-2026W38-01", "INV-SK-2026W39-01", "INV-SK-2026W40-01"]);
+		list.map((r) => r.invoice_number).sort(), ["INV-SK-2026W38-01", "INV-SK-2026W39-01", "INV-SK-2026W40-01", "INV-SK-2026W41-01"]);
 	t("§2 a negative adjustment: the list's total_due is the invoice's Total Due ($1,500.00 - $300.00)",
 		byNo["INV-SK-2026W40-01"].total_due, 1200);
 	t("§2 a positive adjustment: total_due includes it", byNo["INV-SK-2026W39-01"].total_due, 1350.25);
 	t("§2 no adjustment: total_due is total_earnings", byNo["INV-SK-2026W38-01"].total_due, 1050);
+	t("§2 an adjustment larger than the earnings: total_due is the negative total, as computed", byNo["INV-SK-2026W41-01"].total_due, -100);
 	t("§2 every row's total_due equals the payment report's total_due for the same invoice",
 		list.map((r) => [r.invoice_number, r.total_due]).sort(),
 		list.map((r) => [r.invoice_number, reportDue[r.invoice_number]]).sort());
@@ -145,6 +160,8 @@ function batteryDriverList(src) {
 			list.every((r) => r.total_due === w.invoiceTotalDue(w.db.prepare("SELECT * FROM invoices WHERE id = ?").get(r.id))), true);
 	t("§2 total_earnings is still served unchanged", byNo["INV-SK-2026W40-01"].total_earnings, 1500);
 	t("§2 `driver` is still not returned", list.every((r) => !("driver" in r)), true);
+	t("§2 every row carries exactly the listed fields (adjustment yes; driver, adjustment_note, adjusted_by no)",
+		[...new Set(list.map((r) => JSON.stringify(Object.keys(r).sort())))], [JSON.stringify(DRIVER_ROW_FIELDS)]);
 	return out;
 }
 
@@ -157,8 +174,8 @@ function batteryReport(src) {
 	const due = Object.fromEntries(report.invoices.map((r) => [r.invoice_number, r.total_due]));
 	t("§3 the payment report's total_due includes each adjustment",
 		[due["INV-SK-2026W40-01"], due["INV-SK-2026W39-01"], due["INV-SK-2026W38-01"]], [1200, 1350.25, 1050]);
-	t("§3 …and so does its summary (pending, paid, payable)",
-		[report.summary.totalPending, report.summary.totalPaid, report.summary.totalPayable], [2550.25, 1050, 3600.25]);
+	t("§3 …and so does its summary (pending, paid, draft, payable)",
+		[report.summary.totalPending, report.summary.totalPaid, report.summary.totalDraft, report.summary.totalPayable], [2550.25, 1050, -100, 3500.25]);
 	t("§3 buildPaymentReport() takes total_due from invoiceTotalDue()",
 		/total_due: invoiceTotalDue\(r\),/.test(liftFn(src, "buildPaymentReport")), true);
 	return out;
@@ -175,8 +192,11 @@ function batteryDisplay() {
 	const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
 	const card = read("client/src/components/driver/InvoiceCard.vue");
 	const tab = read("client/src/components/driver/InvoiceTab.vue");
-	t("§4 the invoice card shows the server's total_due", /\{\{\s*\(invoice\.total_due \|\| 0\)\.toFixed\(2\)\s*\}\}/.test(card), true);
-	t("§4 the invoice action sheet shows the server's total_due", /selectedInvoice\.total_due\?\.toFixed\(2\)/.test(tab), true);
+	const shows = (src, v) => src.includes(`{{ typeof ${v}.total_due === 'number' ? '$' + ${v}.total_due.toFixed(2) : '—' }}`);
+	t("§4 the invoice card shows the server's total_due, or a dash when the row has none", shows(card, "invoice"), true);
+	t("§4 the invoice action sheet shows the server's total_due, or a dash when the row has none", shows(tab, "selectedInvoice"), true);
+	t("§4 neither shows $0.00 for a missing total (no `total_due || 0`, no bare `total_due?.toFixed`)",
+		[card, tab].map((src) => /total_due\s*\|\|\s*0|total_due\?\.toFixed/.test(src)), [false, false]);
 	t("§4 no driver-app file reads total_earnings",
 		DRIVER_APP_FILES.filter((f) => /total_earnings/.test(read(f))), []);
 	t("§4 no driver-app file reads an invoice adjustment (no total is computed in the browser)",
@@ -195,6 +215,8 @@ const BATTERIES = [
 const MUTANTS = [
 	["the driver app's list drops the adjustment",
 		"total_due: invoiceTotalDue(rest)", "total_due: rest.total_earnings"],
+	["the driver app's list also sends the adjustment's note and author",
+		"total_earnings, adjustment, expenses_total", "total_earnings, adjustment, adjustment_note, adjusted_by, expenses_total"],
 	["invoiceTotalDue() ignores the adjustment",
 		"return Math.round(((row.total_earnings || 0) + (row.adjustment || 0)) * 100) / 100;",
 		"return Math.round((row.total_earnings || 0) * 100) / 100;"],
