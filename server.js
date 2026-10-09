@@ -17347,6 +17347,11 @@ async function generateInvoiceHandler(req, res) {
 		for (const load of uniqueLoads) {
 			const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
 			let dropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+			// The window's last day as the ledger and GET /api/investor read it, for
+			// the pre-dispatch rule only: the drop-off appointment, else the pickup
+			// day (never the completion fallback below), capped at 31 days, by the
+			// ledger's own expansion.
+			const ruleWindowEnd = preDispatch && pickup ? financialsCalc.expandDateRange(pickup, dropoff || pickup).slice(-1)[0] : "";
 			// Fallback: delivered loads with no dropoff appointment lose the
 			// hauling days between pickup and actual delivery. Use the actual
 			// completion timestamp instead so the driver gets credited.
@@ -17379,7 +17384,7 @@ async function generateInvoiceHandler(req, res) {
 			const { days: countedDays } = loadPayDays.payDaysForLoad(
 				loadWindowDays, eld,
 				// loadWindowDays is clipped to the week; the rule reads the whole window.
-				{ loadId: String(lid).trim(), vid, settleMonth: monthCols ? loadAssignedMonthKey(load, monthCols) : "", windowStart: fmtLocalDate(start), windowEnd: fmtLocalDate(end) },
+				{ loadId: String(lid).trim(), vid, settleMonth: monthCols ? loadAssignedMonthKey(load, monthCols) : "", windowStart: fmtLocalDate(start), windowEnd: ruleWindowEnd },
 				preDispatch,
 			);
 			for (const ds of countedDays) {
@@ -36292,6 +36297,23 @@ function preDispatchPayDayFilter() {
 		radiusM: GEOFENCE_RADIUS,
 	});
 }
+
+// One warning at boot when PRE_DISPATCH_PAY_DAY_RULE_FROM is at or before the
+// latest closed month. The rule is not switched off: whether it applies never
+// reads a lock. Read once, here, where period_locks exists.
+function warnPreDispatchFromClosedMonth() {
+	if (!PRE_DISPATCH_PAY_DAY_RULE_ENABLED || !PRE_DISPATCH_PAY_DAY_RULE_FROM) return;
+	let latest = "";
+	try {
+		const row = db.prepare("SELECT MAX(period) AS p FROM period_locks WHERE period_locks.status = 'locked' AND period GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'").get();
+		latest = (row && row.p) || "";
+	} catch {
+		latest = "";
+	}
+	const msg = loadPayDays.fromMonthClosedWarning(PRE_DISPATCH_PAY_DAY_RULE_FROM, latest);
+	if (msg) console.warn(`[pre-dispatch] ${msg}`);
+}
+warnPreDispatchFromClosedMonth();
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
 // for every admin override. Consumed by /api/investor, /api/financials, and

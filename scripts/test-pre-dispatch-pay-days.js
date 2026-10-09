@@ -83,6 +83,11 @@ section("§1 the pure pieces");
 		[warned.length, warned.every((m) => /PRE_DISPATCH_PAY_DAY_RULE_FROM/.test(m) && !/2026-1[03]|October/.test(m))], [8, true]);
 	warned.length = 0;
 	check("FROM: with the flag off nothing is said", [lpd.ruleFromMonth(false, "", warn), warned.length], [null, 0]);
+	const closedMsg = (from, latest) => lpd.fromMonthClosedWarning(from, latest);
+	check("closed-month warning: FROM at or before the latest closed month warns, naming that month",
+		[closedMsg("2026-09", "2026-09"), closedMsg("2026-08", "2026-09")].map((m) => !!m && /PRE_DISPATCH_PAY_DAY_RULE_FROM/.test(m) && m.includes("2026-09")), [true, true]);
+	check("closed-month warning: FROM after it, no closed month, or no FROM says nothing",
+		[closedMsg("2026-10", "2026-09"), closedMsg("2026-10", ""), closedMsg("", "2026-09"), closedMsg("2026-10", null)], [null, null, null, null]);
 	const win = ["2026-10-04", "2026-10-05", "2026-10-06"];
 	const eld = { travel: new Set(["2026-10-04", "2026-10-06"]), coverage: new Set(win) };
 	check("covered window: only travel days count", lpd.eldCountedDays(win, eld), { covered: true, days: ["2026-10-04", "2026-10-06"] });
@@ -399,6 +404,24 @@ section("§4 server.js: default off, FROM required, no lock read, one shared cop
 	check("preDispatchPayDayFilter() reads no month lock", lockRead.test(fnSrc), false);
 	const libCode = fs.readFileSync(path.join(ROOT, "lib", "load-pay-days.js"), "utf8").replace(/\/\/[^\n]*/g, "");
 	check("lib/load-pay-days.js reads no month lock", lockRead.test(libCode), false);
+	// The closed-month boot warning: once at start, after period_locks exists;
+	// it only warns, so the filter above never consults it.
+	check("the closed-month warning runs once at module scope", (SRC.match(/\nwarnPreDispatchFromClosedMonth\(\);\n/g) || []).length, 1);
+	check("…after period_locks is created", SRC.indexOf("\nwarnPreDispatchFromClosedMonth();\n") > SRC.indexOf("CREATE TABLE IF NOT EXISTS period_locks"), true);
+	const warnStart = SRC.indexOf("\nfunction warnPreDispatchFromClosedMonth(");
+	const warnSrc = SRC.slice(warnStart + 1, SRC.indexOf("\n}\n", warnStart) + 2);
+	const bootWarn = (enabled, from, locks) => {
+		const wdb = new Database(":memory:");
+		wdb.exec(tableDdl("period_locks"));
+		for (const p of locks) wdb.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', '2026-10-08T05:00:00.000Z', 'test')").run(p);
+		const said = [];
+		new Function("PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "PRE_DISPATCH_PAY_DAY_RULE_FROM", "db", "loadPayDays", "console", `${warnSrc}\nwarnPreDispatchFromClosedMonth();`)(
+			enabled, from, wdb, lpd, { warn: (...a) => said.push(a.join(" ")) });
+		return said.length;
+	};
+	check("boot: FROM at or before the latest closed month warns once; after it, off, or no FROM, nothing",
+		[bootWarn(true, "2026-09", ["2026-08", "2026-09"]), bootWarn(true, "2026-10", ["2026-08", "2026-09"]), bootWarn(false, "2026-09", ["2026-09"]), bootWarn(true, null, ["2026-09"]), bootWarn(true, "2026-09", [])],
+		[1, 0, 0, 0, 0]);
 
 	const calls = (SRC.match(/loadPayDays\.payDaysForLoad\(/g) || []).length;
 	check("server.js: the invoice and the investor view call payDaysForLoad()", calls, 2);

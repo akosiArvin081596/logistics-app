@@ -21,11 +21,17 @@
  *            the odometer walk rejects): the distance is unknown, so it pays.
  *   L4  Di   assigned 10-01, window 09-29..09-30. No Dispatched row, only a
  *            Delivered tap on 10-01: no dispatch is known, so every day pays.
+ *   L5  Eve  assigned 10-01, pickup 09-30, Drop-off blank, completed 10-02,
+ *            dispatched 10-01, idle 12 km on 09-30. The investor view and the
+ *            ledger read its window as 09-30 alone (the pickup day), so the
+ *            dispatch is after the window: unknown, and 09-30 pays. The invoice
+ *            must read the same last day, not its completion fallback.
  *
  *   §1 the three paths pay exactly the expected days, load by load, and agree
  *   §2 closing September, or September and October, changes nothing on any
  *      path: whether the rule applies is decided by the settle month against
- *      FROM, never by a month lock
+ *      FROM, never by a month lock. A start with FROM at or before the latest
+ *      closed month logs one warning and the rule keeps running
  *   §3 flag on with FROM unset or not a month: the rule is off on every path (the
  *      same days as the flag off) and the start logs one warning naming the
  *      setting, never its value
@@ -63,7 +69,8 @@ const INVESTOR_ROUTE = 'app.get("/api/investor", requireRole("Super Admin", "Inv
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "notifyChange", "logAudit",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR", "fetch", "io", "sendEmail"];
 const LIFTED = closure(SRC, {
-	roots: ["generateInvoiceHandler", "computeInvestorMonthlyEarnings", "getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet", "deduplicateLoads"],
+	roots: ["generateInvoiceHandler", "computeInvestorMonthlyEarnings", "getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet", "deduplicateLoads",
+		"warnPreDispatchFromClosedMonth"],
 	routes: [INVESTOR_ROUTE],
 	provided: PROVIDED,
 	denied: ["server", "transporter", "getDrive", "KEY_FILE"],
@@ -108,13 +115,14 @@ const load = ({ id, driver, pickup, dropoff, assigned, done, truck }) => {
 	});
 	return HEADERS.map((h) => r[h]);
 };
-const DRIVERS = { L1: "Ann Able", L2: "Bo Baker", L3: "Cy Cole", L4: "Di Dunn" };
+const DRIVERS = { L1: "Ann Able", L2: "Bo Baker", L3: "Cy Cole", L4: "Di Dunn", L5: "Eve Ell" };
 const SHEET = [
 	HEADERS,
 	load({ id: "L1", driver: DRIVERS.L1, pickup: "9/30/2026 8:00", dropoff: "10/2/2026 10:00", assigned: "10/1/2026", done: "10/2/2026", truck: "T1" }),
 	load({ id: "L2", driver: DRIVERS.L2, pickup: "9/26/2026 8:00", dropoff: "9/28/2026 10:00", assigned: "9/27/2026", done: "9/28/2026", truck: "T2" }),
 	load({ id: "L3", driver: DRIVERS.L3, pickup: "9/29/2026 8:00", dropoff: "10/1/2026 18:00", assigned: "10/1/2026", done: "10/1/2026", truck: "T3" }),
 	load({ id: "L4", driver: DRIVERS.L4, pickup: "9/29/2026 8:00", dropoff: "9/30/2026 18:00", assigned: "10/1/2026", done: "9/30/2026", truck: "T4" }),
+	load({ id: "L5", driver: DRIVERS.L5, pickup: "9/30/2026 8:00", dropoff: "", assigned: "10/1/2026", done: "10/2/2026", truck: "T5" }),
 ];
 const WEEK_END = "2026-10-02";
 const WEEK = ["2026-09-26", "2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"];
@@ -161,6 +169,7 @@ const FEEDS = {
 		.drive("2026-09-30", { miles: 100, visit: PICKUP }).drive("2026-10-01", { miles: 200 }).park("2026-10-03").pings,
 	V4: feed(400000).park("2026-09-25").drive("2026-09-29", { miles: 8 })
 		.drive("2026-09-30", { miles: 200, visit: PICKUP }).park("2026-10-03").pings,
+	V5: feed(500000).park("2026-09-25").drive("2026-09-30", { miles: 7.5 }).park("2026-10-03").pings,
 };
 // [load, new_status, source, changed_at (SQLite UTC text)]
 const STATUS_ROWS = [
@@ -168,6 +177,7 @@ const STATUS_ROWS = [
 	["l2", "Dispatched", "dispatch", "2026-09-27 15:00:00"], ["l2", "Delivered", "manual", "2026-09-28 20:00:00"],
 	["l3", "Dispatched", "dispatch", "2026-09-30 15:00:00"], ["l3", "Delivered", "manual", "2026-10-01 23:00:00"],
 	["l4", "Delivered", "manual", "2026-10-01 15:00:00"],
+	["l5", "Dispatched", "dispatch", "2026-10-01 14:00:00"], ["l5", "Delivered", "manual", "2026-10-02 20:00:00"],
 ];
 
 function buildDb() {
@@ -185,13 +195,13 @@ function buildDb() {
 		VALUES (?, ?, 5, 'Active', '2026-09-01', '2026-09-01 00:00:00', ?, ?)`);
 	const dir = db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily) VALUES (?, 'Acme Carrier', 'fixed', 250)");
 	const assign = db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, '2026-09-01T17:00:00.000Z')");
-	["L1", "L2", "L3", "L4"].forEach((l, i) => {
+	["L1", "L2", "L3", "L4", "L5"].forEach((l, i) => {
 		truck.run(i + 1, `T${i + 1}`, DRIVERS[l], `V${i + 1}`);
 		dir.run(DRIVERS[l]);
 		assign.run(i + 1, DRIVERS[l]);
 	});
 	const co = db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, ?, ?, 29.4, -98.4)");
-	for (const l of ["L1", "L2", "L3", "L4"]) co.run(l, PICKUP.lat, PICKUP.lng);
+	for (const l of Object.keys(DRIVERS)) co.run(l, PICKUP.lat, PICKUP.lng);
 	const st = db.prepare("INSERT INTO load_status_history (load_id, old_status, new_status, source, changed_at) VALUES (?, '', ?, ?, ?)");
 	for (const r of STATUS_ROWS) st.run(...r);
 	const tl = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, location_date_ms, dropped_reason) VALUES (?, ?, ?, ?, ?, ?, '')");
@@ -238,6 +248,8 @@ function start(env, { locks = [] } = {}) {
 		'"use strict";',
 		LIFTED.text,
 		"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
+		// The boot-time check, run where server.js runs it: once, at start.
+		"warnPreDispatchFromClosedMonth();",
 		"return { generateInvoiceHandler, computeInvestorMonthlyEarnings, getCarrierDBFromSQLite, getInvestorDriverSet, findCol };",
 	].join("\n");
 	const api = new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), SHEET);
@@ -311,6 +323,7 @@ const ALL_DAYS = [
 	"L2 2026-09-26", "L2 2026-09-27", "L2 2026-09-28",
 	"L3 2026-09-29", "L3 2026-09-30", "L3 2026-10-01",
 	"L4 2026-09-29", "L4 2026-09-30",
+	"L5 2026-09-30",
 ];
 const RULE_DAYS = ALL_DAYS.filter((x) => x !== "L1 2026-09-30");
 const ON = { PRE_DISPATCH_PAY_DAY_RULE_ENABLED: "true", PRE_DISPATCH_PAY_DAY_RULE_FROM: "2026-10" };
@@ -331,6 +344,8 @@ const ruleWarnings = (w) => w.filter((x) => /PRE_DISPATCH_PAY_DAY_RULE/.test(x))
 	check("…L2 settles in September, before FROM: its idle day before dispatch still pays", on.ledger.filter((x) => x.startsWith("L2 ")), ["L2 2026-09-26", "L2 2026-09-27", "L2 2026-09-28"]);
 	check("…L3's day with a rejected odometer jump (ELD dark 8 h, 200 miles) still pays (M1)", on.ledger.includes("L3 2026-09-29"), true);
 	check("…L4 has no Dispatched row, only a later Delivered tap: every day still pays (M2)", on.ledger.filter((x) => x.startsWith("L4 ")), ["L4 2026-09-29", "L4 2026-09-30"]);
+	check("…L5, Drop-off blank and dispatched after its pickup day: 09-30 pays on every path, the invoice included (N1)",
+		[on.invoice, on.investor, on.ledger].map((d) => d.filter((x) => x.startsWith("L5 "))), [["L5 2026-09-30"], ["L5 2026-09-30"], ["L5 2026-09-30"]]);
 	check("invoice and investor view agree day for day", on.invoice, on.investor);
 	check("investor view and payout ledger agree day for day", on.investor, on.ledger);
 	check("no warning with a valid FROM", ruleWarnings(on.warnings), []);
@@ -341,6 +356,9 @@ const ruleWarnings = (w) => w.filter((x) => /PRE_DISPATCH_PAY_DAY_RULE/.test(x))
 		check(`invoice: the same days with ${label}`, locked.invoice, on.invoice);
 		check(`investor view: the same days with ${label}`, locked.investor, on.investor);
 		check(`payout ledger: the same days with ${label}`, locked.ledger, on.ledger);
+		const closedWarnings = locked.warnings.filter((x) => /latest closed month/.test(x));
+		check(`${label}: ${locks.includes("2026-10") ? "one boot warning that FROM (2026-10) is at or before the latest closed month" : "no closed-month warning (FROM is after it)"}`,
+			closedWarnings.length, locks.includes("2026-10") ? 1 : 0);
 	}
 
 	section("§3 flag on, FROM unset or not a month: the rule is off, one warning per start");
