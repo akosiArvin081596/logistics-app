@@ -29,14 +29,19 @@
 // After the commit, each invoice's PDF is re-rendered from its corrected
 // snapshot by the server's own rerenderInvoicePdfFromStoredData().
 //
-// Refused or stopped, writing nothing, when: September is not finalized (or was
-// reopened by someone else); an invoice is paid, processing, rejected, deleted,
+// Refused or stopped, writing nothing, when: a correction of these days may
+// already be on record elsewhere (anything the cancelled October-credit data
+// fix wrote, or an adjustment on the driver's invoices from the first corrected
+// week on or on the investor's payout rows from September on); September is not
+// finalized (or was reopened by someone else); an invoice is paid, processing, rejected, deleted,
 // manual, adjusted, or its Sunday line is not the billed day it should be; a
 // Sunday already carries an override this script did not write; the frozen
 // ledger does not hold the driver's day at the invoice's rate; the investor's
 // September payout is not owed (a paid payout is corrected in the open month);
 // the Financials settings changed since September closed; the close retries or
-// the comparison finds any other change.
+// the comparison finds any other change; the checks, made again once the
+// database is held, find anything changed; the investor's payout does not come
+// to --expect-payout.
 //
 // Idempotent: a second apply finds the overrides, the corrected invoices and
 // September finalized by this script, writes nothing to the database, and
@@ -52,7 +57,7 @@
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/data-fix-september-sunday-invoices.js --db=app.db --sheet-id=<id> --dry-run
-//   node scripts/data-fix-september-sunday-invoices.js --db=app.db --sheet-id=<id> --apply
+//   node scripts/data-fix-september-sunday-invoices.js --db=app.db --sheet-id=<id> --apply --expect-payout=<dollars>
 //   --sheet-id=<id>        the Job Tracking sheet, read with the read-only scope;
 //                          there is no default (--sheet-id=env takes the .env's)
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
@@ -62,8 +67,11 @@
 //   --data-dir=<dir>       with a copy only: the folder holding uploads/ (default:
 //                          the app directory)
 //   --key=<file>           the service account key (default service-account-key.json)
+//   --expect-payout=<$>    required to apply: the investor's September payout the
+//                          dry run printed; any other result writes nothing
 // Exit codes: 0 done (written, or already applied), 1 error (nothing written to
-// the database), 2 refused (nothing written).
+// the database), 2 refused (nothing written), 3 the database is written but a
+// PDF was not re-rendered (run the same --apply again to re-render).
 //
 // Required as a module (by its test runner) it runs nothing and exports its
 // parts.
@@ -82,7 +90,10 @@ const ROOT = path.join(__dirname, "..");
 const ACTOR = "script:data-fix-september-sunday-invoices";
 const SYSTEM_USER = Object.freeze({ id: 0, username: ACTOR, role: "system" });
 const REF = "SSI-2026-09";
-const OPTIONS = ["db", "sheet-id", "values-json", "env-file", "data-dir", "key", "dry-run", "apply"];
+// The October-credit data fix (#444) for the same two Sundays, cancelled by the
+// client on 2026-10-09. Anything it wrote means a day may be taken back twice.
+const OCTOBER_CREDIT_ACTOR = "script:data-fix-sunday-pay-days";
+const OPTIONS = ["db", "sheet-id", "values-json", "env-file", "data-dir", "key", "dry-run", "apply", "expect-payout"];
 // The invoice template's week: Saturday to Friday.
 const INVOICE_WEEK = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -300,6 +311,14 @@ function compareSeptember(before, after, { corrected, removed, ownerId, override
 		for (const k of ["splitPct", "lossCarriedIn", "lossDeferred"]) if (String(ab[k]) !== String(bb[k])) problems.push(`owner ${owner}'s September ${k} changed`);
 		if (cents(a.amount) !== cents(a.finalized_amount)) problems.push(`owner ${owner}'s September payout amount and finalized amount differ`);
 		if (cents(a.amount) < cents(b.amount)) problems.push(`owner ${owner}'s September payout went down although driver pay was taken off`);
+		// With no loss carried in or deferred, the payout is the month's share: it
+		// moves by the removed pay times the split, within the share's rounding to
+		// the dollar.
+		if (!Number(bb.lossCarriedIn) && !Number(bb.lossDeferred) && !Number(ab.lossCarriedIn) && !Number(ab.lossDeferred)) {
+			if (cents(a.amount) !== cents(ab.monthShare) || cents(b.amount) !== cents(bb.monthShare)) problems.push(`owner ${owner}'s September payout is not the month's share`);
+			const want = removedCents * Number(ab.splitPct) / 100;
+			if (Math.abs(cents(a.amount) - cents(b.amount) - want) > 100) problems.push(`owner ${owner}'s September payout moved by ${usd((cents(a.amount) - cents(b.amount)) / 100)}, not by about ${usd(want / 100)} (${ab.splitPct}% of the removed pay)`);
+		}
 		changes.push({ what: "payout", ownerId: owner, id: a.id, before: { amount: Number(b.amount), breakdown: bb }, after: { amount: Number(a.amount), breakdown: ab } });
 	}
 	// Overrides: the run's, and no other.
@@ -402,6 +421,32 @@ function plan(db, api) {
 	});
 	if (done === fixes.length && oursExisting.every(Boolean) && finishedBefore) return { alreadyApplied: true, fixes, driver };
 	if (done || oursExisting.some(Boolean) || finishedBefore) throw new Refusal("part of this correction is on record and part is not; nothing was written. Check the audit trail before going further");
+	// An earlier correction of the same days anywhere else would take a day back
+	// twice: anything the October-credit data fix wrote, or an adjustment on any
+	// of the driver's invoices from the first corrected week on, or on the
+	// investor's payout rows from September on (the corrected invoices' own
+	// adjustments are refused by invoiceCorrection()).
+	const earlier = [];
+	const credit = db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE username = ? OR details LIKE ?").get(OCTOBER_CREDIT_ACTOR, "%[SPD-2026%").n;
+	if (credit) earlier.push(`${credit} audit row(s) of the October-credit data fix (${OCTOBER_CREDIT_ACTOR})`);
+	for (const t of ["invoices", "investor_payouts"]) {
+		const n = db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE COALESCE(adjustment_note, '') LIKE ?`).get("%SPD-2026%").n;
+		if (n) earlier.push(`${n} ${t} row(s) whose adjustment note names the October-credit data fix`);
+	}
+	const firstWeek = fixes.map((f) => f.row.week_start).sort()[0];
+	for (const r of db.prepare("SELECT invoice_number, adjustment FROM invoices WHERE lower(trim(driver)) = ? AND week_end >= ? AND COALESCE(deleted_at, '') = '' AND COALESCE(adjustment, 0) != 0 ORDER BY week_start").all(driver, firstWeek)) {
+		earlier.push(`${r.invoice_number} carries an adjustment of ${usd(r.adjustment)}`);
+	}
+	for (const r of db.prepare("SELECT period, adjustment FROM investor_payouts WHERE owner_id = ? AND period >= ? AND COALESCE(adjustment, 0) != 0 ORDER BY period").all(CORRECTION.ownerId, period)) {
+		earlier.push(`owner ${CORRECTION.ownerId}'s ${r.period} payout carries an adjustment of ${usd(r.adjustment)}`);
+	}
+	if (earlier.length) throw new Refusal(`a correction of these days may already be on record, so nothing was written: ${earlier.join("; ")}`);
+	// Each PDF is re-rendered into the file its row names, which must be its own.
+	for (const f of fixes) {
+		if (!f.row.pdf_file_name) throw new Refusal(`${f.target.invoiceNumber} names no PDF file`);
+		const sharers = db.prepare("SELECT invoice_number FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?").all(f.row.pdf_file_name, f.row.id);
+		if (sharers.length) throw new Refusal(`${f.target.invoiceNumber}'s PDF file is also ${sharers.map((r) => r.invoice_number).join(", ")}'s`);
+	}
 	// The frozen day each override takes out: the driver's driver-pay item that
 	// day, at the invoice's rate.
 	const items = db.prepare("SELECT * FROM financials_ledger_items WHERE period = ? AND kind = 'driver_pay' AND driver = ?").all(period, driver);
@@ -447,17 +492,23 @@ async function copyDatabase(db, target, Database) {
 	const ok = copy.pragma("integrity_check", { simple: true });
 	copy.close();
 	if (ok !== "ok") throw new Refusal(`the copy at ${target} failed its integrity check (${ok})`);
+	if (fs.existsSync(`${target}-wal`) || fs.existsSync(`${target}-shm`)) throw new Refusal(`the copy at ${target} left -wal/-shm files beside it`);
 }
 
-// Steps 1 to 5 of the header, in one transaction, then the PDFs. Returns what
-// changed. Throws (and rolls back) on anything unexpected.
-async function correct(world, p) {
+// What a plan was made from: the rows it read. A plan made again inside the
+// transaction must match it, or something changed in between.
+function planFingerprint(p) {
+	return sha([p.lock, p.fixes.map((f) => f.row), p.overrides, p.removed, p.payout]);
+}
+
+// Steps 1 to 5 of the header, in one transaction. Returns what changed. Throws
+// (and rolls back) on anything unexpected. `expectPayout` (an apply's
+// --expect-payout, the dry run's figure) is the investor's September payout the
+// run must arrive at, or nothing is written.
+async function correct(world, p, { expectPayout = null } = {}) {
 	const { db, api, call } = world;
 	const period = CORRECTION.period;
 	const log = [];
-	const before = septemberState(db, period);
-	const auditFrom = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM audit_trail").get().id;
-	const historyFrom = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM investor_payout_history").get().id;
 	api.installPeriodLockTriggers(db);
 	// The fleet's ELD travel days, read once before the transaction into the
 	// same cache the close reads them through (as the server's warm-up does), so
@@ -465,28 +516,43 @@ async function correct(world, p) {
 	await api.computeFleetLedger();
 	const started = Date.now();
 	db.exec("BEGIN IMMEDIATE");
+	// A write that fails inside lifted code that swallows its error (an audit
+	// row) can end the transaction; every later step checks it is still open.
+	const open = (step) => { if (!db.inTransaction) throw new Error(`the transaction ended during ${step}; check the database before going further`); };
 	let result;
 	try {
+		// Checked again, and September read, with the database held: nothing can
+		// move between the checks, the comparison's "before" and the writes.
+		if (planFingerprint(plan(db, api)) !== planFingerprint(p)) throw new Refusal("the invoices, payout or September changed after they were checked; run again");
+		const before = septemberState(db, period);
+		const auditFrom = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM audit_trail").get().id;
+		const historyFrom = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM investor_payout_history").get().id;
 		const reopened = await call("POST /api/periods/:period/reopen", { params: { period }, body: { reason: CORRECTION.reason } });
 		if (reopened.status !== 200) throw new Refusal(`reopening ${period} answered ${reopened.status}: ${JSON.stringify(reopened.body)}`);
+		open("the reopen");
 		log.push(`Reopened ${period} with the reason "${CORRECTION.reason}" (${reopened.body.relinkedOwedRows} owed payout row(s) re-linked to live earnings).`);
 		for (const o of p.overrides) {
 			const r = await call("POST /api/admin/excluded-days", { body: { driverName: o.driver_name, date: o.excluded_date, reason: o.reason, action: "remove" } });
 			if (r.status !== 200 || !r.body || !r.body.inserted) throw new Refusal(`excluding ${o.excluded_date} answered ${r.status}: ${JSON.stringify(r.body)}`);
+			open(`the override for ${o.excluded_date}`);
 			log.push(`Excluded ${weekdayOf(o.excluded_date)} ${o.excluded_date} from the driver's pay (driver-day override #${r.body.row.id}, "remove").`);
 		}
 		for (const f of p.fixes) {
-			const n = db.prepare("UPDATE invoices SET loads_count = ?, total_earnings = ?, render_data = ? WHERE id = ? AND render_data = ? AND total_earnings = ? AND loads_count = ?")
-				.run(f.after.loadsCount, f.after.total, f.renderData, f.row.id, f.row.render_data, f.row.total_earnings, f.row.loads_count).changes;
+			const n = db.prepare(`UPDATE invoices SET loads_count = ?, total_earnings = ?, render_data = ?
+				WHERE id = ? AND render_data = ? AND total_earnings = ? AND loads_count = ? AND status = ?
+					AND COALESCE(paid_at, '') = '' AND COALESCE(adjustment, 0) = 0 AND COALESCE(deleted_at, '') = ''`)
+				.run(f.after.loadsCount, f.after.total, f.renderData, f.row.id, f.row.render_data, f.row.total_earnings, f.row.loads_count, f.row.status).changes;
 			if (n !== 1) throw new Refusal(`${f.target.invoiceNumber} changed while it was being corrected`);
 			audit(db, "correct_invoice", "invoice", f.row.id,
 				`${f.row.status === "Approved" ? "POST-APPROVAL correction (status Approved): " : ""}${f.target.invoiceNumber}: ${weekdayOf(f.target.day)} ${f.target.day} removed (not worked; load ${f.target.load}); ` +
 				`${f.before.loadsCount} day(s) ${usd(f.before.total)} -> ${f.after.loadsCount} day(s) ${usd(f.after.total)}; regenerated in place, same number. ${CORRECTION.reason} [${REF}]`);
+			open(`the correction of ${f.target.invoiceNumber}`);
 			log.push(`Corrected ${f.target.invoiceNumber} in place: ${f.before.loadsCount} days ${usd(f.before.total)} -> ${f.after.loadsCount} days ${usd(f.after.total)} (${f.after.days.map((d) => d.slice(0, 3)).join(", ")}).`);
 		}
 		const closed = await api.finalizePeriods([period], ACTOR);
 		if (closed.retry || !closed.periods.includes(period)) throw new Refusal(`finalizing ${period} again did not close it (${closed.reason || "nothing closed"})`);
 		audit(db, "period_finalize", "period", period, `Finalized ${period} again after the client-requested correction (${closed.stamped} payout row(s) frozen) [${REF}]`);
+		open("the close");
 		log.push(`Finalized ${period} again (${closed.stamped} payout row(s) stamped, Financials items frozen, lock taken).`);
 		const after = septemberState(db, period);
 		const cmp = compareSeptember(before, after, {
@@ -494,6 +560,9 @@ async function correct(world, p) {
 		});
 		if (!cmp.ok) throw new Refusal(`September changed beyond the correction, so nothing was written:\n  - ${cmp.problems.join("\n  - ")}`);
 		const pay = cmp.changes.find((c) => c.what === "payout" && c.ownerId === CORRECTION.ownerId);
+		if (expectPayout !== null && cents(pay.after.amount) !== cents(expectPayout)) {
+			throw new Refusal(`owner ${CORRECTION.ownerId}'s September payout came to ${usd(pay.after.amount)}, not the ${usd(expectPayout)} --expect-payout names, so nothing was written`);
+		}
 		audit(db, "data_fix", "period", period,
 			`${CORRECTION.reason}: driver pay ${usd(driverPayIn(before.items, p.driver))} -> ${usd(driverPayIn(after.items, p.driver))}; ` +
 			`owner ${CORRECTION.ownerId}'s September payout ${usd(pay.before.amount)} -> ${usd(pay.after.amount)} (row ${pay.id}); ` +
@@ -501,18 +570,26 @@ async function correct(world, p) {
 		const audits = db.prepare("SELECT action, username, role, entity, entity_id FROM audit_trail WHERE id > ? ORDER BY id").all(auditFrom);
 		const history = db.prepare("SELECT owner_id, period, kind, old_amount, new_amount FROM investor_payout_history WHERE id > ? ORDER BY id").all(historyFrom);
 		if (history.some((h) => h.period !== period)) throw new Refusal("the run recorded a payout change outside September");
+		open("the comparison");
 		db.exec("COMMIT");
 		result = { before, after, cmp, log, audits, history, lockedMs: Date.now() - started };
 	} catch (err) {
 		if (db.inTransaction) db.exec("ROLLBACK");
 		throw err;
 	}
-	for (const f of p.fixes) {
-		const row = db.prepare("SELECT * FROM invoices WHERE id = ?").get(f.row.id);
-		const mode = await api.rerenderInvoicePdfFromStoredData(row);
-		result.log.push(`Re-rendered ${f.target.invoiceNumber}'s PDF (${row.pdf_file_name}, ${mode}).`);
-	}
 	return result;
+}
+
+// Each corrected invoice's PDF, re-rendered from its stored snapshot by the
+// server's own function. Returns the lines to print.
+async function renderPdfs(world, fixes) {
+	const out = [];
+	for (const f of fixes) {
+		const row = world.db.prepare("SELECT * FROM invoices WHERE id = ?").get(f.row.id);
+		const mode = await world.api.rerenderInvoicePdfFromStoredData(row);
+		out.push(`Re-rendered ${f.target.invoiceNumber}'s PDF (${row.pdf_file_name}, ${mode}).`);
+	}
+	return out;
 }
 
 function report(r, p) {
@@ -562,6 +639,13 @@ async function main() {
 	const apply = args.apply === true;
 	if (dryRun === apply) throw new Refusal("say --dry-run or --apply (one of them)");
 	if (typeof args.db !== "string") throw new Refusal("--db is required");
+	if (typeof args["sheet-id"] !== "string" && typeof args["values-json"] !== "string") throw new Refusal("--sheet-id (or --values-json) is required; there is no default sheet");
+	let expectPayout = null;
+	if (args["expect-payout"] !== undefined) {
+		expectPayout = Number(args["expect-payout"]);
+		if (typeof args["expect-payout"] !== "string" || !/^\d+(\.\d{1,2})?$/.test(args["expect-payout"]) || !Number.isFinite(expectPayout)) throw new Refusal("--expect-payout=<dollars> takes the dry run's payout, e.g. 5346.00");
+	}
+	if (apply && expectPayout === null) throw new Refusal("--apply needs --expect-payout=<the investor's September payout the dry run printed>");
 	const envFile = typeof args["env-file"] === "string" ? args["env-file"] : null;
 	let scope;
 	try { scope = dbScope(args.db, ROOT); } catch (err) { throw new Refusal(err.message); }
@@ -577,6 +661,9 @@ async function main() {
 	say(`Data fix ${REF}: ${CORRECTION.reason}. Mode: ${dryRun ? "dry run (on a temporary copy; the database is not written)" : "apply"}.`);
 	let tmpDir = null;
 	let world = null;
+	// An interrupted dry run deletes its copy of the database too.
+	const onSignal = (sig) => { if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true }); console.error(`Stopped by ${sig}.`); process.exit(130); };
+	for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(sig, onSignal);
 	try {
 		let target = dbFile;
 		let targetDataDir = dataDir;
@@ -600,21 +687,28 @@ async function main() {
 		const p = plan(world.db, world.api);
 		if (p.alreadyApplied) {
 			say(`Already applied: both overrides, both corrected invoices and September finalized by ${ACTOR} are on record. Nothing was written to the database.`);
-			if (apply) {
-				for (const f of p.fixes) {
-					const mode = await world.api.rerenderInvoicePdfFromStoredData(world.db.prepare("SELECT * FROM invoices WHERE id = ?").get(f.row.id));
-					say(`Re-rendered ${f.target.invoiceNumber}'s PDF from its stored snapshot (${mode}).`);
-				}
-			}
+			if (apply) (await renderPdfs(world, p.fixes)).forEach((l) => say(l));
 			return 0;
 		}
 		say("Checked:");
 		say(describePlan(p));
 		if (apply) say(`Backup: ${await backupNextTo(dbFile, world.db, Database)}`);
-		const r = await correct(world, p);
-		say(dryRun ? "On the temporary copy:" : "Applied:");
+		const r = await correct(world, p, { expectPayout });
+		say(dryRun ? "On the temporary copy (committed there):" : "Applied (committed):");
 		r.log.forEach((l, i) => say(`${i + 1}. ${l}`));
 		say(report(r, p));
+		say(`Owner ${CORRECTION.ownerId}'s September payout after the correction: ${(r.cmp.changes.find((c) => c.what === "payout" && c.ownerId === CORRECTION.ownerId).after.amount).toFixed(2)} (--expect-payout for the apply).`);
+		// The database is committed from here; a PDF that fails says so and how to
+		// finish, and never reads as "nothing was written".
+		try {
+			(await renderPdfs(world, p.fixes)).forEach((l) => say(l));
+		} catch (err) {
+			console.error(`PDFS NOT RE-RENDERED: ${err.message}`);
+			console.error(dryRun
+				? "On the temporary copy the database step completed; only the PDF step failed."
+				: "The database IS written (above). Do not restore the backup: run the same --apply again, which writes nothing more and re-renders the two PDFs.");
+			return 3;
+		}
 		say(dryRun ? "Dry run: nothing was written to the database; the temporary copy is deleted." : "Done.");
 		return 0;
 	} finally {
@@ -632,4 +726,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { CORRECTION, ACTOR, REF, REOPEN_HEAD, EXCLUDE_HEAD, ROOTS, PROVIDED, DENIED, invoiceCorrection, septemberState, compareSeptember, driverPayIn, weekdayOf, Refusal };
+module.exports = { CORRECTION, ACTOR, REF, OCTOBER_CREDIT_ACTOR, REOPEN_HEAD, EXCLUDE_HEAD, ROOTS, PROVIDED, DENIED, invoiceCorrection, plan, planFingerprint, septemberState, compareSeptember, driverPayIn, weekdayOf, Refusal };
