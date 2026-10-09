@@ -391,6 +391,11 @@ function battery(mods) {
 		const m2 = get(out2, "revenue");
 		t(cmp(m2, "yoy").status === "missing" && cmp(m2, "yoy").baseValue === null, "§4 October 2025 had no delivered load: no base for a YoY");
 		t(m.coverage.ratio === 1 && m.coverage.what === "delivered loads with a revenue figure", "§4 every delivered load has a revenue figure");
+		const thinBase = get(M.computeKpis(world({ unpaid: "2025-09-10" })), "revenue");
+		t(cmp(thinBase, "yoy").status === "missing" && cmp(thinBase, "t3m_yoy").status === "missing" && cmp(thinBase, "mom").status === "ok"
+			&& thinBase.assumptions.some((a) => /at least 90%/.test(a)),
+			"§4 a base month where under 90% of delivered loads have revenue is no base for a YoY, and the page says why", JSON.stringify(thinBase.comparisons));
+		t(!m.assumptions.some((a) => /at least 90%/.test(a)), "§4 ...and the note appears only when a comparison was held back");
 		const unpaid = get(M.computeKpis(world({ unpaid: "2026-09-29" })), "revenue");
 		t(unpaid.value === 45000 && unpaid.coverage.num === unpaid.coverage.den - 1 && ser(unpaid, "2026-09").coverage === 0.8333,
 			"§4 a delivered load with no Payment adds nothing and lowers the coverage", JSON.stringify({ v: unpaid.value, c: unpaid.coverage, s: ser(unpaid, "2026-09") }));
@@ -625,6 +630,7 @@ const MUTANTS = [
 	["gap months read as 0", "§2", { metrics: [["if (!m.rows) return { value: null, display: NO_RECORDS, coverage, present: false };", "if (!m.rows) return { value: 0, display: formatDisplay(unit, 0), coverage, present: true };"]] }],
 	["2,204.6 lb per ton", "§3", { metrics: [["return lb / catalog.LB_PER_TON;", "return lb / 2204.6;"]] }],
 	["a $0 Payment counted as a revenue figure", "§4", { metrics: [["revenue: delivered && isNum(l.revenue) && l.revenue > 0 ? l.revenue : null,", "revenue: delivered && isNum(l.revenue) ? l.revenue : null,"]] }],
+	["comparisons ignore month coverage", "§4", { metrics: [["if (isNum(spec.minCompareCoverage) && !cells.every(", "if (false && !cells.every("]] }],
 	["CO2 factor 10.21", "§9", { metrics: [["const kgPerGallon = catalog.CO2_KG_PER_GALLON_DIESEL;", "const kgPerGallon = 10.21;"]] }],
 	["rejected receipts counted", "§9", { metrics: [["String(r.status == null ? \"\" : r.status) !== \"Rejected\"", "true"]] }],
 	["$/gal over all spend", "§9", { metrics: [["const pricePerGallon = fw.spendGal / fw.gal;", "const pricePerGallon = fw.spendAll / fw.gal;"]] }],
