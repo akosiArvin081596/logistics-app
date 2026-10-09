@@ -5274,11 +5274,18 @@ const INVESTOR_LEASE_PAYOUTS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.
 const PAYOUT_RULES_V2_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PAYOUT_RULES_V2_ENABLED ?? "").trim());
 const PAYOUT_RULE_KEYS = ["datedAttribution", "datedRates", "futureReceipts", "frozenCarry"];
 // A day before a load's dispatch stops paying for that load when the truck moved
-// under 50 km that day and never reached the pickup (lib/load-pay-days.js), in
-// open months only. Dormant until the owner approves it, like the rules above.
-// preDispatchPayDayFilter() is the one place it is switched; the three pay paths
-// take the filter it returns. Enable with true/1/yes/on.
+// under 50 km that day and never reached the pickup (lib/load-pay-days.js), for
+// days that pay in PRE_DISPATCH_PAY_DAY_RULE_FROM or a later month. Dormant until
+// the owner approves it, like the rules above. preDispatchPayDayFilter() is the
+// one place it is switched; the three pay paths take the filter it returns.
+// Enable with true/1/yes/on.
 const PRE_DISPATCH_PAY_DAY_RULE_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.PRE_DISPATCH_PAY_DAY_RULE_ENABLED ?? "").trim());
+// The first month the rule applies to ("YYYY-MM"), read once: whether a day
+// follows the rule depends on this and the month the day pays in, never on a
+// month lock. With the flag on and no month here the rule stays off, with one
+// warning at boot.
+const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PAY_DAY_RULE_ENABLED, process.env.PRE_DISPATCH_PAY_DAY_RULE_FROM,
+	(msg) => console.warn(`[pre-dispatch] ${msg}`));
 function payoutRules(overrides = null) {
 	const out = {};
 	for (const k of PAYOUT_RULE_KEYS) out[k] = overrides && typeof overrides[k] === "boolean" ? overrides[k] : PAYOUT_RULES_V2_ENABLED;
@@ -17372,7 +17379,7 @@ async function generateInvoiceHandler(req, res) {
 			const { days: countedDays } = loadPayDays.payDaysForLoad(
 				loadWindowDays, eld,
 				// loadWindowDays is clipped to the week; the rule reads the whole window.
-				{ loadId: String(lid).trim(), vid, settleMonth: monthCols ? loadAssignedMonthKey(load, monthCols) : "", windowStart: fmtLocalDate(start) },
+				{ loadId: String(lid).trim(), vid, settleMonth: monthCols ? loadAssignedMonthKey(load, monthCols) : "", windowStart: fmtLocalDate(start), windowEnd: fmtLocalDate(end) },
 				preDispatch,
 			);
 			for (const ds of countedDays) {
@@ -36271,17 +36278,17 @@ function liveJobTrackingView(jt) {
 }
 
 // The pre-dispatch pay-day filter for one request (lib/load-pay-days.js), or null
-// while PRE_DISPATCH_PAY_DAY_RULE_ENABLED is off. POST /api/invoices/generate, GET
+// while the rule is off (PRE_DISPATCH_PAY_DAY_RULE_ENABLED off, or no
+// PRE_DISPATCH_PAY_DAY_RULE_FROM month). POST /api/invoices/generate, GET
 // /api/investor and the payout ledger (gatherLedgerScopeFacts()) each pass it to
-// payDaysForLoad(), so the three move together. A month counts as open only when
-// period_locks is readable and the month is not finalized: an unreadable lock
-// table keeps every day.
+// payDaysForLoad(), so the three move together. It reads no month lock: a day
+// pays the same before and after its month closes.
 function preDispatchPayDayFilter() {
-	if (!PRE_DISPATCH_PAY_DAY_RULE_ENABLED) return null;
+	if (!PRE_DISPATCH_PAY_DAY_RULE_ENABLED || !PRE_DISPATCH_PAY_DAY_RULE_FROM) return null;
 	return loadPayDays.createPreDispatchFilter({
 		db,
 		enabled: true,
-		monthOpen: (mk) => periodLocksReadable() && !isLocked(mk),
+		fromMonth: PRE_DISPATCH_PAY_DAY_RULE_FROM,
 		radiusM: GEOFENCE_RADIUS,
 	});
 }
