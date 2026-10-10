@@ -9,12 +9,14 @@
 //   §2 save writes <user>.json (600, folder 700) and points active.json at it;
 //      the task records the file name (no cookie); a refused state, or a folder
 //      inside the repository, writes nothing; saving an account again ends its
-//      earlier session, in whichever task saved it, and moves the record
+//      earlier session, in whichever task saved it (also where that task's
+//      record can't be read), and moves the record
 //   §3 revoke ends the task's sessions in its working copy and deletes their
 //      files, and only theirs; active.json is emptied before its target goes and
 //      is never left missing, also when revoke fails part way (the files it
 //      didn't reach stay); an unreadable record still ends the sessions found in
-//      the copy; stale temporary files are swept
+//      the copy; stale temporary files and links are swept, and a dangling one
+//      doesn't stop it
 //   §4 the real session store (express-session + better-sqlite3-session-store,
 //      as server.js builds it) no longer returns a session revoke ended
 //   §5 the commands, with HOME on a temporary folder: replica:clean ends the
@@ -120,6 +122,11 @@ const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 		M.save({ root, task: "t2", user: "alice", state: stateOf(cookie("alice-3")), base: BASE });
 		eq("saving it again in the same task ends the one it replaces, and isn't recorded twice", [liveSids(root, "t2"), record(root, "t2")], [["alice-3"], ["alice.json"]]);
 
+		workCopy(root, "t6", ["alice-6"]);
+		fs.writeFileSync(M.taskRecordOf(root, "t2"), "{ not json");
+		M.save({ root, task: "t6", user: "alice", state: stateOf(cookie("alice-6")), base: BASE });
+		eq("the earlier session ends even where that task's record can't be read", liveSids(root, "t2"), []);
+
 		const before = fs.readdirSync(dir).sort();
 		throws("a state with a production cookie is refused", () => M.save({ root, task: "t1", user: "carol", state: stateOf(cookie("c"), cookie("p", "app.logisx.com")), base: BASE }), /another host/);
 		eq("...and writes nothing", [fs.readdirSync(dir).sort(), fs.readlinkSync(M.activeOf(root)), record(root, "t1")], [before, "alice.json", ["bob.json"]]);
@@ -179,8 +186,13 @@ const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 		fs.writeFileSync(newTmp, "{}");
 		const old = new Date(Date.now() - 10 * 60 * 1000);
 		fs.utimesSync(oldTmp, old, old);
-		M.revoke({ root, task: "t9" });
-		eq("a stale temporary file is swept, a fresh one (a save under way) is left", [fs.existsSync(oldTmp), fs.existsSync(newTmp)], [false, true]);
+		const oldLink = path.join(dir, "active.json.4242.tmp");
+		fs.symlinkSync("nowhere.json", oldLink);
+		fs.lutimesSync(oldLink, old, old);
+		let sweepError = null;
+		try { M.revoke({ root, task: "t9" }); } catch (e) { sweepError = e.message; }
+		ok("a dangling temporary link doesn't stop revoke", sweepError === null, sweepError);
+		eq("a stale temporary file or link is swept, a fresh one (a save under way) is left", [fs.existsSync(oldTmp), Boolean(fs.lstatSync(oldLink, { throwIfNoEntry: false })), fs.existsSync(newTmp)], [false, false, true]);
 	}
 
 	console.log("§4 the server's session store no longer knows a revoked session");

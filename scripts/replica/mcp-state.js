@@ -85,9 +85,13 @@ function writeAtomic(file, text) {
 function pointActive(root, fileName) {
 	const active = activeOf(root);
 	const tmp = `${active}.${process.pid}.tmp`;
-	fs.rmSync(tmp, { force: true });
-	fs.symlinkSync(fileName, tmp);
-	fs.renameSync(tmp, active);
+	try {
+		fs.rmSync(tmp, { force: true });
+		fs.symlinkSync(fileName, tmp);
+		fs.renameSync(tmp, active);
+	} finally {
+		fs.rmSync(tmp, { force: true });
+	}
 }
 
 function resetActive(root) {
@@ -136,7 +140,12 @@ function sessionIdOf(file) {
 function endSession(root, task, sid) {
 	const dbPath = path.join(root, "work", task, "app.db");
 	if (!sid || !fs.existsSync(dbPath)) return false;
-	const Database = require(path.join(REPO, "node_modules", "better-sqlite3"));
+	let Database;
+	try {
+		Database = require(path.join(REPO, "node_modules", "better-sqlite3"));
+	} catch (e) {
+		throw new Error(`better-sqlite3 won't load on Node ${process.version} (${String(e.message).split("\n")[0]}); use the repo's Node (fnm use) and run again. Nothing was ended or deleted`);
+	}
 	const db = new Database(dbPath, { fileMustExist: true, timeout: 5000 });
 	try {
 		if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get()) return false;
@@ -155,8 +164,10 @@ function preflight({ root = C.ROOT, task, user }) {
 }
 
 // Saves the signed-in browser's cookies for `user` and points active.json at
-// them. The account's earlier session, saved by any task, ends first; then the
-// task records the file, so replica:clean can always find it.
+// them. The account's earlier session ends first, in every working copy (its id
+// is random, so only the copy that made it holds it, whatever the records say),
+// and leaves the other tasks' records; then the task records the file, so
+// replica:clean can always find it.
 function save({ root = C.ROOT, task, user, state, base }) {
 	const kept = cookiesOnly(state, base);
 	const fileName = preflight({ root, task, user });
@@ -165,11 +176,11 @@ function save({ root = C.ROOT, task, user, state, base }) {
 		const sid = sessionIdOf(file);
 		const work = path.join(root, "work");
 		for (const other of fs.existsSync(work) ? fs.readdirSync(work) : []) {
+			endSession(root, other, sid);
+			if (other === task) continue;
 			let files;
 			try { files = readTaskRecord(root, other); } catch { continue; }
-			if (!files.includes(fileName)) continue;
-			endSession(root, other, sid);
-			if (other !== task) writeTaskRecord(root, other, files.filter((f) => f !== fileName));
+			if (files.includes(fileName)) writeTaskRecord(root, other, files.filter((f) => f !== fileName));
 		}
 	}
 	const files = readTaskRecord(root, task);
@@ -195,7 +206,8 @@ function revoke({ root = C.ROOT, task }) {
 		for (const name of names) {
 			const file = path.join(dir, name);
 			if (name.endsWith(".tmp")) {
-				if (Date.now() - fs.statSync(file).mtimeMs > STALE_TMP_MS) fs.rmSync(file, { force: true });
+				const st = fs.lstatSync(file, { throwIfNoEntry: false });
+				if (st && Date.now() - st.mtimeMs > STALE_TMP_MS) fs.rmSync(file, { force: true });
 				continue;
 			}
 			if (!isSessionFile(name)) continue;

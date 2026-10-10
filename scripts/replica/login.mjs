@@ -175,8 +175,9 @@ try {
 		try {
 			file = M.save({ task, user: user.username, state: await context.storageState(), base: BASE });
 		} catch (e) {
-			await page.evaluate(() => fetch("/api/auth/logout", { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } }));
-			throw new Error(`${e.message} (signed out)`);
+			const out = await page.evaluate(() => fetch("/api/auth/logout", { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } }).then((r) => r.status))
+				.then((status) => (status === 200 ? "signed out" : `sign-out answered ${status}`), (err) => `sign-out failed: ${err.message}`);
+			throw new Error(`${e.message} (${out})`);
 		}
 		console.log(`replica: session kept for the Playwright MCP: ${file} (cookies only); ${M.activeOf(C.ROOT)} points at it`);
 		console.log(`replica: it ends when that browser signs out, or with npm run replica:clean -- --task ${task}`);
