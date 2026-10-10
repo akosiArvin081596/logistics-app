@@ -100,6 +100,8 @@ The box checks that SHA out detached, rebuilds and restarts. It also writes main
 
 ## Things the deploy does on purpose
 
+**Every job runs on `ubuntu-24.04`, not `ubuntu-latest`.** GitHub moves `ubuntu-latest` to Ubuntu 26 from 2026-10-19; pinned, the deploy and CI runners change only when a PR changes them, and that upgrade is planned on its own.
+
 **It holds a box-level lock, and a second deploy of the same app fails fast.** `remote-deploy.sh`, `remote-rollback.sh` and `remote-record-verified.sh` take `flock -n` on `/var/lock/logisx-deploy<dir>.lock`. The file sits outside the repo tree, and `/var/lock` is `/run/lock` on Ubuntu (root-writable tmpfs). It holds one deploy per app directory, whatever started it: `deploy.yml`, the drift heal, an auto-rollback, the step that records a verified deploy, or a human over ssh. A contender exits **75** and names the holder. `ssh-retry.sh` never retries 75, only ssh's own 255. Two bounded waits (`DEPLOY_LOCK_WAIT_S`, default 20 s) are the exceptions:
 - a rollback and the record step wait for any holder, since they run inside a job that already holds the Actions production slot;
 - a deploy waits only when the holder's note names `remote-drift-check.sh`.

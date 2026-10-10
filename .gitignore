@@ -191,3 +191,9 @@ docs/driver-video/captions/
 docs/driver-guide/screenshots/
 docs/driver-guide/screenshots-annotated/
 docs/pdf/*.pdf
+# Except the six manuals scripts/docs/generate-docs.js writes: they are
+# committed deliverables (docs/manual/README.md), and a tracked file under an
+# ignore rule is the invisible-file trap described at uploads/ above.
+!docs/pdf/LogisX-*-Guide.pdf
+!docs/pdf/LogisX-User-Manual.pdf
+!docs/pdf/LogisX-Technical-Documentation.pdf

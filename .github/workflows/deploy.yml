@@ -127,7 +127,7 @@ jobs:
     # the two together).
     name: staging
     if: github.event_name == 'push' || github.event.inputs.target == 'staging'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The deploy and its record step (ssh-retry.sh's transport budget is ~5 min
     # per connection, the deploy itself about 1), the smoke (2 min at most) and
     # the CI wait (20 min at most).
@@ -220,7 +220,7 @@ jobs:
         (github.event_name == 'push' && needs.staging.result == 'success') ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'production')
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Production's queue, shared with deploy-drift.yml's heal (see the note
     # above `permissions`).
