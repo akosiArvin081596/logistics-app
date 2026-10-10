@@ -196,10 +196,12 @@ npm run replica:clean -- [--task <name>]
   storage), in `~/LogisX-replica/mcp/<username>.json` (mode 600, folder 700), and
   `~/LogisX-replica/mcp/active.json`, the file the MCP loads (`--isolated --storage-state`),
   points at it. A state holding a cookie for any host but the replica's is refused and nothing
-  is written. Signing out in that browser ends the session on the server.
-- **`replica:clean`** first takes back the task's `--mcp-state` sessions: each is signed out on
-  the task's server while it runs, its file is deleted and `active.json` is left signed out.
-  It then stops the task's server (by its recorded PID, only while that PID is still that
+  is written. Signing out in that browser, or saving the same account again, ends the session.
+  Run the MCP without `--caps storage`: its cookie tools would show the cookie's value.
+- **`replica:clean`** first takes back the task's `--mcp-state` sessions: each one's row is
+  deleted from the working copy's session store (what Sign out does, so a browser that already
+  loaded the cookie is signed out too), its file is deleted and `active.json` is left signed
+  out. It then stops the task's server (by its recorded PID, only while that PID is still that
   server) and deletes its working copy. The clean snapshot stays. While the recorded PID is
   alive but cannot be shown to be that server, it stops and deletes nothing more.
 

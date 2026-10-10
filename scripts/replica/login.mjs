@@ -23,7 +23,8 @@
 // 4. --mcp-state <username> (headless) keeps the session instead of signing out:
 //    its cookies go to ~/LogisX-replica/mcp/<username>.json (600) and
 //    active.json, the file the Playwright MCP loads, points at them
-//    (mcp-state.js). Signing out in that browser, or replica:clean, ends it.
+//    (mcp-state.js). Signing out in that browser, saving the account again, or
+//    replica:clean ends it. A save it would refuse is checked before signing in.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -98,6 +99,9 @@ const db = new Database(dbPath, { fileMustExist: true });
 const users = db.prepare("SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?)").all(username.trim());
 if (users.length !== 1) { db.close(); C.fail(users.length ? `${users.length} accounts are named ${username}` : `no account named ${username} in the working copy`); }
 const user = users[0];
+if (mcpUser) {
+	try { M.preflight({ task, user: user.username }); } catch (e) { db.close(); C.fail(e.message); }
+}
 db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(bcrypt.hashSync(password, 10), user.id);
 db.close();
 console.log(`replica: local password set on ${user.username} (${user.role}) in ${dbPath} only`);
@@ -167,7 +171,13 @@ try {
 		console.log(`replica: opened ${v}`);
 	}
 	if (mcpUser) {
-		const file = M.save({ task, user: user.username, state: await context.storageState(), base: BASE });
+		let file;
+		try {
+			file = M.save({ task, user: user.username, state: await context.storageState(), base: BASE });
+		} catch (e) {
+			await page.evaluate(() => fetch("/api/auth/logout", { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } }));
+			throw new Error(`${e.message} (signed out)`);
+		}
 		console.log(`replica: session kept for the Playwright MCP: ${file} (cookies only); ${M.activeOf(C.ROOT)} points at it`);
 		console.log(`replica: it ends when that browser signs out, or with npm run replica:clean -- --task ${task}`);
 	} else if (headless) {

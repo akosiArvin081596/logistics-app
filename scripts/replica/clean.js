@@ -6,9 +6,10 @@
 // (~/LogisX-replica/work/<name>/). The clean snapshot, the copied files, the
 // settings, the logs and the screenshots stay.
 //
-// The sessions go first (mcp-state.js): each is signed out on the task's server
-// while that server is running, its file is deleted and the MCP's active.json
-// is left signed out, even when the server cannot be stopped below.
+// The sessions go first (mcp-state.js): each one's row is deleted from the
+// working copy's session store (what Sign out does), its file is deleted and the
+// MCP's active.json is left signed out, even when the server cannot be stopped
+// below.
 //
 // The server is stopped only by the PID replica:start recorded, and only while
 // that PID is still a `node server.js` whose working directory is the recorded
@@ -57,12 +58,12 @@ async function stop() {
 
 async function main() {
 	if (!path.resolve(work).startsWith(path.join(C.ROOT, "work") + path.sep)) C.fail("unexpected working copy path");
-	const server = C.runningServer(task);
-	const revoked = await M.revoke({ task, port: server && server.port });
-	if (!revoked.length) console.log(`replica: no Playwright MCP session saved for task ${task}`);
-	for (const r of revoked) {
-		console.log(`replica: deleted the Playwright MCP session ${path.basename(r.file)}; ` +
-			(r.signedOut ? "signed out on the server" : "the server's copy of it goes with the working copy"));
+	const { removed, recordError } = M.revoke({ task });
+	if (recordError) console.log(`replica: ${recordError}; the task's sessions were found in its working copy instead`);
+	if (!removed.length) console.log(`replica: no Playwright MCP session saved for task ${task}`);
+	for (const r of removed) {
+		console.log(`replica: ended the Playwright MCP session ${path.basename(r.file)} and deleted its file` +
+			(r.ended ? "" : " (it had already ended)"));
 	}
 	await stop();
 	if (fs.existsSync(work)) {
