@@ -149,7 +149,7 @@ In development, run `npm run dev` and `npm run dev:client` in two terminals and 
 
 - **`.env`** — environment secrets.
 - **`service-account-key.json`** — Google credentials.
-- **`app.db`** — SQLite database. Backed up via the manual download endpoint.
+- **`app.db`** — SQLite database. `backup.sh` snapshots it nightly (cron, 02:00 UTC) into `backups/`, verified and gzipped, kept 30 days; the Backup freshness workflow checks the newest snapshot from outside the box every morning.
 - **`uploads/`** — POD photos, receipts and signatures, stored only here. (Uploads never go to Drive; Drive holds only rate-cons.)
 
 Nothing else. The repo is the source of truth for code; the VPS holds runtime state.

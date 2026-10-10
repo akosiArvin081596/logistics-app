@@ -91,7 +91,7 @@ permissions:
 jobs:
   check:
     name: production vs main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The VPS secrets are environment secrets, and both environments accept
     # runs from main only. This job only reads the box, so `deployment: false`
@@ -246,7 +246,7 @@ jobs:
     name: heal production (staging-gated, auto-rollback)
     needs: check
     if: needs.check.outputs.action == 'heal'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # ⚠️ SAME literal group as deploy.yml's production job, on purpose
     # (invariant 1): the heal deploys production, so it waits for an in-flight
@@ -347,7 +347,7 @@ jobs:
     name: re-run the Deploy run whose staging never reached the VPS
     needs: check
     if: needs.check.outputs.action == 'rerun'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # ⚠️ The ONLY job that may write, and only what a re-run needs. Job-level
     # permissions REPLACE the workflow-level ones for this job, so this token

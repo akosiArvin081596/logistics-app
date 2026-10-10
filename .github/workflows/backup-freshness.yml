@@ -49,7 +49,7 @@ permissions:
 jobs:
   check:
     name: nightly snapshot age
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # ssh-retry.sh's transport budget spans ~5 min; the check itself is seconds.
     timeout-minutes: 10
     # The VPS secrets are environment secrets, and both environments accept
