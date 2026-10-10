@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 // npm run replica:clean -- [--task <name>]
 //
-// Stops the task's replica server and deletes its working copy
+// Takes back the sessions replica:login --mcp-state saved for the task, stops
+// the task's replica server and deletes its working copy
 // (~/LogisX-replica/work/<name>/). The clean snapshot, the copied files, the
 // settings, the logs and the screenshots stay.
+//
+// The sessions go first (mcp-state.js): each is signed out on the task's server
+// while that server is running, its file is deleted and the MCP's active.json
+// is left signed out, even when the server cannot be stopped below.
 //
 // The server is stopped only by the PID replica:start recorded, and only while
 // that PID is still a `node server.js` whose working directory is the recorded
@@ -13,6 +18,7 @@
 const fs = require("fs");
 const path = require("path");
 const C = require("./common");
+const M = require("./mcp-state");
 
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
@@ -51,6 +57,13 @@ async function stop() {
 
 async function main() {
 	if (!path.resolve(work).startsWith(path.join(C.ROOT, "work") + path.sep)) C.fail("unexpected working copy path");
+	const server = C.runningServer(task);
+	const revoked = await M.revoke({ task, port: server && server.port });
+	if (!revoked.length) console.log(`replica: no Playwright MCP session saved for task ${task}`);
+	for (const r of revoked) {
+		console.log(`replica: deleted the Playwright MCP session ${path.basename(r.file)}; ` +
+			(r.signedOut ? "signed out on the server" : "the server's copy of it goes with the working copy"));
+	}
 	await stop();
 	if (fs.existsSync(work)) {
 		fs.rmSync(work, { recursive: true, force: true });

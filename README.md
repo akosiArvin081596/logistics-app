@@ -152,6 +152,7 @@ fnm use   # Node 22.23.2: the replica refuses another version than production's
 LOGISX_PROD_SSH=<root@host or ssh config Host> [LOGISX_PROD_SSH_KEY=<identity file>] npm run replica:pull [-- --force]
 npm run replica:start -- [--task <name>] [--port <n>] [--fresh] [--prod-commit]
 npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]...
+npm run replica:login -- --mcp-state <username> [--task <name>]
 npm run replica:clean -- [--task <name>]
 ```
 
@@ -190,10 +191,17 @@ npm run replica:clean -- [--task <name>]
 - **`replica:login`** sets a local password on that account in the working copy only, from the
   Keychain item `logisx-replica` (generated once, never shown), then signs in through the
   login page in Chrome for Testing (headed unless `--headless`). The browser may reach the
-  replica and nothing else.
-- **`replica:clean`** stops the task's server (by its recorded PID, only while that PID is still
-  that server) and deletes its working copy. The clean snapshot stays. While the recorded PID
-  is alive but cannot be shown to be that server, it stops and deletes nothing.
+  replica and nothing else. With `--mcp-state <username>` it signs in headless and keeps the
+  session for the Playwright MCP instead of signing out: the replica's cookies only (no local
+  storage), in `~/LogisX-replica/mcp/<username>.json` (mode 600, folder 700), and
+  `~/LogisX-replica/mcp/active.json`, the file the MCP loads (`--isolated --storage-state`),
+  points at it. A state holding a cookie for any host but the replica's is refused and nothing
+  is written. Signing out in that browser ends the session on the server.
+- **`replica:clean`** first takes back the task's `--mcp-state` sessions: each is signed out on
+  the task's server while it runs, its file is deleted and `active.json` is left signed out.
+  It then stops the task's server (by its recorded PID, only while that PID is still that
+  server) and deletes its working copy. The clean snapshot stays. While the recorded PID is
+  alive but cannot be shown to be that server, it stops and deletes nothing more.
 
 **Replica mode (`LOCAL_REPLICA=1`, `lib/replica-mode.js`)** differs from production on purpose:
 

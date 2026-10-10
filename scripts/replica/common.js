@@ -7,6 +7,8 @@
 //     settings.env               production's non-secret settings (600)
 //     work/<task>/               a task's working copy: clones of all of the above
 //       server.json              the running server: pid, port, code dir, log
+//       mcp-state.json           the session files this task saved (mcp-state.js)
+//     mcp/                       sessions for the Playwright MCP (mcp-state.js)
 //     code/<commit>/             a worktree of production's commit (--prod-commit)
 //     logs/                      pull, server and outbound-guard logs
 //     screens/                   screenshots
@@ -60,6 +62,15 @@ function readJson(file) {
 function writePrivate(file, text) {
 	fs.writeFileSync(file, text, { mode: 0o600 });
 	fs.chmodSync(file, 0o600);
+}
+
+// The real path of `p`, through its nearest existing ancestor (symlinks resolved).
+function realOf(p) {
+	const abs = path.resolve(p);
+	try { return fs.realpathSync(abs); } catch {
+		const parent = path.dirname(abs);
+		return parent === abs ? abs : path.join(realOf(parent), path.basename(abs));
+	}
 }
 
 // The working directory of a pid, as lsof reports it ("" when unknown).
@@ -142,6 +153,7 @@ module.exports = {
 	optionValue,
 	readJson,
 	writePrivate,
+	realOf,
 	cwdOf,
 	commandOf,
 	alive,
