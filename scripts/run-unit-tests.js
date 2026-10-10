@@ -42,7 +42,7 @@
  * anything with another: temp files and directories come from `mkdtemp` (or
  * carry the pid), databases are `:memory:` or inside that temp directory,
  * servers listen on port 0, and nothing is written into the repo tree.
- * Audited 2026-10-08 (all 182 runners): every node process each runner
+ * Audited 2026-10-08 (the 182 runners that existed then): every node process each runner
  * started was traced for file writes, SQLite opens, listen() calls and child
  * processes, the repo tree was checked for new files afterwards, and the
  * runners were grepped for fixed temp paths and ports. No shared file, port or

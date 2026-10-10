@@ -7,6 +7,10 @@ service-account-key.json
 # must never be committable — they were untracked-but-stageable until 2026-08-06.
 .env.bak*
 .env.*.bak
+# Every other .env variant (.env.production, .env.staging, ...) holds live
+# secrets too; only the documented template is tracked.
+.env.*
+!.env.example
 
 # Vue / Vite
 client/dist/
@@ -17,6 +21,7 @@ client/node_modules
 app.db
 app.db-shm
 app.db-wal
+app.db-journal
 app.db.bak*
 app.db.docgen*
 app.db.production*
@@ -35,6 +40,9 @@ app.db.pre-freeze*
 # Every other backup a script or data fix takes next to app.db before it writes
 # (app.db.pre-datafix-<ts> on the server), so none shows in the server's git status.
 app.db.pre-*
+# Any other copy named app.db.<something>: the rules above name the known ones,
+# this catches the next one. No app.db.* file is tracked.
+app.db.*
 logisxdb.db
 # Temp copies written by GET /api/db/download. These are FULL database dumps —
 # every SSN, routing and account number — and the name does not start with
@@ -70,6 +78,9 @@ attachments/
 # model before the location was pinned; a stray copy must never be committed.
 .cache/
 /eng.traineddata
+# Node heap snapshots (written near an out-of-memory restart) are copies of the
+# process memory, so they can hold any record the server had loaded.
+*.heapsnapshot
 *.bak2
 scripts/.wf-backup-*.json
 
