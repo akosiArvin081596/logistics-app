@@ -4,14 +4,16 @@
  * candidate invoice recipient, then checks it is an email address.
  *
  *   §1 SAME OUTPUT. A table of inputs (clean addresses, each kind of trailing
- *      punctuation, punctuation followed by other text, spaces, angle
- *      brackets, non-addresses, empty, null and a number) gives exactly the
- *      results the function gave before its trailing strip became a loop
- *      (captured from it, 2026-10-11). The recipient an invoice goes to never
- *      changes.
+ *      punctuation, punctuation followed by other text, punctuation only,
+ *      spaces, tabs and newlines, angle brackets, a character outside the
+ *      stripped set, an astral character, non-addresses, empty, null and a
+ *      number) gives exactly the results the function gave before its trailing
+ *      strip became a loop (captured from it, 2026-10-11). The recipient an
+ *      invoice goes to never changes.
  *   §2 LINEAR TIME. 100,000 punctuation characters followed by a letter, with
  *      and without an address in front, are each cleaned in under 250 ms, and
- *      a run ten times longer costs well under ten times as much squared.
+ *      a run ten times longer costs far less than the 100 times a squared cost
+ *      would.
  *
  * Plain node, no server, no network, never touches app.db.
  * Run: node scripts/test-invoice-email-cleanup.js
@@ -29,6 +31,9 @@ function eq(actual, expected, label) {
 }
 function ok(cond, label) { eq(!!cond, true, label); }
 function section(t) { console.log(`\n${t}`); }
+
+// An astral character (two UTF-16 units), built from its code point.
+const TRUCK = String.fromCodePoint(0x1f69a);
 
 function sameOutputSection() {
 	section("§1 the same result for every input as before");
@@ -49,6 +54,12 @@ function sameOutputSection() {
 		["billing@broker.com.x", ""],
 		["billing@broker.com;billing2@broker.com", ""],
 		["billing@broker.com.)x", ""],
+		["billing@broker.com.!", ""],
+		[`billing@broker.com${TRUCK}.`, ""],
+		[`billing@broker.com.${TRUCK}`, ""],
+		["\tbilling@broker.com)\n", "billing@broker.com"],
+		["...", ""],
+		[" .;) ", ""],
 		["not an email", ""],
 		["", ""],
 		[null, ""],

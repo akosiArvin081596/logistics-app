@@ -2,9 +2,9 @@
 /**
  * Two server.js log lines that include text a caller supplies keep a fixed
  * message pattern and pass that text as an argument. console.error treats its
- * first argument as a pattern (util.format): %s, %o, %d, %c, %j and %% in it
- * are replaced, so caller text placed there is not logged as written and can
- * swallow the arguments that follow it.
+ * first argument as a pattern (util.format), so with the text as an argument
+ * the method, URL and load id are logged exactly as written, and the error
+ * after them in full.
  *
  *   §1 THE FINAL ERROR HANDLER. The method and URL are arguments: a URL
  *      holding those characters is logged exactly as written, followed by the
