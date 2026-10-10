@@ -303,7 +303,7 @@ maintenance window; `backup-db.js` already sweeps strays.
 Read-only, safe to paste:
 
 ```bash
-ssh -4 -i ~/.ssh/abedubas_vps root@76.13.22.110
+ssh -4 root@76.13.22.110   # with your own key: -i <identity file>, or your ~/.ssh/config Host for the box
 
 df -h /
 du -sh /var/www/logistics-app/backups /opt/osrm/data
