@@ -3,9 +3,10 @@
 # rebuild app.db from the latest production snapshot, SANITIZED ON THE VPS.
 #
 # Run it from the repository root, naming the VPS that holds production's
-# nightly snapshots in VPS_HOST (user@host). It has no default: a database run
-# without it exits 2 with its usage before any command. VPS_KEY is the ssh
-# identity file (default ~/.ssh/abedubas_vps).
+# nightly snapshots in VPS_HOST (user@host, or a Host from your ssh config). It
+# has no default: a database run without it exits 2 with its usage before any
+# command. VPS_KEY, when set, is the ssh identity file; without it ssh's own
+# config and agent choose the key.
 #   VPS_HOST=<user@host> ./scripts/refresh-local.sh                      # code + data
 #   ./scripts/refresh-local.sh --code-only                               # skip the database (no VPS)
 #   VPS_HOST=<user@host> ./scripts/refresh-local.sh --telemetry-all      # full-fidelity telemetry (bigger, slower)
@@ -87,7 +88,7 @@ OPERATOR_REQUESTED=0
 # The VPS is named by the caller; nothing here falls back to one (checked below,
 # after the arguments, since --code-only and --scan-legacy never connect).
 VPS_HOST="${VPS_HOST-}"
-VPS_KEY="${VPS_KEY:-$HOME/.ssh/abedubas_vps}"
+VPS_KEY="${VPS_KEY-}"
 # What a database run reads on that VPS, read-only: production's nightly
 # snapshots, and its node_modules for the sanitizer. They define the source of
 # this tool rather than default a setting.
@@ -124,7 +125,8 @@ usage() {
   echo "       ./scripts/refresh-local.sh --code-only      # code only: the database is left alone"
   echo "       ./scripts/refresh-local.sh --scan-legacy    # report pre-2026-08-09 unsanitized copies"
   echo "A database run needs VPS_HOST=<user@host> in the ENVIRONMENT: the VPS holding production's nightly"
-  echo "snapshots. It has no default. VPS_KEY is its ssh identity file (default ~/.ssh/abedubas_vps)."
+  echo "snapshots (or a Host from your ssh config). It has no default. VPS_KEY, when set, is its ssh"
+  echo "identity file; without it ssh's own config and agent choose the key."
   echo "Operator access: REFRESH_OPERATOR_PASSWORD [REFRESH_OPERATOR_USER] in the ENVIRONMENT, never"
   echo "as an argument (scripts/README-env-refresh.md, 'Signing in to a refreshed copy')."
 }
@@ -205,8 +207,12 @@ fi
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$APP_DIR"
 
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
-SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=20 -i "$VPS_KEY")
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20)
+SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=20)
+if [ -n "$VPS_KEY" ]; then
+  SSH+=(-i "$VPS_KEY")
+  SCP+=(-i "$VPS_KEY")
+fi
 
 # =============================================================================
 # --scan-legacy — the copies the OLD flow left behind

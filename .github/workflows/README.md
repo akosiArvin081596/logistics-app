@@ -20,14 +20,15 @@ Add them at **Settings → Environments → `staging` / `production` → Environ
 
 ### 1. `VPS_SSH_KEY` — the deploy private key
 
-Generate a **dedicated** key. Do not paste in `~/.ssh/abedubas_vps`: that key is your personal login to a box hosting ~23 other clients' apps, and an environment secret is readable by any workflow run on `main`. A separate key can be revoked without locking you out.
+Generate a **dedicated** key. Never reuse your personal login key: it opens a box hosting ~23 other clients' apps, and an environment secret is readable by any workflow run on `main`. A separate key can be revoked without locking you out.
 
 ```bash
 # On your Mac
 ssh-keygen -t ed25519 -C "github-actions-logisx-deploy" -f ~/.ssh/logisx_deploy -N ""
 
-# Authorise it on the VPS (uses your existing personal key to get in)
-ssh-copy-id -i ~/.ssh/logisx_deploy.pub -o IdentityFile=~/.ssh/abedubas_vps root@76.13.22.110
+# Authorise it on the VPS, logging in as root with your own key (your ~/.ssh/config Host for
+# the box, or root@76.13.22.110 with -o IdentityFile=<your key>)
+ssh-copy-id -i ~/.ssh/logisx_deploy.pub <your root login to the VPS>
 
 # Store the PRIVATE key in both environments — the whole file, BEGIN/END lines included
 gh secret set VPS_SSH_KEY --env staging < ~/.ssh/logisx_deploy

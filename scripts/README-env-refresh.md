@@ -13,7 +13,8 @@ cd /var/www/logisx-staging && ./scripts/refresh-staging.sh --yes --restart # and
 ```
 
 `refresh-local.sh` reads production's nightly snapshot from the VPS named in `VPS_HOST`
-(`user@host`; `VPS_KEY` is the ssh identity file, default `~/.ssh/abedubas_vps`). It has no
+(`user@host`, or a Host from your ssh config; `VPS_KEY` is an ssh identity file, used only when
+set, otherwise ssh's own config and agent choose the key). It has no
 default: a database run without it exits 2 with its usage before running any command.
 `--code-only` and `--scan-legacy` never connect to the VPS, so they don't need it.
 

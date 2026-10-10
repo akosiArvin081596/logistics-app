@@ -5,7 +5,7 @@
 # replica of production"): the database, every tab of the Google Sheets, the
 # uploaded files and the non-secret settings, as of now.
 #
-#   LOGISX_PROD_SSH=<user@host> [LOGISX_PROD_SSH_KEY=<identity file>] npm run replica:pull [-- --force]
+#   LOGISX_PROD_SSH=<root@host or ssh config Host> [LOGISX_PROD_SSH_KEY=<identity file>] npm run replica:pull [-- --force]
 #
 # The production host is never written in this repository: it comes from
 # LOGISX_PROD_SSH. Without --force a snapshot younger than 24 hours is kept.

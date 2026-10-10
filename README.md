@@ -149,7 +149,7 @@ from it out of the repo and out of anything shared.**
 
 ```bash
 fnm use   # Node 22.23.2: the replica refuses another version than production's
-LOGISX_PROD_SSH=<user@host> LOGISX_PROD_SSH_KEY=<identity file> npm run replica:pull [-- --force]
+LOGISX_PROD_SSH=<root@host or ssh config Host> [LOGISX_PROD_SSH_KEY=<identity file>] npm run replica:pull [-- --force]
 npm run replica:start -- [--task <name>] [--port <n>] [--fresh] [--prod-commit]
 npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]...
 npm run replica:clean -- [--task <name>]
@@ -157,7 +157,9 @@ npm run replica:clean -- [--task <name>]
 
 - **`replica:pull`** refreshes the clean snapshot when it is older than 24 hours (or with
   `--force`). Production is only read. The ssh destination comes from `LOGISX_PROD_SSH` and is
-  never stored in the repo. A program streamed over ssh (`scripts/replica/remote/`, nothing is
+  never stored in the repo: `root@host`, or a Host from your ssh config that logs in as root (its
+  key and agent apply, so `LOGISX_PROD_SSH_KEY` is only for a key ssh wouldn't pick). A program
+  streamed over ssh (`scripts/replica/remote/`, nothing is
   installed on the server) works in one temporary folder, `/root/logisx-replica-tmp/<stamp>/`
   (a stamp unique to the run; mode 700, umask 077), at low CPU and I/O priority. It first removes
   any such folder an earlier pull left behind for more than 6 hours:
