@@ -55,7 +55,7 @@ jobs:
       # This moved from 20 → 22 because puppeteer 25 requires >=22.12, and
       # puppeteer 25 is the ONLY fix for the extract-zip advisory (no patched
       # extract-zip exists; 2.0.1 is the latest and is itself vulnerable).
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm

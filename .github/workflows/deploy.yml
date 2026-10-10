@@ -250,7 +250,7 @@ jobs:
       # Deploy run (so a rollback to anything main deployed before works), or
       # anything with override=true, recorded as a warning. The gate resolves
       # `ref` to a SHA and the deploy gets exactly that commit.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           node-version-file: .nvmrc
