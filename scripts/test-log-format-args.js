@@ -7,10 +7,10 @@
  * after them in full.
  *
  *   §1 THE FINAL ERROR HANDLER. The method and URL are arguments: a URL
- *      holding those characters is logged exactly as written, followed by the
- *      error's message and stack.
+ *      holding util.format directives (see DIRECTIVES) is logged exactly as
+ *      written, followed by the error's message and stack.
  *   §2 THE DISTANCE LOOKUP FAILURE (POST /api/n8n/load-distance). The load id
- *      is an argument: an id holding those characters is logged exactly as
+ *      is an argument: an id holding the same directives is logged exactly as
  *      written, followed by the lookup error; with no load id the line reads
  *      as it always has.
  *
