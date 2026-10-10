@@ -7499,7 +7499,7 @@ app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 				}
 			} catch (e) {
 				lookupError = e.message || "distance_matrix_failed";
-				console.error(`n8n load-distance: Distance Matrix failed${loadId ? ` (load ${loadId})` : ""}:`, lookupError);
+				console.error("n8n load-distance: Distance Matrix failed%s:", loadId ? ` (load ${loadId})` : "", lookupError);
 			}
 		} else {
 			lookupError = "GOOGLE_MAPS_API_KEY unset";
@@ -62060,9 +62060,11 @@ app.use((err, req, res, next) => {
 // and returns a generic 500 to the client (never leaks err.message details).
 // Per-route try/catch blocks still own their own error responses; this is the
 // safety net that prevents stack traces from reaching API consumers.
+// The method and URL go in as arguments, never into the message pattern, so a
+// URL is logged as written (scripts/test-log-format-args.js).
 app.use((err, req, res, next) => {
 	if (res.headersSent) return next(err);
-	console.error(`[unhandled] ${req.method} ${req.originalUrl}:`, err);
+	console.error("[unhandled] %s %s:", req.method, req.originalUrl, err);
 	res.status(500).json({ error: "Internal server error" });
 });
 
