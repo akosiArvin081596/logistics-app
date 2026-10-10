@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // npm run replica:login -- <username> [--task <name>] [--headless]
 //                          [--screens <dir>] [--visit <path>]... [--dwell <seconds>]
+// npm run replica:login -- --mcp-state <username> [--task <name>] [...]
 //
 // Signs in to a running replica (npm run replica:start) as a copied account, so
 // you see the app as that person sees it.
@@ -19,6 +20,11 @@
 //    --screens <dir> saves a screenshot of the landing page and of each visit
 //    (they show real people's data: kept outside the repo, Documents and Desktop).
 //    Headless: signs out at the end. Headed: stays open until you close it.
+// 4. --mcp-state <username> (headless) keeps the session instead of signing out:
+//    its cookies go to ~/LogisX-replica/mcp/<username>.json (600) and
+//    active.json, the file the Playwright MCP loads, points at them
+//    (mcp-state.js). Signing out in that browser, saving the account again, or
+//    replica:clean ends it. A save it would refuse is checked before signing in.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,27 +33,41 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const C = require("./common.js");
+const M = require("./mcp-state.js");
 const REPO = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."));
 const keychain = require(path.join(REPO, "scripts", "e2e", "keychain.cjs"));
 const KEYCHAIN_ITEM = { service: "logisx-replica", account: "local-copy" };
 
 const argv = process.argv.slice(2);
 const flags = new Set(["--headless"]);
-const valued = new Set(["--task", "--screens", "--visit", "--dwell"]);
+const valued = new Set(["--task", "--screens", "--visit", "--dwell", "--mcp-state"]);
 let username = null;
+let mcpUser = null;
 const visits = [];
 for (let i = 0; i < argv.length; i++) {
 	const a = argv[i];
 	if (flags.has(a)) continue;
-	if (valued.has(a)) { if (a === "--visit") visits.push(argv[i + 1]); i++; continue; }
+	if (valued.has(a)) {
+		const v = argv[i + 1];
+		if (a === "--visit") visits.push(v);
+		if (a === "--mcp-state") {
+			if (!v || v.startsWith("-")) C.fail("--mcp-state takes the username to sign in as");
+			if (mcpUser) C.fail("one --mcp-state, please");
+			mcpUser = v;
+		}
+		i++;
+		continue;
+	}
 	if (a.startsWith("-")) C.fail(`unknown option ${a}`);
 	if (username) C.fail("one username, please");
 	username = a;
 }
-if (!username) C.fail("usage: npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]...");
+if (mcpUser && username && mcpUser.toLowerCase() !== username.toLowerCase()) C.fail(`--mcp-state ${mcpUser} and ${username} name two accounts`);
+username = username || mcpUser;
+if (!username) C.fail("usage: npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]... | --mcp-state <username>");
 for (const v of visits) if (!/^\/[A-Za-z0-9/_?=&.-]*$/.test(String(v || ""))) C.fail(`--visit takes an app path such as /financials, not ${v}`);
 const task = C.taskArg(argv);
-const headless = argv.includes("--headless");
+const headless = argv.includes("--headless") || Boolean(mcpUser);
 const screens = C.optionValue(argv, "--screens");
 const dwellMs = Math.max(0, Number(C.optionValue(argv, "--dwell") || 4)) * 1000;
 
@@ -56,17 +76,9 @@ if (!server) C.fail(`no replica is running for task ${task}; start one with npm 
 const BASE = `http://127.0.0.1:${server.port}`;
 const dbPath = path.join(C.paths.work(task), "app.db");
 if (!fs.realpathSync(dbPath).startsWith(fs.realpathSync(path.join(C.ROOT, "work")) + path.sep)) C.fail("the working copy is not under ~/LogisX-replica/work");
-// The real path of `p`, through its nearest existing ancestor (symlinks resolved).
-function realOf(p) {
-	const abs = path.resolve(p);
-	try { return fs.realpathSync(abs); } catch {
-		const parent = path.dirname(abs);
-		return parent === abs ? abs : path.join(realOf(parent), path.basename(abs));
-	}
-}
 if (screens) {
-	const real = realOf(screens);
-	const synced = ["Documents", "Desktop"].map((d) => realOf(path.join(process.env.HOME, d)));
+	const real = C.realOf(screens);
+	const synced = ["Documents", "Desktop"].map((d) => C.realOf(path.join(process.env.HOME, d)));
 	if ([REPO, ...synced].some((d) => real === d || real.startsWith(d + path.sep))) {
 		C.fail("--screens must be outside the repo and outside Documents and Desktop (the screenshots show real people's data)");
 	}
@@ -87,6 +99,9 @@ const db = new Database(dbPath, { fileMustExist: true });
 const users = db.prepare("SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?)").all(username.trim());
 if (users.length !== 1) { db.close(); C.fail(users.length ? `${users.length} accounts are named ${username}` : `no account named ${username} in the working copy`); }
 const user = users[0];
+if (mcpUser) {
+	try { M.preflight({ task, user: user.username }); } catch (e) { db.close(); C.fail(e.message); }
+}
 db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(bcrypt.hashSync(password, 10), user.id);
 db.close();
 console.log(`replica: local password set on ${user.username} (${user.role}) in ${dbPath} only`);
@@ -155,7 +170,18 @@ try {
 		if (f) saved.push(f);
 		console.log(`replica: opened ${v}`);
 	}
-	if (headless) {
+	if (mcpUser) {
+		let file;
+		try {
+			file = M.save({ task, user: user.username, state: await context.storageState(), base: BASE });
+		} catch (e) {
+			const out = await page.evaluate(() => fetch("/api/auth/logout", { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } }).then((r) => r.status))
+				.then((status) => (status === 200 ? "signed out" : `sign-out answered ${status}`), (err) => `sign-out failed: ${err.message}`);
+			throw new Error(`${e.message} (${out})`);
+		}
+		console.log(`replica: session kept for the Playwright MCP: ${file} (cookies only); ${M.activeOf(C.ROOT)} points at it`);
+		console.log(`replica: it ends when that browser signs out, or with npm run replica:clean -- --task ${task}`);
+	} else if (headless) {
 		await page.evaluate(() => fetch("/api/auth/logout", { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } }));
 		console.log("replica: signed out");
 	}
