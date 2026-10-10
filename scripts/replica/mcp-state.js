@@ -176,7 +176,11 @@ function save({ root = C.ROOT, task, user, state, base }) {
 		const sid = sessionIdOf(file);
 		const work = path.join(root, "work");
 		for (const other of fs.existsSync(work) ? fs.readdirSync(work) : []) {
-			endSession(root, other, sid);
+			try {
+				endSession(root, other, sid);
+			} catch (e) {
+				throw new Error(`the earlier session of ${fileName} couldn't be checked in task ${other}'s working copy (${e.message}); nothing was saved`);
+			}
 			if (other === task) continue;
 			let files;
 			try { files = readTaskRecord(root, other); } catch { continue; }

@@ -126,6 +126,10 @@ const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 		fs.writeFileSync(M.taskRecordOf(root, "t2"), "{ not json");
 		M.save({ root, task: "t6", user: "alice", state: stateOf(cookie("alice-6")), base: BASE });
 		eq("the earlier session ends even where that task's record can't be read", liveSids(root, "t2"), []);
+		fs.mkdirSync(path.join(root, "work", "t7"));
+		fs.writeFileSync(path.join(root, "work", "t7", "app.db"), "not a database");
+		throws("a working copy that can't be read refuses the save, naming the task", () => M.save({ root, task: "t6", user: "alice", state: stateOf(cookie("alice-7")), base: BASE }), /in task t7's working copy .*nothing was saved/);
+		fs.rmSync(path.join(root, "work", "t7"), { recursive: true });
 
 		const before = fs.readdirSync(dir).sort();
 		throws("a state with a production cookie is refused", () => M.save({ root, task: "t1", user: "carol", state: stateOf(cookie("c"), cookie("p", "app.logisx.com")), base: BASE }), /another host/);
