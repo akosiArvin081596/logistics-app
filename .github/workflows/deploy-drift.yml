@@ -108,7 +108,7 @@ jobs:
       run_id: ${{ steps.gate.outputs.run_id }}
       run_attempt: ${{ steps.gate.outputs.run_attempt }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v5
         with:
@@ -262,7 +262,7 @@ jobs:
       name: production
       url: https://app.logisx.com
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Configure SSH
         env:

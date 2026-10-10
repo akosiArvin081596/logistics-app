@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # ⚠️ The version here is NOT a default — it is pinned via .nvmrc to the
       # Node the VPS actually executes this app with, and as of 2026-08-25 that

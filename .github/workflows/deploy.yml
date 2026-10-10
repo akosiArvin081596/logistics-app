@@ -145,7 +145,7 @@ jobs:
     environment:
       name: staging
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: deploy
         uses: ./.github/actions/vps-deploy
         with:
@@ -243,7 +243,7 @@ jobs:
       actions: read
       checks: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # ⚠️ A MANUAL production deploy has no staging job in front of it. It
       # deploys only a commit that passed the staging job of a push-triggered
