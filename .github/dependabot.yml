@@ -1,6 +1,10 @@
 # Dependabot version updates for the three npm lockfiles and the workflows'
 # actions. Minor and patch bumps come grouped, one PR per lockfile. Security
 # updates are switched on in the repository settings and open their own PRs.
+#
+# Major versions are planned work, not Dependabot merges, so version updates
+# skip them. An ignore that names update-types applies to version updates
+# only: security updates still open PRs, to the minimum patched version.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -9,13 +13,25 @@ updates:
     groups: { root-minor-patch: { update-types: [minor, patch] } }
     ignore:
       - dependency-name: googleapis   # pinned on purpose (package.json "//overrides")
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: "/client"
     schedule: { interval: weekly }
     groups: { client-minor-patch: { update-types: [minor, patch] } }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: "/scripts/e2e"
     schedule: { interval: monthly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
