@@ -1,0 +1,21 @@
+# Dependabot version updates for the three npm lockfiles and the workflows'
+# actions. Minor and patch bumps come grouped, one PR per lockfile. Security
+# updates are switched on in the repository settings and open their own PRs.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: weekly }
+    groups: { root-minor-patch: { update-types: [minor, patch] } }
+    ignore:
+      - dependency-name: googleapis   # pinned on purpose (package.json "//overrides")
+  - package-ecosystem: npm
+    directory: "/client"
+    schedule: { interval: weekly }
+    groups: { client-minor-patch: { update-types: [minor, patch] } }
+  - package-ecosystem: npm
+    directory: "/scripts/e2e"
+    schedule: { interval: monthly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }

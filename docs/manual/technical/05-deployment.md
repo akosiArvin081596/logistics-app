@@ -120,7 +120,7 @@ TLS certificates are managed by Let's Encrypt. Renewal runs from cron.
 
 ## pm2 configuration
 
-The `logistics-app` process is started with `pm2 start server.js --name logistics-app`. Useful pm2 commands:
+The `logistics-app` process is defined in `ecosystem.config.js` (`server.js` from `/var/www/logistics-app` on Node 22). pm2 runs it from its saved process list, not from that file, so a change to the file takes the steps in its header comment. Useful pm2 commands:
 
 - `pm2 logs logistics-app` — tail stdout/stderr.
 - `pm2 logs logistics-app --lines 200` — recent logs.
@@ -150,7 +150,7 @@ In development, run `npm run dev` and `npm run dev:client` in two terminals and 
 - **`.env`** — environment secrets.
 - **`service-account-key.json`** — Google credentials.
 - **`app.db`** — SQLite database. Backed up via the manual download endpoint.
-- **`uploads/`** — local copies of POD photos, receipts, signatures. (Drive holds the canonical PODs.)
+- **`uploads/`** — POD photos, receipts and signatures, stored only here. (Uploads never go to Drive; Drive holds only rate-cons.)
 
 Nothing else. The repo is the source of truth for code; the VPS holds runtime state.
 
