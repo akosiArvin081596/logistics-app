@@ -21,7 +21,7 @@
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.5.0",
     "vant": "^4.9.22",
-    "vue": "^3.5.13",
+    "vue": "^3.5.43",
     "vue-pdf-embed": "^2.1.5",
     "vue-router": "^4.5.0"
   },
