@@ -59,8 +59,8 @@ process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: t
 const tmp = (p) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); tempDirs.push(d); return d; };
 // pull.sh's trap, on_exit(), and what it calls, with the variables they read:
 // run as pull.sh has them, with ssh standing in.
-const PULL_TRAP_FNS = ["prod_ssh", "conn_open", "close_conn", "new_snapshot_in_place", "failure_outcome", "remote_cleanup", "on_exit"];
-const PULL_TRAP_VARS = 'CONN_DIR=""; CONN_SOCK=""; FILES_STARTED=0; SETTINGS_DONE=0; RESTORED=0; log() { echo "$*"; }';
+const PULL_TRAP_FNS = ["ctl", "prod_ssh", "direct_ssh", "conn_open", "close_conn", "restore_clean", "new_snapshot_in_place", "failure_outcome", "remote_cleanup", "on_exit"];
+const PULL_TRAP_VARS = 'CONN_DIR=""; CONN_SOCK=""; WATCHDOG_PID=""; CONN_PERSIST_S=30; FILES_STARTED=0; SETTINGS_DONE=0; RESTORED=0; log() { echo "$*"; }';
 
 // ---- §1 the snapshot ------------------------------------------------------------
 console.log("§1 the snapshot reads the live database and writes only its copy");
@@ -300,7 +300,7 @@ console.log("§4 stamps, tasks and the pull scripts");
 	ok("a pull whose server folder cannot be confirmed removed exits non-zero", unconfirmed.status === 1 && /could not confirm the server's temporary folder/.test(unconfirmed.stderr), { status: unconfirmed.status });
 	const confirmed = exitWith(0);
 	ok("...and one whose folder is confirmed gone exits 0", confirmed.status === 0 && /temporary folder is removed/.test(confirmed.stdout), { status: confirmed.status });
-	ok("the download step's own cleanup fails the pull too (pipefail)", /^set -euo pipefail$/m.test(pull) && /^remote_cleanup 2>&1 \| tee -a "\$LOG"$/m.test(pull));
+	ok("the download step's own cleanup fails the pull too (pipefail)", /^set -euo pipefail$/m.test(pull) && /^remote_cleanup prod_ssh 2>&1 \| tee -a "\$LOG"$/m.test(pull));
 
 	const begin = fs.readFileSync(path.join(REMOTE, "begin.sh"), "utf8");
 	ok("the server program removes its folder when any step fails (its own trap)", /trap replica_remote_cleanup EXIT/.test(begin) && /rm -rf -- "\$TMP"/.test(begin));
@@ -484,7 +484,7 @@ console.log("§4 stamps, tasks and the pull scripts");
 		].join("\n");
 		{
 			const parent = serverFolder();
-			const r = spawnSync("bash", ["-c", script(parent, "remote_cleanup\nREMOTE_STARTED=0")], { encoding: "utf8" });
+			const r = spawnSync("bash", ["-c", script(parent, "remote_cleanup prod_ssh\nREMOTE_STARTED=0")], { encoding: "utf8" });
 			ok("after the download, the cleanup removes the folder with its compressed files", r.status === 0 && !fs.existsSync(path.join(parent, "s1")), { status: r.status, err: r.stderr });
 		}
 		{
@@ -523,7 +523,7 @@ console.log("§4 stamps, tasks and the pull scripts");
 		const preBad = spawnSync(process.execPath, ["-e", CHECK, fakeMod], { encoding: "utf8" });
 		ok("...and one a better-sqlite3 built for another Node fails", preBad.status !== 0);
 		const at = (re) => pull.search(re);
-		const order = [/^remote_cleanup 2>&1 \| tee -a "\$LOG"$/m, /pull-local\.js" unpack "\$INCOMING"/, /pull-local\.js" verify "\$INCOMING"/, /^mv "\$INCOMING" "\$ROOT\/clean"$/m].map(at);
+		const order = [/^remote_cleanup prod_ssh 2>&1 \| tee -a "\$LOG"$/m, /pull-local\.js" unpack "\$INCOMING"/, /pull-local\.js" verify "\$INCOMING"/, /^mv "\$INCOMING" "\$ROOT\/clean"$/m].map(at);
 		ok("after the download: the server's folder goes, then unpack, then verify, then the swap", order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), order);
 		const finish = fs.readFileSync(path.join(REMOTE, "finish.sh"), "utf8");
 		ok("on the server, compress.js runs after manifest.js", finish.indexOf("compress.js") > finish.indexOf("manifest.js") && finish.indexOf("compress.js") < finish.indexOf('rm -f -- "$TMP"/*.js'));

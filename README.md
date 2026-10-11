@@ -164,9 +164,12 @@ npm run replica:clean -- [--task <name>]
   the start. Its socket lives in a folder made for the pull (`~/LogisX-replica/.pull-conn.*`,
   mode 700); while it exists, programs running as your user could use the connection too, so it
   is closed and the folder removed as soon as the last upload is done, or when the pull fails or
-  is interrupted. A pull killed outright leaves it to close by itself 60 s after its last
-  session; the next pull removes the folder. If the connection drops mid-pull, the pull fails
-  and says so; only removing the server's temporary folder then asks for Touch ID again. A
+  is interrupted. For a pull killed outright, a watchdog started with the connection closes it
+  and removes the folder within a few seconds; failing that, the connection ends by itself 30 s
+  after its last session and the next pull removes the folder. If the connection drops
+  mid-pull, the pull fails and says so; only removing the server's temporary folder then asks
+  for Touch ID again. A second Ctrl-C while the pull cleans up skips that server cleanup (the
+  next pull removes the folder once it is an hour old) but still closes the connection. A
   program streamed over ssh (`scripts/replica/remote/`, nothing is
   installed on the server) works in one temporary folder, `/root/logisx-replica-tmp/<stamp>/`
   (a stamp unique to the run; mode 700, umask 077), at low CPU and I/O priority. It first removes
@@ -196,8 +199,8 @@ npm run replica:clean -- [--task <name>]
   pull), with the same progress line. They are updated in place, so a pull that fails after
   they started says they may be newer than the clean snapshot. The new snapshot then replaces
   the clean one and its settings are written to `settings.env`; a pull interrupted in the
-  middle of that swap puts the previous snapshot back, and a failed pull's last line says what
-  it left in place. The manifest (`clean/manifest.json`) records the
+  middle of that swap puts the previous snapshot back (one killed outright there is put right
+  by the next pull), and a failed pull's last line says what it left in place. The manifest (`clean/manifest.json`) records the
   production commit, its Node version and time zone, every table's row count and the download's
   checksums.
 - **`replica:start`** clones the clean snapshot and the files as a task's working copy
