@@ -395,13 +395,13 @@ echo "::endgroup::"
 
 echo "::group::install + build"
 # npm_config_save=false installs from the lockfiles without writing them back,
-# so the checkout stays clean. The root install's postinstall runs
-# `npm install` in client/, which rewrote client/package-lock.json on every
-# deploy (the libc drift above); the variable reaches that nested install
-# through the environment. `npm ci` would not stop it, because its postinstall
-# runs the same nested install, and it would delete node_modules under the
-# running process. scripts/test-deploy-scripts.js §16 pins this line in both
-# scripts.
+# so the checkout stays clean. The root install's postinstall installs
+# client/ (a plain `npm install` there rewrote client/package-lock.json on
+# every deploy: the libc drift above); it now runs `npm install --no-save`,
+# and the variable reaches that nested install through the environment too.
+# A root `npm ci` is not used: it would delete node_modules under the running
+# process. scripts/test-deploy-scripts.js §16 pins this line in both scripts,
+# and runs the real postinstall.
 npm_config_save=false npm install --silent --no-audit --no-fund
 # npm tracks package VERSIONS, not ABI — it reports "up to date" and skips the
 # rebuild when only the Node major changed. Probe, then rebuild only on failure.

@@ -73,6 +73,9 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const Database = require("better-sqlite3");
+// Every temporary folder this runner makes is removed when it exits, pass or fail.
+const tempDirs = [];
+process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 const SERVER = path.join(__dirname, "..", "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
@@ -215,7 +218,9 @@ const EXPENSES = [
 ];
 
 function makeDb() {
-	const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "logisx-scope-")), "t.db");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-scope-"));
+	tempDirs.push(dir);
+	const file = path.join(dir, "t.db");
 	const db = new Database(file);
 	db.exec(`
 		CREATE TABLE users (id INTEGER PRIMARY KEY, company_name TEXT DEFAULT '');
