@@ -34,10 +34,10 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          if printf '%s' "$TITLE" | grep -Eq '^((feat|fix|refactor|docs|test|chore|perf|ci|build|revert|style)(\([a-z0-9._/,-]+\))?!?: [^ ]|Revert ")'; then
+          if printf '%s' "$TITLE" | grep -Eq '^((feat|fix|refactor|docs|test|chore|perf|ci|build|revert|style)(\([a-z0-9._/,-]+\))?!?: [^ ]|Revert ".+"$)'; then
             echo "The PR title is a conventional commit."
           else
-            echo "::error::The PR title must be a conventional commit, for example \"fix(invoices): keep the order number\". Types: feat fix refactor docs test chore perf ci build revert style."
+            echo "::error::The PR title must be a conventional commit, for example \"fix(invoices): keep the order number\", or GitHub's own Revert \"...\" title. Types: feat fix refactor docs test chore perf ci build revert style."
             exit 1
           fi
 

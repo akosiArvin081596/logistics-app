@@ -619,7 +619,8 @@ function checkLocal() {
 	const titleRe = ere && new RegExp(ere[1]);
 	const good = ["fix(geocode,investor): rate-limit the public routes", "chore(deps): Bump the root group", "feat!: drop the legacy pages",
 		"style: re-indent a comment", "perf(replica): compress the pull", "ci: pin every action", 'Revert "fix: drop the legacy pages"'];
-	const bad = ["Limit image types before decoding", "Fix: capitalised type", "fix:no space", "fix(x) missing colon", "fix: ", "wip: something", "fix(Scope): upper case"];
+	const bad = ["Limit image types before decoding", "Fix: capitalised type", "fix:no space", "fix(x) missing colon", "fix: ", "wip: something", "fix(Scope): upper case",
+		'Revert "', 'Revert "unclosed', "Revert fix: no quotes"];
 	ok(!!titleRe && good.every((t) => titleRe.test(t)) && bad.every((t) => !titleRe.test(t)),
 		`§4 pr-checks.yml accepts conventional titles and refuses the rest (fails: ${titleRe ? [...good.filter((t) => !titleRe.test(t)), ...bad.filter((t) => titleRe.test(t))].join(" | ") || "none" : "no pattern"})`);
 	ok(/TITLE: \$\{\{ github\.event\.pull_request\.title \}\}/.test(pr) && /types: \[opened, edited, synchronize, reopened\]/.test(pr)
