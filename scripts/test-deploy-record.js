@@ -41,7 +41,7 @@ const { spawnSync } = require("child_process");
 const {
 	REAL, SMOKE, record, finish, crash,
 	D, ENV, git,
-	C1, C2, C3, S1, head, onMain, marker, log, VERIFIED_REF, verified, started,
+	C1, C2, C3, S1, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	rollback, leaveHalfFinished, healExpect, boxSeen,
@@ -339,6 +339,14 @@ const RECORD_CASES = {
 			`${tag}§12 a rollback whose / answers 200 without the app's mount point fails too, recording nothing (exit ${x.code}, record ${short(verified())})`]);
 		return r;
 	},
+	rollbackPageStall(S, tag) {
+		// A stall right after the API's 200: the page gives no answer on the first
+		// try and the app's page on the second. A healthy rollback, recorded.
+		resetBox(C3, { verified: C1 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PAGE_SILENT: "1" });
+		return [[x.code === 0 && /ROLLBACK OK/.test(x.out) && verified() === C2 && pageAsks() === 2,
+			`${tag}§12 a rollback whose page answers only on the second try serves again and records C2 (exit ${x.code}, record ${short(verified())}, ${pageAsks()} asks)`]];
+	},
 	rollbackToFailedCommit(S, tag) {
 		// A rollback handed the very commit that failed (HEAD): a deploy with no
 		// record to return to, or a deploy script from before remote-deploy.sh
@@ -421,6 +429,8 @@ function mutants() {
 		'if [ "$PAGE_OK" != 1 ]; then', "if false; then"), M));
 	expectCaught("the rollback's page check passes without the app's mount point", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
 		"if [ \"$PAGE_CODE\" = \"200\" ] && grep -q 'id=\"app\"' \"$PAGE_BODY\"; then", 'if [ "$PAGE_CODE" = "200" ]; then'), M));
+	expectCaught("the rollback's page check never asks again", RECORD_CASES.rollbackPageStall(rollbackWith(
+		'if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi', "break"), M));
 }
 
 (async () => {

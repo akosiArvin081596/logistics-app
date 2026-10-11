@@ -18,6 +18,9 @@ shown the issue.
 - The code in this repository.
 - The LogisX app deployed from it (app.logisx.com).
 
+Automated scanning and load testing of the deployed app are out of bounds: it
+runs on a shared host and holds real people's data.
+
 Third-party services the app uses (Google, GitHub, n8n, ELD providers and
 others) are out of scope; report issues in those to their owners.
 

@@ -32,8 +32,16 @@ done
 # while /api/config/maintenance still answers 200. So / must answer 200 AND
 # carry the SPA's mount point, id="app" from client/index.html, which that
 # page never carries. Sets PAGE_CODE, and PAGE_OK=1 only when both hold.
+# Only no answer at all (000: a stall right after the API's 200) is asked
+# again, 3 tries in all, 2 s apart. Any answer is final at once, the 503 page
+# and a 200 without the mount point included.
 PAGE_BODY=$(mktemp)
-PAGE_CODE=$(curl -s -o "$PAGE_BODY" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)
+for PAGE_TRY in 1 2 3; do
+	PAGE_CODE=$(curl -s -o "$PAGE_BODY" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)
+	PAGE_CODE=${PAGE_CODE:-000}
+	if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi
+	sleep 2
+done
 PAGE_OK=0
 if [ "$PAGE_CODE" = "200" ] && grep -q 'id="app"' "$PAGE_BODY"; then
 	PAGE_OK=1

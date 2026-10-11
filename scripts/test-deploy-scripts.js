@@ -64,7 +64,8 @@
  *      the app answers its API and every page with the 503 "being updated"
  *      page; the smoke check must fail on that (and on any 200 page without
  *      the SPA's mount point) with its one annotation, and pass on the app's
- *      page. The page check is one block, byte-identical in remote-smoke.sh
+ *      page. Only no answer (000) is asked again, 3 tries in all; any answer
+ *      is final. The page check is one block, byte-identical in remote-smoke.sh
  *      and remote-rollback.sh, and the rollback says ROLLBACK OK or records
  *      only past it (test-deploy-record.js §12 runs the rollback's half).
  *
@@ -94,7 +95,7 @@ const {
 	T, D, ENV, git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
-	short, rollback, boxSeen, withLockHeld, holdLock, holderNote,
+	short, rollback, boxSeen, withLockHeld, holdLock, holderNote, pageAsks,
 } = require("./deploy-test-sandbox.js");
 
 // A unit of work for one worker process (see "running it" at the end). `secs`:
@@ -929,6 +930,10 @@ function mutants() {
 			swap(SMOKE, 'elif [ "$PAGE_OK" != 1 ]; then', "elif false; then"), M), 1),
 		mutant("the smoke check's page check passes without the app's mount point", () => smokePagePins(
 			swap(SMOKE, "if [ \"$PAGE_CODE\" = \"200\" ] && grep -q 'id=\"app\"' \"$PAGE_BODY\"; then", 'if [ "$PAGE_CODE" = "200" ]; then'), M), 1),
+		mutant("the page check asks again after an answer", () => smokePagePins(
+			swap(SMOKE, 'if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi', 'if [ "$PAGE_CODE" = "200" ] || [ "$PAGE_TRY" = 3 ]; then break; fi'), M), 1),
+		mutant("the page check never asks again", () => smokePagePins(
+			swap(SMOKE, 'if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi', "break"), M), 1),
 		// §11: a remote script that exits 255 itself, or lets errexit do it.
 		mutant("remote-deploy.sh ends with exit 255", () => exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M)),
 		mutant("remote-rollback.sh turns on errexit", () => exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M)),
@@ -1043,20 +1048,31 @@ function smokePagePins(text, tag = "") {
 	const r = [];
 	resetBox(C1);
 	let x = runPageSmoke(text);
-	r.push([x.code === 0 && /^smoke OK on :3000 after \d+s: the API answers 200 and \/ is the app's page$/m.test(x.out) && !/::error/.test(x.out),
-		`${tag}§17 an app that answers its API and serves its own page passes (exit ${x.code})`]);
+	r.push([x.code === 0 && /^smoke OK on :3000 after \d+s: the API answers 200 and \/ is the app's page$/m.test(x.out) && !/::error/.test(x.out) && pageAsks() === 1,
+		`${tag}§17 an app that answers its API and serves its own page passes, asked once (exit ${x.code}, ${pageAsks()} asks)`]);
+	resetBox(C1);
 	fs.rmSync(path.join(D.box, "client", "dist"), { recursive: true, force: true });
 	x = runPageSmoke(text);
 	const notes = annotationsFrom(commandLines(x.out));
 	const p = pausedBetween(x.out);
-	r.push([x.code === 1 && !/smoke OK/.test(x.out),
-		`${tag}§17 with no client/dist/index.html (the API answers, every page is the 503 "being updated" page) the smoke check fails (exit ${x.code})`]);
+	r.push([x.code === 1 && !/smoke OK/.test(x.out) && pageAsks() === 1,
+		`${tag}§17 with no client/dist/index.html (the API answers, every page is the 503 "being updated" page) the smoke check fails on the first answer, never asking again (exit ${x.code}, ${pageAsks()} asks)`]);
 	r.push([notes.length === 1 && /^smoke check failed — .*maintenance answers 200, but .* gave 503 .*"being updated" page/.test(notes[0].message),
 		`${tag}§17 …with its one annotation, naming the page (got ${JSON.stringify(notes)})`]);
 	r.push([p.start >= 0 && p.end > p.start, `${tag}§17 …and the pm2 log tail inside a stop-commands pause, as for any failed smoke check`]);
 	resetBox(C1);
 	x = runPageSmoke(text, { STUB_PAGE: "other" });
-	r.push([x.code === 1 && /gave 200 without the app's page/.test(x.out), `${tag}§17 a 200 page without the SPA's mount point fails too (exit ${x.code})`]);
+	r.push([x.code === 1 && /gave 200 without the app's page/.test(x.out) && pageAsks() === 1,
+		`${tag}§17 a 200 page without the SPA's mount point fails too, at once (exit ${x.code}, ${pageAsks()} asks)`]);
+	// A stall right after the API's 200: the page gives no answer (000) at first.
+	resetBox(C1);
+	x = runPageSmoke(text, { STUB_PAGE_SILENT: "1" });
+	r.push([x.code === 0 && /^smoke OK on :3000 /m.test(x.out) && pageAsks() === 2,
+		`${tag}§17 a page that answers only on the second try passes (exit ${x.code}, ${pageAsks()} asks)`]);
+	resetBox(C1);
+	x = runPageSmoke(text, { STUB_PAGE_SILENT: "9" });
+	r.push([x.code === 1 && /gave 000 without the app's page/.test(x.out) && pageAsks() === 3,
+		`${tag}§17 a page that never answers fails after 3 tries (exit ${x.code}, ${pageAsks()} asks)`]);
 	return r;
 }
 function appPageBlock(text) {

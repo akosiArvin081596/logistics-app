@@ -136,9 +136,10 @@ jobs:
       - name: Build client
         run: npm run build:client
 
-      # A build that emits nothing still "succeeds". Express serves client/dist
-      # when it exists and silently falls back to the legacy public/ pages when
-      # it does not, so an empty dist would deploy as a working-but-wrong app.
+      # A build that emits nothing still "succeeds". Express serves client/dist,
+      # and without client/dist/index.html every page is a 503 "being updated"
+      # page while the API still answers, so an empty dist would deploy as a
+      # running server with no app.
       - name: Assert the build actually produced a bundle
         run: |
           test -f client/dist/index.html || { echo "::error::client/dist/index.html missing after build"; exit 1; }

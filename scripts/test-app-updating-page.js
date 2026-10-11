@@ -18,6 +18,9 @@
  *      server.js, answer exactly as a plain express.static + sendFile of
  *      index.html does (status, headers that describe the body, body), for
  *      "/", an SPA route, a bundle file and HEAD; an API route is untouched.
+ *      The replica banner line is pinned exactly, and with a build a replica's
+ *      page carries the banner (CI boots server.js before it builds the
+ *      client, so test-replica-mode.js §7 sees only the 503 page there).
  *   §3 without it: every page request, HEAD included, is the 503 page with
  *      Cache-Control: no-store and Retry-After; so is a client/dist that holds
  *      no index.html (a build in progress), and a build removed while the
@@ -189,6 +192,8 @@ async function noBuildAnswers(opts = {}) {
 		ok(`scripts/deploy/${f} tells the app's page by that same mount point`, t.includes("grep -q 'id=\"app\"'"));
 	}
 	ok("Retry-After is a minute, as the page says", APP_UPDATING_RETRY_AFTER_S === 60);
+	ok("it reloads itself after that minute (a meta refresh to itself, no script)",
+		(page.match(/<meta http-equiv="refresh"[^>]*>/gi) || []).join() === `<meta http-equiv="refresh" content="${APP_UPDATING_RETRY_AFTER_S}">`);
 
 	// =========================================================================
 	console.log("\n§2 with the build: exactly as Express serves it");
@@ -210,6 +215,22 @@ async function noBuildAnswers(opts = {}) {
 		} finally {
 			srv.close();
 			ref.close();
+		}
+	}
+	{
+		// A replica with the build: the banner half, which CI's boot of server.js
+		// (test-replica-mode.js §7, run before CI builds the client) never reaches.
+		const BANNER_LINE = "if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));";
+		ok("server.js mounts the replica banner on client/dist, exactly", SRC.split("\n").filter((l) => l === BANNER_LINE).length === 1);
+		const srv = await listen(buildApp(withBuild(tmpDir()), { replica: true }));
+		try {
+			const page1 = await ask(srv, "/login");
+			ok("in a replica with the build, a page is the build's index.html with the banner in it, once",
+				page1.status === 200 && page1.body === replicaMode.withBanner(INDEX) && (page1.body.match(/logisx-replica-banner/g) || []).length === 1, page1.status);
+			const js = await ask(srv, "/assets/index-a1.js");
+			ok("…and a bundle file is untouched", js.status === 200 && js.body === "export {};\n", js.status);
+		} finally {
+			srv.close();
 		}
 	}
 

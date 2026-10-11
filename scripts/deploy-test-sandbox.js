@@ -210,7 +210,9 @@ exit 0
 // (every remote script cd's to the app first), or, with none there, the 503
 // "being updated" page, the real one from lib/app-updating-page.js.
 // Whatever is on disk, STUB_PAGE=app answers the app's page, STUB_PAGE=other a
-// 200 page that is not the app, and STUB_PAGE=updating the 503 page. The body
+// 200 page that is not the app, and STUB_PAGE=updating the 503 page. Every
+// page request is counted in $STUB_LOG_DIR/page-asks, and the first
+// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). The body
 // goes where -o says; the status is printed, which is what the scripts'
 // -w '%{http_code}' reads.
 writeExec(path.join(D.bin, "curl"), `#!/bin/bash
@@ -226,6 +228,9 @@ done
 code=\${STUB_HTTP_CODE:-200}
 : > "$out"
 if [ "$code" = 200 ] && [[ "$url" =~ ^https?://[^/]+/$ ]]; then
+	asks=$(( $(cat "$STUB_LOG_DIR/page-asks" 2>/dev/null || echo 0) + 1 ))
+	echo "$asks" > "$STUB_LOG_DIR/page-asks"
+	if [ "$asks" -le "\${STUB_PAGE_SILENT:-0}" ]; then printf '000'; exit 0; fi
 	case "\${STUB_PAGE:-}" in
 		app) printf '%s\\n' '${APP_INDEX}' > "$out" ;;
 		other) printf '%s\\n' '<html><body>Welcome to nginx!</body></html>' > "$out" ;;
@@ -322,6 +327,8 @@ const head = () => git(D.box, "rev-parse", "HEAD");
 const onMain = () => tryGit(D.box, "symbolic-ref", "-q", "HEAD").stdout.trim() === "refs/heads/main";
 const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : "");
 const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
+// How many times the stub curl was asked for the page "/" since the last reset.
+const pageAsks = () => { const p = path.join(D.logs, "page-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
 // The box's record of its last VERIFIED deploy: a git ref (see the
 // verified-record block in remote-deploy.sh). "" when there is none.
 const VERIFIED_REF = "refs/logisx/verified-deploy";
@@ -513,7 +520,7 @@ module.exports = {
 	T, D, ENV, NODE_DIR, APP_INDEX,
 	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
-	MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
+	MARKER, LOCK_FILE, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,
