@@ -48,6 +48,12 @@ const D = {
 for (const d of [D.bin, D.lock, D.logs, D.home]) fs.mkdirSync(d, { recursive: true });
 const EMPTY_GITCONFIG = path.join(T, "empty.gitconfig");
 fs.writeFileSync(EMPTY_GITCONFIG, "");
+// What a build leaves in client/dist/index.html, carrying the SPA's mount point
+// (client/index.html's id="app") that the smoke check and the rollback look
+// for, and the 503 page server.js serves when there is none.
+const APP_INDEX = '<!doctype html><html><body><div id="app"></div></body></html>';
+const UPDATING_PAGE = path.join(T, "app-updating.html");
+fs.writeFileSync(UPDATING_PAGE, require(path.join(__dirname, "..", "lib", "app-updating-page")).APP_UPDATING_HTML);
 
 // ⚠️ remote-deploy.sh PREPENDS the directory of pm2's interpreter to PATH (that
 // is how it builds with the Node pm2 runs the app on). A real Node install
@@ -91,6 +97,7 @@ const ENV = {
 	GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
 	STUB_LOG_DIR: D.logs,
 	STUB_NODE: path.join(INTERP_DIR, "node"),
+	STUB_UPDATING_PAGE: UPDATING_PAGE,
 	DEPLOY_LOCK_DIR: D.lock,
 	// The bounded wait for a held lock (remote-deploy.sh's deploy-lock block),
 	// short here so a contender that must give up does so quickly. Cases that
@@ -192,13 +199,46 @@ case "$1" in
 	         echo "build-empty tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
 	         exit 0
 	     fi
-	     mkdir -p client/dist && echo "<html></html>" > client/dist/index.html
+	     mkdir -p client/dist && printf '%s\\n' '${APP_INDEX}' > client/dist/index.html
 	     echo "build tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
 exit 0
 `);
+// curl answers every request with STUB_HTTP_CODE (default 200: the app is up).
+// While it is up, a request for the page "/" is answered the way server.js
+// answers it: the build's client/dist/index.html in the directory curl runs in
+// (every remote script cd's to the app first), or, with none there, the 503
+// "being updated" page, the real one from lib/app-updating-page.js.
+// Whatever is on disk, STUB_PAGE=app answers the app's page, STUB_PAGE=other a
+// 200 page that is not the app, and STUB_PAGE=updating the 503 page. Every
+// page request is counted in $STUB_LOG_DIR/page-asks, and the first
+// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). The body
+// goes where -o says; the status is printed, which is what the scripts'
+// -w '%{http_code}' reads.
 writeExec(path.join(D.bin, "curl"), `#!/bin/bash
-printf '%s' "\${STUB_HTTP_CODE:-200}"
+out=/dev/null url=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-o) out=$2; shift 2 ;;
+		-w|-H|--max-time) shift 2 ;;
+		-*) shift ;;
+		*) url=$1; shift ;;
+	esac
+done
+code=\${STUB_HTTP_CODE:-200}
+: > "$out"
+if [ "$code" = 200 ] && [[ "$url" =~ ^https?://[^/]+/$ ]]; then
+	asks=$(( $(cat "$STUB_LOG_DIR/page-asks" 2>/dev/null || echo 0) + 1 ))
+	echo "$asks" > "$STUB_LOG_DIR/page-asks"
+	if [ "$asks" -le "\${STUB_PAGE_SILENT:-0}" ]; then printf '000'; exit 0; fi
+	case "\${STUB_PAGE:-}" in
+		app) printf '%s\\n' '${APP_INDEX}' > "$out" ;;
+		other) printf '%s\\n' '<html><body>Welcome to nginx!</body></html>' > "$out" ;;
+		updating) code=503; cat "$STUB_UPDATING_PAGE" > "$out" ;;
+		*) if [ -f client/dist/index.html ]; then cat client/dist/index.html > "$out"; else code=503; cat "$STUB_UPDATING_PAGE" > "$out"; fi ;;
+	esac
+fi
+printf '%s' "$code"
 `);
 writeExec(path.join(D.bin, "ssh"), `#!/bin/bash
 n=$(cat "$STUB_SSH_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$STUB_SSH_COUNT"
@@ -287,6 +327,8 @@ const head = () => git(D.box, "rev-parse", "HEAD");
 const onMain = () => tryGit(D.box, "symbolic-ref", "-q", "HEAD").stdout.trim() === "refs/heads/main";
 const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : "");
 const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
+// How many times the stub curl was asked for the page "/" since the last reset.
+const pageAsks = () => { const p = path.join(D.logs, "page-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
 // The box's record of its last VERIFIED deploy: a git ref (see the
 // verified-record block in remote-deploy.sh). "" when there is none.
 const VERIFIED_REF = "refs/logisx/verified-deploy";
@@ -309,6 +351,10 @@ function resetBox(sha, { detachAt = null, verified: record = null, started: mark
 	if (record) git(D.box, "update-ref", VERIFIED_REF, record);
 	if (mark) git(D.box, "update-ref", STARTED_REF, mark);
 	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
+	// The box serves a build, as one deployed before does. client/dist is
+	// ignored, so the reset above leaves whatever the last case built or removed.
+	fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
+	fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), `${APP_INDEX}\n`);
 }
 
 // out: stdout then stderr. stdout alone is what the action parses (ssh hands
@@ -471,10 +517,10 @@ const holderNote = (by) => `pid=1 since=2026-10-08T00:00:00Z by=${by}`;
 module.exports = {
 	DEPLOY_DIR, readScript, REAL, SMOKE,
 	ok, record, finish, crash, removeSandbox, tally, absorb,
-	T, D, ENV, NODE_DIR,
+	T, D, ENV, NODE_DIR, APP_INDEX,
 	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
-	MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
+	MARKER, LOCK_FILE, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,

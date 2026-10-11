@@ -11,7 +11,8 @@
  *      check passes on a healthy app and fails on its own fault (no app JSON,
  *      a missing bundle the SPA fallback answers with index.html and a 200, an
  *      API that answers without a session, a handshake that admits a foreign
- *      Origin); only no answer or a 5xx is retried, 3 tries; the deadline holds
+ *      Origin, server.js's 503 "being updated" page where the app should be);
+ *      only no answer or a 5xx is retried, 3 tries; the deadline holds
  *   §2 scripts/deploy/wait-for-ci.sh against a stub `gh`: only `success`
  *      passes; any other conclusion fails at once; queued, running or absent
  *      is polled until the deadline, then fails; a 4xx read fails at once, but
@@ -48,6 +49,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const http = require("http");
+const net = require("net");
 const { spawn, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
@@ -55,6 +57,8 @@ const SMOKE = path.join(ROOT, "scripts/deploy/staging-smoke.sh");
 const WAIT = path.join(ROOT, "scripts/deploy/wait-for-ci.sh");
 const HOOK = path.join(ROOT, ".githooks/pre-push");
 const SHA = "c".repeat(40);
+// The page server.js serves for every page while client/dist/index.html is missing.
+const { APP_UPDATING_HTML } = require(path.join(ROOT, "lib", "app-updating-page"));
 
 const failures = [];
 let pass = 0;
@@ -94,6 +98,8 @@ function stubApp(faults = {}) {
 			: `<!doctype html><html><head><script type="module" src="${BUNDLE[0]}"></script><link rel="modulepreload" href="${BUNDLE[1]}"><link rel="stylesheet" href="${BUNDLE[2]}"></head><body><div id="app"></div></body></html>`;
 		const spa = () => send(200, "text/html; charset=UTF-8", html);
 		if (faults.hang) return;
+		// No client build: the API answers, every other path is the 503 page.
+		if (faults.updating && !/^\/(api|socket\.io)\//.test(u.pathname)) return send(503, "text/html; charset=utf-8", APP_UPDATING_HTML);
 		if (u.pathname === "/api/config/maintenance") {
 			const seq = faults.maintenance || [];
 			const step = seq[Math.min(hits[u.pathname] - 1, seq.length - 1)];
@@ -135,16 +141,22 @@ async function runSmoke(script, faults, { deadline = 20, base } = {}) {
 	}
 }
 
+// A server that accepts every connection and closes it at once, before any
+// answer: curl reports no HTTP status at all (000), as with nothing listening.
+// It holds its port for the whole run, so no other stub can be handed that
+// port meanwhile (a port only probed and released could be, and once was: the
+// "503, 502, 0" stub answered the "no answer" case).
+async function silentApp() {
+	const conns = { n: 0 };
+	const server = net.createServer((sock) => { conns.n++; sock.destroy(); });
+	await new Promise((res) => server.listen(0, "127.0.0.1", res));
+	return { server, conns, base: `http://127.0.0.1:${server.address().port}` };
+}
+
 // Every case has its own stub on its own port, so they all run at once.
 async function checkSmoke(script, tag = "") {
 	const r = [];
-	const refusedBase = await (async () => {
-		const probe = http.createServer();
-		await new Promise((res) => probe.listen(0, "127.0.0.1", res));
-		const port = probe.address().port;
-		await new Promise((res) => probe.close(res));
-		return `http://127.0.0.1:${port}`;
-	})();
+	const silent = await silentApp();
 	const fails = [
 		["no app JSON behind a 200 (an nginx page)", { maintenance: ["html"] }, /without the app's JSON/],
 		["the health endpoint answers 404", { maintenance: [404] }, /gave 404 \(want 200\)/],
@@ -152,6 +164,8 @@ async function checkSmoke(script, tag = "") {
 		["the login page is not HTML", { loginType: "application/json" }, /want text\/html/],
 		["index.html names no bundle", { html: '<html><body><div id="app"></div></body></html>' }, /names no \/assets bundle/],
 		["the page is not the app's index.html", { html: `<html><script src="${BUNDLE[0]}"></script></html>` }, /no #app mount point/],
+		["every page is the 503 \"being updated\" page (no client build)", { updating: true }, /login page: \/login gave 503 \(want 200\)/],
+		["the \"being updated\" page answers with a 200", { html: APP_UPDATING_HTML }, /no #app mount point/],
 		["a bundle file is missing (the SPA fallback answers 200 with index.html)", { missing: BUNDLE[1] }, /not its own file/],
 		["a bundle file answers 404", { assetCode: [BUNDLE[2], 404] }, /index-c3\.css gave 404/],
 		["a bundle file is empty", { empty: BUNDLE[0] }, /is empty/],
@@ -165,7 +179,7 @@ async function checkSmoke(script, tag = "") {
 		runSmoke(script, { maintenance: [503, 502, 0] }),
 		runSmoke(script, { maintenance: [503] }),
 		runSmoke(script, { maintenance: [404] }),
-		runSmoke(script, {}, { base: refusedBase }),
+		runSmoke(script, {}, { base: silent.base }).finally(() => silent.server.close()),
 		runSmoke(script, { hang: true }, { deadline: 3 }),
 		runSmoke(script, {}, { base: "https://staging.example/login" }),
 		...fails.map(([, faults]) => runSmoke(script, faults)),
@@ -183,8 +197,8 @@ async function checkSmoke(script, tag = "") {
 	r.push([flaky.code === 0 && flaky.hits["/api/config/maintenance"] === 3, `${tag}§1 two 5xx then a 200 passes on the third try (exit ${flaky.code}, ${flaky.hits["/api/config/maintenance"]} tries)`]);
 	r.push([down.code === 1 && down.hits["/api/config/maintenance"] === 3, `${tag}§1 a 5xx every time fails after exactly 3 tries (exit ${down.code}, ${down.hits["/api/config/maintenance"]} tries)`]);
 	r.push([definite.hits["/api/config/maintenance"] === 1, `${tag}§1 a definite wrong answer is never retried (${definite.hits["/api/config/maintenance"]} tries)`]);
-	r.push([refused.code === 1 && /gave 000/.test(refused.out) && (refused.out.match(/retrying/g) || []).length === 2,
-		`${tag}§1 no answer at all is retried twice, then fails as 000 (exit ${refused.code}): ${refused.out.slice(-200)}`]);
+	r.push([refused.code === 1 && /gave 000/.test(refused.out) && (refused.out.match(/retrying/g) || []).length === 2 && silent.conns.n === 3,
+		`${tag}§1 no answer at all is retried twice, then fails as 000 (exit ${refused.code}, ${silent.conns.n} connections): ${refused.out.slice(-200)}`]);
 	r.push([hung.code === 1 && /out of time/.test(hung.out) && hung.ms < 9000, `${tag}§1 an app that never answers fails on the deadline, not the step timeout (exit ${hung.code}, ${hung.ms} ms)`]);
 	r.push([badBase.code === 1 && /bare origin/.test(badBase.out), `${tag}§1 BASE must be a bare origin (exit ${badBase.code})`]);
 	return r;

@@ -37,7 +37,9 @@ Open http://localhost:5173 — Vite proxies `/api`, `/socket.io` and `/uploads`
 to Express.
 
 For a production-style run: `npm run build:client && npm start`, which serves
-the built SPA from `client/dist/`.
+the built SPA from `client/dist/`. Without a build, Express answers every page
+with a plain 503 "being updated" page (`lib/app-updating-page.js`) while the API
+still answers, so in development open the app through Vite.
 
 ### Configuration
 

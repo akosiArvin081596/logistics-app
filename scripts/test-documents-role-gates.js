@@ -464,7 +464,9 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		if (e.isDirectory()) return e.name === "node_modules" || e.name === "dist" ? [] : walk(p);
 		return /\.(vue|js|ts|html)$/.test(e.name) ? [p] : [];
 	});
-	const files = [...walk(path.join(ROOT, "client", "src")), ...walk(path.join(ROOT, "public"))];
+	// The legacy public/ pages are gone; a page put back there is still searched.
+	const legacyDir = path.join(ROOT, "public");
+	const files = [...walk(path.join(ROOT, "client", "src")), ...(fs.existsSync(legacyDir) ? walk(legacyDir) : [])];
 	const rel = (f) => path.relative(ROOT, f).split(path.sep).join("/");
 	const textOf = (f) => fs.readFileSync(f, "utf8");
 	const uploadCallers = files.filter((f) => /['"`]\/api\/documents\/upload['"`]/.test(textOf(f))).map(rel).sort();

@@ -38,7 +38,10 @@
  *       action also runs end to end against the real remote scripts, every
  *       `if:` evaluated: a restart pm2 did not prove (DEPLOY_RESULT=unproven)
  *       still gets the smoke and edge checks, is never recorded, rolls
- *       production back, and ends the job red.
+ *       production back, and ends the job red; and an app that answers its
+ *       API but serves the 503 "being updated" page fails its smoke check,
+ *       and the rollback serving the same page fails at the Auto-rollback
+ *       step with the ROLLBACK FAILED alert, recording nothing.
  *   §8  mutants: each property above, broken on purpose, must turn this
  *       runner red.
  *
@@ -462,13 +465,14 @@ function stepEnvOf(stepText, ctx) {
 }
 // The WHOLE action, step by step, as a runner runs it: each `if:` evaluated,
 // each `env:` resolved, each `run:` executed, continue-on-error honoured. It
-// returns each step's outcome by name, the steps context, and whether the job
-// ended red.
+// returns each step's outcome and output by name, the steps context, and
+// whether the job ended red.
 function runAction(yaml, S, inputs, env = {}) {
 	const cwd = realCwd(S);
 	let failed = false;
 	const ctx = { inputs, steps: {}, status: { success: () => !failed, failure: () => failed, always: () => true, cancelled: () => false } };
 	const ran = {};
+	const said = {};
 	for (const s of actionSteps(yaml)) {
 		const id = collapse(stepValue(s.text, "id"));
 		if (!stepRuns(collapse(stepValue(s.text, "if")), ctx)) {
@@ -482,9 +486,10 @@ function runAction(yaml, S, inputs, env = {}) {
 		const keepGoing = /^\$\{\{/.test(coe) ? Boolean(evalExpr(coe.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), ctx)) : coe === "true";
 		if (outcome === "failure" && !keepGoing) failed = true;
 		ran[s.name] = outcome;
+		said[s.name] = x.out;
 		if (id) ctx.steps[id] = { outcome, conclusion: outcome === "failure" && keepGoing ? "success" : outcome, outputs: x.outputs };
 	}
-	return { ran, steps: ctx.steps, failed };
+	return { ran, said, steps: ctx.steps, failed };
 }
 const PROD_INPUTS = {
 	dir: D.box, pm2: "logistics-app", ref: "main", sha: C2, rollback_on_failure: "true",
@@ -510,6 +515,25 @@ const ACTION_RUN_CASES = {
 				`${tag}§14 …production rolls back to C1: C2 is never recorded, and the drift marker names C2 (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`],
 			[a.ran["Fail the job if verification failed"] === "failure" && a.failed,
 				`${tag}§14 …and the job still ends red`],
+		];
+	},
+	updatingPageFailsTheRollback(yaml, S, tag) {
+		// The app answers its API but every page is the 503 "being updated" page
+		// (no client/dist/index.html), before and after the rollback. The smoke
+		// check fails the deploy, production rolls back, and the rollback, serving
+		// the same page, fails as a rollback: the job ends red at the Auto-rollback
+		// step with the ROLLBACK FAILED alert, never as a rollback that recovered,
+		// and nothing is recorded as verified.
+		resetBox(C1, { verified: C1, started: C1 });
+		const a = runAction(yaml, S, PROD_INPUTS, { STUB_PAGE: "updating" });
+		const rb = a.said["Auto-rollback"] || "";
+		return [
+			[a.ran.Deploy === "success" && a.ran["Smoke check"] === "failure" && a.ran["Public edge check"] === "skipped" && a.ran["Record the verified deploy"] === "skipped",
+				`${tag}§14 the whole action, every page the 503 "being updated" page: the deploy runs, its smoke check fails, and nothing records C2 (${JSON.stringify(a.ran)})`],
+			[a.ran["Auto-rollback"] === "failure" && /^::error::ROLLBACK FAILED — .*"being updated" page.* MANUAL INTERVENTION REQUIRED\.$/m.test(rb) && !/ROLLBACK OK/.test(rb),
+				`${tag}§14 …the rollback to C1 serves the same page, so the Auto-rollback step fails with the ROLLBACK FAILED alert`],
+			[a.failed && head() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …the job ends red, C1 is not recorded again, and the drift marker names C2 (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`],
 		];
 	},
 };

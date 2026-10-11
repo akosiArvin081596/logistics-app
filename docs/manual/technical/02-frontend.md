@@ -154,6 +154,6 @@ When adding a new multi-step form, extend this engine rather than rolling a besp
 
 - Development: `npm run dev` (Express, port 3000) and `npm run dev:client` (Vite, port 5173) in separate terminals. Open `http://localhost:5173`.
 - Production build: `npm run build:client` produces `client/dist/`.
-- Production serve: `npm start` — Express checks if `client/dist/` exists and serves it, otherwise falls back to the legacy `public/` directory.
+- Production serve: `npm start` — Express serves `client/dist/`. Without `client/dist/index.html` every page request gets a plain 503 "being updated" page (`lib/app-updating-page.js`, with `Retry-After` and `Cache-Control: no-store`) while the API keeps answering; the deploy's smoke checks and the rollback fail on that page.
 
 The SPA catch-all `app.get("*")` serves `index.html` for any unmatched route, which is what makes client-side routing work in production.

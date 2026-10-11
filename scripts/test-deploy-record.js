@@ -16,6 +16,10 @@
  *       commit HEAD is not on) and by a rollback that serves again from a
  *       consistent record with a clean install and build, and whose target is
  *       not the commit that failed (whose drift marker it writes regardless).
+ *       "Serves again" means the app: a rollback whose API answers but whose
+ *       / is the 503 "being updated" page (no client/dist/index.html), or any
+ *       page without the SPA's mount point, fails like one that never serves
+ *       (ROLLBACK FAILED, exit 1) and records nothing.
  *       remote-deploy.sh never records its own deploy. With the record, a half-finished deploy
  *       (HEAD moved, nothing restarted) is never a no-op floor or a rollback
  *       target, and main moves back over it; the drift check and the heal prep
@@ -37,7 +41,7 @@ const { spawnSync } = require("child_process");
 const {
 	REAL, SMOKE, record, finish, crash,
 	D, ENV, git,
-	C1, C2, C3, S1, head, onMain, marker, log, VERIFIED_REF, verified, started,
+	C1, C2, C3, S1, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, started,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	rollback, leaveHalfFinished, healExpect, boxSeen,
@@ -60,17 +64,20 @@ function rollbackRecordState(S, tag, states = ["missing", "inconsistent", ""]) {
 }
 
 // A rollback's own install or build that did not complete cleanly, three ways.
+// `index` answers / as the app whatever is on disk (STUB_PAGE=app), so it
+// isolates the BUILD_OK half: with the real answer, the 503 "being updated"
+// page, the page check fails that rollback first (rollbackServesUpdatingPage).
 const BUILD_NOT_CLEAN = {
 	install: ["npm install failed", { STUB_INSTALL_FAIL: "1" }],
 	build: ["build failed, with the old bundle still in place,", { STUB_BUILD_FAIL: "keep" }],
-	index: ["build left no index.html", { STUB_BUILD_EMPTY: "1" }],
+	index: ["build left no index.html (and / still answered as the app)", { STUB_BUILD_EMPTY: "1", STUB_PAGE: "app" }],
 };
 function rollbackBuildNotClean(S, tag, which = Object.keys(BUILD_NOT_CLEAN)) {
 	return which.map((k) => {
 		const [what, env] = BUILD_NOT_CLEAN[k];
 		resetBox(C3, { verified: C1 });
 		fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
-		fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), "<old/>\n");
+		fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), "<!doctype html><div id=\"app\"></div><!-- the old build -->\n");
 		const x = rollback(S, C2, { RECORD_STATE: "ok", ...env });
 		return [x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1
 			&& /::warning::not recording .* install or build did not complete cleanly/.test(x.out),
@@ -309,6 +316,37 @@ const RECORD_CASES = {
 		return [[x.code !== 0 && /ROLLBACK FAILED/.test(x.out) && verified() === C1,
 			`${tag}§12 a rollback that never serves records nothing, even from a consistent record (the record stays C1)`]];
 	},
+	rollbackServesUpdatingPage(S, tag) {
+		// The rollback's build leaves no client/dist/index.html: the restarted
+		// app answers its API, and every page with the 503 "being updated" page.
+		// That is the app down, so it ends exactly like a rollback that never
+		// serves: ROLLBACK FAILED, exit 1, nothing recorded.
+		resetBox(C3, { verified: C1 });
+		let x = rollback(S, C2, { RECORD_STATE: "ok", STUB_BUILD_EMPTY: "1" });
+		const errors = x.out.split("\n").filter((l) => l.startsWith("::error"));
+		const r = [
+			[x.code === 1 && /^restart /m.test(log("pm2")) && head() === C2 && !/ROLLBACK OK/.test(x.out),
+				`${tag}§12 a rollback that restarts C2 but serves the 503 "being updated" page fails (exit ${x.code}), never "ROLLBACK OK"`],
+			[errors.length === 1 && /^::error::ROLLBACK FAILED — .* gave 503 .*"being updated" page.* MANUAL INTERVENTION REQUIRED\.$/.test(errors[0]),
+				`${tag}§12 …with the failed rollback's one alert, naming the "being updated" page (got ${JSON.stringify(errors)})`],
+			[verified() === C1 && !/verified deploy recorded/.test(x.out),
+				`${tag}§12 …and records nothing, from a consistent record (record ${short(verified())})`],
+		];
+		// A clean build, but / answers 200 with a page that is not the app.
+		resetBox(C3, { verified: C1 });
+		x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PAGE: "other" });
+		r.push([x.code === 1 && /ROLLBACK FAILED — .* gave 200 without the app's page/.test(x.out) && verified() === C1,
+			`${tag}§12 a rollback whose / answers 200 without the app's mount point fails too, recording nothing (exit ${x.code}, record ${short(verified())})`]);
+		return r;
+	},
+	rollbackPageStall(S, tag) {
+		// A stall right after the API's 200: the page gives no answer on the first
+		// try and the app's page on the second. A healthy rollback, recorded.
+		resetBox(C3, { verified: C1 });
+		const x = rollback(S, C2, { RECORD_STATE: "ok", STUB_PAGE_SILENT: "1" });
+		return [[x.code === 0 && /ROLLBACK OK/.test(x.out) && verified() === C2 && pageAsks() === 2,
+			`${tag}§12 a rollback whose page answers only on the second try serves again and records C2 (exit ${x.code}, record ${short(verified())}, ${pageAsks()} asks)`]];
+	},
 	rollbackToFailedCommit(S, tag) {
 		// A rollback handed the very commit that failed (HEAD): a deploy with no
 		// record to return to, or a deploy script from before remote-deploy.sh
@@ -387,6 +425,12 @@ function mutants() {
 		"npm run build:client --silent || BUILD_OK=0", "npm run build:client --silent || true"), M, ["build"]));
 	expectCaught("the rollback ignores a missing index.html", rollbackBuildNotClean(rollbackWith(
 		"test -f client/dist/index.html || BUILD_OK=0", "true"), M, ["index"]));
+	expectCaught("the rollback skips the app-page check", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
+		'if [ "$PAGE_OK" != 1 ]; then', "if false; then"), M));
+	expectCaught("the rollback's page check passes without the app's mount point", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
+		"if [ \"$PAGE_CODE\" = \"200\" ] && grep -q 'id=\"app\"' \"$PAGE_BODY\"; then", 'if [ "$PAGE_CODE" = "200" ]; then'), M));
+	expectCaught("the rollback's page check never asks again", RECORD_CASES.rollbackPageStall(rollbackWith(
+		'if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi', "break"), M));
 }
 
 (async () => {
