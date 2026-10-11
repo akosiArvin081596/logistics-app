@@ -38,6 +38,9 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+// Every temporary folder this runner makes is removed when it exits, pass or fail.
+const tempDirs = [];
+process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 let pass = 0;
 const failures = [];
@@ -124,6 +127,7 @@ const SUPER = { id: 1, username: "super_admin", role: "Super Admin" };
 const INV_A = { id: 2, username: "inv_a", role: "Investor" };
 function makeWorld() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "investor-admin-"));
+	tempDirs.push(root);
 	const db = new Database(":memory:");
 	for (const sql of ddl()) db.exec(sql);
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, driver_name) VALUES (?, ?, 'x', ?, '')");

@@ -585,13 +585,49 @@ function checkLocal() {
 	const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts;
 	ok(pkg.check === "npm run lint && npm run test:unit", `§4 npm run check is the syntax check plus every unit runner (got ${pkg.check})`);
 	ok(pkg.ci === "npm run check && npm run build:client", `§4 npm run ci is the full CI gate: check plus the client build (got ${pkg.ci})`);
-	ok(/^ls server\.js lib\/\*\.js scripts\/\*\.js \| xargs -n 1 -P \d+ node --check --$/.test(pkg.lint || ""), `§4 npm run lint is node --check over server.js, lib/*.js and scripts/*.js (got ${pkg.lint})`);
+	const LINT_PATHS = ["server.js", "ecosystem.config.js", "test-suite.js", "'lib/*.js'", "'lib/*.mjs'", "'lib/*.cjs'", "'scripts/*.js'", "'scripts/*.mjs'", "'scripts/*.cjs'"];
+	const lint = /^(git ls-files -z -c -o --exclude-standard -- (.+)) \| xargs -0 -r -n 1 -P \d+ node --check --$/.exec(pkg.lint || "");
+	ok(lint && lint[2].split(" ").sort().join(" ") === [...LINT_PATHS].sort().join(" "),
+		`§4 npm run lint is node --check over server.js, ecosystem.config.js, test-suite.js and every .js/.mjs/.cjs in lib/ and scripts/ (got ${pkg.lint})`);
+	// git's pathspec * crosses "/", so the subfolders are in; ignored files (node_modules) are not.
+	const listed = lint ? spawnSync("sh", ["-c", lint[1]], { cwd: ROOT, encoding: "utf8" }).stdout.split("\0").filter(Boolean) : [];
+	ok(listed.includes("server.js") && listed.some((f) => /^scripts\/[^/]+\.mjs$/.test(f)) && listed.some((f) => /^scripts\/[^/]+\/.+\.js$/.test(f))
+		&& !listed.some((f) => f.split("/").includes("node_modules")),
+		`§4 the lint list holds server.js, the scripts/*.mjs runners and the scripts/ subfolders, and nothing under node_modules (${listed.length} files)`);
 	const harness = fs.readFileSync(path.join(ROOT, "scripts/run-unit-tests.js"), "utf8");
 	ok(/Number\(process\.env\.UNIT_TEST_CONCURRENCY\) \|\| 4\)/.test(harness), "§4 run-unit-tests.js runs 4 at a time by default");
 	ok(/const alone = toRun\.filter\(\(f\) => TIMING_SENSITIVE\.has\(f\)\)/.test(harness) && /queue = alone;\n\tawait worker\(\);/.test(harness),
 		"§4 …and runs the timing-sensitive runners alone, after the pool");
 	const mode = fs.statSync(HOOK).mode;
 	ok((mode & 0o111) === 0o111, `§4 .githooks/pre-push is executable (mode ${(mode & 0o777).toString(8)})`);
+
+	// Every action a workflow or composite action uses is pinned to a full
+	// commit SHA (Dependabot's github-actions entry moves the pins), or is this
+	// repo's own (./).
+	const ghDir = path.join(ROOT, ".github");
+	const ymls = [...fs.readdirSync(path.join(ghDir, "workflows")).filter((f) => /\.ya?ml$/.test(f)).map((f) => path.join(ghDir, "workflows", f)),
+		...fs.readdirSync(path.join(ghDir, "actions")).map((a) => path.join(ghDir, "actions", a, "action.yml")).filter((p) => fs.existsSync(p))];
+	const uses = ymls.flatMap((f) => [...fs.readFileSync(f, "utf8").matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)/gm)].map((m) => m[1]));
+	const unpinned = uses.filter((u) => !u.startsWith("./") && !/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(u));
+	ok(uses.length >= 10 && unpinned.length === 0, `§4 every action is pinned by commit SHA (${uses.length} uses; unpinned: ${unpinned.join(", ") || "none"})`);
+
+	// pr-checks.yml: the title rule, applied by the workflow's own grep -E
+	// pattern (an ERE that reads the same as a JS regex), and dependency review.
+	const prFile = path.join(ghDir, "workflows", "pr-checks.yml");
+	const pr = fs.existsSync(prFile) ? fs.readFileSync(prFile, "utf8") : "";
+	const ere = /grep -Eq '([^']+)'/.exec(pr);
+	const titleRe = ere && new RegExp(ere[1]);
+	const good = ["fix(geocode,investor): rate-limit the public routes", "chore(deps): Bump the root group", "feat!: drop the legacy pages",
+		"style: re-indent a comment", "perf(replica): compress the pull", "ci: pin every action", 'Revert "fix: drop the legacy pages"'];
+	const bad = ["Limit image types before decoding", "Fix: capitalised type", "fix:no space", "fix(x) missing colon", "fix: ", "wip: something", "fix(Scope): upper case",
+		'Revert "', 'Revert "unclosed', "Revert fix: no quotes"];
+	ok(!!titleRe && good.every((t) => titleRe.test(t)) && bad.every((t) => !titleRe.test(t)),
+		`§4 pr-checks.yml accepts conventional titles and refuses the rest (fails: ${titleRe ? [...good.filter((t) => !titleRe.test(t)), ...bad.filter((t) => titleRe.test(t))].join(" | ") || "none" : "no pattern"})`);
+	ok(/TITLE: \$\{\{ github\.event\.pull_request\.title \}\}/.test(pr) && /types: \[opened, edited, synchronize, reopened\]/.test(pr)
+		&& !/pull_request_target/.test(pr), "§4 pr-checks.yml reads the title through env:, re-checks it on edit, and runs on pull_request only");
+	ok(/uses: actions\/dependency-review-action@[0-9a-f]{40}\b/.test(pr) && /fail-on-severity: high/.test(pr)
+		&& /fail-on-scopes: runtime, development, unknown/.test(pr),
+		"§4 pr-checks.yml runs dependency review, failing on high or critical in runtime and development dependencies");
 }
 
 // ─────────────────────────────────────────── §6 the manual-dispatch gate

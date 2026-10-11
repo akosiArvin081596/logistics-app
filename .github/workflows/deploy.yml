@@ -145,7 +145,7 @@ jobs:
     environment:
       name: staging
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - id: deploy
         uses: ./.github/actions/vps-deploy
         with:
@@ -243,14 +243,14 @@ jobs:
       actions: read
       checks: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # ⚠️ A MANUAL production deploy has no staging job in front of it. It
       # deploys only a commit that passed the staging job of a push-triggered
       # Deploy run (so a rollback to anything main deployed before works), or
       # anything with override=true, recorded as a warning. The gate resolves
       # `ref` to a SHA and the deploy gets exactly that commit.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: github.event_name == 'workflow_dispatch'
         with:
           node-version-file: .nvmrc
