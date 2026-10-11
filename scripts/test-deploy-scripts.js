@@ -60,6 +60,13 @@
  *      each install once, with npm_config_save=false, and that line, run for
  *      real (offline), leaves a nested client lockfile as committed while the
  *      bare command rewrites it.
+ *   §17 THE SMOKE CHECK READS THE APP'S PAGE. With no client/dist/index.html
+ *      the app answers its API and every page with the 503 "being updated"
+ *      page; the smoke check must fail on that (and on any 200 page without
+ *      the SPA's mount point) with its one annotation, and pass on the app's
+ *      page. The page check is one block, byte-identical in remote-smoke.sh
+ *      and remote-rollback.sh, and the rollback says ROLLBACK OK or records
+ *      only past it (test-deploy-record.js §12 runs the rollback's half).
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -917,6 +924,11 @@ function mutants() {
 		// §10: the smoke check's log tail with workflow commands left on.
 		mutant("the smoke check prints the pm2 log with commands on", () => smokeLogPins(
 			swap(swap(SMOKE, 'echo "::stop-commands::$tok"', ":"), 'echo "::$tok::"', ":"), M), 1),
+		// §17: the smoke check reads the app's page.
+		mutant("the smoke check passes on the API alone", () => smokePagePins(
+			swap(SMOKE, 'elif [ "$PAGE_OK" != 1 ]; then', "elif false; then"), M), 1),
+		mutant("the smoke check's page check passes without the app's mount point", () => smokePagePins(
+			swap(SMOKE, "if [ \"$PAGE_CODE\" = \"200\" ] && grep -q 'id=\"app\"' \"$PAGE_BODY\"; then", 'if [ "$PAGE_CODE" = "200" ]; then'), M), 1),
 		// §11: a remote script that exits 255 itself, or lets errexit do it.
 		mutant("remote-deploy.sh ends with exit 255", () => exitPins({ ...REMOTE_SCRIPTS, "remote-deploy.sh": `${REMOTE_SCRIPTS["remote-deploy.sh"]}exit 255\n` }, M)),
 		mutant("remote-rollback.sh turns on errexit", () => exitPins({ ...REMOTE_SCRIPTS, "remote-rollback.sh": swap(REMOTE_SCRIPTS["remote-rollback.sh"], "set -uo pipefail", "set -euo pipefail") }, M)),
@@ -1015,6 +1027,53 @@ function smokeStaticPins() {
 			ok(/::stop-commands::\$tok/.test(before) && /^\s*echo "::\$tok::"\s*$/.test(t[i + 1] || ""), `§10 ${f}:${i + 1} prints pm2 logs only inside a stop-commands pause`);
 		});
 	}
+}
+
+// ─────────────────────── §17 the smoke check and the rollback read the app's page
+// The API answering proves the process serves, not that it serves the app:
+// with no client/dist/index.html every page is server.js's 503 "being updated"
+// page while /api/config/maintenance still answers 200. The sandbox's curl
+// answers / the way server.js does (deploy-test-sandbox.js), so the smoke
+// check runs for real against a box with a build, without one, and with a 200
+// page that is not the app. (The rollback's half is §12, test-deploy-record.js.)
+function runPageSmoke(text, env = {}) {
+	return runSh(text, { DIR: D.box, PM2: "logistics-app", STUB_PM2_LOG: "2026-10-11T00:00:00Z a line from the app", PATH: `${smokeBinDir()}:${ENV.PATH}`, ...env });
+}
+function smokePagePins(text, tag = "") {
+	const r = [];
+	resetBox(C1);
+	let x = runPageSmoke(text);
+	r.push([x.code === 0 && /^smoke OK on :3000 after \d+s: the API answers 200 and \/ is the app's page$/m.test(x.out) && !/::error/.test(x.out),
+		`${tag}§17 an app that answers its API and serves its own page passes (exit ${x.code})`]);
+	fs.rmSync(path.join(D.box, "client", "dist"), { recursive: true, force: true });
+	x = runPageSmoke(text);
+	const notes = annotationsFrom(commandLines(x.out));
+	const p = pausedBetween(x.out);
+	r.push([x.code === 1 && !/smoke OK/.test(x.out),
+		`${tag}§17 with no client/dist/index.html (the API answers, every page is the 503 "being updated" page) the smoke check fails (exit ${x.code})`]);
+	r.push([notes.length === 1 && /^smoke check failed — .*maintenance answers 200, but .* gave 503 .*"being updated" page/.test(notes[0].message),
+		`${tag}§17 …with its one annotation, naming the page (got ${JSON.stringify(notes)})`]);
+	r.push([p.start >= 0 && p.end > p.start, `${tag}§17 …and the pm2 log tail inside a stop-commands pause, as for any failed smoke check`]);
+	resetBox(C1);
+	x = runPageSmoke(text, { STUB_PAGE: "other" });
+	r.push([x.code === 1 && /gave 200 without the app's page/.test(x.out), `${tag}§17 a 200 page without the SPA's mount point fails too (exit ${x.code})`]);
+	return r;
+}
+function appPageBlock(text) {
+	const a = text.indexOf("# >>> app-page");
+	const b = text.indexOf("# <<< app-page");
+	return a >= 0 && b > a ? text.slice(a, b) : null;
+}
+function appPagePins() {
+	const s = appPageBlock(SMOKE);
+	const rb = appPageBlock(REAL.rollback);
+	ok(s && rb && s === rb, "§17 the app-page block is byte-identical in remote-smoke.sh and remote-rollback.sh");
+	const t = REAL.rollback;
+	const poll = t.indexOf('"http://127.0.0.1:$PORT/api/config/maintenance"');
+	const end = t.indexOf("# <<< app-page");
+	const gate = t.indexOf('if [ "$PAGE_OK" != 1 ]; then', end);
+	ok(poll > 0 && end > poll && gate > end && t.indexOf('echo "ROLLBACK OK') > gate && t.indexOf('refs/logisx/verified-deploy "$TARGET"') > gate,
+		"§17 the rollback reads the page once its API answers, and says ROLLBACK OK or records anything only past the PAGE_OK gate");
 }
 
 // ─────────────────────── §11 no remote script takes exit 255 itself
@@ -1129,6 +1188,8 @@ const ALL_JOBS = [
 	job("§16 install pins", installPins, 1),
 	job("§10 smoke log tail", () => record(smokeLogPins(SMOKE)), 1),
 	job("§10 smoke static pins", smokeStaticPins),
+	job("§17 smoke reads the app's page", () => record(smokePagePins(SMOKE)), 1),
+	job("§17 app-page pins", appPagePins),
 	job("§11 exit scanner", exitScannerSelfCheck),
 	job("§11 exit pins", () => record(exitPins(REMOTE_SCRIPTS))),
 	...mutants(),

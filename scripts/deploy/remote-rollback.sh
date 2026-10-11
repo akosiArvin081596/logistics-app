@@ -8,6 +8,11 @@
 # finish, so a bad merge must not be able to leave production down until
 # someone notices. Used by deploy.yml's production job AND by
 # deploy-drift.yml's heal (same composite action).
+#
+# It ends "ROLLBACK OK" (exit 0) only when the app serves again: the API
+# answers 200 AND / is the app's own page, not the 503 "being updated" page.
+# Anything else ends "::error::ROLLBACK FAILED … MANUAL INTERVENTION REQUIRED."
+# with exit 1, which fails the action's Auto-rollback step, and records nothing.
 set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"; : "${PREV:?}"
 RECORD_STATE=${RECORD_STATE:-}
@@ -142,7 +147,9 @@ export PATH
 
 # A rollback restarts whatever it managed to build, because a partial rollback
 # that serves beats none. But only a clean install and build may be recorded
-# as VERIFIED below, so every step's outcome is kept.
+# as VERIFIED below, so every step's outcome is kept. A build that leaves no
+# client/dist/index.html serves only the 503 "being updated" page, and the
+# page check below fails that rollback.
 BUILD_OK=1
 # Without writing the lockfiles back, as remote-deploy.sh installs.
 npm_config_save=false npm install --silent --no-audit --no-fund || BUILD_OK=0
@@ -225,29 +232,55 @@ PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 |
 PORT=${PORT:-3000}
 for _ in $(seq 1 30); do
 	code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
-	if [ "$code" = "200" ]; then
-		echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"
-		# Serving again at TARGET: record it as the verified deploy (the
-		# verified-record block in remote-deploy.sh), still under the lock, but
-		# only when TARGET is not the commit that just failed verification
-		# (restarting that commit proves nothing its checks did not), came from
-		# a consistent record (the deploy's LIVE commit; with no record it was
-		# only HEAD, never verified), AND this rollback built it cleanly.
-		# Otherwise the record stays as it was.
-		if [ "$TARGET" = "$FAILED" ]; then
-			echo "::warning::not recording $TARGET as verified: it is the commit that just failed verification"
-		elif [ "$RECORD_STATE" != ok ]; then
-			echo "::warning::not recording $TARGET as verified: the deploy reported the verified-deploy record as '${RECORD_STATE:-unknown}', so $TARGET was only its HEAD"
-		elif [ "$BUILD_OK" != 1 ]; then
-			echo "::warning::not recording $TARGET as verified: its install or build did not complete cleanly, although it serves"
-		elif git update-ref --create-reflog -m "logisx: rollback verified" refs/logisx/verified-deploy "$TARGET"; then
-			echo "verified deploy recorded: $TARGET"
-		else
-			echo "::warning::could not record $TARGET as the verified deploy — the drift check reads the previous record"
-		fi
-		exit 0
-	fi
+	if [ "$code" = "200" ]; then break; fi
 	sleep 2
 done
-echo "::error::ROLLBACK FAILED — $PM2 is not serving at $TARGET either. MANUAL INTERVENTION REQUIRED."
-exit 1
+if [ "$code" != "200" ]; then
+	echo "::error::ROLLBACK FAILED — $PM2 is not serving at $TARGET either. MANUAL INTERVENTION REQUIRED."
+	exit 1
+fi
+# The API answers. A rollback whose build left no client/dist/index.html
+# answers every page with the 503 "being updated" page, which is down for
+# everyone using the app: that is a failed rollback, not a recovery, and it is
+# never recorded.
+# >>> app-page — keep byte-identical in remote-smoke.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# The API answering proves the process serves, not that it serves the app.
+# Without client/dist/index.html (a build that failed or left nothing) every
+# page is server.js's 503 "being updated" page (lib/app-updating-page.js)
+# while /api/config/maintenance still answers 200. So / must answer 200 AND
+# carry the SPA's mount point, id="app" from client/index.html, which that
+# page never carries. Sets PAGE_CODE, and PAGE_OK=1 only when both hold.
+PAGE_BODY=$(mktemp)
+PAGE_CODE=$(curl -s -o "$PAGE_BODY" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)
+PAGE_OK=0
+if [ "$PAGE_CODE" = "200" ] && grep -q 'id="app"' "$PAGE_BODY"; then
+	PAGE_OK=1
+fi
+rm -f "$PAGE_BODY"
+# <<< app-page
+if [ "$PAGE_OK" != 1 ]; then
+	echo "::error::ROLLBACK FAILED — $PM2 answers its API at $TARGET, but :$PORT/ gave $PAGE_CODE without the app's page (no id=\"app\"). A 503 there is the \"being updated\" page: client/dist/index.html is missing, so the app is down. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
+	exit 1
+fi
+echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"
+# Serving again at TARGET: record it as the verified deploy (the
+# verified-record block in remote-deploy.sh), still under the lock, but
+# only when TARGET is not the commit that just failed verification
+# (restarting that commit proves nothing its checks did not), came from
+# a consistent record (the deploy's LIVE commit; with no record it was
+# only HEAD, never verified), AND this rollback built it cleanly.
+# Otherwise the record stays as it was.
+if [ "$TARGET" = "$FAILED" ]; then
+	echo "::warning::not recording $TARGET as verified: it is the commit that just failed verification"
+elif [ "$RECORD_STATE" != ok ]; then
+	echo "::warning::not recording $TARGET as verified: the deploy reported the verified-deploy record as '${RECORD_STATE:-unknown}', so $TARGET was only its HEAD"
+elif [ "$BUILD_OK" != 1 ]; then
+	echo "::warning::not recording $TARGET as verified: its install or build did not complete cleanly, although it serves"
+elif git update-ref --create-reflog -m "logisx: rollback verified" refs/logisx/verified-deploy "$TARGET"; then
+	echo "verified deploy recorded: $TARGET"
+else
+	echo "::warning::could not record $TARGET as the verified deploy — the drift check reads the previous record"
+fi
+exit 0
