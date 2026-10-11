@@ -1851,7 +1851,7 @@ const STORE_MUTANTS = [
 try {
   piniaModule = await import(PINIA_URL)
 } catch (err) {
-  report(false, `FAIL  section 4 cannot load Pinia from client/node_modules (${err.code || err.message}).\n        Install the client dependencies (\`npm ci\` at the repo root runs \`cd client && npm install\`).`)
+  report(false, `FAIL  section 4 cannot load Pinia from client/node_modules (${err.code || err.message}).\n        Install the client dependencies (\`npm ci\` at the repo root also installs client/).`)
 }
 
 if (piniaModule) {

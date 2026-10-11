@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # ⚠️ The version here is NOT a default — it is pinned via .nvmrc to the
       # Node the VPS actually executes this app with, and as of 2026-08-25 that
@@ -55,7 +55,7 @@ jobs:
       # This moved from 20 → 22 because puppeteer 25 requires >=22.12, and
       # puppeteer 25 is the ONLY fix for the extract-zip advisory (no patched
       # extract-zip exists; 2.0.1 is the latest and is itself vulnerable).
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -67,10 +67,10 @@ jobs:
       # lockfile has drifted from its package.json, which is exactly the class
       # of breakage that otherwise only shows up mid-deploy on the VPS.
       #
-      # The root install's `postinstall` already runs `cd client && npm install`.
-      # The explicit client `npm ci` below re-pins those deps deterministically
-      # AND verifies the client lockfile the same way. The duplicate install is
-      # a few seconds and buys lockfile verification for both packages.
+      # The root `npm ci`'s `postinstall` already runs `npm ci` in client/ (it
+      # picks `npm ci` there whenever the root ran `npm ci`), so a client
+      # lockfile out of sync fails the root step. The explicit client step
+      # below repeats the install; it costs a few seconds.
       - name: Install root dependencies
         run: npm ci --no-audit --no-fund
 
@@ -84,10 +84,10 @@ jobs:
       # server.js is ~60k lines in ONE file. A syntax error anywhere in it does
       # not degrade a feature, it stops the entire application from booting —
       # so this is the cheapest, highest-value gate in the pipeline and it runs
-      # first. `npm run lint` is `node --check` over server.js, lib/*.js and
-      # scripts/*.js, under a second. (`npm run check` is lint plus the unit
-      # runners, the local pre-push check; CI runs the two as separate steps
-      # so the unit runners run once.)
+      # first. `npm run lint` is `node --check` over server.js and every
+      # .js/.mjs/.cjs file in lib/ and scripts/, about a second. (`npm run
+      # check` is lint plus the unit runners, the local pre-push check; CI runs
+      # the two as separate steps so the unit runners run once.)
       - name: Syntax check (server.js, lib, scripts)
         run: npm run lint
 

@@ -56,7 +56,14 @@ const ok = (name, cond, detail) => {
 	else { failures++; console.log(`  FAIL ${name}${detail !== undefined ? `  (${typeof detail === "string" ? detail : JSON.stringify(detail)})` : ""}`); }
 };
 const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b), { actual: a, expected: b });
-const tmp = (p) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), p)));
+// Every temporary folder this runner makes is removed when it exits, pass or fail.
+const tempDirs = [];
+process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
+const tmp = (p) => {
+	const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), p)));
+	tempDirs.push(d);
+	return d;
+};
 
 // A replica folder under a temporary HOME, as replica:pull and replica:start leave it.
 function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main" } = {}) {

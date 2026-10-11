@@ -61,7 +61,7 @@ Needed at the repo root, and never committed:
 No Jest/Vitest/ESLint. Instead, standalone runners plus a manual HTTP harness:
 
 ```bash
-npm run lint       # node --check over server.js, lib/*.js and scripts/*.js (under a second)
+npm run lint       # node --check over server.js and every .js/.mjs/.cjs in lib/ and scripts/ (about a second)
 npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), 4 at a time — no server needed
 npm run check      # lint + test:unit: the fast local check, 70–110 s on an M-series Mac
 npm run ci         # check + build:client — the same gate CI runs
