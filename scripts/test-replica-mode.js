@@ -470,9 +470,14 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 			const get = (p) => new Promise((resolve) => http.get({ host: "127.0.0.1", port, path: p }, (res) => {
 				let b = ""; res.on("data", (c) => (b += c)); res.on("end", () => resolve({ status: res.statusCode, body: b, type: res.headers["content-type"] || "" }));
 			}).on("error", (e) => resolve({ status: 0, body: e.message })));
+			// The banner rides on the client build's pages. Without a build (CI runs
+			// the runners before building; replica:start always builds) every page
+			// is the 503 "being updated" page instead.
+			const built = fs.existsSync(path.join(ROOT, "client", "dist", "index.html"));
 			for (const p of ["/", "/login", "/dashboard"]) {
 				const r = await get(p);
-				ok(`GET ${p}: the page carries the LOCAL COPY OF PRODUCTION banner`, r.status === 200 && /id="logisx-replica-banner"[^>]*>LOCAL COPY OF PRODUCTION/.test(r.body), r.status);
+				if (built) ok(`GET ${p}: the page carries the LOCAL COPY OF PRODUCTION banner`, r.status === 200 && /id="logisx-replica-banner"[^>]*>LOCAL COPY OF PRODUCTION/.test(r.body), r.status);
+				else ok(`GET ${p}: with no client build, the 503 "being updated" page`, r.status === 503 && /being updated/.test(r.body) && !/id="app"/.test(r.body), r.status);
 			}
 			const s = await get("/api/auth/session");
 			ok("the API answers as usual (JSON, no banner)", s.status === 200 && /json/.test(s.type) && !s.body.includes("logisx-replica-banner"), s);
