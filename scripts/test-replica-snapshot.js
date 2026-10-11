@@ -498,11 +498,18 @@ const made5 = [];
 		ok("every rsync shows progress through pull-local.js progress, never straight to the log", rsyncLines.length === 2 && rsyncLines.every((l) => / --progress /.test(l) && /\| "\$NODE_BIN" "\$HERE\/pull-local\.js" progress /.test(l) && !/tee/.test(l)), rsyncLines);
 		ok("the download is whole: no seed from the last snapshot", !/cp -c?R "\$ROOT\/clean\/\."/.test(pull));
 		ok("pull.sh streams compress.js to the server", /^REMOTE_FILES=\(.* compress\.js\)$/m.test(pull));
-		const precheck = pull.search(/createZstdDecompress !== "function"\) process\.exit\(3\); require\(process\.argv\[1\]\);' "\$REPO\/node_modules\/better-sqlite3"/);
-		ok("...checks the local Node's zstd and better-sqlite3 before the server does any work", precheck > 0 && precheck < pull.search(/^remote_program \| ssh /m) && precheck < pull.search(/^LOCK="/m));
+		const CHECK = 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); new (require(process.argv[1]))(":memory:").close();';
+		const precheck = pull.indexOf(`"$NODE_BIN" -e '${CHECK}' "$REPO/node_modules/better-sqlite3"`);
+		ok("...checks the local Node's zstd and better-sqlite3 (opening a database, so the binary loads) after the freshness check and before the server does any work", precheck > pull.indexOf("# Fresh enough?") && precheck < pull.search(/^LOCK="/m) && precheck < pull.search(/^remote_program \| ssh /m), precheck);
 		ok("...and the unpack and verify errors reach the log", /pull-local\.js" unpack "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull) && /pull-local\.js" verify "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull));
-		const pre = spawnSync(process.execPath, ["-e", 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); require(process.argv[1]);', path.join(ROOT, "node_modules", "better-sqlite3")], { encoding: "utf8" });
+		const pre = spawnSync(process.execPath, ["-e", CHECK, path.join(ROOT, "node_modules", "better-sqlite3")], { encoding: "utf8" });
 		eq("...a check this Node passes", pre.status, 0);
+		// A stand-in better-sqlite3 that loads but can't open a database, as a
+		// binary built for another Node does.
+		const fakeMod = dir("replica-fake-bs3-");
+		fs.writeFileSync(path.join(fakeMod, "index.js"), "module.exports = function Database() { throw new Error('NODE_MODULE_VERSION mismatch'); };");
+		const preBad = spawnSync(process.execPath, ["-e", CHECK, fakeMod], { encoding: "utf8" });
+		ok("...and one a better-sqlite3 built for another Node fails", preBad.status !== 0);
 		const at = (re) => pull.search(re);
 		const order = [/^remote_cleanup 2>&1 \| tee -a "\$LOG"$/m, /pull-local\.js" unpack "\$INCOMING"/, /pull-local\.js" verify "\$INCOMING"/, /^mv "\$INCOMING" "\$ROOT\/clean"$/m].map(at);
 		ok("after the download: the server's folder goes, then unpack, then verify, then the swap", order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), order);
@@ -531,6 +538,10 @@ const made5 = [];
 			"ssh: connect to host box.example port 22: Connection refused\n",
 			"Connection closed by 192.0.2.10 port 22\n",
 			"Received disconnect from 2001:db8:0:0:0:0:0:1 port 22:2: Too many authentication failures\n",
+			"Connection closed by 2001:db8::1 port 22\n",
+			"ssh: Could not resolve hostname box.example.com: nodename nor servname provided, or not known\n",
+			"openrsync(4242): error: uploads/jane doe.pdf: open: Permission denied\n",
+			"rsync(4242): error: jane doe.pdf: partial cleanup failed, left at .jane doe.pdf.Ab12Cd\n",
 		].join("");
 		const run = (tty, chunks) => {
 			let clock = 0;
@@ -558,6 +569,10 @@ const made5 = [];
 				"ssh: connect to host <host> port 22: Connection refused",
 				"Connection closed by <address> port 22",
 				"Received disconnect from <address> port 22:2: Too many authentication failures",
+				"Connection closed by <address> port 22",
+				"ssh: Could not resolve hostname <host>: nodename nor servname provided, or not known",
+				"openrsync(4242): error: <…>: Permission denied",
+				"rsync(4242): error: <…>: <…>",
 			]);
 			ok(`...and shows those errors too (${where})`, /rsync\(40131\): error: unexpected end of file\nrsync: \[sender\]/.test(out) && /ssh: connect to host <host> port 22: Connection refused/.test(out), out);
 		}

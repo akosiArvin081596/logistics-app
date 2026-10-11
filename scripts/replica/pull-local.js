@@ -4,8 +4,9 @@
 //                                          stdin and shows it as one status line
 //                                          (a line every 30 s when not on a
 //                                          terminal); file names are never shown
-//                                          or logged, rsync's stats and errors
-//                                          are both
+//                                          or logged; rsync's stats are, as they
+//                                          are, and its and ssh's errors are,
+//                                          with names, paths and hosts taken out
 //   node pull-local.js unpack <incoming>   decompresses the .zst files the server
 //                                          made (compress.js) and checks each
 //                                          against the size and SHA-256 the server
@@ -45,16 +46,25 @@ const STATS = [
 // They are shown and logged through redact(), as a failed pull's reason.
 const ERROR = /^((open)?rsync(\(\d+\))?( error| warning)?: |ssh: |kex_exchange_identification: |sign_and_send_pubkey: |client_loop: |Received disconnect |Disconnected from |Connection (closed|reset|timed out) |Host key verification failed|Permission denied \()/;
 
+// The last part of an openrsync error that is only words: a reason, not a path.
+const REASON = /^[A-Za-z][A-Za-z ,'-]*( \(\d+\))?\.?$/;
+
 // An error line without the names in it: quoted text, paths, addresses and
-// hosts become placeholders, and in openrsync's "error: <path>: <reason>" only
-// the reason stays.
+// hosts become placeholders. Of openrsync's "error: <path>: …: <reason>" only
+// a reason that is only words stays.
 function redact(line) {
+	const rs = /^((?:open)?rsync\(\d+\): (?:error|warning): )(.*)$/.exec(line);
+	if (rs) {
+		const parts = rs[2].split(": ");
+		const reason = REASON.test(parts[parts.length - 1]) ? parts[parts.length - 1] : "<…>";
+		line = `${rs[1]}${parts.length > 1 ? "<…>: " : ""}${reason}`;
+	}
 	return line
-		.replace(/^(rsync\(\d+\): (?:error|warning): ).*: ([^:]+)$/, "$1<…>: $2")
 		.replace(/"[^"]*"|'[^']*'/g, '"<…>"')
 		.replace(/(^|[\s(=])\/[^\s:"')]+/g, "$1<path>")
-		.replace(/\b\d{1,3}(\.\d{1,3}){3}\b|\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/gi, "<address>")
-		.replace(/\bhost (?!<)\S+/g, "host <host>")
+		.replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, "<address>")
+		.replace(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,7}\b|(?:\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*\b)?/gi, "<address>")
+		.replace(/\bhost(name)? (?!<)[^\s:]+/g, "host$1 <host>")
 		.replace(/\b(from|by) (?!<)(?=[\w.-]*[.\d])[\w.-]+/g, "$1 <host>");
 }
 

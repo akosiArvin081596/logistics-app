@@ -81,10 +81,6 @@ chmod 700 "$ROOT"
 for d in clean logs uploads storage evidence-archive work; do mkdir -p "$ROOT/$d"; chmod 700 "$ROOT/$d"; done
 
 NODE_BIN="$(command -v node)" || die "node is not on PATH (use the .nvmrc version: fnm use)"
-# The local steps need Node's zstd (22.15+) and the repo's better-sqlite3 built
-# for this Node: checked now, before production does any work.
-"$NODE_BIN" -e 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); require(process.argv[1]);' "$REPO/node_modules/better-sqlite3" 2>/dev/null \
-  || die "this Node ($("$NODE_BIN" -v)) can't run the local steps: they need zstd (Node 22.15+) and the better-sqlite3 built for the .nvmrc version (fnm use)"
 
 # Fresh enough?
 if [ "$FORCE" != 1 ] && [ -f "$ROOT/clean/manifest.json" ]; then
@@ -97,6 +93,12 @@ if [ "$FORCE" != 1 ] && [ -f "$ROOT/clean/manifest.json" ]; then
     exit 0
   fi
 fi
+
+# The local steps need Node's zstd (22.15+) and the repo's better-sqlite3 built
+# for this Node (its binary loads only when a database opens, so one is opened
+# in memory): checked now, before production does any work.
+"$NODE_BIN" -e 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); new (require(process.argv[1]))(":memory:").close();' "$REPO/node_modules/better-sqlite3" 2>/dev/null \
+  || die "this Node ($("$NODE_BIN" -v)) can't run the local steps: they need zstd (Node 22.15+) and the better-sqlite3 built for the .nvmrc version (fnm use)"
 
 # One pull at a time.
 LOCK="$ROOT/.pull.lock"
