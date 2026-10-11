@@ -135,6 +135,8 @@ const publicFormInput = require("./lib/public-form-input");
 // and its "Schedule a call" form (kind: "call").
 const investorRfi = require("./lib/investor-rfi");
 const w9Input = require("./lib/w9-input");
+// The 503 page every page request gets while client/dist/index.html is missing.
+const { sendAppUpdating } = require("./lib/app-updating-page");
 // The business time zone, APP_TIMEZONE (default US Eastern): every "today", month,
 // invoice week, Friday cutoff and sheet stamp is on its clock, never the server's
 // own UTC clock. lib/app-time.js
@@ -7760,16 +7762,15 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 	});
 }
 
-// Serve Vue SPA build (client/dist) if it exists, otherwise fall back to public/
+// Serve the Vue SPA build (client/dist). Without client/dist/index.html the SPA
+// catch-all at the bottom of this file answers every page request with the
+// 503 "being updated" page (lib/app-updating-page.js).
 const clientDistPath = path.join(__dirname, "client", "dist");
-const publicPath = path.join(__dirname, "public");
 // A replica answers every page with the "LOCAL COPY OF PRODUCTION" banner in
 // it, the login page included (lib/replica-mode.js), ahead of the static files.
-if (REPLICA) app.use(REPLICA.bannerMiddleware(fs.existsSync(clientDistPath) ? clientDistPath : publicPath));
+if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));
 if (fs.existsSync(clientDistPath)) {
 	app.use(express.static(clientDistPath));
-} else {
-	app.use(express.static(publicPath));
 }
 
 // ============================================================
@@ -9220,8 +9221,10 @@ function refreshPasswordChangeFlag(req, res, next) {
 // ⚠️ Read through process.env per call rather than a module-scope const, for the
 // same lift reason. CSRF_HEADER_REQUIRED is a KILL SWITCH, not an enable
 // switch — it defaults ON and only an explicit "false" disables it, matching
-// PII_MASK_ENABLED. It exists because the legacy public/ pages use raw fetch
-// with no header and are still served when client/dist is missing.
+// PII_MASK_ENABLED. It was added for the legacy public/ pages, whose raw fetch
+// sent no header. Those pages are gone (without client/dist every page is the
+// 503 "being updated" page); the switch stays, to turn the check off without a
+// deploy.
 function requireAuth(req, res, next) {
 	if (!req.session.user)
 		return res.status(401).json({ error: "Not authenticated" });
@@ -9640,8 +9643,8 @@ const refuseCrossOriginStrict = crossSiteGuard("same-origin", {
 //     neither and holds no browser's session. That is crossSiteGuard's own
 //     order: Sec-Fetch-Site where the browser sent it, then the fall-through.
 //   - JSONP long-polling (a `j` query parameter) is refused whatever its
-//     headers: neither socket.io client this app ships (the SPA's, and the one
-//     /socket.io/socket.io.js serves the legacy pages) uses it.
+//     headers: the SPA's socket.io client, the only one this app's pages use,
+//     never does.
 //
 // A refusal is answered before any namespace sees the connection: 403 on
 // long-polling, 400 on a WebSocket upgrade (Engine.IO answers every refused
@@ -33059,10 +33062,9 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 // whichever tab ?sheet= names with valueInputOption "USER_ENTERED", which stores
 // a value starting with "=" or "+" as a formula, and only a Super Admin enters
 // formulas (see formulaCellRefusal()). Its SPA callers
-// are New Job (/jobs/new) and the Data Manager (/data), both Super Admin routes;
-// the legacy public/index.html is served only when client/dist is missing, and
-// it reads GET /api/data, which is Super Admin only too. Widening this gate
-// means refusing formulas first (formulaCellRefusal(), as PUT does).
+// are New Job (/jobs/new) and the Data Manager (/data), both Super Admin routes.
+// Widening this gate means refusing formulas first (formulaCellRefusal(), as
+// PUT does).
 // scripts/test-broker-column-redaction.js pins the gate.
 app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 	try {
@@ -37198,12 +37200,12 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 // requireRole answers a Dispatcher or an Investor 403 "Forbidden" before the
 // handler runs, so a refused caller costs no sheet or database read. This is the
 // driver app's payload: the driver's loads, messages, expenses and invoice
-// totals, their carrier-directory row and their documents. Its only callers are
+// totals, their carrier-directory row and their documents. Its only caller is
 // the driver app (client/src/stores/driver.js, reached from the /driver view,
-// which admits Driver and Super Admin) and the legacy public/driver.html (same
-// two roles). Dispatch reads driver data through its own routes. If a dispatch
-// screen ever needs this payload, strip what that role does not see BEFORE
-// adding it here: `invoices`, `expenses` and the rate columns are financial.
+// which admits Driver and Super Admin). Dispatch reads driver data through its
+// own routes. If a dispatch screen ever needs this payload, strip what that
+// role does not see BEFORE adding it here: `invoices`, `expenses` and the rate
+// columns are financial.
 //
 // The self check folds BOTH sides through normalizeDriverName(), the rule every
 // other ownership check here uses (driverOwnsInvoice, loadBelongsToDriver,
@@ -37953,9 +37955,8 @@ app.get("/api/driver/truck-documents/:id/view", requireAuth, truckDocViewLimiter
 //     the override modal defaults to statusOptions[0], so it is the same list)
 //   • StatusStepper.vue `statusFlow`      — 6; no "Dispatched" (a driver never moves
 //     a load backwards to it)
-//   • public/driver.html `STATUS_FLOW`    — 5; legacy, also no "Heading to Shipper"
-// The last two are strict SUBSETS, so the unit test asserts subset for them and
-// equality only for statusOptions — asserting equality on all three would fail on
+// The last is a strict SUBSET, so the unit test asserts subset for it and
+// equality only for statusOptions — asserting equality on both would fail on
 // a list that is correct. What must never happen is a client offering a button the
 // server refuses; that is the direction the subset test pins.
 //
@@ -38007,9 +38008,9 @@ const STATUS_OVERRIDE_ALLOWED = ["Dispatched", "Heading to Shipper", "At Shipper
 // portal. Narrowing the write while widening the read is the wrong trade — so
 // the role gate closes both at once.
 //
-// No client changes: all three callers are Driver or admin surfaces
-// (client/src/stores/driver.js, client/src/stores/dashboard.js,
-// public/driver.html). Mounted BEFORE driverWriteLimiter, matching the
+// No client changes: both callers are Driver or admin surfaces
+// (client/src/stores/driver.js, client/src/stores/dashboard.js).
+// Mounted BEFORE driverWriteLimiter, matching the
 // convention on the fuel-events/fuel-gallons routes, so an unauthorized caller
 // cannot spend the rate-limit budget on 403s.
 app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
@@ -38163,8 +38164,8 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		//   1. `rowData` WAS OPTIONAL and the whole re-resolution was gated on it
 		//      (`if (rowData && !rowMatchesData(...))`). Omit it and nothing was
 		//      re-resolved or compared — the write simply went to `rowIndex`. Not
-		//      hypothetical: the legacy public/driver.html posts `values`, NOT
-		//      `rowData`, so that client has always taken the ungated path.
+		//      hypothetical: the legacy public/driver.html (since removed) posted
+		//      `values`, NOT `rowData`, so that client always took the ungated path.
 		//   2. EVEN SUPPLIED IT WAS NOT A LOAD-ID CHECK. It compared only NON-EMPTY
 		//      expected values, so `{}` matched every row, and it need not contain the
 		//      Load ID column at all. `rowData` is caller-supplied, so this bound the
@@ -40243,7 +40244,7 @@ function readFlagOwnName(user) {
 // ⚠️ SUPER ADMIN AND DISPATCHER MARK ANY MESSAGE; EVERY OTHER CALLER MARKS ONLY
 // MESSAGES ADDRESSED TO THEM (readFlagOwnName()), and a caller with no name
 // marks nothing. Staff keep the inbox-wide form because the dispatch inbox
-// (/messages, and the legacy dashboard) clears messages addressed to the shared
+// (/messages) clears messages addressed to the shared
 // "Dispatch" desk, which no one person's name matches. The test is "not staff"
 // rather than `=== "Driver"`, so a role added later is narrowed by default.
 // Pinned by scripts/test-documents-role-gates.js.
@@ -61773,12 +61774,14 @@ app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOri
 // ============================================================
 // SPA Catch-All — Serve Vue app for all non-API routes
 // ============================================================
+// Checked per request, so a build that disappears while the server runs (a
+// rebuild empties client/dist first) answers the 503 page until it is back.
 app.get("*", (req, res) => {
 	const spaIndex = path.join(clientDistPath, "index.html");
 	if (fs.existsSync(spaIndex)) {
 		res.sendFile(spaIndex);
 	} else {
-		res.sendFile(path.join(publicPath, "index.html"));
+		sendAppUpdating(res);
 	}
 });
 

@@ -31,7 +31,8 @@
  *   §6 inventory: every server.js reference to a Maps key is a known shape, so a
  *      new reference (a response, a socket payload, a log line) fails here
  *   §7 the browser side: every Maps loader gets its key from the endpoint;
- *      no build-time Maps key; the legacy pages load no map
+ *      no build-time Maps key; no page under public/ (the legacy pages are
+ *      gone) loads a map
  *   §8 discrimination: each guarded behaviour, broken on purpose, is caught
  *
  * Fake key values only. No server, no network, no .env, no app.db.
@@ -503,9 +504,11 @@ function section7() {
 		baked.map((f) => path.relative(ROOT, f)).join(", "));
 	const vite = fs.readFileSync(path.join(ROOT, "client", "vite.config.js"), "utf8");
 	ok("vite.config.js defines no constant and widens no env prefix", !/\bdefine\s*:|envPrefix/.test(vite));
-	const legacy = walk(path.join(ROOT, "public"));
+	// The legacy public/ pages are gone; anything put back there is held to the same rule.
+	const legacyDir = path.join(ROOT, "public");
+	const legacy = fs.existsSync(legacyDir) ? walk(legacyDir) : [];
 	const legacyMaps = legacy.filter((f) => /maps\.googleapis\.com|\/api\/config\/maps-key|GOOGLE_MAPS/.test(fs.readFileSync(f, "utf8")));
-	ok("the legacy public/ pages load no map and fetch no key", legacyMaps.length === 0,
+	ok("no page under public/ loads a map or fetches a key", legacyMaps.length === 0,
 		legacyMaps.map((f) => path.relative(ROOT, f)).join(", "));
 }
 

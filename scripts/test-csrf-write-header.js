@@ -188,7 +188,7 @@ for (const [label, guard] of [["requireAuth", buildAuth()], ["requireRole", buil
 			"§7 only an explicit 'false' disables it — anything else must fail CLOSED");
 		process.env.CSRF_HEADER_REQUIRED = "false";
 		ok(run(guard, { method: "POST", headers: NO_HDR }).nexted,
-			"§7 'false' must disable it, for the legacy public/ fallback");
+			"§7 'false' must disable it (the kill switch)");
 		process.env.CSRF_HEADER_REQUIRED = "FALSE";
 		ok(run(guard, { method: "POST", headers: NO_HDR }).nexted, "§7 the switch is case-insensitive");
 	} finally {

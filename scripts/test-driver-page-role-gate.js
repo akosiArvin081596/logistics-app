@@ -20,9 +20,9 @@
  *      Tracking), so "refused before any read" is asserted, not assumed.
  *   §2 what an admitted caller receives: a Driver's own read ships no rate
  *      columns, blanked broker contacts and no roster; Super Admin's is whole.
- *   §3 the callers the gate was sized against: only the driver app and the
- *      legacy driver page ask for this route, and both admit Driver and Super
- *      Admin only. A new caller fails here and points at the note above the route.
+ *   §3 the callers the gate was sized against: only the driver app asks for
+ *      this route, and its view admits Driver and Super Admin only. A new
+ *      caller fails here and points at the note above the route.
  *   §4 DISCRIMINATION: one mutant per layer, each required to flip.
  *   §5 the driver's own drivers_directory row is found when it is stored under
  *      another spacing of the name (findDirectoryRowForDriver()), with directory
@@ -345,21 +345,20 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 	});
 	// `/api/driver/${...}` — a name interpolated straight after the prefix. The
 	// sibling routes (`/api/driver/me/...`, `/api/driver/truck-documents/...`)
-	// have a literal segment first and do not match.
-	const callers = [...walk(path.join(ROOT, "client", "src")), ...walk(path.join(ROOT, "public"))]
+	// have a literal segment first and do not match. The legacy public/ pages
+	// are gone, so the SPA is the only page source left to search.
+	const callers = walk(path.join(ROOT, "client", "src"))
 		.filter((f) => /\/api\/driver\/\$\{/.test(fs.readFileSync(f, "utf8")))
 		.map((f) => path.relative(ROOT, f).split(path.sep).join("/"))
 		.sort();
-	ok("only the driver store and the legacy driver page call this route",
-		callers.join() === "client/src/stores/driver.js,public/driver.html", callers.join() || "none");
+	ok("only the driver store calls this route",
+		callers.join() === "client/src/stores/driver.js", callers.join() || "none");
+	ok("no legacy driver page is left to call it", !fs.existsSync(path.join(ROOT, "public", "driver.html")));
 	const router = fs.readFileSync(path.join(ROOT, "client", "src", "router", "index.js"), "utf8");
 	const m = router.match(/path:\s*'\/driver',[\s\S]{0,200}?roles:\s*\[([^\]]*)\]/);
 	const roles = m ? m[1].split(",").map((s) => s.trim().replace(/^'|'$/g, "")).filter(Boolean).sort() : [];
 	ok("the /driver view (the store's only entry) admits Driver and Super Admin only",
 		roles.join() === "Driver,Super Admin", roles.join() || "route not found");
-	const legacy = fs.readFileSync(path.join(ROOT, "public", "driver.html"), "utf8");
-	ok("the legacy driver page admits Driver and Super Admin only",
-		/requiredRoles:\s*\['Driver',\s*'Super Admin'\]/.test(legacy));
 
 	// =========================================================================
 	console.log("\n§4  DISCRIMINATION: defang each layer, require an assertion to flip");

@@ -198,25 +198,22 @@ const statusOptions = JSON.parse(
 );
 check("ActiveLoadsTab statusOptions === server allowlist", statusOptions, STATUS_OVERRIDE_ALLOWED);
 
-// The driver app and the legacy page are strict SUBSETS — a driver never moves a
-// load backwards to "Dispatched". Asserting equality here would fail on lists
-// that are correct; subset pins the direction that actually breaks the app.
+// The driver app is a strict SUBSET — a driver never moves a load backwards to
+// "Dispatched". Asserting equality here would fail on a list that is correct;
+// subset pins the direction that actually breaks the app.
 const stepperValues = [...readList("client/src/components/driver/StatusStepper.vue",
 	/const statusFlow = (\[[\s\S]*?\n\])/, "statusFlow").matchAll(/value: '([^']+)'/g)].map((m) => m[1]);
 check("StatusStepper offers 6 steps", stepperValues.length, 6);
 check("every StatusStepper step is settable on the server",
 	stepperValues.filter((s) => !STATUS_OVERRIDE_ALLOWED.includes(s)), []);
 
-const legacyValues = [...readList("public/driver.html",
-	/const STATUS_FLOW = (\[[\s\S]*?\n\])/, "STATUS_FLOW").matchAll(/value: '([^']+)'/g)].map((m) => m[1]);
-check("legacy public/driver.html offers 5 steps", legacyValues.length, 5);
-check("every legacy step is settable on the server",
-	legacyValues.filter((s) => !STATUS_OVERRIDE_ALLOWED.includes(s)), []);
+// The legacy public/driver.html, a third client with 5 steps, is gone.
+check("no legacy driver page is left as a client", fs.existsSync(path.join(ROOT, "public", "driver.html")), false);
 
 // The union of every caller is the list — neither wider (dead values nobody can
 // send) nor narrower (a button the server refuses).
 check("the allowlist is exactly the union of its clients",
-	[...new Set([...statusOptions, ...stepperValues, ...legacyValues])].sort(),
+	[...new Set([...statusOptions, ...stepperValues])].sort(),
 	[...STATUS_OVERRIDE_ALLOWED].sort());
 
 // ========================================================= 3. the gate's verdicts

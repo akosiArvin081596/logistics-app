@@ -19,7 +19,7 @@ When a domain finally outgrows the single-file model (the PDF rendering already 
 1. Load `.env` via `dotenv`.
 2. Open `app.db` via `better-sqlite3` (synchronous, WAL-mode SQLite). All queries are synchronous — no connection pool, no async lock.
 3. Run schema migrations (described below).
-4. Construct Express app: body parser (50 MB limit for base64 photos), compression, session middleware (SQLite-backed), CSP-free static serving from `client/dist/` (or `public/` fallback).
+4. Construct Express app: body parser (50 MB limit for base64 photos), compression, session middleware (SQLite-backed), CSP-free static serving from `client/dist/` (without `client/dist/index.html`, every page request gets the 503 "being updated" page from `lib/app-updating-page.js`).
 5. Mount routes.
 6. Wire Socket.IO onto the same HTTP server.
 7. Start background intervals (driver-location cleanup, Routemate sync if enabled, demo-viewer write lockdown ticks).
