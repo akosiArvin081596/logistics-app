@@ -73,12 +73,37 @@ function captureRenderLogs() {
 }
 
 // Busy-wait: precisely what a long synchronous SQLite scan or a big JS reduce
-// does to the loop. setTimeout so it lands mid-navigation.
-function blockLoopIn(delayMs, forMs) {
+// does to the loop. setTimeout so it lands mid-navigation. `onDone` runs in the
+// same callback, the moment the loop is free again.
+function blockLoopIn(delayMs, forMs, onDone) {
 	setTimeout(() => {
 		const end = Date.now() + forMs;
 		while (Date.now() < end) { /* spin */ }
+		if (onDone) onDone();
 	}, delayMs);
+}
+
+// Starts that stall `delayMs` after Puppeteer arms its navigation timer, not
+// after the render call: the timer is a plain Node setTimeout of NAV ms (the
+// premise of the production bug), so the stall always lands inside the budget,
+// however long Chromium takes to open the page first. One shot: the retry's own
+// timer is left alone. armed() says whether the timer was ever seen.
+function blockLoopAfterNavTimerArmed(delayMs, forMs, onDone) {
+	const realSetTimeout = global.setTimeout;
+	let armed = false;
+	global.setTimeout = function (fn, ms, ...rest) {
+		const id = realSetTimeout.call(this, fn, ms, ...rest);
+		if (ms === NAV) {
+			armed = true;
+			global.setTimeout = realSetTimeout;
+			blockLoopIn(delayMs, forMs, onDone);
+		}
+		return id;
+	};
+	return {
+		armed: () => armed,
+		restore: () => { global.setTimeout = realSetTimeout; },
+	};
 }
 
 const PLAIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
@@ -95,6 +120,24 @@ async function main() {
 	const UNSETTLEABLE_HTML = `<!doctype html><html><head><meta charset="utf-8">
 <link href="http://127.0.0.1:${hangPort}/never.css" rel="stylesheet"></head>
 <body><h1>never settles</h1></body></html>`;
+
+	// §1's page waits on a stylesheet this server holds until the stall is over,
+	// then serves at once (see §1 for why).
+	let stallOver = false;
+	const held = [];
+	const holding = http.createServer((req, res) => {
+		const send = () => res.writeHead(200, { "Content-Type": "text/css" }).end("h1{margin:0}");
+		if (stallOver) send();
+		else held.push(send);
+	});
+	await new Promise((r) => holding.listen(0, "127.0.0.1", r));
+	const releaseHeld = () => {
+		stallOver = true;
+		for (const send of held.splice(0)) send();
+	};
+	const HELD_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<link href="http://127.0.0.1:${holding.address().port}/held.css" rel="stylesheet"></head>
+<body><h1>cold start regression</h1><p>body text</p></body></html>`;
 
 	console.log(`\n§0  baseline — a healthy render still works (nav timeout ${NAV} ms)`);
 	{
@@ -136,14 +179,26 @@ async function main() {
 	{
 		// Block for longer than the whole budget, so attempt 1 cannot help but
 		// time out even though Chromium has the (trivial, local) page ready.
-		blockLoopIn(150, NAV + 1200);
+		//
+		// ⚠️ This section used to fail about 1 run in 3 on an idle machine (4 of
+		// 14, measured 2026-10-11): the page settled by itself during the
+		// stall, so when the loop came back the overdue timer and Chromium's
+		// queued "settled" message raced, and the message won. The render then
+		// passed at ~4390 ms (the stall's end) with no retry. Its stylesheet is
+		// now held until the stall is over, so Chromium cannot have settled and
+		// the overdue timer fires first, every time; the retry gets the
+		// stylesheet at once. And the stall starts 150 ms after Puppeteer arms
+		// its navigation timer, not after the call, so a slow newPage() can't
+		// let it pass before the budget begins.
+		const stall = blockLoopAfterNavTimerArmed(150, NAV + 1200, releaseHeld);
 		const cap = captureRenderLogs();
 		const t = Date.now();
 		let pdf = null;
 		let err = null;
-		try { pdf = await renderHtmlToPdf(PLAIN_HTML); } catch (e) { err = e; }
+		try { pdf = await renderHtmlToPdf(HELD_HTML); } catch (e) { err = e; } finally { stall.restore(); }
 		const ms = Date.now() - t;
 		const logs = cap.stop();
+		ok(stall.armed(), "the stall landed inside the navigation budget", stall.armed() ? `started 150 ms after the ${NAV} ms timer was armed` : `no ${NAV} ms timer was armed: Puppeteer no longer times navigation with a Node setTimeout, so this section tests nothing`);
 		ok(!err, "render SUCCEEDS despite the stall", err ? err.message.split("\n")[0] : `${ms} ms`);
 		ok(pdf && pdf.slice(0, 4).toString() === "%PDF", "and the bytes are a real PDF");
 		// The retry DEMONSTRABLY ran — read off the module's own decision, so this
@@ -180,6 +235,7 @@ async function main() {
 	}
 
 	await new Promise((r) => hang.close(r));
+	await new Promise((r) => holding.close(r));
 	await shutdownBrowser();
 
 	console.log(`\n${pass} passed, ${fail} failed`);

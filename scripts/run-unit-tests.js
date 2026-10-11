@@ -79,21 +79,26 @@ const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || 4);
  * "everything passed" is a worse lie than a red build.
  *
  * ── Why `test-pdf-cold-start.js` is here ────────────────────────────────────
- * Measured, not guessed. On an 8-core Mac:
- *   • idle machine ............ 6/6 pass
- *   • load average ~11 ........ 3/6 pass, and 4/4 fail at peak load
- *   • the failure tracked the DECAYING load average as it recovered
- * The one assertion that breaks is "the stall retry is what saved it — no retry
- * log emitted", while the timing assertions beside it still pass (render took
- * 4405 ms against a 3000 ms budget, which proves the retry did happen). So the
- * behaviour under test is correct; only the observation of it is racy.
+ * It launches Chromium and asserts on wall-clock budgets (a 3 s navigation
+ * budget, "one budget, not two") around an induced event-loop stall, which a
+ * GitHub-hosted runner's two shared cores can't be trusted to keep.
+ *
+ * Its old flake was a race inside its §1, not machine load (diagnosed
+ * 2026-10-11; this note used to blame load). "The stall retry is what saved it
+ * — no retry log emitted" failed at ~4390 ms, the stall's end: the trivial page
+ * had settled during the stall, so when the loop came back the overdue
+ * navigation timer and Chromium's queued "settled" message raced, and the
+ * message won. No timeout, so no retry: the module was right, the test wasn't.
+ * Measured before the fix on a 15-core Mac: 10/14 pass idle, 14/14 beside 30
+ * CPU-spinning processes. §1 now holds its page's stylesheet until the stall
+ * ends and starts the stall from Puppeteer's own timer: 12/12 idle, 12/12
+ * beside the 30 spinners.
  *
  * The test itself is good and locks a real 2026-08 production bug: the first
  * PDF after a restart 500'd because Puppeteer's navigation timeout is a
  * Node-side wall-clock timer, so a blocked event loop ate the whole budget. To
  * assert that, the test must deliberately induce an event-loop stall and catch
- * the recovery — inherently a race, and a GitHub-hosted runner is 2 shared
- * cores, i.e. more contended than the Mac where it already failed half the time.
+ * the recovery.
  *
  * ⚠️ Run `npm run test:unit` locally (which does NOT skip) before touching
  * `lib/pdf-browser.js` or anything in the PDF render path. CI does not cover it.
@@ -101,7 +106,7 @@ const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || 4);
 const TIMING_SENSITIVE = new Map([
 	[
 		"test-pdf-cold-start.js",
-		"asserts on induced event-loop-stall timing; fails under CPU contention (measured 3/6 at load ~11, 6/6 idle)",
+		"launches Chromium and asserts on wall-clock budgets around an induced event-loop stall; CI's two shared cores can't be trusted to keep them",
 	],
 ]);
 

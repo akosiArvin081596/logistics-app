@@ -25,7 +25,8 @@
  *      leaves the audit rows; a re-run adds audit rows for cells found restored
  *      without one, once; the app's own database ties the sheet to the app.
  *
- * Pure: a temp directory, child processes of the script itself, no network.
+ * Pure: a temp directory, child processes of the script itself, no network. The
+ * script runs from a stand-in app directory with no .env, never this checkout's.
  * Run: node scripts/test-data-fix-october-later-emails.js  # exits 1 on failure
  */
 "use strict";
@@ -39,6 +40,25 @@ const { spawnSync } = require("child_process");
 const ROOT = path.join(__dirname, "..");
 const SCRIPT = path.join(__dirname, "data-fix-october-later-emails.js");
 const fix = require(SCRIPT);
+
+// A stand-in app directory with no .env: the script reads its app directory's
+// .env, and this checkout's holds a developer's real settings (the sandbox
+// refuses it outright). §3 runs a copy of the script from it, so the script's
+// own directory is the stand-in; §4 passes it as `root`. dbScope() decides the
+// layout: the app in BASE/app/logistics-app, the temp directory (where every
+// copy of the database lives) in BASE/tmp, beside neither.
+const BASE = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "oct-restore-"));
+const APP = path.join(BASE, "app", "logistics-app");
+fs.mkdirSync(path.join(APP, "scripts", "lib"), { recursive: true });
+fs.mkdirSync(path.join(APP, "lib"));
+for (const f of ["scripts/data-fix-october-later-emails.js", "scripts/lib/ledger-world.js", "scripts/lib/server-lift.js", "lib/sheet-id.js"]) {
+	fs.copyFileSync(path.join(ROOT, f), path.join(APP, f));
+}
+fs.writeFileSync(path.join(APP, "server.js"), "");
+fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(APP, "node_modules"));
+const APP_SCRIPT = path.join(APP, "scripts", "data-fix-october-later-emails.js");
+fs.mkdirSync(path.join(BASE, "tmp"));
+process.env.TMPDIR = path.join(BASE, "tmp");
 
 let failures = 0;
 let passes = 0;
@@ -130,7 +150,7 @@ const NAMES = Object.fromEntries(fix.FIXES.filter((f) => f.broker).map((f) => [f
 	const values = path.join(tmp, "jt.json");
 	fs.writeFileSync(values, JSON.stringify({ values: sheet() }));
 	const out = path.join(tmp, "out.json");
-	const run = (args, input) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: ROOT, encoding: "utf8", input, env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR || "" } });
+	const run = (args, input) => spawnSync(process.execPath, [APP_SCRIPT, ...args], { cwd: APP, encoding: "utf8", input, env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR } });
 	const refusals = [
 		["an unknown option", ["--db", dbFile, "--dry-run", "--force"], /unknown option/],
 		["neither --dry-run nor --apply", ["--db", dbFile, "--values-json", values], /--dry-run or --apply/],
@@ -139,7 +159,7 @@ const NAMES = Object.fromEntries(fix.FIXES.filter((f) => f.broker).map((f) => [f
 		["no sheet", ["--db", dbFile, "--dry-run"], /--sheet-id \(or --values-json\) is required/],
 		["an apply without --expect-cells", ["--db", dbFile, "--values-json", values, "--values-out", out, "--apply"], /--apply needs --expect-cells/],
 		["a rehearsal apply without --values-out", ["--db", dbFile, "--values-json", values, "--apply", "--expect-cells", "6"], /needs --values-out/],
-		["a database outside the app directory and the temp directory", ["--db", path.join(ROOT, "scripts", "app.db"), "--values-json", values, "--dry-run"], /opens its own app directory's database/],
+		["a database outside the app directory and the temp directory", ["--db", path.join(APP, "scripts", "app.db"), "--values-json", values, "--dry-run"], /opens its own app directory's database/],
 	];
 	for (const [name, args, re] of refusals) {
 		const r = run(args);
@@ -164,7 +184,7 @@ const NAMES = Object.fromEntries(fix.FIXES.filter((f) => f.broker).map((f) => [f
 	check("§3 --names-stdin with bad JSON refuses", badJson.status === 2 && /not a JSON object/.test(badJson.stderr));
 	const wrongName = run(["--db", dbFile, "--values-json", values, "--dry-run", "--names-stdin"], JSON.stringify({ [fix.FIXES[0].load]: "Not The Contact" }));
 	check("§3 --names-stdin with a name whose hash differs refuses, and prints no name", wrongName.status === 2 && /hash differs/.test(wrongName.stderr) && !/Not The Contact/.test(wrongName.stdout + wrongName.stderr));
-	const appDb = run(["--db", path.join(ROOT, "app.db"), "--values-json", values, "--values-out", out, "--apply", "--expect-cells", "6"]);
+	const appDb = run(["--db", path.join(APP, "app.db"), "--values-json", values, "--values-out", out, "--apply", "--expect-cells", "6"]);
 	check("§3 a rehearsal apply with the app's own database refuses", appDb.status === 2 && /only with a copy of the database/.test(appDb.stderr), appDb.stderr);
 	const lockDb = new Database(dbFile);
 	lockDb.prepare("INSERT INTO period_locks (period, status) VALUES ('2026-10', 'locked')").run();
@@ -188,7 +208,7 @@ const NAMES = Object.fromEntries(fix.FIXES.filter((f) => f.broker).map((f) => [f
 	};
 	const audits = (f) => new Database(f, { readonly: true }).prepare("SELECT * FROM audit_trail ORDER BY id").all();
 	const capture = () => { const lines = []; return { lines, log: (x) => lines.push(String(x)), err: (x) => lines.push(String(x)) }; };
-	const opts = (c, extra) => ({ fixes: withHash(), stdin: JSON.stringify(NAMES), log: c.log, err: c.err, ...extra });
+	const opts = (c, extra) => ({ fixes: withHash(), stdin: JSON.stringify(NAMES), log: c.log, err: c.err, root: APP, ...extra });
 	// A rehearsal with the names: all ten cells.
 	{
 		const db = freshDb("a.db");
@@ -266,6 +286,7 @@ const NAMES = Object.fromEntries(fix.FIXES.filter((f) => f.broker).map((f) => [f
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 	fs.rmSync(tmp, { recursive: true, force: true });
+	fs.rmSync(BASE, { recursive: true, force: true });
 	console.log(`test-data-fix-october-later-emails: ${passes} passed, ${failures} failed`);
 	process.exit(failures ? 1 : 0);
 })().catch((err) => { console.error(err); process.exit(1); });
