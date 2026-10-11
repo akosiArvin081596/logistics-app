@@ -19,7 +19,8 @@
 //      what it writes reads back exactly through dotenv
 //   §4 the stamp (unique per run) and task rules; the pull scripts keep the
 //      production host out of the repository, fail when the server's folder
-//      cannot be confirmed gone, sweep stale folders, and run at low priority
+//      cannot be confirmed gone, sweep stale folders (over an hour old), and
+//      run at low priority
 //   §5 the compressed download: compress.js turns app.db and sheets.json into
 //      zstd files (600) and records each original's size and SHA-256; unpack
 //      gives back byte-identical files and refuses a short, damaged or
@@ -52,7 +53,14 @@ const ok = (name, cond, detail) => {
 };
 const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b), { actual: a, expected: b });
 const sha = (f) => crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
-const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+// Every temporary folder goes when the runner exits, pass or fail.
+const tempDirs = [];
+process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
+const tmp = (p) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); tempDirs.push(d); return d; };
+// pull.sh's trap, on_exit(), and what it calls, with the variables they read:
+// run as pull.sh has them, with ssh standing in.
+const PULL_TRAP_FNS = ["prod_ssh", "conn_open", "close_conn", "new_snapshot_in_place", "failure_outcome", "remote_cleanup", "on_exit"];
+const PULL_TRAP_VARS = 'CONN_DIR=""; CONN_SOCK=""; FILES_STARTED=0; SETTINGS_DONE=0; RESTORED=0; log() { echo "$*"; }';
 
 // ---- §1 the snapshot ------------------------------------------------------------
 console.log("§1 the snapshot reads the live database and writes only its copy");
@@ -270,19 +278,19 @@ console.log("§4 stamps, tasks and the pull scripts");
 	const stamps = stampLine ? [0, 1].map(() => spawnSync("bash", ["-c", `${stampLine}; printf %s "$STAMP"`], { encoding: "utf8" }).stdout) : [];
 	ok("...two runs get different stamps, each one the guard's folder shape accepts", stamps.length === 2 && stamps[0] !== stamps[1] && stamps.every((s) => rules.isValidStamp(s) && /^\d{8}T\d{6}Z-[0-9a-f]{8}$/.test(s)), stamps);
 
-	// The server's folder must be confirmed gone, or the pull fails. The two
+	// The server's folder must be confirmed gone, or the pull fails. The trap's
 	// functions are run as pull.sh has them, with ssh standing in.
 	const fn = (name) => (pull.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}\\n`, "m")) || [""])[0];
-	ok("pull.sh has remote_cleanup() and on_exit()", !!fn("remote_cleanup") && !!fn("on_exit"));
+	ok("pull.sh has remote_cleanup(), on_exit() and what they call", PULL_TRAP_FNS.every((f) => !!fn(f)), PULL_TRAP_FNS.filter((f) => !fn(f)));
 	const exitWith = (sshStatus) => {
 		const d = tmp("replica-exit-");
 		const script = [
 			"set -euo pipefail",
 			`ssh() { return ${sshStatus}; }`,
 			"SSH_OPTS=(-o BatchMode=yes); LOGISX_PROD_SSH=x; TMP_PARENT=/root/logisx-replica-tmp; STAMP=s1",
-			`INCOMING="${d}/in"; LOCK="${d}/lock"; LOG="${d}/log"; REMOTE_STARTED=1`,
+			`ROOT="${d}"; INCOMING="${d}/in"; LOCK="${d}/lock"; LOG="${d}/log"; REMOTE_STARTED=1; ${PULL_TRAP_VARS}`,
 			"mkdir -p \"$LOCK\"",
-			fn("remote_cleanup"), fn("on_exit"),
+			...PULL_TRAP_FNS.map(fn),
 			"trap on_exit EXIT",
 			"true",
 		].join("\n");
@@ -303,17 +311,22 @@ console.log("§4 stamps, tasks and the pull scripts");
 	{
 		const parent = tmp("replica-stale-");
 		const elsewhere = tmp("replica-elsewhere-");
-		const hoursAgo = (h) => new Date(Date.now() - h * 3600 * 1000);
-		const mk = (name, h) => { const p = path.join(parent, name); fs.mkdirSync(p); fs.writeFileSync(path.join(p, "app.db"), "x"); fs.utimesSync(p, hoursAgo(h), hoursAgo(h)); return p; };
-		mk("20261008T010000Z-aaaa1111", 7);
-		mk("20261008T070000Z-bbbb2222", 1);
-		mk(".hidden-old", 7);
+		const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
+		const mk = (name, m) => { const p = path.join(parent, name); fs.mkdirSync(p); fs.writeFileSync(path.join(p, "app.db"), "x"); fs.utimesSync(p, minutesAgo(m), minutesAgo(m)); return p; };
+		mk("20261008T010000Z-aaaa1111", 7 * 60);
+		mk("20261008T070000Z-cccc3333", 75);
+		mk("20261008T070000Z-bbbb2222", 45);
+		mk(".hidden-old", 7 * 60);
+		const oldFile = path.join(parent, "20261008T020000Z-dddd4444");
+		fs.writeFileSync(oldFile, "x");
+		fs.utimesSync(oldFile, minutesAgo(7 * 60), minutesAgo(7 * 60));
 		fs.symlinkSync(elsewhere, path.join(parent, "20261008T000000Z-link"));
 		fs.writeFileSync(path.join(elsewhere, "keep"), "x");
 		const r = spawnSync("bash", ["-c", `set -euo pipefail\nTMP_PARENT=${JSON.stringify(parent)}\n${sweep}`], { encoding: "utf8" });
-		eq("...it removes a stamp folder over 6 hours old and nothing else (a young one, an odd name, a symlink)", [r.status, fs.readdirSync(parent).sort()], [0, [".hidden-old", "20261008T000000Z-link", "20261008T070000Z-bbbb2222"]]);
+		eq("...it removes stamp folders over an hour old (75 min, 7 h) and nothing else (a 45-minute one, an odd name, a file, a symlink)", [r.status, fs.readdirSync(parent).sort()], [0, [".hidden-old", "20261008T000000Z-link", "20261008T020000Z-dddd4444", "20261008T070000Z-bbbb2222"]]);
 		ok("...never following a symlink", fs.existsSync(path.join(elsewhere, "keep")));
-		ok("...and says how many it removed", /removed 1 stale temporary folder/.test(r.stdout));
+		ok("...and says how many it removed", /removed 2 stale temporary folder/.test(r.stdout));
+		ok("...pull.sh's message names the same age", /the next pull removes it once it is an hour old/.test(pull) && !/6 hours/.test(pull));
 	}
 
 	const finish = fs.readFileSync(path.join(REMOTE, "finish.sh"), "utf8");
@@ -328,12 +341,11 @@ console.log("§4 stamps, tasks and the pull scripts");
 }
 
 // ---- §5 the compressed download -------------------------------------------------------------
-const made5 = [];
 (async () => {
 	console.log("§5 the compressed download");
 	const { compressFolder, FILES, LEVEL } = require(path.join(REMOTE, "compress.js"));
 	const local = require(path.join(ROOT, "scripts", "replica", "pull-local.js"));
-	const dir = (p) => { const d = tmp(p); made5.push(d); return d; };
+	const dir = tmp;
 	const mode = (f) => fs.statSync(f).mode & 0o777;
 
 	// A pull folder as manifest.js leaves it: a real database and a Sheets copy.
@@ -464,9 +476,9 @@ const made5 = [];
 			"set -euo pipefail",
 			'ssh() { bash -c "${!#}"; }',
 			`SSH_OPTS=(-o BatchMode=yes); LOGISX_PROD_SSH=x; TMP_PARENT=${JSON.stringify(parent)}; STAMP=s1`,
-			`INCOMING=${JSON.stringify(path.join(parent, "in"))}; LOCK=${JSON.stringify(path.join(parent, "lock"))}; LOG=/dev/null; REMOTE_STARTED=1`,
+			`ROOT=${JSON.stringify(parent)}; INCOMING=${JSON.stringify(path.join(parent, "in"))}; LOCK=${JSON.stringify(path.join(parent, "lock"))}; LOG=/dev/null; REMOTE_STARTED=1; ${PULL_TRAP_VARS}`,
 			'mkdir -p "$LOCK"',
-			fn("remote_cleanup"), fn("on_exit"),
+			...PULL_TRAP_FNS.map(fn),
 			...traps,
 			body,
 		].join("\n");
@@ -500,7 +512,7 @@ const made5 = [];
 		ok("pull.sh streams compress.js to the server", /^REMOTE_FILES=\(.* compress\.js\)$/m.test(pull));
 		const CHECK = 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); new (require(process.argv[1]))(":memory:").close();';
 		const precheck = pull.indexOf(`"$NODE_BIN" -e '${CHECK}' "$REPO/node_modules/better-sqlite3"`);
-		ok("...checks the local Node's zstd and better-sqlite3 (opening a database, so the binary loads) after the freshness check and before the server does any work", precheck > pull.indexOf("# Fresh enough?") && precheck < pull.search(/^LOCK="/m) && precheck < pull.search(/^remote_program \| ssh /m), precheck);
+		ok("...checks the local Node's zstd and better-sqlite3 (opening a database, so the binary loads) after the freshness check and before the server does any work", precheck > pull.indexOf("# Fresh enough?") && precheck < pull.search(/^LOCK="/m) && precheck < pull.search(/^open_conn$/m) && pull.search(/^open_conn$/m) < pull.search(/^remote_program \| prod_ssh /m), precheck);
 		ok("...and the unpack and verify errors reach the log", /pull-local\.js" unpack "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull) && /pull-local\.js" verify "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull));
 		const pre = spawnSync(process.execPath, ["-e", CHECK, path.join(ROOT, "node_modules", "better-sqlite3")], { encoding: "utf8" });
 		eq("...a check this Node passes", pre.status, 0);
@@ -592,7 +604,4 @@ const made5 = [];
 })().catch((err) => {
 	console.error(err);
 	return 1;
-}).then((code) => {
-	for (const d of made5) fs.rmSync(d, { recursive: true, force: true });
-	process.exit(code);
-});
+}).then((code) => process.exit(code));

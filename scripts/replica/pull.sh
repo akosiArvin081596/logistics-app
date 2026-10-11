@@ -10,9 +10,11 @@
 # The production host is never written in this repository: it comes from
 # LOGISX_PROD_SSH. Without --force a snapshot younger than 24 hours is kept.
 #
-# Production is only read. On the server, one program (scripts/replica/remote/,
-# streamed over ssh's stdin, so nothing is deployed or installed there) works in
-# a temporary folder, /root/logisx-replica-tmp/<stamp>/ (mode 700, umask 077):
+# Production is only read, over one ssh connection the whole pull shares (a key
+# that asks for Touch ID asks once; "the shared ssh connection" below). On the
+# server, one program (scripts/replica/remote/, streamed over ssh's stdin, so
+# nothing is deployed or installed there) works in a temporary folder,
+# /root/logisx-replica-tmp/<stamp>/ (mode 700, umask 077):
 #   1. the live app.db, copied read-only with VACUUM INTO (snapshot.js);
 #   2. in that copy, sessions and stored tokens cleared (scrub.js); the
 #      non-secret settings from .env (settings.js); every tab of the
@@ -31,8 +33,12 @@
 #      and SHA-256s, and the database must pass quick_check, before anything
 #      replaces the clean snapshot (pull-local.js unpack, verify);
 #   6. uploads/, storage/ and evidence-archive/ are copied with rsync (only what
-#      changed, after the first time), with a progress line;
-#   7. the settings are written to ~/LogisX-replica/settings.env (mode 600).
+#      changed, after the first time), with a progress line. They are updated in
+#      place, so a pull that fails from here on says they may be newer than the
+#      clean snapshot. The shared connection is closed after them;
+#   7. the new snapshot replaces the clean one, then its settings are written to
+#      ~/LogisX-replica/settings.env (mode 600). A pull interrupted between the
+#      two renames of that swap puts the previous clean snapshot back.
 # Everything local is mode 700/600. Only names and counts are printed: the
 # progress lines never show a file name.
 set -euo pipefail
@@ -45,6 +51,9 @@ APP="${LOGISX_PROD_APP_DIR:-/var/www/logistics-app}"
 REMOTE_NODE="${LOGISX_PROD_NODE:-/opt/node22/bin/node}"
 TMP_PARENT=/root/logisx-replica-tmp
 MAX_AGE_HOURS=24
+# Seconds the shared ssh connection stays open after its last session ends,
+# when nothing closes it ("the shared ssh connection" below).
+CONN_PERSIST_S=60
 REMOTE_FILES=(replica-rules.js snapshot.js scrub.js settings.js sheets-export.js manifest.js compress.js)
 EOF_MARK=__LOGISX_REPLICA_FILE__
 
@@ -69,10 +78,6 @@ if [ -n "${LOGISX_PROD_SSH_KEY:-}" ]; then
   case "$KEY" in *[!A-Za-z0-9/._@+-]*) die "LOGISX_PROD_SSH_KEY: the path may hold letters, digits and / . _ @ + - only" ;; esac
   SSH_OPTS+=(-i "$KEY" -o IdentitiesOnly=yes)
 fi
-# rsync gets no keepalive options: openrsync can go quiet long enough on a large
-# file for ssh to call the server unresponsive. The server program gets them.
-RSH="ssh ${SSH_OPTS[*]}"
-SSH_OPTS+=(-o ServerAliveInterval=15 -o ServerAliveCountMax=8)
 
 # The copy lives outside the repo and outside Documents (iCloud), never inside a checkout.
 case "$ROOT/" in "$REPO/"*) die "refusing: $ROOT is inside the repository" ;; esac
@@ -116,29 +121,145 @@ case "$STAMP" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) die "could not make a stamp"
 LOG="$ROOT/logs/pull-$STAMP.log"
 INCOMING="$ROOT/clean.incoming"
 REMOTE_STARTED=0
+FILES_STARTED=0
+SETTINGS_DONE=0
+RESTORED=0
+CONN_DIR=""
+CONN_SOCK=""
 START_TS=$(date +%s)
+
+log() { echo "$*" | tee -a "$LOG"; }
+
+# --- the shared ssh connection ----------------------------------------------------------
+# One connection to production carries every ssh and rsync of the pull, so a
+# key that asks for Touch ID asks once. It is OpenSSH's connection
+# sharing, with each of its settings given on the command line so that nothing
+# in ~/.ssh/config changes them:
+#   - it is opened first (ControlMaster=yes, -N -f: no command, in the
+#     background, in a session of its own, so a Ctrl-C reaches the pull and its
+#     steps but not the connection the trap still needs). Every later ssh, and
+#     rsync through -e, joins it (ControlMaster=no) by its socket;
+#   - the socket is in a folder made for this pull (mktemp -d, mode 700) in
+#     ~/LogisX-replica. While the socket exists, programs running as this user
+#     can open sessions to production through it as well, so it exists only
+#     while the pull runs: it is closed (ssh -O exit) and its folder removed
+#     after the last upload, or by the trap once the trap's own server cleanup
+#     has used it;
+#   - a pull killed outright runs no trap: its connection then ends by itself
+#     CONN_PERSIST_S seconds after its last session (ControlPersist), and the
+#     next pull closes and removes any folder one left. 60 s is far above the
+#     longest pause between two steps that use it (decompressing and checking
+#     the database: under 1 s for 392 MiB, measured 2026-10-11);
+#   - each step checks first that the connection is open, and the pull fails,
+#     saying so, when it has closed (the network dropped, or no step ran for
+#     CONN_PERSIST_S seconds). Only the trap's server cleanup then lets ssh make
+#     a new connection (a second Touch ID), so the server's folder still goes;
+#   - keepalive belongs to the connection, so it covers the downloads too:
+#     after 15 s of quiet ssh asks the server for an answer, and it gives up
+#     after 40 unanswered (10 minutes). rsync had no keepalive before, because a
+#     download once went quiet long enough for a shorter limit to end it.
+prod_ssh() {
+  ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o "ControlPath=${CONN_SOCK:-none}" "$@"
+}
+conn_open() {
+  [ -n "$CONN_SOCK" ] && ssh "${SSH_OPTS[@]}" -o "ControlPath=$CONN_SOCK" -O check "$LOGISX_PROD_SSH" >/dev/null 2>&1
+}
+need_conn() {
+  conn_open || die "the shared ssh connection to production closed before $1 (the network dropped, or no step ran for ${CONN_PERSIST_S} s); nothing was replaced. Run the pull again"
+}
+open_conn() {
+  local t0
+  t0=$(date +%s)
+  CONN_DIR="$(mktemp -d "$ROOT/.pull-conn.XXXXXX")" || die "could not create a folder for the shared ssh connection"
+  CONN_SOCK="$CONN_DIR/s"
+  case "$CONN_SOCK" in *[!A-Za-z0-9/._-]*) die "the shared ssh connection's folder: the path to $ROOT may hold letters, digits and / . _ - only" ;; esac
+  # ssh creates the socket at its path plus 17 characters and renames it, and
+  # macOS takes a socket path of at most 103.
+  [ "${#CONN_SOCK}" -le 86 ] || die "the shared ssh connection's socket path would be ${#CONN_SOCK} characters, over the 86 macOS allows: the path to $ROOT is too long"
+  if ! ssh "${SSH_OPTS[@]}" -o ControlMaster=yes -o "ControlPath=$CONN_SOCK" -o "ControlPersist=$CONN_PERSIST_S" \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=40 -N -f "$LOGISX_PROD_SSH" </dev/null >/dev/null 2>"$CONN_DIR/open.err" \
+      || ! conn_open; then
+    "$NODE_BIN" "$HERE/pull-local.js" progress ssh "$LOG" <"$CONN_DIR/open.err" || true
+    die "could not open the ssh connection to production (Touch ID declined or timed out, the key refused, or the host unreachable)"
+  fi
+  rm -f "$CONN_DIR/open.err"
+  RSH="ssh ${SSH_OPTS[*]} -o ControlMaster=no -o ControlPath=$CONN_SOCK"
+  log "shared ssh connection open: $(( $(date +%s) - t0 )) s; every step below uses it"
+}
+close_conn() {
+  [ -n "$CONN_DIR" ] || return 0
+  if [ -n "$CONN_SOCK" ] && ssh "${SSH_OPTS[@]}" -o "ControlPath=$CONN_SOCK" -O exit "$LOGISX_PROD_SSH" >/dev/null 2>&1; then
+    log "shared ssh connection closed"
+  fi
+  rm -rf -- "$CONN_DIR"
+  CONN_DIR=""
+  CONN_SOCK=""
+}
+# A folder a killed pull left (no trap ran): its connection, if still open, is
+# closed and the folder goes. This pull holds the lock, so none is in use.
+sweep_conn_dirs() {
+  local d n=0
+  for d in "$ROOT"/.pull-conn.*; do
+    case "${d##*/}" in *[!A-Za-z0-9._-]*) continue ;; esac
+    if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
+    ssh "${SSH_OPTS[@]}" -o "ControlPath=$d/s" -O exit "$LOGISX_PROD_SSH" >/dev/null 2>&1 || true
+    rm -rf -- "$d"
+    n=$((n + 1))
+  done
+  if [ "$n" != 0 ]; then log "removed $n shared ssh connection folder(s) a stopped pull left"; fi
+}
 
 # Removes the server's temporary folder and confirms it is gone; returns
 # non-zero when it cannot confirm that, which fails the pull.
 remote_cleanup() {
-  if ssh "${SSH_OPTS[@]}" "$LOGISX_PROD_SSH" "rm -rf -- '$TMP_PARENT/$STAMP'; rmdir -- '$TMP_PARENT' 2>/dev/null; test ! -e '$TMP_PARENT/$STAMP'" </dev/null; then
+  if prod_ssh "$LOGISX_PROD_SSH" "rm -rf -- '$TMP_PARENT/$STAMP'; rmdir -- '$TMP_PARENT' 2>/dev/null; test ! -e '$TMP_PARENT/$STAMP'" </dev/null; then
     echo "replica:pull: the server's temporary folder is removed"
     return 0
   fi
-  echo "replica:pull: ERROR: could not confirm the server's temporary folder $TMP_PARENT/$STAMP is removed (the next pull removes it once it is 6 hours old)" >&2
+  echo "replica:pull: ERROR: could not confirm the server's temporary folder $TMP_PARENT/$STAMP is removed (the next pull removes it once it is an hour old)" >&2
   return 1
+}
+new_snapshot_in_place() {
+  grep -qsF "\"$STAMP\"" "$ROOT/clean/manifest.json"
+}
+# What a failed pull left in place, for its last line.
+failure_outcome() {
+  local s
+  if new_snapshot_in_place; then
+    if [ "$SETTINGS_DONE" = 1 ]; then echo "the new clean snapshot and its settings are in place"
+    else echo "the new clean snapshot is in place, but settings.env is still the previous pull's (run the pull again with --force)"; fi
+    return 0
+  fi
+  case "$RESTORED" in
+    1) s="the swap was interrupted, so the previous clean snapshot was put back; settings.env was left as it was" ;;
+    failed) s="clean/ is missing and could not be put back: the previous clean snapshot is in clean.old/" ;;
+    *) s="the clean snapshot and settings.env were left as they were" ;;
+  esac
+  if [ "$FILES_STARTED" = 1 ]; then s="$s; uploads/, storage/ and evidence-archive/ were being updated and may be newer than the snapshot"; fi
+  echo "$s"
 }
 on_exit() {
   rc=$?
-  if [ "$REMOTE_STARTED" = 1 ] && ! remote_cleanup; then rc=1; fi
-  if [ "$rc" != 0 ]; then rm -rf "$INCOMING"; echo "replica:pull: FAILED (exit $rc); the clean snapshot was left as it was. Log: $LOG" >&2; fi
+  if [ "$REMOTE_STARTED" = 1 ]; then
+    conn_open || echo "replica:pull: the shared ssh connection has closed; removing the server's temporary folder takes a new one (Touch ID)" >&2
+    remote_cleanup || rc=1
+  fi
+  close_conn
+  # Interrupted between the swap's two renames: the previous snapshot goes back.
+  if [ ! -e "$ROOT/clean" ] && [ -d "$ROOT/clean.old" ]; then
+    if mv "$ROOT/clean.old" "$ROOT/clean"; then RESTORED=1; else RESTORED=failed; fi
+  fi
+  if [ "$rc" != 0 ]; then
+    rm -rf "$INCOMING"
+    if new_snapshot_in_place; then rm -rf "$ROOT/clean.old"; fi
+    echo "replica:pull: FAILED (exit $rc); $(failure_outcome). Log: $LOG" >&2
+  fi
   rm -rf "$LOCK"
   exit "$rc"
 }
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
-log() { echo "$*" | tee -a "$LOG"; }
 log "replica:pull $STAMP: production $APP over ssh (destination from LOGISX_PROD_SSH)"
 
 # --- 1-2: the server program ---------------------------------------------------
@@ -156,15 +277,18 @@ remote_program() {
   cat "$HERE/remote/finish.sh"
 }
 case "$APP$REMOTE_NODE" in *[!A-Za-z0-9/._-]*) die "LOGISX_PROD_APP_DIR / LOGISX_PROD_NODE: paths may hold letters, digits and / . _ - only" ;; esac
+sweep_conn_dirs
+open_conn
 T0=$(date +%s)
 REMOTE_STARTED=1
-remote_program | ssh "${SSH_OPTS[@]}" "$LOGISX_PROD_SSH" 'bash -s' 2>&1 | tee -a "$LOG"
+remote_program | prod_ssh "$LOGISX_PROD_SSH" 'bash -s' 2>&1 | tee -a "$LOG"
 log "server steps: $(( $(date +%s) - T0 )) s"
 
 # --- 3: download --------------------------------------------------------------------
 # rsync's progress goes through pull-local.js progress: one status line, no
 # file names; its stats and errors reach the log.
 T0=$(date +%s)
+need_conn "the download"
 rm -rf "$INCOMING"
 mkdir -p "$INCOMING"
 chmod 700 "$INCOMING"
@@ -173,6 +297,7 @@ chmod -R go-rwx "$INCOMING"
 log "download: $(( $(date +%s) - T0 )) s"
 
 # --- 4: the server's temporary folder goes now (and in the trap on any failure) --------
+need_conn "removing the server's temporary folder"
 remote_cleanup 2>&1 | tee -a "$LOG"
 REMOTE_STARTED=0
 
@@ -180,20 +305,24 @@ REMOTE_STARTED=0
 "$NODE_BIN" "$HERE/pull-local.js" unpack "$INCOMING" 2>&1 | tee -a "$LOG"
 "$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" 2>&1 | tee -a "$LOG"
 
-# --- 6: uploaded files ---------------------------------------------------------------
+# --- 6: uploaded files, updated in place; then the shared connection closes ------------
 T0=$(date +%s)
 for d in uploads storage evidence-archive; do
+  need_conn "copying $d/"
+  FILES_STARTED=1
   rsync -rlt --delete --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
   chmod -R go-rwx "$ROOT/$d"
 done
 log "files: $(( $(date +%s) - T0 )) s"
+close_conn
 
-# --- 7: settings, and the swap -------------------------------------------------------------
-install -m 600 "$INCOMING/settings.env" "$ROOT/settings.env"
+# --- 7: the swap, then the settings ----------------------------------------------------------
 "$NODE_BIN" "$HERE/pull-local.js" finish "$INCOMING" | tee -a "$LOG"
 rm -rf "$ROOT/clean.old"
 mv "$ROOT/clean" "$ROOT/clean.old"
 mv "$INCOMING" "$ROOT/clean"
+install -m 600 "$ROOT/clean/settings.env" "$ROOT/settings.env"
+SETTINGS_DONE=1
 rm -rf "$ROOT/clean.old"
 chmod -R go-rwx "$ROOT"
 log "replica:pull $STAMP done in $(( $(date +%s) - START_TS )) s; clean snapshot: $ROOT/clean"

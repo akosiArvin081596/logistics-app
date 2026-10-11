@@ -30,8 +30,9 @@ trap 'exit 130' INT TERM HUP
 [ -x "$NODE" ] || { echo "replica-remote: no node at $NODE" >&2; exit 2; }
 # A folder an earlier pull could not remove (its connection dropped before its
 # cleanup ran) goes now: only stamp-named folders directly in $TMP_PARENT,
-# never a symlink, and only when older than 6 hours, so a pull still running
-# elsewhere keeps its own.
+# never a symlink, and only when older than an hour, so a pull still running
+# elsewhere keeps its own (a pull takes about a minute, and the lock on the
+# Mac that runs it lets only one run there at a time).
 if [ -d "$TMP_PARENT" ] && [ ! -L "$TMP_PARENT" ]; then
   stale=0
   while IFS= read -r -d '' old; do
@@ -40,7 +41,7 @@ if [ -d "$TMP_PARENT" ] && [ ! -L "$TMP_PARENT" ]; then
     [ -L "$old" ] && continue
     rm -rf -- "$old"
     stale=$((stale + 1))
-  done < <(find "$TMP_PARENT" -mindepth 1 -maxdepth 1 -type d -mmin +360 -print0)
+  done < <(find "$TMP_PARENT" -mindepth 1 -maxdepth 1 -type d -mmin +60 -print0)
   [ "$stale" = 0 ] || echo "replica-remote: removed $stale stale temporary folder(s) left by earlier pulls"
 fi
 mkdir -p -m 700 -- "$TMP_PARENT"
