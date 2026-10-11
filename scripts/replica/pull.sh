@@ -18,16 +18,23 @@
 #      non-secret settings from .env (settings.js); every tab of the
 #      spreadsheets, read with a spreadsheets.readonly client and the server's
 #      own key, which never leaves the server (sheets-export.js); the manifest
-#      (manifest.js).
+#      (manifest.js); then app.db and sheets.json compressed with zstd level 6,
+#      one thread, each original's size and SHA-256 recorded in compress.json
+#      (compress.js).
 # Then, from here:
-#   3. the folder is downloaded with rsync into ~/LogisX-replica/clean/ (only
-#      what changed, after the first time);
-#   4. the server's temporary folder is deleted, also when any step fails (a
-#      trap here, and one in the server program);
-#   5. uploads/, storage/ and evidence-archive/ are copied with rsync (only what
-#      changed, after the first time);
-#   6. the settings are written to ~/LogisX-replica/settings.env (mode 600).
-# Everything local is mode 700/600. Only names and counts are printed.
+#   3. the folder is downloaded with rsync, whole (compressed data leaves rsync
+#      nothing to match), with a progress line;
+#   4. the server's temporary folder is deleted, compressed files included, also
+#      when any step fails or the pull is interrupted (a trap here, and one in
+#      the server program);
+#   5. the .zst files are decompressed here and must match the server's sizes
+#      and SHA-256s, and the database must pass quick_check, before anything
+#      replaces the clean snapshot (pull-local.js unpack, verify);
+#   6. uploads/, storage/ and evidence-archive/ are copied with rsync (only what
+#      changed, after the first time), with a progress line;
+#   7. the settings are written to ~/LogisX-replica/settings.env (mode 600).
+# Everything local is mode 700/600. Only names and counts are printed: the
+# progress lines never show a file name.
 set -euo pipefail
 umask 077
 
@@ -38,7 +45,7 @@ APP="${LOGISX_PROD_APP_DIR:-/var/www/logistics-app}"
 REMOTE_NODE="${LOGISX_PROD_NODE:-/opt/node22/bin/node}"
 TMP_PARENT=/root/logisx-replica-tmp
 MAX_AGE_HOURS=24
-REMOTE_FILES=(replica-rules.js snapshot.js scrub.js settings.js sheets-export.js manifest.js)
+REMOTE_FILES=(replica-rules.js snapshot.js scrub.js settings.js sheets-export.js manifest.js compress.js)
 EOF_MARK=__LOGISX_REPLICA_FILE__
 
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -86,6 +93,12 @@ if [ "$FORCE" != 1 ] && [ -f "$ROOT/clean/manifest.json" ]; then
     exit 0
   fi
 fi
+
+# The local steps need Node's zstd (22.15+) and the repo's better-sqlite3 built
+# for this Node (its binary loads only when a database opens, so one is opened
+# in memory): checked now, before production does any work.
+"$NODE_BIN" -e 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); new (require(process.argv[1]))(":memory:").close();' "$REPO/node_modules/better-sqlite3" 2>/dev/null \
+  || die "this Node ($("$NODE_BIN" -v)) can't run the local steps: they need zstd (Node 22.15+) and the better-sqlite3 built for the .nvmrc version (fnm use)"
 
 # One pull at a time.
 LOCK="$ROOT/.pull.lock"
@@ -149,13 +162,13 @@ remote_program | ssh "${SSH_OPTS[@]}" "$LOGISX_PROD_SSH" 'bash -s' 2>&1 | tee -a
 log "server steps: $(( $(date +%s) - T0 )) s"
 
 # --- 3: download --------------------------------------------------------------------
+# rsync's progress goes through pull-local.js progress: one status line, no
+# file names; its stats and errors reach the log.
 T0=$(date +%s)
 rm -rf "$INCOMING"
 mkdir -p "$INCOMING"
 chmod 700 "$INCOMING"
-# Seeded with the last snapshot (an APFS clone, no extra space) so rsync sends only what changed.
-if [ -n "$(ls -A "$ROOT/clean" 2>/dev/null)" ]; then cp -cR "$ROOT/clean/." "$INCOMING/" 2>/dev/null || cp -R "$ROOT/clean/." "$INCOMING/"; fi
-rsync -rlt --delete --stats --exclude="*.js" -e "$RSH" "$LOGISX_PROD_SSH:$TMP_PARENT/$STAMP/" "$INCOMING/" 2>&1 | tee -a "$LOG"
+rsync -rlt --delete --stats --progress --exclude="*.js" -e "$RSH" "$LOGISX_PROD_SSH:$TMP_PARENT/$STAMP/" "$INCOMING/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress download "$LOG"
 chmod -R go-rwx "$INCOMING"
 log "download: $(( $(date +%s) - T0 )) s"
 
@@ -163,18 +176,19 @@ log "download: $(( $(date +%s) - T0 )) s"
 remote_cleanup 2>&1 | tee -a "$LOG"
 REMOTE_STARTED=0
 
-# The download is whole before it replaces the clean snapshot.
-"$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" | tee -a "$LOG"
+# --- 5: decompressed and checked against the server's checksums before it replaces the clean snapshot
+"$NODE_BIN" "$HERE/pull-local.js" unpack "$INCOMING" 2>&1 | tee -a "$LOG"
+"$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" 2>&1 | tee -a "$LOG"
 
-# --- 5: uploaded files ---------------------------------------------------------------
+# --- 6: uploaded files ---------------------------------------------------------------
 T0=$(date +%s)
 for d in uploads storage evidence-archive; do
-  rsync -rlt --delete --stats -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | tee -a "$LOG"
+  rsync -rlt --delete --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
   chmod -R go-rwx "$ROOT/$d"
 done
 log "files: $(( $(date +%s) - T0 )) s"
 
-# --- 6: settings, and the swap -------------------------------------------------------------
+# --- 7: settings, and the swap -------------------------------------------------------------
 install -m 600 "$INCOMING/settings.env" "$ROOT/settings.env"
 "$NODE_BIN" "$HERE/pull-local.js" finish "$INCOMING" | tee -a "$LOG"
 rm -rf "$ROOT/clean.old"
