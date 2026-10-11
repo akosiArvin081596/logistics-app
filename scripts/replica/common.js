@@ -96,6 +96,18 @@ function alive(pid) {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// "running", "gone" (no such process) or "unknown" (the system refused to say:
+// EPERM inside a sandbox, or another user's process). Only "gone" proves a
+// recorded server has stopped.
+function pidState(pid) {
+	try {
+		process.kill(pid, 0);
+		return "running";
+	} catch (err) {
+		return err.code === "ESRCH" ? "gone" : "unknown";
+	}
+}
+
 // The task's server, when the recorded pid is still that server: a node
 // server.js whose working directory is the recorded code directory. A reused
 // pid, or another app's server, is never treated as ours.
@@ -157,6 +169,7 @@ module.exports = {
 	cwdOf,
 	commandOf,
 	alive,
+	pidState,
 	runningServer,
 	dirStats,
 	mib,

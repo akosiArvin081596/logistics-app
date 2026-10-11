@@ -13,7 +13,9 @@
 //
 // The server is stopped only by the PID replica:start recorded, and only while
 // that PID is still a `node server.js` whose working directory is the recorded
-// code directory (lsof). Anything else is never signalled.
+// code directory (lsof). Anything else is never signalled. The working copy is
+// deleted only once that PID is shown to be gone: when the system won't say
+// (inside a sandbox), the copy is kept and the command fails.
 "use strict";
 
 const fs = require("fs");
@@ -37,9 +39,17 @@ async function stop() {
 	const server = C.runningServer(task);
 	if (!server) {
 		const r = C.readJson(rec);
+		// Only a pid shown to be gone lets the working copy go. One the system
+		// won't report on (inside a sandbox) may be the server, still serving it.
+		const state = Number.isInteger(r.pid) ? C.pidState(r.pid) : "unknown";
+		if (state === "unknown") {
+			C.fail(`could not check whether the recorded pid ${r.pid} is still running (the system refused to say, ` +
+				"as it does inside a sandbox). Nothing was signalled and the working copy was kept; run " +
+				`npm run replica:clean -- --task ${task} again on its own, outside the sandbox.`);
+		}
 		// A live process that cannot be shown to be this task's server may still
 		// be using the working copy: nothing is signalled and nothing is deleted.
-		if (Number.isInteger(r.pid) && C.alive(r.pid)) {
+		if (state === "running") {
 			C.fail(`the recorded pid ${r.pid} is running but cannot be verified as this task's server ` +
 				`(command: ${C.commandOf(r.pid) || "unknown"}; working directory: ${C.cwdOf(r.pid) || "unknown"}). ` +
 				"Nothing was signalled and the working copy was kept; stop that process yourself if it is the replica, then run this again.");
@@ -47,12 +57,12 @@ async function stop() {
 		return console.log(`replica: the recorded pid ${r.pid} is not running; nothing to stop`);
 	}
 	process.kill(server.pid, "SIGTERM");
-	for (let i = 0; i < 30 && C.alive(server.pid); i++) await sleep(500);
-	if (C.alive(server.pid) && C.runningServer(task)) {
+	for (let i = 0; i < 30 && C.pidState(server.pid) === "running"; i++) await sleep(500);
+	if (C.pidState(server.pid) === "running" && C.runningServer(task)) {
 		process.kill(server.pid, "SIGKILL");
 		await sleep(500);
 	}
-	if (C.alive(server.pid)) C.fail(`pid ${server.pid} is still running; the working copy was kept`);
+	if (C.pidState(server.pid) !== "gone") C.fail(`pid ${server.pid} is still running, or can't be checked; the working copy was kept`);
 	console.log(`replica: stopped pid ${server.pid} (task ${task}, port ${server.port})`);
 }
 

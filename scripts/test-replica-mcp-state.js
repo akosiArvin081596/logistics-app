@@ -21,8 +21,10 @@
 //      as server.js builds it) no longer returns a session revoke ended
 //   §5 the commands, with HOME on a temporary folder: replica:clean ends the
 //      task's sessions first, also when its server can't be verified and the
-//      working copy is kept; replica:login refuses an --mcp-state that names a
-//      second account or no account
+//      working copy is kept; it keeps the copy too when the recorded pid can't
+//      be checked (EPERM) or there is none, and deletes it only for a pid shown
+//      to be gone; replica:login refuses an --mcp-state that names a second
+//      account or no account
 //   §6 server.js, read: Sign out destroys the session in the SQLite store, and
 //      the cookie keeps express-session's default name
 //
@@ -240,6 +242,24 @@ const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 		const unverified = run("clean.js", ["--task", "t2"]);
 		ok("with a server it can't verify, replica:clean stops short and keeps the working copy", unverified.status === 1 && /cannot be verified/.test(unverified.stderr) && fs.existsSync(path.join(root, "work", "t2", "app.db")), { status: unverified.status, err: unverified.stderr.slice(0, 300) });
 		eq("...but the session has already ended in it, and its file is gone", [liveSids(root, "t2"), fs.existsSync(path.join(M.dirOf(root), "heidi.json")), read(M.activeOf(root))], [[], false, M.EMPTY_STATE]);
+
+		// A pid the system won't report on (EPERM, as inside a sandbox): pid 1,
+		// which only root may signal. As root it reads as running, and the
+		// unverified-server refusal above keeps the copy instead.
+		workCopy(root, "t3", ["ivan-1"]);
+		fs.writeFileSync(path.join(root, "work", "t3", "server.json"), JSON.stringify({ pid: 1, port: 3901, codeDir: path.join(home, "nowhere") }));
+		const unknown = run("clean.js", ["--task", "t3"]);
+		const asRoot = process.getuid && process.getuid() === 0;
+		ok("with a pid it can't check, replica:clean keeps the working copy and says why", unknown.status === 1 && fs.existsSync(path.join(root, "work", "t3", "app.db")) && (asRoot ? /cannot be verified/ : /could not check whether the recorded pid 1 is still running/).test(unknown.stderr), { status: unknown.status, err: unknown.stderr.slice(0, 300) });
+		workCopy(root, "t4", ["judy-1"]);
+		fs.writeFileSync(path.join(root, "work", "t4", "server.json"), JSON.stringify({ port: 3901, codeDir: path.join(home, "nowhere") }));
+		const noPid = run("clean.js", ["--task", "t4"]);
+		ok("...and with a record that names no pid", noPid.status === 1 && /could not check/.test(noPid.stderr) && fs.existsSync(path.join(root, "work", "t4", "app.db")), { status: noPid.status, err: noPid.stderr.slice(0, 300) });
+		// A pid above every system's limit is shown to be gone (ESRCH).
+		workCopy(root, "t5", ["kim-1"]);
+		fs.writeFileSync(path.join(root, "work", "t5", "server.json"), JSON.stringify({ pid: 99999999, port: 3901, codeDir: path.join(home, "nowhere") }));
+		const gone = run("clean.js", ["--task", "t5"]);
+		ok("a recorded pid shown to be gone lets the working copy go", gone.status === 0 && /not running; nothing to stop/.test(gone.stdout) && !fs.existsSync(path.join(root, "work", "t5")), { status: gone.status, err: gone.stderr.slice(0, 300) });
 
 		const two = run("login.mjs", ["alice", "--mcp-state", "bob"]);
 		ok("replica:login refuses --mcp-state naming a second account", two.status === 1 && /name two accounts/.test(two.stderr), { status: two.status, err: two.stderr.slice(0, 300) });
