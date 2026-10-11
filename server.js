@@ -41990,7 +41990,7 @@ function queueReceiptOcr(documentId, imageBuffer) {
 // Rate-con drag-and-drop → load creation
 // ============================================================
 // Server-side replica of the n8n "Dispatch v2 (Fixed)" ingestion path (see
-// Dispatch-v2-fixed.json — Validate Load ID · Critical Fields Complete? ·
+// docs/n8n/Dispatch-v2-fixed.json — Validate Load ID · Critical Fields Complete? ·
 // Lookup Existing Row · Row Already Has Payment? · JOB DETAILS ENTRY).
 // ⚠️ Node names drift; the live workflow over the API is the source of truth.
 // This list previously named "Check Existing Load", "RATE UPDATE", "Google
