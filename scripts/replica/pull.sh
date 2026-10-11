@@ -81,6 +81,10 @@ chmod 700 "$ROOT"
 for d in clean logs uploads storage evidence-archive work; do mkdir -p "$ROOT/$d"; chmod 700 "$ROOT/$d"; done
 
 NODE_BIN="$(command -v node)" || die "node is not on PATH (use the .nvmrc version: fnm use)"
+# The local steps need Node's zstd (22.15+) and the repo's better-sqlite3 built
+# for this Node: checked now, before production does any work.
+"$NODE_BIN" -e 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); require(process.argv[1]);' "$REPO/node_modules/better-sqlite3" 2>/dev/null \
+  || die "this Node ($("$NODE_BIN" -v)) can't run the local steps: they need zstd (Node 22.15+) and the better-sqlite3 built for the .nvmrc version (fnm use)"
 
 # Fresh enough?
 if [ "$FORCE" != 1 ] && [ -f "$ROOT/clean/manifest.json" ]; then
@@ -171,8 +175,8 @@ remote_cleanup 2>&1 | tee -a "$LOG"
 REMOTE_STARTED=0
 
 # --- 5: decompressed and checked against the server's checksums before it replaces the clean snapshot
-"$NODE_BIN" "$HERE/pull-local.js" unpack "$INCOMING" | tee -a "$LOG"
-"$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" | tee -a "$LOG"
+"$NODE_BIN" "$HERE/pull-local.js" unpack "$INCOMING" 2>&1 | tee -a "$LOG"
+"$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" 2>&1 | tee -a "$LOG"
 
 # --- 6: uploaded files ---------------------------------------------------------------
 T0=$(date +%s)

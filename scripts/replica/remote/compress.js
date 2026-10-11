@@ -38,12 +38,24 @@ async function compressFile(src, dest) {
 	if (typeof zlib.createZstdCompress !== "function") throw new Error(`this Node (${process.version}) has no zstd; 22.15 or later is needed`);
 	const hash = crypto.createHash("sha256");
 	let bytes = 0;
-	await pipeline(
+	try {
+		await compressStream(src, dest, hash, (n) => { bytes += n; });
+	} catch (err) {
+		// A half-written .zst never stays (begin.sh's trap would remove it too).
+		if (err.code !== "EEXIST") fs.rmSync(dest, { force: true });
+		throw err;
+	}
+	fs.chmodSync(dest, 0o600);
+	return { bytes, sha256: hash.digest("hex"), compressed: fs.statSync(dest).size };
+}
+
+function compressStream(src, dest, hash, count) {
+	return pipeline(
 		fs.createReadStream(src),
 		async function* (source) {
 			for await (const chunk of source) {
 				hash.update(chunk);
-				bytes += chunk.length;
+				count(chunk.length);
 				yield chunk;
 			}
 		},
@@ -56,8 +68,6 @@ async function compressFile(src, dest) {
 		}),
 		fs.createWriteStream(dest, { flags: "wx", mode: 0o600 }),
 	);
-	fs.chmodSync(dest, 0o600);
-	return { bytes, sha256: hash.digest("hex"), compressed: fs.statSync(dest).size };
 }
 
 async function compressFolder(dir) {
@@ -66,6 +76,7 @@ async function compressFolder(dir) {
 		const src = path.join(dir, name);
 		const dest = `${src}.zst`;
 		if (!fs.existsSync(src)) throw new Error(`${name} is missing`);
+		if (!fs.lstatSync(src).isFile()) throw new Error(`${name} is not a regular file`);
 		if (fs.existsSync(dest)) throw new Error(`${name}.zst already exists`);
 		summary.files.push({ name, ...(await compressFile(src, dest)) });
 	}

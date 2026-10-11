@@ -29,8 +29,34 @@ const { FILES: COMPRESSED_FILES } = require("./remote/compress");
 // rsync's --progress line: bytes so far, percent, rate, time left (GNU rsync
 // and openrsync print the same shape; GNU puts commas in the bytes).
 const PROGRESS = /^\s*([\d,]+)\s+(\d{1,3})%\s+(\S+\/s)\s+(\d+:\d{2}:\d{2})/;
-// Lines passed through as they are: --stats, and rsync's own errors.
-const PASS = /^(Number of |Total |Literal data|Matched data|Unmatched data|File list |sent \d|total size is|(open)?rsync( error| warning)?:)/;
+// --stats lines, whole: each ends in a number (openrsync and GNU rsync). They
+// count only from "Number of files:" on, which rsync prints after the last
+// file name.
+const STATS_START = /^Number of files: [\d,]+( \(.*\))?$/;
+const STATS = [
+	/^Number of [a-z ]+: [\d,]+( \([a-z]+: [\d,]+(, [a-z]+: [\d,]+)*\))?$/,
+	/^Total [a-z ]+: [\d,.]+( [A-Za-z]+)?$/,
+	/^(Literal|Matched|Unmatched) data: [\d,.]+( [A-Za-z]+)?$/,
+	/^File list [a-z ]+: [\d,.]+( [A-Za-z]+)?$/,
+	/^sent [\d,.]+ bytes +received [\d,.]+ bytes +[\d,.]+ bytes\/sec$/,
+	/^total size is [\d,.]+ +speedup is [\d,.]+$/,
+];
+// rsync's and ssh's own errors (openrsync prints "rsync(<pid>): error: …").
+// They are shown and logged through redact(), as a failed pull's reason.
+const ERROR = /^((open)?rsync(\(\d+\))?( error| warning)?: |ssh: |kex_exchange_identification: |sign_and_send_pubkey: |client_loop: |Received disconnect |Disconnected from |Connection (closed|reset|timed out) |Host key verification failed|Permission denied \()/;
+
+// An error line without the names in it: quoted text, paths, addresses and
+// hosts become placeholders, and in openrsync's "error: <path>: <reason>" only
+// the reason stays.
+function redact(line) {
+	return line
+		.replace(/^(rsync\(\d+\): (?:error|warning): ).*: ([^:]+)$/, "$1<…>: $2")
+		.replace(/"[^"]*"|'[^']*'/g, '"<…>"')
+		.replace(/(^|[\s(=])\/[^\s:"')]+/g, "$1<path>")
+		.replace(/\b\d{1,3}(\.\d{1,3}){3}\b|\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/gi, "<address>")
+		.replace(/\bhost (?!<)\S+/g, "host <host>")
+		.replace(/\b(from|by) (?!<)(?=[\w.-]*[.\d])[\w.-]+/g, "$1 <host>");
+}
 
 // A file's last progress line ends "(xfer#N, to-check=…)" (GNU: "(xfr#N, …)").
 const FILE_DONE = /\(xfe?r#\d+/;
@@ -38,9 +64,10 @@ const FILE_DONE = /\(xfe?r#\d+/;
 // Shows rsync --progress output as one status line: the bytes so far over all
 // files, the rate, and the current file's percent and time left. On a terminal
 // the line is redrawn in place; elsewhere it is printed at most once per
-// `every` ms, and its latest state once more before the stats. Any other line
-// is a file name: never shown, never logged (the uploads folders' names can be
-// personal).
+// `every` ms, and its latest state once more before the stats. rsync's stats
+// pass as they are, and its and ssh's errors pass redacted, to the screen and
+// the log. Any other line is a file name: never shown, never logged (the
+// uploads folders' names can be personal).
 function progressFilter({ label, tty, write, log, now = Date.now, every = 30000 }) {
 	let rest = "";
 	let done = 0;
@@ -48,6 +75,7 @@ function progressFilter({ label, tty, write, log, now = Date.now, every = 30000 
 	let shownAt = null;
 	let unshown = false;
 	let open = false;
+	let inStats = false;
 	const status = () => `${label}: ${mib(done + latest.bytes)} so far, ${latest.rate}` +
 		(latest.pct < 100 ? `; this file ${latest.pct}%, ${latest.eta} left` : "");
 	const closeLine = () => {
@@ -78,10 +106,15 @@ function progressFilter({ label, tty, write, log, now = Date.now, every = 30000 
 			}
 			return;
 		}
-		if (PASS.test(line.trimStart())) {
+		const bare = line.trim();
+		if (STATS_START.test(bare)) inStats = true;
+		let pass = null;
+		if (inStats && STATS.some((re) => re.test(bare))) pass = bare;
+		else if (ERROR.test(bare)) pass = redact(bare);
+		if (pass !== null) {
 			closeLine();
-			write(`${line.trimStart()}\n`);
-			log(line.trimStart());
+			write(`${pass}\n`);
+			log(pass);
 		}
 	};
 	return {
@@ -112,7 +145,9 @@ function runProgress(label, logFile) {
 }
 
 // Decompresses `src` into `dest` (created, never overwritten) and returns the
-// result's size and SHA-256. zstd checks the frame's own checksum on the way.
+// result's size and SHA-256. zstd checks the frame's checksum only when the
+// frame is whole: a cut-off file can decompress short without an error, so the
+// size and SHA-256 comparison in unpack() is what decides.
 async function decompressFile(src, dest) {
 	if (typeof zlib.createZstdDecompress !== "function") throw new Error(`this Node (${process.version}) has no zstd; use the .nvmrc version (fnm use)`);
 	const hash = crypto.createHash("sha256");
@@ -139,7 +174,9 @@ async function decompressFile(src, dest) {
 
 // Each compressed file must arrive at the size the server made it, and
 // decompress to the size and SHA-256 the server recorded for the original.
-// Anything else fails the pull before the clean snapshot is touched.
+// Anything else fails the pull before the clean snapshot is touched, and
+// removes every file this run decompressed. The .zst files go only once every
+// file has matched.
 async function unpack(incoming, say = console.log) {
 	const summaryFile = path.join(incoming, "compress.json");
 	if (!fs.existsSync(summaryFile)) throw new Error("the download has no compress.json");
@@ -149,23 +186,32 @@ async function unpack(incoming, say = console.log) {
 	if (summary.codec !== "zstd" || JSON.stringify(names) !== JSON.stringify([...COMPRESSED_FILES].sort())) {
 		throw new Error("compress.json does not list the files the server compresses");
 	}
+	const written = [];
+	try {
+		for (const f of files) {
+			const zst = path.join(incoming, `${f.name}.zst`);
+			const out = path.join(incoming, f.name);
+			if (!fs.existsSync(zst)) throw new Error(`the download has no ${f.name}.zst`);
+			if (fs.existsSync(out)) throw new Error(`${f.name} is already in the download folder; nothing was overwritten`);
+			const size = fs.statSync(zst).size;
+			if (size !== f.compressed) throw new Error(`${f.name}.zst is ${size} bytes, the server made ${f.compressed}: the download is incomplete`);
+			let got;
+			try {
+				got = await decompressFile(zst, out);
+			} catch (err) {
+				throw new Error(`${f.name}.zst does not decompress (${err.message}): the download is damaged`);
+			}
+			written.push(out);
+			if (got.bytes !== f.bytes || got.sha256 !== f.sha256) {
+				throw new Error(`${f.name} decompressed to ${got.bytes} bytes with SHA-256 ${got.sha256}; the server's was ${f.bytes} bytes, ${f.sha256}`);
+			}
+		}
+	} catch (err) {
+		for (const out of written) fs.rmSync(out, { force: true });
+		throw err;
+	}
 	for (const f of files) {
-		const zst = path.join(incoming, `${f.name}.zst`);
-		const out = path.join(incoming, f.name);
-		if (!fs.existsSync(zst)) throw new Error(`the download has no ${f.name}.zst`);
-		const size = fs.statSync(zst).size;
-		if (size !== f.compressed) throw new Error(`${f.name}.zst is ${size} bytes, the server made ${f.compressed}: the download is incomplete`);
-		let got;
-		try {
-			got = await decompressFile(zst, out);
-		} catch (err) {
-			throw new Error(`${f.name}.zst does not decompress (${err.message}): the download is damaged`);
-		}
-		if (got.bytes !== f.bytes || got.sha256 !== f.sha256) {
-			fs.rmSync(out, { force: true });
-			throw new Error(`${f.name} decompressed to ${got.bytes} bytes with SHA-256 ${got.sha256}; the server's was ${f.bytes} bytes, ${f.sha256}`);
-		}
-		fs.rmSync(zst);
+		fs.rmSync(path.join(incoming, `${f.name}.zst`));
 		say(`unpacked ${f.name}: ${mib(f.compressed)} downloaded, ${mib(f.bytes)} decompressed, SHA-256 matches the server's`);
 	}
 }

@@ -328,12 +328,12 @@ console.log("§4 stamps, tasks and the pull scripts");
 }
 
 // ---- §5 the compressed download -------------------------------------------------------------
+const made5 = [];
 (async () => {
 	console.log("§5 the compressed download");
 	const { compressFolder, FILES, LEVEL } = require(path.join(REMOTE, "compress.js"));
 	const local = require(path.join(ROOT, "scripts", "replica", "pull-local.js"));
-	const made = [];
-	const dir = (p) => { const d = tmp(p); made.push(d); return d; };
+	const dir = (p) => { const d = tmp(p); made5.push(d); return d; };
 	const mode = (f) => fs.statSync(f).mode & 0o777;
 
 	// A pull folder as manifest.js leaves it: a real database and a Sheets copy.
@@ -377,14 +377,24 @@ console.log("§4 stamps, tasks and the pull scripts");
 		ok("...and says each one matched", said.length === 2 && said.every((s) => /SHA-256 matches the server's/.test(s)), said);
 
 		// Each refusal starts from a fresh copy of the server's folder.
-		const refused = async (name, damage, re) => {
+		const refused = async (name, damage, re, kept = {}) => {
 			const inc = dir("replica-bad-");
 			for (const f of fs.readdirSync(d)) fs.copyFileSync(path.join(d, f), path.join(inc, f));
 			damage(inc);
 			let e = null;
 			try { await local.unpack(inc, () => {}); } catch (x) { e = x; }
 			ok(`unpack refuses ${name}`, e && re.test(e.message), e ? e.message : "no error");
-			ok("...and leaves no decompressed database behind", !fs.existsSync(path.join(inc, "app.db")));
+			const left = FILES.map((f) => fs.existsSync(path.join(inc, f)) ? fs.readFileSync(path.join(inc, f), "utf8") === kept[f] ? "kept" : "LEFT" : "none");
+			eq("...and leaves no file it decompressed behind", left, FILES.map((f) => (f in kept ? "kept" : "none")));
+		};
+		// Cuts a .zst short and says the server made it that size, so only the
+		// decompressed size and SHA-256 can catch it (zstd may end without an error).
+		const cutAndAgree = (inc, name) => {
+			const f = path.join(inc, `${name}.zst`);
+			fs.truncateSync(f, Math.floor(fs.statSync(f).size / 2));
+			const c = JSON.parse(fs.readFileSync(path.join(inc, "compress.json"), "utf8"));
+			c.files.find((x) => x.name === name).compressed = fs.statSync(f).size;
+			fs.writeFileSync(path.join(inc, "compress.json"), JSON.stringify(c));
 		};
 		await refused("a short download", (inc) => fs.truncateSync(path.join(inc, "app.db.zst"), 1000), /incomplete/);
 		await refused("a damaged one (same size, one byte changed)", (inc) => {
@@ -406,6 +416,16 @@ console.log("§4 stamps, tasks and the pull scripts");
 			c.files[0].name = "../app.db";
 			fs.writeFileSync(f, JSON.stringify(c));
 		}, /does not list the files/);
+		await refused("a cut-off file whose compressed size was made to agree", (inc) => cutAndAgree(inc, "app.db"), /the server's was|damaged/);
+		await refused("a damaged second file, after the first matched", (inc) => cutAndAgree(inc, "sheets.json"), /sheets\.json.*(the server's was|damaged)/);
+		await refused("a file already in the download folder, without touching it", (inc) => fs.writeFileSync(path.join(inc, "app.db"), "older"), /app\.db is already in the download folder/, { "app.db": "older" });
+		{
+			const inc = dir("replica-bad-");
+			for (const f of fs.readdirSync(d)) fs.copyFileSync(path.join(d, f), path.join(inc, f));
+			cutAndAgree(inc, "sheets.json");
+			try { await local.unpack(inc, () => {}); } catch { /* refused above */ }
+			ok("...and the .zst files stay until every file has matched", FILES.every((f) => fs.existsSync(path.join(inc, `${f}.zst`))));
+		}
 	}
 	{
 		const { parent, stamp, d } = pullFolder();
@@ -417,6 +437,13 @@ console.log("§4 stamps, tasks and the pull scripts");
 		let e = null;
 		try { await compressFolder(path.join(parent, "no-such-stamp")); } catch (x) { e = x; }
 		ok("...and a folder with nothing to compress", e && /app\.db is missing/.test(e.message));
+	}
+	{
+		const { parent, stamp, d } = pullFolder();
+		fs.renameSync(path.join(d, "app.db"), path.join(d, "real.db"));
+		fs.symlinkSync(path.join(d, "real.db"), path.join(d, "app.db"));
+		const run = spawnSync(process.execPath, [path.join(REMOTE, "compress.js"), `--stamp=${stamp}`, `--parent=${parent}`], { encoding: "utf8" });
+		ok("compress.js refuses an app.db that isn't a regular file (a link)", run.status === 1 && /not a regular file/.test(run.stderr) && !fs.existsSync(path.join(d, "app.db.zst")), run.stderr);
 	}
 
 	// The server's folder goes, compressed files included, on success (the
@@ -471,6 +498,11 @@ console.log("§4 stamps, tasks and the pull scripts");
 		ok("every rsync shows progress through pull-local.js progress, never straight to the log", rsyncLines.length === 2 && rsyncLines.every((l) => / --progress /.test(l) && /\| "\$NODE_BIN" "\$HERE\/pull-local\.js" progress /.test(l) && !/tee/.test(l)), rsyncLines);
 		ok("the download is whole: no seed from the last snapshot", !/cp -c?R "\$ROOT\/clean\/\."/.test(pull));
 		ok("pull.sh streams compress.js to the server", /^REMOTE_FILES=\(.* compress\.js\)$/m.test(pull));
+		const precheck = pull.search(/createZstdDecompress !== "function"\) process\.exit\(3\); require\(process\.argv\[1\]\);' "\$REPO\/node_modules\/better-sqlite3"/);
+		ok("...checks the local Node's zstd and better-sqlite3 before the server does any work", precheck > 0 && precheck < pull.search(/^remote_program \| ssh /m) && precheck < pull.search(/^LOCK="/m));
+		ok("...and the unpack and verify errors reach the log", /pull-local\.js" unpack "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull) && /pull-local\.js" verify "\$INCOMING" 2>&1 \| tee -a "\$LOG"/.test(pull));
+		const pre = spawnSync(process.execPath, ["-e", 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); require(process.argv[1]);', path.join(ROOT, "node_modules", "better-sqlite3")], { encoding: "utf8" });
+		eq("...a check this Node passes", pre.status, 0);
 		const at = (re) => pull.search(re);
 		const order = [/^remote_cleanup 2>&1 \| tee -a "\$LOG"$/m, /pull-local\.js" unpack "\$INCOMING"/, /pull-local\.js" verify "\$INCOMING"/, /^mv "\$INCOMING" "\$ROOT\/clean"$/m].map(at);
 		ok("after the download: the server's folder goes, then unpack, then verify, then the swap", order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), order);
@@ -485,11 +517,20 @@ console.log("§4 stamps, tasks and the pull scripts");
 			"     1081344  36%    1.03MB/s    00:00:01\r",
 			"     2097152  70%  992.00KB/s    00:00:00\r",
 			"     3000000 100%    1.42MB/s    00:00:02 (xfer#1, to-check=1/3)\n",
+			// A top-level name shaped like a stats line, and openrsync's own error about it.
+			"Total jane doe.pdf\n",
+			"rsync(40131): error: uploads/jane doe.pdf: open: Permission denied\n",
 			"driver-jane-doe-license.jpg\n",
 			"           3 100%   13.82KB/s    00:00:00 (xfer#2, to-check=2/3)\n",
 			"Number of files: 3\nNumber of files transferred: 2\nTotal file size: 3000003 B\n",
 			"sent 3000548 bytes  received 64 bytes  2467203200000 bytes/sec\ntotal size is 3000003  speedup is 1.00\n",
 			"rsync: connection unexpectedly closed (0 bytes received so far) [receiver]\n",
+			// openrsync's, GNU rsync's and ssh's errors, as a failed download prints them.
+			"rsync(40131): error: unexpected end of file\n",
+			'rsync: [sender] send_files failed to open "/var/www/app/uploads/jane doe.pdf": Permission denied (13)\n',
+			"ssh: connect to host box.example port 22: Connection refused\n",
+			"Connection closed by 192.0.2.10 port 22\n",
+			"Received disconnect from 2001:db8:0:0:0:0:0:1 port 22:2: Too many authentication failures\n",
 		].join("");
 		const run = (tty, chunks) => {
 			let clock = 0;
@@ -504,10 +545,21 @@ console.log("§4 stamps, tasks and the pull scripts");
 		for (const tty of [false, true]) {
 			const { out, logged } = run(tty, pieces(SAMPLE, 37));
 			const where = tty ? "on a terminal" : "off a terminal";
-			ok(`the progress filter never shows a file name (${where})`, !/jane|doe|app\.db\.zst|\.jpg/.test(out), out);
-			ok(`...nor logs one, and the log has no progress lines (${where})`, !/jane|doe|\.jpg|app\.db\.zst|%|\r/.test(logged.join("\n")), logged);
+			ok(`the progress filter never shows a file name, a path or the host (${where})`, !/jane|doe|app\.db\.zst|\.jpg|\.pdf|\/var\/www|box\.example|192\.0\.2|2001:db8/.test(out), out);
+			ok(`...nor logs one, and the log has no progress lines (${where})`, !/jane|doe|\.jpg|\.pdf|app\.db\.zst|\/var\/www|box\.example|192\.0\.2|2001:db8|%|\r/.test(logged.join("\n")), logged);
 			ok(`...shows bytes, percent, rate and time left (${where})`, /download: 1\.0 MiB so far, 1\.03MB\/s; this file 36%, 00:00:01 left/.test(out), out);
-			eq(`...logs rsync's stats and errors, as they are (${where})`, logged, ["Number of files: 3", "Number of files transferred: 2", "Total file size: 3000003 B", "sent 3000548 bytes  received 64 bytes  2467203200000 bytes/sec", "total size is 3000003  speedup is 1.00", "rsync: connection unexpectedly closed (0 bytes received so far) [receiver]"]);
+			eq(`...logs rsync's stats as they are, and its and ssh's errors with the names taken out (${where})`, logged, [
+				"rsync(40131): error: <…>: Permission denied",
+				"Number of files: 3", "Number of files transferred: 2", "Total file size: 3000003 B",
+				"sent 3000548 bytes  received 64 bytes  2467203200000 bytes/sec", "total size is 3000003  speedup is 1.00",
+				"rsync: connection unexpectedly closed (0 bytes received so far) [receiver]",
+				"rsync(40131): error: unexpected end of file",
+				'rsync: [sender] send_files failed to open "<…>": Permission denied (13)',
+				"ssh: connect to host <host> port 22: Connection refused",
+				"Connection closed by <address> port 22",
+				"Received disconnect from <address> port 22:2: Too many authentication failures",
+			]);
+			ok(`...and shows those errors too (${where})`, /rsync\(40131\): error: unexpected end of file\nrsync: \[sender\]/.test(out) && /ssh: connect to host <host> port 22: Connection refused/.test(out), out);
 		}
 		const total = run(false, [SAMPLE]).out;
 		ok("...counts the bytes so far over every file, and prints the latest before the stats", /download: 2\.9 MiB so far, 13\.82KB\/s\nNumber of files: 3/.test(total), total);
@@ -520,10 +572,12 @@ console.log("§4 stamps, tasks and the pull scripts");
 		ok("...and reads GNU rsync's commas", /download: 62\.5 MiB so far, 10\.00MB\/s\n/.test(gnu), gnu);
 	}
 
-	for (const d of made) fs.rmSync(d, { recursive: true, force: true });
 	console.log(failures ? `\n${failures} FAILED` : "\nall passed");
-	process.exit(failures ? 1 : 0);
+	return failures ? 1 : 0;
 })().catch((err) => {
 	console.error(err);
-	process.exit(1);
+	return 1;
+}).then((code) => {
+	for (const d of made5) fs.rmSync(d, { recursive: true, force: true });
+	process.exit(code);
 });
