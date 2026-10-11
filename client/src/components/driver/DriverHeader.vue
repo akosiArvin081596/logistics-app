@@ -35,6 +35,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import ChangePasswordModal from './ChangePasswordModal.vue'
 import { useApi } from '../../composables/useApi'
+import { useAuthStore } from '../../stores/auth'
 
 defineProps({
   driverName: { type: String, default: '' },
@@ -50,8 +51,11 @@ const showPwModal = ref(false)
    A Driver session resolves its own truck server-side, so this sends NO
    params — see the scoping note on GET /api/fuel/range. Polled slowly: the
    endpoint is local SQLite only (no Google/Places call), and fuel does not
-   move fast enough to justify anything tighter. */
+   move fast enough to justify anything tighter. Only a Driver session asks:
+   anyone else has to name a driver or vehicle and this header has neither,
+   so a Super Admin opening /driver would get a 400 on every poll. */
 const api = useApi()
+const auth = useAuthStore()
 const range = ref(null)
 let timer = null
 
@@ -65,6 +69,7 @@ async function loadRange() {
   }
 }
 onMounted(() => {
+  if (!auth.isDriver) return
   loadRange()
   timer = setInterval(loadRange, 120000)
 })
