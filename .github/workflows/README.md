@@ -10,7 +10,7 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 | Touches production | never | **every push to `main`, once its staging job passed** (deploy, staging smoke, CI on main) | only for a deploy that never landed. Per commit: at most one re-run of main's Deploy run, when its staging job never reached the VPS (production then follows staging as usual), then at most one heal, only once that commit has passed staging, with the same auto-rollback | never — strictly read-only |
 | Self-heals | n/a | rolls back on failed verification | yes: per commit, one re-run of the Deploy run, then possibly one heal | **no, by design** |
 
-A fifth, `pr-checks.yml`, runs beside CI on every PR into `main` (opened, edited, pushed, reopened) and never touches the box: **PR title** (a squash merge's subject is the PR title, so it must be a conventional commit) and **dependency review** (fails a PR that adds a dependency version with a known high or critical vulnerability). Every action in every workflow is pinned by commit SHA; Dependabot's `github-actions` entry moves the pins, and `scripts/test-release-gate.js` §4 fails on an unpinned one.
+A fifth, `pr-checks.yml`, runs beside CI on every PR into `main` (opened, edited, pushed, reopened) and never touches the box: **PR title** (a squash merge's subject is the PR title, so it must be a conventional commit, or GitHub's own `Revert "..."` title) and **dependency review** (fails a PR that adds a runtime or development dependency version with a known high or critical vulnerability). Every action in every workflow is pinned by commit SHA; Dependabot's `github-actions` entry moves the pins, and `scripts/test-release-gate.js` §4 fails on an unpinned one.
 
 ---
 

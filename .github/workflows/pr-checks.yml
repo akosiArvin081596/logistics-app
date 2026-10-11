@@ -1,12 +1,15 @@
 name: PR checks
 
 # Two quick checks beside CI on every PR into main:
-# - PR title: a squash merge's commit subject is the PR title, so the title
-#   must be a conventional commit (CLAUDE.md lists the types). The title
-#   reaches the shell through env: only, and is never printed.
+# - PR title: a squash merge's commit subject is the PR title (the repository's
+#   squash setting), so the title must be a conventional commit (CLAUDE.md
+#   lists the types), or GitHub's own `Revert "..."` title for a revert. The
+#   title reaches the shell through env: only; the script never echoes it.
 # - Dependency review: fails a PR that adds a dependency version with a known
-#   high or critical vulnerability (GitHub's dependency graph, free on public
-#   repos). It reads the PR through the API, so it needs no checkout.
+#   high or critical vulnerability, in runtime and development dependencies
+#   alike (the client's build tools run on the VPS at every deploy). GitHub's
+#   dependency graph, free on public repos; it reads the PR through the API,
+#   so it needs no checkout.
 # scripts/test-release-gate.js §4 pins both, and that every action is pinned
 # by commit SHA.
 on:
@@ -31,7 +34,7 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|refactor|docs|test|chore|perf|ci|build|revert|style)(\([a-z0-9._/,-]+\))?!?: [^ ]'; then
+          if printf '%s' "$TITLE" | grep -Eq '^((feat|fix|refactor|docs|test|chore|perf|ci|build|revert|style)(\([a-z0-9._/,-]+\))?!?: [^ ]|Revert ")'; then
             echo "The PR title is a conventional commit."
           else
             echo "::error::The PR title must be a conventional commit, for example \"fix(invoices): keep the order number\". Types: feat fix refactor docs test chore perf ci build revert style."
@@ -46,3 +49,4 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown

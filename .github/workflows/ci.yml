@@ -68,10 +68,9 @@ jobs:
       # of breakage that otherwise only shows up mid-deploy on the VPS.
       #
       # The root `npm ci`'s `postinstall` already runs `npm ci` in client/ (it
-      # picks `npm ci` there whenever the root ran `npm ci`). The explicit
-      # client step below repeats it as a named check of the client lockfile,
-      # so a client lockfile failure shows under its own step. The duplicate
-      # install is a few seconds.
+      # picks `npm ci` there whenever the root ran `npm ci`), so a client
+      # lockfile out of sync fails the root step. The explicit client step
+      # below repeats the install; it costs a few seconds.
       - name: Install root dependencies
         run: npm ci --no-audit --no-fund
 

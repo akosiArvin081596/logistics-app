@@ -618,14 +618,15 @@ function checkLocal() {
 	const ere = /grep -Eq '([^']+)'/.exec(pr);
 	const titleRe = ere && new RegExp(ere[1]);
 	const good = ["fix(geocode,investor): rate-limit the public routes", "chore(deps): Bump the root group", "feat!: drop the legacy pages",
-		"style: re-indent a comment", "perf(replica): compress the pull", "ci: pin every action"];
+		"style: re-indent a comment", "perf(replica): compress the pull", "ci: pin every action", 'Revert "fix: drop the legacy pages"'];
 	const bad = ["Limit image types before decoding", "Fix: capitalised type", "fix:no space", "fix(x) missing colon", "fix: ", "wip: something", "fix(Scope): upper case"];
 	ok(!!titleRe && good.every((t) => titleRe.test(t)) && bad.every((t) => !titleRe.test(t)),
 		`§4 pr-checks.yml accepts conventional titles and refuses the rest (fails: ${titleRe ? [...good.filter((t) => !titleRe.test(t)), ...bad.filter((t) => titleRe.test(t))].join(" | ") || "none" : "no pattern"})`);
 	ok(/TITLE: \$\{\{ github\.event\.pull_request\.title \}\}/.test(pr) && /types: \[opened, edited, synchronize, reopened\]/.test(pr)
 		&& !/pull_request_target/.test(pr), "§4 pr-checks.yml reads the title through env:, re-checks it on edit, and runs on pull_request only");
-	ok(/uses: actions\/dependency-review-action@[0-9a-f]{40}\b/.test(pr) && /fail-on-severity: high/.test(pr),
-		"§4 pr-checks.yml runs dependency review, failing on high or critical");
+	ok(/uses: actions\/dependency-review-action@[0-9a-f]{40}\b/.test(pr) && /fail-on-severity: high/.test(pr)
+		&& /fail-on-scopes: runtime, development, unknown/.test(pr),
+		"§4 pr-checks.yml runs dependency review, failing on high or critical in runtime and development dependencies");
 }
 
 // ─────────────────────────────────────────── §6 the manual-dispatch gate

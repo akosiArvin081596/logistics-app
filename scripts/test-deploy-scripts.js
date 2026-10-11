@@ -622,26 +622,30 @@ function probePins() {
 }
 
 // ─────────────────────────────── §16 the install leaves the lockfiles alone
-// The root install's postinstall runs `npm install` in client/, and the box's
-// npm rewrote client/package-lock.json on every deploy, leaving the server
+// The root install's postinstall ran a plain `npm install` in client/, and the
+// box's npm rewrote client/package-lock.json on every deploy, leaving the server
 // checkouts modified. Each script's install line is run for real with the npm
 // on PATH, offline, in a root + client/ layout whose client lockfile is valid
-// but not in npm's own layout, so any write to it shows. The bare command is
-// the control: it must rewrite the file, or this check proves nothing. The
-// repo's own postinstall (package.json) is then run for real under a bare
-// root `npm install` and a root `npm ci`: neither may rewrite the client
-// lockfile, and only the `npm ci` one may clear client/node_modules (the mark
-// of a nested `npm ci`). The installs run side by side, each in a directory of
-// its own.
+// but not in npm's own layout, so any write to it shows. The bare command with
+// that plain postinstall is the control: it must rewrite the file, or this
+// check proves nothing. The repo's own postinstall (package.json) is then run
+// for real under a root `npm install`, `npm ci` and `npm cit`: none may rewrite
+// the client lockfile, and only `npm ci`/`npm cit` may clear client/node_modules
+// (the mark of a nested `npm ci`), except when client/node_modules is a link
+// (a worktree sharing the main checkout's): the folder it points to must keep
+// its contents. The installs run side by side, each in a directory of its own.
 async function installPins() {
 	const INSTALL = /^\s*(?:npm_config_\w+=\S+\s+)*npm\s+(?:install|i|ci)\b/;
 	const PLAIN_POSTINSTALL = "cd client && npm install --no-audit --no-fund";
 	const REPO_POSTINSTALL = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).scripts.postinstall;
-	const lockAfter = (cmd, postinstall = PLAIN_POSTINSTALL) => new Promise((resolve) => {
+	const lockAfter = (cmd, postinstall = PLAIN_POSTINSTALL, { linked = false } = {}) => new Promise((resolve) => {
 		const d = fs.mkdtempSync(path.join(T, "install-"));
-		fs.mkdirSync(path.join(d, "client", "node_modules"), { recursive: true });
-		fs.writeFileSync(path.join(d, "client", "node_modules", ".mark"), "");
-		fs.writeFileSync(path.join(d, "package.json"), JSON.stringify({ name: "root", version: "1.0.0", scripts: { postinstall } }));
+		const modules = linked ? path.join(d, "shared-client-modules") : path.join(d, "client", "node_modules");
+		fs.mkdirSync(modules, { recursive: true });
+		fs.mkdirSync(path.join(d, "client"), { recursive: true });
+		if (linked) fs.symlinkSync(modules, path.join(d, "client", "node_modules"));
+		fs.writeFileSync(path.join(modules, ".mark"), "");
+		fs.writeFileSync(path.join(d, "package.json"), JSON.stringify({ name: "root", version: "1.0.0", scripts: { postinstall, test: "true" } }));
 		fs.writeFileSync(path.join(d, "package-lock.json"),
 			JSON.stringify({ name: "root", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "root", version: "1.0.0" } } }));
 		fs.writeFileSync(path.join(d, "client", "package.json"), JSON.stringify({ name: "client", version: "1.0.0" }));
@@ -653,17 +657,23 @@ async function installPins() {
 		}).on("close", (code) => resolve({
 			code,
 			rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock,
-			cleared: !fs.existsSync(path.join(d, "client", "node_modules", ".mark")),
+			cleared: !fs.existsSync(path.join(modules, ".mark")),
 		}));
 	});
 	const scripts = [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]].map(([name, text]) =>
 		[name, text.split("\n").filter((l) => !/^\s*#/.test(l) && INSTALL.test(l))]);
-	const [control, repoInstall, repoCi, ...runs] = await Promise.all([
+	const [control, repoInstall, repoCi, repoCit, repoCiLinked, ...runs] = await Promise.all([
 		lockAfter("npm install --silent --no-audit --no-fund"),
 		lockAfter("npm install --silent --no-audit --no-fund", REPO_POSTINSTALL),
 		lockAfter("npm ci --silent --no-audit --no-fund", REPO_POSTINSTALL),
+		lockAfter("npm cit --silent --no-audit --no-fund", REPO_POSTINSTALL),
+		lockAfter("npm ci --silent --no-audit --no-fund", REPO_POSTINSTALL, { linked: true }),
 		...scripts.map(([, installs]) => (installs.length === 1 ? lockAfter(installs[0].trim()) : null)),
 	]);
+	ok(repoCit.code === 0 && !repoCit.rewritten && repoCit.cleared,
+		`§16 the repo's postinstall, under npm cit, runs npm ci in client/ too (code ${repoCit.code}, rewritten ${repoCit.rewritten}, cleared ${repoCit.cleared})`);
+	ok(repoCiLinked.code === 0 && !repoCiLinked.rewritten && !repoCiLinked.cleared,
+		`§16 under npm ci, a client/node_modules that is a link keeps the folder it points to (code ${repoCiLinked.code}, rewritten ${repoCiLinked.rewritten}, emptied ${repoCiLinked.cleared})`);
 	ok(control.code === 0 && control.rewritten && !control.cleared,
 		`§16 control: a bare npm install rewrites the client lockfile through the postinstall (code ${control.code}, rewritten ${control.rewritten})`);
 	ok(repoInstall.code === 0 && !repoInstall.rewritten && !repoInstall.cleared,
