@@ -170,9 +170,16 @@ case "$1" in
 esac
 exit 0
 `);
-// STUB_INSTALL_FAIL: install exits 1. STUB_BUILD_FAIL: the build dies part-way
-// (exit 1, client/dist removed; =keep leaves an existing client/dist alone).
-// STUB_BUILD_EMPTY: the build exits 0 and leaves no index.html.
+// STUB_INSTALL_FAIL: install exits 1 (=once: only the first install since the
+// last reset, as a transient failure would). STUB_BUILD_FAIL: the build dies part-way
+// (exit 1, its output folder emptied; =keep leaves an existing one alone).
+// STUB_BUILD_EMPTY: the build exits 0 and leaves its output folder with no
+// index.html. A build writes where Vite writes: it EMPTIES its output folder first, then
+// writes an index.html naming the commit it built. The output folder is
+// client/dist for the root's `npm run build:client`, and for client/'s own
+// `npm run build` (run in client/) the --outDir it is handed, else dist. Each
+// build logs its output folder, and whether the build the app serves
+// (client/dist/index.html) was still there while it wrote (serving=yes|no).
 writeExec(path.join(D.bin, "npm"), `#!/bin/bash
 case "$1" in
 	--version) echo 10.9.8 ;;
@@ -181,26 +188,32 @@ case "$1" in
 		if [ -n "\${STUB_HOLD_FILE:-}" ]; then
 			n=0; while [ ! -e "$STUB_HOLD_FILE" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done
 		fi
-		if [ -n "\${STUB_INSTALL_FAIL:-}" ]; then
+		if [ -n "\${STUB_INSTALL_FAIL:-}" ] && { [ "$STUB_INSTALL_FAIL" != once ] || [ ! -e "$STUB_LOG_DIR/install-fail-used" ]; }; then
+			: > "$STUB_LOG_DIR/install-fail-used"
 			echo "install-failed tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
 			exit 1
 		fi
 		echo "install-end tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
 	rebuild) echo "rebuild tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
 	         : > "$STUB_LOG_DIR/bsql-rebuilt" ;;
-	run) if [ -n "\${STUB_BUILD_FAIL:-}" ]; then
-	         # A build that dies part-way: the old bundle is gone, nothing new.
-	         [ "$STUB_BUILD_FAIL" = keep ] || rm -rf client/dist
-	         echo "build-failed tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
+	run) if [ "\${2:-}" = build:client ]; then served=client/dist; out=client/dist; else served=dist; out=dist; fi
+	     prev=""
+	     for a in "$@"; do if [ "$prev" = --outDir ]; then out=$a; fi; prev=$a; done
+	     if [ -n "\${STUB_BUILD_FAIL:-}" ]; then
+	         # A build that dies part-way: its output folder emptied, nothing new.
+	         [ "$STUB_BUILD_FAIL" = keep ] || rm -rf "$out"
+	         echo "build-failed tag=\${STUB_TAG:-} out=$out" >> "$STUB_LOG_DIR/npm.log"
 	         exit 1
 	     fi
+	     rm -rf "$out"
 	     if [ -n "\${STUB_BUILD_EMPTY:-}" ]; then
-	         rm -rf client/dist
-	         echo "build-empty tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
+	         mkdir -p "$out"
+	         echo "build-empty tag=\${STUB_TAG:-} out=$out" >> "$STUB_LOG_DIR/npm.log"
 	         exit 0
 	     fi
-	     mkdir -p client/dist && printf '%s\\n' '${APP_INDEX}' > client/dist/index.html
-	     echo "build tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
+	     if [ -f "$served/index.html" ]; then serving=yes; else serving=no; fi
+	     mkdir -p "$out" && printf '%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$(git rev-parse HEAD 2>/dev/null)" > "$out/index.html"
+	     echo "build tag=\${STUB_TAG:-} out=$out serving=$serving" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
 exit 0
 `);
@@ -329,6 +342,13 @@ const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : 
 const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
 // How many times the stub curl was asked for the page "/" since the last reset.
 const pageAsks = () => { const p = path.join(D.logs, "page-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
+// The build the app serves (client/dist/index.html, "" when there is none), and
+// whatever a client build left beside it (client_build leaves nothing).
+const SERVED_INDEX = path.join(D.box, "client", "dist", "index.html");
+const servedIndex = () => (fs.existsSync(SERVED_INDEX) ? fs.readFileSync(SERVED_INDEX, "utf8") : "");
+const buildLeftovers = () => ["dist.next", "dist.prev"].filter((d) => fs.existsSync(path.join(D.box, "client", d)));
+// A build that is plainly not the stub npm's (which names the commit it built).
+const OLD_BUILD = '<!doctype html><div id="app"></div><!-- the build from before -->\n';
 // The box's record of its last VERIFIED deploy: a git ref (see the
 // verified-record block in remote-deploy.sh). "" when there is none.
 const VERIFIED_REF = "refs/logisx/verified-deploy";
@@ -352,7 +372,9 @@ function resetBox(sha, { detachAt = null, verified: record = null, started: mark
 	if (mark) git(D.box, "update-ref", STARTED_REF, mark);
 	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
 	// The box serves a build, as one deployed before does. client/dist is
-	// ignored, so the reset above leaves whatever the last case built or removed.
+	// ignored, so the reset above leaves whatever the last case built or removed,
+	// and a build a case left beside it (client_build's dist.next and dist.prev).
+	for (const d of ["dist.next", "dist.prev"]) fs.rmSync(path.join(D.box, "client", d), { recursive: true, force: true });
 	fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
 	fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), `${APP_INDEX}\n`);
 }
@@ -521,6 +543,7 @@ module.exports = {
 	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
 	MARKER, LOCK_FILE, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, STARTED_REF, started,
+	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,

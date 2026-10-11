@@ -64,6 +64,9 @@ const UNREACHED_MESSAGE_PREFIX = "ssh failed to connect after ";
 // empty state, e.g. unparseable ssh output) must ALARM, never heal.
 const ACTIONS = Object.freeze({
 	"in-sync": "none",
+	// On main's commit but not serving the app (the API, or the 503 "being
+	// updated" page). Nothing to heal, and never a pass.
+	"in-sync-unhealthy": "alarm",
 	"behind-healable": "heal",
 	"behind-staging-pending": "notice",
 	"behind-staging-unreached": "rerun",
@@ -85,6 +88,8 @@ const ACTIONS = Object.freeze({
 
 const HINTS = Object.freeze({
 	"in-sync": "production is on main.",
+	"in-sync-unhealthy":
+		"production's last verified deploy is main's commit, but it is not serving the app: its API does not answer 200, or / is not the app's page (a 503 there is the \"being updated\" page: client/dist/index.html is missing on the box). Nothing is behind, so nothing heals: an incident for a human. Check the app on the box (pm2 status and its error log, client/dist), then redeploy main by hand once the cause is known (Actions → Deploy → production, ref=main), which rebuilds the client.",
 	"behind-healable":
 		"production's last verified deploy is behind main but it is serving, and main's commit PASSED staging: the shape of a deploy that failed on transport, or one that died after its checkout (HEAD moved, never verified). Healing once, a full deploy of main's commit with the same smoke check, edge check and auto-rollback as deploy.yml.",
 	"behind-staging-pending":
@@ -92,7 +97,7 @@ const HINTS = Object.freeze({
 	"behind-already-attempted":
 		"an automatic attempt at main's commit is already recorded on the box: an earlier heal, a production auto-rollback, or a manual pin to another ref. Not retrying. Fix main, or deploy it by hand once it is safe (Actions → Deploy → production, ref=main).",
 	"behind-and-unhealthy":
-		"production is behind main AND not serving 200. That is an incident, not a missed deploy; healing would paper over it.",
+		"production is behind main AND not serving the app: its API does not answer 200, or / is not the app's page (a 503 there is the \"being updated\" page: client/dist/index.html is missing on the box). That is an incident, not a missed deploy; healing would paper over it.",
 	"behind-staging-failed":
 		"main's staging job failed (its deploy, the staging smoke, or the wait for CI on main), so production must not get the commit. Open the failed staging job first. If CI on main failed or timed out for a reason unrelated to the commit, re-run that CI run, then re-run the Deploy run's failed jobs (gh run rerun <run-id> --failed): staging redeploys, smoke-checks, finds CI green, and production follows. Fix main only when CI or the smoke is genuinely red; the next green staging then deploys production normally.",
 	"behind-staging-unverified":
@@ -401,6 +406,11 @@ async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetc
 	// smoke check polls it. While a Deploy run of main's commit is still
 	// running (any event: a push, or a manual production deploy dispatched
 	// from main), that is a deploy in progress; otherwise the box's alarm stands.
+	// in-sync-unhealthy is never softened this way: production already runs
+	// main's verified commit, so no deploy is on its way to it. A redeploy of
+	// that very commit, or pm2 restarting a crashed process, can still read as
+	// unhealthy for the few seconds of a boot, and an alarm then is the safe
+	// mistake.
 	if (boxState === "behind-and-unhealthy" && SHA_RE.test(targetSha || "") && boxHead === targetSha && repo) {
 		let seen;
 		try {

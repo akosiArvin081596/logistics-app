@@ -3,11 +3,13 @@
 # Inputs (env): DIR, PM2, PREV (the full commit to return to: the deploy's
 #   DEPLOYED_FROM), and RECORD_STATE (the deploy's DEPLOY_RECORD_STATE).
 #
-# Only ever invoked when a deploy's smoke check FAILED. A reviewer approves a
-# production deploy before it starts (since 2026-09-25), but nobody watches it
-# finish, so a bad merge must not be able to leave production down until
-# someone notices. Used by deploy.yml's production job AND by
-# deploy-drift.yml's heal (same composite action).
+# Only ever invoked when a deploy FAILED: its smoke or edge check failed, pm2
+# did not prove its restart, or its install or build failed after its checkout
+# (DEPLOY_RESULT=unbuilt). A reviewer approves a production deploy before it
+# starts (since 2026-09-25), but nobody watches it finish, so a bad merge must
+# not be able to leave production down until someone notices. Used by
+# deploy.yml's production job AND by deploy-drift.yml's heal (same composite
+# action).
 #
 # It ends "ROLLBACK OK" (exit 0) only when the app serves again: the API
 # answers 200 AND / is the app's own page, not the 503 "being updated" page.
@@ -147,17 +149,54 @@ export PATH
 
 # A rollback restarts whatever it managed to build, because a partial rollback
 # that serves beats none. But only a clean install and build may be recorded
-# as VERIFIED below, so every step's outcome is kept. A build that leaves no
-# client/dist/index.html serves only the 503 "being updated" page, and the
-# page check below fails that rollback.
+# as VERIFIED below, so every step's outcome is kept. A client build that
+# fails leaves client/dist as it was (client_build), so the build that served
+# before keeps serving. Only a box left with no client/dist/index.html at all
+# serves the 503 "being updated" page, and the page check below fails that
+# rollback.
 BUILD_OK=1
 # Without writing the lockfiles back, as remote-deploy.sh installs.
 npm_config_save=false npm install --silent --no-audit --no-fund || BUILD_OK=0
 # ⚠️ OPEN a database: require() alone passes under an ABI-mismatched Node (the
 # native binding loads lazily). Same probe as remote-deploy.sh.
 node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3 || BUILD_OK=0
-npm run build:client --silent || BUILD_OK=0
-test -f client/dist/index.html || BUILD_OK=0
+# >>> client-build — keep byte-identical in remote-deploy.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# client_build builds the client BESIDE the build the running process serves,
+# and swaps it in only once it is whole. Vite empties its output folder before
+# it writes, so a build straight into client/dist left the running process
+# with no client/dist/index.html for the whole build: every page was
+# server.js's 503 "being updated" page, and after a failed build it stayed
+# that way, with nothing to bring the app's pages back.
+#
+# It runs client/'s own build script (what the root's build:client runs) with
+# only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
+# e2e servers and a developer still build into client/dist. Only a build that
+# exited 0 and left an index.html replaces client/dist, by two renames (the
+# box's coreutils predates mv --exchange): client/dist is missing for the
+# moment between them, not for the length of a build. A failed build leaves
+# client/dist as it was. Returns 0 only once the new build is in place.
+client_build() {
+	rm -rf client/dist.next client/dist.prev
+	if ! (cd client && npm run build --silent -- --outDir dist.next); then
+		echo "::warning::the client build failed — client/dist is left as it was"
+	elif [ ! -f client/dist.next/index.html ]; then
+		echo "::warning::the client build left no index.html — client/dist is left as it was"
+	elif [ -e client/dist ] && ! mv client/dist client/dist.prev; then
+		echo "::warning::could not move client/dist aside — client/dist is left as it was"
+	elif ! mv client/dist.next client/dist; then
+		echo "::warning::could not move the new build into client/dist — putting the previous build back"
+		[ ! -e client/dist.prev ] || mv client/dist.prev client/dist
+	else
+		rm -rf client/dist.prev
+		return 0
+	fi
+	rm -rf client/dist.next
+	return 1
+}
+# <<< client-build
+client_build || BUILD_OK=0
 # >>> pm2-restart — keep byte-identical in remote-deploy.sh and remote-rollback.sh
 # (scripts/test-deploy-scripts.js pins the copies)
 #
@@ -243,8 +282,8 @@ fi
 # answers every page with the 503 "being updated" page, which is down for
 # everyone using the app: that is a failed rollback, not a recovery, and it is
 # never recorded.
-# >>> app-page — keep byte-identical in remote-smoke.sh and remote-rollback.sh
-# (scripts/test-deploy-scripts.js pins the copies)
+# >>> app-page — keep byte-identical in remote-smoke.sh, remote-rollback.sh and
+# remote-drift-check.sh (scripts/test-deploy-scripts.js pins the copies)
 #
 # The API answering proves the process serves, not that it serves the app.
 # Without client/dist/index.html (a build that failed or left nothing) every

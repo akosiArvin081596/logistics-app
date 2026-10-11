@@ -19,7 +19,9 @@
  *       "Serves again" means the app: a rollback whose API answers but whose
  *       / is the 503 "being updated" page (no client/dist/index.html), or any
  *       page without the SPA's mount point, fails like one that never serves
- *       (ROLLBACK FAILED, exit 1) and records nothing.
+ *       (ROLLBACK FAILED, exit 1) and records nothing. A rollback whose own
+ *       client build fails keeps the build that was serving in client/dist
+ *       (client_build), so it still serves, and records nothing.
  *       remote-deploy.sh never records its own deploy. With the record, a half-finished deploy
  *       (HEAD moved, nothing restarted) is never a no-op floor or a rollback
  *       target, and main moves back over it; the drift check and the heal prep
@@ -42,13 +44,17 @@ const {
 	REAL, SMOKE, record, finish, crash,
 	D, ENV, git,
 	C1, C2, C3, S1, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, started,
+	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	rollback, leaveHalfFinished, healExpect, boxSeen,
 } = require("./deploy-test-sandbox.js");
 
 // A deploy that dies AFTER its checkout: HEAD moves to `sha`, the build fails,
-// nothing restarts and nothing is recorded.
+// nothing restarts and nothing is recorded (DEPLOY_RESULT=unbuilt). On
+// production the action then rolls back (test-deploy-live.js §14); this is the
+// box as it stays when no rollback follows (staging, or a job that lost its
+// connection or timed out before the rollback).
 const halfFinished = (S, sha) => runSh(S.deploy, deployEnv({ SHA: sha, STUB_BUILD_FAIL: "1", STUB_TAG: "half" }));
 
 // A rollback handed a deploy's RECORD_STATE other than ok: PREV was only HEAD,
@@ -64,24 +70,29 @@ function rollbackRecordState(S, tag, states = ["missing", "inconsistent", ""]) {
 }
 
 // A rollback's own install or build that did not complete cleanly, three ways.
-// `index` answers / as the app whatever is on disk (STUB_PAGE=app), so it
-// isolates the BUILD_OK half: with the real answer, the 503 "being updated"
-// page, the page check fails that rollback first (rollbackServesUpdatingPage).
+// A client build that fails, part-way (emptying its output folder, as Vite
+// does) or with no index.html, leaves the build that served in client/dist
+// (client_build), so the page check passes on it: `keeps` says that build must
+// still be there. An install that fails is followed by a build that succeeds.
 const BUILD_NOT_CLEAN = {
-	install: ["npm install failed", { STUB_INSTALL_FAIL: "1" }],
-	build: ["build failed, with the old bundle still in place,", { STUB_BUILD_FAIL: "keep" }],
-	index: ["build left no index.html (and / still answered as the app)", { STUB_BUILD_EMPTY: "1", STUB_PAGE: "app" }],
+	install: ["npm install failed", { STUB_INSTALL_FAIL: "1" }, false],
+	build: ["build died part-way, emptying its output folder,", { STUB_BUILD_FAIL: "1" }, true],
+	index: ["build left no index.html", { STUB_BUILD_EMPTY: "1" }, true],
 };
 function rollbackBuildNotClean(S, tag, which = Object.keys(BUILD_NOT_CLEAN)) {
-	return which.map((k) => {
-		const [what, env] = BUILD_NOT_CLEAN[k];
+	return which.flatMap((k) => {
+		const [what, env, keeps] = BUILD_NOT_CLEAN[k];
 		resetBox(C3, { verified: C1 });
-		fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
-		fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), "<!doctype html><div id=\"app\"></div><!-- the old build -->\n");
+		fs.writeFileSync(SERVED_INDEX, OLD_BUILD);
 		const x = rollback(S, C2, { RECORD_STATE: "ok", ...env });
-		return [x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1
+		const r = [[x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1
 			&& /::warning::not recording .* install or build did not complete cleanly/.test(x.out),
-		`${tag}§12 a rollback whose ${what} still restarts and serves, but records nothing (record ${short(verified())}, code ${x.code})`];
+		`${tag}§12 a rollback whose ${what} still restarts and serves, but records nothing (record ${short(verified())}, code ${x.code})`]];
+		if (keeps) {
+			r.push([servedIndex() === OLD_BUILD && buildLeftovers().length === 0,
+				`${tag}§12 …serving the build that was there before it, byte-for-byte, with nothing left beside it (leftovers ${JSON.stringify(buildLeftovers())})`]);
+		}
+		return r;
 	});
 }
 
@@ -91,8 +102,8 @@ const RECORD_CASES = {
 		const r = [];
 		resetBox(C1, { verified: C1 });
 		const x = halfFinished(S, C3);
-		r.push([x.code !== 0 && head() === C3 && onMain() && git(D.box, "rev-parse", "main") === C3,
-			`${tag}§12 a deploy whose build fails after its checkout exits non-zero with HEAD (and main) already on C3 (code ${x.code})`]);
+		r.push([result(x) === "unbuilt" && head() === C3 && onMain() && git(D.box, "rev-parse", "main") === C3,
+			`${tag}§12 a deploy whose build fails after its checkout reports DEPLOY_RESULT=unbuilt with HEAD (and main) already on C3, the state a deploy no rollback follows leaves (code ${x.code}, result ${result(x) || "none"})`]);
 		r.push([!/^restart /m.test(log("pm2")) && verified() === C1 && started() === "",
 			`${tag}§12 …restarts nothing, marks nothing started, and the verified record stays C1`]);
 		// (B) The drift check must see it: HEAD is main's tip, the old code serves.
@@ -198,7 +209,7 @@ const RECORD_CASES = {
 		resetBox(C3, { verified: C3 });
 		const pin = runSh(S.deploy, deployEnv({ REF: C1, STUB_BUILD_FAIL: "1" }));
 		out = checkOut(S);
-		r.push([pin.code !== 0 && head() === C1 && verified() === C3 && field(out, "DRIFT_STATE") === "verified-record-inconsistent",
+		r.push([result(pin) === "unbuilt" && head() === C1 && verified() === C3 && field(out, "DRIFT_STATE") === "verified-record-inconsistent",
 			`${tag}§12 a manual deploy of an older ref that died after its checkout → verified-record-inconsistent, never a heal (got ${field(out, "DRIFT_STATE")})`]);
 		return r;
 	},
@@ -317,11 +328,13 @@ const RECORD_CASES = {
 			`${tag}§12 a rollback that never serves records nothing, even from a consistent record (the record stays C1)`]];
 	},
 	rollbackServesUpdatingPage(S, tag) {
-		// The rollback's build leaves no client/dist/index.html: the restarted
-		// app answers its API, and every page with the 503 "being updated" page.
-		// That is the app down, so it ends exactly like a rollback that never
-		// serves: ROLLBACK FAILED, exit 1, nothing recorded.
+		// A box with no client build at all, and a rollback whose build leaves
+		// no index.html either: the restarted app answers its API, and every
+		// page with the 503 "being updated" page. That is the app down, so it
+		// ends exactly like a rollback that never serves: ROLLBACK FAILED,
+		// exit 1, nothing recorded.
 		resetBox(C3, { verified: C1 });
+		fs.rmSync(path.join(D.box, "client", "dist"), { recursive: true, force: true });
 		let x = rollback(S, C2, { RECORD_STATE: "ok", STUB_BUILD_EMPTY: "1" });
 		const errors = x.out.split("\n").filter((l) => l.startsWith("::error"));
 		const r = [
@@ -422,9 +435,11 @@ function mutants() {
 	expectCaught("the rollback ignores a failed install", rollbackBuildNotClean(rollbackWith(
 		"npm install --silent --no-audit --no-fund || BUILD_OK=0", "npm install --silent --no-audit --no-fund"), M, ["install"]));
 	expectCaught("the rollback ignores a failed build", rollbackBuildNotClean(rollbackWith(
-		"npm run build:client --silent || BUILD_OK=0", "npm run build:client --silent || true"), M, ["build"]));
+		"client_build || BUILD_OK=0", "client_build || true"), M, ["build"]));
 	expectCaught("the rollback ignores a missing index.html", rollbackBuildNotClean(rollbackWith(
-		"test -f client/dist/index.html || BUILD_OK=0", "true"), M, ["index"]));
+		"\telif [ ! -f client/dist.next/index.html ]; then", "\telif false; then"), M, ["index"]));
+	expectCaught("the rollback builds straight into client/dist", rollbackBuildNotClean(rollbackWith(
+		"client_build || BUILD_OK=0", "npm run build:client --silent || BUILD_OK=0"), M, ["build"]));
 	expectCaught("the rollback skips the app-page check", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
 		'if [ "$PAGE_OK" != 1 ]; then', "if false; then"), M));
 	expectCaught("the rollback's page check passes without the app's mount point", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
