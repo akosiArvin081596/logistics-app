@@ -96,12 +96,13 @@ jobs:
       # isolation audit is in its header), timing-sensitive ones alone after.
       #
       # ⚠️ UNIT_TEST_SKIP_TIMING drops the timing-sensitive runners (currently
-      # exactly one: test-pdf-cold-start.js, which induces an event-loop stall
-      # and asserts on catching the recovery). Measured on an 8-core Mac it
-      # passes 6/6 idle but only 3/6 at load average ~11 — and a GitHub-hosted
-      # runner is TWO shared cores, i.e. worse. Left in, CI would be red a third
-      # of the time for a reason unrelated to the change under review, and a
-      # pipeline nobody trusts is worse than no pipeline.
+      # exactly one: test-pdf-cold-start.js, which launches Chromium, induces an
+      # event-loop stall and asserts on wall-clock budgets around the recovery).
+      # Its old flake was a race inside its own §1, not machine load, and is
+      # fixed (#492; measured 12/12 idle and 12/12 under load on a 15-core Mac,
+      # see scripts/run-unit-tests.js). It stays out of CI because a 3 s
+      # navigation budget on a GitHub-hosted runner's two shared cores is
+      # untested, and a pipeline nobody trusts is worse than no pipeline.
       #
       # The skip is printed at the start AND end of the run and named in the job
       # summary below — never silent. It means the PDF cold-start path is NOT

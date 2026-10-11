@@ -175,12 +175,20 @@ npm run replica:clean -- [--task <name>]
     credentials (in its user, query or path), a value that looks like a key, a
     `NODE_ENV`/`PORT`-style runtime setting, or any name production's code does not read;
   - it reads every tab of the Google Sheets the app uses with its own `spreadsheets.readonly`
-    client. The server's key never leaves the server.
+    client. The server's key never leaves the server;
+  - last, it compresses `app.db` and `sheets.json` with zstd (level 6, one thread, Node's
+    built-in zstd), recording each original's size and SHA-256 in `compress.json`. The
+    download is about a sixth of the database's size (365 MiB to 62 MiB, 2026-10-11).
 
-  The folder is then downloaded with rsync and deleted, also when a step fails (a trap on each
-  side); the pull fails when it cannot confirm the folder is gone. `uploads/`, `storage/` and `evidence-archive/` are copied with rsync. After the first
-  pull, only what changed is transferred. The manifest (`clean/manifest.json`) records the
-  production commit, its Node version and time zone, and every table's row count.
+  The folder is then downloaded with rsync, showing one progress line (bytes so far, rate, time
+  left; never a file name), and deleted, compressed files included, also when a step fails or
+  the pull is interrupted (a trap on each side); the pull fails when it cannot confirm the folder
+  is gone. Each file is decompressed here and must match the server's size and SHA-256, and the
+  database must pass `quick_check`, before it replaces the clean snapshot. `uploads/`,
+  `storage/` and `evidence-archive/` are copied with rsync (only what changed, after the first
+  pull), with the same progress line. The manifest (`clean/manifest.json`) records the
+  production commit, its Node version and time zone, every table's row count and the download's
+  checksums.
 - **`replica:start`** clones the clean snapshot and the files as a task's working copy
   (`work/<task>/`, APFS clones: instant, no space until something changes; kept until
   `replica:clean`). It then starts this checkout's server on it in replica mode at

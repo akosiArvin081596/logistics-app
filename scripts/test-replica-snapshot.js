@@ -20,6 +20,13 @@
 //   §4 the stamp (unique per run) and task rules; the pull scripts keep the
 //      production host out of the repository, fail when the server's folder
 //      cannot be confirmed gone, sweep stale folders, and run at low priority
+//   §5 the compressed download: compress.js turns app.db and sheets.json into
+//      zstd files (600) and records each original's size and SHA-256; unpack
+//      gives back byte-identical files and refuses a short, damaged or
+//      mismatched download (removing what it wrote); the server's folder goes,
+//      compressed files included, on success, on a failed step and when the
+//      pull is interrupted; the progress filter never shows or logs a file
+//      name; pull.sh downloads whole, with progress, and checks before the swap
 //
 // Standalone: node scripts/test-replica-snapshot.js. No server, no network.
 "use strict";
@@ -311,7 +318,7 @@ console.log("§4 stamps, tasks and the pull scripts");
 
 	const finish = fs.readFileSync(path.join(REMOTE, "finish.sh"), "utf8");
 	const steps = finish.split("\n").filter((l) => /"\$NODE"/.test(l));
-	ok("the server steps all run at low priority and never read the program's stdin", steps.length === 5 && steps.every((l) => /^"\$\{LOW\[@\]\}" "\$NODE" /.test(l) && /<\/dev\/null/.test(l)), steps);
+	ok("the server steps all run at low priority and never read the program's stdin", steps.length === 6 && steps.every((l) => /^"\$\{LOW\[@\]\}" "\$NODE" /.test(l) && /<\/dev\/null/.test(l)), steps);
 	ok("...low priority is nice, plus ionice where the box has it", /^LOW=\(nice -n 10\)$/m.test(finish) && /command -v ionice >\/dev\/null 2>&1; then LOW\+=\(ionice -c 2 -n 7\)/.test(finish));
 	const run = spawnSync("bash", ["-n", path.join(ROOT, "scripts", "replica", "pull.sh")], { encoding: "utf8" });
 	eq("pull.sh parses", run.status, 0);
@@ -320,5 +327,203 @@ console.log("§4 stamps, tasks and the pull scripts");
 	ok("without LOGISX_PROD_SSH it stops before doing anything", noSsh.status !== 0 && /LOGISX_PROD_SSH/.test(noSsh.stderr));
 }
 
-console.log(failures ? `\n${failures} FAILED` : "\nall passed");
-process.exit(failures ? 1 : 0);
+// ---- §5 the compressed download -------------------------------------------------------------
+(async () => {
+	console.log("§5 the compressed download");
+	const { compressFolder, FILES, LEVEL } = require(path.join(REMOTE, "compress.js"));
+	const local = require(path.join(ROOT, "scripts", "replica", "pull-local.js"));
+	const made = [];
+	const dir = (p) => { const d = tmp(p); made.push(d); return d; };
+	const mode = (f) => fs.statSync(f).mode & 0o777;
+
+	// A pull folder as manifest.js leaves it: a real database and a Sheets copy.
+	const pullFolder = () => {
+		const parent = dir("replica-zst-");
+		const stamp = "20261011T0600Z-0a1b2c3d";
+		const d = path.join(parent, stamp);
+		fs.mkdirSync(d, { mode: 0o700 });
+		const db = new Database(path.join(d, "app.db"));
+		db.exec("CREATE TABLE loads (id INTEGER PRIMARY KEY, name TEXT, notes TEXT)");
+		const ins = db.prepare("INSERT INTO loads (name, notes) VALUES (?, ?)");
+		for (let i = 0; i < 3000; i++) ins.run(`load-${i}`, crypto.randomBytes(24).toString("hex"));
+		db.close();
+		fs.writeFileSync(path.join(d, "sheets.json"), JSON.stringify({ format: 1, spreadsheets: { s1: { role: "main", tabs: { "Job Tracking": [["Load ID"], ["1"]] } } } }));
+		fs.writeFileSync(path.join(d, "manifest.json"), "{}");
+		return { parent, stamp, d };
+	};
+
+	{
+		const { parent, stamp, d } = pullFolder();
+		const before = Object.fromEntries(FILES.map((f) => [f, { sha256: sha(path.join(d, f)), bytes: fs.statSync(path.join(d, f)).size }]));
+		const run = spawnSync(process.execPath, [path.join(REMOTE, "compress.js"), `--stamp=${stamp}`, `--parent=${parent}`], { encoding: "utf8" });
+		eq("compress.js exits 0", [run.status, run.stderr], [0, ""]);
+		eq("...leaves each file only as <name>.zst, mode 600, beside compress.json", fs.readdirSync(d).sort(), ["app.db.zst", "compress.json", "manifest.json", "sheets.json.zst"]);
+		ok("...every file it wrote is mode 600", ["app.db.zst", "sheets.json.zst", "compress.json"].every((f) => mode(path.join(d, f)) === 0o600));
+		const summary = JSON.parse(fs.readFileSync(path.join(d, "compress.json"), "utf8"));
+		eq("...compress.json records zstd level 6 and each original's size and SHA-256", [summary.codec, summary.level, summary.files.map((f) => [f.name, f.bytes, f.sha256])], ["zstd", 6, FILES.map((f) => [f, before[f].bytes, before[f].sha256])]);
+		eq("...and each compressed file's size", summary.files.map((f) => f.compressed), FILES.map((f) => fs.statSync(path.join(d, `${f}.zst`)).size));
+		ok("...the database shrinks", summary.files[0].compressed < summary.files[0].bytes / 2, summary.files[0]);
+		ok("...its output names sizes only", /"step":"compress"/.test(run.stdout) && !/[0-9a-f]{64}/.test(run.stdout), run.stdout);
+		eq("level 6, as approved", LEVEL, 6);
+
+		const incoming = dir("replica-in-");
+		for (const f of fs.readdirSync(d)) fs.copyFileSync(path.join(d, f), path.join(incoming, f));
+		const said = [];
+		let err = null;
+		try { await local.unpack(incoming, (s) => said.push(s)); } catch (e) { err = e; }
+		ok("unpack gives back the files", !err, err && err.message);
+		eq("...byte-identical to the server's (SHA-256)", FILES.map((f) => fs.existsSync(path.join(incoming, f)) && sha(path.join(incoming, f))), FILES.map((f) => before[f].sha256));
+		ok("...mode 600, with the .zst files gone", FILES.every((f) => mode(path.join(incoming, f)) === 0o600 && !fs.existsSync(path.join(incoming, `${f}.zst`))));
+		ok("...and says each one matched", said.length === 2 && said.every((s) => /SHA-256 matches the server's/.test(s)), said);
+
+		// Each refusal starts from a fresh copy of the server's folder.
+		const refused = async (name, damage, re) => {
+			const inc = dir("replica-bad-");
+			for (const f of fs.readdirSync(d)) fs.copyFileSync(path.join(d, f), path.join(inc, f));
+			damage(inc);
+			let e = null;
+			try { await local.unpack(inc, () => {}); } catch (x) { e = x; }
+			ok(`unpack refuses ${name}`, e && re.test(e.message), e ? e.message : "no error");
+			ok("...and leaves no decompressed database behind", !fs.existsSync(path.join(inc, "app.db")));
+		};
+		await refused("a short download", (inc) => fs.truncateSync(path.join(inc, "app.db.zst"), 1000), /incomplete/);
+		await refused("a damaged one (same size, one byte changed)", (inc) => {
+			const f = path.join(inc, "app.db.zst");
+			const b = fs.readFileSync(f);
+			b[Math.floor(b.length / 2)] ^= 0xff;
+			fs.writeFileSync(f, b);
+		}, /damaged|SHA-256/);
+		await refused("a file whose checksum differs from the server's", (inc) => {
+			const f = path.join(inc, "compress.json");
+			const c = JSON.parse(fs.readFileSync(f, "utf8"));
+			c.files[0].sha256 = "0".repeat(64);
+			fs.writeFileSync(f, JSON.stringify(c));
+		}, /the server's was/);
+		await refused("a download with no compress.json", (inc) => fs.rmSync(path.join(inc, "compress.json")), /no compress\.json/);
+		await refused("a compress.json naming other files", (inc) => {
+			const f = path.join(inc, "compress.json");
+			const c = JSON.parse(fs.readFileSync(f, "utf8"));
+			c.files[0].name = "../app.db";
+			fs.writeFileSync(f, JSON.stringify(c));
+		}, /does not list the files/);
+	}
+	{
+		const { parent, stamp, d } = pullFolder();
+		fs.writeFileSync(path.join(d, "app.db.zst"), "x");
+		const run = spawnSync(process.execPath, [path.join(REMOTE, "compress.js"), `--stamp=${stamp}`, `--parent=${parent}`], { encoding: "utf8" });
+		ok("compress.js refuses an existing .zst and keeps the original", run.status === 1 && /already exists/.test(run.stderr) && fs.existsSync(path.join(d, "app.db")), run.stderr);
+		const bad = spawnSync(process.execPath, [path.join(REMOTE, "compress.js"), "--stamp=../x", `--parent=${parent}`], { encoding: "utf8" });
+		ok("...and a stamp that isn't one", bad.status === 1 && /stamp/.test(bad.stderr));
+		let e = null;
+		try { await compressFolder(path.join(parent, "no-such-stamp")); } catch (x) { e = x; }
+		ok("...and a folder with nothing to compress", e && /app\.db is missing/.test(e.message));
+	}
+
+	// The server's folder goes, compressed files included, on success (the
+	// download step's cleanup), on any failure and on an interruption (the
+	// trap), each run as pull.sh has it with ssh running the command here.
+	{
+		const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
+		const fn = (name) => (pull.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}\\n`, "m")) || [""])[0];
+		const traps = ["trap on_exit EXIT", "trap 'exit 130' INT TERM HUP"];
+		ok("pull.sh traps EXIT and INT, TERM, HUP", traps.every((t) => pull.split("\n").includes(t)));
+		const serverFolder = () => {
+			const parent = dir("replica-srv-");
+			fs.mkdirSync(path.join(parent, "s1"));
+			for (const f of ["app.db.zst", "sheets.json.zst", "compress.json", "manifest.json"]) fs.writeFileSync(path.join(parent, "s1", f), "x");
+			return parent;
+		};
+		const script = (parent, body) => [
+			"set -euo pipefail",
+			'ssh() { bash -c "${!#}"; }',
+			`SSH_OPTS=(-o BatchMode=yes); LOGISX_PROD_SSH=x; TMP_PARENT=${JSON.stringify(parent)}; STAMP=s1`,
+			`INCOMING=${JSON.stringify(path.join(parent, "in"))}; LOCK=${JSON.stringify(path.join(parent, "lock"))}; LOG=/dev/null; REMOTE_STARTED=1`,
+			'mkdir -p "$LOCK"',
+			fn("remote_cleanup"), fn("on_exit"),
+			...traps,
+			body,
+		].join("\n");
+		{
+			const parent = serverFolder();
+			const r = spawnSync("bash", ["-c", script(parent, "remote_cleanup\nREMOTE_STARTED=0")], { encoding: "utf8" });
+			ok("after the download, the cleanup removes the folder with its compressed files", r.status === 0 && !fs.existsSync(path.join(parent, "s1")), { status: r.status, err: r.stderr });
+		}
+		{
+			const parent = serverFolder();
+			const r = spawnSync("bash", ["-c", script(parent, "false")], { encoding: "utf8" });
+			ok("a failed step removes it through the trap", r.status === 1 && !fs.existsSync(path.join(parent, "s1")), { status: r.status, err: r.stderr });
+		}
+		for (const sig of ["INT", "TERM", "HUP"]) {
+			const parent = serverFolder();
+			const r = spawnSync("bash", ["-c", script(parent, `kill -${sig} $$\nsleep 5`)], { encoding: "utf8", timeout: 15000 });
+			ok(`an interruption (SIG${sig}) removes it too and the pull exits 130`, r.status === 130 && !fs.existsSync(path.join(parent, "s1")), { status: r.status, err: r.stderr });
+		}
+		const begin = fs.readFileSync(path.join(REMOTE, "begin.sh"), "utf8");
+		const trapFn = (begin.match(/^replica_remote_cleanup\(\) \{\n[\s\S]*?\n\}\n/m) || [""])[0];
+		{
+			// The server program's own trap, when a step fails part way (a half-written .zst).
+			const parent = serverFolder();
+			const r = spawnSync("bash", ["-c", ["set -euo pipefail", `TMP_PARENT=${JSON.stringify(parent)}; TMP="$TMP_PARENT/s1"; REPLICA_REMOTE_OK=0`, trapFn, "trap replica_remote_cleanup EXIT", "false"].join("\n")], { encoding: "utf8" });
+			ok("on the server, a failed step removes the folder with its compressed files", !!trapFn && r.status === 1 && !fs.existsSync(path.join(parent, "s1")), { status: r.status, err: r.stderr });
+		}
+
+		const rsyncLines = pull.split("\n").filter((l) => /^\s*rsync /.test(l));
+		ok("every rsync shows progress through pull-local.js progress, never straight to the log", rsyncLines.length === 2 && rsyncLines.every((l) => / --progress /.test(l) && /\| "\$NODE_BIN" "\$HERE\/pull-local\.js" progress /.test(l) && !/tee/.test(l)), rsyncLines);
+		ok("the download is whole: no seed from the last snapshot", !/cp -c?R "\$ROOT\/clean\/\."/.test(pull));
+		ok("pull.sh streams compress.js to the server", /^REMOTE_FILES=\(.* compress\.js\)$/m.test(pull));
+		const at = (re) => pull.search(re);
+		const order = [/^remote_cleanup 2>&1 \| tee -a "\$LOG"$/m, /pull-local\.js" unpack "\$INCOMING"/, /pull-local\.js" verify "\$INCOMING"/, /^mv "\$INCOMING" "\$ROOT\/clean"$/m].map(at);
+		ok("after the download: the server's folder goes, then unpack, then verify, then the swap", order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), order);
+		const finish = fs.readFileSync(path.join(REMOTE, "finish.sh"), "utf8");
+		ok("on the server, compress.js runs after manifest.js", finish.indexOf("compress.js") > finish.indexOf("manifest.js") && finish.indexOf("compress.js") < finish.indexOf('rm -f -- "$TMP"/*.js'));
+	}
+
+	// The progress filter, on openrsync's own output with names a person could have.
+	{
+		const SAMPLE = [
+			"app.db.zst\n",
+			"     1081344  36%    1.03MB/s    00:00:01\r",
+			"     2097152  70%  992.00KB/s    00:00:00\r",
+			"     3000000 100%    1.42MB/s    00:00:02 (xfer#1, to-check=1/3)\n",
+			"driver-jane-doe-license.jpg\n",
+			"           3 100%   13.82KB/s    00:00:00 (xfer#2, to-check=2/3)\n",
+			"Number of files: 3\nNumber of files transferred: 2\nTotal file size: 3000003 B\n",
+			"sent 3000548 bytes  received 64 bytes  2467203200000 bytes/sec\ntotal size is 3000003  speedup is 1.00\n",
+			"rsync: connection unexpectedly closed (0 bytes received so far) [receiver]\n",
+		].join("");
+		const run = (tty, chunks) => {
+			let clock = 0;
+			let out = "";
+			const logged = [];
+			const f = local.progressFilter({ label: "download", tty, write: (s) => { out += s; }, log: (l) => logged.push(l), now: () => clock, every: 30000 });
+			for (const c of chunks) { f.push(c); clock += 10000; }
+			f.end();
+			return { out, logged };
+		};
+		const pieces = (text, n) => Array.from({ length: Math.ceil(text.length / n) }, (_, i) => text.slice(i * n, (i + 1) * n));
+		for (const tty of [false, true]) {
+			const { out, logged } = run(tty, pieces(SAMPLE, 37));
+			const where = tty ? "on a terminal" : "off a terminal";
+			ok(`the progress filter never shows a file name (${where})`, !/jane|doe|app\.db\.zst|\.jpg/.test(out), out);
+			ok(`...nor logs one, and the log has no progress lines (${where})`, !/jane|doe|\.jpg|app\.db\.zst|%|\r/.test(logged.join("\n")), logged);
+			ok(`...shows bytes, percent, rate and time left (${where})`, /download: 1\.0 MiB so far, 1\.03MB\/s; this file 36%, 00:00:01 left/.test(out), out);
+			eq(`...logs rsync's stats and errors, as they are (${where})`, logged, ["Number of files: 3", "Number of files transferred: 2", "Total file size: 3000003 B", "sent 3000548 bytes  received 64 bytes  2467203200000 bytes/sec", "total size is 3000003  speedup is 1.00", "rsync: connection unexpectedly closed (0 bytes received so far) [receiver]"]);
+		}
+		const total = run(false, [SAMPLE]).out;
+		ok("...counts the bytes so far over every file, and prints the latest before the stats", /download: 2\.9 MiB so far, 13\.82KB\/s\nNumber of files: 3/.test(total), total);
+		const term = run(true, [SAMPLE]).out;
+		ok("on a terminal the status line is redrawn in place, and ends before the stats", /\rdownload: [^\n]*\x1b\[K\nNumber of files: 3/.test(term), term);
+		const quiet = run(false, pieces(SAMPLE, 9));
+		const lines = quiet.out.split("\n").filter((l) => l.startsWith("download:"));
+		ok("off a terminal a status line is printed at most every 30 s, plus the last one", lines.length >= 2 && lines.length < 6 && !/\r/.test(quiet.out), lines);
+		const gnu = run(false, ["      32,768   0%    0.00kB/s    0:00:00\r 65,536,000 100%   10.00MB/s    0:00:06 (xfr#1, to-chk=0/1)\n"]).out;
+		ok("...and reads GNU rsync's commas", /download: 62\.5 MiB so far, 10\.00MB\/s\n/.test(gnu), gnu);
+	}
+
+	for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+	console.log(failures ? `\n${failures} FAILED` : "\nall passed");
+	process.exit(failures ? 1 : 0);
+})().catch((err) => {
+	console.error(err);
+	process.exit(1);
+});
