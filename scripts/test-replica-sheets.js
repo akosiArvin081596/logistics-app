@@ -22,6 +22,9 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const loadedBefore = new Set(Object.keys(require.cache));
+// Every temporary folder this runner makes is removed when it exits, pass or fail.
+const tempDirs = [];
+process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
 const fake = require(path.join(ROOT, "lib", "replica-sheets.js"));
 
 let failures = 0;
@@ -35,6 +38,7 @@ const MAIN = "main-sheet-id";
 const ARCHIVE = "archive-sheet-id";
 function workingCopy() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "replica-sheets-"));
+	tempDirs.push(dir);
 	const file = path.join(dir, "sheets.json");
 	const tab = (sheetId, title, index, values, formulas = {}) => ({
 		properties: { sheetId, title, index, sheetType: "GRID", gridProperties: { rowCount: 1000, columnCount: 26 } },

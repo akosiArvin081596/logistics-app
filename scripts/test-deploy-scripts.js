@@ -59,7 +59,9 @@
  *   §16 THE INSTALL LEAVES THE LOCKFILES ALONE. The deploy and the rollback
  *      each install once, with npm_config_save=false, and that line, run for
  *      real (offline), leaves a nested client lockfile as committed while the
- *      bare command rewrites it.
+ *      bare command rewrites it. The repo's own postinstall leaves it as
+ *      committed too, under a root npm install and under npm ci (where it
+ *      runs npm ci in client/).
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -626,30 +628,48 @@ function probePins() {
 // on PATH, offline, in a root + client/ layout whose client lockfile is valid
 // but not in npm's own layout, so any write to it shows. The bare command is
 // the control: it must rewrite the file, or this check proves nothing. The
-// three installs run side by side, each in a directory of its own.
+// repo's own postinstall (package.json) is then run for real under a bare
+// root `npm install` and a root `npm ci`: neither may rewrite the client
+// lockfile, and only the `npm ci` one may clear client/node_modules (the mark
+// of a nested `npm ci`). The installs run side by side, each in a directory of
+// its own.
 async function installPins() {
 	const INSTALL = /^\s*(?:npm_config_\w+=\S+\s+)*npm\s+(?:install|i|ci)\b/;
-	const lockAfter = (cmd) => new Promise((resolve) => {
+	const PLAIN_POSTINSTALL = "cd client && npm install --no-audit --no-fund";
+	const REPO_POSTINSTALL = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).scripts.postinstall;
+	const lockAfter = (cmd, postinstall = PLAIN_POSTINSTALL) => new Promise((resolve) => {
 		const d = fs.mkdtempSync(path.join(T, "install-"));
-		fs.mkdirSync(path.join(d, "client"));
-		fs.writeFileSync(path.join(d, "package.json"),
-			JSON.stringify({ name: "root", version: "1.0.0", scripts: { postinstall: "cd client && npm install --no-audit --no-fund" } }));
+		fs.mkdirSync(path.join(d, "client", "node_modules"), { recursive: true });
+		fs.writeFileSync(path.join(d, "client", "node_modules", ".mark"), "");
+		fs.writeFileSync(path.join(d, "package.json"), JSON.stringify({ name: "root", version: "1.0.0", scripts: { postinstall } }));
+		fs.writeFileSync(path.join(d, "package-lock.json"),
+			JSON.stringify({ name: "root", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "root", version: "1.0.0" } } }));
 		fs.writeFileSync(path.join(d, "client", "package.json"), JSON.stringify({ name: "client", version: "1.0.0" }));
 		const lock = JSON.stringify({ name: "client", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "client", version: "1.0.0" } } });
 		fs.writeFileSync(path.join(d, "client", "package-lock.json"), lock);
 		spawn("sh", ["-c", cmd.replace(/\s*\|\|.*$/, "")], {
 			cwd: d, stdio: "ignore", timeout: 60000,
 			env: { ...process.env, npm_config_offline: "true", npm_config_update_notifier: "false" },
-		}).on("close", (code) => resolve({ code, rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock }));
+		}).on("close", (code) => resolve({
+			code,
+			rewritten: fs.readFileSync(path.join(d, "client", "package-lock.json"), "utf8") !== lock,
+			cleared: !fs.existsSync(path.join(d, "client", "node_modules", ".mark")),
+		}));
 	});
 	const scripts = [["remote-deploy.sh", REAL.deploy], ["remote-rollback.sh", REAL.rollback]].map(([name, text]) =>
 		[name, text.split("\n").filter((l) => !/^\s*#/.test(l) && INSTALL.test(l))]);
-	const [control, ...runs] = await Promise.all([
+	const [control, repoInstall, repoCi, ...runs] = await Promise.all([
 		lockAfter("npm install --silent --no-audit --no-fund"),
+		lockAfter("npm install --silent --no-audit --no-fund", REPO_POSTINSTALL),
+		lockAfter("npm ci --silent --no-audit --no-fund", REPO_POSTINSTALL),
 		...scripts.map(([, installs]) => (installs.length === 1 ? lockAfter(installs[0].trim()) : null)),
 	]);
-	ok(control.code === 0 && control.rewritten,
+	ok(control.code === 0 && control.rewritten && !control.cleared,
 		`§16 control: a bare npm install rewrites the client lockfile through the postinstall (code ${control.code}, rewritten ${control.rewritten})`);
+	ok(repoInstall.code === 0 && !repoInstall.rewritten && !repoInstall.cleared,
+		`§16 the repo's postinstall, under a bare npm install, installs client/ without rewriting its lockfile (code ${repoInstall.code}, rewritten ${repoInstall.rewritten}, cleared ${repoInstall.cleared})`);
+	ok(repoCi.code === 0 && !repoCi.rewritten && repoCi.cleared,
+		`§16 the repo's postinstall, under npm ci, runs npm ci in client/ (code ${repoCi.code}, rewritten ${repoCi.rewritten}, cleared ${repoCi.cleared})`);
 	scripts.forEach(([name, installs], i) => {
 		ok(installs.length === 1 && /^\s*npm_config_save=false npm install\b/.test(installs[0]),
 			`§16 ${name} installs once, with npm_config_save=false (got ${JSON.stringify(installs.map((l) => l.trim()))})`);
