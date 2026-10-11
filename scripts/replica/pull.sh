@@ -198,13 +198,16 @@ ctl() {
   ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o ControlPersist=no -o "ControlPath=$1" -O "$2" "$LOGISX_PROD_SSH" </dev/null >/dev/null 2>&1
 }
 # A session on the shared connection; it fails if the connection has closed.
+# ClearAllForwardings: a session would otherwise ask the master for the port
+# forwardings ~/.ssh/config names, for the whole pull.
 prod_ssh() {
-  ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o "ControlPath=${CONN_SOCK:-none}" -o ProxyCommand=/usr/bin/false "$@"
+  ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o "ControlPath=${CONN_SOCK:-none}" -o ProxyCommand=/usr/bin/false -o ClearAllForwardings=yes "$@"
 }
 # A connection of its own (Touch ID again): only for the trap's server cleanup
 # once the shared connection has closed.
 direct_ssh() {
-  ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o ControlPath=none -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$@"
+  ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o ControlPath=none -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+    -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no "$@"
 }
 conn_open() {
   [ -n "$CONN_SOCK" ] && ctl "$CONN_SOCK" check
@@ -243,20 +246,22 @@ open_conn() {
     die "could not open the ssh connection to production (Touch ID declined or timed out, the key refused, or the host unreachable)"
   fi
   rm -f "$CONN_DIR/open.err"
-  RSH="ssh ${SSH_OPTS[*]} -o ControlMaster=no -o ControlPath=$CONN_SOCK -o ProxyCommand=/usr/bin/false"
+  RSH="ssh ${SSH_OPTS[*]} -o ControlMaster=no -o ControlPath=$CONN_SOCK -o ProxyCommand=/usr/bin/false -o ClearAllForwardings=yes"
   start_watchdog
   log "shared ssh connection open: $(( $(date +%s) - t0 )) s; every step below uses it"
 }
 close_conn() {
   [ -n "$CONN_DIR" ] || return 0
-  if [ -n "$WATCHDOG_PID" ]; then
-    kill "$WATCHDOG_PID" 2>/dev/null || true
-    WATCHDOG_PID=""
-  fi
+  # Closed first, the watchdog stopped after: a pull killed between the two
+  # still leaves the watchdog to close it.
   if ctl "$CONN_SOCK" exit; then
     log "shared ssh connection closed"
   elif [ -e "$CONN_SOCK" ]; then
     log "the shared ssh connection did not close when asked; it ends by itself within ${CONN_PERSIST_S} s of its last session"
+  fi
+  if [ -n "$WATCHDOG_PID" ]; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+    WATCHDOG_PID=""
   fi
   rm -rf -- "$CONN_DIR"
   CONN_DIR=""
@@ -314,7 +319,7 @@ on_exit() {
   # TERM, HUP) only stops the step in progress.
   set +e
   trap '' PIPE
-  trap ':' INT TERM HUP
+  trap ':' INT TERM HUP QUIT
   if [ "$REMOTE_STARTED" = 1 ]; then
     echo "replica:pull: removing the server's temporary folder (a Ctrl-C now skips this, and the next pull removes that folder once it is an hour old)" >&2
     if conn_open; then
@@ -342,6 +347,9 @@ on_exit() {
 }
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
+# A reader that went away (| head) or Ctrl-\ still runs the cleanup above.
+trap 'exit 141' PIPE
+trap 'exit 131' QUIT
 
 log "replica:pull $STAMP: production $APP over ssh (destination from LOGISX_PROD_SSH)"
 

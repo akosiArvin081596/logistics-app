@@ -122,7 +122,8 @@ function fakeSsh() {
 	// ProxyCommand when one is given.
 	const kind = shared ? "mux" : o.ProxyCommand === "/usr/bin/false" ? "refused" : "direct";
 	const what = cmd === "bash -s" ? "program" : cmd.startsWith("rsync --server") ? "rsync" : cmd.startsWith("rm -rf -- ") ? "cleanup" : "other";
-	rec({ kind, what, master: o.ControlMaster, path: sock, host, proxy: o.ProxyCommand, keepalive: `${o.ServerAliveInterval}x${o.ServerAliveCountMax}` });
+	rec({ kind, what, master: o.ControlMaster, path: sock, host, proxy: o.ProxyCommand, keepalive: `${o.ServerAliveInterval}x${o.ServerAliveCountMax}`,
+		forwarding: [o.ForwardAgent, o.ForwardX11, o.ClearAllForwardings, o.PermitLocalCommand].join(",") });
 	if (kind === "refused") { out(2, "kex_exchange_identification: Connection closed by remote host\n"); process.exit(255); }
 	let rc = 0;
 	if (what === "program") {
@@ -336,8 +337,9 @@ console.log("§1 one shared ssh connection");
 	ok("...its socket in a folder of its own in ~/LogisX-replica, mode 700", path.dirname(path.dirname(m.path || "")) === p.R && /^\.pull-conn\.[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(m.path || ""))) && m.dirMode === "700", m);
 	eq("every ssh joins it: the server program, the download, the cleanup, the three uploads", seq(p), ["mux:program", "mux:rsync", "mux:cleanup", "mux:rsync", "mux:rsync", "mux:rsync"]);
 	ok("...each through that socket, never as a master, failing rather than signing in if it is gone", p.sessions.every((c) => c.path === m.path && c.master === "no" && c.proxy === "/usr/bin/false"));
+	ok("...each asking the master for no port forwarding (ClearAllForwardings), so ~/.ssh/config can't open one for the pull", p.sessions.length > 0 && p.sessions.every((c) => c.forwarding.split(",")[2] === "yes"), p.sessions.map((c) => c.forwarding));
 	const rsyncs = p.calls.filter((c) => c.kind === "rsync");
-	ok("...rsync through -e, with the same settings", rsyncs.length === 4 && rsyncs.every((c) => / -o ControlMaster=no /.test(` ${c.rsh} `) && c.rsh.includes(`-o ControlPath=${m.path}`) && c.rsh.includes("-o ProxyCommand=/usr/bin/false")), rsyncs.map((c) => c.rsh));
+	ok("...rsync through -e, with the same settings", rsyncs.length === 4 && rsyncs.every((c) => / -o ControlMaster=no /.test(` ${c.rsh} `) && c.rsh.includes(`-o ControlPath=${m.path}`) && c.rsh.includes("-o ProxyCommand=/usr/bin/false") && c.rsh.includes("-o ClearAllForwardings=yes")), rsyncs.map((c) => c.rsh));
 	ok("...each step checking the connection first", p.sessions.slice(1).every((s) => {
 		const at = p.calls.indexOf(s);
 		const prev = p.calls.indexOf(p.sessions[p.sessions.indexOf(s) - 1]);
@@ -366,6 +368,12 @@ for (const [where, sig, expected] of [["program", "TERM", ["mux:program", "mux:c
 	eq("...every ssh before and in the trap uses the shared connection", seq(p), expected);
 	ok("...the connection is closed after them and its folder removed", closedAfter(p, isSession) && p.connDirs().length === 0, p.connDirs());
 	ok("...the server's folder is gone", p.serverFolders.length === 0, p.serverFolders);
+}
+{
+	const p = pull({ env: () => ({ FAKE_SIGNAL_AT: "program:QUIT" }) });
+	ok("Ctrl-\\ (SIGQUIT) during the server program runs the cleanup too: exits 131", p.r.status === 131, p.out);
+	eq("...its server cleanup goes through the shared connection", seq(p), ["mux:program", "mux:cleanup"]);
+	ok("...the connection is closed after it, its folder removed, the server's folder gone", closedAfter(p, isSession) && p.connDirs().length === 0 && p.serverFolders.length === 0, [p.connDirs(), p.serverFolders]);
 }
 {
 	const p = pull({ env: () => ({ FAKE_SIGNAL_AT: "program:TERM", FAKE_SIGNAL_IN_CLEANUP: "TERM" }) });
@@ -427,6 +435,7 @@ for (const [where, sig, expected] of [["program", "TERM", ["mux:program", "mux:c
 	eq("...only that cleanup connects again", seq(p), ["mux:program", "direct:cleanup"]);
 	const d = p.sessions.find((c) => c.kind === "direct") || {};
 	eq("...on a connection of its own (ControlPath=none, no ProxyCommand), with keepalive 15 s x 8", [d.path, d.proxy, d.keepalive], ["none", undefined, "15x8"]);
+	eq("...with agent and X11 forwarding, every port forwarding and local commands off", d.forwarding, "no,no,yes,no");
 	ok("...the server's folder is removed and the connection's folder too", p.serverFolders.length === 0 && p.connDirs().length === 0, [p.serverFolders, p.connDirs()]);
 	eq("...nothing local changed", [p.clean(), p.settings()], ["previous-pull", "PREVIOUS=1\n"]);
 }
