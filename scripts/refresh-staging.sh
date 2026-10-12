@@ -173,8 +173,24 @@ if ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>
     || die "better-sqlite3 still cannot open a database under $(node --version) after the rebuild, so $PM2_NAME would not boot on it. The code and node_modules are updated; NOT restarted, the client was not built and the database was not touched."
 fi
 say "native modules OK under $(node --version)"
+# >>> load-client-build - keep byte-identical in refresh-local.sh and
+# refresh-staging.sh (scripts/test-refresh-remote-node.js pins the copies)
+#
+# The client is built the way the deploy builds it: client_build, the
+# client-build block of scripts/deploy/remote-deploy.sh, read from the commit
+# checked out here, so the two never differ. It builds beside client/dist and
+# swaps the build in only once it is whole. Built straight into client/dist,
+# Vite emptied it first, so a running server answered every page with the 503
+# "being updated" page for the length of the build, and after a failed build
+# went on doing so.
+CLIENT_BUILD="$(sed -n '/^# >>> client-build/,/^# <<< client-build/p' scripts/deploy/remote-deploy.sh 2>/dev/null || true)"
+case "$CLIENT_BUILD" in
+  *'client_build() {'*) eval "$CLIENT_BUILD" ;;
+  *) die "could not read the client-build block from scripts/deploy/remote-deploy.sh, so the client was not built. Nothing was restarted, and the database was not touched." ;;
+esac
+# <<< load-client-build
 say "building client…"
-npm run build:client --silent
+client_build || die "the client build failed or left no whole build, so client/dist is left as it was and $PM2_NAME still serves it. The code and node_modules are updated; NOT restarted, and the database was not touched."
 PATH="$SAVED_PATH"
 export PATH
 

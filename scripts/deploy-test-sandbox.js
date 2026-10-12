@@ -175,7 +175,10 @@ exit 0
 // (exit 1, its output folder emptied; =keep leaves an existing one alone).
 // STUB_BUILD_EMPTY: the build exits 0 and leaves its output folder with no
 // index.html. A build writes where Vite writes: it EMPTIES its output folder first, then
-// writes an index.html naming the commit it built. The output folder is
+// writes its bundle, assets/index-<commit>.js, and an index.html naming that
+// bundle and the commit it built. STUB_BUILD_ASSETS breaks the bundle while
+// the build still exits 0: =missing names it and never writes it, =empty
+// writes it empty, =none names no bundle at all. The output folder is
 // client/dist for the root's `npm run build:client`, and for client/'s own
 // `npm run build` (run in client/) the --outDir it is handed, else dist. Each
 // build logs its output folder, and whether the build the app serves
@@ -212,7 +215,17 @@ case "$1" in
 	         exit 0
 	     fi
 	     if [ -f "$served/index.html" ]; then serving=yes; else serving=no; fi
-	     mkdir -p "$out" && printf '%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$(git rev-parse HEAD 2>/dev/null)" > "$out/index.html"
+	     built=$(git rev-parse HEAD 2>/dev/null)
+	     bundle=/assets/index-\${built:0:7}.js
+	     refs="<script type=\\"module\\" src=\\"$bundle\\"></script>"
+	     mkdir -p "$out/assets"
+	     case "\${STUB_BUILD_ASSETS:-}" in
+	         missing) ;;
+	         empty) : > "$out$bundle" ;;
+	         none) refs="" ;;
+	         *) printf 'export {};\\n' > "$out$bundle" ;;
+	     esac
+	     printf '%s\\n%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$refs" "$built" > "$out/index.html"
 	     echo "build tag=\${STUB_TAG:-} out=$out serving=$serving" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
 exit 0

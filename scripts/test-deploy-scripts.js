@@ -61,7 +61,8 @@
  *      DEPLOY_RESULT=unproven (the action checks, rolls back and fails the
  *      job; test-deploy-live.js §14 runs that), and the rollback fails. §7
  *      pins the shared restart block byte-identical, with nothing marked
- *      started before its gate.
+ *      started before its gate. A deploy that cannot read pm2's interpreter
+ *      refuses before its checkout: HEAD and main stay where they were.
  *   §16 THE INSTALL LEAVES THE LOCKFILES ALONE. The deploy and the rollback
  *      each install once, with npm_config_save=false, and that line, run for
  *      real (offline), leaves a nested client lockfile as committed while the
@@ -80,7 +81,9 @@
  *   §18 A FAILED INSTALL OR BUILD NEVER TAKES THE APP'S PAGES. The deploy and
  *      the rollback build the client into client/dist.next, beside the build
  *      the app serves, and swap it in only once the build succeeded and left
- *      an index.html (one block, byte-identical in both, pinned), so
+ *      a whole build: an index.html, and every /assets bundle file it names,
+ *      none empty, and at least one (one block, byte-identical in both,
+ *      pinned), so
  *      client/dist is there throughout every build. A deploy whose install,
  *      native-module probe or build fails after its checkout restarts
  *      nothing, leaves client/dist byte-for-byte as it was (the smoke check
@@ -91,6 +94,8 @@
  *      with its commit (.build-commit, which express.static never serves),
  *      and the build it replaces is kept, stamped, in client/dist.prev; one a
  *      cut-short swap left there with no client/dist is put back first. The
+ *      next swap takes the kept build's stamp off before deleting it, so a
+ *      delete cut short leaves nothing a rollback would put back. The
  *      build line, run with the real npm, hands Vite exactly --outDir
  *      dist.next, and client/'s build script is exactly vite build.
  *
@@ -625,9 +630,15 @@ const RESTART_CASES = {
 		// jlist does not list the process: no guess at PATH's node.
 		resetBox(C1, { verified: C1, started: C1 });
 		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_PM2_MISSING: "1" }));
-		return [[x.code === 1 && /::error::cannot read the interpreter pm2 runs logistics-app with/.test(x.out)
-			&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && started() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
-		`${tag}§15 a deploy that cannot read pm2's interpreter refuses to build: nothing installed, built or restarted (code ${x.code})`]];
+		return [
+			[x.code === 1 && /::error::cannot read the interpreter pm2 runs logistics-app with/.test(x.out)
+				&& !/install-start/.test(log("npm")) && !/^restart /m.test(log("pm2")) && started() === C1 && lastField(x.stdout, "DEPLOY_RESULT") === "",
+			`${tag}§15 a deploy that cannot read pm2's interpreter refuses to build: nothing installed, built or restarted (code ${x.code})`],
+			// Read before the checkout, as the rollback reads it: a refusal after
+			// it left HEAD on C2, never built, with no DEPLOY_RESULT to roll back on.
+			[head() === C1 && onMain() && git(D.box, "rev-parse", "main") === C1 && !/::group::fetch \+ checkout/.test(x.out),
+				`${tag}§15 …and refuses before its checkout: HEAD and main stay on C1, nothing fetched or checked out (HEAD ${short(head())}, main ${short(git(D.box, "rev-parse", "main"))})`],
+		];
 	},
 	rollbackNoInterpreter(S, tag) {
 		resetBox(C3, { verified: C1, started: C3 });
@@ -1063,7 +1074,21 @@ function mutants() {
 		mutant("the deploy ignores a failed install", () => BUILD_CASES["unbuilt-install"]({ ...REAL, deploy: swap(REAL.deploy,
 			' || { echo "::error::npm install failed at $NEW"; BUILT=0; }', "") }, M)),
 		mutant("the swap takes a build with no index.html", () => BUILD_CASES["unbuilt-empty"]({ ...REAL, deploy: swap(REAL.deploy,
-			"\telif [ ! -f client/dist.next/index.html ]; then", "\telif false; then") }, M)),
+			"\telif ! client_whole client/dist.next; then", "\telif false; then") }, M)),
+		mutant("the swap takes a build missing a bundle its index.html names", () => BUILD_CASES["unbuilt-bundleMissing"]({ ...REAL, deploy: swap(REAL.deploy,
+			'\t\t[ -s "$1$a" ] || return 1\n', "") }, M)),
+		mutant("the swap takes a build whose index.html names no bundle", () => BUILD_CASES["unbuilt-noBundle"]({ ...REAL, deploy: swap(REAL.deploy,
+			'\t[ "$n" -gt 0 ]\n', "\ttrue\n") }, M)),
+		mutant("the kept build is deleted with its stamp still on it", () => BUILD_CASES.keptStampFirst({ ...REAL, deploy: swap(REAL.deploy,
+			"! rm -f client/dist.prev/.build-commit || ", "") }, M)),
+		mutant("the deploy reads pm2's interpreter after its checkout", () => {
+			const a = REAL.deploy.indexOf('echo "::group::resolve the Node this app actually runs on"');
+			const end = 'echo "::endgroup::"\n';
+			const b = REAL.deploy.indexOf(end, a) + end.length;
+			const block = a >= 0 && b > a ? REAL.deploy.slice(a, b) : "(the interpreter group was not found)";
+			const moved = swap(swap(REAL.deploy, block, ""), "# >>> client-build", `${block}\n# >>> client-build`);
+			return RESTART_CASES.deployNoInterpreter({ ...REAL, deploy: moved }, M);
+		}),
 		mutant("the drift check reads the API alone", () => DRIFT_CASES.checkPage({ ...REAL, check: swap(REAL.check,
 			'if [ "$CODE" = "200" ] && [ "$PAGE_OK" = 1 ]; then HEALTHY=1; fi', 'if [ "$CODE" = "200" ]; then HEALTHY=1; fi') }, M)),
 		mutant("the drift check passes a box on main that does not serve the app", () => DRIFT_CASES.checkPage({ ...REAL, check: swap(REAL.check,
@@ -1257,6 +1282,9 @@ const UNBUILT = {
 	native: ["better-sqlite3 still cannot open a database after the rebuild", { STUB_BSQL: "broken" }],
 	build: ["client build dies part-way, emptying its output folder", { STUB_BUILD_FAIL: "1" }],
 	empty: ["client build exits 0 but leaves no index.html", { STUB_BUILD_EMPTY: "1" }],
+	bundleMissing: ["client build exits 0 with an index.html naming an /assets bundle it never wrote", { STUB_BUILD_ASSETS: "missing" }],
+	bundleEmpty: ["client build exits 0 with the /assets bundle its index.html names left empty", { STUB_BUILD_ASSETS: "empty" }],
+	noBundle: ["client build exits 0 with an index.html that names no /assets bundle", { STUB_BUILD_ASSETS: "none" }],
 };
 const unbuiltCase = (what, env) => (S, tag) => {
 	resetBox(C1, { verified: C1, started: C1 });
@@ -1275,6 +1303,19 @@ const unbuiltCase = (what, env) => (S, tag) => {
 		[smoke.code === 0, `${tag}§18 …so the app still serves its own pages: the smoke check passes (exit ${smoke.code})`],
 	];
 };
+// A whole kept build of C1: its index.html names a bundle the case writes beside it.
+const KEPT_C1_INDEX = '<!doctype html><div id="app"></div><script type="module" src="/assets/index-kept.js"></script><!-- the build of C1, kept -->\n';
+// rm, first on PATH, whose delete of the kept build (rm -rf client/dist.prev)
+// is cut short after it took the bundle folder, the stamp and index.html still
+// there; every other rm is the real one.
+let cutRmBin = null;
+function cutRmBinDir() {
+	if (cutRmBin) return cutRmBin;
+	cutRmBin = path.join(T, "cut-rm-bin");
+	fs.mkdirSync(cutRmBin);
+	writeExec(path.join(cutRmBin, "rm"), '#!/bin/bash\nif [ "$*" = "-rf client/dist.prev" ]; then\n\t/bin/rm -rf client/dist.prev/assets\n\texit 1\nfi\nexec /bin/rm "$@"\n');
+	return cutRmBin;
+}
 const BUILD_CASES = {
 	swap(S, tag) {
 		resetBox(C1, { verified: C1, started: C1 });
@@ -1305,6 +1346,31 @@ const BUILD_CASES = {
 				`${tag}§18 a client build that finds no client/dist and a whole build in client/dist.prev puts it back first, and a failed build leaves it serving (stamp ${short(stampOf())}, last line ${JSON.stringify(lastLine(x))})`],
 			[smoke.code === 0, `${tag}§18 …so the app serves its pages again: the smoke check passes (exit ${smoke.code})`],
 		];
+	},
+	keptStampFirst(S, tag) {
+		// The box serves C2's build and keeps C1's whole, stamped C1, as after a
+		// deploy of C2 over C1. The next swap's delete of that kept build is cut
+		// short after it took the bundle (rm deletes in no set order): whatever
+		// is left must carry no stamp, because a rollback to C1 whose own build
+		// fails puts a kept build back on its stamp alone.
+		resetBox(C2, { verified: C2, started: C2 });
+		seedBuild("dist.prev", KEPT_C1_INDEX, C1);
+		fs.mkdirSync(path.join(D.box, "client", "dist.prev", "assets"));
+		fs.writeFileSync(path.join(D.box, "client", "dist.prev", "assets", "index-kept.js"), "export {};\n");
+		const x = runSh(S.deploy, deployEnv({ SHA: C3, PATH: `${cutRmBinDir()}:${ENV.PATH}` }));
+		const left = keptIndex();
+		const r = [
+			[lastLine(x) === "DEPLOY_RESULT=unbuilt" && stampOf() === C2 && /::warning::could not move client\/dist aside/.test(x.out),
+				`${tag}§18 a swap whose delete of the kept build is cut short ends unbuilt, C2's build still serving (stamp ${short(stampOf())}, last line ${JSON.stringify(lastLine(x))})`],
+			[left === KEPT_C1_INDEX && stampOf("dist.prev") === "",
+				`${tag}§18 …and what is left of the kept build carries no stamp (index left: ${left === KEPT_C1_INDEX}, stamp ${short(stampOf("dist.prev"))})`],
+		];
+		// A rollback to C1 whose own build fails: no kept build of C1 to put
+		// back, so it fails loudly instead of serving the part left.
+		const rb = rollback(S, C1, { RECORD_STATE: "ok", STUB_BUILD_FAIL: "1" });
+		r.push([rb.code === 1 && !/ROLLBACK OK/.test(rb.out) && stampOf() === C2 && new RegExp(`with the client build of ${C2}, not ${C1}'s`).test(rb.out),
+			`${tag}§18 …so a rollback to C1 whose own build fails never puts that part back: ROLLBACK FAILED, naming C2's client (exit ${rb.code}, serving stamp ${short(stampOf())})`]);
+		return r;
 	},
 	unbuiltRunningTarget(S, tag) {
 		// A started commit the record never verified (its checks failed and its
