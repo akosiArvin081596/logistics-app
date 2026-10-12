@@ -1586,51 +1586,6 @@
       }
     },
     {
-      "id": "231fea78-57ef-4919-8140-b55b7f74ae3b",
-      "name": "ReadWebhook",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
-      "position": [
-        200,
-        700
-      ],
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "read-bison-b4f3f09a",
-        "responseMode": "lastNode",
-        "options": {}
-      },
-      "webhookId": "bcd49114-5563-44e2-afb0-c65a8be263ac"
-    },
-    {
-      "id": "a8c7a23d-e194-4b3d-b103-efeeab1e665d",
-      "name": "GetBisonEmails",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
-      "position": [
-        440,
-        700
-      ],
-      "parameters": {
-        "operation": "getAll",
-        "limit": 20,
-        "simple": false,
-        "filters": {
-          "q": "from:bisontransport.com"
-        },
-        "options": {
-          "downloadAttachments": false
-        }
-      },
-      "credentials": {
-        "gmailOAuth2": {
-          "id": "oymS9U543xCU6JOB",
-          "name": "Gmail account 7"
-        }
-      },
-      "webhookId": "5b5186cc-d07d-4df9-b3d6-08f28f6bae7f"
-    },
-    {
       "id": "64623e4f-0a99-4634-9d89-6d01c6ca1c9b",
       "name": "Critical Fields Complete?",
       "type": "n8n-nodes-base.if",
@@ -2273,17 +2228,6 @@
         [
           {
             "node": "Critical Fields Complete?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "ReadWebhook": {
-      "main": [
-        [
-          {
-            "node": "GetBisonEmails",
             "type": "main",
             "index": 0
           }
