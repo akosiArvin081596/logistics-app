@@ -31,8 +31,11 @@ function section(t) { console.log(`\n${t}`); }
 
 const WEBHOOK_TYPE = /(?:^|\.)(?:webhook|formTrigger|chatTrigger|mcpTrigger)$/i;
 const SECRET_NAME = /secret|token|api[-_]?key|password|passwd|authori[sz]ation|^key$/i;
-const isExpression = (v) => typeof v === "string" && (v.trim().startsWith("=") || v.includes("{{"));
-const isPlaceholder = (v) => typeof v === "string" && /REDACTED/.test(v);
+// An n8n expression reads a value at run time ({{ … }}). A field saved in
+// expression mode without one ("=abc123") is still the literal abc123.
+const isExpression = (v) => typeof v === "string" && v.includes("{{");
+// The whole value is the placeholder, so "REDACTED" can't front a real value.
+const isPlaceholder = (v) => typeof v === "string" && /^_*REDACTED[A-Z0-9_]*$/.test(v);
 
 // Problems in one workflow export, as readable strings (empty = clean).
 function webhookProblems(wf, file) {
@@ -92,9 +95,13 @@ function selfCheckSection() {
 	ok(secretProblems(header("s3cr3t-value-123"), "t").length === 1, "§3 a literal secret header is refused");
 	ok(secretProblems(header("REDACTED_SET_IN_N8N"), "t").length === 0, "§3 a REDACTED placeholder header passes");
 	ok(secretProblems(header("={{ $env.SECRET }}"), "t").length === 0, "§3 an expression header passes");
+	ok(secretProblems(header("=s3cr3t-value-123"), "t").length === 1, "§3 a literal saved in expression mode (no {{ }}) is refused");
+	ok(secretProblems(header("REDACTED-s3cr3t-value-123"), "t").length === 1, "§3 a real value behind the word REDACTED is refused");
+	ok(webhookProblems({ nodes: [{ name: "Hook", type: "n8n-nodes-base.webhook", parameters: { authentication: "headerAuth", path: "REDACTED/live-path" } }] }, "t").length === 1,
+		"§3 a real path behind the word REDACTED is refused");
 	const field = { nodes: [{ name: "Api", type: "n8n-nodes-base.httpRequest", parameters: { options: { apiKey: "abc123" } } }] };
 	ok(secretProblems(field, "t").length === 1, "§3 a literal apiKey field is refused");
-	const harmless = { nodes: [{ name: "Gmail", type: "n8n-nodes-base.gmail", webhookId: "0f2b8454-2949-4e8d-a1c9-910756a8b2ea", parameters: { operation: "getAll", filters: { q: "from:x" } } }] };
+	const harmless = { nodes: [{ name: "Gmail", type: "n8n-nodes-base.gmail", webhookId: "00000000-0000-4000-8000-000000000000", parameters: { operation: "getAll", filters: { q: "from:x" } } }] };
 	ok(webhookProblems(harmless, "t").length === 0 && secretProblems(harmless, "t").length === 0, "§3 a Gmail node's internal webhookId and ordinary parameters pass");
 }
 
