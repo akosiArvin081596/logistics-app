@@ -170,9 +170,16 @@ case "$1" in
 esac
 exit 0
 `);
-// STUB_INSTALL_FAIL: install exits 1. STUB_BUILD_FAIL: the build dies part-way
-// (exit 1, client/dist removed; =keep leaves an existing client/dist alone).
-// STUB_BUILD_EMPTY: the build exits 0 and leaves no index.html.
+// STUB_INSTALL_FAIL: install exits 1 (=once: only the first install since the
+// last reset, as a transient failure would). STUB_BUILD_FAIL: the build dies part-way
+// (exit 1, its output folder emptied; =keep leaves an existing one alone).
+// STUB_BUILD_EMPTY: the build exits 0 and leaves its output folder with no
+// index.html. A build writes where Vite writes: it EMPTIES its output folder first, then
+// writes an index.html naming the commit it built. The output folder is
+// client/dist for the root's `npm run build:client`, and for client/'s own
+// `npm run build` (run in client/) the --outDir it is handed, else dist. Each
+// build logs its output folder, and whether the build the app serves
+// (client/dist/index.html) was still there while it wrote (serving=yes|no).
 writeExec(path.join(D.bin, "npm"), `#!/bin/bash
 case "$1" in
 	--version) echo 10.9.8 ;;
@@ -181,26 +188,32 @@ case "$1" in
 		if [ -n "\${STUB_HOLD_FILE:-}" ]; then
 			n=0; while [ ! -e "$STUB_HOLD_FILE" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done
 		fi
-		if [ -n "\${STUB_INSTALL_FAIL:-}" ]; then
+		if [ -n "\${STUB_INSTALL_FAIL:-}" ] && { [ "$STUB_INSTALL_FAIL" != once ] || [ ! -e "$STUB_LOG_DIR/install-fail-used" ]; }; then
+			: > "$STUB_LOG_DIR/install-fail-used"
 			echo "install-failed tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
 			exit 1
 		fi
 		echo "install-end tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
 	rebuild) echo "rebuild tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
 	         : > "$STUB_LOG_DIR/bsql-rebuilt" ;;
-	run) if [ -n "\${STUB_BUILD_FAIL:-}" ]; then
-	         # A build that dies part-way: the old bundle is gone, nothing new.
-	         [ "$STUB_BUILD_FAIL" = keep ] || rm -rf client/dist
-	         echo "build-failed tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
+	run) if [ "\${2:-}" = build:client ]; then served=client/dist; out=client/dist; else served=dist; out=dist; fi
+	     prev=""
+	     for a in "$@"; do if [ "$prev" = --outDir ]; then out=$a; fi; prev=$a; done
+	     if [ -n "\${STUB_BUILD_FAIL:-}" ]; then
+	         # A build that dies part-way: its output folder emptied, nothing new.
+	         [ "$STUB_BUILD_FAIL" = keep ] || rm -rf "$out"
+	         echo "build-failed tag=\${STUB_TAG:-} out=$out" >> "$STUB_LOG_DIR/npm.log"
 	         exit 1
 	     fi
+	     rm -rf "$out"
 	     if [ -n "\${STUB_BUILD_EMPTY:-}" ]; then
-	         rm -rf client/dist
-	         echo "build-empty tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log"
+	         mkdir -p "$out"
+	         echo "build-empty tag=\${STUB_TAG:-} out=$out" >> "$STUB_LOG_DIR/npm.log"
 	         exit 0
 	     fi
-	     mkdir -p client/dist && printf '%s\\n' '${APP_INDEX}' > client/dist/index.html
-	     echo "build tag=\${STUB_TAG:-}" >> "$STUB_LOG_DIR/npm.log" ;;
+	     if [ -f "$served/index.html" ]; then serving=yes; else serving=no; fi
+	     mkdir -p "$out" && printf '%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$(git rev-parse HEAD 2>/dev/null)" > "$out/index.html"
+	     echo "build tag=\${STUB_TAG:-} out=$out serving=$serving" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
 exit 0
 `);
@@ -212,8 +225,10 @@ exit 0
 // Whatever is on disk, STUB_PAGE=app answers the app's page, STUB_PAGE=other a
 // 200 page that is not the app, and STUB_PAGE=updating the 503 page. Every
 // page request is counted in $STUB_LOG_DIR/page-asks, and the first
-// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). The body
-// goes where -o says; the status is printed, which is what the scripts'
+// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). Every
+// request for /api/config/maintenance is counted in $STUB_LOG_DIR/api-asks,
+// and the first STUB_API_SILENT of them get no answer either. The body goes
+// where -o says; the status is printed, which is what the scripts'
 // -w '%{http_code}' reads.
 writeExec(path.join(D.bin, "curl"), `#!/bin/bash
 out=/dev/null url=""
@@ -227,6 +242,11 @@ while [ $# -gt 0 ]; do
 done
 code=\${STUB_HTTP_CODE:-200}
 : > "$out"
+if [[ "$url" == */api/config/maintenance ]]; then
+	asks=$(( $(cat "$STUB_LOG_DIR/api-asks" 2>/dev/null || echo 0) + 1 ))
+	echo "$asks" > "$STUB_LOG_DIR/api-asks"
+	if [ "$asks" -le "\${STUB_API_SILENT:-0}" ]; then printf '000'; exit 0; fi
+fi
 if [ "$code" = 200 ] && [[ "$url" =~ ^https?://[^/]+/$ ]]; then
 	asks=$(( $(cat "$STUB_LOG_DIR/page-asks" 2>/dev/null || echo 0) + 1 ))
 	echo "$asks" > "$STUB_LOG_DIR/page-asks"
@@ -329,6 +349,28 @@ const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : 
 const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
 // How many times the stub curl was asked for the page "/" since the last reset.
 const pageAsks = () => { const p = path.join(D.logs, "page-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
+// How many times the stub curl was asked for /api/config/maintenance.
+const apiAsks = () => { const p = path.join(D.logs, "api-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
+// The build the app serves (client/dist/index.html, "" when there is none), the
+// build client_build keeps beside it (client/dist.prev), the commit a build's
+// .build-commit stamp names ("" for none), and a half-built build left behind
+// (client_build leaves none).
+const clientDir = (d) => path.join(D.box, "client", d);
+const SERVED_INDEX = path.join(clientDir("dist"), "index.html");
+const servedIndex = () => (fs.existsSync(SERVED_INDEX) ? fs.readFileSync(SERVED_INDEX, "utf8") : "");
+const keptIndex = () => { const p = path.join(clientDir("dist.prev"), "index.html"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
+const stampOf = (d = "dist") => { const p = path.join(clientDir(d), ".build-commit"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8").trim() : ""; };
+// Puts a build in client/<d>: `index` as its index.html, stamped with `stamp`
+// (no stamp file when it is "").
+function seedBuild(d, index, stamp = "") {
+	fs.rmSync(clientDir(d), { recursive: true, force: true });
+	fs.mkdirSync(clientDir(d), { recursive: true });
+	fs.writeFileSync(path.join(clientDir(d), "index.html"), index);
+	if (stamp) fs.writeFileSync(path.join(clientDir(d), ".build-commit"), `${stamp}\n`);
+}
+const buildLeftovers = () => ["dist.next"].filter((d) => fs.existsSync(clientDir(d)));
+// A build that is plainly not the stub npm's (which names the commit it built).
+const OLD_BUILD = '<!doctype html><div id="app"></div><!-- the build from before -->\n';
 // The box's record of its last VERIFIED deploy: a git ref (see the
 // verified-record block in remote-deploy.sh). "" when there is none.
 const VERIFIED_REF = "refs/logisx/verified-deploy";
@@ -351,10 +393,12 @@ function resetBox(sha, { detachAt = null, verified: record = null, started: mark
 	if (record) git(D.box, "update-ref", VERIFIED_REF, record);
 	if (mark) git(D.box, "update-ref", STARTED_REF, mark);
 	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
-	// The box serves a build, as one deployed before does. client/dist is
-	// ignored, so the reset above leaves whatever the last case built or removed.
-	fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
-	fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), `${APP_INDEX}\n`);
+	// The box serves the build of `sha`, stamped as client_build stamps it, as
+	// one deployed before does, and keeps none beside it. client/dist is
+	// ignored, so the reset above leaves whatever the last case built, removed
+	// or kept (client_build's dist.next and dist.prev).
+	for (const d of ["dist.next", "dist.prev"]) fs.rmSync(clientDir(d), { recursive: true, force: true });
+	seedBuild("dist", `${APP_INDEX}\n`, sha);
 }
 
 // out: stdout then stderr. stdout alone is what the action parses (ssh hands
@@ -521,6 +565,7 @@ module.exports = {
 	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
 	MARKER, LOCK_FILE, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, STARTED_REF, started,
+	SERVED_INDEX, servedIndex, keptIndex, stampOf, seedBuild, buildLeftovers, OLD_BUILD, apiAsks,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,

@@ -38,10 +38,16 @@
  *       action also runs end to end against the real remote scripts, every
  *       `if:` evaluated: a restart pm2 did not prove (DEPLOY_RESULT=unproven)
  *       still gets the smoke and edge checks, is never recorded, rolls
- *       production back, and ends the job red; and an app that answers its
- *       API but serves the 503 "being updated" page fails its smoke check,
- *       and the rollback serving the same page fails at the Auto-rollback
- *       step with the ROLLBACK FAILED alert, recording nothing.
+ *       production back, and ends the job red; a failed install or build
+ *       after the checkout (DEPLOY_RESULT=unbuilt) restarts nothing, gets no
+ *       check and no record, rolls production back to the previous live
+ *       commit with the previous build serving throughout, and ends the job
+ *       red, while staging stays where it is and ends red too; when the
+ *       rollback's own install fails as well, it is handed the deploy's
+ *       result and restarts nothing (ROLLBACK FAILED); and an app
+ *       that answers its API but serves the 503 "being updated" page fails
+ *       its smoke check, and the rollback serving the same page fails at the
+ *       Auto-rollback step with the ROLLBACK FAILED alert, recording nothing.
  *   §8  mutants: each property above, broken on purpose, must turn this
  *       runner red.
  *
@@ -58,6 +64,7 @@ const {
 	REAL, SMOKE, ok, record, finish, crash,
 	T, D, ENV, git, writeExec,
 	C1, C2, C3, S1, head, onMain, marker, log, verified, STARTED_REF, started,
+	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, clearLogs, reflog, checkOut, result, deployedFrom, didFullDeploy, isNoop, rollback,
 	fastBinDir, leaveHalfFinished, healExpect,
@@ -345,8 +352,11 @@ function actionPins(yaml, tag = "") {
 	r.push([iEdge >= 0 && /^\s*HANDSHAKE_GUARD:\s*\$\{\{\s*steps\.deploy\.outputs\.handshake_guard\s*\}\}\s*$/m.test(steps[iEdge].text),
 		`${tag}§14 the edge check is told the deploy's handshake_guard`]);
 	r.push([iRollback >= 0 && /^\s*RECORD_STATE:\s*\$\{\{\s*steps\.deploy\.outputs\.record_state\s*\}\}\s*$/m.test(steps[iRollback].text)
-		&& /PREV='\$PREV' RECORD_STATE='\$RECORD_STATE' bash -s/.test(steps[iRollback].text),
+		&& /PREV='\$PREV' RECORD_STATE='\$RECORD_STATE' /.test(steps[iRollback].text),
 	`${tag}§14 the rollback is handed the deploy's record_state beside PREV`]);
+	r.push([iRollback >= 0 && /^\s*RESULT:\s*\$\{\{\s*steps\.deploy\.outputs\.result\s*\}\}\s*$/m.test(steps[iRollback].text)
+		&& / DEPLOY_RESULT='\$RESULT' bash -s/.test(steps[iRollback].text),
+	`${tag}§14 …and the deploy's result, as DEPLOY_RESULT`]);
 	return r;
 }
 
@@ -517,6 +527,70 @@ const ACTION_RUN_CASES = {
 				`${tag}§14 …and the job still ends red`],
 		];
 	},
+	unbuiltRollsBack(yaml, S, tag) {
+		// The build of C2 fails after the checkout moved HEAD to C2. Nothing
+		// restarts, so the old process still serves C1's build, untouched.
+		// Production rolls back to C1 anyway (HEAD and node_modules moved), the
+		// checks never run, nothing records C2, and the job ends red. So does a
+		// failed install. A build that keeps failing fails the rollback's build
+		// too, and the build from before the deploy still serves through both;
+		// an install that failed once is followed by a clean rollback.
+		return [
+			["build", { STUB_BUILD_FAIL: "1" }, () => servedIndex() === OLD_BUILD, "the build from before the deploy, untouched"],
+			["install", { STUB_INSTALL_FAIL: "once" }, () => servedIndex().includes(`build of ${C1}`), "C1's build, which the rollback made"],
+		].flatMap(([what, env, servedOk, serving]) => {
+			resetBox(C1, { verified: C1, started: C1 });
+			fs.writeFileSync(SERVED_INDEX, OLD_BUILD);
+			const a = runAction(yaml, S, PROD_INPUTS, env);
+			const out = (a.steps.deploy || {}).outputs || {};
+			const rb = a.said["Auto-rollback"] || "";
+			return [
+				[servedOk() && buildLeftovers().length === 0, `${tag}§14 the whole action, a failed ${what}: client/dist serves ${serving}, with nothing left beside it`],
+				[a.ran.Deploy === "success" && out.result === "unbuilt" && out.prev === C1 && out.to === C2,
+					`${tag}§14 the whole action, a failed ${what} of C2: the deploy step reports result=unbuilt with rollback target C1 (outputs ${JSON.stringify(out)})`],
+				[a.ran["Smoke check"] === "skipped" && a.ran["Public edge check"] === "skipped" && a.ran["Record the verified deploy"] === "skipped",
+					`${tag}§14 …no check runs on a deploy that restarted nothing, and nothing records it (${JSON.stringify(a.ran)})`],
+				[a.ran["Auto-rollback"] === "success" && /the install or build of the new commit failed — rolling logistics-app back to/.test(rb) && /ROLLBACK OK/.test(rb)
+					&& head() === C1 && started() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …production rolls back to C1, so HEAD, node_modules and the running code agree again; C2 is never recorded, and the drift marker names it (HEAD ${short(head())}, record ${short(verified())}, marker ${short(marker())})`],
+				[a.ran["Fail the job if verification failed"] === "failure" && a.failed, `${tag}§14 …and the job ends red, at the step that fails every deploy that did not verify`],
+			];
+		});
+	},
+	unbuiltRollbackInstallFails(yaml, S, tag) {
+		// The install fails, the deploy's and then the rollback's own: nothing
+		// was ever restarted, and the old process still serves the code from
+		// before the deploy. The rollback must not restart it onto a
+		// part-installed node_modules: it fails loudly instead, restarting
+		// nothing, and the job ends red.
+		resetBox(C1, { verified: C1, started: C1 });
+		const a = runAction(yaml, S, PROD_INPUTS, { STUB_INSTALL_FAIL: "1" });
+		const out = (a.steps.deploy || {}).outputs || {};
+		const rb = a.said["Auto-rollback"] || "";
+		return [
+			[out.result === "unbuilt" && a.ran["Auto-rollback"] === "failure"
+				&& /^::error::ROLLBACK FAILED — the deploy of [0-9a-f]{40} was never built, .* Not restarting: .* MANUAL INTERVENTION REQUIRED\.$/m.test(rb) && !/ROLLBACK OK/.test(rb),
+			`${tag}§14 the whole action, an install that fails for the deploy and its rollback alike: the Auto-rollback step fails with ROLLBACK FAILED and restarts nothing (${JSON.stringify(a.ran)})`],
+			[!/^restart /m.test(log("pm2")) && !/^build /m.test(log("npm")) && started() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …no restart and no build at all, the drift marker names C2, nothing recorded (started ${short(started())}, record ${short(verified())}, marker ${short(marker())})`],
+			[a.failed, `${tag}§14 …and the job ends red`],
+		];
+	},
+	unbuiltStagingStays(yaml, S, tag) {
+		// Staging never rolls back: a failed build leaves its HEAD on C2 for a
+		// human to inspect, with its old build still serving, and the job red.
+		resetBox(C1, { verified: C1, started: C1 });
+		fs.writeFileSync(SERVED_INDEX, OLD_BUILD);
+		const a = runAction(yaml, S, { ...PROD_INPUTS, rollback_on_failure: "false", public_url: "" }, { STUB_BUILD_FAIL: "1" });
+		const out = (a.steps.deploy || {}).outputs || {};
+		return [
+			[out.result === "unbuilt" && a.ran["Smoke check"] === "skipped" && a.ran["Record the verified deploy"] === "skipped" && a.ran["Auto-rollback"] === "skipped",
+				`${tag}§14 the whole action on staging, a failed build of C2: result=unbuilt, no check, no record, and no rollback (${JSON.stringify(a.ran)})`],
+			[head() === C2 && verified() === C1 && started() === C1 && marker() === "" && servedIndex() === OLD_BUILD && !/^restart /m.test(log("pm2")),
+				`${tag}§14 …HEAD stays on C2, nothing restarts, and the old build still serves (HEAD ${short(head())}, marker ${short(marker()) || "none"})`],
+			[a.ran["Fail the job if verification failed"] === "failure" && a.failed, `${tag}§14 …and the job ends red, at the step that fails every deploy that did not verify`],
+		];
+	},
 	updatingPageFailsTheRollback(yaml, S, tag) {
 		// The app answers its API but every page is the 503 "being updated" page
 		// (no client/dist/index.html), before and after the rollback. The smoke
@@ -562,6 +636,11 @@ const DEPLOY_STEP_CASES = {
 	wholeLines(script, tag) {
 		const x = runDeployStep(script, { out: `${deployOut()}  DEPLOY_RESULT=noop\nDEPLOY_RESULT=noop; x\nDEPLOYED_FROM=${S1} \nDEPLOY_HANDSHAKE_GUARD=0x\nDEPLOY_RECORD_STATE=okay\n` });
 		return [[x.code === 0 && sameOutputs(x.outputs), `${tag}§14 …and only from a whole line of the exact shape: an indented, suffixed or padded one never counts (got ${JSON.stringify(x.outputs)})`]];
+	},
+	unbuiltRead(script, tag) {
+		const x = runDeployStep(script, { out: deployOut({ result: "unbuilt" }) });
+		return [[x.code === 0 && x.outputs.result === "unbuilt" && x.outputs.prev === C1,
+			`${tag}§14 …and reads result=unbuilt, beside its rollback target (got ${JSON.stringify(x.outputs)})`]];
 	},
 	shortFrom(script, tag) {
 		const x = runDeployStep(script, { out: deployOut({ from: C1.slice(0, 7) }) });
@@ -764,7 +843,11 @@ function mutants() {
 	expectCaught("the edge check is never told the handshake guard", actionPins(swap(ACTION,
 		"        HANDSHAKE_GUARD: ${{ steps.deploy.outputs.handshake_guard }}\n", ""), M));
 	expectCaught("the rollback is not told the record state", actionPins(swap(ACTION,
-		" RECORD_STATE='$RECORD_STATE' bash -s", " bash -s"), M));
+		" RECORD_STATE='$RECORD_STATE' DEPLOY_RESULT=", " DEPLOY_RESULT="), M));
+	expectCaught("the rollback is not told the deploy result", [
+		...actionPins(swap(ACTION, " DEPLOY_RESULT='$RESULT' bash -s", " bash -s"), M),
+		...actionRunPins(swap(ACTION, " DEPLOY_RESULT='$RESULT' bash -s", " bash -s"), REAL, M, ["unbuiltRollbackInstallFails"]),
+	]);
 
 	// §14: the deploy step's input checks and output parsing.
 	const step = deployStepScript(ACTION);
@@ -780,7 +863,16 @@ function mutants() {
 		"last_line DEPLOYED_FROM '[0-9a-f]{40}'", "last_line DEPLOYED_FROM '[0-9a-f]+'"), M, ["shortFrom"]));
 	// §14: an unproven restart rolls production back.
 	expectCaught("an unproven restart does not roll production back", actionRunPins(swap(ACTION,
-		" ||\n         steps.deploy.outputs.result == 'unproven')", ")"), REAL, M));
+		"         steps.deploy.outputs.result == 'unproven' ||\n", ""), REAL, M, ["unprovenRollsBack"]));
+	// §14: a failed install or build rolls production back, and fails staging.
+	expectCaught("the deploy step drops result=unbuilt", deployStepPins(swap(step,
+		"'deployed|noop|unproven|unbuilt'", "'deployed|noop|unproven'"), M, ["unbuiltRead"]));
+	expectCaught("a failed build does not roll production back", actionRunPins(swap(ACTION,
+		" ||\n         steps.deploy.outputs.result == 'unbuilt')", ")"), REAL, M, ["unbuiltRollsBack"]));
+	expectCaught("a deploy that restarted nothing is smoke-checked", actionRunPins(swap(ACTION,
+		"      if: steps.deploy.outputs.result != 'unbuilt'\n", ""), REAL, M, ["unbuiltRollsBack"]));
+	expectCaught("a failed build leaves staging's job green", actionRunPins(swap(ACTION,
+		" || steps.deploy.outputs.result == 'unbuilt'\n", "\n"), REAL, M, ["unbuiltStagingStays"]));
 
 	// §14: the edge check.
 	const edge = edgeScript(ACTION);

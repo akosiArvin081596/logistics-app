@@ -190,9 +190,11 @@ jobs:
 
       - name: Alarm
         # Loud and never healed: already attempted, behind-and-unhealthy,
-        # staging failed, staging unverified, staging still unreached after a
-        # re-run, verified-record-inconsistent, or an unrecognised state. The
-        # ONLY step that fails this job: `rerun` is not an alarm, the rerun job
+        # in-sync-unhealthy (on main but not serving the app, the 503 "being
+        # updated" page included), staging failed, staging unverified,
+        # staging still unreached after a re-run,
+        # verified-record-inconsistent, or an unrecognised state. The ONLY
+        # step that fails this job: `rerun` is not an alarm, the rerun job
         # below acts on it.
         if: steps.gate.outputs.action == 'alarm'
         env:

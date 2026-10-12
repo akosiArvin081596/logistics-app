@@ -17,14 +17,16 @@
 #               consistent record), DEPLOY_RECORD_STATE=ok|missing|inconsistent,
 #               DEPLOY_HANDSHAKE_GUARD=1|0 (whether the commit now serving
 #               refuses a foreign Origin), and, always LAST, DEPLOY_RESULT=
-#               deployed|noop|unproven (noop: a newer live main commit already
-#               contains SHA, and DEPLOY_NOOP=1 is printed too, for people;
-#               unproven: pm2 did not prove the restart, and the action treats
-#               that as a failed verification). The workflow takes the last line
-#               of each, so no earlier output can stand in.
-# Exit codes:   0 deployed, a no-op or unproven (DEPLOY_RESULT says which), 75
-#               another deploy holds the box lock, anything else a failure. 75
-#               is deliberately not an ssh transport code (255), so
+#               deployed|noop|unproven|unbuilt (noop: a newer live main commit
+#               already contains SHA, and DEPLOY_NOOP=1 is printed too, for
+#               people; unproven: pm2 did not prove the restart, and the action
+#               treats that as a failed verification; unbuilt: the install or
+#               the build of the commit checked out failed, nothing was
+#               restarted, and the action rolls production back). The workflow
+#               takes the last line of each, so no earlier output can stand in.
+# Exit codes:   0 deployed, a no-op, unproven or unbuilt (DEPLOY_RESULT says
+#               which), 75 another deploy holds the box lock, anything else a
+#               failure. 75 is deliberately not an ssh transport code (255), so
 #               ssh-retry.sh does not retry it.
 #
 # ⚠️ This script never records its own deploy as verified: it cannot know. The
@@ -353,6 +355,12 @@ if [ -n "$SHA" ] && [ "$NEW" != "$SHA" ]; then
 	exit 1
 fi
 echo "new HEAD: $NEW"
+# The code running now, as the rollback target above chose it (the live
+# commit, or the record when a started commit is not answering). A deploy
+# whose install or build fails restarts nothing, so its rollback returns to
+# exactly this (DEPLOY_RESULT=unbuilt, below), even when it is $NEW: the rule
+# next only exists because a restart would replace it.
+RUNNING_TO=$ROLLBACK_TO
 # ⚠️ A rollback never returns to the very commit this deploy restarts, unless
 # that commit is the verified record. LIVE can be a started commit that is not
 # the record: one whose own checks failed while its rollback never ran (ssh
@@ -364,6 +372,10 @@ if [ "$ROLLBACK_TO" = "$NEW" ] && [ -n "$VERIFIED" ] && [ "$VERIFIED" != "$NEW" 
 	ROLLBACK_TO=$VERIFIED
 	echo "::warning::$NEW is the commit this deploy restarts, and the verified deploy is $VERIFIED — a rollback of this deploy returns to $VERIFIED instead, and drops: $(git log --oneline "$VERIFIED..$NEW" 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
 fi
+# The live-update Origin check only exists in server.js since it gained
+# liveUpdateHandshakeAllowed; the public edge check asks a foreign Origin for a
+# 403 only when the commit deployed has it (a rollback by hand may not).
+if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$NEW" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
 echo "::endgroup::"
 
 echo "::group::resolve the Node this app actually runs on"
@@ -393,7 +405,71 @@ echo "pm2 interpreter: $NODE_BIN"
 echo "building with:   $(command -v node) $(node --version) / npm $(npm --version)"
 echo "::endgroup::"
 
+# >>> client-build — keep byte-identical in remote-deploy.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# client_build builds the client BESIDE the build the running process serves,
+# and swaps it in only once it is whole. Vite empties its output folder before
+# it writes, so a build straight into client/dist left the running process
+# with no client/dist/index.html for the whole build: every page was
+# server.js's 503 "being updated" page, and after a failed build it stayed
+# that way, with nothing to bring the app's pages back.
+#
+# It runs client/'s own build script (what the root's build:client runs) with
+# only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
+# e2e servers and a developer still build into client/dist. Only a build that
+# exited 0 and left an index.html replaces client/dist, stamped first with the
+# commit it was built from (.build-commit: express.static never serves a
+# dotfile), by two renames (the box's coreutils predates mv --exchange):
+# client/dist is missing for the moment between them, not for the length of a
+# build. The build it replaces is KEPT, with its stamp, in client/dist.prev
+# until the next swap, so a rollback whose own build fails can put its
+# commit's build back (remote-rollback.sh). A failed build leaves client/dist
+# and client/dist.prev as they were. Returns 0 only once the new build is in
+# place. client_stamp DIR prints the commit DIR's build was made from, or
+# nothing for a build with no stamp.
+#
+# ⚠️ A run cut short between the two renames leaves no client/dist and the
+# whole previous build in client/dist.prev: before anything else, client_build
+# puts it back, so the next build never starts by losing the only good copy.
+client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
+client_build() {
+	if [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then
+		mv client/dist.prev client/dist && echo "::warning::client/dist was missing and client/dist.prev held a whole build (a swap cut short): put it back"
+	fi
+	rm -rf client/dist.next
+	if ! (cd client && npm run build --silent -- --outDir dist.next); then
+		echo "::warning::the client build failed — client/dist is left as it was"
+	elif [ ! -f client/dist.next/index.html ]; then
+		echo "::warning::the client build left no index.html — client/dist is left as it was"
+	elif ! git rev-parse HEAD > client/dist.next/.build-commit; then
+		echo "::warning::could not stamp the new build with its commit — client/dist is left as it was"
+	elif ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
+		echo "::warning::could not move client/dist aside — client/dist is left as it was"
+	elif ! mv client/dist.next client/dist; then
+		echo "::warning::could not move the new build into client/dist — putting the previous build back"
+		[ ! -e client/dist.prev ] || mv client/dist.prev client/dist
+	else
+		return 0
+	fi
+	rm -rf client/dist.next
+	return 1
+}
+# <<< client-build
+
 echo "::group::install + build"
+# ⚠️ HEAD is $NEW from here on, while the app still runs the code from before
+# this deploy. A failed install, native-module probe or client build therefore
+# does not end the deploy there, which would leave HEAD, node_modules and the
+# running code disagreeing with nothing to bring them back together. It sets
+# BUILT=0: nothing is restarted, and the deploy reports DEPLOY_RESULT=unbuilt
+# (below). .github/actions/vps-deploy then never records $NEW, rolls
+# production back to $RUNNING_TO, the code running now, with
+# remote-rollback.sh (which installs and builds that commit again, and
+# restarts nothing when that install fails too), and fails the job. Staging,
+# which never rolls back, just fails. client_build keeps the build the app
+# serves in place either way.
+BUILT=1
 # npm_config_save=false installs from the lockfiles without writing them back,
 # so the checkout stays clean. The root install's postinstall installs
 # client/ (a plain `npm install` there rewrote client/package-lock.json on
@@ -402,7 +478,7 @@ echo "::group::install + build"
 # A root `npm ci` is not used: it would delete node_modules under the running
 # process. scripts/test-deploy-scripts.js §16 pins this line in both scripts,
 # and runs the real postinstall.
-npm_config_save=false npm install --silent --no-audit --no-fund
+npm_config_save=false npm install --silent --no-audit --no-fund || { echo "::error::npm install failed at $NEW"; BUILT=0; }
 # npm tracks package VERSIONS, not ABI — it reports "up to date" and skips the
 # rebuild when only the Node major changed. Probe, then rebuild only on failure.
 #
@@ -411,15 +487,25 @@ npm_config_save=false npm install --silent --no-audit --no-fund
 # `new Database()`. Measured on the VPS 2026-09-19: /usr/bin/node v20 passes
 # require() and fails new Database(). backup.sh's probe was fixed the same way;
 # scripts/test-deploy-scripts.js §9 pins both.
-if ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1; then
+if [ "$BUILT" = 1 ] && ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1; then
 	echo "native ABI mismatch detected — rebuilding better-sqlite3 for $(node --version)"
 	npm rebuild better-sqlite3
-	node -e "new (require('better-sqlite3'))(':memory:').close()" || { echo "::error::better-sqlite3 still fails to load after rebuild"; exit 1; }
+	node -e "new (require('better-sqlite3'))(':memory:').close()" || { echo "::error::better-sqlite3 still fails to load after rebuild"; BUILT=0; }
 fi
-echo "native modules OK under $(node --version)"
-npm run build:client --silent
-test -f client/dist/index.html || { echo "::error::build produced no client/dist/index.html"; exit 1; }
+if [ "$BUILT" = 1 ]; then
+	echo "native modules OK under $(node --version)"
+	client_build || BUILT=0
+fi
 echo "::endgroup::"
+if [ "$BUILT" != 1 ]; then
+	echo "::error::$NEW is checked out but its install or build failed, so nothing was restarted: the app still runs the code from before this deploy, and its build still serves. DEPLOY_RESULT=unbuilt: nothing records $NEW as verified, production rolls back to $RUNNING_TO, and staging stays as it is"
+	echo "DEPLOYED_FROM=$RUNNING_TO"
+	echo "DEPLOYED_TO=$NEW"
+	echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
+	echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
+	echo "DEPLOY_RESULT=unbuilt"
+	exit 0
+fi
 
 echo "::group::restart"
 # >>> pm2-restart — keep byte-identical in remote-deploy.sh and remote-rollback.sh
@@ -503,10 +589,6 @@ else
 fi
 echo "::endgroup::"
 
-# The live-update Origin check only exists in server.js since it gained
-# liveUpdateHandshakeAllowed; the public edge check asks a foreign Origin for a
-# 403 only when the commit deployed has it (a rollback by hand may not).
-if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$NEW" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
 # The workflow reads each of these from the LAST line of its kind, and
 # DEPLOY_RESULT is always the final line.
 echo "DEPLOYED_FROM=$ROLLBACK_TO"

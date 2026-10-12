@@ -4,8 +4,10 @@
 # Inputs (env): DIR, PM2
 #
 # Prints DRIFT_*=... lines for the workflow to parse. Read-only: it never writes
-# the marker it reads, nor the verified-deploy record. The one file it writes is
-# its holder note in the deploy lock file, while it holds the lock (below).
+# the marker it reads, nor the verified-deploy record, nor anything in the
+# clone. It writes two files: its holder note in the deploy lock file, while it
+# holds the lock (below), and a temporary file (mktemp) holding the page it
+# reads, removed as soon as it is read (the app-page block).
 #
 # ⚠️ `behind-healable` is the box's view only, NOT permission to heal: the box
 # cannot see whether main's commit passed staging.
@@ -134,21 +136,65 @@ LAST=$(cat "$MARKER" 2>/dev/null || echo "")
 # Refs and the marker are read: let a deploy have the box before the probe.
 exec 9>&-
 
-# Up to 8 s, so never under the lock. A deploy that takes the lock after this
-# point restarts the app only after its install and build, well after the
-# probe. One that has already released the lock left main checked out, so HEAD
-# reads main, and the gate (drift-gate.js) asks GitHub whether main's Deploy
-# run is still running before it calls a box behind and not answering an
-# incident: the app boots for 2–16 s after the restart.
+# The API (up to about 30 s) and then the page (up to about 20 s), so never
+# under the lock. A deploy that takes the lock after this point restarts the
+# app only after its install and build, well after the probe, and its build no
+# longer empties client/dist while it runs (client_build). One that has
+# already released the lock left main checked out, so HEAD reads main, and the
+# gate (drift-gate.js) asks GitHub whether main's Deploy run is still running
+# before it calls a box behind and not answering an incident: the app boots
+# for 2–16 s after the restart.
 PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
 PORT=${PORT:-3000}
-CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+# The API is asked again only while it gives no answer at all (000: a refused
+# connection, or 8 s with no reply), 3 tries in all, 2 s apart, as the page
+# is: a box on main's commit is in-sync only when it answers, so a briefly
+# blocked event loop must not read as in-sync-unhealthy. A stall or a boot
+# longer than the three tries (about 30 s) still reads as unhealthy, and so
+# does any answer other than 200.
+for API_TRY in 1 2 3; do
+	CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+	CODE=${CODE:-000}
+	if [ "$CODE" != "000" ] || [ "$API_TRY" = 3 ]; then break; fi
+	sleep 2
+done
+# Healthy means serving the APP, read exactly as the smoke check and the
+# rollback read it: the API answering 200 is not enough when every page is the
+# 503 "being updated" page.
+# >>> app-page — keep byte-identical in remote-smoke.sh, remote-rollback.sh and
+# remote-drift-check.sh (scripts/test-deploy-scripts.js pins the copies)
+#
+# The API answering proves the process serves, not that it serves the app.
+# Without client/dist/index.html (a build that failed or left nothing) every
+# page is server.js's 503 "being updated" page (lib/app-updating-page.js)
+# while /api/config/maintenance still answers 200. So / must answer 200 AND
+# carry the SPA's mount point, id="app" from client/index.html, which that
+# page never carries. Sets PAGE_CODE, and PAGE_OK=1 only when both hold.
+# Only no answer at all (000: a stall right after the API's 200) is asked
+# again, 3 tries in all, 2 s apart. Any answer is final at once, the 503 page
+# and a 200 without the mount point included.
+PAGE_BODY=$(mktemp)
+for PAGE_TRY in 1 2 3; do
+	PAGE_CODE=$(curl -s -o "$PAGE_BODY" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)
+	PAGE_CODE=${PAGE_CODE:-000}
+	if [ "$PAGE_CODE" != "000" ] || [ "$PAGE_TRY" = 3 ]; then break; fi
+	sleep 2
+done
+PAGE_OK=0
+if [ "$PAGE_CODE" = "200" ] && grep -q 'id="app"' "$PAGE_BODY"; then
+	PAGE_OK=1
+fi
+rm -f "$PAGE_BODY"
+# <<< app-page
+HEALTHY=0
+if [ "$CODE" = "200" ] && [ "$PAGE_OK" = 1 ]; then HEALTHY=1; fi
 
 echo "DRIFT_LOCAL=$LOCAL"
 echo "DRIFT_HEAD=$HEAD_SHA"
 echo "DRIFT_RECORD=$VERIFIED_STATE"
 echo "DRIFT_REMOTE=$REMOTE"
 echo "DRIFT_HTTP=$CODE"
+echo "DRIFT_PAGE=$PAGE_CODE"
 echo "DRIFT_MARKER=$LAST"
 if [ "$VERIFIED_STATE" = inconsistent ]; then
 	# HEAD was moved back past the verified commit outside these scripts (a
@@ -156,14 +202,21 @@ if [ "$VERIFIED_STATE" = inconsistent ]; then
 	# checkout, or the record came from another clone. Which commit serves is
 	# unknown, so a human decides: never a heal.
 	echo "DRIFT_STATE=verified-record-inconsistent"
-elif [ "$LOCAL" = "$REMOTE" ]; then
+elif [ "$LOCAL" = "$REMOTE" ] && [ "$HEALTHY" = 1 ]; then
 	echo "DRIFT_STATE=in-sync"
+elif [ "$LOCAL" = "$REMOTE" ]; then
+	# On main's commit but not serving the app: the API does not answer 200,
+	# or every page is the 503 "being updated" page. Nothing is behind, so
+	# nothing would heal it, and a pass would hide it: an alarm, an incident
+	# like behind-and-unhealthy.
+	echo "DRIFT_STATE=in-sync-unhealthy"
 elif [ "$LAST" = "$REMOTE" ]; then
 	# Already tried once for this SHA — do not restart production again.
 	echo "DRIFT_STATE=behind-already-attempted"
-elif [ "$CODE" != "200" ]; then
+elif [ "$HEALTHY" != 1 ]; then
 	# Behind AND unhealthy is not a missed deploy, it is an incident. Healing
-	# would paper over it; alarm instead.
+	# would paper over it; alarm instead. Unhealthy includes an API that
+	# answers 200 while every page is the 503 "being updated" page.
 	echo "DRIFT_STATE=behind-and-unhealthy"
 else
 	# Behind main and serving. Either a deploy never reached the box, or one

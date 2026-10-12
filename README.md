@@ -118,7 +118,9 @@ live-update handshake), and CI's push run passed on that same commit. Branch
 protection does not require PRs to be up to date with `main`, so that push run
 is the first CI verdict on what a merge produced. Production then smoke-checks
 itself, verifies the public edge, and **rolls itself back** to the previous SHA
-if either check fails. A manual production deploy (a rollback, say) deploys
+if either check fails, or if its install or build fails. The client is built
+beside the live build and swapped in only once it is whole, so a build never
+takes the app's pages down. A manual production deploy (a rollback, say) deploys
 only a commit that passed staging in its own push run, unless it is run with
 `override=true`, which is recorded as a warning on the run.
 

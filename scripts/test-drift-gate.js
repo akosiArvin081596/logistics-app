@@ -21,7 +21,9 @@
  *      cannot be read the verdict stays `failed`
  *   §5 decide(): every failure path is fail-closed (unverified), never a heal;
  *      a box behind and not answering with main checked out is
- *      deploy-in-progress only while main's Deploy run still runs
+ *      deploy-in-progress only while main's Deploy run still runs; a box on
+ *      main's commit that does not serve the app (in-sync-unhealthy) alarms
+ *      at once, whatever runs
  *   §6 the CLI end to end against a local fake GitHub API, including the
  *      $GITHUB_OUTPUT contract deploy-drift.yml reads
  *   §7 source pins — the workflow files and the gate agree (job name; the
@@ -104,6 +106,9 @@ function checkActionTable(g, tag = "") {
 	const r = [];
 	const expect = {
 		"in-sync": "none",
+		// On main's commit but not serving the app (the 503 "being updated"
+		// page included): an incident, never a pass.
+		"in-sync-unhealthy": "alarm",
 		"behind-healable": "heal",
 		"behind-staging-pending": "notice",
 		"behind-already-attempted": "alarm",
@@ -156,7 +161,7 @@ function checkRefine(g, tag = "") {
 	for (const v of ["unverified", "", undefined, null, "PASSED", "success", "UNREACHED"]) {
 		r.push([g.refineState("behind-healable", v) === "behind-staging-unverified", `${tag}§2 healable + verdict ${JSON.stringify(v)} must fail closed as unverified`]);
 	}
-	for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy", "verified-record-inconsistent", ""]) {
+	for (const box of ["in-sync", "in-sync-unhealthy", "behind-already-attempted", "behind-and-unhealthy", "verified-record-inconsistent", ""]) {
 		for (const v of ["passed", "failed", "pending", "unverified", "unreached"]) {
 			r.push([g.refineState(box, v, 1) === box, `${tag}§2 box state '${box}' must not be changed by verdict '${v}'`]);
 		}
@@ -533,10 +538,17 @@ async function checkAnnotationLookup(g, tag = "") {
 	for (const [c, m] of await checkUnhealthyDeploy(gate)) ok(c, m);
 	{
 		const never = fakeFetch([[/./, () => { throw new Error("must not be called"); }]]);
-		for (const box of ["in-sync", "behind-already-attempted", "behind-and-unhealthy"]) {
+		for (const box of ["in-sync", "in-sync-unhealthy", "behind-already-attempted", "behind-and-unhealthy"]) {
 			const d = await gate.decide({ boxState: box, targetSha: SHA, repo: "o/r", fetchImpl: never, sleepImpl: noSleep });
 			ok(d.state === box && never.calls.length === 0, `§5 box state ${box} needs no API call and is passed through`);
 		}
+		// On main's commit and not serving the app: an alarm at once, never
+		// softened to deploy-in-progress, even with main checked out and a
+		// Deploy run of main's commit still running.
+		const running = fakeFetch([[/\/runs\?/, { body: { workflow_runs: [run(95, { status: "in_progress", conclusion: null })] } }]]);
+		const inSync = await gate.decide({ boxState: "in-sync-unhealthy", targetSha: SHA, boxHead: SHA, repo: "o/r", fetchImpl: running, sleepImpl: noSleep });
+		ok(inSync.state === "in-sync-unhealthy" && inSync.action === "alarm" && running.calls.length === 0,
+			`§5 in-sync-unhealthy alarms at once, with main checked out and its Deploy run running, asking GitHub nothing (got ${inSync.state}/${inSync.action}, ${running.calls.length} calls)`);
 		const bad = await gate.decide({ boxState: "behind-healable", targetSha: "abc", repo: "o/r", fetchImpl: never, sleepImpl: noSleep });
 		ok(bad.action === "alarm" && bad.state === "behind-staging-unverified", "§5 no usable target SHA → unverified alarm, not a heal");
 		const norepo = await gate.decide({ boxState: "behind-healable", targetSha: SHA, repo: "", fetchImpl: never, sleepImpl: noSleep });
