@@ -244,10 +244,13 @@ runs:
         else
           echo "::warning::deploy verification failed — rolling $PM2 back to $PREV"
         fi
-        # Both were read from the deploy's own last lines and matched a fixed
-        # shape there (40 hex; ok|missing|inconsistent), so they are safe in
-        # the remote command's quotes.
-        bash scripts/deploy/ssh-retry.sh "$USER@$HOST" "DIR='$DIR' PM2='$PM2' PREV='$PREV' RECORD_STATE='$RECORD_STATE' bash -s" < scripts/deploy/remote-rollback.sh
+        # All three were read from the deploy's own last lines and matched a
+        # fixed shape there (40 hex; ok|missing|inconsistent;
+        # deployed|noop|unproven|unbuilt), so they are safe in the remote
+        # command's quotes. The result tells the rollback whether the deploy
+        # restarted anything: after an unbuilt one it never restarts on a
+        # failed install of its own.
+        bash scripts/deploy/ssh-retry.sh "$USER@$HOST" "DIR='$DIR' PM2='$PM2' PREV='$PREV' RECORD_STATE='$RECORD_STATE' DEPLOY_RESULT='$RESULT' bash -s" < scripts/deploy/remote-rollback.sh
 
     - name: Fail the job if verification failed
       # The smoke/edge steps are continue-on-error so the rollback can run first.

@@ -4,8 +4,10 @@
 # Inputs (env): DIR, PM2
 #
 # Prints DRIFT_*=... lines for the workflow to parse. Read-only: it never writes
-# the marker it reads, nor the verified-deploy record. The one file it writes is
-# its holder note in the deploy lock file, while it holds the lock (below).
+# the marker it reads, nor the verified-deploy record, nor anything in the
+# clone. It writes two files: its holder note in the deploy lock file, while it
+# holds the lock (below), and a temporary file (mktemp) holding the page it
+# reads, removed as soon as it is read (the app-page block).
 #
 # ⚠️ `behind-healable` is the box's view only, NOT permission to heal: the box
 # cannot see whether main's commit passed staging.
@@ -134,17 +136,28 @@ LAST=$(cat "$MARKER" 2>/dev/null || echo "")
 # Refs and the marker are read: let a deploy have the box before the probe.
 exec 9>&-
 
-# The API (up to 8 s) and then the page (up to about 20 s), so never under the
-# lock. A deploy that takes the lock after this point restarts the app only
-# after its install and build, well after the probe, and its build no longer
-# empties client/dist while it runs (client_build). One that has already
-# released the lock left main checked out, so HEAD reads main, and the gate
-# (drift-gate.js) asks GitHub whether main's Deploy run is still running
+# The API (up to about 30 s) and then the page (up to about 20 s), so never
+# under the lock. A deploy that takes the lock after this point restarts the
+# app only after its install and build, well after the probe, and its build no
+# longer empties client/dist while it runs (client_build). One that has
+# already released the lock left main checked out, so HEAD reads main, and the
+# gate (drift-gate.js) asks GitHub whether main's Deploy run is still running
 # before it calls a box behind and not answering an incident: the app boots
 # for 2–16 s after the restart.
 PORT=$(grep -oE '^PORT=[0-9]+' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
 PORT=${PORT:-3000}
-CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+# The API is asked again only while it gives no answer at all (000: a refused
+# connection, or 8 s with no reply), 3 tries in all, 2 s apart, as the page
+# is: a box on main's commit is in-sync only when it answers, so a briefly
+# blocked event loop must not read as in-sync-unhealthy. A stall or a boot
+# longer than the three tries (about 30 s) still reads as unhealthy, and so
+# does any answer other than 200.
+for API_TRY in 1 2 3; do
+	CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$PORT/api/config/maintenance" || true)
+	CODE=${CODE:-000}
+	if [ "$CODE" != "000" ] || [ "$API_TRY" = 3 ]; then break; fi
+	sleep 2
+done
 # Healthy means serving the APP, read exactly as the smoke check and the
 # rollback read it: the API answering 200 is not enough when every page is the
 # 503 "being updated" page.

@@ -225,8 +225,10 @@ exit 0
 // Whatever is on disk, STUB_PAGE=app answers the app's page, STUB_PAGE=other a
 // 200 page that is not the app, and STUB_PAGE=updating the 503 page. Every
 // page request is counted in $STUB_LOG_DIR/page-asks, and the first
-// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). The body
-// goes where -o says; the status is printed, which is what the scripts'
+// STUB_PAGE_SILENT of them get no answer at all (000, an empty body). Every
+// request for /api/config/maintenance is counted in $STUB_LOG_DIR/api-asks,
+// and the first STUB_API_SILENT of them get no answer either. The body goes
+// where -o says; the status is printed, which is what the scripts'
 // -w '%{http_code}' reads.
 writeExec(path.join(D.bin, "curl"), `#!/bin/bash
 out=/dev/null url=""
@@ -240,6 +242,11 @@ while [ $# -gt 0 ]; do
 done
 code=\${STUB_HTTP_CODE:-200}
 : > "$out"
+if [[ "$url" == */api/config/maintenance ]]; then
+	asks=$(( $(cat "$STUB_LOG_DIR/api-asks" 2>/dev/null || echo 0) + 1 ))
+	echo "$asks" > "$STUB_LOG_DIR/api-asks"
+	if [ "$asks" -le "\${STUB_API_SILENT:-0}" ]; then printf '000'; exit 0; fi
+fi
 if [ "$code" = 200 ] && [[ "$url" =~ ^https?://[^/]+/$ ]]; then
 	asks=$(( $(cat "$STUB_LOG_DIR/page-asks" 2>/dev/null || echo 0) + 1 ))
 	echo "$asks" > "$STUB_LOG_DIR/page-asks"
@@ -342,11 +349,26 @@ const marker = () => (fs.existsSync(MARKER) ? fs.readFileSync(MARKER, "utf8") : 
 const log = (n) => { const p = path.join(D.logs, `${n}.log`); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
 // How many times the stub curl was asked for the page "/" since the last reset.
 const pageAsks = () => { const p = path.join(D.logs, "page-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
-// The build the app serves (client/dist/index.html, "" when there is none), and
-// whatever a client build left beside it (client_build leaves nothing).
-const SERVED_INDEX = path.join(D.box, "client", "dist", "index.html");
+// How many times the stub curl was asked for /api/config/maintenance.
+const apiAsks = () => { const p = path.join(D.logs, "api-asks"); return fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8").trim()) : 0; };
+// The build the app serves (client/dist/index.html, "" when there is none), the
+// build client_build keeps beside it (client/dist.prev), the commit a build's
+// .build-commit stamp names ("" for none), and a half-built build left behind
+// (client_build leaves none).
+const clientDir = (d) => path.join(D.box, "client", d);
+const SERVED_INDEX = path.join(clientDir("dist"), "index.html");
 const servedIndex = () => (fs.existsSync(SERVED_INDEX) ? fs.readFileSync(SERVED_INDEX, "utf8") : "");
-const buildLeftovers = () => ["dist.next", "dist.prev"].filter((d) => fs.existsSync(path.join(D.box, "client", d)));
+const keptIndex = () => { const p = path.join(clientDir("dist.prev"), "index.html"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
+const stampOf = (d = "dist") => { const p = path.join(clientDir(d), ".build-commit"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8").trim() : ""; };
+// Puts a build in client/<d>: `index` as its index.html, stamped with `stamp`
+// (no stamp file when it is "").
+function seedBuild(d, index, stamp = "") {
+	fs.rmSync(clientDir(d), { recursive: true, force: true });
+	fs.mkdirSync(clientDir(d), { recursive: true });
+	fs.writeFileSync(path.join(clientDir(d), "index.html"), index);
+	if (stamp) fs.writeFileSync(path.join(clientDir(d), ".build-commit"), `${stamp}\n`);
+}
+const buildLeftovers = () => ["dist.next"].filter((d) => fs.existsSync(clientDir(d)));
 // A build that is plainly not the stub npm's (which names the commit it built).
 const OLD_BUILD = '<!doctype html><div id="app"></div><!-- the build from before -->\n';
 // The box's record of its last VERIFIED deploy: a git ref (see the
@@ -371,12 +393,12 @@ function resetBox(sha, { detachAt = null, verified: record = null, started: mark
 	if (record) git(D.box, "update-ref", VERIFIED_REF, record);
 	if (mark) git(D.box, "update-ref", STARTED_REF, mark);
 	for (const f of fs.readdirSync(D.logs)) fs.rmSync(path.join(D.logs, f), { force: true });
-	// The box serves a build, as one deployed before does. client/dist is
-	// ignored, so the reset above leaves whatever the last case built or removed,
-	// and a build a case left beside it (client_build's dist.next and dist.prev).
-	for (const d of ["dist.next", "dist.prev"]) fs.rmSync(path.join(D.box, "client", d), { recursive: true, force: true });
-	fs.mkdirSync(path.join(D.box, "client", "dist"), { recursive: true });
-	fs.writeFileSync(path.join(D.box, "client", "dist", "index.html"), `${APP_INDEX}\n`);
+	// The box serves the build of `sha`, stamped as client_build stamps it, as
+	// one deployed before does, and keeps none beside it. client/dist is
+	// ignored, so the reset above leaves whatever the last case built, removed
+	// or kept (client_build's dist.next and dist.prev).
+	for (const d of ["dist.next", "dist.prev"]) fs.rmSync(clientDir(d), { recursive: true, force: true });
+	seedBuild("dist", `${APP_INDEX}\n`, sha);
 }
 
 // out: stdout then stderr. stdout alone is what the action parses (ssh hands
@@ -543,7 +565,7 @@ module.exports = {
 	git, tryGit, writeExec, STUB_EXEC, hasRealFlock,
 	C1, C2, C3, S1,
 	MARKER, LOCK_FILE, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, STARTED_REF, started,
-	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
+	SERVED_INDEX, servedIndex, keptIndex, stampOf, seedBuild, buildLeftovers, OLD_BUILD, apiAsks,
 	resetBox, runSh, deployEnv, field, lastField, waitFor,
 	short, runCases, clearLogs, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	fastBinDir, rollback, leaveHalfFinished,

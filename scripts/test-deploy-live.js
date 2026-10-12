@@ -42,7 +42,9 @@
  *       after the checkout (DEPLOY_RESULT=unbuilt) restarts nothing, gets no
  *       check and no record, rolls production back to the previous live
  *       commit with the previous build serving throughout, and ends the job
- *       red, while staging stays where it is and ends red too; and an app
+ *       red, while staging stays where it is and ends red too; when the
+ *       rollback's own install fails as well, it is handed the deploy's
+ *       result and restarts nothing (ROLLBACK FAILED); and an app
  *       that answers its API but serves the 503 "being updated" page fails
  *       its smoke check, and the rollback serving the same page fails at the
  *       Auto-rollback step with the ROLLBACK FAILED alert, recording nothing.
@@ -350,8 +352,11 @@ function actionPins(yaml, tag = "") {
 	r.push([iEdge >= 0 && /^\s*HANDSHAKE_GUARD:\s*\$\{\{\s*steps\.deploy\.outputs\.handshake_guard\s*\}\}\s*$/m.test(steps[iEdge].text),
 		`${tag}§14 the edge check is told the deploy's handshake_guard`]);
 	r.push([iRollback >= 0 && /^\s*RECORD_STATE:\s*\$\{\{\s*steps\.deploy\.outputs\.record_state\s*\}\}\s*$/m.test(steps[iRollback].text)
-		&& /PREV='\$PREV' RECORD_STATE='\$RECORD_STATE' bash -s/.test(steps[iRollback].text),
+		&& /PREV='\$PREV' RECORD_STATE='\$RECORD_STATE' /.test(steps[iRollback].text),
 	`${tag}§14 the rollback is handed the deploy's record_state beside PREV`]);
+	r.push([iRollback >= 0 && /^\s*RESULT:\s*\$\{\{\s*steps\.deploy\.outputs\.result\s*\}\}\s*$/m.test(steps[iRollback].text)
+		&& / DEPLOY_RESULT='\$RESULT' bash -s/.test(steps[iRollback].text),
+	`${tag}§14 …and the deploy's result, as DEPLOY_RESULT`]);
 	return r;
 }
 
@@ -551,6 +556,25 @@ const ACTION_RUN_CASES = {
 				[a.ran["Fail the job if verification failed"] === "failure" && a.failed, `${tag}§14 …and the job ends red, at the step that fails every deploy that did not verify`],
 			];
 		});
+	},
+	unbuiltRollbackInstallFails(yaml, S, tag) {
+		// The install fails, the deploy's and then the rollback's own: nothing
+		// was ever restarted, and the old process still serves the code from
+		// before the deploy. The rollback must not restart it onto a
+		// part-installed node_modules: it fails loudly instead, restarting
+		// nothing, and the job ends red.
+		resetBox(C1, { verified: C1, started: C1 });
+		const a = runAction(yaml, S, PROD_INPUTS, { STUB_INSTALL_FAIL: "1" });
+		const out = (a.steps.deploy || {}).outputs || {};
+		const rb = a.said["Auto-rollback"] || "";
+		return [
+			[out.result === "unbuilt" && a.ran["Auto-rollback"] === "failure"
+				&& /^::error::ROLLBACK FAILED — the deploy of [0-9a-f]{40} was never built, .* Not restarting: .* MANUAL INTERVENTION REQUIRED\.$/m.test(rb) && !/ROLLBACK OK/.test(rb),
+			`${tag}§14 the whole action, an install that fails for the deploy and its rollback alike: the Auto-rollback step fails with ROLLBACK FAILED and restarts nothing (${JSON.stringify(a.ran)})`],
+			[!/^restart /m.test(log("pm2")) && !/^build /m.test(log("npm")) && started() === C1 && verified() === C1 && marker() === C2,
+				`${tag}§14 …no restart and no build at all, the drift marker names C2, nothing recorded (started ${short(started())}, record ${short(verified())}, marker ${short(marker())})`],
+			[a.failed, `${tag}§14 …and the job ends red`],
+		];
 	},
 	unbuiltStagingStays(yaml, S, tag) {
 		// Staging never rolls back: a failed build leaves its HEAD on C2 for a
@@ -819,7 +843,11 @@ function mutants() {
 	expectCaught("the edge check is never told the handshake guard", actionPins(swap(ACTION,
 		"        HANDSHAKE_GUARD: ${{ steps.deploy.outputs.handshake_guard }}\n", ""), M));
 	expectCaught("the rollback is not told the record state", actionPins(swap(ACTION,
-		" RECORD_STATE='$RECORD_STATE' bash -s", " bash -s"), M));
+		" RECORD_STATE='$RECORD_STATE' DEPLOY_RESULT=", " DEPLOY_RESULT="), M));
+	expectCaught("the rollback is not told the deploy result", [
+		...actionPins(swap(ACTION, " DEPLOY_RESULT='$RESULT' bash -s", " bash -s"), M),
+		...actionRunPins(swap(ACTION, " DEPLOY_RESULT='$RESULT' bash -s", " bash -s"), REAL, M, ["unbuiltRollbackInstallFails"]),
+	]);
 
 	// §14: the deploy step's input checks and output parsing.
 	const step = deployStepScript(ACTION);

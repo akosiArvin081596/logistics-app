@@ -27,7 +27,9 @@
  *      check). A box whose API answers but whose every page is the 503 "being
  *      updated" page (or any page without the app's mount point) is
  *      unhealthy: in-sync-unhealthy on main's commit, behind-and-unhealthy
- *      behind it, both alarms, never in-sync or a heal.
+ *      behind it, both alarms, never in-sync or a heal. The API, like the
+ *      page, is asked again only while it gives no answer (3 tries), and the
+ *      page's temporary file is removed.
  *   §6 ssh-retry.sh retries ONLY transport failures (255); a remote failure
  *      and the lock's 75 pass straight through. Its give-up line is pinned
  *      exactly, and drift-gate.js must read it back as "never reached the
@@ -84,8 +86,13 @@
  *      nothing, leaves client/dist byte-for-byte as it was (the smoke check
  *      still passes on it), and reports DEPLOY_RESULT=unbuilt with the
  *      rollback target, which the action rolls production back on
- *      (test-deploy-live.js §14 runs that). The build line, run with the real
- *      npm, hands Vite exactly --outDir dist.next.
+ *      (test-deploy-live.js §14 runs that): the code that runs, and the record
+ *      only when a started commit does not answer. Every build swapped in is stamped
+ *      with its commit (.build-commit, which express.static never serves),
+ *      and the build it replaces is kept, stamped, in client/dist.prev; one a
+ *      cut-short swap left there with no client/dist is put back first. The
+ *      build line, run with the real npm, hands Vite exactly --outDir
+ *      dist.next, and client/'s build script is exactly vite build.
  *
  * The verified-deploy record is tested by scripts/test-deploy-record.js (§12),
  * and the started mark, the LIVE commit and the vps-deploy action by
@@ -114,7 +121,7 @@ const {
 	C1, C2, C3, S1, MARKER, LOCK_FILE, head, onMain, marker, log, VERIFIED_REF, verified, STARTED_REF, started,
 	resetBox, runSh, deployEnv, field, lastField, waitFor, swap, cut, expectCaught, M,
 	short, rollback, boxSeen, withLockHeld, holdLock, holderNote, pageAsks, fastBinDir,
-	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
+	SERVED_INDEX, servedIndex, keptIndex, stampOf, seedBuild, buildLeftovers, OLD_BUILD, apiAsks,
 } = require("./deploy-test-sandbox.js");
 
 // A unit of work for one worker process (see "running it" at the end). `secs`:
@@ -328,6 +335,30 @@ const DRIFT_CASES = {
 		resetBox(C2);
 		out = read();
 		r.push([field(out, "DRIFT_STATE") === "behind-healable", `${tag}§5 …and behind, serving the app → behind-healable, as before (got ${field(out, "DRIFT_STATE")})`]);
+		return r;
+	},
+	checkApiStall(S, tag) {
+		// A briefly blocked event loop gives no answer (000) for a moment. The
+		// API is asked again only then, 3 tries in all, 2 s apart, like the page:
+		// a box on main's commit must not read as in-sync-unhealthy for it.
+		const r = [];
+		const read = (env = {}) => runSh(S.check, { DIR: D.box, PM2: "logistics-app", PATH: `${fastBinDir()}:${ENV.PATH}`, ...env }).out;
+		resetBox(C3);
+		let out = read({ STUB_API_SILENT: "2" });
+		r.push([field(out, "DRIFT_STATE") === "in-sync" && field(out, "DRIFT_HTTP") === "200" && apiAsks() === 3,
+			`${tag}§5 an API that answers only on the third try → in-sync (got ${field(out, "DRIFT_STATE")}, API ${field(out, "DRIFT_HTTP")}, ${apiAsks()} asks)`]);
+		resetBox(C3);
+		out = read({ STUB_API_SILENT: "9" });
+		r.push([field(out, "DRIFT_STATE") === "in-sync-unhealthy" && field(out, "DRIFT_HTTP") === "000" && apiAsks() === 3,
+			`${tag}§5 …one that never answers → in-sync-unhealthy after 3 tries (got ${field(out, "DRIFT_STATE")}, ${apiAsks()} asks)`]);
+		resetBox(C3);
+		out = read({ STUB_HTTP_CODE: "503" });
+		r.push([field(out, "DRIFT_STATE") === "in-sync-unhealthy" && apiAsks() === 1,
+			`${tag}§5 …and any answer is final at once: a 503 → in-sync-unhealthy, asked once (got ${field(out, "DRIFT_STATE")}, ${apiAsks()} asks)`]);
+		const tmp = fs.mkdtempSync(path.join(T, "drift-tmp-"));
+		resetBox(C3);
+		read({ TMPDIR: tmp });
+		r.push([fs.readdirSync(tmp).length === 0, `${tag}§5 the drift check removes the temporary file it reads the page into (left ${JSON.stringify(fs.readdirSync(tmp))})`]);
 		return r;
 	},
 	checkLocked(S, tag) {
@@ -678,8 +709,8 @@ function probePins() {
 		ok(probes.length > 0 && opens.length === probes.length,
 			`§9 every better-sqlite3 probe in ${name} opens a database, not just require()s it (${opens.length} of ${probes.length})`);
 	}
-	ok(REAL.deploy.split(DB_PROBE).length - 1 === 2 && REAL.rollback.split(DB_PROBE).length - 1 === 1,
-		"§9 the deploy probes before and after its rebuild, the rollback once — all with the same text the mutants swap");
+	ok(REAL.deploy.split(DB_PROBE).length - 1 === 2 && REAL.rollback.split(DB_PROBE).length - 1 === 2,
+		"§9 the deploy and the rollback each probe before and after their rebuild — all with the same text the mutants swap");
 }
 
 // ─────────────────────────────── §16 the install leaves the lockfiles alone
@@ -1037,6 +1068,13 @@ function mutants() {
 			'if [ "$CODE" = "200" ] && [ "$PAGE_OK" = 1 ]; then HEALTHY=1; fi', 'if [ "$CODE" = "200" ]; then HEALTHY=1; fi') }, M)),
 		mutant("the drift check passes a box on main that does not serve the app", () => DRIFT_CASES.checkPage({ ...REAL, check: swap(REAL.check,
 			'elif [ "$LOCAL" = "$REMOTE" ] && [ "$HEALTHY" = 1 ]; then', 'elif [ "$LOCAL" = "$REMOTE" ]; then') }, M)),
+		mutant("the drift check asks the API once", () => DRIFT_CASES.checkApiStall({ ...REAL, check: swap(REAL.check,
+			'\tif [ "$CODE" != "000" ] || [ "$API_TRY" = 3 ]; then break; fi', "\tbreak") }, M)),
+		mutant("a client build loses the build a cut-short swap left in client/dist.prev", () => BUILD_CASES.swapCutShort({ ...REAL, deploy: swap(REAL.deploy,
+			"\tif [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then", "\tif false; then") }, M)),
+		mutant("an unbuilt deploy rolls back to the record, not the code running", () => BUILD_CASES.unbuiltRunningTarget({ ...REAL, deploy: swap(REAL.deploy,
+			'echo "DEPLOYED_FROM=$RUNNING_TO"', 'echo "DEPLOYED_FROM=$ROLLBACK_TO"') }, M)),
+		mutant("client/'s build script runs more than vite build", () => buildScriptPins(PACKAGE_SCRIPTS("package.json"), { build: "vite build && node postbuild.js" }, M)),
 
 		// §15: the restart is proven.
 		mutant("the deploy ignores whether the start time moved", () => RESTART_CASES.deployRestartNoop({ ...REAL, deploy: swap(REAL.deploy,
@@ -1192,6 +1230,11 @@ function appPagePins() {
 	const decide = c.indexOf('echo "DRIFT_STATE=in-sync"');
 	ok(released > 0 && api > released && pageEnd > api && healthy > pageEnd && decide > healthy,
 		"§17 the drift check reads the page after releasing the lock and after the API, and calls the box healthy only when both answer as the app");
+	// Its header says what it writes: the lock's holder note, and the
+	// temporary file the page check reads the page into.
+	const header = c.slice(0, c.indexOf("set -uo pipefail"));
+	ok(/holder note/.test(header) && /temporary file \(mktemp\)/.test(header) && /PAGE_BODY=\$\(mktemp\)/.test(c) && /rm -f "\$PAGE_BODY"/.test(c),
+		"§17 remote-drift-check.sh's header names both files it writes: the lock's holder note and the page check's temporary file, which it removes");
 	const t = REAL.rollback;
 	const poll = t.indexOf('"http://127.0.0.1:$PORT/api/config/maintenance"');
 	const end = t.indexOf("# <<< app-page");
@@ -1243,8 +1286,43 @@ const BUILD_CASES = {
 			[builds.length === 1 && /^build tag= out=dist\.next serving=yes$/.test(builds[0]),
 				`${tag}§18 …building into client/dist.next while the running app's client/dist/index.html is still there (got ${JSON.stringify(builds)})`],
 			[servedIndex().includes(`build of ${C2}`) && buildLeftovers().length === 0,
-				`${tag}§18 …then swapping it in: client/dist is C2's build, with nothing left beside it (leftovers ${JSON.stringify(buildLeftovers())})`],
+				`${tag}§18 …then swapping it in: client/dist is C2's build, with nothing half-built left beside it (leftovers ${JSON.stringify(buildLeftovers())})`],
+			[stampOf() === C2 && keptIndex() === OLD_BUILD && stampOf("dist.prev") === C1,
+				`${tag}§18 …stamped C2, while the build it replaced is KEPT, stamped C1, in client/dist.prev (stamps ${short(stampOf())}/${short(stampOf("dist.prev"))})`],
 		];
+	},
+	swapCutShort(S, tag) {
+		// A run cut short between the swap's two renames: no client/dist, and the
+		// whole previous build in client/dist.prev. The next client_build puts
+		// it back before anything else, here one whose own build then fails.
+		resetBox(C1, { verified: C1, started: C1 });
+		fs.rmSync(path.join(D.box, "client", "dist"), { recursive: true, force: true });
+		seedBuild("dist.prev", OLD_BUILD, C1);
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BUILD_FAIL: "1" }));
+		const smoke = runPageSmoke(SMOKE);
+		return [
+			[lastLine(x) === "DEPLOY_RESULT=unbuilt" && servedIndex() === OLD_BUILD && stampOf() === C1 && /::warning::client\/dist was missing and client\/dist\.prev held a whole build/.test(x.out),
+				`${tag}§18 a client build that finds no client/dist and a whole build in client/dist.prev puts it back first, and a failed build leaves it serving (stamp ${short(stampOf())}, last line ${JSON.stringify(lastLine(x))})`],
+			[smoke.code === 0, `${tag}§18 …so the app serves its pages again: the smoke check passes (exit ${smoke.code})`],
+		];
+	},
+	unbuiltRunningTarget(S, tag) {
+		// A started commit the record never verified (its checks failed and its
+		// rollback never ran) is what runs, and answers. A heal or re-run of it
+		// whose build fails restarted nothing, so its rollback target is the
+		// code running, C2, not the older record C1 a restart would need.
+		resetBox(C2, { verified: C1, started: C2 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BUILD_FAIL: "1" }));
+		return [[lastLine(x) === "DEPLOY_RESULT=unbuilt" && lastField(x.stdout, "DEPLOYED_FROM") === C2,
+			`${tag}§18 an unbuilt deploy reports the code that runs (the started C2) as its rollback target, not the record C1 (got ${short(lastField(x.stdout, "DEPLOYED_FROM"))})`]];
+	},
+	unbuiltNotAnswering(S, tag) {
+		// …but a started commit that does not answer may be what broke: the
+		// rollback target stays the record, as for any deploy.
+		resetBox(C2, { verified: C1, started: C2 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BUILD_FAIL: "1", STUB_HTTP_CODE: "503", PATH: `${fastBinDir()}:${ENV.PATH}` }));
+		return [[lastLine(x) === "DEPLOY_RESULT=unbuilt" && lastField(x.stdout, "DEPLOYED_FROM") === C1,
+			`${tag}§18 …and when that started commit does not answer, the record C1 (got ${short(lastField(x.stdout, "DEPLOYED_FROM"))})`]];
 	},
 	...Object.fromEntries(Object.entries(UNBUILT).map(([k, [what, env]]) => [`unbuilt-${k}`, unbuiltCase(what, env)])),
 };
@@ -1255,6 +1333,45 @@ function clientBuildBlock(text) {
 }
 // The one line that builds the client, in both scripts.
 const BUILD_LINE = "if ! (cd client && npm run build --silent -- --outDir dist.next); then";
+const PACKAGE_SCRIPTS = (rel) => JSON.parse(fs.readFileSync(path.join(__dirname, "..", rel), "utf8")).scripts || {};
+// client/'s own build script is what the root's build:client runs, so the
+// deploy builds what CI, the replica and e2e build, into another folder. And it
+// is vite build itself, with nothing after it: npm appends --outDir dist.next to
+// the script, and only Vite, last on that line, would read it.
+function buildScriptPins(rootScripts, clientScripts, tag = "") {
+	return [
+		[rootScripts["build:client"] === "cd client && npm run build",
+			`${tag}§18 the root's build:client still runs client/'s own build script, which client_build runs with --outDir (got ${JSON.stringify(rootScripts["build:client"])})`],
+		[clientScripts.build === "vite build",
+			`${tag}§18 client/'s build script is exactly "vite build", so the --outDir client_build appends reaches Vite (got ${JSON.stringify(clientScripts.build)})`],
+	];
+}
+// The stamp a build carries (.build-commit) is never served: server.js mounts
+// client/dist with express.static's defaults, which skip a dotfile. Run for
+// real with this repo's express against a build folder holding one.
+const APP_INDEX_PAGE = '<!doctype html><div id="app"></div>\n';
+async function stampNeverServedPins() {
+	const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+	ok(/^\s*app\.use\(express\.static\(clientDistPath\)\);$/m.test(server),
+		"§18 server.js serves client/dist with express.static's defaults (no dotfiles option)");
+	const express = require("express");
+	const dir = fs.mkdtempSync(path.join(T, "static-"));
+	fs.writeFileSync(path.join(dir, "index.html"), APP_INDEX_PAGE);
+	fs.writeFileSync(path.join(dir, ".build-commit"), `${C1}\n`);
+	const app = express();
+	app.use(express.static(dir));
+	const srv = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+	try {
+		const base = `http://127.0.0.1:${srv.address().port}`;
+		const stamp = await fetch(`${base}/.build-commit`);
+		const stampBody = await stamp.text();
+		const index = await fetch(`${base}/index.html`);
+		ok(stamp.status === 404 && !stampBody.includes(C1) && index.status === 200,
+			`§18 express.static answers /.build-commit 404 without the stamp, and /index.html 200 (got ${stamp.status}, ${index.status})`);
+	} finally {
+		await new Promise((resolve) => srv.close(resolve));
+	}
+}
 function buildPins() {
 	const d = clientBuildBlock(REAL.deploy);
 	const rb = clientBuildBlock(REAL.rollback);
@@ -1267,11 +1384,7 @@ function buildPins() {
 		ok(!code.some((l) => /\btest -f client\/dist\//.test(l)), `§18 ${name} judges the build only inside client_build, by client/dist.next`);
 		ok(code.filter((l) => l.trim() === call).length === 1, `§18 ${name} calls client_build once, as \`${call}\``);
 	}
-	// client/'s own build script is what the root's build:client runs, so the
-	// deploy builds what CI, the replica and e2e build, into another folder.
-	const scripts = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).scripts;
-	ok(scripts["build:client"] === "cd client && npm run build",
-		`§18 the root's build:client still runs client/'s own build script, which client_build runs with --outDir (got ${JSON.stringify(scripts["build:client"])})`);
+	record(buildScriptPins(PACKAGE_SCRIPTS("package.json"), PACKAGE_SCRIPTS("client/package.json")));
 	// An unbuilt deploy reports itself and stops before the restart.
 	const t = REAL.deploy;
 	const call = t.indexOf("client_build || BUILT=0");
@@ -1419,6 +1532,7 @@ const ALL_JOBS = [
 	...caseJobs("§18", BUILD_CASES),
 	job("§18 build pins", buildPins),
 	job("§18 the build line under the real npm", buildLinePins, 1),
+	job("§18 the build stamp is never served", stampNeverServedPins),
 	job("§11 exit scanner", exitScannerSelfCheck),
 	job("§11 exit pins", () => record(exitPins(REMOTE_SCRIPTS))),
 	...mutants(),

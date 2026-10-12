@@ -408,9 +408,9 @@ async function decide({ boxState, targetSha, boxHead, repo, token, apiBase, fetc
 	// from main), that is a deploy in progress; otherwise the box's alarm stands.
 	// in-sync-unhealthy is never softened this way: production already runs
 	// main's verified commit, so no deploy is on its way to it. A redeploy of
-	// that very commit, or pm2 restarting a crashed process, can still read as
-	// unhealthy for the few seconds of a boot, and an alarm then is the safe
-	// mistake.
+	// that very commit, or pm2 restarting a crashed process, reads as unhealthy
+	// only when its boot outlasts the check's three tries at the API (about
+	// 30 s), and an alarm then is the safe mistake.
 	if (boxState === "behind-and-unhealthy" && SHA_RE.test(targetSha || "") && boxHead === targetSha && repo) {
 		let seen;
 		try {

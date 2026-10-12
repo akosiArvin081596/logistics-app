@@ -19,9 +19,15 @@
  *       "Serves again" means the app: a rollback whose API answers but whose
  *       / is the 503 "being updated" page (no client/dist/index.html), or any
  *       page without the SPA's mount point, fails like one that never serves
- *       (ROLLBACK FAILED, exit 1) and records nothing. A rollback whose own
- *       client build fails keeps the build that was serving in client/dist
- *       (client_build), so it still serves, and records nothing.
+ *       (ROLLBACK FAILED, exit 1) and records nothing. "The app" means the
+ *       target's own client too: every build is stamped with its commit and
+ *       the build a swap replaces is kept, so a rollback whose own client
+ *       build fails serves the target's build (the one in place, or the kept
+ *       one, put back), and with neither it ends ROLLBACK FAILED naming the
+ *       client that serves; either way it records nothing. After a deploy
+ *       that was never built (DEPLOY_RESULT=unbuilt), a rollback whose own
+ *       install or native module fails restarts nothing and ends ROLLBACK
+ *       FAILED: the old process never stopped serving.
  *       remote-deploy.sh never records its own deploy. With the record, a half-finished deploy
  *       (HEAD moved, nothing restarted) is never a no-op floor or a rollback
  *       target, and main moves back over it; the drift check and the heal prep
@@ -44,7 +50,7 @@ const {
 	REAL, SMOKE, record, finish, crash,
 	D, ENV, git,
 	C1, C2, C3, S1, head, onMain, marker, log, pageAsks, VERIFIED_REF, verified, started,
-	SERVED_INDEX, servedIndex, buildLeftovers, OLD_BUILD,
+	servedIndex, keptIndex, stampOf, seedBuild, buildLeftovers,
 	resetBox, runSh, deployEnv, field, lastField, swap, expectCaught, M,
 	short, runCases, reflog, checkOut, recordVerified, result, deployedFrom, didFullDeploy, isNoop,
 	rollback, leaveHalfFinished, healExpect, boxSeen,
@@ -69,32 +75,53 @@ function rollbackRecordState(S, tag, states = ["missing", "inconsistent", ""]) {
 	});
 }
 
-// A rollback's own install or build that did not complete cleanly, three ways.
-// A client build that fails, part-way (emptying its output folder, as Vite
-// does) or with no index.html, leaves the build that served in client/dist
-// (client_build), so the page check passes on it: `keeps` says that build must
-// still be there. An install that fails is followed by a build that succeeds.
+// A rollback's own install or build that did not complete cleanly, three ways:
+// it still restarts and serves TARGET's own client, and records nothing. Here
+// the box already serves C2's build, stamped C2, as it does after a deploy of
+// C3 that was never built (DEPLOY_RESULT=unbuilt). A client build that fails,
+// part-way (emptying its output folder, as Vite does) or with no index.html,
+// leaves client/dist as it was (client_build), so that build serves on. An
+// install that fails is followed by a build that succeeds, stamped C2. A
+// client that is NOT the target's is rollbackRestoresKeptBuild and
+// rollbackClientNotTarget, below.
+const C1_BUILD = '<!doctype html><div id="app"></div><!-- the build of C1 -->\n';
+const C2_BUILD = '<!doctype html><div id="app"></div><!-- the build of C2 -->\n';
 const BUILD_NOT_CLEAN = {
-	install: ["npm install failed", { STUB_INSTALL_FAIL: "1" }, false],
-	build: ["build died part-way, emptying its output folder,", { STUB_BUILD_FAIL: "1" }, true],
-	index: ["build left no index.html", { STUB_BUILD_EMPTY: "1" }, true],
+	install: ["npm install failed", { STUB_INSTALL_FAIL: "1" }, () => servedIndex().includes(`build of ${C2}`), "a new build of C2"],
+	build: ["client build died part-way, emptying its output folder,", { STUB_BUILD_FAIL: "1" }, () => servedIndex() === C2_BUILD, "C2's build that was there"],
+	index: ["client build left no index.html", { STUB_BUILD_EMPTY: "1" }, () => servedIndex() === C2_BUILD, "C2's build that was there"],
 };
 function rollbackBuildNotClean(S, tag, which = Object.keys(BUILD_NOT_CLEAN)) {
 	return which.flatMap((k) => {
-		const [what, env, keeps] = BUILD_NOT_CLEAN[k];
+		const [what, env, servesOk, serving] = BUILD_NOT_CLEAN[k];
 		resetBox(C3, { verified: C1 });
-		fs.writeFileSync(SERVED_INDEX, OLD_BUILD);
+		seedBuild("dist", C2_BUILD, C2);
 		const x = rollback(S, C2, { RECORD_STATE: "ok", ...env });
-		const r = [[x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1
-			&& /::warning::not recording .* install or build did not complete cleanly/.test(x.out),
-		`${tag}§12 a rollback whose ${what} still restarts and serves, but records nothing (record ${short(verified())}, code ${x.code})`]];
-		if (keeps) {
-			r.push([servedIndex() === OLD_BUILD && buildLeftovers().length === 0,
-				`${tag}§12 …serving the build that was there before it, byte-for-byte, with nothing left beside it (leftovers ${JSON.stringify(buildLeftovers())})`]);
-		}
-		return r;
+		return [
+			[x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1
+				&& /::warning::not recording .* install or build did not complete cleanly/.test(x.out),
+			`${tag}§12 a rollback whose ${what} still restarts and serves, but records nothing (record ${short(verified())}, code ${x.code})`],
+			[servesOk() && stampOf() === C2 && buildLeftovers().length === 0,
+				`${tag}§12 …serving ${serving}, stamped C2, with nothing half-built left beside it (stamp ${short(stampOf())}, leftovers ${JSON.stringify(buildLeftovers())})`],
+		];
 	});
 }
+
+// After a deploy of C2 that swapped its build in and then failed (its checks,
+// or a restart pm2 did not prove), from a box serving C1's build stamped C1.
+function deployedC2OverC1(S) {
+	resetBox(C1, { verified: C1, started: C1 });
+	seedBuild("dist", C1_BUILD, C1);
+	return runSh(S.deploy, deployEnv({ SHA: C2 }));
+}
+
+// After a deploy that was never built (DEPLOY_RESULT=unbuilt) the old process
+// never stopped serving. A rollback whose own install, or native module,
+// fails must not restart it onto that.
+const ROLLBACK_INSTALL_FAILS = {
+	install: ["npm install", { STUB_INSTALL_FAIL: "1" }],
+	native: ["better-sqlite3, still unable to open a database after its rebuild,", { STUB_BSQL: "broken" }],
+};
 
 // Named cases, small enough that a mutant re-runs only the one that targets it.
 const RECORD_CASES = {
@@ -320,6 +347,61 @@ const RECORD_CASES = {
 	rollbackBuildNotClean(S, tag) {
 		return rollbackBuildNotClean(S, tag);
 	},
+	rollbackRestoresKeptBuild(S, tag) {
+		// The deploy of C2 swaps C2's build in and KEEPS C1's, stamped, beside
+		// it. The rollback to C1, whose own client build fails, puts C1's kept
+		// build back: C1's server never serves C2's client.
+		const d = deployedC2OverC1(S);
+		const kept = result(d) === "deployed" && servedIndex().includes(`build of ${C2}`) && stampOf() === C2 && keptIndex() === C1_BUILD && stampOf("dist.prev") === C1;
+		const x = rollback(S, C1, { RECORD_STATE: "ok", STUB_BUILD_FAIL: "1" });
+		return [
+			[kept, `${tag}§12 a deploy of C2 swaps in its build stamped C2 and keeps C1's, stamped C1, in client/dist.prev (result ${result(d)}, stamps ${short(stampOf())}/${short(stampOf("dist.prev"))})`],
+			[x.code === 0 && /ROLLBACK OK/.test(x.out) && servedIndex() === C1_BUILD && stampOf() === C1
+				&& new RegExp(`put the build of ${C1} kept in client/dist\\.prev back in place`).test(x.out),
+			`${tag}§12 …and the rollback to C1 whose own client build fails puts C1's kept build back and serves it (code ${x.code}, serving stamp ${short(stampOf())})`],
+			[verified() === C1 && !/verified deploy recorded/.test(x.out), `${tag}§12 …recording nothing: its own build was not clean (record ${short(verified())})`],
+		];
+	},
+	rollbackClientNotTarget(S, tag) {
+		// …but with no build of C1 kept (here, one kept from before builds were
+		// stamped), the rollback must not say ROLLBACK OK while C1's server
+		// serves C2's client: it fails, naming the client that serves.
+		const d = deployedC2OverC1(S);
+		fs.rmSync(path.join(D.box, "client", "dist.prev", ".build-commit"), { force: true });
+		const x = rollback(S, C1, { RECORD_STATE: "ok", STUB_BUILD_FAIL: "1" });
+		const errors = x.out.split("\n").filter((l) => l.startsWith("::error"));
+		return [
+			[result(d) === "deployed" && x.code === 1 && !/ROLLBACK OK/.test(x.out) && servedIndex().includes(`build of ${C2}`),
+				`${tag}§12 a rollback to C1 whose own client build fails, with no build of C1 kept, never says ROLLBACK OK over C2's client (exit ${x.code})`],
+			[errors.length === 1 && errors[0].includes(`with the client build of ${C2}, not ${C1}'s`) && /^::error::ROLLBACK FAILED — .* MANUAL INTERVENTION REQUIRED\.$/.test(errors[0]),
+				`${tag}§12 …its one alert names C2's client as the one serving (got ${JSON.stringify(errors)})`],
+			[verified() === C1, `${tag}§12 …and it records nothing (record ${short(verified())})`],
+		];
+	},
+	rollbackAfterUnbuiltInstallFails(S, tag) {
+		return Object.values(ROLLBACK_INSTALL_FAILS).flatMap(([what, env]) => {
+			resetBox(C1, { verified: C1, started: C1 });
+			leaveHalfFinished(C2);
+			const x = rollback(S, C1, { RECORD_STATE: "ok", DEPLOY_RESULT: "unbuilt", ...env });
+			return [
+				[x.code === 1 && !/ROLLBACK OK/.test(x.out)
+					&& /^::error::ROLLBACK FAILED — the deploy of [0-9a-f]{40} was never built, so logistics-app still runs the code from before it, .* Not restarting: .* MANUAL INTERVENTION REQUIRED\.$/m.test(x.out),
+				`${tag}§12 after an unbuilt deploy, a rollback whose own ${what} fails ends ROLLBACK FAILED, saying it does not restart (exit ${x.code})`],
+				[!/^restart /m.test(log("pm2")) && !/^build /m.test(log("npm")) && started() === C1 && verified() === C1 && marker() === C2,
+					`${tag}§12 …restarting and building nothing, marking and recording nothing, and still writing the drift marker for C2 (started ${short(started())}, marker ${short(marker())})`],
+			];
+		});
+	},
+	rollbackAfterRestartInstallFails(S, tag) {
+		// The same failed install after a deploy that DID restart (here, one
+		// pm2 did not prove): the failed commit may be what runs, so the
+		// rollback still restarts what it has, and records nothing.
+		resetBox(C1, { verified: C1, started: C1 });
+		leaveHalfFinished(C2);
+		const x = rollback(S, C1, { RECORD_STATE: "ok", DEPLOY_RESULT: "unproven", STUB_INSTALL_FAIL: "1" });
+		return [[x.code === 0 && /ROLLBACK OK/.test(x.out) && /^restart /m.test(log("pm2")) && verified() === C1,
+			`${tag}§12 after a deploy that restarted, a rollback whose own install fails still restarts and serves, recording nothing (exit ${x.code})`]];
+	},
 	rollbackFailedRecordsNothing(S, tag) {
 		resetBox(C2, { verified: C1 });
 		leaveHalfFinished(C3);
@@ -440,6 +522,20 @@ function mutants() {
 		"\telif [ ! -f client/dist.next/index.html ]; then", "\telif false; then"), M, ["index"]));
 	expectCaught("the rollback builds straight into client/dist", rollbackBuildNotClean(rollbackWith(
 		"client_build || BUILD_OK=0", "npm run build:client --silent || BUILD_OK=0"), M, ["build"]));
+	// The client a rollback serves must be its target's own build.
+	expectCaught("the rollback serves whatever client is there", RECORD_CASES.rollbackClientNotTarget(rollbackWith(
+		'if [ "$CLIENT_AT" != "$TARGET" ]; then', "if false; then"), M));
+	expectCaught("the rollback never puts the kept build back", RECORD_CASES.rollbackRestoresKeptBuild(rollbackWith(
+		'if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ]; then', "if false; then"), M));
+	expectCaught("the deploy deletes the build it replaces", RECORD_CASES.rollbackRestoresKeptBuild(deployWith(
+		"\telse\n\t\treturn 0\n", "\telse\n\t\trm -rf client/dist.prev\n\t\treturn 0\n"), M));
+	expectCaught("a build is swapped in without its stamp", RECORD_CASES.rollbackRestoresKeptBuild({ ...REAL,
+		deploy: swap(REAL.deploy, "\telif ! git rev-parse HEAD > client/dist.next/.build-commit; then", "\telif false; then") }, M));
+	// After an unbuilt deploy, a rollback whose own install fails restarts nothing.
+	expectCaught("the rollback restarts after an unbuilt deploy's failed install", RECORD_CASES.rollbackAfterUnbuiltInstallFails(rollbackWith(
+		'if [ "$DEPLOY_RESULT" = unbuilt ] && [ "$BUILD_OK" != 1 ]; then', "if false; then"), M));
+	expectCaught("the rollback trusts a rebuild it never probed", RECORD_CASES.rollbackAfterUnbuiltInstallFails(rollbackWith(
+		"\tnode -e \"new (require('better-sqlite3'))(':memory:').close()\" >/dev/null 2>&1 || BUILD_OK=0\n", ""), M));
 	expectCaught("the rollback skips the app-page check", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(
 		'if [ "$PAGE_OK" != 1 ]; then', "if false; then"), M));
 	expectCaught("the rollback's page check passes without the app's mount point", RECORD_CASES.rollbackServesUpdatingPage(rollbackWith(

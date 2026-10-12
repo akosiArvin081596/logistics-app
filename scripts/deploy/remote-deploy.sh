@@ -355,6 +355,12 @@ if [ -n "$SHA" ] && [ "$NEW" != "$SHA" ]; then
 	exit 1
 fi
 echo "new HEAD: $NEW"
+# The code running now, as the rollback target above chose it (the live
+# commit, or the record when a started commit is not answering). A deploy
+# whose install or build fails restarts nothing, so its rollback returns to
+# exactly this (DEPLOY_RESULT=unbuilt, below), even when it is $NEW: the rule
+# next only exists because a restart would replace it.
+RUNNING_TO=$ROLLBACK_TO
 # ⚠️ A rollback never returns to the very commit this deploy restarts, unless
 # that commit is the verified record. LIVE can be a started commit that is not
 # the record: one whose own checks failed while its rollback never ran (ssh
@@ -412,23 +418,38 @@ echo "::endgroup::"
 # It runs client/'s own build script (what the root's build:client runs) with
 # only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
 # e2e servers and a developer still build into client/dist. Only a build that
-# exited 0 and left an index.html replaces client/dist, by two renames (the
-# box's coreutils predates mv --exchange): client/dist is missing for the
-# moment between them, not for the length of a build. A failed build leaves
-# client/dist as it was. Returns 0 only once the new build is in place.
+# exited 0 and left an index.html replaces client/dist, stamped first with the
+# commit it was built from (.build-commit: express.static never serves a
+# dotfile), by two renames (the box's coreutils predates mv --exchange):
+# client/dist is missing for the moment between them, not for the length of a
+# build. The build it replaces is KEPT, with its stamp, in client/dist.prev
+# until the next swap, so a rollback whose own build fails can put its
+# commit's build back (remote-rollback.sh). A failed build leaves client/dist
+# and client/dist.prev as they were. Returns 0 only once the new build is in
+# place. client_stamp DIR prints the commit DIR's build was made from, or
+# nothing for a build with no stamp.
+#
+# ⚠️ A run cut short between the two renames leaves no client/dist and the
+# whole previous build in client/dist.prev: before anything else, client_build
+# puts it back, so the next build never starts by losing the only good copy.
+client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
 client_build() {
-	rm -rf client/dist.next client/dist.prev
+	if [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then
+		mv client/dist.prev client/dist && echo "::warning::client/dist was missing and client/dist.prev held a whole build (a swap cut short): put it back"
+	fi
+	rm -rf client/dist.next
 	if ! (cd client && npm run build --silent -- --outDir dist.next); then
 		echo "::warning::the client build failed — client/dist is left as it was"
 	elif [ ! -f client/dist.next/index.html ]; then
 		echo "::warning::the client build left no index.html — client/dist is left as it was"
-	elif [ -e client/dist ] && ! mv client/dist client/dist.prev; then
+	elif ! git rev-parse HEAD > client/dist.next/.build-commit; then
+		echo "::warning::could not stamp the new build with its commit — client/dist is left as it was"
+	elif ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
 		echo "::warning::could not move client/dist aside — client/dist is left as it was"
 	elif ! mv client/dist.next client/dist; then
 		echo "::warning::could not move the new build into client/dist — putting the previous build back"
 		[ ! -e client/dist.prev ] || mv client/dist.prev client/dist
 	else
-		rm -rf client/dist.prev
 		return 0
 	fi
 	rm -rf client/dist.next
@@ -443,10 +464,11 @@ echo "::group::install + build"
 # running code disagreeing with nothing to bring them back together. It sets
 # BUILT=0: nothing is restarted, and the deploy reports DEPLOY_RESULT=unbuilt
 # (below). .github/actions/vps-deploy then never records $NEW, rolls
-# production back to $ROLLBACK_TO with remote-rollback.sh (which installs and
-# builds that commit again), and fails the job. Staging, which never rolls
-# back, just fails. client_build keeps the build the app serves in place
-# either way.
+# production back to $RUNNING_TO, the code running now, with
+# remote-rollback.sh (which installs and builds that commit again, and
+# restarts nothing when that install fails too), and fails the job. Staging,
+# which never rolls back, just fails. client_build keeps the build the app
+# serves in place either way.
 BUILT=1
 # npm_config_save=false installs from the lockfiles without writing them back,
 # so the checkout stays clean. The root install's postinstall installs
@@ -476,8 +498,8 @@ if [ "$BUILT" = 1 ]; then
 fi
 echo "::endgroup::"
 if [ "$BUILT" != 1 ]; then
-	echo "::error::$NEW is checked out but its install or build failed, so nothing was restarted: the app still runs the code from before this deploy, and its build still serves. DEPLOY_RESULT=unbuilt: nothing records $NEW as verified, production rolls back to $ROLLBACK_TO, and staging stays as it is"
-	echo "DEPLOYED_FROM=$ROLLBACK_TO"
+	echo "::error::$NEW is checked out but its install or build failed, so nothing was restarted: the app still runs the code from before this deploy, and its build still serves. DEPLOY_RESULT=unbuilt: nothing records $NEW as verified, production rolls back to $RUNNING_TO, and staging stays as it is"
+	echo "DEPLOYED_FROM=$RUNNING_TO"
 	echo "DEPLOYED_TO=$NEW"
 	echo "DEPLOY_RECORD_STATE=$VERIFIED_STATE"
 	echo "DEPLOY_HANDSHAKE_GUARD=$GUARD"
