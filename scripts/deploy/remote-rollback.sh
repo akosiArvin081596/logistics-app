@@ -194,6 +194,9 @@ fi
 # exited 0 and left a whole build replaces client/dist: an index.html, and
 # every /assets bundle file it names, none of them empty (client_whole). An
 # index.html that names none is not whole either: Vite's entry is always one.
+# "Names" means a src= or href= attribute whose value is that path, as Vite
+# writes them, so a comment or another site's URL that happens to hold
+# /assets/ never counts.
 # The build is stamped first with the commit it was built from (.build-commit:
 # express.static never serves a dotfile), then swapped in by two renames (the
 # box's coreutils predates mv --exchange): client/dist is missing for the
@@ -209,13 +212,15 @@ fi
 # puts it back, so the next build never starts by losing the only good copy.
 #
 # ⚠️ The kept build loses its stamp BEFORE it is deleted. The rollback puts a
-# kept build back on its stamp alone, and rm -rf deletes in no set order, so a
+# kept build back by its stamp, and rm -rf deletes in no set order, so a
 # delete cut short could otherwise leave part of a build still stamped whole.
 client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
 client_whole() {
 	local a n=0
 	[ -f "$1/index.html" ] || return 1
-	for a in $(grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' "$1/index.html" | sort -u); do
+	for a in $(grep -oE '(src|href)="/assets/[A-Za-z0-9._-]+\.(js|css)"' "$1/index.html" | sort -u); do
+		a=${a#*\"}
+		a=${a%\"}
 		[ -s "$1$a" ] || return 1
 		n=$((n + 1))
 	done
@@ -251,9 +256,11 @@ client_build || BUILD_OK=0
 # is the FAILED commit's client, which the page check below would pass. So
 # when client/dist is not TARGET's build and the build kept in
 # client/dist.prev is (client_build keeps the one it replaced), that one goes
-# back in place. When neither is, this rollback ends ROLLBACK FAILED below,
-# naming the client that serves.
-if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ]; then
+# back in place, but only when it is whole as well (client_whole): a build
+# kept by an older deploy was only ever checked for its index.html. When
+# neither is, this rollback ends ROLLBACK FAILED below, naming the client that
+# serves.
+if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ] && client_whole client/dist.prev; then
 	rm -rf client/dist.next
 	if { [ ! -e client/dist ] || mv client/dist client/dist.next; } && mv client/dist.prev client/dist; then
 		echo "::warning::client/dist was not $TARGET's build: put the build of $TARGET kept in client/dist.prev back in place"

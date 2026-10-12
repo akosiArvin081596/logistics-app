@@ -182,10 +182,12 @@ say "native modules OK under $(node --version)"
 # swaps the build in only once it is whole. Built straight into client/dist,
 # Vite emptied it first, so a running server answered every page with the 503
 # "being updated" page for the length of the build, and after a failed build
-# went on doing so.
+# went on doing so. It is evaluated only when it arrived whole, ending on its
+# end marker: with that marker lost, sed would hand over the rest of the
+# deploy script, which must never run here.
 CLIENT_BUILD="$(sed -n '/^# >>> client-build/,/^# <<< client-build/p' scripts/deploy/remote-deploy.sh 2>/dev/null || true)"
 case "$CLIENT_BUILD" in
-  *'client_build() {'*) eval "$CLIENT_BUILD" ;;
+  *'client_build() {'*$'\n''# <<< client-build') eval "$CLIENT_BUILD" ;;
   *) die "could not read the client-build block from scripts/deploy/remote-deploy.sh, so the client was not built. Nothing was restarted, and the database was not touched." ;;
 esac
 # <<< load-client-build

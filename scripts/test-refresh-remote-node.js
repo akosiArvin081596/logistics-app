@@ -64,7 +64,11 @@
  *      the new one builds into client/dist.next, which is swapped in stamped,
  *      the old one kept in client/dist.prev; a failed build leaves the old
  *      one serving and stops the run (refresh-staging.sh before the database
- *      and the restart). Mutant: the old build line, in each script.
+ *      and the restart). The loader evaluates the block only when it ends on
+ *      its end marker: a remote-deploy.sh whose block lost it (sed would hand
+ *      over the rest of the deploy script) or has none is refused, with none
+ *      of the rest run. Mutants: the old build line, and a loader that skips
+ *      the end-marker check, in each script.
  *
  * The REAL scripts run under bash against a sandbox standing in for the VPS:
  * their /var/www and /opt/node22 are rebased onto it (asserted to apply), each
@@ -818,6 +822,47 @@ try {
 			check(`${name} builds the client only through client_build, called once, and never with npm run build:client`,
 				builds.length === 0 && calls.length === 1, `npm build lines ${JSON.stringify(builds)}, client_build calls ${calls.length}`);
 		}
+	}
+	// The loader's own refusal. A client-build block that lost its end marker
+	// makes sed hand over the rest of remote-deploy.sh, down to its `exit 0`;
+	// one with no block at all hands over nothing. Either is refused, nothing
+	// of the rest runs (a line right after the block would leave SENTINEL),
+	// nothing is built, and the run stops (staging: before the database and
+	// the restart).
+	const SENTINEL = path.join(T, "rest-of-deploy-ran");
+	const REST_RAN = `touch ${JSON.stringify(SENTINEL)}\n`;
+	const BROKEN_DEPLOYS = [
+		["its client-build block lost its end marker", DEPLOY_SRC.split("\n# <<< client-build\n").join(`\n${REST_RAN}`)],
+		["it has no client-build block", DEPLOY_SRC.replace(/^# >>> client-build[\s\S]*?^# <<< client-build\n/m, REST_RAN)],
+	];
+	const loaderRefuses = (name, src, deployText) => {
+		for (const dir of [STAGING_DIR, APP]) fs.writeFileSync(path.join(dir, "scripts", "deploy", "remote-deploy.sh"), deployText);
+		fs.rmSync(SENTINEL, { force: true });
+		try {
+			const { x, c } = runBuilds[name](src, false);
+			const ran = fs.existsSync(SENTINEL);
+			const stopped = name === "staging" ? !x.wrote && !x.restarted : true;
+			return [x.code !== 0 && /could not read the client-build block from scripts\/deploy\/remote-deploy\.sh/.test(x.out) && !ran && stopped
+				&& c.dist === OLD_BUILD && c.builds.length === 0,
+			`exit ${x.code}, the rest of remote-deploy.sh ${ran ? "RAN" : "did not run"}${name === "staging" ? `, app.db written ${x.wrote}, restarted ${x.restarted}` : ""}; ${seenClient(c)}`];
+		} finally {
+			for (const dir of [STAGING_DIR, APP]) fs.writeFileSync(path.join(dir, "scripts", "deploy", "remote-deploy.sh"), DEPLOY_SRC);
+			fs.rmSync(SENTINEL, { force: true });
+		}
+	};
+	for (const [what, deployText] of BROKEN_DEPLOYS) {
+		check(`the broken copy of remote-deploy.sh (${what}) was made, with a line right after where the block ends`, deployText !== DEPLOY_SRC && deployText.includes(REST_RAN));
+		for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+			const [okRefused, seenRefused] = loaderRefuses(name, SRC[name], deployText);
+			check(`${file} refuses a remote-deploy.sh where ${what}: "could not read the client-build block", none of the rest run, nothing built`, okRefused, seenRefused);
+		}
+	}
+	for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+		const loose = once(ORIG[name], "  *'client_build() {'*$'\\n''# <<< client-build') eval", "  *'client_build() {'*) eval");
+		check(`M12 ${file} evaluates the block without its end marker — actually changed the script`, !!loose);
+		if (!loose) continue;
+		const [ok] = loaderRefuses(name, rebase(loose), BROKEN_DEPLOYS[0][1]);
+		check(`M12 ${file} evaluates the block without its end marker — is caught`, !ok, ok ? "SURVIVED" : "");
 	}
 	for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
 		const mutated = once(ORIG[name], "\nclient_build || die ", "\nnpm run build:client --silent || die ");

@@ -81,9 +81,11 @@
  *   §18 A FAILED INSTALL OR BUILD NEVER TAKES THE APP'S PAGES. The deploy and
  *      the rollback build the client into client/dist.next, beside the build
  *      the app serves, and swap it in only once the build succeeded and left
- *      a whole build: an index.html, and every /assets bundle file it names,
- *      none empty, and at least one (one block, byte-identical in both,
- *      pinned), so
+ *      a whole build: an index.html, and every /assets bundle file it names
+ *      in a src= or href= attribute, none empty, and at least one (a comment
+ *      or another site's URL holding /assets/ names nothing; one block,
+ *      byte-identical in both, pinned; ci.yml runs the same client_whole on
+ *      every real Vite build), so
  *      client/dist is there throughout every build. A deploy whose install,
  *      native-module probe or build fails after its checkout restarts
  *      nothing, leaves client/dist byte-for-byte as it was (the smoke check
@@ -1079,6 +1081,16 @@ function mutants() {
 			'\t\t[ -s "$1$a" ] || return 1\n', "") }, M)),
 		mutant("the swap takes a build whose index.html names no bundle", () => BUILD_CASES["unbuilt-noBundle"]({ ...REAL, deploy: swap(REAL.deploy,
 			'\t[ "$n" -gt 0 ]\n', "\ttrue\n") }, M)),
+		mutant("client_whole counts /assets/ anywhere in index.html", () => {
+			const loose = swap(REAL.deploy, `'(src|href)="/assets/[A-Za-z0-9._-]+\\.(js|css)"'`, "'/assets/[A-Za-z0-9._-]+\\.(js|css)'");
+			return [...clientWholePins(loose, M), ...BUILD_CASES.noisyWhole({ ...REAL, deploy: loose }, M)];
+		}),
+		mutant("client_whole checks only the first bundle it names", () => BUILD_CASES["unbuilt-secondMissing"]({ ...REAL, deploy: swap(REAL.deploy,
+			"\t\tn=$((n + 1))\n", "\t\tn=$((n + 1))\n\t\tbreak\n") }, M)),
+		mutant("the CI step passes whatever client_whole says", () => ciWholeStepPins(swap(CI_YAML,
+			"if ! client_whole client/dist; then", "if false; then"), REAL.deploy, M)),
+		mutant("the CI step runs a block that lost its end marker", () => ciWholeStepPins(swap(CI_YAML,
+			"*'client_whole() {'*$'\\n''# <<< client-build') ;;", "*'client_whole() {'*) ;;"), REAL.deploy, M)),
 		mutant("the kept build is deleted with its stamp still on it", () => BUILD_CASES.keptStampFirst({ ...REAL, deploy: swap(REAL.deploy,
 			"! rm -f client/dist.prev/.build-commit || ", "") }, M)),
 		mutant("the deploy reads pm2's interpreter after its checkout", () => {
@@ -1285,6 +1297,8 @@ const UNBUILT = {
 	bundleMissing: ["client build exits 0 with an index.html naming an /assets bundle it never wrote", { STUB_BUILD_ASSETS: "missing" }],
 	bundleEmpty: ["client build exits 0 with the /assets bundle its index.html names left empty", { STUB_BUILD_ASSETS: "empty" }],
 	noBundle: ["client build exits 0 with an index.html that names no /assets bundle", { STUB_BUILD_ASSETS: "none" }],
+	secondMissing: ["client build exits 0 with the SECOND /assets bundle its index.html names never written", { STUB_BUILD_ASSETS: "missing-second" }],
+	noisyMissing: ["client build exits 0 with a bundle missing, its index.html also holding /assets/ in a comment and another site's URL", { STUB_BUILD_ASSETS: "missing", STUB_BUILD_NOISE: "1" }],
 };
 const unbuiltCase = (what, env) => (S, tag) => {
 	resetBox(C1, { verified: C1, started: C1 });
@@ -1347,6 +1361,16 @@ const BUILD_CASES = {
 			[smoke.code === 0, `${tag}§18 …so the app serves its pages again: the smoke check passes (exit ${smoke.code})`],
 		];
 	},
+	noisyWhole(S, tag) {
+		// A whole build whose index.html also holds /assets/ where no bundle of
+		// this build is named: in a comment, and in another site's URL. Only a
+		// src= or href= naming /assets/... counts, so it deploys.
+		resetBox(C1, { verified: C1, started: C1 });
+		const x = runSh(S.deploy, deployEnv({ SHA: C2, STUB_BUILD_NOISE: "1" }));
+		return [[x.code === 0 && lastLine(x) === "DEPLOY_RESULT=deployed" && stampOf() === C2
+			&& /see \/src\/assets\/app-loader\.css/.test(servedIndex()) && servedIndex().includes("https://cdn.example.test/assets/fonts.css"),
+		`${tag}§18 a whole build whose index.html also holds /assets/ in a comment and in another site's URL is swapped in and deployed (last line ${JSON.stringify(lastLine(x))}, stamp ${short(stampOf())})`]];
+	},
 	keptStampFirst(S, tag) {
 		// The box serves C2's build and keeps C1's whole, stamped C1, as after a
 		// deploy of C2 over C1. The next swap's delete of that kept build is cut
@@ -1354,9 +1378,7 @@ const BUILD_CASES = {
 		// is left must carry no stamp, because a rollback to C1 whose own build
 		// fails puts a kept build back on its stamp alone.
 		resetBox(C2, { verified: C2, started: C2 });
-		seedBuild("dist.prev", KEPT_C1_INDEX, C1);
-		fs.mkdirSync(path.join(D.box, "client", "dist.prev", "assets"));
-		fs.writeFileSync(path.join(D.box, "client", "dist.prev", "assets", "index-kept.js"), "export {};\n");
+		seedBuild("dist.prev", KEPT_C1_INDEX, C1, ["/assets/index-kept.js"]);
 		const x = runSh(S.deploy, deployEnv({ SHA: C3, PATH: `${cutRmBinDir()}:${ENV.PATH}` }));
 		const left = keptIndex();
 		const r = [
@@ -1460,6 +1482,81 @@ function buildPins() {
 	ok(call > 0 && gate > call && report > gate && restart > report,
 		"§18 the deploy reports DEPLOY_RESULT=unbuilt and stops before the pm2-restart block");
 }
+// client_whole on its own, from the block as a script carries it, against
+// builds written here: what counts as a bundle index.html names. Each is
+// [what, index.html (null: none), files written beside it, whole?]; a file
+// named with a leading "-" is written empty.
+const STYLE = '<link rel="stylesheet" crossorigin href="/assets/index-a1.css">';
+const SCRIPT = '<script type="module" crossorigin src="/assets/index-b2.js"></script>';
+const COMMENT = "<!-- see /src/assets/app-loader.css -->";
+const ELSEWHERE = '<link rel="preconnect" href="https://cdn.example.test/assets/fonts.css">';
+const WHOLE_FIXTURES = [
+	["names a stylesheet (href=) and a script (src=), both there", `${STYLE}${SCRIPT}`, ["index-a1.css", "index-b2.js"], true],
+	["…also holding /assets/ in a comment", `${COMMENT}${STYLE}${SCRIPT}`, ["index-a1.css", "index-b2.js"], true],
+	["…and in another site's URL", `${ELSEWHERE}${STYLE}${SCRIPT}`, ["index-a1.css", "index-b2.js"], true],
+	["the first bundle it names missing", `${STYLE}${SCRIPT}`, ["index-b2.js"], false],
+	["the second bundle it names missing", `${STYLE}${SCRIPT}`, ["index-a1.css"], false],
+	["the second bundle it names missing, with the comment and the other site's URL", `${COMMENT}${ELSEWHERE}${STYLE}${SCRIPT}`, ["index-a1.css"], false],
+	["a bundle it names empty", `${STYLE}${SCRIPT}`, ["index-a1.css", "-index-b2.js"], false],
+	["no bundle named: /assets/ only in a comment and another site's URL", `${COMMENT}${ELSEWHERE}`, ["index-a1.css", "index-b2.js"], false],
+	["no index.html", null, ["index-a1.css", "index-b2.js"], false],
+];
+function clientWholePins(scriptText, tag = "") {
+	const block = clientBuildBlock(scriptText);
+	return WHOLE_FIXTURES.map(([what, index, files, whole]) => {
+		const dir = fs.mkdtempSync(path.join(T, "whole-"));
+		fs.mkdirSync(path.join(dir, "assets"));
+		if (index !== null) fs.writeFileSync(path.join(dir, "index.html"), `<!doctype html><div id="app"></div>${index}\n`);
+		for (const f of files) fs.writeFileSync(path.join(dir, "assets", f.replace(/^-/, "")), f.startsWith("-") ? "" : "x\n");
+		const r = spawnSync("bash", ["-c", 'eval "$BLOCK" && client_whole "$DIR"'], { env: { ...ENV, BLOCK: block || "false", DIR: dir }, encoding: "utf8" });
+		fs.rmSync(dir, { recursive: true, force: true });
+		return [(r.status === 0) === whole, `${tag}§18 client_whole: a build whose index.html ${what} is ${whole ? "whole" : "NOT whole"} (exit ${r.status})`];
+	});
+}
+// The CI step that runs client_whole on the real Vite build, in the job that
+// builds it: found by name, after "Build client", and its script run against
+// builds written here, with this repo's remote-deploy.sh or a copy of it.
+const CI_WHOLE_STEP = "      - name: The deploy's whole-build check accepts this build";
+function ciWholeStep(yaml) {
+	const lines = yaml.split("\n");
+	const at = lines.indexOf(CI_WHOLE_STEP);
+	const run = at >= 0 ? lines.findIndex((l, i) => i > at && l === "        run: |") : -1;
+	if (run < 0 || lines.slice(at + 1, run).some((l) => /^ {6}- /.test(l))) return { at, script: "" };
+	const body = [];
+	for (let i = run + 1; i < lines.length && (!lines[i].trim() || /^ {10}/.test(lines[i])); i++) body.push(lines[i].slice(10));
+	return { at, script: `${body.join("\n")}\n` };
+}
+function ciWholeStepPins(yaml, deployText, tag = "") {
+	const r = [];
+	const lines = yaml.split("\n");
+	const { at, script } = ciWholeStep(yaml);
+	const built = lines.indexOf("      - name: Build client");
+	const jobs = lines.map((l, i) => (/^ {2}[A-Za-z_-]+:\s*$/.test(l) && i > lines.indexOf("jobs:") ? i : -1)).filter((i) => i >= 0);
+	const jobOf = (i) => jobs.filter((j) => j < i).pop();
+	r.push([at > built && built > 0 && jobOf(at) === jobOf(built) && !lines.slice(built + 1, at).some((l) => /^ {6}- name:/.test(l)) && !!script,
+		`${tag}§18 ci.yml runs the deploy's whole-build check in the job that builds the client, right after "Build client" (step at ${at}, build at ${built})`]);
+	const run = (deploy, files) => {
+		const dir = fs.mkdtempSync(path.join(T, "ci-whole-"));
+		fs.mkdirSync(path.join(dir, "scripts", "deploy"), { recursive: true });
+		fs.writeFileSync(path.join(dir, "scripts", "deploy", "remote-deploy.sh"), deploy);
+		fs.mkdirSync(path.join(dir, "client", "dist", "assets"), { recursive: true });
+		fs.writeFileSync(path.join(dir, "client", "dist", "index.html"), `<!doctype html><div id="app"></div>${COMMENT}${STYLE}${SCRIPT}\n`);
+		for (const f of files) fs.writeFileSync(path.join(dir, "client", "dist", "assets", f), "x\n");
+		const x = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", script || "exit 0"], { cwd: dir, env: ENV, encoding: "utf8" });
+		fs.rmSync(dir, { recursive: true, force: true });
+		return { code: x.status, out: `${x.stdout}${x.stderr}` };
+	};
+	const whole = run(deployText, ["index-a1.css", "index-b2.js"]);
+	r.push([whole.code === 0 && /^ok: client_whole accepts client\/dist$/m.test(whole.out), `${tag}§18 …which passes a whole build (exit ${whole.code})`]);
+	const missing = run(deployText, ["index-a1.css"]);
+	r.push([missing.code === 1 && /^::error::the deploy's whole-build check \(client_whole\) refuses this build/m.test(missing.out),
+		`${tag}§18 …and fails the job on a build missing a bundle its index.html names (exit ${missing.code})`]);
+	const lost = run(deployText.split("\n# <<< client-build\n").join("\n"), ["index-a1.css", "index-b2.js"]);
+	r.push([lost.code === 1 && /^::error::could not read the client-build block/m.test(lost.out) && !/^ok: /m.test(lost.out),
+		`${tag}§18 …and when the block's end marker is lost, refuses rather than run the rest of remote-deploy.sh (exit ${lost.code})`]);
+	return r;
+}
+const CI_YAML = fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", "ci.yml"), "utf8");
 // The build line, run with the REAL npm (offline) against a client/ whose
 // build script records what it is handed: Vite gets exactly --outDir
 // dist.next, in client/, and npm keeps its own --silent.
@@ -1597,6 +1694,8 @@ const ALL_JOBS = [
 	job("§17 app-page pins", appPagePins),
 	...caseJobs("§18", BUILD_CASES),
 	job("§18 build pins", buildPins),
+	job("§18 client_whole on its own", () => record(clientWholePins(REAL.deploy))),
+	job("§18 CI runs client_whole on the real build", () => record(ciWholeStepPins(CI_YAML, REAL.deploy))),
 	job("§18 the build line under the real npm", buildLinePins, 1),
 	job("§18 the build stamp is never served", stampNeverServedPins),
 	job("§11 exit scanner", exitScannerSelfCheck),
