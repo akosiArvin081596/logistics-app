@@ -297,8 +297,26 @@ fi
 
 say "installing dependencies…"
 npm install --silent --no-audit --no-fund
+# >>> load-client-build - keep byte-identical in refresh-local.sh and
+# refresh-staging.sh (scripts/test-refresh-remote-node.js pins the copies)
+#
+# The client is built the way the deploy builds it: client_build, the
+# client-build block of scripts/deploy/remote-deploy.sh, read from the commit
+# checked out here, so the two never differ. It builds beside client/dist and
+# swaps the build in only once it is whole. Built straight into client/dist,
+# Vite emptied it first, so a running server answered every page with the 503
+# "being updated" page for the length of the build, and after a failed build
+# went on doing so. It is evaluated only when it arrived whole, ending on its
+# end marker: with that marker lost, sed would hand over the rest of the
+# deploy script, which must never run here.
+CLIENT_BUILD="$(sed -n '/^# >>> client-build/,/^# <<< client-build/p' scripts/deploy/remote-deploy.sh 2>/dev/null || true)"
+case "$CLIENT_BUILD" in
+  *'client_build() {'*$'\n''# <<< client-build') eval "$CLIENT_BUILD" ;;
+  *) die "could not read the client-build block from scripts/deploy/remote-deploy.sh, so the client was not built. Nothing was restarted, and the database was not touched." ;;
+esac
+# <<< load-client-build
 say "building client…"
-npm run build:client --silent
+client_build || die "the client build failed or left no whole build, so client/dist is left as it was. The code and node_modules are updated; the database was not touched."
 
 if [ "$CODE_ONLY" = "1" ]; then
   say "--code-only: database left alone. Done."

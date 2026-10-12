@@ -55,6 +55,20 @@
  *      Mutants: the preflight without the options, and the old unquoted join.
  *      (The refusal's own mutant is W5 in test-refresh-sign-in.js, with a
  *      password typed as a bare word.)
+ *   §8 THE CLIENT IS BUILT AS THE DEPLOY BUILDS IT. Both scripts ran
+ *      `npm run build:client`, which empties client/dist before it writes:
+ *      a running server answered every page with the 503 "being updated"
+ *      page for the whole build, and kept doing so after a failed one. Each
+ *      now runs client_build, read from remote-deploy.sh's client-build
+ *      block (a loader byte-identical in both): the old build serves while
+ *      the new one builds into client/dist.next, which is swapped in stamped,
+ *      the old one kept in client/dist.prev; a failed build leaves the old
+ *      one serving and stops the run (refresh-staging.sh before the database
+ *      and the restart). The loader evaluates the block only when it ends on
+ *      its end marker: a remote-deploy.sh whose block lost it (sed would hand
+ *      over the rest of the deploy script) or has none is refused, with none
+ *      of the rest run. Mutants: the old build line, and a loader that skips
+ *      the end-marker check, in each script.
  *
  * The REAL scripts run under bash against a sandbox standing in for the VPS:
  * their /var/www and /opt/node22 are rebased onto it (asserted to apply), each
@@ -166,6 +180,14 @@ if (mode === "sanitize-only" || mode === "install") {
 }
 `;
 
+// The client builds (§8): the one each checkout serves before a run, and the
+// one the stub npm builds, with the commit the stub git names.
+const OLD_BUILD = '<div id="app"></div><script type="module" src="/assets/index-old.js"></script><!-- old build -->';
+const NEW_BUILD = '<div id="app"></div><script type="module" src="/assets/index-new.js"></script><!-- new build -->';
+const NEW_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+// The real deploy script: both refresh scripts read their client build from it.
+const DEPLOY_SRC = fs.readFileSync(DEPLOY_SH, "utf8");
+
 // /var/www and /opt/node22 are the VPS's own paths; everything else stays.
 const rebase = (text) => text.split("/var/www/").join(`${VPS}/var/www/`).split("/opt/node22/").join(`${VPS}/opt/node22/`);
 
@@ -177,6 +199,7 @@ fs.writeFileSync(path.join(mk(PROD_DIR, "backups"), "app.db.20260925_020001.gz")
 const STAGING_DIR = mk(VPS, "var", "www", "logisx-staging");
 stubSqlite(STAGING_DIR, "127");
 fs.writeFileSync(path.join(mk(STAGING_DIR, "scripts"), "refresh-env.js"), STUB_REFRESH_ENV);
+fs.writeFileSync(path.join(mk(STAGING_DIR, "scripts", "deploy"), "remote-deploy.sh"), DEPLOY_SRC);
 fs.writeFileSync(path.join(STAGING_DIR, ".env"), "PORT=3932\nSPREADSHEET_ID=sandbox-staging-sheet\n");
 const REMOTE_TMP_ROOT = mk(VPS, "var", "tmp");
 const VPS_BIN = mk(VPS, "bin");
@@ -193,10 +216,27 @@ const GIT_STUB = `#!/bin/bash
 case "$1 $2" in
 	"rev-parse --abbrev-ref") echo feature ;;
 	"rev-parse --short") echo abc1234 ;;
+	"rev-parse HEAD") echo ${NEW_COMMIT} ;;
 esac
 exit 0
 `;
 writeExec(path.join(VPS_BIN, "git"), GIT_STUB);
+// What `npm run …` does, for both npm stubs: a client build that writes where
+// Vite writes. The root's build:client builds into client/dist, client/'s own
+// build (run in client/) into the --outDir it is handed, else dist. Like Vite
+// it EMPTIES its output folder first, then writes a bundle and an index.html
+// naming it; with build-fails flagged it dies after the emptying. Each build
+// logs its output folder, and whether the build being served
+// (client/dist/index.html) was still there while it wrote.
+const BUILD_STUB = `if [ "\${2:-}" = build:client ]; then served=client/dist; out=client/dist; else served=dist; out=dist; fi
+		prev=""
+		for a in "$@"; do if [ "$prev" = --outDir ]; then out=$a; fi; prev=$a; done
+		rm -rf "$out"
+		if [ -f "$served/index.html" ]; then serving=yes; else serving=no; fi
+		echo "build out=$out serving=$serving" >> '${LOGS}/build.log'
+		[ ! -e '${PM2_STATE}/build-fails' ] || exit 1
+		mkdir -p "$out/assets" && printf 'export {};\\n' > "$out/assets/index-new.js"
+		printf '%s\\n' '${NEW_BUILD}' > "$out/index.html"`;
 // npm as real npm behaves under the Node that runs it: npm is a node script,
 // so it runs under PATH's first node, whose id and ABI this stub asks for and
 // logs with every call. `rebuild` builds better-sqlite3 for that ABI (unless
@@ -210,6 +250,7 @@ case "$1" in
 	--version) echo 10.9.8 ;;
 	rebuild) [ -e '${PM2_STATE}/rebuild-broken' ] || node '${REBUILD_JS}' "$PWD" "$abi" ;;
 	install) if [ -e '${PM2_STATE}/install-fetches' ]; then node '${REBUILD_JS}' "$PWD" "$abi"; fi ;;
+	run) ${BUILD_STUB} ;;
 esac
 exit 0
 `);
@@ -225,11 +266,12 @@ exec /usr/bin/stat "$@"
 // refused run started nothing.
 const APP = mk(LAPTOP, "app");
 fs.writeFileSync(path.join(mk(APP, "scripts"), "refresh-env.js"), STUB_REFRESH_ENV);
+fs.writeFileSync(path.join(mk(APP, "scripts", "deploy"), "remote-deploy.sh"), DEPLOY_SRC);
 fs.writeFileSync(path.join(APP, ".env"), "PORT=3931\nSPREADSHEET_ID=sandbox-local-sheet\n");
 const LAPTOP_BIN = mk(LAPTOP, "bin");
 const LAPTOP_PATH = `${LAPTOP_BIN}:${path.dirname(process.execPath)}:/usr/bin:/bin`;
 writeExec(path.join(LAPTOP_BIN, "git"), GIT_STUB.replace("#!/bin/bash\n", `#!/bin/bash\necho "git $*" >> '${LOGS}/laptop.log'\n`));
-writeExec(path.join(LAPTOP_BIN, "npm"), `#!/bin/bash\necho "npm $*" >> '${LOGS}/laptop.log'\nexit 0\n`);
+writeExec(path.join(LAPTOP_BIN, "npm"), `#!/bin/bash\necho "npm $*" >> '${LOGS}/laptop.log'\ncase "$1" in\n\trun) ${BUILD_STUB} ;;\nesac\nexit 0\n`);
 // ssh: drop the options and the host, then run the command on the VPS, under
 // bash with the VPS's PATH and HOME and nothing else from this machine.
 writeExec(path.join(LAPTOP_BIN, "ssh"), `#!/bin/bash
@@ -342,7 +384,7 @@ function setBox(s) {
 	fs.writeFileSync(path.join(PM2_STATE, "jlist.json"), `${JSON.stringify(s.procs)}\n`);
 	if (s.notice) fs.writeFileSync(path.join(PM2_STATE, "notice"), NOTICE);
 	else fs.rmSync(path.join(PM2_STATE, "notice"), { force: true });
-	for (const [flag, on] of [["install-fetches", s.installFetches], ["rebuild-broken", s.rebuildBroken]]) {
+	for (const [flag, on] of [["install-fetches", s.installFetches], ["rebuild-broken", s.rebuildBroken], ["build-fails", s.buildFails]]) {
 		if (on) fs.writeFileSync(path.join(PM2_STATE, flag), "");
 		else fs.rmSync(path.join(PM2_STATE, flag), { force: true });
 	}
@@ -351,6 +393,26 @@ function setBox(s) {
 	for (const f of fs.readdirSync(LOGS)) fs.rmSync(path.join(LOGS, f), { force: true });
 	fs.rmSync(path.join(APP, "app.db"), { force: true });
 	fs.rmSync(path.join(STAGING_DIR, "app.db"), { force: true });
+	// Each checkout serves the old build, stamped, and keeps none beside it.
+	for (const dir of [APP, STAGING_DIR]) {
+		for (const d of ["dist", "dist.next", "dist.prev"]) fs.rmSync(path.join(dir, "client", d), { recursive: true, force: true });
+		const dist = mk(dir, "client", "dist", "assets");
+		fs.writeFileSync(path.join(dist, "index-old.js"), "export {};\n");
+		fs.writeFileSync(path.join(dir, "client", "dist", "index.html"), `${OLD_BUILD}\n`);
+		fs.writeFileSync(path.join(dir, "client", "dist", ".build-commit"), "old\n");
+	}
+}
+// A checkout's client builds after a run: what client/dist and client/dist.prev
+// serve (null when absent), whether client/dist.next was left, and each build
+// the stub npm ran.
+function clientState(dir) {
+	const index = (d) => readIf(path.join(dir, "client", d, "index.html")).trim() || null;
+	return {
+		dist: index("dist"), prev: index("dist.prev"),
+		stamp: readIf(path.join(dir, "client", "dist", ".build-commit")).trim(),
+		next: fs.existsSync(path.join(dir, "client", "dist.next")),
+		builds: readIf(path.join(LOGS, "build.log")).split("\n").filter(Boolean),
+	};
 }
 const stubRuns = (out) => [...out.matchAll(/^\[stub-refresh-env\] mode=(\S+) node=(\S+)$/gm)].map((m) => ({ mode: m[1], node: m[2] }));
 const tail = (out) => out.split("\n").filter(Boolean).slice(-4).join(" | ");
@@ -567,9 +629,10 @@ try {
 		const first = lines.findIndex((l) => l.trim() === 'PATH="$(dirname "$PM2_NODE"):$PATH"');
 		const back = lines.findIndex((l) => l.trim() === 'PATH="$SAVED_PATH"');
 		const npmAt = lines.map((l, i) => (/^\s*npm\s/.test(l) ? i : -1)).filter((i) => i >= 0);
-		check("refresh-staging.sh runs npm only while pm2's Node is first on PATH",
-			first >= 0 && back > first && npmAt.length >= 3 && npmAt.every((i) => i > first && i < back),
-			`pm2's Node first at ${first}, PATH put back at ${back}, npm at [${npmAt}]`);
+		const buildAt = lines.findIndex((l) => /^client_build \|\| die /.test(l));
+		check("refresh-staging.sh runs npm, and the client build (its npm run build), only while pm2's Node is first on PATH",
+			first >= 0 && back > first && npmAt.length >= 2 && npmAt.every((i) => i > first && i < back) && buildAt > first && buildAt < back,
+			`pm2's Node first at ${first}, PATH put back at ${back}, npm at [${npmAt}], client_build at ${buildAt}`);
 	}
 
 	section("5. Mutants — each hole, reopened in the shipped source, turns this runner red");
@@ -700,6 +763,113 @@ try {
 				!ok || ran.length ? `the VPS received other arguments${ran.length ? `, and ran: ${ran}` : ""}` : "SURVIVED");
 			for (const t of ["subst", "semicolon", "backtick"]) fs.rmSync(RAN(t), { force: true });
 		}
+	}
+
+	section("8. Both refresh scripts build the client as the deploy does: beside client/dist, swapped in once whole");
+	// The deploy's own client_build, read from scripts/deploy/remote-deploy.sh:
+	// the old build serves throughout the build, the new one replaces it only
+	// once it is whole, stamped, and a failed build leaves it serving.
+	const swapped = (c) => c.dist === NEW_BUILD && c.stamp === NEW_COMMIT && c.prev === OLD_BUILD && !c.next
+		&& c.builds.length === 1 && /^build out=dist\.next serving=yes$/.test(c.builds[0]);
+	const kept = (c) => c.dist === OLD_BUILD && c.stamp === "old" && !c.next && c.builds.length === 1;
+	const seenClient = (c) => `client/dist ${c.dist === NEW_BUILD ? "new" : c.dist === OLD_BUILD ? "old" : c.dist ? "other" : "missing"} (stamp ${c.stamp || "none"}), dist.prev ${c.prev === OLD_BUILD ? "old" : c.prev ? "other" : "none"}, dist.next ${c.next ? "LEFT" : "gone"}, builds ${JSON.stringify(c.builds)}`;
+	const runBuilds = {
+		staging: (src, buildFails) => {
+			setBox({ ...SCENARIOS.incident, buildFails });
+			const x = runStaging(src, ["--yes", "--restart"]);
+			return { x, c: clientState(STAGING_DIR) };
+		},
+		local: (src, buildFails) => {
+			setBox({ ...SCENARIOS.incident, buildFails });
+			const x = runLocal(src, ["--code-only"]);
+			return { x, c: clientState(APP) };
+		},
+	};
+	const buildVerdicts = {
+		staging: {
+			good: ({ x, c }) => [x.code === 0 && x.wrote && x.restarted && swapped(c), `exit ${x.code}, app.db written ${x.wrote}, restarted ${x.restarted}; ${seenClient(c)}`],
+			bad: ({ x, c }) => [x.code !== 0 && /the client build failed or left no whole build, so client\/dist is left as it was/.test(x.out) && !x.wrote && !x.restarted && kept(c),
+				`exit ${x.code}, app.db written ${x.wrote}, restarted ${x.restarted}; ${seenClient(c)}`],
+		},
+		local: {
+			good: ({ x, c }) => [x.code === 0 && swapped(c), `exit ${x.code}; ${seenClient(c)}`],
+			bad: ({ x, c }) => [x.code !== 0 && /the client build failed or left no whole build, so client\/dist is left as it was/.test(x.out) && kept(c),
+				`exit ${x.code}; ${seenClient(c)}`],
+		},
+	};
+	for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+		const [okGood, seenGood] = buildVerdicts[name].good(runBuilds[name](SRC[name], false));
+		check(`${file} builds into client/dist.next while the old build serves, then swaps it in stamped, keeping the old one in client/dist.prev`, okGood, seenGood);
+		const [okBad, seenBad] = buildVerdicts[name].bad(runBuilds[name](SRC[name], true));
+		check(`${file}: a client build that fails leaves the old build serving in client/dist and stops the run${name === "staging" ? " before the database and the restart" : ""}`, okBad, seenBad);
+	}
+	{
+		const block = (text) => {
+			const a = text.indexOf("# >>> load-client-build");
+			const b = text.indexOf("# <<< load-client-build");
+			return a >= 0 && b > a && text.indexOf("# >>> load-client-build", a + 1) < 0 ? text.slice(a, b) : null;
+		};
+		const bl = block(ORIG.local);
+		const bs = block(ORIG.staging);
+		check("the load-client-build block appears once in each script and is byte-identical in both", !!bl && bl === bs,
+			!bl || !bs ? "a marker is missing or repeated" : bl === bs ? "" : "the copies differ");
+		check("…and what it reads is the client-build block remote-deploy.sh and remote-rollback.sh share",
+			/^# >>> client-build/m.test(DEPLOY_SRC) && /^# <<< client-build/m.test(DEPLOY_SRC) && /\nclient_build\(\) \{\n/.test(DEPLOY_SRC));
+		for (const [name, text] of [["refresh-local.sh", ORIG.local], ["refresh-staging.sh", ORIG.staging]]) {
+			const lines = code(text);
+			const builds = lines.filter((l) => /\bnpm run build\b|build:client|vite build/.test(l));
+			const calls = lines.filter((l) => /^client_build \|\| die /.test(l));
+			check(`${name} builds the client only through client_build, called once, and never with npm run build:client`,
+				builds.length === 0 && calls.length === 1, `npm build lines ${JSON.stringify(builds)}, client_build calls ${calls.length}`);
+		}
+	}
+	// The loader's own refusal. A client-build block that lost its end marker
+	// makes sed hand over the rest of remote-deploy.sh, down to its `exit 0`;
+	// one with no block at all hands over nothing. Either is refused, nothing
+	// of the rest runs (a line right after the block would leave SENTINEL),
+	// nothing is built, and the run stops (staging: before the database and
+	// the restart).
+	const SENTINEL = path.join(T, "rest-of-deploy-ran");
+	const REST_RAN = `touch ${JSON.stringify(SENTINEL)}\n`;
+	const BROKEN_DEPLOYS = [
+		["its client-build block lost its end marker", DEPLOY_SRC.split("\n# <<< client-build\n").join(`\n${REST_RAN}`)],
+		["it has no client-build block", DEPLOY_SRC.replace(/^# >>> client-build[\s\S]*?^# <<< client-build\n/m, REST_RAN)],
+	];
+	const loaderRefuses = (name, src, deployText) => {
+		for (const dir of [STAGING_DIR, APP]) fs.writeFileSync(path.join(dir, "scripts", "deploy", "remote-deploy.sh"), deployText);
+		fs.rmSync(SENTINEL, { force: true });
+		try {
+			const { x, c } = runBuilds[name](src, false);
+			const ran = fs.existsSync(SENTINEL);
+			const stopped = name === "staging" ? !x.wrote && !x.restarted : true;
+			return [x.code !== 0 && /could not read the client-build block from scripts\/deploy\/remote-deploy\.sh/.test(x.out) && !ran && stopped
+				&& c.dist === OLD_BUILD && c.builds.length === 0,
+			`exit ${x.code}, the rest of remote-deploy.sh ${ran ? "RAN" : "did not run"}${name === "staging" ? `, app.db written ${x.wrote}, restarted ${x.restarted}` : ""}; ${seenClient(c)}`];
+		} finally {
+			for (const dir of [STAGING_DIR, APP]) fs.writeFileSync(path.join(dir, "scripts", "deploy", "remote-deploy.sh"), DEPLOY_SRC);
+			fs.rmSync(SENTINEL, { force: true });
+		}
+	};
+	for (const [what, deployText] of BROKEN_DEPLOYS) {
+		check(`the broken copy of remote-deploy.sh (${what}) was made, with a line right after where the block ends`, deployText !== DEPLOY_SRC && deployText.includes(REST_RAN));
+		for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+			const [okRefused, seenRefused] = loaderRefuses(name, SRC[name], deployText);
+			check(`${file} refuses a remote-deploy.sh where ${what}: "could not read the client-build block", none of the rest run, nothing built`, okRefused, seenRefused);
+		}
+	}
+	for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+		const loose = once(ORIG[name], "  *'client_build() {'*$'\\n''# <<< client-build') eval", "  *'client_build() {'*) eval");
+		check(`M12 ${file} evaluates the block without its end marker — actually changed the script`, !!loose);
+		if (!loose) continue;
+		const [ok] = loaderRefuses(name, rebase(loose), BROKEN_DEPLOYS[0][1]);
+		check(`M12 ${file} evaluates the block without its end marker — is caught`, !ok, ok ? "SURVIVED" : "");
+	}
+	for (const [name, file] of [["staging", "refresh-staging.sh"], ["local", "refresh-local.sh"]]) {
+		const mutated = once(ORIG[name], "\nclient_build || die ", "\nnpm run build:client --silent || die ");
+		check(`M11 ${file} builds straight into client/dist again — actually changed the script`, !!mutated);
+		if (!mutated) continue;
+		const [ok] = buildVerdicts[name].good(runBuilds[name](rebase(mutated), false));
+		check(`M11 ${file} builds straight into client/dist again — is caught`, !ok, ok ? "SURVIVED" : "");
 	}
 } catch (e) {
 	check("runner crashed", false, e && e.stack ? e.stack : String(e));

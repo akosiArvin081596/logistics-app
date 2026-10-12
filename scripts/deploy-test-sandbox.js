@@ -175,7 +175,14 @@ exit 0
 // (exit 1, its output folder emptied; =keep leaves an existing one alone).
 // STUB_BUILD_EMPTY: the build exits 0 and leaves its output folder with no
 // index.html. A build writes where Vite writes: it EMPTIES its output folder first, then
-// writes an index.html naming the commit it built. The output folder is
+// writes its two bundle files, assets/index-<commit>.css and .js, and an
+// index.html naming both, the stylesheet first (href=) and the script second
+// (src=), as Vite does, and the commit it built. STUB_BUILD_ASSETS breaks them
+// while the build still exits 0: =missing leaves out the first file named,
+// =missing-second the second, =empty writes the script empty, =none names no
+// bundle at all. STUB_BUILD_NOISE adds to index.html what is not a bundle of
+// this build: a comment and another site's URL, each holding /assets/. The
+// output folder is
 // client/dist for the root's `npm run build:client`, and for client/'s own
 // `npm run build` (run in client/) the --outDir it is handed, else dist. Each
 // build logs its output folder, and whether the build the app serves
@@ -212,7 +219,23 @@ case "$1" in
 	         exit 0
 	     fi
 	     if [ -f "$served/index.html" ]; then serving=yes; else serving=no; fi
-	     mkdir -p "$out" && printf '%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$(git rev-parse HEAD 2>/dev/null)" > "$out/index.html"
+	     built=$(git rev-parse HEAD 2>/dev/null)
+	     bundle=/assets/index-\${built:0:7}.js
+	     styles=/assets/index-\${built:0:7}.css
+	     refs="<link rel=\\"stylesheet\\" crossorigin href=\\"$styles\\"><script type=\\"module\\" crossorigin src=\\"$bundle\\"></script>"
+	     mkdir -p "$out/assets"
+	     printf 'export {};\\n' > "$out$bundle"
+	     printf 'body{}\\n' > "$out$styles"
+	     case "\${STUB_BUILD_ASSETS:-}" in
+	         missing) rm -f "$out$styles" ;;
+	         missing-second) rm -f "$out$bundle" ;;
+	         empty) : > "$out$bundle" ;;
+	         none) refs=""; rm -f "$out$bundle" "$out$styles" ;;
+	     esac
+	     if [ -n "\${STUB_BUILD_NOISE:-}" ]; then
+	         refs="$refs<!-- see /src/assets/app-loader.css --><link rel=\\"preconnect\\" href=\\"https://cdn.example.test/assets/fonts.css\\">"
+	     fi
+	     printf '%s\\n%s\\n<!-- build of %s -->\\n' '${APP_INDEX}' "$refs" "$built" > "$out/index.html"
 	     echo "build tag=\${STUB_TAG:-} out=$out serving=$serving" >> "$STUB_LOG_DIR/npm.log" ;;
 esac
 exit 0
@@ -361,12 +384,14 @@ const servedIndex = () => (fs.existsSync(SERVED_INDEX) ? fs.readFileSync(SERVED_
 const keptIndex = () => { const p = path.join(clientDir("dist.prev"), "index.html"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""; };
 const stampOf = (d = "dist") => { const p = path.join(clientDir(d), ".build-commit"); return fs.existsSync(p) ? fs.readFileSync(p, "utf8").trim() : ""; };
 // Puts a build in client/<d>: `index` as its index.html, stamped with `stamp`
-// (no stamp file when it is "").
-function seedBuild(d, index, stamp = "") {
+// (no stamp file when it is ""), and each of `bundles` (paths like
+// /assets/x.js) written beside it.
+function seedBuild(d, index, stamp = "", bundles = []) {
 	fs.rmSync(clientDir(d), { recursive: true, force: true });
-	fs.mkdirSync(clientDir(d), { recursive: true });
+	fs.mkdirSync(path.join(clientDir(d), "assets"), { recursive: true });
 	fs.writeFileSync(path.join(clientDir(d), "index.html"), index);
 	if (stamp) fs.writeFileSync(path.join(clientDir(d), ".build-commit"), `${stamp}\n`);
+	for (const b of bundles) fs.writeFileSync(path.join(clientDir(d), b), "export {};\n");
 }
 const buildLeftovers = () => ["dist.next"].filter((d) => fs.existsSync(clientDir(d)));
 // A build that is plainly not the stub npm's (which names the commit it built).
