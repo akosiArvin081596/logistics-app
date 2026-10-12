@@ -23,8 +23,8 @@ for i in $(seq 1 30); do
 	sleep 2
 done
 # Then the page, once: a process that answered has every route registered.
-# >>> app-page — keep byte-identical in remote-smoke.sh and remote-rollback.sh
-# (scripts/test-deploy-scripts.js pins the copies)
+# >>> app-page — keep byte-identical in remote-smoke.sh, remote-rollback.sh and
+# remote-drift-check.sh (scripts/test-deploy-scripts.js pins the copies)
 #
 # The API answering proves the process serves, not that it serves the app.
 # Without client/dist/index.html (a build that failed or left nothing) every

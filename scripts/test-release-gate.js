@@ -525,6 +525,7 @@ function checkServes(deployText, tag = "") {
 		["a no-op with a NEWER commit serving", "noop", OTHER, 1],
 		["a deploy that reports another commit", "deployed", OTHER, 1],
 		["an unproven restart", "unproven", SHA, 1],
+		["a failed install or build", "unbuilt", SHA, 1],
 		["no result at all", "", "", 1],
 	]) {
 		const x = run(result, to);

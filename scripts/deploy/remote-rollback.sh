@@ -1,21 +1,27 @@
 #!/bin/bash
 # Emergency rollback. Runs ON THE VPS.
 # Inputs (env): DIR, PM2, PREV (the full commit to return to: the deploy's
-#   DEPLOYED_FROM), and RECORD_STATE (the deploy's DEPLOY_RECORD_STATE).
+#   DEPLOYED_FROM), RECORD_STATE (the deploy's DEPLOY_RECORD_STATE), and
+#   DEPLOY_RESULT (the deploy's DEPLOY_RESULT: an unbuilt deploy restarted
+#   nothing, which changes when this rollback may restart, below).
 #
-# Only ever invoked when a deploy's smoke check FAILED. A reviewer approves a
-# production deploy before it starts (since 2026-09-25), but nobody watches it
-# finish, so a bad merge must not be able to leave production down until
-# someone notices. Used by deploy.yml's production job AND by
-# deploy-drift.yml's heal (same composite action).
+# Only ever invoked when a deploy FAILED: its smoke or edge check failed, pm2
+# did not prove its restart, or its install or build failed after its checkout
+# (DEPLOY_RESULT=unbuilt). A reviewer approves a production deploy before it
+# starts (since 2026-09-25), but nobody watches it finish, so a bad merge must
+# not be able to leave production down until someone notices. Used by
+# deploy.yml's production job AND by deploy-drift.yml's heal (same composite
+# action).
 #
 # It ends "ROLLBACK OK" (exit 0) only when the app serves again: the API
-# answers 200 AND / is the app's own page, not the 503 "being updated" page.
+# answers 200 AND / is the app's own page, not the 503 "being updated" page,
+# AND that page is PREV's own client build (its .build-commit stamp).
 # Anything else ends "::error::ROLLBACK FAILED … MANUAL INTERVENTION REQUIRED."
 # with exit 1, which fails the action's Auto-rollback step, and records nothing.
 set -uo pipefail
 : "${DIR:?}"; : "${PM2:?}"; : "${PREV:?}"
 RECORD_STATE=${RECORD_STATE:-}
+DEPLOY_RESULT=${DEPLOY_RESULT:-}
 # Validate before touching anything, including the lock.
 if ! [[ "$PREV" =~ ^[0-9a-f]{40}$ ]]; then
 	echo "::error::PREV must be a full 40-character lowercase commit id (got '$PREV') — nothing was changed"
@@ -147,17 +153,102 @@ export PATH
 
 # A rollback restarts whatever it managed to build, because a partial rollback
 # that serves beats none. But only a clean install and build may be recorded
-# as VERIFIED below, so every step's outcome is kept. A build that leaves no
-# client/dist/index.html serves only the 503 "being updated" page, and the
-# page check below fails that rollback.
+# as VERIFIED below, so every step's outcome is kept. A client build that
+# fails leaves client/dist as it was (client_build); whether that is TARGET's
+# client is checked after it. Only a box left with no client/dist/index.html
+# at all serves the 503 "being updated" page, and the page check below fails
+# that rollback.
 BUILD_OK=1
 # Without writing the lockfiles back, as remote-deploy.sh installs.
 npm_config_save=false npm install --silent --no-audit --no-fund || BUILD_OK=0
 # ⚠️ OPEN a database: require() alone passes under an ABI-mismatched Node (the
-# native binding loads lazily). Same probe as remote-deploy.sh.
-node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || npm rebuild better-sqlite3 || BUILD_OK=0
-npm run build:client --silent || BUILD_OK=0
-test -f client/dist/index.html || BUILD_OK=0
+# native binding loads lazily). Same probe as remote-deploy.sh, before and
+# after the rebuild.
+if ! node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1; then
+	npm rebuild better-sqlite3
+	node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1 || BUILD_OK=0
+fi
+# ⚠️ After a deploy that was never built (DEPLOY_RESULT=unbuilt) nothing was
+# restarted: the process serving is still the code from before that deploy,
+# and it never stopped serving. A restart is worth it only with TARGET's
+# server installed. When this install or the native module failed, a restart
+# could take the API down too, where nothing was down, so stop here, before
+# the client build and the restart.
+if [ "$DEPLOY_RESULT" = unbuilt ] && [ "$BUILD_OK" != 1 ]; then
+	echo "::error::ROLLBACK FAILED — the deploy of $FAILED was never built, so $PM2 still runs the code from before it, but this rollback's own install of $TARGET failed (npm install, or better-sqlite3 cannot open a database). Not restarting: a restart could take the API down too. HEAD is $TARGET and node_modules may be part-installed, which the next restart of any kind would start. Nothing was restarted or recorded. MANUAL INTERVENTION REQUIRED."
+	exit 1
+fi
+# >>> client-build — keep byte-identical in remote-deploy.sh and remote-rollback.sh
+# (scripts/test-deploy-scripts.js pins the copies)
+#
+# client_build builds the client BESIDE the build the running process serves,
+# and swaps it in only once it is whole. Vite empties its output folder before
+# it writes, so a build straight into client/dist left the running process
+# with no client/dist/index.html for the whole build: every page was
+# server.js's 503 "being updated" page, and after a failed build it stayed
+# that way, with nothing to bring the app's pages back.
+#
+# It runs client/'s own build script (what the root's build:client runs) with
+# only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
+# e2e servers and a developer still build into client/dist. Only a build that
+# exited 0 and left an index.html replaces client/dist, stamped first with the
+# commit it was built from (.build-commit: express.static never serves a
+# dotfile), by two renames (the box's coreutils predates mv --exchange):
+# client/dist is missing for the moment between them, not for the length of a
+# build. The build it replaces is KEPT, with its stamp, in client/dist.prev
+# until the next swap, so a rollback whose own build fails can put its
+# commit's build back (remote-rollback.sh). A failed build leaves client/dist
+# and client/dist.prev as they were. Returns 0 only once the new build is in
+# place. client_stamp DIR prints the commit DIR's build was made from, or
+# nothing for a build with no stamp.
+#
+# ⚠️ A run cut short between the two renames leaves no client/dist and the
+# whole previous build in client/dist.prev: before anything else, client_build
+# puts it back, so the next build never starts by losing the only good copy.
+client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
+client_build() {
+	if [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then
+		mv client/dist.prev client/dist && echo "::warning::client/dist was missing and client/dist.prev held a whole build (a swap cut short): put it back"
+	fi
+	rm -rf client/dist.next
+	if ! (cd client && npm run build --silent -- --outDir dist.next); then
+		echo "::warning::the client build failed — client/dist is left as it was"
+	elif [ ! -f client/dist.next/index.html ]; then
+		echo "::warning::the client build left no index.html — client/dist is left as it was"
+	elif ! git rev-parse HEAD > client/dist.next/.build-commit; then
+		echo "::warning::could not stamp the new build with its commit — client/dist is left as it was"
+	elif ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
+		echo "::warning::could not move client/dist aside — client/dist is left as it was"
+	elif ! mv client/dist.next client/dist; then
+		echo "::warning::could not move the new build into client/dist — putting the previous build back"
+		[ ! -e client/dist.prev ] || mv client/dist.prev client/dist
+	else
+		return 0
+	fi
+	rm -rf client/dist.next
+	return 1
+}
+# <<< client-build
+client_build || BUILD_OK=0
+# ⚠️ Which commit's client TARGET's server is about to serve. A client build
+# of TARGET that failed left client/dist as it was, and after a deploy whose
+# build was swapped in (its checks failed, or its restart was unproven) that
+# is the FAILED commit's client, which the page check below would pass. So
+# when client/dist is not TARGET's build and the build kept in
+# client/dist.prev is (client_build keeps the one it replaced), that one goes
+# back in place. When neither is, this rollback ends ROLLBACK FAILED below,
+# naming the client that serves.
+if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ]; then
+	rm -rf client/dist.next
+	if { [ ! -e client/dist ] || mv client/dist client/dist.next; } && mv client/dist.prev client/dist; then
+		echo "::warning::client/dist was not $TARGET's build: put the build of $TARGET kept in client/dist.prev back in place"
+	else
+		[ -e client/dist ] || [ ! -e client/dist.next ] || mv client/dist.next client/dist
+		echo "::warning::could not put the build of $TARGET kept in client/dist.prev back in place"
+	fi
+	rm -rf client/dist.next
+fi
+CLIENT_AT=$(client_stamp client/dist)
 # >>> pm2-restart — keep byte-identical in remote-deploy.sh and remote-rollback.sh
 # (scripts/test-deploy-scripts.js pins the copies)
 #
@@ -243,8 +334,8 @@ fi
 # answers every page with the 503 "being updated" page, which is down for
 # everyone using the app: that is a failed rollback, not a recovery, and it is
 # never recorded.
-# >>> app-page — keep byte-identical in remote-smoke.sh and remote-rollback.sh
-# (scripts/test-deploy-scripts.js pins the copies)
+# >>> app-page — keep byte-identical in remote-smoke.sh, remote-rollback.sh and
+# remote-drift-check.sh (scripts/test-deploy-scripts.js pins the copies)
 #
 # The API answering proves the process serves, not that it serves the app.
 # Without client/dist/index.html (a build that failed or left nothing) every
@@ -270,6 +361,11 @@ rm -f "$PAGE_BODY"
 # <<< app-page
 if [ "$PAGE_OK" != 1 ]; then
 	echo "::error::ROLLBACK FAILED — $PM2 answers its API at $TARGET, but :$PORT/ gave $PAGE_CODE without the app's page (no id=\"app\"). A 503 there is the \"being updated\" page: client/dist/index.html is missing, so the app is down. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
+	exit 1
+fi
+# Its pages, but whose client? Only TARGET's own build is a rollback.
+if [ "$CLIENT_AT" != "$TARGET" ]; then
+	echo "::error::ROLLBACK FAILED — $PM2 serves its pages at $TARGET, but with the client build of ${CLIENT_AT:-an unknown commit (client/dist has no .build-commit stamp)}, not $TARGET's: this rollback's own client build failed and no build of $TARGET was kept. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
 	exit 1
 fi
 echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"

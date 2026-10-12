@@ -14,6 +14,10 @@ service-account-key.json
 
 # Vue / Vite
 client/dist/
+# The deploy's build beside client/dist, and the build it replaced, kept until
+# the next swap (client_build in scripts/deploy/remote-deploy.sh).
+client/dist.next/
+client/dist.prev/
 client/node_modules/
 client/node_modules
 
