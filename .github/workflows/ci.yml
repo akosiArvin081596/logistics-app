@@ -152,7 +152,7 @@ jobs:
           esac
           eval "$block"
           if ! client_whole client/dist; then
-            echo "::error::the deploy's whole-build check (client_whole) refuses this build: client/dist/index.html names an /assets bundle that is missing or empty, or names none. Every deploy of this commit would end unbuilt."
+            echo "::error::the deploy's whole-build check (client_whole) refuses this build: client/dist has no index.html, or its index.html names an /assets bundle that is missing or empty, or names none. Every deploy of this commit would end unbuilt."
             exit 1
           fi
           echo "ok: client_whole accepts client/dist"

@@ -1376,7 +1376,7 @@ const BUILD_CASES = {
 		// deploy of C2 over C1. The next swap's delete of that kept build is cut
 		// short after it took the bundle (rm deletes in no set order): whatever
 		// is left must carry no stamp, because a rollback to C1 whose own build
-		// fails puts a kept build back on its stamp alone.
+		// fails puts back a kept build that carries C1's stamp (and is whole).
 		resetBox(C2, { verified: C2, started: C2 });
 		seedBuild("dist.prev", KEPT_C1_INDEX, C1, ["/assets/index-kept.js"]);
 		const x = runSh(S.deploy, deployEnv({ SHA: C3, PATH: `${cutRmBinDir()}:${ENV.PATH}` }));

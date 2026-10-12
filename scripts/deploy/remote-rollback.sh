@@ -387,7 +387,7 @@ if [ "$PAGE_OK" != 1 ]; then
 fi
 # Its pages, but whose client? Only TARGET's own build is a rollback.
 if [ "$CLIENT_AT" != "$TARGET" ]; then
-	echo "::error::ROLLBACK FAILED — $PM2 serves its pages at $TARGET, but with the client build of ${CLIENT_AT:-an unknown commit (client/dist has no .build-commit stamp)}, not $TARGET's: this rollback's own client build failed and no build of $TARGET was kept. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
+	echo "::error::ROLLBACK FAILED — $PM2 serves its pages at $TARGET, but with the client build of ${CLIENT_AT:-an unknown commit (client/dist has no .build-commit stamp)}, not $TARGET's: this rollback's own client build failed and no whole build of $TARGET was kept. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
 	exit 1
 fi
 echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"

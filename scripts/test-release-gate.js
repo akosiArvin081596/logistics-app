@@ -174,8 +174,12 @@ async function checkSmoke(script, tag = "") {
 		["the handshake refuses the app's own Origin", { ownOrigin: 403 }, /own Origin gave 403/],
 		["the handshake admits a foreign Origin", { foreignOrigin: 200 }, /foreign Origin gave 200/],
 	];
-	const [good, flaky, down, definite, refused, hung, badBase, ...failed] = await Promise.all([
+	// /assets/ outside a src or href attribute (a comment, another site's URL)
+	// names no bundle of this build, as the deploy's client_whole reads it.
+	const noisyHtml = `<!doctype html><html><head><!-- see /src/assets/app-loader.css --><link rel="preconnect" href="https://cdn.example.com/assets/x.css"><script type="module" src="${BUNDLE[0]}"></script><link rel="modulepreload" href="${BUNDLE[1]}"><link rel="stylesheet" href="${BUNDLE[2]}"></head><body><div id="app"></div></body></html>`;
+	const [good, noisy, flaky, down, definite, refused, hung, badBase, ...failed] = await Promise.all([
 		runSmoke(script, {}),
+		runSmoke(script, { html: noisyHtml }),
 		runSmoke(script, { maintenance: [503, 502, 0] }),
 		runSmoke(script, { maintenance: [503] }),
 		runSmoke(script, { maintenance: [404] }),
@@ -188,6 +192,8 @@ async function checkSmoke(script, tag = "") {
 	r.push([BUNDLE.every((a) => good.hits[a] === 1) && good.hits["/api/tabs"] === 1 && good.hits["/socket.io/"] === 2,
 		`${tag}§1 …and asks each bundle file, the API and both handshakes exactly once (got ${JSON.stringify(good.hits)})`]);
 	r.push([/::error/.test(good.out) === false, `${tag}§1 …with no error annotation`]);
+	r.push([noisy.code === 0 && /3 bundle files 200/.test(noisy.out) && !noisy.hits["/assets/app-loader.css"] && !noisy.hits["/assets/x.css"],
+		`${tag}§1 /assets/ in a comment or another site's URL is not a bundle: only the three src/href bundles are asked (exit ${noisy.code}, hits ${JSON.stringify(noisy.hits)})`]);
 	fails.forEach(([name, , re], i) => {
 		const x = failed[i];
 		r.push([x.code === 1 && re.test(x.out) && /::error title=Staging smoke failed::/.test(x.out), `${tag}§1 fails when ${name} (exit ${x.code}): ${x.out.slice(-240)}`]);
@@ -761,9 +767,12 @@ function mut(file, from, to) {
 async function asyncMutants() {
 	const m1 = mut(SMOKE, '[[ "$CTYPE" =~ $want ]] ||', "true ||");
 	const m2 = mut(SMOKE, "000|5??|\"\")", "000|5??|4??|\"\")");
-	const [r1, r2] = await Promise.all([checkSmoke(m1.p, "[mutant] "), checkSmoke(m2.p, "[mutant] ")]);
+	const m3 = mut(SMOKE, `grep -oE '(src|href)="/assets/[A-Za-z0-9._-]+\\.(js|css)"' "$BODY" | sed -E 's/^(src|href)="//; s/"$//'`,
+		`grep -oE '/assets/[A-Za-z0-9._-]+\\.(js|css)' "$BODY"`);
+	const [r1, r2, r3] = await Promise.all([checkSmoke(m1.p, "[mutant] "), checkSmoke(m2.p, "[mutant] "), checkSmoke(m3.p, "[mutant] ")]);
 	ok(r1.some(([c]) => !c), "§5 mutant 'any 200 is a bundle file' must be caught by §1");
 	ok(r2.some(([c]) => !c), "§5 mutant 'a 4xx is retried' must be caught by §1");
+	ok(r3.some(([c]) => !c), "§5 mutant '/assets/ anywhere in the page is a bundle' must be caught by §1");
 	// The dispatch gate, loaded from mutated text with its real require().
 	const gatePath = path.join(ROOT, "scripts/deploy/dispatch-gate.js");
 	const load = (code) => {
