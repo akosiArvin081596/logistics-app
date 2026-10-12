@@ -4,8 +4,8 @@
 // reach the live instance and the live ingestion workflow; now it stops, exit
 // 2 with one line naming what is missing, before any network call.
 //
-// Pure apart from requireN8nSettings() and requireN8nGmailCredential(), which
-// end the process.
+// Pure apart from requireN8nSettings(), requireN8nGmailCredential() and
+// requireN8nReplayAuth(), which end the process.
 // scripts/test-no-production-defaults.js runs every script that uses it.
 "use strict";
 
@@ -49,4 +49,22 @@ function requireN8nGmailCredential(script, env = process.env) {
 	return id;
 }
 
-module.exports = { N8N_SETTINGS, readN8nSettings, requireN8nSettings, requireN8nGmailCredential };
+// What a replay's temporary webhook requires: N8N_REPLAY_CREDENTIAL_ID, the n8n
+// Header Auth credential the webhook node checks, and N8N_REPLAY_SECRET, the
+// value the script presents. No defaults: both, or exit 2 with one line on
+// stderr naming each missing one, before any network call.
+function requireN8nReplayAuth(script, env = process.env) {
+	const credentialId = String((env && env.N8N_REPLAY_CREDENTIAL_ID) ?? "").trim();
+	const secret = String((env && env.N8N_REPLAY_SECRET) ?? "").trim();
+	const missing = [!credentialId && "N8N_REPLAY_CREDENTIAL_ID", !secret && "N8N_REPLAY_SECRET"].filter(Boolean);
+	if (missing.length) {
+		console.error(
+			`${script}: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} not set; ` +
+			"name the n8n Header Auth credential the replay's webhook requires (N8N_REPLAY_CREDENTIAL_ID) and its value (N8N_REPLAY_SECRET). There is no default.",
+		);
+		process.exit(2);
+	}
+	return { credentialId, secret };
+}
+
+module.exports = { N8N_SETTINGS, readN8nSettings, requireN8nSettings, requireN8nGmailCredential, requireN8nReplayAuth };
