@@ -7351,14 +7351,102 @@ const n8nKeepStoredLimiter = rateLimit({
 let n8nKeepStoredUnauthorized = 0;
 let n8nKeepStoredUnauthorizedLoggedAt = 0;
 
+// RE-ISSUED RATE CONS (2026-10-13). A broker re-sends a rate con after the load
+// moved on: C.H. Robinson's post-delivery "Booked Load #" carries DVIR
+// deductions, an "Advanced Total" and a "New Total", and written as it came it
+// lowered Payment on five loads already invoiced and moved pickup dates (a pickup
+// date moves a driver's pay window). So, for a load already in Job Tracking:
+// - delivered (Job Status Delivered / Completed / POD Received) or invoiced (an
+//   invoice draft under any spelling of its id): Payment, Pickup Appointment and
+//   Drop-off Appointment come back as stored, a blank stored date included
+//   (filling it would move pay too); every other column keeps the rules below;
+// - in a closed month (any month loadRowAccountingMonths() books the row into is
+//   write-locked): EVERY column comes back as stored. Closed months are final as
+//   recorded; only a reopen changes one.
+// A value that really differs (amounts compared in cents, dates as the same
+// moment) is "held"; on a protected load, every other column the email changes
+// is listed too. alertRateConReissueHold() sends both to a person, who decides;
+// nothing is applied for them. Fails closed: a draft table or lock table that
+// can't be read, or a date that can't be placed in a month, holds.
+// RATECON_REISSUE_HOLD_ENABLED is a kill switch (defaults ON): it only keeps values.
+const RATECON_REISSUE_HOLD_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_REISSUE_HOLD_ENABLED ?? "").trim());
+const REISSUE_HELD_COLUMNS = new Set(["payment", "pickup appointment", "drop-off appointment"]);
+
+// Whether two cells say the same thing: "$1,516.56" and " $ 1,516.56 " are one
+// amount, "10/9/2026 0:01" and "10/9/2026 00:01" one moment, and other text is
+// compared with its spaces collapsed. Bounded patterns: sheet and email text.
+function reissueSameValue(col, a, b) {
+	const x = String(a == null ? "" : a).trim();
+	const y = String(b == null ? "" : b).trim();
+	if (x === y) return true;
+	const name = String(col).trim().toLowerCase();
+	if (name === "payment") {
+		const cents = (s) => {
+			const t = s.replace(/[\s$,]/g, "");
+			return /^-?\d{1,9}(?:\.\d{1,2})?$/.test(t) ? Math.round(Number(t) * 100) : null;
+		};
+		const cx = cents(x);
+		return cx !== null && cx === cents(y);
+	}
+	if (/appointment|date/.test(name)) {
+		const moment = (s) => {
+			const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,?\s{1,3}(\d{1,2}):(\d{2})(?::(\d{2}))?\s{0,3}([AaPp][Mm])?)?$/.exec(s);
+			if (!m) return null;
+			let h = m[4] === undefined ? null : Number(m[4]);
+			if (h !== null && m[7]) h = (h % 12) + (/^p/i.test(m[7]) ? 12 : 0);
+			return [Number(m[3]), Number(m[1]), Number(m[2]), h, m[5] === undefined ? null : Number(m[5]), Number(m[6] || 0)].join("-");
+		};
+		const mx = moment(x);
+		return mx !== null && mx === moment(y);
+	}
+	return x.replace(/\s+/g, " ") === y.replace(/\s+/g, " ");
+}
+
+// Why a re-issue may not change this stored row, or null when it may. `row` is
+// the sheet row as an array, `key` the load's normLoadKey().
+function reissueHoldFor(headers, row, key) {
+	const reasons = [];
+	let all = false;
+	const statusIdx = headers.findIndex((h) => /^(job[\s._-]?)?status$/i.test(String(h || "").trim()));
+	if (statusIdx !== -1 && /^(delivered|completed|pod received)$/i.test(String(row[statusIdx] || "").trim())) reasons.push("delivered");
+	try {
+		const drafts = db.prepare("SELECT load_id FROM load_invoice_drafts").all();
+		if (drafts.some((d) => normLoadKey(d.load_id) === key)) reasons.push("invoiced");
+	} catch (e) {
+		console.error(`[ratecon-reissue] load_invoice_drafts could not be read (${e.message}); load ${key} is held as if invoiced`);
+		reasons.push("invoice status unknown");
+	}
+	if (!periodLocksReadable()) {
+		all = true;
+		reasons.push("the closed months can't be read");
+	} else {
+		const months = loadRowAccountingMonths(headers, row);
+		if (months === null) {
+			all = true;
+			reasons.push("a date on the load can't be placed in a month");
+		} else {
+			const locked = months.filter((mk) => periodWriteLocked(mk));
+			if (locked.length) {
+				all = true;
+				reasons.push(`in a closed month (${locked.join(", ")})`);
+			}
+		}
+	}
+	return reasons.length ? { all, reasons } : null;
+}
+
 // The values a later email may write to a load already in Job Tracking, by
 // sheet column: a blank (missing, null or only spaces) never replaces a stored
 // value, and a stored Assigned Date is kept, because it is set once, when the
 // load is first assigned, and never re-stamped (client, 2026-10-09). Any other
 // value is written as sent; a column still blank takes its `fallbacks` value.
-// `stored` is the row by header, or null for a new load. Returns
-// { values, kept } (kept: the columns whose stored value won).
-function keepStoredSheetValues(stored, values, fallbacks = {}) {
+// `stored` is the row by header, or null for a new load. `protect` (from
+// reissueHoldFor(), for a stored load) keeps the held columns, or with `all`
+// every column, as stored. Returns { values, kept, held, changed } (kept: the
+// columns whose stored value won; held: { column, stored, sent } where a
+// protected column's sent value really differed; changed: the other columns a
+// protected load's values change).
+function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
 	const blank = (v) => v === undefined || v === null || String(v).trim() === "";
 	const storedOf = (col) => {
 		if (!stored) return "";
@@ -7369,9 +7457,20 @@ function keepStoredSheetValues(stored, values, fallbacks = {}) {
 	};
 	const out = {};
 	const kept = [];
+	const held = [];
+	const changed = [];
+	const guarded = Boolean(protect && stored);
 	for (const [col, val] of Object.entries(values)) {
 		const have = storedOf(col);
-		const assigned = String(col).trim().toLowerCase() === "assigned date";
+		const name = String(col).trim().toLowerCase();
+		const assigned = name === "assigned date";
+		if (guarded && (protect.all || REISSUE_HELD_COLUMNS.has(name))) {
+			out[col] = have;
+			if (String(val == null ? "" : val) !== have) kept.push(col);
+			// Assigned Date is kept by its own rule on every load (set once), so it is no news.
+			if (!assigned && !blank(val) && !reissueSameValue(col, have, val)) held.push({ column: col, stored: have, sent: String(val) });
+			continue;
+		}
 		if (!blank(have) && (blank(val) || assigned)) {
 			out[col] = have;
 			if (String(val == null ? "" : val) !== have) kept.push(col);
@@ -7380,8 +7479,9 @@ function keepStoredSheetValues(stored, values, fallbacks = {}) {
 		} else {
 			out[col] = val == null ? "" : val;
 		}
+		if (guarded && !assigned && !reissueSameValue(col, have, out[col])) changed.push({ column: col, stored: have, sent: String(out[col]) });
 	}
-	return { values: out, kept };
+	return { values: out, kept, held, changed };
 }
 
 // A `values` or `fallbacks` body object: at most 60 columns of text.
@@ -7424,13 +7524,121 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 			stored = {};
 			headers.forEach((h, i) => { stored[h] = match[i] == null ? "" : match[i]; });
 		}
-		const out = keepStoredSheetValues(stored, body.values, fallbacks);
-		res.json({ loadId, found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept });
+		const hold = match && RATECON_REISSUE_HOLD_ENABLED ? reissueHoldFor(headers, match, key) : null;
+		const out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
+		const holdReason = hold ? hold.reasons.join(" and ") : "";
+		res.json({ loadId, found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept, held: out.held, holdReason, alsoChanged: out.changed });
+		if (hold && (out.held.length || out.changed.length)) {
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
+		}
 	} catch (err) {
 		console.error("n8n keep-stored-values:", err.message);
 		res.status(503).json({ error: "Job Tracking could not be read, so nothing should be written", code: "JOB_TRACKING_UNREADABLE" });
 	}
 });
+
+// Ceiling on re-issue alerts per rolling 24 h, counted in loads. The once-per-change
+// ledger is the primary control; this one holds whatever the key turns out to be,
+// because sendEmail is shared with every other app mail.
+const RATECON_REISSUE_ALERT_MAX_PER_DAY =
+	Math.max(1, parseInt(process.env.RATECON_REISSUE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
+
+// The re-issue ledger: one row per load, column and sent value (the dedupe key),
+// with what was stored then and when it was alerted. Created on first use.
+function reissueHoldTable() {
+	if (reissueHoldTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS ratecon_reissue_holds (
+			load_id TEXT NOT NULL,
+			column_name TEXT NOT NULL,
+			sent_value TEXT NOT NULL,
+			stored_value TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT 'held',
+			reason TEXT NOT NULL DEFAULT '',
+			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			alerted_at DATETIME,
+			PRIMARY KEY (load_id, column_name, sent_value)
+		)
+	`);
+	reissueHoldTable.ready = true;
+}
+
+// Tells a person that a re-issued rate con was held (keepStoredSheetValues()):
+// the held columns with the stored and the sent value, and every other column it
+// changed on the protected load. Once per load, column and sent value: a new sent
+// value alerts again. An email to ADMIN_NOTIFY_EMAIL and an in-app dispatch
+// notification; alerted_at is stamped only when one of them went out, so a failed
+// send retries on the next sighting. Fire-and-forget: never throws, never rejects.
+async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
+	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
+	try {
+		reissueHoldTable();
+		const raw = String(loadId == null ? "" : loadId).trim();
+		// The key is the caller's text: validated like the other once-per-load alerts.
+		const id = /^[A-Za-z0-9\-_.#]{1,40}$/.test(raw) ? raw : "";
+		const key = id ? normLoadKey(id) : `unidentified:${new Date().toISOString().slice(0, 10)}`;
+		const cap = (v) => String(v == null ? "" : v).slice(0, 500);
+		const entries = [...held.map((h) => ({ ...h, kind: "held" })), ...changed.map((c) => ({ ...c, kind: "changed" }))]
+			.map((e) => ({ column: cap(e.column).trim(), stored: cap(e.stored), sent: cap(e.sent), kind: e.kind }));
+		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason) VALUES (?, ?, ?, ?, ?, ?)");
+		const seen = db.prepare("SELECT alerted_at FROM ratecon_reissue_holds WHERE load_id = ? AND column_name = ? AND sent_value = ?");
+		const fresh = [];
+		for (const e of entries) {
+			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason));
+			const r = seen.get(key, e.column, e.sent);
+			if (r && !r.alerted_at) fresh.push(e);
+		}
+		if (!fresh.length) return { alerted: false, reason: "already_alerted", key };
+		const dayAgo = new Date(Date.now() - 86400000).toISOString();
+		const loadsToday = db.prepare("SELECT COUNT(DISTINCT load_id) AS c FROM ratecon_reissue_holds WHERE alerted_at > ?").get(dayAgo).c;
+		if (loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY) {
+			console.warn(`[ratecon-reissue] daily alert cap (${RATECON_REISSUE_ALERT_MAX_PER_DAY}) reached; load ${key} recorded, not sent`);
+			return { alerted: false, reason: "daily_cap", key };
+		}
+
+		const label = (id || "(no load number)").replace(/[\r\n]+/g, " ").slice(0, 60);
+		const anyHeld = fresh.some((e) => e.kind === "held");
+		const why = cap(reason).slice(0, 160) || "protected";
+		const subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
+		const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
+		const rows = fresh.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
+		const html =
+			`<p><b>A rate con for load ${escHtml(label)} came in again after the load was ${escHtml(why)}.</b></p>` +
+			"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
+			"The held fields keep their stored values; the others were written as the email gave them.</p>" +
+			"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+			"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
+			"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
+			rows + "</table>" +
+			"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
+			"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+		const to = String(process.env.ADMIN_NOTIFY_EMAIL || "").trim();
+		let emailed = false;
+		if (to) {
+			try { emailed = (await sendEmail(to, subject, html)) === true; } catch (e) { console.error("[ratecon-reissue] alert email failed:", e.message); }
+		}
+		let notified = false;
+		const title = anyHeld ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
+		const body = fresh.map((e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`).join(", ");
+		const metadata = { loadId: id, reason: why, fields: fresh.map((e) => ({ column: e.column, kind: e.kind })) };
+		try {
+			insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
+			io.to("dispatch").emit("dispatch-notification", { type: "ratecon-reissue-held", title, body, metadata });
+			notified = true;
+		} catch (e) { console.error("[ratecon-reissue] notification failed:", e.message); }
+		const delivered = emailed || notified;
+		if (delivered) {
+			const at = new Date().toISOString();
+			const stamp = db.prepare("UPDATE ratecon_reissue_holds SET alerted_at = ? WHERE load_id = ? AND column_name = ? AND sent_value = ? AND alerted_at IS NULL");
+			for (const e of fresh) stamp.run(at, key, e.column, e.sent);
+		}
+		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sighting)", label, why, body);
+		return { alerted: delivered, emailed, notified, key };
+	} catch (e) {
+		console.error("[ratecon-reissue] alert failed:", e && e.message);
+		return { alerted: false, reason: "error" };
+	}
+}
 
 app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {
@@ -57531,6 +57739,13 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 // --print runs the same checks by hand, read-only.
 const INTEGRITY_CHECK_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.INTEGRITY_CHECK_ENABLED ?? "").trim());
 const integrityCheck = require("./lib/integrity-check");
+// Check 5's closed-month rule: the months loadRowAccountingMonths() books a Job
+// Tracking row into (cached rows are header-keyed) that are write-locked, or null
+// when a date can't be placed. An unreadable lock table reads as closed.
+function integrityClosedMonthsOf(headers, row) {
+	const months = loadRowAccountingMonths(headers, headers.map((h) => row[h]));
+	return months === null ? null : months.filter((mk) => periodWriteLocked(mk));
+}
 if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 	const integrityTick = integrityCheck.dailyTicker({
 		db,
@@ -57549,6 +57764,7 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			sendEmail,
 			to: ADMIN_NOTIFY_EMAIL,
 			emailHtml: ({ heading, bodyHtml }) => invoiceEmailHtml({ heading, bodyHtml }),
+			closedMonthsOf: integrityClosedMonthsOf,
 		}),
 	});
 	// The ticker never rejects; a rejection here is a defect in its own guard.

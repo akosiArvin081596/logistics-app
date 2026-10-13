@@ -152,7 +152,17 @@ if (!process.env.SERVER_JS) {
 	} else {
 		const HEADERS = ["Contract ID", "Load ID", "Details", "Pickup Info", "Pickup Appointment", "Pickup Address", "Assigned Date", "Documents", "  Payment  "];
 		const STORED = ["", "900000001", "Mill A", "IP REF/PU#: 1", "9/30/2026 06:00", "1 Test Rd", "9/30/2026, 2:06:03 PM", "BOL-77", "$1,000.00"];
-		const lifted = closure(SRC, { routes: [KHEAD], provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require"], denied: ["sendEmail", "transporter", "io", "server"] });
+		const lifted = closure(SRC, { routes: [KHEAD], provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"], denied: ["sendEmail", "transporter", "io", "server"] });
+		// The route also reads invoice drafts and the period locks (a re-issue on a
+		// delivered, invoiced or closed-month load is held: test-ratecon-reissue-hold.js).
+		// Neither applies to these loads, so every rule below is the plain one.
+		const kdb = new Database(":memory:");
+		for (const t of ["load_invoice_drafts", "period_locks"]) {
+			const ddl = new RegExp(`db\\.exec\\(\`\\s*(CREATE TABLE IF NOT EXISTS ${t} \\([\\s\\S]*?\\n\\t\\))\\s*\`\\);`).exec(SRC);
+			if (!ddl) throw new Error(`${t}'s CREATE TABLE was not found in server.js`);
+			kdb.exec(ddl[1]);
+		}
+		const reissueAlerts = [];
 		const routes = {};
 		const app = { post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
 		let sheetValues = [HEADERS, STORED];
@@ -164,8 +174,9 @@ if (!process.env.SERVER_JS) {
 		}, batchUpdate: async () => { calls.push(["batchUpdate"]); } } };
 		const warnings = [];
 		const quiet = { ...console, error: () => {}, warn: (m) => warnings.push(m) };
-		new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", `"use strict";\n${lifted.text}`)(
+		new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", `"use strict";\n${lifted.text}`)(
 			async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET } }, app, require,
+			kdb, (a) => { reissueAlerts.push(a); return Promise.resolve({ alerted: true }); },
 		);
 		const post = async (body, { secret = SECRET } = {}) => {
 			const out = { status: 200, body: null };
@@ -223,6 +234,7 @@ if (!process.env.SERVER_JS) {
 			const down = await post({ loadId: "900000001", values: later });
 			check("§3 a sheet that can't be read: 503, so n8n alerts and writes nothing", down.status === 503 && down.body.code === "JOB_TRACKING_UNREADABLE");
 			check("§3 it never writes the sheet", calls.every(([k]) => k === "get") && calls.every(([, range]) => range === "Job Tracking"), JSON.stringify(calls));
+			check("§3 a load neither delivered, invoiced nor in a closed month raises no re-issue alert", reissueAlerts.length === 0, JSON.stringify(reissueAlerts));
 			const limiter = /const n8nKeepStoredLimiter = rateLimit\(\{[\s\S]*?\n\}\);/.exec(SRC);
 			const distance = /const n8nDistanceLimiter = rateLimit\(\{[\s\S]*?\n\}\);/.exec(SRC);
 			check("§3 it has its own limiter, keyed like load-distance's", limiter && distance && /keyGenerator: \(req\) => n8nLimiterKey\(req\)/.test(limiter[0]) && /keyGenerator: \(req\) => n8nLimiterKey\(req\)/.test(distance[0]) && /keep-stored-values requests/.test(limiter[0]));

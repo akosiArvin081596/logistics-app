@@ -18,8 +18,11 @@
  *      - the hold alert is raised with the load, the reason and the held columns;
  *      - the draft is found under any spelling of the load id ("#X", case, edge spaces);
  *      - a draft table that can't be read holds (fails closed) and says so;
- *      a load that is neither still gets every value as sent, with nothing held and no alert,
- *      and the route still never writes the sheet.
+ *      - the alert also lists every other field the re-issue changed, with stored and new values;
+ *      a load whose dates book it into a closed month gets EVERY column back as stored (no
+ *      fallback fills a blank), whatever its status; a load that is neither delivered,
+ *      invoiced nor in a closed month still gets every value as sent, with nothing held and no
+ *      alert; the route never writes the sheet.
  *   §2 alertRateConReissueHold(): once per load, column and sent value (a dedupe ledger like
  *      ratecon_extract_alerts); a new sent value alerts again; alerted_at is stamped only on a
  *      confirmed delivery (the email or the in-app notification), so a failed send retries; it
@@ -27,8 +30,10 @@
  *   §3 the daily integrity check, check 5: a load whose Job Tracking Payment differs from the
  *      sheet's figure when its invoice was drafted (load_invoice_drafts.sheet_total, the latest
  *      draft) is reported once; the same amount in another format is not; a further change is
- *      reported again; a draft with no sheet_total is skipped; a load whose Assigned Date is in
- *      a closed month is not raised; a database without load_invoice_drafts skips the check.
+ *      reported again; a draft with no sheet_total is skipped; a load whose accounting months
+ *      (the server's loadRowAccountingMonths(), lifted) include a closed one is not raised; a
+ *      database without load_invoice_drafts, or a caller with no closed-month rule, skips the
+ *      check and says so in the log line.
  *
  * Pure: no server, no network. Run: node scripts/test-ratecon-reissue-hold.js  # exits 1 on failure
  */
@@ -59,10 +64,15 @@ function check(name, ok, detail) {
 
 const SECRET = "test-secret";
 const DRAFTS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS load_invoice_drafts \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
-if (!DRAFTS_DDL) { console.error("FAILED: load_invoice_drafts's CREATE TABLE was not found in server.js"); process.exit(1); }
+const LOCKS_DDL = /db\.exec\(`\s*(CREATE TABLE IF NOT EXISTS period_locks \([\s\S]*?\n\t\))\s*`\);/.exec(SRC);
+if (!DRAFTS_DDL || !LOCKS_DDL) { console.error("FAILED: load_invoice_drafts's or period_locks's CREATE TABLE was not found in server.js"); process.exit(1); }
+function lockMonth(db, period) {
+	db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', '2026-10-01T00:00:00Z')").run(period);
+}
 function draftsDb() {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_DDL[1]);
+	db.exec(LOCKS_DDL[1]);
 	for (const col of ["sheet_total TEXT", "ratecon_total TEXT", "total_source TEXT"]) {
 		try { db.exec(`ALTER TABLE load_invoice_drafts ADD COLUMN ${col}`); } catch { /* already there */ }
 	}
@@ -81,6 +91,8 @@ const DELIVERED = row({ "Load ID": "900000101", Details: "ROLLSTOCK, 44,548 lbs"
 const IN_TRANSIT_INVOICED = row({ "Load ID": "900000102", "Pickup Appointment": "10/6/2026 8:00", "Drop-off Appointment": "10/8/2026 0:00", "Job Status": "In Transit", "  Payment  ": " $ 1,511.22 " });
 const DISPATCHED = row({ "Load ID": "900000103", "Pickup Appointment": "10/12/2026 10:00", "Drop-off Appointment": "", "Job Status": "Dispatched", "  Payment  ": " $ 2,635.29 " });
 const DELIVERED_NO_PICKUP = row({ "Load ID": "900000104", "Pickup Appointment": "", "Drop-off Appointment": "10/8/2026 0:00", "Job Status": "Delivered", "  Payment  ": " $ 1,511.22 " });
+// Not delivered and not invoiced, but its dates book it into September, which is closed.
+const CLOSED_MONTH = row({ "Load ID": "900000106", Details: "Paper, 40,000 lbs", "Pickup Info": "Plant REF/PU#: 1", "Pickup Appointment": "9/28/2026 8:00", "Drop-off Appointment": "9/29/2026 0:00", "Job Status": "Dispatched", "Assigned Date": "9/27/2026, 9:00:00 AM", "  Payment  ": " $ 900.00 " });
 // What n8n sends for the post-delivery re-issue of 900000101 (the shape of a real one).
 const REISSUE = { "Load ID": "900000101", Details: "ROLLSTOCK, 7 Roll(s), 44,548 lbs, Equipment: Van/Min L = 53", "Pickup Info": "Mill REF/PU#: 7000000001, DEL#: 359000", "Pickup Appointment": "10/8/2026 00:00", "Pickup Address": "1 Mill Ln, Town, OK 74000", "Drop-off Appointment": "10/9/2026 00:01", "Assigned Date": "10/13/2026, 8:51:31 AM", Documents: "", "  Payment  ": "$1,446.56" };
 
@@ -88,6 +100,7 @@ async function section1() {
 	if (!SRC.includes(KHEAD)) { check("§1 the route exists", false); return; }
 	const db = draftsDb();
 	addDraft(db, { loadId: "#900000102", total: "$1,511.22", sheetTotal: "$1,511.22" });
+	lockMonth(db, "2026-09");
 	const alerts = [];
 	const lifted = closure(SRC, {
 		routes: [KHEAD],
@@ -96,7 +109,7 @@ async function section1() {
 	});
 	const routes = {};
 	const app = { post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
-	let sheetValues = [HEADERS, DELIVERED, IN_TRANSIT_INVOICED, DISPATCHED, DELIVERED_NO_PICKUP];
+	let sheetValues = [HEADERS, DELIVERED, IN_TRANSIT_INVOICED, DISPATCHED, DELIVERED_NO_PICKUP, CLOSED_MONTH];
 	const calls = [];
 	const sheets = { spreadsheets: { values: {
 		get: async (q) => { calls.push(["get", q.range]); return { data: { values: sheetValues } }; },
@@ -135,6 +148,26 @@ async function section1() {
 	check("§1 delivered: the reason says delivered", r.body && /delivered/i.test(String(r.body.holdReason || "")), r.body && r.body.holdReason);
 	check("§1 delivered: one alert, with the load, the reason and the held columns",
 		alerts.length === 1 && alerts[0].loadId === "900000101" && /delivered/i.test(String(alerts[0].reason || "")) && (alerts[0].held || []).length === 2, alerts);
+	const otherCols = ((alerts[0] && alerts[0].changed) || []).map((c) => c.column).sort();
+	check("§1 delivered: the alert also lists every other field the re-issue changed (written, not held)",
+		JSON.stringify(otherCols) === JSON.stringify(["Details", "Pickup Info"]), alerts[0] && alerts[0].changed);
+	const det = ((alerts[0] && alerts[0].changed) || []).find((c) => c.column === "Details");
+	check("§1 delivered: each listed change carries the stored and the new value", det && det.stored === "ROLLSTOCK, 44,548 lbs" && det.sent === REISSUE.Details, det);
+	check("§1 delivered: unchanged and blank-sent columns are not listed (Pickup Address, Documents, Assigned Date)",
+		!otherCols.includes("Pickup Address") && !otherCols.includes("Documents") && !otherCols.includes("Assigned Date"));
+
+	// A closed month: every column is held, whatever the status.
+	alerts.length = 0;
+	const cm = await post({ loadId: "900000106", values: { "Load ID": "900000106", Details: "Paper, 41,000 lbs", "Pickup Info": "Plant REF/PU#: 2", "Pickup Appointment": "9/28/2026 09:00", "  Payment  ": "$850.00", Documents: "", "Assigned Date": "10/13/2026, 8:51:31 AM" }, fallbacks: { Documents: "900000106" } });
+	const cv = (cm.body && cm.body.values) || {};
+	check("§1 closed month: every column comes back as stored", cv.Details === "Paper, 40,000 lbs" && cv["Pickup Info"] === "Plant REF/PU#: 1"
+		&& cv["Pickup Appointment"] === "9/28/2026 8:00" && cv["  Payment  "] === " $ 900.00 ", cv);
+	check("§1 closed month: a fallback does not fill a blank either", cv.Documents === "", cv.Documents);
+	check("§1 closed month: Assigned Date comes back as stored and is not listed (kept by its own rule)",
+		cv["Assigned Date"] === "9/27/2026, 9:00:00 AM" && !heldCols(cm.body).includes("Assigned Date"), { assigned: cv["Assigned Date"], held: heldCols(cm.body) });
+	check("§1 closed month: the reason names the closed month, and each changed column is held",
+		/closed month \(2026-09\)/.test(String(cm.body && cm.body.holdReason)) && JSON.stringify(heldCols(cm.body)) === JSON.stringify(["  Payment  ", "Details", "Pickup Appointment", "Pickup Info"].sort()), cm.body);
+	check("§1 closed month: one alert", alerts.length === 1 && alerts[0].loadId === "900000106", alerts.length);
 
 	// Invoiced but not delivered: a draft exists under another spelling of the id.
 	alerts.length = 0;
@@ -184,7 +217,7 @@ async function section2() {
 	const db = new Database(":memory:");
 	const sends = [];
 	const notes = [];
-	const lifted = closure(SRC, { functions: ["alertRateConReissueHold"], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process"] });
+	const lifted = closure(SRC, { roots: ["alertRateConReissueHold"], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process"] });
 	const before = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().length;
 	const fn = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", `"use strict";\n${lifted.text}\nreturn alertRateConReissueHold;`)(
 		db, async (to, subject, html) => { sends.push({ to, subject, html }); return true; },
@@ -226,14 +259,23 @@ function icDb({ drafts = true } = {}) {
 			date TEXT NOT NULL, status TEXT DEFAULT 'Pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, posted_period TEXT DEFAULT '');
 		CREATE TABLE invoices (id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL DEFAULT 'd',
 			status TEXT NOT NULL DEFAULT 'Draft', expense_ids TEXT DEFAULT '[]', deleted_at TEXT DEFAULT '');
-		CREATE TABLE period_locks (period TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'locked', finalized_at TEXT NOT NULL DEFAULT '');
 	`);
+	if (!drafts) db.exec(LOCKS_DDL[1]);
 	return db;
 }
+// The server's own accounting-month rule, lifted, with the database's locks: what
+// server.js hands the job as closedMonthsOf.
+const { loadRowAccountingMonths } = new Function(`"use strict";\n${closure(SRC, { roots: ["loadRowAccountingMonths"] }).text}\nreturn { loadRowAccountingMonths };`)();
+const closedMonthsOf = (db) => (headers, r) => {
+	const months = loadRowAccountingMonths(headers, headers.map((h) => r[h]));
+	if (months === null) return null;
+	const locked = new Set(db.prepare("SELECT period FROM period_locks WHERE status = 'locked'").all().map((x) => x.period));
+	return months.filter((mk) => locked.has(mk));
+};
 async function runIc(db, sheet, now = new Date("2026-10-14T12:00:30Z")) {
 	const sends = [];
 	const result = await ic.runIntegrityCheck({
-		db, write: true, now, readJobTracking: async () => sheet, readRateConEmails: null, expensePeriodExpr: EXPENSE_PERIOD_EXPR,
+		db, write: true, now, readJobTracking: async () => sheet, readRateConEmails: null, expensePeriodExpr: EXPENSE_PERIOD_EXPR, closedMonthsOf: closedMonthsOf(db),
 		sendEmail: async (to, subject, html) => { sends.push({ to, subject, html }); return true; }, to: "admin@example.test",
 		log: { log: () => {}, info: () => {}, warn: () => {}, error: () => {} }, appZone: "America/New_York",
 	});
@@ -248,7 +290,7 @@ async function section3() {
 	addDraft(db, { loadId: "900000204", total: "$900.00", sheetTotal: "$900.00", createdAt: "2026-10-01T10:00:00Z" });
 	addDraft(db, { loadId: "900000204", total: "$950.00", sheetTotal: "$950.00", createdAt: "2026-10-05T10:00:00Z" });
 	addDraft(db, { loadId: "900000205", total: "$1,000.00", sheetTotal: "$1,000.00" });
-	db.prepare("INSERT INTO period_locks (period, status) VALUES ('2026-09', 'locked')").run();
+	lockMonth(db, "2026-09");
 	const sheet = (p201) => jt([
 		{ id: "900000201", payment: p201 },
 		{ id: "900000202", payment: " $ 1,511.22 " },
@@ -271,8 +313,15 @@ async function section3() {
 	check("§3 load_invoice_drafts is never written", before === JSON.stringify(db.prepare("SELECT * FROM load_invoice_drafts ORDER BY id").all()));
 	const bare = icDb({ drafts: false });
 	let threw = null;
-	try { await runIc(bare, sheet(" $ 1,446.56 ")); } catch (e) { threw = e.message; }
-	check("§3 a database without load_invoice_drafts skips the check and the run still completes", threw === null, threw);
+	let bareRun = null;
+	try { bareRun = await runIc(bare, sheet(" $ 1,446.56 ")); } catch (e) { threw = e.message; }
+	check("§3 a database without load_invoice_drafts skips the check and the run still completes", threw === null && /not checked/i.test(bareRun.result.logLine || ""), threw || (bareRun && bareRun.result.logLine));
+	const noRule = await ic.runIntegrityCheck({
+		db: icDb(), write: false, now: new Date("2026-10-14T12:00:30Z"), readJobTracking: async () => sheet(" $ 1,446.56 "), expensePeriodExpr: EXPENSE_PERIOD_EXPR,
+		log: { log: () => {}, info: () => {}, warn: () => {}, error: () => {} }, appZone: "America/New_York",
+	});
+	check("§3 without a closed-month rule the check is skipped, never run without it", noRule.report.payments.skipped === "no closed-month rule was given", noRule.report.payments);
+	check("§3 the log line names the change", /Payment changed after invoicing: load 900000201/.test(r1.result.logLine || ""), r1.result.logLine);
 }
 
 (async () => {
