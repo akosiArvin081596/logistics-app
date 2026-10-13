@@ -121,6 +121,38 @@ printf 'pid=%s since=%s by=%s ref=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%
 
 cd "$DIR" || { echo "::error::$DIR does not exist"; exit 1; }
 
+echo "::group::resolve the Node this app actually runs on"
+# ⚠️ Build with the SAME Node pm2 executes the app with, not whatever is on
+# PATH. Native modules (better-sqlite3) are compiled per NODE_MODULE_VERSION;
+# installing under one major and running under another is ERR_DLOPEN_FAILED on
+# boot. pm2's interpreter is the single source of truth so the two cannot drift.
+# ⚠️ Read by name from jlist's JSON line (pm2 can print a notice ahead of it,
+# see the pm2-restart block). When it cannot be read at all, refuse: a guess
+# at PATH's node is the box's system Node 20, whose build dies on boot under
+# pm2's Node 22. Only pm2's own default, the bare `node`, means PATH's node.
+# ⚠️ Read FIRST, before the lockfile reset and the checkout, as
+# remote-rollback.sh reads it. A refusal after the checkout exited 1 with HEAD
+# already on the new commit and nothing built: the half-finished state that
+# DEPLOY_RESULT=unbuilt exists to roll back, but with no result for the action
+# to act on. Refused here, nothing has moved.
+NODE_BIN=$(pm2 jlist 9>&- | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
+    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
+    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
+  });' "$PM2")
+case "$NODE_BIN" in
+	node) NODE_BIN=$(command -v node) ;;
+	"")
+		echo "::error::cannot read the interpreter pm2 runs $PM2 with — refusing to build with a guess. Nothing was checked out, built or restarted."
+		exit 1 ;;
+esac
+PATH="$(dirname "$NODE_BIN"):$PATH"
+export PATH
+echo "pm2 interpreter: $NODE_BIN"
+echo "building with:   $(command -v node) $(node --version) / npm $(npm --version)"
+echo "::endgroup::"
+
 PREV=$(git rev-parse HEAD)
 # >>> verified-record — keep byte-identical in remote-deploy.sh,
 # remote-drift-check.sh and remote-drift-heal.sh (scripts/test-deploy-scripts.js
@@ -378,33 +410,6 @@ fi
 if git grep -q 'allowRequest: liveUpdateHandshakeAllowed' "$NEW" -- server.js 2>/dev/null; then GUARD=1; else GUARD=0; fi
 echo "::endgroup::"
 
-echo "::group::resolve the Node this app actually runs on"
-# ⚠️ Build with the SAME Node pm2 executes the app with, not whatever is on
-# PATH. Native modules (better-sqlite3) are compiled per NODE_MODULE_VERSION;
-# installing under one major and running under another is ERR_DLOPEN_FAILED on
-# boot. pm2's interpreter is the single source of truth so the two cannot drift.
-# ⚠️ Read by name from jlist's JSON line (pm2 can print a notice ahead of it,
-# see the pm2-restart block). When it cannot be read at all, refuse: a guess
-# at PATH's node is the box's system Node 20, whose build dies on boot under
-# pm2's Node 22. Only pm2's own default, the bare `node`, means PATH's node.
-NODE_BIN=$(pm2 jlist 9>&- | node -e '
-  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    let l=[];try{l=JSON.parse(d.slice(d.lastIndexOf("\n[")+1));}catch(e){}
-    const p=Array.isArray(l)?l.find(x=>x&&x.name===process.argv[1]):null;
-    process.stdout.write(p && p.pm2_env ? (p.pm2_env.exec_interpreter||"") : "");
-  });' "$PM2")
-case "$NODE_BIN" in
-	node) NODE_BIN=$(command -v node) ;;
-	"")
-		echo "::error::cannot read the interpreter pm2 runs $PM2 with — refusing to build with a guess. Nothing was built or restarted."
-		exit 1 ;;
-esac
-PATH="$(dirname "$NODE_BIN"):$PATH"
-export PATH
-echo "pm2 interpreter: $NODE_BIN"
-echo "building with:   $(command -v node) $(node --version) / npm $(npm --version)"
-echo "::endgroup::"
-
 # >>> client-build — keep byte-identical in remote-deploy.sh and remote-rollback.sh
 # (scripts/test-deploy-scripts.js pins the copies)
 #
@@ -418,21 +423,41 @@ echo "::endgroup::"
 # It runs client/'s own build script (what the root's build:client runs) with
 # only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
 # e2e servers and a developer still build into client/dist. Only a build that
-# exited 0 and left an index.html replaces client/dist, stamped first with the
-# commit it was built from (.build-commit: express.static never serves a
-# dotfile), by two renames (the box's coreutils predates mv --exchange):
-# client/dist is missing for the moment between them, not for the length of a
-# build. The build it replaces is KEPT, with its stamp, in client/dist.prev
-# until the next swap, so a rollback whose own build fails can put its
-# commit's build back (remote-rollback.sh). A failed build leaves client/dist
-# and client/dist.prev as they were. Returns 0 only once the new build is in
-# place. client_stamp DIR prints the commit DIR's build was made from, or
-# nothing for a build with no stamp.
+# exited 0 and left a whole build replaces client/dist: an index.html, and
+# every /assets bundle file it names, none of them empty (client_whole). An
+# index.html that names none is not whole either: Vite's entry is always one.
+# "Names" means a src= or href= attribute whose value is that path, as Vite
+# writes them, so a comment or another site's URL that happens to hold
+# /assets/ never counts.
+# The build is stamped first with the commit it was built from (.build-commit:
+# express.static never serves a dotfile), then swapped in by two renames (the
+# box's coreutils predates mv --exchange): client/dist is missing for the
+# moment between them, not for the length of a build. The build it replaces is
+# KEPT, with its stamp, in client/dist.prev until the next swap, so a rollback
+# whose own build fails can put its commit's build back (remote-rollback.sh).
+# A failed build leaves client/dist and client/dist.prev as they were. Returns
+# 0 only once the new build is in place. client_stamp DIR prints the commit
+# DIR's build was made from, or nothing for a build with no stamp.
 #
 # ⚠️ A run cut short between the two renames leaves no client/dist and the
 # whole previous build in client/dist.prev: before anything else, client_build
 # puts it back, so the next build never starts by losing the only good copy.
+#
+# ⚠️ The kept build loses its stamp BEFORE it is deleted. The rollback puts a
+# kept build back by its stamp, and rm -rf deletes in no set order, so a
+# delete cut short could otherwise leave part of a build still stamped whole.
 client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
+client_whole() {
+	local a n=0
+	[ -f "$1/index.html" ] || return 1
+	for a in $(grep -oE '(src|href)="/assets/[A-Za-z0-9._-]+\.(js|css)"' "$1/index.html" | sort -u); do
+		a=${a#*\"}
+		a=${a%\"}
+		[ -s "$1$a" ] || return 1
+		n=$((n + 1))
+	done
+	[ "$n" -gt 0 ]
+}
 client_build() {
 	if [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then
 		mv client/dist.prev client/dist && echo "::warning::client/dist was missing and client/dist.prev held a whole build (a swap cut short): put it back"
@@ -440,11 +465,11 @@ client_build() {
 	rm -rf client/dist.next
 	if ! (cd client && npm run build --silent -- --outDir dist.next); then
 		echo "::warning::the client build failed — client/dist is left as it was"
-	elif [ ! -f client/dist.next/index.html ]; then
-		echo "::warning::the client build left no index.html — client/dist is left as it was"
+	elif ! client_whole client/dist.next; then
+		echo "::warning::the client build left no whole build (no index.html, or not every /assets file it names) — client/dist is left as it was"
 	elif ! git rev-parse HEAD > client/dist.next/.build-commit; then
 		echo "::warning::could not stamp the new build with its commit — client/dist is left as it was"
-	elif ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
+	elif ! rm -f client/dist.prev/.build-commit || ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
 		echo "::warning::could not move client/dist aside — client/dist is left as it was"
 	elif ! mv client/dist.next client/dist; then
 		echo "::warning::could not move the new build into client/dist — putting the previous build back"

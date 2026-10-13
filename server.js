@@ -7763,13 +7763,14 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 // Serve the Vue SPA build (client/dist). Without client/dist/index.html the SPA
 // catch-all at the bottom of this file answers every page request with the
 // 503 "being updated" page (lib/app-updating-page.js).
+// Mounted whether or not client/dist exists at boot: express.static looks per
+// request, so a process started while the build was missing (a deploy swaps
+// it in with two renames) serves the bundle files as soon as it is back.
 const clientDistPath = path.join(__dirname, "client", "dist");
 // A replica answers every page with the "LOCAL COPY OF PRODUCTION" banner in
 // it, the login page included (lib/replica-mode.js), ahead of the static files.
 if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));
-if (fs.existsSync(clientDistPath)) {
-	app.use(express.static(clientDistPath));
-}
+app.use(express.static(clientDistPath));
 
 // ============================================================
 // CONFIGURATION — Update these values with your own
@@ -61774,7 +61775,16 @@ app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOri
 // ============================================================
 // Checked per request, so a build that disappears while the server runs (a
 // rebuild empties client/dist first) answers the 503 page until it is back.
+// A bundle file express.static did not find (anything under /assets/, where
+// Vite writes them) is a 404, never a page: answered with index.html or the
+// 503 page, a missing bundle reads as a 200 or as "being updated" to a
+// browser and to every check that asks for it. no-store, so no cache keeps
+// the 404 once the build that has the file is in place.
 app.get("*", (req, res) => {
+	if (req.path.startsWith("/assets/")) {
+		res.status(404).set("Cache-Control", "no-store").type("text").send("Not found");
+		return;
+	}
 	const spaIndex = path.join(clientDistPath, "index.html");
 	if (fs.existsSync(spaIndex)) {
 		res.sendFile(spaIndex);

@@ -136,6 +136,27 @@ jobs:
       - name: Build client
         run: npm run build:client
 
+      # A deploy swaps a client build in only when client_whole, from the
+      # client-build block of scripts/deploy/remote-deploy.sh, calls it whole:
+      # an index.html naming /assets bundle files, every one of them there and
+      # non-empty. Run here on this real Vite build, so a change to Vite's
+      # output or to that check that would leave every deploy unbuilt fails
+      # on the PR instead. The block is read as the refresh scripts read it,
+      # and run only when it arrived whole, ending on its end marker.
+      - name: The deploy's whole-build check accepts this build
+        run: |
+          block=$(sed -n '/^# >>> client-build/,/^# <<< client-build/p' scripts/deploy/remote-deploy.sh)
+          case "$block" in
+            *'client_whole() {'*$'\n''# <<< client-build') ;;
+            *) echo "::error::could not read the client-build block from scripts/deploy/remote-deploy.sh"; exit 1 ;;
+          esac
+          eval "$block"
+          if ! client_whole client/dist; then
+            echo "::error::the deploy's whole-build check (client_whole) refuses this build: client/dist has no index.html, or its index.html names an /assets bundle that is missing or empty, or names none. Every deploy of this commit would end unbuilt."
+            exit 1
+          fi
+          echo "ok: client_whole accepts client/dist"
+
       # A build that emits nothing still "succeeds". Express serves client/dist,
       # and without client/dist/index.html every page is a 503 "being updated"
       # page while the API still answers, so an empty dist would deploy as a

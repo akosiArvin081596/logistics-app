@@ -30,6 +30,14 @@
  *      public/ folder.
  *   §5 discrimination: a catch-all that sends index.html without looking, and
  *      a page sent with 200, each turn a §3 assertion red.
+ *   §6 bundle files: client/dist is mounted whether or not it exists at boot,
+ *      so a server started while the build was missing serves the bundle
+ *      files once it is back. A bundle URL (under /assets/) that is not there
+ *      is a 404 with no-store, with the build or without it, never
+ *      index.html or the 503 page, which a browser or a check would read as a
+ *      bundle that answered; a page whose path merely holds the word assets
+ *      is still a page. Two mutants: the mount behind a boot-time existsSync,
+ *      and a catch-all that answers bundle paths too.
  *
  * Pure: no server.js boot, no app.db, no network beyond 127.0.0.1 port 0.
  * SERVER_JS=<path> checks another copy of server.js (e.g. main's, to watch
@@ -100,12 +108,12 @@ const CATCH_ALL_SRC = catchAll(SRC);
 // `appDir` stands in for __dirname.
 // Express's "test" env only keeps its default error handler from logging the
 // ENOENT a mutant's sendFile ends in; nothing else here depends on it.
-function buildApp(appDir, { replica = null, catchAllSrc = CATCH_ALL_SRC, send = sendAppUpdating } = {}) {
+function buildApp(appDir, { replica = null, staticSrc = STATIC_SRC, catchAllSrc = CATCH_ALL_SRC, send = sendAppUpdating } = {}) {
 	const app = express();
 	app.set("env", "test");
 	app.get("/api/thing", (req, res) => res.json({ ok: true }));
 	const REPLICA = replica ? { bannerMiddleware: replicaMode.bannerMiddleware } : null;
-	new Function("app", "express", "fs", "path", "__dirname", "REPLICA", "sendAppUpdating", `${STATIC_SRC}\n${catchAllSrc}`)(
+	new Function("app", "express", "fs", "path", "__dirname", "REPLICA", "sendAppUpdating", `${staticSrc}\n${catchAllSrc}`)(
 		app, express, fs, path, appDir, REPLICA, send);
 	return app;
 }
@@ -299,6 +307,62 @@ async function noBuildAnswers(opts = {}) {
 		ok("MUTANT (the page sent with 200): GET / is no longer the 503 page", !isUpdatingPage(as200.pages[0]), as200.pages[0].status);
 		const cached = await noBuildAnswers({ send: libFrom(mutate(LIB_SRC, '"Cache-Control": "no-store", ', "")).sendAppUpdating });
 		ok("MUTANT (no Cache-Control: no-store): GET / is no longer the 503 page", !isUpdatingPage(cached.pages[0]), cached.pages[0].headers["cache-control"]);
+	}
+
+	// =========================================================================
+	console.log("\n§6 bundle files: served once they are there, a 404 when they are not");
+	// =========================================================================
+	const isMissingBundle = (r) => r.status === 404 && r.headers["cache-control"] === "no-store"
+		&& !/html/.test(r.headers["content-type"] || "") && !r.body.includes('id="app"') && r.body !== APP_UPDATING_HTML;
+	// Started with no client/dist at all, then the build arrives (a deploy's
+	// swap, or a build that finishes after a restart).
+	async function startedWithoutBuild(opts = {}) {
+		const dir = tmpDir();
+		const srv = await listen(buildApp(dir, opts));
+		try {
+			withBuild(dir);
+			return { js: await ask(srv, "/assets/index-a1.js"), page: await ask(srv, "/login") };
+		} finally {
+			srv.close();
+		}
+	}
+	{
+		const r = await startedWithoutBuild();
+		ok("started while client/dist was missing, a bundle file is served as itself once the build is back",
+			r.js.status === 200 && /javascript/.test(r.js.headers["content-type"] || "") && r.js.body === "export {};\n", { status: r.js.status, type: r.js.headers["content-type"] });
+		ok("…and so are the pages", r.page.status === 200 && r.page.body === INDEX, r.page.status);
+	}
+	async function bundleAnswers(dir, opts = {}) {
+		const srv = await listen(buildApp(dir, opts));
+		try {
+			return {
+				missing: await ask(srv, "/assets/index-gone.js"),
+				head: await ask(srv, "/assets/index-gone.css", "HEAD"),
+				route: await ask(srv, "/dashboard/assets"),
+			};
+		} finally {
+			srv.close();
+		}
+	}
+	{
+		const withIt = await bundleAnswers(withBuild(tmpDir()));
+		ok("with the build, a bundle file that is not there is a 404 with no-store, never index.html",
+			isMissingBundle(withIt.missing), { status: withIt.missing.status, headers: withIt.missing.headers, body: withIt.missing.body.slice(0, 80) });
+		ok("…HEAD too", withIt.head.status === 404 && withIt.head.headers["cache-control"] === "no-store", withIt.head.status);
+		ok("…while a page whose path merely holds the word assets is still the app's page", withIt.route.status === 200 && withIt.route.body === INDEX, withIt.route.status);
+		const without = await bundleAnswers(tmpDir());
+		ok("without the build, a bundle file is a 404 too, not the 503 page", isMissingBundle(without.missing), without.missing.status);
+		ok("…while a page is still the 503 page", isUpdatingPage(without.route), without.route.status);
+	}
+	{
+		const STATIC_LINE = "app.use(express.static(clientDistPath));";
+		ok("server.js mounts client/dist with express.static unconditionally, exactly once",
+			SRC.split("\n").filter((l) => l === STATIC_LINE).length === 1 && !/existsSync\(clientDistPath\)/.test(SRC));
+		const atBoot = await startedWithoutBuild({ staticSrc: mutate(STATIC_SRC, STATIC_LINE, `if (fs.existsSync(clientDistPath)) {\n\t${STATIC_LINE}\n}`) });
+		ok("MUTANT (static files mounted only when client/dist exists at boot): the bundle is no longer served once the build is back",
+			!(atBoot.js.status === 200 && atBoot.js.body === "export {};\n"), atBoot.js.status);
+		const unguarded = await bundleAnswers(withBuild(tmpDir()), { catchAllSrc: mutate(CATCH_ALL_SRC, 'if (req.path.startsWith("/assets/")) {', "if (false) {") });
+		ok("MUTANT (the catch-all answers bundle paths too): a missing bundle file is no longer a 404", !isMissingBundle(unguarded.missing), unguarded.missing.status);
 	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);

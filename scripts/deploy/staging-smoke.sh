@@ -86,7 +86,7 @@ echo "login page  $BASE/login -> $CODE $CTYPE"
 [ "$CODE" = 200 ] || fail "login page: /login gave $CODE (want 200)"
 [[ "$CTYPE" == text/html* ]] || fail "login page: /login answered '$CTYPE' (want text/html)"
 grep -q 'id="app"' "$BODY" || fail "login page: /login is not the app's index.html (no #app mount point)"
-assets=$(grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' "$BODY" | sort -u || true)
+assets=$(grep -oE '(src|href)="/assets/[A-Za-z0-9._-]+\.(js|css)"' "$BODY" | sed -E 's/^(src|href)="//; s/"$//' | sort -u || true)
 [ -n "$assets" ] || fail "login page: index.html names no /assets bundle"
 
 # 3. bundle

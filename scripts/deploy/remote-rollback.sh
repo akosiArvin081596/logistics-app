@@ -7,9 +7,9 @@
 #
 # Only ever invoked when a deploy FAILED: its smoke or edge check failed, pm2
 # did not prove its restart, or its install or build failed after its checkout
-# (DEPLOY_RESULT=unbuilt). A reviewer approves a production deploy before it
-# starts (since 2026-09-25), but nobody watches it finish, so a bad merge must
-# not be able to leave production down until someone notices. Used by
+# (DEPLOY_RESULT=unbuilt). Nobody approves a production deploy (the production
+# environment has no required reviewer) or watches one finish, so a bad merge
+# must not be able to leave production down until someone notices. Used by
 # deploy.yml's production job AND by deploy-drift.yml's heal (same composite
 # action).
 #
@@ -191,21 +191,41 @@ fi
 # It runs client/'s own build script (what the root's build:client runs) with
 # only Vite's --outDir changed, to client/dist.next, so CI, the replica, the
 # e2e servers and a developer still build into client/dist. Only a build that
-# exited 0 and left an index.html replaces client/dist, stamped first with the
-# commit it was built from (.build-commit: express.static never serves a
-# dotfile), by two renames (the box's coreutils predates mv --exchange):
-# client/dist is missing for the moment between them, not for the length of a
-# build. The build it replaces is KEPT, with its stamp, in client/dist.prev
-# until the next swap, so a rollback whose own build fails can put its
-# commit's build back (remote-rollback.sh). A failed build leaves client/dist
-# and client/dist.prev as they were. Returns 0 only once the new build is in
-# place. client_stamp DIR prints the commit DIR's build was made from, or
-# nothing for a build with no stamp.
+# exited 0 and left a whole build replaces client/dist: an index.html, and
+# every /assets bundle file it names, none of them empty (client_whole). An
+# index.html that names none is not whole either: Vite's entry is always one.
+# "Names" means a src= or href= attribute whose value is that path, as Vite
+# writes them, so a comment or another site's URL that happens to hold
+# /assets/ never counts.
+# The build is stamped first with the commit it was built from (.build-commit:
+# express.static never serves a dotfile), then swapped in by two renames (the
+# box's coreutils predates mv --exchange): client/dist is missing for the
+# moment between them, not for the length of a build. The build it replaces is
+# KEPT, with its stamp, in client/dist.prev until the next swap, so a rollback
+# whose own build fails can put its commit's build back (remote-rollback.sh).
+# A failed build leaves client/dist and client/dist.prev as they were. Returns
+# 0 only once the new build is in place. client_stamp DIR prints the commit
+# DIR's build was made from, or nothing for a build with no stamp.
 #
 # ⚠️ A run cut short between the two renames leaves no client/dist and the
 # whole previous build in client/dist.prev: before anything else, client_build
 # puts it back, so the next build never starts by losing the only good copy.
+#
+# ⚠️ The kept build loses its stamp BEFORE it is deleted. The rollback puts a
+# kept build back by its stamp, and rm -rf deletes in no set order, so a
+# delete cut short could otherwise leave part of a build still stamped whole.
 client_stamp() { head -n 1 "$1/.build-commit" 2>/dev/null || true; }
+client_whole() {
+	local a n=0
+	[ -f "$1/index.html" ] || return 1
+	for a in $(grep -oE '(src|href)="/assets/[A-Za-z0-9._-]+\.(js|css)"' "$1/index.html" | sort -u); do
+		a=${a#*\"}
+		a=${a%\"}
+		[ -s "$1$a" ] || return 1
+		n=$((n + 1))
+	done
+	[ "$n" -gt 0 ]
+}
 client_build() {
 	if [ ! -e client/dist ] && [ -f client/dist.prev/index.html ]; then
 		mv client/dist.prev client/dist && echo "::warning::client/dist was missing and client/dist.prev held a whole build (a swap cut short): put it back"
@@ -213,11 +233,11 @@ client_build() {
 	rm -rf client/dist.next
 	if ! (cd client && npm run build --silent -- --outDir dist.next); then
 		echo "::warning::the client build failed — client/dist is left as it was"
-	elif [ ! -f client/dist.next/index.html ]; then
-		echo "::warning::the client build left no index.html — client/dist is left as it was"
+	elif ! client_whole client/dist.next; then
+		echo "::warning::the client build left no whole build (no index.html, or not every /assets file it names) — client/dist is left as it was"
 	elif ! git rev-parse HEAD > client/dist.next/.build-commit; then
 		echo "::warning::could not stamp the new build with its commit — client/dist is left as it was"
-	elif ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
+	elif ! rm -f client/dist.prev/.build-commit || ! rm -rf client/dist.prev || { [ -e client/dist ] && ! mv client/dist client/dist.prev; }; then
 		echo "::warning::could not move client/dist aside — client/dist is left as it was"
 	elif ! mv client/dist.next client/dist; then
 		echo "::warning::could not move the new build into client/dist — putting the previous build back"
@@ -236,9 +256,11 @@ client_build || BUILD_OK=0
 # is the FAILED commit's client, which the page check below would pass. So
 # when client/dist is not TARGET's build and the build kept in
 # client/dist.prev is (client_build keeps the one it replaced), that one goes
-# back in place. When neither is, this rollback ends ROLLBACK FAILED below,
-# naming the client that serves.
-if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ]; then
+# back in place, but only when it is whole as well (client_whole): a build
+# kept by an older deploy was only ever checked for its index.html. When
+# neither is, this rollback ends ROLLBACK FAILED below, naming the client that
+# serves.
+if [ "$(client_stamp client/dist)" != "$TARGET" ] && [ "$(client_stamp client/dist.prev)" = "$TARGET" ] && client_whole client/dist.prev; then
 	rm -rf client/dist.next
 	if { [ ! -e client/dist ] || mv client/dist client/dist.next; } && mv client/dist.prev client/dist; then
 		echo "::warning::client/dist was not $TARGET's build: put the build of $TARGET kept in client/dist.prev back in place"
@@ -365,7 +387,7 @@ if [ "$PAGE_OK" != 1 ]; then
 fi
 # Its pages, but whose client? Only TARGET's own build is a rollback.
 if [ "$CLIENT_AT" != "$TARGET" ]; then
-	echo "::error::ROLLBACK FAILED — $PM2 serves its pages at $TARGET, but with the client build of ${CLIENT_AT:-an unknown commit (client/dist has no .build-commit stamp)}, not $TARGET's: this rollback's own client build failed and no build of $TARGET was kept. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
+	echo "::error::ROLLBACK FAILED — $PM2 serves its pages at $TARGET, but with the client build of ${CLIENT_AT:-an unknown commit (client/dist has no .build-commit stamp)}, not $TARGET's: this rollback's own client build failed and no whole build of $TARGET was kept. Nothing was recorded as verified. MANUAL INTERVENTION REQUIRED."
 	exit 1
 fi
 echo "ROLLBACK OK — $PM2 serving 200 on :$PORT at $TARGET"

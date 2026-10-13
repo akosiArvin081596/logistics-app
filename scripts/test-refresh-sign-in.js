@@ -63,6 +63,8 @@ const REFRESH = path.join(__dirname, "refresh-env.js");
 const PREPARE = path.join(__dirname, "prepare-test-fixtures.js");
 const STAGING_SH = path.join(__dirname, "refresh-staging.sh");
 const LOCAL_SH = path.join(__dirname, "refresh-local.sh");
+// Both wrappers build the client with the deploy's client_build, read from here.
+const DEPLOY_SH = path.join(__dirname, "deploy", "remote-deploy.sh");
 const KEEP = process.argv.includes("--keep");
 // Resolved: macOS keeps tmpdir behind the /var -> /private/var symlink, and the
 // staging wrapper compares `pwd` against a path, so every sandbox path is real.
@@ -333,7 +335,16 @@ function rewrite(srcPath, edits) {
 			`#!/bin/bash\n{ printf 'CALL %s' '${name}'; printf ' <%s>' "$@"; printf '\\n'; env; printf 'END\\n'; } >> "$STUB_LOG"\n${body}\nexit 0\n`,
 			{ mode: 0o755 });
 		stub("git", 'case "$1 $2" in\n  "rev-parse --abbrev-ref") echo feature ;;\n  "rev-parse --short") echo abc1234 ;;\nesac');
-		stub("npm", ":");
+		// `npm run build` (client_build's, in client/) writes a whole build into
+		// its --outDir: an index.html and the bundle it names.
+		stub("npm", [
+			'if [ "$1" = run ]; then',
+			'  out=dist; prev=""',
+			'  for a in "$@"; do if [ "$prev" = --outDir ]; then out=$a; fi; prev=$a; done',
+			'  mkdir -p "$out/assets" && printf \'export {};\\n\' > "$out/assets/index-new.js"',
+			'  printf \'<div id="app"></div><script type="module" src="/assets/index-new.js"></script>\\n\' > "$out/index.html"',
+			"fi",
+		].join("\n"));
 		stub("sleep", ":");
 		stub("dirname", `exec ${JSON.stringify(REAL_DIRNAME)} "$@"`);
 		stub("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
@@ -397,6 +408,8 @@ function rewrite(srcPath, edits) {
 		const backups = mkdirp(name, "backups");
 		fs.copyFileSync(snapshotGz, path.join(backups, path.basename(snapshotGz)));
 		fs.copyFileSync(REFRESH, path.join(stagingDir, "scripts", "refresh-env.js"));
+		fs.copyFileSync(DEPLOY_SH, path.join(mkdirp(name, "staging", "scripts", "deploy"), "remote-deploy.sh"));
+		mkdirp(name, "staging", "client");
 		fs.symlinkSync(NODE_MODULES, path.join(stagingDir, "node_modules"), "dir");
 		fs.writeFileSync(path.join(stagingDir, ".env"), `PORT=3903\nSPREADSHEET_ID=${STAGING_SHEET}\nNODE_ENV=development\n`);
 		const { src, err } = rewrite(STAGING_SH, [
@@ -429,6 +442,8 @@ function rewrite(srcPath, edits) {
 		const sb = mkdirp(name);
 		const app = mkdirp(name, "app", "scripts").replace(/\/scripts$/, "");
 		fs.copyFileSync(REFRESH, path.join(app, "scripts", "refresh-env.js"));
+		fs.copyFileSync(DEPLOY_SH, path.join(mkdirp(name, "app", "scripts", "deploy"), "remote-deploy.sh"));
+		mkdirp(name, "app", "client");
 		fs.symlinkSync(NODE_MODULES, path.join(app, "node_modules"), "dir");
 		fs.writeFileSync(path.join(app, ".env"), `PORT=3911\nSPREADSHEET_ID=${LOCAL_SHEET}\nNODE_ENV=development\n`);
 		const { src, err } = extraEdits.length ? rewrite(LOCAL_SH, extraEdits) : { src: fs.readFileSync(LOCAL_SH, "utf8"), err: "" };

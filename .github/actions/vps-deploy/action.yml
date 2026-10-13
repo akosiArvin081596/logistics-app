@@ -96,6 +96,20 @@ runs:
           echo "result=$result"
         } >> "$GITHUB_OUTPUT"
         echo "deployed_from=$prev deployed_to=$to record=$record_state handshake_guard=$handshake_guard result=$result"
+        # A deploy that exits 0 always ends with one of these four results.
+        # With none (its output cut short, or a remote script that never
+        # printed one), no later step knows what the box runs: the record and
+        # the rollback key on the result, so neither would run, the smoke
+        # check would vouch for whatever answers, and the job would end
+        # green. So the deploy step fails here, and every step after it but
+        # the summary is skipped.
+        case "$result" in
+          deployed|noop|unproven|unbuilt) ;;
+          *)
+            echo "::error::the deploy exited 0 without a DEPLOY_RESULT of deployed, noop, unproven or unbuilt, so what the box runs is unknown. Nothing was checked, recorded or rolled back."
+            exit 1
+            ;;
+        esac
 
     - name: Smoke check
       id: smoke

@@ -32,7 +32,9 @@
  *       check and the edge check all passed, never for a no-op, and a failed
  *       record fails production's job only. The deploy step lets only a plain
  *       ref and a full SHA reach the box, and reads each value from the LAST
- *       whole line of its kind. The edge check retries only an unanswered or
+ *       whole line of its kind. A deploy that exits 0 with no result it knows
+ *       (none, empty, unknown, or not a whole line) fails the deploy step, so
+ *       the job ends red rather than green with nothing checked or recorded. The edge check retries only an unanswered or
  *       5xx request, and asks a foreign Origin for its 403 unless the deploy
  *       reported that the commit now serving predates that check. The WHOLE
  *       action also runs end to end against the real remote scripts, every
@@ -557,6 +559,21 @@ const ACTION_RUN_CASES = {
 			];
 		});
 	},
+	resultMissingFailsTheJob(yaml, S, tag) {
+		// A remote deploy that does its work and exits 0 but never prints its
+		// result: with none, the record and the rollback (which key on it) never
+		// run, and only the deploy step itself can end the job red.
+		resetBox(C1, { verified: C1, started: C1 });
+		const silent = { ...S, deploy: S.deploy.split('echo "DEPLOY_RESULT=$RESULT"\n').join("") };
+		const a = runAction(yaml, silent, PROD_INPUTS);
+		const out = (a.steps.deploy || {}).outputs || {};
+		return [
+			[S.deploy !== silent.deploy && a.ran.Deploy === "failure" && out.result === "" && out.to === C2,
+				`${tag}§14 the whole action, a deploy that exits 0 without a result: the deploy step fails (outputs ${JSON.stringify(out)})`],
+			[a.ran["Smoke check"] === "skipped" && a.ran["Record the verified deploy"] === "skipped" && a.ran["Auto-rollback"] === "skipped" && a.failed && verified() === C1,
+				`${tag}§14 …nothing after it checks or records C2, and the job ends red instead of green (${JSON.stringify(a.ran)}, record ${short(verified())})`],
+		];
+	},
 	unbuiltRollbackInstallFails(yaml, S, tag) {
 		// The install fails, the deploy's and then the rollback's own: nothing
 		// was ever restarted, and the old process still serves the code from
@@ -641,6 +658,24 @@ const DEPLOY_STEP_CASES = {
 		const x = runDeployStep(script, { out: deployOut({ result: "unbuilt" }) });
 		return [[x.code === 0 && x.outputs.result === "unbuilt" && x.outputs.prev === C1,
 			`${tag}§14 …and reads result=unbuilt, beside its rollback target (got ${JSON.stringify(x.outputs)})`]];
+	},
+	resultMissing(script, tag) {
+		// The remote deploy exited 0 (the stub's ssh does), but its output has
+		// no result the action knows: none at all, an empty one, one it does not
+		// know, or one that is not a whole line. Every later step keys on the
+		// result, so the deploy step fails here, its other outputs still written.
+		const withoutResult = deployOut().replace(/^DEPLOY_RESULT=.*\n/m, "");
+		return [
+			["no DEPLOY_RESULT line", withoutResult],
+			["an empty DEPLOY_RESULT", `${withoutResult}DEPLOY_RESULT=\n`],
+			["a DEPLOY_RESULT it does not know", `${withoutResult}DEPLOY_RESULT=done\n`],
+			["a DEPLOY_RESULT that is not a whole line", `${withoutResult}  DEPLOY_RESULT=deployed\n`],
+		].map(([what, out]) => {
+			const x = runDeployStep(script, { out });
+			return [x.code === 1 && x.outputs.result === "" && x.outputs.prev === C1 && x.calls.split("\n").filter(Boolean).length === 1
+				&& /^::error::the deploy exited 0 without a DEPLOY_RESULT of deployed, noop, unproven or unbuilt/m.test(x.out),
+			`${tag}§14 a deploy that exits 0 with ${what} fails the deploy step, with its other outputs still written (code ${x.code}, outputs ${JSON.stringify(x.outputs)})`];
+		});
 	},
 	shortFrom(script, tag) {
 		const x = runDeployStep(script, { out: deployOut({ from: C1.slice(0, 7) }) });
@@ -867,6 +902,12 @@ function mutants() {
 	// §14: a failed install or build rolls production back, and fails staging.
 	expectCaught("the deploy step drops result=unbuilt", deployStepPins(swap(step,
 		"'deployed|noop|unproven|unbuilt'", "'deployed|noop|unproven'"), M, ["unbuiltRead"]));
+	// §14: a deploy that exits 0 with no result it knows fails the step.
+	const anyResult = swap(ACTION, "          deployed|noop|unproven|unbuilt) ;;\n", "          *) ;;\n");
+	expectCaught("the deploy step passes without a result", [
+		...deployStepPins(deployStepScript(anyResult), M, ["resultMissing"]),
+		...actionRunPins(anyResult, REAL, M, ["resultMissingFailsTheJob"]),
+	]);
 	expectCaught("a failed build does not roll production back", actionRunPins(swap(ACTION,
 		" ||\n         steps.deploy.outputs.result == 'unbuilt')", ")"), REAL, M, ["unbuiltRollsBack"]));
 	expectCaught("a deploy that restarted nothing is smoke-checked", actionRunPins(swap(ACTION,
