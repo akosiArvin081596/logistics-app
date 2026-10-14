@@ -7359,9 +7359,11 @@ let n8nKeepStoredUnauthorizedLoggedAt = 0;
 // deductions, an "Advanced Total" and a "New Total", and written as it came it
 // lowered Payment on five loads already invoiced and moved pickup dates (a pickup
 // date moves a driver's pay window). So, for a load already in Job Tracking:
-// - delivered (Job Status Delivered / Completed / POD Received) or invoiced (an
-//   invoice draft under any spelling of its id): Payment, Pickup Appointment and
-//   Drop-off Appointment come back as stored, a blank stored date included
+// - delivered (Job Status Delivered / Completed / POD Received, DISPATCH_COMPLETED_RE),
+//   invoiced (an invoice draft under any spelling of its id), or with no Job
+//   Status column to read (status unknown): Payment, Pickup Appointment and
+//   Drop-off Appointment (each found by the money math's own header pattern,
+//   REISSUE_HELD_COLUMN_RES) come back as stored, a blank stored date included
 //   (filling it would move pay too); every other column keeps the rules below;
 // - in a closed month (any month loadRowAccountingMonths() books the row into is
 //   write-locked): EVERY column comes back as stored. Closed months are final as
@@ -7379,12 +7381,26 @@ let n8nKeepStoredUnauthorizedLoggedAt = 0;
 // the sheet has it.
 // RATECON_REISSUE_HOLD_ENABLED is a kill switch (defaults ON): it only keeps values.
 const RATECON_REISSUE_HOLD_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_REISSUE_HOLD_ENABLED ?? "").trim());
-const REISSUE_HELD_COLUMNS = new Set(["payment", "pickup appointment", "drop-off appointment"]);
+// The columns a re-issue may not change on a delivered or invoiced load, found by
+// the patterns the money math finds them by, not by exact name: the pickup and
+// the drop-off date (the revenue and driver-pay math and loadRowAccountingMonths()
+// read /pickup.*appo|pickup.*date/i and /drop.?off.*appo|drop.?off.*date|delivery.*date/i)
+// and the load's amount (the revenue math's findCol(headers, /payment|rate|amount|revenue/i);
+// lib/broker-invoice.js findPaymentColumn()'s /payment/i is inside it). A column
+// name matching any of them is held, so a header the money math reads is never
+// missed, whatever it is called.
+const REISSUE_PAYMENT_RE = /payment|rate|amount|revenue/i;
+const REISSUE_HELD_COLUMN_RES = [/pickup.*appo|pickup.*date/i, /drop.?off.*appo|drop.?off.*date|delivery.*date/i, REISSUE_PAYMENT_RE];
+function reissueHeldColumn(col) {
+	const name = String(col == null ? "" : col).trim();
+	return REISSUE_HELD_COLUMN_RES.some((re) => re.test(name));
+}
 
-// Whether two cells say the same thing. Payment: the same amount in cents
-// (lib/cell-compare.js moneyCents(): "$1,234.56", " $ 1,234.56 ", "1234.560";
-// "($100.00)" is "-$100.00"). A date or appointment column: the same wall-clock
-// moment (sameMoment(): "10/9/2026 0:01" and "10/9/2026 00:01", "2026-10-09" and
+// Whether two cells say the same thing. The amount (REISSUE_PAYMENT_RE): the same
+// amount in cents (lib/cell-compare.js moneyCents(): "$1,234.56", " $ 1,234.56 ",
+// "1234.560"; "($100.00)" is "-$100.00"). A date or appointment column
+// (loadRowAccountingMonths()'s /date|appo|appt/i): the same wall-clock moment
+// (sameMoment(): "10/9/2026 0:01" and "10/9/2026 00:01", "2026-10-09" and
 // "10/9/2026", a date alone and that day at 0:00); two cells neither of which is
 // a moment are compared as text. Other text is compared with its spaces collapsed.
 function reissueSameValue(col, a, b) {
@@ -7392,11 +7408,11 @@ function reissueSameValue(col, a, b) {
 	const y = String(b == null ? "" : b).trim();
 	if (x === y) return true;
 	const name = String(col).trim().toLowerCase();
-	if (name === "payment") {
+	if (REISSUE_PAYMENT_RE.test(name)) {
 		const cx = cellCompare.moneyCents(x);
 		return cx !== null && cx === cellCompare.moneyCents(y);
 	}
-	if (/appointment|date/.test(name) && (cellCompare.momentKey(x) !== null || cellCompare.momentKey(y) !== null)) {
+	if (/date|appo|appt/.test(name) && (cellCompare.momentKey(x) !== null || cellCompare.momentKey(y) !== null)) {
 		return cellCompare.sameMoment(x, y);
 	}
 	return x.replace(/\s+/g, " ") === y.replace(/\s+/g, " ");
@@ -7408,7 +7424,13 @@ function reissueHoldFor(headers, row, key) {
 	const reasons = [];
 	let all = false;
 	const statusIdx = headers.findIndex((h) => /^(job[\s._-]?)?status$/i.test(String(h || "").trim()));
-	if (statusIdx !== -1 && /^(delivered|completed|pod received)$/i.test(String(row[statusIdx] || "").trim())) reasons.push("delivered");
+	if (statusIdx === -1) {
+		// Fails closed: with no status to read, the load may be delivered.
+		console.error(`[ratecon-reissue] Job Tracking has no Job Status column; load ${key} is held as if delivered`);
+		reasons.push("status unknown (no Job Status column)");
+	} else if (DISPATCH_COMPLETED_RE.test(String(row[statusIdx] || "").trim())) {
+		reasons.push("delivered");
+	}
 	try {
 		const drafts = db.prepare("SELECT load_id FROM load_invoice_drafts").all();
 		if (drafts.some((d) => normLoadKey(d.load_id) === key)) reasons.push("invoiced");
@@ -7485,11 +7507,12 @@ function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
 		const have = storedOf(col);
 		const name = String(col).trim().toLowerCase();
 		const assigned = name === "assigned date";
-		if (guarded && (protect.all || REISSUE_HELD_COLUMNS.has(name))) {
+		if (guarded && (protect.all || reissueHeldColumn(col))) {
 			out[col] = have;
 			if (String(val == null ? "" : val) !== have) kept.push(col);
-			// Assigned Date is kept by its own rule on every load (set once), so it is no news.
-			if (!assigned && !blank(val) && !reissueSameValue(col, have, val)) held.push({ column: col, stored: have, sent: String(val) });
+			// A stored Assigned Date is kept by its own rule on every load (set once), so
+			// it is no news; a blank one the email would have filled is held, and listed.
+			if (!(assigned && !blank(have)) && !blank(val) && !reissueSameValue(col, have, val)) held.push({ column: col, stored: have, sent: String(val) });
 			continue;
 		}
 		if (!blank(have) && (blank(val) || assigned)) {
@@ -7574,9 +7597,10 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 	}
 });
 
-// Ceiling on re-issue alerts per rolling 24 h, counted in loads. The once-per-change
-// ledger is the primary control; this one holds whatever the key turns out to be,
-// because sendEmail is shared with every other app mail.
+// Ceiling on re-issue alert EMAILS per rolling 24 h, counted in loads (distinct
+// load_id). The once-per-change ledger is the primary control; this one holds
+// whatever the key turns out to be, because sendEmail is shared with every other
+// app mail. Past it the in-app notification still goes out.
 const RATECON_REISSUE_ALERT_MAX_PER_DAY =
 	Math.max(1, parseInt(process.env.RATECON_REISSUE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
 const REISSUE_CLAIM_STALE_MS = 5 * 60 * 1000;
@@ -7612,9 +7636,9 @@ function reissueHoldTable() {
 // Tells a person that a re-issued rate con was held (keepStoredSheetValues()):
 // the held columns with the stored and the sent value, and every other column it
 // changed on the protected load. Once per load, column and sent value: a new sent
-// value alerts again. An email to ADMIN_NOTIFY_EMAIL and an in-app dispatch
-// notification; alerted_at is stamped only when one of them went out, so a failed
-// send (or one the daily cap stopped) retries on the next sighting. A call sends
+// value alerts again. An email to ADMIN_NOTIFY_EMAIL (not past the daily cap) and
+// an in-app dispatch notification (always); alerted_at is stamped only when one of
+// them went out, so a failed send retries on the next sighting. A call sends
 // only the rows it claimed (claimed_at), so two overlapping calls for one change
 // send once. Fire-and-forget: never throws, never rejects.
 async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
@@ -7647,13 +7671,11 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 			const unclaim = db.prepare("UPDATE ratecon_reissue_holds SET claimed_at = NULL WHERE load_id = ? AND column_name = ? AND sent_value = ? AND claimed_at = ? AND alerted_at IS NULL");
 			for (const e of fresh) unclaim.run(key, e.column, e.sent, nowIso);
 		};
+		// The cap stops only the email: the in-app notification always goes in, so a
+		// capped change is still reported, once.
 		const dayAgo = new Date(now.getTime() - 86400000).toISOString();
 		const loadsToday = db.prepare("SELECT COUNT(DISTINCT load_id) AS c FROM ratecon_reissue_holds WHERE alerted_at > ?").get(dayAgo).c;
-		if (loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY) {
-			release();
-			console.warn(`[ratecon-reissue] daily alert cap (${RATECON_REISSUE_ALERT_MAX_PER_DAY}) reached; load ${label} recorded, not sent`);
-			return { alerted: false, reason: "daily_cap", key };
-		}
+		const capped = loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY;
 
 		const anyHeld = fresh.some((e) => e.kind === "held");
 		const why = cap(reason).slice(0, 160) || "protected";
@@ -7673,10 +7695,15 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 			rows + "</table>" +
 			"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
 			"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
-		const to = String(process.env.ADMIN_NOTIFY_EMAIL || "").trim();
+		let mailing = null;
+		if (capped) {
+			console.warn(`[ratecon-reissue] daily alert email cap (${RATECON_REISSUE_ALERT_MAX_PER_DAY}) reached; load ${label} gets the in-app notification only`);
+		} else {
+			if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(ADMIN_NOTIFY_EMAIL, subject, html);
+		}
 		let emailed = false;
-		if (to) {
-			try { emailed = (await sendEmail(to, subject, html)) === true; } catch (e) { console.error("[ratecon-reissue] alert email failed:", e.message); }
+		if (mailing) {
+			try { emailed = (await mailing) === true; } catch (e) { console.error("[ratecon-reissue] alert email failed:", e.message); }
 		}
 		let notified = false;
 		const title = anyHeld ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
@@ -7695,8 +7722,8 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		} else {
 			release();
 		}
-		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? "ALERT" : "ALERT UNDELIVERED (will retry next sighting)", label, why, body);
-		return { alerted: delivered, emailed, notified, key };
+		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? (capped ? "ALERT (in-app only: daily email cap)" : "ALERT") : "ALERT UNDELIVERED (will retry next sighting)", label, why, body);
+		return { alerted: delivered, emailed, notified, key, ...(capped ? { reason: "daily_cap" } : {}) };
 	} catch (e) {
 		console.error("[ratecon-reissue] alert failed:", e && e.message);
 		return { alerted: false, reason: "error" };

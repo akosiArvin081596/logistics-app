@@ -151,8 +151,10 @@ if (!process.env.SERVER_JS) {
 	if (!SRC.includes(KHEAD)) {
 		check("§3 the route exists", false, "POST /api/n8n/keep-stored-values is not in this server.js");
 	} else {
-		const HEADERS = ["Contract ID", "Load ID", "Details", "Pickup Info", "Pickup Appointment", "Pickup Address", "Assigned Date", "Documents", "  Payment  "];
-		const STORED = ["", "900000001", "Mill A", "IP REF/PU#: 1", "9/30/2026 06:00", "1 Test Rd", "9/30/2026, 2:06:03 PM", "BOL-77", "$1,000.00"];
+		// A Job Status column, as production's sheet has: without one the route
+		// holds Payment and the dates as if the load were delivered (status unknown).
+		const HEADERS = ["Contract ID", "Load ID", "Details", "Pickup Info", "Pickup Appointment", "Pickup Address", "Assigned Date", "Documents", "  Payment  ", "Job Status"];
+		const STORED = ["", "900000001", "Mill A", "IP REF/PU#: 1", "9/30/2026 06:00", "1 Test Rd", "9/30/2026, 2:06:03 PM", "BOL-77", "$1,000.00", "Dispatched"];
 		const lifted = closure(SRC, { routes: [KHEAD], provided: ["getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold"], denied: ["sendEmail", "transporter", "io", "server"] });
 		// The route also reads invoice drafts and the period locks (a re-issue on a
 		// delivered, invoiced or closed-month load is held: test-ratecon-reissue-hold.js).
@@ -199,7 +201,7 @@ if (!process.env.SERVER_JS) {
 			check("§3 the kept columns are named", JSON.stringify((r.body.kept || []).sort()) === JSON.stringify(["Assigned Date", "Documents", "Pickup Address", "Pickup Appointment"]), JSON.stringify(r.body.kept));
 			check("§3 every column sent comes back", Object.keys(v).join("|") === Object.keys(later).join("|"));
 
-			sheetValues = [HEADERS, [...STORED.slice(0, 6), "", "BOL-77", "$1,000.00"]];
+			sheetValues = [HEADERS, [...STORED.slice(0, 6), "", "BOL-77", "$1,000.00", "Dispatched"]];
 			const fill = await post({ loadId: "900000001", values: { "Assigned Date": "10/4/2026, 7:45:35 AM" } });
 			check("§3 a stored blank Assigned Date takes the one sent", fill.body.values["Assigned Date"] === "10/4/2026, 7:45:35 AM");
 			sheetValues = [HEADERS, STORED];
@@ -218,7 +220,7 @@ if (!process.env.SERVER_JS) {
 				const x = await post({ loadId: id, values: { "Pickup Appointment": "" } });
 				check(`§3 ${name} is the same load`, x.body.found === true && x.body.values["Pickup Appointment"] === "9/30/2026 06:00", JSON.stringify(x.body));
 			}
-			sheetValues = [HEADERS, ["", "#900000001", "Mill A", "", "9/1/2026 00:00", "", "9/1/2026, 1:00:00 PM", "", ""], ["", "900000001", "Mill A", "", "9/30/2026 06:00", "", "9/30/2026, 2:06:03 PM", "", ""]];
+			sheetValues = [HEADERS, ["", "#900000001", "Mill A", "", "9/1/2026 00:00", "", "9/1/2026, 1:00:00 PM", "", "", "Dispatched"], ["", "900000001", "Mill A", "", "9/30/2026 06:00", "", "9/30/2026, 2:06:03 PM", "", "", "Dispatched"]];
 			const two = await post({ loadId: "900000001", values: { "Pickup Appointment": "", "Assigned Date": "10/4/2026, 7:45:35 AM" } });
 			check("§3 with two rows, the last (the one the app reads) wins", two.body.rows === 2 && two.body.values["Pickup Appointment"] === "9/30/2026 06:00" && two.body.values["Assigned Date"] === "9/30/2026, 2:06:03 PM", JSON.stringify(two.body));
 			sheetValues = [HEADERS, STORED];
