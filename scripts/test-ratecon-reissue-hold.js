@@ -46,6 +46,13 @@
  *      reported once; the in-app notification shows each column's old and new value, except a
  *      broker contact column (BROKER_WITHHELD_RE), named without values; the email says why it held; first_seen and alerted_at are ISO strings; it
  *      writes no table but its own.
+ *      B7: each channel is stamped on its own (emailed_at, notified_at): an email that answered
+ *      false or rejected is retried on the next sighting without a second notification, a failed
+ *      notification without a second email, both when both failed, and the log line names the
+ *      failed channel; a load already counted by the cap is not capped again, while a new load
+ *      is, and a capped change (or one with no ADMIN_NOTIFY_EMAIL) is never emailed later
+ *      (email_skipped); overlapping calls send once per channel; a ledger made before these
+ *      columns gets them, its alerted rows backfilled as done on both channels, nothing re-sent.
  *   §3 the daily integrity check, check 5: a load whose Job Tracking Payment differs from the
  *      sheet's figure when its invoice was drafted (load_invoice_drafts.sheet_total, the latest
  *      draft) is reported once; the same amount in another format is not, on the day or later;
@@ -68,6 +75,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const util = require("util");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
@@ -430,13 +438,13 @@ async function section2() {
 	if (!/\n(async )?function alertRateConReissueHold\(/.test(SRC)) { check("§2 alertRateConReissueHold() exists in server.js", false); return; }
 	const lifted = closure(SRC, { roots: ["alertRateConReissueHold"], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process"] });
 	const quiet = { ...console, log: () => {}, error: () => {}, warn: () => {} };
-	const make = ({ db, send = async () => true, notify = null, env = {} }) => {
+	const make = ({ db, send = async () => true, notify = null, env = {}, logs = null }) => {
 		const sends = [];
 		const notes = [];
 		const fn = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", `"use strict";\n${lifted.text}\nreturn alertRateConReissueHold;`)(
 			db, async (to, subject, html) => { sends.push({ to, subject, html }); return send(to, subject, html); },
 			notify || { run: (...a) => { notes.push(a); } }, { to: () => ({ emit: () => {} }) },
-			quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } },
+			logs ? { ...quiet, log: (...a) => { logs.push(util.format(...a)); } } : quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } },
 		);
 		return { fn, sends, notes };
 	};
@@ -559,6 +567,165 @@ async function section2() {
 	const nextLoad = await distinct.fn({ loadId: "900000124", reason: "delivered", held: [{ column: "  Payment  ", stored: "$40.00", sent: "$39.00" }] });
 	check("§2 with RATECON_REISSUE_ALERT_MAX_PER_DAY=2, a second load after one with two held columns is still emailed (distinct loads)",
 		distinct.sends.length === 2 && nextLoad && nextLoad.emailed === true, { sends: distinct.sends.length, nextLoad });
+
+	await section2Channels(make);
+}
+
+// B7: each channel once per change. The email and the in-app notification are stamped on
+// their own (emailed_at, notified_at), so one that failed is retried on the next sighting of
+// that change without repeating the other. sendEmail answers false on an SMTP error (it never
+// throws), so false is a failure; a rejection is treated the same.
+async function section2Channels(make) {
+	// SELECT *: on a server.js without the channel columns each check fails on its own.
+	const ledger = (db, loadId) => db.prepare("SELECT * FROM ratecon_reissue_holds WHERE load_id = ? ORDER BY column_name, sent_value").all(loadId);
+	// st.email: true, false or "reject"; st.inApp: whether the notification insert works.
+	const flaky = (db, st, opts = {}) => {
+		const notes = [];
+		const m = make({
+			db, ...opts,
+			send: async () => { if (st.email === "reject") throw new Error("smtp down"); return st.email; },
+			notify: { run: (...a) => { if (!st.inApp) throw new Error("notifications down"); notes.push(a); } },
+		});
+		return { ...m, notes };
+	};
+	const pay = (loadId, stored, sent) => ({ loadId, reason: "delivered", held: [{ column: "  Payment  ", stored, sent }] });
+
+	// The email answers false, the in-app notification goes in.
+	const adb = new Database(":memory:");
+	const ast = { email: false, inApp: true };
+	const logs = [];
+	const a = flaky(adb, ast, { logs });
+	const a1 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 email answers false, in-app goes in: notified, not emailed", a1 && a1.notified === true && a1.emailed === false && a.sends.length === 1 && a.notes.length === 1, { a1, sends: a.sends.length, notes: a.notes.length });
+	const ar = ledger(adb, "900000126")[0] || {};
+	check("§2 B7 ...the ledger stamps the in-app channel and alerted_at, not the email", ISO_RE.test(String(ar.notified_at)) && ISO_RE.test(String(ar.alerted_at)) && ar.emailed_at == null && ar.email_skipped == null && ar.claimed_at == null, ar);
+	check("§2 B7 ...the log line says the email failed and the in-app notification went", logs.some((l) => /email FAILED/.test(l) && /in-app sent/.test(l)), logs);
+	ast.email = true;
+	const a2 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 ...the next sighting of that change sends the email only", a.sends.length === 2 && a.notes.length === 1 && a2 && a2.emailed === true && a2.notified === false, { a2, sends: a.sends.length, notes: a.notes.length });
+	check("§2 B7 ...and that email carries the stored and the sent value", /60\.00/.test(a.sends[1] && a.sends[1].html) && /59\.00/.test(a.sends[1] && a.sends[1].html), a.sends[1] && a.sends[1].subject);
+	const ar2 = ledger(adb, "900000126")[0] || {};
+	check("§2 B7 ...emailed_at is stamped, alerted_at keeps the first time a person was told", ISO_RE.test(String(ar2.emailed_at)) && ar2.alerted_at === ar.alerted_at, ar2);
+	const a3 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 ...a third sighting sends nothing", a.sends.length === 2 && a.notes.length === 1 && a3 && a3.reason === "already_alerted", a3);
+	// A rejected send is a failure too.
+	ast.email = "reject";
+	await a.fn(pay("900000126", "$60.00", "$58.00"));
+	ast.email = true;
+	const ra = await a.fn(pay("900000126", "$60.00", "$58.00"));
+	check("§2 B7 a rejected email is retried on the next sighting, the notification is not repeated", a.sends.length === 4 && a.notes.length === 2 && ra && ra.emailed === true && ra.notified === false, { ra, sends: a.sends.length, notes: a.notes.length });
+
+	// The email goes, the in-app notification fails.
+	const bdb = new Database(":memory:");
+	const bst = { email: true, inApp: false };
+	const b = flaky(bdb, bst);
+	const b1 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 email goes, in-app fails: emailed, not notified", b1 && b1.emailed === true && b1.notified === false && b.sends.length === 1 && b.notes.length === 0, b1);
+	bst.inApp = true;
+	const b2 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 ...the next sighting sends the in-app notification only", b.sends.length === 1 && b.notes.length === 1 && b2 && b2.notified === true && b2.emailed === false, { b2, sends: b.sends.length });
+	check("§2 B7 ...and it shows the old and new value", /Payment \(held\): \$61\.00 → \$60\.00/.test(String(b.notes[0] && b.notes[0][2])), b.notes[0] && b.notes[0][2]);
+	const b3 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 ...a third sighting sends nothing", b.sends.length === 1 && b.notes.length === 1 && b3 && b3.reason === "already_alerted", b3);
+
+	// Both fail.
+	const cdb = new Database(":memory:");
+	const cst = { email: false, inApp: false };
+	const c = flaky(cdb, cst);
+	const c1 = await c.fn(pay("900000130", "$62.00", "$61.00"));
+	const cr = ledger(cdb, "900000130")[0] || {};
+	check("§2 B7 both channels fail: nothing stamped, claim released", c1 && c1.alerted === false && cr.alerted_at == null && cr.emailed_at == null && cr.notified_at == null && cr.claimed_at == null, { c1, cr });
+	cst.email = true; cst.inApp = true;
+	const c2 = await c.fn(pay("900000130", "$62.00", "$61.00"));
+	check("§2 B7 ...the next sighting sends both", c.sends.length === 2 && c.notes.length === 1 && c2 && c2.emailed === true && c2.notified === true, { c2, sends: c.sends.length, notes: c.notes.length });
+
+	// A change with one column emailed earlier and a new column: the email lists only what it owes.
+	const ddb = new Database(":memory:");
+	const dst = { email: false, inApp: true };
+	const d = flaky(ddb, dst);
+	await d.fn(pay("900000134", "$63.00", "$62.00"));
+	dst.email = true;
+	await d.fn({ loadId: "900000134", reason: "delivered", held: [{ column: "  Payment  ", stored: "$63.00", sent: "$62.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 08:00" }] });
+	check("§2 B7 an owed email and a new column: one email with both, one notification with the new column only",
+		d.sends.length === 2 && /62\.00/.test(d.sends[1].html) && /10\/8\/2026 08:00/.test(d.sends[1].html)
+		&& d.notes.length === 2 && /Pickup Appointment/.test(String(d.notes[1][2])) && !/Payment/.test(String(d.notes[1][2])), { notes: d.notes.map((n) => n[2]) });
+
+	// The cap: a load already counted in the window doesn't count again.
+	const kdb = new Database(":memory:");
+	const k = make({ db: kdb, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await k.fn(pay("900000135", "$70.00", "$69.00"));
+	const kA = await k.fn(pay("900000135", "$70.00", "$68.00"));
+	check("§2 B7 cap 1, load A alerted today: a new change on A is still emailed", k.sends.length === 2 && kA && kA.emailed === true && kA.reason !== "daily_cap", { kA, sends: k.sends.length });
+	const kB = await k.fn(pay("900000136", "$80.00", "$79.00"));
+	check("§2 B7 ...while a new load B is capped (in-app only)", k.sends.length === 2 && kB && kB.reason === "daily_cap" && kB.emailed === false && kB.notified === true && k.notes.length === 3, { kB, sends: k.sends.length });
+	const kbr = ledger(kdb, "900000136")[0] || {};
+	check("§2 B7 ...the capped change records why no email is owed", kbr.email_skipped === "daily_cap" && kbr.emailed_at == null && ISO_RE.test(String(kbr.notified_at)), kbr);
+	const kB2 = await k.fn(pay("900000136", "$80.00", "$79.00"));
+	check("§2 B7 ...and is not emailed on its next sighting, though B is now counted", k.sends.length === 2 && k.notes.length === 3 && kB2 && kB2.reason === "already_alerted", { kB2, sends: k.sends.length });
+	const kB3 = await k.fn(pay("900000136", "$80.00", "$78.00"));
+	check("§2 B7 ...while a new change on B, now counted, is emailed", k.sends.length === 3 && kB3 && kB3.emailed === true, { kB3, sends: k.sends.length });
+	// An email that failed is retried even when the cap is full: its load is already counted.
+	const fdb = new Database(":memory:");
+	const fst = { email: false, inApp: true };
+	const f = flaky(fdb, fst, { env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await f.fn(pay("900000137", "$90.00", "$89.00"));
+	fst.email = true;
+	const fr = await f.fn(pay("900000137", "$90.00", "$89.00"));
+	check("§2 B7 cap 1: a failed email on the only counted load is still retried", f.sends.length === 2 && fr && fr.emailed === true, { fr, sends: f.sends.length });
+
+	// No ADMIN_NOTIFY_EMAIL: in-app only, and the change is not emailed once one is set.
+	const ndb = new Database(":memory:");
+	const n1 = make({ db: ndb, env: { ADMIN_NOTIFY_EMAIL: "" } });
+	const nr = await n1.fn(pay("900000138", "$95.00", "$94.00"));
+	check("§2 B7 no ADMIN_NOTIFY_EMAIL: in-app only, recorded as no_recipient", n1.sends.length === 0 && n1.notes.length === 1 && nr && nr.notified === true
+		&& (ledger(ndb, "900000138")[0] || {}).email_skipped === "no_recipient", { nr, row: ledger(ndb, "900000138")[0] });
+	const n2 = make({ db: ndb });
+	const nr2 = await n2.fn(pay("900000138", "$95.00", "$94.00"));
+	check("§2 B7 ...a later sighting with the address set sends nothing", n2.sends.length === 0 && n2.notes.length === 0 && nr2 && nr2.reason === "already_alerted", nr2);
+
+	// Two overlapping calls still send once per channel, on a retry too.
+	const odb = new Database(":memory:");
+	const ost = { email: false, inApp: true };
+	const slow = flaky(odb, ost);
+	await slow.fn(pay("900000139", "$99.00", "$98.00"));
+	ost.email = true;
+	const slowSend = make({ db: odb, send: async () => { await new Promise((r) => setTimeout(r, 20)); return true; } });
+	const both = await Promise.all([slowSend.fn(pay("900000139", "$99.00", "$98.00")), slowSend.fn(pay("900000139", "$99.00", "$98.00"))]);
+	check("§2 B7 two overlapping retries of an owed email: one email, no notification", slowSend.sends.length === 1 && slowSend.notes.length === 0
+		&& both.filter((r) => r.emailed === true).length === 1, { sends: slowSend.sends.length, notes: slowSend.notes.length, both });
+	const fresh2 = make({ db: odb, send: async () => { await new Promise((r) => setTimeout(r, 20)); return true; } });
+	await Promise.all([fresh2.fn(pay("900000140", "$99.00", "$97.00")), fresh2.fn(pay("900000140", "$99.00", "$97.00")), fresh2.fn(pay("900000140", "$99.00", "$97.00"))]);
+	check("§2 B7 three overlapping calls for a new change: one email and one notification", fresh2.sends.length === 1 && fresh2.notes.length === 1, { sends: fresh2.sends.length, notes: fresh2.notes.length });
+
+	// The migration: a ledger made before the channel columns (with claimed_at, as main made
+	// it), holding alerted rows and an unalerted one. Alerted rows count as done on both
+	// channels and are not sent again; the unalerted one still owes both.
+	const mdb = new Database(":memory:");
+	mdb.exec(OLD_LEDGER_DDL);
+	mdb.exec("ALTER TABLE ratecon_reissue_holds ADD COLUMN claimed_at TEXT");
+	const told = "2026-10-13T15:00:00.000Z";
+	const ins = mdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, first_seen, alerted_at, claimed_at) VALUES (?, ?, ?, ?, 'held', ?, ?, ?)");
+	ins.run("900000141", "Payment", "$49.00", "$50.00", told, told, told);
+	ins.run("900000141", "Pickup Appointment", "10/8/2026 08:00", "10/9/2026 0:00", told, told, null);
+	ins.run("900000142", "Payment", "$39.00", "$40.00", told, told, null);
+	ins.run("900000143", "Payment", "$29.00", "$30.00", told, null, null);
+	const m = make({ db: mdb });
+	const m1 = await m.fn({ loadId: "900000141", reason: "delivered", held: [{ column: "  Payment  ", stored: "$50.00", sent: "$49.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 08:00" }] });
+	const m2 = await m.fn(pay("900000142", "$40.00", "$39.00"));
+	const cols = mdb.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((x) => x.name);
+	check("§2 B7 migration: emailed_at, notified_at and email_skipped are added", ["emailed_at", "notified_at", "email_skipped"].every((x) => cols.includes(x)), cols);
+	const back = mdb.prepare("SELECT * FROM ratecon_reissue_holds WHERE alerted_at IS NOT NULL").all();
+	check("§2 B7 migration: every alerted row is backfilled done on both channels, at its alerted_at", back.length === 3 && back.every((x) => x.emailed_at === told && x.notified_at === told), back);
+	check("§2 B7 migration: no alerted row is sent again", m.sends.length === 0 && m.notes.length === 0 && m1 && m1.reason === "already_alerted" && m2 && m2.reason === "already_alerted", { m1, m2, sends: m.sends.length, notes: m.notes.length });
+	const m3 = await m.fn(pay("900000143", "$30.00", "$29.00"));
+	check("§2 B7 migration: an unalerted row still gets both channels", m.sends.length === 1 && m.notes.length === 1 && m3 && m3.emailed === true && m3.notified === true, m3);
+	const pre = new Database(":memory:");
+	pre.exec(OLD_LEDGER_DDL);
+	pre.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, alerted_at) VALUES ('900000144', 'Payment', '$19.00', 'held', ?)").run(told);
+	const p = make({ db: pre });
+	await p.fn(pay("900000144", "$20.00", "$19.00"));
+	const pr = pre.prepare("SELECT * FROM ratecon_reissue_holds WHERE load_id = '900000144'").get();
+	check("§2 B7 migration: a ledger made before claimed_at gets every column, backfilled, nothing sent", p.sends.length === 0 && p.notes.length === 0 && pr.emailed_at === told && pr.notified_at === told, { pr, sends: p.sends.length });
 }
 
 // --- §3 the integrity check, check 5 ------------------------------------------
