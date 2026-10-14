@@ -43114,6 +43114,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// load invoiceable. Drive is then attempted best-effort for parity with
 		// the email pipeline, but its failure is silent — (b) already covers us.
 		let rateconArchived = false;
+		// For the audit line, which says where the copy actually went: the Drive
+		// mirror counts as "copied to Drive" only once its file id is on the
+		// documents row (rateconOnDrive), or, when the local write failed, once Drive
+		// answered an id at all (rateconDriveOnly).
+		let rateconOnDrive = false;
+		let rateconDriveOnly = false;
 		const rawPdf = typeof pdfBase64 === "string"
 			? pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim()
 			: "";
@@ -43176,10 +43182,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 					// went missing" is a routine event, not a hypothetical.
 					const driveId = created && created.data && created.data.id;
 					if (driveId && rateconArchived) {
-						db.prepare(
+						rateconOnDrive = db.prepare(
 							`UPDATE documents SET drive_file_id = ?
 							 WHERE load_id = ? AND UPPER(type) = 'RATECON' AND drive_file_id = ''`,
-						).run(driveId, loadId);
+						).run(driveId, loadId).changes > 0;
+					} else if (driveId) {
+						rateconDriveOnly = true;
 					}
 				} catch (e) {
 					// No warning to the dispatcher — the local copy already made the
@@ -43219,13 +43227,19 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			} catch { /* non-critical */ }
 		}
 
+		// Where the rate con was actually saved (step 7). The local copy is the one
+		// invoice drafting reads; the Drive mirror is best-effort and is named only
+		// when Drive answered a file id.
+		const rateconWhere = rateconArchived
+			? (rateconOnDrive ? "saved locally and copied to Drive" : "saved locally")
+			: (rateconDriveOnly ? "NOT saved locally; copied to Drive" : "NOT saved");
 		logAudit(
 			req,
 			"create_load_ratecon",
 			"load",
 			loadId,
 			`Created load ${loadId} from a dropped rate-con${fileName ? ` (${String(fileName).slice(0, 120)})` : ""}; ` +
-				`${rpm.distance_miles} mi @ $${rpm.rate_per_mile}/mi; rate-con ${rateconArchived ? "archived to Drive" : "NOT archived"}`,
+				`${rpm.distance_miles} mi @ $${rpm.rate_per_mile}/mi; rate-con ${rateconWhere}`,
 		);
 
 		// Same "new-load" notification the n8n webhook raises, so a dropped load
