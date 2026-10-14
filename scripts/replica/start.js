@@ -56,8 +56,10 @@ function portFree(p) {
 	});
 }
 
+// A call with { stdio: "inherit" } (fetch, worktree add) shows git's output
+// instead of returning it: execFileSync answers null, and git() answers "".
 function git(args, opts = {}) {
-	return execFileSync("git", ["-C", REPO, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
+	return (execFileSync("git", ["-C", REPO, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }) ?? "").trim();
 }
 
 function hasCommit(commit) {
