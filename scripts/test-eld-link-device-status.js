@@ -371,7 +371,7 @@ function routeWorld(db, verb, route, deps = {}) {
 			expose: ["alertEldFeedSilence"],
 			deps: {
 				appTodayKey: () => "2026-10-01",
-				process: { env: { GMAIL_USER: "ops@example.invalid" } },
+				process: { env: { GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test" } },
 				sendEmail: async (to, subject, html) => { rec.emails.push({ subject, html }); return true; },
 				insertDispatchNotification: { run: (type, title, body) => rec.notes.push({ title, body }) },
 				io: { to: () => ({ emit: () => {} }) },

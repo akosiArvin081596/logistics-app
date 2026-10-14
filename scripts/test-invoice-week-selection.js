@@ -68,9 +68,11 @@ const eldMiles = require("../lib/eld-miles");
 const appTime = require("../lib/app-time");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-// The batch and the undated-load digest email GMAIL_USER; with none set the
-// digest's email is skipped (no_recipient), so a made-up mailbox is named.
+// The batch and the undated-load digest email GMAIL_USER; without it and
+// GMAIL_APP_PASSWORD the digest's email is skipped (no_recipient), so a
+// made-up mailbox is named.
 process.env.GMAIL_USER = "ops@example.invalid";
+process.env.GMAIL_APP_PASSWORD = "app-password-under-test";
 
 // ---------------------------------------------------------------- lifting
 function liftAt(src, needle, label) {
@@ -134,14 +136,14 @@ const SHARED_FNS = [
 	// The Friday batch, run for real in §4b.
 	"escHtml", "invoiceEmailHtml", "generateInvoiceInProcess", "abortAutogenRun",
 	// The undated-load ledger, §7.
-	"listUndatedCompletedLoads", "undatedLoadPayload", "undatedLoadFromRow", "undatedAlertedToday",
+	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
 const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
-	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY", "INVOICE_UNDATED_EXTRA_COLUMNS",
+	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest", "sendUndatedDigestOwed"];
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed"];
 
 // Build the lifted world against one database. `src` defaults to the shipping
 // server.js; §6 passes mutated copies. `overrides` replaces a lifted binding
@@ -1265,7 +1267,7 @@ function oldImpl(db) {
 			detectChecks, "detect: exactly the loads no invoice can place — '#8001'/'8001' once, 8003, 8007"],
 		["MU3", "no silent baseline", "if (!getState(INVOICE_UNDATED_BASELINE_KEY)) {", "if (false) {",
 			lifecycleChecks, "seed: the boot tick records the backlog open, and the dated loads as closed history"],
-		["MU4", "stamped whether or not it was delivered", "if (emailed || notified) for (const k of digest) stamp.run(at, k);", "for (const k of digest) stamp.run(at, k);",
+		["MU4", "stamped whether or not it was delivered", "for (const k of told) stamp.run(at, k);", "for (const k of digest) stamp.run(at, k);",
 			deliveryChecks, "delivery: …so NOT stamped (a failed send is not a told human)"],
 		["MU5", "the cap compares the raw ISO string", "WHERE datetime(alerted_at) > datetime('now', '-1 day')", "WHERE alerted_at > datetime('now', '-1 day')",
 			capChecks, "cap: stamps older than 24 h do not count — compared through datetime()"],
@@ -1285,7 +1287,7 @@ function oldImpl(db) {
 			ledgerBatchChecks, "batch: ONE digest, of the load nobody else named (8202) — not 8201 again"],
 		["MU12", "the ledger reads the deduplicated cache", "const sheet = parseSheet(resp.data);", "const sheet = await getJobTrackingCached();",
 			lifecycleChecks, "seed: the boot tick records the backlog open, and the dated loads as closed history"],
-		["MU13", "an unusable sheet is taken as evidence", "if (!sheet.data.length || !found.resolved) {", "if (false) {",
+		["MU13", "an unusable sheet is taken as evidence", "if (!usable) {", "if (false) {",
 			guardChecks, "guard: …so every seeded row stays open, and nothing is reported"],
 		["MU14", "the weekly summary's report is never recorded", "for (const k of toldBySummary) stamp.run(at, k);", "",
 			ledgerBatchChecks, "batch: 8201 is recorded as told — a delivered summary printed it"],

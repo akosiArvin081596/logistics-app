@@ -3057,6 +3057,8 @@ db.exec(`
 	)
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_eld_feed_alerts_open ON eld_feed_alerts(resolved_at, alert_key)`); } catch {}
+// Its per-channel columns, at boot; a failure is logged once and keeps the old rule.
+alertChannels.prepareLedger(db, "eld_feed_alerts", [], console);
 
 // THE per-vehicle last-clean-fix query. Lifted out of
 // GET /api/admin/fleet-health so the panel a dispatcher reads and the sweep that
@@ -3444,7 +3446,7 @@ async function alertEldFeedSilence(verdict) {
 		const v = verdict || {};
 		const key = eldFeedHealth.feedAlertKey(v.vehicleId, Date.now());
 
-		alertChannels.ensureColumns(db, "eld_feed_alerts");
+		alertChannels.prepareLedger(db, "eld_feed_alerts", [], console);
 		const seen = db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(key);
 		// ⚠️ `!seen.resolved_at` is the half that makes the re-open below mean
 		// anything. A bare alerted_at short-circuit — fuel_event_alerts' shape,
@@ -3463,12 +3465,16 @@ async function alertEldFeedSilence(verdict) {
 			return { alerted: false, reason: "cooldown", key };
 		}
 
-		// An open row still owed a channel after the retry window is given up, once.
+		// An open row told by one channel whose other channel is still undelivered
+		// RETRY_WINDOW_MS later gives that channel up, once. A row nothing was
+		// delivered for keeps retrying every sweep while the feed stays bad.
 		if (seen && !seen.resolved_at && alertChannels.expired(seen, Date.now())) {
 			const gave = alertChannels.giveUp(db, "eld_feed_alerts", "alert_key", key);
-			console.warn("[eld-feed] GAVE UP — %s (%s): still undelivered %d h after the first try; email %s; in-app %s",
-				String(v.unitNumber || key).replace(/[\r\n]+/g, " ").slice(0, 60), v.state, Math.round(alertChannels.RETRY_WINDOW_MS / 3600000),
-				gave.email ? "given up" : "not owed", gave.inApp ? "given up" : "not owed");
+			if (gave.email || gave.inApp) {
+				console.warn("[eld-feed] GAVE UP — %s (%s): still undelivered %d h after a person was told by the other channel; email %s; in-app %s",
+					String(v.unitNumber || key).replace(/[\r\n]+/g, " ").slice(0, 60), v.state, Math.round(alertChannels.RETRY_WINDOW_MS / 3600000),
+					gave.email ? "given up" : "not owed", gave.inApp ? "given up" : "not owed");
+			}
 			return { alerted: false, reason: "gave_up", key };
 		}
 
@@ -3481,7 +3487,7 @@ async function alertEldFeedSilence(verdict) {
 		// A re-open is a new episode: it owes both channels again. An open row told
 		// by one channel and owed the other skips the upsert, which would clear its
 		// alerted_at (when a person was first told).
-		if (seen && seen.resolved_at) db.prepare(`UPDATE eld_feed_alerts SET ${alertChannels.RESET_SQL} WHERE alert_key = ?`).run(key);
+		if (seen && seen.resolved_at) alertChannels.reset(db, "eld_feed_alerts", "alert_key", key);
 		const toldBefore = !!(seen && !seen.resolved_at && seen.alerted_at);
 
 		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
@@ -3579,12 +3585,13 @@ async function alertEldFeedSilence(verdict) {
 
 		// Only the channels the row still owes are sent: both on a new alert, the
 		// failed one on a retry. Each is stamped (emailed_at, notified_at) as soon as
-		// it went out; with no GMAIL_USER the email is skipped, not owed.
+		// it went out; with no mailbox configured the email is skipped, not owed.
 		const owed = alertChannels.claim(db, "eld_feed_alerts", "alert_key", key);
 		if (!owed) return { alerted: false, reason: "already_alerted", key };
+		const mailTo = alertChannels.mailbox(process.env);
 		const sent = await alertChannels.sendOwed({
 			db, table: "eld_feed_alerts", keyCol: "alert_key", key, owed, log: console, tag: "[eld-feed]",
-			email: process.env.GMAIL_USER ? () => sendEmail(process.env.GMAIL_USER, subject, html) : null,
+			email: mailTo ? () => sendEmail(mailTo, subject, html) : null,
 			inApp: () => {
 				const title = v.state === "orphan"
 					? `ELD ${deviceLabel} is linked to no truck`
@@ -3619,11 +3626,14 @@ async function alertEldFeedSilence(verdict) {
 		// channel that failed stays owed on its own (emailed_at / notified_at).
 		const delivered = emailed || notified;
 		if (delivered) {
-			db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
-				.run(new Date().toISOString(), key);
-			// The cap counts this send. A failure to log it must not turn a delivered
-			// alert into a reported error.
-			try { recordEldAlertSend(Date.now()); } catch (e) { console.error("[eld-feed] send log not updated:", e.message); }
+			const firstTold = db.prepare("UPDATE eld_feed_alerts SET alerted_at = ? WHERE alert_key = ? AND alerted_at IS NULL")
+				.run(new Date().toISOString(), key).changes > 0;
+			// The cap counts this send, once per alert: a retry of the channel that
+			// failed is not a second one. A failure to log it must not turn a
+			// delivered alert into a reported error.
+			if (firstTold) {
+				try { recordEldAlertSend(Date.now()); } catch (e) { console.error("[eld-feed] send log not updated:", e.message); }
+			}
 		}
 		console.log(
 			"[eld-feed] %s — %s (%s): %s; email %s; in-app %s",
@@ -18858,6 +18868,8 @@ try {
 			resolved_at DATETIME
 		)
 	`);
+	// Its per-channel columns; a failure is logged once and keeps the old rule.
+	alertChannels.prepareLedger(db, "invoice_undated_alerts", [], console);
 } catch (e) { console.error("[invoice-undated] ledger unavailable — undated-load alerts off:", e.message); }
 
 // DEFAULTS ON, deliberately — a kill switch, not an enable switch: the same call
@@ -18920,18 +18932,11 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 	try {
 		if (seedOnly && getState(INVOICE_UNDATED_BASELINE_KEY)) return { skipped: "seeded" };
 
-		// EVERY row, read the way the invoice handler reads it — not the
-		// deduplicated cache (see listUndatedCompletedLoads()).
-		const sheets = await getSheets();
-		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
-		const sheet = parseSheet(resp.data);
-		// strict: a tombstone read that failed must stop the run, not report every
-		// soft-deleted load as unbilled.
-		const found = listUndatedCompletedLoads(sheet.data, sheet.headers, loadKeySet(getDeletedLoadIds({ strict: true })));
+		const { sheet, found, usable } = await readUndatedLoads();
 		// An empty or unrecognisable sheet is no evidence either way. Acting on it
 		// would close every open row, or seed an empty baseline and report the
 		// whole history later.
-		if (!sheet.data.length || !found.resolved) {
+		if (!usable) {
 			console.warn(`[invoice-undated] Job Tracking ${sheet.data.length ? "has no status, Load ID or completion-date column" : "read back empty"} — ledger left as it was`);
 			return finish("skipped", { skipped: "sheet-unusable" });
 		}
@@ -18939,7 +18944,7 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 		// ⚠️ NO AWAIT between here and the ledger writes. The baseline is re-read
 		// AFTER the sheet read, so a boot tick and a batch that both got this far
 		// cannot both seed, and neither can report the backlog.
-		alertChannels.ensureColumns(db, "invoice_undated_alerts", INVOICE_UNDATED_EXTRA_COLUMNS);
+		alertChannels.prepareLedger(db, "invoice_undated_alerts", [], console);
 		const now = new Date().toISOString();
 		const current = new Map(found.loads.map((l) => [l.key, l]));
 		const openKeys = () => db.prepare("SELECT load_key FROM invoice_undated_alerts WHERE resolved_at IS NULL").all().map((r) => r.load_key);
@@ -18998,46 +19003,44 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 		// Record the list. New → owed. Back after a resolve → owed again, as a new
 		// episode (the old stamps described the last one, the channels' too),
 		// first_seen kept — unless it is history, which keeps seeded_at and so
-		// re-opens silently. Still open → only the driver and what a retry shows
-		// (payload) move.
+		// re-opens silently. Still open → only the driver moves.
 		let resolved = 0;
 		db.transaction(() => {
 			resolved = close(gone);
+			for (const l of found.loads) alertChannels.reset(db, "invoice_undated_alerts", "load_key", l.key, "resolved_at IS NOT NULL");
 			const record = db.prepare(`
-				INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at, payload)
-				VALUES (?, ?, ?, NULL, NULL, NULL, ?)
+				INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, seeded_at, alerted_at, resolved_at)
+				VALUES (?, ?, ?, NULL, NULL, NULL)
 				ON CONFLICT(load_key) DO UPDATE SET
 					driver = excluded.driver,
 					alerted_at = CASE WHEN resolved_at IS NULL THEN alerted_at ELSE NULL END,
-					${alertChannels.resetWhenSql("resolved_at IS NOT NULL")},
-					payload = excluded.payload,
 					resolved_at = NULL
 			`);
-			for (const l of found.loads) record.run(l.key, l.driver, now, undatedLoadPayload(l));
+			for (const l of found.loads) record.run(l.key, l.driver, now);
 		})();
 
 		// Owed a report: open, not history, and owing a channel: never reported, or
-		// told by one channel and owed the other (lib/alert-channels.js). One still
-		// owed past the retry window is given up instead. One the weekly summary
-		// names is left out of the digest (the summary is its report) and recorded
-		// as told only if a delivered channel actually printed it.
+		// told by one channel and owed the other (lib/alert-channels.js). The second
+		// channel of a load a person was told about is given up after the retry
+		// window; a load nothing was delivered for stays owed. One the weekly
+		// summary names is left out of the digest (the summary is its report) and
+		// recorded as told only if a delivered channel actually printed it.
 		const keysOf = (ids) => new Set((ids || []).map((id) => normalizeLoadId(id)).filter(Boolean));
 		const reported = keysOf(reportedIds);
 		const shown = keysOf(shownIds);
 		const nowMs = Date.now();
 		const owedRows = db.prepare(
-			`SELECT * FROM invoice_undated_alerts WHERE resolved_at IS NULL AND seeded_at IS NULL AND ${alertChannels.OWES_SQL} AND ${alertChannels.TRACKED_SQL} ORDER BY first_seen, load_key`,
+			`SELECT * FROM invoice_undated_alerts WHERE resolved_at IS NULL AND seeded_at IS NULL AND ${alertChannels.owesSql(db, "invoice_undated_alerts")} ORDER BY first_seen, load_key`,
 		).all().filter((r) => current.has(r.load_key));
 		const gaveUp = owedRows.filter((r) => alertChannels.expired(r, nowMs)).filter((r) => {
 			const gave = alertChannels.giveUp(db, "invoice_undated_alerts", "load_key", r.load_key);
 			return gave.email || gave.inApp;
 		}).length;
-		const owed = owedRows.filter((r) => !alertChannels.expired(r, nowMs)).map((r) => r.load_key);
+		const owedRow = new Map(owedRows.filter((r) => !alertChannels.expired(r, nowMs)).map((r) => [r.load_key, r]));
+		const owed = [...owedRow.keys()];
 		const toldBySummary = owed.filter((k) => shown.has(k));
 		const candidates = owed.filter((k) => !reported.has(k));
-		const alertedToday = undatedAlertedToday();
-		const listed = candidates.slice(0, Math.max(0, INVOICE_UNDATED_ALERT_MAX_PER_DAY - alertedToday));
-		const held = candidates.length - listed.length;
+		const { listed, held } = undatedDigestSlice(candidates.map((k) => owedRow.get(k)));
 
 		// Each listed load is claimed and sent only the channels it still owes:
 		// both when it is new, the failed one when it is retried.
@@ -19049,8 +19052,9 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 		const digest = listed.filter((k) => claims.has(k));
 		let emailed = false;
 		let notified = false;
+		let told = new Set();
 		try {
-			if (digest.length) ({ emailed, notified } = await sendUndatedDigestOwed(digest, claims, (k) => current.get(k), { range, held }));
+			if (digest.length) ({ emailed, notified, told } = await sendUndatedDigestOwed(digest, claims, (k) => current.get(k), { range, held }));
 		} finally {
 			for (const [k, owes] of claims) alertChannels.release(db, "invoice_undated_alerts", "load_key", k, owes.claimedAt);
 		}
@@ -19059,11 +19063,12 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 		// failed Gmail call as a told human, and the load would never be named
 		// again; unstamped, it is simply owed to a retry. The in-app notification
 		// is delivery in its own right, and a channel that failed stays owed on its
-		// own (emailed_at / notified_at). A load in only one channel's list was
-		// already told by the other, so this stamps only loads told now.
+		// own (emailed_at / notified_at). Only the loads a channel that went out
+		// actually carried are told (`told`): a load on the other channel's list
+		// only is not.
 		const at = new Date().toISOString();
 		const stamp = db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE load_key = ? AND alerted_at IS NULL AND resolved_at IS NULL");
-		if (emailed || notified) for (const k of digest) stamp.run(at, k);
+		for (const k of told) stamp.run(at, k);
 		for (const k of toldBySummary) stamp.run(at, k);
 		// The weekly summary is the batch's own report: a load it printed owes this
 		// digest nothing more on either channel.
@@ -19079,7 +19084,7 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 			(held ? `, ${held} held for the next run (${INVOICE_UNDATED_ALERT_MAX_PER_DAY} per digest)` : "") +
 			(toldBySummary.length ? `, ${toldBySummary.length} shown by the weekly summary` : "") +
 			(unshown ? `, ${unshown} named by the weekly summary but not shown — owed` : "") +
-			(gaveUp ? `, ${gaveUp} given up (undelivered ${Math.round(alertChannels.RETRY_WINDOW_MS / 3600000)} h after the first try)` : "") +
+			(gaveUp ? `, ${gaveUp} second channel(s) given up (undelivered ${Math.round(alertChannels.RETRY_WINDOW_MS / 3600000)} h after a person was told)` : "") +
 			(resolved ? `, ${resolved} resolved` : "") +
 			(found.unkeyed ? `, ${found.unkeyed} row(s) with no Load ID untracked` : ""));
 		return finish(digest.length && !delivered ? "undelivered" : "ok", {
@@ -19095,12 +19100,13 @@ async function runUndatedLoadAlerts({ range = null, reportedIds = [], shownIds =
 }
 
 // The digest: one dispatch notification for `loads` and one email for
-// `emailLoads` (listUndatedCompletedLoads() entries, or a retry's from the
-// ledger): the same loads unless a retry owes the two channels different ones.
-// A channel whose list is empty is not sent. Each channel is tried on its own,
-// so a mail outage still leaves the in-app notification; `retry` says so in the
-// email. Returns { emailed, notified } and never throws.
-async function sendUndatedLoadDigest(loads, { range = null, held = 0, emailLoads = loads, retry = false } = {}) {
+// `emailLoads` (listUndatedCompletedLoads() entries): the same loads unless a
+// retry owes the two channels different ones. A channel whose list is empty is
+// not sent. Each channel is tried on its own, so a mail outage still leaves the
+// in-app notification. `listedAt` (an instant) marks a retry: the email says it
+// is one and when the loads were first listed, in APP_TIMEZONE. Returns
+// { emailed, notified } and never throws.
+async function sendUndatedLoadDigest(loads, { range = null, held = 0, emailLoads = loads, listedAt = null } = {}) {
 	// Sheet text, on one line, bounded BEFORE any regex runs on it.
 	const oneLine = (v, max = 80) => String(v == null ? "" : v).slice(0, 400).replace(/\s+/g, " ").trim().slice(0, max);
 	const titleOf = (count) => `${count} completed load${count === 1 ? "" : "s"} no weekly invoice will bill`;
@@ -19134,7 +19140,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0, emailLoads
 		const html = invoiceEmailHtml({
 			heading: "Completed Loads No Invoice Will Bill",
 			bodyHtml: `
-				${retry ? `<p style="margin:0 0 12px;line-height:1.6;color:#334155">This is a retry: the first try to send this digest failed.</p>` : ""}
+				${listedAt ? `<p style="margin:0 0 12px;line-height:1.6;color:#334155">This is a retry: the first try to send this digest failed. These loads were listed as of ${escHtml(appTime.dateTextInZone(new Date(listedAt), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}, and Job Tracking still lists them.</p>` : ""}
 				<p style="margin:0 0 12px;line-height:1.6;color:#334155">These loads are marked completed on Job Tracking but have no <b>Status Update Date</b> or <b>Completion Date</b>, so no weekly invoice will ever bill them${range ? ` (checked after the weekly run for ${escHtml(range.weekStart)} — ${escHtml(range.weekEnd)})` : ""}.</p>
 				<table style="border-collapse:collapse;font-size:13px;margin:0 0 12px">
 					<tr>${cell("Load", "th")}${cell("Driver", "th")}${cell("Pickup appointment", "th")}${cell("Drop-off appointment", "th")}</tr>
@@ -19161,85 +19167,122 @@ function undatedAlertedToday() {
 	).get().c;
 }
 
-// The ledger's extra column: what a retry needs to name a load (its Load ID as
-// the sheet spells it, the pickup and drop-off appointments), as JSON.
-const INVOICE_UNDATED_EXTRA_COLUMNS = [["payload", "TEXT"]];
-function undatedLoadPayload(l) {
-	const cap = (v) => String(v == null ? "" : v).slice(0, 200);
-	return JSON.stringify({ loadId: cap(l.loadId), pickup: cap(l.pickup), dropoff: cap(l.dropoff) });
+// Job Tracking for the undated-load ledger, for the weekly run and the retry
+// alike: EVERY row, read the way the invoice handler reads it — not the
+// deduplicated cache (see listUndatedCompletedLoads()) — and the undated
+// completed loads in it. The tombstones are read strictly: a tombstone read that
+// failed must stop the caller, not report every soft-deleted load as unbilled.
+// `usable` is false for an empty or unrecognisable sheet.
+async function readUndatedLoads() {
+	const sheets = await getSheets();
+	const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+	const sheet = parseSheet(resp.data);
+	const found = listUndatedCompletedLoads(sheet.data, sheet.headers, loadKeySet(getDeletedLoadIds({ strict: true })));
+	return { sheet, found, usable: sheet.data.length > 0 && found.resolved };
 }
-// A ledger row as a digest entry, for a retry.
-function undatedLoadFromRow(r) {
-	let p = {};
-	try { p = JSON.parse(r.payload || "{}") || {}; } catch { p = {}; }
-	return { key: r.load_key, loadId: p.loadId || r.load_key, driver: r.driver || "", pickup: p.pickup || "", dropoff: p.dropoff || "" };
+
+// The digest's share of the daily cap, over owed ledger rows in order: a load a
+// person was already told about (a retry of the channel that failed) was
+// counted when it was told, so it is free; each load not yet told takes one of
+// the slots INVOICE_UNDATED_ALERT_MAX_PER_DAY leaves after the loads told in the
+// last 24 h. Answers { listed: [load_key], held: how many waited }.
+function undatedDigestSlice(rows) {
+	let slots = Math.max(0, INVOICE_UNDATED_ALERT_MAX_PER_DAY - undatedAlertedToday());
+	const listed = [];
+	let held = 0;
+	for (const r of rows) {
+		if (r.alerted_at) listed.push(r.load_key);
+		else if (slots > 0) { listed.push(r.load_key); slots--; }
+		else held++;
+	}
+	return { listed, held };
 }
 
 // Sends one digest for claimed invoice_undated_alerts rows (`keys`, with what each
 // owes in `claims`): the in-app notification names those owed it, the email
 // those owed it, and each row's channel is stamped once it went out. With no
-// GMAIL_USER the email is skipped, not owed. The caller releases the claims.
-async function sendUndatedDigestOwed(keys, claims, loadOf, { range = null, held = 0, retry = false } = {}) {
+// mailbox configured the email is skipped, not owed. `told`: the keys a channel
+// that went out carried. The caller releases the claims.
+async function sendUndatedDigestOwed(keys, claims, loadOf, { range = null, held = 0, listedAt = null } = {}) {
 	const inAppKeys = keys.filter((k) => claims.get(k).inApp);
 	let emailKeys = keys.filter((k) => claims.get(k).email);
-	if (emailKeys.length && !process.env.GMAIL_USER) {
+	if (emailKeys.length && !alertChannels.mailbox(process.env)) {
 		for (const k of emailKeys) alertChannels.stampSkipped(db, "invoice_undated_alerts", "load_key", k, "email", "no_recipient");
 		emailKeys = [];
 	}
-	const { emailed, notified } = await sendUndatedLoadDigest(inAppKeys.map(loadOf), { range, held, emailLoads: emailKeys.map(loadOf), retry });
+	const { emailed, notified } = await sendUndatedLoadDigest(inAppKeys.map(loadOf), { range, held, emailLoads: emailKeys.map(loadOf), listedAt });
 	const at = new Date().toISOString();
 	if (notified) for (const k of inAppKeys) alertChannels.stampSent(db, "invoice_undated_alerts", "load_key", k, "inApp", at);
 	if (emailed) for (const k of emailKeys) alertChannels.stampSent(db, "invoice_undated_alerts", "load_key", k, "email", at);
-	return { emailed, notified, emailFailed: emailKeys.length > 0 && !emailed, inAppFailed: inAppKeys.length > 0 && !notified };
+	const told = new Set([...(notified ? inAppKeys : []), ...(emailed ? emailKeys : [])]);
+	return { emailed, notified, told, emailFailed: emailKeys.length > 0 && !emailed, inAppFailed: inAppKeys.length > 0 && !notified };
 }
 
 // The retry sweep's half for the undated-load digest. The digest runs once a
-// week, so a channel it couldn't send is retried from the ledger: open rows
-// tried before and still owed a channel, at their next slot
-// (lib/alert-channels.js), as one in-app notification and one email naming the
-// loads each owes; past the window they are given up. The daily cap holds a
-// retry back like a first digest. Skipped while a weekly run is going, and when
-// the ledger could not be made at boot (the alert is off then). Never throws for
-// a send.
+// week, so a channel it couldn't send is retried here: open rows tried before
+// and still owed a channel, at their next slot (lib/alert-channels.js), as one
+// in-app notification and one email naming the loads each owes. Job Tracking is
+// read first, as the weekly run reads it: a load given a date or deleted since
+// is left out and stays owed (only the weekly run resolves a load, behind its
+// shrink guard), and the email says when the loads were first listed. The
+// second channel of a load a person was told about is given up after the
+// window; a load nothing was delivered for keeps retrying. The daily cap holds
+// back only loads not yet told. Skipped while a weekly run is going, and when
+// the ledger could not be made at boot (the alert is off then). Never throws
+// for a send.
 async function retryUndatedLoadAlerts({ now = new Date() } = {}) {
-	if (!INVOICE_UNDATED_ALERT_ENABLED || invoiceUndatedAlertsRunning) return { tried: 0, failing: 0, gaveUp: 0 };
-	if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invoice_undated_alerts'").get()) return { tried: 0, failing: 0, gaveUp: 0 };
-	alertChannels.ensureColumns(db, "invoice_undated_alerts", INVOICE_UNDATED_EXTRA_COLUMNS);
+	const none = { tried: 0, failing: 0, gaveUp: 0, waiting: 0 };
+	if (!INVOICE_UNDATED_ALERT_ENABLED || invoiceUndatedAlertsRunning) return none;
+	if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invoice_undated_alerts'").get()) return none;
+	alertChannels.prepareLedger(db, "invoice_undated_alerts", [], console);
 	const { expired, due } = alertChannels.retryCandidates(db, "invoice_undated_alerts", { now, where: "resolved_at IS NULL AND seeded_at IS NULL" });
 	const gaveUp = expired.filter((r) => {
-		const gave = alertChannels.giveUp(db, "invoice_undated_alerts", "load_key", r.load_key);
+		const gave = alertChannels.giveUp(db, "invoice_undated_alerts", "load_key", r.load_key, now);
 		return gave.email || gave.inApp;
-	}).map((r) => undatedLoadFromRow(r).loadId);
+	}).map((r) => r.load_key);
 	if (gaveUp.length) {
-		console.warn("[invoice-undated] GAVE UP — %d load(s) still undelivered %d h after the first try: %s",
+		console.warn("[invoice-undated] GAVE UP — %d load(s)' second channel still undelivered %d h after a person was told: %s",
 			gaveUp.length, Math.round(alertChannels.RETRY_WINDOW_MS / 3600000), gaveUp.slice(0, 20).join(", "));
 	}
-	const alertedToday = undatedAlertedToday();
-	const listed = due.sort((a, b) => String(a.first_seen).localeCompare(String(b.first_seen)) || a.load_key.localeCompare(b.load_key))
-		.slice(0, Math.max(0, INVOICE_UNDATED_ALERT_MAX_PER_DAY - alertedToday));
-	const claims = new Map();
-	for (const r of listed) {
-		const owed = alertChannels.claim(db, "invoice_undated_alerts", "load_key", r.load_key, now);
-		if (owed) claims.set(r.load_key, owed);
+	if (!due.length) return { ...none, gaveUp: gaveUp.length };
+
+	const read = await readUndatedLoads();
+	if (!read.usable) {
+		console.warn(`[invoice-undated] retry sweep: Job Tracking ${read.sheet.data.length ? "has no status, Load ID or completion-date column" : "read back empty"} — ${due.length} retry(ies) wait`);
+		return { ...none, gaveUp: gaveUp.length };
 	}
-	if (!claims.size) return { tried: 0, failing: 0, gaveUp: gaveUp.length };
-	const rows = new Map(listed.map((r) => [r.load_key, r]));
+	const current = new Map(read.found.loads.map((l) => [l.key, l]));
+	const still = due.filter((r) => current.has(r.load_key))
+		.sort((a, b) => String(a.first_seen).localeCompare(String(b.first_seen)) || a.load_key.localeCompare(b.load_key));
+	const waiting = due.length - still.length;
+	const { listed } = undatedDigestSlice(still);
+	const claims = new Map();
+	for (const k of listed) {
+		const owed = alertChannels.claim(db, "invoice_undated_alerts", "load_key", k, now);
+		if (owed) claims.set(k, owed);
+	}
+	if (!claims.size) {
+		if (waiting) console.log("[invoice-undated] retry sweep: %d load(s) no longer listed on Job Tracking, left owed", waiting);
+		return { ...none, gaveUp: gaveUp.length, waiting };
+	}
+	const firstTry = new Map(still.map((r) => [r.load_key, r.first_try]));
 	const keys = [...claims.keys()];
-	let sent = { emailed: false, notified: false, emailFailed: false, inAppFailed: false };
+	const listedAt = keys.map((k) => firstTry.get(k)).filter(Boolean).sort()[0] || now.toISOString();
+	let sent = { emailed: false, notified: false, told: new Set(), emailFailed: false, inAppFailed: false };
 	try {
-		sent = await sendUndatedDigestOwed(keys, claims, (k) => undatedLoadFromRow(rows.get(k)), { retry: true });
-		if (sent.emailed || sent.notified) {
-			const stamp = db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE load_key = ? AND alerted_at IS NULL AND resolved_at IS NULL");
-			const at = new Date().toISOString();
-			for (const k of keys) stamp.run(at, k);
-		}
+		sent = await sendUndatedDigestOwed(keys, claims, (k) => current.get(k), { listedAt });
+		const stamp = db.prepare("UPDATE invoice_undated_alerts SET alerted_at = ? WHERE load_key = ? AND alerted_at IS NULL AND resolved_at IS NULL");
+		const at = new Date().toISOString();
+		for (const k of sent.told) stamp.run(at, k);
 	} finally {
 		for (const [k, owed] of claims) alertChannels.release(db, "invoice_undated_alerts", "load_key", k, owed.claimedAt);
 	}
-	console.log("[invoice-undated] retry sweep: %d load(s) retried; email %s; in-app %s", keys.length,
-		alertChannels.channelState(keys.some((k) => claims.get(k).email), sent.emailed, sent.emailFailed || sent.emailed ? "" : "skipped (no recipient)"),
-		alertChannels.channelState(keys.some((k) => claims.get(k).inApp), sent.notified, ""));
-	return { tried: keys.length, failing: sent.emailFailed || sent.inAppFailed ? keys.length : 0, gaveUp: gaveUp.length };
+	const emailOwed = keys.some((k) => claims.get(k).email);
+	console.log("[invoice-undated] retry sweep: %d load(s) retried; email %s; in-app %s%s", keys.length,
+		alertChannels.channelState(emailOwed, sent.emailed, emailOwed && !sent.emailFailed && !sent.emailed ? "skipped (no mailbox configured)" : ""),
+		alertChannels.channelState(keys.some((k) => claims.get(k).inApp), sent.notified, ""),
+		waiting ? `; ${waiting} load(s) no longer listed on Job Tracking, left owed` : "");
+	return { tried: keys.length, failing: sent.emailFailed || sent.inAppFailed ? keys.length : 0, gaveUp: gaveUp.length, waiting };
 }
 
 let invoiceAutogenRunning = false;
@@ -19398,6 +19441,10 @@ db.exec(`
 		alerted_at DATETIME
 	)
 `);
+// Its per-channel columns, and `payload` (what a retry needs to say the alert
+// again), at boot; a failure is logged once and keeps the old rule.
+const RATECON_EXTRACT_ALERT_EXTRA_COLUMNS = [["payload", "TEXT"]];
+alertChannels.prepareLedger(db, "ratecon_extract_alerts", RATECON_EXTRACT_ALERT_EXTRA_COLUMNS, console);
 
 // DEFAULTS ON, deliberately breaking the ships-dormant convention — same call as
 // PII_MASK_ENABLED, and for the same reason: this is a kill switch, not an
@@ -19436,7 +19483,7 @@ async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
 		// key keeps the channel from either spamming or going silent: at most one
 		// "we extracted nothing identifiable today" line.
 		const key = id || `unidentified:${new Date().toISOString().slice(0, 10)}`;
-		alertChannels.ensureColumns(db, "ratecon_extract_alerts", RATECON_EXTRACT_ALERT_EXTRA_COLUMNS);
+		alertChannels.prepareLedger(db, "ratecon_extract_alerts", RATECON_EXTRACT_ALERT_EXTRA_COLUMNS, console);
 		const seen = db.prepare("SELECT * FROM ratecon_extract_alerts WHERE load_id = ?").get(key);
 		// Done once it owes no channel (lib/alert-channels.js): a load told in-app
 		// whose email failed is retried, email only, here or by the retry sweep.
@@ -19467,9 +19514,11 @@ async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
 		}
 		const payload = JSON.stringify({ id, unusable, fields: shownFields });
 		db.prepare(
-			"INSERT OR IGNORE INTO ratecon_extract_alerts (load_id, unusable, first_seen, alerted_at, payload) VALUES (?, ?, CURRENT_TIMESTAMP, NULL, ?)",
-		).run(key, unusable.join(", "), payload);
-		db.prepare("UPDATE ratecon_extract_alerts SET payload = ? WHERE load_id = ? AND payload IS NULL").run(payload, key);
+			"INSERT OR IGNORE INTO ratecon_extract_alerts (load_id, unusable, first_seen, alerted_at) VALUES (?, ?, CURRENT_TIMESTAMP, NULL)",
+		).run(key, unusable.join(", "));
+		if (alertChannels.ready(db, "ratecon_extract_alerts")) {
+			db.prepare("UPDATE ratecon_extract_alerts SET payload = ? WHERE load_id = ? AND payload IS NULL").run(payload, key);
+		}
 
 		const sent = await sendRateConExtractAlert(key, { id, unusable, fields: shownFields });
 		if (!sent) return { alerted: false, reason: "already_alerted", key };
@@ -19488,7 +19537,6 @@ async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
 // The fields an unusable-address alert shows, kept in the ledger's payload so a
 // retry shows them too.
 const RATECON_EXTRACT_SHOWN_FIELDS = ["Pickup Address", "Drop-off Address", "Rate", "Load Number"];
-const RATECON_EXTRACT_ALERT_EXTRA_COLUMNS = [["payload", "TEXT"]];
 
 // Loads alerted in the last 24 h: the daily cap's count, for a sighting and a
 // retry alike.
@@ -19537,8 +19585,8 @@ async function sendRateConExtractAlert(key, { id, unusable, fields }, { firstSee
 		`<p style="color:#888;font-size:12px;">Reported once per load.</p>`;
 	const sent = await alertChannels.sendOwed({
 		db, table: "ratecon_extract_alerts", keyCol: "load_id", key, owed, log: console, tag: "[ratecon-extract]",
-		email: process.env.GMAIL_USER
-			? () => sendEmail(process.env.GMAIL_USER, `⚠️ Load ${label} ingested with an unusable address`, html)
+		email: alertChannels.mailbox(process.env)
+			? () => sendEmail(alertChannels.mailbox(process.env), `⚠️ Load ${label} ingested with an unusable address`, html)
 			: null,
 		inApp: () => {
 			insertDispatchNotification.run(
@@ -19573,12 +19621,12 @@ async function sendRateConExtractAlert(key, { id, unusable, fields }, { firstSee
 	return { ...sent, delivered, label };
 }
 
-// Gives up what a ratecon_extract_alerts row still owes after the retry window,
-// with one log line.
+// Gives up the channel a ratecon_extract_alerts row still owes once a person was
+// told by the other one RETRY_WINDOW_MS ago, with one log line.
 function giveUpRateConExtractAlert(row) {
 	const gave = alertChannels.giveUp(db, "ratecon_extract_alerts", "load_id", row.load_id);
 	if (gave.email || gave.inApp) {
-		console.warn("[ratecon-extract] GAVE UP — load %s: still undelivered %d h after the first try; email %s; in-app %s",
+		console.warn("[ratecon-extract] GAVE UP — load %s: still undelivered %d h after a person was told by the other channel; email %s; in-app %s",
 			String(row.load_id).replace(/[\r\n]+/g, " ").slice(0, 60), Math.round(alertChannels.RETRY_WINDOW_MS / 3600000),
 			gave.email ? "given up" : "not owed", gave.inApp ? "given up" : "not owed");
 	}
@@ -19588,11 +19636,13 @@ function giveUpRateConExtractAlert(row) {
 // The retry sweep's half for unusable-address alerts. An extraction is rarely
 // seen again, so a channel the sighting couldn't send is retried from the
 // ledger: rows tried before and still owed a channel, at their next slot
-// (lib/alert-channels.js); past the window they are given up. The daily cap
-// holds a retry back like a first alert. Never throws for a send.
+// (lib/alert-channels.js). The second channel of a load a person was told about
+// is given up after the window; a load nothing was delivered for keeps
+// retrying. The daily cap holds a retry back like a first alert. Never throws
+// for a send.
 async function retryRateConExtractAlerts({ now = new Date() } = {}) {
 	if (!RATECON_EXTRACT_ALERT_ENABLED) return { tried: 0, failing: 0, gaveUp: 0 };
-	alertChannels.ensureColumns(db, "ratecon_extract_alerts", RATECON_EXTRACT_ALERT_EXTRA_COLUMNS);
+	alertChannels.prepareLedger(db, "ratecon_extract_alerts", RATECON_EXTRACT_ALERT_EXTRA_COLUMNS, console);
 	const { expired, due } = alertChannels.retryCandidates(db, "ratecon_extract_alerts", { now });
 	const gaveUp = expired.filter((r) => giveUpRateConExtractAlert(r)).length;
 	let tried = 0;
@@ -19659,7 +19709,7 @@ function startAlertChannelRetrySweep() {
 		};
 		const timer = setInterval(tick, alertChannels.SWEEP_MS);
 		if (typeof timer.unref === "function") timer.unref();
-		console.log(`[alert-retry] retry sweep every ${Math.round(alertChannels.SWEEP_MS / 60000)} min for unusable-address alerts and the undated-load digest, for ${Math.round(alertChannels.RETRY_WINDOW_MS / 3600000)} h after the first try`);
+		console.log(`[alert-retry] retry sweep every ${Math.round(alertChannels.SWEEP_MS / 60000)} min for unusable-address alerts and the undated-load digest; a second channel is given up ${Math.round(alertChannels.RETRY_WINDOW_MS / 3600000)} h after a person was told`);
 		started = true;
 	}
 	return started;
@@ -21116,6 +21166,8 @@ db.exec(`
 		resolved_at DATETIME
 	)
 `);
+// Its per-channel columns, at boot; a failure is logged once and keeps the old rule.
+alertChannels.prepareLedger(db, "expense_duplicate_alerts", [], console);
 
 // DEFAULTS ON, deliberately breaking the ships-dormant convention — same call as
 // PII_MASK_ENABLED and RATECON_EXTRACT_ALERT_ENABLED, and for the same reason:
@@ -21162,7 +21214,7 @@ async function alertDuplicateReceipts(group) {
 			? raw
 			: `unkeyed:${new Date().toISOString().slice(0, 10)}`;
 
-		alertChannels.ensureColumns(db, "expense_duplicate_alerts");
+		alertChannels.prepareLedger(db, "expense_duplicate_alerts", [], console);
 		const seen = db.prepare("SELECT * FROM expense_duplicate_alerts WHERE group_key = ?").get(key);
 		// ⚠️ `!seen.resolved_at` is the half that makes the fuel_event_alerts
 		// upsert below mean anything. A bare `alerted_at` short-circuit — which is
@@ -21174,12 +21226,16 @@ async function alertDuplicateReceipts(group) {
 		// (lib/alert-channels.js): an email that failed is retried on each sweep.
 		if (seen && !seen.resolved_at && !alertChannels.owes(seen)) return { alerted: false, reason: "already_alerted", key };
 
-		// An open row still owed a channel after the retry window is given up, once.
+		// An open row told by one channel whose other channel is still undelivered
+		// RETRY_WINDOW_MS later gives that channel up, once. A row nothing was
+		// delivered for keeps retrying every sweep while the group stands.
 		if (seen && !seen.resolved_at && alertChannels.expired(seen, Date.now())) {
 			const gave = alertChannels.giveUp(db, "expense_duplicate_alerts", "group_key", key);
-			console.warn("[expense-duplicates] GAVE UP — group %s: still undelivered %d h after the first try; email %s; in-app %s",
-				key.replace(/[\r\n]+/g, " ").slice(0, 100), Math.round(alertChannels.RETRY_WINDOW_MS / 3600000),
-				gave.email ? "given up" : "not owed", gave.inApp ? "given up" : "not owed");
+			if (gave.email || gave.inApp) {
+				console.warn("[expense-duplicates] GAVE UP — group %s: still undelivered %d h after a person was told by the other channel; email %s; in-app %s",
+					key.replace(/[\r\n]+/g, " ").slice(0, 100), Math.round(alertChannels.RETRY_WINDOW_MS / 3600000),
+					gave.email ? "given up" : "not owed", gave.inApp ? "given up" : "not owed");
+			}
 			return { alerted: false, reason: "gave_up", key };
 		}
 
@@ -21196,7 +21252,7 @@ async function alertDuplicateReceipts(group) {
 		// A re-open is a new episode: it owes both channels again. An open row told
 		// by one channel and owed the other skips the upsert, which would clear its
 		// alerted_at (when a person was first told).
-		if (seen && seen.resolved_at) db.prepare(`UPDATE expense_duplicate_alerts SET ${alertChannels.RESET_SQL} WHERE group_key = ?`).run(key);
+		if (seen && seen.resolved_at) alertChannels.reset(db, "expense_duplicate_alerts", "group_key", key);
 		const toldBefore = !!(seen && !seen.resolved_at && seen.alerted_at);
 		// Record the sighting NOW but leave alerted_at NULL — see the stamp below.
 		// first_seen is preserved across a re-open so "how long has this been
@@ -21273,13 +21329,14 @@ async function alertDuplicateReceipts(group) {
 
 		// Only the channels the row still owes are sent: both on a new alert, the
 		// failed one on a retry. Each is stamped (emailed_at, notified_at) as soon as
-		// it went out; with no GMAIL_USER the email is skipped, not owed.
+		// it went out; with no mailbox configured the email is skipped, not owed.
 		const owed = alertChannels.claim(db, "expense_duplicate_alerts", "group_key", key);
 		if (!owed) return { alerted: false, reason: "already_alerted", key };
+		const mailTo = alertChannels.mailbox(process.env);
 		const sent = await alertChannels.sendOwed({
 			db, table: "expense_duplicate_alerts", keyCol: "group_key", key, owed, log: console, tag: "[expense-duplicates]",
-			email: process.env.GMAIL_USER
-				? () => sendEmail(process.env.GMAIL_USER, `⚠️ Duplicate receipt — ${who} ${day}, ${money(group.excessAmount)} booked twice`, html)
+			email: mailTo
+				? () => sendEmail(mailTo, `⚠️ Duplicate receipt — ${who} ${day}, ${money(group.excessAmount)} booked twice`, html)
 				: null,
 			inApp: () => {
 				const title = `Duplicate receipt — ${who} ${day} (${money(group.excessAmount)} booked twice)`;

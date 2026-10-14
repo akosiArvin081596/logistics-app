@@ -222,7 +222,7 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 		"db", "eldFeedHealth", "alertChannels", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "console", "process",
 		src,
 	)(db, opts.lib || feedLib, alertChannels, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
-		{ env: { GMAIL_USER: "ops@example.invalid" } });
+		{ env: { GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test" } });
 	return { ...built, rec, db };
 }
 

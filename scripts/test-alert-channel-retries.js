@@ -9,9 +9,11 @@
  * check reports re-issue alerts that were given up undelivered.
  *
  *   §1 lib/alert-channels.js: what a row owes (a row alerted before the channels were tracked owes
- *      nothing), the claim (one call at a time, a stale claim retaken), the backoff, the retry
- *      window, the give-up; ensureColumns() adds the columns once and marks the rows alerted before
- *      them "before_tracking".
+ *      nothing), the claim (one call at a time, a stale claim retaken), the backoff, mailbox() (mail
+ *      needs GMAIL_USER and GMAIL_APP_PASSWORD), the give-up (only the second channel of an alert a
+ *      person was told about, 48 h after; never while a live call holds the row; never a row nothing
+ *      was delivered for); prepareLedger() adds the columns once, marks the rows alerted before them
+ *      "before_tracking", and when the columns can't be added logs once and keeps the old rule.
  *   §2-§5, one alert each, lifted from server.js (scripts/lib/server-lift.js) over an in-memory
  *      SQLite with the ledger's own CREATE TABLE and stand-in email and notification channels:
  *      - email fails, in-app goes: the row owes the email; a later tick sends only the email;
@@ -19,20 +21,26 @@
  *      - both go: nothing is owed and a later tick sends nothing;
  *      - rows alerted before the change owe nothing (no re-arm) and are marked before_tracking;
  *        a row nothing was delivered for is still retried, as before;
- *      - past the 48 h retry window the owed channel is given up (gave_up), nothing is sent, and
- *        one log line says so;
+ *      - the email still undelivered 48 h after the in-app notice is given up (gave_up), nothing is
+ *        sent, and one log line says so; a row nothing was delivered for, first tried 49 h ago, is
+ *        not given up and is retried (the owner's decision, 2026-10-14);
  *      the later tick is the alert's own: the hourly ELD sweep and the six-hourly duplicate sweep
  *      call the alert again; a re-sighted rate con does too; the unusable-address alert and the
  *      undated-load digest are retried by the shared retry sweep (retryRateConExtractAlerts(),
  *      retryUndatedLoadAlerts()) at the row's next slot, and the retry says it is one. A resolved
- *      ELD feed or duplicate group that re-opens owes both channels again. With no GMAIL_USER the
- *      email is skipped, not owed.
+ *      ELD feed or duplicate group that re-opens owes both channels again. With no GMAIL_USER, or
+ *      no GMAIL_APP_PASSWORD, the email is skipped, not owed. ELD: the email's retry is not a second
+ *      send against the daily cap, and when the columns can't be added the alert keeps its old
+ *      rule. Undated: only the loads a channel that went out carried are told; the retry re-reads
+ *      Job Tracking and leaves out (still owed) a load given a date since, and says when the loads
+ *      were first listed (Eastern); a retry of a load already told is free under the daily cap.
  *   §6 the shared retry sweep: sweepAlertChannelRetries() runs both halves, one failing does not
  *      stop the other; startAlertChannelRetrySweep() starts an unref'd 15-minute timer, and none in
  *      a replica or with both kill switches off.
  *   §7 the daily integrity check (lib/integrity-check.js) reports re-issue alerts given up
  *      (ratecon_reissue_holds rows with email_skipped or notify_skipped "gave_up"): the load
- *      numbers and the count, once each; it never writes that ledger.
+ *      numbers and the count, once each, the first-seen date in Eastern (ISO and SQLite's UTC
+ *      form alike); it never writes that ledger.
  *
  * Every value is made up: load numbers, units, names, amounts, addresses and mailboxes.
  * SERVER_JS=<file> runs against another copy of server.js, INTEGRITY_CHECK_JS=<file> another
@@ -110,7 +118,8 @@ function makeChannels() {
 	ch.console = { log: capture, warn: capture, error: capture, info: capture };
 	return ch;
 }
-const PROCESS = { env: { GMAIL_USER: "ops@example.test" } };
+// A made-up mailbox: mail counts as configured only with both settings.
+const PROCESS = { env: { GMAIL_USER: "ops@example.test", GMAIL_APP_PASSWORD: "app-password-under-test" } };
 
 // `roots` lifted from server.js over `deps` (the names given, never lifted); a root the server.js
 // under test lacks is left out, and its cases fail.
@@ -145,20 +154,22 @@ function section1() {
 		&& !ac.retryDue({ attempts: 3, last_try: new Date(now - 59 * 60000).toISOString() }, now)
 		&& !ac.retryDue({ attempts: 9, last_try: new Date(now - 3.9 * HOUR).toISOString() }, now)
 		&& ac.retryDue({ attempts: 9, last_try: new Date(now - 4 * HOUR).toISOString() }, now));
-	ok("§1 the retry window is 48 h from the first try", !ac.expired({ first_try: hoursAgo(47.9) }, now) && ac.expired({ first_try: hoursAgo(48.1) }, now));
-	ok("§1 a row never tried is never expired", !ac.expired({}, now));
+	ok("§1 the second channel is given up 48 h after a person was told by the first",
+		!ac.expired({ alerted_at: hoursAgo(47.9), first_try: hoursAgo(100) }, now) && ac.expired({ alerted_at: hoursAgo(48.1) }, now));
+	ok("§1 a row nothing was delivered for is never given up, however old its first try", !ac.expired({ first_try: hoursAgo(500) }, now) && !ac.expired({}, now));
+	eq([ac.mailbox({ GMAIL_USER: "ops@example.test", GMAIL_APP_PASSWORD: "p" }), ac.mailbox({ GMAIL_USER: "ops@example.test" }), ac.mailbox({ GMAIL_APP_PASSWORD: "p" }), ac.mailbox({})],
+		["ops@example.test", "", "", ""], "§1 mailbox(): GMAIL_USER only when GMAIL_APP_PASSWORD is set too");
 
 	const db = new Database(":memory:");
 	db.exec("CREATE TABLE t_alerts (k TEXT PRIMARY KEY, first_seen TEXT, alerted_at TEXT, resolved_at TEXT)");
 	db.prepare("INSERT INTO t_alerts (k, alerted_at) VALUES ('old', ?), ('unsent', NULL)").run(hoursAgo(100));
-	ac.ensureColumns(db, "t_alerts", [["payload", "TEXT"]]);
+	eq(ac.prepareLedger(db, "t_alerts", [["payload", "TEXT"]]), true, "§1 prepareLedger(): the columns are added");
 	const cols = db.prepare("PRAGMA table_info(t_alerts)").all().map((c) => c.name);
 	ok("§1 ensureColumns() adds the channel columns and the extra one",
 		["emailed_at", "notified_at", "email_skipped", "notify_skipped", "claimed_at", "attempts", "first_try", "last_try", "payload"].every((c) => cols.includes(c)), cols);
 	eq([rowOf(db, "t_alerts", "k", "old").email_skipped, rowOf(db, "t_alerts", "k", "old").notify_skipped], ["before_tracking", "before_tracking"],
 		"§1 a row alerted before the columns is marked before_tracking on both channels");
 	eq(rowOf(db, "t_alerts", "k", "unsent").email_skipped, null, "§1 a row never delivered is left owing");
-	ac.ensureColumns(db, "t_alerts");
 	const c1 = ac.claim(db, "t_alerts", "k", "unsent");
 	ok("§1 claim(): the owed channels and the claim time", !!c1 && c1.email && c1.inApp && typeof c1.claimedAt === "string", c1);
 	eq(ac.claim(db, "t_alerts", "k", "unsent"), null, "§1 a second claim while the first is live: none");
@@ -166,11 +177,29 @@ function section1() {
 	eq(ac.claim(db, "t_alerts", "k", "old"), null, "§1 a before_tracking row is never claimed");
 	const r = rowOf(db, "t_alerts", "k", "unsent");
 	ok("§1 each claim counts a try; first_try is kept from the first", r.attempts === 2 && !!r.first_try && r.last_try > r.first_try, r);
-	eq(ac.giveUp(db, "t_alerts", "k", "unsent"), { email: true, inApp: true }, "§1 giveUp() gives up both owed channels");
+	eq(ac.giveUp(db, "t_alerts", "k", "unsent"), { email: false, inApp: false }, "§1 giveUp(): nothing on a row nothing was delivered for");
+	db.prepare("UPDATE t_alerts SET alerted_at = ?, notified_at = ?, claimed_at = ? WHERE k = 'unsent'").run(hoursAgo(50), hoursAgo(50), new Date().toISOString());
+	eq(ac.giveUp(db, "t_alerts", "k", "unsent"), { email: false, inApp: false }, "§1 giveUp(): not while a live call holds the row (its send may still land)");
+	db.prepare("UPDATE t_alerts SET claimed_at = NULL WHERE k = 'unsent'").run();
+	eq(ac.giveUp(db, "t_alerts", "k", "unsent"), { email: true, inApp: false }, "§1 giveUp(): the email still owed after a person was told in-app");
 	eq(ac.giveUp(db, "t_alerts", "k", "unsent"), { email: false, inApp: false }, "§1 …and only once");
 	let refused = false;
-	try { ac.claim(db, "t_alerts; DROP TABLE t_alerts", "k", "x"); } catch { refused = true; }
-	ok("§1 a table name that is not an identifier is refused", refused);
+	try { ac.ensureColumns(db, "t_alerts; DROP TABLE t_alerts"); } catch { refused = true; }
+	ok("§1 a table name that is not an identifier is refused", refused && !!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 't_alerts'").get());
+
+	// The columns can't be added: logged once, and the ledger keeps the old rule.
+	const real = new Database(":memory:");
+	real.exec("CREATE TABLE f_alerts (k TEXT PRIMARY KEY, alerted_at TEXT)");
+	const broken = { prepare: (s) => { if (/^ALTER TABLE/.test(s)) throw new Error("database is locked (test)"); return real.prepare(s); } };
+	const logs = [];
+	const log = { error: (...a) => logs.push(a.join(" ")) };
+	eq([ac.prepareLedger(broken, "f_alerts", [], log), ac.prepareLedger(broken, "f_alerts", [], log), logs.length], [false, false, 1],
+		"§1 prepareLedger(): an ALTER that fails answers false, is not tried again, and is logged once");
+	const c3 = ac.claim(broken, "f_alerts", "k", "x");
+	ac.stampSent(broken, "f_alerts", "k", "x", "email");
+	ok("§1 an untracked ledger keeps the old rule: claim() answers both channels, unclaimed", !!c3 && c3.email && c3.inApp && c3.claimedAt === null, c3);
+	eq([ac.owesSql(broken, "f_alerts"), ac.retryCandidates(broken, "f_alerts"), ac.giveUp(broken, "f_alerts", "k", "x")],
+		["alerted_at IS NULL", { expired: [], due: [] }, { email: false, inApp: false }], "§1 …its owed test is the old one, and nothing is retried or given up");
 }
 
 // ===========================================================================
@@ -198,9 +227,36 @@ async function section2() {
 		tick: (w, vid) => w.alertEldFeedSilence(feed(vid)),
 		legacyInsert: (db, vid) => db.prepare("INSERT INTO eld_feed_alerts (alert_key, truck_unit, alert_condition, first_seen, alerted_at) VALUES (?, ?, 'stale', ?, ?)")
 			.run(`vid:${vid}`, `TEST-${vid}`, hoursAgo(80), hoursAgo(79)),
-		table: "eld_feed_alerts", keyCol: "alert_key", key: (vid) => `vid:${vid}`, ids: ["vid9101", "vid9102", "vid9103", "vid9104", "vid9105", "vid9106"],
+		table: "eld_feed_alerts", keyCol: "alert_key", key: (vid) => `vid:${vid}`, ids: ["vid9101", "vid9102", "vid9103", "vid9104", "vid9105", "vid9106", "vid9107"],
 		reopen: (db, vid) => db.prepare("UPDATE eld_feed_alerts SET resolved_at = ?, alerted_at = ? WHERE alert_key = ?").run(hoursAgo(1), hoursAgo(25), `vid:${vid}`),
 	});
+	{
+		// The daily cap counts sends, once per alert: the email's retry is not a second one.
+		const db = freshDb();
+		const w = world(db);
+		const sendLog = () => {
+			const r = db.prepare("SELECT value FROM server_state WHERE key = 'eld_feed_alert_sends'").get();
+			return r ? JSON.parse(r.value).length : 0;
+		};
+		w.ch.mailOk = false;
+		await attempt(() => w.alertEldFeedSilence(feed("vid9201")));
+		const afterFirst = sendLog();
+		w.ch.mailOk = true;
+		await attempt(() => w.alertEldFeedSilence(feed("vid9201")));
+		eq([afterFirst, sendLog(), w.ch.sends.length], [1, 1, 2], "§2 ELD feed: the email's retry goes out without counting a second send against the daily cap");
+	}
+	{
+		// The columns can't be added: logged once, and the alert keeps its old rule.
+		const real = freshDb();
+		const db = { prepare: (s) => { if (/^ALTER TABLE/.test(s)) throw new Error("database is locked (test)"); return real.prepare(s); } };
+		const w = world(db);
+		const r1 = await attempt(() => w.alertEldFeedSilence(feed("vid9301")));
+		const r2 = await attempt(() => w.alertEldFeedSilence(feed("vid9301")));
+		ok("§2 ELD feed, the columns can't be added: the alert still goes out by both channels and is stamped",
+			r1 && r1.alerted === true && w.ch.sends.length === 1 && w.ch.notes.length === 1 && !!rowOf(real, "eld_feed_alerts", "alert_key", "vid:vid9301").alerted_at, r1);
+		ok("§2 …a second sweep dedupes it as before", r2 && r2.reason === "already_alerted" && w.ch.sends.length === 1, r2);
+		eq(w.ch.logs.filter((l) => /per-channel columns could not be added/.test(l)).length, 1, "§2 …and the failure is logged once");
+	}
 }
 
 async function section3() {
@@ -230,14 +286,14 @@ async function section3() {
 		tick: (w, unit) => w.alertDuplicateReceipts(group(unit)),
 		legacyInsert: (db, unit) => db.prepare("INSERT INTO expense_duplicate_alerts (group_key, truck_unit, first_seen, alerted_at) VALUES (?, ?, ?, ?)")
 			.run(key(unit), unit, hoursAgo(80), hoursAgo(79)),
-		table: "expense_duplicate_alerts", keyCol: "group_key", key, ids: ["TU-31", "TU-32", "TU-33", "TU-34", "TU-35", "TU-36"],
+		table: "expense_duplicate_alerts", keyCol: "group_key", key, ids: ["TU-31", "TU-32", "TU-33", "TU-34", "TU-35", "TU-36", "TU-37"],
 		reopen: (db, unit) => db.prepare("UPDATE expense_duplicate_alerts SET resolved_at = ? WHERE group_key = ?").run(hoursAgo(1), key(unit)),
 	});
 }
 
 // The cases every alert shares. `send` is the first sighting; `tick` the later one that retries.
 async function channelCases(tag, o) {
-	const [idA, idB, idC, idD, idE, idF] = o.ids;
+	const [idA, idB, idC, idD, idE, idF, idG] = o.ids;
 	{
 		// Email fails, in-app goes.
 		const db = o.freshDb();
@@ -303,29 +359,45 @@ async function channelCases(tag, o) {
 		}
 	}
 	{
-		// Past the retry window: given up.
+		// Told in-app, the email still undelivered 48 h later: the email is given up.
 		const db = o.freshDb();
 		const w = o.world(db);
 		w.ch.mailOk = false;
 		await attempt(() => o.send(w, idE));
-		const aged = tryRun(db, `UPDATE ${o.table} SET first_try = ? WHERE ${o.keyCol} = ?`, hoursAgo(49), o.key(idE));
+		const aged = tryRun(db, `UPDATE ${o.table} SET alerted_at = ?, notified_at = ?, first_try = ? WHERE ${o.keyCol} = ?`, hoursAgo(49), hoursAgo(49), hoursAgo(49), o.key(idE));
 		w.ch.mailOk = true;
 		const sends = w.ch.sends.length;
 		const r = await attempt(() => o.tick(w, idE));
-		ok(`${tag}, past the 48 h window: nothing is sent`, aged && w.ch.sends.length === sends && w.ch.notes.length === 1, { aged, r });
-		eq(o.led(db, idE).email_skipped, "gave_up", `${tag}, past the 48 h window: the email is given up`);
-		ok(`${tag}, past the 48 h window: one GAVE UP log line`, w.ch.logs.filter((l) => /GAVE UP/.test(l)).length === 1, w.ch.logs);
+		ok(`${tag}, the email still undelivered 48 h after the in-app notice: nothing is sent`, aged && w.ch.sends.length === sends && w.ch.notes.length === 1, { aged, r });
+		eq(o.led(db, idE).email_skipped, "gave_up", `${tag}, the email still undelivered 48 h after the in-app notice: it is given up`);
+		ok(`${tag}, …with one GAVE UP log line`, w.ch.logs.filter((l) => /GAVE UP/.test(l)).length === 1, w.ch.logs);
 		await attempt(() => o.tick(w, idE));
 		ok(`${tag}, given up: never retried or logged again`, w.ch.sends.length === sends && w.ch.logs.filter((l) => /GAVE UP/.test(l)).length === 1, w.ch.logs);
 	}
 	{
-		// No GMAIL_USER: the email is skipped, not owed.
+		// Nothing delivered, first tried 49 h ago: never given up, still retried (the owner's decision).
 		const db = o.freshDb();
-		const saved = PROCESS.env.GMAIL_USER;
-		delete PROCESS.env.GMAIL_USER;
+		const w = o.world(db);
+		w.ch.mailOk = false;
+		w.ch.inAppOk = false;
+		await attempt(() => o.send(w, idG));
+		const aged = tryRun(db, `UPDATE ${o.table} SET first_try = ? WHERE ${o.keyCol} = ?`, hoursAgo(49), o.key(idG));
+		w.ch.mailOk = true;
+		w.ch.inAppOk = true;
+		const sends = w.ch.sends.length;
+		await attempt(() => o.tick(w, idG));
+		const row = o.led(db, idG);
+		ok(`${tag}, nothing delivered and first tried 49 h ago: not given up, both channels retried and delivered`,
+			aged && w.ch.sends.length === sends + 1 && w.ch.notes.length === 1 && !row.email_skipped && !row.notify_skipped && !!row.alerted_at, { aged, row });
+	}
+	for (const [label, env] of [["no GMAIL_USER", { GMAIL_APP_PASSWORD: "app-password-under-test" }], ["GMAIL_USER but no GMAIL_APP_PASSWORD", { GMAIL_USER: "ops@example.test" }]]) {
+		// No mailbox configured: the email is skipped, not owed.
+		const db = o.freshDb();
+		const saved = PROCESS.env;
+		PROCESS.env = env;
 		let w;
-		try { w = o.world(db); await attempt(() => o.send(w, idB)); } finally { PROCESS.env.GMAIL_USER = saved; }
-		eq([w.ch.sends.length, w.ch.notes.length, o.led(db, idB).email_skipped], [0, 1, "no_recipient"], `${tag}, no GMAIL_USER: no email, the in-app notification, and the email skipped (no_recipient)`);
+		try { w = o.world(db); await attempt(() => o.send(w, idB)); } finally { PROCESS.env = saved; }
+		eq([w.ch.sends.length, w.ch.notes.length, o.led(db, idB).email_skipped], [0, 1, "no_recipient"], `${tag}, ${label}: no email, the in-app notification, and the email skipped (no_recipient)`);
 	}
 }
 
@@ -358,7 +430,7 @@ async function section4() {
 		tick: (w, id) => w.alertUnusableRateConExtraction(sighting(id)),
 		legacyInsert: (db, id) => db.prepare("INSERT INTO ratecon_extract_alerts (load_id, unusable, first_seen, alerted_at) VALUES (?, 'Drop-off Address', ?, ?)")
 			.run(id, hoursAgo(80), hoursAgo(79)),
-		table: "ratecon_extract_alerts", keyCol: "load_id", key: (id) => id, ids: ["RX-9101", "RX-9102", "RX-9103", "RX-9104", "RX-9105", "RX-9106"],
+		table: "ratecon_extract_alerts", keyCol: "load_id", key: (id) => id, ids: ["RX-9101", "RX-9102", "RX-9103", "RX-9104", "RX-9105", "RX-9106", "RX-9107"],
 	});
 	await channelCases("§4 unusable address (retry sweep)", {
 		freshDb, led,
@@ -367,7 +439,7 @@ async function section4() {
 		tick: (w, id) => sweepLater(w, w.db, id),
 		legacyInsert: (db, id) => db.prepare("INSERT INTO ratecon_extract_alerts (load_id, unusable, first_seen, alerted_at) VALUES (?, 'Drop-off Address', ?, ?)")
 			.run(id, hoursAgo(80), hoursAgo(79)),
-		table: "ratecon_extract_alerts", keyCol: "load_id", key: (id) => id, ids: ["RX-9201", "RX-9202", "RX-9203", "RX-9204", "RX-9205", "RX-9206"],
+		table: "ratecon_extract_alerts", keyCol: "load_id", key: (id) => id, ids: ["RX-9201", "RX-9202", "RX-9203", "RX-9204", "RX-9205", "RX-9206", "RX-9207"],
 		retriesUntried: false,
 	});
 	{
@@ -434,8 +506,9 @@ async function section5() {
 		await sweepLater(w, "UL-9101");
 		const mail = digestMails(w)[digestMails(w).length - 1] || { html: "" };
 		eq([digestMails(w).length - mails, digestNotes(w).length], [1, 1], "§5 email fails and in-app goes: the retry sweep sends only the email");
-		ok("§5 …naming the load, its driver and pickup, and saying it is a retry",
-			/UL-9101/.test(mail.html) && /Test Driver Una/.test(mail.html) && /10\/05\/2026 08:00/.test(mail.html) && /This is a retry/.test(mail.html), mail.html.slice(0, 300));
+		ok("§5 …naming the load, its driver and pickup, and saying it is a retry, listed as of its first try (Eastern)",
+			/UL-9101/.test(mail.html) && /Test Driver Una/.test(mail.html) && /10\/05\/2026 08:00/.test(mail.html) && /This is a retry/.test(mail.html)
+				&& /listed as of [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2}\s[AP]M E[DS]T/.test(mail.html), mail.html.slice(0, 600));
 		ok("§5 …and the email is stamped", !!led(w.db, "UL-9101").emailed_at);
 		await sweepLater(w, "UL-9101");
 		const r2 = await attempt(() => w.runUndatedLoadAlerts({ range: RANGE }));
@@ -485,20 +558,87 @@ async function section5() {
 		const w = world(freshDb());
 		w.ch.mailOk = false;
 		await newLoad(w, "UL-9106");
-		const aged = tryRun(w.db, "UPDATE invoice_undated_alerts SET first_try = ? WHERE load_key = 'ul-9106'", hoursAgo(49));
+		const aged = tryRun(w.db, "UPDATE invoice_undated_alerts SET alerted_at = ?, notified_at = ?, first_try = ? WHERE load_key = 'ul-9106'", hoursAgo(49), hoursAgo(49), hoursAgo(49));
 		w.ch.mailOk = true;
 		await attempt(() => w.retryUndatedLoadAlerts({}));
-		ok("§5 past the 48 h window: the sweep sends nothing", aged && digestMails(w).length === 1, { aged, mails: digestMails(w).length });
-		eq(led(w.db, "UL-9106").email_skipped, "gave_up", "§5 past the 48 h window: the email is given up");
-		ok("§5 past the 48 h window: one GAVE UP log line naming the load", w.ch.logs.filter((l) => /GAVE UP/.test(l) && /UL-9106/.test(l)).length === 1, w.ch.logs);
+		ok("§5 the email still undelivered 48 h after the in-app digest: the sweep sends nothing", aged && digestMails(w).length === 1, { aged, mails: digestMails(w).length });
+		eq(led(w.db, "UL-9106").email_skipped, "gave_up", "§5 …and the email is given up");
+		ok("§5 …with one GAVE UP log line naming the load", w.ch.logs.filter((l) => /GAVE UP/.test(l) && /ul-9106/i.test(l)).length === 1, w.ch.logs);
 	}
 	{
+		// Nothing delivered, first tried 49 h ago: never given up, still retried (the owner's decision).
+		const w = world(freshDb());
+		w.ch.mailOk = false;
+		w.ch.inAppOk = false;
+		await newLoad(w, "UL-9109");
+		const aged = tryRun(w.db, "UPDATE invoice_undated_alerts SET first_try = ? WHERE load_key = 'ul-9109'", hoursAgo(49));
+		w.ch.mailOk = true;
+		w.ch.inAppOk = true;
+		await sweepLater(w, "UL-9109");
+		const row = led(w.db, "UL-9109");
+		ok("§5 nothing delivered and first tried 49 h ago: not given up; the sweep sends both channels",
+			aged && digestMails(w).length === 2 && digestNotes(w).length === 1 && !row.email_skipped && !row.notify_skipped && !!row.alerted_at, { aged, row });
+	}
+	for (const [label, env] of [["no GMAIL_USER", { GMAIL_APP_PASSWORD: "app-password-under-test" }], ["GMAIL_USER but no GMAIL_APP_PASSWORD", { GMAIL_USER: "ops@example.test" }]]) {
 		const db = freshDb();
-		const saved = PROCESS.env.GMAIL_USER;
-		delete PROCESS.env.GMAIL_USER;
+		const saved = PROCESS.env;
+		PROCESS.env = env;
 		let w;
-		try { w = world(db); await newLoad(w, "UL-9107"); } finally { PROCESS.env.GMAIL_USER = saved; }
-		eq([digestMails(w).length, digestNotes(w).length, led(db, "UL-9107").email_skipped], [0, 1, "no_recipient"], "§5 no GMAIL_USER: no email, the in-app digest, the email skipped (no_recipient)");
+		try { w = world(db); await newLoad(w, "UL-9107"); } finally { PROCESS.env = saved; }
+		eq([digestMails(w).length, digestNotes(w).length, led(db, "UL-9107").email_skipped], [0, 1, "no_recipient"], `§5 ${label}: no email, the in-app digest, the email skipped (no_recipient)`);
+	}
+	{
+		// Only the loads a channel that went out carried are told. UL-9111 owes only the in-app
+		// notification (its email was skipped: no mailbox then); UL-9112 is new. The email (UL-9112
+		// only) goes out, the in-app digest (both) fails.
+		const db = freshDb();
+		const saved = PROCESS.env;
+		PROCESS.env = { GMAIL_USER: "ops@example.test" };
+		let w;
+		try {
+			w = world(db);
+			w.ch.inAppOk = false;
+			await newLoad(w, "UL-9111");
+		} finally { PROCESS.env = saved; }
+		const before = led(db, "UL-9111");
+		w.sheet.rows.push(sheetRow("UL-9112"));
+		const r = await attempt(() => w.runUndatedLoadAlerts({ range: RANGE }));
+		const a = led(db, "UL-9111");
+		ok("§5 set-up: UL-9111 owes only the in-app notification, told by nothing", before.email_skipped === "no_recipient" && !before.alerted_at, before);
+		ok("§5 the email carried only UL-9112", r && r.emailed === true && digestMails(w).length === 1 && /UL-9112/.test(digestMails(w)[0].html) && !/UL-9111/.test(digestMails(w)[0].html), r);
+		eq([a.alerted_at, a.notified_at, a.notify_skipped], [null, null, null], "§5 UL-9111, on the in-app list only, whose in-app digest failed: not told, still owes the in-app notification");
+		ok("§5 UL-9112, carried by the email: told", !!led(db, "UL-9112").alerted_at && !!led(db, "UL-9112").emailed_at);
+	}
+	{
+		// A load given a date on Job Tracking after the first try is left out of the retry, still owed.
+		const w = world(freshDb());
+		w.ch.mailOk = false;
+		await newLoad(w, "UL-9113");
+		w.ch.mailOk = true;
+		w.sheet.rows[w.sheet.rows.length - 1] = sheetRow("UL-9113", true);
+		await sweepLater(w, "UL-9113");
+		const row = led(w.db, "UL-9113");
+		eq([digestMails(w).length, row.emailed_at, row.email_skipped, row.resolved_at], [1, null, null, null],
+			"§5 a load dated since the first try: the retry leaves it out, and it stays owed and open (only the weekly run resolves)");
+		ok("§5 …and the sweep says so", w.ch.logs.some((l) => /1 load\(s\) no longer listed on Job Tracking, left owed/.test(l)), w.ch.logs);
+		w.sheet.rows[w.sheet.rows.length - 1] = sheetRow("UL-9113");
+		await sweepLater(w, "UL-9113");
+		eq(digestMails(w).length, 2, "§5 listed again: the next retry sends its email");
+	}
+	{
+		// The cap is full of loads told today; a retry of a load already told is free, a new one waits.
+		const db = freshDb();
+		const w = world(db);
+		w.ch.mailOk = false;
+		await newLoad(w, "UL-9114");
+		const ins = db.prepare("INSERT INTO invoice_undated_alerts (load_key, driver, first_seen, alerted_at, resolved_at) VALUES (?, '', ?, ?, ?)");
+		for (let i = 0; i < 25; i++) ins.run(`ul-cap-${i}`, hoursAgo(2), hoursAgo(1), hoursAgo(0.5));
+		w.ch.mailOk = true;
+		await sweepLater(w, "UL-9114");
+		eq([digestMails(w).length, !!led(db, "UL-9114").emailed_at], [2, true], "§5 the daily cap is full: the retry of a load already told still goes out (it was counted once)");
+		w.sheet.rows.push(sheetRow("UL-9115"));
+		const r = await attempt(() => w.runUndatedLoadAlerts({ range: RANGE }));
+		eq([r.digest, r.held], [0, 1], "§5 …while a new load waits for a slot");
 	}
 	{
 		// A re-opened load owes both channels again.
@@ -573,7 +713,8 @@ async function section7() {
 			const lateEvening = "2026-10-12T02:30:00.000Z";
 			ins.run("rh-5102", "Payment", "$700.00", lateEvening, lateEvening, lateEvening, null, null, "gave_up", "RH-5102");
 			ins.run("rh-5103", "Payment", "$650.00", t, t, t, t, null, null, "RH-5103");
-			ins.run("rh-5104", "Payment", "$640.00", t, t, null, t, "daily_cap", null, "RH-5104");
+			// SQLite's UTC "YYYY-MM-DD HH:MM:SS": 4:00 AM Eastern on Oct 12 (Oct 11 if read as local time east of UTC+4).
+			ins.run("rh-5104", "Payment", "$640.00", "2026-10-12 08:00:00", t, null, t, "daily_cap", null, "RH-5104");
 		}
 		return db;
 	};
@@ -605,6 +746,8 @@ async function section7() {
 	db.prepare("UPDATE ratecon_reissue_holds SET email_skipped = 'gave_up' WHERE load_id = 'rh-5104'").run();
 	const r3 = await attempt(() => run(db, new Date("2026-10-16T12:30:00Z"), []));
 	ok("§7 a row given up later is named on the next run, alone", !!(r3 && r3.report) && /RH-5104/.test(r3.report.text) && !/RH-5101|RH-5102/.test(r3.report.text), r3 && r3.report && r3.report.text);
+	ok("§7 a first_seen in SQLite's UTC form is read as UTC (Oct 12 in Eastern), not as the server's local time",
+		!!(r3 && r3.report) && /Load RH-5104: [^\n]*first seen Oct 12, 2026\./.test(r3.report.text), r3 && r3.report && r3.report.text);
 	const none = await attempt(() => run(makeDb({ holds: false }), new Date("2026-10-14T12:30:00Z"), []));
 	ok("§7 a database with no re-issue ledger: no error and no section", !!(none && none.ok) && !/Re-issued rate con/.test(none.report.text), none);
 }

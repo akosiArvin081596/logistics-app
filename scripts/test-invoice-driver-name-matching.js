@@ -109,7 +109,7 @@ function liftFragment(src, anchor, terminator, label) {
 const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
-	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY", "INVOICE_UNDATED_EXTRA_COLUMNS",
+	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
 const SHARED_FNS = [
 	"appDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
@@ -130,9 +130,9 @@ const SHARED_FNS = [
 	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth",
 	// The Friday batch and its mail.
 	"escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "generateInvoiceInProcess", "abortAutogenRun",
-	"listUndatedCompletedLoads", "undatedLoadPayload", "undatedLoadFromRow", "undatedAlertedToday",
+	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
 	"rerenderInvoicePdfFromStoredData"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
