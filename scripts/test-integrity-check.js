@@ -43,7 +43,9 @@
  *      sheet (no default; --sheet-id=env with no SPREADSHEET_ID is a refusal,
  *      exit 2), opens the database read-only, prints what it would
  *      send, writes nothing (the file is byte-identical, no state table is
- *      created) and never sends mail
+ *      created) and never sends mail; with no lock table to read, check 5
+ *      counts the load as untold (not closed) and says the closed months
+ *      can't be read
  *
  * Hermetic: in-memory SQLite and a mkdtemp directory; no network.
  *   node scripts/test-integrity-check.js
@@ -718,6 +720,25 @@ async function section7() {
 		ok("with state: the database file is still unchanged (no state write)", sha(dbFile) === h1);
 		const noMail = cli(["--print", ...base]);
 		ok("without --mailbox or --emails-json: check 3 says the mailbox was not read", /mailbox/i.test(noMail.stdout) && noMail.status === 0, noMail.stdout);
+
+		// Check 5 with no lock table to read: the load is counted as untold, not
+		// as closed, and the run says the closed months can't be read.
+		const lockless = path.join(tmp, "lockless.db");
+		const ldb = new Database(lockless);
+		ldb.exec(`
+			CREATE TABLE expenses (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL DEFAULT '', driver TEXT NOT NULL DEFAULT 'd',
+				load_id TEXT DEFAULT '', type TEXT NOT NULL DEFAULT 'Fuel', amount REAL NOT NULL DEFAULT 10, description TEXT DEFAULT '',
+				date TEXT NOT NULL, status TEXT DEFAULT 'Pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, posted_period TEXT DEFAULT '');
+			CREATE TABLE invoices (id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL DEFAULT 'd',
+				status TEXT NOT NULL DEFAULT 'Draft', expense_ids TEXT DEFAULT '[]', deleted_at TEXT DEFAULT '');
+			CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, invoice_id TEXT, sheet_total TEXT, created_at TEXT);
+		`);
+		ldb.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, sheet_total, created_at) VALUES ('333', 'INV-333', '$450.00', '2026-10-10T12:00:00Z')").run();
+		ldb.close();
+		fs.writeFileSync(path.join(tmp, "values5.json"), JSON.stringify({ values: [["Load ID", "Pickup Appointment", "Assigned Date", "Payment"], ["333", "10/9/2026", "10/9/2026", "$500.00"]] }));
+		const noLocks = cli(["--print", `--db=${lockless}`, `--values-json=${path.join(tmp, "values5.json")}`, `--env-file=${path.join(tmp, "settings.env")}`]);
+		ok("check 5 with no lock table: the load is untold, not closed, and the run says the closed months can't be read",
+			noLocks.status === 0 && /1 whose month can't be told \(a date that can't be placed, or closed months that can't be read\)/.test(noLocks.stdout) && !/in a closed month/.test(noLocks.stdout), noLocks.stdout + noLocks.stderr);
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}

@@ -54,8 +54,9 @@ function liftFromServer() {
 }
 
 // Check 5's closed-month rule, read as the server reads it: the row's accounting
-// months that period_locks marks 'locked'. A lock table that can't be read makes
-// every month closed, as the server's periodWriteLocked() does.
+// months that period_locks marks 'locked'. A lock table that can't be read
+// answers null for every row, as the server's integrityClosedMonthsOf() does:
+// the check counts those loads and says the closed months can't be read.
 function closedMonthsRule(db, loadRowAccountingMonths) {
 	let locked = null;
 	try {
@@ -64,9 +65,10 @@ function closedMonthsRule(db, loadRowAccountingMonths) {
 		locked = null;
 	}
 	return (headers, row) => {
+		if (locked === null) return null;
 		const months = loadRowAccountingMonths(headers, headers.map((h) => row[h]));
 		if (months === null) return null;
-		return locked === null ? months : months.filter((mk) => locked.has(mk));
+		return months.filter((mk) => locked.has(mk));
 	};
 }
 

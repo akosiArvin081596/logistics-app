@@ -36,6 +36,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
@@ -175,7 +176,7 @@ if (!process.env.SERVER_JS) {
 		const warnings = [];
 		const quiet = { ...console, error: () => {}, warn: (m) => warnings.push(m) };
 		new Function("getSheets", "SPREADSHEET_ID", "n8nKeepStoredLimiter", "console", "process", "app", "require", "db", "alertRateConReissueHold", `"use strict";\n${lifted.text}`)(
-			async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET } }, app, require,
+			async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET } }, app, createRequire(path.join(ROOT, "server.js")),
 			kdb, (a) => { reissueAlerts.push(a); return Promise.resolve({ alerted: true }); },
 		);
 		const post = async (body, { secret = SECRET } = {}) => {
