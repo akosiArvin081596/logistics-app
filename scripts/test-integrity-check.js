@@ -634,7 +634,7 @@ async function section6() {
 	const rule = SRC.match(/\nfunction integrityClosedMonthsOf\(headers, row\) \{[\s\S]*?\n\}/);
 	ok("that rule is loadRowAccountingMonths() filtered by periodWriteLocked() (one rule, not a copy)",
 		!!rule && /loadRowAccountingMonths\(headers, headers\.map\(\(h\) => row\[h\]\)\)/.test(rule[0]) && /periodWriteLocked\(mk\)/.test(rule[0]));
-	ok("no sendEmail() call of its own in server.js (the five admin sends stay five)", !/sendEmail\(ADMIN_NOTIFY_EMAIL/.test(block));
+	ok("no sendEmail() call of its own in server.js (the six admin sends stay six)", !/sendEmail\(ADMIN_NOTIFY_EMAIL/.test(block));
 	const example = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 	ok(".env.example documents INTEGRITY_CHECK_ENABLED as a kill switch", /\nINTEGRITY_CHECK_ENABLED=true\n/.test(example) && /integrity/i.test(example));
 	const lib = fs.readFileSync(path.join(ROOT, "lib", "integrity-check.js"), "utf8");

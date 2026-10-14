@@ -10,9 +10,11 @@
  *
  *   §1 POST /api/n8n/keep-stored-values, lifted, with a stand-in Job Tracking and an in-memory
  *      load_invoice_drafts and period_locks (their CREATE TABLEs taken from server.js). For a load
- *      whose Job Status is delivered (/^(delivered|completed|pod received)$/i) or that has an
- *      invoice draft:
- *      - Payment, Pickup Appointment and Drop-off Appointment come back as stored;
+ *      whose Job Status is delivered (DISPATCH_COMPLETED_RE, the dispatch guard's own rule), that
+ *      has an invoice draft, or on a sheet with no Job Status column (status unknown: fails closed):
+ *      - Payment, Pickup Appointment and Drop-off Appointment come back as stored, each found by
+ *        header pattern, REISSUE_HELD_COLUMN_RES ("Pickup Appointment Time", "Drop Off Appointment", "Payment ($)"
+ *        too, compared in cents and as moments);
  *      - a blank stored date is not filled either;
  *      - the response names each held column with the stored and the sent value, and why;
  *      - the same amount or moment in another format is not a hold;
@@ -26,17 +28,23 @@
  *      into one included) gets EVERY column back as stored (no fallback fills a blank), whatever
  *      its status; so does a load with a date that can't be placed, a load when the lock table
  *      can't be read, and a load whose OUTGOING values would book it into a closed month (a
- *      blank stored date filled with a closed-month one, or a row with no dates yet); a load
- *      that is neither delivered, invoiced nor in a closed month still gets every value as sent,
- *      with nothing held and no alert; RATECON_REISSUE_HOLD_ENABLED=false turns the hold off;
+ *      blank stored date filled with a closed-month one, or a row with no dates yet, or a
+ *      delivered load's blank Assigned Date sent in a closed month) or carry a date that can't
+ *      be placed (an ordinary load sent "TBD"); when every column is held, a blank stored
+ *      Assigned Date the email would fill is listed as held and alerted; a load
+ *      that is neither delivered, invoiced nor in a closed month (a blank Job Status cell
+ *      included) still gets every value as sent, with nothing held and no alert; RATECON_REISSUE_HOLD_ENABLED=false turns the hold off;
  *      a found load's answer names its stored Load ID cell (storedLoadId); the route never
  *      writes the sheet.
  *   §2 alertRateConReissueHold(): once per load, column and sent value (a dedupe ledger like
  *      ratecon_extract_alerts); a new sent value alerts again; alerted_at is stamped only on a
  *      confirmed delivery (the email or the in-app notification), so a failed send retries; two
- *      overlapping calls send once (claimed_at), a stale claim is retaken, a table made before
- *      claimed_at gets it; ids with spaces or "/" are their own loads; the daily cap records and
- *      doesn't send; the email says why it held; first_seen and alerted_at are ISO strings; it
+ *      overlapping calls send once (claimed_at), a stale claim is retaken, an already-alerted row
+ *      is never sent again even when its claim is stale, a table made before claimed_at gets it;
+ *      ids with spaces or "/" are their own loads; past the daily cap (counted in distinct loads)
+ *      no email goes, but the in-app notification does and the change is stamped, so it is
+ *      reported once; the in-app notification shows each column's old and new value, except a
+ *      broker contact column (BROKER_WITHHELD_RE), named without values; the email says why it held; first_seen and alerted_at are ISO strings; it
  *      writes no table but its own.
  *   §3 the daily integrity check, check 5: a load whose Job Tracking Payment differs from the
  *      sheet's figure when its invoice was drafted (load_invoice_drafts.sheet_total, the latest
@@ -49,7 +57,9 @@
  *      closed-month rule, skips the check and says so in the log line.
  *   §4 lib/cell-compare.js, the one amount and moment reading both sides use: cents
  *      (trailing zeros, accounting negatives), moments (a date alone is 0:00, ISO and US forms);
- *      server.js's reissueSameValue() reads through it.
+ *      server.js's reissueSameValue() reads through it; reissueHeldColumn() holds Payment and the
+ *      pickup and drop-off dates under the names its patterns read, and no other column of the sheet
+ *      (Completion Date and Status Update Date included).
  *
  * SERVER_JS=<file> runs against another copy of server.js (a mutant, to show a case fails).
  * Pure: no server, no network. Run: node scripts/test-ratecon-reissue-hold.js  # exits 1 on failure
@@ -129,12 +139,22 @@ const BLANK_PICKUP = row({ "Load ID": "900000112", Details: "Lumber", "Pickup Ap
 const NO_DATES = row({ "Load ID": "900000113", Details: "Pallets", "Job Status": "Dispatched" });
 // Stored under another spelling of its id.
 const STORED_SPELLING = row({ "Load ID": "#X900000114", Details: "Drums", "Pickup Appointment": "10/13/2026 08:00", "Drop-off Appointment": "10/14/2026 0:00", "Job Status": "Dispatched", "Assigned Date": "10/12/2026, 9:00:00 AM", "  Payment  ": " $ 1,000.00 " });
-const SHEET = [HEADERS, DELIVERED, IN_TRANSIT_INVOICED, DISPATCHED, DELIVERED_NO_PICKUP, CLOSED_MONTH, DELIVERED_NO_ASSIGNED, TBD_PICKUP, POD_RECEIVED, COMPLETED, SPAN, BLANK_PICKUP, NO_DATES, STORED_SPELLING];
+// An open-month load whose Job Status cell is blank, with no invoice draft: nothing to hold.
+const BLANK_STATUS = row({ "Load ID": "900000133", Details: "Cartons", "Pickup Appointment": "10/13/2026 08:00", "Drop-off Appointment": "10/14/2026 0:00", "Job Status": "", "Assigned Date": "10/12/2026, 9:00:00 AM", "  Payment  ": " $ 1,200.00 " });
+const SHEET = [HEADERS, DELIVERED, IN_TRANSIT_INVOICED, DISPATCHED, DELIVERED_NO_PICKUP, CLOSED_MONTH, DELIVERED_NO_ASSIGNED, TBD_PICKUP, POD_RECEIVED, COMPLETED, SPAN, BLANK_PICKUP, NO_DATES, STORED_SPELLING, BLANK_STATUS];
 // What n8n sends for the post-delivery re-issue of 900000101.
 const REISSUE = { "Load ID": "900000101", Details: "Paper rolls, 6 Roll(s), 12,345 lbs, Equipment: Van 53", "Pickup Info": "Test Mill REF/PU#: 1000000001, DEL#: 100001", "Pickup Appointment": "10/8/2026 00:00", "Pickup Address": "1 Test Ln, Testville, OK 70000", "Drop-off Appointment": "10/9/2026 00:01", "Assigned Date": "10/13/2026, 8:00:00 AM", Documents: "", "  Payment  ": "$1,184.56" };
 
-// The route, lifted, on `db` (a function: the database it reads at call time), with `env`.
-function liftRoute({ db, env = {} }) {
+// Job Tracking with its columns named otherwise: each found by header pattern (REISSUE_HELD_COLUMN_RES).
+const ALT_HEADERS = ["Load ID", "Details", "Pickup Appointment Time", "Drop Off Appointment", "Job Status", "Assigned Date", "Payment ($)"];
+const ALT_SHEET = [ALT_HEADERS, ["900000131", "Steel", "10/9/2026 08:00", "10/10/2026 0:00", "Delivered", "10/8/2026, 9:00:00 AM", "$1,500.00"]];
+// Job Tracking with no Job Status column: an ordinary October load, not invoiced.
+const NO_STATUS_HEADERS = ["Load ID", "Details", "Pickup Appointment", "Drop-off Appointment", "Assigned Date", "  Payment  "];
+const NO_STATUS_SHEET = [NO_STATUS_HEADERS, ["900000132", "Tiles", "10/12/2026 08:00", "10/13/2026 0:00", "10/11/2026, 9:00:00 AM", " $ 2,000.00 "]];
+
+// The route, lifted, on `db` (a function: the database it reads at call time), with `env`,
+// reading `sheet` as Job Tracking.
+function liftRoute({ db, env = {}, sheet = SHEET }) {
 	const alerts = [];
 	const lifted = closure(SRC, {
 		routes: [KHEAD],
@@ -145,7 +165,7 @@ function liftRoute({ db, env = {} }) {
 	const app = { post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
 	const calls = [];
 	const sheets = { spreadsheets: { values: {
-		get: async (q) => { calls.push(["get", q.range]); return { data: { values: SHEET } }; },
+		get: async (q) => { calls.push(["get", q.range]); return { data: { values: sheet } }; },
 		update: async () => { calls.push(["update"]); }, append: async () => { calls.push(["append"]); }, batchUpdate: async () => { calls.push(["batchUpdate"]); },
 	}, batchUpdate: async () => { calls.push(["batchUpdate"]); } } };
 	const logs = [];
@@ -211,6 +231,30 @@ async function section1() {
 	check("§1 delivered, no stored Assigned Date: and alerted as a change",
 		alerts.length === 1 && ((alerts[0].changed || []).some((c) => c.column === "Assigned Date")), alerts);
 
+	// Low 1: the same delivered load, its blank Assigned Date sent in closed September. The
+	// load is already held (delivered), and the values going out are still checked.
+	alerts.length = 0;
+	const lc = await post({ loadId: "900000107", values: { "Load ID": "900000107", Details: "Boxes, 4 pallets", "Assigned Date": "9/28/2026, 9:00:00 AM", "  Payment  ": "$480.00" } });
+	const lcv = valuesOf(lc);
+	check("§1 delivered, a blank Assigned Date sent in a closed month: every column comes back as stored",
+		lcv["Load ID"] === "900000107" && lcv.Details === "Boxes" && lcv["Assigned Date"] === "" && lcv["  Payment  "] === " $ 500.00 ", lcv);
+	check("§1 delivered, a blank Assigned Date sent in a closed month: the reason says the re-issue's dates are in a closed month",
+		/delivered/.test(reasonOf(lc)) && /the re-issue's dates are in a closed month \(2026-09\)/.test(reasonOf(lc)), reasonOf(lc));
+	const lcAssigned = ((lc.body && lc.body.held) || []).find((h) => h.column === "Assigned Date");
+	check("§1 delivered, a blank Assigned Date sent in a closed month: the Assigned Date is held (stored blank), and alerted",
+		!!lcAssigned && lcAssigned.stored === "" && lcAssigned.sent === "9/28/2026, 9:00:00 AM" && alerts.length === 1, { held: lc.body && lc.body.held, alerts: alerts.length });
+
+	// Low 3: every column held on the stored row alone (a window reaching into closed
+	// September); the email's only news is the blank stored Assigned Date it would fill.
+	alerts.length = 0;
+	const fa = await post({ loadId: "900000111", values: { "Load ID": "900000111", "Assigned Date": "10/13/2026, 8:00:00 AM" } });
+	check("§1 every column held, a blank stored Assigned Date sent: it comes back blank", valuesOf(fa)["Assigned Date"] === "", valuesOf(fa));
+	const faHeld = ((fa.body && fa.body.held) || []).find((h) => h.column === "Assigned Date");
+	check("§1 every column held, a blank stored Assigned Date sent: it is listed as held, stored blank",
+		!!faHeld && faHeld.stored === "" && faHeld.sent === "10/13/2026, 8:00:00 AM", fa.body && fa.body.held);
+	check("§1 every column held, a blank stored Assigned Date sent: and alerted",
+		alerts.length === 1 && (alerts[0].held || []).some((h) => h.column === "Assigned Date"), alerts);
+
 	// A closed month: every column is held, whatever the status.
 	alerts.length = 0;
 	const cm = await post({ loadId: "900000106", values: { "Load ID": "900000106", Details: "Paper, 21,000 lbs", "Pickup Info": "Test Plant REF/PU#: 2", "Pickup Appointment": "9/28/2026 09:00", "  Payment  ": "$850.00", Documents: "", "Assigned Date": "10/13/2026, 8:00:00 AM" }, fallbacks: { Documents: "900000106" } });
@@ -246,6 +290,10 @@ async function section1() {
 		const s = await post({ loadId: id, values: { "Load ID": id, "  Payment  ": sent } });
 		check(`§1 Job Status "${status}": Payment comes back as stored`, valuesOf(s)["  Payment  "] === stored && /delivered/.test(reasonOf(s)), s.body);
 	}
+	// Low 5: "delivered" is the dispatch guard's own rule, not a copy of it.
+	const holdFor = (SRC.match(/\nfunction reissueHoldFor\([\s\S]*?\n\}\n/) || [""])[0];
+	check("§1 delivered is DISPATCH_COMPLETED_RE (the dispatch guard's rule), with no copy of its pattern",
+		/DISPATCH_COMPLETED_RE\.test\(/.test(holdFor) && !/delivered\|completed/i.test(holdFor) && /\nconst DISPATCH_COMPLETED_RE = /.test(SRC), holdFor.slice(0, 200));
 
 	// Invoiced but not delivered: a draft exists under another spelling of the id.
 	alerts.length = 0;
@@ -262,6 +310,25 @@ async function section1() {
 	const dv = valuesOf(disp);
 	check("§1 neither delivered nor invoiced: values come back as sent", dv["  Payment  "] === "$3,400.00" && dv["Pickup Appointment"] === "10/13/2026 09:00" && dv["Drop-off Appointment"] === "10/14/2026", dv);
 	check("§1 neither: nothing held, no alert", heldCols(disp.body).length === 0 && alerts.length === 0 && reasonOf(disp) === "", { held: disp.body && disp.body.held, alerts });
+
+	// A blank Job Status cell is not "delivered" and not "unknown": the column is there.
+	alerts.length = 0;
+	const bs = await post({ loadId: "900000133", values: { "Load ID": "900000133", "Pickup Appointment": "10/13/2026 09:00", "Drop-off Appointment": "10/15/2026 0:00", "  Payment  ": "$1,250.00" } });
+	const bsv = valuesOf(bs);
+	check("§1 a blank Job Status, open month, not invoiced: Payment and both dates come back as sent",
+		bsv["  Payment  "] === "$1,250.00" && bsv["Pickup Appointment"] === "10/13/2026 09:00" && bsv["Drop-off Appointment"] === "10/15/2026 0:00", bsv);
+	check("§1 a blank Job Status: nothing held, no reason, no alert", heldCols(bs.body).length === 0 && reasonOf(bs) === "" && alerts.length === 0, { held: bs.body && bs.body.held, reason: reasonOf(bs), alerts: alerts.length });
+
+	// Low 2: the same ordinary open-month load, sent a pickup that can't be placed in a month.
+	alerts.length = 0;
+	const tb = await post({ loadId: "900000103", values: { "Load ID": "900000103", Details: "Crates of test parts", "Pickup Appointment": "TBD", "  Payment  ": "$3,400.00" } });
+	const tbv = valuesOf(tb);
+	check("§1 an ordinary load sent \"Pickup Appointment\": \"TBD\": every column comes back as stored",
+		tbv["Pickup Appointment"] === "10/12/2026 10:00" && tbv["  Payment  "] === " $ 3,333.33 " && tbv.Details === "", tbv);
+	check("§1 an ordinary load sent \"TBD\": the reason says a date the re-issue would write can't be placed",
+		/a date the re-issue would write can't be placed in a month/.test(reasonOf(tb)), reasonOf(tb));
+	check("§1 an ordinary load sent \"TBD\": the pickup, Payment and Details are held, and alerted",
+		JSON.stringify(heldCols(tb.body)) === JSON.stringify(["  Payment  ", "Details", "Pickup Appointment"].sort()) && alerts.length === 1, { held: heldCols(tb.body), alerts: alerts.length });
 
 	// EXTRA A: the values going out are held to the closed months too.
 	alerts.length = 0;
@@ -328,6 +395,30 @@ async function section1() {
 	check("§1 RATECON_REISSUE_HOLD_ENABLED=false: values come back as sent (stored Assigned Date rule kept)",
 		ov["  Payment  "] === "$1,184.56" && ov["Pickup Appointment"] === "10/8/2026 00:00" && ov["Assigned Date"] === "10/7/2026, 1:23:45 PM", ov);
 	check("§1 RATECON_REISSUE_HOLD_ENABLED=false: nothing held, no alert", heldCols(o.body).length === 0 && reasonOf(o) === "" && off.alerts.length === 0, { held: o.body && o.body.held, alerts: off.alerts.length });
+
+	// Low 5: the held columns are found by header pattern, not by exact name.
+	const alt = liftRoute({ db: () => db, sheet: ALT_SHEET });
+	const ar = await alt.post({ loadId: "900000131", values: { Details: "Steel, 2 coils", "Pickup Appointment Time": "10/8/2026 08:00", "Drop Off Appointment": "10/11/2026 0:00", "Payment ($)": "$1,465.00" } });
+	const arv = valuesOf(ar);
+	check("§1 columns named otherwise (\"Pickup Appointment Time\", \"Drop Off Appointment\", \"Payment ($)\"): each comes back as stored",
+		arv["Pickup Appointment Time"] === "10/9/2026 08:00" && arv["Drop Off Appointment"] === "10/10/2026 0:00" && arv["Payment ($)"] === "$1,500.00", arv);
+	check("§1 columns named otherwise: Details still comes back as sent, and the three are held",
+		arv.Details === "Steel, 2 coils" && JSON.stringify(heldCols(ar.body)) === JSON.stringify(["Drop Off Appointment", "Payment ($)", "Pickup Appointment Time"]), ar.body);
+	alt.alerts.length = 0;
+	const as = await alt.post({ loadId: "900000131", values: { "Pickup Appointment Time": "10/9/2026 8:00", "Payment ($)": "1500.00" } });
+	check("§1 columns named otherwise: the same amount and moment in another format are not a hold (cents, moments)",
+		heldCols(as.body).length === 0 && alt.alerts.length === 0, { held: as.body && as.body.held, alerts: alt.alerts.length });
+
+	// Low 5: no Job Status column to read: fail closed, as if delivered.
+	const ns = liftRoute({ db: () => db, sheet: NO_STATUS_SHEET });
+	const nr = await ns.post({ loadId: "900000132", values: { "Load ID": "900000132", Details: "Tiles, 9 pallets", "Pickup Appointment": "10/12/2026 09:00", "  Payment  ": "$1,950.00" } });
+	const nrv = valuesOf(nr);
+	check("§1 no Job Status column: Payment and the pickup come back as stored (fails closed)",
+		nrv["  Payment  "] === " $ 2,000.00 " && nrv["Pickup Appointment"] === "10/12/2026 08:00", nrv);
+	check("§1 no Job Status column: other columns still come back as sent", nrv.Details === "Tiles, 9 pallets", nrv.Details);
+	check("§1 no Job Status column: the reason says the status is unknown, and it is alerted and logged",
+		/status unknown/.test(reasonOf(nr)) && ns.alerts.length === 1 && /status unknown/.test(String(ns.alerts[0].reason || ""))
+		&& ns.logs.some((l) => /no Job Status column/.test(l)), { reason: reasonOf(nr), alerts: ns.alerts.length, logs: ns.logs });
 }
 
 // --- §2 the alert ledger -------------------------------------------------------
@@ -415,15 +506,59 @@ async function section2() {
 	check("§2 a ledger made before claimed_at: the column is added and the alert goes out",
 		oa && oa.alerted === true && odb.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().some((c) => c.name === "claimed_at"), oa);
 
-	// M2: the daily cap records the second load and does not send it.
+	// Nit 7: a row already alerted is never sent again, even with a claim older than 5 minutes.
+	cdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, first_seen, alerted_at, claimed_at) VALUES (?, ?, ?, 'held', ?, ?, ?)")
+		.run("900000122", "Payment", "$9.00", new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 10 * 60 * 1000).toISOString());
+	const quickBefore = { sends: quick.sends.length, notes: quick.notes.length };
+	const aa = await quick.fn({ loadId: "900000122", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] });
+	check("§2 an already-alerted row whose claim is older than 5 minutes: no second email or notification",
+		quick.sends.length === quickBefore.sends && quick.notes.length === quickBefore.notes && aa && aa.reason === "already_alerted", { aa, sends: quick.sends.length });
+
+	// Low 4: the daily cap stops the email only; the in-app notification goes in and the
+	// change is stamped, so it is reported once.
 	const capDb = new Database(":memory:");
 	const capped = make({ db: capDb, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
 	await capped.fn({ loadId: "900000120", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] });
-	const second = await capped.fn({ loadId: "900000121", reason: "delivered", held: [{ column: "  Payment  ", stored: "$20.00", sent: "$19.00" }] });
-	check("§2 with RATECON_REISSUE_ALERT_MAX_PER_DAY=1, a second load the same day is not sent: reason daily_cap",
-		capped.sends.length === 1 && second && second.alerted === false && second.reason === "daily_cap", { sends: capped.sends.length, second });
-	const rec = capDb.prepare("SELECT alerted_at, claimed_at FROM ratecon_reissue_holds WHERE load_id = '900000121'").get();
-	check("§2 ...but it is recorded, unclaimed, for the next sighting", !!rec && rec.alerted_at === null && rec.claimed_at === null, rec);
+	const secondChange = { loadId: "900000121", reason: "delivered", held: [{ column: "  Payment  ", stored: "$20.00", sent: "$19.00" }] };
+	const second = await capped.fn(secondChange);
+	check("§2 with RATECON_REISSUE_ALERT_MAX_PER_DAY=1, a second load the same day gets no email: reason daily_cap",
+		capped.sends.length === 1 && second && second.emailed === false && second.reason === "daily_cap", { sends: capped.sends.length, second });
+	check("§2 ...but its in-app notification goes in", capped.notes.length === 2 && second.notified === true && second.alerted === true
+		&& /900000121/.test(String(capped.notes[1] && capped.notes[1][1])), { notes: capped.notes.length, second });
+	check("§2 ...and it carries the old and new value, so the capped change still reaches a person",
+		/Payment \(held\): \$20\.00 → \$19\.00/.test(String(capped.notes[1] && capped.notes[1][2])), capped.notes[1] && capped.notes[1][2]);
+	const rec = capDb.prepare("SELECT alerted_at FROM ratecon_reissue_holds WHERE load_id = '900000121'").get();
+	check("§2 ...and the change is stamped as reported", !!rec && ISO_RE.test(String(rec.alerted_at)), rec);
+	const third = await capped.fn(secondChange);
+	check("§2 ...so its next sighting reports nothing again", capped.sends.length === 1 && capped.notes.length === 2 && third && third.reason === "already_alerted", { third, notes: capped.notes.length });
+
+	// The in-app notification shows old and new values, except for broker contact columns:
+	// Dispatchers see the dispatch room and get no broker contact data.
+	const wdb = new Database(":memory:");
+	const w = make({ db: wdb });
+	await w.fn({
+		loadId: "900000125", reason: "delivered",
+		held: [{ column: "  Payment  ", stored: "$50.00", sent: "$49.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 08:00" }],
+		changed: [{ column: "Details", stored: "Test cargo", sent: "Test cargo, 3 pallets" }, { column: "Phone Number", stored: "555-0100", sent: "555-0199" },
+			{ column: "Email", stored: "agent.one@example.test", sent: "agent.two@example.test" }, { column: "Broker Contact Name", stored: "Test Agent One", sent: "Test Agent Two" }],
+	});
+	const wNote = w.notes[0] || [];
+	const wBody = String(wNote[2] || "");
+	check("§2 the in-app notification shows each listed column's old and new value",
+		/Payment \(held\): \$50\.00 → \$49\.00/.test(wBody) && /Pickup Appointment \(held\): 10\/9\/2026 0:00 → 10\/8\/2026 08:00/.test(wBody)
+		&& /Details: Test cargo → Test cargo, 3 pallets/.test(wBody), wBody);
+	check("§2 ...but names each broker contact column without its values (body and metadata)",
+		/Phone Number: broker contact, not shown/.test(wBody) && /Email: broker contact, not shown/.test(wBody) && /Broker Contact Name: broker contact, not shown/.test(wBody)
+		&& !/555-01|example\.test|Test Agent/.test(wBody + String(wNote[3] || "")), { body: wBody, metadata: wNote[3] });
+	check("§2 ...while the email to ADMIN_NOTIFY_EMAIL still has them", w.sends.length === 1 && /555-0199/.test(w.sends[0].html) && /Test Agent Two/.test(w.sends[0].html), w.sends.length);
+
+	// Nit 7: the cap counts loads, not ledger rows: one load with two held columns is one.
+	const distinctDb = new Database(":memory:");
+	const distinct = make({ db: distinctDb, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "2" } });
+	await distinct.fn({ loadId: "900000123", reason: "delivered", held: [{ column: "  Payment  ", stored: "$30.00", sent: "$29.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 0:00" }] });
+	const nextLoad = await distinct.fn({ loadId: "900000124", reason: "delivered", held: [{ column: "  Payment  ", stored: "$40.00", sent: "$39.00" }] });
+	check("§2 with RATECON_REISSUE_ALERT_MAX_PER_DAY=2, a second load after one with two held columns is still emailed (distinct loads)",
+		distinct.sends.length === 2 && nextLoad && nextLoad.emailed === true, { sends: distinct.sends.length, nextLoad });
 }
 
 // --- §3 the integrity check, check 5 ------------------------------------------
@@ -558,6 +693,21 @@ function section4() {
 	check("§4 reissueSameValue: a date column's text that is no moment compares as text (spaces collapsed)",
 		same("Drop-off Appointment", "TBD  by phone", "TBD by phone") && !same("Drop-off Appointment", "TBD", "10/9/2026"));
 	check("§4 reissueSameValue: a real change is a change", !same("Payment", "$1.00", "$1.01") && !same("Pickup Appointment", "10/9/2026", "10/10/2026"));
+	check("§4 reissueSameValue: an amount column named otherwise compares in cents, an abbreviated date column as a moment",
+		same("Payment ($)", "1500.00", "$1,500.00") && same("Rate", "$900", "900.00") && same("Pickup Appt", "10/9/2026", "10/9/2026 0:00"));
+
+	// Low 5: the held columns, by header pattern (REISSUE_HELD_COLUMN_RES).
+	const heldLift = closure(SRC, { roots: ["reissueHeldColumn"] });
+	const isHeld = new Function(`"use strict";\n${heldLift.text}\nreturn reissueHeldColumn;`)();
+	const heldNames = ["  Payment  ", "Payment", "Payment ($)", "Rate", "Total Amount", "Revenue", "Pickup Appointment", "Pickup Appointment Time", "Pickup Date",
+		"Drop-off Appointment", "Drop Off Appointment", "Dropoff Appt Date", "Delivery Date"];
+	const freeNames = ["Load ID", "Details", "Pickup Info", "Pickup Address", "Drop-off Info", "Drop-off Address", "Broker Contact Name", "Phone Number", "Email",
+		"Assigned Date", "Documents", "Job Status", "Contract ID",
+		"Completion Date", "Status Update Date", "Truck", "Owner ID", "Trailer Number", "Driver", "Carrier Stage", "Phase of Progress", "Location Link"];
+	check("§4 reissueHeldColumn: Payment and the pickup and drop-off dates, under the names the patterns read (\"Delivery Appointment\" too)",
+		[...heldNames, "Delivery Appointment"].every(isHeld), [...heldNames, "Delivery Appointment"].filter((n) => !isHeld(n)));
+	check("§4 reissueHeldColumn: every other column of the sheet is free (Assigned Date has its own rule)",
+		freeNames.every((n) => !isHeld(n)), freeNames.filter(isHeld));
 
 	const icSrc = fs.readFileSync(path.join(ROOT, "lib", "integrity-check.js"), "utf8");
 	const libSrc = fs.readFileSync(path.join(ROOT, "lib", "cell-compare.js"), "utf8");
