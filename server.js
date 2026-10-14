@@ -7603,21 +7603,49 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 	}
 });
 
-// Ceiling on re-issue alert EMAILS per rolling 24 h. It counts the loads (distinct
-// load_id) alerted by any channel, email or in-app notification, in that window
-// (alerted_at). The once-per-change ledger is the primary control; this one holds
-// whatever the key turns out to be, because sendEmail is shared with every other
-// app mail. Past it the in-app notification still goes out.
+// Ceiling on re-issue alert EMAILS: loads emailed per rolling 24 h. It counts the
+// loads (distinct load_id) emailed in that window, or still owed an email from an
+// alert in it (one whose email failed); a load already emailed in the window, or
+// still owed an email from an earlier alert whatever its age, isn't held back. A
+// load the cap held back doesn't become counted through its in-app notification.
+// The once-per-change ledger is the primary control; this one holds whatever the
+// key turns out to be, because sendEmail is shared with every other app mail.
+// Past it a new load's change gets the in-app notification only.
 const RATECON_REISSUE_ALERT_MAX_PER_DAY =
 	Math.max(1, parseInt(process.env.RATECON_REISSUE_ALERT_MAX_PER_DAY ?? "25", 10) || 25);
-const REISSUE_CLAIM_STALE_MS = 5 * 60 * 1000;
+// How long a call sending a row's alert holds the row. Longer than one send can
+// take (nodemailer's defaults: 2 min to connect, 30 s for the greeting, 10 min of
+// socket silence), so a claim is retaken only from a call that died.
+const REISSUE_CLAIM_STALE_MS = 15 * 60 * 1000;
+// The retry sweep (sweepRateConReissueHolds()) runs every REISSUE_RETRY_SWEEP_MS
+// and retries rows first seen in the last REISSUE_RETRY_WINDOW_MS; a row still
+// owed after that is given up. A row is retried only once its next slot comes:
+// 15 min after its first try, then 30 min, 1 h and 2 h after each later one,
+// then every 4 h (about 15 tries in 48 h), so an outage of the shared mailbox
+// costs a few logins an hour, not one per row per sweep.
+const REISSUE_RETRY_SWEEP_MS = 15 * 60 * 1000;
+const REISSUE_RETRY_WINDOW_MS = 48 * 60 * 60 * 1000;
+const REISSUE_RETRY_BACKOFF_MS = [15, 30, 60, 120, 240].map((min) => min * 60 * 1000);
+// A ledger row still owes a channel when that channel was neither sent nor
+// skipped. A row alerted with neither channel stamped was told before the
+// channels were tracked: it owes nothing (reissueHoldTable() marks those).
+const REISSUE_OWES_SQL = "((notified_at IS NULL AND notify_skipped IS NULL) OR (emailed_at IS NULL AND email_skipped IS NULL))";
+const REISSUE_TRACKED_SQL = "NOT (alerted_at IS NOT NULL AND emailed_at IS NULL AND notified_at IS NULL)";
 
 // The re-issue ledger: one row per load, column and sent value (the dedupe key),
-// with what was stored then, when it was first seen and alerted (ISO strings),
-// and claimed_at: the call sending its alert holds the row, so two overlapping
-// calls never both send (a claim older than REISSUE_CLAIM_STALE_MS, a call that
-// died mid-send, can be retaken). Created on first use; claimed_at is added to a
-// table made before it.
+// with the load number as first written (load_label), what was stored then, the
+// reason, and when it was first seen (ISO strings). Each channel is tracked on
+// its own: emailed_at and notified_at (the email to ADMIN_NOTIFY_EMAIL went; the
+// in-app notification went in), and email_skipped and notify_skipped (why that
+// channel is owed nothing more: "daily_cap" or "no_recipient" for the email,
+// "gave_up" once the retry window has passed, "before_tracking" for a row
+// alerted before the channels were tracked). alerted_at is when a person was
+// first told by either channel. attempts and last_try count the row's tries (a
+// try sends whatever channels the row still owes, so one pair serves both) and
+// set its next retry slot. claimed_at: the call sending a row's alert holds the
+// row, so two overlapping calls never both send (a claim older than
+// REISSUE_CLAIM_STALE_MS, a call that died mid-send, can be retaken). Created on
+// first use; the later columns are added to a table made before them.
 function reissueHoldTable() {
 	if (reissueHoldTable.ready) return;
 	db.exec(`
@@ -7631,23 +7659,170 @@ function reissueHoldTable() {
 			first_seen TEXT,
 			alerted_at TEXT,
 			claimed_at TEXT,
+			emailed_at TEXT,
+			notified_at TEXT,
+			email_skipped TEXT,
+			notify_skipped TEXT,
+			load_label TEXT,
+			attempts INTEGER,
+			last_try TEXT,
 			PRIMARY KEY (load_id, column_name, sent_value)
 		)
 	`);
-	if (!db.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().some((c) => c.name === "claimed_at")) {
-		db.exec("ALTER TABLE ratecon_reissue_holds ADD COLUMN claimed_at TEXT");
-	}
+	db.transaction(() => {
+		const have = new Set(db.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((c) => c.name));
+		const later = [["claimed_at", "TEXT"], ["emailed_at", "TEXT"], ["notified_at", "TEXT"], ["email_skipped", "TEXT"],
+			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"]];
+		for (const [col, type] of later) {
+			if (!have.has(col)) db.exec(`ALTER TABLE ratecon_reissue_holds ADD COLUMN ${col} ${type}`);
+		}
+		// Which channel told a person about a row alerted before the channels were
+		// tracked wasn't recorded: neither is stamped, and both are done.
+		db.prepare(`UPDATE ratecon_reissue_holds SET email_skipped = 'before_tracking', notify_skipped = 'before_tracking'
+			WHERE alerted_at IS NOT NULL AND emailed_at IS NULL AND notified_at IS NULL AND email_skipped IS NULL AND notify_skipped IS NULL`).run();
+	}).immediate();
 	reissueHoldTable.ready = true;
+}
+
+// Claims a ledger row for one call (claimedAt) when it still owes a channel and
+// no live call holds it, and counts the try. Answers which channels it owes, or
+// null.
+function claimReissueRow(key, column, sent, claimedAt, staleBefore) {
+	const owed = db.prepare(`UPDATE ratecon_reissue_holds SET claimed_at = ?, attempts = COALESCE(attempts, 0) + 1, last_try = ?
+		WHERE load_id = ? AND column_name = ? AND sent_value = ? AND ${REISSUE_OWES_SQL} AND ${REISSUE_TRACKED_SQL}
+		AND (claimed_at IS NULL OR claimed_at < ?)
+		RETURNING emailed_at, notified_at, email_skipped, notify_skipped`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
+	return owed ? { email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped } : null;
+}
+
+// Whether a ledger row's next retry slot has come at nowMs (REISSUE_RETRY_BACKOFF_MS
+// after its last try; a row never tried is due).
+function reissueRetryDue(r, nowMs) {
+	if (!r.last_try || !(r.attempts > 0)) return true;
+	const wait = REISSUE_RETRY_BACKOFF_MS[Math.min(r.attempts, REISSUE_RETRY_BACKOFF_MS.length) - 1];
+	return Date.parse(r.last_try) + wait <= nowMs;
+}
+
+// Sends, for one load, what the rows a call claimed (claimedAt) still owe: the
+// in-app dispatch notification first, inserted and stamped before the email is
+// even started, then the email to ADMIN_NOTIFY_EMAIL when it is set and the
+// daily cap allows (otherwise that change is never emailed). Each channel is
+// stamped as soon as it went out (alerted_at with the first), and the call's own
+// claims are released however it ends, so a channel that failed stays owed to
+// the next sighting or retry sweep, on its own. rows: [{ column, stored, sent,
+// kind, email, inApp }]; firstSeen marks a retry, and the email says when the
+// change was first seen.
+async function sendReissueAlert({ key, label, reason, rows, claimedAt, now, firstSeen = null }) {
+	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
+	const toEmail = rows.filter((e) => e.email);
+	const toNotify = rows.filter((e) => e.inApp);
+	const why = String(reason || "").slice(0, 160) || "protected";
+	const fieldName = (e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`;
+	let capped = false;
+	let skipped = null;
+	let emailed = false;
+	let notified = false;
+	try {
+		if (toEmail.length) {
+			// The cap stops only the email. It is decided before anything is stamped:
+			// loads emailed, or still owed an email, in the window count, and this load
+			// is exempt when it was emailed in the window or is still owed an email
+			// from an earlier alert, however old.
+			const dayAgo = new Date(now.getTime() - 86400000).toISOString();
+			const loadsToday = db.prepare(`SELECT COUNT(DISTINCT load_id) AS c FROM ratecon_reissue_holds
+				WHERE emailed_at > ? OR (alerted_at > ? AND emailed_at IS NULL AND email_skipped IS NULL)`).get(dayAgo, dayAgo).c;
+			const counted = !!db.prepare(`SELECT 1 FROM ratecon_reissue_holds WHERE load_id = ?
+				AND (emailed_at > ? OR (alerted_at IS NOT NULL AND emailed_at IS NULL AND email_skipped IS NULL)) LIMIT 1`).get(key, dayAgo);
+			capped = loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY && !counted;
+			if (capped) {
+				skipped = "daily_cap";
+				console.warn(`[ratecon-reissue] daily alert email cap (${RATECON_REISSUE_ALERT_MAX_PER_DAY}) reached; load ${label} gets the in-app notification only`);
+			}
+		}
+		if (toNotify.length) {
+			const title = toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
+			// Each listed column with its old and new value, so a change the email cap
+			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
+			// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
+			// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them).
+			const shown = (v) => {
+				const s = String(v).replace(/\s+/g, " ").trim();
+				if (!s) return "(blank)";
+				return s.length > 100 ? `${s.slice(0, 100)}…` : s;
+			};
+			const body = toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
+				? `${fieldName(e)}: broker contact, not shown`
+				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ");
+			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
+			try {
+				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
+				io.to("dispatch").emit("dispatch-notification", { type: "ratecon-reissue-held", title, body, metadata });
+				notified = true;
+			} catch (e) { console.error("[ratecon-reissue] notification failed:", e.message); }
+			if (notified) {
+				const at = new Date().toISOString();
+				const stampNotified = db.prepare(`UPDATE ratecon_reissue_holds SET notified_at = ?, alerted_at = COALESCE(alerted_at, ?) ${row} AND notified_at IS NULL`);
+				for (const e of toNotify) stampNotified.run(at, at, key, e.column, e.sent);
+			}
+		}
+		let mailing = null;
+		if (toEmail.length && !capped) {
+			const anyHeld = toEmail.some((e) => e.kind === "held");
+			const subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
+			const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
+			const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
+			const lead = anyHeld
+				? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
+				: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
+			const retry = firstSeen
+				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
+				: "";
+			const html =
+				`<p><b>${lead}</b></p>` + retry +
+				"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
+				"The held fields keep their stored values; the others were written as the email gave them.</p>" +
+				"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+				"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
+				"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
+				tableRows + "</table>" +
+				"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
+				"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(ADMIN_NOTIFY_EMAIL, subject, html);
+			else skipped = "no_recipient";
+		}
+		if (skipped) {
+			const stampSkipped = db.prepare(`UPDATE ratecon_reissue_holds SET email_skipped = ? ${row} AND emailed_at IS NULL AND email_skipped IS NULL`);
+			for (const e of toEmail) stampSkipped.run(skipped, key, e.column, e.sent);
+		}
+		if (mailing) {
+			try { emailed = (await mailing) === true; } catch (e) { console.error("[ratecon-reissue] alert email failed:", e.message); }
+			if (emailed) {
+				const at = new Date().toISOString();
+				const stampEmailed = db.prepare(`UPDATE ratecon_reissue_holds SET emailed_at = ?, alerted_at = COALESCE(alerted_at, ?) ${row} AND emailed_at IS NULL`);
+				for (const e of toEmail) stampEmailed.run(at, at, key, e.column, e.sent);
+			}
+		}
+	} finally {
+		const unclaim = db.prepare(`UPDATE ratecon_reissue_holds SET claimed_at = NULL ${row} AND claimed_at = ?`);
+		for (const e of rows) unclaim.run(key, e.column, e.sent, claimedAt);
+	}
+	const emailFailed = toEmail.length > 0 && !emailed && !skipped;
+	const inAppFailed = toNotify.length > 0 && !notified;
+	const retry = `FAILED (retried for ${Math.round(REISSUE_RETRY_WINDOW_MS / 3600000)} h after first seen, less often each time)`;
+	const emailState = !toEmail.length ? "not owed" : emailed ? "sent"
+		: skipped === "daily_cap" ? "skipped (daily cap)" : skipped ? "skipped (ADMIN_NOTIFY_EMAIL not set)" : retry;
+	const inAppState = !toNotify.length ? "not owed" : notified ? "sent" : retry;
+	return { emailed, notified, capped, emailFailed, inAppFailed, why, fields: rows.map(fieldName).join(", "), emailState, inAppState };
 }
 
 // Tells a person that a re-issued rate con was held (keepStoredSheetValues()):
 // the held columns with the stored and the sent value, and every other column it
-// changed on the protected load. Once per load, column and sent value: a new sent
-// value alerts again. An email to ADMIN_NOTIFY_EMAIL (not past the daily cap) and
-// an in-app dispatch notification (always); alerted_at is stamped only when one of
-// them went out, so a failed send retries on the next sighting. A call sends
-// only the rows it claimed (claimed_at), so two overlapping calls for one change
-// send once. Fire-and-forget: never throws, never rejects.
+// changed on the protected load. Once per load, column and sent value, on each
+// channel: a new sent value alerts again. A call sends only the rows it claimed
+// (claimed_at), so two overlapping calls for one change send once per channel;
+// what it couldn't send is retried by sweepRateConReissueHolds() (and on any
+// later sighting of the same change, whatever the retry slot). Fire-and-forget:
+// never throws, never rejects.
 async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
 	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
 	try {
@@ -7662,93 +7837,132 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 			.map((e) => ({ column: cap(e.column).trim(), stored: cap(e.stored), sent: cap(e.sent), kind: e.kind }));
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen) VALUES (?, ?, ?, ?, ?, ?, ?)");
-		// A row is this call's to send only if it claims it: not yet alerted, and not
-		// held by another call (or held so long ago that call is taken to have died).
-		const claim = db.prepare(`UPDATE ratecon_reissue_holds SET claimed_at = ?
-			WHERE load_id = ? AND column_name = ? AND sent_value = ? AND alerted_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)`);
+		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
 		const staleBefore = new Date(now.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
 		const fresh = [];
 		for (const e of entries) {
-			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso);
-			if (claim.run(nowIso, key, e.column, e.sent, staleBefore).changes === 1) fresh.push(e);
+			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label);
+			const owed = claimReissueRow(key, e.column, e.sent, nowIso, staleBefore);
+			if (owed) fresh.push({ ...e, ...owed });
 		}
 		if (!fresh.length) return { alerted: false, reason: "already_alerted", key };
-		const release = () => {
-			const unclaim = db.prepare("UPDATE ratecon_reissue_holds SET claimed_at = NULL WHERE load_id = ? AND column_name = ? AND sent_value = ? AND claimed_at = ? AND alerted_at IS NULL");
-			for (const e of fresh) unclaim.run(key, e.column, e.sent, nowIso);
-		};
-		// The cap stops only the email: the in-app notification always goes in, so a
-		// capped change is still reported, once. It counts loads alerted by any channel.
-		const dayAgo = new Date(now.getTime() - 86400000).toISOString();
-		const loadsToday = db.prepare("SELECT COUNT(DISTINCT load_id) AS c FROM ratecon_reissue_holds WHERE alerted_at > ?").get(dayAgo).c;
-		const capped = loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY;
-
-		const anyHeld = fresh.some((e) => e.kind === "held");
-		const why = cap(reason).slice(0, 160) || "protected";
-		const subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
-		const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
-		const rows = fresh.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
-		const lead = anyHeld
-			? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
-			: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
-		const html =
-			`<p><b>${lead}</b></p>` +
-			"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
-			"The held fields keep their stored values; the others were written as the email gave them.</p>" +
-			"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
-			"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
-			"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
-			rows + "</table>" +
-			"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
-			"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
-		let mailing = null;
-		if (capped) {
-			console.warn(`[ratecon-reissue] daily alert email cap (${RATECON_REISSUE_ALERT_MAX_PER_DAY}) reached; load ${label} gets the in-app notification only`);
-		} else {
-			if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(ADMIN_NOTIFY_EMAIL, subject, html);
-		}
-		let emailed = false;
-		if (mailing) {
-			try { emailed = (await mailing) === true; } catch (e) { console.error("[ratecon-reissue] alert email failed:", e.message); }
-		}
-		let notified = false;
-		const title = anyHeld ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
-		// Each listed column with its old and new value, so a change the email cap
-		// skipped still reaches a person. The dispatch room sees this, and Dispatchers
-		// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
-		// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them).
-		const names = fresh.map((e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`).join(", ");
-		const shown = (v) => {
-			const s = String(v).replace(/\s+/g, " ").trim();
-			if (!s) return "(blank)";
-			return s.length > 100 ? `${s.slice(0, 100)}…` : s;
-		};
-		const body = fresh.map((e) => {
-			const name = `${e.column}${e.kind === "held" ? " (held)" : ""}`;
-			return BROKER_WITHHELD_RE.test(e.column) ? `${name}: broker contact, not shown` : `${name}: ${shown(e.stored)} → ${shown(e.sent)}`;
-		}).join("; ");
-		const metadata = { loadId: label, reason: why, fields: fresh.map((e) => ({ column: e.column, kind: e.kind })) };
-		try {
-			insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
-			io.to("dispatch").emit("dispatch-notification", { type: "ratecon-reissue-held", title, body, metadata });
-			notified = true;
-		} catch (e) { console.error("[ratecon-reissue] notification failed:", e.message); }
-		const delivered = emailed || notified;
-		if (delivered) {
-			const at = new Date().toISOString();
-			const stamp = db.prepare("UPDATE ratecon_reissue_holds SET alerted_at = ? WHERE load_id = ? AND column_name = ? AND sent_value = ? AND alerted_at IS NULL");
-			for (const e of fresh) stamp.run(at, key, e.column, e.sent);
-		} else {
-			release();
-		}
-		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? (capped ? "ALERT (in-app only: daily email cap)" : "ALERT") : "ALERT UNDELIVERED (will retry next sighting)", label, why, names);
-		return { alerted: delivered, emailed, notified, key, ...(capped ? { reason: "daily_cap" } : {}) };
+		const r = await sendReissueAlert({ key, label, reason: cap(reason), rows: fresh, claimedAt: nowIso, now });
+		console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
+			label, r.why, r.fields, r.emailState, r.inAppState);
+		return { alerted: r.emailed || r.notified, emailed: r.emailed, notified: r.notified, key, ...(r.capped ? { reason: "daily_cap" } : {}) };
 	} catch (e) {
 		console.error("[ratecon-reissue] alert failed:", e && e.message);
 		return { alerted: false, reason: "error" };
 	}
 }
+
+// The retry sweep. A change is rarely seen again (a written field isn't listed
+// once the sheet holds it, and a held value recurs only if the broker resends
+// it), so a channel a sighting couldn't send is retried from the ledger: rows
+// first seen in the last REISSUE_RETRY_WINDOW_MS that still owe a channel, whose
+// retry slot has come (reissueRetryDue()) and that no live call holds are
+// claimed per load and sent what they owe, with the label, reason, stored and
+// sent values the ledger kept. Each load is claimed with the time it is reached
+// (clock()), not the sweep's start (now), so a sweep slowed by a stalled send
+// never hands out a claim that already looks stale. Rows still owed after the
+// window are given up: email_skipped and notify_skipped become "gave_up" for the
+// channel each owed, one log line per load. One summary line per sweep that
+// retried anything. Never throws for a send; a database error rejects
+// (maybeSweepRateConReissueHolds() logs it).
+async function sweepRateConReissueHolds({ now = new Date(), clock = () => new Date() } = {}) {
+	if (!RATECON_REISSUE_HOLD_ENABLED) return { loads: 0, failing: 0, gaveUp: 0 };
+	reissueHoldTable();
+	const since = new Date(now.getTime() - REISSUE_RETRY_WINDOW_MS).toISOString();
+	const staleAt = (t) => new Date(t.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
+	const owedRows = (op, t, loadId = null) => db.prepare(`SELECT * FROM ratecon_reissue_holds
+		WHERE first_seen ${op} ? AND ${REISSUE_OWES_SQL} AND ${REISSUE_TRACKED_SQL} AND (claimed_at IS NULL OR claimed_at < ?)
+		${loadId === null ? "" : "AND load_id = ?"} ORDER BY load_id, first_seen, column_name, sent_value`)
+		.all(since, staleAt(t), ...(loadId === null ? [] : [loadId]));
+	const hours = Math.round(REISSUE_RETRY_WINDOW_MS / 3600000);
+	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
+	const giveUpEmail = db.prepare(`UPDATE ratecon_reissue_holds SET email_skipped = 'gave_up' ${row} AND emailed_at IS NULL AND email_skipped IS NULL`);
+	const giveUpInApp = db.prepare(`UPDATE ratecon_reissue_holds SET notify_skipped = 'gave_up' ${row} AND notified_at IS NULL AND notify_skipped IS NULL`);
+	const expired = new Map();
+	for (const r of owedRows("<", now)) {
+		if (!expired.has(r.load_id)) expired.set(r.load_id, []);
+		expired.get(r.load_id).push(r);
+	}
+	let gaveUp = 0;
+	for (const [key, rows] of expired) {
+		const email = [];
+		const inApp = [];
+		db.transaction(() => {
+			for (const r of rows) {
+				if (giveUpEmail.run(key, r.column_name, r.sent_value).changes) email.push(r.column_name);
+				if (giveUpInApp.run(key, r.column_name, r.sent_value).changes) inApp.push(r.column_name);
+			}
+		})();
+		gaveUp += rows.length;
+		console.warn("[ratecon-reissue] GAVE UP — load %s: still undelivered %d h after first seen (%s); email: %s; in-app: %s",
+			rows[0].load_label || key, hours, rows[0].first_seen, email.join(", ") || "not owed", inApp.join(", ") || "not owed");
+	}
+	let tried = 0;
+	let delivered = 0;
+	const failing = [];
+	for (const key of [...new Set(owedRows(">=", now).map((r) => r.load_id))]) {
+		const at = clock();
+		const claimedAt = at.toISOString();
+		const due = owedRows(">=", at, key).filter((r) => reissueRetryDue(r, at.getTime()));
+		const claimed = [];
+		for (const r of due) {
+			const owed = claimReissueRow(key, r.column_name, r.sent_value, claimedAt, staleAt(at));
+			if (owed) claimed.push({ column: r.column_name, stored: r.stored_value, sent: r.sent_value, kind: r.kind, ...owed });
+		}
+		if (!claimed.length) continue;
+		const reason = [...new Set(due.map((r) => r.reason).filter(Boolean))].join("; ");
+		const label = due[0].load_label || key;
+		const res = await sendReissueAlert({ key, label, reason, rows: claimed, claimedAt, now: at, firstSeen: due[0].first_seen });
+		tried++;
+		if (res.emailFailed || res.inAppFailed) failing.push(`${label} (${[res.emailFailed ? "email" : "", res.inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
+		else delivered++;
+	}
+	if (tried) {
+		const shown = failing.length > 10 ? `${failing.slice(0, 10).join("; ")}; and ${failing.length - 10} more` : failing.join("; ");
+		console.log("[ratecon-reissue] retry sweep: %d load(s) retried, %d delivered; still failing, retried later: %s", tried, delivered, shown || "none");
+	}
+	return { loads: tried, failing: failing.length, gaveUp };
+}
+
+let reissueSweepRunning = false;
+async function maybeSweepRateConReissueHolds() {
+	if (reissueSweepRunning) return;
+	reissueSweepRunning = true;
+	try {
+		await sweepRateConReissueHolds();
+	} catch (e) {
+		console.error("[ratecon-reissue] retry sweep failed:", e.message);
+	} finally {
+		reissueSweepRunning = false;
+	}
+}
+
+// Started like the other sweeps: behind the kill switch and startsJob() (a
+// replica starts no job), on an unref'd interval that never holds the process
+// open. The ledger keeps what is owed across a restart; the first tick comes one
+// interval after boot.
+function startRateConReissueSweep() {
+	let started = false;
+	if (RATECON_REISSUE_HOLD_ENABLED && startsJob("rate-con re-issue alert retry sweep")) {
+		// maybeSweepRateConReissueHolds() owns its try/catch/finally; a rejection
+		// here is a defect in that guard, so it is logged, never swallowed.
+		const tick = () => {
+			maybeSweepRateConReissueHolds().catch((e) => {
+				console.error("[ratecon-reissue] retry sweep threw outside its own guard:", (e && e.message) || e);
+			});
+		};
+		const timer = setInterval(tick, REISSUE_RETRY_SWEEP_MS);
+		if (typeof timer.unref === "function") timer.unref();
+		console.log(`[ratecon-reissue] retry sweep every ${Math.round(REISSUE_RETRY_SWEEP_MS / 60000)} min, for ${Math.round(REISSUE_RETRY_WINDOW_MS / 3600000)} h after a change is first seen`);
+		started = true;
+	}
+	return started;
+}
+startRateConReissueSweep();
 
 app.post("/api/n8n/load-distance", n8nDistanceLimiter, async (req, res) => {
 	if (!n8nDistanceAuthorized(req)) {

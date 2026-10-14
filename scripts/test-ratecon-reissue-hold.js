@@ -46,6 +46,29 @@
  *      reported once; the in-app notification shows each column's old and new value, except a
  *      broker contact column (BROKER_WITHHELD_RE), named without values; the email says why it held; first_seen and alerted_at are ISO strings; it
  *      writes no table but its own.
+ *      B7: each channel is stamped on its own (emailed_at, notified_at) as soon as it went out,
+ *      the in-app notification before the email is awaited: an email that answered false or
+ *      rejected is retried on the next sighting without a second notification, a failed
+ *      notification without a second email, both when both failed, and the log line names the
+ *      failed channel; the email lists only the rows that owe it; the cap counts loads emailed
+ *      (or still owed an email) in 24 h, so a load already emailed is not capped again while a
+ *      new load, and a load the cap held back, is; a capped change (or one with no
+ *      ADMIN_NOTIFY_EMAIL) is never emailed later (email_skipped); a claim is stale after
+ *      15 minutes, and a call releases only its own; overlapping calls send once per channel;
+ *      a ledger made before these columns gets them (an IMMEDIATE transaction), its alerted
+ *      rows marked before_tracking on both channels, nothing re-sent. The retry sweep
+ *      (sweepRateConReissueHolds()) sends what rows first seen in the last 48 h still owe, from
+ *      the ledger, since a change is rarely seen again; older rows are given up (gave_up), one
+ *      log line per load; a sweep and a sighting together send once per channel; a replica
+ *      (startsJob()) or RATECON_REISSUE_HOLD_ENABLED=false starts no sweep, and otherwise it
+ *      runs every 15 minutes on an unref'd timer. A row is retried only at its next slot
+ *      (15 min, 30 min, 1 h, 2 h, then every 4 h after its last try; attempts and last_try),
+ *      and a sweep logs one summary line naming the loads still failing; each load is claimed
+ *      with the time the sweep reached it; the retry carries the reason and the load number as
+ *      first written, and says when the change was first seen (APP_TIMEZONE); the in-app
+ *      notification goes in before the email starts; the cap counts a load still owed an email
+ *      (so a new load is capped) but not one told in-app only, and a load owed an email from an
+ *      alert over 24 h old still gets its retry.
  *   §3 the daily integrity check, check 5: a load whose Job Tracking Payment differs from the
  *      sheet's figure when its invoice was drafted (load_invoice_drafts.sheet_total, the latest
  *      draft) is reported once; the same amount in another format is not, on the day or later;
@@ -68,6 +91,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const util = require("util");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
@@ -84,6 +108,7 @@ try {
 }
 const ic = require(path.join(ROOT, "lib", "integrity-check"));
 const cellCompare = require(path.join(ROOT, "lib", "cell-compare"));
+const appTime = require(path.join(ROOT, "lib", "app-time"));
 
 let passes = 0;
 let failures = 0;
@@ -91,6 +116,9 @@ function check(name, ok, detail) {
 	if (ok) { passes++; return; }
 	failures++;
 	console.error(`FAIL ${name}${detail === undefined ? "" : `: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`}`);
+}
+function eqCheck(name, actual, expected) {
+	check(name, JSON.stringify(actual) === JSON.stringify(expected), { actual, expected });
 }
 
 const SECRET = "test-secret";
@@ -428,17 +456,24 @@ const OLD_LEDGER_DDL = `CREATE TABLE ratecon_reissue_holds (load_id TEXT NOT NUL
 
 async function section2() {
 	if (!/\n(async )?function alertRateConReissueHold\(/.test(SRC)) { check("§2 alertRateConReissueHold() exists in server.js", false); return; }
-	const lifted = closure(SRC, { roots: ["alertRateConReissueHold"], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process"] });
+	// The retry sweep is lifted with it when server.js has one (a base without it fails §2 B7's sweep cases).
+	const hasSweep = /\n(async )?function sweepRateConReissueHolds\(/.test(SRC);
+	const lifted = closure(SRC, { roots: ["alertRateConReissueHold", ...(hasSweep ? ["sweepRateConReissueHolds"] : [])], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "require"] });
 	const quiet = { ...console, log: () => {}, error: () => {}, warn: () => {} };
-	const make = ({ db, send = async () => true, notify = null, env = {} }) => {
+	// logs: the log and warn lines, formatted. sweep: sweepRateConReissueHolds(), or null.
+	// order: "in-app" and "email", in the order the default notification and the email started.
+	const make = ({ db, send = async () => true, notify = null, env = {}, logs = null }) => {
 		const sends = [];
 		const notes = [];
-		const fn = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", `"use strict";\n${lifted.text}\nreturn alertRateConReissueHold;`)(
-			db, async (to, subject, html) => { sends.push({ to, subject, html }); return send(to, subject, html); },
-			notify || { run: (...a) => { notes.push(a); } }, { to: () => ({ emit: () => {} }) },
-			quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } },
+		const order = [];
+		const capture = (...a) => { logs.push(util.format(...a)); };
+		const lift = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "require",
+			`"use strict";\n${lifted.text}\nreturn { fn: alertRateConReissueHold, sweep: ${hasSweep ? "sweepRateConReissueHolds" : "null"} };`)(
+			db, async (to, subject, html) => { order.push("email"); sends.push({ to, subject, html }); return send(to, subject, html); },
+			notify || { run: (...a) => { order.push("in-app"); notes.push(a); } }, { to: () => ({ emit: () => {} }) },
+			logs ? { ...quiet, log: capture, warn: capture } : quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } }, rootRequire,
 		);
-		return { fn, sends, notes };
+		return { fn: lift.fn, sweep: lift.sweep, sends, notes, order };
 	};
 
 	const db = new Database(":memory:");
@@ -486,17 +521,17 @@ async function section2() {
 	const change = { loadId: "900000116", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] };
 	const both = await Promise.all([slow.fn(change), slow.fn(change)]);
 	check("§2 two concurrent calls for the same new change: one email", slow.sends.length === 1 && slow.notes.length === 1, { sends: slow.sends.length, results: both });
-	// A claim left by a call that died is retaken once it is stale; a fresh one is not.
-	// (The ledger stores the column name trimmed.)
+	// A claim left by a call that died is retaken once it is stale (15 minutes: longer than a
+	// send can take); a younger one is not. (The ledger stores the column name trimmed.)
 	cdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, first_seen, claimed_at) VALUES (?, ?, ?, 'held', ?, ?)")
-		.run("900000117", "Payment", "$9.00", new Date().toISOString(), new Date(Date.now() - 10 * 60 * 1000).toISOString());
+		.run("900000117", "Payment", "$9.00", new Date().toISOString(), new Date(Date.now() - 20 * 60 * 1000).toISOString());
 	cdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, first_seen, claimed_at) VALUES (?, ?, ?, 'held', ?, ?)")
-		.run("900000118", "Payment", "$9.00", new Date().toISOString(), new Date(Date.now() - 1000).toISOString());
+		.run("900000118", "Payment", "$9.00", new Date().toISOString(), new Date(Date.now() - 10 * 60 * 1000).toISOString());
 	const quick = make({ db: cdb });
 	await quick.fn({ loadId: "900000117", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] });
-	check("§2 a claim older than 5 minutes is retaken and sent", quick.sends.length === 1 && /900000117/.test(quick.sends[0] && quick.sends[0].subject), quick.sends.map((s) => s.subject));
+	check("§2 a claim older than 15 minutes is retaken and sent", quick.sends.length === 1 && /900000117/.test(quick.sends[0] && quick.sends[0].subject), quick.sends.map((s) => s.subject));
 	await quick.fn({ loadId: "900000118", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] });
-	check("§2 a claim another call holds right now is left alone", quick.sends.length === 1, quick.sends.map((s) => s.subject));
+	check("§2 a claim 10 minutes old (its send may still be running) is left alone", quick.sends.length === 1, quick.sends.map((s) => s.subject));
 
 	// L5: a table made before claimed_at existed gets the column.
 	const odb = new Database(":memory:");
@@ -506,12 +541,12 @@ async function section2() {
 	check("§2 a ledger made before claimed_at: the column is added and the alert goes out",
 		oa && oa.alerted === true && odb.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().some((c) => c.name === "claimed_at"), oa);
 
-	// Nit 7: a row already alerted is never sent again, even with a claim older than 5 minutes.
+	// Nit 7: a row already alerted is never sent again, even with a stale claim.
 	cdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, first_seen, alerted_at, claimed_at) VALUES (?, ?, ?, 'held', ?, ?, ?)")
-		.run("900000122", "Payment", "$9.00", new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 10 * 60 * 1000).toISOString());
+		.run("900000122", "Payment", "$9.00", new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 60 * 60 * 1000).toISOString(), new Date(Date.now() - 20 * 60 * 1000).toISOString());
 	const quickBefore = { sends: quick.sends.length, notes: quick.notes.length };
 	const aa = await quick.fn({ loadId: "900000122", reason: "delivered", held: [{ column: "  Payment  ", stored: "$10.00", sent: "$9.00" }] });
-	check("§2 an already-alerted row whose claim is older than 5 minutes: no second email or notification",
+	check("§2 an already-alerted row whose claim is older than 15 minutes: no second email or notification",
 		quick.sends.length === quickBefore.sends && quick.notes.length === quickBefore.notes && aa && aa.reason === "already_alerted", { aa, sends: quick.sends.length });
 
 	// Low 4: the daily cap stops the email only; the in-app notification goes in and the
@@ -559,6 +594,418 @@ async function section2() {
 	const nextLoad = await distinct.fn({ loadId: "900000124", reason: "delivered", held: [{ column: "  Payment  ", stored: "$40.00", sent: "$39.00" }] });
 	check("§2 with RATECON_REISSUE_ALERT_MAX_PER_DAY=2, a second load after one with two held columns is still emailed (distinct loads)",
 		distinct.sends.length === 2 && nextLoad && nextLoad.emailed === true, { sends: distinct.sends.length, nextLoad });
+
+	await section2Channels(make);
+}
+
+// B7: each channel once per change. The email and the in-app notification are stamped on
+// their own (emailed_at, notified_at), so one that failed is retried on the next sighting of
+// that change without repeating the other. sendEmail answers false on an SMTP error (it never
+// throws), so false is a failure; a rejection is treated the same.
+async function section2Channels(make) {
+	// SELECT *: on a server.js without the channel columns each check fails on its own.
+	const ledger = (db, loadId) => db.prepare("SELECT * FROM ratecon_reissue_holds WHERE load_id = ? ORDER BY column_name, sent_value").all(loadId);
+	// st.email: true, false or "reject"; st.inApp: whether the notification insert works.
+	const flaky = (db, st, opts = {}) => {
+		const notes = [];
+		const m = make({
+			db, ...opts,
+			send: async () => { if (st.email === "reject") throw new Error("smtp down"); return st.email; },
+			notify: { run: (...a) => { if (!st.inApp) throw new Error("notifications down"); notes.push(a); } },
+		});
+		return { ...m, notes };
+	};
+	const pay = (loadId, stored, sent) => ({ loadId, reason: "delivered", held: [{ column: "  Payment  ", stored, sent }] });
+
+	// The email answers false, the in-app notification goes in.
+	const adb = new Database(":memory:");
+	const ast = { email: false, inApp: true };
+	const logs = [];
+	const a = flaky(adb, ast, { logs });
+	const a1 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 email answers false, in-app goes in: notified, not emailed", a1 && a1.notified === true && a1.emailed === false && a.sends.length === 1 && a.notes.length === 1, { a1, sends: a.sends.length, notes: a.notes.length });
+	const ar = ledger(adb, "900000126")[0] || {};
+	check("§2 B7 ...the ledger stamps the in-app channel and alerted_at, not the email", ISO_RE.test(String(ar.notified_at)) && ISO_RE.test(String(ar.alerted_at)) && ar.emailed_at == null && ar.email_skipped == null && ar.claimed_at == null, ar);
+	check("§2 B7 ...the log line says the email failed and the in-app notification went", logs.some((l) => /email FAILED/.test(l) && /in-app sent/.test(l)), logs);
+	ast.email = true;
+	const a2 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 ...the next sighting of that change sends the email only", a.sends.length === 2 && a.notes.length === 1 && a2 && a2.emailed === true && a2.notified === false, { a2, sends: a.sends.length, notes: a.notes.length });
+	check("§2 B7 ...and that email carries the stored and the sent value", /60\.00/.test(a.sends[1] && a.sends[1].html) && /59\.00/.test(a.sends[1] && a.sends[1].html), a.sends[1] && a.sends[1].subject);
+	const ar2 = ledger(adb, "900000126")[0] || {};
+	check("§2 B7 ...emailed_at is stamped, alerted_at keeps the first time a person was told", ISO_RE.test(String(ar2.emailed_at)) && ar2.alerted_at === ar.alerted_at, ar2);
+	const a3 = await a.fn(pay("900000126", "$60.00", "$59.00"));
+	check("§2 B7 ...a third sighting sends nothing", a.sends.length === 2 && a.notes.length === 1 && a3 && a3.reason === "already_alerted", a3);
+	// A rejected send is a failure too.
+	ast.email = "reject";
+	await a.fn(pay("900000126", "$60.00", "$58.00"));
+	ast.email = true;
+	const ra = await a.fn(pay("900000126", "$60.00", "$58.00"));
+	check("§2 B7 a rejected email is retried on the next sighting, the notification is not repeated", a.sends.length === 4 && a.notes.length === 2 && ra && ra.emailed === true && ra.notified === false, { ra, sends: a.sends.length, notes: a.notes.length });
+
+	// The email goes, the in-app notification fails.
+	const bdb = new Database(":memory:");
+	const bst = { email: true, inApp: false };
+	const blogs = [];
+	const b = flaky(bdb, bst, { logs: blogs });
+	const b1 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 email goes, in-app fails: emailed, not notified", b1 && b1.emailed === true && b1.notified === false && b.sends.length === 1 && b.notes.length === 0, b1);
+	check("§2 B7 ...the log line says the email went and the in-app notification failed", blogs.some((l) => /email sent/.test(l) && /in-app FAILED/.test(l)), blogs);
+	bst.inApp = true;
+	const b2 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 ...the next sighting sends the in-app notification only", b.sends.length === 1 && b.notes.length === 1 && b2 && b2.notified === true && b2.emailed === false, { b2, sends: b.sends.length });
+	check("§2 B7 ...and it shows the old and new value", /Payment \(held\): \$61\.00 → \$60\.00/.test(String(b.notes[0] && b.notes[0][2])), b.notes[0] && b.notes[0][2]);
+	const b3 = await b.fn(pay("900000129", "$61.00", "$60.00"));
+	check("§2 B7 ...a third sighting sends nothing", b.sends.length === 1 && b.notes.length === 1 && b3 && b3.reason === "already_alerted", b3);
+
+	// Both fail.
+	const cdb = new Database(":memory:");
+	const cst = { email: false, inApp: false };
+	const c = flaky(cdb, cst);
+	const c1 = await c.fn(pay("900000130", "$62.00", "$61.00"));
+	const cr = ledger(cdb, "900000130")[0] || {};
+	check("§2 B7 both channels fail: nothing stamped, claim released", c1 && c1.alerted === false && cr.alerted_at == null && cr.emailed_at == null && cr.notified_at == null && cr.claimed_at == null, { c1, cr });
+	cst.email = true; cst.inApp = true;
+	const c2 = await c.fn(pay("900000130", "$62.00", "$61.00"));
+	check("§2 B7 ...the next sighting sends both", c.sends.length === 2 && c.notes.length === 1 && c2 && c2.emailed === true && c2.notified === true, { c2, sends: c.sends.length, notes: c.notes.length });
+
+	// A change with one column emailed earlier and a new column: the email lists only what it owes.
+	const ddb = new Database(":memory:");
+	const dst = { email: false, inApp: true };
+	const d = flaky(ddb, dst);
+	await d.fn(pay("900000134", "$63.00", "$62.00"));
+	dst.email = true;
+	await d.fn({ loadId: "900000134", reason: "delivered", held: [{ column: "  Payment  ", stored: "$63.00", sent: "$62.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 08:00" }] });
+	check("§2 B7 an owed email and a new column: one email with both, one notification with the new column only",
+		d.sends.length === 2 && /62\.00/.test(d.sends[1].html) && /10\/8\/2026 08:00/.test(d.sends[1].html)
+		&& d.notes.length === 2 && /Pickup Appointment/.test(String(d.notes[1][2])) && !/Payment/.test(String(d.notes[1][2])), { notes: d.notes.map((n) => n[2]) });
+
+	// The cap counts loads emailed (or still owed an email) in the window; a load already
+	// emailed there doesn't count again, and one the cap held back doesn't become counted
+	// through its in-app notification.
+	const kdb = new Database(":memory:");
+	const k = make({ db: kdb, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await k.fn(pay("900000135", "$70.00", "$69.00"));
+	const kA = await k.fn(pay("900000135", "$70.00", "$68.00"));
+	check("§2 B7 cap 1, load A emailed today: a new change on A is still emailed", k.sends.length === 2 && kA && kA.emailed === true && kA.reason !== "daily_cap", { kA, sends: k.sends.length });
+	const kB = await k.fn(pay("900000136", "$80.00", "$79.00"));
+	check("§2 B7 ...while a new load B is capped (in-app only)", k.sends.length === 2 && kB && kB.reason === "daily_cap" && kB.emailed === false && kB.notified === true && k.notes.length === 3, { kB, sends: k.sends.length });
+	const kbr = ledger(kdb, "900000136")[0] || {};
+	check("§2 B7 ...the capped change records why no email is owed", kbr.email_skipped === "daily_cap" && kbr.emailed_at == null && ISO_RE.test(String(kbr.notified_at)), kbr);
+	const kB2 = await k.fn(pay("900000136", "$80.00", "$79.00"));
+	check("§2 B7 ...and is not emailed on its next sighting", k.sends.length === 2 && k.notes.length === 3 && kB2 && kB2.reason === "already_alerted", { kB2, sends: k.sends.length });
+	const kB3 = await k.fn(pay("900000136", "$80.00", "$78.00"));
+	check("§2 B7 ...and a new change on B is capped too (B's in-app notification doesn't make it counted)",
+		k.sends.length === 2 && kB3 && kB3.reason === "daily_cap" && kB3.emailed === false && kB3.notified === true, { kB3, sends: k.sends.length });
+	// M7: a capped change whose in-app notification failed gets it later, never the email.
+	const k7db = new Database(":memory:");
+	const k7st = { email: true, inApp: true };
+	const k7 = flaky(k7db, k7st, { env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await k7.fn(pay("900000151", "$70.00", "$69.00"));
+	k7st.inApp = false;
+	const k7b = await k7.fn(pay("900000152", "$80.00", "$79.00"));
+	k7st.inApp = true;
+	const k7c = await k7.fn(pay("900000152", "$80.00", "$79.00"));
+	const k7s = k7.sweep ? await k7.sweep() : null;
+	check("§2 B7 a capped change whose in-app notification failed: the next sighting sends it, and no email (nor does the sweep)",
+		k7b && k7b.reason === "daily_cap" && k7c && k7c.notified === true && k7c.emailed === false && k7.sends.length === 1 && k7.notes.length === 2 && !!k7s,
+		{ k7b, k7c, k7s, sends: k7.sends.length, notes: k7.notes.length });
+	// An email that failed is retried even when the cap is full: its load is already counted.
+	const fdb = new Database(":memory:");
+	const fst = { email: false, inApp: true };
+	const f = flaky(fdb, fst, { env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await f.fn(pay("900000137", "$90.00", "$89.00"));
+	fst.email = true;
+	const fr = await f.fn(pay("900000137", "$90.00", "$89.00"));
+	check("§2 B7 cap 1: a failed email on the only counted load is still retried", f.sends.length === 2 && fr && fr.emailed === true, { fr, sends: f.sends.length });
+
+	// No ADMIN_NOTIFY_EMAIL: in-app only, and the change is not emailed once one is set.
+	const ndb = new Database(":memory:");
+	const n1 = make({ db: ndb, env: { ADMIN_NOTIFY_EMAIL: "" } });
+	const nr = await n1.fn(pay("900000138", "$95.00", "$94.00"));
+	check("§2 B7 no ADMIN_NOTIFY_EMAIL: in-app only, recorded as no_recipient", n1.sends.length === 0 && n1.notes.length === 1 && nr && nr.notified === true
+		&& (ledger(ndb, "900000138")[0] || {}).email_skipped === "no_recipient", { nr, row: ledger(ndb, "900000138")[0] });
+	const n2 = make({ db: ndb });
+	const nr2 = await n2.fn(pay("900000138", "$95.00", "$94.00"));
+	check("§2 B7 ...a later sighting with the address set sends nothing", n2.sends.length === 0 && n2.notes.length === 0 && nr2 && nr2.reason === "already_alerted", nr2);
+	// M7, M12, M17: no address and a failed in-app notification, then (address set) the same
+	// change and a new column on the load. The old column gets the in-app notification only:
+	// it is not emailed, not listed in the email, and not stamped emailed.
+	const n3db = new Database(":memory:");
+	const n3 = make({ db: n3db, env: { ADMIN_NOTIFY_EMAIL: "" }, notify: { run: () => { throw new Error("notifications down"); } } });
+	await n3.fn(pay("900000153", "$45.00", "$44.00"));
+	const n4 = make({ db: n3db });
+	const pickup = { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 07:00" };
+	const n4r = await n4.fn({ loadId: "900000153", reason: "delivered", held: [{ column: "  Payment  ", stored: "$45.00", sent: "$44.00" }, pickup] });
+	const n4pay = ledger(n3db, "900000153").find((x) => x.column_name === "Payment") || {};
+	const n4mail = (n4.sends[0] && n4.sends[0].html) || "";
+	check("§2 B7 no address and in-app failed, then a new column: one email, for the new column only",
+		n4r && n4r.emailed === true && n4.sends.length === 1 && /10\/8\/2026 07:00/.test(n4mail) && !/44\.00|45\.00/.test(n4mail), { n4r, mail: n4mail.slice(0, 120) });
+	check("§2 B7 ...the old column gets its in-app notification, and is not stamped emailed",
+		n4.notes.length === 1 && /Payment \(held\): \$45\.00 → \$44\.00/.test(String(n4.notes[0][2])) && n4pay.emailed_at == null && n4pay.email_skipped === "no_recipient" && ISO_RE.test(String(n4pay.notified_at)),
+		{ note: n4.notes[0] && n4.notes[0][2], row: n4pay });
+
+	// Two overlapping calls still send once per channel, on a retry too.
+	const odb = new Database(":memory:");
+	const ost = { email: false, inApp: true };
+	const slow = flaky(odb, ost);
+	await slow.fn(pay("900000139", "$99.00", "$98.00"));
+	ost.email = true;
+	const slowSend = make({ db: odb, send: async () => { await new Promise((r) => setTimeout(r, 20)); return true; } });
+	const both = await Promise.all([slowSend.fn(pay("900000139", "$99.00", "$98.00")), slowSend.fn(pay("900000139", "$99.00", "$98.00"))]);
+	check("§2 B7 two overlapping retries of an owed email: one email, no notification", slowSend.sends.length === 1 && slowSend.notes.length === 0
+		&& both.filter((r) => r.emailed === true).length === 1, { sends: slowSend.sends.length, notes: slowSend.notes.length, both });
+	const fresh2 = make({ db: odb, send: async () => { await new Promise((r) => setTimeout(r, 20)); return true; } });
+	await Promise.all([fresh2.fn(pay("900000140", "$99.00", "$97.00")), fresh2.fn(pay("900000140", "$99.00", "$97.00")), fresh2.fn(pay("900000140", "$99.00", "$97.00"))]);
+	check("§2 B7 three overlapping calls for a new change: one email and one notification", fresh2.sends.length === 1 && fresh2.notes.length === 1, { sends: fresh2.sends.length, notes: fresh2.notes.length });
+
+	// The migration: a ledger made before the channel columns (with claimed_at, as main made
+	// it), holding alerted rows and an unalerted one. Alerted rows count as done on both
+	// channels and are not sent again; the unalerted one still owes both.
+	const mdb = new Database(":memory:");
+	mdb.exec(OLD_LEDGER_DDL);
+	mdb.exec("ALTER TABLE ratecon_reissue_holds ADD COLUMN claimed_at TEXT");
+	const told = "2026-10-13T15:00:00.000Z";
+	const ins = mdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, first_seen, alerted_at, claimed_at) VALUES (?, ?, ?, ?, 'held', ?, ?, ?)");
+	ins.run("900000141", "Payment", "$49.00", "$50.00", told, told, told);
+	ins.run("900000141", "Pickup Appointment", "10/8/2026 08:00", "10/9/2026 0:00", told, told, null);
+	ins.run("900000142", "Payment", "$39.00", "$40.00", told, told, null);
+	ins.run("900000143", "Payment", "$29.00", "$30.00", told, null, null);
+	const m = make({ db: mdb });
+	const m1 = await m.fn({ loadId: "900000141", reason: "delivered", held: [{ column: "  Payment  ", stored: "$50.00", sent: "$49.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 08:00" }] });
+	const m2 = await m.fn(pay("900000142", "$40.00", "$39.00"));
+	const cols = mdb.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((x) => x.name);
+	check("§2 B7 migration: emailed_at, notified_at, email_skipped and notify_skipped are added", ["emailed_at", "notified_at", "email_skipped", "notify_skipped"].every((x) => cols.includes(x)), cols);
+	const back = mdb.prepare("SELECT * FROM ratecon_reissue_holds WHERE alerted_at IS NOT NULL").all();
+	check("§2 B7 migration: every alerted row is marked done on both channels as before_tracking, with no channel stamp made up",
+		back.length === 3 && back.every((x) => x.email_skipped === "before_tracking" && x.notify_skipped === "before_tracking" && x.emailed_at == null && x.notified_at == null && x.alerted_at === told), back);
+	check("§2 B7 migration: no alerted row is sent again", m.sends.length === 0 && m.notes.length === 0 && m1 && m1.reason === "already_alerted" && m2 && m2.reason === "already_alerted", { m1, m2, sends: m.sends.length, notes: m.notes.length });
+	const m3 = await m.fn(pay("900000143", "$30.00", "$29.00"));
+	check("§2 B7 migration: an unalerted row still gets both channels", m.sends.length === 1 && m.notes.length === 1 && m3 && m3.emailed === true && m3.notified === true, m3);
+	const pre = new Database(":memory:");
+	pre.exec(OLD_LEDGER_DDL);
+	pre.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, kind, alerted_at) VALUES ('900000144', 'Payment', '$19.00', 'held', ?)").run(told);
+	const p = make({ db: pre });
+	await p.fn(pay("900000144", "$20.00", "$19.00"));
+	const pr = pre.prepare("SELECT * FROM ratecon_reissue_holds WHERE load_id = '900000144'").get();
+	check("§2 B7 migration: a ledger made before claimed_at gets every column, marked before_tracking, nothing sent",
+		p.sends.length === 0 && p.notes.length === 0 && pr.email_skipped === "before_tracking" && pr.notify_skipped === "before_tracking" && "claimed_at" in pr, { pr, sends: p.sends.length });
+	const ps = p.sweep ? await p.sweep() : null;
+	check("§2 B7 migration: the retry sweep sends nothing for a row marked before_tracking", !!ps && p.sends.length === 0 && p.notes.length === 0, ps);
+	// One connection can't show it: the migration takes the write lock up front (IMMEDIATE),
+	// so another process's write can't interleave between reading the columns and adding them.
+	check("§2 B7 migration: its transaction is IMMEDIATE", /\nfunction reissueHoldTable\(\) \{[\s\S]*?\n\t\}\)\.immediate\(\);\n[\s\S]*?\n\}\n/.test(SRC));
+
+	await section2Sweep(make, flaky, ledger, pay);
+}
+
+// M1: a channel a sighting couldn't send is retried from the ledger, because the change is
+// rarely seen again: a written ("changed") field is not listed once the sheet holds it, and a
+// held value recurs only if the broker resends it. sweepRateConReissueHolds() retries rows
+// first seen in the last 48 h, per load, from the values the ledger kept; older rows are given
+// up, logged once per load; a replica never starts it.
+async function section2Sweep(make, flaky, ledger, pay) {
+	if (!/\n(async )?function sweepRateConReissueHolds\(/.test(SRC)) { check("§2 B7 sweepRateConReissueHolds() exists in server.js", false); }
+	const sweepOf = (m) => (m.sweep ? m.sweep : async () => ({ missing: true }));
+	// A sweep `min` minutes from now (its start and every load it reaches): past a first try's 15-minute slot at 16.
+	const inMin = (min) => { const t = new Date(Date.now() + min * 60 * 1000); return { now: t, clock: () => t }; };
+
+	// A changed field whose email failed: the next rate con carries the value now stored, so
+	// the route lists nothing; the sweep sends the email, once.
+	const cfdb = new Database(":memory:");
+	const cfst = { email: false, inApp: true };
+	const cf = flaky(cfdb, cfst);
+	const cfChange = { column: "Details", stored: "Test cargo", sent: "Test cargo, 2 pallets" };
+	await cf.fn({ loadId: "#X900000145", reason: "delivered and invoiced", changed: [cfChange] });
+	cfst.email = true;
+	const cfAgain = await cf.fn({ loadId: "#X900000145", reason: "delivered", changed: [] });
+	check("§2 B7 sweep: a changed field's failed email, then a sighting with nothing changed: nothing sent", cf.sends.length === 1 && cf.notes.length === 1 && cfAgain && cfAgain.reason === "already_alerted", { cfAgain, sends: cf.sends.length });
+	const cfs = await sweepOf(cf)(inMin(16));
+	const cfMail = (cf.sends[1] && cf.sends[1].html) || "";
+	check("§2 B7 sweep: ...the sweep sends that email, with the stored and the sent value, and no second notification",
+		cf.sends.length === 2 && cf.notes.length === 1 && /Test cargo, 2 pallets/.test(cfMail) && /changed fields/.test(cf.sends[1].subject) && cfs && cfs.loads === 1, { cfs, sends: cf.sends.length, subject: cf.sends[1] && cf.sends[1].subject });
+	const cfr = ledger(cfdb, "x900000145")[0] || {};
+	check("§2 B7 sweep: ...emailed_at is stamped and the claim released", ISO_RE.test(String(cfr.emailed_at)) && cfr.claimed_at == null, cfr);
+	check("§2 B7 sweep: ...the retry carries the original reason", /because: delivered and invoiced\./.test(cfMail), cfMail.slice(0, 260));
+	check("§2 B7 sweep: ...and the load number as first written, not the ledger key", /Load #X900000145:/.test(cf.sends[1] && cf.sends[1].subject) && /load #X900000145/.test(cfMail), cf.sends[1] && cf.sends[1].subject);
+	const firstSeenText = appTime.dateTextInZone(new Date(cfr.first_seen || 0), appTime.appTimeZone(), { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+	check("§2 B7 sweep: ...and says it is a retry, with when the change was first seen in the business time zone",
+		cfMail.includes(`This is a retry: the first try to send this email failed. The change was first seen ${firstSeenText}.`)
+		&& !/This is a retry/.test((cf.sends[0] && cf.sends[0].html) || ""), { expected: firstSeenText, mail: cfMail.slice(0, 400) });
+	const cfs2 = await sweepOf(cf)(inMin(40));
+	check("§2 B7 sweep: ...and the next sweep sends nothing", cf.sends.length === 2 && cf.notes.length === 1 && cfs2 && cfs2.loads === 0, cfs2);
+
+	// A held value whose in-app notification failed: the broker never resends that value.
+	const hvdb = new Database(":memory:");
+	const hvst = { email: true, inApp: false };
+	const hv = flaky(hvdb, hvst);
+	await hv.fn(pay("900000146", "$75.00", "$74.00"));
+	hvst.inApp = true;
+	await hv.fn({ loadId: "900000146", reason: "delivered", held: [] });
+	check("§2 B7 sweep: a held value's failed notification, then a sighting without it: nothing sent", hv.sends.length === 1 && hv.notes.length === 0, { sends: hv.sends.length, notes: hv.notes.length });
+	const hvs = await sweepOf(hv)(inMin(16));
+	check("§2 B7 sweep: ...the sweep sends the in-app notification only, with old and new value",
+		hv.sends.length === 1 && hv.notes.length === 1 && /Payment \(held\): \$75\.00 → \$74\.00/.test(String(hv.notes[0] && hv.notes[0][2])) && hvs && hvs.loads === 1, { hvs, note: hv.notes[0] && hv.notes[0][2] });
+	await sweepOf(hv)(inMin(40));
+	check("§2 B7 sweep: ...once", hv.sends.length === 1 && hv.notes.length === 1, { sends: hv.sends.length, notes: hv.notes.length });
+
+	// 48 h: rows still owed are given up, one log line per load; rows inside the window are sent.
+	const gdb = new Database(":memory:");
+	const glogs = [];
+	const g = make({ db: gdb, logs: glogs });
+	if (!g.sweep) { check("§2 B7 sweep: the 48 h give-up (no sweep to run)", false); } else {
+	await g.sweep();
+	const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+	const gins = gdb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, alerted_at, notified_at) VALUES (?, ?, ?, ?, 'held', 'delivered', ?, ?, ?)");
+	gins.run("900000147", "Payment", "$9.00", "$10.00", ago(48.5), null, null);
+	gins.run("900000147", "Pickup Appointment", "10/8/2026 08:00", "10/9/2026 0:00", ago(50), ago(50), ago(50));
+	gins.run("900000148", "Payment", "$19.00", "$20.00", ago(47.5), null, null);
+	const gs = await g.sweep();
+	const g147 = ledger(gdb, "900000147");
+	const gPay = g147.find((x) => x.column_name === "Payment") || {};
+	const gPick = g147.find((x) => x.column_name === "Pickup Appointment") || {};
+	check("§2 B7 sweep: rows first seen 48.5 h and 50 h ago are given up on each channel they owed, and nothing is sent for them",
+		gPay.email_skipped === "gave_up" && gPay.notify_skipped === "gave_up" && gPick.email_skipped === "gave_up" && gPick.notify_skipped == null && ISO_RE.test(String(gPick.notified_at))
+		&& !g.sends.some((s) => /900000147/.test(s.subject)) && !g.notes.some((n) => /900000147/.test(String(n[1]))), { gPay, gPick });
+	check("§2 B7 sweep: ...a row first seen 47.5 h ago is still sent", g.sends.some((s) => /900000148/.test(s.subject)) && g.notes.some((n) => /900000148/.test(String(n[1]))) && gs && gs.loads === 1, gs);
+	const gaveUpLines = glogs.filter((l) => /GAVE UP/.test(l));
+	check("§2 B7 sweep: ...one GAVE UP line for the load, naming what each channel gave up",
+		gaveUpLines.length === 1 && /900000147/.test(gaveUpLines[0]) && /email: (Pickup Appointment, Payment|Payment, Pickup Appointment);/.test(gaveUpLines[0]) && /in-app: Payment$/.test(gaveUpLines[0]), glogs);
+	const gSends = g.sends.length;
+	await g.sweep();
+	check("§2 B7 sweep: ...and the next sweep neither sends nor logs it again", g.sends.length === gSends && glogs.filter((l) => /GAVE UP/.test(l)).length === 1, glogs);
+	}
+
+	// The sweep and an overlapping sighting send once per channel.
+	const ovdb = new Database(":memory:");
+	const ovst = { email: false, inApp: true };
+	const ov = flaky(ovdb, ovst);
+	await ov.fn(pay("900000149", "$55.00", "$54.00"));
+	const ovSlow = make({ db: ovdb, send: async () => { await new Promise((r) => setTimeout(r, 20)); return true; } });
+	await Promise.all([sweepOf(ovSlow)(inMin(16)), ovSlow.fn(pay("900000149", "$55.00", "$54.00")), sweepOf(ovSlow)(inMin(16))]);
+	check("§2 B7 sweep: a sweep and a sighting together retry an owed email once, with no notification", ovSlow.sends.length === 1 && ovSlow.notes.length === 0, { sends: ovSlow.sends.length, notes: ovSlow.notes.length });
+
+	// A call releases only its own claim (M8): a sighting whose send outlived the claim
+	// timeout finishes while the sweep, which retook the row, is still sending; a third call
+	// must still find the row held.
+	const xdb = new Database(":memory:");
+	const pending = [];
+	const x = make({ db: xdb, send: () => new Promise((r) => pending.push(r)) });
+	const xCall = x.fn(pay("900000150", "$65.00", "$64.00"));
+	await new Promise((r) => setImmediate(r));
+	check("§2 B7 claims: the in-app notification goes in before the email is awaited", x.notes.length === 1 && x.sends.length === 1, { notes: x.notes.length, sends: x.sends.length });
+	const sCall = sweepOf(x)(inMin(16));
+	await new Promise((r) => setImmediate(r));
+	check("§2 B7 claims: a claim older than 15 minutes is retaken by the sweep, for the email only", x.sends.length === 2 && x.notes.length === 1, { sends: x.sends.length, notes: x.notes.length });
+	if (pending[0]) pending[0](false);
+	await xCall;
+	const third = x.fn(pay("900000150", "$65.00", "$64.00"));
+	await new Promise((r) => setImmediate(r));
+	check("§2 B7 claims: the first call, finishing, leaves the sweep's claim in place: a third call sends nothing", x.sends.length === 2 && x.notes.length === 1, { sends: x.sends.length });
+	for (const r of pending.slice(1)) r(true);
+	await Promise.all([sCall, third]);
+	const xr = ledger(xdb, "900000150")[0] || {};
+	check("§2 B7 claims: ...the sweep's email is stamped and its claim released", ISO_RE.test(String(xr.emailed_at)) && xr.claimed_at == null && x.sends.length === 2, xr);
+
+	// A load the sweep reaches 20 minutes after it started is claimed with the time it was
+	// reached, so a sighting while its email is in flight doesn't find the claim stale.
+	const ldb = new Database(":memory:");
+	const lpending = [];
+	const lg = make({ db: ldb, send: () => new Promise((r) => lpending.push(r)) });
+	await lg.fn({ loadId: "900000154", reason: "delivered", held: [] });
+	const lt = new Date().toISOString();
+	ldb.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, alerted_at, notified_at) VALUES ('900000155', 'Payment', '$34.00', '$35.00', 'held', 'delivered', ?, ?, ?)").run(lt, lt, lt);
+	const lsweep = sweepOf(lg)({ now: new Date(Date.now() - 20 * 60 * 1000) });
+	await new Promise((r) => setImmediate(r));
+	const lsight = lg.fn(pay("900000155", "$35.00", "$34.00"));
+	await new Promise((r) => setImmediate(r));
+	check("§2 B7 claims: a load a sweep reaches 20 minutes in: a sighting while its email is in flight sends nothing", lg.sends.length === 1, { sends: lg.sends.length });
+	for (const r of lpending) r(true);
+	await Promise.all([lsweep, lsight]);
+
+	// Retries back off: 15 min after the first try, then 30 min, 1 h and 2 h after each
+	// later one, then every 4 h. A sweep before a row's slot leaves it alone.
+	const bodb = new Database(":memory:");
+	const bo = flaky(bodb, { email: false, inApp: true });
+	await bo.fn(pay("900000156", "$25.00", "$24.00"));
+	const t0 = Date.parse((ledger(bodb, "900000156")[0] || {}).last_try) || Date.now();
+	const tried = [];
+	for (const min of [10, 16, 40, 47, 106, 108, 227, 229, 468, 470, 709, 711]) {
+		const before = bo.sends.length;
+		const t = new Date(t0 + min * 60 * 1000);
+		await sweepOf(bo)({ now: t, clock: () => t });
+		if (bo.sends.length > before) tried.push(min);
+	}
+	eqCheck("§2 B7 backoff: retried at +16, +47, +108, +229, +470 and +711 min after the first try, and at no sweep before its slot", tried, [16, 47, 108, 229, 470, 711]);
+	const boRow = ledger(bodb, "900000156")[0] || {};
+	check("§2 B7 backoff: ...each try counted (attempts) with its time (last_try)", boRow.attempts === 7 && boRow.last_try === new Date(t0 + 711 * 60 * 1000).toISOString(), boRow);
+
+	// One summary line per sweep for the loads still failing, not a line per row or load.
+	const sudb = new Database(":memory:");
+	const sulogs = [];
+	const su = flaky(sudb, { email: false, inApp: true }, { logs: sulogs });
+	await su.fn({ loadId: "900000157", reason: "delivered", held: [{ column: "  Payment  ", stored: "$5.00", sent: "$4.00" }, { column: "Pickup Appointment", stored: "10/9/2026 0:00", sent: "10/8/2026 06:00" }] });
+	await su.fn(pay("900000158", "$6.00", "$5.00"));
+	sulogs.length = 0;
+	await sweepOf(su)(inMin(16));
+	const suLines = sulogs.filter((l) => /\[ratecon-reissue\]/.test(l));
+	check("§2 B7 sweep log: one summary line naming each load still failing and the channel",
+		suLines.length === 1 && /retry sweep: 2 load\(s\) retried, 0 delivered; still failing, retried later: 900000157 \(email\); 900000158 \(email\)$/.test(suLines[0]), suLines);
+	sulogs.length = 0;
+	await sweepOf(su)(inMin(20));
+	check("§2 B7 sweep log: ...and a sweep with nothing due logs nothing", sulogs.filter((l) => /\[ratecon-reissue\]/.test(l)).length === 0, sulogs);
+
+	// The cap counts a load still owed an email: with load A's email failed, a new load B is capped.
+	const s12db = new Database(":memory:");
+	const s12st = { email: false, inApp: true };
+	const s12 = flaky(s12db, s12st, { env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await s12.fn(pay("900000159", "$7.00", "$6.00"));
+	s12st.email = true;
+	const s12b = await s12.fn(pay("900000160", "$8.00", "$7.00"));
+	check("§2 B7 cap 1: load A's email failed (still owed), so a new load B is capped", s12.sends.length === 1 && s12b && s12b.reason === "daily_cap" && s12b.notified === true, { s12b, sends: s12.sends.length });
+	// ...while a load told in-app only (no address then) doesn't use up the cap.
+	const m2db = new Database(":memory:");
+	await make({ db: m2db, env: { ADMIN_NOTIFY_EMAIL: "" } }).fn(pay("900000164", "$3.00", "$2.00"));
+	const m2 = make({ db: m2db, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	const m2r = await m2.fn(pay("900000165", "$4.00", "$3.00"));
+	check("§2 B7 cap 1: a load told in-app only, with no address, doesn't count: the next load is emailed", m2.sends.length === 1 && m2r && m2r.emailed === true, { m2r, sends: m2.sends.length });
+
+	// The in-app notification goes in (and is stamped) before the email is even started.
+	const ordb = new Database(":memory:");
+	const or = make({ db: ordb });
+	await or.fn(pay("900000161", "$9.00", "$8.00"));
+	eqCheck("§2 B7 order: the in-app notification before the email starts", or.order, ["in-app", "email"]);
+
+	// A load still owed an email from an alert more than 24 h old is not held back by a full
+	// cap when its retry comes (hours 25-48).
+	const c24db = new Database(":memory:");
+	const c24 = make({ db: c24db, env: { RATECON_REISSUE_ALERT_MAX_PER_DAY: "1" } });
+	await c24.fn(pay("900000162", "$11.00", "$10.00"));
+	const old = new Date(Date.now() - 30 * 3600000).toISOString();
+	c24db.prepare("INSERT INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, alerted_at, notified_at) VALUES ('900000163', 'Payment', '$12.00', '$13.00', 'held', 'delivered', ?, ?, ?)").run(old, old, old);
+	await sweepOf(c24)();
+	check("§2 B7 cap 1 full: a load owed an email from an alert 30 h old still gets its retry",
+		c24.sends.length === 2 && /900000163/.test(c24.sends[1] && c24.sends[1].subject) && (ledger(c24db, "900000163")[0] || {}).email_skipped == null, { sends: c24.sends.map((s) => s.subject), row: ledger(c24db, "900000163")[0] });
+
+	// A replica starts no sweep; otherwise it runs every 15 minutes on an unref'd timer.
+	if (!/\nfunction startRateConReissueSweep\(/.test(SRC)) { check("§2 B7 startRateConReissueSweep() exists in server.js", false); return; }
+	const lift = closure(SRC, { roots: ["startRateConReissueSweep"], provided: ["db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "REPLICA", "setInterval", "require"] });
+	const quiet = { ...console, log: () => {}, error: () => {}, warn: () => {} };
+	const start = (REPLICA, env = {}) => {
+		const timers = [];
+		const fakeInterval = (fn, ms) => { const t = { fn, ms, unref() { t.unrefd = true; } }; timers.push(t); return t; };
+		const started = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "REPLICA", "setInterval", "require",
+			`"use strict";\n${lift.text}\nreturn startRateConReissueSweep();`)(
+			new Database(":memory:"), async () => true, { run: () => {} }, { to: () => ({ emit: () => {} }) }, quiet, { env }, REPLICA, fakeInterval, rootRequire);
+		return { started, timers };
+	};
+	const notStarted = [];
+	const rep = start({ jobNotStarted: (name) => { notStarted.push(name); return false; } });
+	check("§2 B7 sweep: a replica starts no sweep, and names it", rep.started === false && rep.timers.length === 0 && notStarted.some((n) => /re-issue/.test(n)), { rep, notStarted });
+	const live = start(null);
+	check("§2 B7 sweep: outside a replica it runs every 15 minutes on an unref'd timer",
+		live.started === true && live.timers.length === 1 && live.timers[0].ms === 15 * 60 * 1000 && live.timers[0].unrefd === true, live.timers);
+	const off = start(null, { RATECON_REISSUE_HOLD_ENABLED: "false" });
+	check("§2 B7 sweep: RATECON_REISSUE_HOLD_ENABLED=false starts none", off.started === false && off.timers.length === 0, off);
 }
 
 // --- §3 the integrity check, check 5 ------------------------------------------

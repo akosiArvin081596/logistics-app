@@ -212,7 +212,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		ok("the session store sweeps no expired sessions in a replica", /expired: \{ clear: !REPLICA, intervalMs: 3600000 \}/.test(SRC));
 		ok("the boot's address geocode asks startsJob()", /if \(startsJob\("address geocode and load-coordinate backfill \(at boot\)"\)\) \(async \(\) => \{/.test(SRC));
 		const jobs = [...SRC.matchAll(/startsJob\("([^"]+)"\)/g)].map((m) => m[1]);
-		for (const j of ["month-end close", "weekly invoice batch", "rate-con email reconcile", "Routemate live telemetry poll", "ELD telemetry trim (at boot, then weekly)", "fuel-event sweep", "duplicate-receipt alert sweep", "ELD feed-silence sweep"]) {
+		for (const j of ["month-end close", "weekly invoice batch", "rate-con email reconcile", "Routemate live telemetry poll", "ELD telemetry trim (at boot, then weekly)", "fuel-event sweep", "duplicate-receipt alert sweep", "ELD feed-silence sweep", "rate-con re-issue alert retry sweep"]) {
 			ok(`the job "${j}" is gated`, jobs.includes(j));
 		}
 
@@ -494,7 +494,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		await new Promise((r) => (child.exitCode !== null ? r() : child.once("exit", r)));
 		const notStarted = [...out.matchAll(/\[replica\] scheduled job not started: (.+)/g)].map((m) => m[1]);
 		ok("no scheduled job starts (each is named in the log)", notStarted.length >= 20, notStarted.length);
-		for (const j of ["month-end close", "weekly invoice batch", "rate-con email reconcile", "fuel-event sweep", "Routemate live telemetry poll", "Routemate vehicle sync (at boot)", "ELD telemetry trim (at boot, then weekly)", "address geocode and load-coordinate backfill (at boot)"]) {
+		for (const j of ["month-end close", "weekly invoice batch", "rate-con email reconcile", "fuel-event sweep", "Routemate live telemetry poll", "Routemate vehicle sync (at boot)", "ELD telemetry trim (at boot, then weekly)", "address geocode and load-coordinate backfill (at boot)", "rate-con re-issue alert retry sweep"]) {
 			ok(`...including "${j}", its flag on in the settings`, notStarted.includes(j));
 		}
 		ok("Google Sheets answer from the local copy", /Google Sheets connected — 1 tabs cached/.test(out), out.slice(-300));
