@@ -760,6 +760,8 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			// The settings read the environment only.
 			const def = SRC.match(/\nconst ADMIN_NOTIFY_EMAIL = ([^;]+);/);
 			check("§1 server.js declares ADMIN_NOTIFY_EMAIL once", !!def && SRC.split("\nconst ADMIN_NOTIFY_EMAIL = ").length === 2);
+			check(`§1 server.js reads process.env.ADMIN_NOTIFY_EMAIL once, in that declaration (found ${SRC.split("process.env.ADMIN_NOTIFY_EMAIL").length - 1})`,
+				SRC.split("process.env.ADMIN_NOTIFY_EMAIL").length === 2);
 			if (def) {
 				const value = (env) => { try { return new Function("process", `return ${def[1]};`)({ env }); } catch (e) { return `threw ${e.message}`; } };
 				check("§1 ADMIN_NOTIFY_EMAIL unset: empty", value({}) === "");

@@ -7362,8 +7362,8 @@ let n8nKeepStoredUnauthorizedLoggedAt = 0;
 // - delivered (Job Status Delivered / Completed / POD Received, DISPATCH_COMPLETED_RE),
 //   invoiced (an invoice draft under any spelling of its id), or with no Job
 //   Status column to read (status unknown): Payment, Pickup Appointment and
-//   Drop-off Appointment (each found by the money math's own header pattern,
-//   REISSUE_HELD_COLUMN_RES) come back as stored, a blank stored date included
+//   Drop-off Appointment (each found by header pattern, REISSUE_HELD_COLUMN_RES)
+//   come back as stored, a blank stored date included
 //   (filling it would move pay too); every other column keeps the rules below;
 // - in a closed month (any month loadRowAccountingMonths() books the row into is
 //   write-locked): EVERY column comes back as stored. Closed months are final as
@@ -7382,15 +7382,21 @@ let n8nKeepStoredUnauthorizedLoggedAt = 0;
 // RATECON_REISSUE_HOLD_ENABLED is a kill switch (defaults ON): it only keeps values.
 const RATECON_REISSUE_HOLD_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_REISSUE_HOLD_ENABLED ?? "").trim());
 // The columns a re-issue may not change on a delivered or invoiced load, found by
-// the patterns the money math finds them by, not by exact name: the pickup and
-// the drop-off date (the revenue and driver-pay math and loadRowAccountingMonths()
-// read /pickup.*appo|pickup.*date/i and /drop.?off.*appo|drop.?off.*date|delivery.*date/i)
-// and the load's amount (the revenue math's findCol(headers, /payment|rate|amount|revenue/i);
-// lib/broker-invoice.js findPaymentColumn()'s /payment/i is inside it). A column
-// name matching any of them is held, so a header the money math reads is never
-// missed, whatever it is called.
+// pattern, not by exact name, so a renamed or abbreviated header is still held:
+// - the pickup date: the revenue and driver-pay math's /pickup.*appo|pickup.*date/i
+//   (as loadRowAccountingMonths() reads it);
+// - the drop-off date: the same math's /drop.?off.*appo|drop.?off.*date|delivery.*date/i,
+//   plus deliv.*appo, which invoiceWeekColumns(), invoice drafting and public
+//   tracking also read;
+// - the amount: the revenue math's findCol(headers, /payment|rate|amount|revenue/i)
+//   (/api/investor, /api/financials, the invoice batch); lib/broker-invoice.js
+//   findPaymentColumn()'s /payment/i is inside it.
+// It is not every money or date regex in this file: the dashboard's /pay/, the tax
+// CSV's /charge|price|cost/ and other date columns (Completion Date, Status Update
+// Date) are not held on a delivered or invoiced load. Assigned Date keeps its own
+// set-once rule, and a closed month holds every column whatever its name.
 const REISSUE_PAYMENT_RE = /payment|rate|amount|revenue/i;
-const REISSUE_HELD_COLUMN_RES = [/pickup.*appo|pickup.*date/i, /drop.?off.*appo|drop.?off.*date|delivery.*date/i, REISSUE_PAYMENT_RE];
+const REISSUE_HELD_COLUMN_RES = [/pickup.*appo|pickup.*date/i, /drop.?off.*appo|drop.?off.*date|delivery.*date|deliv.*appo/i, REISSUE_PAYMENT_RE];
 function reissueHeldColumn(col) {
 	const name = String(col == null ? "" : col).trim();
 	return REISSUE_HELD_COLUMN_RES.some((re) => re.test(name));
@@ -7597,8 +7603,9 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 	}
 });
 
-// Ceiling on re-issue alert EMAILS per rolling 24 h, counted in loads (distinct
-// load_id). The once-per-change ledger is the primary control; this one holds
+// Ceiling on re-issue alert EMAILS per rolling 24 h. It counts the loads (distinct
+// load_id) alerted by any channel, email or in-app notification, in that window
+// (alerted_at). The once-per-change ledger is the primary control; this one holds
 // whatever the key turns out to be, because sendEmail is shared with every other
 // app mail. Past it the in-app notification still goes out.
 const RATECON_REISSUE_ALERT_MAX_PER_DAY =
@@ -7672,7 +7679,7 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 			for (const e of fresh) unclaim.run(key, e.column, e.sent, nowIso);
 		};
 		// The cap stops only the email: the in-app notification always goes in, so a
-		// capped change is still reported, once.
+		// capped change is still reported, once. It counts loads alerted by any channel.
 		const dayAgo = new Date(now.getTime() - 86400000).toISOString();
 		const loadsToday = db.prepare("SELECT COUNT(DISTINCT load_id) AS c FROM ratecon_reissue_holds WHERE alerted_at > ?").get(dayAgo).c;
 		const capped = loadsToday >= RATECON_REISSUE_ALERT_MAX_PER_DAY;
@@ -7707,7 +7714,20 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		}
 		let notified = false;
 		const title = anyHeld ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
-		const body = fresh.map((e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`).join(", ");
+		// Each listed column with its old and new value, so a change the email cap
+		// skipped still reaches a person. The dispatch room sees this, and Dispatchers
+		// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
+		// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them).
+		const names = fresh.map((e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`).join(", ");
+		const shown = (v) => {
+			const s = String(v).replace(/\s+/g, " ").trim();
+			if (!s) return "(blank)";
+			return s.length > 100 ? `${s.slice(0, 100)}…` : s;
+		};
+		const body = fresh.map((e) => {
+			const name = `${e.column}${e.kind === "held" ? " (held)" : ""}`;
+			return BROKER_WITHHELD_RE.test(e.column) ? `${name}: broker contact, not shown` : `${name}: ${shown(e.stored)} → ${shown(e.sent)}`;
+		}).join("; ");
 		const metadata = { loadId: label, reason: why, fields: fresh.map((e) => ({ column: e.column, kind: e.kind })) };
 		try {
 			insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
@@ -7722,7 +7742,7 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		} else {
 			release();
 		}
-		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? (capped ? "ALERT (in-app only: daily email cap)" : "ALERT") : "ALERT UNDELIVERED (will retry next sighting)", label, why, body);
+		console.log("[ratecon-reissue] %s — load %s (%s): %s", delivered ? (capped ? "ALERT (in-app only: daily email cap)" : "ALERT") : "ALERT UNDELIVERED (will retry next sighting)", label, why, names);
 		return { alerted: delivered, emailed, notified, key, ...(capped ? { reason: "daily_cap" } : {}) };
 	} catch (e) {
 		console.error("[ratecon-reissue] alert failed:", e && e.message);
