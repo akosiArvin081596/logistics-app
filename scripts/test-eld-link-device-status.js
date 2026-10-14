@@ -33,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 const eldFeedHealth = require("../lib/eld-feed-health");
+const alertChannels = require("../lib/alert-channels");
 
 const src = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -145,7 +146,7 @@ function freshDb({ link356 = "", unit356 = "LogisX-#356", rm356FixMs = NOW - 10 
 // One Function scope per world: the lifted code closes over these names only.
 function build(db, pieces, extra = {}) {
 	const deps = {
-		db, eldFeedHealth, Date: FixedDate,
+		db, eldFeedHealth, alertChannels, Date: FixedDate,
 		ELD_STALE_HOURS: 24, ELD_STALE_ALERT_ENABLED: true, ELD_STALE_ALERT_MAX_PER_DAY: 25,
 		console: { log: () => {}, warn: () => {}, error: (...a) => (extra.errors || []).push(a.join(" ")) },
 		...extra.deps,
@@ -370,7 +371,7 @@ function routeWorld(db, verb, route, deps = {}) {
 			expose: ["alertEldFeedSilence"],
 			deps: {
 				appTodayKey: () => "2026-10-01",
-				process: { env: { GMAIL_USER: "ops@example.invalid" } },
+				process: { env: { GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test" } },
 				sendEmail: async (to, subject, html) => { rec.emails.push({ subject, html }); return true; },
 				insertDispatchNotification: { run: (type, title, body) => rec.notes.push({ title, body }) },
 				io: { to: () => ({ emit: () => {} }) },

@@ -77,6 +77,7 @@ const ROOT = path.join(__dirname, "..");
 const SERVER = path.join(ROOT, "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
 const feedLib = require(path.join(ROOT, "lib", "eld-feed-health.js"));
+const alertChannels = require(path.join(ROOT, "lib", "alert-channels.js"));
 
 // ------------------------------------------------------------------ harness
 let passed = 0;
@@ -218,10 +219,10 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 	const body = FNS.map(extract).join("\n\n");
 	const src = mutate(`${preamble}${body}\nreturn { ${FNS.join(", ")}, eldFeedSweepHealth };`);
 	const built = new Function(
-		"db", "eldFeedHealth", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "console", "process",
+		"db", "eldFeedHealth", "alertChannels", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "console", "process",
 		src,
-	)(db, opts.lib || feedLib, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
-		{ env: { GMAIL_USER: "ops@example.invalid" } });
+	)(db, opts.lib || feedLib, alertChannels, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
+		{ env: { GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test" } });
 	return { ...built, rec, db };
 }
 
@@ -402,8 +403,10 @@ section("§1 textual — the shipped source says what this test assumes");
 	// ⚠️ THE HALF THAT SEPARATES THIS FROM fuel_event_alerts. A bare alerted_at
 	// short-circuit silences a feed forever after its first ping — including
 	// after it was repaired and died again, which is the failure nobody watches for.
-	ok("§1.19 dedupe is guarded by `&& !seen.resolved_at` (standing condition, not point event)",
-		/seen\.alerted_at\s*&&\s*!seen\.resolved_at/.test(alertFn));
+	// The open row is done only once it owes no channel (lib/alert-channels.js):
+	// one told in-app whose email failed is retried, email only.
+	ok("§1.19 dedupe is guarded by `!seen.resolved_at` and no channel owed (standing condition, not point event)",
+		/seen\s*&&\s*!seen\.resolved_at\s*&&\s*!alertChannels\.owesRow\(db, "eld_feed_alerts", seen\)/.test(alertFn));
 	ok("§1.20 first_seen preserved across re-open via COALESCE", /COALESCE\(\(SELECT first_seen FROM eld_feed_alerts/.test(alertFn));
 	ok("§1.21 re-open clears resolved_at", /resolved_at\s*=\s*NULL/.test(alertFn));
 	// ⚠️ alerted_at is stamped ONLY after confirmed delivery, and the source order
@@ -858,7 +861,7 @@ async function run() {
 		// silenced forever after its first ping, including after a repair-and-die.
 		const db = seedProduction(freshDb(), Date.now());
 		const S = loadShipped(db, {}, (s) => s.replace(
-			"if (seen && seen.alerted_at && !seen.resolved_at) return",
+			"if (seen && !seen.resolved_at && !alertChannels.owesRow(db, \"eld_feed_alerts\", seen)) return",
 			"if (seen && seen.alerted_at) return",
 		));
 		await S.sweepEldFeedSilence();

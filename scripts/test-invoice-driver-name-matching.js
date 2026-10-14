@@ -130,9 +130,9 @@ const SHARED_FNS = [
 	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth",
 	// The Friday batch and its mail.
 	"escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "generateInvoiceInProcess", "abortAutogenRun",
-	"listUndatedCompletedLoads",
+	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest",
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
 	"rerenderInvoicePdfFromStoredData"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
@@ -306,6 +306,8 @@ function buildWorld(opts = {}) {
 	const passthrough = () => (req, res, next) => next && next();
 	const deps = {
 		db, app, normalizeLoadId, loadPayDays: require("../lib/load-pay-days.js"),
+		// The undated-load ledger's per-channel delivery (emailed_at, notified_at, the claim).
+		alertChannels: require("../lib/alert-channels.js"),
 		localDayInTz: eldMiles.localDayInTz,
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
