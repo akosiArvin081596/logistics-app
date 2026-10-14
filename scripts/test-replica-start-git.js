@@ -14,8 +14,12 @@
 //      starts as in §1
 //   §3 without --prod-commit the server runs from the checkout itself and the
 //      record names the checkout's HEAD (git's piped answers still come back
-//      trimmed); the checkout's own repository registered none of the
-//      throwaway worktrees
+//      trimmed)
+//   §4 the commit is on origin neither: after the fetch, replica:start refuses
+//      with "is not in this repository" and exits 1, adds no worktree and
+//      starts nothing (a failing git call still fails; it is not read as "")
+//   Last, this checkout's own repository lists its worktrees, and none of them
+//   is a throwaway one.
 //
 // The start.js under test is START_JS (default: this checkout's). It runs from
 // the scripts/replica/ folder of a throwaway repository (its REPO is two folders
@@ -25,6 +29,10 @@
 // otherwise point every call at this repository). The server is a stand-in
 // server.js committed in the throwaway repository: it answers replica:start's
 // readiness check once and exits.
+//
+// run-unit-tests.js kills a runner at 60 s, and then the exit handler never
+// removes the temporary folders: the replica:start runs share one 45 s budget,
+// at most 12 s each (the stand-in server exits by itself at 10 s).
 //
 // Standalone: node scripts/test-replica-start-git.js. Temporary folders only,
 // a free local port, no network.
@@ -38,6 +46,7 @@ const { spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const START_JS = path.resolve(process.env.START_JS || path.join(ROOT, "scripts", "replica", "start.js"));
+const RUNS_UNTIL = Date.now() + 45000;
 
 let failures = 0;
 const ok = (name, cond, detail) => {
@@ -166,7 +175,7 @@ function exited(pid) {
 async function start(fx, h, task, extra) {
 	const port = await freePort();
 	const r = spawnSync(process.execPath, [path.join(fx.repo, "scripts", "replica", "start.js"), "--task", task, "--port", String(port), ...extra],
-		{ cwd: fx.repo, env: envFor(h.home), encoding: "utf8", timeout: 20000 });
+		{ cwd: fx.repo, env: envFor(h.home), encoding: "utf8", timeout: Math.max(1, Math.min(12000, RUNS_UNTIL - Date.now())) });
 	const recFile = path.join(h.root, "work", task, "server.json");
 	const record = fs.existsSync(recFile) ? JSON.parse(fs.readFileSync(recFile, "utf8")) : {};
 	const log = record.log && fs.existsSync(record.log) ? fs.readFileSync(record.log, "utf8") : "";
@@ -243,9 +252,24 @@ const linkOf = (p) => { try { return fs.readlinkSync(p); } catch { return ""; } 
 		eq("the server ran from the checkout", r.firstLog, `stand-in server, version one, from ${fx.repo}`);
 		ok("no worktree is added", !fs.existsSync(path.join(h.root, "code")));
 		ok("the stand-in server has exited", r.serverExited);
-		const own = worktreesOf(ROOT, process.env);
-		ok("this checkout's repository registered none of the throwaway worktrees", !own.some((w) => w.startsWith(`${fx.base}${path.sep}`)), own);
 	}
+
+	console.log("§4 a commit on origin neither: refused after the fetch");
+	{
+		const nowhere = "0123456789abcdef0123456789abcdef01234567";
+		const h = replicaHome(fx, nowhere);
+		ok("(fixture) the commit is not in the repository", !hasCommit(fx, nowhere));
+		const r = await start(fx, h, "t5", ["--prod-commit"]);
+		eq("replica:start exits 1", r.status, 1);
+		ok("...after fetching origin", r.out.includes(`fetching ${nowhere.slice(0, 12)} from origin`), tail(r.out));
+		ok("...saying the commit is not in this repository", r.out.includes(`production's commit ${nowhere} is not in this repository`), tail(r.out));
+		ok("no code folder and no worktree are added", !fs.existsSync(path.join(h.root, "code")) && !worktreesOf(fx.repo, fx.env).some((w) => w.includes(nowhere)), worktreesOf(fx.repo, fx.env));
+		ok("no server is started or recorded", !fs.existsSync(path.join(h.root, "work", "t5")));
+	}
+
+	const own = worktreesOf(ROOT, process.env);
+	ok("this checkout's repository lists its worktrees (the checkout itself among them)", own.length > 0, own);
+	ok("...and none of them is a throwaway one", !own.some((w) => w.startsWith(`${fx.base}${path.sep}`)), own);
 
 	console.log(failures ? `\n${failures} FAILED` : "\nall passed");
 	process.exit(failures ? 1 : 0);
