@@ -12,8 +12,9 @@
  *      as a fallback (`|| "…"`, `?? "…"`), a constant holding a recipient,
  *      instance or workflow, a sendEmail() recipient, a default parameter or
  *      an argument default. No script carries the n8n instance or workflow in
- *      code, and none defaults --sheet-id. The five admin notifications send
- *      to ADMIN_NOTIFY_EMAIL, each one guarded; the setting reads the
+ *      code, and none defaults --sheet-id. The six admin notifications send
+ *      to ADMIN_NOTIFY_EMAIL, each one guarded (if (ADMIN_NOTIFY_EMAIL), the
+ *      re-issue alert's keeping its promise in a variable); the setting reads the
  *      environment only, trimmed.
  *   §2 server.js, booted (nodemailer and Google stubbed): without
  *      ADMIN_NOTIFY_EMAIL it starts and logs one [admin-notify] warning, once
@@ -26,7 +27,7 @@
  *      [invoice-bank] warning naming each missing one and never a value. With
  *      the settings, no warning, and the admin email and the RFI go to the
  *      named inbox.
- *   §3 each of the five admin sends, run on its own: skipped without the
+ *   §3 each of the six admin sends, run on its own: skipped without the
  *      setting, one email to it with it.
  *   §4 invoice drafts: resolveInvoiceTo() answers "" for a missing setting,
  *      the rate-con's documents email still wins for a non-Bison broker, and a
@@ -742,13 +743,15 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§1 no script defaults --sheet-id (${argDefault.join(", ") || "none"})`, argDefault.length === 0);
 			check(`§1 nothing falls back to the production sheet constant (${prodFallback.join(", ") || "none"})`, prodFallback.length === 0);
 
-			// The five admin notifications, each guarded on the setting.
+			// The six admin notifications, each guarded on the setting. The re-issue
+			// alert keeps its send's promise (`if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(…)`)
+			// to learn whether it went out; the guard is the same.
 			const calls = sendEmailCalls(SRC);
 			const literalTo = calls.filter((c) => /^["'`]/.test(c.first));
 			check(`§1 no sendEmail() in server.js has a literal recipient (${literalTo.map((c) => `server.js:${lineOf(SRC, c.at)}`).join(", ") || "none"})`, literalTo.length === 0);
 			const admin = calls.filter((c) => c.first === "ADMIN_NOTIFY_EMAIL");
-			check(`§1 five admin notifications send to ADMIN_NOTIFY_EMAIL (found ${admin.length})`, admin.length === 5);
-			const unguarded = admin.filter((c) => c.lead !== "if (ADMIN_NOTIFY_EMAIL)");
+			check(`§1 six admin notifications send to ADMIN_NOTIFY_EMAIL (found ${admin.length})`, admin.length === 6);
+			const unguarded = admin.filter((c) => !/^if \(ADMIN_NOTIFY_EMAIL\)(?: [A-Za-z_$][\w$]* =)?$/.test(c.lead));
 			check(`§1 …each one guarded by if (ADMIN_NOTIFY_EMAIL) (${admin.length ? unguarded.map((c) => `server.js:${lineOf(SRC, c.at)}`).join(", ") || "all are" : "none found"})`,
 				admin.length > 0 && unguarded.length === 0);
 			const alerts = calls.filter((c) => /GMAIL_USER/.test(c.first) || c.first === "adminEmail");
@@ -757,6 +760,8 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			// The settings read the environment only.
 			const def = SRC.match(/\nconst ADMIN_NOTIFY_EMAIL = ([^;]+);/);
 			check("§1 server.js declares ADMIN_NOTIFY_EMAIL once", !!def && SRC.split("\nconst ADMIN_NOTIFY_EMAIL = ").length === 2);
+			check(`§1 server.js reads process.env.ADMIN_NOTIFY_EMAIL once, in that declaration (found ${SRC.split("process.env.ADMIN_NOTIFY_EMAIL").length - 1})`,
+				SRC.split("process.env.ADMIN_NOTIFY_EMAIL").length === 2);
 			if (def) {
 				const value = (env) => { try { return new Function("process", `return ${def[1]};`)({ env }); } catch (e) { return `threw ${e.message}`; } };
 				check("§1 ADMIN_NOTIFY_EMAIL unset: empty", value({}) === "");
@@ -838,9 +843,9 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			}
 		});
 
-		await section("§3 the five admin sends, each run on its own", () => {
+		await section("§3 the six admin sends, each run on its own", () => {
 			const admin = sendEmailCalls(SRC).filter((c) => c.first === "ADMIN_NOTIFY_EMAIL");
-			check(`§3 the five sends are found (got ${admin.length})`, admin.length === 5);
+			check(`§3 the six sends are found (got ${admin.length})`, admin.length === 6);
 			for (const c of admin) {
 				const label = (c.statement.match(/`([^`$]*)/) || [, `server.js:${lineOf(SRC, c.at)}`])[1].trim() || `server.js:${lineOf(SRC, c.at)}`;
 				const skipped = runStatement(c.statement, { ADMIN_NOTIFY_EMAIL: "" });
