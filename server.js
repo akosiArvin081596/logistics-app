@@ -3456,7 +3456,7 @@ async function alertEldFeedSilence(verdict) {
 		// report, because the second death is the one nobody is watching for.
 		// An open row is done only when it owes no channel (lib/alert-channels.js):
 		// one told in-app whose email failed is retried on each sweep, email only.
-		if (seen && !seen.resolved_at && !alertChannels.owes(seen)) return { alerted: false, reason: "already_alerted", key };
+		if (seen && !seen.resolved_at && !alertChannels.owesRow(db, "eld_feed_alerts", seen)) return { alerted: false, reason: "already_alerted", key };
 
 		// ⚠️ RE-OPEN COOLDOWN (see ELD_STALE_REOPEN_COOLDOWN_MS). Returning BEFORE the
 		// upsert below is what keeps the clock: the row stays resolved with the last
@@ -19246,8 +19246,12 @@ async function retryUndatedLoadAlerts({ now = new Date() } = {}) {
 	}
 	if (!due.length) return { ...none, gaveUp: gaveUp.length };
 
+	// A row this sweep reaches but leaves out (the sheet unusable, or its load no
+	// longer listed) still counts a try, so it follows the backoff (up to every
+	// 4 h) instead of costing a Job Tracking read every tick.
 	const read = await readUndatedLoads();
 	if (!read.usable) {
+		for (const r of due) alertChannels.noteTry(db, "invoice_undated_alerts", "load_key", r.load_key, now);
 		console.warn(`[invoice-undated] retry sweep: Job Tracking ${read.sheet.data.length ? "has no status, Load ID or completion-date column" : "read back empty"} — ${due.length} retry(ies) wait`);
 		return { ...none, gaveUp: gaveUp.length };
 	}
@@ -19255,6 +19259,9 @@ async function retryUndatedLoadAlerts({ now = new Date() } = {}) {
 	const still = due.filter((r) => current.has(r.load_key))
 		.sort((a, b) => String(a.first_seen).localeCompare(String(b.first_seen)) || a.load_key.localeCompare(b.load_key));
 	const waiting = due.length - still.length;
+	for (const r of due) {
+		if (!current.has(r.load_key)) alertChannels.noteTry(db, "invoice_undated_alerts", "load_key", r.load_key, now);
+	}
 	const { listed } = undatedDigestSlice(still);
 	const claims = new Map();
 	for (const k of listed) {
@@ -19487,7 +19494,7 @@ async function alertUnusableRateConExtraction({ loadId, unusable, fields }) {
 		const seen = db.prepare("SELECT * FROM ratecon_extract_alerts WHERE load_id = ?").get(key);
 		// Done once it owes no channel (lib/alert-channels.js): a load told in-app
 		// whose email failed is retried, email only, here or by the retry sweep.
-		if (seen && !alertChannels.owes(seen)) return { alerted: false, reason: "already_alerted", key };
+		if (seen && !alertChannels.owesRow(db, "ratecon_extract_alerts", seen)) return { alerted: false, reason: "already_alerted", key };
 		if (seen && alertChannels.expired(seen, Date.now())) {
 			giveUpRateConExtractAlert(seen);
 			return { alerted: false, reason: "gave_up", key };
@@ -21224,7 +21231,7 @@ async function alertDuplicateReceipts(group) {
 		// standing condition, so "already told you" is only true while it is still
 		// the same unresolved condition, and only once it owes no channel
 		// (lib/alert-channels.js): an email that failed is retried on each sweep.
-		if (seen && !seen.resolved_at && !alertChannels.owes(seen)) return { alerted: false, reason: "already_alerted", key };
+		if (seen && !seen.resolved_at && !alertChannels.owesRow(db, "expense_duplicate_alerts", seen)) return { alerted: false, reason: "already_alerted", key };
 
 		// An open row told by one channel whose other channel is still undelivered
 		// RETRY_WINDOW_MS later gives that channel up, once. A row nothing was

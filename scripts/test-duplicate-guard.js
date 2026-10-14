@@ -457,7 +457,7 @@ check("empty string rejected", keyOk(""), false);
 // filed. Three pieces have to agree for that to work, and until 2026-09-19 they
 // did not:
 //
-//   (a) the dedupe guard   `if (seen && !seen.resolved_at && !alertChannels.owes(seen))`
+//   (a) the dedupe guard   `if (seen && !seen.resolved_at && !alertChannels.owesRow(db, <ledger>, seen))`
 //                          (then `seen.alerted_at && !seen.resolved_at`; a row
 //                          alerted with no channel stamped owes nothing)
 //   (b) the UPSERT         cleared `resolved_at` on a re-open...
@@ -529,7 +529,8 @@ check("empty string rejected", keyOk(""), false);
 		/SELECT COUNT\(\*\) AS c FROM expense_duplicate_alerts WHERE alerted_at > datetime\('now', '-1 day'\)/,
 		"the rolling-24h cap query",
 	);
-	const GUARD_RE = /if \(seen && !seen\.resolved_at && !alertChannels\.owes\(seen\)\) return \{ alerted: false, reason: "already_alerted", key \};/;
+	// Each copy names its own ledger (owesRow() answers by that ledger's readiness).
+	const GUARD_RE = /if \(seen && !seen\.resolved_at && !alertChannels\.owesRow\(db, "(?:expense_duplicate_alerts|eld_feed_alerts)", seen\)\) return \{ alerted: false, reason: "already_alerted", key \};/;
 	const guardSrc = one(GUARD_RE, "the dedupe guard");
 
 	// The duplication is deliberate; pin it so an accidental THIRD copy is loud.
@@ -545,9 +546,16 @@ check("empty string rejected", keyOk(""), false);
 	check("the shipped UPSERT clears resolved_at", /resolved_at = NULL/.test(upsertShipped), true);
 	check("the stamp is still gated on alerted_at IS NULL", /alerted_at IS NULL/.test(stampSql), true);
 
-	// The guard, executed rather than eyeballed, over lib/alert-channels.js.
-	const guardFn = new Function("seen", "alertChannels", `const key = "k"; ${guardSrc} return null;`);
-	const guard = (seen) => guardFn(seen, alertChannels);
+	// The guard, executed rather than eyeballed, over lib/alert-channels.js and a
+	// ledger whose per-channel columns are in place.
+	const guardFn = new Function("seen", "alertChannels", "db", `const key = "k"; ${guardSrc} return null;`);
+	const trackedDb = new Database(":memory:");
+	trackedDb.exec(ddl);
+	alertChannels.prepareLedger(trackedDb, "expense_duplicate_alerts", [], { error() {} });
+	const guard = (seen) => guardFn(seen, alertChannels, trackedDb);
+	// A ledger whose columns could not be added keeps the old rule: alerted means done.
+	check("guard, ledger without its columns: told in-app with the email owed -> dedupe (the old rule)",
+		guardFn({ alerted_at: "t", resolved_at: null, notified_at: "t", emailed_at: null }, alertChannels, {}) !== null, true);
 	check("guard: alerted + unresolved  -> dedupe", guard({ alerted_at: "t", resolved_at: null }) !== null, true);
 	check("guard: alerted + RESOLVED    -> let through", guard({ alerted_at: "t", resolved_at: "t" }), null);
 	check("guard: never alerted         -> let through", guard({ alerted_at: null, resolved_at: null }), null);

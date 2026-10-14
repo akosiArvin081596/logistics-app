@@ -406,7 +406,7 @@ section("§1 textual — the shipped source says what this test assumes");
 	// The open row is done only once it owes no channel (lib/alert-channels.js):
 	// one told in-app whose email failed is retried, email only.
 	ok("§1.19 dedupe is guarded by `!seen.resolved_at` and no channel owed (standing condition, not point event)",
-		/seen\s*&&\s*!seen\.resolved_at\s*&&\s*!alertChannels\.owes\(seen\)/.test(alertFn));
+		/seen\s*&&\s*!seen\.resolved_at\s*&&\s*!alertChannels\.owesRow\(db, "eld_feed_alerts", seen\)/.test(alertFn));
 	ok("§1.20 first_seen preserved across re-open via COALESCE", /COALESCE\(\(SELECT first_seen FROM eld_feed_alerts/.test(alertFn));
 	ok("§1.21 re-open clears resolved_at", /resolved_at\s*=\s*NULL/.test(alertFn));
 	// ⚠️ alerted_at is stamped ONLY after confirmed delivery, and the source order
@@ -861,7 +861,7 @@ async function run() {
 		// silenced forever after its first ping, including after a repair-and-die.
 		const db = seedProduction(freshDb(), Date.now());
 		const S = loadShipped(db, {}, (s) => s.replace(
-			"if (seen && !seen.resolved_at && !alertChannels.owes(seen)) return",
+			"if (seen && !seen.resolved_at && !alertChannels.owesRow(db, \"eld_feed_alerts\", seen)) return",
 			"if (seen && seen.alerted_at) return",
 		));
 		await S.sweepEldFeedSilence();

@@ -13,7 +13,10 @@
  *      needs GMAIL_USER and GMAIL_APP_PASSWORD), the give-up (only the second channel of an alert a
  *      person was told about, 48 h after; never while a live call holds the row; never a row nothing
  *      was delivered for); prepareLedger() adds the columns once, marks the rows alerted before them
- *      "before_tracking", and when the columns can't be added logs once and keeps the old rule.
+ *      "before_tracking", and when the columns can't be added logs once and keeps the old rule
+ *      (owesRow() then reads "alerted" as done); with every column added but the marking failing,
+ *      the ledger is tracked and nothing already told is sent again; noteTry() counts a try for a
+ *      row a sweep left out, never one a live call holds.
  *   §2-§5, one alert each, lifted from server.js (scripts/lib/server-lift.js) over an in-memory
  *      SQLite with the ledger's own CREATE TABLE and stand-in email and notification channels:
  *      - email fails, in-app goes: the row owes the email; a later tick sends only the email;
@@ -32,8 +35,10 @@
  *      no GMAIL_APP_PASSWORD, the email is skipped, not owed. ELD: the email's retry is not a second
  *      send against the daily cap, and when the columns can't be added the alert keeps its old
  *      rule. Undated: only the loads a channel that went out carried are told; the retry re-reads
- *      Job Tracking and leaves out (still owed) a load given a date since, and says when the loads
- *      were first listed (Eastern); a retry of a load already told is free under the daily cap.
+ *      Job Tracking and leaves out (still owed) a load given a date since, counting the try so the
+ *      next tick neither reads the sheet nor logs; an unusable read sends nothing; the retry says
+ *      when the loads were first listed (Eastern); a retry of a load already told is free under
+ *      the daily cap.
  *   §6 the shared retry sweep: sweepAlertChannelRetries() runs both halves, one failing does not
  *      stop the other; startAlertChannelRetrySweep() starts an unref'd 15-minute timer, and none in
  *      a replica or with both kill switches off.
@@ -200,6 +205,34 @@ function section1() {
 	ok("§1 an untracked ledger keeps the old rule: claim() answers both channels, unclaimed", !!c3 && c3.email && c3.inApp && c3.claimedAt === null, c3);
 	eq([ac.owesSql(broken, "f_alerts"), ac.retryCandidates(broken, "f_alerts"), ac.giveUp(broken, "f_alerts", "k", "x")],
 		["alerted_at IS NULL", { expired: [], due: [] }, { email: false, inApp: false }], "§1 …its owed test is the old one, and nothing is retried or given up");
+	eq([ac.owesRow(broken, "f_alerts", { alerted_at: "t", notified_at: "t" }), ac.owesRow(broken, "f_alerts", { alerted_at: null })],
+		[null, { email: true, inApp: true }], "§1 owesRow() on a ledger without its columns: the old rule (alerted owes nothing, never alerted owes both)");
+
+	// Every column added, but marking the earlier rows fails (a busy database): the ledger is
+	// tracked all the same, so nothing already told is sent again.
+	const mreal = new Database(":memory:");
+	mreal.exec("CREATE TABLE m_alerts (k TEXT PRIMARY KEY, alerted_at TEXT)");
+	mreal.prepare("INSERT INTO m_alerts (k, alerted_at) VALUES ('hist', ?)").run(hoursAgo(100));
+	const busy = { prepare: (s) => { if (/before_tracking/.test(s)) throw new Error("database is busy (test)"); return mreal.prepare(s); } };
+	const mlogs = [];
+	eq(ac.prepareLedger(busy, "m_alerts", [], { error: (...a) => mlogs.push(a.join(" ")) }), true, "§1 the columns added, the marking failed: the ledger is tracked");
+	ok("§1 …and the failed marking is logged once", mlogs.length === 1 && /not marked before_tracking/.test(mlogs[0]), mlogs);
+	mreal.prepare("INSERT INTO m_alerts (k, alerted_at, emailed_at, notified_at) VALUES ('both', ?, ?, ?)").run(hoursAgo(2), hoursAgo(2), hoursAgo(2));
+	mreal.prepare("INSERT INTO m_alerts (k, alerted_at, notified_at) VALUES ('inapp', ?, ?)").run(hoursAgo(2), hoursAgo(2));
+	const row = (k) => mreal.prepare("SELECT * FROM m_alerts WHERE k = ?").get(k);
+	eq([ac.owesRow(busy, "m_alerts", row("hist")), ac.claim(busy, "m_alerts", "k", "hist")], [null, null],
+		"§1 …a row alerted before tracking (left unmarked) owes nothing and is never claimed");
+	eq([ac.owesRow(busy, "m_alerts", row("both")), ac.claim(busy, "m_alerts", "k", "both")], [null, null], "§1 …a row told by both channels: nothing resent");
+	const ci = ac.claim(busy, "m_alerts", "k", "inapp");
+	ok("§1 …a row told in-app: only its email is owed, under a claim", !!ci && ci.email === true && ci.inApp === false && typeof ci.claimedAt === "string", ci);
+
+	// noteTry(): a try counted for a row a sweep left out, never one a live call holds.
+	mreal.prepare("UPDATE m_alerts SET claimed_at = ?, attempts = 1 WHERE k = 'inapp'").run(new Date().toISOString());
+	eq(ac.noteTry(busy, "m_alerts", "k", "inapp"), false, "§1 noteTry(): not while a live call holds the row");
+	mreal.prepare("UPDATE m_alerts SET claimed_at = NULL, last_try = ? WHERE k = 'inapp'").run(hoursAgo(5));
+	ok("§1 noteTry(): counts the try and moves last_try", ac.noteTry(busy, "m_alerts", "k", "inapp") === true && row("inapp").attempts === 2
+		&& Date.parse(row("inapp").last_try) > Date.now() - 60000, row("inapp"));
+	eq(ac.noteTry(broken, "f_alerts", "k", "x"), false, "§1 noteTry(): nothing on a ledger without its columns");
 }
 
 // ===========================================================================
@@ -244,6 +277,21 @@ async function section2() {
 		w.ch.mailOk = true;
 		await attempt(() => w.alertEldFeedSilence(feed("vid9201")));
 		eq([afterFirst, sendLog(), w.ch.sends.length], [1, 1, 2], "§2 ELD feed: the email's retry goes out without counting a second send against the daily cap");
+	}
+	{
+		// A feed told in-app (its email failed) in one process; after a restart whose marking of the
+		// earlier rows fails (a busy database), the columns are all there: the ledger is still
+		// tracked, so the retry sends only the owed email, and nothing once both went.
+		const real = freshDb();
+		const before = world(real);
+		before.ch.mailOk = false;
+		await attempt(() => before.alertEldFeedSilence(feed("vid9401")));
+		const restarted = { prepare: (s) => { if (/before_tracking/.test(s)) throw new Error("database is busy (test)"); return real.prepare(s); } };
+		const w = world(restarted);
+		await attempt(() => w.alertEldFeedSilence(feed("vid9401")));
+		await attempt(() => w.alertEldFeedSilence(feed("vid9401")));
+		eq([before.ch.notes.length, w.ch.sends.length, w.ch.notes.length], [1, 1, 0],
+			"§2 ELD feed, restarted and the earlier rows can't be marked: the retry sends only the owed email, and nothing after both went");
 	}
 	{
 		// The columns can't be added: logged once, and the alert keeps its old rule.
@@ -472,19 +520,20 @@ async function section5() {
 	};
 	const world = (db) => {
 		const ch = makeChannels();
-		const sheet = { rows: [sheetRow("UL-9000", true)] };
+		const sheet = { rows: [sheetRow("UL-9000", true)], reads: 0 };
 		const f = lift(["runUndatedLoadAlerts", "retryUndatedLoadAlerts"], {
 			db, sendEmail: ch.sendEmail, insertDispatchNotification: ch.insertDispatchNotification, io: ch.io, console: ch.console,
 			process: PROCESS, require: rootRequire, SPREADSHEET_ID: "sheet-under-test-b9", getDeletedLoadIds: () => new Set(),
-			getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [HEADERS, ...sheet.rows] } }) } } }),
+			getSheets: async () => ({ spreadsheets: { values: { get: async () => { sheet.reads++; return { data: { values: [HEADERS, ...sheet.rows] } }; } } } }),
 		});
 		return { ...f, ch, sheet, db };
 	};
 	const led = (db, id) => rowOf(db, "invoice_undated_alerts", "load_key", id.toLowerCase());
 	const digestNotes = (w) => w.ch.notes.filter((n) => n.type === "invoices-undated");
 	const digestMails = (w) => w.ch.sends.filter((s) => / no weekly invoice will bill$/.test(s.subject));
+	// The sweep reaches a row at its next slot: the last try is set back past the longest wait (4 h).
 	const sweepLater = async (w, id) => {
-		tryRun(w.db, "UPDATE invoice_undated_alerts SET last_try = ? WHERE load_key = ?", new Date(Date.now() - 16 * 60000).toISOString(), id.toLowerCase());
+		tryRun(w.db, "UPDATE invoice_undated_alerts SET last_try = ? WHERE load_key = ?", hoursAgo(5), id.toLowerCase());
 		return attempt(() => w.retryUndatedLoadAlerts({}));
 	};
 	// The baseline (UL-9000 dated, history), then `id` completed with no date and the weekly run.
@@ -621,9 +670,31 @@ async function section5() {
 		eq([digestMails(w).length, row.emailed_at, row.email_skipped, row.resolved_at], [1, null, null, null],
 			"§5 a load dated since the first try: the retry leaves it out, and it stays owed and open (only the weekly run resolves)");
 		ok("§5 …and the sweep says so", w.ch.logs.some((l) => /1 load\(s\) no longer listed on Job Tracking, left owed/.test(l)), w.ch.logs);
+		ok("§5 …and the left-out row counts a try, so it follows the backoff", row.attempts === 2 && Date.parse(row.last_try) > Date.now() - 60000, row);
+		const reads = w.sheet.reads;
+		const logs = w.ch.logs.length;
+		await attempt(() => w.retryUndatedLoadAlerts({}));
+		eq([w.sheet.reads - reads, w.ch.logs.length - logs], [0, 0], "§5 the next tick, before its slot: no Job Tracking read and no log line");
 		w.sheet.rows[w.sheet.rows.length - 1] = sheetRow("UL-9113");
 		await sweepLater(w, "UL-9113");
 		eq(digestMails(w).length, 2, "§5 listed again: the next retry sends its email");
+	}
+	{
+		// The retry's own guard: Job Tracking reads back unusable (empty) — nothing is sent.
+		const w = world(freshDb());
+		w.ch.mailOk = false;
+		await newLoad(w, "UL-9116");
+		w.ch.mailOk = true;
+		const keep = w.sheet.rows;
+		w.sheet.rows = [];
+		await sweepLater(w, "UL-9116");
+		const row = led(w.db, "UL-9116");
+		eq([digestMails(w).length, digestNotes(w).length, row.emailed_at, row.email_skipped, row.resolved_at], [1, 1, null, null, null],
+			"§5 Job Tracking read back empty: the retry sends nothing, and the load stays owed and open");
+		ok("§5 …says the retries wait, and counts the try", w.ch.logs.some((l) => /read back empty — 1 retry\(ies\) wait/.test(l)) && row.attempts === 2, { logs: w.ch.logs, row });
+		w.sheet.rows = keep;
+		await sweepLater(w, "UL-9116");
+		eq(digestMails(w).length, 2, "§5 a usable read again: the retry sends the email");
 	}
 	{
 		// The cap is full of loads told today; a retry of a load already told is free, a new one waits.
