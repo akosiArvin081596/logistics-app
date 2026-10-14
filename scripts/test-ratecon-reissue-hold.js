@@ -18,8 +18,8 @@
  *      - a blank stored date is not filled either;
  *      - the response names each held column with the stored and the sent value, and why;
  *      - the same amount or moment in another format is not a hold;
- *      - every other column still comes back as sent, and a blank stored Assigned Date the
- *        email fills is listed as a change;
+ *      - every other column still comes back as sent; a blank stored Assigned Date is not
+ *        filled either (decision 3, 2026-10-14): the email's date is listed as held;
  *      - the hold alert is raised with the load, the reason and the held columns;
  *      - the draft is found under any spelling of the load id ("#X", case, edge spaces);
  *      - a draft table that can't be read holds (fails closed) and says so;
@@ -28,9 +28,10 @@
  *      into one included) gets EVERY column back as stored (no fallback fills a blank), whatever
  *      its status; so does a load with a date that can't be placed, a load when the lock table
  *      can't be read, and a load whose OUTGOING values would book it into a closed month (a
- *      blank stored date filled with a closed-month one, or a row with no dates yet, or a
- *      delivered load's blank Assigned Date sent in a closed month) or carry a date that can't
- *      be placed (an ordinary load sent "TBD"); when every column is held, a blank stored
+ *      blank stored date filled with a closed-month one, or a row with no dates yet; a
+ *      delivered load's blank Assigned Date sent in a closed month is held, so it does not, and
+ *      the reason names that month) or
+ *      carry a date that can't be placed (an ordinary load sent "TBD"); when every column is held, a blank stored
  *      Assigned Date the email would fill is listed as held and alerted; a load
  *      that is neither delivered, invoiced nor in a closed month (a blank Job Status cell
  *      included) still gets every value as sent, with nothing held and no alert; RATECON_REISSUE_HOLD_ENABLED=false turns the hold off;
@@ -153,7 +154,7 @@ const DISPATCHED = row({ "Load ID": "900000103", "Pickup Appointment": "10/12/20
 const DELIVERED_NO_PICKUP = row({ "Load ID": "900000104", "Pickup Appointment": "", "Drop-off Appointment": "10/8/2026 0:00", "Job Status": "Delivered", "  Payment  ": " $ 1,111.11 " });
 // Not delivered and not invoiced, but its dates book it into September, which is closed.
 const CLOSED_MONTH = row({ "Load ID": "900000106", Details: "Paper, 20,000 lbs", "Pickup Info": "Test Plant REF/PU#: 1", "Pickup Appointment": "9/28/2026 8:00", "Drop-off Appointment": "9/29/2026 0:00", "Job Status": "Dispatched", "Assigned Date": "9/27/2026, 9:00:00 AM", "  Payment  ": " $ 900.00 " });
-// Delivered with no Assigned Date yet: the email's Assigned Date fills it, and that is listed.
+// Delivered with no Assigned Date yet: the email's Assigned Date does not fill it; it is held.
 const DELIVERED_NO_ASSIGNED = row({ "Load ID": "900000107", Details: "Boxes", "Pickup Appointment": "10/9/2026 0:00", "Drop-off Appointment": "10/10/2026 0:00", "Job Status": "Delivered", "Assigned Date": "", "  Payment  ": " $ 500.00 " });
 // An ordinary load with a pickup that can't be placed in a month.
 const TBD_PICKUP = row({ "Load ID": "900000108", Details: "Crates", "Pickup Appointment": "TBD", "Drop-off Appointment": "10/15/2026 0:00", "Job Status": "Dispatched", "Assigned Date": "10/12/2026, 9:00:00 AM", "  Payment  ": " $ 700.00 " });
@@ -248,26 +249,28 @@ async function section1() {
 	check("§1 delivered: unchanged and blank-sent columns are not listed (Pickup Address, Documents, Assigned Date)",
 		!otherCols.includes("Pickup Address") && !otherCols.includes("Documents") && !otherCols.includes("Assigned Date"));
 
-	// M1: a blank stored Assigned Date the email fills is the one real Assigned Date change.
+	// M1, decision 3 (2026-10-14): a re-issue never fills a blank Assigned Date on a
+	// delivered load; the email's date is held for a person.
 	alerts.length = 0;
 	const na = await post({ loadId: "900000107", values: { "Load ID": "900000107", Details: "Boxes", "Assigned Date": "10/13/2026, 8:00:00 AM", "  Payment  ": "$500.00" } });
 	const nav = valuesOf(na);
-	check("§1 delivered, no stored Assigned Date: it comes back as sent", nav["Assigned Date"] === "10/13/2026, 8:00:00 AM", nav["Assigned Date"]);
-	const naChanged = ((na.body && na.body.alsoChanged) || []).find((c) => c.column === "Assigned Date");
-	check("§1 delivered, no stored Assigned Date: the fill is listed in alsoChanged, stored blank",
-		!!naChanged && naChanged.stored === "" && naChanged.sent === "10/13/2026, 8:00:00 AM", na.body && na.body.alsoChanged);
-	check("§1 delivered, no stored Assigned Date: and alerted as a change",
-		alerts.length === 1 && ((alerts[0].changed || []).some((c) => c.column === "Assigned Date")), alerts);
+	check("§1 delivered, no stored Assigned Date: it comes back blank, not filled", nav["Assigned Date"] === "", nav["Assigned Date"]);
+	const naHeld = ((na.body && na.body.held) || []).find((c) => c.column === "Assigned Date");
+	check("§1 delivered, no stored Assigned Date: the email's date is listed in held, stored blank, and not in alsoChanged",
+		!!naHeld && naHeld.stored === "" && naHeld.sent === "10/13/2026, 8:00:00 AM" && !((na.body && na.body.alsoChanged) || []).some((c) => c.column === "Assigned Date"), na.body);
+	check("§1 delivered, no stored Assigned Date: and alerted as held",
+		alerts.length === 1 && ((alerts[0].held || []).some((c) => c.column === "Assigned Date")), alerts);
 
 	// Low 1: the same delivered load, its blank Assigned Date sent in closed September. The
-	// load is already held (delivered), and the values going out are still checked.
+	// Assigned Date is held (decision 3), so nothing booked into September goes out: the
+	// values going out are checked, and the reason names the email's closed month.
 	alerts.length = 0;
 	const lc = await post({ loadId: "900000107", values: { "Load ID": "900000107", Details: "Boxes, 4 pallets", "Assigned Date": "9/28/2026, 9:00:00 AM", "  Payment  ": "$480.00" } });
 	const lcv = valuesOf(lc);
-	check("§1 delivered, a blank Assigned Date sent in a closed month: every column comes back as stored",
-		lcv["Load ID"] === "900000107" && lcv.Details === "Boxes" && lcv["Assigned Date"] === "" && lcv["  Payment  "] === " $ 500.00 ", lcv);
-	check("§1 delivered, a blank Assigned Date sent in a closed month: the reason says the re-issue's dates are in a closed month",
-		/delivered/.test(reasonOf(lc)) && /the re-issue's dates are in a closed month \(2026-09\)/.test(reasonOf(lc)), reasonOf(lc));
+	check("§1 delivered, a blank Assigned Date sent in a closed month: Assigned Date and Payment come back as stored, Details as sent",
+		lcv["Load ID"] === "900000107" && lcv.Details === "Boxes, 4 pallets" && lcv["Assigned Date"] === "" && lcv["  Payment  "] === " $ 500.00 ", lcv);
+	check("§1 delivered, a blank Assigned Date sent in a closed month: the reason is delivered, naming the email's closed month (nothing in it goes out)",
+		reasonOf(lc) === "delivered and the email's Assigned Date is in a closed month (2026-09)", reasonOf(lc));
 	const lcAssigned = ((lc.body && lc.body.held) || []).find((h) => h.column === "Assigned Date");
 	check("§1 delivered, a blank Assigned Date sent in a closed month: the Assigned Date is held (stored blank), and alerted",
 		!!lcAssigned && lcAssigned.stored === "" && lcAssigned.sent === "9/28/2026, 9:00:00 AM" && alerts.length === 1, { held: lc.body && lc.body.held, alerts: alerts.length });

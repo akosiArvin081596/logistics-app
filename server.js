@@ -7019,6 +7019,56 @@ function rateConNormalizeOptions(base64) {
 	return { now: Date.now(), documentDates };
 }
 
+// DVIR LINES FOR THE RE-ISSUE ALERT (2026-10-14). The re-issue hold alert
+// (alertRateConReissueHold()) says what C.H. Robinson deducted for DVIR, read from
+// the rate con itself (lib/ratecon-dvir.js). The route below is where the app sees a
+// rate-con email's PDF, just before n8n asks POST /api/n8n/keep-stored-values about
+// the same load, and it only forwards the bytes to Gemini. So, once its response is
+// sent, it reads the text of the bytes it already holds itself (rateconDvir.pdfText(),
+// each stream once, its inflating capped at RATECON_DVIR_TEXT_MAX_BYTES), and
+// keeps the reading in memory by load number (normLoadKey()) for
+// RATECON_DVIR_TTL_MS, at most RATECON_DVIR_MAX_LOADS loads, the oldest dropped first.
+// Nothing is written; a restart forgets it. A load with no reading (a restart, a
+// failed extraction, or a PDF whose text can't be decoded, as with many brokers' font
+// encodings) gets the alert's "Payment dropped" line instead.
+const rateconDvir = require("./lib/ratecon-dvir");
+const RATECON_DVIR_TTL_MS = 10 * 60 * 1000;
+const RATECON_DVIR_MAX_LOADS = 200;
+const RATECON_DVIR_TEXT_MAX_BYTES = 4 * 1024 * 1024;
+const rateConDvirReadings = new Map();
+
+// Reads one rate con's DVIR lines (base64: the PDF the route was sent) and keeps
+// them under its load number. Never throws: the extraction must not fail because
+// of it.
+function noteRateConDvir(loadNumber, base64, now = Date.now()) {
+	try {
+		const key = normLoadKey(loadNumber).slice(0, 80);
+		if (!key || typeof base64 !== "string") return;
+		const size = Math.floor(base64.length * 3 / 4);
+		let text = "";
+		if (size <= rateconDvir.MAX_PDF_BYTES) {
+			text = rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES });
+		}
+		const reading = rateconDvir.readRateConDvir(text, size);
+		for (const [k, v] of rateConDvirReadings) {
+			if (now - v.at < RATECON_DVIR_TTL_MS) break;
+			rateConDvirReadings.delete(k);
+		}
+		rateConDvirReadings.delete(key);
+		rateConDvirReadings.set(key, { ...reading, at: now });
+		while (rateConDvirReadings.size > RATECON_DVIR_MAX_LOADS) rateConDvirReadings.delete(rateConDvirReadings.keys().next().value);
+	} catch (e) {
+		console.warn(`[ratecon-dvir] rate-con text not read (${e && e.message}); a re-issue alert for this load falls back to the Payment drop`);
+	}
+}
+
+// The DVIR reading kept for a load, or null (none, or older than RATECON_DVIR_TTL_MS).
+function rateConDvirReading(loadId, now = Date.now()) {
+	const key = normLoadKey(loadId).slice(0, 80);
+	const hit = key ? rateConDvirReadings.get(key) : undefined;
+	return hit && now - hit.at < RATECON_DVIR_TTL_MS ? hit : null;
+}
+
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 	// Accepts EITHER the shared n8n secret OR an extract-only secret.
 	//
@@ -7134,6 +7184,9 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 					loadId: fields["Load Number"], unusable, fields,
 				}).catch(() => {});
 			}
+			// Read for the re-issue alert once the response below is sent.
+			const loadNumber = fields["Load Number"];
+			setImmediate(() => noteRateConDvir(loadNumber, base64));
 
 			// Mirror the Information Extractor output shape so the n8n
 			// Normalize Load Fields node (which reads $json.output.X) works
@@ -7364,21 +7417,27 @@ let n8nKeepStoredUnauthorizedLoggedAt = 0;
 //   Status column to read (status unknown): Payment, Pickup Appointment and
 //   Drop-off Appointment (each found by header pattern, REISSUE_HELD_COLUMN_RES)
 //   come back as stored, a blank stored date included
-//   (filling it would move pay too); every other column keeps the rules below;
+//   (filling it would move pay too), and so does a blank Assigned Date (every
+//   column assignedDateColumn() names): a re-issue never fills it, and the date
+//   it carried is held for a person (2026-10-14), the reason naming a closed
+//   month it falls in (reissueHeldAssignedClosedReason()); every other column
+//   keeps the rules below;
 // - in a closed month (any month loadRowAccountingMonths() books the row into is
 //   write-locked): EVERY column comes back as stored. Closed months are final as
 //   recorded; only a reopen changes one;
 // - whatever its status, when the values going out would book it into a closed
 //   month or carry a date that can't be placed (a blank stored date filled with
 //   one in a closed month): EVERY column comes back as stored
-//   (reissueOutgoingHold()).
+//   (reissueOutgoingHold(), which reads the values that would go out, so a
+//   held Assigned Date counts as stored).
 // A value that really differs (amounts compared in cents, dates as the same
 // moment) is "held"; on a protected load, every other column the email changes
 // is listed too. alertRateConReissueHold() sends both to a person, who decides;
-// nothing is applied for them. Fails closed: a draft table or lock table that
-// can't be read, or a date that can't be placed in a month, holds. A found
-// load's answer also names the stored row's Load ID (storedLoadId) exactly as
-// the sheet has it.
+// nothing is applied for them. The alert also says what the rate con deducted
+// for DVIR, or that a Payment drop may be one (noteRateConDvir()). Fails
+// closed: a draft table or lock table that can't be read, or a date that can't
+// be placed in a month, holds. A found load's answer also names the stored row's
+// Load ID (storedLoadId) exactly as the sheet has it.
 // RATECON_REISSUE_HOLD_ENABLED is a kill switch (defaults ON): it only keeps values.
 const RATECON_REISSUE_HOLD_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.RATECON_REISSUE_HOLD_ENABLED ?? "").trim());
 // The columns a re-issue may not change on a delivered or invoiced load, found by
@@ -7394,12 +7453,25 @@ const RATECON_REISSUE_HOLD_ENABLED = !/^(false|0|no|off)$/i.test(String(process.
 // It is not every money or date regex in this file: the dashboard's /pay/, the tax
 // CSV's /charge|price|cost/ and other date columns (Completion Date, Status Update
 // Date) are not held on a delivered or invoiced load. Assigned Date keeps its own
-// set-once rule, and a closed month holds every column whatever its name.
+// rules (assignedDateColumn()), and a closed month holds every column whatever
+// its name.
 const REISSUE_PAYMENT_RE = /payment|rate|amount|revenue/i;
 const REISSUE_HELD_COLUMN_RES = [/pickup.*appo|pickup.*date/i, /drop.?off.*appo|drop.?off.*date|delivery.*date|deliv.*appo/i, REISSUE_PAYMENT_RE];
 function reissueHeldColumn(col) {
 	const name = String(col == null ? "" : col).trim();
 	return REISSUE_HELD_COLUMN_RES.some((re) => re.test(name));
+}
+
+// Assigned Date, under every header that names it (2026-10-14): the money math's
+// findCol(headers, /assigned.*date/i) and jobTrackingMonthCols(), and the KPI and
+// integrity check's /date.*assigned/i. Each matching column is set once, when the
+// load is first assigned, and never re-stamped, and a re-issue never fills a blank
+// one on a delivered or invoiced load (keepStoredSheetValues()). The name comes
+// from the request body, so it is cut to ASSIGNED_DATE_NAME_MAX before the match.
+const ASSIGNED_DATE_COLUMN_RE = /assigned.*date|date.*assigned/i;
+const ASSIGNED_DATE_NAME_MAX = 200;
+function assignedDateColumn(col) {
+	return ASSIGNED_DATE_COLUMN_RE.test(String(col == null ? "" : col).trim().slice(0, ASSIGNED_DATE_NAME_MAX));
 }
 
 // Whether two cells say the same thing. The amount (REISSUE_PAYMENT_RE): the same
@@ -7484,14 +7556,29 @@ function reissueOutgoingHold(headers, row, values) {
 	return locked.length ? `the re-issue's dates are in a closed month (${locked.join(", ")})` : null;
 }
 
+// The closed months a held Assigned Date falls in (the date the email carried, which
+// keepStoredSheetValues() did not write), as a hold reason for the person deciding,
+// or "". It changes nothing held or written. With the closed months unreadable the
+// hold already says so.
+function reissueHeldAssignedClosedReason(held) {
+	if (!periodLocksReadable()) return "";
+	const months = new Set();
+	for (const h of held || []) {
+		if (!assignedDateColumn(h.column)) continue;
+		for (const mk of sheetCellMonths(h.sent) || []) if (periodWriteLocked(mk)) months.add(mk);
+	}
+	return months.size ? `the email's Assigned Date is in a closed month (${[...months].sort().join(", ")})` : "";
+}
+
 // The values a later email may write to a load already in Job Tracking, by
 // sheet column: a blank (missing, null or only spaces) never replaces a stored
-// value, and a stored Assigned Date is kept, because it is set once, when the
-// load is first assigned, and never re-stamped (client, 2026-10-09). Any other
-// value is written as sent; a column still blank takes its `fallbacks` value.
-// `stored` is the row by header, or null for a new load. `protect` (from
-// reissueHoldFor(), for a stored load) keeps the held columns, or with `all`
-// every column, as stored. Returns { values, kept, held, changed } (kept: the
+// value, and a stored Assigned Date (every column assignedDateColumn() names) is
+// kept, because it is set once, when the load is first assigned, and never
+// re-stamped (client, 2026-10-09). Any other value is written as sent; a column
+// still blank takes its `fallbacks` value. `stored` is the row by header, or null
+// for a new load. `protect` (from reissueHoldFor(), for a stored load) keeps the
+// held columns and every Assigned Date column, a blank one included, or with
+// `all` every column, as stored. Returns { values, kept, held, changed } (kept: the
 // columns whose stored value won; held: { column, stored, sent } where a
 // protected column's sent value really differed; changed: the other columns a
 // protected load's values change).
@@ -7511,9 +7598,8 @@ function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
 	const guarded = Boolean(protect && stored);
 	for (const [col, val] of Object.entries(values)) {
 		const have = storedOf(col);
-		const name = String(col).trim().toLowerCase();
-		const assigned = name === "assigned date";
-		if (guarded && (protect.all || reissueHeldColumn(col))) {
+		const assigned = assignedDateColumn(col);
+		if (guarded && (protect.all || reissueHeldColumn(col) || assigned)) {
 			out[col] = have;
 			if (String(val == null ? "" : val) !== have) kept.push(col);
 			// A stored Assigned Date is kept by its own rule on every load (set once), so
@@ -7529,8 +7615,7 @@ function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
 		} else {
 			out[col] = val == null ? "" : val;
 		}
-		// A stored Assigned Date came back above (same, so not listed); a blank one
-		// filled by the email is a real change and is listed.
+		// A protected load's Assigned Date columns never get here (held above).
 		if (guarded && !reissueSameValue(col, have, out[col])) changed.push({ column: col, stored: have, sent: String(out[col]) });
 	}
 	return { values: out, kept, held, changed };
@@ -7587,7 +7672,8 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 				out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 			}
 		}
-		const holdReason = hold ? hold.reasons.join(" and ") : "";
+		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held) : "";
+		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ") : "";
 		// storedLoadId: the stored row's Load ID cell as the sheet has it, so n8n can
 		// write to that row (its appendOrUpdate matches the exact text).
 		res.json({
@@ -7644,8 +7730,10 @@ const REISSUE_TRACKED_SQL = "NOT (alerted_at IS NOT NULL AND emailed_at IS NULL 
 // try sends whatever channels the row still owes, so one pair serves both) and
 // set its next retry slot. claimed_at: the call sending a row's alert holds the
 // row, so two overlapping calls never both send (a claim older than
-// REISSUE_CLAIM_STALE_MS, a call that died mid-send, can be retaken). Created on
-// first use; the later columns are added to a table made before them.
+// REISSUE_CLAIM_STALE_MS, a call that died mid-send, can be retaken). note: the
+// DVIR line the first alert carried (rateconDvir.dvirAlertLine()), so a retry
+// says it too; it is no part of the dedupe key. Created on first use; the later
+// columns are added to a table made before them.
 function reissueHoldTable() {
 	if (reissueHoldTable.ready) return;
 	db.exec(`
@@ -7666,13 +7754,14 @@ function reissueHoldTable() {
 			load_label TEXT,
 			attempts INTEGER,
 			last_try TEXT,
+			note TEXT,
 			PRIMARY KEY (load_id, column_name, sent_value)
 		)
 	`);
 	db.transaction(() => {
 		const have = new Set(db.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((c) => c.name));
 		const later = [["claimed_at", "TEXT"], ["emailed_at", "TEXT"], ["notified_at", "TEXT"], ["email_skipped", "TEXT"],
-			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"]];
+			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"], ["note", "TEXT"]];
 		for (const [col, type] of later) {
 			if (!have.has(col)) db.exec(`ALTER TABLE ratecon_reissue_holds ADD COLUMN ${col} ${type}`);
 		}
@@ -7711,8 +7800,8 @@ function reissueRetryDue(r, nowMs) {
 // claims are released however it ends, so a channel that failed stays owed to
 // the next sighting or retry sweep, on its own. rows: [{ column, stored, sent,
 // kind, email, inApp }]; firstSeen marks a retry, and the email says when the
-// change was first seen.
-async function sendReissueAlert({ key, label, reason, rows, claimedAt, now, firstSeen = null }) {
+// change was first seen. note (the DVIR line, or "") goes in both channels.
+async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null }) {
 	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
 	const toEmail = rows.filter((e) => e.email);
 	const toNotify = rows.filter((e) => e.inApp);
@@ -7752,7 +7841,7 @@ async function sendReissueAlert({ key, label, reason, rows, claimedAt, now, firs
 			};
 			const body = toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ");
+				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ") + (note ? `. ${note}` : "");
 			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
@@ -7778,7 +7867,7 @@ async function sendReissueAlert({ key, label, reason, rows, claimedAt, now, firs
 				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
 				: "";
 			const html =
-				`<p><b>${lead}</b></p>` + retry +
+				`<p><b>${lead}</b></p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
 				"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
 				"The held fields keep their stored values; the others were written as the email gave them.</p>" +
 				"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
@@ -7821,8 +7910,11 @@ async function sendReissueAlert({ key, label, reason, rows, claimedAt, now, firs
 // channel: a new sent value alerts again. A call sends only the rows it claimed
 // (claimed_at), so two overlapping calls for one change send once per channel;
 // what it couldn't send is retried by sweepRateConReissueHolds() (and on any
-// later sighting of the same change, whatever the retry slot). Fire-and-forget:
-// never throws, never rejects.
+// later sighting of the same change, whatever the retry slot). Both channels also
+// carry the DVIR line (rateconDvir.dvirAlertLine(), from the reading the extract
+// route kept for this load, rateConDvirReading()), which changes nothing held or
+// written and nothing in the ledger's key. Fire-and-forget: never throws, never
+// rejects.
 async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
 	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
 	try {
@@ -7835,18 +7927,19 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		const cap = (v) => String(v == null ? "" : v).slice(0, 500);
 		const entries = [...held.map((h) => ({ ...h, kind: "held" })), ...changed.map((c) => ({ ...c, kind: "changed" }))]
 			.map((e) => ({ column: cap(e.column).trim(), stored: cap(e.stored), sent: cap(e.sent), kind: e.kind }));
+		const note = cap(rateconDvir.dvirAlertLine(rateConDvirReading(raw), held));
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
 		const staleBefore = new Date(now.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
 		const fresh = [];
 		for (const e of entries) {
-			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label);
+			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label, note);
 			const owed = claimReissueRow(key, e.column, e.sent, nowIso, staleBefore);
 			if (owed) fresh.push({ ...e, ...owed });
 		}
 		if (!fresh.length) return { alerted: false, reason: "already_alerted", key };
-		const r = await sendReissueAlert({ key, label, reason: cap(reason), rows: fresh, claimedAt: nowIso, now });
+		const r = await sendReissueAlert({ key, label, reason: cap(reason), note, rows: fresh, claimedAt: nowIso, now });
 		console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
 			label, r.why, r.fields, r.emailState, r.inAppState);
 		return { alerted: r.emailed || r.notified, emailed: r.emailed, notified: r.notified, key, ...(r.capped ? { reason: "daily_cap" } : {}) };
@@ -7916,7 +8009,10 @@ async function sweepRateConReissueHolds({ now = new Date(), clock = () => new Da
 		if (!claimed.length) continue;
 		const reason = [...new Set(due.map((r) => r.reason).filter(Boolean))].join("; ");
 		const label = due[0].load_label || key;
-		const res = await sendReissueAlert({ key, label, reason, rows: claimed, claimedAt, now: at, firstSeen: due[0].first_seen });
+		// The newest alert's DVIR line (due is in first_seen order).
+		const noted = due.filter((r) => r.note);
+		const note = noted.length ? noted[noted.length - 1].note : "";
+		const res = await sendReissueAlert({ key, label, reason, note, rows: claimed, claimedAt, now: at, firstSeen: due[0].first_seen });
 		tried++;
 		if (res.emailFailed || res.inAppFailed) failing.push(`${label} (${[res.emailFailed ? "email" : "", res.inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
 		else delivered++;
