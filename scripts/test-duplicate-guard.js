@@ -52,6 +52,7 @@
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
+const alertChannels = require(path.join(__dirname, "..", "lib", "alert-channels.js"));
 
 const SERVER = path.join(__dirname, "..", "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
@@ -456,7 +457,9 @@ check("empty string rejected", keyOk(""), false);
 // filed. Three pieces have to agree for that to work, and until 2026-09-19 they
 // did not:
 //
-//   (a) the dedupe guard   `if (seen && seen.alerted_at && !seen.resolved_at)`
+//   (a) the dedupe guard   `if (seen && !seen.resolved_at && !alertChannels.owes(seen))`
+//                          (then `seen.alerted_at && !seen.resolved_at`; a row
+//                          alerted with no channel stamped owes nothing)
 //   (b) the UPSERT         cleared `resolved_at` on a re-open...
 //   (c) the delivery stamp `... WHERE group_key = ? AND alerted_at IS NULL`
 //
@@ -526,7 +529,7 @@ check("empty string rejected", keyOk(""), false);
 		/SELECT COUNT\(\*\) AS c FROM expense_duplicate_alerts WHERE alerted_at > datetime\('now', '-1 day'\)/,
 		"the rolling-24h cap query",
 	);
-	const GUARD_RE = /if \(seen && seen\.alerted_at && !seen\.resolved_at\) return \{ alerted: false, reason: "already_alerted", key \};/;
+	const GUARD_RE = /if \(seen && !seen\.resolved_at && !alertChannels\.owes\(seen\)\) return \{ alerted: false, reason: "already_alerted", key \};/;
 	const guardSrc = one(GUARD_RE, "the dedupe guard");
 
 	// The duplication is deliberate; pin it so an accidental THIRD copy is loud.
@@ -542,11 +545,20 @@ check("empty string rejected", keyOk(""), false);
 	check("the shipped UPSERT clears resolved_at", /resolved_at = NULL/.test(upsertShipped), true);
 	check("the stamp is still gated on alerted_at IS NULL", /alerted_at IS NULL/.test(stampSql), true);
 
-	// The guard, executed rather than eyeballed.
-	const guard = new Function("seen", `const key = "k"; ${guardSrc} return null;`);
+	// The guard, executed rather than eyeballed, over lib/alert-channels.js.
+	const guardFn = new Function("seen", "alertChannels", `const key = "k"; ${guardSrc} return null;`);
+	const guard = (seen) => guardFn(seen, alertChannels);
 	check("guard: alerted + unresolved  -> dedupe", guard({ alerted_at: "t", resolved_at: null }) !== null, true);
 	check("guard: alerted + RESOLVED    -> let through", guard({ alerted_at: "t", resolved_at: "t" }), null);
 	check("guard: never alerted         -> let through", guard({ alerted_at: null, resolved_at: null }), null);
+	// Each channel on its own: told in-app with the email still owed is retried,
+	// and told by both (or the email skipped) is done.
+	check("guard: told in-app, email owed -> let through (the email is retried)",
+		guard({ alerted_at: "t", resolved_at: null, notified_at: "t", emailed_at: null, email_skipped: null }), null);
+	check("guard: told by email and in-app -> dedupe",
+		guard({ alerted_at: "t", resolved_at: null, notified_at: "t", emailed_at: "t" }) !== null, true);
+	check("guard: told in-app, email given up -> dedupe",
+		guard({ alerted_at: "t", resolved_at: null, notified_at: "t", emailed_at: null, email_skipped: "gave_up" }) !== null, true);
 
 	// Strip exactly the clause this fix added — nothing else changes.
 	const upsertMutant = upsertShipped.replace(/resolved_at = NULL,[\s\S]*?alerted_at = NULL/, "resolved_at = NULL");

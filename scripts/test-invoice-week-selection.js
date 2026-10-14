@@ -68,6 +68,9 @@ const eldMiles = require("../lib/eld-miles");
 const appTime = require("../lib/app-time");
 
 const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+// The batch and the undated-load digest email GMAIL_USER; with none set the
+// digest's email is skipped (no_recipient), so a made-up mailbox is named.
+process.env.GMAIL_USER = "ops@example.invalid";
 
 // ---------------------------------------------------------------- lifting
 function liftAt(src, needle, label) {
@@ -131,14 +134,14 @@ const SHARED_FNS = [
 	// The Friday batch, run for real in §4b.
 	"escHtml", "invoiceEmailHtml", "generateInvoiceInProcess", "abortAutogenRun",
 	// The undated-load ledger, §7.
-	"listUndatedCompletedLoads",
+	"listUndatedCompletedLoads", "undatedLoadPayload", "undatedLoadFromRow", "undatedAlertedToday",
 ];
 const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
-	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
+	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY", "INVOICE_UNDATED_EXTRA_COLUMNS",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest"];
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "sendUndatedLoadDigest", "sendUndatedDigestOwed"];
 
 // Build the lifted world against one database. `src` defaults to the shipping
 // server.js; §6 passes mutated copies. `overrides` replaces a lifted binding
@@ -173,6 +176,8 @@ function buildWorld(db, opts = {}) {
 	const deps = {
 		db,
 		normalizeLoadId, loadPayDays: require("../lib/load-pay-days.js"),
+		// The ledger's per-channel delivery (emailed_at, notified_at, the claim).
+		alertChannels: require("../lib/alert-channels.js"),
 		localDayInTz: eldMiles.localDayInTz,
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
@@ -951,11 +956,19 @@ function oldImpl(db) {
 		const retried = await w.runUndatedLoadAlerts({ range: RANGE });
 		out.push(["delivery: the load is owed to the next run, which reports it", [retried.digest, digestIds(digestNotes(w)[0])], [1, ["8102"]]]);
 		out.push(["delivery: the in-app notification alone is delivery — stamped", !!ledgerRow(db, "8102").alerted_at, true]);
+		// Each channel on its own: the email that failed is still owed.
+		out.push(["delivery: …and 8102 still owes its email", [!!ledgerRow(db, "8102").notified_at, ledgerRow(db, "8102").emailed_at], [true, null]]);
 		mailOk = true;
 		feedDown = true; // and mail alone is delivery too
 		w.sheet.values = toValues([...U, newLoad({ "Load ID": "8102" }), newLoad({ "Load ID": "8103" })]);
+		const notesBefore = digestNotes(w).length;
 		const mailOnly = await w.runUndatedLoadAlerts({ range: RANGE });
-		out.push(["delivery: mail alone is delivery too — stamped", [mailOnly.digest, mailOnly.emailed, !!ledgerRow(db, "8103").alerted_at], [1, true, true]]);
+		out.push(["delivery: mail alone is delivery too — stamped", [mailOnly.emailed, !!ledgerRow(db, "8103").alerted_at], [true, true]]);
+		const lastEmail = digestEmails(w)[digestEmails(w).length - 1] || { html: "" };
+		out.push(["delivery: the run's email carries 8102's owed email with 8103, and 8102 is emailed now",
+			[mailOnly.digest, /8102/.test(lastEmail.html), /8103/.test(lastEmail.html), !!ledgerRow(db, "8102").emailed_at], [2, true, true, true]]);
+		out.push(["delivery: 8102 gets no second in-app notification (only 8103 was owed one; the feed is down)",
+			[digestNotes(w).length - notesBefore, ledgerRow(db, "8103").notified_at], [0, null]]);
 		return out;
 	}
 
