@@ -225,8 +225,8 @@ export function recoveryRows(payload) {
  * of the rows and onto the section.
  *
  * THE HOIST IS THE WHOLE POINT OF THIS FUNCTION. All 25 receipts in production
- * today carry the byte-identical sentence "This receipt is booked to a finalized
- * month. Reopen the period, or record the correction as a payout adjustment."
+ * today carry the byte-identical sentence "This receipt is in a closed month, so
+ * its gallons can't be filled in. Closed months stay as they were recorded."
  * Rendering it per row is 25 reads of one fact — precisely the thing the brief
  * asks to replace with a single glance. Some reasons DO differ per row (the
  * refusals interpolate the actual figures: "$90.00 over 10 gal implies

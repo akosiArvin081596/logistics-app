@@ -59606,6 +59606,32 @@ function expenseStatusReason(body) {
 	return scrubPurgeMarker(raw).replace(/[\r\n\t]+/g, " ").trim().slice(0, EXPENSE_STATUS_REASON_MAX);
 }
 
+// The sentence shown when a receipt's status change is refused because its month
+// is closed. One producer for PUT /api/expenses/:id/status and its batch twin
+// PUT /api/expenses/bulk-status, so the two cannot drift. Closed months are
+// final and never reopened (2026-10-14), so it never suggests reopening: it says
+// the receipt already counts in that month as it stands (a Rejected one is left
+// out, EXPENSE_PNL_FILTER), and that a correction is a payout adjustment in the
+// current month (the Payouts page's Adjust, on an open month). Plain words only:
+// no route, no code. `periods` are the closed 'YYYY-MM' months, `count` the
+// receipts refused and `rejected` how many of those are Rejected.
+function closedMonthReceiptRefusal(periods, count, rejected) {
+	const names = periods.map(periodLabel);
+	const many = names.length > 1;
+	const months = many ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0] || "";
+	const figures = many ? "those months' figures" : `${months}'s figures`;
+	const one = count === 1;
+	const closed = `${months} ${many ? "are" : "is"} closed, so ${one ? "this receipt" : "these receipts"} can't be approved or rejected.`;
+	const fix = "record the correction as a payout adjustment in the current month.";
+	if (!rejected) {
+		return `${closed} ${one ? "It already counts" : "They already count"} in ${figures} as ${one ? "it stands" : "they stand"}. If ${one ? "it" : "they"} shouldn't have counted, ${fix}`;
+	}
+	if (rejected >= count) {
+		return `${closed} ${one ? "It was rejected, so it is" : "They were rejected, so they are"} left out of ${figures}. If ${one ? "it" : "they"} should have counted, ${fix}`;
+	}
+	return `${closed} They already count in ${figures} as they stand, except the ${rejected === 1 ? "rejected one, which is" : `${rejected} rejected ones, which are`} left out. If any of them should count differently, ${fix}`;
+}
+
 // PUT /api/expenses/:id/status — Approve or reject an expense
 app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -59677,11 +59703,12 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 				(blockedReason ? ` — reason: ${blockedReason}` : ""),
 				refusalCode);
 			return res.status(409).json({
-				// Two causes, two sentences, two remedies — "reopen the period" is
-				// useless advice when the period_locks table itself is the problem.
+				// Two causes, two sentences: a closed month is final as it stands,
+				// while an unreadable period_locks table is a fault that, once fixed,
+				// lets the same change through.
 				error: unreadable
 					? "The period lock table could not be read, so this expense's month cannot be confirmed open. Status changes are held until that is fixed."
-					: `This expense is booked to ${periodLabel(expPeriod)}, which is finalized. Reopen the period, or record the correction as a payout adjustment.`,
+					: closedMonthReceiptRefusal([expPeriod], 1, expense.status === "Rejected" ? 1 : 0),
 				code: unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED",
 				period: expPeriod,
 			});
@@ -59799,7 +59826,7 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		}
 		const ph = numericIds.map(() => "?").join(",");
 		const existing = db
-			.prepare(`SELECT id, date, created_at, posted_period FROM expenses WHERE id IN (${ph})`)
+			.prepare(`SELECT id, date, status, created_at, posted_period FROM expenses WHERE id IN (${ph})`)
 			.all(...numericIds);
 		if (existing.length === 0) {
 			return res.status(404).json({ error: "No matching expenses found" });
@@ -59828,7 +59855,7 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		const existingIds = [];
 		for (const e of existing) {
 			const p = expensePostedPeriod(e);
-			if (periodWriteLocked(p)) lockedRows.push({ id: e.id, period: p });
+			if (periodWriteLocked(p)) lockedRows.push({ id: e.id, period: p, rejected: e.status === "Rejected" });
 			else existingIds.push(e.id);
 		}
 
@@ -59945,7 +59972,7 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 				finalizedPeriods: lockReadable ? lockedPeriods : [],
 				...(lockReadable ? {} : { periodLockUnreadable: true }),
 				message: lockReadable
-					? `${changed} updated. ${lockedRows.length} skipped — ${lockedPeriods.map(periodLabel).join(", ")} ${lockedPeriods.length === 1 ? "is" : "are"} finalized.`
+					? `${changed} updated. ${lockedRows.length} skipped. ${closedMonthReceiptRefusal(lockedPeriods, lockedRows.length, lockedRows.filter((r) => r.rejected).length)}`
 					: `${changed} updated. ${lockedRows.length} skipped — the period lock table could not be read, so no month could be confirmed open.`,
 			} : {}),
 		});
