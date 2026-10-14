@@ -33,7 +33,8 @@
  *      - the outgoing closed-month check reads what goes out: a delivered load's blank
  *        Assigned Date sent in a closed month is held by decision 3, and nothing booked into
  *        the closed month goes out, so other columns follow the delivered rules; the reason
- *        names the closed month the email's Assigned Date is in (an open month adds nothing);
+ *        names the closed month the email's Assigned Date is in (an open month adds nothing,
+ *        and a month the hold of every column already names is not named again);
  *        a column a delivered load still writes (Completion Date) sent in a closed month still
  *        holds every column;
  *      - a sheet with two matching columns ("Assigned Date" and "Date Assigned"): each stored
@@ -216,6 +217,9 @@ async function edgeCases() {
 	eq([cv.Details, cv["Completion Date"], cv[ad]], [LOADS.deliveredBlank[1], "", ""], "§4 delivered, a Completion Date sent in a closed month: every column comes back as stored");
 	ok("§4 delivered, a Completion Date sent in a closed month: the reason says the re-issue's dates are in a closed month",
 		/delivered/.test(String(c.body.holdReason || "")) && /the re-issue's dates are in a closed month \(2026-09\)/.test(String(c.body.holdReason || "")), c.body.holdReason);
+	const sameMonth = await post(LOADS.deliveredBlank, { "Load ID": LOADS.deliveredBlank[0], [ad]: closedAd, "Completion Date": "9/30/2026", Payment: LOADS.deliveredBlank[7] });
+	eq(String(sameMonth.body.holdReason || ""), "delivered and the re-issue's dates are in a closed month (2026-09)",
+		"§4 delivered, Assigned Date and Completion Date sent in the same closed month: that month is named once (no separate Assigned Date note)");
 
 	// Two matching columns: each is protected.
 	const twoHeaders = ["Load ID", "Details", "Pickup Appointment", "Drop-off Appointment", "Job Status", ad, DATE_ASSIGNED, "Status Update Date", "Completion Date", "Payment"];

@@ -7559,13 +7559,16 @@ function reissueOutgoingHold(headers, row, values) {
 // The closed months a held Assigned Date falls in (the date the email carried, which
 // keepStoredSheetValues() did not write), as a hold reason for the person deciding,
 // or "". It changes nothing held or written. With the closed months unreadable the
-// hold already says so.
-function reissueHeldAssignedClosedReason(held) {
+// hold already says so; a month one of `named` (the reasons of a hold of every
+// column) already names is not named again.
+function reissueHeldAssignedClosedReason(held, named = []) {
 	if (!periodLocksReadable()) return "";
 	const months = new Set();
 	for (const h of held || []) {
 		if (!assignedDateColumn(h.column)) continue;
-		for (const mk of sheetCellMonths(h.sent) || []) if (periodWriteLocked(mk)) months.add(mk);
+		for (const mk of sheetCellMonths(h.sent) || []) {
+			if (periodWriteLocked(mk) && !named.some((r) => String(r).includes(mk))) months.add(mk);
+		}
 	}
 	return months.size ? `the email's Assigned Date is in a closed month (${[...months].sort().join(", ")})` : "";
 }
@@ -7672,7 +7675,7 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 				out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 			}
 		}
-		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held) : "";
+		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held, hold.all ? hold.reasons : []) : "";
 		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ") : "";
 		// storedLoadId: the stored row's Load ID cell as the sheet has it, so n8n can
 		// write to that row (its appendOrUpdate matches the exact text).

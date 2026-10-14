@@ -15,7 +15,10 @@
  *      (brokerInvoice.extractPdfText()) reads from a page's streams, each stream once (an
  *      uncompressed page too), with the same string rule and escapes; 3 MB of ordinary text in
  *      one compressed stream and 3 MB of tiny streams are read within a second, at most
- *      MAX_STREAMS streams and MAX_TEXT_CHARS of text. A readable rate con's DVIR deductions
+ *      MAX_STREAMS streams and MAX_TEXT_CHARS of text; the inflate budget is spent once, in
+ *      all: a stream that would inflate past it, or fails after its header, ends the reading,
+ *      while an uncompressed stream is read as it is and a cut-off one gives what it holds.
+ *      A readable rate con's DVIR deductions
  *      (one line, two lines, two identical lines, another amount, an accounting negative), and
  *      what is not one (a positive amount, a sentence naming DVIR, no DVIR); unreadable text
  *      and an over-size PDF; the alert line for each: the owner's sentence for a readable
@@ -153,6 +156,30 @@ function section1() {
 	ok(`§1 pdfText(): 3 MB of tiny streams is read within a second (${tiny.ms} ms)`, tiny.ms < 1000, tiny.ms);
 	const many = dvir.pdfText(pdfOf(Array.from({ length: dvir.MAX_STREAMS + 200 }, (_v, i) => `BT (s${i}) Tj ET`)));
 	eq([many.includes(`s${dvir.MAX_STREAMS - 1}`), many.includes(`s${dvir.MAX_STREAMS}`)], [true, false], `§1 pdfText(): at most MAX_STREAMS (${dvir.MAX_STREAMS}) streams are read`);
+
+	// The inflate budget is spent once, in all (asserted by what is read).
+	const budget = { maxInflatedBytes: 2000 };
+	const filler = (word) => `BT (${word}) Tj ET ${"BT (Line Haul 300.00) Tj ET ".repeat(200)}`;
+	const deflate = (s) => zlib.deflateSync(Buffer.from(s, "latin1"));
+	const pdfRaw = (datas) => Buffer.concat([Buffer.from("%PDF-1.4\n", "latin1"),
+		...datas.flatMap((d, i) => [Buffer.from(`${i + 1} 0 obj\n<< /Length ${d.length} /Filter /FlateDecode >>\nstream\n`, "latin1"), d, Buffer.from("\nendstream\nendobj\n", "latin1")]),
+		Buffer.from("trailer\n<< >>\n%%EOF\n", "latin1")]);
+	const small = (word) => deflate(`BT (${word}) Tj ET`);
+	eq(dvir.pdfText(pdfRaw([small("FIRST"), small("SECOND")]), budget), "FIRST SECOND", "§1 pdfText(): two compressed streams within the budget are both read");
+	eq(dvir.pdfText(Buffer.concat([pdfOf(["BT (PLAIN) Tj ET"]), pdfRaw([small("AFTER")])]), budget),
+		"PLAIN AFTER", "§1 pdfText(): an uncompressed stream is read as it is, and the next one still inflated");
+	const over = dvir.pdfText(pdfRaw([deflate(filler("FIRST")), small("SECOND"), deflate(filler("THIRD"))]), budget);
+	eq([over.includes("FIRST"), over.includes("SECOND"), over.includes("THIRD")], [false, false, false],
+		"§1 pdfText(): a stream that would inflate past the budget spends it: no stream after it is inflated or read");
+	const okThenOver = dvir.pdfText(pdfRaw([small("FIRST"), deflate(filler("BIG")), small("LAST")]), budget);
+	eq([okThenOver.startsWith("FIRST"), okThenOver.includes("BIG"), okThenOver.includes("LAST")], [true, false, false],
+		"§1 pdfText(): streams before an over-budget one are read; none after it");
+	const badCheck = (s) => { const d = Buffer.from(deflate(s)); d.writeUInt32BE(0, d.length - 4); return d; };
+	const broken = dvir.pdfText(pdfRaw([badCheck("BT (BROKEN) Tj ET"), small("SECOND")]), budget);
+	eq([broken.includes("BROKEN"), broken.includes("SECOND")], [false, false], "§1 pdfText(): a stream that fails after its header spends the budget: nothing after it is read");
+	const cut = deflate(filler("PARTIAL"));
+	const partial = dvir.pdfText(pdfRaw([cut.subarray(0, Math.floor(cut.length * 0.8)), small("NEXT")]), { maxInflatedBytes: 100000 });
+	eq([partial.startsWith("PARTIAL"), partial.endsWith("NEXT")], [true, true], "§1 pdfText(): a cut-off stream gives what it holds, and the next one is still read");
 
 	const read = (t, size = 1000) => dvir.readRateConDvir(t, size);
 	eq(read(TJ_ONE), { readable: true, cents: 3500, count: 1 }, "§1 one DVIR line (the readers' space-joined form): $35, one deduction");
