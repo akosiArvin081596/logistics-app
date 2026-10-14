@@ -43,7 +43,9 @@
  *      sheet (no default; --sheet-id=env with no SPREADSHEET_ID is a refusal,
  *      exit 2), opens the database read-only, prints what it would
  *      send, writes nothing (the file is byte-identical, no state table is
- *      created) and never sends mail
+ *      created) and never sends mail; with no lock table to read, check 5
+ *      counts the load as untold (not closed) and says the closed months
+ *      can't be read
  *
  * Hermetic: in-memory SQLite and a mkdtemp directory; no network.
  *   node scripts/test-integrity-check.js
@@ -507,8 +509,8 @@ async function section5() {
 	ok("the subject counts the findings", /2 issues/.test(spy.calls[0].subject), spy.calls[0].subject);
 	ok("the email names receipt #7 and its age", /#7/.test(spy.calls[0].html) && /days/.test(spy.calls[0].html));
 	ok("a run writes no business table", businessRows(db) === before);
-	ok("its only tables are its own (the load state and the reported list)",
-		tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === [ic.STATE_TABLE, ic.RECEIPTS_TABLE].sort().join(), tables(db));
+	ok("its only tables are its own (the load state and the two reported lists)",
+		tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === [ic.STATE_TABLE, ic.RECEIPTS_TABLE, ic.PAYMENTS_TABLE].sort().join(), tables(db));
 	ok("result.emailed", result.emailed === true);
 
 	const db2 = makeDb();
@@ -576,7 +578,8 @@ async function section6() {
 	if (!block) return;
 	const startsJobSrc = SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0];
 	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
-		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process"];
+		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
+		"integrityClosedMonthsOf"];
 	const exec = (over) => {
 		const timers = [];
 		const seen = {};
@@ -600,6 +603,7 @@ async function section6() {
 			invoiceEmailHtml: ({ heading }) => `<h2>${heading}</h2>`,
 			RATECON_RECONCILE_MAILBOX: "RATECONs",
 			process: { env: { GMAIL_USER: "ops@example.test", GMAIL_APP_PASSWORD: "pw" } },
+			integrityClosedMonthsOf: () => [],
 			...over,
 		};
 		new Function(...names, `${startsJobSrc}\n${block}`)(...names.map((n) => env[n]));
@@ -625,7 +629,11 @@ async function section6() {
 		ok("it books receipts with EXPENSE_PERIOD_EXPR", o.expensePeriodExpr === EXPENSE_PERIOD_EXPR);
 		ok("it reads the rate-con mailbox with the app's Gmail account and label", !!on.seen.reader && on.seen.reader.user === "ops@example.test" && on.seen.reader.pass === "pw" && on.seen.reader.mailbox === "RATECONs" && o.readRateConEmails === "reader");
 		ok("it wraps the email in the app's template", typeof o.emailHtml === "function" && /<h2>x<\/h2>/.test(o.emailHtml({ heading: "x", bodyHtml: "" })));
+		ok("check 5 gets the server's closed-month rule", o.closedMonthsOf === on.env.integrityClosedMonthsOf);
 	}
+	const rule = SRC.match(/\nfunction integrityClosedMonthsOf\(headers, row\) \{[\s\S]*?\n\}/);
+	ok("that rule is loadRowAccountingMonths() filtered by periodWriteLocked() (one rule, not a copy)",
+		!!rule && /loadRowAccountingMonths\(headers, headers\.map\(\(h\) => row\[h\]\)\)/.test(rule[0]) && /periodWriteLocked\(mk\)/.test(rule[0]));
 	ok("no sendEmail() call of its own in server.js (the five admin sends stay five)", !/sendEmail\(ADMIN_NOTIFY_EMAIL/.test(block));
 	const example = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 	ok(".env.example documents INTEGRITY_CHECK_ENABLED as a kill switch", /\nINTEGRITY_CHECK_ENABLED=true\n/.test(example) && /integrity/i.test(example));
@@ -633,11 +641,11 @@ async function section6() {
 	ok("the lib sends only through the sendEmail it is given, to the inbox it is given", !/nodemailer|createTransport|sendMail\(/.test(lib));
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
-	ok("the lib writes, creates and changes only its own table",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+	ok("the lib writes, creates and changes only its own tables",
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
-	ok("the reported list is written in the same transaction as the load state", /upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody), txBody);
+	ok("the reported lists are written in the same transaction as the load state", /upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
@@ -712,6 +720,25 @@ async function section7() {
 		ok("with state: the database file is still unchanged (no state write)", sha(dbFile) === h1);
 		const noMail = cli(["--print", ...base]);
 		ok("without --mailbox or --emails-json: check 3 says the mailbox was not read", /mailbox/i.test(noMail.stdout) && noMail.status === 0, noMail.stdout);
+
+		// Check 5 with no lock table to read: the load is counted as untold, not
+		// as closed, and the run says the closed months can't be read.
+		const lockless = path.join(tmp, "lockless.db");
+		const ldb = new Database(lockless);
+		ldb.exec(`
+			CREATE TABLE expenses (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL DEFAULT '', driver TEXT NOT NULL DEFAULT 'd',
+				load_id TEXT DEFAULT '', type TEXT NOT NULL DEFAULT 'Fuel', amount REAL NOT NULL DEFAULT 10, description TEXT DEFAULT '',
+				date TEXT NOT NULL, status TEXT DEFAULT 'Pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, posted_period TEXT DEFAULT '');
+			CREATE TABLE invoices (id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL DEFAULT 'd',
+				status TEXT NOT NULL DEFAULT 'Draft', expense_ids TEXT DEFAULT '[]', deleted_at TEXT DEFAULT '');
+			CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, load_id TEXT, invoice_id TEXT, sheet_total TEXT, created_at TEXT);
+		`);
+		ldb.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, sheet_total, created_at) VALUES ('333', 'INV-333', '$450.00', '2026-10-10T12:00:00Z')").run();
+		ldb.close();
+		fs.writeFileSync(path.join(tmp, "values5.json"), JSON.stringify({ values: [["Load ID", "Pickup Appointment", "Assigned Date", "Payment"], ["333", "10/9/2026", "10/9/2026", "$500.00"]] }));
+		const noLocks = cli(["--print", `--db=${lockless}`, `--values-json=${path.join(tmp, "values5.json")}`, `--env-file=${path.join(tmp, "settings.env")}`]);
+		ok("check 5 with no lock table: the load is untold, not closed, and the run says the closed months can't be read",
+			noLocks.status === 0 && /1 whose month can't be told \(a date that can't be placed, or closed months that can't be read\)/.test(noLocks.stdout) && !/in a closed month/.test(noLocks.stdout), noLocks.stdout + noLocks.stderr);
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}

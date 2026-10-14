@@ -42,14 +42,34 @@ function refuse(message) {
 	process.exit(2);
 }
 
-// The server's own sheet reader and expense month rule, from this checkout.
+// The server's own sheet reader, expense month rule and accounting-month rule,
+// from this checkout.
 function liftFromServer() {
 	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 	const lifted = closure(SRC, {
-		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR"],
+		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths"],
 		denied: ["db", "getSheets", "sheets", "sendEmail", "transporter", "app", "io", "server", "SPREADSHEET_ID"],
 	});
-	return new Function(`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR };`)();
+	return new Function(`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths };`)();
+}
+
+// Check 5's closed-month rule, read as the server reads it: the row's accounting
+// months that period_locks marks 'locked'. A lock table that can't be read
+// answers null for every row, as the server's integrityClosedMonthsOf() does:
+// the check counts those loads and says the closed months can't be read.
+function closedMonthsRule(db, loadRowAccountingMonths) {
+	let locked = null;
+	try {
+		locked = new Set(db.prepare("SELECT period FROM period_locks WHERE status = 'locked'").all().map((r) => r.period));
+	} catch {
+		locked = null;
+	}
+	return (headers, row) => {
+		if (locked === null) return null;
+		const months = loadRowAccountingMonths(headers, headers.map((h) => row[h]));
+		if (months === null) return null;
+		return months.filter((mk) => locked.has(mk));
+	};
 }
 
 async function main() {
@@ -111,6 +131,7 @@ async function main() {
 		to,
 		log,
 		appZone: appTime.resolveAppTimeZone(env.APP_TIMEZONE, (m) => console.error(m)),
+		closedMonthsOf: closedMonthsRule(db, server.loadRowAccountingMonths),
 	});
 	db.close();
 
