@@ -16,11 +16,11 @@
 import { fmtSheetMoment } from '../utils/datetime.js'
 
 // M/D/YYYY, optionally with H:MM[:SS] and AM/PM: fmtSheetMoment's bare shape.
-const SHEET_STAMP_RE = /^(\d{1,2})\/(\d{1,2})\/\d{4}(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:AM|PM)?)?$/i
+const SHEET_STAMP_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:AM|PM)?)?$/i
 // M/D/YY with a time (required): the same stamp with a two-digit year.
 const SHORT_YEAR_STAMP_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{2})([ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:AM|PM)?)$/i
 // YYYY-MM-DD, or an ISO time that names its zone (Z or an offset).
-const ISO_RE = /^\d{4}-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2}))?$/
+const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2}))?$/
 // An RFC 2822 date as an email's Date header writes it, with an optional
 // "Date:" label and an optional zone comment ("(UTC)").
 const EMAIL_DATE_RE = /^(?:Date: {0,3})?(?:(Sun|Mon|Tue|Wed|Thu|Fri|Sat), {0,3})?(\d{1,2}) {1,3}(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,3}(\d{4}) {1,3}(\d{1,2}):(\d{2})(?::(\d{2}))? {1,3}([+-]\d{4}|GMT|UTC|UT)(?: {1,3}\([A-Za-z]{1,5}\))?$/i
@@ -28,10 +28,14 @@ const EMAIL_DATE_RE = /^(?:Date: {0,3})?(?:(Sun|Mon|Tue|Wed|Thu|Fri|Sat), {0,3})
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
-function inRange(month, day) {
+// A day the calendar has (no 2/30, no 2/29 outside a leap year). month is 1-12.
+function realDay(year, month, day) {
+  const y = Number(year)
   const m = Number(month)
   const d = Number(day)
-  return m >= 1 && m <= 12 && d >= 1 && d <= 31
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false
+  const date = new Date(Date.UTC(y, m - 1, d))
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d
 }
 
 // Hour 0-23, minute and second 0-59; a stamp with no time passes.
@@ -51,8 +55,8 @@ function emailDateIso(s) {
   const [, weekday, day, mon, year, hour, minute, second = '00', zone] = m
   const month = MONTHS.indexOf(mon.toLowerCase())
   const d = Number(day)
+  if (!realDay(year, month + 1, d)) return null
   const date = new Date(Date.UTC(Number(year), month, d))
-  if (date.getUTCMonth() !== month || date.getUTCDate() !== d) return null
   if (weekday && WEEKDAYS[date.getUTCDay()] !== weekday.toLowerCase()) return null
   if (!clockInRange(hour, minute, second)) return null
   let offset = 'Z'
@@ -68,14 +72,14 @@ function momentText(v) {
   if (typeof v !== 'string') return null
   const s = v.trim()
   const stamp = s.match(SHEET_STAMP_RE)
-  if (stamp) return inRange(stamp[1], stamp[2]) && clockInRange(stamp[3], stamp[4], stamp[5]) ? s : null
+  if (stamp) return realDay(stamp[3], stamp[1], stamp[2]) && clockInRange(stamp[4], stamp[5], stamp[6]) ? s : null
   const short = s.match(SHORT_YEAR_STAMP_RE)
   if (short) {
     const [, month, day, yy, time, hour, minute, second] = short
-    return inRange(month, day) && clockInRange(hour, minute, second) ? `${month}/${day}/20${yy}${time}` : null
+    return realDay(`20${yy}`, month, day) && clockInRange(hour, minute, second) ? `${month}/${day}/20${yy}${time}` : null
   }
   const iso = s.match(ISO_RE)
-  if (iso) return inRange(iso[1], iso[2]) ? s : null
+  if (iso) return realDay(iso[1], iso[2], iso[3]) ? s : null
   return emailDateIso(s)
 }
 

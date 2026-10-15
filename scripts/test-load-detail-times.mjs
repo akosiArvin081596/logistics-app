@@ -90,6 +90,10 @@ if (lib) {
     ['11/18/25 13:00', '11/18/2025, 1:00 PM'],
     ['1/5/26 9:07:30', '1/5/2026, 9:07 AM'],
     ['11/18/25 1:00 PM', '11/18/2025, 1:00 PM'],
+    // February 29th in a leap year is a real day.
+    ['2/29/2028 10:00', '2/29/2028, 10:00 AM'],
+    ['2/29/24 9:00', '2/29/2024, 9:00 AM'],
+    ['2028-02-29', 'Feb 29, 2028'],
   ]
   check('date and time cells show like the rest of the page', SHOWN.map(([v]) => cell(v)), SHOWN.map(([, want]) => want))
   const UNCHANGED = [
@@ -110,6 +114,8 @@ if (lib) {
     // Two-digit years: free text after the time, an impossible clock or month,
     // and a date with no time stay as written.
     '1/28/26 10:00 Appt.', '11/18/25 27:00', '13/18/25 10:00', '11/18/25',
+    // A day the calendar doesn't have, in any of the stamp shapes.
+    '2/29/27 10:00', '2/30/2026 10:00', '2/30/2026', '4/31/2026 8:00', '2/29/2027', '2026-02-30', '2027-02-29',
   ]
   check('every other cell prints as written', UNCHANGED.map(cell), UNCHANGED)
   check('a number prints as the number', detailValue({ C: 1800 }, 'C'), 1800)
