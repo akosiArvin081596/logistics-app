@@ -55,6 +55,26 @@ function optionValue(argv, name) {
 	return i >= 0 ? argv[i + 1] : undefined;
 }
 
+// The flags --enable names (each --enable takes the next word), checked against
+// lib/replica-rules.js before anything starts: sorted, without repeats. Any
+// refusal ends the run. A word holding "=" is shown without what follows it, so
+// a value typed by mistake is never printed.
+function enableArgs(argv) {
+	const names = new Set();
+	const refused = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== "--enable") continue;
+		const name = argv[i + 1];
+		if (name === undefined || name.startsWith("--")) fail("--enable needs a setting name, e.g. --enable PERSONAL_EXPENSE_DEDUCTIONS_ENABLED");
+		const why = rules.enableRefusal(name);
+		if (why) refused.push(`--enable ${name.replace(/=.*$/s, "=...").slice(0, 64)}: ${why}`);
+		else names.add(name);
+		i++;
+	}
+	if (refused.length) fail(`refusing to start:\n  ${refused.join("\n  ")}`);
+	return [...names].sort();
+}
+
 function readJson(file) {
 	return JSON.parse(fs.readFileSync(file, "utf8"));
 }
@@ -163,6 +183,7 @@ module.exports = {
 	fail,
 	taskArg,
 	optionValue,
+	enableArgs,
 	readJson,
 	writePrivate,
 	realOf,

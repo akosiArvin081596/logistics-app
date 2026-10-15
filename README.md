@@ -154,7 +154,7 @@ from it out of the repo and out of anything shared.**
 ```bash
 fnm use   # Node 22.23.2: the replica refuses another version than production's
 LOGISX_PROD_SSH=<root@host or ssh config Host> [LOGISX_PROD_SSH_KEY=<identity file>] npm run replica:pull [-- --force]
-npm run replica:start -- [--task <name>] [--port <n>] [--fresh] [--prod-commit]
+npm run replica:start -- [--task <name>] [--port <n>] [--fresh] [--prod-commit] [--enable <NAME>]...
 npm run replica:login -- <username> [--task <name>] [--headless] [--screens <dir>] [--visit <path>]...
 npm run replica:login -- --mcp-state <username> [--task <name>]
 npm run replica:clean -- [--task <name>]
@@ -214,6 +214,13 @@ npm run replica:clean -- [--task <name>]
   `--prod-commit` runs production's exact commit from a worktree under
   `~/LogisX-replica/code/`; it is refused for a commit without replica mode (remove that
   worktree with `git worktree remove` when you are done with it).
+  `--enable <NAME>` (repeatable) sets a flag to `true` for that start of that task only: in the
+  server's environment, never in `settings.env`, and listed in the banner ("enabled for this
+  task: ..."). It takes only the business flags on the allowlist in `lib/replica-rules.js`
+  (`ENABLE_ALLOWED`, for example `PERSONAL_EXPENSE_DEDUCTIONS_ENABLED`); a flag that reaches
+  outside the machine (mail, Drive, Sheets, n8n, ELD, paid APIs), a scheduled job or a kill
+  switch is refused before anything starts. A task already running with other flags is refused
+  until `replica:clean` stops it.
 - **`replica:login`** sets a local password on that account in the working copy only, from the
   Keychain item `logisx-replica` (generated once, never shown), then signs in through the
   login page in Chrome for Testing (headed unless `--headless`). The browser may reach the

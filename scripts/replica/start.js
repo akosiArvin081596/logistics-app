@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// npm run replica:start -- [--task <name>] [--port <n>] [--prod-commit] [--fresh]
+// npm run replica:start -- [--task <name>] [--port <n>] [--prod-commit] [--fresh] [--enable <NAME>]...
 //
 // Starts the app on a task's working copy of production, in replica mode
 // (LOCAL_REPLICA=1, lib/replica-mode.js), on 127.0.0.1:<port> (default 3901).
@@ -14,6 +14,13 @@
 //   --prod-commit    run the commit production runs (from the manifest) in a
 //                    worktree under ~/LogisX-replica/code/, instead of this
 //                    checkout. Refused when that commit has no replica mode.
+//   --enable <NAME>  set the flag NAME to "true" for this start of this task
+//                    only (repeatable): in the server's environment, never in
+//                    settings.env, and printed in the banner. Only the business
+//                    flags on the allowlist in lib/replica-rules.js
+//                    (ENABLE_ALLOWED); anything that reaches outside this
+//                    machine (mail, Drive, Sheets, n8n, ELD, paid APIs) or a
+//                    scheduled job is refused before anything starts.
 //
 // The server gets a minimal environment: none of this shell's variables but
 // PATH, HOME, USER, LANG and TMPDIR, the replica's paths, production's time zone,
@@ -33,16 +40,18 @@ const C = require("./common");
 const rules = require("../../lib/replica-rules");
 
 const argv = process.argv.slice(2);
-const known = new Set(["--task", "--port", "--prod-commit", "--fresh", "-h", "--help"]);
+const known = new Set(["--task", "--port", "--prod-commit", "--fresh", "--enable", "-h", "--help"]);
 for (let i = 0; i < argv.length; i++) {
 	if (!known.has(argv[i])) C.fail(`unknown option ${argv[i]} (see --help)`);
-	if (argv[i] === "--task" || argv[i] === "--port") i++;
+	if (argv[i] === "--task" || argv[i] === "--port" || (argv[i] === "--enable" && argv[i + 1] !== undefined && !argv[i + 1].startsWith("--"))) i++;
 }
 if (argv.includes("-h") || argv.includes("--help")) {
-	console.log(fs.readFileSync(__filename, "utf8").split("\n").slice(1, 24).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+	const lines = fs.readFileSync(__filename, "utf8").split("\n").slice(1);
+	console.log(lines.slice(0, lines.findIndex((l) => !l.startsWith("//"))).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 	process.exit(0);
 }
 const task = C.taskArg(argv);
+const enabled = C.enableArgs(argv);
 const port = Number(C.optionValue(argv, "--port") || C.DEFAULT_PORT);
 const prodCommit = argv.includes("--prod-commit");
 const fresh = argv.includes("--fresh");
@@ -158,7 +167,13 @@ async function main() {
 
 	const running = C.runningServer(task);
 	if (running) {
+		const had = Array.isArray(running.enabled) ? running.enabled : [];
+		if (JSON.stringify(had) !== JSON.stringify(enabled)) {
+			C.fail(`task ${task} is already running (pid ${running.pid}) with enabled: ${had.join(", ") || "none"}; this start asks for ${enabled.join(", ") || "none"}. ` +
+				`Stop it first (npm run replica:clean -- --task ${task}), then start it again.`);
+		}
 		console.log(`replica: task ${task} is already running: http://127.0.0.1:${running.port} (pid ${running.pid})`);
+		if (enabled.length) console.log(`replica: enabled for this task: ${enabled.join(", ")}`);
 		return;
 	}
 	if (!Number.isInteger(port) || port < 1024 || port > 65535) C.fail("--port must be a number from 1024 to 65535");
@@ -203,6 +218,9 @@ async function main() {
 		// The books this copy's Sheets stub holds: the server needs its sheet
 		// named (lib/sheet-id.js), and these are the only ones the stub answers.
 		...C.replicaSheetIds(path.join(work, "sheets.json")),
+		// --enable: set here, so the server's settings file never fills them
+		// (lib/replica-mode.js loads only names not already set).
+		...Object.fromEntries(enabled.map((name) => [name, "true"])),
 	};
 	const out = fs.openSync(logFile, "a", 0o600);
 	const child = spawn(process.execPath, ["server.js"], { cwd: codeDir, env, detached: true, stdio: ["ignore", out, out] });
@@ -211,6 +229,7 @@ async function main() {
 		task, pid: child.pid, port, codeDir, log: logFile, guardLog, startedAt: new Date().toISOString(),
 		commit: prodCommit ? manifest.production.commit : (() => { try { return git(["rev-parse", "HEAD"]); } catch { return ""; } })(),
 		snapshotAt: manifest.snapshotAt,
+		enabled,
 	};
 	C.writePrivate(C.paths.serverRecord(task), JSON.stringify(record, null, 2));
 	console.log(`replica: started pid ${child.pid} from ${codeDir} (log ${logFile})`);
@@ -220,6 +239,7 @@ async function main() {
 		C.fail(err.message);
 	}
 	console.log(`replica: LOCAL COPY OF PRODUCTION (task ${task}) is serving at http://127.0.0.1:${port}  pid ${child.pid}`);
+	if (enabled.length) console.log(`replica: enabled for this task: ${enabled.join(", ")} (set to true for this start only; settings.env is unchanged)`);
 	console.log(`replica: outbound guard log ${guardLog} (empty = nothing was attempted)`);
 	console.log(`replica: sign in as someone: npm run replica:login -- <username> --task ${task}; stop: npm run replica:clean -- --task ${task}`);
 }
