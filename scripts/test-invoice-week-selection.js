@@ -136,6 +136,9 @@ const SHARED_FNS = [
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows",
+	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
+	// the paid-days release a regenerated Draft runs.
+	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
 	// The Friday batch, run for real in §4b.
 	"escHtml", "invoiceEmailHtml", "generateInvoiceInProcess", "abortAutogenRun",
 	// The undated-load ledger, §7.
@@ -189,6 +192,8 @@ function buildWorld(db, opts = {}) {
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
+		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
+		TRIP_WORK_DAYS_FROM: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },
