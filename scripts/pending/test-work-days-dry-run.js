@@ -12,7 +12,7 @@
  *   - per driver-day: the load and timestamp behind the day, and its flags;
  *   - per invoice: days and $ difference;
  *   - per investor-month: driver pay and payout difference at the split;
- *   - the backfill rows and the refused earlier days.
+ *   - the backfill rows and the refused late days (a late day goes on its own week's invoice or a correction, never on a later invoice: the owner's rule of 2026-10-14).
  * The plan names the parameters, not their form: these cases pass from=to=2026-10,
  * which reads the same as a month range or as a candidate FROM (TRIP_WORK_DAYS_FROM
  * is 2026-10 in the env, the flag off). The output's field names are the fix's
@@ -22,7 +22,7 @@
  *   F101  Ann Vey   no appointments, no Assigned Date; At Shipper Tue 10/6 09:00 ET,
  *                   Delivered Wed 10/7: today 0 days, the rule 10/6-10/7 (October)
  *   F105  Ann Vey   Assigned 9/30 (before FROM), appointments 10/1-10/3, completed
- *                   after W39: its 10/1 and 10/2 are refused earlier days
+ *                   after W39: its 10/1 and 10/2 are refused late days
  *   F201  Bo Wyn    Assigned 10/5, $5,000 (October revenue); F202 Bo Wyn 9/15
  *   Invoices made today: Bo, week 9/12-9/18 (9/15); Ann W40 (10/3, $260); Bo W40 (10/5)
  *   Expected: Ann's W40 +2 days, +$520; October driver pay +$520, payout -$260;
@@ -123,14 +123,14 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		}
 	});
 
-	await R.test("F4 The backfill rows (Bo Wyn 2026-09-15 on his 9/12-9/18 invoice) and the refused earlier days (Ann Vey 2026-10-01 and 2026-10-02 of F105, a load settling before FROM) are listed", async ({ ok }) => {
+	await R.test("F4 The backfill rows (Bo Wyn 2026-09-15 on his 9/12-9/18 invoice) and the refused late days (Ann Vey 2026-10-01 and 2026-10-02 of F105, a load settling before FROM) are listed", async ({ ok }) => {
 		const o = await get();
 		requireBoth(ok, o);
 		const early = o.f.boEarly.invoice && o.f.boEarly.invoice.invoice_number;
 		for (const [name, json] of sources(o)) {
 			ok(`${name}: backfill row Bo Wyn 2026-09-15 ${early}`, W.objects(json).some((x) => W.scalars(x).includes("2026-09-15") && W.scalars(x).includes(early)), JSON.stringify(json).slice(0, 200));
 			for (const day of ["2026-10-01", "2026-10-02"]) {
-				ok(`${name}: refused earlier day ${day}`, W.objects(json).some((x) => W.scalars(x).includes(day) && /F105|ann vey/i.test(JSON.stringify(x)) && Object.keys(x).some((k) => /reason|refus/i.test(k))), JSON.stringify(json).slice(0, 200));
+				ok(`${name}: refused late day ${day}`, W.objects(json).some((x) => W.scalars(x).includes(day) && /F105|ann vey/i.test(JSON.stringify(x)) && Object.keys(x).some((k) => /reason|refus/i.test(k))), JSON.stringify(json).slice(0, 200));
 			}
 		}
 	});

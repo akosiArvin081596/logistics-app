@@ -19,11 +19,14 @@
  *     choice; the plan names no file) --db=<copy> --env-file=<file> [--dry-run]
  *     writes one row per paid day of the day grid of every live weekly invoice,
  *     Rejected included, soft-deleted skipped; idempotent;
- *   - an earlier day is carried only when its load settles in FROM or later, the
- *     day is on or after the floor (app_settings trip_work_days_started_at, the
- *     first Saturday the rule invoiced, written once in that invoice's
- *     transaction), no live invoice holds it, and its month is not closed; a
- *     refused day is named in `warnings`.
+ *   - a late day (payable after its week's invoice was made) is carried only when
+ *     its load settles in FROM or later, the day is on or after the floor
+ *     (app_settings trip_work_days_started_at, the first Saturday the rule
+ *     invoiced, written once in that invoice's transaction), no live invoice
+ *     holds it, and its month is not closed; a refused day is named in
+ *     `warnings`. A carried day goes on its own week's invoice, never a later
+ *     one (the owner's rule, 2026-10-14): in place while that invoice is not
+ *     approved, else on a correction invoice for that week.
  *
  * Shipping code lifted from server.js on an in-memory SQLite built from its DDL
  * (lib/work-days-world.js beside this runner). Flags: TRIP_WORK_DAYS_ENABLED on,
@@ -51,6 +54,10 @@ function claims(world, where = "", ...args) {
 }
 const claimDays = (world, invoiceId) => claims(world, "WHERE invoice_id = ?", invoiceId).map((r) => r.day);
 const invoiceCount = (world) => world.db.prepare("SELECT COUNT(*) AS n FROM invoices").get().n;
+// The paid grid days of a stored invoice, and the work-day correction invoices
+// (a late day goes on its own week's invoice or a correction for that week).
+const storedGrid = (world, id, weekEnd) => W.gridDays(JSON.parse(world.db.prepare("SELECT render_data FROM invoices WHERE id = ?").get(id).render_data || "{}"), weekEnd);
+const corrections = (world) => world.db.prepare("SELECT * FROM invoices WHERE is_manual = 1 AND correction_of IS NOT NULL AND deleted_at = '' ORDER BY id").all();
 const marker = (world) => { const r = world.db.prepare("SELECT value FROM app_settings WHERE key = 'trip_work_days_started_at'").get(); return r ? r.value : null; };
 const manual = (world, payee, days, period = ["2026-10-05", "2026-10-06"]) => W.route(world, "POST /api/invoices/manual", {
 	body: { payee, periodStart: period[0], periodEnd: period[1], lineItems: [{ description: "Layover", amount: 260 }], ...(days ? { days } : {}) },
@@ -216,7 +223,7 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 		eq("second run: exit 0 and the same rows", [again.code, read()], [0, want]);
 	});
 
-	await R.test("C9 [Q16] Earlier-day limits, each refused day named in `warnings`: a load settling before FROM, a day before the stored floor marker, a day another live invoice holds, a day in a closed month (invoiceMonthLockBlockers()); a day within every limit is carried", async ({ eq, ok }) => {
+	await R.test("C9 [Q16, revised 2026-10-14] Late-day limits, each refused day named in `warnings`: a load settling before FROM, a day before the stored floor marker, a day another live invoice holds, a day in a closed month (invoiceMonthLockBlockers()); a day within every limit goes on its own week's invoice (W39, a Draft) or, when that week touches a closed month, on a correction for it, never on W40", async ({ eq, ok }) => {
 		const warned = (g, day) => (g.warnings || []).some((x) => String(x).includes(day));
 		// (a) FROM=2026-10: a Sep-assigned load completed after W39 is refused; an Oct-assigned one is carried.
 		{
@@ -232,13 +239,14 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 				status: [s("C900", "At Shipper", "2026-09-28 12:00:00"), s("C900", "Delivered", "2026-09-29 21:00:00"), s("C901", "At Shipper", "2026-09-30 13:00:00"), s("C902", "At Shipper", "2026-10-02 12:00:00")],
 				now: etMs("2026-10-02 20:00"),
 			});
-			await W.generate(w, D, W39);
+			const g39 = await W.generate(w, D, W39);
 			w.addStatus([s("C901", "Delivered", "2026-10-03 16:00:00"), s("C902", "Delivered", "2026-10-03 02:00:00")]);
 			w.setRow("C901", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
 			w.setRow("C902", { "Job Status": "Delivered", "Status Update Date": "10/2/2026", "Completion Date": "10/2/2026" });
 			w.clock.ms = etMs("2026-10-09 20:00");
 			const g = await W.generate(w, D, W40);
-			eq("(a) carried: only the Oct-assigned load's 10/2", W.earlierDays(g.data).map((e) => [e.day, e.loads]), [["2026-10-02", ["C902"]]]);
+			eq("(a) W39 gains only the Oct-assigned load's 10/2; W40 carries no earlier day", [storedGrid(w, g39.invoice.id, W39).map((e) => [e.day, e.loads]), g.data && g.data.earlierDays],
+				[[["2026-09-28", ["C900"]], ["2026-09-29", ["C900"]], ["2026-10-02", ["C902"]]], undefined]);
 			ok("(a) the Sep-assigned load's 9/30 and 10/1 are named in warnings", warned(g, "2026-09-30") && warned(g, "2026-10-01"), JSON.stringify(g.warnings));
 		}
 		// (b) the stored floor marker is 2026-10-03: nothing before it is carried, and the marker is not rewritten.
@@ -253,7 +261,7 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 			});
 			w.db.prepare("INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES ('trip_work_days_started_at', '2026-10-03', '2026-10-03T00:00:00.000Z', 'system')").run();
 			const g = await W.generate(w, D, W40);
-			eq("(b) grid 10/3, no earlier day", [W.dayList(W.gridDays(g.data, W40)), W.earlierDays(g.data)], [["2026-10-03"], []]);
+			eq("(b) grid 10/3, no earlier day, no correction", [W.dayList(W.gridDays(g.data, W40)), g.data && g.data.earlierDays, corrections(w).length], [["2026-10-03"], undefined, 0]);
 			ok("(b) 10/1 and 10/2 (before the floor) named in warnings", warned(g, "2026-10-01") && warned(g, "2026-10-02"), JSON.stringify(g.warnings));
 			eq("(b) the marker stays 2026-10-03", marker(w), "2026-10-03");
 		}
@@ -270,14 +278,14 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 				status: [s("C920", "At Shipper", "2026-09-28 12:00:00"), s("C920", "Delivered", "2026-09-29 21:00:00"), s("C921", "At Shipper", "2026-10-01 13:00:00")],
 				now: etMs("2026-10-02 20:00"),
 			});
-			await W.generate(w, D, W39);
+			const g39 = await W.generate(w, D, W39);
 			const m = await manual(w, D, ["2026-10-01"], ["2026-10-01", "2026-10-01"]);
 			eq("(c) the manual invoice holds 10/1", m.status, 200);
 			w.addStatus([s("C921", "Delivered", "2026-10-03 16:00:00")]);
 			w.setRow("C921", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
 			w.clock.ms = etMs("2026-10-09 20:00");
 			const g = await W.generate(w, D, W40);
-			eq("(c) carried: 10/2 only", W.dayList(W.earlierDays(g.data)), ["2026-10-02"]);
+			eq("(c) W39 gains 10/2 only; W40 carries no earlier day", [W.dayList(storedGrid(w, g39.invoice.id, W39)), g.data && g.data.earlierDays], [["2026-09-28", "2026-09-29", "2026-10-02"], undefined]);
 			ok("(c) the held 10/1 is named in warnings", warned(g, "2026-10-01"), JSON.stringify(g.warnings));
 		}
 		// (d) September closed: 9/30 is refused, 10/1 and 10/2 are carried.
@@ -293,18 +301,20 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 				status: [s("C930", "At Shipper", "2026-09-28 12:00:00"), s("C930", "Delivered", "2026-09-29 21:00:00"), s("C931", "At Shipper", "2026-09-30 13:00:00")],
 				now: etMs("2026-10-02 20:00"),
 			});
-			await W.generate(w, D, W39);
+			const g39 = await W.generate(w, D, W39);
 			w.lock(["2026-09"]);
 			w.addStatus([s("C931", "Delivered", "2026-10-03 16:00:00")]);
 			w.setRow("C931", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
 			w.clock.ms = etMs("2026-10-09 20:00");
 			const g = await W.generate(w, D, W40);
-			eq("(d) carried: 10/1 and 10/2", W.dayList(W.earlierDays(g.data)), ["2026-10-01", "2026-10-02"]);
+			eq("(d) W39 (its week touches closed September) is left as made; 10/1 and 10/2 go on a correction dated 10/1-10/2; W40 carries no earlier day",
+				[W.dayList(storedGrid(w, g39.invoice.id, W39)), corrections(w).map((c) => [c.week_start, c.week_end, JSON.parse(c.render_data).paidDays]), g.data && g.data.earlierDays],
+				[["2026-09-28", "2026-09-29"], [["2026-10-01", "2026-10-02", ["2026-10-01", "2026-10-02"]]], undefined]);
 			ok("(d) the closed-month 9/30 is named in warnings", warned(g, "2026-09-30"), JSON.stringify(g.warnings));
 		}
 	});
 
-	await R.test("C10 (N1) Reject, revert, next week: W39 pays Thu and Fri and is Rejected; W40 does not carry them (the Rejected invoice still holds them); W39 reverted to Submitted still pays them; Thu and Fri are each paid once", async ({ eq }) => {
+	await R.test("C10 (N1) Reject, revert, next week: W39 pays Thu and Fri and is Rejected; W40's run puts them on no invoice and makes no correction (the Rejected invoice still holds them); W39 reverted to Submitted still pays them; Thu and Fri are each paid once", async ({ eq }) => {
 		const D = "Wes Yale";
 		const w = W.startWorld({
 			env: TRIP(),
@@ -325,7 +335,7 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 		eq("the Rejected W39 still holds Thu and Fri", claimDays(w, id), ["2026-10-01", "2026-10-02"]);
 		w.clock.ms = etMs("2026-10-09 20:00");
 		const g40 = await W.generate(w, D, W40);
-		eq("W40 carries neither Thu nor Fri", W.dayList(W.earlierDays(g40.data)), []);
+		eq("W40 carries neither Thu nor Fri, and no correction is made", [W.dayList(W.earlierDays(g40.data)), corrections(w).length], [[], 0]);
 		const rev = await W.route(w, "PUT /api/invoices/:id/revert", { params: { id: String(id) }, body: { reason: "test" } });
 		eq("revert: Submitted", [rev.status, rev.body && rev.body.invoice && rev.body.invoice.status], [200, "Submitted"]);
 		const w39data = JSON.parse(w.db.prepare("SELECT render_data FROM invoices WHERE id = ?").get(id).render_data);

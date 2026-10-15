@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * B12 runner B: the trip-timestamp work-day rule on the three pay paths (plan
- * section 4.1(2)-(8), cases B1-B14), behind TRIP_WORK_DAYS_ENABLED and
- * TRIP_WORK_DAYS_FROM (FROM=2026-09 unless a case says otherwise).
+ * section 4.1(2)-(8), cases B1-B14, and B15-B18 for the owner's late-day rule
+ * of 2026-10-14), behind TRIP_WORK_DAYS_ENABLED and TRIP_WORK_DAYS_FROM
+ * (FROM=2026-09 unless a case says otherwise).
  * FAILING TESTS WRITTEN BEFORE THE FIX. On main the flags are ignored, so the
  * new-rule cases fail with today's days (the reproduction); B7, B8 and B11 pin
  * today's behaviour and pass on main.
@@ -22,10 +23,14 @@
  *   - ledger and investor view: a day in a bucket month that is FROM or later is
  *     dropped when a load with an earlier Assigned month pays it (earliest wins);
  *   - invoice: the week pays every trip day of the driver's completed loads that
- *     falls in it; days that became payable after their week's invoice was made
- *     go on the next invoice as render_data.earlierDays [{ day, loadBol, total }];
- *     a day in a closed month is not carried and is named in `warnings`; Total Due
- *     is the sum of each day's own rate (pay_rate_history).
+ *     falls in it; Total Due is the sum of each day's own rate (pay_rate_history);
+ *   - a day that became payable after its week's invoice was made NEVER goes on a
+ *     later week's invoice (the owner's rule, 2026-10-14, replacing the plan's
+ *     "earlier days"): a Super Admin's run (the Friday batch included) puts it on
+ *     that week's own invoice in place while it is not approved (Draft,
+ *     Submitted, Rejected; status kept), or on a separate correction invoice for
+ *     that week, a Draft, once it is approved or when its week touches a closed
+ *     month; a day in a closed month is not carried and is named in `warnings`.
  * Each daily-rate case also checks that the invoices, the investor view and the
  * ledger pay the same driver-days (as days: the invoice grid names every load
  * behind a day, the ledger the first). B11 is percentage pay (no day grid); a day
@@ -37,6 +42,7 @@
  */
 "use strict";
 process.env.TZ = "UTC";
+const path = require("path");
 const W = require("./lib/work-days-world");
 const { loadRow, et, etMs, daysFrom } = W;
 
@@ -63,6 +69,40 @@ function parity(eq, invoiceDays, views, scope, except = []) {
 }
 const WEEK39 = daysFrom("2026-09-26", "2026-10-02");
 const WEEK40 = daysFrom("2026-10-03", "2026-10-09");
+
+// The owner's rule for a late day (2026-10-14): it goes on its own week's
+// invoice (in place while that invoice is not approved) or on a correction
+// invoice for that week, never on a later week's invoice.
+const invoiceRow = (w, id) => w.db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);
+// The paid grid days of a stored invoice: [{ day, loads, total }].
+const storedGrid = (w, id, weekEnd) => W.gridDays(JSON.parse(invoiceRow(w, id).render_data || "{}"), weekEnd);
+// The work-day correction invoices (manual rows correcting a weekly invoice).
+const corrections = (w) => w.db.prepare("SELECT * FROM invoices WHERE is_manual = 1 AND correction_of IS NOT NULL AND deleted_at = '' ORDER BY id").all();
+const paidDaysOf = (row) => JSON.parse(row.render_data || "{}").paidDays || [];
+const claimRows = (w) => w.db.prepare("SELECT day, invoice_id FROM invoice_paid_days ORDER BY day").all().map((r) => [r.day, r.invoice_id]);
+// W39 has a Mon-Tue load; a load At Shipper Thu 10/1 is still In Transit when
+// W39 is made (Fri 10/2 20:00 ET) and is delivered Mon 10/5.
+function boundaryWorld(D, extra = {}) {
+	return W.startWorld({
+		env: TRIP(),
+		drivers: [{ name: D }],
+		rows: [
+			loadRow({ id: "Q301", driver: D, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+			loadRow({ id: "Q302", driver: D, pickup: "2026-10-01 9:00", dropoff: "2026-10-05 14:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+		],
+		status: [
+			s("Q301", "At Shipper", "2026-09-28 12:00:00"), s("Q301", "Delivered", "2026-09-29 21:00:00"),
+			s("Q302", "At Shipper", "2026-10-01 14:00:00"), s("Q302", "In Transit", "2026-10-01 18:00:00"),
+		],
+		now: etMs("2026-10-02 20:00"),
+		...extra,
+	});
+}
+function deliverBoundaryLoad(w) {
+	w.addStatus([s("Q302", "At Receiver", "2026-10-05 15:00:00"), s("Q302", "Delivered", "2026-10-05 17:00:00")]);
+	w.setRow("Q302", { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
+	w.clock.ms = etMs("2026-10-09 20:00");
+}
 
 // Case a: four loads in W39 (B1, B8).
 const ADA = "Ada Quill";
@@ -132,30 +172,22 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		parity(eq, invDays(g, W39), v, WEEK39);
 	});
 
-	await R.test("B3 [Q8] Week boundary: a load At Shipper Thu 10/1, Delivered Mon 10/5. W39, made Fri 10/2 20:00 ET, pays nothing from it (not completed); W40 pays Thu 10/1 and Fri 10/2 as earlier days and Sat-Mon in its grid; ledger and investor view Thu-Mon in its Assigned month; no day paid twice. Base: Thu and Fri paid by no invoice", async ({ eq }) => {
+	await R.test("B3 [Q8, revised 2026-10-14] Week boundary: a load At Shipper Thu 10/1, Delivered Mon 10/5. W39, made Fri 10/2 20:00 ET, pays nothing from it (not completed). When W40 is made, Thu 10/1 and Fri 10/2 go onto W39 itself (still a Draft: updated in place, its status kept), never onto W40; W40 pays Sat-Mon; ledger and investor view Thu-Mon in its Assigned month; no day paid twice. Base: Thu and Fri paid by no invoice", async ({ eq }) => {
 		const D = "Bea Lark";
-		const w = W.startWorld({
-			env: TRIP(),
-			drivers: [{ name: D }],
-			rows: [
-				loadRow({ id: "Q301", driver: D, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
-				loadRow({ id: "Q302", driver: D, pickup: "2026-10-01 9:00", dropoff: "2026-10-05 14:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
-			],
-			status: [
-				s("Q301", "At Shipper", "2026-09-28 12:00:00"), s("Q301", "Delivered", "2026-09-29 21:00:00"),
-				s("Q302", "At Shipper", "2026-10-01 14:00:00"), s("Q302", "In Transit", "2026-10-01 18:00:00"),
-			],
-			now: etMs("2026-10-02 20:00"),
-		});
+		const w = boundaryWorld(D);
 		const g39 = await W.generate(w, D, W39);
 		eq("W39 days (nothing from the open load)", invDays(g39, W39), ["2026-09-28", "2026-09-29"]);
-		w.addStatus([s("Q302", "At Receiver", "2026-10-05 15:00:00"), s("Q302", "Delivered", "2026-10-05 17:00:00")]);
-		w.setRow("Q302", { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
-		w.clock.ms = etMs("2026-10-09 20:00");
+		deliverBoundaryLoad(w);
 		const g40 = await W.generate(w, D, W40);
 		eq("W40 grid", W.dayList(W.gridDays(g40.data, W40)), ["2026-10-03", "2026-10-04", "2026-10-05"]);
-		eq("W40 earlier days, from the boundary load", W.earlierDays(g40.data).map((e) => [e.day, e.loads]), [["2026-10-01", ["Q302"]], ["2026-10-02", ["Q302"]]]);
-		const all = [...invDays(g39, W39), ...invDays(g40, W40)];
+		eq("W40 carries no earlier days", g40.data && g40.data.earlierDays, undefined);
+		const w39 = invoiceRow(w, g39.invoice.id);
+		eq("W39 now pays Thu and Fri too, from the boundary load, at $260 each", storedGrid(w, g39.invoice.id, W39).map((e) => [e.day, e.loads, e.total]),
+			[["2026-09-28", ["Q301"], 260], ["2026-09-29", ["Q301"], 260], ["2026-10-01", ["Q302"], 260], ["2026-10-02", ["Q302"], 260]]);
+		eq("W39 keeps its number and status; its total and day count follow", [w39.invoice_number, w39.status, w39.total_earnings, w39.loads_count], [g39.invoice.invoice_number, "Draft", 1040, 4]);
+		eq("the W40 response reports the update", g40.body && g40.body.lateWorkDays && g40.body.lateWorkDays.updated.map((u) => [u.invoiceNumber, u.days]), [[g39.invoice.invoice_number, ["2026-10-01", "2026-10-02"]]]);
+		eq("no correction invoice", corrections(w).length, 0);
+		const all = [...W.dayList(storedGrid(w, g39.invoice.id, W39)), ...invDays(g40, W40)];
 		eq("no day paid twice", all.length, uniq(all).length);
 		const v = await monthViews(w, D);
 		const want = ["2026-09 2026-09-28", "2026-09 2026-09-29", ...daysFrom("2026-10-01", "2026-10-05").map((d) => `2026-10 ${d}`)];
@@ -180,7 +212,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		parity(eq, invDays(g, W39), v, WEEK39);
 	});
 
-	await R.test("B5 A completed load with blank Status Update and Completion Date (At Shipper Tue, Delivered Wed): the invoice pays Tue and Wed; and a week holding only earlier days (a load delivered Fri 22:00 ET, after its week's invoice) produces an invoice, not a 400. Base: 400 \"No completed loads\"", async ({ eq }) => {
+	await R.test("B5 [revised 2026-10-14] A completed load with blank Status Update and Completion Date (At Shipper Tue, Delivered Wed): the invoice pays Tue and Wed. And a load delivered Fri 22:00 ET, after its week's invoice was made: the next week, which holds none of its days, answers 400 \"No completed loads\" for itself, while the run puts Thu and Fri onto the earlier week's own invoice. Base: 400, and Thu and Fri paid by no invoice", async ({ eq }) => {
 		const D = "Dee Moss";
 		const w = W.startWorld({
 			env: TRIP(),
@@ -209,9 +241,10 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		w2.setRow("Q512", { "Job Status": "Delivered", "Status Update Date": "10/2/2026", "Completion Date": "10/2/2026" });
 		w2.clock.ms = etMs("2026-10-09 20:00");
 		const b = await W.generate(w2, E, W40);
-		eq("only earlier days: W40 status", b.status, 200);
-		eq("only earlier days: W40 grid empty, earlier days Thu and Fri", [W.dayList(W.gridDays(b.data, W40)), W.dayList(W.earlierDays(b.data))], [[], ["2026-10-01", "2026-10-02"]]);
-		parity(eq, [...invDays(a, W39), ...invDays(b, W40)], await monthViews(w2, E), [...WEEK39, ...WEEK40]);
+		eq("W40 holds no day of its own: 400", b.status, 400);
+		eq("…and the run put Thu and Fri onto W39", b.body && b.body.lateWorkDays && b.body.lateWorkDays.updated.map((u) => [u.invoiceNumber, u.days]), [[a.invoice.invoice_number, ["2026-10-01", "2026-10-02"]]]);
+		eq("W39 now pays Mon, Tue, Thu, Fri", W.dayList(storedGrid(w2, a.invoice.id, W39)), ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]);
+		parity(eq, W.dayList(storedGrid(w2, a.invoice.id, W39)), await monthViews(w2, E), [...WEEK39, ...WEEK40]);
 	});
 
 	await R.test("B6 FROM=2026-10: two drivers on the same trip (At Shipper Tue 9/29, Delivered Fri 10/2; appointments 9/28-10/1). Assigned Sep: today's rule on all paths, Sep bucket; Assigned Oct: trip days 9/29-10/2 on all paths, Oct bucket; the boundary week pays each its own way. Base: the Oct load pays its appointment window", async ({ eq }) => {
@@ -355,7 +388,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("flag on: identical invoice render and ledger items", await snap(fixture(TRIP())), off);
 	});
 
-	await R.test("B12 Overrides: a remove row removes a rule day in the grid (Sun 10/4) and in earlier days (Fri 10/2); an add row adds a day (Wed 10/7); an add row in a closed month (9/30, September closed) is not carried onto the open W40 invoice. Base: no earlier days at all", async ({ eq, ok }) => {
+	await R.test("B12 [revised 2026-10-14] Overrides: a remove row removes a rule day in the grid (Sun 10/4) and among the late days (Fri 10/2); an add row adds a day (Wed 10/7); an add row in a closed month (9/30, September closed) goes on no invoice. With September closed, W39 (its week touches September) is left as made and the late Thu 10/1 goes on a correction invoice for that week, a Draft dated 10/1-10/2 in the open month, never on W40. Base: Thu paid by no invoice", async ({ eq, ok }) => {
 		const D = "Ned Ross";
 		const w = W.startWorld({
 			env: TRIP(),
@@ -375,9 +408,16 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		w.clock.ms = etMs("2026-10-09 20:00");
 		const g40 = await W.generate(w, D, W40);
 		eq("W40 grid: Sat, Mon (Sun removed), Wed (added)", W.dayList(W.gridDays(g40.data, W40)), ["2026-10-03", "2026-10-05", "2026-10-07"]);
-		eq("W40 earlier days: Thu only (Fri removed)", W.dayList(W.earlierDays(g40.data)), ["2026-10-01"]);
-		ok("the closed-month add day (9/30) is on no invoice", ![...invDays(g39, W39), ...invDays(g40, W40)].includes("2026-09-30"));
-		parity(eq, [...invDays(g39, W39), ...invDays(g40, W40)], await monthViews(w, D), [...WEEK39, ...WEEK40], ["2026-09-30"]);
+		eq("W40 carries no earlier days", g40.data && g40.data.earlierDays, undefined);
+		eq("W39 is left as made", W.dayList(storedGrid(w, g39.invoice.id, W39)), ["2026-09-28", "2026-09-29"]);
+		const cs = corrections(w);
+		eq("one correction: a Draft for Thu only (Fri removed), $260, correcting W39, dated in the open month",
+			cs.map((c) => [c.status, c.correction_of, c.week_start, c.week_end, c.total_earnings, paidDaysOf(c)]),
+			[["Draft", g39.invoice.id, "2026-10-01", "2026-10-02", 260, ["2026-10-01"]]]);
+		eq("the correction holds Thu", claimRows(w).filter(([d]) => d === "2026-10-01"), [["2026-10-01", cs[0] && cs[0].id]]);
+		const paid = [...W.dayList(storedGrid(w, g39.invoice.id, W39)), ...invDays(g40, W40), ...cs.flatMap(paidDaysOf)];
+		ok("the closed-month add day (9/30) is on no invoice", !paid.includes("2026-09-30"));
+		parity(eq, paid, await monthViews(w, D), [...WEEK39, ...WEEK40], ["2026-09-30"]);
 	});
 
 	await R.test("B13 [Q13] Rate $280, then $320 from Wed 9/30 (pay_rate_history), a full week worked: the invoice prices Sat-Tue at $280 and Wed-Fri at $320, Total Due 4 x $280 + 3 x $320 = $2,080; with PAYOUT_RULES_V2_ENABLED off the ledger keeps one month rate (7 x $320 = $2,240), a $160 difference that is expected until datedRates is on. Base: 7 x $320 on the invoice", async ({ eq }) => {
@@ -423,11 +463,79 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		w.clock.ms = etMs("2026-11-13 20:00");
 		const g45 = await W.generate(w, D, "2026-11-13");
 		ok("10/30 is on no November invoice", !invDays(g45, "2026-11-13").includes("2026-10-30"), JSON.stringify(invDays(g45, "2026-11-13")));
+		eq("…nor on W43, which is left as made, nor on a correction", [W.dayList(storedGrid(w, g43.invoice.id, "2026-10-30")), corrections(w).length], [["2026-10-26", "2026-10-27"], 0]);
 		ok("10/30 is listed in warnings", (g45.warnings || []).some((x) => /2026-10-30|10\/30/.test(String(x))), JSON.stringify(g45.warnings));
 		eq("October's frozen items untouched", W.tableHashes(w.db).financials_ledger_items, frozenBefore);
 		// The refused 10/30 is paid by no invoice by design (a person decides it).
 		parity(eq, [...invDays(g43, "2026-10-30"), ...invDays(g45, "2026-11-13")], await monthViews(w, D),
 			[...daysFrom("2026-10-24", "2026-10-30"), ...daysFrom("2026-11-07", "2026-11-13")], ["2026-10-30"]);
+	});
+
+	await R.test("B15 [Q8, 2026-10-14] Late days for a week whose invoice is Submitted (not approved): that invoice is updated in place and stays Submitted, its admin adjustment kept and printed; W40 carries none of them; W39 holds Thu and Fri", async ({ eq }) => {
+		const D = "Cy Dunn";
+		const w = boundaryWorld(D);
+		const g39 = await W.generate(w, D, W39);
+		w.db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = '2026-10-03T00:00:00.000Z', adjustment = 25, adjustment_note = 'bonus', adjusted_by = 'super_admin', adjusted_at = '2026-10-03T01:00:00.000Z' WHERE id = ?").run(g39.invoice.id);
+		deliverBoundaryLoad(w);
+		const g40 = await W.generate(w, D, W40);
+		const row = invoiceRow(w, g39.invoice.id);
+		eq("W39 still Submitted, adjustment kept, Thu and Fri added", [row.status, row.adjustment, row.adjustment_note, row.total_earnings, W.dayList(storedGrid(w, row.id, W39))],
+			["Submitted", 25, "bonus", 1040, ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]]);
+		eq("the redrawn W39 prints the adjustment and the new total", [JSON.parse(row.render_data).adjustment, JSON.parse(row.render_data).totalDue], [25, 1040]);
+		eq("W40 carries none of them", [g40.status, g40.data && g40.data.earlierDays, W.dayList(W.gridDays(g40.data, W40))], [200, undefined, ["2026-10-03", "2026-10-04", "2026-10-05"]]);
+		eq("Thu and Fri are held by W39", claimRows(w).filter(([d]) => d === "2026-10-01" || d === "2026-10-02").map(([, id]) => id), [row.id, row.id]);
+	});
+
+	await R.test("B16 [Q8, 2026-10-14] Late days for a week whose invoice is Approved: a separate correction invoice for that same week, a Draft for the owner to approve, one $260 line per day naming the approved invoice (an INV-M- number); the approved invoice and W40 are left alone; regenerating W40 adds nothing more (the correction holds the days)", async ({ eq, ok }) => {
+		const D = "Di Earl";
+		const w = boundaryWorld(D);
+		const g39 = await W.generate(w, D, W39);
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = '2026-10-04T00:00:00.000Z', approved_by = 'super_admin' WHERE id = ?").run(g39.invoice.id);
+		const before = invoiceRow(w, g39.invoice.id);
+		deliverBoundaryLoad(w);
+		const g40 = await W.generate(w, D, W40);
+		const after = invoiceRow(w, g39.invoice.id);
+		eq("the approved W39 is unchanged", [after.status, after.total_earnings, after.render_data], [before.status, before.total_earnings, before.render_data]);
+		const cs = corrections(w);
+		eq("one correction for W39's week: Draft, $520, Thu and Fri", cs.map((c) => [c.status, c.correction_of, c.week_start, c.week_end, c.total_earnings, paidDaysOf(c)]),
+			[["Draft", before.id, "2026-09-26", "2026-10-02", 520, ["2026-10-01", "2026-10-02"]]]);
+		const lines = cs[0] ? JSON.parse(cs[0].render_data).lineItems : [];
+		ok("each line names the approved invoice and its day, at $260", lines.length === 2 && lines.every((l) => l.description.startsWith(`Correction for ${before.invoice_number}:`) && l.amount === 260), JSON.stringify(lines));
+		ok("an INV-M- number, is_correction left for Personal corrections", cs[0] && /^INV-M-/.test(cs[0].invoice_number) && cs[0].is_correction === 0, JSON.stringify(cs[0] && [cs[0].invoice_number, cs[0].is_correction]));
+		eq("the W40 response reports it", g40.body && g40.body.lateWorkDays && g40.body.lateWorkDays.corrections.map((c) => [c.correctionOf, c.days]), [[before.invoice_number, ["2026-10-01", "2026-10-02"]]]);
+		eq("W40 carries none of them", g40.data && g40.data.earlierDays, undefined);
+		await W.generate(w, D, W40);
+		eq("regenerating W40: still one correction", corrections(w).length, 1);
+	});
+
+	await R.test("B17 A driver generating his own invoice settles no late day (only a Super Admin's run does, the Friday batch included); the next Super Admin run does", async ({ eq }) => {
+		const D = "Ed Fox";
+		const w = boundaryWorld(D);
+		const g39 = await W.generate(w, D, W39);
+		deliverBoundaryLoad(w);
+		const own = await W.call(w.api.generateInvoiceHandler, { session: { user: { id: 9, role: "Driver", username: "efox", driverName: D } }, headers: {}, query: {}, params: {}, body: { weekEnd: W40 } });
+		eq("the driver's own W40: 200, W39 untouched, no late-day report", [own.status, W.dayList(storedGrid(w, g39.invoice.id, W39)), own.body && own.body.lateWorkDays],
+			[200, ["2026-09-28", "2026-09-29"], undefined]);
+		const admin = await W.generate(w, D, W40);
+		eq("a Super Admin's run puts Thu and Fri onto W39", [admin.status, W.dayList(storedGrid(w, g39.invoice.id, W39))], [200, ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]]);
+	});
+
+	await R.test("B18 R3: a Personal line on an invoice that late days are added to stays on it and printed; pay is the four days ($1,040), the line $50", async ({ eq }) => {
+		const D = "Flo Gale";
+		const w = boundaryWorld(D);
+		w.db.exec(require(path.join(W.ROOT, "lib", "personal-expense.js")).SCHEMA_SQL);
+		const g39 = await W.generate(w, D, W39);
+		const exp = w.db.prepare("INSERT INTO expenses (driver, date, timestamp, amount, type, status) VALUES (?, '2026-09-29', '2026-09-29T15:00:00.000Z', 50, 'Other', 'Approved')").run(D).lastInsertRowid;
+		const line = w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, invoice_id, created_at, created_by, created_by_id, created_role)
+			VALUES (?, 'deduct', 5000, 5000, 'Corner Store', '2026-09-29', '2026-09', 1, '2026-09-29', '2026-09-26', ?, '2026-10-03T00:00:00.000Z', 'super_admin', 1, 'Super Admin')`).run(exp, g39.invoice.id).lastInsertRowid;
+		w.db.prepare("UPDATE invoices SET personal_total = 50 WHERE id = ?").run(g39.invoice.id);
+		deliverBoundaryLoad(w);
+		await W.generate(w, D, W40);
+		const row = invoiceRow(w, g39.invoice.id);
+		const data = JSON.parse(row.render_data);
+		eq("the line is still on W39, not voided", w.db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?").get(line), { invoice_id: row.id, voided_at: "" });
+		eq("W39: four days, pay $1,040, the Personal line printed, $50", [W.dayList(storedGrid(w, row.id, W39)).length, row.total_earnings, data.personalTotal, Array.isArray(data.personalLines) && data.personalLines.length > 0, row.personal_total],
+			[4, 1040, 50, true, 50]);
 	});
 
 	R.finish();
