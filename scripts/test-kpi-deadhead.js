@@ -198,7 +198,8 @@ function battery(mod) {
 		const failedRoutes = new Map(routes);
 		failedRoutes.set(get("c").pairKey, { status: "failed", distanceMiles: null });
 		const withFailed = run(loads, { routes: failedRoutes });
-		t(withFailed.get("c").deadheadMiles === null && !withFailed.out.pending.some((p) => p.pairKey === get("c").pairKey), "a failed route is unknown and is not asked again by the chain (the job retries it after 30 days)");
+		t(withFailed.get("c").deadheadMiles === null && withFailed.out.pending.some((p) => p.pairKey === get("c").pairKey),
+			"a failed route is unknown and stays pending (the job's 30-day wait decides when it is asked again)");
 		const stated = run([L("s1", { pickupArriveMs: Z("2026-09-01T10:00:00Z"), destArriveMs: Z("2026-09-01T15:00:00Z") }), L("s2", { pickupArriveMs: Z("2026-09-01T20:00:00Z"), destArriveMs: Z("2026-09-02T15:00:00Z"), statedEmptyMiles: 30 })], { routes: new Map() });
 		t(stated.out.pending.length === 0 && stated.get("s2").deadheadMiles === 30, "no route call for a load whose rate con states its Empty Movement");
 	}
@@ -351,6 +352,8 @@ const MUTANTS = [
 		"pairKey: null, deadheadMiles: null, source: null,", "pairKey: null, deadheadMiles: 0, source: null,"],
 	["a stated Empty Movement ignored", "a stated Empty Movement counts",
 		"if (stated != null) {", "if (stated != null && false) {"],
+	["a failed route dropped from pending (never retried)", "a failed route is unknown and stays pending",
+		"} else if (!cached || cached.status !== \"ok\") {", "} else if (!cached) {"],
 	["the 3b window widened past 72 h", "more than 72 h before the marker's delivery still chains",
 		"const MARKER_LOOKBACK_MS = 72 * HOUR_MS;", "const MARKER_LOOKBACK_MS = 96 * HOUR_MS;"],
 ];

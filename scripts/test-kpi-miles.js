@@ -382,6 +382,36 @@ function battery(mods) {
 		t(dh2.warnings.length === 0, "rule 6: within the empty miles, no warning", JSON.stringify(dh2.warnings));
 	}
 
+	// Review Low 4: before the contract start, a load with no stated miles counts
+	// its lane miles as fully known WHATEVER its rate-con status (the plan's rule:
+	// no empty leg was paid then); from the start, the same load is loaded leg only.
+	{
+		seq = 0;
+		const statuses = [null, "no_text", "conflict", "not_found", "error", "too_large", "no_miles"];
+		const loads = [
+			...statuses.map((s, i) => load(`2026-08-${String(10 + i).padStart(2, "0")}`, "flat", { L: 500, extra: { rateconStatus: s } })),
+			...statuses.map((s, i) => load(`2026-09-${String(10 + i).padStart(2, "0")}`, "flat", { L: 500, extra: { rateconStatus: s } })),
+		];
+		const paid = get(M.computeKpis(inputs({ asOfDay: "2026-10-05", eld: eld("2026-08-01", "2026-10-04", 1000), loads })), "paid_miles");
+		t(ser(paid, "2026-08").value === 3500 && ser(paid, "2026-08").coverage === 1, "Low 4: before the start, lane miles count as fully known for every rate-con status (none, no_text, conflict, not_found, error, too_large, no_miles)", JSON.stringify(ser(paid, "2026-08")));
+		t(ser(paid, "2026-09").value === 3500 && ser(paid, "2026-09").coverage === 0, "Low 4: from the start, the same loads add their lane miles but are not fully known", JSON.stringify(ser(paid, "2026-09")));
+		t(C.metricByKey("paid_miles").assumptions.includes("Before the contract start, a load whose rate confirmation states no miles counts Google's lane distance as its paid miles, whatever the reason (a flat rate, a rate confirmation that is unreadable, conflicting, not found or not read yet), because no empty leg was paid before the contract."),
+			"Low 4: the rule is named plainly in paid_miles' assumptions");
+	}
+
+	// Review Low 5: the withheld-month coverage note belongs to the mile metrics
+	// only; revenue and stated freight read as before R10.
+	{
+		const sheet = [];
+		for (let i = 1; i <= 10; i++) sheet.push({ loadId: `zed-sentinel-r${i}`, status: "Delivered", day: `2026-08-${String(i).padStart(2, "0")}`, contractIdBlank: false, driverKey: "zed sentinel driver", truckKey: "", detailsText: "Weight: 40,000 lbs", revenue: 1000 });
+		for (let i = 1; i <= 10; i++) sheet.push({ loadId: `zed-sentinel-s${i}`, status: "Delivered", day: `2026-09-${String(i).padStart(2, "0")}`, contractIdBlank: false, driverKey: "zed sentinel driver", truckKey: "", detailsText: "General freight", revenue: null });
+		const o = M.computeKpis({ ...inputs({ asOfDay: "2026-10-05", eld: eld("2026-08-01", "2026-10-04", 1000), loads: [] }), loads: sheet });
+		for (const k of ["revenue", "freight_tons_stated"]) {
+			const m = get(o, k);
+			t(mom(m).status === "missing" && !m.assumptions.some((a) => /^A comparison is shown only where/.test(a)), `Low 5: ${k} with a month that has no figure adds no coverage note (as before R10)`, JSON.stringify(m.assumptions));
+		}
+	}
+
 	// The settings response: dedicatedStart's precision.
 	{
 		const resp = (v) => M.buildKpiResponse({ asOfDay: "2026-10-14", settings: { dedicatedStart: v }, snapshots: [], series: [], approvals: [] }).settings.dedicatedStart;
@@ -411,6 +441,8 @@ const MUTANTS = [
 	["the new metrics compare on any month", "29 loaded_miles: September at 89%", { metrics: [["\t\tminCompareCoverage: COMPARE_MIN_COVERAGE,\n\t\tcompareCoverageNote: MILES_COMPARE_NOTE,", "\t\tcompareCoverageNote: MILES_COMPARE_NOTE,"]] }],
 	["utilization moved to month mode", "30 '2026-09' gives the same equal windows", { metrics: [["const dedicatedDate = contract ? contract.startDay : null;", "const dedicatedDate = contract && contract.precision === \"day\" ? contract.startDay : null;"]] }],
 	["paid miles dated by the pickup", "31 all its paid miles in the month", { miles: [["\t\t\tday: l.day,\n\t\t\ttruckId,", "\t\t\tday: new Date(l.pickupArriveMs).toISOString().slice(0, 10),\n\t\t\ttruckId,"]] }],
+	["the withheld-month note added to every metric", "Low 5: revenue", { metrics: [["if (spec.noteWithheldMonths && isNum(spec.minCompareCoverage)", "if (isNum(spec.minCompareCoverage)"]] }],
+	["the withheld-month note dropped for the mile metrics", "29 unloaded_miles: September at 89%", { metrics: [["\t\tnoteWithheldMonths: true,\n", ""]] }],
 	["the deadhead warning dropped", "rule 6:", { metrics: [["if (t.deadhead > Math.max(0, t.eld - t.loaded)) over.add(monthOf(t.day));", "if (false) over.add(monthOf(t.day));"]] }],
 	["dedicatedStart not part of paid_miles' approval", "16 '2026-09' -> '2026-09-01' lapses", { catalog: [["\t], [\"dedicatedStart\"], null, 1),\n\tentry(\"deadhead_miles\"", "\t], [], null, 1),\n\tentry(\"deadhead_miles\""]] }],
 ];

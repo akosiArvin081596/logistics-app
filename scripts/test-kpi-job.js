@@ -729,6 +729,9 @@ function routeWorld(o = {}) {
 		const c = db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, ?, ?, ?, ?)");
 		c.run("r-2001", 29.1, -95.1, 30.2, -96.2);
 		c.run("r-2002", 30.5, -96.5, 31.6, -97.6);
+		// Truck 1's ELD records cover both loads' days (the seed has Sep 10), so
+		// both are in the mile metrics' scope and the pair is usable.
+		db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, truck_id, miles) VALUES ('rv-1', '2026-09-11', 'a', ?, 1, 200)").run(DRIVER);
 	} });
 }
 const milesWiringSection = section(async (t, block = BLOCK) => {

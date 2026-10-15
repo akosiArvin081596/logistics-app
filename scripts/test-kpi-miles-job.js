@@ -355,6 +355,56 @@ const one = (db, table, id) => db.prepare(`SELECT * FROM ${table} WHERE load_id 
 			"26 KPI_DEADHEAD_ROUTES_ENABLED defaults off; only true/1/yes/on turn it on");
 	}
 
+	// Review fixes: the pairs the job asks for (lib/kpi-miles.js pendingRoutePairs()).
+	//  - Medium: a failed route stays pending, so the 30-day retry can run (it
+	//    was dropped as "cached" and never asked again);
+	//  - Low 3: only pairs the mile metrics can use (a delivered load whose truck
+	//    has ELD records that day), newest first.
+	{
+		const MILES = require(path.join(ROOT, "lib", "kpi-miles.js"));
+		const at = (iso) => Date.parse(iso);
+		const ld = (key, day, status, o) => ({
+			key, status, day, driverKey: "", truckKey: "", pickupText: "", dropoffText: "", completionText: "",
+			eldTruckId: "1", pickupArriveMs: at(`${day}T10:00:00Z`), destArriveMs: at(`${day}T15:00:00Z`),
+			laneMiles: null, rateconStatus: null, statedLoadedMiles: null, statedEmptyMiles: null, ...o,
+		});
+		const milesLoads = [
+			ld("zed-a", "2026-09-01", "Delivered", { originLat: 29, originLng: -94, destLat: 30, destLng: -95 }),
+			ld("zed-b", "2026-09-02", "Delivered", { originLat: 30.5, originLng: -95.5, destLat: 31, destLng: -96 }),
+			ld("zed-c", "2026-09-03", "Delivered", { originLat: 31.5, originLng: -96.5, destLat: 32, destLng: -97 }),
+			ld("zed-d", "2026-09-04", "In Transit", { originLat: 32.5, originLng: -97.5, destLat: 33, destLng: -98 }),
+			ld("zed-e", "2026-05-02", "Delivered", { originLat: 20, originLng: -90, destLat: 21, destLng: -91 }),
+			ld("zed-f", "2026-05-03", "Delivered", { originLat: 21.5, originLng: -91.5, destLat: 22, destLng: -92 }),
+			ld("zed-g", "2025-06-01", "Delivered", { originLat: 10, originLng: -80, destLat: 11, destLng: -81 }),
+			ld("zed-h", "2025-06-02", "Delivered", { originLat: 11.5, originLng: -81.5, destLat: 12, destLng: -82 }),
+		];
+		const eldRows = [];
+		for (let d = 1; d <= 30; d++) eldRows.push({ truckId: "1", day: `2026-09-${String(d).padStart(2, "0")}`, miles: 300 });
+		const ab = DEADHEAD.pairKey({ lat: 30, lng: -95 }, { lat: 30.5, lng: -95.5 });
+		const bc = DEADHEAD.pairKey({ lat: 31, lng: -96 }, { lat: 31.5, lng: -96.5 });
+		const nowMs = at("2026-10-14T08:10:00Z");
+		const routes = new Map([
+			[ab, { status: "failed", distanceMiles: null, checkedAt: new Date(nowMs - 75 * DAY).toISOString() }],
+			[bc, { status: "failed", distanceMiles: null, checkedAt: new Date(nowMs - 5 * DAY).toISOString() }],
+		]);
+		const pending = MILES.pendingRoutePairs({ milesLoads, timeZone: TZ, eldRows, routes, truckIdByUnit: new Map(), truckAt: null });
+		t(pending.map((p) => p.pairKey).join("|") === `${bc}|${ab}`,
+			"Medium + Low 3: both failed pairs stay pending, only pairs ending at a delivered load on an ELD truck-day, newest first", JSON.stringify(pending.map((p) => p.pairKey)));
+		const db = freshDb();
+		const ins = db.prepare("INSERT INTO kpi_deadhead_routes (pair_key, distance_miles, status, checked_at) VALUES (?, NULL, 'failed', ?)");
+		ins.run(ab, new Date(nowMs - 75 * DAY).toISOString());
+		ins.run(bc, new Date(nowMs - 5 * DAY).toISOString());
+		const log = [];
+		const res = await ROUTES.runRouteCalls({
+			db, pending, kind: "nightly", enabled: true, replica: false, apiKey: "test-key", day: "2026-10-14", timeZone: TZ, now: () => nowMs,
+			fetchFn: async (url, init) => { log.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ routes: [{ distanceMeters: 16093.44 }] }) }; },
+		});
+		t(res.calls === 1 && log.length === 1 && log[0].origin.location.latLng.latitude === 30 && db.prepare("SELECT status FROM kpi_deadhead_routes WHERE pair_key = ?").get(ab).status === "ok"
+			&& db.prepare("SELECT status FROM kpi_deadhead_routes WHERE pair_key = ?").get(bc).status === "failed",
+			"Medium: through the job, a 75-day-old failure is asked again and a 5-day-old one waits", JSON.stringify(res));
+		t(MILES.pendingRoutePairs({ milesLoads, timeZone: TZ, routes: new Map() }).length === 0, "Low 3: with no ELD records given, no pair is usable");
+	}
+
 	// The gatherer.
 	{
 		const db = freshDb();
