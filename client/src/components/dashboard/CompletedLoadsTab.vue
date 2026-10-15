@@ -84,7 +84,7 @@
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
               <template v-else-if="col === loadIdCol">
-                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract">⚠ Review</span>
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
                 {{ cellValue(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
@@ -100,7 +100,7 @@
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
-            <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
+            <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
                  draft route answers anyone else 403. -->
             <button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
@@ -118,6 +118,15 @@
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <!-- Why the load is flagged, and where it can be fixed: a completed load
+               isn't listed in Active Loads, so the fix is its Job Tracking row in
+               Data Manager (Super Admin only; that page refuses a Payment change in
+               a closed month). -->
+          <p v-if="selectedJob && needsReview(selectedJob)" class="review-note" role="note">
+            {{ reviewReasonText(selectedJob) }}
+            <template v-if="auth.isSuperAdmin">Fix it on the load's Job Tracking row in <RouterLink to="/data" class="review-note-link">Data Manager</RouterLink>. A closed month's Payment can't be changed.</template>
+            <template v-else>A Super Admin can fix it in Data Manager. A closed month's Payment can't be changed.</template>
+          </p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -260,7 +269,7 @@ import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
-import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
@@ -735,7 +744,7 @@ async function draftInvoice() {
     // A server still on the pre-relaxation build answers 422 here. Say what to do
     // instead of echoing "Invoice total unknown", which reads as a dead end.
     const msg = e && e.code === 'INVOICE_TOTAL_UNKNOWN'
-      ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on the load (Active Loads → Edit), then try again.'
+      ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on this load in Data Manager (Job Tracking), then try again.'
       : (e && e.message) || 'Failed to prepare the invoice preview.'
     draftResult.value = { tone: 'error', msg }
   } finally {
@@ -800,6 +809,19 @@ const detailSections = computed(() => {
 /* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
+/* Needs Review: why, and where to fix it (top of the load detail). */
+.review-note {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.review-note-link { color: #92400e; font-weight: 600; text-decoration: underline; }
+.review-note-link:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; border-radius: 2px; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */

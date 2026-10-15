@@ -27,7 +27,7 @@
         <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-load-card" @click="openDetail(job)">
           <div class="mobile-load-head">
             <div class="mobile-load-id">
-              <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+              <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
               {{ cellValue(job, loadIdCol) || '—' }}
               <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
             </div>
@@ -89,7 +89,7 @@
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
               <template v-else-if="col === loadIdCol">
-                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
                 {{ cellValue(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
@@ -484,7 +484,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
-import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { normDriver } from '../../lib/driverName'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
