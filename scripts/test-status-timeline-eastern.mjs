@@ -129,8 +129,40 @@ for (const [tz, offset] of ZONES) {
 ok('§1 the same timeline text on all four machines', texts.length === ZONES.length && texts.every((t) => t === texts[0]))
 
 // §2 the helper and its styling are gone; nothing on screen reads the browser zone.
-// Code only: comments (/* */, whole-line //, <!-- -->) may say why it went.
-const code = (src) => src.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+// Code only: comments may say why it went. The source with its comments
+// dropped, in one forward scan with no pattern stripping: an HTML comment
+// "<!--" … "-->", a block comment "/*" … "*/", and a "//" comment that starts
+// its line (only spaces before it) up to the end of that line. An unclosed
+// comment runs to the end of the file. Everything else is kept as written.
+function code(src) {
+  const s = String(src)
+  let out = ''
+  let i = 0
+  let lineStart = true // only spaces or tabs since the last newline
+  while (i < s.length) {
+    if (s.startsWith('<!--', i)) {
+      const end = s.indexOf('-->', i + 4)
+      i = end === -1 ? s.length : end + 3
+      continue
+    }
+    if (s.startsWith('/*', i)) {
+      const end = s.indexOf('*/', i + 2)
+      i = end === -1 ? s.length : end + 2
+      continue
+    }
+    if (lineStart && s.startsWith('//', i)) {
+      const end = s.indexOf('\n', i + 2)
+      i = end === -1 ? s.length : end
+      continue
+    }
+    const ch = s[i]
+    out += ch
+    if (ch === '\n') lineStart = true
+    else if (ch !== ' ' && ch !== '\t' && ch !== '\r') lineStart = false
+    i++
+  }
+  return out
+}
 const DATETIME = code(fs.readFileSync(path.join(SRC, 'utils', 'datetime.js'), 'utf8'))
 ok('§2 datetime.js no longer has viewerZoneNote()', !/\bviewerZoneNote\b/.test(DATETIME))
 const TIMELINE = code(fs.readFileSync(path.join(SRC, 'components', 'shared', 'StatusTimeline.vue'), 'utf8'))
