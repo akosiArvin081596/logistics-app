@@ -380,7 +380,7 @@ function ctxOf(report, answered) {
 			amount: 900, cause: "PERIOD_FINALIZED", periods: ["2026-07"],
 			adjustable: false, neverPayable: true, isManual: false,
 			detail: "INV-SK-2026W30-01 bills 2026-07-25 — 2026-07-31, which covers July 2026",
-			remedy: "A closed month's invoices stay as recorded. To pay or recover a difference, create a correction invoice dated in the current month.",
+			remedy: "A closed month's invoices stay as recorded. To pay or recover a difference, create a manual invoice (New Manual Invoice) dated in the current month.",
 		});
 		check("a frozen invoice is never adjustable", inv.adjustable, false);
 		check("…and names its month in words", inv.periodLabels, ["July 2026"]);
@@ -419,10 +419,9 @@ function ctxOf(report, answered) {
 	}
 
 	const impact = (o) => frozenInvoiceImpact(normalizeFrozenInvoice(o));
-	check("a stuck-before-Paid invoice names its closed month and the correction invoice, never a reopen",
+	check("a stuck-before-Paid invoice names its closed month, never a reopen",
 		impact({ status: "Draft", cause: "PERIOD_FINALIZED", periods: ["2026-07"], neverPayable: true }),
-		"Can't be adjusted, and can't be marked Paid in the app yet — it is Draft, and July 2026 is closed. "
-		+ "For a difference, create a correction invoice dated in the current month.");
+		"Can't be adjusted, and can't be marked Paid in the app yet — it is Draft, and July 2026 is closed.");
 	check("two months read as a list",
 		impact({ status: "Submitted", cause: "PERIOD_FINALIZED", periods: ["2026-05", "2026-06"], neverPayable: true })
 			.includes("May 2026 and June 2026 are closed"), true);
@@ -441,11 +440,16 @@ function ctxOf(report, answered) {
 		check("an unresolvable date says the dates cannot be edited", t.includes("no route in the app can edit"), true);
 		check("…and never tells anyone to reopen a month", /reopen/i.test(t), false);
 		// Closed months are never reopened (2026-10-14), so the finalized branch
-		// names the closed month and the correction invoice instead.
+		// names the closed month instead. What to do about a difference is the
+		// server's `remedy` (a manual invoice dated in the current month), shown
+		// once, beneath this sentence; the sentence does not repeat it.
 		const finalized = impact({ status: "Draft", cause: "PERIOD_FINALIZED", periods: ["2026-07"], neverPayable: true });
 		check("…and neither does the finalized branch", /reopen/i.test(finalized), false);
-		check("…which names the closed month and the correction invoice",
-			/July 2026 is closed/.test(finalized) && /correction invoice dated in the current month/.test(finalized), true);
+		check("…which names the closed month", /July 2026 is closed/.test(finalized), true);
+		check("…and leaves the correction to the server's remedy, so it is said once",
+			/manual invoice|correction/i.test(finalized), false);
+		const VIEW_ROW = fs.readFileSync(path.join(__dirname, "..", "client", "src", "views", "DataIssuesView.vue"), "utf8");
+		check("…which the page shows beneath the sentence", VIEW_ROW.includes("{{ inv.remedy }}"), true);
 	}
 	check("no invoice at all -> no sentence", frozenInvoiceImpact(null), "");
 

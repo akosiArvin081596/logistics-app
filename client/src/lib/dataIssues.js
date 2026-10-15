@@ -1205,13 +1205,13 @@ export function frozenInvoiceImpact(inv) {
         + 'this one has to be regenerated.'
   }
   // Closed months are never reopened (2026-10-14): the invoice stays as
-  // recorded, a difference goes on a correction invoice dated in the current
-  // month, and recording its payment waits on a separate change.
+  // recorded and recording its payment waits on a separate change. What to do
+  // about a difference is the server's `remedy`, shown beneath this sentence on
+  // the page, so it is not repeated here.
   const months = inv.periodLabels.length ? periodList(inv.periods) : ''
   const where = months ? `${months} ${inv.periodLabels.length === 1 ? 'is' : 'are'} closed` : 'its month is closed'
   if (inv.neverPayable) {
-    return `Can't be adjusted, and can't be marked Paid in the app yet — it is ${inv.status || 'unpaid'}, and ${where}. `
-      + 'For a difference, create a correction invoice dated in the current month.'
+    return `Can't be adjusted, and can't be marked Paid in the app yet — it is ${inv.status || 'unpaid'}, and ${where}.`
   }
   return `Can't be adjusted. It is already ${inv.status || 'settled'}, so nothing is waiting on it.`
 }

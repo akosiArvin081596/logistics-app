@@ -9236,7 +9236,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 				return periodBlockedResponse(req, res,
 					`Cannot add ${insName}`,
 					createLock.blockers,
-					"Pay terms don't keep a history by month yet, so these terms would also apply to the closed months this driver worked. Nothing was changed.",
+					"A driver's directory row (pay terms, name, carrier) has no history by month, so this change would also apply to the closed months this driver worked. Nothing was changed.",
 					createAudit);
 			}
 		}
@@ -23612,7 +23612,7 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 				return periodBlockedResponse(req, res,
 					`Cannot adjust ${invoice.invoice_number || `invoice #${invoice.id}`}`,
 					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit,
-					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} closed, so this invoice can't be changed. Create a correction invoice dated in the current month.`);
+					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} closed, so this invoice can't be changed. For a correction, create a manual invoice (New Manual Invoice) dated in the current month.`);
 			}
 		}
 
@@ -29037,8 +29037,7 @@ function directoryChangedColumns(before, after) {
 // from the current month onward": rates carry no effective date, so no tool does
 // that, and closed months are never reopened (2026-10-14).
 const DIRECTORY_LOCK_REMEDY =
-	"Pay terms don't keep a history by month yet, so this change would also apply to the closed months this driver worked; " +
-	"it can't apply to the open month only. Nothing was changed.";
+	"A driver's directory row (pay terms, name, carrier) has no history by month, so this change would also apply to the closed months this driver worked. Nothing was changed.";
 
 // Everything a write to drivers_directory would restate inside a finalized
 // month. Same contract as truckEditLockBlockers: `changed` holds ONLY columns
@@ -29946,7 +29945,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			return periodBlockedResponse(req, res,
 				`Cannot add ${unit}`,
 				createLock.blockers,
-				"Nothing was changed. Add the truck with an in-service date in the current month or later; if a driver assignment is named above, add the truck without it.",
+				"Nothing was changed: closed months stay as recorded. An in-service date in the current month or later keeps the truck's fixed costs out of them; a driver can't be put on it while that would change their closed months.",
 				createAudit);
 		}
 
@@ -31024,17 +31023,17 @@ function invoiceRowPeriodLocked(r) {
 // The remedy sentences the invoice write guards end on, kept in one place so the
 // routes cannot drift into telling an admin different things. Closed months are
 // never reopened (2026-10-14): a correction to a closed month's invoice goes on a
-// separate correction invoice dated in the open month (the owner's decision), and
+// separate manual invoice dated in the open month (the owner's decision), and
 // a closed-month invoice can't be marked Paid yet (a separate change will allow
 // recording the payment). The adjust route's finalized-month refusal says its own
 // plain sentence (periodBlockedResponse()'s `finalizedMessage`); its fallback and
 // the Data Issues list end on INVOICE_LOCK_REMEDY.
 const INVOICE_LOCK_REMEDY =
-	"A closed month's invoices stay as recorded. To pay or recover a difference, create a correction invoice dated in the current month.";
+	"A closed month's invoices stay as recorded. To pay or recover a difference, create a manual invoice (New Manual Invoice) dated in the current month.";
 const INVOICE_PAID_LOCK_REMEDY =
 	"The app can't record a payment on an invoice in a closed month yet; its amount stays as recorded. Nothing was changed.";
 const INVOICE_REVERT_LOCK_REMEDY =
-	"A paid invoice in a closed month can't go back for review. If its amount was wrong, create a correction invoice dated in the current month. Nothing was changed.";
+	"A paid invoice in a closed month can't go back for review. If its amount was wrong, create a manual invoice (New Manual Invoice) dated in the current month for the difference. Nothing was changed.";
 
 // Ceiling on the months one invoice may claim to bill. A weekly invoice spans 1
 // or 2; the widest legitimate manual invoice anyone has described is a catch-up
@@ -53641,10 +53640,12 @@ function frozenPayoutBreakdown(p) {
 
 // A recompute found activity for an owner in a closed month that has no payout
 // row for them. Nothing is written to the month; one system audit row records
-// what the recompute found, so it can be reviewed (and settled by reopening the
-// month if it is real). The reconcile runs on every payouts read, so the row is
-// written once per distinct finding: the same owner, month and figures again
-// is the same finding.
+// what the recompute found, so it can be reviewed; a real one is corrected in an
+// open month, since closed months are never reopened (2026-10-14). The row's
+// closing words predate that rule and stay as they are: `details` is compared
+// verbatim below, so new wording would record every past finding again. The
+// reconcile runs on every payouts read, so the row is written once per distinct
+// finding: the same owner, month and figures again is the same finding.
 function noteLateItemInClosedMonth(ownerId, m, payable) {
 	const figures = ["revenue", "driverPay", "fixedCosts", "tripExpenses", "maintFundCost", "complianceCost"];
 	const exact = m.exact || m;
@@ -53751,7 +53752,8 @@ async function reconcileInvestorPayouts(ownerId, ctx) {
 				// closed month means something changed after the close: a load's
 				// Owner ID, a driver moved onto this owner's truck, a backdated edit.
 				// The month stays exactly as settled; the item is recorded for review,
-				// and reopening the month is the way to settle it.
+				// and a real one is corrected in an open month (closed months are never
+				// reopened, 2026-10-14).
 				// periodWriteLocked, so an unreadable lock table writes nothing.
 				if (periodWriteLocked(m.month)) {
 					// Only a month the table says is closed is reported as closed; an

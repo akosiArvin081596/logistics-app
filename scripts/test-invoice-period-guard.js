@@ -544,14 +544,14 @@ guarded("section 4-5 (behaviour + mutants) ran", () => {
 // ── 6. the adjust route's finalized refusal, in plain words ─────────────────
 // The 409's `error` is the toast an admin reads on the Invoices screen, so the
 // adjust route's finalized-month refusal names the months and where corrections
-// go (a correction invoice dated in the current month; closed months are never
+// go (a manual invoice dated in the current month; closed months are never
 // reopened, 2026-10-14), and no API path. Only that string changes: the status, `code`, `periods`,
 // `unresolved`, `blockers` and the audit call are asserted as before, and the
 // unresolved-date and unreadable-lock refusals keep their own text.
 //
 // The REAL route runs, lifted from server.js with the real guard and response
 // helpers on the in-memory db above; only the audit recorder is captured.
-const PLAIN_TAIL = "so this invoice can't be changed. Create a correction invoice dated in the current month.";
+const PLAIN_TAIL = "so this invoice can't be changed. For a correction, create a manual invoice (New Manual Invoice) dated in the current month.";
 
 async function section6() {
 	section("6. the adjust route's finalized refusal (real route, real helpers)");

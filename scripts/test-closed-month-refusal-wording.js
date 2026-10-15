@@ -19,14 +19,15 @@
  *
  * WHAT FAILS:
  *   1. a user-facing literal that says "reopen" in any case, apart from the
- *      reopen controls themselves and one unrelated use (ALLOWED below, each
- *      with its reason);
+ *      reopen controls themselves (the Payouts console, REOPEN_SKIP_FILES) and
+ *      the few literals in ALLOWED below, each with its reason;
  *   2. a user-facing literal that names "/api/periods";
  *   3. a user-facing literal that shows an API path ("/api/") while talking
  *      about a closed, finalized or settled month;
  *   4. a user-facing literal that prints an internal PERIOD_* code inside a
  *      sentence (a literal that IS the code, such as `code: "PERIOD_FINALIZED"`,
- *      is the machine-readable field and passes).
+ *      is the machine-readable field and passes, and so does the name of the
+ *      PERIOD_FINALIZE_ENABLED setting).
  *
  * Pure: reads source text only.
  * Run: node scripts/test-closed-month-refusal-wording.js    # exits 1 on failure
@@ -51,8 +52,12 @@ const ALLOWED = [
 		why: "the details of a system audit row (late_item_closed_month), not a refusal; they are compared verbatim to record each finding once, so new wording would record every past finding again" },
 ];
 // The Payouts console IS the reopen control (Reopen Month, Reopen payout): its
-// labels, modals and help text describe that action rather than advise it.
-const SKIP_FILES = new Set(["client/src/views/PayoutsView.vue"]);
+// labels, modals and help text describe that action rather than advise it. Only
+// the "reopen" check skips it; the API-path and PERIOD_* checks still run there.
+const REOPEN_SKIP_FILES = new Set(["client/src/views/PayoutsView.vue"]);
+// An internal refusal code: PERIOD_ and capitals, but not a feature flag's name
+// (PERIOD_FINALIZE_ENABLED is a setting an admin is told about, not a code).
+const INTERNAL_CODE = /\bPERIOD_(?![A-Z_]*_ENABLED\b)[A-Z_]+/;
 
 const NOT_USER_FACING_CALLEE = /(^|\.)(console\.\w+|logAudit|logAuditRefusal|recordPayoutChange|prepare|exec)$/;
 // Upper case only: "Create the account…" is a sentence, not SQL.
@@ -158,12 +163,12 @@ function judge(file, lit) {
 	const where = `${file}:${lit.line}`;
 	const snippet = t.length > 160 ? `${t.slice(0, 157)}...` : t;
 	const allowed = ALLOWED.some((a) => a.file === file && (a.text === t || (a.startsWith && t.startsWith(a.startsWith))));
-	if (/reopen/i.test(t) && !allowed) findings.push(`${where} says "reopen": ${snippet}`);
+	if (/reopen/i.test(t) && !allowed && !REOPEN_SKIP_FILES.has(file)) findings.push(`${where} says "reopen": ${snippet}`);
 	if (t.includes("/api/periods")) findings.push(`${where} names /api/periods: ${snippet}`);
 	else if (t.includes("/api/") && /finaliz|closed|settled/i.test(t)) {
 		findings.push(`${where} shows an API path in a closed-month message: ${snippet}`);
 	}
-	if (/\bPERIOD_[A-Z_]+/.test(t) && /\s/.test(t.trim())) {
+	if (INTERNAL_CODE.test(t) && /\s/.test(t.trim())) {
 		findings.push(`${where} prints an internal PERIOD_* code in a sentence: ${snippet}`);
 	}
 }
@@ -231,6 +236,8 @@ function check(name, ok, detail = "") {
 	check("self-test: a comment is not a literal", !probe.some((l) => /comment/.test(l.text)), JSON.stringify(probe.map((l) => l.text)));
 	check("self-test: SQL is not user-facing", !userFacing({ text: "UPDATE period_locks SET status = 'reopened'", callees: [] }));
 	check("self-test: a sentence starting with a SQL word is user-facing", userFacing({ text: "Create the account, or reopen", callees: [] }));
+	check("self-test: a refusal code in a sentence is caught", INTERNAL_CODE.test("Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE."));
+	check("self-test: the PERIOD_FINALIZE_ENABLED setting is not a refusal code", !INTERNAL_CODE.test("turn on PERIOD_FINALIZE_ENABLED to restore it"));
 }
 
 let scanned = 0;
@@ -242,7 +249,6 @@ const files = [
 ];
 for (const abs of files) {
 	const rel = path.relative(ROOT, abs).split(path.sep).join("/");
-	if (SKIP_FILES.has(rel)) continue;
 	const text = fs.readFileSync(abs, "utf8");
 	scanned += rel.endsWith(".vue") ? scanVue(rel, text) : scanJs(rel, text);
 	if (rel === "server.js") desynced = literals(text).filter((l) => /\n\s*\/\/ /.test(l.text)).length;
