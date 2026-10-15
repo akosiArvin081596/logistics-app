@@ -92,10 +92,13 @@ const REAL = [
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckBilledMonthCount", "truckFixedCostLockedMonths", "truckMonthlyFixed",
 	"parseInServiceDate", "parseRetiredAt",
+	// truckBilledMonthCount()'s end month is the business month (appMonthStart()).
+	"appMonthStart", "appDay",
 ];
 
-// The only stubs: the clock (so the horizon cap is deterministic) and the
-// constant it reads. Stubbing the month math would test nothing.
+// The only stubs: the clock (so the horizon cap is deterministic), the
+// constant it reads and the business time zone. Stubbing the month math would
+// test nothing.
 let TODAY_CT = "2026-08-09";
 const appTodayKey = () => TODAY_CT;
 const IN_SERVICE_MAX_MONTHS_AHEAD = (() => {
@@ -105,9 +108,9 @@ const IN_SERVICE_MAX_MONTHS_AHEAD = (() => {
 })();
 
 const M = new Function(
-	"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD",
+	"appTodayKey", "IN_SERVICE_MAX_MONTHS_AHEAD", "APP_TIMEZONE",
 	`${REAL.map(extract).join("\n")}\nreturn { ${REAL.join(", ")} };`
-)(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD);
+)(appTodayKey, IN_SERVICE_MAX_MONTHS_AHEAD, "America/New_York");
 
 const {
 	truckChargeFromMonth, truckChargeUntilMonth, truckChargedInMonth,
