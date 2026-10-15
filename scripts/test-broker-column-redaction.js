@@ -672,6 +672,7 @@ function mountPut(routeSrc, M, rows) {
 	const env = {
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		SHEET_ROW_MAX_CELLS: 20000,
@@ -862,6 +863,7 @@ function mountPostData(routeSrc, M, rows) {
 	const env = {
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		getSheetName: () => "Job Tracking",
@@ -1115,6 +1117,7 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 	const env = {
 		app: { get: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		getJobTrackingCached: async () => cache,
 		liveJobTrackingView: VIEW.liveJobTrackingView,
 		findCol: VIEW.findCol,

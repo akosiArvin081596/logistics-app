@@ -37,13 +37,13 @@
             <JobBoardTab :active="activeTab === 'jobBoard'" :jobs="store.unassignedJobs" :drivers="driverOptions" :headers="store.headers" :loading="store.isLoading" @assign="handleAssign" @cancel="handleCancel" @deleted="handleDeleted" />
           </TabsContent>
           <TabsContent value="activeLoads" style="margin-top:0;">
-            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :busy-drivers="busyDrivers" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
+            <ActiveLoadsTab :active="activeTab === 'activeLoads'" :jobs="store.activeJobs" :headers="store.headers" :drivers="store.drivers" :busy-drivers="busyDrivers" :off-until="store.offUntil" :focus-load-id="focusLoadId" @reassign="handleReassign" @cancel="handleCancel" @status-update="handleStatusUpdate" @deleted="handleDeleted" @focus-consumed="onFocusConsumed" />
           </TabsContent>
           <TabsContent value="completed" style="margin-top:0;">
             <CompletedLoadsTab :active="activeTab === 'completed'" :jobs="store.completedJobs" :headers="store.completedHeaders" />
           </TabsContent>
           <TabsContent value="fleet" style="margin-top:0;">
-            <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" />
+            <FleetTab :fleet="store.fleet" :active-jobs="store.activeJobs" :headers="store.headers" @availability-changed="refresh" />
           </TabsContent>
         </CardContent>
       </Tabs>
@@ -64,6 +64,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { useAuthStore } from '../stores/auth'
 import { normDriver } from '../lib/driverName'
+import { sortDriversForAssign } from '../lib/availabilityText'
+import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import KpiGrid from '../components/dashboard/KpiGrid.vue'
 import RevenueGrid from '../components/dashboard/RevenueGrid.vue'
 import JobBoardTab from '../components/dashboard/JobBoardTab.vue'
@@ -74,6 +76,7 @@ import CompletedLoadsTab from '../components/dashboard/CompletedLoadsTab.vue'
 const store = useDashboardStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
+const { withOffDutyConfirm } = useOffDutyConfirm()
 const socket = useSocket()
 const route = useRoute()
 const router = useRouter()
@@ -124,15 +127,19 @@ const busyDrivers = computed(() => {
 // lets the dropdown render '— On Load' / '(Queue: N)' suffixes and lets the
 // confirmation modal explain the queue position before posting. Other tabs
 // (ActiveLoadsTab reassign) still consume the plain string array + busyDrivers.
+// A driver recorded off today (R11) reads '— Off until Oct 20' and sorts last,
+// never hidden.
 const driverOptions = computed(() => {
   const fleetByName = new Map((store.fleet || []).map((f) => [f.Driver, f]))
-  return (store.drivers || []).map((name) => {
+  const off = store.offUntil || {}
+  return sortDriversForAssign(store.drivers || [], off).map((name) => {
     const f = fleetByName.get(name) || {}
     return {
       name,
       activeCount: f.Status === 'On Load' ? 1 : 0,
       queueCount: f.QueueCount || 0,
       activeLoadId: f.CurrentLoad || '',
+      offUntil: off[name] || null,
     }
   })
 })
@@ -148,8 +155,26 @@ const lastUpdated = computed(() => {
 
 function handleKpiClick(key) { const m = { active: 'activeLoads', unassigned: 'jobBoard', completed: 'completed', fleet: 'fleet' }; activeTab.value = m[key] || activeTab.value }
 async function refresh() { try { await store.refresh() } catch { toast('Failed to load dashboard', 'error') } }
-async function handleAssign({ rowIndex, driver, job }) { try { await store.assignDriver(rowIndex, driver, job, store.headers); const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to assign', 'error') } }
-async function handleReassign({ rowIndex, newDriver, job }) { try { await store.reassignDriver(rowIndex, newDriver, job, store.headers); toast(`Reassigned to ${newDriver}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to reassign', 'error') } }
+// A driver recorded off on the load's days: the server answers 409
+// DRIVER_OFF_DUTY and the person chooses "Assign anyway" or keeps things as they
+// were (useOffDutyConfirm()).
+async function handleAssign({ rowIndex, driver, job }) {
+  try {
+    const r = await withOffDutyConfirm((confirmOffDuty) => store.assignDriver(rowIndex, driver, job, store.headers, { confirmOffDuty }))
+    if (r && r.offDutyDeclined) return
+    const lc = store.headers.find(h => /load.?id|job.?id/i.test(h))
+    toast(`${driver} assigned to ${lc ? job[lc] : 'load'}`, 'success')
+    refresh()
+  } catch (err) { toast((err && err.message) || 'Failed to assign', 'error') }
+}
+async function handleReassign({ rowIndex, newDriver, job }) {
+  try {
+    const r = await withOffDutyConfirm((confirmOffDuty) => store.reassignDriver(rowIndex, newDriver, job, store.headers, { confirmOffDuty }))
+    if (r && r.offDutyDeclined) { refresh(); return }
+    toast(`Reassigned to ${newDriver}`, 'success')
+    refresh()
+  } catch (err) { toast((err && err.message) || 'Failed to reassign', 'error') }
+}
 async function handleCancel({ rowIndex, job, reason }) { try { await store.cancelLoad(rowIndex, job, store.headers, reason); toast('Assignment cancelled', 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to cancel', 'error') } }
 function handleDeleted({ loadId }) { toast(`Load ${loadId} deleted`, 'success'); refresh() }
 async function handleStatusUpdate({ rowIndex, newStatus, job, _override }) { if (_override) { toast(`Status overridden: ${newStatus}`, 'success'); refresh(); return } try { const lc = store.headers.find(h => /load.?id|job.?id/i.test(h)); const dc = store.headers.find(h => /driver/i.test(h)); await store.updateStatus(rowIndex, dc ? job[dc] || '' : '', lc ? job[lc] || '' : '', newStatus, job); toast(`Status: ${newStatus}`, 'success'); refresh() } catch (err) { toast((err && err.message) || 'Failed to update', 'error') } }
