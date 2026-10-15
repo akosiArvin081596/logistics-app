@@ -24735,6 +24735,7 @@ async function runPersonalSweep() {
 					`${summary.attached} attached · ${summary.flagged} waiting for a correction invoice · ${summary.failed} failed`);
 			out.weeks.push(summary);
 		}
+		if (out.weeks.some((w) => w.attached > 0)) notifyChange("invoices");
 		if (flaggedAll.length) {
 			const title = `Personal expenses need a correction invoice (${flaggedAll.length})`;
 			const body = `${flaggedAll.length} Personal line(s) could not go on a weekly invoice. Open Expenses and create each week's correction invoice.`;
