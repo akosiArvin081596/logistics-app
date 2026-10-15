@@ -93,7 +93,7 @@ async function run({ loadId, drive = "none", localFails = false, pdf = PDF }) {
 	const deps = {
 		app, db, fs: fsUnder, path, require: rootRequire, console: QUIET, process: { env: {} },
 		requireRole: () => (req, res, next) => next(), rateConLimiter: (req, res, next) => next(),
-		io: { to: () => ({ emit() {} }) }, notifyChange() {},
+		io: { to: () => ({ emit() {}, except: () => ({ emit() {} }) }) }, notifyChange() {},
 		insertDispatchNotification: { run() {} },
 		logAudit: (req, action, entity, entityId, details) => audits.push({ action, entity, entityId, details }),
 		upsertLoadCoordsStmt: { run() {} },

@@ -22,6 +22,8 @@
 
         <div v-if="submitError" class="rc-callout rc-callout-error" role="alert">{{ submitError }}</div>
 
+        <p v-if="!auth.isSuperAdmin" class="rc-note">{{ BROKER_KEPT_NOTE }}</p>
+
         <section v-for="section in visibleSections" :key="section.title" class="rc-section">
           <div class="rc-section-title">{{ section.title }}</div>
           <div class="rc-grid">
@@ -85,6 +87,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
+import { useAuthStore } from '../../stores/auth'
+import { rateConSectionsFor, BROKER_KEPT_NOTE } from '../../lib/brokerContactView'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -98,6 +102,7 @@ const props = defineProps({
 const emit = defineEmits(['update:open', 'created'])
 
 const api = useApi()
+const auth = useAuthStore()
 
 // Sheets read + Distance Matrix + 3 tab writes + a Drive upload. The 20s
 // useApi default aborts a request that is still working.
@@ -160,8 +165,10 @@ const SECTIONS = [
 ]
 
 const KNOWN_KEYS = SECTIONS.flatMap(s => s.fields.map(f => f.key))
-const ALL_FIELDS = SECTIONS.flatMap(s => s.fields)
-const IMPORTANT_KEYS = ALL_FIELDS.filter(f => f.important).map(f => f.key)
+// The sections this user reviews: no Broker section for a non-Super-Admin
+// (rateConSectionsFor()), so its fields are neither shown nor counted as missing.
+const roleSections = computed(() => rateConSectionsFor(SECTIONS, auth.isSuperAdmin))
+const roleFields = computed(() => roleSections.value.flatMap(s => s.fields))
 
 const form = reactive({})
 const showMore = ref(false)
@@ -169,9 +176,9 @@ const submitting = ref(false)
 const submitError = ref('')
 
 const extraFieldCount = computed(() => SECTIONS.find(s => s.extra)?.fields.length || 0)
-const visibleSections = computed(() => SECTIONS.filter(s => !s.extra || showMore.value))
+const visibleSections = computed(() => roleSections.value.filter(s => !s.extra || showMore.value))
 const loadNumber = computed(() => (form['Load Number'] || '').toString().trim())
-const missingCount = computed(() => IMPORTANT_KEYS.filter(k => !(form[k] || '').toString().trim()).length)
+const missingCount = computed(() => roleFields.value.filter(f => f.important && !(form[f.key] || '').toString().trim()).length)
 
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -213,7 +220,7 @@ function inputId(key) {
 // only hard block — everything else is fixable later from Active Loads → Edit.
 const flags = computed(() => {
   const out = {}
-  for (const f of ALL_FIELDS) {
+  for (const f of roleFields.value) {
     const blank = !(form[f.key] || '').toString().trim()
     if (f.required && blank) out[f.key] = { level: 'error', label: 'Required' }
     else if (blank && f.important) out[f.key] = { level: 'warn', label: 'Not found' }
@@ -288,6 +295,7 @@ function messageFor(err) {
 .rc-callout ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
 .rc-callout-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
 .rc-callout-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.rc-note { margin: 0; font-size: 0.8rem; color: #6b7280; }
 
 .rc-section { display: flex; flex-direction: column; gap: 0.5rem; }
 .rc-section-title {

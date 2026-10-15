@@ -19,8 +19,9 @@
 //     add, and the days the rule would not pay (kept: an issued invoice is never
 //     reduced);
 //   - lateDays: days of earlier weeks the rule pays that no invoice holds yet
-//     (from the late days' floor on, they go on that week's invoice while it is
-//     not approved, else on a correction invoice for that week);
+//     (from the late days' floor, FROM's first week, on, they go on that week's
+//     invoice while it is not approved, else on a correction invoice for that
+//     week);
 //   - refusedDays: days of --from..--to worked by the trip timestamps that no
 //     invoice will carry, with the reason and amount (before the floor: paid by
 //     the ledger, on no invoice; a load settling before FROM; a closed month; a
@@ -36,10 +37,6 @@
 //   --from=YYYY-MM         the TRIP_WORK_DAYS_FROM to try. Refused unless it is
 //                          after the latest closed month
 //   --to=YYYY-MM           the last month the lists cover (default --from)
-//   --floor=YYYY-MM-DD     a day in the week the first rule invoice is expected
-//                          for (the switch-on week); default this business
-//                          week. Ignored once the rule has invoiced (the stored
-//                          floor applies)
 //   --sheet-id=env         the SPREADSHEET_ID the .env sets (refused when none)
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
 //   --env-file=<file>      with a copy of the database under the temp directory only
@@ -133,8 +130,7 @@ async function main() {
 		extraRoots: ["workDaysDryRun"],
 	});
 	try {
-		const floor = typeof args.floor === "string" ? args.floor.trim() : "";
-		const result = await world.api.workDaysDryRun({ from, to, floor, names: args.names === true });
+		const result = await world.api.workDaysDryRun({ from, to, names: args.names === true });
 		if (result.refused) refuse(result.reason);
 		if (args.json === true) console.log(JSON.stringify(result, null, 1));
 		else printText(result);
