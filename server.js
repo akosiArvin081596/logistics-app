@@ -61862,9 +61862,14 @@ const KPI_DIGEST_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_DI
 // free tier): default OFF, on only for true/1/yes/on (kpiDeadheadRoutes.routesEnabled()).
 const KPI_DEADHEAD_ROUTES_ENABLED = kpiDeadheadRoutes.routesEnabled(process.env.KPI_DEADHEAD_ROUTES_ENABLED);
 
-// The run's time box, and the Drive phase's share of it.
+// The run's time box, and the Drive phase's and the deadhead route phase's
+// shares of it.
 const KPI_RUN_TIME_LIMIT_MS = 4 * 60 * 1000;
 const KPI_DRIVE_TIME_LIMIT_MS = 2 * 60 * 1000;
+const KPI_ROUTES_TIME_LIMIT_MS = 60 * 1000;
+// What the route phase always leaves of the run's time box for computing and
+// storing the figures.
+const KPI_ROUTES_RESERVE_MS = 30 * 1000;
 // One Drive request (a list or a download).
 const KPI_DRIVE_TIMEOUT_MS = 20 * 1000;
 // Rate-con PDFs read per business day, shared by the weight and the miles
@@ -62190,11 +62195,10 @@ function kpiGatherDbInputs(db, opts) {
 	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, milesData };
 }
 
-// The inputs lib/kpi-metrics.js computeKpis() takes. Load miles are kept for
-// live loads only (a cancelled or deleted load's miles are not the fleet's work)
-// and take that load's day.
+// The inputs lib/kpi-metrics.js computeKpis() takes. The mile records cover live
+// loads only (a cancelled or deleted load's miles are not the fleet's work) and
+// take that load's day.
 function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
-	const loadsByKey = new Map(sheet.loads.filter((l) => l.loadId).map((l) => [l.loadId, l]));
 	const arrivals = sheet.arrivals.map((a) => {
 		const eld = dbIn.loadEld.get(a.loadId);
 		return {
@@ -62206,15 +62210,6 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 			deliveredDay: a.deliveredDay,
 		};
 	});
-	const loadMiles = [];
-	for (const [k, e] of dbIn.loadEld) {
-		const load = loadsByKey.get(k);
-		if (!load) continue;
-		loadMiles.push({
-			loadId: k, day: load.day, loadedMiles: e.loadedMiles, deadheadMiles: e.deadheadMiles,
-			basis: e.basis, loadedBasis: e.loadedBasis, deadheadBasis: e.deadheadBasis, inProgress: e.inProgress, overlap: e.overlap,
-		});
-	}
 	return {
 		asOfDay,
 		settings: { aiDispatchStart: settings.aiDispatchStart, dedicatedStart: settings.dedicatedStart, baselineMpg: settings.baselineMpg },
@@ -62225,7 +62220,6 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 		fleetHistory: dbIn.fleetHistory,
 		fuelReceipts: dbIn.fuelReceipts,
 		arrivals,
-		loadMiles,
 		activity: dbIn.activity,
 		// R10: the mile metrics' per-load records, the Truck-column map, the cached
 		// route distances, the dated driver-to-truck resolver and the business zone.
@@ -62368,18 +62362,21 @@ async function kpiBackfillWeights(deadlineMs, loads, day, maxLoads = KPI_WEIGHT_
 }
 
 // The nightly deadhead route phase (lib/kpi-deadhead-routes.js): distance-only
-// Routes calls for the chained pairs the cache does not hold yet, at most 50 a
-// business day, never in a replica, never with KPI_DEADHEAD_ROUTES_ENABLED off.
-// New distances go back into `inputs` so this run's figures use them.
-async function kpiDeadheadRouteCalls(inputs, day, kind) {
+// Routes calls for the chained pairs the mile metrics can use that the cache
+// has no good answer for (newest first; a failed pair after 30 days), at most 50
+// a business day, never in a replica, never with KPI_DEADHEAD_ROUTES_ENABLED off,
+// and only until `deadlineMs` (the phase's own budget): no call starts after it
+// and none runs past it. New distances go back into `inputs` so this run's
+// figures use them.
+async function kpiDeadheadRouteCalls(inputs, day, kind, deadlineMs) {
 	if (kind !== "nightly" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;
 	const pending = kpiMiles.pendingRoutePairs({
-		milesLoads: inputs.milesLoads, timeZone: APP_TIMEZONE, truckAt: inputs.truckAt,
+		milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone: APP_TIMEZONE, truckAt: inputs.truckAt,
 		truckIdByUnit: inputs.truckIdByUnit, routes: inputs.deadheadRoutes,
 	});
 	const res = await kpiDeadheadRoutes.runRouteCalls({
 		db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,
-		apiKey: GOOGLE_MAPS_API_KEY, fetchFn: fetch, day, timeZone: APP_TIMEZONE, now: () => Date.now(),
+		apiKey: GOOGLE_MAPS_API_KEY, fetchFn: fetch, day, timeZone: APP_TIMEZONE, now: () => Date.now(), deadlineMs,
 	});
 	if (res.calls) inputs.deadheadRoutes = kpiDeadheadRoutes.readRoutes(db);
 	return res;
@@ -62520,9 +62517,14 @@ async function runKpiSnapshot(kind) {
 		}
 		await kpiYield();
 
-		// R10: deadhead route distances, nightly runs only (and only with the flag on).
+		// R10: deadhead route distances, nightly runs only (and only with the flag on),
+		// within the phase's own budget: KPI_ROUTES_TIME_LIMIT_MS, ending at least
+		// KPI_ROUTES_RESERVE_MS before the run's deadline, so a slow or hanging
+		// Routes call can never cost the night its snapshot. kpiWithin() is the
+		// backstop for a call that ignores its abort signal.
+		const routesDeadlineMs = Math.min(Date.now() + KPI_ROUTES_TIME_LIMIT_MS, deadlineMs - KPI_ROUTES_RESERVE_MS);
 		try {
-			const r = await kpiWithin(kpiDeadheadRouteCalls(inputs, day, kind), Math.max(0, deadlineMs - Date.now()));
+			const r = await kpiWithin(kpiDeadheadRouteCalls(inputs, day, kind, routesDeadlineMs), Math.max(0, routesDeadlineMs - Date.now()) + 1000);
 			for (const code of r ? r.codes : []) note("deadhead_miles", code);
 		} catch (e) {
 			note("deadhead_miles", e && e.kpiCode === "TIME_LIMIT" ? "ROUTES_TIME_LIMIT" : "ROUTES_PHASE_FAILED");

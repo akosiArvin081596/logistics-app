@@ -394,6 +394,8 @@ function world(opts = {}) {
 		GOOGLE_MAPS_API_KEY: opts.mapsKey === undefined ? "maps-key-under-test" : opts.mapsKey,
 		fetch: async (url, init) => {
 			log.fetches.push({ url, body: init && init.body, mask: init && init.headers && init.headers["X-Goog-FieldMask"] });
+			// opts.fetch(n, init, clock) shapes an answer (a slow or a hanging call).
+			if (opts.fetch) return opts.fetch(log.fetches.length, init, clock);
 			return { ok: true, status: 200, json: async () => ({ routes: [{ distanceMeters: 80467.2 }] }) };
 		},
 	};
@@ -522,12 +524,14 @@ const runSection = section(async (t, block = BLOCK) => {
 	t(out.status === "ok" && run.status === "ok" && run.kind === "nightly" && run.day === "2026-10-09" && run.errors === "[]" && run.finished_at && run.duration_ms >= 0, `§5 the run row: ok, nightly, the business day (${run && run.status} ${run && run.errors})`);
 	t(/Z$/.test(run.started_at) && /Z$/.test(run.finished_at), "§5 timestamps are ISO Z");
 	const inputs = w.log.inputs[0];
-	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "loadMiles", "activity"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
+	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "activity", "milesLoads", "timeZone"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
 	t(inputs.asOfDay === "2026-10-09" && JSON.stringify(inputs.settings) === JSON.stringify({ aiDispatchStart: "2026-04-01", dedicatedStart: null, baselineMpg: 8 }), "§5 asOfDay and the settings (no recipients)");
 	t(inputs.loads.find((l) => l.loadId === "l-1002").revenue === 0 && !("revenueByMonth" in inputs), "§5 revenue rides on each load; no books are read");
 	const a2 = inputs.arrivals.find((a) => a.loadId === "l-1002");
 	t(a2 && a2.destLng === -95.3 && a2.eldArriveMs === Date.parse("2026-09-12T13:00:00Z") && a2.receiverEvents.length === 1 && a2.receiverEvents[0].source === "geofence", "§5 an arrival joined to its coordinates, ELD arrival and receiver events");
-	t(inputs.loadMiles.map((m) => m.loadId).sort().join() === "l-1002,l-1003" && inputs.loadMiles.find((m) => m.loadId === "l-1002").day === "2026-09-12", "§5 load miles for live loads only (a cancelled load's dropped), with the load's day");
+	// R10: paid-mile share v2 reads milesLoads; the ELD-leg loadMiles input is gone.
+	t(!("loadMiles" in inputs) && inputs.milesLoads.find((m) => m.key === "l-1002").day === "2026-09-12" && !inputs.milesLoads.some((m) => m.key === "l-1004"),
+		"§5 no unused loadMiles input; the mile records are live loads only, with the load's day");
 	const snaps = all(w, "SELECT * FROM kpi_snapshots WHERE day = '2026-10-09'");
 	t(snaps.length === 16 && snaps.every((s) => s.definition_version === 1 && /Z$/.test(s.computed_at)), "§5 sixteen snapshot rows for the day");
 	t(snaps.every((s) => Buffer.byteLength(s.payload) <= 4096), "§5 every payload within 4 KB");
@@ -721,6 +725,7 @@ function routeWorld(o = {}) {
 	const sheet = { headers: HEADERS, data: [
 		row(0, { "Load ID": "R-2001", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/10/2026 08:00", "Completion Date": "2026-09-10" }),
 		row(1, { "Load ID": "R-2002", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/11/2026 08:00", "Completion Date": "2026-09-11" }),
+		...(o.third ? [row(2, { "Load ID": "R-2003", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/12/2026 08:00", "Completion Date": "2026-09-12" })] : []),
 	] };
 	return world({ ...o, sheet, before: (db) => {
 		const lem = db.prepare("INSERT INTO load_eld_miles (load_id, truck_id, pickup_arrive_ms, dest_arrive_ms) VALUES (?, 1, ?, ?)");
@@ -732,6 +737,11 @@ function routeWorld(o = {}) {
 		// Truck 1's ELD records cover both loads' days (the seed has Sep 10), so
 		// both are in the mile metrics' scope and the pair is usable.
 		db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, truck_id, miles) VALUES ('rv-1', '2026-09-11', 'a', ?, 1, 200)").run(DRIVER);
+		if (o.third) {
+			lem.run("r-2003", Date.parse("2026-09-12T13:00:00Z"), Date.parse("2026-09-12T20:00:00Z"));
+			c.run("r-2003", 32.1, -98.1, 33.2, -99.2);
+			db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, truck_id, miles) VALUES ('rv-1', '2026-09-12', 'a', ?, 1, 200)").run(DRIVER);
+		}
 	} });
 }
 const milesWiringSection = section(async (t, block = BLOCK) => {
@@ -781,6 +791,25 @@ const milesWiringSection = section(async (t, block = BLOCK) => {
 		await x.k.runKpiSnapshot(kind);
 		t(x.log.fetches.length === 0 && one(x, "SELECT COUNT(*) AS n FROM kpi_deadhead_routes").n === 0, `§12 ${label}: no route call, no row`);
 	}
+
+	// Review Low 2: the route phase's own budget (60 s, within the run's), so a
+	// slow or hanging Routes call can never fail the night's snapshot.
+	const okAnswer = { ok: true, status: 200, json: async () => ({ routes: [{ distanceMeters: 80467.2 }] }) };
+	const slow = routeWorld({ block, third: true, env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, fetch: async (n, init, clock) => { clock.ms += 61000; return okAnswer; } });
+	const sr = await slow.k.runKpiSnapshot("nightly");
+	const srun = one(slow, "SELECT status, errors FROM kpi_runs WHERE id = ?", sr.runId);
+	t(slow.log.fetches.length === 1 && srun.status === "partial" && srun.errors.includes("ROUTES_TIME_LIMIT") && one(slow, "SELECT COUNT(*) AS n FROM kpi_snapshots").n > 0,
+		`§12 a call that spends the 60 s budget is the last one; the snapshot is stored (${slow.log.fetches.length} call(s), ${srun.status} ${srun.errors})`);
+	const hang = routeWorld({ block, third: true, env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, fetch: (n, init, clock) => {
+		if (n === 1) { clock.ms += 59950; return Promise.resolve(okAnswer); }
+		return new Promise((resolve, reject) => init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+	} });
+	const startedAt = Date.now();
+	const hr = await hang.k.runKpiSnapshot("nightly");
+	const hrun = one(hang, "SELECT status FROM kpi_runs WHERE id = ?", hr.runId);
+	t(hang.log.fetches.length === 2 && Date.now() - startedAt < 5000 && hrun.status !== "failed" && one(hang, "SELECT COUNT(*) AS n FROM kpi_snapshots").n > 0
+		&& one(hang, "SELECT COUNT(*) AS n FROM kpi_deadhead_routes WHERE status = 'failed'").n === 1,
+		`§12 a hanging call is cut to the budget left (50 ms here): stored failed, and the snapshot still stored (${hrun.status}, ${Date.now() - startedAt} ms)`);
 });
 
 // ─────────────────────────────────────────── §7 the time box
@@ -1032,6 +1061,8 @@ const failed = (results) => results.some((x) => !x.ok);
 			"db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,", "db, pending, kind, enabled: true, replica: !!REPLICA,")],
 		["route calls in a replica", milesWiringSection, swap(swap(BLOCK, "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;", "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED) return null;"),
 			"db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,", "db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: false,")],
+		["the route phase without its own budget (the run's deadline instead)", milesWiringSection, swap(BLOCK, "kpiDeadheadRouteCalls(inputs, day, kind, routesDeadlineMs)", "kpiDeadheadRouteCalls(inputs, day, kind, deadlineMs)")],
+		["route pairs chosen without the ELD truck-days", milesWiringSection, swap(BLOCK, "milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone", "milesLoads: inputs.milesLoads, timeZone")],
 		["a month refused for the contract start", milesWiringSection, swap(BLOCK, "dedicatedStart: kpiSettingMonthOrDay(r.dedicatedStart) ? r.dedicatedStart : null,", "dedicatedStart: kpiSettingDay(r.dedicatedStart) ? r.dedicatedStart : null,")],
 		["SELECT * on expenses", gatherSection, swap(BLOCK, `"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'"`, `"SELECT * FROM expenses WHERE LOWER(type) = 'fuel'"`)],
 	];
