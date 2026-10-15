@@ -53,20 +53,30 @@ const Vue = clientRequire('vue')
 const { parse, compileScript } = clientRequire('vue/compiler-sfc')
 const { renderToString } = clientRequire('vue/server-renderer')
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)) }
-// Rendered HTML to its visible text. Comments and tags are removed until none
-// is left (one pass can leave a "<!--" that two halves join into), then any
-// angle bracket still standing goes too: rendered text carries none raw (the
-// renderer writes &lt; / &gt;, which stay encoded here). Then the two entities
-// the server renderer emits in these components are decoded, &amp; last.
+// Rendered HTML to its visible text, in one forward scan with no pattern
+// stripping: a "<!--" … "-->" comment is dropped, any other "<" … ">" tag
+// becomes one space, and the text between them is kept as written (the
+// renderer writes &lt; / &gt; for a literal bracket, which stay encoded). Then
+// the two entities the server renderer emits in these components are decoded,
+// &amp; last, and whitespace is collapsed.
 function text(html) {
-  let s = String(html)
-  let prev
-  do {
-    prev = s
-    s = s.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]*>/g, ' ')
-  } while (s !== prev)
-  s = s.replace(/[<>]/g, ' ')
-  return s.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+  const s = String(html)
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    const lt = s.indexOf('<', i)
+    if (lt === -1) { out += s.slice(i); break }
+    out += s.slice(i, lt)
+    if (s.startsWith('<!--', lt)) {
+      const end = s.indexOf('-->', lt + 4)
+      i = end === -1 ? s.length : end + 3
+    } else {
+      const end = s.indexOf('>', lt + 1)
+      out += ' '
+      i = end === -1 ? s.length : end + 1
+    }
+  }
+  return out.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
 }
 
 // Compile a committed SFC's <script setup> + <template> into a component.
