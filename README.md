@@ -219,11 +219,11 @@ npm run replica:clean -- [--task <name>]
   task: ..."). It takes only the business flags on the allowlist in `lib/replica-rules.js`
   (`ENABLE_ALLOWED`, for example `PERSONAL_EXPENSE_DEDUCTIONS_ENABLED`); a flag that reaches
   outside the machine (mail, Drive, Sheets, n8n, ELD, paid APIs), a scheduled job or a kill
-  switch is refused before anything starts. `LEDGER_DAY_ONCE_ENABLED` and
-  `PRE_DISPATCH_PAY_DAY_RULE_ENABLED` do nothing without their first month, so they need
-  `--from-month YYYY-MM`, which sets their `*_FROM` for that start only (shown in the banner,
-  never written to `settings.env`); either flag without it, or it without either flag, is
-  refused. A task already running with other flags is refused until `replica:clean` stops it.
+  switch is refused before anything starts. `LEDGER_DAY_ONCE_ENABLED`,
+  `PRE_DISPATCH_PAY_DAY_RULE_ENABLED` and `TRIP_WORK_DAYS_ENABLED` do nothing without their
+  first month, so they need `--from-month YYYY-MM`, which sets their `*_FROM` for that start
+  only (shown in the banner, never written to `settings.env`); any of those flags without it,
+  or it without one of them, is refused. A task already running with other flags is refused until `replica:clean` stops it.
 - **`replica:login`** sets a local password on that account in the working copy only, from the
   Keychain item `logisx-replica` (generated once, never shown), then signs in through the
   login page in Chrome for Testing (headed unless `--headless`). The browser may reach the
