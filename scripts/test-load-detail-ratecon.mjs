@@ -101,7 +101,9 @@ async function ssr(Comp, props) {
 // A minimal in-memory renderer, so a component can be MOUNTED (watchers run,
 // awaits resolve, the template re-renders) without a DOM.
 function mountInMemory(Comp, props) {
-  const node = (type, tag) => ({ type, tag, children: [], parent: null, props: {}, text: '', addEventListener() {}, removeEventListener() {} })
+  // markRaw: Vue never proxies a real DOM element held in a template ref, so
+  // these must not be proxied either (identity checks compare them).
+  const node = (type, tag) => Vue.markRaw({ type, tag, children: [], parent: null, props: {}, text: '', addEventListener() {}, removeEventListener() {} })
   const ops = {
     insert(child, parent, anchor) {
       if (child.parent) ops.remove(child)
@@ -449,6 +451,75 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
       ok('§5 unmount removes the keydown listener', !winListeners.some((l) => l.type === 'keydown'))
     } catch (err) {
       ok(`§5 RateConViewer mounts in this harness (${err.message})`, false)
+    } finally {
+      delete globalThis.window
+      delete globalThis.document
+      delete globalThis.getComputedStyle
+    }
+  }
+  // Mounted: NATIVE full screen, and the browser leaving it on Escape by itself
+  // before the keydown is handled (document.fullscreenElement already null).
+  // `dispatchEscape` plays the event path: window capture (the viewer), then
+  // the dialog's own Escape handler (reka-ui, window bubble), which closes the
+  // dialog unless the event was stopped or its default prevented.
+  if (VIEWER) {
+    const winListeners = []
+    const docListeners = []
+    globalThis.window = {
+      devicePixelRatio: 2,
+      addEventListener: (type, fn, capture) => winListeners.push({ type, fn, capture }),
+      removeEventListener: (type, fn) => { const i = winListeners.findIndex((l) => l.type === type && l.fn === fn); if (i >= 0) winListeners.splice(i, 1) },
+    }
+    const doc = {
+      fullscreenEnabled: true,
+      fullscreenElement: null,
+      body: {},
+      addEventListener: (type, fn) => docListeners.push({ type, fn }),
+      removeEventListener: (type, fn) => { const i = docListeners.findIndex((l) => l.type === type && l.fn === fn); if (i >= 0) docListeners.splice(i, 1) },
+      exitFullscreen: async () => {},
+    }
+    globalThis.document = doc
+    globalThis.getComputedStyle = () => ({ overflowY: 'visible', paddingTop: '0px', paddingBottom: '0px' })
+    const fireFullscreenChange = (timeStamp) => docListeners.filter((l) => l.type === 'fullscreenchange').forEach((l) => l.fn({ type: 'fullscreenchange', timeStamp }))
+    const dialog = { open: true }
+    function dispatchEscape(timeStamp) {
+      const ev = { key: 'Escape', timeStamp, defaultPrevented: false, stopped: false, preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.stopped = true }, stopImmediatePropagation() { this.stopped = true } }
+      for (const l of winListeners.filter((x) => x.type === 'keydown' && x.capture === true)) { l.fn(ev); if (ev.stopped) break }
+      if (!ev.stopped && !ev.defaultPrevented) dialog.open = false
+      return ev
+    }
+    try {
+      const Viewer3 = await compileComponent('client/src/components/shared/RateConViewer.vue')
+      const m = mountInMemory(Viewer3, { src: 'blob:test' })
+      await drain()
+      const tile = m.find((n) => n.type === 'el' && /\brcv\b/.test(String(n.props.class || '')))
+      const fsBtn = m.find((n) => n.type === 'el' && n.props['aria-label'] === 'Full screen')
+      if (tile && fsBtn) {
+        tile.requestFullscreen = async () => { doc.fullscreenElement = tile; fireFullscreenChange(1000) }
+        fsBtn.props.onClick()
+        await drain()
+        const exitBtn = m.find((n) => n.type === 'el' && n.props['aria-label'] === 'Exit full screen')
+        ok('§5 native full screen is entered (the button now says Exit full screen)', !!exitBtn)
+        // The browser leaves full screen on Escape and reports it first.
+        doc.fullscreenElement = null
+        fireFullscreenChange(2000)
+        await drain()
+        ok('§5 native exit reported: the tile is out of full screen', !!m.find((n) => n.type === 'el' && n.props['aria-label'] === 'Full screen'))
+        // The keydown's handler runs late (a busy main thread), but the key was
+        // pressed 300 ms after the exit was reported: still the viewer's.
+        await new Promise((r) => setTimeout(r, 700))
+        const late = dispatchEscape(2300)
+        ok('§5 Escape handled after fullscreenchange (fullscreenElement null, within 500 ms of the exit): the dialog stays open', dialog.open === true && late.stopped && late.defaultPrevented)
+        const before = dispatchEscape(1990)
+        ok('§5 an Escape pressed just before the exit was reported is also held back', dialog.open === true && before.stopped)
+        const later = dispatchEscape(3000)
+        ok('§5 Escape 1 s after leaving full screen closes the dialog as usual', dialog.open === false && !later.stopped && !later.defaultPrevented)
+      } else {
+        ok('§5 mounted (native): the tile and the Full screen button are found', false)
+      }
+      m.unmount()
+    } catch (err) {
+      ok(`§5 RateConViewer mounts in this harness, native full screen (${err.message})`, false)
     } finally {
       delete globalThis.window
       delete globalThis.document

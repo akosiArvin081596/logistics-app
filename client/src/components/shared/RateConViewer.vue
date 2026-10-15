@@ -187,20 +187,35 @@ function toggleFullscreen() {
     expanded.value = true
   }
 }
-let fullExitedAt = 0
-function onFullscreenChange() {
-  const wasFull = nativeFull.value
-  nativeFull.value = !!tileEl.value && document.fullscreenElement === tileEl.value
-  if (wasFull && !nativeFull.value) fullExitedAt = Date.now()
-}
 // Escape in full screen leaves full screen and nothing else. The load dialog
 // closes on Escape too (reka-ui listens on window, in the bubble phase), so this
 // listens on window in the CAPTURE phase, which runs first, and stops the
-// event there. The browser may already have left native full screen by the
-// time the key event arrives, so a press just after that is held back too.
+// event there.
+//
+// ⚠️ The browser leaves NATIVE full screen on that same Escape by itself, and
+// its fullscreenchange can be handled before the keydown, so by then
+// document.fullscreenElement is already null. An Escape that comes within
+// ESC_GRACE_MS of leaving full screen is therefore still the viewer's. Both
+// times are the EVENTS' own timestamps (when they happened), not the clock
+// when a handler finally runs: the first full-screen exit re-renders the page
+// at a new size, and a busy main thread used to push the keydown's handler
+// past a wall-clock window (1 run in 7 closed the dialog).
+const ESC_GRACE_MS = 500
+let fullExitedTs = -Infinity
+function eventTime(e) {
+  const t = Number(e && e.timeStamp)
+  return t > 0 ? t : performance.now()
+}
+function onFullscreenChange(e) {
+  const wasFull = nativeFull.value
+  nativeFull.value = !!tileEl.value && document.fullscreenElement === tileEl.value
+  if (wasFull && !nativeFull.value) fullExitedTs = eventTime(e)
+}
 function onKeydown(e) {
   if (e.key !== 'Escape' && e.key !== 'Esc') return
-  if (!isFull.value && Date.now() - fullExitedAt > 600) return
+  // Negative when the key was pressed before the exit was reported: also ours.
+  const justLeft = eventTime(e) - fullExitedTs <= ESC_GRACE_MS
+  if (!isFull.value && !justLeft) return
   e.preventDefault()
   e.stopImmediatePropagation()
   e.stopPropagation()
