@@ -4,10 +4,12 @@
       <div class="map-empty">No route coordinates available</div>
     </template>
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (chipMiles != null || chipMinutes != null || driverDistanceInfo)">
-        <span v-if="chipMiles != null" class="info-item">{{ chipMiles }} mi</span>
-        <span v-if="chipMinutes != null" class="info-item">{{ chipEtaText }} {{ usePlannedLane ? 'drive time' : 'ETA' }}</span>
-        <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
+      <!-- A fix over 2 hours old hides the figures but not the row's Navigate
+           button; the public tracker has no button, so the row goes too. -->
+      <div class="map-info" v-if="hasCoords && (chipMiles != null || chipMinutes != null || driverDistanceInfo) && (!fixTooOld || !publicMode)">
+        <span v-if="chipMiles != null && !fixTooOld" class="info-item">{{ chipMiles }} mi</span>
+        <span v-if="chipMinutes != null && !fixTooOld" class="info-item">{{ chipEtaText }} {{ usePlannedLane ? 'drive time' : 'ETA' }}</span>
+        <span v-if="driverDistanceInfo && !fixTooOld" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
         <!-- Drive Mode is a DRIVER affordance (turn-by-turn for the truck) and
              it needs `steps`, which the public payload deliberately omits — so
              on the customer tracker the button would open an empty fullscreen
@@ -23,9 +25,12 @@
            .map-info is a flex row with no wrap, and a date long enough to carry
            the weekday and the zone label pushes the Navigate button off the
            edge at phone width. -->
-      <div v-if="showArrival && arrivalClock && !usePlannedLane" class="map-arrival">
+      <div v-if="showArrival && arrivalClock && !usePlannedLane && !fixTooOld" class="map-arrival">
         <span class="map-arrival-label">{{ arrivalLabel }}</span>
         <span class="map-arrival-value">{{ arrivalClock }}</span>
+      </div>
+      <div v-if="fixLastSeen" class="map-last-seen">
+        {{ fixLastSeen }}<template v-if="fixTooOld">. No distance or ETA until the truck reports again.</template>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div v-else-if="!driverLatLng && !dispatchMode" class="map-eld-hint">
@@ -56,7 +61,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useGoogleMaps, createDotPin } from '../../composables/useGoogleMaps'
 import { useDriverPosition } from '../../composables/useDriverPosition'
@@ -72,6 +77,7 @@ import {
   createDeviationDetector,
 } from '../../utils/routeProgress'
 import { formatMinutes } from '../../lib/duration'
+import { fixAgeMs, lastSeenText, fixHidesFigures } from '../../lib/fixAge'
 import { fmtArrivalClock } from '../../utils/datetime'
 import DriveModeOverlay from './DriveModeOverlay.vue'
 
@@ -130,9 +136,24 @@ const props = defineProps({
   // pass it, and every branch below reads usePlannedLane, so they render
   // exactly as they did.
   plannedLane: { type: Object, default: null },
+  // When driverPosition is a feed's last fix (the dispatch load detail, the
+  // public tracker), the time it was taken: an ISO instant or epoch ms. Older
+  // than 30 minutes, the map says "Last seen X ago"; older than 2 hours (or
+  // unreadable) it shows no distance, no ETA and no arrival, which would all be
+  // measured from where the truck was (B11, 2026-10-15). Default null: the
+  // driver app's own live position and every other caller render as before.
+  fixAt: { type: [String, Number], default: null },
 })
 
 const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
+
+// The fix's age on a 30 s clock, so "Last seen" and the 2-hour cut-off move
+// while the map stays open without a new position.
+const fixClock = ref(Date.now())
+let fixClockTimer = null
+const fixAge = computed(() => (props.fixAt == null ? null : fixAgeMs(props.fixAt, fixClock.value)))
+const fixLastSeen = computed(() => (props.fixAt != null && props.driverPosition ? lastSeenText(fixAge.value) : ''))
+const fixTooOld = computed(() => !!props.driverPosition && fixHidesFigures(props.fixAt, fixClock.value))
 
 const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()
@@ -1258,6 +1279,19 @@ onMounted(() => {
   if (hasCoords.value || driverLatLng.value) {
     nextTick(() => initMap())
   }
+  if (props.fixAt != null) startFixClock()
+})
+
+function startFixClock() {
+  if (!fixClockTimer) fixClockTimer = setInterval(() => { fixClock.value = Date.now() }, 30 * 1000)
+}
+watch(() => props.fixAt, (at) => {
+  fixClock.value = Date.now()
+  if (at != null) startFixClock()
+})
+
+onUnmounted(() => {
+  if (fixClockTimer) { clearInterval(fixClockTimer); fixClockTimer = null }
 })
 </script>
 
@@ -1274,6 +1308,7 @@ onMounted(() => {
 .map-arrival-value { color: var(--text); font-weight: 600; }
 .map-label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; }
 .map-eld-hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 500; }
+.map-last-seen { font-size: 0.75rem; margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 600; }
 .map-planned-hint { font-size: 0.75rem; margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #eff6ff; color: #1e40af; border-radius: 6px; font-weight: 500; }
 .gps-waiting { display: flex; align-items: center; justify-content: center; background: var(--bg, #f5f6fa); border: 1px solid var(--border, #e5e7eb); }
 .gps-overlay { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; color: var(--text-dim); font-size: 0.82rem; font-weight: 500; }

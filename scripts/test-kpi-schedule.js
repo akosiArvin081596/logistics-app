@@ -21,6 +21,12 @@
  *    slot; the 6-hour catch-up limit removed; the slot computed in the
  *    server's zone. Each mutant is compiled from the module's source and run in
  *    process and in both child zones; at least one check must fail.
+ * §8 scheduleText(): the KPI page's schedule words name US Eastern only
+ *    ("Daily at 4:00 AM Eastern", "Mondays at 9:00 AM Eastern"; no Central
+ *    time, 2026-10-15); another business zone is named as itself; the KPI
+ *    response's default job says the same; no Central schedule time is left
+ *    in lib/, client/src or docs/manual, and server.js and .env.example name
+ *    no "US Central" time.
  *
  * Pure: no server, no database, no network; children get the module source on
  * stdin and write nothing.
@@ -167,6 +173,44 @@ console.log("\n§7 MUTANTS");
 	];
 	const r = mutants.map(([name, src]) => ({ ok: caught(src), name: `MUTANT ${name}: caught` }));
 	record(r);
+}
+
+console.log("\n§8 the schedule in words: Eastern only");
+{
+	const s = loadFrom(SRC);
+	const out = [];
+	const t = (cond, name) => out.push({ ok: !!cond, name });
+	const has = typeof s.scheduleText === "function";
+	t(has, "§8 scheduleText() is exported");
+	if (has) {
+		const ny = s.scheduleText(NY);
+		t(ny.snapshot === "Daily at 4:00 AM Eastern", `§8 the snapshot names Eastern only (got ${JSON.stringify(ny.snapshot)})`);
+		t(ny.digest === "Mondays at 9:00 AM Eastern", `§8 the digest names Eastern only (got ${JSON.stringify(ny.digest)})`);
+		t(!/central/i.test(`${ny.snapshot} ${ny.digest}`), "§8 no Central time in either");
+		const chi = s.scheduleText(CHI);
+		t(chi.snapshot === "Daily at 4:00 AM (America/Chicago)" && chi.digest === "Mondays at 9:00 AM (America/Chicago)", "§8 any other business zone is named as itself");
+	}
+	const metrics = require(path.join(ROOT, "lib", "kpi-metrics.js"));
+	const job = metrics.buildKpiResponse({ asOfDay: "2026-10-15", snapshots: [], series: [], approvals: [] }).job;
+	t(job.snapshotSchedule === "Daily at 4:00 AM Eastern" && job.digestSchedule === "Mondays at 9:00 AM Eastern",
+		`§8 the KPI response's default job says the same (got ${JSON.stringify([job.snapshotSchedule, job.digestSchedule])})`);
+	// No KPI schedule text in lib/, the client or the manual adds a Central time.
+	const scan = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+		const p = path.join(dir, e.name);
+		if (e.isDirectory()) return e.name === "node_modules" ? [] : scan(p);
+		return /\.(js|mjs|vue|md)$/.test(e.name) ? [p] : [];
+	});
+	const centralTime = /\d{1,2}:\d{2}\s?[AP]M Central|US Central\)|\(\d{1,2}:\d{2} Central\)/;
+	const hits = ["lib", path.join("client", "src"), path.join("docs", "manual")]
+		.flatMap((d) => scan(path.join(ROOT, d)))
+		.filter((p) => centralTime.test(fs.readFileSync(p, "utf8")))
+		.map((p) => path.relative(ROOT, p));
+	t(hits.length === 0, `§8 no Central schedule time in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
+	// server.js and .env.example describe the same schedule; neither adds the
+	// Central hour (other server.js comments name Central for unrelated history).
+	const usCentral = ["server.js", ".env.example"].filter((f) => /US\s+Central/.test(fs.readFileSync(path.join(ROOT, f), "utf8").replace(/\n#\s*/g, " ")));
+	t(usCentral.length === 0, `§8 server.js and .env.example name no US Central schedule time (found in: ${usCentral.join(", ") || "none"})`);
+	record(out);
 }
 
 if (failures.length) {

@@ -14556,8 +14556,11 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 //       field stripped, so driver/admin names never leak via the timeline.
 //     * X-Robots-Tag keeps tracker URLs out of search indexes
 //   - Driver GPS privacy: only the last ping is returned, and only if it's
-//     within the last 2 hours — prevents leaking a driver's off-shift
-//     location after they stop reporting.
+//     within the last 3 hours (MAX_PING_AGE_MS) — prevents leaking a driver's
+//     off-shift location after they stop reporting.
+//   - With no ping within the last 2 hours there is no ETA, distance or drive
+//     time in the payload (B11, owner decision 2026-10-15); the page shows the
+//     age of a ping it still has from lastPing.at instead.
 const trackPublicLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60, // higher than publicFormLimiter — customers refresh a lot
@@ -14863,7 +14866,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		const driverNameKey = driverNameRaw.toLowerCase().replace(/\s+/g, " ").trim();
 		let lastPing = null;
 		let lastPingSpeed = 0;
+		let lastPingAgeMs = null;
 		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
+		const ETA_MAX_PING_AGE_MS = 2 * 60 * 60 * 1000; // B11: no ETA or distance from an older fix
 		if (driverNameKey) {
 			// Source priority: pick whichever of ELD telemetry vs phone GPS has the
 			// most recent valid ping within the 3-hour window. ELD is preferred only
@@ -14935,15 +14940,19 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				chosen = rmCandidate || phoneCandidate;
 			}
 			if (chosen) {
-				lastPing = { lat: chosen.lat, lng: chosen.lng, at: chosen.at };
+				// The fix time as an ISO instant, whatever form its source stored it
+				// in, so every browser reads its age the same way.
+				lastPing = { lat: chosen.lat, lng: chosen.lng, at: new Date(chosen.ts).toISOString() };
 				lastPingSpeed = chosen.speed;
+				lastPingAgeMs = Date.now() - chosen.ts;
 			}
 		}
+		const pingFreshForEta = lastPing !== null && lastPingAgeMs !== null && lastPingAgeMs <= ETA_MAX_PING_AGE_MS;
 
 		let eta = null;
 		const deliveredRe = /^(delivered|pod received|completed)$/i;
 		const isDelivered = deliveredRe.test(statusLower);
-		if (!isDelivered && lastPing && destLat != null && destLng != null) {
+		if (!isDelivered && pingFreshForEta && destLat != null && destLng != null) {
 			let distanceMiles, minutesRemaining, expectedAt;
 			const route = await getRoute(
 				{ latitude: lastPing.lat, longitude: lastPing.lng },
@@ -15016,13 +15025,20 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			}
 		}
 		// The figures rendered beside the line describe the trip the customer is
-		// actually being told about: what is LEFT once the truck is reporting,
-		// otherwise the planned haul the line itself depicts. Taken verbatim
-		// from `eta` rather than recomputed, so the map's info strip can never
-		// contradict the ETA card sitting directly above it.
+		// actually being told about: what is LEFT once the truck is reporting.
+		// Taken verbatim from `eta` rather than recomputed, so the map's info
+		// strip can never contradict the ETA card sitting directly above it.
+		// With no fix within 2 hours (none at all, a truck silent past
+		// MAX_PING_AGE_MS, or one older than ETA_MAX_PING_AGE_MS) no distance or
+		// drive time is sent either: the page shows the planned lane's as an ETA,
+		// and the customer link shows none from an old or missing fix (B11). A
+		// delivered load with a fresh fix keeps the lane's figures, as before.
 		if (eta) {
 			routeDistanceMiles = eta.distanceMiles;
 			routeEtaMinutes = eta.minutesRemaining;
+		} else if (!pingFreshForEta) {
+			routeDistanceMiles = null;
+			routeEtaMinutes = null;
 		}
 
 		// The driver's truck, matched as the money stamps match it
@@ -64574,9 +64590,9 @@ require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folde
 // stored and logged as a CODE ({ metric, code }).
 //
 // WHEN. A 1-minute tick (started 10 minutes after boot, with a boot run then)
-// takes the snapshot at 04:00 APP_TIMEZONE (03:00 US Central), catching up a
-// missed slot the same business day, and sends the digest on Mondays at 09:00
-// (08:00 Central). Slot maths: lib/kpi-schedule.js. Two kill switches, both
+// takes the snapshot at 04:00 APP_TIMEZONE, catching up a missed slot the same
+// business day, and sends the digest on Mondays at 09:00 APP_TIMEZONE. Slot
+// maths and the schedule's words: lib/kpi-schedule.js. Two kill switches, both
 // default ON (the `!/^(false|0|no|off)$/i` shape): KPI_SNAPSHOT_ENABLED (the
 // nightly job and with it every scheduled email) and KPI_DIGEST_ENABLED (every
 // KPI email, the one-time preview included). A Super Admin's
@@ -65424,14 +65440,11 @@ async function runKpiSnapshot(kind) {
 	return { runId, status };
 }
 
-// The schedule in words, for the admin page. The Central times hold only for the
-// default business zone (US Eastern, one hour ahead of Central all year), so any
-// other zone is named as itself.
+// The schedule in words, for the admin page: the business zone only ("Eastern"
+// for the default, any other zone named as itself). One wording, in
+// lib/kpi-schedule.js scheduleText().
 function kpiScheduleText(tz) {
-	if (tz === appTime.DEFAULT_APP_TIMEZONE) {
-		return { snapshot: "Daily at 4:00 AM Eastern (3:00 AM Central)", digest: "Mondays at 9:00 AM Eastern (8:00 AM Central)" };
-	}
-	return { snapshot: `Daily at 4:00 AM (${tz})`, digest: `Mondays at 9:00 AM (${tz})` };
+	return kpiSchedule.scheduleText(tz);
 }
 
 function kpiParseErrors(text) {
@@ -65636,8 +65649,8 @@ if (KPI_SNAPSHOT_ENABLED && startsJob("KPI snapshot")) {
 		kpiTickSafely("boot");
 		setInterval(() => kpiTickSafely("nightly"), KPI_TICK_MS);
 	}, KPI_BOOT_DELAY_MS);
-	console.log(`[kpi] enabled — snapshot daily at 04:00 ${APP_TIMEZONE} (03:00 US Central), ` +
-		(KPI_DIGEST_ENABLED ? `digest Mondays at 09:00 ${APP_TIMEZONE} (08:00 US Central)` : "digest off (KPI_DIGEST_ENABLED)"));
+	console.log(`[kpi] enabled — snapshot daily at 04:00 ${APP_TIMEZONE}, ` +
+		(KPI_DIGEST_ENABLED ? `digest Mondays at 09:00 ${APP_TIMEZONE}` : "digest off (KPI_DIGEST_ENABLED)"));
 } else if (!KPI_SNAPSHOT_ENABLED) {
 	console.log("[kpi] off (KPI_SNAPSHOT_ENABLED) — no nightly KPI snapshot or digest is scheduled");
 }
