@@ -209,7 +209,7 @@ const SRCS = {
 	logout: liftRoute('app.post("/api/auth/logout", (req, res) => {'),
 	change: liftRoute('app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {'),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
-	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {'),
+	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {'),
 	refresh: liftFunction("function refreshOwnSession(req) {"),
 	fixName: liftRoute('app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {'),
 	accountIds: liftFunction("function driverRenameAccountIds(oldName, newName, opts = {}) {"),
@@ -429,7 +429,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
 		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
-		sources.updateUser)(
+		"userPasswordResetLimiter", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
@@ -443,7 +443,9 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		// scripts/test-investor-company-lock.js): nothing to judge.
 		() => [], () => null,
 		// The password-change email (above): sends nothing.
-		notifyPasswordChanged, passwordRules);
+		notifyPasswordChanged, passwordRules,
+		// The password-reset limiter (test-password-change-notice.js section 9): lets every request through.
+		passThrough);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions

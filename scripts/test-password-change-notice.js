@@ -42,6 +42,11 @@
  *      a 400 PASSWORD_IS_YOURS (the B21 incident: a saved login filled into
  *      both fields); "" or null keeps the current password; change-password
  *      answers exactly as before
+ *   §9 the reset limiter (shipped, on a fresh store): every PUT that carries a
+ *      password field counts, whatever it then answers (a guess with an invalid
+ *      role included); the 6th within 15 minutes is 429 before any comparison
+ *      or validation and writes nothing; edits without a password field never
+ *      count; the limit is per acting admin
  *
  * Runs the SHIPPED code: the login, change-password and PUT /api/users/:id
  * routes, notifyPasswordChanged(), sendEmail(), invoiceEmailHtml(),
@@ -91,13 +96,14 @@ function die(msg) {
 	process.exit(1);
 }
 
-let express, session, Database, bcrypt, SqliteStoreFactory;
+let express, session, Database, bcrypt, SqliteStoreFactory, rateLimitLib;
 try {
 	express = require("express");
 	session = require("express-session");
 	Database = require("better-sqlite3");
 	bcrypt = require("bcryptjs");
 	SqliteStoreFactory = require("better-sqlite3-session-store");
+	rateLimitLib = require("express-rate-limit");
 } catch (e) {
 	die(`a server dependency did not load (${e.message}); run npm ci under the .nvmrc Node`);
 }
@@ -141,10 +147,20 @@ function stripComments(src) {
 	}).join("\n");
 }
 
+// PUT /api/users/:id mounts the password-reset limiter after its role check.
+const PUT_HEAD = 'app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {';
+const PUT_HEAD_BASE = 'app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {';
+// `const userPasswordResetLimiter = rateLimit({ … });`, or null on a base without it.
+function liftResetLimiter() {
+	const head = "\nconst userPasswordResetLimiter = rateLimit({";
+	if (count(head) !== 1) return null;
+	const a = SRC.indexOf(head) + 1;
+	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
+}
 const SRCS = {
 	login: liftRoute('app.post("/api/auth/login", loginLimiter, async (req, res) => {'),
 	change: liftRoute('app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {'),
-	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {'),
+	updateUser: count(PUT_HEAD) === 1 ? liftRoute(PUT_HEAD) : liftRoute(PUT_HEAD_BASE),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
 	refresh: liftFunction("function refreshOwnSession(req) {"),
 	live: liftFunction("function liveSessionIds(sids) {"),
@@ -159,6 +175,7 @@ const SRCS = {
 	sendEmail: liftFunction("async function sendEmail(to, subject, htmlBody, attachments = [], { replyTo } = {}) {"),
 	emailHtml: liftFunction("function invoiceEmailHtml({ heading, bodyHtml, ctaText = \"\", ctaHref = \"\" }) {"),
 	notify: liftFunction("function notifyPasswordChanged(userId, addresses, { byAdmin }) {", { optional: true }),
+	resetLimiter: liftResetLimiter(),
 };
 const SESSION_CONFIG_SRC = (() => {
 	const a = SRC.indexOf("const sessionMiddleware = session({");
@@ -239,7 +256,7 @@ const fastBcrypt = { compare: (pw, h) => bcrypt.compare(pw, h), hash: (pw) => bc
 
 // mailer: "ok" | "fail" | "throw" | "real" (server.js's own sendEmail over a
 // recording nodemailer). `replica` is the REPLICA object sendEmail reads.
-async function startWorld({ mailer = "ok", replica = null, adminEmail = "" } = {}) {
+async function startWorld({ mailer = "ok", replica = null, adminEmail = "", limiter = false } = {}) {
 	const db = makeDb();
 	class TestStore extends SqliteStoreBase {}
 	const sessionMiddleware = buildSessionMiddleware(db, TestStore);
@@ -260,6 +277,11 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "" } = {
 	const requireAuth = new Function(`${SRCS.requireAuth}\nreturn requireAuth;`)();
 	const requireRole = new Function(`${SRCS.requireRole}\nreturn requireRole;`)();
 	const passThrough = (req, res, next) => next();
+	// The reset limiter as shipped (a fresh store per world), or a pass-through
+	// for the scenarios that reset many times on purpose.
+	const userPasswordResetLimiter = limiter && SRCS.resetLimiter
+		? new Function("rateLimit", "ipKeyGenerator", `${SRCS.resetLimiter}\nreturn userPasswordResetLimiter;`)(rateLimitLib, rateLimitLib.ipKeyGenerator)
+		: passThrough;
 
 	// What reached the mailer: { to, subject, html }.
 	const sent = [];
@@ -300,13 +322,13 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "" } = {
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
 		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
-		SRCS.updateUser)(
+		"userPasswordResetLimiter", SRCS.updateUser)(
 		app, requireRole, db, noSheetRows, "b21-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, purgeUserSessions, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
 		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {},
 		new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
-		() => null, () => [], () => null, notifyPasswordChanged, passwordRules);
+		() => null, () => [], () => null, notifyPasswordChanged, passwordRules, userPasswordResetLimiter);
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
@@ -714,6 +736,51 @@ async function sectionResetRules() {
 	}
 }
 
+// ═══ §9 the reset limiter ═══════════════════════════════════════════════════
+// The own-password check answers PASSWORD_IS_YOURS on a match, so whoever holds
+// an admin session could test guesses at that admin's password; a guess sent
+// with an invalid role writes nothing either way. So EVERY request that
+// carries a password field counts, before any validation or comparison: 5 per
+// 15 minutes per acting admin, change-password's limit. Requests without one
+// never count.
+async function sectionResetLimiter() {
+	const w = await startWorld({ limiter: true });
+	try {
+		const admin = await login(w, "root", PW.root);
+		const other = await login(w, "bob", PW.bob);
+		const aliceHash = storedHash(w.db, 1);
+		// Edits without a password field never count.
+		const plain = [];
+		for (let i = 0; i < 8; i++) plain.push((await editUser(w, admin, 1, { fullName: `Alice ${i}` })).status);
+		ok(plain.every((s) => s === 200), `§9 edits without a password field are never limited (${plain.join(",")})`);
+		// Five password-bearing requests, of every kind, each answered as usual.
+		const five = [
+			await editUser(w, admin, 1, { password: "Guess-0001!", role: "Bogus" }),
+			await editUser(w, admin, 1, { password: "weak" }),
+			await editUser(w, admin, 1, { password: PW.root }),
+			await editUser(w, admin, 1, { fullName: "Alice F", password: "" }),
+			await editUser(w, admin, 1, { password: RESET_PW }),
+		];
+		ok(JSON.stringify(five.map((r) => r.status)) === JSON.stringify([400, 400, 400, 200, 200]),
+			`§9 the first five password-bearing requests are answered as usual (${five.map((r) => `${r.status} ${r.json && r.json.code}`).join(", ")})`);
+		ok(five[0].json && five[0].json.code === "INVALID_ROLE", "§9 ...a guess sent with an invalid role is refused, and it counted");
+		const sixth = await editUser(w, admin, 1, { password: PW.root, role: "Bogus" });
+		ok(sixth.status === 429, `§9 the 6th within 15 minutes is 429 (${sixth.status} ${sixth.raw})`);
+		ok(!(sixth.json && /PASSWORD_IS_YOURS|INVALID_ROLE/.test(String(sixth.json.code))) && !sixth.raw.includes(PW.root),
+			"§9 ...before any comparison or other validation answers (the admin's own password with a bad role gets neither code)");
+		ok(sixth.json && typeof sixth.json.error === "string" && /Too many password/.test(sixth.json.error), `§9 ...with a plain message (${sixth.raw})`);
+		const seventh = await editUser(w, admin, 1, { password: NEW_PW });
+		ok(seventh.status === 429 && bcrypt.compareSync(RESET_PW, storedHash(w.db, 1)) && storedHash(w.db, 1) !== aliceHash,
+			"§9 ...and a valid reset is refused too, with nothing written");
+		const stillPlain = await editUser(w, admin, 1, { fullName: "Alice Again" });
+		ok(stillPlain.status === 200, `§9 a limited admin can still edit without a password (${stillPlain.status})`);
+		const byOther = await editUser(w, other, 1, { password: NEW_PW });
+		ok(byOther.status === 200, `§9 the limit is per acting admin: another Super Admin is not limited (${byOther.status} ${byOther.raw})`);
+	} finally {
+		await w.close();
+	}
+}
+
 // ═══ §6 the source ══════════════════════════════════════════════════════════
 function sectionSource() {
 	const at = (s, needle) => s.indexOf(needle);
@@ -763,6 +830,14 @@ function sectionSource() {
 	ok(uOwn > 0 && uOwn < uReread && Math.abs(uOwn - uHash) < 600,
 		"§6 PUT compares with the acting admin's hash alongside the hashing, in the await block above the re-read and the guards");
 	ok(/"PASSWORD_IS_YOURS"/.test(upd) && /This is your own password\. Enter a new password for this user\./.test(upd), "§6 ...and refuses with its code and message");
+
+	// The reset limiter: after the role check, before the handler.
+	ok(count(PUT_HEAD) === 1, "§6 PUT /api/users/:id mounts userPasswordResetLimiter after requireRole(\"Super Admin\")");
+	const lim = SRCS.resetLimiter ? stripComments(SRCS.resetLimiter) : "";
+	ok(/windowMs: 15 \* 60 \* 1000,/.test(lim) && /\bmax: 5,/.test(lim), "§6 ...5 per 15 minutes, change-password's limit");
+	ok(/const id = req\.session\?\.user\?\.id;\s*return id \? `u:\$\{id\}` : `ip:\$\{ipKeyGenerator\(req\.ip\)\}`;/.test(lim), "§6 ...keyed per acting admin (session user id, else the IP)");
+	ok(/skip: \(req\) => !\(req\.body && typeof req\.body === "object" && req\.body\.password !== undefined\)/.test(lim),
+		"§6 ...counting every request that carries a password field, and only those");
 }
 
 function finish() {
@@ -789,6 +864,7 @@ function finish() {
 	await sectionRealMailer();
 	sectionRule();
 	await sectionResetRules();
+	await sectionResetLimiter();
 	finish();
 })().catch((e) => {
 	restoreConsole();

@@ -24981,7 +24981,27 @@ function userUpdateLockBlockers(user, next) {
 }
 
 // Admin: update a user's role, driverName, or email
-app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
+// B21: password resets through PUT /api/users/:id, 5 per 15 minutes per acting
+// admin (change-password's limit). The reset refuses the acting admin's own
+// password (PASSWORD_IS_YOURS), so without a cap whoever holds an admin session
+// could use it to test guesses at that admin's password; a guess sent with an
+// invalid role writes nothing either way. So EVERY request carrying a password
+// field counts, whatever the route then answers, and this runs before any
+// validation or comparison. Edits without a password field never count.
+// Mounted after requireRole, so only a Super Admin spends the budget; keyed on
+// the session user, else the IP, like the other per-feature limiters.
+const userPasswordResetLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 5,
+	skip: (req) => !(req.body && typeof req.body === "object" && req.body.password !== undefined),
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many password changes. Try again in 15 minutes." },
+	standardHeaders: true,
+});
+app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const { role, email, password, fullName, companyName } = req.body;
