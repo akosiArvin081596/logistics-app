@@ -14529,8 +14529,10 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 //       field stripped, so driver/admin names never leak via the timeline.
 //     * X-Robots-Tag keeps tracker URLs out of search indexes
 //   - Driver GPS privacy: only the last ping is returned, and only if it's
-//     within the last 2 hours — prevents leaking a driver's off-shift
-//     location after they stop reporting.
+//     within the last 3 hours (MAX_PING_AGE_MS) — prevents leaking a driver's
+//     off-shift location after they stop reporting.
+//   - A ping older than 2 hours gives no ETA and no distance (B11, owner
+//     decision 2026-10-15); the page shows its age from lastPing.at instead.
 const trackPublicLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60, // higher than publicFormLimiter — customers refresh a lot
@@ -14836,7 +14838,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		const driverNameKey = driverNameRaw.toLowerCase().replace(/\s+/g, " ").trim();
 		let lastPing = null;
 		let lastPingSpeed = 0;
+		let lastPingAgeMs = null;
 		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
+		const ETA_MAX_PING_AGE_MS = 2 * 60 * 60 * 1000; // B11: no ETA or distance from an older fix
 		if (driverNameKey) {
 			// Source priority: pick whichever of ELD telemetry vs phone GPS has the
 			// most recent valid ping within the 3-hour window. ELD is preferred only
@@ -14908,15 +14912,19 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				chosen = rmCandidate || phoneCandidate;
 			}
 			if (chosen) {
-				lastPing = { lat: chosen.lat, lng: chosen.lng, at: chosen.at };
+				// The fix time as an ISO instant, whatever form its source stored it
+				// in, so every browser reads its age the same way.
+				lastPing = { lat: chosen.lat, lng: chosen.lng, at: new Date(chosen.ts).toISOString() };
 				lastPingSpeed = chosen.speed;
+				lastPingAgeMs = Date.now() - chosen.ts;
 			}
 		}
+		const pingFreshForEta = lastPing !== null && lastPingAgeMs !== null && lastPingAgeMs <= ETA_MAX_PING_AGE_MS;
 
 		let eta = null;
 		const deliveredRe = /^(delivered|pod received|completed)$/i;
 		const isDelivered = deliveredRe.test(statusLower);
-		if (!isDelivered && lastPing && destLat != null && destLng != null) {
+		if (!isDelivered && pingFreshForEta && destLat != null && destLng != null) {
 			let distanceMiles, minutesRemaining, expectedAt;
 			const route = await getRoute(
 				{ latitude: lastPing.lat, longitude: lastPing.lng },
@@ -14996,6 +15004,11 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		if (eta) {
 			routeDistanceMiles = eta.distanceMiles;
 			routeEtaMinutes = eta.minutesRemaining;
+		} else if (lastPing && !pingFreshForEta) {
+			// A ping older than 2 hours: no distance or ETA beside the line either,
+			// where the page would read the planned lane's as the truck's (B11).
+			routeDistanceMiles = null;
+			routeEtaMinutes = null;
 		}
 
 		// The driver's truck, matched as the money stamps match it
