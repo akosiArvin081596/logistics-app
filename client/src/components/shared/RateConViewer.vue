@@ -76,7 +76,7 @@
 <script setup>
 import { ref, shallowRef, computed, watch, nextTick, effectScope, useId, onMounted, onBeforeUnmount } from 'vue'
 import { FIT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_PAGE_ASPECT, stepZoom, clampPage, tileMaxHeight } from '../../lib/rateConView'
-import { fitSize, fitView, clampView, zoomAt, panBy, pinchStep, wheelZoomFactor, renderDensity, keepCentre, pageTopView } from '../../lib/rateConZoom'
+import { fitSize, fitView, clampView, zoomAt, panBy, pinchStep, wheelZoomFactor, renderDensity, canvasPixelCap, keepCentre, pageTopView } from '../../lib/rateConZoom'
 
 const props = defineProps({
   // A blob: URL of the PDF bytes (RateConPdfSection fetched them).
@@ -114,6 +114,14 @@ const nativeFull = ref(false)     // the Fullscreen API's own state
 const isFull = computed(() => expanded.value || nativeFull.value)
 
 const dpr = () => (typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1)
+// How big a canvas this device takes (rateConZoom.js canvasPixelCap()), read once.
+function deviceTraits() {
+  if (typeof window === 'undefined') return {}
+  const nav = window.navigator || {}
+  const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+  return { userAgent: nav.userAgent, platform: nav.platform, maxTouchPoints: nav.maxTouchPoints, coarsePointer: !!coarse }
+}
+const canvasCap = canvasPixelCap(deviceTraits())
 // A narrow (phone) stage keeps a smaller margin round the page.
 const gapFor = (w) => (w > 0 && w < 480 ? 4 : 8)
 
@@ -208,20 +216,20 @@ async function drawPage(n, place) {
   let p
   try {
     p = await d.getPage(n)
-  } catch {
-    if (seq === renderSeq) onFail()
+  } catch (err) {
+    drawFailed(seq, place, err)
     return
   }
   if (seq !== renderSeq) return
   const base = p.getViewport({ scale: 1 })
-  if (!base || !(base.width > 0) || !(base.height > 0)) { onFail(); return }
+  if (!base || !(base.width > 0) || !(base.height > 0)) { drawFailed(seq, place, new Error('the page has no size')); return }
   const a = base.height / base.width
   const f = fitSize(stage.value, a)
   const target = place ? place(f) : clampView(view.value, stage.value, f)
   const cssW = f.w * target.zoom
   const cssH = f.h * target.zoom
   if (!(cssW > 0) || !(cssH > 0)) return
-  const viewport = p.getViewport({ scale: (cssW / base.width) * renderDensity(cssW, cssH, dpr()) })
+  const viewport = p.getViewport({ scale: (cssW / base.width) * renderDensity(cssW, cssH, dpr(), canvasCap) })
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.floor(viewport.width))
   canvas.height = Math.max(1, Math.floor(viewport.height))
@@ -232,7 +240,7 @@ async function drawPage(n, place) {
   } catch (err) {
     if (renderTask === task) renderTask = null
     freeCanvas(canvas)
-    if (seq === renderSeq && !(err && err.name === 'RenderingCancelledException')) onFail()
+    if (!(err && err.name === 'RenderingCancelledException')) drawFailed(seq, place, err)
     return
   }
   if (renderTask === task) renderTask = null
@@ -242,6 +250,17 @@ async function drawPage(n, place) {
   if (place || a !== aspect.value) view.value = target
   aspect.value = a
   swapIn(canvas, target.zoom, n, f.w)
+}
+// A draw that failed. A sharp re-draw of the page already on screen keeps that
+// page (still right, only softer until the next zoom) and logs; a new page or
+// the first draw shows the failure message.
+function drawFailed(seq, place, err) {
+  if (seq !== renderSeq) return
+  if (!place && shown.value && shownPage === page.value) {
+    console.warn('[rate con viewer] sharp re-draw failed, keeping the page on screen:', err && err.message ? err.message : err)
+    return
+  }
+  onFail()
 }
 // The new canvas goes in before the old one comes out, so the page box is
 // never empty; the old one is freed only once it is off screen.

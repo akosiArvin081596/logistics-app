@@ -19,8 +19,17 @@
 //   push it further out, so nothing ever snaps.
 import { FIT_ZOOM, DEFAULT_PAGE_ASPECT, fitPageWidth, clampZoom } from './rateConView.js'
 
-// iOS Safari refuses canvases past ~16.7 million pixels and paints them blank.
+// iOS Safari refuses canvases past ~16.7 million pixels and paints them blank,
+// and phones run short of memory well before that. The cap for iOS, iPadOS and
+// touch-first devices, and the default when the device is unknown.
 export const MAX_CANVAS_PIXELS = 16 * 1000 * 1000
+// Desktop Chrome, Safari and Firefox draw far larger canvases (about 268 million
+// pixels in Chrome and Safari). 36 million (144 MB) keeps 400 % at full density
+// on a Retina screen in the tile and most full-screen windows, with room for
+// the old and the new canvas to be alive together during a swap.
+export const DESKTOP_CANVAS_PIXELS = 36 * 1000 * 1000
+// No canvas side longer than this (a very tall page), within every browser's limit.
+export const MAX_CANVAS_SIDE = 16384
 // The wheel: about 1.2x per mouse-wheel notch (100 px). A trackpad pinch comes
 // as wheel events with ctrlKey and small deltas, scaled finer and capped lower
 // so ctrl + a mouse wheel is still a single step.
@@ -129,13 +138,29 @@ export function wheelZoomFactor(deltaY, deltaMode = 0, ctrlKey = false) {
   return Math.exp(-clamp(px, -WHEEL_MAX_PX, WHEEL_MAX_PX) * WHEEL_PER_PX)
 }
 
+// The canvas cap for a device, from navigator's userAgent, platform and
+// maxTouchPoints and whether the primary pointer is coarse: the iOS-safe cap on
+// iOS, iPadOS and touch-first devices (and when nothing is known), the desktop
+// cap on desktop browsers (a touch screen with a mouse first counts as desktop).
+export function canvasPixelCap(device = {}) {
+  const ua = String((device && device.userAgent) || '')
+  if (!ua || /iPhone|iPad|iPod/.test(ua)) return MAX_CANVAS_PIXELS
+  // An iPad asking for the desktop site sends a Mac user agent; touch gives it away.
+  if (device.platform === 'MacIntel' && Number(device.maxTouchPoints) > 1) return MAX_CANVAS_PIXELS
+  if (device.coarsePointer) return MAX_CANVAS_PIXELS
+  return DESKTOP_CANVAS_PIXELS
+}
+
 // Canvas pixels per CSS px for a page drawn cssW × cssH: the screen's density,
-// lowered only as far as keeps the canvas under the iOS limit (400 % on a phone).
-export function renderDensity(cssW, cssH, dpr = 1) {
+// lowered only as far as keeps the canvas under `cap` pixels (canvasPixelCap())
+// and every side under MAX_CANVAS_SIDE.
+export function renderDensity(cssW, cssH, dpr = 1, cap = MAX_CANVAS_PIXELS) {
   const d = Number(dpr) > 0 ? Number(dpr) : 1
-  const area = Number(cssW) * Number(cssH)
-  if (!(area > 0)) return d
-  return Math.min(d, Math.sqrt(MAX_CANVAS_PIXELS / area))
+  const w = Number(cssW)
+  const h = Number(cssH)
+  if (!(w > 0) || !(h > 0)) return d
+  const c = Number(cap) > 0 ? Number(cap) : MAX_CANVAS_PIXELS
+  return Math.min(d, Math.sqrt(c / (w * h)), MAX_CANVAS_SIDE / Math.max(w, h))
 }
 
 // The stage changed size (full screen, a rotated phone): same zoom, and the

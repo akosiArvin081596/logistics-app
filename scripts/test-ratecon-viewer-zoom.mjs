@@ -193,6 +193,35 @@ if (haveAll && V) {
   }
 }
 
+// Canvas caps: the iOS-safe one on iOS, iPadOS and touch-first devices, a
+// higher one on desktop browsers, and no side past what Safari draws.
+{
+  const has = !!Z && typeof Z.canvasPixelCap === 'function' && Z.DESKTOP_CANVAS_PIXELS > Z.MAX_CANVAS_PIXELS && Z.MAX_CANVAS_SIDE > 0
+  ok('§1 rateConZoom.js has canvasPixelCap(), DESKTOP_CANVAS_PIXELS and MAX_CANVAS_SIDE', has)
+  if (has) {
+    const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+    const MAC_SAFARI = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
+    const WIN_CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+    const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36'
+    const IOS = Z.MAX_CANVAS_PIXELS
+    const DESK = Z.DESKTOP_CANVAS_PIXELS
+    ok('§1 cap: iPhone gets the iOS-safe cap', Z.canvasPixelCap({ userAgent: IPHONE, platform: 'iPhone', maxTouchPoints: 5, coarsePointer: true }) === IOS)
+    ok('§1 cap: an iPad in desktop mode (Mac user agent, touch points) gets the iOS-safe cap', Z.canvasPixelCap({ userAgent: MAC_SAFARI, platform: 'MacIntel', maxTouchPoints: 5, coarsePointer: false }) === IOS)
+    ok('§1 cap: a touch-first Android phone gets the iOS-safe cap', Z.canvasPixelCap({ userAgent: ANDROID, platform: 'Linux armv81', maxTouchPoints: 5, coarsePointer: true }) === IOS)
+    ok('§1 cap: Mac Safari gets the desktop cap', Z.canvasPixelCap({ userAgent: MAC_SAFARI, platform: 'MacIntel', maxTouchPoints: 0, coarsePointer: false }) === DESK)
+    ok('§1 cap: Windows Chrome with a touch screen but a mouse first gets the desktop cap', Z.canvasPixelCap({ userAgent: WIN_CHROME, platform: 'Win32', maxTouchPoints: 10, coarsePointer: false }) === DESK)
+    ok('§1 cap: nothing known gets the iOS-safe cap', Z.canvasPixelCap({}) === IOS && Z.canvasPixelCap() === IOS)
+    ok(`§1 cap: the desktop cap stays well inside desktop limits (${DESK} px, side ${Z.MAX_CANVAS_SIDE})`, DESK >= 30e6 && DESK <= 40e6 && Z.MAX_CANVAS_SIDE <= 16384)
+    const dW = 528 * 4
+    const dH = dW * (11 / 8.5)
+    ok('§1 desktop, 400 % at DPR 2: drawn at the full density under the desktop cap', Z.renderDensity(dW, dH, 2, DESK) === 2 && (dW * 2) * (dH * 2) <= DESK)
+    ok('§1 the same page under the iOS-safe cap gives way', Z.renderDensity(dW, dH, 2, IOS) < 2)
+    ok('§1 renderDensity defaults to the iOS-safe cap', Z.renderDensity(dW, dH, 2) === Z.renderDensity(dW, dH, 2, IOS))
+    const tall = Z.renderDensity(1000, 12000, 2, DESK)
+    ok(`§1 a very tall page: no canvas side past MAX_CANVAS_SIDE (${Math.round(12000 * tall)})`, 12000 * tall <= Z.MAX_CANVAS_SIDE && (1000 * tall) * (12000 * tall) <= DESK)
+  }
+}
+
 // ══ §2 the component, mounted ═══════════════════════════════════════════════
 const clientRequire = createRequire(path.join(CLIENT_DIR, 'package.json'))
 const Vue = clientRequire('vue')
@@ -336,7 +365,7 @@ if (VIEWER) {
       const promise = new Promise((res, rej) => { resolve = res; reject = rej })
       const task = { promise, cancelled: false, cancel() { task.cancelled = true; const e = new Error('Rendering cancelled'); e.name = 'RenderingCancelledException'; reject(e) } }
       promise.catch(() => {})
-      renders.push({ canvas, viewport, page: n, resolve, task })
+      renders.push({ canvas, viewport, page: n, resolve, reject, task })
       return task
     },
     cleanup() {},
@@ -706,6 +735,93 @@ if (VIEWER) {
       ok('§2 ...frees its off-screen canvas', pending.canvas.width === 0 && pending.canvas.height === 0)
       ok('§2 ...and frees the page that was on screen only once it is off screen', first2.canvas.width === 0 && log.every((e) => !e.attached))
       ok('§2 ...and removes every listener it added (page area, window, document)', stage2.listeners.length === 0 && winListeners.length === 0 && docListeners.length === 0)
+    }
+
+    // The canvas cap where it is used: 400 % on a DPR-3 touch phone stays under
+    // the iOS limit; 400 % on a DPR-2 desktop browser is drawn at full density.
+    const atMaxZoom = async (device) => {
+      window.devicePixelRatio = device.dpr
+      window.navigator = { userAgent: device.userAgent, platform: device.platform, maxTouchPoints: device.maxTouchPoints }
+      window.matchMedia = (q) => ({ media: q, matches: q === '(pointer: coarse)' ? device.coarse : false })
+      try {
+        const mm = mountInMemory(Viewer, { src: 'blob:test' }, device.size)
+        await drain()
+        resolveLive()
+        await drain()
+        const box = mm.find((n) => n.type === 'el' && hasClass(n, 'rcv-page'))
+        const zin = () => mm.find((n) => n.type === 'el' && n.props['aria-label'] === 'Zoom in')
+        const fitW = placed(box).w
+        for (let i = 0; i < 12 && !zin().props.disabled; i++) { zin().props.onClick(); await drain() }
+        await sleep(320)
+        await drain()
+        const r = renders.filter((x) => !x.task.cancelled && !x.done).pop()
+        const canvas = r ? { w: r.canvas.width, h: r.canvas.height } : null
+        resolveLive()
+        await drain()
+        const css = placed(box)
+        mm.unmount()
+        await drain()
+        return { canvas, zoom: css ? css.w / fitW : 0, density: canvas && css ? canvas.w / css.w : 0 }
+      } finally {
+        window.devicePixelRatio = 1
+        delete window.navigator
+        delete window.matchMedia
+      }
+    }
+    {
+      const phone = await atMaxZoom({ dpr: 3, size: { w: 348, h: 414 }, coarse: true, maxTouchPoints: 5, platform: 'iPhone', userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1' })
+      const px = phone.canvas ? phone.canvas.w * phone.canvas.h : Infinity
+      ok(`§2 phone (DPR 3, touch): 400 % is reached (${phone.zoom.toFixed(2)}x)`, near(phone.zoom, 4, 0.01))
+      ok(`§2 phone (DPR 3, touch): the 400 % canvas stays under the iOS limit (${phone.canvas && `${phone.canvas.w} x ${phone.canvas.h}`} = ${px} <= ${Z && Z.MAX_CANVAS_PIXELS})`, !!Z && px <= Z.MAX_CANVAS_PIXELS)
+      ok(`§2 phone (DPR 3, touch): ...and is still drawn well above 2x (${phone.density.toFixed(2)})`, phone.density > 2)
+      const desk = await atMaxZoom({ dpr: 2, size: { w: 900, h: 700 }, coarse: false, maxTouchPoints: 0, platform: 'Win32', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36' })
+      const dpx = desk.canvas ? desk.canvas.w * desk.canvas.h : Infinity
+      ok(`§2 desktop (DPR 2): 400 % is drawn at the full screen density (${desk.density.toFixed(2)})`, near(desk.zoom, 4, 0.01) && near(desk.density, 2, 0.01))
+      ok(`§2 desktop (DPR 2): ...within the desktop cap (${dpx})`, !!Z && dpx <= (Z.DESKTOP_CANVAS_PIXELS || 0))
+    }
+
+    // A failed sharp re-draw keeps the good page; a failed first draw says so.
+    {
+      const warnings = []
+      const origWarn = console.warn
+      console.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
+      try {
+        const m3 = mountInMemory(Viewer, { src: 'blob:test' }, SIZE)
+        await drain()
+        resolveLive()
+        await drain()
+        const box3 = m3.find((n) => n.type === 'el' && hasClass(n, 'rcv-page'))
+        const stage3 = m3.find((n) => n.type === 'el' && hasClass(n, 'rcv-stage'))
+        const good = canvasesIn(box3)[0]
+        const wheel3 = stage3.listeners.find((l) => l.type === 'wheel')
+        wheel3.fn({ deltaY: -200, deltaMode: 0, ctrlKey: false, clientX: 450, clientY: 350, preventDefault() {} })
+        await sleep(320)
+        await drain()
+        const bad = renders.filter((x) => !x.task.cancelled && !x.done).pop()
+        if (bad) { bad.done = true; bad.reject(new Error('render failed (test)')) }
+        await drain()
+        ok('§2 a failed sharp re-draw keeps the page on screen, no failure message', !!bad && !m3.find((n) => n.type === 'el' && hasClass(n, 'rcv-status-fail')) && canvasesIn(box3).length === 1 && canvasesIn(box3)[0] === good)
+        ok('§2 ...and logs it to the console', warnings.some((w) => /rate con/i.test(w) && /render failed \(test\)/.test(w)))
+        const n3 = renders.length
+        wheel3.fn({ deltaY: -100, deltaMode: 0, ctrlKey: false, clientX: 450, clientY: 350, preventDefault() {} })
+        await sleep(320)
+        await drain()
+        ok('§2 ...and the next zoom still draws sharp', renders.length === n3 + 1)
+        resolveLive()
+        await drain()
+        m3.unmount()
+        await drain()
+        const m4 = mountInMemory(Viewer, { src: 'blob:test' }, SIZE)
+        await drain()
+        const first4 = renders.filter((x) => !x.task.cancelled && !x.done).pop()
+        if (first4) { first4.done = true; first4.reject(new Error('bad page (test)')) }
+        await drain()
+        ok('§2 a first draw that fails still says "Couldn\'t show the rate con here."', !!first4 && !!m4.find((n) => n.type === 'el' && hasClass(n, 'rcv-status-fail')))
+        m4.unmount()
+        await drain()
+      } finally {
+        console.warn = origWarn
+      }
     }
   } catch (err) {
     ok(`§2 RateConViewer mounts in this harness (${err.message})`, false)
