@@ -130,6 +130,8 @@ const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY
 	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI",
 	// GET /api/trucks' ELD status (eldDeviceStatus()).
 	"ELD_STALE_HOURS",
+	// Driver availability (R11): read off the env this world has, i.e. off.
+	"DRIVER_AVAILABILITY_ENABLED",
 	// GET /api/financials reads the report (buildFinancialsReport()).
 	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR"];
 const LETS = ["lastPayStructShadowWarnMs"];

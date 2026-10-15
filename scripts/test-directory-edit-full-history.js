@@ -209,6 +209,8 @@ function makeApp() {
 		syncCarrierDriverHistory: () => {},
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
+		// Driver availability off (R11): the delete leaves time-off rows alone.
+		DRIVER_AVAILABILITY_ENABLED: false,
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const names = Object.keys(env);

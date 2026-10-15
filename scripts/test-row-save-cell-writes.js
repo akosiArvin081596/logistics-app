@@ -292,6 +292,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		normalizeLoadId,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		getSheets: sheet.getSheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		SHEET_ROW_MAX_CELLS: 20000,

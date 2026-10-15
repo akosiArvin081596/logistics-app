@@ -200,6 +200,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import { useGeocode } from '../composables/useGeocode'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import RateConDropzone from '../components/shared/RateConDropzone.vue'
@@ -207,6 +208,7 @@ import RateConDropzone from '../components/shared/RateConDropzone.vue'
 const api = useApi()
 const router = useRouter()
 const { show: toast } = useToast()
+const { withOffDutyConfirm } = useOffDutyConfirm()
 const geocode = useGeocode()
 
 const headers = ref([])
@@ -549,7 +551,10 @@ async function submit() {
       pickupAddress: form.pickupAddress || '',
       dropoffAddress: form.dropoffAddress || '',
     } : undefined
-    const res = await api.post('/api/data?sheet=Job%20Tracking', { values, coordinates })
+    // A driver recorded off on the load's days (R11): "Assign anyway" re-sends
+    // confirmed; "Keep as is" leaves the form as filled in.
+    const res = await withOffDutyConfirm((confirmOffDuty) => api.post('/api/data?sheet=Job%20Tracking', { values, coordinates, ...(confirmOffDuty ? { confirmOffDuty: true } : {}) }))
+    if (res && res.offDutyDeclined) return
     if (res.warning) duplicateWarning.value = res.warning
 
     toast('Job created successfully', 'success')

@@ -25,6 +25,7 @@
   <!-- Teleports to <body>, so its position in this tree is cosmetic. Kept
        outside <main> to make it obvious it is not part of the page flow. -->
   <MaintenanceModal />
+  <OffDutyConfirmHost />
 </template>
 
 <script setup>
@@ -38,6 +39,7 @@ import AppSidebar from './components/layout/AppSidebar.vue'
 import AppToast from './components/layout/AppToast.vue'
 import MaintenanceBanner from './components/shared/MaintenanceBanner.vue'
 import MaintenanceModal from './components/shared/MaintenanceModal.vue'
+import OffDutyConfirmHost from './components/shared/OffDutyConfirmHost.vue'
 
 const route = useRoute()
 const auth = useAuthStore()

@@ -64,7 +64,7 @@
               <div class="mobile-load-action-row">
                 <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm mobile-load-select">
                   <option value="">Pick driver</option>
-                  <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
+                  <option v-for="d in reassignDrivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}{{ offSuffix(d) }}</option>
                 </select>
                 <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
               </div>
@@ -112,7 +112,7 @@
                   <div style="display:flex;align-items:center;gap:0.25rem;">
                     <select v-model="reassignSelections[job._rowIndex]" class="dash-select dash-select-sm" style="flex:1;min-width:0;">
                       <option value="">{{ getCurrentDriver(job) || 'Pick driver' }}</option>
-                      <option v-for="d in drivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}</option>
+                      <option v-for="d in reassignDrivers" :key="d" :value="d">{{ d }}{{ isBusy(d) ? ' — On Load' : '' }}{{ offSuffix(d) }}</option>
                     </select>
                     <Button v-if="reassignSelections[job._rowIndex]" size="sm" @click="confirmReassign(job)">Go</Button>
                   </div>
@@ -522,13 +522,22 @@ import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { useViewport } from '../../composables/useViewport'
 import { useToast } from '../../composables/useToast'
+import { useOffDutyConfirm } from '../../composables/useOffDutyConfirm'
+import { offDutySuffix, sortDriversForAssign } from '../../lib/availabilityText'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 const api = useApi()
 const { show: toast } = useToast()
+const { withOffDutyConfirm } = useOffDutyConfirm()
 const auth = useAuthStore()
 const dashStore = useDashboardStore()
 const { isMobile } = useViewport()
-const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, busyDrivers: { type: Array, default: () => [] }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
+// offUntil: drivers recorded off today -> last day off (R11); null when the
+// server sent none, and then nothing about time off shows.
+const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, drivers: { type: Array, default: () => [] }, busyDrivers: { type: Array, default: () => [] }, offUntil: { type: Object, default: null }, active: { type: Boolean, default: true }, focusLoadId: { type: String, default: '' } })
+// The reassign dropdown: a driver off today reads '— Off until Oct 20' and
+// sorts last, never hidden.
+const reassignDrivers = computed(() => sortDriversForAssign(props.drivers, props.offUntil))
+function offSuffix(d) { return offDutySuffix(props.offUntil ? props.offUntil[d] : null) }
 watch(() => props.active, v => { if (!v) { selectedJob.value = null; selectedDriverPosition.value = null } })
 const emit = defineEmits(['reassign', 'cancel', 'status-update', 'deleted', 'focus-consumed'])
 const searchQuery = ref('')
@@ -838,10 +847,14 @@ async function submitEdit() {
     // Same order as values: a cell equal to its baseline was not edited, and
     // the server leaves it as the sheet holds it now (see editBaseline).
     const baseline = props.headers.map(opened)
-    await api.put(
+    const body = { values, baseline }
+    // A new driver recorded off on the load's days: "Assign anyway" re-sends
+    // the same save confirmed; "Keep as is" leaves the editor open.
+    const sent = await withOffDutyConfirm((confirmOffDuty) => api.put(
       `/api/data/${rowIndex}?sheet=${encodeURIComponent('Job Tracking')}`,
-      { values, baseline }
-    )
+      confirmOffDuty ? { ...body, confirmOffDuty: true } : body
+    ))
+    if (sent && sent.offDutyDeclined) return
     const patch = {}
     for (const col of editableHeaders.value) {
       if (withheldCols.value.has(col) || contactCells.value.has(col)) continue
