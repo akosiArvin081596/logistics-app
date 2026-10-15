@@ -102,7 +102,7 @@ const NAMES = [
 	"resolvePreviewUser", "parseSheet", "deduplicateLoads", "findCol", "getDeletedLoadIds", "loadKeySet", "excludeDroppedLoads",
 	"reportRangeMonthKeys", "summarizeReportPayout", "reportPayoutNote", "reportPayoutLabel", "periodLabel",
 	"investorJobRowTest", "driverNameForTotals", "isBuiltInPropertyName", "normalizeDriverName",
-	"investorTruckPurchase", "resolveInvestorSplitPct", "investorExpenseScopeSql",
+	"investorTruckPurchase", "resolveInvestorSplitPct", "investorExpenseScopeSql", "expenseFrom", "personalLedgerPresent",
 ];
 const SOURCES = Object.fromEntries(NAMES.map((n) => [n, extractFn(n)]));
 const CONSTS = ["CANCELED_STATUS_RE", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR"].map(extractConst);

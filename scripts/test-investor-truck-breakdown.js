@@ -89,7 +89,7 @@ const FNS = [
 	"getDeductibleExpensesByDriverMonth", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules",
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
 	"appDay", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
-	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
+	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "expenseFrom", "personalLedgerPresent",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "sanitizeDetails", "getLoadMilesIndex",

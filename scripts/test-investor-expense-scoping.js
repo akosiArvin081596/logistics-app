@@ -126,6 +126,10 @@ const FNS = [
 	// getInvestorDriverSet — a hand-written stand-in would only prove that a set of
 	// names this test invented leaks, not that the one the handler actually built did.
 	"getInvestorDriverSet",
+	// The receipt source every settlement sum reads (expenseFrom("book")); with no
+	// Personal ledger in the fixture it is the plain table.
+	"expenseFrom",
+	"personalLedgerPresent",
 ];
 
 // `db` is injected so getInvestorDriverMonthWindows runs against a real fixture
@@ -301,8 +305,8 @@ const S = loadShipped(db);
 	ok(callers === 8, `§1 investorExpenseScopeSql should have 1 definition + 7 callers; found ${callers}`);
 
 	for (const marker of [
-		"FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m",
-		"FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)",
+		'FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m',
+		'FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)',
 	]) ok(SRC.includes(marker), `§1 shared scope reaches: ${marker}`);
 
 	ok(SRC.includes("fixedCostComposition"), "§1 monthlyEarnings carries fixedCostComposition");
@@ -646,8 +650,8 @@ let sectionMutants = 0;
 		const code = (s) => s.split("\n").filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
 		const hCode = code(h), bCode = code(b);
 		return [
-			[(hCode.match(/FROM expenses/g) || []).length === 1,
-				"§11 the handler has exactly ONE `FROM expenses` query — a second one is a second place to get the scope wrong"],
+			[(hCode.match(/FROM (?:expenses\b|\$\{expenseFrom\("book"\)\})/g) || []).length === 1,
+				"§11 the handler has exactly ONE receipt query (the books source) — a second one is a second place to get the scope wrong"],
 			[/investorExpenseScopeSql\(\s*reportOwnerId\s*,\s*getInvestorDriverMonthWindows\(\s*reportOwnerId\s*\)\s*,\s*EXPENSE_PERIOD_EXPR\s*\)/.test(bCode),
 				"§11 it scopes via investorExpenseScopeSql(reportOwnerId, getInvestorDriverMonthWindows(reportOwnerId), EXPENSE_PERIOD_EXPR)"],
 			[!/LOWER\(driver\)\s*IN/.test(bCode),
@@ -681,7 +685,7 @@ let sectionMutants = 0;
 	function runBlock(b, ownerId, lib) {
 		const fn = new Function("db", "S", "reportOwnerId", `
 			const { investorExpenseScopeSql, getInvestorDriverMonthWindows, getInvestorDriverSet,
-			        EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR } = S;
+			        EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR, expenseFrom } = S;
 			const dateWhere = ''; const dateParams = [];
 			let fuelExpenses = 0, maintenanceExpenses = 0, otherExpenses = 0, totalExpenses = 0;
 			${b}

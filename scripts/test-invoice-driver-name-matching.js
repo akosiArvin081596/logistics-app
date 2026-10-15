@@ -124,16 +124,19 @@ const SHARED_FNS = [
 	"truckDailyRateCandidates", "findDriverNameClashes", "canonicalDriverName", "driverOwnsInvoice",
 	"invoiceTotalDue", "invoiceListSummary", "buildPaymentReport", "sanitizeManualInvoiceRows", "manualInvoiceTotals",
 	"assertInvoiceFileStillOwn", "writeInvoiceFileAtomically",
+	// The Personal lines a weekly invoice carries (none in these fixtures).
+	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
+	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
 	// The P&L's deduction and the key it folds a driver's spellings to — which,
 	// like getAllExcludedDriverDays(), reads a name through these two.
 	"isBuiltInPropertyName", "driverNameForTotals",
-	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth",
+	"expenseDriverKey", "foldExpenseTotalsByDriver", "getDeductibleExpensesByDriverMonth", "expenseFrom",
 	// The Friday batch and its mail.
 	"escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "generateInvoiceInProcess", "abortAutogenRun",
 	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
-	"rerenderInvoicePdfFromStoredData"];
+	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
 	'app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {',
@@ -194,7 +197,7 @@ const toValues = (rows) => [HEADERS, ...rows.map((r) => HEADERS.map((h) => r[h] 
 
 const DDL = `
 	CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '');
-	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '');
+	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL, loads_count INTEGER NOT NULL DEFAULT 0, rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Draft', rejection_note TEXT DEFAULT '', pdf_file_name TEXT DEFAULT '', load_ids TEXT DEFAULT '[]', expense_ids TEXT DEFAULT '[]', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '', delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '', personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0);
 	CREATE UNIQUE INDEX idx_invoices_driver_week ON ${INDEX_COLS};
 	CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, date TEXT, amount REAL, type TEXT, status TEXT DEFAULT '', description TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, posted_period TEXT DEFAULT '', truck_unit TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT, assigned_driver TEXT, driver_pay_daily REAL DEFAULT 0, routemate_vehicle_id TEXT DEFAULT '');
@@ -274,7 +277,7 @@ function liftedFor(src) {
 			`${liftFragment(src, DRIVER_APP_LIST_ANCHOR, ";\n", "the driver app's invoice list")}\nreturn driverInvoices;`),
 		pnlTrucks: new Function("db", "normalizeDriverName",
 			`const investorDriverSet = null;\nconst user = { id: 0 };\n${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t}", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
-		investorTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER", "user",
+		investorTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER", "user", "expenseFrom",
 			`${liftFragment(src, INVESTOR_TRUCK_EXP_ANCHOR, INVESTOR_TRUCK_EXP_END, "GET /api/investor's per-truck expense map")}\nreturn expByDriver;`),
 	};
 	LIFT_CACHE.set(src, lifted);
@@ -361,7 +364,7 @@ function buildWorld(opts = {}) {
 		// `fold` defaults to the shipped foldExpenseTotalsByDriver(); passing
 		// OLD_perTruckExpenseMap runs origin/main's construction over the same query.
 		investorTruckExp: (ownerId, fold = w.foldExpenseTotalsByDriver) =>
-			lifted.investorTruckExp(db, fold, w.EXPENSE_PNL_FILTER, { id: ownerId }),
+			lifted.investorTruckExp(db, fold, w.EXPENSE_PNL_FILTER, { id: ownerId }, w.expenseFrom),
 	});
 }
 
@@ -1131,8 +1134,8 @@ const MUTANTS = [
 		"if (r.month) entry[r.month] = (entry[r.month] || 0) + (r.total || 0);",
 		"if (r.month) entry[r.month] = r.total || 0;"],
 	["M8 the deduction groups by the raw spelling, so a name's case variants are summed in JS",
-		"SELECT LOWER(driver) AS name_lc, ${periodExpr} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY LOWER(driver), month",
-		"SELECT driver AS name_lc, ${periodExpr} AS month, SUM(amount) AS total\n\t\tFROM expenses\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY driver, month"],
+		"SELECT LOWER(driver) AS name_lc, ${periodExpr} AS month, SUM(amount) AS total\n\t\tFROM ${expenseFrom(\"book\")}\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY LOWER(driver), month",
+		"SELECT driver AS name_lc, ${periodExpr} AS month, SUM(amount) AS total\n\t\tFROM ${expenseFrom(\"book\")}\n\t\tWHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}\n\t\tGROUP BY driver, month"],
 	["M9 the weekly generate takes a Super Admin's driver name unjudged",
 		'const reserved = reservedDriverNameRefusal(driverName, "driver");',
 		"const reserved = null;"],
@@ -1188,10 +1191,20 @@ function mutate(find, replace, label) {
 				[list, approve, restore, report_].map((s) => /LOWER\((driver|driver_name)\)/.test(s)), [false, false, false, false]],
 			// The two INSERTs that mint an invoice (the boot-time CHECK probe, which
 			// inserts and deletes a sentinel row, names no loads_count).
-			["§7 both invoice-minting INSERTs are insert() callbacks of commitInvoiceWithPdf()",
-				[(SRC.match(/INSERT INTO invoices \(invoice_number, driver, week_start, week_end, loads_count/g) || []).length,
-					(SRC.match(/insert: \(\) => db\.prepare\(\n\t+`INSERT INTO invoices \(invoice_number, driver, week_start, week_end, loads_count/g) || []).length],
-				[2, 2]],
+			// Three mint an invoice: the weekly generate, the manual route and the
+			// Personal correction. Each must sit inside the insert() callback of the
+			// commitInvoiceWithPdf({ … }) call just above it.
+			["§7 every invoice-minting INSERT is an insert() callback of commitInvoiceWithPdf()",
+				(() => {
+					const at = [...SRC.matchAll(/INSERT INTO invoices \(invoice_number, driver, week_start, week_end, loads_count/g)].map((m) => m.index);
+					const inside = at.filter((i) => {
+						const c = SRC.lastIndexOf("commitInvoiceWithPdf({", i);
+						const between = c >= 0 ? SRC.slice(c, i) : "";
+						return c >= 0 && i - c < 4000 && /\binsert: \(\) =>/.test(between) && !/\n\t*\}\);\n/.test(between);
+					});
+					return [at.length, inside.length];
+				})(),
+				[3, 3]],
 			["§7 the P&L resolution §4 compares against is what /api/financials runs",
 				[SRC.includes('const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };'),
 					SRC.includes("dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);")], [true, true]],

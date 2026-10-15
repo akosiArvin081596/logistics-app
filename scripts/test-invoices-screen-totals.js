@@ -94,7 +94,8 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '',
 	paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '',
 	adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '',
-	delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '')`;
+	delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '',
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0)`;
 
 function harness(src) {
 	const db = new Database(":memory:");
@@ -247,11 +248,15 @@ async function batterySummary(src) {
 	t("§2 invoiceListSummary() counts only rows that are not deleted, at invoiceTotalDue()",
 		typeof w.invoiceListSummary === "function"
 			? w.invoiceListSummary([
-				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "" },
-				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z" },
-				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "" },
+				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "", personal_total: 0, personal_share_total: 0 },
+				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z", personal_total: 0, personal_share_total: 0 },
+				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "", personal_total: 0, personal_share_total: 0 },
 			]).Paid
 			: "no invoiceListSummary()", { count: 1, total_due: 15 });
+	t("§2 …and a card's total includes Personal lines (the share returned, less what the driver repays)",
+		typeof w.invoiceListSummary === "function"
+			? w.invoiceListSummary([{ status: "Submitted", total_earnings: 800, adjustment: 0, deleted_at: "", personal_total: 100, personal_share_total: 25 }]).Submitted
+			: "no invoiceListSummary()", { count: 1, total_due: 725 });
 
 	// The cards follow the list the route answers: the screen sends no filter, so
 	// they cover every live invoice; a filtered call (the route's own ?driver=)

@@ -133,6 +133,9 @@ const SHARED_FNS = [
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "invoiceWriteRefusal",
 	"commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures", "truckDailyRateCandidates",
 	"findDriverNameClashes", "canonicalDriverName",
+	// The Personal lines a weekly invoice carries (none in these fixtures).
+	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
+	"personalWaitingRows",
 	// The Friday batch, run for real in §4b.
 	"escHtml", "invoiceEmailHtml", "generateInvoiceInProcess", "abortAutogenRun",
 	// The undated-load ledger, §7.
@@ -143,7 +146,7 @@ const SHARED_CONSTS = [
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed"];
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines"];
 
 // Build the lifted world against one database. `src` defaults to the shipping
 // server.js; §6 passes mutated copies. `overrides` replaces a lifted binding

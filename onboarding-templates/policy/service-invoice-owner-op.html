@@ -380,6 +380,12 @@
         <span class="label">&times; Owner-Operator Share (<span aria-label="Pay percentage"></span>%)</span>
         <span class="value"></span>
       </div>
+      <!-- Personal lines — the renderer clones this hidden row once per line (a
+           share returned, or what the driver repays) and then removes it. -->
+      <div class="row personal-row" data-personal-line-template style="display:none">
+        <span class="label" data-cell="label"></span>
+        <span class="value" data-cell="amount"></span>
+      </div>
       <!-- Admin adjustment line — Super Admin's +/- delta with reason. Hidden
            by the renderer when amount is empty (no adjustment). -->
       <div class="row adjustment-row" data-show-when-adjusted>

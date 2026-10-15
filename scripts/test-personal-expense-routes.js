@@ -223,7 +223,7 @@ const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
 		const summary = w.api.personalSummaryByExpense([1, 5, 7]);
 		check("T22 the driver payload's summary: R1 and R5 carry their lines, R7 none",
 			[summary[1] && summary[1].cents, summary[5] && summary[5].cents, summary[7] || null], [20000, 5000, null]);
-		const driverRoute = SRC.slice(SRC.indexOf('app.get("/api/driver/:driverName"'));
+		const driverRoute = SRC.slice(SRC.indexOf('\napp.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (req, res) => {') + 1);
 		check("T22 GET /api/driver/:driverName adds each receipt's personal summary", /personalSummaryByExpense\(/.test(driverRoute.slice(0, driverRoute.indexOf("\n});\n"))), true);
 		w.cleanup();
 	}

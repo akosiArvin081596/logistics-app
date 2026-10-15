@@ -116,6 +116,8 @@ const RENAME_LEG_SRC = [
 	...["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount"].map(extract),
 	extractConst("const DRIVER_RENAME_TARGETS = [", "\n];"),
 	...["driverRenameWhereSql", "driverRenameWhereArgs", "driverRenameWidens", "driverRenameSpellings"].map(extract),
+	// The guard's Personal-line blocker probes for the ledger table first (none here).
+	extract("personalLedgerPresent"),
 ].join("\n");
 function runCascade(db, user, name, id, body = CASCADE) {
 	const removed = {}, detached = {};

@@ -438,6 +438,19 @@
         tbody.appendChild(tr);
       });
 
+      // PERSONAL rows — the renderer clones this hidden row once per Personal
+      // line (what the driver repays, or a share returned) and then removes it;
+      // with no line nothing prints.
+      const personalRow = document.createElement('tr');
+      personalRow.className = 'personal-row';
+      personalRow.setAttribute('data-personal-line-template', '');
+      personalRow.style.display = 'none';
+      personalRow.innerHTML = `
+        <td colspan="4"><span data-cell="label"></span></td>
+        <td class="total-cell"><span data-cell="amount"></span></td>
+      `;
+      tbody.appendChild(personalRow);
+
       // ADJUSTMENT row — populated by the renderer when invoices.adjustment != 0.
       // Hidden when amount is empty (see policy-renderer.js). Sits between the
       // day rows and TOTAL DUE so the admin's bonus/deduction is visible just
@@ -466,7 +479,7 @@
 
       // Auto-calc: when Completed ticked, fill row total with 300; untick clears it.
       // Completed and N/A are mutually exclusive.
-      const rows = Array.from(tbody.querySelectorAll('tr:not(.total-row)'));
+      const rows = Array.from(tbody.querySelectorAll('tr:not(.total-row):not(.adjustment-row):not(.personal-row)'));
       const grandTotalInput = document.getElementById('grand-total');
 
       function recalcGrand() {

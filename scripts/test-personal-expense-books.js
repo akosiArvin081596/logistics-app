@@ -171,7 +171,9 @@ const fuelCard = (w, month) => {
 		check("October's deductible -$100", round2(after.deductible[key]["2026-10"] - before.deductible[key]["2026-10"]), -100);
 		check("October driver pay +$25 (25% of $100)", round2(after.octDriverPay - before.octDriverPay), 25);
 		check("October trip expenses -$100", round2(after.octTrip - before.octTrip), -100);
-		check("the investor +$37.50 (50% of $100 - $25)", round2(after.octInvestor - before.octInvestor), 37.5);
+		check("October net profit +$75 ($100 off trip expenses, $25 more pay)", round2(after.octNet - before.octNet), 75);
+		check("the investor's 50% of it (+$37.50), rounded once to the dollar as every payout is",
+			[after.octInvestor, Math.abs(after.octInvestor - before.octInvestor - 37.5) <= 0.5], [Math.round(after.octNet * 0.5), true]);
 		w.cleanup();
 	}
 

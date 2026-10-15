@@ -87,14 +87,17 @@ for (const [label, region] of [
 	["the tax CSV", routeRegion('app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investorTaxCsvLimiter, async (req, res) => {')],
 	["the investor report", routeRegion('app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investorReportLimiter, async (req, res) => {')],
 ]) {
-	const stmts = statements(region).filter((s) => /\bexpenses\b/.test(s.sql) && SUMS_RE.test(s.sql));
-	check(`${label}: every receipt sum reads expenseFrom("book")`,
-		[stmts.length > 0, stmts.every((s) => s.sql.includes('expenseFrom("book")'))], [true, true]);
+	// A receipt sum reads the plain table, expenseFrom("book") itself, or a local
+	// holding it (gatherLedgerScopeFacts names it bookFrom).
+	const book = /FROM \$\{(?:expenseFrom\("book"\)|bookFrom)\}/;
+	const stmts = statements(region).filter((s) => SUMS_RE.test(s.sql) && (PLAIN_RE.test(s.sql) || book.test(s.sql)));
+	check(`${label}: every receipt sum reads the books source`,
+		[stmts.length > 0, stmts.every((s) => book.test(s.sql) && !PLAIN_RE.test(s.sql)), region.includes('expenseFrom("book")')], [true, true, true]);
 }
 
 section("§3 operational views read the world");
 for (const [label, region, re] of [
-	["Financials' fuel card", routeRegion('app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {'), /LOWER\(type\)='fuel'/],
+	["Financials' fuel card", routeRegion('app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {'), /COUNT\(\*\) AS fills/],
 	["fuel analytics", routeRegion('app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), fuelAnalyticsLimiter, (req, res) => {'), /LOWER\(type\) = 'fuel'/],
 	["mileage", SRC.slice(SRC.indexOf('app.get("/api/analytics/mileage",'), SRC.indexOf('app.get("/api/analytics/mileage/detail",')), /LOWER\(type\) = 'fuel'/],
 	["mileage detail", SRC.slice(SRC.indexOf('app.get("/api/analytics/mileage/detail",'), SRC.indexOf("\n});\n", SRC.indexOf('app.get("/api/analytics/mileage/detail",'))), /LOWER\(type\) = 'fuel'/],

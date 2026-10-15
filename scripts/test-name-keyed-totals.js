@@ -135,7 +135,7 @@ const FNS = [
 	// Under test.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
 	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
-	"getDeductibleExpensesByDriverMonth", "computeDriverQueues", "computeInvestorMonthlyEarnings",
+	"getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "computeDriverQueues", "computeInvestorMonthlyEarnings",
 	"gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows",
 	// Financials' books (GET /api/financials reads them).
 	"buildFinancialsLedger", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "ledgerItemFromRow",
@@ -300,7 +300,7 @@ const DDL = `
 	CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL, distance_miles REAL);
 	CREATE TABLE load_eld_miles (load_id TEXT PRIMARY KEY, loaded_miles REAL, deadhead_miles REAL, loaded_basis TEXT DEFAULT 'no-data', in_progress INTEGER DEFAULT 0);
 	CREATE TABLE load_ratecon_miles (load_id TEXT PRIMARY KEY, miles REAL NOT NULL, match TEXT NOT NULL DEFAULT '');
-	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, week_start TEXT, week_end TEXT, total_earnings REAL DEFAULT 0, adjustment REAL DEFAULT 0, status TEXT DEFAULT 'Draft', deleted_at TEXT DEFAULT '');
+	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, week_start TEXT, week_end TEXT, total_earnings REAL DEFAULT 0, adjustment REAL DEFAULT 0, status TEXT DEFAULT 'Draft', deleted_at TEXT DEFAULT '', personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0);
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
 	CREATE TABLE load_ratings (load_id TEXT PRIMARY KEY, driver_name TEXT, rating INTEGER, rated_by INTEGER, updated_at TEXT);

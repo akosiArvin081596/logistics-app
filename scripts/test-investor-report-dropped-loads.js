@@ -243,6 +243,8 @@ function runSection(segment, { session, query = {}, rangeMode = "whole-months" }
 		getInvestorDriverSet: () => new Set(),
 		getInvestorDriverMonthWindows: () => new Map(),
 		investorExpenseScopeSql: (ownerId) => ({ sql: "owner_id = ?", params: [ownerId] }),
+		// The receipt source with no Personal ledger: the plain table.
+		expenseFrom: () => "expenses",
 		investorReportPayoutEntries: async () => [],
 		reportPayoutNote: () => "",
 		resolveInvestorSplitPct: () => 50,

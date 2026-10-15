@@ -69,6 +69,9 @@ const ROOTS = [
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet", "deduplicateLoads", "findCol",
 	"kpiGatherDbInputs", "fuelCpgBandFromFleet", "computeInsightsCacheKey", "closingFingerprint",
 	"personalSummaryByExpense", "requireAuth", "userDeleteLockBlockers",
+	// Called right after a comment that ends in a full stop, which the closure
+	// walker reads as a property access (lib/server-lift.js), so named here.
+	"assertInvoiceFileStillOwn",
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
