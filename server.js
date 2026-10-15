@@ -24262,6 +24262,28 @@ app.get("/api/auth/session", (req, res) => {
 	}
 });
 
+// B21: every password change emails the account it changed — when (in
+// APP_TIMEZONE), whether "an administrator" or "you" made it, and whom to
+// contact (ADMIN_NOTIFY_EMAIL, else "your administrator"). Never the password:
+// none is passed in. lib/password-change-notice.js builds and sends it.
+// Called by change-password and PUT /api/users/:id AFTER their write commits,
+// and never awaited: a slow or failed send cannot hold or undo a change, and
+// neither route's answer says whether an address is on file. Whether mail goes
+// at all is sendEmail()'s call (nothing in replica mode; GMAIL_USER and
+// GMAIL_APP_PASSWORD both needed). Every notice not sent is logged by account
+// id. The returned promise never rejects.
+const passwordChangeNotice = require("./lib/password-change-notice");
+function notifyPasswordChanged(userId, addresses, { byAdmin }) {
+	return passwordChangeNotice.sendPasswordChangeNotice({
+		userId,
+		addresses,
+		byAdmin: !!byAdmin,
+		adminEmail: ADMIN_NOTIFY_EMAIL,
+		timeZone: APP_TIMEZONE,
+		send: (to, notice) => sendEmail(to, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml })),
+	});
+}
+
 // Change the current user's own password. Requires the current password
 // to prevent someone with an unattended session from locking the real user out.
 // Rate-limited (5/15min per IP) to defeat brute-force against currentPassword.
@@ -24378,6 +24400,10 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		// the account as re-read, not the copy this request arrived with.
 		logAudit({ session: { user: freshUser } }, "change_password", "user", userId,
 			`Password changed${requiredChange ? " (required change)" : ""}; other sessions signed out: ${sessionsRevoked}`);
+
+		// B21: tell the account, at the address on the row re-read above. Not
+		// awaited (see notifyPasswordChanged()); the answer is the same either way.
+		notifyPasswordChanged(userId, [current.email], { byAdmin: false });
 
 		// This session's live-update sockets end with its old ID, before
 		// regenerate() retires it: a socket opened on a copied cookie must not
@@ -25727,6 +25753,13 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			`${user.role} ${user.username}: ${diff.join("; ") || "no field change"}${cascade ? `; cascade: ${cascade}` : ""}` +
 			`${variantsMoved ? `; moved from another spelling, which renaming back does not restore (spacingVariants): ${variantsMoved}` : ""}` +
 			`${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
+
+		// B21: a password reset emails the account: at the address on file before
+		// this edit, and at a new one this edit wrote (the old one is the one that
+		// reaches the real person if the new one is wrong). "you" when a Super
+		// Admin reset their own password here. Not awaited (see
+		// notifyPasswordChanged()), so no await follows the write.
+		if (passwordHash) notifyPasswordChanged(id, [user.email, email], { byAdmin: !selfEdit });
 
 		// The spared session of a self-edit that revoked the account's other
 		// sessions is rebuilt from the row now, under a new session ID (see
