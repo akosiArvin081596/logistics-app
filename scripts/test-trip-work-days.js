@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * B12 runner A: the trip-timestamp work-day rule, the pure part (plan section
- * 4.1(1), cases A1-A15). FAILING TESTS WRITTEN BEFORE THE FIX: every case fails
- * on main because lib/trip-work-days.js does not exist yet.
+ * 4.1(1), cases A1-A15). Written before the fix, which they failed: every case
+ * failed on main because lib/trip-work-days.js did not exist.
  *
  * The contract these cases hold the fix to (from the plan):
  *   tripDaysForLoad(events, opts)          pure
@@ -32,7 +32,7 @@
  * America/Chicago, America/Los_Angeles and Asia/Manila; the answers must match.
  *
  * Made-up data only (drivers, loads, times). Pure: no server, no network.
- * Run: node scripts/pending/test-trip-work-days.js    # exits 1 on failure (scripts/test-trip-work-days.js once enabled)
+ * Run: node scripts/test-trip-work-days.js    # exits 1 on failure
  */
 "use strict";
 

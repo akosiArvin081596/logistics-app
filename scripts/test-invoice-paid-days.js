@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * B12 runner C: the days-billed ledger, invoice_paid_days (plan section 4.1(5)
- * and (6), cases C1-C11). FAILING TESTS WRITTEN BEFORE THE FIX: on main the
+ * and (6), cases C1-C11). Written before the fix, which they failed: on main the
  * table, the claims, the backfill script and the floor marker do not exist.
  *
  * The contract (from the plan):
@@ -33,7 +33,7 @@
  * FROM=2026-09 unless a case says otherwise. Weeks: W39 9/26-10/2, W40 10/3-10/9.
  * [Qn] in a title: expected values follow the plan's recommended answer to open
  * question n. Made-up data only. Pure: no server, no app.db, no network.
- * Run: node scripts/pending/test-invoice-paid-days.js    # exits 1 on failure (scripts/test-invoice-paid-days.js once enabled)
+ * Run: node scripts/test-invoice-paid-days.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";

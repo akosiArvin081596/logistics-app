@@ -4,7 +4,7 @@
  * section 4.1(2)-(8), cases B1-B14, and B15-B18 for the owner's late-day rule
  * of 2026-10-14), behind TRIP_WORK_DAYS_ENABLED and TRIP_WORK_DAYS_FROM
  * (FROM=2026-09 unless a case says otherwise).
- * FAILING TESTS WRITTEN BEFORE THE FIX. On main the flags are ignored, so the
+ * Written before the fix, which they failed. On main the flags are ignored, so the
  * new-rule cases fail with today's days (the reproduction); B7, B8 and B11 pin
  * today's behaviour and pass on main.
  *
@@ -38,7 +38,7 @@
  *
  * [Qn] in a title: the expected days follow the plan's recommended answer to open
  * question n. Made-up data only. Pure: no server, no app.db, no network.
- * Run: node scripts/pending/test-trip-work-days-pay-paths.js    # exits 1 on failure (scripts/test-trip-work-days-pay-paths.js once enabled)
+ * Run: node scripts/test-trip-work-days-pay-paths.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";

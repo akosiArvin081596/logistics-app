@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * B12 runner G: the trip work-day rule's flags and edges the plan's cases do not
- * reach. FAILING TESTS WRITTEN BEFORE THE FIX: on main the flag is ignored and
+ * reach. Written before the fix, which they failed: on main the flag is ignored and
  * the notices, the settings, the paid-days table and the scripts do not exist,
  * so every case fails there.
  *   - G1: the two money flags compose. TRIP_WORK_DAYS reuses the ledger
@@ -25,7 +25,7 @@
  *     invoice, the ledger and the investor view alike.
  * Paths lifted from server.js (lib/work-days-world.js beside this runner).
  * Made-up data only. Pure: no server, no app.db, no network.
- * Run: node scripts/pending/test-trip-work-days-flags.js    # exits 1 on failure (scripts/test-trip-work-days-flags.js once enabled)
+ * Run: node scripts/test-trip-work-days-flags.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";

@@ -106,8 +106,11 @@ function readEnv(root, appRequire) {
 // `envFile`: the .env to read in place of the app directory's, for a copy of
 // the database only (tests pass an empty one, so a developer's flags never
 // reach them). `envOverrides`: settings laid over that environment for this
-// world only (a dry run comparing a rule off and on).
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null }) {
+// world only (a dry run comparing a rule off and on). `extraRoots`: more
+// server.js functions to lift and return, for the script that asks for them
+// (scripts/work-days-dry-run.js, scripts/backfill-invoice-paid-days.js); the
+// other scripts lift exactly what they always did.
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [] }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
@@ -116,7 +119,8 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, e
 	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
 	db.pragma("busy_timeout = 10000");
 
-	const lifted = closure(SRC, { roots: ROOTS, routes: [FREEZE_HEAD], provided: PROVIDED, denied: DENIED });
+	const extra = (extraRoots || []).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && !ROOTS.includes(n));
+	const lifted = closure(SRC, { roots: [...ROOTS, ...extra], routes: [FREEZE_HEAD], provided: PROVIDED, denied: DENIED });
 	const routes = {};
 	const register = (method) => (p, ...h) => { routes[`${method} ${p}`] = h[h.length - 1]; };
 	const app = { get: register("GET"), post: register("POST"), put: register("PUT"), delete: register("DELETE") };
@@ -141,7 +145,7 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, e
 		"}",
 		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc,",
 		"\tcomputeFleetLedger, computeInvestorMonthlyEarnings, computeLossCarryForward, listSettlableInvestors, getCarrierDBFromSQLite,",
-		"\tgetInvestorDriverSet, findCol, isLocked };",
+		`\tgetInvestorDriverSet, findCol, isLocked${extra.map((n) => `, ${n}`).join("")} };`,
 	].join("\n");
 	const api = new Function("db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "fetch", "__sheetData", body)(
 		db, liftedRequire, console, scriptProcess, root, app, pass, pass(), () => {}, noFetch, sheetData,

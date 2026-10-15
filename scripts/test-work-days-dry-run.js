@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * B12 runner F: the trip-work-days dry run (plan section 4.1(9), L5, cases
- * F1-F4). FAILING TESTS WRITTEN BEFORE THE FIX: on main neither the route nor
+ * F1-F4). Written before the fix, which they failed: on main neither the route nor
  * the script exists.
  *
  * The contract (from the plan): GET /api/admin/work-days/dry-run?from=&to=
@@ -30,7 +30,7 @@
  *
  * Shipping code lifted from server.js (lib/work-days-world.js beside this runner).
  * Pure: no server, no app.db, no network.
- * Run: node scripts/pending/test-work-days-dry-run.js    # exits 1 on failure (scripts/test-work-days-dry-run.js once enabled)
+ * Run: node scripts/test-work-days-dry-run.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";

@@ -5,9 +5,9 @@
  * invoice was generated NEVER goes on a later week's invoice. While that week's
  * invoice is not approved it is updated in place, so the day prints in its own
  * week's Saturday-Friday grid; once approved, a correction invoice for that week
- * carries it. There is no "Earlier days" section any more. FAILING TESTS
- * WRITTEN BEFORE THE FIX: on main no invoice takes a late day and every day is
- * priced at one rate. D4 pins today's rendering and passes on main.
+ * carries it. There is no "Earlier days" section any more. Written before the
+ * fix, which they failed: on main no invoice takes a late day and every day is
+ * priced at one rate. D4 pins today's rendering and passed on main too.
  *
  * The contract:
  *   - a late day fills its own weekday in its week's grid ({ completed, total,
@@ -24,7 +24,7 @@
  * Shipping code lifted from server.js (lib/work-days-world.js beside this runner);
  * the PDF render is stubbed and its input captured. TRIP_WORK_DAYS_ENABLED on,
  * FROM=2026-09. Made-up data only. Pure: no server, no app.db, no network.
- * Run: node scripts/pending/test-invoice-earlier-days-render.js    # exits 1 on failure (scripts/test-invoice-earlier-days-render.js once enabled)
+ * Run: node scripts/test-invoice-late-days-render.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";
