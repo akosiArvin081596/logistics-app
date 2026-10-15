@@ -247,8 +247,10 @@ function fakeCanvas(log) {
 function mountInMemory(Comp, props, size) {
   const node = (type, tag) => {
     const n = {
-      type, tag, children: [], parent: null, props: {}, text: '', listeners: [], style: {},
-      clientWidth: size.w, clientHeight: size.h,
+      type, tag, children: [], parent: null, props: {}, text: '', listeners: [], style: {}, scrollTop: 0,
+      get clientWidth() { return size.w },
+      get clientHeight() { return size.h },
+      get parentElement() { return n.parent && n.parent.type === 'el' ? n.parent : null },
       getBoundingClientRect: () => ({ left: 0, top: 0, width: size.w, height: size.h, right: size.w, bottom: size.h }),
       addEventListener(t, fn, opts) { n.listeners.push({ type: t, fn, opts }) },
       removeEventListener(t, fn) { const i = n.listeners.findIndex((l) => l.type === t && l.fn === fn); if (i >= 0) n.listeners.splice(i, 1) },
@@ -351,8 +353,18 @@ if (VIEWER) {
     if (/pdf\.worker/.test(spec)) return { default: '/assets/pdf.worker.min.mjs' }
     throw new Error(`unexpected import(${spec})`)
   }
+  // A resize is played by changing SIZE and calling fireResize().
+  const resizeCallbacks = []
+  class FakeResizeObserver {
+    constructor(cb) { this.cb = cb }
+    observe() { resizeCallbacks.push(this.cb) }
+    disconnect() { const i = resizeCallbacks.indexOf(this.cb); if (i >= 0) resizeCallbacks.splice(i, 1) }
+  }
+  const fireResize = () => resizeCallbacks.slice().forEach((cb) => cb())
+  globalThis.ResizeObserver = FakeResizeObserver
   globalThis.window = {
     devicePixelRatio: 1,
+    ResizeObserver: FakeResizeObserver,
     addEventListener: (type, fn, opts) => winListeners.push({ type, fn, opts }),
     removeEventListener: (type, fn) => { const i = winListeners.findIndex((l) => l.type === type && l.fn === fn); if (i >= 0) winListeners.splice(i, 1) },
   }
@@ -362,8 +374,10 @@ if (VIEWER) {
     removeEventListener: (type, fn) => { const i = docListeners.findIndex((l) => l.type === type && l.fn === fn); if (i >= 0) docListeners.splice(i, 1) },
     createElement: (tag) => (tag === 'canvas' ? fakeCanvas(log) : { tag, style: {}, setAttribute() {} }),
   }
-  globalThis.getComputedStyle = () => ({ overflowY: 'visible', paddingTop: '0px', paddingBottom: '0px' })
+  // The mount root plays the dialog body: the scroll area the tile sits in.
+  globalThis.getComputedStyle = (el) => ({ overflowY: el && el.tag === 'root' ? 'auto' : 'visible', paddingTop: '0px', paddingBottom: '0px' })
   const SIZE = { w: 900, h: 700 }
+  const resolveLive = () => renders.filter((x) => !x.task.cancelled && !x.done).forEach((x) => { x.done = true; x.resolve() })
   try {
     const Viewer = await compileComponent(VIEWER_REL, dyn)
     const m = mountInMemory(Viewer, { src: 'blob:test' }, SIZE)
@@ -524,15 +538,182 @@ if (VIEWER) {
       ok('§2 ...and page 3 is the one on screen', !!live[0] && canvasesIn(pageBox).length === 1 && canvasesIn(pageBox)[0] === live[0].canvas)
     }
 
+    // Touch: at fit one finger is the dialog's; two fingers pinch about their
+    // midpoint; the finger left after a pinch moves the zoomed page.
+    {
+      const tl = (type) => (stage.listeners.find((l) => l.type === type) || { fn() {} }).fn
+      const tev = (pts) => ({ touches: pts.map(([x, y]) => ({ clientX: x, clientY: y })), cancelable: true, defaultPrevented: false, preventDefault() { this.defaultPrevented = true } })
+      btn('Fit to page').props.onClick()
+      await drain()
+      const f0 = placed(pageBox)
+      tl('touchstart')(tev([[400, 300]]))
+      const swipe = tev([[400, 250]])
+      tl('touchmove')(swipe)
+      tl('touchend')(tev([]))
+      await drain()
+      ok('§2 touch at fit: one finger is left to scroll the dialog (not prevented, page still)', !swipe.defaultPrevented && near(placed(pageBox).y, f0.y))
+      const u = (400 - f0.x) / f0.w
+      const v = (300 - f0.y) / f0.h
+      tl('touchstart')(tev([[350, 300], [450, 300]]))
+      const spread = tev([[300, 300], [500, 300]])
+      tl('touchmove')(spread)
+      await drain()
+      const p1 = placed(pageBox)
+      ok(`§2 pinch: fingers twice as far apart zoom 2x (${(p1.w / f0.w).toFixed(2)}x)`, spread.defaultPrevented && near(p1.w / f0.w, 2, 0.01))
+      ok('§2 pinch: the point between the fingers stays between them', Math.hypot(p1.x + u * p1.w - 400, p1.y + v * p1.h - 300) < 1)
+      tl('touchend')(tev([[500, 300]]))
+      const one = tev([[470, 280]])
+      tl('touchmove')(one)
+      await drain()
+      const p2 = placed(pageBox)
+      ok('§2 one finger left after a pinch moves the zoomed page with it', one.defaultPrevented && near(p2.x, p1.x - 30, 0.01) && near(p2.y, p1.y - 20, 0.01))
+      tl('touchend')(tev([]))
+      ok('§2 zoomed, the page area takes touches (pannable: touch-action none)', hasClass(stage, 'rcv-pannable'))
+    }
+
+    // Keyboard on the focused page area.
+    {
+      const key = (k, extra = {}) => {
+        const e = { key: k, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, ...extra }
+        stage.props.onKeydown(e)
+        return e
+      }
+      btn('Fit to page').props.onClick()
+      await drain()
+      const atFit = placed(pageBox)
+      const down0 = key('ArrowDown')
+      await drain()
+      ok('§2 keyboard at fit: the arrows are left to scroll the dialog', !down0.defaultPrevented && near(placed(pageBox).y, atFit.y))
+      const plus = key('+')
+      await drain()
+      ok('§2 keyboard: + zooms in one step', plus.defaultPrevented && near(placed(pageBox).w / atFit.w, 1.25, 0.01))
+      key('+')
+      key('+')
+      await drain()
+      const z2 = placed(pageBox)
+      const down = key('ArrowDown')
+      await drain()
+      ok('§2 keyboard zoomed: ArrowDown shows what is below (page up 48 px)', down.defaultPrevented && near(placed(pageBox).y, z2.y - 48, 0.01))
+      const upFast = key('ArrowUp', { shiftKey: true })
+      await drain()
+      ok('§2 keyboard zoomed: Shift+ArrowUp moves three steps (144 px)', upFast.defaultPrevented && near(placed(pageBox).y, z2.y - 48 + 144, 0.01))
+      const right = key('ArrowRight')
+      await drain()
+      ok('§2 keyboard zoomed: ArrowRight shows what is to the right (page left 48 px)', right.defaultPrevented && near(placed(pageBox).x, z2.x - 48, 0.01))
+      const zero = key('0')
+      await drain()
+      ok('§2 keyboard: 0 is fit', zero.defaultPrevented && near(placed(pageBox).w, atFit.w, 0.5))
+      ok('§2 keyboard: other keys and browser shortcuts are left alone', !key('a').defaultPrevented && !key('+', { ctrlKey: true }).defaultPrevented)
+    }
+
+    // A resize schedules a sharp draw for the new size; zooming back to the
+    // drawn zoom within the pause must not drop it.
+    {
+      SIZE.w = 1000
+      SIZE.h = 760
+      fireResize()
+      wheel.fn({ deltaY: -100, deltaMode: 0, ctrlKey: false, clientX: 450, clientY: 350, preventDefault() {} })
+      btn('Fit to page').props.onClick()
+      await sleep(320)
+      await drain()
+      const live = renders.filter((x) => !x.task.cancelled && !x.done)
+      const newFitW = Math.floor((760 - 16) / (PAGE_H / PAGE_W))
+      ok(`§2 after a resize, zooming back to the drawn zoom still draws the page for the new size (${live.map((x) => Math.round(x.viewport.width)).join(',') || 'no draw'} vs ${newFitW})`, live.length === 1 && near(live[0].viewport.width, newFitW, 1))
+      resolveLive()
+      await drain()
+    }
+
+    // Full screen (the CSS fallback here): leaving it untouched brings back the
+    // exact view and the dialog's scroll; zoomed in full screen, it keeps that.
+    {
+      SIZE.w = 900
+      SIZE.h = 700
+      fireResize()
+      await sleep(320)
+      await drain()
+      resolveLive()
+      await drain()
+      wheel.fn({ deltaY: -300, deltaMode: 0, ctrlKey: false, clientX: 400, clientY: 300, preventDefault() {} })
+      await sleep(320)
+      await drain()
+      resolveLive()
+      await drain()
+      const before = placed(pageBox)
+      m.root.scrollTop = 20
+      btn('Full screen').props.onClick()
+      await drain()
+      m.root.scrollTop = 0
+      SIZE.w = 1400
+      SIZE.h = 900
+      fireResize()
+      await drain()
+      const inFull = placed(pageBox)
+      ok('§2 full screen: the page follows the bigger stage at the same zoom', !!inFull && inFull.w > before.w + 50)
+      SIZE.w = 900
+      SIZE.h = 700
+      btn('Exit full screen').props.onClick()
+      await drain()
+      const after = placed(pageBox)
+      ok('§2 leaving full screen untouched: the exact view comes back', !!after && near(after.x, before.x, 0.01) && near(after.y, before.y, 0.01) && near(after.w, before.w, 0.01))
+      ok(`§2 ...and the dialog's own scroll comes back (${m.root.scrollTop})`, m.root.scrollTop === 20)
+      btn('Full screen').props.onClick()
+      await drain()
+      SIZE.w = 1400
+      SIZE.h = 900
+      fireResize()
+      await drain()
+      wheel.fn({ deltaY: -100, deltaMode: 0, ctrlKey: false, clientX: 700, clientY: 450, preventDefault() {} })
+      await drain()
+      SIZE.w = 900
+      SIZE.h = 700
+      btn('Exit full screen').props.onClick()
+      await drain()
+      const kept = placed(pageBox)
+      ok('§2 zoomed in full screen: leaving keeps that zoom, not the old view', !!kept && kept.w > before.w * 1.1)
+      await sleep(320)
+      await drain()
+      resolveLive()
+      await drain()
+    }
+
     m.unmount()
     ok('§2 unmount removes the wheel listener', !stage.listeners.some((l) => l.type === 'wheel'))
     ok('§2 pdf.js was handed only { url }', sources.length >= 1 && sources.every((s) => s && Object.keys(s).length === 1 && s.url === 'blob:test'))
+
+    // A second viewer: keys before the first page is shown, then unmount in
+    // the middle of a draw.
+    {
+      const m2 = mountInMemory(Viewer, { src: 'blob:test' }, SIZE)
+      await drain()
+      const stage2 = m2.find((n) => n.type === 'el' && hasClass(n, 'rcv-stage'))
+      const first2 = renders[renders.length - 1]
+      const early = { key: '+', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
+      stage2.props.onKeydown(early)
+      await drain()
+      ok('§2 before the first page is shown, keys do nothing (its first draw goes on)', !early.defaultPrevented && !!first2 && !first2.task.cancelled && renders[renders.length - 1] === first2)
+      first2.done = true
+      first2.resolve()
+      await drain()
+      const wheel2 = stage2.listeners.find((l) => l.type === 'wheel')
+      wheel2.fn({ deltaY: -200, deltaMode: 0, ctrlKey: false, clientX: 450, clientY: 350, preventDefault() {} })
+      await sleep(320)
+      await drain()
+      const pending = renders[renders.length - 1]
+      ok('§2 a sharp draw is under way', pending !== first2 && !pending.done && !pending.task.cancelled)
+      m2.unmount()
+      await drain()
+      ok('§2 unmount in the middle of a draw cancels it', pending.task.cancelled)
+      ok('§2 ...frees its off-screen canvas', pending.canvas.width === 0 && pending.canvas.height === 0)
+      ok('§2 ...and frees the page that was on screen only once it is off screen', first2.canvas.width === 0 && log.every((e) => !e.attached))
+      ok('§2 ...and removes every listener it added', stage2.listeners.length === 0)
+    }
   } catch (err) {
     ok(`§2 RateConViewer mounts in this harness (${err.message})`, false)
   } finally {
     delete globalThis.window
     delete globalThis.document
     delete globalThis.getComputedStyle
+    delete globalThis.ResizeObserver
   }
 } else {
   ok('§2 RateConViewer.vue exists', false)

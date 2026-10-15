@@ -177,6 +177,7 @@ let renderTimer = null
 let renderTask = null
 let onScreen = null
 let shownPage = 0 // the page number the canvas on screen shows
+let shownFitW = 0 // and the fit width it was drawn for (the stage's size then)
 
 function freeCanvas(c) {
   // Only ever a canvas that is off screen. Zero size hands its memory back
@@ -240,11 +241,11 @@ async function drawPage(n, place) {
   // place and the swap show up in one frame.
   if (place || a !== aspect.value) view.value = target
   aspect.value = a
-  swapIn(canvas, target.zoom, n)
+  swapIn(canvas, target.zoom, n, f.w)
 }
 // The new canvas goes in before the old one comes out, so the page box is
 // never empty; the old one is freed only once it is off screen.
-function swapIn(canvas, drawnZoom, pageNo) {
+function swapIn(canvas, drawnZoom, pageNo, fitW) {
   const host = pageEl.value
   if (!host) { freeCanvas(canvas); return }
   canvas.style.cssText = 'display:block;width:100%;height:100%;'
@@ -258,6 +259,7 @@ function swapIn(canvas, drawnZoom, pageNo) {
   }
   onScreen = canvas
   shownPage = pageNo
+  shownFitW = fitW
   shown.value = true
   loading.value = false
   failed.value = false
@@ -268,6 +270,7 @@ function removeShown() {
   freeCanvas(onScreen)
   onScreen = null
   shownPage = 0
+  shownFitW = 0
   shown.value = false
 }
 
@@ -298,9 +301,9 @@ function setView(next) {
   // Moved by hand in full screen: leaving it keeps this place (restoreView).
   if (isFull.value) savedView = null
   if (!rezoom) return
-  // Back at the zoom the canvas on screen was drawn at: it is already sharp
-  // (unless a page change is still on its way).
-  if (next.zoom === renderZoom.value && shownPage === page.value) cancelRender()
+  // Back at the zoom the canvas on screen was drawn at: it is already sharp,
+  // unless a page change is on its way or the stage has changed size since.
+  if (next.zoom === renderZoom.value && shownPage === page.value && shownFitW === fit.value.w) cancelRender()
   else scheduleRender()
 }
 function stagePoint(clientX, clientY) {
@@ -364,7 +367,7 @@ function onPointerUp(e) {
 // Keyboard, with the page area focused: arrows move a zoomed page, + / - / 0
 // zoom. At fit the arrows are left to scroll the dialog.
 function onStageKey(e) {
-  if (e.altKey || e.metaKey || e.ctrlKey) return
+  if (!shown.value || failed.value || e.altKey || e.metaKey || e.ctrlKey) return
   const step = e.shiftKey ? KEY_PAN_PX * 3 : KEY_PAN_PX
   const pan = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key]
   if (pan) {
@@ -662,8 +665,12 @@ onBeforeUnmount(() => {
   touch-action: pan-x pan-y;
   user-select: none; -webkit-user-select: none;
 }
-/* An outline paints above the page, so it shows even when a zoomed page fills the stage. */
-.rcv-stage:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+/* The focus ring is a last child laid over the stage, so it paints above a
+   zoomed page that fills it. */
+.rcv-stage:focus-visible::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
 .rcv-pannable { touch-action: none; cursor: grab; }
 .rcv-dragging { cursor: grabbing; }
 .rcv-page {
