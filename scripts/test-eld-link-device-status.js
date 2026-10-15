@@ -148,6 +148,8 @@ function build(db, pieces, extra = {}) {
 	const deps = {
 		db, eldFeedHealth, alertChannels, Date: FixedDate,
 		ELD_STALE_HOURS: 24, ELD_STALE_ALERT_ENABLED: true, ELD_STALE_ALERT_MAX_PER_DAY: 25,
+		// Driver availability off, as production runs until it is approved (R11).
+		DRIVER_AVAILABILITY_ENABLED: false,
 		console: { log: () => {}, warn: () => {}, error: (...a) => (extra.errors || []).push(a.join(" ")) },
 		...extra.deps,
 	};

@@ -105,6 +105,7 @@ const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
 const eldFeedHealth = require("./lib/eld-feed-health");
+const driverAvailability = require("./lib/driver-availability");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
@@ -123,6 +124,8 @@ const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
+// A live ETA against the Drop-off Appointment, on the receiver's clock.
+const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
@@ -257,6 +260,21 @@ function driverRoom(name) {
 }
 function userRoom(username) {
 	return `user:${identityRoomKey(username)}`;
+}
+// The dispatch room holds Super Admins and Dispatchers alike. A notice that can
+// carry broker contact goes per role (BROKER CONTACT BY VALUE, beside
+// BROKER_WITHHELD_RE): Super Admins get `full` through their own role room,
+// "super-admin" (joined on register by role only, never by a name), and the rest
+// of the dispatch room gets `redacted`. With BROKER_CONTACT_VALUE_REDACTION_ENABLED
+// off, the whole room gets `full`. Rooms are written as literals, as
+// scripts/test-socket-hardening.js pins them.
+function emitDispatchByRole(event, full, redacted) {
+	if (!BROKER_CONTACT_VALUE_REDACTION_ENABLED) {
+		io.to("dispatch").emit(event, full);
+		return;
+	}
+	io.to("super-admin").emit(event, full);
+	io.to("dispatch").except("super-admin").emit(event, redacted);
 }
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
@@ -3197,6 +3215,103 @@ function eldFixCountsByVehicle(vehicleIds, sinceMs) {
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// DRIVER AVAILABILITY (R11): the reads. Every caller sits behind
+// DRIVER_AVAILABILITY_ENABLED, so with the flag off nothing reads the table.
+//
+// The live rows of every driver still in the directory, keyed by
+// normalizeDriverName() of the directory row's CURRENT name (a renamed driver
+// keeps his rows). The JOIN is what keeps an orphan inert: a row whose directory
+// row is gone matches no one. Rows that ended before `sinceDay` are left out.
+function driverAvailabilityByName(sinceDay) {
+	const rows = db.prepare(`
+		SELECT a.id, a.directory_id, a.kind, a.from_date, a.to_date, a.cancelled_at, d.driver_name AS directory_name
+		FROM driver_availability a
+		JOIN drivers_directory d ON d.id = a.directory_id
+		WHERE a.cancelled_at IS NULL AND a.to_date >= ?
+		ORDER BY a.from_date ASC, a.id ASC
+	`).all(String(sinceDay || ""));
+	return driverAvailability.groupAvailabilityByDriver(rows, normalizeDriverName);
+}
+
+// The live Job Tracking loads "Assign anyway" confirmations are checked against
+// (R11): Map(normLoadKey(load id) -> { driver, truck, pickupKey, dropoffKey,
+// cancelled }). Cancelled and removed loads are not in it (excludeDroppedLoads()),
+// so their confirmations stop counting, as do those of a load that now has
+// another driver. Built by each ELD sweep from the cached sheet (read only, never
+// written) before it judges, and read by every later truckDriverAvailability()
+// until the next; null until a sweep built it or when the sheet could not be
+// read, and then each confirmation counts as recorded (an extra alert rather than
+// a missed one).
+let availabilityLoadIndex = null;
+async function refreshAvailabilityLoadIndex() {
+	try {
+		const jt = await getJobTrackingCached();
+		const cols = jobTrackingMonthCols(jt.headers);
+		const truckCol = findCol(jt.headers, /^truck$/i);
+		const index = new Map();
+		for (const r of excludeDroppedLoads(jt.data, jt.headers)) {
+			const key = normLoadKey(cols.loadIdCol ? r[cols.loadIdCol] : "");
+			if (!key) continue;
+			index.set(key, {
+				driver: cols.driverCol ? r[cols.driverCol] || "" : "",
+				truck: truckCol ? r[truckCol] || "" : "",
+				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
+				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
+				cancelled: false,
+			});
+		}
+		availabilityLoadIndex = index;
+	} catch (e) {
+		availabilityLoadIndex = null;
+		console.error("[eld-feed] Job Tracking unreadable; \"Assign anyway\" confirmations count as recorded:", e.message);
+	}
+}
+
+// Every truck's current driver's time off, Map(truck id -> { driverName,
+// driverOffUntil, driverLastOffTo, driverReturningFromMs, driverConfirmedLoadToday }).
+// The truck's driver is its newest open assignment, else trucks.assigned_driver,
+// matched through normalizeDriverName() (lib/driver-availability.js
+// truckAvailabilityFields()). Rows that ended longer ago than the returning grace
+// can last are not read. A load given him with "Assign anyway"
+// (driver_availability_confirmations) that still has him and covers today lets
+// the truck it names, or his own when it names none, alert as normal
+// (standingConfirmations(), against availabilityLoadIndex).
+function truckDriverAvailability() {
+	const today = appTodayKey();
+	const byDriver = driverAvailabilityByName(driverAvailability.shiftAvailabilityDay(today, -(Math.ceil(ELD_STALE_HOURS / 24) + 2)));
+	const standing = driverAvailability.standingConfirmations({
+		confirmations: db.prepare(`
+			SELECT c.id, c.load_id, c.load_from, c.load_to, d.driver_name AS directory_name
+			FROM driver_availability_confirmations c
+			JOIN drivers_directory d ON d.id = c.directory_id
+			WHERE c.load_to >= ?
+		`).all(driverAvailability.shiftAvailabilityDay(today, -60)),
+		loads: availabilityLoadIndex,
+		todayKey: today,
+		normalize: normalizeDriverName,
+		loadKey: normLoadKey,
+	});
+	const openByTruck = new Map();
+	for (const a of db.prepare("SELECT id, truck_id, driver_name, start_date FROM truck_assignments WHERE COALESCE(end_date, '') = ''").all()) {
+		if (!openByTruck.has(a.truck_id)) openByTruck.set(a.truck_id, []);
+		openByTruck.get(a.truck_id).push(a);
+	}
+	const out = new Map();
+	const trucks = db.prepare("SELECT id, unit_number, assigned_driver FROM trucks").all();
+	// A load's Truck cell is matched with the fleet's unit-number rule
+	// (unitNumberToken(), as ELD linking matches); one naming none of the fleet's
+	// units counts on the driver's own truck, so it can never keep a dark truck quiet.
+	const knownUnits = trucks.map((t) => t.unit_number);
+	for (const t of trucks) {
+		out.set(t.id, driverAvailability.truckAvailabilityFields({
+			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, unitNumber: t.unit_number,
+			unitToken: unitNumberToken, knownUnits, byDriver, standing, todayKey: today, normalize: normalizeDriverName,
+		}));
+	}
+	return out;
+}
+
 // Everything the judge needs, read in four bounded queries.
 //
 // ⚠️ THE ORPHAN CANDIDATE SET COMES FROM TELEMETRY. routemate_vehicles CANNOT
@@ -3243,6 +3358,18 @@ function eldFeedSnapshot(nowMs) {
 	const latest = eldLatestCleanFixByVehicle(allIds);
 	const counts = eldFixCountsByVehicle(allIds, now - 24 * 60 * 60 * 1000);
 
+	// The truck's driver's recorded time off (R11), only while the flag is on.
+	// A failed read judges every truck without it, i.e. alerting as before: a
+	// detector that goes quiet on an error is the failure this sweep exists for.
+	let availabilityByTruck = null;
+	if (DRIVER_AVAILABILITY_ENABLED) {
+		try {
+			availabilityByTruck = truckDriverAvailability();
+		} catch (e) {
+			console.error("[eld-feed] driver availability unreadable; judging without it:", e.message);
+		}
+	}
+
 	return {
 		// ⚠️ `last_fix_ms`, NOT `location_date_ms`. The staleness clock is the newest
 		// moment the DEVICE reported, never the timestamp on the last row we
@@ -3260,6 +3387,7 @@ function eldFeedSnapshot(nowMs) {
 				lastFixMs: tel ? tel.last_fix_ms : null,
 				fixes24h: vid ? (counts[vid] || 0) : 0,
 				source: tel ? (tel.source || "") : "",
+				...(availabilityByTruck && availabilityByTruck.has(t.id) ? availabilityByTruck.get(t.id) : {}),
 			};
 		}),
 		orphans: orphanIds.map((vid) => {
@@ -3363,6 +3491,11 @@ function eldFeedHealthReport(nowMs) {
 				&& eldFeedHealth.reopenCooldownActive(led.alerted_at, now, ELD_STALE_REOPEN_COOLDOWN_MS)
 				? new Date(eldFeedHealth.stampMs(led.alerted_at) + ELD_STALE_REOPEN_COOLDOWN_MS).toISOString()
 				: null,
+			// The truck's driver is recorded off (driver_off: his last day off) or
+			// just back (driver_returning: when a dark feed alerts again). Only
+			// these two states carry them, so with the flag off neither key exists.
+			...(f.driverOffUntil ? { driverOffUntil: f.driverOffUntil } : {}),
+			...(f.alertsResumeMs ? { alertsResumeAt: new Date(f.alertsResumeMs).toISOString() } : {}),
 		};
 	});
 
@@ -3592,7 +3725,9 @@ async function alertEldFeedSilence(verdict) {
 				? `<p>This device is pushing telemetry that is filed under no truck. Link it under <b>Trucks → ELD device</b>, or have the provider deactivate it if it is not ours.</p>`
 				: v.state === "never_reported"
 					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
-					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set its status to OOS or Maintenance, or record its retirement date — either stops this alert at the source.</p>`) +
+					: DRIVER_AVAILABILITY_ENABLED
+						? `<p>Check the device is powered and in coverage. If the driver is away, record the driver's time off under Drivers (Availability): the alert pauses while he is off and resumes a day after he is back. If the truck itself is out of service, set its status to OOS or Maintenance, or record its retirement date.</p>`
+						: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set its status to OOS or Maintenance, or record its retirement date — either stops this alert at the source.</p>`) +
 			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time, and no sooner than a day after this report.</p>`;
 
 		// Only the channels the row still owes are sent: both on a new alert, the
@@ -3667,6 +3802,9 @@ const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastA
 // to do about a dead ELD is a human call; this feature's whole job is to put
 // that call in front of one.
 async function sweepEldFeedSilence() {
+	// "Assign anyway" confirmations are judged against the loads as Job Tracking
+	// has them now (R11, refreshAvailabilityLoadIndex(); a read only).
+	if (DRIVER_AVAILABILITY_ENABLED) await refreshAvailabilityLoadIndex();
 	const judged = eldFeedVerdicts(Date.now());
 	const alerting = judged.alerts;
 
@@ -6246,6 +6384,60 @@ db.exec(`
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
 
+// DRIVER AVAILABILITY (R11), default OFF (the shape reads off: only
+// true/1/yes/on turns it on), off in production until the owner approves it.
+// A driver's recorded time off, kept apart from every truck status: setting a
+// truck Inactive for a vacation took its fixed costs out of every month, and OOS
+// silenced its ELD alert with no end date. Availability touches no truck, no pay
+// day and no money: it only pauses the ELD silence alert while the truck's driver
+// is away (and for one stale window after he returns) and warns a dispatcher who
+// assigns him a load inside his off days (409 DRIVER_OFF_DUTY, "Assign anyway").
+// Off, nothing reads or writes the tables below: the six routes answer as an
+// unknown path does (a GET reaches the SPA catch-all page, a POST or PUT gets
+// Express's 404), no response carries an availability key, and the sweep and
+// the assign routes run as before. Only this additive migration runs either way, so
+// turning the flag on needs no other step; rows saved while it was on stay, inert.
+const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_ENABLED ?? "").trim());
+// One row per period off. `directory_id` is drivers_directory.id: a row follows
+// a rename, and a deleted driver's rows are cancelled with the directory row
+// (a re-added driver gets a new id and starts with none). Dates are calendar days
+// on the business clock, both included. Rows are cancelled, never deleted.
+// driver_availability_confirmations: one row per "Assign anyway" whose sheet
+// write succeeded, with the load's window. A confirmed load covering today lets
+// the driver's truck alert as normal (the owner's rule, 2026-10-15).
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_availability (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		directory_id INTEGER NOT NULL,
+		driver_name TEXT NOT NULL,
+		kind TEXT NOT NULL CHECK(kind IN ('vacation', 'off_duty', 'other')),
+		from_date TEXT NOT NULL,
+		to_date TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		created_by TEXT NOT NULL,
+		created_by_user_id INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT,
+		cancelled_at TEXT,
+		cancelled_by TEXT,
+		CHECK(from_date <= to_date)
+	);
+	CREATE INDEX IF NOT EXISTS idx_driver_avail_dir ON driver_availability(directory_id, from_date);
+	CREATE TABLE IF NOT EXISTS driver_availability_confirmations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		availability_id INTEGER NOT NULL,
+		directory_id INTEGER NOT NULL,
+		load_id TEXT NOT NULL DEFAULT '',
+		load_from TEXT NOT NULL,
+		load_to TEXT NOT NULL,
+		via TEXT NOT NULL DEFAULT '',
+		confirmed_by TEXT NOT NULL DEFAULT '',
+		confirmed_by_user_id INTEGER NOT NULL DEFAULT 0,
+		confirmed_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_driver_avail_conf_dir ON driver_availability_confirmations(directory_id, load_to);
+`);
+
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
 // ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
 // always read and written this table, but NOTHING in the repo created it — it
@@ -7936,18 +8128,30 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
 			// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
 			// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them).
-			const shown = (v) => {
+			// The other values go per role (BROKER CONTACT BY VALUE): the stored body,
+			// and what the Super Admin room is sent, are in full; with
+			// BROKER_CONTACT_VALUE_REDACTION_ENABLED the rest of the dispatch room is
+			// sent a copy whose values have their broker contact withheld WHOLE, before
+			// any is cut to 100 characters (so the cut can never split a phone or an
+			// email), and that copy is stored in metadata.redactedBody for
+			// GET /api/dispatch-notifications to serve every role but Super Admin.
+			const cut = (v) => {
 				const s = String(v).replace(/\s+/g, " ").trim();
 				if (!s) return "(blank)";
 				return s.length > 100 ? `${s.slice(0, 100)}…` : s;
 			};
-			const body = toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
+			const bodyOf = (view) => toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ") + (note ? `. ${note}` : "");
+				: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
+			const body = bodyOf((v) => String(v));
+			const redactedBody = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? bodyOf((v) => brokerContact.redactNoticeValue(v)) : null;
 			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
+			const storedMetadata = redactedBody == null ? metadata : { ...metadata, redactedBody };
 			try {
-				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
-				io.to("dispatch").emit("dispatch-notification", { type: "ratecon-reissue-held", title, body, metadata });
+				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(storedMetadata));
+				emitDispatchByRole("dispatch-notification",
+					{ type: "ratecon-reissue-held", title, body, metadata },
+					{ type: "ratecon-reissue-held", title, body: redactedBody, metadata });
 				notified = true;
 			} catch (e) { console.error("[ratecon-reissue] notification failed:", e.message); }
 			if (notified) {
@@ -9156,6 +9360,31 @@ function getCarrierDBFromSQLite() {
 app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
+		// Each driver's time off for the directory chip (R11), only while the flag
+		// is on: the period covering today, else the next one, as OffFrom / OffTo
+		// (null when none). Staff only, like this whole route. A failed read leaves
+		// the keys out, as the flag off does.
+		let offByDirectory = null;
+		let today = "";
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			try {
+				today = appTodayKey();
+				offByDirectory = new Map();
+				for (const rows of driverAvailabilityByName(today).values()) {
+					for (const r of rows) {
+						if (!offByDirectory.has(r.directory_id)) offByDirectory.set(r.directory_id, []);
+						offByDirectory.get(r.directory_id).push(r);
+					}
+				}
+			} catch (e) {
+				console.error("[drivers-directory] driver availability unreadable:", e.message);
+				offByDirectory = null;
+			}
+		}
+		const offFields = (id) => {
+			const off = driverAvailability.currentOrNextOff(offByDirectory.get(id) || [], today);
+			return { OffFrom: off ? off.from : null, OffTo: off ? off.to : null };
+		};
 		// Return in a format compatible with the old sheet-based response
 		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status", "PayType", "PayPercentage", "PayDaily"];
 		const data = drivers.map(d => ({
@@ -9167,6 +9396,7 @@ app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req
 			PayPercentage: d.pay_percentage || 0,
 			PayDaily: d.pay_daily || 0,
 			ProfilePictureUrl: d.profile_picture_url || '',
+			...(offByDirectory ? offFields(d.id) : {}),
 			_rowIndex: d.id, _id: d.id,
 		}));
 		res.json({ headers, data, total: data.length });
@@ -9691,7 +9921,18 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 			} catch (err) { console.error("Failed to unlink driver profile pic on cascade:", err.message); }
 		}
 		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
-		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		// The driver's live time off (R11) is cancelled with the row, in one
+		// transaction, while the flag is on. A re-added driver gets a new id and
+		// starts with none; with the flag off the rows stay, inert, because every
+		// read joins on an existing directory row.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			db.transaction(() => {
+				db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+				cancelDirectoryAvailability(req, id, dirRow.driver_name);
+			})();
+		} else {
+			db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		}
 
 		// ⚠️ THE MONEY LINE, AND IT IS THE WHOLE RECORD THAT THIS ROW EVER EXISTED.
 		// getDriverPayStructures() reads drivers_directory; with the row gone the
@@ -9713,6 +9954,254 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// ============================================================
+// DRIVER AVAILABILITY (R11) — a driver's recorded time off
+// ============================================================
+// Super Admin and Dispatcher record, edit, end early and cancel; a Driver reads
+// his own current and upcoming rows (no reason); Investors get nothing. The
+// rules (dates, the 60-day cap, the Dispatcher's 30-day and end-early limits)
+// are lib/driver-availability.js validateAvailability(), one validator for
+// create and edit; the overlap check runs in the write's own transaction.
+// Rows are cancelled, never deleted. Nothing here reaches pay or money.
+
+// The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
+// request moves on as if the route were never registered, before any role
+// check, so no 401 or 403 says it exists: it gets what an unknown path gets,
+// which for a GET is the SPA catch-all page (200), not a 404, and for a POST or
+// PUT is Express's 404.
+function availabilityFlagGate(req, res, next) {
+	if (!DRIVER_AVAILABILITY_ENABLED) return next("route");
+	return next();
+}
+
+// One stored row as the staff screens get it.
+function availabilityRowView(r, todayKey) {
+	return {
+		id: r.id,
+		directoryId: r.directory_id,
+		kind: r.kind,
+		from: r.from_date,
+		to: r.to_date,
+		reason: r.reason || "",
+		createdBy: r.created_by,
+		createdAt: r.created_at,
+		updatedAt: r.updated_at || null,
+		cancelledAt: r.cancelled_at || null,
+		cancelledBy: r.cancelled_by || null,
+		status: r.cancelled_at ? "cancelled" : r.to_date < todayKey ? "past" : r.from_date > todayKey ? "upcoming" : "current",
+	};
+}
+
+// Cancels a deleted directory row's live time off (the system's cancel,
+// audited per row). Runs inside the delete's transaction.
+function cancelDirectoryAvailability(req, directoryId, driverName) {
+	const live = db.prepare("SELECT id, kind, from_date, to_date FROM driver_availability WHERE directory_id = ? AND cancelled_at IS NULL").all(directoryId);
+	const now = new Date().toISOString();
+	const stamp = db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = 'system:directory-delete' WHERE id = ? AND cancelled_at IS NULL");
+	for (const r of live) {
+		stamp.run(now, r.id);
+		logAudit(req, "driver_availability_cancel", "driver", String(directoryId),
+			`${driverName}: off ${r.from_date}..${r.to_date} (${r.kind}) cancelled by the system: directory row deleted`);
+	}
+	return live.length;
+}
+
+// A stored row with its directory row's current name, or undefined when either
+// is gone (an orphan is answered 404 like an unknown id).
+function availabilityRowWithDriver(id) {
+	if (!Number.isInteger(id) || id <= 0) return undefined;
+	return db.prepare(`SELECT a.*, d.driver_name AS directory_name FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id WHERE a.id = ?`).get(id);
+}
+
+// The live row of the same driver that overlaps from..to, other than `exceptId`.
+function availabilityOverlap(directoryId, exceptId, from, to) {
+	return db.prepare(`
+		SELECT id, from_date, to_date FROM driver_availability
+		WHERE directory_id = ? AND cancelled_at IS NULL AND id <> ? AND from_date <= ? AND to_date >= ?
+		ORDER BY from_date ASC LIMIT 1
+	`).get(directoryId, exceptId, to, from);
+}
+
+function availabilityOverlapBody(name, clash) {
+	return {
+		error: `${name} already has time off ${driverAvailability.availabilityRangeText(clash.from_date, clash.to_date)} that overlaps these dates. Change or cancel that one instead.`,
+		code: "AVAILABILITY_OVERLAP",
+		overlapping: { id: clash.id, from: clash.from_date, to: clash.to_date },
+	};
+}
+
+// What a refused request asked for, for the refusal's audit line (bounded:
+// the body is the caller's text).
+function availabilityAttempt(body) {
+	const b = body && typeof body === "object" ? body : {};
+	return ["kind", "from", "to"].map((k) => `${k} ${auditText(b[k], 20) || "-"}`).join(", ");
+}
+
+// GET /api/drivers-directory/:id/availability — one driver's rows, newest first.
+app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
+		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
+		const today = appTodayKey();
+		const rows = db.prepare("SELECT * FROM driver_availability WHERE directory_id = ? ORDER BY from_date DESC, id DESC").all(id);
+		res.json({ directoryId: dir.id, driver: dir.driver_name, today, rows: rows.map((r) => availabilityRowView(r, today)) });
+	} catch (err) {
+		console.error("[availability] list failed:", err.message);
+		res.status(500).json({ error: "This driver's time off could not be read." });
+	}
+});
+
+// POST /api/drivers-directory/:id/availability — record a period off.
+// Body { kind, from, to, reason }. 400 INVALID_KIND / INVALID_REASON /
+// REASON_TOO_LONG / INVALID_DATE / RANGE_REVERSED / RANGE_TOO_LONG /
+// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP.
+app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
+		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin" });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
+				`${dir.driver_name}: ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		const { kind, from, to, reason } = v.value;
+		const outcome = db.transaction(() => {
+			const clash = availabilityOverlap(id, 0, from, to);
+			if (clash) return { clash };
+			const info = db.prepare(`
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(id, dir.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+			logAudit(req, "driver_availability_create", "driver", String(id), `${dir.driver_name}: off ${from}..${to} (${kind})`);
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid) };
+		})();
+		if (outcome.clash) {
+			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
+				`${dir.driver_name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(dir.driver_name, outcome.clash));
+		}
+		notifyChange("drivers");
+		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today) });
+	} catch (err) {
+		console.error("[availability] create failed:", err.message);
+		res.status(500).json({ error: "The time off could not be saved." });
+	}
+});
+
+// PUT /api/driver-availability/:id — change a period (a partial body over the
+// stored row; "end early" is a new `to`). The create's codes, plus 409
+// AVAILABILITY_CANCELLED; 404 for an unknown id or a row whose driver is gone.
+app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const name = row.directory_name;
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
+				`${name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		const { kind, from, to, reason } = v.value;
+		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && reason === String(row.reason || "");
+		const outcome = db.transaction(() => {
+			const clash = availabilityOverlap(row.directory_id, row.id, from, to);
+			if (clash) return { clash };
+			if (!unchanged) {
+				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
+					.run(kind, from, to, reason, new Date().toISOString(), row.id);
+				logAudit(req, "driver_availability_update", "driver", String(row.directory_id),
+					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})`);
+			}
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id) };
+		})();
+		if (outcome.clash) {
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
+				`${name}: row ${row.id} to ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(name, outcome.clash));
+		}
+		if (!unchanged) notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(outcome.row, today), ...(unchanged ? { unchanged: true } : {}) });
+	} catch (err) {
+		console.error("[availability] update failed:", err.message);
+		res.status(500).json({ error: "The time off could not be saved." });
+	}
+});
+
+// POST /api/driver-availability/:id/cancel — cancel a period (stamped, never
+// deleted). 409 AVAILABILITY_CANCELLED; 400 BACKDATE_LIMIT for a Dispatcher on
+// a row that starts more than 30 days back.
+app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const v = driverAvailability.validateAvailability({}, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_cancel_blocked", "driver", String(row.directory_id),
+				`${row.directory_name}: cancel row ${row.id} (${row.from_date}..${row.to_date}) [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		db.transaction(() => {
+			db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cancelled_at IS NULL")
+				.run(new Date().toISOString(), String(user.username || ""), row.id);
+			logAudit(req, "driver_availability_cancel", "driver", String(row.directory_id),
+				`${row.directory_name}: off ${row.from_date}..${row.to_date} (${row.kind}) cancelled`);
+		})();
+		notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today) });
+	} catch (err) {
+		console.error("[availability] cancel failed:", err.message);
+		res.status(500).json({ error: "The time off could not be cancelled." });
+	}
+});
+
+// GET /api/driver/me/availability — the signed-in driver's own current and
+// upcoming time off, read-only, without the reason. Two path segments under
+// /api/driver/, so `/api/driver/:driverName` can never capture it.
+app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
+	try {
+		const today = appTodayKey();
+		const me = normalizeDriverName(req.session.user.driverName);
+		const rows = me ? driverAvailabilityByName(today).get(me) || [] : [];
+		res.json({
+			today,
+			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
+		});
+	} catch (err) {
+		console.error("[availability] driver view failed:", err.message);
+		res.status(500).json({ error: "Your time off could not be read." });
+	}
+});
+
+// GET /api/driver-availability — every driver's current and upcoming time off
+// (staff), for the assign screens' driver lists.
+app.get("/api/driver-availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const today = appTodayKey();
+		const rows = [...driverAvailabilityByName(today).values()].flat()
+			.sort((a, b) => (a.from_date < b.from_date ? -1 : a.from_date > b.from_date ? 1 : a.id - b.id));
+		res.json({
+			today,
+			rows: rows.map((r) => ({
+				id: r.id, directoryId: r.directory_id, driver: r.directory_name, kind: r.kind, from: r.from_date, to: r.to_date,
+				status: r.from_date > today ? "upcoming" : "current",
+			})),
+		});
+	} catch (err) {
+		console.error("[availability] list failed:", err.message);
+		res.status(500).json({ error: "Time off could not be read." });
 	}
 });
 
@@ -14919,6 +15408,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		const destLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i);
 		const pickupDateCol = headers.find((h) => /pickup.*date|pickup.*appoint/i.test(h)) || null;
 		const deliveryDateCol = headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i.test(h)) || null;
+		// The badge judges against the Drop-off Appointment itself, never a
+		// delivered or completion date the broader match above can land on.
+		const appointmentCol = findCol(headers, DROPOFF_APPOINTMENT_COL_RE);
 		const statusUpdateCol = headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) || null;
 
 		const status = (load[statusCol] || "").toString().trim();
@@ -15078,13 +15570,18 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				minutesRemaining = Math.round(etaSeconds / 60);
 				expectedAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
 			}
+			// The appointment is a wall clock at the receiver (lib/eta-on-time.js),
+			// never the server's UTC one. `arrivalLocal` is the ETA on that same
+			// clock with its zone, shown beside the badge; an unreadable cell shows
+			// no badge.
 			let onTime = null;
-			const schedRaw = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
+			let arrivalLocal = null;
+			const schedRaw = appointmentCol ? (load[appointmentCol] || "").toString().trim() : "";
 			if (schedRaw) {
-				const scheduled = new Date(schedRaw);
-				if (!isNaN(scheduled)) onTime = new Date(expectedAt) <= scheduled;
+				const verdict = etaVerdict(Date.parse(expectedAt), schedRaw, { destAddress: destAddr, destLat, destLng });
+				if (verdict) { onTime = verdict.onTime; arrivalLocal = verdict.arrivalLocal; }
 			}
-			eta = { distanceMiles, minutesRemaining, expectedAt, onTime };
+			eta = { distanceMiles, minutesRemaining, expectedAt, onTime, arrivalLocal };
 		}
 
 		// --- Route line ------------------------------------------------------
@@ -17456,6 +17953,19 @@ function appMonthKey() {
 	return appTodayKey().slice(0, 7);
 }
 
+// The first day of the business month (APP_TIMEZONE) that `now` falls in, as a
+// server-local midnight Date: the end of the month loops, which walk a
+// server-local cursor (new Date(y, m, 1) and getMonth()). Never
+// new Date(now.getFullYear(), now.getMonth(), 1): that is the SERVER's month,
+// which on the UTC VPS is already next month from 8 PM EDT / 7 PM EST on a
+// month's last day, and for those hours the payout ledger, the investor view
+// and Financials showed a month that had not begun and the investor's totals
+// moved (scripts/test-month-end-business-clock.js).
+function appMonthStart(now = new Date()) {
+	const [y, m] = appDay(now).slice(0, 7).split("-").map(Number);
+	return new Date(y, m - 1, 1);
+}
+
 // Configured grace window, clamped to something sane. 0 = close at month end
 // (no window); 28 keeps the window inside the following month.
 function settlementGraceDays() {
@@ -18277,10 +18787,14 @@ function invoiceWeekWarnings(undated) {
 // Rejected), or on a separate correction invoice for that week, a Draft for the
 // owner to approve, once it is (Approved, Processing, Paid) or when its week
 // touches a closed month. A day in a closed month is never carried; a person
-// decides it (it is named in `warnings`).
+// decides it (it is named in `warnings`). Late days start at FROM's first week
+// (the Saturday of the week holding FROM's first day: the owner's decision of
+// 2026-10-15), so the weeks of FROM's month invoiced before the switch-on are
+// brought to the rule too, in place or by a correction.
 
-// The marker the late days start from: the Saturday of the first week the rule
-// generated an invoice for, written once in that invoice's transaction.
+// The record of the first week the rule generated an invoice for, written once
+// in that invoice's transaction. A record only: the late days start at FROM's
+// first week, whatever it says.
 const TRIP_WORK_DAYS_FLOOR_KEY = "trip_work_days_started_at";
 // Statuses whose invoice takes a late day in place.
 const LATE_WORK_DAY_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
@@ -18288,13 +18802,10 @@ const LATE_WORK_DAY_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
 // lists every one).
 const LATE_WORK_DAY_REPORT_DAYS = 35;
 
-function tripWorkDaysFloor() {
-	try {
-		const r = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(TRIP_WORK_DAYS_FLOOR_KEY);
-		return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.value || "")) ? r.value : "";
-	} catch {
-		return "";
-	}
+// The first day late days may be carried for, under TRIP_WORK_DAYS_FROM
+// `fromMonth`: the Saturday of the week holding its first day.
+function tripWorkDaysFloor(fromMonth) {
+	return getWeekRange(`${fromMonth}-01`).weekStart;
 }
 
 function dayKeyPlus(day, n) {
@@ -18506,7 +19017,7 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 		}
 		if (manualCover.has(c.day)) { refuse("mayBePaid", `it may already be paid by ${manualCover.get(c.day)}`); continue; }
 		if (!c.follows) { refuse("beforeFrom", "its load settles before TRIP_WORK_DAYS_FROM"); continue; }
-		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week the rule invoiced`); continue; }
+		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week of TRIP_WORK_DAYS_FROM`); continue; }
 		if (periodWriteLocked(c.day.slice(0, 7))) {
 			refuse("closedMonth", periodLocksReadable() ? `${periodLabel(c.day.slice(0, 7))} is closed` : "the month locks cannot be read");
 			continue;
@@ -18684,7 +19195,7 @@ async function createWorkDayCorrection({ driverName, weekly, weekStart, weekEnd,
 // One driver's late days (see the section header), settled: each week's days go
 // onto that week's own invoice or a correction for it. Runs at the start of a
 // weekly generation by a Super Admin (the Friday batch included), for the weeks
-// before it, with the rule on; nothing happens before the rule's first invoice.
+// before it from FROM's first week (tripWorkDaysFloor()), with the rule on.
 // Returns { report, warnings }; a week that cannot be settled is named in
 // `warnings` and waits for the next run (the days stay unpaid, never doubled).
 async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTrackingRows, resolver, req }) {
@@ -18694,8 +19205,7 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 	const nameNorm = normalizeDriverName(driverName);
 	const payStruct = getDriverPayStructures()[nameNorm] || { payType: "fixed", payPercentage: 0 };
 	if (payStruct.payType === "percentage") return out;
-	const floor = tripWorkDaysFloor();
-	if (!floor) return out;
+	const floor = tripWorkDaysFloor(resolver.fromMonth);
 	const { headers, data } = jobTrackingRowsOf(await readJobTrackingRows());
 	if (!headers.length) return out;
 	const found = lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay: dayKeyPlus(beforeWeekStart, -1) });
@@ -18710,8 +19220,8 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 	let changed = false;
 	for (const [weekStart, list] of found.byWeek) {
 		const weekEnd = getWeekRange(weekStart).weekEnd;
-		const entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
-		const dayText = entries.map((e) => e.day).join(", ");
+		let entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
+		let dayText = entries.map((e) => e.day).join(", ");
 		try {
 			const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
 			if (weekly.length !== 1) {
@@ -18722,6 +19232,27 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 				continue;
 			}
 			const inv = weekly[0];
+			// A day already on the week's own invoice grid is paid, even when no
+			// invoice_paid_days row holds it (invoiced before the switch-on and
+			// the start-up backfill not run yet): it is recorded as that
+			// invoice's (no amount changes) and left out. A day another live
+			// invoice already holds stays with it.
+			const onGrid = new Set(invoicePaidDaysOf(inv));
+			const gridDays = entries.filter((e) => onGrid.has(e.day)).map((e) => e.day);
+			if (gridDays.length) {
+				const invNorm = normalizeDriverName(inv.driver || "");
+				try {
+					db.transaction(() => {
+						const holders = invoicePaidDayHolders(invNorm, gridDays);
+						claimInvoicePaidDays(inv.id, invNorm, gridDays.filter((d) => !holders.has(d)));
+					}).immediate();
+				} catch (err) {
+					warnings.push(`NOT RECORDED: ${gridDays.join(", ")} on ${inv.invoice_number}'s grid: ${err && err.message}`);
+				}
+			}
+			entries = entries.filter((e) => !onGrid.has(e.day));
+			if (!entries.length) continue;
+			dayText = entries.map((e) => e.day).join(", ");
 			const blocker = lateWorkWeekBlocker(inv, { manuals: driverManualInvoicesForDays(nameNorm), minRate: Math.min(...entries.map((e) => e.rate)) });
 			if (blocker) {
 				for (const e of entries) report.refused.push({ day: e.day, loadId: e.loads.join(", "), reason: blocker, kind: "mayBePaid" });
@@ -18772,32 +19303,29 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 //   lateDays        days of weeks before this one that the rule pays and no
 //                   invoice holds yet, by week (they overlap perInvoice's
 //                   added days)
-//   refusedDays     days of from..to worked by the trip timestamps that no
-//                   invoice will carry, each with its reason and amount (before
-//                   the floor, a load settling before FROM, a closed month, may
-//                   already be paid by a manual invoice or an adjustment)
-//   lateDaysFloor   the floor used: the stored marker, else `floor` (the
-//                   Saturday of the week the first rule invoice is expected
-//                   for), else this business week's Saturday
+//   refusedDays     days of from..to (and any day before the floor, or in a
+//                   closed month, of a load settling in FROM or later) worked
+//                   by the trip timestamps
+//                   that no invoice will carry, each with its reason and amount
+//                   (before the floor, a load settling before FROM, a closed
+//                   month, may already be paid by a manual invoice or an
+//                   adjustment)
+//   lateDaysFloor   the floor: the Saturday of FROM's first week
+//                   (tripWorkDaysFloor()), as the switch-on uses it
 //   backfillRows    the invoice_paid_days rows the backfill would write first
 //   closedMonthsUnchanged, monthsBeforeFromUnchanged  false is a problem (the
 //                   script exits 1)
 // Drivers are numbered labels ("driver 1", …, per run) unless `names`.
 // Refuses a FROM at or before the latest closed month.
-async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
+async function workDaysDryRun({ from, to = "", names = false }) {
 	const fromMonth = String(from || "").trim();
 	const toMonth = String(to || "").trim() || fromMonth;
 	if (!tripWorkDays.FROM_MONTH_RE.test(fromMonth)) return { refused: true, reason: "from=YYYY-MM is required: the TRIP_WORK_DAYS_FROM to try" };
 	if (!tripWorkDays.FROM_MONTH_RE.test(toMonth) || toMonth < fromMonth) return { refused: true, reason: "to must be a month (YYYY-MM) on or after from" };
-	// The late days' floor the switch-on would have: the stored marker once the
-	// rule has invoiced, else `floor` (the Saturday of the week the first rule
-	// invoice is expected for), else this business week's Saturday (the Friday
-	// batch's week). Days of FROM's month before it are paid by the ledger but
-	// carried onto no invoice: refusedDays lists them with their amounts.
-	const floorGiven = String(floor || "").trim();
-	const realDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(`${d}T12:00:00Z`)) && new Date(`${d}T12:00:00Z`).toISOString().slice(0, 10) === d;
-	if (floorGiven && !realDay(floorGiven)) return { refused: true, reason: "floor must be a calendar day (YYYY-MM-DD)" };
-	const lateFloor = tripWorkDaysFloor() || (floorGiven ? getWeekRange(floorGiven).weekStart : getWeekRange().weekStart);
+	// The late days' floor, as the switch-on uses it: FROM's first week. A day
+	// before it is paid by the ledger but carried onto no invoice: refusedDays
+	// lists such days with their amounts.
+	const lateFloor = tripWorkDaysFloor(fromMonth);
 	const latestClosed = financialsCalc.ledgerDayOnce.latestClosedMonth(db);
 	if (latestClosed && fromMonth <= latestClosed) {
 		return { refused: true, reason: `from=${fromMonth} is at or before ${latestClosed}, the latest closed month. The rule may only start in an open month: closed months are final as recorded.` };
@@ -18907,8 +19435,9 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 		if (nm && !drivers.has(nm)) drivers.set(nm, String(row[cols.driverCol]).trim());
 	}
 	// Late days are those of weeks before this business week (the Friday batch
-	// settles the weeks before the one it bills), up to the end of `to`; with a
-	// floor in a later week, the days up to it too (all refused: before the floor).
+	// settles the weeks before the one it bills), up to the end of `to`; with
+	// FROM in a later month, the days up to its floor too (all refused: before
+	// the floor).
 	const beforeThisWeek = dayKeyPlus(getWeekRange().weekStart, -1);
 	const beforeFloor = dayKeyPlus(lateFloor, -1);
 	const reach = beforeFloor > beforeThisWeek ? beforeFloor : beforeThisWeek;
@@ -18934,7 +19463,10 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 			}
 		}
 		for (const r of found.refused) {
-			if (r.day < rangeStart || r.day > rangeEnd) continue;
+			// A day before FROM refused before the floor or for its closed month
+			// (only in FROM's first week) is listed too: its load settles in FROM,
+			// so the ledger pays it there and a person decides it.
+			if (r.day > rangeEnd || (r.day < rangeStart && r.kind !== "beforeFloor" && r.kind !== "closedMonth")) continue;
 			// A day before the floor in a week with no invoice yet: that week's own
 			// invoice will still pay its days, so it is not part of the floor gap.
 			const notYet = r.kind === "beforeFloor" && !liveWeeklyInvoicesForDriverWeek(display, getWeekRange(r.day).weekStart).length;
@@ -18974,7 +19506,8 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 			const ids = String(gridOf(d).loadBol || "").split(",").map((x) => x.trim()).filter(Boolean);
 			if (!ids.length || ids.some((id) => !follows(id))) ruleDays.add(d);
 		}
-		const added = [...ruleDays].filter((d) => !current.includes(d)).sort();
+		// A closed month's day is never added (refusedDays lists it), as live.
+		const added = [...ruleDays].filter((d) => !current.includes(d) && !periodWriteLocked(d.slice(0, 7))).sort();
 		const dropped = current.filter((d) => !ruleDays.has(d));
 		if (!added.length && !dropped.length) continue;
 		const rateOf = raterFor(nm, display);
@@ -19039,12 +19572,12 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 	};
 }
 
-// GET /api/admin/work-days/dry-run?from=YYYY-MM&to=YYYY-MM[&floor=YYYY-MM-DD][&names=1] — what the
+// GET /api/admin/work-days/dry-run?from=YYYY-MM&to=YYYY-MM[&names=1] — what the
 // trip work-day rule would change (workDaysDryRun()). Super Admin; read-only.
 app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const q = req.query || {};
-		const out = await workDaysDryRun({ from: String(q.from || ""), to: String(q.to || ""), floor: String(q.floor || ""), names: q.names === "1" || q.names === "true" });
+		const out = await workDaysDryRun({ from: String(q.from || ""), to: String(q.to || ""), names: q.names === "1" || q.names === "true" });
 		if (out.refused) return res.status(400).json({ error: out.reason, code: "WORK_DAYS_DRY_RUN_REFUSED" });
 		res.json(out);
 	} catch (err) {
@@ -19666,7 +20199,8 @@ async function generateInvoiceHandler(req, res) {
 				personalCommitGeneration(invoiceId, personal, personalFit);
 				// The trip work-day rule: the days this invoice pays, claimed in this
 				// transaction (409 INVOICE_DAY_ALREADY_PAID when another live invoice
-				// holds one), and the late days' floor, written once.
+				// holds one), and the record of the rule's first invoice week,
+				// written once.
 				if (tripRule) {
 					if (weekRule) claimInvoicePaidDays(invoiceId, nameNorm, [...activeDaySet]);
 					db.prepare("INSERT OR IGNORE INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, 'system')")
@@ -30064,6 +30598,20 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		console.error("/api/trucks: ELD last-fix read failed:", err.message);
 	}
 
+	// The truck's driver's time off (R11): for a Super Admin or a Dispatcher
+	// only, never for an Investor nor a Super Admin previewing an investor's
+	// portal (investors see nothing of a driver's time off), and only while the
+	// flag is on. A failed read leaves the key out, as the flag off does.
+	let truckOff = null;
+	if (DRIVER_AVAILABILITY_ENABLED && !preview.isPreview && (user.role === "Super Admin" || user.role === "Dispatcher")) {
+		try {
+			truckOff = truckDriverAvailability();
+		} catch (err) {
+			truckOff = null;
+			console.error("/api/trucks: driver availability unreadable:", err.message);
+		}
+	}
+
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
 		const driverLower = normalizeDriverName(t.assigned_driver);
@@ -30124,6 +30672,8 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			EldProvider: eld ? eld.provider : '',
 			EldSilent: eld ? eld.silent : false,
 			EldVehicleNumber: eld ? (eldNumberByVid[eldVid] || '') : '',
+			// His last day off, back-to-back periods joined; null when not off.
+			...(truckOff ? { DriverOffUntil: (truckOff.get(t.id) || {}).driverOffUntil || null } : {}),
 		};
 	});
 	res.json({ trucks });
@@ -37052,6 +37602,10 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			// covers; an append to any other tab is not judged.
 			const reservedDriver = driverCellRefusal(hdrs, [], values);
 			if (reservedDriver) return res.status(400).json(reservedDriver);
+			// Likewise an email or phone in Contract ID, 400 CONTACT_NOT_ALLOWED
+			// (brokerContact.contactNotAllowedRefusal(), as the row saves refuse it).
+			const contactInId = brokerContact.contactNotAllowedRefusal(hdrs, [], values);
+			if (contactInId) return res.status(400).json(contactInId);
 			const appendChanges = changedGuardedCells(hdrs, [], values);
 			const appendBlocker = sheetRowUpdateBlocker(true, hdrs, [], values, appendChanges);
 			if (appendBlocker) {
@@ -37077,6 +37631,16 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			}
 		}
 
+		// A new Job Tracking row that names a driver asks the off-duty check (R11);
+		// the caller confirms with confirmOffDuty: true, recorded only once the
+		// append succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: appendHeaders ? sheetRowOffDutyDriver(appendHeaders, [], values) : "", headers: appendHeaders, row: values, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "POST /api/data" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -37085,6 +37649,7 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				values: [values],
 			},
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// The append had no audit line either — and unlike the update there is no
 		// prior value to record, so the row's own contents ARE the record.
@@ -37297,11 +37862,33 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// written "" over the stored address. A disclosure bug turns into DATA LOSS
 		// the instant the reader and the writer disagree about which columns are
 		// withheld, so both ask resolveBrokerWithheldColumns().
+		// And first, with BROKER_CONTACT_VALUE_REDACTION_ENABLED: a cell (outside
+		// those columns) whose stored value holds broker contact, served to these
+		// callers redacted, is read-only. Sent back as stored or as served it is
+		// written back as stored; sent with anything else the save is refused, 409
+		// CONTACT_CELL_READ_ONLY naming the column (brokerContact.restoreContactCells()).
+		// The refusal is on the audit trail (logAuditRefusal(), coalesced like any
+		// non-period refusal), naming the column: repeated, it says someone is
+		// testing what a withheld cell holds.
+		if (req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED) {
+			const readOnly = brokerContact.restoreContactCells(headers, before, values, { withheldRe: BROKER_WITHHELD_RE });
+			if (readOnly) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`,
+					sheetAuditWithCode(JSON.stringify({ outcome: "blocked", sheet: sheetName, rowIndex, column: readOnly.field }), readOnly.code), readOnly.code);
+				return res.status(409).json(readOnly);
+			}
+		}
 		if (req.session.user.role !== "Super Admin") {
 			restoreWithheldBrokerCells(headers, before, values);
 			const formula = formulaCellRefusal(headers, before, values);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: an email or a formatted phone
+		// newly typed into Contract ID is refused, 400 CONTACT_NOT_ALLOWED naming the
+		// column (brokerContact.contactNotAllowedRefusal()); a stored value resent
+		// unchanged is not judged.
+		const contactInId = brokerContact.contactNotAllowedRefusal(headers, before, values);
+		if (contactInId) return res.status(400).json(contactInId);
 		// For every caller, Super Admin included: a changed cell in a Driver column
 		// that reads as a built-in property name is refused, 400
 		// DRIVER_NAME_RESERVED naming the column (driverCellRefusal()), judged on
@@ -37407,7 +37994,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			// the sibling refusals on this same action (DUPLICATE_LOAD, SHEET_CHANGED) —
 			// which ARE reachable on demand — are the ones a future reader will reach for.
 			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: blocker.code, periods: blocker.periods }), blocker.code), blocker.code);
-			return res.status(409).json({
+			const refusal = {
 				error: blocker.error,
 				code: blocker.code,
 				periods: blocker.periods,
@@ -37415,7 +38002,12 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 				// Which date cells could not be read, so the caller can fix the right
 				// one without parsing it back out of the prose.
 				...(blocker.unreadable ? { unreadable: blocker.unreadable } : {}),
-			});
+			};
+			// The text quotes stored and sent cells: every role but Super Admin gets
+			// it with broker contact withheld (BROKER CONTACT BY VALUE).
+			return res.status(409).json(req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED
+				? brokerContact.redactContactDeep(refusal)
+				: refusal);
 		}
 
 		// ⚠️ RE-READ IMMEDIATELY BEFORE WRITING, for the same reason
@@ -37455,6 +38047,17 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			}
 		}
 
+		// A save that puts another driver on a Job Tracking load, or moves an
+		// assigned load's dates, asks the off-duty check (R11) last, after the
+		// re-read, so nothing awaits between it and the write; the caller confirms
+		// with confirmOffDuty: true, recorded only once the write succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowOffDutyDriver(headers, before, after) : "", headers, row: after, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "PUT /api/data/:rowIndex" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		// Only the cells this save changes, one range each (sheetRowCellWrites()):
 		// a cell sent back as read is not rewritten, so every cell nobody edited,
 		// a formula cell included, stays as it is. Nothing changed, nothing
@@ -37478,6 +38081,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		}
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
@@ -38011,6 +38615,111 @@ function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
 	return res.status(refusal.http).json(body);
 }
 
+// Which driver a row save asks the off-duty check about (R11), or "": a new
+// driver on the load, or the load's driver when the save moves its Pickup or
+// Drop-off day (the owner's rule, 2026-10-15; a new time on the same day is no
+// move). lib/driver-availability.js offDutyCheckDriver() decides, on days read
+// with sheetDayKey(). `before` and `after` are cell arrays in `headers` order;
+// a new row passes `before` as []. Only the Driver column is checked: Job
+// Tracking has no co-driver column.
+function sheetRowOffDutyDriver(headers, before, after) {
+	if (!Array.isArray(headers) || !Array.isArray(after)) return "";
+	const cols = jobTrackingMonthCols(headers);
+	const cell = (cells, col) => {
+		const i = col ? headers.indexOf(col) : -1;
+		return i < 0 || !Array.isArray(cells) ? "" : cells[i];
+	};
+	if (!cols.driverCol || headers.indexOf(cols.driverCol) < 0) return "";
+	return driverAvailability.offDutyCheckDriver({
+		driverBefore: cell(before, cols.driverCol),
+		driverAfter: cell(after, cols.driverCol),
+		pickupBefore: sheetDayKey(cell(before, cols.pickupDateCol)),
+		pickupAfter: sheetDayKey(cell(after, cols.pickupDateCol)),
+		dropoffBefore: sheetDayKey(cell(before, cols.dropoffDateCol)),
+		dropoffAfter: sheetDayKey(cell(after, cols.dropoffDateCol)),
+		normalize: normalizeDriverName,
+	});
+}
+
+// THE OFF-DUTY CHECK (R11), shared by the five routes that put a driver on a
+// load or move an assigned load's dates: POST /api/dispatch, POST
+// /api/dispatch/reassign, PUT /api/data/:rowIndex and PUT /api/load/:loadId (a
+// new driver, or new dates: sheetRowOffDutyDriver()), and POST /api/data. Each
+// calls it inside `if (DRIVER_AVAILABILITY_ENABLED)`, so with the flag off it
+// never runs; n8n and system writes never call it. It warns, never blocks (the
+// owner's rule): when the load's window (lib/driver-availability.js
+// offDutyLoadWindow(), from the row's Pickup and Drop-off Appointment read with
+// sheetDayKey()) overlaps one of the driver's live off rows and ends today or
+// later, it answers { refusal }, the 409 DRIVER_OFF_DUTY body naming the dates;
+// with the caller's confirmation it answers { confirmed }, which the route
+// records with recordOffDutyConfirmation() only once its sheet write
+// succeeded. `row` is the load's row as it will be written. null: go ahead with
+// nothing to record. A read that fails is logged and answers null: the check is
+// a warning, and must never be the reason a dispatch fails.
+function driverOffDutyRefusal(req, { driver, headers, row, loadId, confirmed, via }) {
+	try {
+		const name = String(driver || "").trim();
+		if (!name || !Array.isArray(headers) || !Array.isArray(row)) return null;
+		const today = appTodayKey();
+		const rows = driverAvailabilityByName(today).get(normalizeDriverName(name)) || [];
+		if (!rows.length) return null;
+		const cols = jobTrackingMonthCols(headers);
+		const day = (col) => {
+			const i = col ? headers.indexOf(col) : -1;
+			return i < 0 ? "" : sheetDayKey(row[i]);
+		};
+		const conflict = driverAvailability.offDutyConflict({ rows, pickupKey: day(cols.pickupDateCol), dropoffKey: day(cols.dropoffDateCol), todayKey: today });
+		if (!conflict) return null;
+		const loadIdx = cols.loadIdCol ? headers.indexOf(cols.loadIdCol) : -1;
+		const load = String(loadId || (loadIdx >= 0 ? row[loadIdx] || "" : "")).trim();
+		if (confirmed) {
+			const offRow = rows.find((r) => r.id === conflict.id);
+			return { confirmed: { driver: name, load, via, conflict, directoryId: offRow ? offRow.directory_id : 0 } };
+		}
+		const kindText = { vacation: "vacation", off_duty: "off duty", other: "time off" }[conflict.kind] || "time off";
+		return {
+			refusal: {
+				error: `${name} is off ${driverAvailability.availabilityRangeText(conflict.from, conflict.to)} (${kindText}), and this load runs ` +
+					`${driverAvailability.availabilityRangeText(conflict.windowStart, conflict.windowEnd)}. Assign anyway?`,
+				code: "DRIVER_OFF_DUTY",
+				driver: name,
+				offFrom: conflict.from,
+				offTo: conflict.to,
+				kind: conflict.kind,
+				loadFrom: conflict.windowStart,
+				loadTo: conflict.windowEnd,
+			},
+		};
+	} catch (e) {
+		console.error(`[availability] off-duty check failed; assigning without it (${via}):`, e.message);
+		return null;
+	}
+}
+
+// An "Assign anyway" whose sheet write succeeded (driverOffDutyRefusal()'s
+// { confirmed }): the confirmation row, which lets the driver's truck alert as
+// normal while the load covers today, and its audit line, naming the driver, his
+// off dates and the load's window. Called only after the write: a confirmed
+// assignment that was never written leaves neither. A failure here is logged,
+// never answered: the assignment itself went through.
+function recordOffDutyConfirmation(req, c) {
+	try {
+		const user = (req.session && req.session.user) || {};
+		const { conflict } = c;
+		db.prepare(`
+			INSERT INTO driver_availability_confirmations
+				(availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by, confirmed_by_user_id, confirmed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(conflict.id, Number(c.directoryId) || 0, c.load, conflict.windowStart, conflict.windowEnd, String(c.via || ""),
+			String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+		logAudit(req, "dispatch_off_duty_confirmed", "load", c.load,
+			`${c.driver} assigned to load ${c.load || "(unknown)"} while off ${conflict.from}..${conflict.to} (${conflict.kind}); ` +
+			`load window ${conflict.windowStart}..${conflict.windowEnd}; confirmed (${c.via})`);
+	} catch (e) {
+		console.error("[availability] an \"Assign anyway\" was written but could not be recorded:", e.message);
+	}
+}
+
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 //
 // ⚠️ PERIOD-GUARDED — see dispatchWriteBlocker() above for where the line is
@@ -38125,6 +38834,16 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			}
 		}
 
+		// The driver's recorded time off (R11): a warning the caller confirms
+		// with confirmOffDuty: true. Before the first write; a confirmation is
+		// recorded only once the write below succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		// Ensure Truck and Owner ID columns exist in sheet
 		let truckColIdx = headers.findIndex(h => /^truck$/i.test(h));
 		let ownerColIdx = headers.findIndex(h => /^owner.?id$/i.test(h));
@@ -38155,6 +38874,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// Persist notification and notify the driver in real-time
 		const route = [origin, destination].filter(Boolean).join(' → ') || '';
@@ -38292,6 +39012,15 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			}
 		}
 
+		// The new driver's recorded time off (R11), as POST /api/dispatch asks it;
+		// a confirmation is recorded only once the write below succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: newDriver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch/reassign" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		// Ensure Truck and Owner ID columns exist (same approach as /api/dispatch).
 		let truckColIdx = headers.findIndex(h => /^truck$/i.test(h));
 		let ownerColIdx = headers.findIndex(h => /^owner.?id$/i.test(h));
@@ -38320,6 +39049,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// Notify new driver
 		insertNotification.run(
@@ -39600,6 +40330,28 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			};
 		});
 
+		// Drivers recorded off today (R11), only while the flag is on: each fleet
+		// entry's `offUntil` (his last day off, back-to-back periods joined; null
+		// when not off) for the Fleet & Drivers pill, and an `offUntil` map of the
+		// dropdown's drivers who are off, for the assign dropdowns. A failed read
+		// leaves both out, as the flag off does.
+		let offUntilByName = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			try {
+				const today = appTodayKey();
+				offUntilByName = new Map();
+				for (const [key, rows] of driverAvailabilityByName(today)) {
+					const until = driverAvailability.availabilityFields(rows, today).driverOffUntil;
+					if (until) offUntilByName.set(key, until);
+				}
+				for (const f of fleet) f.offUntil = offUntilByName.get(normalizeDriverName(f.Driver)) || null;
+			} catch (e) {
+				console.error("[dashboard] driver availability unreadable:", e.message);
+				offUntilByName = null;
+				for (const f of fleet) delete f.offUntil;
+			}
+		}
+
 		// Pre-resolve origin/destination address columns so we can enrich every
 		// job row with plain "City, ST ZIP" strings that the new Pickup/Drop-off
 		// table columns render. Desoren asked for this 2026-04-20 because the
@@ -39667,6 +40419,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			fleet,
 			drivers: driverList,
 			driverQueues,
+			...(offUntilByName
+				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
+				: {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -39794,14 +40549,33 @@ function resolveBrokerWithheldColumns(headers) {
 	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
 }
 
+// BROKER CONTACT BY VALUE (the owner, 2026-10-15). The columns above are not the
+// only place a broker email or phone can sit: any column, free text included,
+// can hold one. For every role but Super Admin, every value a load response
+// carries goes through lib/broker-contact.js: an email or a formatted phone
+// (and the row's own broker phone, email and agent name) reads
+// "[contact withheld]", a cell holding only contact is blank, such a cell is
+// read-only (409 CONTACT_CELL_READ_ONLY), and the rate-con extract answers with
+// its broker fields empty. Kill switch, defaults ON like PII_MASK_ENABLED:
+// "false" restores the column-only rule for every response. An email or phone
+// typed into Contract ID is refused either way (400 CONTACT_NOT_ALLOWED).
+const brokerContact = require("./lib/broker-contact");
+const BROKER_CONTACT_VALUE_REDACTION_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.BROKER_CONTACT_VALUE_REDACTION_ENABLED ?? "").trim());
+
 // A copy of the rows with every withheld cell that holds anything served as "",
 // plain text and JSON contact blobs alike (the owner's decision above). An
-// absent or empty cell is left as it is. Callers apply it to every role but
-// Super Admin.
+// absent or empty cell is left as it is. With BROKER_CONTACT_VALUE_REDACTION_ENABLED
+// every other value is redacted first (brokerContact.redactLoadValues(), which
+// reads the row's own contact from the withheld cells as stored and lists the
+// cells it redacted in `_withheldCells`). Callers apply it to every role but
+// Super Admin, last before the answer, after any enrichment.
 function sanitizeBrokerColumns(headers, rows) {
 	const withheld = resolveBrokerWithheldColumns(headers);
-	if (!withheld.length) return rows;
-	return rows.map((row) => {
+	const source = BROKER_CONTACT_VALUE_REDACTION_ENABLED
+		? brokerContact.redactLoadValues(headers, rows, { withheldRe: BROKER_WITHHELD_RE })
+		: rows;
+	if (!withheld.length) return source;
+	return source.map((row) => {
 		const cleaned = { ...row };
 		for (const col of withheld) {
 			if (cleaned[col]) cleaned[col] = "";
@@ -44270,7 +45044,16 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		const unreadCount = db.prepare(
 			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0`
 		).get().count;
-		res.json({ notifications, unreadCount });
+		// Every role but Super Admin (with BROKER_CONTACT_VALUE_REDACTION_ENABLED):
+		// each notice's title, body and metadata with broker contact withheld, the
+		// copy stored with it (metadata.redactedBody) served as its body, and a
+		// re-issue notice stored before that copy existed naming its columns only
+		// (brokerContact.redactDispatchNotice()). Otherwise each as stored, without
+		// the copy (brokerContact.fullDispatchNotice()).
+		const served = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin"
+			? notifications.map((n) => brokerContact.redactDispatchNotice(n))
+			: notifications.map((n) => brokerContact.fullDispatchNotice(n));
+		res.json({ notifications: served, unreadCount });
 	} catch (error) {
 		res.status(500).json({ error: error.message });
 	}
@@ -46044,6 +46827,19 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 					fields = rateconNormalize.mergeExtractions(fields, retry);
 				} catch { /* keep the first-pass fields if the retry fails */ }
 			}
+			// Every role but Super Admin (BROKER CONTACT BY VALUE): the broker fields
+			// (Broker Name, Phone, Email, Documents Email) null, whatever the kill
+			// switch says, and with BROKER_CONTACT_VALUE_REDACTION_ENABLED every other
+			// value redacted. The original is kept in memory for this PDF, so the
+			// create that follows writes the rate con's own broker contact (POST
+			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()).
+			if (req.session.user.role !== "Super Admin") {
+				brokerContact.rateConStash.put(brokerContact.rateConStashKey(base64), fields);
+				return res.json({
+					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
+					warnings: rateconLoad.extractionWarnings(fields),
+				});
+			}
 			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
 		} catch (err) {
 			// A rejected key or an exhausted quota is the same state as having no key
@@ -46093,9 +46889,37 @@ const RATECON_SHEET_FIELDS = [
 // dispatcher "fixing" a hard error by re-dropping the PDF would create a twin.
 app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
 	try {
-		const { fields, pdfBase64, fileName } = req.body || {};
+		const { pdfBase64, fileName } = req.body || {};
+		let { fields } = req.body || {};
 		if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
 			return res.status(400).json({ error: "fields required" });
+		}
+		// Every role but Super Admin (BROKER CONTACT BY VALUE): the extract served
+		// them the broker fields empty (and, with BROKER_CONTACT_VALUE_REDACTION_ENABLED,
+		// the rest redacted), so the broker fields come from the extract's own
+		// answer for this PDF, never from the body, whatever the kill switch says; a
+		// field sent back exactly as served gets its original, an edited one is
+		// written as sent. With no extract held (another PDF, or more than 30
+		// minutes ago) the broker fields are written blank and a warning says so.
+		// Before every check below, so they judge the fields as they will be written.
+		let brokerContactMissed = false;
+		let fromExtract = [];
+		if (req.session.user.role !== "Super Admin") {
+			const held = brokerContact.rateConStash.get(brokerContact.rateConStashKey(pdfBase64));
+			const merged = brokerContact.rateConCreateFields(fields, held, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED });
+			fields = merged.fields;
+			brokerContactMissed = merged.missed;
+			fromExtract = merged.fromHeld;
+		}
+		// A field taken from the extract (a broker field, or one put back from the
+		// served copy) that the sheet would store as a formula (an international
+		// "+52 ..." phone) is written blank, with a warning naming it: the person
+		// never saw that value to fix it, and check 1 below would refuse the load.
+		const blankedFromExtract = [];
+		if (req.session.user.role !== "Super Admin") {
+			for (const k of fromExtract) {
+				if (formulaCellRefusal([k], [], [fields[k]])) { fields[k] = ""; blankedFromExtract.push(k); }
+			}
 		}
 
 		// ---- 1) Validate Load ID (n8n "Validate Load ID" filter) ----
@@ -46180,6 +47004,13 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		res.on("close", () => rateConCreateInFlight.delete(loadKey));
 
 		const warnings = [];
+		if (brokerContactMissed) {
+			warnings.push("The broker's contact details could not be taken from this rate con (it was not read here in the last 30 minutes), so the load has none. A Super Admin can add them.");
+		}
+		if (blankedFromExtract.length) {
+			const one = blankedFromExtract.length === 1;
+			warnings.push(`${blankedFromExtract.join(", ")}: the value on this rate con could not be saved as read (the sheet would take it as a formula), so ${one ? "it was" : "they were"} left blank. A Super Admin can add ${one ? "it" : "them"}.`);
+		}
 		const sheets = await getSheets();
 
 		// ---- 2) Dedupe against Job Tracking (n8n "Check Existing Load") ----
@@ -46581,21 +47412,25 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// Same "new-load" notification the n8n webhook raises, so a dropped load
 		// surfaces identically to an email-ingested one. loadId lives inside
 		// metadata for the NotificationsView click-routing convention.
+		// An address can hold a phone, so the text goes per role (BROKER CONTACT BY
+		// VALUE, emitDispatchByRole()): stored and sent to Super Admins in full; with
+		// BROKER_CONTACT_VALUE_REDACTION_ENABLED the rest of the dispatch room is
+		// sent, and GET /api/dispatch-notifications serves them, a copy with broker
+		// contact withheld (metadata.redactedBody, kept when it differs).
 		const route = rpm.details && rpm.details !== "Distance unavailable"
 			? rpm.details
 			: [pickupAddress, dropoffAddress].filter(Boolean).join(" → ");
+		const routeRedacted = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactNoticeValue(route) : route;
 		insertDispatchNotification.run(
 			"new-load",
 			`New Load ${loadId}`,
 			route,
-			JSON.stringify({ loadId, rowIndex, source: "ratecon-drop" }),
+			JSON.stringify({ loadId, rowIndex, source: "ratecon-drop", ...(routeRedacted !== route ? { redactedBody: routeRedacted } : {}) }),
 		);
 		io.to("dispatch").emit("new-load", { timestamp: Date.now() });
-		io.to("dispatch").emit("dispatch-notification", {
-			type: "new-load",
-			title: `New Load ${loadId}`,
-			body: route,
-		});
+		emitDispatchByRole("dispatch-notification",
+			{ type: "new-load", title: `New Load ${loadId}`, body: route },
+			{ type: "new-load", title: `New Load ${loadId}`, body: routeRedacted });
 		notifyChange("dashboard");
 
 		res.json({
@@ -51350,7 +52185,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
 			const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
 			const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
-			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
+			// The receiver's appointment ("Drop-off Appointment"). The old
+			// /delivery.*time|drop.*date/-style match found no Job Tracking column, so
+			// the on-time / delayed status never fired.
+			const deliveryTimeCol = findCol(headers, DROPOFF_APPOINTMENT_COL_RE);
+			// The receiver's address, which tells its state and so its clock.
+			const dropoffAddressCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 
 			if (loadIdCol) {
 				// Build load lookup, null-prototype, filed and read through
@@ -51380,6 +52220,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// blank one (driverNameForTotals()); both maps are null-prototype and
 				// filed by fileByDriver(), so a Driver cell with other spacing than the
 				// directory's still reaches its driver (readByDriver()).
+				const redactEntries = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin";
+				const brokerWithheld = resolveBrokerWithheldColumns(headers);
 				const driverActiveLoadMap = Object.create(null);   // driver → first active loadId (for override, includes dispatched)
 				const driverActiveLoadsMap = Object.create(null);  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
@@ -51427,7 +52269,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 									if (!entry.destLat && lc.dest_lat) { entry.destLat = lc.dest_lat; entry.destLng = lc.dest_lng; }
 								}
 							}
-							loadsBySpelling[spelling].push(entry);
+							// Every role but Super Admin: the entry's text (details and the
+							// address parts) with broker contact withheld, the row's own
+							// contact included (BROKER CONTACT BY VALUE).
+							loadsBySpelling[spelling].push(redactEntries
+								? brokerContact.redactContactDeep(entry, brokerContact.ownContact(brokerWithheld.map((h) => [h, obj[h]])))
+								: entry);
 						}
 					}
 				}
@@ -51530,14 +52377,13 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						loc.etaMinutes = Math.round(etaSeconds / 60);
 					}
 
+					// The same verdict as the customer tracker's badge: the appointment
+					// on the receiver's clock (lib/eta-on-time.js).
 					if (deliveryTimeCol && load[deliveryTimeCol]) {
-						try {
-							const scheduled = new Date(load[deliveryTimeCol]);
-							if (!isNaN(scheduled)) {
-								const arrival = new Date(Date.now() + etaSeconds * 1000);
-								loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
-							}
-						} catch { /* ignore parse error */ }
+						const onTime = etaOnTime(Date.now() + etaSeconds * 1000, String(load[deliveryTimeCol]), {
+							destAddress: dropoffAddressCol ? String(load[dropoffAddressCol] || "") : "", destLat: dLat, destLng: dLng,
+						});
+						if (onTime !== null) loc.etaStatus = onTime ? "on-time" : "delayed";
 					}
 				}));
 
@@ -51929,12 +52775,28 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// before anything is written: every broker contact column is written back
 		// exactly as stored, whatever the body sent (restoreWithheldBrokerCells()),
 		// and a changed cell the sheet would store as a formula is refused 400
-		// FORMULA_NOT_ALLOWED (formulaCellRefusal()).
+		// FORMULA_NOT_ALLOWED (formulaCellRefusal()); and first, with
+		// BROKER_CONTACT_VALUE_REDACTION_ENABLED, a cell holding broker contact is
+		// read-only, 409 CONTACT_CELL_READ_ONLY (brokerContact.restoreContactCells()).
+		// Audited as PUT /api/data/:rowIndex audits it.
+		if (req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED) {
+			const readOnly = brokerContact.restoreContactCells(headers, before, updatedRow, { withheldRe: BROKER_WITHHELD_RE });
+			if (readOnly) {
+				logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`,
+					sheetAuditWithCode(JSON.stringify({ outcome: "blocked", sheet: sheetName, rowIndex, loadId, column: readOnly.field }), readOnly.code), readOnly.code);
+				return res.status(409).json(readOnly);
+			}
+		}
 		if (req.session.user.role !== "Super Admin") {
 			restoreWithheldBrokerCells(headers, before, updatedRow);
 			const formula = formulaCellRefusal(headers, before, updatedRow);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: an email or phone newly typed into
+		// Contract ID is refused, 400 CONTACT_NOT_ALLOWED, as PUT /api/data/:rowIndex
+		// refuses it (brokerContact.contactNotAllowedRefusal()).
+		const contactInId = brokerContact.contactNotAllowedRefusal(headers, before, updatedRow);
+		if (contactInId) return res.status(400).json(contactInId);
 		// For every caller, Super Admin included: a changed Driver cell that reads
 		// as a built-in property name is refused, 400 DRIVER_NAME_RESERVED naming
 		// the column (driverCellRefusal(), as PUT /api/data/:rowIndex refuses it).
@@ -52014,13 +52876,18 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			// the sibling refusals on this same action (DUPLICATE_LOAD, SHEET_CHANGED) —
 			// which ARE reachable on demand — are the ones a future reader will reach for.
 			logAuditRefusal(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: blocker.code, periods: blocker.periods }), blocker.code), blocker.code);
-			return res.status(409).json({
+			const refusal = {
 				error: blocker.error,
 				code: blocker.code,
 				periods: blocker.periods,
 				...(blocker.changed ? { changed: blocker.changed } : {}),
 				...(blocker.unreadable ? { unreadable: blocker.unreadable } : {}),
-			});
+			};
+			// Every role but Super Admin: with broker contact withheld, as
+			// PUT /api/data/:rowIndex sends it.
+			return res.status(409).json(req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED
+				? brokerContact.redactContactDeep(refusal)
+				: refusal);
 		}
 
 		// ⚠️ RE-READ IMMEDIATELY BEFORE WRITING, for the same reason PUT /api/data and
@@ -52059,6 +52926,17 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 		}
 
+		// A new driver or new dates ask the off-duty check (R11), as PUT
+		// /api/data/:rowIndex does. Every body key here is a column name, so the
+		// confirmation is the query flag ?confirmOffDuty=true; it is recorded only
+		// once the write succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowOffDutyDriver(headers, before, after) : "", headers, row: after, loadId, confirmed: req.query.confirmOffDuty === "true", via: "PUT /api/load/:loadId" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		// Only the cells this save changes, one range each (sheetRowCellWrites(), as
 		// PUT /api/data/:rowIndex writes): a column the body left out, or sent back
 		// as read, is not rewritten, so a formula shown as its value and a text cell
@@ -52080,6 +52958,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 			// The 60s Job Tracking cache would otherwise keep serving the old figures.
 			if (guarded) jtCacheInvalidate();
 		}
@@ -53012,9 +53891,15 @@ const loadEldMilesGetStmt = db.prepare(`SELECT * FROM load_eld_miles WHERE load_
 // routemate_telemetry purges at 90 days, so a later recompute over a
 // partially-purged window sees FEWER samples and would otherwise overwrite a
 // complete historical figure with a truncated one. Failing closed on sample
-// count is what makes this table outlive the pings it was derived from. An
-// in-progress load's sample count only ever grows, so the same guard still lets
-// a live haul update on every view.
+// count is what makes this table outlive the pings it was derived from.
+//
+// A row written before the load closed out (in_progress = 1) is not a historical
+// figure, and the load's first result after close-out replaces it whatever the
+// two sample counts. The guard used to refuse that result without a word when the
+// mid-haul row held more samples: a replay that took an earlier load's visit to
+// the same shipper as this load's departure measured days of driving "so far".
+// measureLoadEldMiles() decides which writes may happen at all (never one for a
+// load in a closed month).
 const loadEldMilesUpsertStmt = db.prepare(`
 	INSERT INTO load_eld_miles (
 		load_id, routemate_vehicle_id, truck_id,
@@ -53057,16 +53942,19 @@ const loadEldMilesUpsertStmt = db.prepare(`
 		in_progress = excluded.in_progress,
 		computed_at = CURRENT_TIMESTAMP
 	WHERE excluded.samples >= load_eld_miles.samples
+	   OR (load_eld_miles.in_progress = 1 AND excluded.in_progress = 0)
 `);
 
 const HAUL_TRUCK_COL_RE = /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i;
 
 // Outer bound for the ping query, derived from the load's status history.
 //
-// Status timestamps are used HERE and for the deadhead leg's start, and nowhere
-// else. "When was this load handed to the driver" is a dispatch fact and a
-// button press is the right record of it; "when did the truck reach the shipper"
-// is a physical fact and a button press is not.
+// Status timestamps are used HERE, for the deadhead leg's start, and to tell an
+// earlier load's visit to the same shipper from this load's pickup
+// (lib/load-haul.js STALE_VISIT_BEFORE_DISPATCH_MS), and nowhere else. "When was
+// this load handed to the driver" is a dispatch fact and a button press is the
+// right record of it; "when did the truck reach the shipper" is a physical fact
+// and a button press is not.
 //
 // `closeOut` is the sheet's completion signal (haulSheetCloseOut()). It closes a
 // window the status history left open — a load typed into the sheet, or marked
@@ -53113,6 +54001,20 @@ function haulSheetCloseOut(row, headers, nowMs) {
 // is not. The modal and the sweep both read a load's window through this.
 function haulLoadWindow(rawId, row, headers, nowMs) {
 	return haulWindowFromPhases(computeStatusPhases(rawId), nowMs, haulSheetCloseOut(row, headers, nowMs));
+}
+
+// Is this load's haul row held as recorded? Closed months show exactly as settled,
+// so only an open-month load's row is written or rewritten (user, 2026-10-15).
+// The month-end lock's own test for a Job Tracking row (loadRowAccountingMonths()
+// and periodWriteLocked(), as integrityClosedMonthsOf() reads a cached row): a
+// load that books into any closed month is held, and so is one whose months can't
+// be told (an unreadable or missing date, or a lock table that can't be read).
+function haulRowInClosedMonth(headers, row) {
+	if (!row || !periodLocksReadable()) return true;
+	const hs = headers || [];
+	const months = loadRowAccountingMonths(hs, hs.map((h) => row[h]));
+	if (!months || !months.length) return true;
+	return months.some((mk) => periodWriteLocked(mk));
 }
 
 // Every OTHER load that ran on the same truck, with its status span.
@@ -53270,6 +54172,9 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 				dest: { lat: destLat, lng: destLng },
 				radiusM: HAUL_REPLAY_RADIUS_M,
 				terminal: win.terminal,
+				// The pings run 24 h past the close-out: a shipper visit after it is
+				// the truck's next load.
+				closeOutMs: win.terminal ? win.endMs : null,
 			};
 			// Two passes, because the deadhead floor depends on a physical
 			// fact the first pass is what discovers: when the truck actually
@@ -53279,14 +54184,21 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 			const otherSpans = haulSameTruckSpans(rows, headers, loadKey, truck.truck_id, truckResolver);
 			const deadheadStart = loadHaul.deadheadFloorMs(otherSpans, probe.pickupArriveMs, win.dispatchMs);
 			const computed = loadHaul.computeHaulMiles(samples, { ...legOpts, dispatchMs: deadheadStart });
-			if (computed.samples > 0) {
+			// A load in a closed month keeps its row as recorded: it is measured
+			// for this answer and never written.
+			const held = haulRowInClosedMonth(headers, row);
+			// A closed-out load replaces the row written while it ran, even when
+			// it measures nothing: handing that row back showed a delivered load
+			// "so far", from a replay that read another load's visit as its own.
+			const replacesLiveRow = !held && win.terminal && !!stored && !!stored.in_progress;
+			if (computed.samples > 0 || replacesLiveRow) {
 				const overlaps = otherSpans
 					.filter((sp) => loadHaul.windowsOverlap(
 						computed.windowStartMs, computed.windowEndMs, sp.startMs, sp.endMs))
 					.map((sp) => sp.key);
 				driven = { ...computed, overlapLoadIds: overlaps, stored: false };
 				try {
-					loadEldMilesUpsertStmt.run({
+					if (!held) loadEldMilesUpsertStmt.run({
 						load_id: loadKey,
 						routemate_vehicle_id: vid,
 						truck_id: truck ? truck.truck_id : 0,
@@ -53308,12 +54220,16 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 						max_gap_ms: computed.maxGapMs,
 						dropped_miles: computed.droppedMiles,
 						overlap_load_ids: overlaps.join(","),
-						in_progress: computed.inProgress ? 1 : 0,
+						// Measured before the load closed out, the row is provisional
+						// whatever the replay found (a truck still at the shipper, or
+						// already at the receiver), so the closed-out result replaces it.
+						in_progress: win.terminal ? 0 : 1,
 					});
 				} catch (e) { console.error("load_eld_miles upsert failed:", e.message); }
-			} else if (stored) {
+			} else if (stored && !stored.in_progress) {
 				// No pings left in the window — the 90-day purge has eaten them.
-				// The stored derivation outlives them; that is why it is stored.
+				// A final row outlives them; that is why it is stored. A row written
+				// mid-haul is no figure for the load and is not shown in its place.
 				driven = haulDrivenFromRow(stored);
 			} else {
 				driven = haulDrivenEmpty(computed.reason || "no_samples");
@@ -53329,8 +54245,9 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 // modal (32 of 345 loads in production), so every other load became
 // unmeasurable once its pings aged past the 90-day purge. This sweep runs
 // measureLoadEldMiles() for every live, closed-out load that has no final row
-// yet and whose window is still inside the retained telemetry. The first run
-// after a deploy is therefore the backfill.
+// yet, whose window is still inside the retained telemetry and which books into
+// no closed month (haulRowInClosedMonth()). The first run after a deploy is
+// therefore the backfill.
 //
 // Same rules as the modal, by construction (one function). "Closed out" is a
 // terminal status in load_status_history or, where there is none (a load typed
@@ -53371,6 +54288,8 @@ async function sweepLoadEldMiles() {
 			if (!win.terminal) { bump("not_closed_out"); continue; }
 			if (win.closedBy === "sheet") bump("closed_out_by_sheet");
 			if (win.endMs < nowMs - LOAD_ELD_MILES_SWEEP_MAX_AGE_MS) { bump("telemetry_purged"); continue; }
+			// Closed months show exactly as settled: their loads' rows stay as recorded.
+			if (haulRowInClosedMonth(live.headers, r)) { bump("closed_month"); continue; }
 			const { driven } = measureLoadEldMiles(rawId, {
 				coords: getLoadCoordsFull(rawId), jt, nowMs, truckResolver, deviceResolver,
 			});
@@ -53586,13 +54505,19 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 			deviceResolver: buildEldDeviceResolver(),
 		});
 
+		// Every role but Super Admin: the stored addresses with broker contact
+		// withheld (BROKER CONTACT BY VALUE; an address can carry a phone).
+		const shownAddress = (a) => {
+			const s = a || "";
+			return role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactContactText(s).text : s;
+		};
 		res.json({
 			loadId: rawId,
 			origin: hasOrigin
-				? { lat: originLat, lng: originLng, address: (coords && coords.pickup_address) || "" }
+				? { lat: originLat, lng: originLng, address: shownAddress(coords && coords.pickup_address) }
 				: null,
 			destination: hasDest
-				? { lat: destLat, lng: destLng, address: (coords && coords.dropoff_address) || "" }
+				? { lat: destLat, lng: destLng, address: shownAddress(coords && coords.dropoff_address) }
 				: null,
 			truck: truckUnit ? { unit: truckUnit, hasEld: !!vid } : null,
 			lane,
@@ -55312,8 +56237,12 @@ app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 		const result = {};
 		if (row.origin_lat) { result.originLat = row.origin_lat; result.originLng = row.origin_lng; }
 		if (row.dest_lat) { result.destLat = row.dest_lat; result.destLng = row.dest_lng; }
-		result.pickupAddress = row.pickup_address;
-		result.dropoffAddress = row.dropoff_address;
+		// The addresses as the load was created with them can carry a phone: every
+		// role but Super Admin gets them with broker contact withheld (BROKER
+		// CONTACT BY VALUE).
+		const shownAddress = (a) => (geoRole !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactContactText(a).text : a);
+		result.pickupAddress = shownAddress(row.pickup_address);
+		result.dropoffAddress = shownAddress(row.dropoff_address);
 		res.json(result);
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -55639,11 +56568,12 @@ function truckBilledMonthCount(t, now) {
 	const sy = parseInt(from.slice(0, 4), 10);
 	const sm = parseInt(from.slice(5, 7), 10) - 1;
 	if (!Number.isFinite(sy) || !Number.isFinite(sm)) return null;
-	// End month = the current month, pulled back to the retirement month when the
-	// truck has one. Never pushed FORWARD: a truck retired in the future is still
-	// accruing today, so a later retired_at must not invent months it has not
-	// lived through.
-	let ey = now.getFullYear(), em = now.getMonth();
+	// End month = the current business month (appMonthStart(), not the server's
+	// clock), pulled back to the retirement month when the truck has one. Never
+	// pushed FORWARD: a truck retired in the future is still accruing today, so a
+	// later retired_at must not invent months it has not lived through.
+	const thisMonth = appMonthStart(now);
+	let ey = thisMonth.getFullYear(), em = thisMonth.getMonth();
 	const until = truckChargeUntilMonth(t);
 	if (until) {
 		const uy = parseInt(until.slice(0, 4), 10), um = parseInt(until.slice(5, 7), 10) - 1;
@@ -55940,7 +56870,8 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// month with no activity still exists, and pays as the downtime setting says.
 		startMonthFor: (earliestKey) => investorPayoutBasis.firstPayoutMonth(earliestKey || currentMonthKey, payoutBasis),
 		currentMonthKey,
-		endDate: new Date(now.getFullYear(), now.getMonth(), 1),
+		// The business month's first day, as currentMonthKey (appMonthStart()).
+		endDate: appMonthStart(now),
 		ownerId: investorOwnerId || 0,
 		payoutBasis,
 		detailForMonth,
@@ -58039,7 +58970,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: currentMonthKey;
 			const startMonth = investorPayoutBasis.firstPayoutMonth(activityStartMonth, payoutBasis);
 			let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
-			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			// The business month's first day, as currentMonthKey (appMonthStart()).
+			const endDate = appMonthStart(now);
 			let deferredAccrual = 0;
 			const months = [];
 			while (cursor <= endDate) {
@@ -64376,6 +65308,12 @@ app.get("/api/analytics/mileage/detail",
 		// Loads the driver moved that day. `actor` is the driver's name on any
 		// driver-initiated status change, so this needs no sheet read.
 		const loadsByDay = new Map();
+		// Every role but Super Admin: each load's stored addresses with broker
+		// contact withheld (BROKER CONTACT BY VALUE; an address can carry a phone).
+		const shownAddress = (a) => {
+			const s = a || "";
+			return req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactContactText(s).text : s;
+		};
 		if (drivers.length) {
 			const ph = drivers.map(() => "LOWER(?)").join(",");
 			for (const h of db.prepare(
@@ -64390,7 +65328,7 @@ app.get("/api/analytics/mileage/detail",
 				const list = loadsByDay.get(h.day) || [];
 				list.push({
 					loadId: h.load_id, status: h.new_status, at: h.changed_at, actor: h.actor,
-					pickup: h.pickup_address || "", dropoff: h.dropoff_address || "",
+					pickup: shownAddress(h.pickup_address), dropoff: shownAddress(h.dropoff_address),
 				});
 				loadsByDay.set(h.day, list);
 			}
@@ -65266,16 +66204,21 @@ function kpiGatherDbInputs(db, opts) {
 		});
 	}
 
+	// The receiver's place, which tells its clock (lib/stop-zone.js): its
+	// longitude, and its latitude and address for its state.
 	const destLng = new Map();
-	for (const r of db.prepare("SELECT load_id, dest_lng FROM load_coordinates").all()) {
+	const destPlace = new Map();
+	for (const r of db.prepare("SELECT load_id, dest_lat, dest_lng, dropoff_address FROM load_coordinates").all()) {
 		const k = key(r.load_id);
-		if (k) destLng.set(k, finite(r.dest_lng));
+		if (!k) continue;
+		destLng.set(k, finite(r.dest_lng));
+		destPlace.set(k, { lat: finite(r.dest_lat), address: String(r.dropoff_address || "").slice(0, 300) });
 	}
 
 	// R10: what the mile metrics read (lib/kpi-miles-data.js, named columns only).
 	const milesData = kpiMilesData.gatherMilesData(db);
 
-	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, milesData };
+	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, destPlace, milesData };
 }
 
 // The inputs lib/kpi-metrics.js computeKpis() takes. The mile records cover live
@@ -65284,10 +66227,13 @@ function kpiGatherDbInputs(db, opts) {
 function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 	const arrivals = sheet.arrivals.map((a) => {
 		const eld = dbIn.loadEld.get(a.loadId);
+		const place = dbIn.destPlace ? dbIn.destPlace.get(a.loadId) : null;
 		return {
 			loadId: a.loadId,
 			appointmentText: a.appointmentText,
 			destLng: dbIn.destLng.has(a.loadId) ? dbIn.destLng.get(a.loadId) : null,
+			destLat: place ? place.lat : null,
+			destAddress: place ? place.address : "",
 			eldArriveMs: eld ? eld.eldArriveMs : null,
 			receiverEvents: dbIn.receiverEvents.get(a.loadId) || [],
 			deliveredDay: a.deliveredDay,
@@ -66227,6 +67173,7 @@ io.on("connection", (socket) => {
 		// name that is not a string as no name.
 		if (role === "Super Admin" || role === "Dispatcher") {
 			socket.join("dispatch");
+			if (role === "Super Admin") socket.join("super-admin");
 			if (usernameLower) socket.join(userRoom(usernameLower));
 		} else if (role === "Investor") {
 			socket.join("investor");

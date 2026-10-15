@@ -192,7 +192,9 @@ eq(libZones, {
 	"app-time.js": ['"America/New_York"'],
 	"eld-miles.js": ['"America/New_York"', '"America/Chicago"', '"America/Denver"', '"America/Los_Angeles"'],
 	"load-haul.js": ['"America/Chicago"'],
-}, "lib/ names a zone only for the default, the truck-location bands and pre-switch stamps");
+	// A stop's own clock (user, 2026-10-15): the zones no longitude band holds.
+	"stop-zone.js": ['"America/Phoenix"', '"America/Anchorage"'],
+}, "lib/ names a zone only for the default, the truck-location bands, a stop's own clock and pre-switch stamps");
 eq(/const PRE_SWITCH_STAMP_TZ = "America\/Chicago";/.test(fs.readFileSync(path.join(ROOT, "lib", "load-haul.js"), "utf8")), true,
 	"load-haul's Houston is the reading of stamps written before the switch");
 const clientSrc = fs.readFileSync(path.join(ROOT, "client", "src", "utils", "datetime.js"), "utf8");

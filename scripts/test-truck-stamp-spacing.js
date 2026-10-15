@@ -450,6 +450,7 @@ function mountDispatch(db, routeSrc, helperOver) {
 	const env = {
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db,
 		findTruckForDriverStamp: helpers.findTruckForDriverStamp,

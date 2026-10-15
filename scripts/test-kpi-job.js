@@ -81,7 +81,7 @@ const Module = require("module");
 const os = require("os");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
 
 function die(msg) { console.error(`FAILED: ${msg}`); process.exit(1); }
 
@@ -234,7 +234,7 @@ function seed(db) {
 	lem.run("l-1002", 400, 50, "eld", "eld", "eld", Date.parse("2026-09-12T13:00:00Z"), "", 0);
 	lem.run("l-1003", null, 20, "partial", "no-data", "eld", 0, "l-1002", 0);
 	lem.run("l-1004", 300, 30, "eld", "eld", "eld", 0, "", 0);
-	db.prepare("INSERT INTO load_coordinates (load_id, dest_lat, dest_lng) VALUES ('#L-1002', 29.7, -95.3)").run();
+	db.prepare("INSERT INTO load_coordinates (load_id, dest_lat, dest_lng, dropoff_address) VALUES ('#L-1002', 29.7, -95.3, 'Houston, TX 77002')").run();
 	db.prepare("INSERT INTO deleted_loads (load_id) VALUES ('l-1005')").run();
 }
 
@@ -532,6 +532,7 @@ const runSection = section(async (t, block = BLOCK) => {
 	t(inputs.loads.find((l) => l.loadId === "l-1002").revenue === 0 && !("revenueByMonth" in inputs), "§5 revenue rides on each load; no books are read");
 	const a2 = inputs.arrivals.find((a) => a.loadId === "l-1002");
 	t(a2 && a2.destLng === -95.3 && a2.eldArriveMs === Date.parse("2026-09-12T13:00:00Z") && a2.receiverEvents.length === 1 && a2.receiverEvents[0].source === "geofence", "§5 an arrival joined to its coordinates, ELD arrival and receiver events");
+	t(a2 && a2.destLat === 29.7 && a2.destAddress === "Houston, TX 77002", "§5 ...and to the receiver's latitude and address, which tell its clock (lib/stop-zone.js)", JSON.stringify(a2));
 	// R10: paid-mile share v2 reads milesLoads; the ELD-leg loadMiles input is gone.
 	t(!("loadMiles" in inputs) && inputs.milesLoads.find((m) => m.key === "l-1002").day === "2026-09-12" && !inputs.milesLoads.some((m) => m.key === "l-1004"),
 		"§5 no unused loadMiles input; the mile records are live loads only, with the load's day");

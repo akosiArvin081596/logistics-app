@@ -534,7 +534,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 	{
 		const ME_NAMES = ["computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "computeLossCarryForward", "investorReportPayoutEntries",
 			"summarizeReportPayout", "reportPayoutNote", "periodLabel", "findCol", "pickAddressColumn", "moneySheetDate",
-			"appDay", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
+			"appDay", "appMonthStart", "normalizeDriverName", "driverNameForTotals", "isBuiltInPropertyName", "resolveInvestorSplitPct"];
 		const ME = Object.fromEntries(ME_NAMES.map((n) => [n, extractFn(n)]));
 		const JT = {
 			headers: ["Load ID", "Driver", "Job Status", "  Payment  ", "Assigned Date", "Owner ID", "Truck"],
@@ -554,7 +554,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 			};
 		};
 		const FILTER = "monthlyEarnings.filter((m) => m.month <= currentMonthKey)";
-		const run = async (iso, readerSrc = ME.investorReportPayoutEntries) => {
+		const run = async (iso, readerSrc = ME.investorReportPayoutEntries, factsSrc = ME.gatherLedgerScopeFacts) => {
 			const deps = {
 				Date: clockAt(iso),
 				APP_TIMEZONE: require("../lib/app-time").appTimeZone(),
@@ -587,7 +587,7 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				payoutBasisContext: (ownerId) => { if (ownerId) throw new Error("the fleet report settles no owner"); return null; },
 			};
 			const names = Object.keys(deps);
-			const srcs = ME_NAMES.map((n) => (n === "investorReportPayoutEntries" ? readerSrc : ME[n]));
+			const srcs = ME_NAMES.map((n) => (n === "investorReportPayoutEntries" ? readerSrc : n === "gatherLedgerScopeFacts" ? factsSrc : ME[n]));
 			const f = new Function(...names, `${srcs.join("\n")}
 				return { computeInvestorMonthlyEarnings, investorReportPayoutEntries, summarizeReportPayout, reportPayoutNote };`)(...names.map((n) => deps[n]));
 			const config = { investor_split_pct: "50" };
@@ -601,8 +601,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 		try {
 			const r = await run("2026-10-01T01:30:00Z"); // 2026-09-30 21:30 EDT
 			eq(r.earnings.currentMonthKey, "2026-09", "month end: the business clock is still in September");
-			eq(r.earnings.monthlyEarnings.map((m) => m.month), ["2026-08", "2026-09", "2026-10"],
-				"…while the shared computation's months already run to October, the server's month (its input, as it ships)");
+			eq(r.earnings.monthlyEarnings.map((m) => m.month), ["2026-08", "2026-09"],
+				"…and the shared computation's months stop at the business month too (appMonthStart(); scripts/test-month-end-business-clock.js)");
 			eq(r.entries.map((e) => e.month), ["2026-08", "2026-09"], "the fleet reader stops at the business month");
 			eq(r.all.inProgressMonth, "2026-09", "…September is the month in progress");
 			ok(r.note.startsWith("Investor Payout is the total of the fleet-wide monthly investor shares for August 2026 – September 2026. September 2026 is still in progress"),
@@ -611,9 +611,19 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 			eq([mid.earnings.monthlyEarnings.map((m) => m.month), mid.entries.map((e) => e.month)], [["2026-08", "2026-09"], ["2026-08", "2026-09"]],
 				"control, mid-month: the computation has no extra month, and the reader reads the same two");
 
+			// The reader's own filter stays as a second guard: with the computation's
+			// end month put back on the server's clock (the shape before
+			// appMonthStart()), the reader still stops at September, and only the
+			// reader without its filter prints October.
+			const BUSINESS_END = "endDate: appMonthStart(now),";
+			const serverClockFacts = ME.gatherLedgerScopeFacts.replace(BUSINESS_END, "endDate: new Date(now.getFullYear(), now.getMonth(), 1),");
+			ok(serverClockFacts !== ME.gatherLedgerScopeFacts, "the server-clock computation mutant applied");
+			const guarded = await run("2026-10-01T01:30:00Z", ME.investorReportPayoutEntries, serverClockFacts);
+			eq([guarded.earnings.monthlyEarnings.map((m) => m.month), guarded.entries.map((e) => e.month)], [["2026-08", "2026-09", "2026-10"], ["2026-08", "2026-09"]],
+				"server-clock computation: October appears in the computation, and the reader's filter still stops at September");
 			const unfiltered = ME.investorReportPayoutEntries.replace(FILTER, "monthlyEarnings");
 			ok(unfiltered !== ME.investorReportPayoutEntries, "the no-filter mutant applied");
-			const m = await run("2026-10-01T01:30:00Z", unfiltered);
+			const m = await run("2026-10-01T01:30:00Z", unfiltered, serverClockFacts);
 			ok(m.all.months.includes("2026-10") && /September 2026 – October 2026|August 2026 – October 2026/.test(m.note),
 				`MUTANT the fleet reader without the filter prints October at month end (caught): ${m.all.months.join(", ")}`);
 		} finally {

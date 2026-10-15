@@ -395,5 +395,123 @@ check("a load geocoded to null island reads as unmapped",
 	m.computeHaulMiles(trip.rows, { origin: { lat: 0, lng: 0 }, dest: LAREDO, dispatchMs, terminal: true }).reason,
 	"no_coordinates");
 
+// ---------------------------------------------------------------------------
+// 12. Repeat lanes: the same truck at the same shipper on another load.
+//
+// The ping query reaches 7 days before dispatch and 24 h past the close-out, so
+// on a lane a truck runs every few days it holds the shipper visit of the load
+// before (in the lookback) and of the load after (in the lookahead). Neither is
+// this load's pickup. Read as one, a delivered haul came out "no departure" or
+// "no arrival", and a live one measured "loaded so far" from days before it was
+// dispatched. Shapes from the 2026-10-15 haul-rows report, data made up.
+// ---------------------------------------------------------------------------
+const HOUR = 60 * MIN;
+const ELSEWHERE = offsetNorth(HOUSTON, 60);
+const laneLoaded = laneMi - 2 * radiusMi;
+
+// 12a. Delivered, then straight back to the same shipper inside the 24-hour
+// lookahead, still parked there at the newest fix.
+const back = makeTrip();
+const backDispatch = back.t - 5 * MIN;
+ping(back, ELSEWHERE.lat, ELSEWHERE.lng);
+drive(back, ELSEWHERE, HOUSTON, 60);
+dwell(back, 30);
+drive(back, HOUSTON, LAREDO, 280);
+dwell(back, 10);
+const backDeliveredMs = back.last.ms;
+drive(back, LAREDO, HOUSTON, 280);
+dwell(back, 20);
+const r12a = m.computeHaulMiles(back.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: backDispatch, terminal: true, closeOutMs: backDeliveredMs,
+});
+check("12a a return to the shipper after the close-out is not this load's departure", r12a.reason, "");
+near("12a ...the delivered haul is measured", r12a.loadedMiles, laneLoaded, 3);
+ok("12a ...departing before the close-out", r12a.pickupDepartMs < backDeliveredMs);
+ok("12a ...and arriving at the receiver before it", r12a.destArriveMs !== null && r12a.destArriveMs <= backDeliveredMs);
+// Without the close-out instant the module cannot tell the two visits apart.
+check("12a without a close-out instant the old reading stands",
+	m.computeHaulMiles(back.rows, { origin: HOUSTON, dest: LAREDO, dispatchMs: backDispatch, terminal: true }).reason,
+	"no_departure");
+
+// 12b. A live load still on its way to the shipper, which the truck last
+// visited for an earlier load three days before this one was dispatched.
+function staleVisitThen(trip) {
+	ping(trip, HOUSTON.lat, HOUSTON.lng);
+	dwell(trip, 60);                       // the earlier load's pickup
+	drive(trip, HOUSTON, ELSEWHERE, 60);   // gone with that load
+	dwell(trip, 72, HOUR);                 // three days away
+}
+const live = makeTrip();
+staleVisitThen(live);
+const liveDispatch = live.last.ms + HOUR;
+dwell(live, 2, HOUR);
+drive(live, ELSEWHERE, offsetNorth(HOUSTON, 20), 40);   // inbound, 20 mi out
+const r12b = m.computeHaulMiles(live.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: liveDispatch, terminal: false,
+});
+check("12b an earlier load's visit is not this live load's pickup", r12b.reason, "no_pickup_zone");
+check("12b ...so nothing is loaded yet", [r12b.inProgress, r12b.loadedMiles], [false, null]);
+check("12b ...and no pickup is reported", r12b.pickupArriveMs, null);
+
+// 12c. Same lane, but the earlier load also went to this load's receiver: the
+// earlier delivery must not close this live load's haul either.
+const prev = makeTrip();
+ping(prev, HOUSTON.lat, HOUSTON.lng);
+dwell(prev, 60);
+drive(prev, HOUSTON, LAREDO, 280);
+dwell(prev, 60);
+drive(prev, LAREDO, ELSEWHERE, 300);
+dwell(prev, 48, HOUR);
+const prevDispatch = prev.last.ms + HOUR;
+dwell(prev, 2, HOUR);
+const r12c = m.computeHaulMiles(prev.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: prevDispatch, terminal: false,
+});
+check("12c the earlier load's delivery does not measure this live load", [r12c.reason, r12c.destArriveMs, r12c.loadedMiles], ["no_pickup_zone", null, null]);
+
+// 12d. Delivered, with the earlier visit still in the lookback: the pickup is
+// the visit after dispatch, so the deadhead leg runs to it instead of ending
+// before it began.
+const done = makeTrip();
+staleVisitThen(done);
+const doneDispatch = done.last.ms + HOUR;
+dwell(done, 2, HOUR);
+drive(done, ELSEWHERE, HOUSTON, 60);
+dwell(done, 30);
+drive(done, HOUSTON, LAREDO, 280);
+dwell(done, 10);
+const r12d = m.computeHaulMiles(done.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: doneDispatch, terminal: true, closeOutMs: done.last.ms,
+});
+check("12d the delivered haul resolves", r12d.reason, "");
+ok("12d ...its pickup is the visit after dispatch", r12d.pickupArriveMs > doneDispatch);
+near("12d ...the deadhead leg is measured", r12d.deadheadMiles, 60 - radiusMi, 3);
+near("12d ...and the loaded leg too", r12d.loadedMiles, laneLoaded, 3);
+
+// 12e. A live load whose truck left the shipper two hours before the Dispatched
+// tap. That visit is this load's pickup, and the haul is under way.
+const MIDWAY = { lat: (HOUSTON.lat + LAREDO.lat) / 2, lng: (HOUSTON.lng + LAREDO.lng) / 2 };
+const tapLate = makeTrip();
+ping(tapLate, HOUSTON.lat, HOUSTON.lng);
+dwell(tapLate, 40);
+drive(tapLate, HOUSTON, MIDWAY, 140);
+const r12e = m.computeHaulMiles(tapLate.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: tapLate.rows[41].ms + 2 * HOUR, terminal: false,
+});
+check("12e a Dispatched tap two hours after the pickup still finds it", [r12e.reason, r12e.inProgress], ["", true]);
+ok("12e ...and measures the haul so far", r12e.loadedMiles > 100);
+
+// 12f. Every tap made at the end, long after the pickup. A delivered load keeps
+// the visit before its receiver, as before; only a live one waits for the
+// pickup, and it is measured once it closes out.
+const tappedLate = trip.rows[trip.rows.length - 1].ms + 2 * 24 * HOUR;
+const r12f = m.computeHaulMiles(trip.rows, {
+	origin: HOUSTON, dest: LAREDO, dispatchMs: tappedLate, terminal: true, closeOutMs: tappedLate,
+});
+check("12f a delivered load tapped days late is still measured", r12f.loadedMiles, r1.loadedMiles);
+check("12f a live one reads as not at the pickup yet",
+	m.computeHaulMiles(trip.rows, { origin: HOUSTON, dest: LAREDO, dispatchMs: tappedLate, terminal: false }).reason,
+	"no_pickup_zone");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -141,6 +141,11 @@ return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formula
 	a1SheetPrefix, sheetRowAfterUpdate, sheetRowCellWrites };
 `)();
 const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_FIELDS")};`)();
+// The broker contact rule the create applies for a non-Super-Admin, shipped as
+// is (lib/broker-contact.js; scripts/test-broker-contact-redaction.js runs it).
+const BROKER_WITHHELD_RE = new Function(`return ${extractConst("BROKER_WITHHELD_RE")};`)();
+const BROKER_CONTACT_VALUE_REDACTION_ENABLED = new Function(`return ${extractConst("BROKER_CONTACT_VALUE_REDACTION_ENABLED")};`)();
+const brokerContact = require("../lib/broker-contact");
 const RATECON_GEMINI_FIELDS = new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
 const QUIET = { error() {}, log() {}, warn() {} };
 const readJobTrackingSnapshot = new Function("SPREADSHEET_ID", "console",
@@ -348,9 +353,13 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 	const env = {
 		app: { post: (p, gate, limiter, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		rateConLimiter: null,
 		formulaCellRefusal: H.formulaCellRefusal,
 		RATECON_SHEET_FIELDS,
+		BROKER_WITHHELD_RE,
+		BROKER_CONTACT_VALUE_REDACTION_ENABLED,
+		brokerContact,
 		boundAddressForStorage: H.boundAddressForStorage,
 		ADDRESS_MAX_CHARS: H.ADDRESS_MAX_CHARS,
 		rateconLoad,
@@ -379,6 +388,8 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 		logAudit: (req, action) => { audits.push(action); },
 		insertDispatchNotification: { run: () => ({}) },
 		io: { to: () => ({ emit: () => {} }) },
+		// The New Load notice, per role (scripts/test-broker-contact-redaction.js runs it).
+		emitDispatchByRole: () => {},
 		notifyChange: () => {},
 		console: QUIET,
 		Buffer,
@@ -406,22 +417,30 @@ async function rateconSection(routeSrc = RATECON_SRC) {
 			[200, ["append Job Tracking", "update Payments Table", "update Job Details"], true]);
 	}
 	// CHECK 1: every field this route writes to a sheet. The Load Number is left
-	// out here: its own whitelist refuses an "=" before check 1 runs (below).
-	for (const key of RATECON_SHEET_FIELDS.filter((k) => k !== "Load Number")) {
+	// out here: its own whitelist refuses an "=" before check 1 runs (below). The
+	// broker fields too: a non-Super-Admin's are never taken from the body (the
+	// create writes the rate con's own, from the extract the server holds; none
+	// here, as no PDF is sent), so a formula typed into one is not written at all.
+	for (const key of RATECON_SHEET_FIELDS.filter((k) => k !== "Load Number" && !BROKER_WITHHELD_RE.test(k))) {
 		const { r, m } = await run("Dispatcher", { [key]: "=1+1" });
 		t(`from-ratecon, Dispatcher, ${JSON.stringify(key)} = "=1+1": 400 FORMULA_NOT_ALLOWED naming the field; no claim, no read, no Distance Matrix, no write`,
 			[r.code, r.body && r.body.code, r.body && r.body.field, bodyKeys(r), m.claims.length, m.log.reads.length, m.dm(), m.log.writes.length],
 			[400, "FORMULA_NOT_ALLOWED", key, ["error", "code", "field"], 0, 0, 0, 0]);
 	}
+	for (const key of RATECON_SHEET_FIELDS.filter((k) => BROKER_WITHHELD_RE.test(k))) {
+		const { r, m } = await run("Dispatcher", { [key]: "=1+1" });
+		t(`from-ratecon, Dispatcher, ${JSON.stringify(key)} = "=1+1": the body's broker field is ignored: 200, three writes, the formula in none of them`,
+			[r.code, m.log.writes.length, written(m.log).some((c) => c.includes("=1+1"))], [200, 3, false]);
+	}
 	for (const [label, key, value] of [
-		["leading spaces", "Broker Name", "  =SUM(A1:A2)"],
+		["leading spaces", "Pickup Company Information", "  =SUM(A1:A2)"],
 		["a leading tab and newline", "Details", "\t\n=A1"],
 		["a lone \"=\"", "Trailer Number", "="],
 		// USER_ENTERED stores a value starting with "+" as a formula too.
 		["a \"+\" before a cell reference", "Trailer Number", "+A1"],
-		["a \"+\" before a function", "Broker Name", "+SUM(A1:A2)"],
+		["a \"+\" before a function", "Pickup Company Information", "+SUM(A1:A2)"],
 		["a \"+\" before an expression", "Details", "+1+1"],
-		["a \"+\" before a spaced phone number", "Broker Phone", "+1 800 555 1234"],
+		["a \"+\" before a spaced phone number", "Details", "+1 800 555 1234"],
 	]) {
 		const { r, m } = await run("Dispatcher", { [key]: value });
 		t(`from-ratecon, Dispatcher, ${label}: refused by check 1 too`,
@@ -491,8 +510,10 @@ async function rateconSection(routeSrc = RATECON_SRC) {
 
 // ---------------------------------------------------------------------------
 // §4b THE UPSERTS — an existing row is updated cell by cell, a new row is
-// written whole. A Dispatcher drops the clean rate-con (LEGIT, load RC-5001:
-// broker "Della Garcia", rate "$1,500.00") on each fixture.
+// written whole. A Super Admin drops the clean rate-con (LEGIT, load RC-5001:
+// broker "Della Garcia", rate "$1,500.00") on each fixture: a non-Super-Admin's
+// broker name comes from the extract the server holds, which no fixture here
+// has, and the Payments Table's Contract ID is that name.
 // ---------------------------------------------------------------------------
 // A Payments Table wider than the three columns the route maps, as production's
 // is, and a Job Details tab WITH a Load ID column, which production's lacks
@@ -517,7 +538,7 @@ async function upsertSection(routeSrc = RATECON_SRC) {
 	const { results, t } = collector();
 	const run = async (tabs, over = {}) => {
 		const m = mountRatecon(routeSrc, tabs);
-		const r = await m.run("Dispatcher", { fields: { ...LEGIT, ...over } });
+		const r = await m.run("Super Admin", { fields: { ...LEGIT, ...over } });
 		return { r, m };
 	};
 	// Every call that touched `tab`, in order, as "get <render>",
@@ -618,6 +639,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 	const env = {
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db: { prepare: (sql) => ({
 			get: () => (/FROM users/.test(sql) ? (account ? { driver_name: account } : undefined)

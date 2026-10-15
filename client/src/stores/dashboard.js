@@ -20,6 +20,9 @@ export const useDashboardStore = defineStore('dashboard', {
     fleet: (s) => s.data?.fleet || [],
     drivers: (s) => s.data?.drivers || [],
     driverQueues: (s) => s.data?.driverQueues || {},
+    // Drivers recorded off today -> their last day off (R11). null when the
+    // server sent no availability (the flag off): nothing about time off shows.
+    offUntil: (s) => (s.data && s.data.offUntil && typeof s.data.offUntil === 'object' ? s.data.offUntil : null),
     headers: (s) => s.data?.jobTrackingHeaders || [],
     completedHeaders: (s) => s.data?.completedHeaders || s.data?.jobTrackingHeaders || [],
   },
@@ -51,20 +54,22 @@ export const useDashboardStore = defineStore('dashboard', {
     // his route was "12x32 DAIRY PURE WholeMilk, 43,764 lbs \u2192 1,575 Case(s)".
     // resolveLoadRoute() reads the address columns the sheet actually has, and
     // consults `Details` only when it is genuinely route-shaped.
-    async assignDriver(rowIndex, driver, job, headers) {
+    // `opts.confirmOffDuty`: the person chose "Assign anyway" after the server
+    // answered 409 DRIVER_OFF_DUTY (useOffDutyConfirm()).
+    async assignDriver(rowIndex, driver, job, headers, opts = {}) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
       const { origin, destination } = resolveLoadRoute(job, headers)
 
-      await api.post('/api/dispatch', { rowIndex, driver, loadId, origin, destination })
+      await api.post('/api/dispatch', { rowIndex, driver, loadId, origin, destination, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) })
     },
 
-    async reassignDriver(rowIndex, newDriver, job, headers) {
+    async reassignDriver(rowIndex, newDriver, job, headers, opts = {}) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
       const driverCol = headers.find((h) => /driver/i.test(h))
       const loadId = loadIdCol ? job[loadIdCol] || '' : ''
       const oldDriver = driverCol ? job[driverCol] || '' : ''
-      await api.post('/api/dispatch/reassign', { rowIndex, newDriver, loadId, oldDriver })
+      await api.post('/api/dispatch/reassign', { rowIndex, newDriver, loadId, oldDriver, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) })
     },
 
     // `reason` is required by the server (400 CANCEL_REASON_REQUIRED without

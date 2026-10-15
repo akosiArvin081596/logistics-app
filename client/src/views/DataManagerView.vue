@@ -115,6 +115,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useSheetsStore } from '../stores/sheets'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
+import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import { useSocket } from '../composables/useSocket'
 import SheetTabs from '../components/data-manager/SheetTabs.vue'
 import DataTable from '../components/data-manager/DataTable.vue'
@@ -125,6 +126,7 @@ import ConfirmModal from '../components/shared/ConfirmModal.vue'
 const store = useSheetsStore()
 const auth = useAuthStore()
 const { show: toast } = useToast()
+const { withOffDutyConfirm } = useOffDutyConfirm()
 const socket = useSocket()
 
 const showModal = ref(false)
@@ -199,9 +201,13 @@ function handleCancel() {
   store.editingRow = null
 }
 
+// A Driver recorded off on the load's days (R11): the server answers 409
+// DRIVER_OFF_DUTY; "Assign anyway" re-sends confirmed, "Keep as is" leaves the
+// row being edited (useOffDutyConfirm()).
 async function handleSave(rowIndex, values) {
   try {
-    await store.saveRow(rowIndex, values)
+    const r = await withOffDutyConfirm((confirmOffDuty) => store.saveRow(rowIndex, values, { confirmOffDuty }))
+    if (r && r.offDutyDeclined) return
     toast('Row updated', 'success')
   } catch (err) {
     // Same reasoning as confirmDelete below: an edit to a finalized month comes
@@ -214,7 +220,8 @@ async function handleSave(rowIndex, values) {
 
 async function handleAdd(values) {
   try {
-    const result = await store.addRow(values)
+    const result = await withOffDutyConfirm((confirmOffDuty) => store.addRow(values, { confirmOffDuty }))
+    if (result && result.offDutyDeclined) return
     showModal.value = false
     if (result?.warning) {
       toast(result.warning, 'error')
