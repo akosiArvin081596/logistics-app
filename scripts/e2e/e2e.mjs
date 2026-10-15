@@ -5960,7 +5960,7 @@ async function openInvoiceEditor(page, cand, label, nav = 'goto') {
   await tab.waitFor({ state: 'visible', timeout: 45000 })
   await tab.click()
   const panel = page.locator('[role="tabpanel"][data-state="active"]')
-  const search = panel.getByPlaceholder('Search load number...')
+  const search = panel.getByPlaceholder('Search load, order, PO, move or ref #')
   await search.waitFor({ state: 'visible', timeout: 30000 })
   await search.fill(cand.id)
   const row = panel.locator('tbody tr', { hasText: cand.id }).first()
