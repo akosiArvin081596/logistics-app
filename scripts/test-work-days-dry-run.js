@@ -174,5 +174,39 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		}
 	});
 
+	await R.test("F7 (money review of 1cf2c20) The floor week, the dry run as live: FROM=2026-10, September closed, a load Assigned 10/1 with trip days 9/30-10/3, W39 already invoiced: the dry run adds only 10/1 and 10/2 ($520) to W39, as a correction (its week touches September), and lists 9/30 as refused (closed month, $260); live writes that same $520 correction", async ({ eq }) => {
+		const D = "Dot Ellis";
+		const build = (env) => W.startWorld({
+			env,
+			drivers: [{ name: D }],
+			rows: [
+				loadRow({ id: "F701", driver: D, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+				loadRow({ id: "F702", driver: D, pickup: "2026-09-30 8:00", dropoff: "2026-10-03 12:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+			],
+			status: [s("F701", "At Shipper", "2026-09-28 12:00:00"), s("F701", "Delivered", "2026-09-29 21:00:00"), s("F702", "At Shipper", "2026-09-30 13:00:00")],
+			now: etMs("2026-10-02 20:00"),
+		});
+		const finish = (w) => {
+			w.addStatus([s("F702", "Delivered", "2026-10-03 16:00:00")]);
+			w.setRow("F702", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
+			w.lock(["2026-09"]);
+			w.clock.ms = etMs("2026-10-09 20:00");
+		};
+		const w = build(ENV);
+		const g39 = await W.generate(w, D, "2026-10-02");
+		finish(w);
+		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+		const inv = ((r.body && r.body.perInvoice) || []).find((i) => i.invoiceNumber === g39.invoice.invoice_number);
+		eq("dry run: W39 adds 10/1 and 10/2, $520, as a correction", inv && [inv.addedDays, inv.amountAdded, inv.afterSwitchOn],
+			[["2026-10-01", "2026-10-02"], 520, "a correction invoice (Draft) for this week"]);
+		eq("dry run: 9/30 is refused, closed month, $260", ((r.body && r.body.refusedDays) || []).filter((d) => d.day === "2026-09-30").map((d) => [d.kind, d.amount]), [["closedMonth", 260]]);
+		const live = build({ TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-10" });
+		const l39 = await W.generate(live, D, "2026-10-02");
+		finish(live);
+		await W.generate(live, D, "2026-10-09");
+		const cs = live.db.prepare("SELECT total_earnings, render_data FROM invoices WHERE is_manual = 1 AND correction_of = ?").all(l39.invoice.id);
+		eq("live: one correction for W39, $520, 10/1 and 10/2", cs.map((c) => [c.total_earnings, JSON.parse(c.render_data).paidDays]), [[520, ["2026-10-01", "2026-10-02"]]]);
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

@@ -18701,8 +18701,8 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 	let changed = false;
 	for (const [weekStart, list] of found.byWeek) {
 		const weekEnd = getWeekRange(weekStart).weekEnd;
-		const entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
-		const dayText = entries.map((e) => e.day).join(", ");
+		let entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
+		let dayText = entries.map((e) => e.day).join(", ");
 		try {
 			const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
 			if (weekly.length !== 1) {
@@ -18713,6 +18713,13 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 				continue;
 			}
 			const inv = weekly[0];
+			// A day already on the week's own invoice grid is paid, even when no
+			// invoice_paid_days row holds it (invoiced before the switch-on and
+			// the start-up backfill not run yet).
+			const onGrid = new Set(invoicePaidDaysOf(inv));
+			entries = entries.filter((e) => !onGrid.has(e.day));
+			if (!entries.length) continue;
+			dayText = entries.map((e) => e.day).join(", ");
 			const blocker = lateWorkWeekBlocker(inv, { manuals: driverManualInvoicesForDays(nameNorm), minRate: Math.min(...entries.map((e) => e.rate)) });
 			if (blocker) {
 				for (const e of entries) report.refused.push({ day: e.day, loadId: e.loads.join(", "), reason: blocker, kind: "mayBePaid" });
@@ -18763,8 +18770,9 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 //   lateDays        days of weeks before this one that the rule pays and no
 //                   invoice holds yet, by week (they overlap perInvoice's
 //                   added days)
-//   refusedDays     days of from..to (and any day before the floor of a load
-//                   settling in FROM or later) worked by the trip timestamps
+//   refusedDays     days of from..to (and any day before the floor, or in a
+//                   closed month, of a load settling in FROM or later) worked
+//                   by the trip timestamps
 //                   that no invoice will carry, each with its reason and amount
 //                   (before the floor, a load settling before FROM, a closed
 //                   month, may already be paid by a manual invoice or an
@@ -18922,9 +18930,10 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 			}
 		}
 		for (const r of found.refused) {
-			// A day before the floor (FROM's first week) is listed whatever its
-			// month: its load settles in FROM, so the ledger pays it there.
-			if (r.day > rangeEnd || (r.day < rangeStart && r.kind !== "beforeFloor")) continue;
+			// A day before FROM refused before the floor or for its closed month
+			// (only in FROM's first week) is listed too: its load settles in FROM,
+			// so the ledger pays it there and a person decides it.
+			if (r.day > rangeEnd || (r.day < rangeStart && r.kind !== "beforeFloor" && r.kind !== "closedMonth")) continue;
 			// A day before the floor in a week with no invoice yet: that week's own
 			// invoice will still pay its days, so it is not part of the floor gap.
 			const notYet = r.kind === "beforeFloor" && !liveWeeklyInvoicesForDriverWeek(display, getWeekRange(r.day).weekStart).length;
@@ -18964,7 +18973,8 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 			const ids = String(gridOf(d).loadBol || "").split(",").map((x) => x.trim()).filter(Boolean);
 			if (!ids.length || ids.some((id) => !follows(id))) ruleDays.add(d);
 		}
-		const added = [...ruleDays].filter((d) => !current.includes(d)).sort();
+		// A closed month's day is never added (refusedDays lists it), as live.
+		const added = [...ruleDays].filter((d) => !current.includes(d) && !periodWriteLocked(d.slice(0, 7))).sort();
 		const dropped = current.filter((d) => !ruleDays.has(d));
 		if (!added.length && !dropped.length) continue;
 		const rateOf = raterFor(nm, display);

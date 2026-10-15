@@ -703,5 +703,17 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		ok("no day is refused as before the floor", !(g41.warnings || []).some((x) => /before 20\d\d-\d\d-\d\d/.test(x)), JSON.stringify(g41.warnings));
 	});
 
+	await R.test("B23 (money review of 1cf2c20) An Approved W39 made while the rule was off has no paid-day rows (the start-up backfill did not run); with the rule on, its correction carries only the late Thu and Fri ($520), never the Mon and Tue already on its own grid", async ({ eq }) => {
+		const D = "Vic Wynn";
+		const w = boundaryWorld(D);
+		const g39 = await W.generate(w, D, W39);
+		// As made with the rule off: no invoice_paid_days row holds its days.
+		w.db.prepare("DELETE FROM invoice_paid_days").run();
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = '2026-10-04T00:00:00.000Z', approved_by = 'super_admin' WHERE id = ?").run(g39.invoice.id);
+		deliverBoundaryLoad(w);
+		await W.generate(w, D, W40);
+		eq("one correction for W39: Thu and Fri only, $520", corrections(w).map((c) => [c.correction_of, paidDaysOf(c), c.total_earnings]), [[g39.invoice.id, ["2026-10-01", "2026-10-02"], 520]]);
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
