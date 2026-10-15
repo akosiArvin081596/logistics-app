@@ -37539,6 +37539,19 @@ function warnPreDispatchFromClosedMonth() {
 	if (msg) console.warn(`[pre-dispatch] ${msg}`);
 }
 warnPreDispatchFromClosedMonth();
+// A driver-day counted in one month only, from LEDGER_DAY_ONCE_FROM on, in the
+// payout ledger and GET /api/investor (lib/ledger-day-once.js ruleFromEnv(); on
+// only when process.env.LEDGER_DAY_ONCE_ENABLED === "true"). Dormant until the
+// owner approves the dry run (scripts/ledger-day-once-dry-run.js). At boot: one
+// warning when the flag is on without a month, and the notice above for a FROM
+// at or before the latest closed month.
+function warnLedgerDayOnceFromClosedMonth() {
+	const dayOnce = financialsCalc.ledgerDayOnce;
+	const fromMonth = dayOnce.ruleFromEnv(process.env, (msg) => console.warn(`[ledger-day-once] ${msg}`));
+	const msg = fromMonth ? dayOnce.fromMonthClosedWarning(fromMonth, dayOnce.latestClosedMonth(db)) : null;
+	if (msg) console.warn(`[ledger-day-once] ${msg}`);
+}
+warnLedgerDayOnceFromClosedMonth();
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
 // for every admin override. Consumed by /api/investor, /api/financials, and
@@ -52942,6 +52955,7 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// The pre-dispatch rule (off unless enabled), the filter GET /api/investor
 		// and the weekly invoice pass to payDaysForLoad() too.
 		preDispatch: preDispatchPayDayFilter(),
+		dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -53127,8 +53141,8 @@ async function computeFleetLedger({ rules = payoutRules() } = {}) {
 		for (const x of facts.receipts) claim(claimed.receipt, x.id, inv.ownerId);
 		for (const x of facts.maintRows) claim(claimed.maintenance, x.id, inv.ownerId);
 		for (const x of facts.complianceRows) claim(claimed.compliance, x.id, inv.ownerId);
-		const { months, items } = financialsCalc.computeLedgerScope(facts);
-		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items });
+		const { months, items, dayOnceDrops } = financialsCalc.computeLedgerScope(facts);
+		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items, ...(dayOnceDrops && { dayOnceDrops }) });
 	}
 	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking, rules });
 	const investorIds = new Set(investors.map((i) => i.ownerId));
@@ -53152,7 +53166,7 @@ async function computeFleetLedger({ rules = payoutRules() } = {}) {
 		detailForMonth: null,
 		startMonthFor: (earliestKey) => earliestKey || fleet.currentMonthKey,
 	});
-	scopes.push({ ownerId: 0, name: "Company", months: company.months, items: company.items });
+	scopes.push({ ownerId: 0, name: "Company", months: company.months, items: company.items, ...(company.dayOnceDrops && { dayOnceDrops: company.dayOnceDrops }) });
 
 	// Each load's pickup and delivery state, on its revenue item: the two-letter
 	// state of the city-level address (resolveCityState(), the reduction investors
@@ -54696,6 +54710,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				driverDaySource[drv][bucket].est = true;
 			}
 		}
+		// The ledger day-once rule, as the payout ledger applies it (off unless enabled).
+		financialsCalc.ledgerDayOnce.dropRepeatedDays(driverMonthlyDays, financialsCalc.ledgerDayOnce.ruleFromEnv(process.env), driverMonthlyDayLoads);
 
 		// Avg daily revenue = 30-day average (S2).
 		// Gross = raw top-line from completed loads in the trailing 30 days.
@@ -58594,6 +58610,9 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			to: ADMIN_NOTIFY_EMAIL,
 			emailHtml: ({ heading, bodyHtml }) => invoiceEmailHtml({ heading, bodyHtml }),
 			closedMonthsOf: integrityClosedMonthsOf,
+			// Check 7, only while the ledger day-once rule is on (lib/ledger-day-once.js).
+			dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
+			readFleetLedger: computeFleetLedger,
 		}),
 	});
 	// The ticker never rejects; a rejection here is a defect in its own guard.

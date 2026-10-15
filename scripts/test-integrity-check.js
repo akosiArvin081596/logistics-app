@@ -579,7 +579,7 @@ async function section6() {
 	const startsJobSrc = SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0];
 	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
 		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
-		"integrityClosedMonthsOf"];
+		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger"];
 	const exec = (over) => {
 		const timers = [];
 		const seen = {};
@@ -604,6 +604,8 @@ async function section6() {
 			RATECON_RECONCILE_MAILBOX: "RATECONs",
 			process: { env: { GMAIL_USER: "ops@example.test", GMAIL_APP_PASSWORD: "pw" } },
 			integrityClosedMonthsOf: () => [],
+			financialsCalc: require(path.join(ROOT, "lib", "financials-calc.js")),
+			computeFleetLedger: async () => ({ scopes: [] }),
 			...over,
 		};
 		new Function(...names, `${startsJobSrc}\n${block}`)(...names.map((n) => env[n]));
@@ -630,6 +632,10 @@ async function section6() {
 		ok("it reads the rate-con mailbox with the app's Gmail account and label", !!on.seen.reader && on.seen.reader.user === "ops@example.test" && on.seen.reader.pass === "pw" && on.seen.reader.mailbox === "RATECONs" && o.readRateConEmails === "reader");
 		ok("it wraps the email in the app's template", typeof o.emailHtml === "function" && /<h2>x<\/h2>/.test(o.emailHtml({ heading: "x", bodyHtml: "" })));
 		ok("check 5 gets the server's closed-month rule", o.closedMonthsOf === on.env.integrityClosedMonthsOf);
+		ok("check 7 gets the server's payout ledger, and with the ledger day-once rule off no FROM month", o.readFleetLedger === on.env.computeFleetLedger && o.dayOnceFrom === null);
+		const dayOnceOn = exec({ process: { env: { LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2026-10" } } });
+		dayOnceOn.seen.ticker.run(now);
+		ok("...and with the rule on, its FROM month", (dayOnceOn.seen.run || {}).dayOnceFrom === "2026-10");
 	}
 	const rule = SRC.match(/\nfunction integrityClosedMonthsOf\(headers, row\) \{[\s\S]*?\n\}/);
 	ok("that rule is loadRowAccountingMonths() filtered by periodWriteLocked() (one rule, not a copy)",
@@ -642,11 +648,11 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own tables",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
 	ok("the reported lists are written in the same transaction as the load state",
-		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody), txBody);
+		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
