@@ -148,6 +148,12 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		eq("Ann's W40: added days, their amount, nothing dropped, added in place", inv && [inv.addedDays, inv.amountAdded, inv.droppedDays, inv.afterSwitchOn],
 			[["2026-10-06", "2026-10-07"], 520, [], "added to this invoice in place"]);
 		eq("months before FROM unchanged", body.monthsBeforeFromUnchanged, true);
+		const later = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-10-12" } });
+		const gap = ((later.body && later.body.refusedDays) || []).filter((d) => d.kind === "beforeFloor").map((d) => [d.day, d.loadId, d.amount]);
+		eq("a later floor (week of 10/10): Ann's 10/6 and 10/7 are refused as before the floor, $260 each", gap, [["2026-10-06", "F101", 260], ["2026-10-07", "F101", 260]]);
+		eq("…totalled on their own", later.body && later.body.summary.refusedByKind.beforeFloor, { days: 2, amount: 520 });
+		const bad = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", floor: "2026-13-45" } });
+		eq("a floor that is no calendar day: 400", bad.status, 400);
 	});
 
 	R.finish();

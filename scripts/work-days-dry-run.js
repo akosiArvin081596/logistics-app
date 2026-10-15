@@ -85,6 +85,7 @@ function printText(r) {
 	lines.push(`Ledger driver-days: +${s.daysAdded} / -${s.daysRemoved}; driver pay ${usd(s.driverPayChange)}; investor payable ${usd(s.investorPayableChange)}.`);
 	lines.push(`Invoices whose week the rule pays differently: ${s.invoicesChanged} (days the rule adds: ${usd(s.invoiceAmountAdded)}; ${s.invoiceDaysDroppedKept} day(s) it would not pay stay as issued).`);
 	lines.push(`Late days: ${s.lateDays} (${usd(s.lateDaysAmount)}; overlapping the invoices' added days). Refused days: ${s.refusedDays} (${usd(s.refusedAmount)}).`);
+	lines.push(`Refused by reason: ${Object.entries(s.refusedByKind || {}).map(([k, v]) => `${k} ${v.days} (${usd(v.amount)})`).join("; ") || "none"}. "beforeFloor" is paid by the ledger and carried onto no invoice.`);
 	lines.push(`Backfill: ${s.backfillRows} row(s), ${s.backfillConflicts} conflict(s).`);
 	lines.push("", "Driver-days (scope, driver, month, day, change, load, trip start, flags):");
 	for (const d of r.perDay) lines.push(`  owner ${d.ownerId}  ${d.driver}  ${d.month}  ${d.day}  ${d.change} ${usd(d.amount)}  ${d.added ? "added day" : `load ${d.loadId}`}  ${d.tripStartStatus ? `${d.tripStartStatus} ${d.tripStart}` : "(no trip)"}  ${d.flags.join(",")}`);

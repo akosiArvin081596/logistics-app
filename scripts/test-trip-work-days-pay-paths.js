@@ -575,5 +575,56 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		}
 	});
 
+	await R.test("B20 (re-review M1, L2) A manual invoice that names the week's invoice in a line or its notes blocks that week's late days, whatever date it carries; an adjustment under one day's pay (a $25 bonus) does not block; nor do a Rejected or soft-deleted manual invoice, a Personal correction (is_correction) or a manual invoice that names its days", async ({ eq, ok }) => {
+		const run = async (D, prepare) => {
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			await prepare(w, g39);
+			deliverBoundaryLoad(w);
+			const g40 = await W.generate(w, D, W40);
+			return { w, g39, g40, grid: W.dayList(storedGrid(w, g39.invoice.id, W39)) };
+		};
+		const manualFor = (w, D, body) => W.route(w, "POST /api/invoices/manual", { body: { payee: D, lineItems: [{ date: "2026-10-20", description: "Catch-up", amount: 260 }], periodStart: "2026-10-20", periodEnd: "2026-10-20", ...body } });
+		const BOTH = ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"];
+		{
+			const r = await run("Jo Kerr", (w, g39) => manualFor(w, "Jo Kerr", { lineItems: [{ date: "2026-10-20", description: `Missed Thu Oct 1 (${g39.invoice.invoice_number})`, amount: 260 }] }));
+			eq("a line naming W39, dated 10/20: W39 gains nothing", r.grid, ["2026-09-28", "2026-09-29"]);
+			ok("…and the warning names the manual invoice", (r.g40.warnings || []).some((x) => /names INV-/.test(x)), JSON.stringify(r.g40.warnings));
+		}
+		{
+			const r = await run("Kai Lowe", (w, g39) => manualFor(w, "Kai Lowe", { notes: `Correction to ${g39.invoice.invoice_number}` }));
+			eq("notes naming W39: W39 gains nothing", r.grid, ["2026-09-28", "2026-09-29"]);
+		}
+		{
+			const r = await run("Lu Mars", (w, g39) => { w.db.prepare("UPDATE invoices SET adjustment = 25, adjustment_note = 'bonus' WHERE id = ?").run(g39.invoice.id); });
+			eq("a $25 bonus: Thu and Fri go on W39", r.grid, BOTH);
+		}
+		{
+			const r = await run("Mo Nash", async (w, g39) => {
+				const m = await manualFor(w, "Mo Nash", { lineItems: [{ date: "2026-10-01", description: `Missed day (${g39.invoice.invoice_number})`, amount: 260 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
+				w.db.prepare("UPDATE invoices SET status = 'Rejected' WHERE id = ?").run(m.body.invoice.id);
+			});
+			eq("a Rejected manual invoice does not block", r.grid, BOTH);
+		}
+		{
+			const r = await run("Ned Oaks", async (w, g39) => {
+				const m = await manualFor(w, "Ned Oaks", { lineItems: [{ date: "2026-10-01", description: `Missed day (${g39.invoice.invoice_number})`, amount: 260 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
+				w.db.prepare("UPDATE invoices SET deleted_at = '2026-10-05T00:00:00.000Z', deleted_by = 'super_admin' WHERE id = ?").run(m.body.invoice.id);
+			});
+			eq("a soft-deleted manual invoice does not block", r.grid, BOTH);
+		}
+		{
+			const r = await run("Oli Pratt", async (w, g39) => {
+				const m = await manualFor(w, "Oli Pratt", { lineItems: [{ date: "2026-10-01", description: `Personal line (${g39.invoice.invoice_number})`, amount: 20 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
+				w.db.prepare("UPDATE invoices SET is_correction = 1 WHERE id = ?").run(m.body.invoice.id);
+			});
+			eq("a Personal correction does not block", r.grid, BOTH);
+		}
+		{
+			const r = await run("Pam Quin", (w) => manualFor(w, "Pam Quin", { days: ["2026-10-20"] }));
+			eq("a manual invoice naming its days (another day) does not block", r.grid, BOTH);
+		}
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
