@@ -286,6 +286,11 @@ function liftArchive(folder) {
 				/^if \(!RATECON_DRIVE_FOLDER_ID\) \{$/,
 				/^if \(!RATECON_DRIVE_FOLDER_ID\) return res\.status\(503\)\.json\(\{ error: "No rate-con Drive folder is configured\." \}\);$/,
 				/^if \(RATECON_DRIVE_FOLDER_ID && safe\) \{$/,
+				// The KPI job's rate-con sources (kpiRateConSources(), R10): with
+				// the setting empty it returns before getDrive(), so the load is
+				// recorded not_found with no Drive call (scripts/test-kpi-job.js §6
+				// "no folder setting" checks that).
+				/^if \(!RATECON_DRIVE_FOLDER_ID\) return null;$/,
 				/^if \(!candidates\.length && RATECON_DRIVE_FOLDER_ID && safe && loadCtx && !rateconScanMissedRecently\(scanMissKey\)\) \{$/,
 				/^if \(RATECON_DRIVE_FOLDER_ID\) \{$/,
 				/^q: `'\$\{RATECON_DRIVE_FOLDER_ID\}' in parents and trashed = false`,$/,
