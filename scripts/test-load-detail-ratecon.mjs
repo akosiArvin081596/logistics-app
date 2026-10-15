@@ -54,8 +54,10 @@ const { parse, compileScript } = clientRequire('vue/compiler-sfc')
 const { renderToString } = clientRequire('vue/server-renderer')
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)) }
 // Rendered HTML to its visible text. Comments and tags are removed until none
-// is left (one pass can leave a "<!--" that two halves join into), then the two
-// entities the server renderer emits here are decoded, &amp; last.
+// is left (one pass can leave a "<!--" that two halves join into), then any
+// angle bracket still standing goes too: rendered text carries none raw (the
+// renderer writes &lt; / &gt;, which stay encoded here). Then the two entities
+// the server renderer emits in these components are decoded, &amp; last.
 function text(html) {
   let s = String(html)
   let prev
@@ -63,6 +65,7 @@ function text(html) {
     prev = s
     s = s.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]*>/g, ' ')
   } while (s !== prev)
+  s = s.replace(/[<>]/g, ' ')
   return s.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
 }
 
