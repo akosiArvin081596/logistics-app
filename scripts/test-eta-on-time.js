@@ -121,10 +121,13 @@ if (lib && lib.etaVerdict) {
 // §2 The customer tracker's badge, lifted from GET /api/public/track/:loadId.
 // ---------------------------------------------------------------------------
 const trackSrc = lift(/\n(\t+)let onTime = null;\n[\s\S]*?\n\1eta = \{ distanceMiles, minutesRemaining, expectedAt, onTime[^}\n]*\};\n/g, "tracker verdict");
-function trackerBadge(appointment, expectedAt, destLng) {
-	const names = ["deliveryDateCol", "load", "expectedAt", "distanceMiles", "minutesRemaining", "destLng", ...Object.keys(deps)];
+// `deliveryDateCol` is what an older route read the appointment from;
+// `appointmentCol`, `destAddr` and `destLat` are the route's own names now.
+function trackerBadge(appointment, expectedAt, destLng, place = {}) {
+	const names = ["deliveryDateCol", "appointmentCol", "load", "expectedAt", "distanceMiles", "minutesRemaining", "destAddr", "destLat", "destLng", ...Object.keys(deps)];
 	const run = new Function(...names, `let eta = null;\n${trackSrc}\nreturn [eta.onTime, eta.arrivalLocal === undefined ? null : eta.arrivalLocal];`);
-	return run("Drop-off Appointment", { "Drop-off Appointment": appointment }, expectedAt, 120, 90, destLng, ...Object.values(deps));
+	return run("Drop-off Appointment", "Drop-off Appointment", { "Drop-off Appointment": appointment }, expectedAt, 120, 90,
+		place.address || "", place.lat == null ? null : place.lat, destLng, ...Object.values(deps));
 }
 check("§2.1 Eastern receiver: due 1:30 PM EDT for 2 PM is On time, the ETA shown in EDT",
 	trackerBadge("10/15/2026 14:00", "2026-10-15T17:30:00.000Z", EAST), [true, "Oct 15, 1:30 PM EDT"]);
@@ -135,19 +138,27 @@ check("§2.3 Pacific receiver: due 1:30 PM PDT for 2 PM is On time, the ETA show
 check("§2.4 ...and due 2:30 PM PDT is Delayed", trackerBadge("10/15/2026 14:00", "2026-10-15T21:30:00.000Z", PACIFIC), [false, "Oct 15, 2:30 PM PDT"]);
 check("§2.5 a window is judged by its end", trackerBadge("10/15/26 08:00-14:00", "2026-10-15T19:30:00.000Z", CENTRAL), [false, "Oct 15, 2:30 PM CDT"]);
 check("§2.6 no appointment, no badge", trackerBadge("", "2026-10-15T17:30:00.000Z", CENTRAL), [null, null]);
+check("§2.7 an Indianapolis receiver (its address): 2:30 PM EDT for 2 PM is Delayed, shown in EDT, not the Central band's CDT",
+	trackerBadge("10/15/2026 14:00", "2026-10-15T18:30:00.000Z", -86.16, { address: "Indianapolis, IN 46204", lat: 39.77 }), [false, "Oct 15, 2:30 PM EDT"]);
+check("§2.8 the route reads the Drop-off Appointment column, never a delivered or completion date",
+	/const appointmentCol = findCol\(headers, DROPOFF_APPOINTMENT_COL_RE\);/.test(SHIPPED) && /load\[appointmentCol\]/.test(trackSrc), true);
 
 // ---------------------------------------------------------------------------
 // §3 The Tracking tab's status, lifted from GET /api/locations/latest.
 // ---------------------------------------------------------------------------
 const colSrc = lift(/\n\t+const deliveryTimeCol = [^\n]*\n/g, "Tracking tab appointment column");
+// The receiver's address column (absent from a route that predates it).
+const addrSrc = (SHIPPED.match(/\n\t+const dropoffAddressCol = [^\n]*\n/g) || [""])[0];
 const statusSrc = lift(/\n(\t+)if \(deliveryTimeCol && load\[deliveryTimeCol\]\) \{\n[\s\S]*?\n\1\}\n/g, "Tracking tab verdict");
-function tabStatus(appointment, nowIso, etaMinutes, dLng) {
-	const names = ["headers", "load", "loc", "etaSeconds", "dLng", "Date", ...Object.keys(deps)];
+const pickAddressColumn = new Function("findCol", `return (${lift(/\nfunction pickAddressColumn\([\s\S]*?\n}\n/g, "pickAddressColumn").trim()});`)(deps.findCol);
+function tabStatus(appointment, nowIso, etaMinutes, dLng, place = {}) {
+	const names = ["headers", "load", "loc", "etaSeconds", "dLat", "dLng", "Date", "pickAddressColumn", ...Object.keys(deps)];
 	const NOW = Date.parse(nowIso);
 	const FixedDate = class extends Date { static now() { return NOW; } };
 	const loc = { etaStatus: "unknown" };
-	const load = { "Load ID": "L-1", "Drop-off Appointment": appointment };
-	new Function(...names, `${colSrc}\n${statusSrc}`)(HEADERS, load, loc, etaMinutes * 60, dLng, FixedDate, ...Object.values(deps));
+	const load = { "Load ID": "L-1", "Drop-off Appointment": appointment, "Drop-off Address": place.address || "" };
+	new Function(...names, `${colSrc}\n${addrSrc}\n${statusSrc}`)(HEADERS, load, loc, etaMinutes * 60, place.lat == null ? NaN : place.lat, dLng,
+		FixedDate, pickAddressColumn, ...Object.values(deps));
 	return loc.etaStatus;
 }
 check("§3.1 the Tracking tab reads the Drop-off Appointment: an Eastern receiver on time",
@@ -155,6 +166,8 @@ check("§3.1 the Tracking tab reads the Drop-off Appointment: an Eastern receive
 check("§3.2 a Central receiver, due 1:30 PM CDT: on time", tabStatus("10/15/2026 14:00", "2026-10-15T17:30:00Z", 60, CENTRAL), "on-time");
 check("§3.3 a Pacific receiver, due 2:30 PM PDT: delayed", tabStatus("10/15/2026 14:00", "2026-10-15T20:30:00Z", 60, PACIFIC), "delayed");
 check("§3.4 an unreadable appointment stays unknown", tabStatus("Contact for scheduling information", "2026-10-15T15:30:00Z", 120, CENTRAL), "unknown");
+check("§3.5 an Indianapolis receiver (its address): due 2:30 PM EDT for 2 PM is delayed, not on time by the Central band",
+	tabStatus("10/15/2026 14:00", "2026-10-15T17:30:00Z", 60, -86.16, { address: "Indianapolis, IN 46204", lat: 39.77 }), "delayed");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

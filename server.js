@@ -14912,6 +14912,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		const destLngCol = findCol(headers, /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i);
 		const pickupDateCol = headers.find((h) => /pickup.*date|pickup.*appoint/i.test(h)) || null;
 		const deliveryDateCol = headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint|completion.*date/i.test(h)) || null;
+		// The badge judges against the Drop-off Appointment itself, never a
+		// delivered or completion date the broader match above can land on.
+		const appointmentCol = findCol(headers, DROPOFF_APPOINTMENT_COL_RE);
 		const statusUpdateCol = headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) || null;
 
 		const status = (load[statusCol] || "").toString().trim();
@@ -15077,9 +15080,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			// no badge.
 			let onTime = null;
 			let arrivalLocal = null;
-			const schedRaw = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
+			const schedRaw = appointmentCol ? (load[appointmentCol] || "").toString().trim() : "";
 			if (schedRaw) {
-				const verdict = etaVerdict(Date.parse(expectedAt), schedRaw, { destLng });
+				const verdict = etaVerdict(Date.parse(expectedAt), schedRaw, { destAddress: destAddr, destLat, destLng });
 				if (verdict) { onTime = verdict.onTime; arrivalLocal = verdict.arrivalLocal; }
 			}
 			eta = { distanceMiles, minutesRemaining, expectedAt, onTime, arrivalLocal };
@@ -51275,6 +51278,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			// /delivery.*time|drop.*date/-style match found no Job Tracking column, so
 			// the on-time / delayed status never fired.
 			const deliveryTimeCol = findCol(headers, DROPOFF_APPOINTMENT_COL_RE);
+			// The receiver's address, which tells its state and so its clock.
+			const dropoffAddressCol = pickAddressColumn(headers, /dest|drop|receiver|delivery/i);
 
 			if (loadIdCol) {
 				// Build load lookup, null-prototype, filed and read through
@@ -51457,7 +51462,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					// The same verdict as the customer tracker's badge: the appointment
 					// on the receiver's clock (lib/eta-on-time.js).
 					if (deliveryTimeCol && load[deliveryTimeCol]) {
-						const onTime = etaOnTime(Date.now() + etaSeconds * 1000, String(load[deliveryTimeCol]), { destLng: dLng });
+						const onTime = etaOnTime(Date.now() + etaSeconds * 1000, String(load[deliveryTimeCol]), {
+							destAddress: dropoffAddressCol ? String(load[dropoffAddressCol] || "") : "", destLat: dLat, destLng: dLng,
+						});
 						if (onTime !== null) loc.etaStatus = onTime ? "on-time" : "delayed";
 					}
 				}));
@@ -65184,16 +65191,21 @@ function kpiGatherDbInputs(db, opts) {
 		});
 	}
 
+	// The receiver's place, which tells its clock (lib/stop-zone.js): its
+	// longitude, and its latitude and address for its state.
 	const destLng = new Map();
-	for (const r of db.prepare("SELECT load_id, dest_lng FROM load_coordinates").all()) {
+	const destPlace = new Map();
+	for (const r of db.prepare("SELECT load_id, dest_lat, dest_lng, dropoff_address FROM load_coordinates").all()) {
 		const k = key(r.load_id);
-		if (k) destLng.set(k, finite(r.dest_lng));
+		if (!k) continue;
+		destLng.set(k, finite(r.dest_lng));
+		destPlace.set(k, { lat: finite(r.dest_lat), address: String(r.dropoff_address || "").slice(0, 300) });
 	}
 
 	// R10: what the mile metrics read (lib/kpi-miles-data.js, named columns only).
 	const milesData = kpiMilesData.gatherMilesData(db);
 
-	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, milesData };
+	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, destPlace, milesData };
 }
 
 // The inputs lib/kpi-metrics.js computeKpis() takes. The mile records cover live
@@ -65202,10 +65214,13 @@ function kpiGatherDbInputs(db, opts) {
 function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 	const arrivals = sheet.arrivals.map((a) => {
 		const eld = dbIn.loadEld.get(a.loadId);
+		const place = dbIn.destPlace ? dbIn.destPlace.get(a.loadId) : null;
 		return {
 			loadId: a.loadId,
 			appointmentText: a.appointmentText,
 			destLng: dbIn.destLng.has(a.loadId) ? dbIn.destLng.get(a.loadId) : null,
+			destLat: place ? place.lat : null,
+			destAddress: place ? place.address : "",
 			eldArriveMs: eld ? eld.eldArriveMs : null,
 			receiverEvents: dbIn.receiverEvents.get(a.loadId) || [],
 			deliveredDay: a.deliveredDay,
