@@ -5528,7 +5528,7 @@ db.exec(`
 // the database file is dropped first, so only this definition is ever in force.
 function installPeriodLockTriggers(database) {
 	const locked = (periodExpr) => `EXISTS (SELECT 1 FROM main.period_locks WHERE main.period_locks.period = ${periodExpr} AND main.period_locks.status = 'locked')`;
-	const refuse = "SELECT RAISE(ABORT, 'PERIOD_FINALIZED: the month is closed; reopen it to change its figures');";
+	const refuse = "SELECT RAISE(ABORT, 'PERIOD_FINALIZED: the month is closed; its figures stay as recorded');";
 	const names = ["investor_payouts_locked_insert", "investor_payouts_locked_update", "investor_payouts_locked_delete",
 		"financials_ledger_items_locked_insert", "financials_ledger_items_locked_update", "financials_ledger_items_locked_delete",
 		"financials_ledger_freezes_locked_insert", "financials_ledger_freezes_locked_update", "financials_ledger_freezes_locked_delete"];
@@ -9236,7 +9236,7 @@ app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), asy
 				return periodBlockedResponse(req, res,
 					`Cannot add ${insName}`,
 					createLock.blockers,
-					"A driver's pay structure has no per-month history, so these terms would reach the finalized months they worked. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+					"Pay terms don't keep a history by month yet, so these terms would also apply to the closed months this driver worked. Nothing was changed.",
 					createAudit);
 			}
 		}
@@ -15611,7 +15611,7 @@ app.put("/api/investor-applications/:id/status", requireRole("Super Admin"), asy
 				return periodBlockedResponse(req, res,
 					`Not accepted: ${fullName}`,
 					companyLock.blockers,
-					"Nothing was changed. Reopen the affected periods first (POST /api/periods/:period/reopen records a reason), then accept it again.",
+					"Nothing was changed. Closed months' earnings stay with the investor they were settled to, so this application can't be accepted under this company name.",
 					companyAudit);
 			}
 
@@ -23484,7 +23484,7 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 				// edit a week date.
 				return periodBlockedResponse(req, res,
 					`Cannot mark ${invoice.invoice_number || `invoice #${invoice.id}`} paid`,
-					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoicePaidAudit);
+					lock.blockers, lock.remedy || INVOICE_PAID_LOCK_REMEDY, invoicePaidAudit);
 			}
 		}
 
@@ -23612,7 +23612,7 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 				return periodBlockedResponse(req, res,
 					`Cannot adjust ${invoice.invoice_number || `invoice #${invoice.id}`}`,
 					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceAdjustAudit,
-					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} finalized, so this invoice can't be changed here. Corrections go into the current month.`);
+					(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} closed, so this invoice can't be changed. Create a correction invoice dated in the current month.`);
 			}
 		}
 
@@ -23734,7 +23734,7 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 				// edit a week date. Same fallback as its two siblings.
 				return periodBlockedResponse(req, res,
 					`Cannot revert ${invoice.invoice_number || `invoice #${invoice.id}`}`,
-					lock.blockers, lock.remedy || INVOICE_LOCK_REMEDY, invoiceRevertAudit);
+					lock.blockers, lock.remedy || INVOICE_REVERT_LOCK_REMEDY, invoiceRevertAudit);
 			}
 		}
 
@@ -24526,7 +24526,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 				return periodBlockedResponse(req, res,
 					`Cannot create the account for ${newDriverName}`,
 					rowLock.blockers,
-					"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+					"Nothing was changed. Create the account without a company name.",
 					accountRowAudit);
 			}
 		}
@@ -24545,7 +24545,7 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			return periodBlockedResponse(req, res,
 				`Cannot create the account ${newUsername}`,
 				companyLock.blockers,
-				"Create the account without a company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				"Nothing was changed. Create the account without a company name.",
 				companyAudit);
 		}
 
@@ -24961,7 +24961,7 @@ function userUpdateLockBlockers(user, next) {
 			rows: frozen.length,
 			paidRows,
 			periods: [...new Set(frozen.map((r) => r.period))].sort(),
-			detail: `${frozen.length} settled payout row${frozen.length === 1 ? "" : "s"}${paidRows ? ` (${paidRows} already PAID)` : ""} would drop out of the payouts console — GET /api/payouts lists Investors only, and these rows would stay in the table unreachable`,
+			detail: `${frozen.length} settled payout row${frozen.length === 1 ? "" : "s"}${paidRows ? ` (${paidRows} already PAID)` : ""} would no longer show on the Payouts page, which lists Investors only`,
 		});
 	}
 
@@ -25329,7 +25329,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 				remedy.push(`${paidInvoiceRows} invoice${paidInvoiceRows === 1 ? " has" : "s have"} already been PAID — money moved against a document naming this driver, so ${paidInvoiceRows === 1 ? "it cannot" : "they cannot"} be re-attributed.`);
 			}
 			if (!paidRows) {
-				if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
+				if (periods.length) remedy.push("Closed months stay as recorded, so save the account without this change. Nothing was changed.");
 				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
 			}
 			if (code === "DRIVER_NAME_IN_USE") {
@@ -25385,7 +25385,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			return periodBlockedResponse(req, res,
 				`Cannot update the account for ${dirSync.name}`,
 				syncLock.blockers,
-				"Save the account without this company name, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				"Nothing was changed. Save the account without this company name.",
 				accountRowAudit);
 		}
 
@@ -25410,8 +25410,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			return periodBlockedResponse(req, res,
 				`Cannot update ${user.username}`,
 				companyLock.blockers,
-				"Keep the company name and the role as they are (a change of letter case, or of spaces at either end, keeps every driver linked), " +
-				"or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+				"Nothing was changed. Keep the company name and the role as they are (a change of letter case, or of spaces at either end, keeps every driver linked).",
 				companyAudit);
 		}
 
@@ -25438,7 +25437,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		if (wantsRename) {
 			if (sheetRowsUnderOldName === null) {
 				return res.status(409).json({
-					error: "Job Tracking could not be read, so it cannot be confirmed free of the old driver name. A rename that lands only in the database is the partial rename that restates closed months. Try again, or use PUT /api/admin/fix-driver-name.",
+					error: "Job Tracking could not be read, so it cannot be confirmed free of the old driver name. A rename that lands only in the database is the partial rename that restates closed months. Nothing was changed; try again shortly.",
 					code: "SHEET_UNREADABLE",
 				});
 			}
@@ -25452,7 +25451,7 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			if (sheetRowsToRename > 0) {
 				const variantNote = sheetRowsToRename > sheetRowsUnderOldName ? ` (${sheetRowsToRename - sheetRowsUnderOldName} of them under another spacing of it)` : "";
 				return res.status(409).json({
-					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsToRename} Job Tracking row${sheetRowsToRename === 1 ? "" : "s"} still carry the old name${variantNote}, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Use PUT /api/admin/fix-driver-name, which renames the sheet and the database together and offers ?dryRun=true first.`,
+					error: `Cannot rename "${user.driver_name}" to "${driverName.trim()}" here: ${sheetRowsToRename} Job Tracking row${sheetRowsToRename === 1 ? "" : "s"} still carry the old name${variantNote}, and this route does not write the sheet. Renaming only the database is a partial rename — the pay math would resolve those loads to default rates inside months that are already closed. Nothing was changed: this rename has to change the sheet and the database together, which this screen can't do.`,
 					code: "RENAME_REQUIRES_SHEET",
 					sheetRows: sheetRowsToRename,
 					route: "PUT /api/admin/fix-driver-name",
@@ -26591,10 +26590,15 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			remedy.push(`${paidInvoiceRows} invoice${paidInvoiceRows === 1 ? " has" : "s have"} already been PAID — money moved against a document naming this driver, so ${paidInvoiceRows === 1 ? "it cannot" : "they cannot"} be left unattributable.`);
 		}
 		if (!paidRows) {
-			if (periods.length) remedy.push(`Reopen the affected period${periods.length === 1 ? "" : "s"} first — POST /api/periods/:period/reopen records a reason.`);
-			if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
-			if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
-			remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
+			// A closed month stays as recorded, so with one in the way the account
+			// has to stay: re-assigning trucks or fixing dates would not unblock it.
+			if (periods.length) {
+				remedy.push("Leave the account in place — a closed month's figures are attributed to it. Nothing was changed.");
+			} else {
+				if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
+				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
+				remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
+			}
 		}
 
 		// Audited under the code the route SELECTED, for the reason PUT
@@ -29025,14 +29029,16 @@ function directoryChangedColumns(before, after) {
 	return changed;
 }
 
-// One remedy string for all three drivers_directory refusals. It deliberately
-// does NOT suggest "delete the row and re-add it" or "rename it instead" —
-// both are refused by the sibling guards here for the same reason, and pointing
-// an operator at something another guard then blocks is how a guard earns a
-// reputation for being broken.
+// One remedy string for the drivers_directory edit and delete refusals. It
+// deliberately does NOT suggest "delete the row and re-add it" or "rename it
+// instead" — both are refused by the sibling guards here for the same reason,
+// and pointing an operator at something another guard then blocks is how a
+// guard earns a reputation for being broken. Nor does it offer "the new terms
+// from the current month onward": rates carry no effective date, so no tool does
+// that, and closed months are never reopened (2026-10-14).
 const DIRECTORY_LOCK_REMEDY =
-	"A driver's pay structure has no per-month history, so there is no version of this edit that touches only the open month. " +
-	"Record the new terms from the current month onward, or reopen the affected periods first (POST /api/periods/:period/reopen records a reason).";
+	"Pay terms don't keep a history by month yet, so this change would also apply to the closed months this driver worked; " +
+	"it can't apply to the open month only. Nothing was changed.";
 
 // Everything a write to drivers_directory would restate inside a finalized
 // month. Same contract as truckEditLockBlockers: `changed` holds ONLY columns
@@ -29940,7 +29946,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 			return periodBlockedResponse(req, res,
 				`Cannot add ${unit}`,
 				createLock.blockers,
-				"Add the truck with an in-service date in the current month, and assign its driver once the affected periods are open — or reopen them first (POST /api/periods/:period/reopen records a reason).",
+				"Nothing was changed. Add the truck with an in-service date in the current month or later; if a driver assignment is named above, add the truck without it.",
 				createAudit);
 		}
 
@@ -30246,7 +30252,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			return periodBlockedResponse(req, res,
 				`Cannot apply this change to ${truck.unit_number || `truck #${id}`}`,
 				lock.blockers,
-				`Reopen the affected period${lock.blockers.some((b) => b.periods.filter(Boolean).length > 1) ? "s" : ""} first — POST /api/periods/:period/reopen records a reason — or revert the field${lock.blockers.length === 1 ? "" : "s"} named above (${lock.blockers.map((b) => b.field).join(", ")}) and save the rest of the edit, which is not blocked.`,
+				`Nothing was changed. Closed months stay as recorded, so undo the field${lock.blockers.length === 1 ? "" : "s"} named above (${lock.blockers.map((b) => b.field).join(", ")}) and save the rest of the edit, which is not blocked.`,
 				truckEditAudit);
 		}
 
@@ -30543,7 +30549,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		return periodBlockedResponse(req, res,
 			`Cannot delete ${truck.unit_number || `truck #${id}`}`,
 			lock.blockers,
-			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. If it genuinely has to go, reopen the affected periods first (POST /api/periods/:period/reopen records a reason).",
+			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. To take it out of service, give it a retirement date in an open month. Nothing was changed.",
 			truckDelAudit);
 	}
 
@@ -31015,13 +31021,20 @@ function invoiceRowPeriodLocked(r) {
 	return (MONTH.test(start) && isLocked(start)) || (MONTH.test(end) && isLocked(end));
 }
 
-// The remedy sentence every invoice write guard ends on, kept in one place so the
-// two routes cannot drift into telling an admin two different things. The adjust
-// route's finalized-month refusal is the exception: it says its own plain sentence
-// (periodBlockedResponse()'s `finalizedMessage`). Mark-paid, revert and the Data
-// Issues list still end on this one.
+// The remedy sentences the invoice write guards end on, kept in one place so the
+// routes cannot drift into telling an admin different things. Closed months are
+// never reopened (2026-10-14): a correction to a closed month's invoice goes on a
+// separate correction invoice dated in the open month (the owner's decision), and
+// a closed-month invoice can't be marked Paid yet (a separate change will allow
+// recording the payment). The adjust route's finalized-month refusal says its own
+// plain sentence (periodBlockedResponse()'s `finalizedMessage`); its fallback and
+// the Data Issues list end on INVOICE_LOCK_REMEDY.
 const INVOICE_LOCK_REMEDY =
-	"Reopen the affected period first — POST /api/periods/:period/reopen records a reason.";
+	"A closed month's invoices stay as recorded. To pay or recover a difference, create a correction invoice dated in the current month.";
+const INVOICE_PAID_LOCK_REMEDY =
+	"The app can't record a payment on an invoice in a closed month yet; its amount stays as recorded. Nothing was changed.";
+const INVOICE_REVERT_LOCK_REMEDY =
+	"A paid invoice in a closed month can't go back for review. If its amount was wrong, create a correction invoice dated in the current month. Nothing was changed.";
 
 // Ceiling on the months one invoice may claim to bill. A weekly invoice spans 1
 // or 2; the widest legitimate manual invoice anyone has described is a catch-up
@@ -31891,7 +31904,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 				DIRECTORY_NAME_COLLISION: "Two drivers_directory rows would be written the same name, which violates its UNIQUE constraint, and because the sheet is written first the failure would land as a PARTIAL_RENAME. Merge or delete the redundant row first.",
 				DIRECTORY_NAME_VARIANT: "The rename would leave two drivers_directory rows whose names differ only in case or spacing, for what every ownership check reads as one driver. Merge or delete the redundant row first.",
 				DRIVER_NAME_TAKEN: "The new name is a reserved name or another account's username, and a driver name must be neither.",
-			}[hardBlockers[0].code] || "A money-bearing target could not be read, so it cannot be confirmed free of finalized-month rows. Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE.";
+			}[hardBlockers[0].code] || "A table this rename changes could not be read, so it can't be confirmed free of closed-month rows. Nothing was changed; try again shortly.";
 		} else if (moneyNeutral) {
 			verdict.decision = "allow";
 			verdict.rationale = "Case/whitespace-only rename: every settlement join key folds case (LOWER / normalizeDriverName), so no locked month's figure can move.";
@@ -31945,7 +31958,7 @@ app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, re
 					? "Cannot verify which accounting periods are closed — refusing the rename."
 					: DRIVER_RENAME_HARD_BLOCK_CODES.has(verdict.code)
 						? `Rename refused: ${hardBlockers.map((b) => b.detail).join("; ")}.`
-						: `Rename withheld: it reaches ${blockers.length} finalized-period target${blockers.length === 1 ? "" : "s"}.`,
+						: "Rename withheld: it would change records in closed months. Nothing was changed.",
 				code: verdict.code, oldName: oldTrim, newName: newTrim, plan, verdict,
 			});
 		}
@@ -32757,8 +32770,8 @@ function sheetRowDeleteBlocker(guarded, headers, row) {
 			code: "PERIOD_UNRESOLVED",
 			periods: [],
 			error: months === null
-				? "This row carries a date the server cannot resolve to a month, so it cannot be shown to sit outside a closed period. Correct the date, or remove the load reversibly with DELETE /api/loads/:loadId."
-				: "This row carries no date the server can resolve to a month, so it cannot be shown to sit outside a closed period. Add the date, or remove the load reversibly with DELETE /api/loads/:loadId.",
+				? "This row carries a date the server cannot resolve to a month, so it cannot be shown to sit outside a closed month. Nothing was changed; correct the date and try again."
+				: "This row carries no date the server can resolve to a month, so it cannot be shown to sit outside a closed month. Nothing was changed; add the date and try again.",
 		};
 	}
 
@@ -32767,17 +32780,16 @@ function sheetRowDeleteBlocker(guarded, headers, row) {
 	return {
 		code: "PERIOD_FINALIZED",
 		periods: locked,
-		// Two ways forward, in the order they should be considered. The soft delete
-		// leads because it is almost always the right answer: it keeps the row in
-		// the sheet for audit, drops it from every KPI, and reverses.
-		error: `This row's figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} finalized — deleting the row would restate a closed month and cannot be undone. Remove the load reversibly with DELETE /api/loads/:loadId (soft delete; keeps the row for audit), or reopen the period first with POST /api/periods/:period/reopen, which records a reason.`,
+		// No way forward is offered because none exists: the soft delete refuses the
+		// same closed-month loads, and closed months are never reopened (2026-10-14).
+		error: `This row's figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} finalized, so it can't be deleted: that would restate a closed month. Nothing was changed.`,
 	};
 }
 
 // Cancelling a load drops it from every figure. A COMPLETED load is in the
 // settled figures of the months it books into (its revenue and its driver
 // days), so cancelling one whose months include a closed month would restate
-// that month: refused (409 PERIOD_FINALIZED), reopen the month first. A load
+// that month: refused (409 PERIOD_FINALIZED), and the month stays as settled. A load
 // that is not completed contributes nothing to any month, so cancelling it, the
 // ordinary case of a broker calling a load off late (#211), is never refused.
 // Same rungs as sheetRowDeleteBlocker(): an unreadable lock table or an
@@ -32803,7 +32815,7 @@ function completedLoadCancelRefusal(headers, row, statusColIdx) {
 	if (!locked.length) return null;
 	return {
 		http: 409, code: "PERIOD_FINALIZED",
-		error: `This load is completed and its figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} closed. Cancelling it would restate a settled month. Reopen the month first (POST /api/periods/:period/reopen, which records a reason). Nothing was changed.`,
+		error: `This load is completed and its figures belong to ${locked.map(periodLabel).join(", ")}, which ${locked.length === 1 ? "is" : "are"} closed, so it can't be cancelled: that would restate a settled month. Nothing was changed.`,
 	};
 }
 
@@ -33020,7 +33032,7 @@ function sheetRowUpdateBlocker(guarded, headers, before, after, changes) {
 		code: "PERIOD_FINALIZED",
 		periods: locked,
 		changed: changes.map((c) => ({ column: c.column, why: c.why })),
-		error: `${parts.join(", and ")} — ${locked.length === 1 ? "a month that is" : "months that are"} finalized. This edit changes ${changes.map((c) => `${c.column} (${c.why})`).join("; ")}, so it would restate a closed month. Reopen the period first with POST /api/periods/:period/reopen, which records a reason — or edit only the fields that carry no figures (notes, addresses, contacts, trailer), which are never blocked.`,
+		error: `${parts.join(", and ")} — ${locked.length === 1 ? "a month that is" : "months that are"} finalized. This edit changes ${changes.map((c) => `${c.column} (${c.why})`).join("; ")}, so it would restate a closed month. Nothing was changed. You can still edit the fields that carry no figures (notes, addresses, contacts, trailer), which are never blocked.`,
 	};
 }
 
@@ -35720,7 +35732,7 @@ function sendPeriodRefusal(req, res, kind, periods, extra, audit) {
 	}
 	const named = (periods || []).map(periodLabel).join(", ");
 	return res.status(409).json({
-		error: `${extra || "This change"} would restate ${named} — ${periods.length === 1 ? "a month that is" : "months that are"} already finalized, with the statement published against ${periods.length === 1 ? "it" : "them"}. Reopen the period first (POST /api/periods/:period/reopen records a reason), or leave the figures as settled.`,
+		error: `${extra || "This change"} would restate ${named} — ${periods.length === 1 ? "a month that is" : "months that are"} already finalized, with the statement published against ${periods.length === 1 ? "it" : "them"}. Closed months stay as settled, so nothing was changed.`,
 		code: "PERIOD_FINALIZED",
 		periods,
 	});
@@ -40866,7 +40878,7 @@ app.post("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), asyn
 				return periodBlockedResponse(req, res,
 					`Cannot ${truck.routemate_vehicle_id ? "re-point" : "link"} the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.",
+					"Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
 					linkAudit);
 			}
 		}
@@ -40921,7 +40933,7 @@ app.delete("/api/trucks/:truckId/link-routemate", requireRole("Super Admin"), as
 				return periodBlockedResponse(req, res,
 					`Cannot unlink the ELD device on ${truck.unit_number || `truck #${truckId}`}`,
 					lock.blockers,
-					"Reopen the affected periods first — POST /api/periods/:period/reopen records a reason.",
+					"Closed months stay as recorded, and this would change which days count as worked in them. Nothing was changed.",
 					unlinkAudit);
 			}
 		}
@@ -56984,7 +56996,7 @@ app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCr
 			return res.status(409).json({
 				error: lockUnreadable
 					? `${periodLabel(payout.period)} cannot be confirmed open — the period lock table could not be read, so adjustments are blocked until it can be. This is a database fault, not the close window.`
-					: `${periodLabel(payout.period)} is closed, so its payout stays as settled. Post the correction as an adjustment on an open month${openRow ? ` (${periodLabel(openRow.period)})` : " once the current month ends"}, or reopen ${periodLabel(payout.period)} to change it.`,
+					: `${periodLabel(payout.period)} is closed, so its payout stays as settled. Post the correction as an adjustment on an open month${openRow ? ` (${periodLabel(openRow.period)})` : " once the current month ends"}.`,
 				code: refusalCode,
 				period: payout.period,
 				...(openRow ? { openPeriod: openRow.period, openPayoutId: openRow.id } : {}),
@@ -58290,7 +58302,7 @@ async function finalizePeriods(periods, actor) {
 	if (!freezeItems) {
 		try {
 			insertDispatchNotification.run("period-close", "ACTION NEEDED — Financials figures not frozen at close",
-				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed or written (${freezeError}). Freeze them with the one-time freeze (POST /api/admin/financials/freeze-closed-months).`,
+				`${toClose.map(periodLabel).join(", ")} closed and their payouts are frozen, but their Financials line items could not be computed or written (${freezeError}). They need the one-time Financials freeze, which a developer runs.`,
 				JSON.stringify({ periods: toClose, stage: "financials-freeze" }));
 		} catch {}
 	} else if (frozenLive.size) {
@@ -60659,7 +60671,7 @@ app.post("/api/maintenance-fund", requireRole("Super Admin", "Dispatcher"), (req
 						table: "maintenance_fund", rows: 1, periods: [period],
 						detail: `a $${parseFloat(amount)} service payment dated ${String(date).trim()} would be deducted from ${periodLabel(period)}, which is finalized`,
 					}],
-					"Date it inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.",
+					"Nothing was changed. Date it inside the current open month.",
 					maintAudit);
 			}
 		}
@@ -60764,7 +60776,7 @@ app.post("/api/compliance/fees", requireRole("Super Admin", "Dispatcher"), (req,
 							? `$${parseFloat(amount)} would be deducted from ${periodLabel(period)}, which is finalized`
 							: "the dates on this fee do not resolve to a month, so the month it would be deducted from cannot be confirmed open",
 					}],
-					"Use a paid date inside the current open month, record it as Pending for now, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.",
+					"Nothing was changed. Use a paid date inside the current open month, or record it as Pending for now.",
 					feeAudit);
 			}
 		}
@@ -60888,7 +60900,7 @@ app.put("/api/compliance/fees/:id", requireRole("Super Admin", "Dispatcher"), (r
 							? (b.period ? `$${fee.amount} is currently deducted from ${periodLabel(b.period)}, which is finalized` : `this fee carries a date the server cannot resolve to a month, so it is currently deducted from none`)
 							: `paying it on ${paidDate} would deduct $${fee.amount} from ${periodLabel(b.period)}, which is finalized`).join("; "),
 					}],
-					`Use a paid date inside the current open month, or reopen the affected period first — POST /api/periods/:period/reopen records a reason.`,
+					"Nothing was changed. Use a paid date inside the current open month.",
 					feePayAudit);
 			}
 		}

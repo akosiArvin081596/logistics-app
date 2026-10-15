@@ -179,7 +179,7 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed, it can't be removed: closed months stay as recorded.`"
       confirm-text="Delete"
       :danger="true"
       :confirm-disabled="deleting"
@@ -516,8 +516,8 @@ async function runDelete() {
     // This used to be a bare `catch {}` that discarded the error and left the
     // confirm sitting open, so a refused delete was indistinguishable from a
     // slow one — the admin clicked Delete again. It matters more now: the server
-    // returns 409 PERIOD_FINALIZED naming the closed month and how to reopen it,
-    // and that sentence is the whole point of the guard.
+    // returns 409 PERIOD_FINALIZED naming the closed month and saying nothing was
+    // changed, and that sentence is the whole point of the guard.
     deleteError.value = (err && err.message) || 'Failed to delete this load.'
     toast(deleteError.value, 'error')
   } finally {

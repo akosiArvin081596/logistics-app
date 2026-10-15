@@ -1142,8 +1142,9 @@ export function refusalCauseText(code) {
  * transition carries a month-end guard — submit, approve and processing do not —
  * so a Draft in a finalized month walks all the way to Approved and then stops
  * for good. Unlike an un-adjustable invoice, which needs nothing unless somebody
- * wants to change it, this one is waiting on a payment that cannot arrive, and
- * there is no in-app remedy short of reopening the month.
+ * wants to change it, this one is waiting on a payment the app can't record yet:
+ * closed months are never reopened (2026-10-14), and recording the payment on a
+ * closed-month invoice waits on a separate change.
  *
  * `adjustable` is server-told and always false here by construction: a row only
  * reaches this list because invoiceMonthLockBlockers() refused it.
@@ -1203,10 +1204,14 @@ export function frozenInvoiceImpact(inv) {
       : "Neither adjustable nor payable, and no route in the app can edit an invoice's billing dates — "
         + 'this one has to be regenerated.'
   }
+  // Closed months are never reopened (2026-10-14): the invoice stays as
+  // recorded, a difference goes on a correction invoice dated in the current
+  // month, and recording its payment waits on a separate change.
   const months = inv.periodLabels.length ? periodList(inv.periods) : ''
-  const where = months ? `${months} would have to be reopened first` : 'the month would have to be reopened first'
+  const where = months ? `${months} ${inv.periodLabels.length === 1 ? 'is' : 'are'} closed` : 'its month is closed'
   if (inv.neverPayable) {
-    return `Can't be adjusted, and can never be marked Paid — it is ${inv.status || 'unpaid'}, and ${where}.`
+    return `Can't be adjusted, and can't be marked Paid in the app yet — it is ${inv.status || 'unpaid'}, and ${where}. `
+      + 'For a difference, create a correction invoice dated in the current month.'
   }
   return `Can't be adjusted. It is already ${inv.status || 'settled'}, so nothing is waiting on it.`
 }

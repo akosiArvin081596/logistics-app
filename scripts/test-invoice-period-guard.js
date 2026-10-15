@@ -544,13 +544,14 @@ guarded("section 4-5 (behaviour + mutants) ran", () => {
 // ── 6. the adjust route's finalized refusal, in plain words ─────────────────
 // The 409's `error` is the toast an admin reads on the Invoices screen, so the
 // adjust route's finalized-month refusal names the months and where corrections
-// go, and no API path. Only that string changes: the status, `code`, `periods`,
+// go (a correction invoice dated in the current month; closed months are never
+// reopened, 2026-10-14), and no API path. Only that string changes: the status, `code`, `periods`,
 // `unresolved`, `blockers` and the audit call are asserted as before, and the
 // unresolved-date and unreadable-lock refusals keep their own text.
 //
 // The REAL route runs, lifted from server.js with the real guard and response
 // helpers on the in-memory db above; only the audit recorder is captured.
-const PLAIN_TAIL = "so this invoice can't be changed here. Corrections go into the current month.";
+const PLAIN_TAIL = "so this invoice can't be changed. Create a correction invoice dated in the current month.";
 
 async function section6() {
 	section("6. the adjust route's finalized refusal (real route, real helpers)");
@@ -605,7 +606,7 @@ async function section6() {
 	let R = build();
 	let r = await R.adjust(39);
 	check("ONE MONTH: the refusal is a 409", r.status, 409);
-	check("...worded in plain language", errorOf(r), `September 2026 is finalized, ${PLAIN_TAIL}`);
+	check("...worded in plain language", errorOf(r), `September 2026 is closed, ${PLAIN_TAIL}`);
 	check("...naming no API path", /\/api\//.test(errorOf(r)), false);
 	check("...and the rest of the body is as before (code, periods, unresolved, blockers)",
 		r.body && [r.body.code, r.body.periods, r.body.unresolved, r.body.blockers],
@@ -618,7 +619,7 @@ async function section6() {
 	R = build();
 	r = await R.adjust(39);
 	check("TWO MONTHS: both named, in the order of the wire `periods`",
-		errorOf(r), `September 2026, October 2026 are finalized, ${PLAIN_TAIL}`);
+		errorOf(r), `September 2026, October 2026 are closed, ${PLAIN_TAIL}`);
 	check("...naming no API path", /\/api\//.test(errorOf(r)), false);
 	check("...and the rest of the body is as before",
 		[r.status, r.body && r.body.code, r.body && r.body.periods, r.body && r.body.unresolved],

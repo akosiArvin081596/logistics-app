@@ -380,7 +380,7 @@ function ctxOf(report, answered) {
 			amount: 900, cause: "PERIOD_FINALIZED", periods: ["2026-07"],
 			adjustable: false, neverPayable: true, isManual: false,
 			detail: "INV-SK-2026W30-01 bills 2026-07-25 — 2026-07-31, which covers July 2026",
-			remedy: "Reopen the affected period first — POST /api/periods/:period/reopen records a reason.",
+			remedy: "A closed month's invoices stay as recorded. To pay or recover a difference, create a correction invoice dated in the current month.",
 		});
 		check("a frozen invoice is never adjustable", inv.adjustable, false);
 		check("…and names its month in words", inv.periodLabels, ["July 2026"]);
@@ -419,12 +419,13 @@ function ctxOf(report, answered) {
 	}
 
 	const impact = (o) => frozenInvoiceImpact(normalizeFrozenInvoice(o));
-	check("a stuck-before-Paid invoice names the month to reopen",
+	check("a stuck-before-Paid invoice names its closed month and the correction invoice, never a reopen",
 		impact({ status: "Draft", cause: "PERIOD_FINALIZED", periods: ["2026-07"], neverPayable: true }),
-		"Can't be adjusted, and can never be marked Paid — it is Draft, and July 2026 would have to be reopened first.");
+		"Can't be adjusted, and can't be marked Paid in the app yet — it is Draft, and July 2026 is closed. "
+		+ "For a difference, create a correction invoice dated in the current month.");
 	check("two months read as a list",
 		impact({ status: "Submitted", cause: "PERIOD_FINALIZED", periods: ["2026-05", "2026-06"], neverPayable: true })
-			.includes("May 2026 and June 2026"), true);
+			.includes("May 2026 and June 2026 are closed"), true);
 	// The PAIR: an already-settled invoice is frozen too, and saying "can never be
 	// paid" about a Paid row would be nonsense.
 	check("an already-Paid invoice is not reported as waiting on anything",
@@ -439,8 +440,12 @@ function ctxOf(report, answered) {
 		const t = impact({ status: "Draft", cause: "PERIOD_UNRESOLVED", periods: [], neverPayable: true });
 		check("an unresolvable date says the dates cannot be edited", t.includes("no route in the app can edit"), true);
 		check("…and never tells anyone to reopen a month", /reopen/i.test(t), false);
-		check("…where the finalized branch DOES say reopen",
-			/reopened/i.test(impact({ status: "Draft", cause: "PERIOD_FINALIZED", periods: ["2026-07"], neverPayable: true })), true);
+		// Closed months are never reopened (2026-10-14), so the finalized branch
+		// names the closed month and the correction invoice instead.
+		const finalized = impact({ status: "Draft", cause: "PERIOD_FINALIZED", periods: ["2026-07"], neverPayable: true });
+		check("…and neither does the finalized branch", /reopen/i.test(finalized), false);
+		check("…which names the closed month and the correction invoice",
+			/July 2026 is closed/.test(finalized) && /correction invoice dated in the current month/.test(finalized), true);
 	}
 	check("no invoice at all -> no sentence", frozenInvoiceImpact(null), "");
 
