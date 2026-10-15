@@ -111,6 +111,11 @@ const { appendGmailDraft } = require("./lib/imap-draft");
 const { runReceiptOcr } = require("./lib/receipt-ocr");
 const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDetailed, aggregateExpenses, runQuerySpec, buildInsightsAggregates } = require("./lib/expense-analytics");
 const expenseAi = require("./lib/expense-ai");
+// "Personal" receipts: the rules, the line text and the two expense sources.
+const personalExpense = require("./lib/personal-expense");
+// Their receipts on the invoice: the re-encode service and the page layout.
+const receiptImagesLib = require("./lib/receipt-images");
+const invoiceReceipts = require("./lib/invoice-receipts");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
@@ -5769,6 +5774,21 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN delete_reason TEXT DEFAULT ''"); 
 // list/submit/approve/PDF pipeline as generated weekly invoices.
 try { db.exec("ALTER TABLE invoices ADD COLUMN is_manual INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''"); } catch {}
+// "Personal" receipts (see the PERSONAL RECEIPTS section). personal_total is what
+// the driver repays on this invoice (deduction lines less reversal credits),
+// personal_share_total the owner-operator share returned (net); both are signed
+// sums of the expense_personal rows linked to the invoice, rewritten in every
+// transaction that links or unlinks one. invoiceTotalDue() reads both. A
+// correction invoice (is_correction = 1, a manual row) holds only Personal lines
+// for one driver-week: total_earnings 0, correction_of = the weekly invoice it
+// corrects (NULL when that week had none).
+try { db.exec("ALTER TABLE invoices ADD COLUMN personal_total REAL NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN personal_share_total REAL NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN correction_of INTEGER"); } catch {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN is_correction INTEGER NOT NULL DEFAULT 0"); } catch {}
+// The Personal ledger itself (lib/personal-expense.js SCHEMA_SQL): additive,
+// CREATE ... IF NOT EXISTS, one live mark per receipt by a unique partial index.
+db.exec(personalExpense.SCHEMA_SQL);
 // ---------------------------------------------------------------------------
 // idx_invoices_driver_week — the one-invoice-per-driver-week constraint.
 //
@@ -8437,9 +8457,20 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 // request, so a process started while the build was missing (a deploy swaps
 // it in with two renames) serves the bundle files as soon as it is back.
 const clientDistPath = path.join(__dirname, "client", "dist");
+// Pages (index.html, or the replica's bannered copy) per client: a navigation
+// asks for one; the bundle files, API calls, uploads and sockets a page uses
+// are never counted.
+const pageLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	max: 300,
+	message: "Too many page requests. Try again in a minute.",
+	standardHeaders: true,
+	legacyHeaders: false,
+	skip: (req) => (req.method !== "GET" && req.method !== "HEAD") || /^\/(api|uploads|socket\.io|assets)(\/|$)/i.test(req.path),
+});
 // A replica answers every page with the "LOCAL COPY OF PRODUCTION" banner in
 // it, the login page included (lib/replica-mode.js), ahead of the static files.
-if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));
+if (REPLICA) app.use(pageLimiter, REPLICA.bannerMiddleware(clientDistPath));
 app.use(express.static(clientDistPath));
 
 // ============================================================
@@ -17061,6 +17092,45 @@ const EXPENSE_PNL_FILTER = "COALESCE(status, '') != 'Rejected'";
 const EXPENSE_PERIOD_EXPR =
 	"COALESCE(NULLIF(posted_period,''), strftime('%Y-%m', COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at))))";
 
+// Does the "Personal" ledger (expense_personal) exist in this database? Always
+// yes in the server (created at boot); a script or runner that built only the
+// tables it needs answers no, which reads exactly as "no Personal line". An
+// existing table that cannot be read is NOT swallowed here: its queries throw.
+// The yes is kept on the function object (a table is never dropped).
+function personalLedgerPresent() {
+	if (personalLedgerPresent.yes) return true;
+	const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'expense_personal'").get();
+	if (row) personalLedgerPresent.yes = true;
+	return !!row;
+}
+
+// THE FROM-ITEM EVERY EXPENSE TOTAL READS, so the personal part of a receipt
+// leaves every figure at once (lib/personal-expense.js, expenseSourceSql()):
+//   expenseFrom("book")   settlement figures, next to EXPENSE_PNL_FILTER and
+//                         EXPENSE_PERIOD_EXPR: the payout ledger and Financials,
+//                         percentage pay, the investor portal, tax and reports;
+//   expenseFrom("world")  operational figures on the receipt's own date: fuel
+//                         spend and gallons, KPI, cost per gallon, mileage, the
+//                         investor's receipt list.
+// Write `FROM ${expenseFrom("book")} WHERE …`; column names stay unqualified (or
+// qualified `expenses.`), as on the plain table. Until the ledger holds a row it
+// answers the plain table, so every query is the one it always was; from the
+// first row (a mark made at runtime switches it, no restart) it answers the
+// derived table, which with no row that applies gives the same figures to the
+// cent. It never switches back: switching the flag off must not un-count a
+// deduction already on an invoice. scripts/test-expense-book-sources.js pins the
+// readers; scripts/test-personal-expense-books.js the figures.
+function expenseFrom(kind) {
+	if (kind !== "book" && kind !== "world") throw new Error(`expenseFrom(): unknown source ${JSON.stringify(kind)}`);
+	const state = expenseFrom.state || (expenseFrom.state = { active: false, columns: null });
+	if (!state.active) {
+		if (!personalLedgerPresent() || !db.prepare("SELECT 1 FROM expense_personal LIMIT 1").get()) return "expenses";
+		state.active = true;
+	}
+	if (!state.columns) state.columns = db.prepare("PRAGMA table_info(expenses)").all().map((c) => c.name);
+	return `(${require("./lib/personal-expense").expenseSourceSql(kind, state.columns)}) AS expenses`;
+}
+
 // ============================================================
 // Month-end close — the period lifecycle
 // ============================================================
@@ -17332,9 +17402,11 @@ function foldExpenseTotalsByDriver(rows) {
 // receipt counted as a company trip expense but never reduced a percentage
 // driver's pay.
 function getDeductibleExpensesByDriverMonth(periodExpr = EXPENSE_PERIOD_EXPR) {
+	// The books source (expenseFrom()): a Personal part leaves a percentage
+	// driver's base, as it leaves the weekly invoice's.
 	const rows = db.prepare(`
 		SELECT LOWER(driver) AS name_lc, ${periodExpr} AS month, SUM(amount) AS total
-		FROM expenses
+		FROM ${expenseFrom("book")}
 		WHERE type IN ('Fuel', 'Maintenance') AND ${EXPENSE_PNL_FILTER}
 		GROUP BY LOWER(driver), month
 	`).all();
@@ -17518,12 +17590,12 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 		await appendInvoiceAdjustmentAddendum(invoiceRow);
 		return "addendum";
 	}
-	const templateName = renderData.__templateName;
-	delete renderData.__templateName;
-	// Layer in the latest adjustment values (the snapshot is otherwise frozen).
-	renderData.adjustment = invoiceRow.adjustment || 0;
-	renderData.adjustmentNote = invoiceRow.adjustment_note || "";
-	const pdfBuffer = await renderPolicy(templateName, renderData);
+	// Layer in the latest adjustment values and the Personal lines the invoice
+	// carries now (the snapshot is otherwise frozen): personalRenderData().
+	const personalRows = personalRowsOnInvoice(invoiceRow.id);
+	const { templateName, data } = personalRenderData(renderData, invoiceRow, personalRows);
+	const withReceipts = await personalReceiptRenderData(data, personalRows);
+	const pdfBuffer = await renderPolicy(templateName, withReceipts);
 	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
@@ -18057,6 +18129,10 @@ async function generateInvoiceHandler(req, res) {
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
 		const expenseIds = expenses.map(e => e.id);
+		// Personal lines (the PERSONAL RECEIPTS section): which ones this invoice may
+		// carry and, for a percentage driver, what its base leaves out. Read here,
+		// before the render; re-checked in the write's transaction.
+		const personal = personalGenerationPlan({ driverName, weekStart, existing, expenses, percentage: payStruct.payType === "percentage" });
 
 		// --- Active-day algorithm for driver pay ---
 		// Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
@@ -18317,10 +18393,13 @@ async function generateInvoiceHandler(req, res) {
 		if (payType === "percentage") {
 			// Owner-operator pay: % of (week's load revenue − fuel & maintenance).
 			const grossRevenue = uniqueLoads.reduce((sum, l) => sum + parseAmount(rateCol ? l[rateCol] : 0), 0);
+			// A Personal part leaves the base (personal.leftOut) and is deducted once,
+			// in full, as its own line; a receipt that was all Personal leaves the table.
+			const counted = (e) => (personal.leftOut[e.id] ? (Math.round((e.amount || 0) * 100) - personal.leftOut[e.id]) / 100 : (e.amount || 0));
 			const fuelMaintExpenses = expenses.filter(e =>
 				(e.type === "Fuel" || e.type === "Maintenance") && e.status !== "Rejected"
-			);
-			const deductible = fuelMaintExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+			).filter((e) => !personal.leftOut[e.id] || counted(e) !== 0);
+			const deductible = fuelMaintExpenses.reduce((sum, e) => sum + counted(e), 0);
 			const net = Math.max(0, grossRevenue - deductible);
 			totalEarnings = Math.round((net * payPercentage / 100) * 100) / 100;
 			invoiceRatePerLoad = payPercentage; // overload the column to store the % for this row
@@ -18348,12 +18427,17 @@ async function generateInvoiceHandler(req, res) {
 						rate: parseAmount(rateCol ? l[rateCol] : 0),
 					};
 				}),
+				// A receipt with a Personal part names its id, for an undo before
+				// approval to give the cents back (restoreOwnerOpBase()).
 				fuelMaintExpenses: fuelMaintExpenses.map(e => ({
+					...(personal.leftOut[e.id] ? { expenseId: e.id } : {}),
 					date: e.date,
 					type: e.type,
 					description: e.description || "",
-					amount: e.amount || 0,
+					amount: counted(e),
 				})),
+				// The cents each receipt left out of this base (none: no key).
+				...(Object.keys(personal.leftOut).length ? { personalBase: personal.leftOut } : {}),
 				grossRevenue,
 				deductible,
 				net,
@@ -18394,10 +18478,17 @@ async function generateInvoiceHandler(req, res) {
 		// the same adjustment line the previous Draft had.
 		renderData.adjustment = preservedAdjustment ? preservedAdjustment.adjustment : 0;
 		renderData.adjustmentNote = preservedAdjustment ? preservedAdjustment.adjustment_note : "";
+		// The Personal lines it carries: oldest first, never taking the total due
+		// below $0 (a line that does not fit waits for the week's correction).
+		const personalFit = personalFitForGeneration(personal,
+			Math.round((totalEarnings + (preservedAdjustment ? Number(preservedAdjustment.adjustment) || 0 : 0)) * 100));
+		if (personalFit.renderFields) Object.assign(renderData, personalFit.renderFields);
+		// Their receipts join the data for the render only, never the snapshot
+		const renderInput = personalFit.fit.length ? await personalReceiptRenderData(renderData, personalFit.fit) : renderData;
 
 		// The LAST await. Everything below runs synchronously, so what the write
 		// re-checks is what it writes against.
-		const pdfBuffer = await renderPolicy(templateName, renderData);
+		const pdfBuffer = await renderPolicy(templateName, renderInput);
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -18419,27 +18510,42 @@ async function generateInvoiceHandler(req, res) {
 			invoiceNumber, pdfFileName, pdfBuffer,
 			replacing: existing,
 			slot: { driverName, weekStart },
-			insert: () => db.prepare(
-				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?)`
-			).run(
-				invoiceNumber, canonicalDriverName(driverName).toLowerCase(), weekStart, computedWeekEnd,
-				invoiceLoadsCount, invoiceRatePerLoad, totalEarnings, expensesTotal,
-				pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds),
-				preservedAdjustment ? preservedAdjustment.adjustment : 0,
-				preservedAdjustment ? preservedAdjustment.adjustment_note : "",
-				preservedAdjustment ? preservedAdjustment.adjusted_by : "",
-				preservedAdjustment ? preservedAdjustment.adjusted_at : "",
-				JSON.stringify(renderSnapshot)
-			),
+			insert: () => {
+				const inserted = db.prepare(
+					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?)`
+				).run(
+					invoiceNumber, canonicalDriverName(driverName).toLowerCase(), weekStart, computedWeekEnd,
+					invoiceLoadsCount, invoiceRatePerLoad, totalEarnings, expensesTotal,
+					pdfFileName, JSON.stringify(loadIds), JSON.stringify(expenseIds),
+					preservedAdjustment ? preservedAdjustment.adjustment : 0,
+					preservedAdjustment ? preservedAdjustment.adjustment_note : "",
+					preservedAdjustment ? preservedAdjustment.adjusted_by : "",
+					preservedAdjustment ? preservedAdjustment.adjusted_at : "",
+					JSON.stringify(renderSnapshot)
+				);
+				// The Personal lines move with the row, in this transaction: link what
+				// fits, flag what does not (personalCommitGeneration()).
+				const invoiceId = Number(inserted.lastInsertRowid);
+				personalCommitGeneration(invoiceId, personal, personalFit);
+				return inserted;
+			},
 		});
 
 		// created_at is SQLite CURRENT_TIMESTAMP — UTC but serialized without a
 		// zone, which JS parses as local time. Wrap it as ISO-8601 Z; the trailing
 		// alias overrides the value the star already selected.
-		const invoice = db.prepare(
+		let invoice = db.prepare(
 			"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?"
 		).get(result.lastInsertRowid);
+		if (personalFit.fit.length) {
+			logAudit(req, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: generated with ${personalFit.fit.length} Personal line(s), repays ${personalExpense.formatMoney(Math.round(personalFit.personalTotal * 100))}`);
+		}
+		for (const r of personalFit.flagged) {
+			logAudit(req, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+		}
+		// A line marked while this was rendering goes on through the attach path.
+		invoice = await attachLatePersonalLines(invoice, req);
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek });
 	} catch (err) {
@@ -18656,6 +18762,8 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// of those a delivered channel actually showed.
 	const undatedInWeek = [];
 	const undatedInWeekIds = [];
+	// The week's Personal receipt images, cached before any invoice renders
+	await warmPersonalReceiptsForWeek(range.weekStart);
 	for (const driver of rosterDrivers) {
 		const norm = normalizeDriverName(driver);
 		try {
@@ -22096,8 +22204,9 @@ const FUEL_GALLONS_RECOVERY_ENABLED = String(process.env.FUEL_GALLONS_RECOVERY_E
 // basis. See the EXPENSE_PERIOD_EXPR comment.
 function fuelCpgBandFromFleet() {
 	try {
+		// The world source (expenseFrom()): the company's dollars on the receipt.
 		const rows = db.prepare(`
-			SELECT amount, gallons FROM expenses
+			SELECT amount, gallons FROM ${expenseFrom("world")}
 			WHERE LOWER(type) = 'fuel' AND COALESCE(amount,0) > 0 AND COALESCE(gallons,0) > 0
 			  AND ${EXPENSE_PNL_FILTER}
 		`).all();
@@ -23030,7 +23139,10 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 		// Each row's total_due is invoiceTotalDue() (the PDF's "Total Due"), and
 		// `summary` is the status cards over the rows listed here
 		// (invoiceListSummary()): the Invoices screen shows both and adds nothing.
-		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r) }));
+		// personal_lines: the Personal lines each carries, with their receipts
+		// (personalLinesForInvoices()); [] for none.
+		const personalLines = personalLinesForInvoices(invoices.map((r) => r.id));
+		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));
 		res.json({ invoices, summary: invoiceListSummary(invoices) });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -23064,10 +23176,19 @@ function parsePaymentReportParams(req) {
 }
 
 // An invoice's total due: the computed total_earnings plus the admin
-// adjustment, to the cent. It is the number the PDF "Total Due" shows, and the
-// one figure the payment report and the driver app's invoice list serve.
+// adjustment, plus the owner-operator share returned on Personal lines, less
+// what the driver repays on them (personal_total), to the cent. It is the number
+// the PDF "Total Due" shows, and the one figure the payment report and the
+// driver app's invoice list serve.
+//
+// ⚠️ A ROW READ WITHOUT THE TWO PERSONAL COLUMNS THROWS, rather than reading
+// them as $0: a SELECT that lists its columns and misses one would otherwise
+// overstate the total due of every invoice carrying a Personal line, silently.
 function invoiceTotalDue(row) {
-	return Math.round(((row.total_earnings || 0) + (row.adjustment || 0)) * 100) / 100;
+	for (const col of ["personal_total", "personal_share_total"]) {
+		if (row[col] === undefined) throw new Error(`invoiceTotalDue(): the invoice row was read without ${col}; select it with the row.`);
+	}
+	return Math.round(((row.total_earnings || 0) + (row.adjustment || 0) + (row.personal_share_total || 0) - (row.personal_total || 0)) * 100) / 100;
 }
 
 // The admin Invoices screen's status cards, sent with GET /api/invoices: per
@@ -23097,7 +23218,7 @@ function buildPaymentReport(payee, from, to) {
 	const payeeKey = normalizeDriverName(payee);
 	const rows = db.prepare(
 		`SELECT id, invoice_number, driver, week_start, week_end, loads_count, status, is_manual,
-		        total_earnings, expenses_total, adjustment, adjustment_note,
+		        total_earnings, expenses_total, adjustment, adjustment_note, personal_total, personal_share_total,
 		        submitted_at, approved_at, approved_by, paid_at, paid_by,
 		        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 		 FROM invoices
@@ -23145,6 +23266,36 @@ app.get("/api/invoices/report", requireRole("Super Admin"), (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 });
+
+// The payment report PDF's invoice table. "Personal" is the net of an invoice's
+// Personal lines (share returned less what the driver repays), so Base + Adjust
+// + Personal = Total Due on a row; it is printed only when an invoice in the
+// report carries Personal lines, and the table is otherwise the one it was
+// before they existed.
+function paymentReportColumns(invoices) {
+	const withPersonal = (invoices || []).some((inv) => Number(inv.personal_total) || Number(inv.personal_share_total));
+	if (!withPersonal) {
+		return [
+			{ key: "invoice", label: "Invoice #", x: 50, w: 116, align: "left" },
+			{ key: "period", label: "Period", x: 166, w: 94, align: "left" },
+			{ key: "status", label: "Status", x: 260, w: 56, align: "left" },
+			{ key: "base", label: "Base", x: 316, w: 62, align: "right" },
+			{ key: "adjust", label: "Adjust", x: 378, w: 50, align: "right" },
+			{ key: "due", label: "Total Due", x: 428, w: 64, align: "right" },
+			{ key: "paid", label: "Paid On", x: 492, w: 70, align: "right" },
+		];
+	}
+	return [
+		{ key: "invoice", label: "Invoice #", x: 50, w: 104, align: "left" },
+		{ key: "period", label: "Period", x: 154, w: 88, align: "left" },
+		{ key: "status", label: "Status", x: 242, w: 52, align: "left" },
+		{ key: "base", label: "Base", x: 294, w: 58, align: "right" },
+		{ key: "adjust", label: "Adjust", x: 352, w: 48, align: "right" },
+		{ key: "personal", label: "Personal", x: 400, w: 52, align: "right" },
+		{ key: "due", label: "Total Due", x: 452, w: 60, align: "right" },
+		{ key: "paid", label: "Paid On", x: 512, w: 50, align: "right" },
+	];
+}
 
 // GET /api/invoices/report/pdf — printable payment summary (pdfkit, same
 // params as the JSON report). Patterned on the investor performance report.
@@ -23195,16 +23346,8 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 		kpiRow("Total Payable (excl. rejected)", fmtMoney(report.summary.totalPayable),
 			"Invoices in Period", String(report.summary.invoiceCount));
 
-		// ── Invoice table
-		const cols = [
-			{ label: "Invoice #", x: 50, w: 116, align: "left" },
-			{ label: "Period", x: 166, w: 94, align: "left" },
-			{ label: "Status", x: 260, w: 56, align: "left" },
-			{ label: "Base", x: 316, w: 62, align: "right" },
-			{ label: "Adjust", x: 378, w: 50, align: "right" },
-			{ label: "Total Due", x: 428, w: 64, align: "right" },
-			{ label: "Paid On", x: 492, w: 70, align: "right" },
-		];
+		// ── Invoice table (paymentReportColumns())
+		const cols = paymentReportColumns(report.invoices);
 		const footerSafety = 60;
 		const drawTableHeader = () => {
 			const y = doc.y;
@@ -23228,16 +23371,18 @@ app.get("/api/invoices/report/pdf", requireRole("Super Admin"), async (req, res)
 			const y = doc.y;
 			doc.rect(50, y, doc.page.width - 100, 16).fill(i % 2 === 0 ? "#ffffff" : "#f8f9fa");
 			doc.fillColor("#333333").font("Helvetica").fontSize(8);
-			const vals = [
-				inv.invoice_number + (inv.is_manual ? " (M)" : ""),
-				`${fmtDay(inv.week_start)} – ${fmtDay(inv.week_end)}`,
-				inv.status,
-				fmtMoney(inv.total_earnings),
-				inv.adjustment ? fmtMoney(inv.adjustment) : "—",
-				fmtMoney(inv.total_due),
-				inv.status === "Paid" ? fmtPaidDay(inv.paid_at) : "—",
-			];
-			cols.forEach((c, j) => doc.text(vals[j], c.x + 3, y + 4, { width: c.w - 6, align: c.align, lineBreak: false }));
+			const net = Math.round(((inv.personal_share_total || 0) - (inv.personal_total || 0)) * 100) / 100;
+			const vals = {
+				invoice: inv.invoice_number + (inv.is_manual ? " (M)" : ""),
+				period: `${fmtDay(inv.week_start)} – ${fmtDay(inv.week_end)}`,
+				status: inv.status,
+				base: fmtMoney(inv.total_earnings),
+				adjust: inv.adjustment ? fmtMoney(inv.adjustment) : "—",
+				personal: net ? `${net < 0 ? "-" : ""}${fmtMoney(Math.abs(net))}` : "—",
+				due: fmtMoney(inv.total_due),
+				paid: inv.status === "Paid" ? fmtPaidDay(inv.paid_at) : "—",
+			};
+			cols.forEach((c) => doc.text(vals[c.key], c.x + 3, y + 4, { width: c.w - 6, align: c.align, lineBreak: false }));
 			doc.y = y + 16;
 		});
 
@@ -23638,6 +23783,10 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 		db.prepare(
 			"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ?"
 		).run(adjustment, note, adminName, now, invoice.id);
+		// Never negative (the PERSONAL RECEIPTS section): on an open weekly invoice a
+		// Personal line the new total no longer covers is unlinked and flagged for
+		// the week's correction, in this same step; put back if the PDF fails below.
+		const personalDetached = personalDetachUnfit(invoice.id);
 
 		// Re-render PDF using the snapshot stored at generate time. Newer invoices
 		// re-render the full template ("rerender"); legacy invoices that predate
@@ -23654,7 +23803,12 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 			db.prepare(
 				"UPDATE invoices SET adjustment = ?, adjustment_note = ?, adjusted_by = ?, adjusted_at = ? WHERE id = ? AND adjustment = ? AND adjustment_note = ? AND adjusted_by = ? AND adjusted_at = ?"
 			).run(oldAdjustment, oldNote, invoice.adjusted_by || "", invoice.adjusted_at || "", invoice.id, adjustment, note, adminName, now);
+			undoPersonalDetach(personalDetached);
 			return res.status(409).json({ error: renderErr.message || "PDF update failed" });
+		}
+		for (const d of personalDetached) {
+			logAudit(req, "detach_personal_expense", "expense", d.expenseId,
+				`line ${d.id} (${personalExpense.formatMoney(d.cents)}) taken off ${invoice.invoice_number}: the adjustment to ${adjustment.toFixed(2)} leaves too little to cover it; waiting for the week's correction`);
 		}
 
 		logAudit(
@@ -23781,7 +23935,7 @@ app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
 		const adminName = req.session.user.username || "";
 		db.prepare("UPDATE invoices SET deleted_at = ?, deleted_by = ?, delete_reason = ? WHERE id = ?")
 			.run(now, adminName, reason, invoice.id);
-		const totalDue = (Number(invoice.total_earnings) || 0) + (Number(invoice.adjustment) || 0);
+		const totalDue = invoiceTotalDue(invoice);
 		logAudit(
 			req,
 			"delete_invoice",
@@ -23821,6 +23975,8 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 				return res.status(409).json({ error: `Cannot restore — ${clash.invoice_number} already covers that driver/week. Delete it first.` });
 			}
 		}
+		const personalMoved = personalRestoreBlocker(invoice);
+		if (personalMoved) return res.status(409).json({ error: personalMoved, code: "PERSONAL_LINES_MOVED" });
 		db.prepare("UPDATE invoices SET deleted_at = '', deleted_by = '', delete_reason = '' WHERE id = ?").run(invoice.id);
 		logAudit(
 			req,
@@ -23837,6 +23993,1376 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 	} catch (err) {
 		console.error("Invoice restore error:", err.message);
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// ============================================================
+// PERSONAL RECEIPTS — the driver repays a purchase that was his
+// ============================================================
+// A Super Admin marks all or part of a receipt Personal. lib/personal-expense.js
+// holds the rules and their reasons; this section is the wiring: the ledger
+// reads, where a line lands, the invoice re-render, corrections, the routes and
+// the weekly sweep. The books side is expenseFrom() (beside EXPENSE_PNL_FILTER).
+//
+// Every route is Super Admin only (no Dispatcher power). The flag
+// PERSONAL_EXPENSE_DEDUCTIONS_ENABLED (off unless exactly "true") refuses NEW
+// marks only: undo, reverse, generation, attach and the sweep keep working on
+// lines that exist, so switching it off never strands a deduction.
+//
+// WHERE A LINE LANDS — the week it is marked in, never another week's invoice:
+//   that week's weekly invoice not generated yet  waits; the week's generation takes it
+//   Draft / Submitted / Rejected                  attached now, the PDF redrawn
+//   Approved / Processing / Paid                  the week's correction invoice (a
+//                                                 manual Draft holding only Personal
+//                                                 lines, total_earnings 0), created
+//                                                 or joined by the mark itself
+//   the week touches a finalized month, or the    flagged (needs_correction_since)
+//   line would take the weekly total below $0     for the week's correction, which a
+//                                                 Super Admin creates
+// Once the week is over (Saturday 06:00 Eastern, after the Friday batch's last
+// retry) runPersonalSweep() attaches any line still waiting to the week's open
+// invoice, or flags it, so no line is ever left off every invoice.
+//
+// UNDO before approval voids the line (the row stays, as history); after
+// approval, or once its cost month is finalized, a REVERSE row credits it back
+// on the week the reversal is made in, by the same rules.
+const PERSONAL_EXPENSE_DEDUCTIONS_ENABLED = process.env.PERSONAL_EXPENSE_DEDUCTIONS_ENABLED === "true";
+// An invoice whose Personal lines may still change.
+const PERSONAL_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
+// Each ledger row with the type and driver of its receipt.
+const PERSONAL_ROW_SELECT = "SELECT ep.*, e.type AS receipt_type, e.driver AS receipt_driver FROM expense_personal ep LEFT JOIN expenses e ON e.id = ep.expense_id";
+// The actor a job's audit rows name.
+const PERSONAL_SYSTEM_ACTOR = { session: { user: { id: 0, username: "personal-sweep", role: "system" } } };
+// The id a line being written stands under while its invoice is rendered.
+const PERSONAL_PROVISIONAL_ID = Number.MAX_SAFE_INTEGER;
+const PERSONAL_REASON_MAX = 300;
+
+// A refusal the routes answer as `status` { error, code }; nothing was written.
+function personalRefusal(status, code, error) {
+	const err = new Error(error);
+	err.personalRefusal = true;
+	err.status = status;
+	err.code = code;
+	return err;
+}
+
+function personalReason(body) {
+	const raw = body && typeof body.reason === "string" ? body.reason : "";
+	return scrubPurgeMarker(raw).replace(/[\r\n\t]+/g, " ").trim().slice(0, PERSONAL_REASON_MAX);
+}
+
+// The live deduction on a receipt (not voided, not reversed), or null.
+function livePersonalDeduct(expenseId) {
+	if (!personalLedgerPresent()) return null;
+	return db.prepare("SELECT * FROM expense_personal WHERE expense_id = ? AND kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NULL").get(expenseId) || null;
+}
+
+// The lines an invoice carries now.
+function personalRowsOnInvoice(invoiceId) {
+	if (!personalLedgerPresent()) return [];
+	return db.prepare(`${PERSONAL_ROW_SELECT} WHERE ep.invoice_id = ? AND ep.voided_at = '' ORDER BY ep.id`).all(invoiceId);
+}
+
+// One driver's lines for a week that no live invoice carries: never attached,
+// or left on an invoice that was soft-deleted. Matched on the receipt's driver
+// in any spelling (normalizeDriverName()), never on another driver's.
+function personalWaitingRows(driverName, weekStart) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key || !personalLedgerPresent()) return [];
+	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+		WHERE ep.voided_at = '' AND ep.week_start = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
+		.all(weekStart).filter((r) => normalizeDriverName(r.receipt_driver || "") === key);
+}
+
+// An invoice's stored render data, or null when it predates render snapshots.
+function personalSnapshotOf(invoiceRow) {
+	let s = null;
+	try { s = JSON.parse((invoiceRow && invoiceRow.render_data) || "{}"); } catch { s = null; }
+	return s && s.__templateName ? s : null;
+}
+
+// The data an invoice renders with: its frozen snapshot, the row's adjustment,
+// and the Personal lines it carries (`rows`). A weekly invoice prints them as
+// their own rows above the adjustment (personalLines); a correction invoice's
+// line items and deductions ARE its lines. Returns the template, the data and
+// the invoice's two Personal columns.
+function personalRenderData(snapshot, invoiceRow, rows) {
+	const data = { ...snapshot };
+	const templateName = data.__templateName;
+	delete data.__templateName;
+	data.adjustment = invoiceRow.adjustment || 0;
+	data.adjustmentNote = invoiceRow.adjustment_note || "";
+	if (!rows || !rows.length) {
+		// No line: exactly the data an invoice had before Personal lines existed (a
+		// weekly snapshot that carried lines drops them).
+		if (data.personalCorrection) {
+			data.lineItems = [];
+			data.deductions = [];
+			Object.assign(data, manualInvoiceTotals([], []));
+		} else {
+			delete data.personalLines;
+			delete data.personalTotal;
+			delete data.personalShareTotal;
+		}
+		return { templateName, data, personalTotal: 0, personalShareTotal: 0 };
+	}
+	const { lines, personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
+	if (data.personalCorrection) {
+		const dayOf = new Map((rows || []).map((r) => [r.id, r.receipt_date || ""]));
+		data.lineItems = lines.filter((l) => l.cents > 0).map((l) => ({ date: dayOf.get(l.rowId) || "", description: l.label, amount: l.cents / 100 }));
+		data.deductions = lines.filter((l) => l.cents < 0).map((l) => ({ date: dayOf.get(l.rowId) || "", description: l.label, amount: -l.cents / 100 }));
+		Object.assign(data, manualInvoiceTotals(data.lineItems, data.deductions));
+	} else {
+		data.personalLines = lines;
+		data.personalTotal = personalTotalCents / 100;
+		data.personalShareTotal = shareTotalCents / 100;
+	}
+	return { templateName, data, personalTotal: personalTotalCents / 100, personalShareTotal: shareTotalCents / 100 };
+}
+
+// RECEIPTS ON THE INVOICE. Each Personal line says where its receipt is, and
+// each image receipt prints on its own page after the invoice
+// (lib/invoice-receipts.js receiptLayout()). The images are re-encoded off the
+// event loop (lib/receipt-images.js) and cached under DATA_DIR/storage, outside
+// uploads/. None of it is stored in render_data: it joins the data for the
+// render only, so a snapshot never holds an image or a note that went stale.
+const PERSONAL_RECEIPT_WAIT_MS = 15_000;
+function receiptImageService() {
+	if (!receiptImageService.instance) {
+		receiptImageService.instance = receiptImagesLib.createReceiptImageService({
+			receiptsDir: RECEIPTS_DIR,
+			cacheDir: path.join(DATA_DIR, "storage", "receipt-images"),
+			log: (m) => console.warn(`[receipt-images] ${m}`),
+		});
+	}
+	return receiptImageService.instance;
+}
+
+// Start (or join) one receipt's re-encode; never waits, never throws.
+function warmReceiptImage(expense) {
+	if (!expense || !expense.photo_data) return;
+	receiptImageService().prepare({ expenseId: expense.id, photoData: expense.photo_data }).catch(() => {});
+}
+
+// The render data with its receipts: `data` from personalRenderData() (or the
+// generation's), `rows` the lines it prints (a provisional line carries its
+// expense_id). Only the image receipts that can have a page (the first
+// RECEIPT_PAGES_MAX in print order) are prepared, waiting at most
+// PERSONAL_RECEIPT_WAIT_MS; one not ready by then prints "Receipt image not
+// available". A new object.
+async function personalReceiptRenderData(data, rows) {
+	if (!rows || !rows.length) return data;
+	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
+	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
+	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
+		.map((l) => expenseOfRow.get(l.rowId)).filter((n) => Number.isInteger(n) && n > 0))];
+	const photoOf = new Map(order.length
+		? db.prepare(`SELECT id, photo_data FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e.photo_data])
+		: []);
+	const service = receiptImageService();
+	let images = 0;
+	const prepared = new Map(await Promise.all(order.map(async (id) => {
+		const kind = receiptImagesLib.receiptImageKind(photoOf.get(id), RECEIPTS_DIR);
+		if (kind === "pdf") return [id, { status: "pdf" }];
+		if (kind !== "image") return [id, { status: "unavailable", reason: "missing" }];
+		images += 1;
+		if (images > invoiceReceipts.RECEIPT_PAGES_MAX) return [id, { status: "over_cap" }];
+		return [id, await service.prepare({ expenseId: id, photoData: photoOf.get(id) }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
+	})));
+	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
+	const out = { ...data, receiptPages: layout.pages };
+	if (data.personalCorrection) {
+		// A correction's line items and deductions are its lines, in the same order.
+		const credits = layout.entries.filter((l) => l.cents > 0);
+		const debits = layout.entries.filter((l) => l.cents < 0);
+		out.lineItems = (data.lineItems || []).map((item, i) => ({ ...item, receiptNote: (credits[i] && credits[i].receiptNote) || "" }));
+		out.deductions = (data.deductions || []).map((item, i) => ({ ...item, receiptNote: (debits[i] && debits[i].receiptNote) || "" }));
+	} else {
+		out.personalLines = layout.entries;
+	}
+	return out;
+}
+
+// Before the Friday batch renders: every image receipt behind a Personal line of
+// that week (waiting, or on one of its invoices) is re-encoded and cached first,
+// one at a time, so the batch's renders read the cache instead of racing the
+// re-encode; an image not ready within a render's wait would print "Receipt image
+// not available" on an invoice nothing redraws. Bounded by
+// PERSONAL_RECEIPT_WARM_MS overall (each re-encode by its own deadline); never
+// throws. { receipts, prepared }.
+const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
+async function warmPersonalReceiptsForWeek(weekStart) {
+	const out = { receipts: 0, prepared: 0 };
+	try {
+		if (!personalLedgerPresent()) return out;
+		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
+			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
+			.filter((e) => receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) === "image");
+		out.receipts = list.length;
+		const service = receiptImageService();
+		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
+		for (const e of list) {
+			if (Date.now() > deadline) break;
+			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
+			if (res.status === "image") out.prepared += 1;
+		}
+	} catch (err) {
+		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
+	}
+	return out;
+}
+
+// The Personal lines of each invoice, for the screens: { invoiceId: [{ line_id,
+// kind, label, amount, receipt }] } as a Map, in print order. receipt is null on
+// a share line, else { kind: image | pdf | none, url, expense_id }; url is the
+// receipt route for an image. Every figure is the server's text.
+function personalLinesForInvoices(invoiceIds) {
+	const out = new Map();
+	const ids = [...new Set((invoiceIds || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+	if (!ids.length || !personalLedgerPresent()) return out;
+	for (let i = 0; i < ids.length; i += 500) {
+		const chunk = ids.slice(i, i + 500);
+		const rows = db.prepare(`SELECT ep.*, e.type AS receipt_type, e.photo_data AS receipt_photo FROM expense_personal ep LEFT JOIN expenses e ON e.id = ep.expense_id
+			WHERE ep.invoice_id IN (${chunk.map(() => "?").join(",")}) AND ep.voided_at = '' ORDER BY ep.id`).all(...chunk);
+		const byInvoice = new Map();
+		for (const r of rows) {
+			if (!byInvoice.has(r.invoice_id)) byInvoice.set(r.invoice_id, []);
+			byInvoice.get(r.invoice_id).push(r);
+		}
+		for (const [invoiceId, list] of byInvoice) {
+			const byId = new Map(list.map((r) => [r.id, r]));
+			const { lines } = personalExpense.invoiceLines(list, (r) => r.receipt_type);
+			out.set(invoiceId, lines.map((l) => {
+				const r = byId.get(l.rowId);
+				const receiptLine = l.kind === "personal" || l.kind === "personal_reversed";
+				const kind = receiptLine ? receiptImagesLib.receiptImageKind(r && r.receipt_photo, RECEIPTS_DIR) : "";
+				return {
+					line_id: l.rowId, kind: l.kind, label: l.label, amount: l.amount,
+					receipt: receiptLine
+						? { kind, url: kind === "image" ? `/api/invoices/${invoiceId}/personal-receipts/${l.rowId}` : "", expense_id: r ? r.expense_id : null }
+						: null,
+				};
+			}));
+		}
+	}
+	return out;
+}
+
+// "Oct 10-16, 2026", "Sep 26 - Oct 2, 2026", "Dec 26, 2026 - Jan 1, 2027".
+function personalWeekLabel(weekStart, weekEnd) {
+	const a = personalExpense.formatDay(weekStart);
+	const b = personalExpense.formatDay(weekEnd);
+	if (!a || !b) return `${weekStart} to ${weekEnd}`;
+	const [am, ad, ay] = a.replace(",", "").split(" ");
+	const [bm, bd, by] = b.replace(",", "").split(" ");
+	if (ay !== by) return `${a} - ${b}`;
+	if (am !== bm) return `${am} ${ad} - ${bm} ${bd}, ${by}`;
+	return `${am} ${ad}-${bd}, ${by}`;
+}
+
+// The owner-operator share a Personal amount carries: p x the part of it the
+// percentage base of the receipt's own weekly invoice still counts. p is THAT
+// invoice's percentage (rate_per_load), never the current week's. 0 for a
+// company driver, a receipt type outside the base, or a base that already left
+// the amount out (personalBase; a reversed line's exclusion no longer counts).
+function personalShareForReceipt(expense, cents) {
+	if (!expense || (expense.type !== "Fuel" && expense.type !== "Maintenance")) return 0;
+	const day = String(expense.date || "").slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return 0;
+	const week = getWeekRange(day).weekStart;
+	const inv = liveWeeklyInvoicesForDriverWeek(String(expense.driver || ""), week).find((r) => {
+		let ids = [];
+		try { ids = JSON.parse(r.expense_ids || "[]"); } catch { ids = []; }
+		return Array.isArray(ids) && ids.map(Number).includes(Number(expense.id));
+	});
+	const snap = inv ? personalSnapshotOf(inv) : null;
+	if (!snap || snap.__templateName !== "service_invoice_owner_op") return 0;
+	const leftOut = Number((snap.personalBase || {})[expense.id]) || 0;
+	const reversedOut = db.prepare("SELECT COALESCE(SUM(cents), 0) AS c FROM expense_personal WHERE expense_id = ? AND kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NOT NULL AND base_invoice_id = ?")
+		.get(expense.id, inv.id).c;
+	const liveOut = Math.max(0, leftOut - reversedOut);
+	return personalExpense.shareCents(inv.rate_per_load, Math.max(0, Math.min(cents, cents - liveOut)));
+}
+function personalShareForRow(row) {
+	const expense = db.prepare("SELECT id, driver, type, date, amount FROM expenses WHERE id = ?").get(row.expense_id);
+	return personalShareForReceipt(expense, Number(row.cents) || 0);
+}
+// Lines about to be linked to an invoice: a deduction's share follows the
+// invoice that counted its receipt, which may have been generated (or approved)
+// after the mark. { lineId: fresh share } for each line whose share changes.
+function personalRefreshedShares(rows) {
+	const shares = new Map();
+	for (const r of rows || []) {
+		if (r.kind !== "deduct" || r.base_invoice_id != null) continue;
+		const fresh = personalShareForRow(r);
+		if (fresh !== (Number(r.share_cents) || 0)) shares.set(r.id, fresh);
+	}
+	return shares;
+}
+
+const PERSONAL_INSERT_COLS = ["expense_id", "kind", "reverses_id", "cents", "receipt_cents", "merchant", "receipt_date", "cost_period",
+	"in_place", "book_date", "week_start", "invoice_id", "share_cents", "base_invoice_id", "needs_correction_since", "reason",
+	"created_at", "created_by", "created_by_id", "created_role"];
+// Inside a write's transaction, after any render: a line booked in place is only
+// written or voided while its cost month is open — the month may have closed
+// while the PDF was being drawn, and a finalized month takes no write.
+function assertPersonalCostMonthOpen(row) {
+	if (Number(row.in_place) === 1 && periodWriteLocked(row.cost_period)) {
+		throw personalRefusal(409, periodLocksReadable() ? "PERIOD_FINALIZED" : "PERIOD_LOCK_UNREADABLE",
+			`${periodLabel(row.cost_period)} was finalized while this Personal line was being written, so nothing was saved. Try again.`);
+	}
+}
+
+function insertPersonalRow(row) {
+	assertPersonalCostMonthOpen(row);
+	const defaults = { reverses_id: null, merchant: "", receipt_date: "", invoice_id: null, share_cents: 0, base_invoice_id: null, needs_correction_since: "", reason: "" };
+	const full = { ...defaults, ...row };
+	return Number(db.prepare(`INSERT INTO expense_personal (${PERSONAL_INSERT_COLS.join(", ")}) VALUES (${PERSONAL_INSERT_COLS.map(() => "?").join(", ")})`)
+		.run(...PERSONAL_INSERT_COLS.map((c) => (full[c] === undefined ? null : full[c]))).lastInsertRowid);
+}
+
+// The live, still-open correction invoice of one driver-week, or null.
+function openPersonalCorrection(driverName, weekStart) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key) return null;
+	return db.prepare("SELECT * FROM invoices WHERE is_correction = 1 AND deleted_at = '' AND week_start = ? ORDER BY id DESC").all(weekStart)
+		.find((r) => PERSONAL_OPEN_STATUSES.has(r.status) && normalizeDriverName(r.driver) === key) || null;
+}
+
+// Where a new line for this driver-week goes (the table at the top of the section).
+function personalPlacement(driverName, weekStart) {
+	const weekEnd = getWeekRange(weekStart).weekEnd;
+	const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: weekEnd });
+	if (lock.unreadable) return { kind: "unreadable" };
+	if (lock.blockers.length) return { kind: "flag", why: "the week touches a finalized month" };
+	const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
+	if (weekly.length > 1) return { kind: "flag", why: "the week has two weekly invoices" };
+	const inv = weekly[0] || null;
+	if (!inv) return { kind: "pending" };
+	if (PERSONAL_OPEN_STATUSES.has(inv.status)) {
+		return personalSnapshotOf(inv) ? { kind: "attach", invoice: inv } : { kind: "flag", why: `${inv.invoice_number} predates stored render data` };
+	}
+	return { kind: "correction", weekly: inv, correction: openPersonalCorrection(driverName, weekStart) };
+}
+
+// Change the Personal lines a live, open invoice carries and redraw its PDF:
+// render first (its receipts, then the PDF: the only awaits), then ONE immediate transaction re-checks that
+// neither the invoice nor its lines moved and writes the rows, the invoice's
+// columns and the file (renamed into place last) together. plan:
+//   attach  ids of this driver-week's waiting lines to link
+//   insert  a new line to write (the column object) and insertType, its receipt type
+//   fit     weekly invoice: a NEW line that would take the total below $0 is
+//           flagged for the week's correction instead (no line is ever split)
+//   detach  ids of lines on this invoice to unlink and flag
+//   void    { id, by, reason } a line on this invoice to void (an undo)
+//   rebase  { expenseId, cents, receipt } give a percentage base back the cents
+//           the voided line had left out of it (restoreOwnerOpBase())
+//   onCommit(insertedId) more writes inside the same transaction
+// A correction left with no line is soft-deleted ("no Personal lines left").
+// Throws personalRefusal(409, "PERSONAL_CHANGED") when anything moved: an
+// approval during the render refuses; Draft -> Submitted (the Friday batch) does not.
+async function rewriteInvoicePersonalLines(invoiceRow, plan) {
+	const inv = invoiceRow;
+	const label = inv.invoice_number || `Invoice #${inv.id}`;
+	const snapshot = personalSnapshotOf(inv);
+	if (!snapshot || !inv.pdf_file_name) {
+		throw personalRefusal(409, "PERSONAL_NO_SNAPSHOT", `${label} was generated before invoices kept their render data, so its PDF cannot be redrawn with a Personal line. Regenerate it, then try again.`);
+	}
+	const changed = () => personalRefusal(409, "PERSONAL_CHANGED", `${label} changed while its PDF was being redrawn. Nothing was saved; try again.`);
+	const current = personalRowsOnInvoice(inv.id);
+	const currentIds = current.map((r) => r.id);
+	const voidId = plan.void ? plan.void.id : null;
+	if (voidId != null && !currentIds.includes(voidId)) throw changed();
+	const detachIds = new Set((plan.detach || []).filter((id) => currentIds.includes(id)));
+	const attachIds = [...new Set(plan.attach || [])].filter((id) => !currentIds.includes(id));
+	const attachRows = attachIds.length
+		? db.prepare(`${PERSONAL_ROW_SELECT} WHERE ep.id IN (${attachIds.map(() => "?").join(",")}) ORDER BY ep.id`).all(...attachIds)
+		: [];
+	const invKey = normalizeDriverName(inv.driver);
+	for (const r of attachRows) {
+		if (r.voided_at || r.week_start !== inv.week_start || normalizeDriverName(r.receipt_driver || "") !== invKey) {
+			throw personalRefusal(409, "PERSONAL_DRIVER_MISMATCH", `A Personal line of another driver or week cannot go on ${label}.`);
+		}
+	}
+	const shares = personalRefreshedShares(attachRows);
+	const provisional = plan.insert ? { ...plan.insert, id: PERSONAL_PROVISIONAL_ID, receipt_type: plan.insertType || "" } : null;
+	const kept = current.filter((r) => r.id !== voidId && !detachIds.has(r.id));
+	let incoming = [...attachRows.map((r) => (shares.has(r.id) ? { ...r, share_cents: shares.get(r.id) } : r)), ...(provisional ? [provisional] : [])];
+	let flagged = [];
+	if (plan.fit && !inv.is_correction) {
+		const base = Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100) + kept.reduce((s, r) => s + personalExpense.netCents(r), 0);
+		const f = personalExpense.fitLines(base, incoming);
+		incoming = f.fit;
+		flagged = f.flagged;
+	}
+	const next = [...kept, ...incoming].sort((a, b) => a.id - b.id);
+	const insertOnInvoice = !!provisional && incoming.some((r) => r.id === PERSONAL_PROVISIONAL_ID);
+	const touchesInvoice = incoming.length > 0 || voidId != null || detachIds.size > 0;
+	const softDelete = !!inv.is_correction && touchesInvoice && next.length === 0;
+	const rebase = plan.rebase && snapshot.__templateName === "service_invoice_owner_op" ? personalExpense.restoreOwnerOpBase(snapshot, plan.rebase) : null;
+	const snap = rebase ? { ...rebase.snapshot, __templateName: snapshot.__templateName } : snapshot;
+	const earnings = rebase ? rebase.totalEarnings : inv.total_earnings;
+	let rendered = null;
+	let tmpPath = null;
+	const dir = path.join(DATA_DIR, "uploads", "invoices");
+	const finalPath = path.join(dir, inv.pdf_file_name);
+	if (touchesInvoice && !softDelete) {
+		rendered = personalRenderData(snap, inv, next);
+		const withReceipts = await personalReceiptRenderData(rendered.data, next);
+		const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
+		fs.writeFileSync(tmpPath, pdfBuffer);
+	}
+	try {
+		return db.transaction(() => {
+			const now = db.prepare("SELECT * FROM invoices WHERE id = ?").get(inv.id);
+			const moved = !now || !!now.deleted_at || !PERSONAL_OPEN_STATUSES.has(now.status) || now.pdf_file_name !== inv.pdf_file_name
+				|| ["render_data", "adjustment", "adjustment_note", "adjusted_at", "total_earnings"].some((k) => String(now[k] ?? "") !== String(inv[k] ?? ""));
+			const nowIds = personalRowsOnInvoice(inv.id).map((r) => r.id);
+			const sameLines = nowIds.length === currentIds.length && nowIds.every((id, i) => id === currentIds[i]);
+			const shared = db.prepare("SELECT 1 FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?").get(inv.pdf_file_name, inv.id);
+			// The invoice's week may have come to touch a finalized month meanwhile.
+			const weekLock = invoiceMonthLockBlockers(now || inv);
+			if (moved || !sameLines || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
+			if (voidId != null) assertPersonalCostMonthOpen(current.find((r) => r.id === voidId));
+			const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
+			for (const r of attachRows) {
+				const cur = readRow.get(r.id);
+				if (!cur || cur.voided_at || cur.invoice_id !== r.invoice_id) throw changed();
+			}
+			const stamp = new Date().toISOString();
+			const insertedId = provisional
+				? insertPersonalRow({ ...plan.insert, invoice_id: insertOnInvoice ? inv.id : null, needs_correction_since: insertOnInvoice ? "" : stamp })
+				: null;
+			const link = db.prepare("UPDATE expense_personal SET invoice_id = ?, needs_correction_since = '', share_cents = ? WHERE id = ?");
+			for (const r of incoming) if (r.id !== PERSONAL_PROVISIONAL_ID) link.run(inv.id, Number(r.share_cents) || 0, r.id);
+			const flag = db.prepare("UPDATE expense_personal SET invoice_id = NULL, needs_correction_since = CASE WHEN needs_correction_since = '' THEN ? ELSE needs_correction_since END WHERE id = ?");
+			for (const r of flagged) if (r.id !== PERSONAL_PROVISIONAL_ID) flag.run(stamp, r.id);
+			for (const id of detachIds) flag.run(stamp, id);
+			if (voidId != null) {
+				const v = db.prepare("UPDATE expense_personal SET voided_at = ?, voided_by = ?, void_reason = ?, invoice_id = NULL WHERE id = ? AND voided_at = ''")
+					.run(stamp, plan.void.by || "", plan.void.reason || "", voidId);
+				if (v.changes !== 1) throw changed();
+			}
+			if (plan.onCommit) plan.onCommit(insertedId);
+			if (softDelete) {
+				db.prepare("UPDATE invoices SET personal_total = 0, personal_share_total = 0, loads_count = 0, deleted_at = ?, deleted_by = ?, delete_reason = 'no Personal lines left' WHERE id = ?")
+					.run(stamp, plan.actorName || "", inv.id);
+			} else if (rendered) {
+				const stored = { ...rendered.data, __templateName: rendered.templateName };
+				if (Array.isArray(stored.personalLines)) stored.personalLines = stored.personalLines.map((l) => ({ ...l, rowId: l.rowId === PERSONAL_PROVISIONAL_ID ? insertedId : l.rowId }));
+				db.prepare("UPDATE invoices SET personal_total = ?, personal_share_total = ?, total_earnings = ?, render_data = ?, loads_count = CASE WHEN is_correction = 1 THEN ? ELSE loads_count END WHERE id = ?")
+					.run(rendered.personalTotal, rendered.personalShareTotal, earnings, JSON.stringify(stored), next.length, inv.id);
+				fs.renameSync(tmpPath, finalPath);
+			}
+			return {
+				insertedId,
+				insertFlagged: !!provisional && !insertOnInvoice,
+				attached: incoming.filter((r) => r.id !== PERSONAL_PROVISIONAL_ID).map((r) => r.id),
+				flagged: flagged.filter((r) => r.id !== PERSONAL_PROVISIONAL_ID).map((r) => r.id),
+				softDeleted: softDelete,
+				invoice: db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(inv.id),
+			};
+		}).immediate();
+	} catch (err) {
+		if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch { /* renamed into place, or never written */ } }
+		throw err;
+	}
+}
+
+// Create the correction invoice of one driver-week: a manual Draft (is_manual,
+// is_correction) holding only that week's Personal lines, total_earnings 0,
+// numbered in the manual scheme (INV-M-…), titled "Correction to INV-…, week of
+// …". Written through commitInvoiceWithPdf(); the lines are linked in its
+// transaction, after a re-check that they still wait.
+async function createPersonalCorrection({ driverName, weekStart, weekly, insert, insertType, attach, onCommit, actor }) {
+	const weekEnd = getWeekRange(weekStart).weekEnd;
+	const attachIds = [...new Set(attach || [])];
+	const readRows = attachIds.length
+		? db.prepare(`${PERSONAL_ROW_SELECT} WHERE ep.id IN (${attachIds.map(() => "?").join(",")}) ORDER BY ep.id`).all(...attachIds)
+		: [];
+	// Each line's share as the invoice that counted its receipt now gives it.
+	const shares = personalRefreshedShares(readRows);
+	const attachRows = readRows.map((r) => (shares.has(r.id) ? { ...r, share_cents: shares.get(r.id) } : r));
+	const provisional = insert ? { ...insert, id: PERSONAL_PROVISIONAL_ID, receipt_type: insertType || "" } : null;
+	const rows = [...attachRows, ...(provisional ? [provisional] : [])];
+	if (!rows.length) throw personalRefusal(409, "PERSONAL_NOTHING_TO_CORRECT", "No Personal line is waiting for a correction invoice for that week.");
+	const display = canonicalDriverName(driverName) || String(driverName || "").trim();
+	const key = normalizeDriverName(display);
+	const dirRow = db.prepare("SELECT driver_name, address, city, state, zip, phone, cell FROM drivers_directory ORDER BY id ASC").all()
+		.find((r) => normalizeDriverName(r.driver_name) === key);
+	const invoiceNumber = generateInvoiceNumber(display, weekStart, { prefix: "INV-M-" });
+	const pdfFileName = invoicePdfFileName(invoiceNumber);
+	const fmtDay = (s) => new Date(`${s}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+	const week = personalWeekLabel(weekStart, weekEnd);
+	const snapshot = {
+		__templateName: "service_invoice_manual",
+		personalCorrection: true,
+		correctionOf: weekly ? weekly.invoice_number : "",
+		payeeName: display,
+		payeeRole: "Driver",
+		payeeAddress: dirRow ? [dirRow.address, dirRow.city, dirRow.state, dirRow.zip].filter(Boolean).join(", ") : "",
+		payeePhone: dirRow ? (dirRow.phone || dirRow.cell || "") : "",
+		invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+		issueDate: appTime.dateTextInZone(new Date(), APP_TIMEZONE),
+		billingPeriodStart: fmtDay(weekStart),
+		billingPeriodEnd: fmtDay(weekEnd),
+		notes: weekly
+			? `Correction to ${weekly.invoice_number}, week of ${week}: Personal expense lines.`
+			: `Correction for the week of ${week} (no weekly invoice): Personal expense lines.`,
+		preparedBy: (actor && actor.session && actor.session.user && actor.session.user.username) || "",
+		adjustment: 0,
+		adjustmentNote: "",
+	};
+	const rendered = personalRenderData(snapshot, { adjustment: 0, adjustment_note: "" }, rows);
+	const withReceipts = await personalReceiptRenderData(rendered.data, rows);
+	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	let insertedId = null;
+	const result = commitInvoiceWithPdf({
+		invoiceNumber, pdfFileName, pdfBuffer,
+		insert: () => {
+			// The week may have come to touch a finalized month while the PDF was drawn.
+			const weekLock = invoiceMonthLockBlockers({ invoice_number: invoiceNumber, week_start: weekStart, week_end: weekEnd });
+			if (weekLock.unreadable) {
+				throw invoiceWriteRefusal("PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. Nothing was saved.");
+			}
+			if (weekLock.blockers.length) {
+				throw invoiceWriteRefusal("PERIOD_FINALIZED", `The week of ${weekStart} came to touch a finalized month while the correction was being drawn. Nothing was saved.`);
+			}
+			const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
+			for (const r of attachRows) {
+				const cur = readRow.get(r.id);
+				if (!cur || cur.voided_at || cur.invoice_id !== r.invoice_id) {
+					throw invoiceWriteRefusal("PERSONAL_CHANGED", "A Personal line of that week changed while the correction was being drawn. Nothing was saved; try again.");
+				}
+			}
+			const res = db.prepare(
+				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name,
+				 load_ids, expense_ids, render_data, is_manual, created_by, is_correction, correction_of, personal_total, personal_share_total)
+				 VALUES (?, ?, ?, ?, ?, 0, 0, 0, 'Draft', ?, '[]', '[]', ?, 1, ?, 1, ?, ?, ?)`
+			).run(invoiceNumber, display.toLowerCase(), weekStart, weekEnd, rows.length, pdfFileName,
+				JSON.stringify({ ...rendered.data, __templateName: rendered.templateName }), snapshot.preparedBy,
+				weekly ? weekly.id : null, rendered.personalTotal, rendered.personalShareTotal);
+			const invoiceId = Number(res.lastInsertRowid);
+			if (provisional) insertedId = insertPersonalRow({ ...insert, invoice_id: invoiceId, needs_correction_since: "" });
+			const link = db.prepare("UPDATE expense_personal SET invoice_id = ?, needs_correction_since = '', share_cents = ? WHERE id = ? AND voided_at = ''");
+			for (const r of attachRows) link.run(invoiceId, Number(r.share_cents) || 0, r.id);
+			if (onCommit) onCommit(insertedId);
+			return res;
+		},
+	});
+	const invoice = db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+	logAudit(actor || PERSONAL_SYSTEM_ACTOR, "create_personal_correction_invoice", "invoice", invoice.id,
+		`${invoice.invoice_number} for ${display}, week ${weekStart} – ${weekEnd}${weekly ? `, correcting ${weekly.invoice_number}` : ", no weekly invoice"}: ${rows.length} Personal line(s), total due ${personalExpense.signedMoney(personalExpense.totalDueCents(invoice))}`);
+	return { insertedId, invoice, created: true };
+}
+
+// Place a new line (a mark's deduction or a reversal) by the week rules and
+// write it. Returns { lineId, state, invoice, created }.
+async function placePersonalLine({ row, receiptType, driverName, actor, onCommit }) {
+	const place = personalPlacement(driverName, row.week_start);
+	if (place.kind === "unreadable") {
+		throw personalRefusal(409, "PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. The Personal line is held until that is fixed.");
+	}
+	const actorName = (actor && actor.session && actor.session.user && actor.session.user.username) || "";
+	if (place.kind === "attach") {
+		const out = await rewriteInvoicePersonalLines(place.invoice, { insert: row, insertType: receiptType, fit: true, onCommit, actorName });
+		return { lineId: out.insertedId, state: out.insertFlagged ? "needs_correction" : "invoiced", invoice: out.insertFlagged ? null : out.invoice };
+	}
+	if (place.kind === "correction") {
+		// Every line of the week still waiting goes with it: the approved weekly
+		// invoice can carry none of them.
+		const waiting = personalWaitingRows(driverName, row.week_start).map((r) => r.id);
+		if (place.correction) {
+			const out = await rewriteInvoicePersonalLines(place.correction, { insert: row, insertType: receiptType, attach: waiting, onCommit, actorName });
+			return { lineId: out.insertedId, state: "correction", invoice: out.invoice };
+		}
+		const out = await createPersonalCorrection({ driverName, weekStart: row.week_start, weekly: place.weekly, insert: row, insertType: receiptType, attach: waiting, onCommit, actor });
+		return { lineId: out.insertedId, state: "correction", invoice: out.invoice, created: true };
+	}
+	const stamp = place.kind === "flag" ? new Date().toISOString() : "";
+	const lineId = db.transaction(() => {
+		const id = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: stamp });
+		if (onCommit) onCommit(id);
+		return id;
+	}).immediate();
+	return { lineId, state: stamp ? "needs_correction" : "pending", invoice: null };
+}
+
+// Why a live deduction can no longer be undone (then it is reversed), or null.
+//   PERSONAL_INVOICE_APPROVED  its invoice is Approved, Processing or Paid
+//   PERIOD_FINALIZED           its invoice's week, or its in-place cost month, is
+//                              finalized (PERIOD_LOCK_UNREADABLE: cannot tell)
+//   PERSONAL_BASE_ELSEWHERE    another invoice's percentage base already left its
+//                              cents out (only that invoice's own undo restores it)
+function personalUndoBlocker(line) {
+	const inv = line.invoice_id ? db.prepare("SELECT * FROM invoices WHERE id = ?").get(line.invoice_id) : null;
+	const live = inv && !inv.deleted_at ? inv : null;
+	if (live) {
+		if (!PERSONAL_OPEN_STATUSES.has(live.status)) {
+			return { code: "PERSONAL_INVOICE_APPROVED", message: `${live.invoice_number} is ${live.status}, so this Personal line stays on it.` };
+		}
+		const lock = invoiceMonthLockBlockers(live);
+		if (lock.unreadable) return { code: "PERIOD_LOCK_UNREADABLE", message: "The period lock table could not be read, so no month can be confirmed open." };
+		if (lock.blockers.length) return { code: "PERIOD_FINALIZED", message: `${live.invoice_number} covers a week that touches a finalized month.` };
+	}
+	if (line.in_place && periodWriteLocked(line.cost_period)) {
+		return periodLocksReadable()
+			? { code: "PERIOD_FINALIZED", message: `The receipt's month (${periodLabel(line.cost_period)}) is finalized.` }
+			: { code: "PERIOD_LOCK_UNREADABLE", message: "The period lock table could not be read, so no month can be confirmed open." };
+	}
+	if (line.base_invoice_id != null) {
+		const base = db.prepare("SELECT id, invoice_number, deleted_at FROM invoices WHERE id = ?").get(line.base_invoice_id);
+		if (base && !base.deleted_at && (!live || base.id !== live.id)) {
+			return { code: "PERSONAL_BASE_ELSEWHERE", message: `${base.invoice_number} already left this receipt out of the percentage pay.` };
+		}
+	}
+	return null;
+}
+
+// The owner-operator share a reversal takes back: what the deduction gave the
+// driver beyond the deduction itself — its share returned, or the pay its base
+// gained when the base left the cents out.
+function personalReverseShare(line) {
+	if (Number(line.share_cents) > 0) return Number(line.share_cents);
+	if (line.base_invoice_id == null) return 0;
+	const base = db.prepare("SELECT rate_per_load, deleted_at, render_data FROM invoices WHERE id = ?").get(line.base_invoice_id);
+	const snap = base ? personalSnapshotOf(base) : null;
+	if (!base || base.deleted_at || !snap || snap.__templateName !== "service_invoice_owner_op") return 0;
+	return personalExpense.shareCents(base.rate_per_load, Number(line.cents) || 0);
+}
+
+// Each receipt's live Personal deduction, for the screens: { [expenseId]:
+// { line_id, cents, share_cents, week_start, state, invoice_id, invoice_number,
+// in_place, cost_period } }, state one of pending, invoiced, correction,
+// needs_correction, reversed. A null-prototype object.
+function personalSummaryByExpense(ids) {
+	const out = Object.create(null);
+	const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+	if (!list.length || !personalLedgerPresent()) return out;
+	for (let i = 0; i < list.length; i += 500) {
+		const chunk = list.slice(i, i + 500);
+		const rows = db.prepare(
+			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at
+			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id
+			 WHERE ep.expense_id IN (${chunk.map(() => "?").join(",")}) AND ep.kind = 'deduct' AND ep.voided_at = '' ORDER BY ep.id`
+		).all(...chunk);
+		for (const r of rows) {
+			const onInvoice = r.invoice_id != null && r.inv_number != null && !r.inv_deleted_at;
+			const state = r.reversed_by_id != null ? "reversed"
+				: onInvoice ? (r.inv_is_correction ? "correction" : "invoiced")
+					: r.needs_correction_since ? "needs_correction" : "pending";
+			out[r.expense_id] = {
+				line_id: r.id, cents: r.cents, share_cents: r.share_cents, week_start: r.week_start, state,
+				invoice_id: onInvoice ? r.invoice_id : null, invoice_number: onInvoice ? r.inv_number : "",
+				in_place: r.in_place, cost_period: r.cost_period,
+				amount_text: personalExpense.formatMoney(r.cents),
+				week_label: /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || "")) ? personalWeekLabel(r.week_start, getWeekRange(r.week_start).weekEnd) : "",
+			};
+			// The row itself, for personalSummaryForRole()'s Undo test; not enumerable,
+			// so it never reaches a response.
+			Object.defineProperty(out[r.expense_id], "row", { value: r, enumerable: false });
+		}
+	}
+	return out;
+}
+
+// One receipt's Personal summary as a role may see it. Super Admin: all of it,
+// plus can_undo (personalUndoBlocker(): Undo while it applies, Reverse after).
+// A Dispatcher: the state, the amount and the week — no share, invoice or books.
+// A Driver (his own receipts): the same, plus which of his invoices carries it.
+function personalSummaryForRole(summary, role) {
+	if (!summary) return null;
+	if (role === "Super Admin") {
+		const live = summary.state !== "reversed";
+		return { ...summary, can_undo: live && summary.row ? !personalUndoBlocker(summary.row) : false };
+	}
+	const { line_id, state, cents, amount_text, week_start, week_label } = summary;
+	const shown = { line_id, state, cents, amount_text, week_start, week_label };
+	return role === "Driver" ? { ...shown, invoice_number: summary.invoice_number || "" } : shown;
+}
+
+// The receipts among `ids` with a live (unreversed) Personal deduction.
+function personalLiveExpenseIds(ids) {
+	const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+	if (!list.length || !personalLedgerPresent()) return new Set();
+	return new Set(db.prepare(`SELECT expense_id FROM expense_personal WHERE expense_id IN (${list.map(() => "?").join(",")}) AND kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NULL`)
+		.all(...list).map((r) => r.expense_id));
+}
+
+// What one weekly generation does with Personal lines, read before its render:
+//   candidates   the lines it may carry: the week's waiting lines and those on the
+//                Draft it replaces
+//   leftOut      percentage driver: the cents each of the week's Fuel/Maintenance
+//                receipts leaves out of the base ({ expenseId: cents })
+//   shareResets  lines whose share goes back to 0 because this base now leaves
+//                their receipt out (a regenerate of the invoice that counted it)
+//   baseRows     lines whose cents this base leaves out (base_invoice_id)
+//   shareRefresh other weeks' receipts: the share the counting invoice now gives
+//   read         each line's invoice_id as read, for the write's re-check
+// A base leaves a live deduction's cents out unless its share is frozen on
+// another live invoice (a returned share there stands for the cents in this base).
+function personalGenerationPlan({ driverName, weekStart, existing, expenses, percentage }) {
+	const plan = { candidates: [], leftOut: {}, shareResets: [], baseRows: [], shareRefresh: new Map(), read: new Map() };
+	if (!personalLedgerPresent()) return plan;
+	const waiting = personalWaitingRows(driverName, weekStart);
+	const onDraft = existing ? personalRowsOnInvoice(existing.id) : [];
+	const seen = new Set(waiting.map((r) => r.id));
+	plan.candidates = [...waiting, ...onDraft.filter((r) => !seen.has(r.id))].sort((a, b) => a.id - b.id);
+	for (const r of plan.candidates) plan.read.set(r.id, r.invoice_id);
+	const weekReceipts = new Set(expenses.map((e) => e.id));
+	if (percentage) {
+		const gone = (invoiceId) => {
+			if (invoiceId == null) return true;
+			const i = db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(invoiceId);
+			return !i || !!i.deleted_at;
+		};
+		for (const e of expenses) {
+			if (e.type !== "Fuel" && e.type !== "Maintenance") continue;
+			const rows = db.prepare("SELECT * FROM expense_personal WHERE expense_id = ? AND voided_at = '' ORDER BY id").all(e.id);
+			let cents = 0;
+			for (const d of rows.filter((r) => r.kind === "deduct")) {
+				const share = Number(d.share_cents) || 0;
+				if (d.reversed_by_id == null) {
+					const resettable = gone(d.invoice_id) || (!!existing && d.invoice_id === existing.id);
+					if (share > 0 && !resettable) continue;
+					cents += d.cents;
+					plan.baseRows.push(d.id);
+					if (share > 0) plan.shareResets.push(d.id);
+					if (!plan.read.has(d.id)) plan.read.set(d.id, d.invoice_id);
+				} else {
+					// A reversal that took back the pay this base gave stays balanced only
+					// while the base keeps leaving the cents out; the line's base moves to
+					// this invoice with them, so a later mark of the receipt reads it here.
+					const rev = rows.find((x) => x.id === d.reversed_by_id);
+					if (share === 0 && rev && Number(rev.share_cents) > 0) {
+						cents += d.cents;
+						plan.baseRows.push(d.id);
+					}
+				}
+			}
+			if (cents > 0) plan.leftOut[e.id] = Math.min(cents, personalExpense.receiptCents(e.amount));
+		}
+	}
+	for (const r of plan.candidates) {
+		if (r.kind !== "deduct" || r.base_invoice_id != null || weekReceipts.has(r.expense_id)) continue;
+		const fresh = personalShareForRow(r);
+		if (fresh !== (Number(r.share_cents) || 0)) plan.shareRefresh.set(r.id, fresh);
+	}
+	return plan;
+}
+
+// Which candidates the invoice carries (never below $0, oldest first) and what
+// it prints. baseCents: its pay plus adjustment, in cents.
+function personalFitForGeneration(plan, baseCents) {
+	if (!plan.candidates.length) return { fit: [], flagged: [], personalTotal: 0, personalShareTotal: 0, renderFields: null };
+	const resets = new Set(plan.shareResets);
+	const effective = plan.candidates.map((r) => ({
+		...r,
+		share_cents: resets.has(r.id) ? 0 : plan.shareRefresh.has(r.id) ? plan.shareRefresh.get(r.id) : (Number(r.share_cents) || 0),
+	}));
+	const { fit, flagged } = personalExpense.fitLines(baseCents, effective);
+	const { lines, personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
+	return {
+		fit, flagged,
+		personalTotal: personalTotalCents / 100,
+		personalShareTotal: shareTotalCents / 100,
+		renderFields: { personalLines: lines, personalTotal: personalTotalCents / 100, personalShareTotal: shareTotalCents / 100 },
+	};
+}
+
+// The generation's Personal writes, inside commitInvoiceWithPdf()'s transaction,
+// after the INSERT: re-check that no line it read moved (a line marked during the
+// render is not one of them; it is attached right after the commit), link what
+// fits, flag what does not, reset and record the base, write the two columns.
+function personalCommitGeneration(invoiceId, plan, fitted) {
+	if (!plan.candidates.length && !plan.baseRows.length) return;
+	const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
+	for (const [id, invoiceIdRead] of plan.read) {
+		const cur = readRow.get(id);
+		if (!cur || cur.voided_at || cur.invoice_id !== invoiceIdRead) {
+			throw invoiceWriteRefusal("PERSONAL_CHANGED", "A Personal line of this week changed while the invoice was being generated. Nothing was saved; generate it again.");
+		}
+	}
+	const stamp = new Date().toISOString();
+	const link = db.prepare("UPDATE expense_personal SET invoice_id = ?, needs_correction_since = '', share_cents = ? WHERE id = ?");
+	for (const r of fitted.fit) link.run(invoiceId, r.share_cents, r.id);
+	const flag = db.prepare("UPDATE expense_personal SET invoice_id = NULL, share_cents = ?, needs_correction_since = CASE WHEN needs_correction_since = '' THEN ? ELSE needs_correction_since END WHERE id = ?");
+	for (const r of fitted.flagged) flag.run(r.share_cents, stamp, r.id);
+	const reset = db.prepare("UPDATE expense_personal SET share_cents = 0 WHERE id = ?");
+	for (const id of plan.shareResets) reset.run(id);
+	const base = db.prepare("UPDATE expense_personal SET base_invoice_id = ? WHERE id = ?");
+	for (const id of plan.baseRows) base.run(invoiceId, id);
+	db.prepare("UPDATE invoices SET personal_total = ?, personal_share_total = ? WHERE id = ?").run(fitted.personalTotal, fitted.personalShareTotal, invoiceId);
+}
+
+// After a generation commits: a line marked during its render goes on through
+// the attach path. A failure leaves it waiting for the weekly sweep.
+async function attachLatePersonalLines(invoice, actor) {
+	const waiting = personalWaitingRows(invoice.driver, invoice.week_start);
+	if (!waiting.length) return invoice;
+	try {
+		const out = await rewriteInvoicePersonalLines(invoice, { attach: waiting.map((r) => r.id), fit: true });
+		if (out.attached.length) {
+			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${out.attached.length} Personal line(s) marked during generation attached`);
+		}
+		for (const id of out.flagged) logAudit(actor, "flag_personal_expense", "expense", String(waiting.find((r) => r.id === id).expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+		return out.invoice;
+	} catch (err) {
+		console.error(`[personal] ${invoice.invoice_number}: a Personal line marked during generation was not attached (${err.message}); the weekly sweep will place it.`);
+		return db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(invoice.id) || invoice;
+	}
+}
+
+// Never negative after an adjustment (PUT /api/invoices/:id/adjust): on an open
+// weekly invoice, the newest lines the new total no longer covers are unlinked
+// and flagged for the week's correction, and the two columns rewritten. Returns
+// what it changed, for undoPersonalDetach() if the PDF then fails.
+function personalDetachUnfit(invoiceId) {
+	if (!personalLedgerPresent()) return [];
+	const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId);
+	if (!inv || inv.deleted_at || inv.is_correction || !PERSONAL_OPEN_STATUSES.has(inv.status)) return [];
+	const rows = personalRowsOnInvoice(invoiceId);
+	if (!rows.length) return [];
+	const { fit, flagged } = personalExpense.fitLines(Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100), rows);
+	if (!flagged.length) return [];
+	const stamp = new Date().toISOString();
+	const { personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
+	// The stored render data keeps the lines it still carries (personalRenderData()).
+	const snapshot = personalSnapshotOf(inv);
+	const renderData = snapshot
+		? JSON.stringify({ ...personalRenderData(snapshot, inv, fit).data, __templateName: snapshot.__templateName })
+		: inv.render_data;
+	db.transaction(() => {
+		const flag = db.prepare("UPDATE expense_personal SET invoice_id = NULL, needs_correction_since = ? WHERE id = ? AND invoice_id = ?");
+		for (const r of flagged) flag.run(stamp, r.id, invoiceId);
+		db.prepare("UPDATE invoices SET personal_total = ?, personal_share_total = ?, render_data = ? WHERE id = ?")
+			.run(personalTotalCents / 100, shareTotalCents / 100, renderData, invoiceId);
+	})();
+	return flagged.map((r) => ({ id: r.id, expenseId: r.expense_id, cents: r.cents, stamp, invoiceId, renderDataBefore: inv.render_data, renderDataAfter: renderData }));
+}
+function undoPersonalDetach(detached) {
+	if (!detached.length) return;
+	db.transaction(() => {
+		const back = db.prepare("UPDATE expense_personal SET invoice_id = ?, needs_correction_since = '' WHERE id = ? AND invoice_id IS NULL AND needs_correction_since = ? AND voided_at = ''");
+		for (const d of detached) back.run(d.invoiceId, d.id, d.stamp);
+		const { invoiceId, renderDataBefore, renderDataAfter } = detached[0];
+		const { personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(personalRowsOnInvoice(invoiceId), (r) => r.receipt_type);
+		db.prepare("UPDATE invoices SET personal_total = ?, personal_share_total = ? WHERE id = ?").run(personalTotalCents / 100, shareTotalCents / 100, invoiceId);
+		// Its stored render data too, unless something rewrote it since.
+		db.prepare("UPDATE invoices SET render_data = ? WHERE id = ? AND render_data = ?").run(renderDataBefore, invoiceId, renderDataAfter);
+	})();
+}
+
+// Why a soft-deleted invoice cannot be restored: its Personal lines moved on
+// (re-linked to another invoice, undone or flagged) since it was deleted, so its
+// stored columns no longer match the lines that still point at it.
+function personalRestoreBlocker(invoice) {
+	if (!personalLedgerPresent()) return null;
+	const rows = personalRowsOnInvoice(invoice.id);
+	const { personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
+	if (personalTotalCents === Math.round((Number(invoice.personal_total) || 0) * 100)
+		&& shareTotalCents === Math.round((Number(invoice.personal_share_total) || 0) * 100)) return null;
+	return `Cannot restore ${invoice.invoice_number}: its Personal lines have moved to another invoice or been undone since it was deleted, so its total would no longer be what it printed. Leave it deleted.`;
+}
+
+// When a week's sweep is due: the Saturday after it, 06:00 business time — after
+// the Friday 19:00 batch and its two retries 15 minutes apart.
+function personalSweepDueMs(weekStart) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(weekStart || ""));
+	if (!m) return Infinity;
+	const sat = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + 7));
+	return appTime.wallClockToMs(APP_TIMEZONE, sat.getUTCFullYear(), sat.getUTCMonth() + 1, sat.getUTCDate(), 6, 0, 0);
+}
+
+// THE WEEKLY SWEEP — its own job, independent of INVOICE_AUTOGEN_ENABLED and of
+// the flag. For every week whose sweep is due, every line still waiting (never
+// attached, or left on a soft-deleted invoice) and not yet flagged:
+//   the driver's weekly invoice for that week is live and open   attached, by the
+//                                                                attach path
+//   approved, missing, or the week touches a finalized month     flagged for the
+//                                                                week's correction;
+//                                                                Super Admins told
+//                                                                in the app
+// It creates no invoice. An attach that fails is left as it was and retried on
+// the next tick. Each swept week is recorded in personal_sweep_runs.
+async function runPersonalSweep() {
+	const out = { weeks: [] };
+	if (runPersonalSweep.running || !personalLedgerPresent()) return out;
+	runPersonalSweep.running = true;
+	try {
+		const nowMs = Date.now();
+		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+			WHERE ep.voided_at = '' AND ep.needs_correction_since = '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
+			ORDER BY ep.week_start, ep.id`).all();
+		const byWeek = new Map();
+		for (const r of rows) {
+			if (!byWeek.has(r.week_start)) byWeek.set(r.week_start, []);
+			byWeek.get(r.week_start).push(r);
+		}
+		const flaggedAll = [];
+		const flagRows = (list, why) => {
+			const stamp = new Date().toISOString();
+			// Still waiting as the write runs: a line a live invoice took meanwhile
+			// (a generation or an attach during an earlier await) is left alone.
+			const flag = db.prepare(`UPDATE expense_personal SET needs_correction_since = ? WHERE id = ? AND needs_correction_since = '' AND voided_at = ''
+				AND (invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = expense_personal.invoice_id AND COALESCE(i.deleted_at, '') = ''))`);
+			const done = db.transaction(() => list.filter((r) => flag.run(stamp, r.id).changes === 1))();
+			for (const r of done) {
+				logAudit(PERSONAL_SYSTEM_ACTOR, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} (${personalExpense.formatMoney(r.cents)}, week ${r.week_start}) waits for the week's correction invoice: ${why}`);
+			}
+			flaggedAll.push(...done);
+			return done.length;
+		};
+		for (const [weekStart, list] of byWeek) {
+			if (personalSweepDueMs(weekStart) > nowMs) continue;
+			const summary = { weekStart, attached: 0, flagged: 0, failed: 0 };
+			const byDriver = new Map();
+			for (const r of list) {
+				const k = normalizeDriverName(r.receipt_driver || "");
+				if (!byDriver.has(k)) byDriver.set(k, []);
+				byDriver.get(k).push(r);
+			}
+			for (const [key, lines] of byDriver) {
+				if (!key) { summary.flagged += flagRows(lines, "the receipt names no driver"); continue; }
+				const place = personalPlacement(lines[0].receipt_driver, weekStart);
+				if (place.kind === "unreadable") { summary.failed += lines.length; continue; }
+				if (place.kind !== "attach") {
+					const why = place.kind === "pending" ? "the week has no weekly invoice"
+						: place.kind === "correction" ? `${place.weekly.invoice_number} is ${place.weekly.status}` : place.why;
+					summary.flagged += flagRows(lines, why);
+					continue;
+				}
+				try {
+					const res = await rewriteInvoicePersonalLines(place.invoice, { attach: lines.map((l) => l.id), fit: true });
+					summary.attached += res.attached.length;
+					if (res.attached.length) {
+						logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", place.invoice.id, `${place.invoice.invoice_number}: ${res.attached.length} waiting Personal line(s) attached by the weekly sweep`);
+					}
+					const left = lines.filter((l) => res.flagged.includes(l.id));
+					for (const l of left) {
+						logAudit(PERSONAL_SYSTEM_ACTOR, "flag_personal_expense", "expense", l.expense_id, `line ${l.id} does not fit ${place.invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+					}
+					summary.flagged += left.length;
+					flaggedAll.push(...left);
+				} catch (err) {
+					summary.failed += lines.length;
+					console.error(`[personal-sweep] week ${weekStart}: ${lines.length} line(s) not attached to ${place.invoice.invoice_number} (${err.message}); retried next run`);
+				}
+			}
+			db.prepare("INSERT OR REPLACE INTO personal_sweep_runs (week_start, ran_at, attached, flagged, failed, summary) VALUES (?, ?, ?, ?, ?, ?)")
+				.run(weekStart, new Date().toISOString(), summary.attached, summary.flagged, summary.failed,
+					`${summary.attached} attached · ${summary.flagged} waiting for a correction invoice · ${summary.failed} failed`);
+			out.weeks.push(summary);
+		}
+		if (out.weeks.some((w) => w.attached > 0)) notifyChange("invoices");
+		if (flaggedAll.length) {
+			const title = `Personal expenses need a correction invoice (${flaggedAll.length})`;
+			const body = `${flaggedAll.length} Personal line(s) could not go on a weekly invoice. Open Expenses and create each week's correction invoice.`;
+			try {
+				insertDispatchNotification.run("personal-expenses", title, body, JSON.stringify({ lines: flaggedAll.map((r) => r.id) }));
+				if (io) io.to("dispatch").emit("dispatch-notification", { type: "personal-expenses", title, body });
+			} catch (err) { console.error("[personal-sweep] notification failed:", err.message); }
+			notifyChange("expenses");
+		}
+	} finally {
+		runPersonalSweep.running = false;
+	}
+	return out;
+}
+if (startsJob("Personal receipt sweep")) {
+	const personalSweepTick = () => { runPersonalSweep().catch((err) => console.error("[personal-sweep] failed:", err.message)); };
+	const first = setTimeout(personalSweepTick, 2 * 60 * 1000);
+	if (first && typeof first.unref === "function") first.unref();
+	const every = setInterval(personalSweepTick, 15 * 60 * 1000);
+	if (every && typeof every.unref === "function") every.unref();
+}
+
+function personalErrorResponse(res, err, what) {
+	if (err && err.personalRefusal) return res.status(err.status).json({ error: err.message, code: err.code });
+	if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
+	if (err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+		return res.status(409).json({ error: "Another change to this receipt's Personal line landed first. Reload and try again.", code: "PERSONAL_CHANGED" });
+	}
+	console.error(`${what} error:`, err && err.message);
+	return res.status(500).json({ error: (err && err.message) || "Server error" });
+}
+
+function personalAlreadyMarked(res, line, cents, user) {
+	const personal = personalSummaryForRole(personalSummaryByExpense([line.expense_id])[line.expense_id], "Super Admin");
+	if (line.cents === cents && Number(line.created_by_id) === Number(user.id)) {
+		return res.status(200).json({ success: true, alreadyMarked: true, personal });
+	}
+	return res.status(409).json({
+		error: `This receipt is already marked Personal for ${personalExpense.formatMoney(line.cents)} (by ${line.created_by}). Undo that line first to change it.`,
+		code: "EXPENSE_ALREADY_PERSONAL",
+		personal,
+	});
+}
+
+function personalExpenseById(req) {
+	const id = parseInt(req.params.id, 10);
+	return Number.isInteger(id) && id > 0 ? db.prepare("SELECT * FROM expenses WHERE id = ?").get(id) || null : null;
+}
+
+// The Personal writes below (mark, undo, reverse, the correction invoice), after
+// their gate: each redraws an invoice PDF, and a Super Admin makes a handful at a
+// time, never hundreds. The waiting list has its own read-sized count
+// (personalListLimiter): the Expenses screen re-reads it on every expenses or
+// invoices change, which must never use up the writes'.
+// ⚠️ PER-USER, NOT PER-IP (periodIssueLimiter's reasoning): the whole office
+// behind one NAT would otherwise share one count. Falls back to the IP for a
+// request with no session, which the gate has already refused by then.
+const personalRouteLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 120,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many Personal receipt changes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+const personalListLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests for the Personal lines waiting for a correction. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// POST /api/expenses/:id/personal { amount?, reason? } — mark all or part of a
+// receipt Personal. amount is dollars (absent = the whole receipt). A Pending
+// receipt in an open month is approved in the same write; a receipt in a
+// finalized month keeps its status and its month: its credit books to the open
+// month (in_place 0). 201 { personal }; the same mark again 200 alreadyMarked.
+app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
+	try {
+		if (!PERSONAL_EXPENSE_DEDUCTIONS_ENABLED) {
+			return res.status(403).json({ error: "Marking receipts Personal is switched off on this server.", code: "PERSONAL_DISABLED" });
+		}
+		const expense = personalExpenseById(req);
+		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
+		const id = expense.id;
+		if (String(expense.status || "") === "Rejected") {
+			return res.status(409).json({ error: "This receipt was rejected, so it is not a company cost and there is nothing to charge back. Approve it first if it should count.", code: "EXPENSE_REJECTED" });
+		}
+		const driverName = String(expense.driver || "");
+		if (!normalizeDriverName(driverName)) {
+			return res.status(409).json({ error: "This receipt names no driver, so no invoice can carry the deduction.", code: "PERSONAL_NO_DRIVER" });
+		}
+		const receiptCents = personalExpense.receiptCents(expense.amount);
+		const amount = personalExpense.parseAmountCents(req.body ? req.body.amount : undefined, receiptCents);
+		if (amount.code) return res.status(400).json({ error: amount.error, code: amount.code });
+		const user = req.session.user;
+		const existing = livePersonalDeduct(id);
+		if (existing) return personalAlreadyMarked(res, existing, amount.cents, user);
+		const reason = personalReason(req.body);
+		if (!periodLocksReadable()) {
+			return periodLockUnreadableResponse(req, res, "Marking a receipt Personal",
+				{ action: "mark_expense_personal_blocked", entity: "expense", entityId: String(id), subject: `mark receipt ${id} Personal`, note: reason });
+		}
+		const periodExpr = payoutRules().futureReceipts ? futureAwarePeriodExpr() : EXPENSE_PERIOD_EXPR;
+		const month = (db.prepare(`SELECT ${periodExpr} AS m FROM expenses WHERE id = ?`).get(id) || {}).m || "";
+		const inPlace = /^\d{4}-\d{2}$/.test(month) && !periodWriteLocked(month);
+		const receiptDay = String(expense.date || "").slice(0, 10);
+		const today = appTodayKey();
+		const row = {
+			expense_id: id, kind: "deduct", cents: amount.cents, receipt_cents: receiptCents,
+			merchant: personalExpense.merchantOf(expense), receipt_date: receiptDay,
+			cost_period: inPlace ? month : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? (receiptDay || today) : today,
+			week_start: getWeekRange().weekStart, share_cents: personalShareForReceipt(expense, amount.cents), reason,
+			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
+		};
+		const approve = inPlace && String(expense.status || "") === "Pending";
+		// The receipt's page image starts now, and the invoice render below joins it
+		warmReceiptImage(expense);
+		let placed;
+		try {
+			placed = await placePersonalLine({
+				row, receiptType: expense.type, driverName, actor: req,
+				onCommit: approve ? () => { db.prepare("UPDATE expenses SET status = 'Approved' WHERE id = ? AND status = 'Pending'").run(id); } : null,
+			});
+		} catch (err) {
+			const won = err && err.code === "SQLITE_CONSTRAINT_UNIQUE" ? livePersonalDeduct(id) : null;
+			if (won) return personalAlreadyMarked(res, won, amount.cents, user);
+			throw err;
+		}
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		const books = row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period} for finalized ${month || "unknown month"}`;
+		logAudit(req, "mark_expense_personal", "expense", id,
+			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}; ${where}; ${books}` +
+			(row.share_cents ? `; share returned ${personalExpense.formatMoney(row.share_cents)}` : "") + (reason ? `; reason: ${reason}` : ""));
+		if (approve) logAudit(req, "update_expense_status", "expense", id, `status Pending -> Approved (marked Personal; period ${row.cost_period})`);
+		if (placed.invoice && !placed.created) {
+			logAudit(req, "invoice_personal_lines", "invoice", placed.invoice.id, `${placed.invoice.invoice_number}: Personal line for receipt ${id} added (${personalExpense.formatMoney(row.cents)})`);
+		}
+		notifyChange("expenses");
+		if (placed.invoice) notifyChange("invoices");
+		res.status(201).json({ success: true, personal: personalSummaryForRole(personalSummaryByExpense([id])[id], "Super Admin") });
+	} catch (err) {
+		return personalErrorResponse(res, err, "Marking a receipt Personal");
+	}
+});
+
+// DELETE /api/expenses/:id/personal { reason } — undo the receipt's live
+// Personal line while it can still be undone (personalUndoBlocker()): it is
+// voided (the row stays), unlinked, and its invoice redrawn; a correction left
+// empty is soft-deleted. Otherwise 409, "use Reverse". The receipt keeps the
+// status the mark gave it.
+app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
+	try {
+		const expense = personalExpenseById(req);
+		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
+		const id = expense.id;
+		const line = livePersonalDeduct(id);
+		if (!line) return res.status(404).json({ error: "This receipt has no Personal line to undo.", code: "PERSONAL_NOT_FOUND" });
+		const reason = personalReason(req.body);
+		const block = personalUndoBlocker(line);
+		if (block) {
+			logAuditRefusal(req, "undo_expense_personal_blocked", "expense", id,
+				`undo Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [${block.code}] — nothing was written` + (reason ? ` — reason: ${reason}` : ""),
+				block.code);
+			return res.status(409).json({ error: `${block.message} Use Reverse instead.`, code: block.code });
+		}
+		const user = req.session.user;
+		const inv = line.invoice_id ? db.prepare("SELECT * FROM invoices WHERE id = ?").get(line.invoice_id) : null;
+		let invoice = null;
+		if (inv && !inv.deleted_at) {
+			const out = await rewriteInvoicePersonalLines(inv, {
+				void: { id: line.id, by: user.username || "", reason },
+				actorName: user.username || "",
+				rebase: line.base_invoice_id === inv.id ? { expenseId: id, cents: line.cents, receipt: { date: expense.date, type: expense.type, description: expense.description } } : null,
+			});
+			invoice = out.invoice;
+			if (out.softDeleted) logAudit(req, "delete_invoice", "invoice", inv.id, `${inv.invoice_number} soft-deleted: no Personal lines left`);
+			else logAudit(req, "invoice_personal_lines", "invoice", inv.id, `${inv.invoice_number}: Personal line for receipt ${id} undone (${personalExpense.formatMoney(line.cents)})`);
+		} else {
+			const v = db.prepare("UPDATE expense_personal SET voided_at = ?, voided_by = ?, void_reason = ?, invoice_id = NULL WHERE id = ? AND voided_at = '' AND reversed_by_id IS NULL")
+				.run(new Date().toISOString(), user.username || "", reason, line.id);
+			if (v.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
+		}
+		logAudit(req, "undo_expense_personal", "expense", id,
+			`Personal ${personalExpense.formatMoney(line.cents)} undone (line ${line.id}, week ${line.week_start}${invoice ? `, ${invoice.invoice_number}` : ""})` + (reason ? ` — reason: ${reason}` : ""));
+		notifyChange("expenses");
+		if (inv) notifyChange("invoices");
+		res.json({ success: true, personal: null });
+	} catch (err) {
+		return personalErrorResponse(res, err, "Undoing a Personal line");
+	}
+});
+
+// POST /api/expenses/:id/personal/reverse { reason } — a reversing line for a
+// Personal line that can no longer be undone: it credits the amount back (and
+// takes back an owner-operator's share) on the week the reversal is made in, by
+// the same placement rules; the original line stays on its invoice. Its cost
+// month is the line's own while that month is open, else the open month (a
+// credit row). After a reversal the receipt can be marked again.
+app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
+	try {
+		const expense = personalExpenseById(req);
+		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
+		const id = expense.id;
+		const line = livePersonalDeduct(id);
+		if (!line) {
+			const reversed = personalLedgerPresent() && db.prepare("SELECT 1 FROM expense_personal WHERE expense_id = ? AND kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NOT NULL").get(id);
+			return reversed
+				? res.status(409).json({ error: "This receipt's Personal line was already reversed.", code: "PERSONAL_ALREADY_REVERSED" })
+				: res.status(404).json({ error: "This receipt has no Personal line to reverse.", code: "PERSONAL_NOT_FOUND" });
+		}
+		const reason = personalReason(req.body);
+		const block = personalUndoBlocker(line);
+		if (!block) {
+			return res.status(409).json({ error: "This Personal line is not on an approved invoice yet, so Undo removes it. A reversing line is only for a line that can no longer be undone.", code: "PERSONAL_USE_UNDO" });
+		}
+		if (block.code === "PERIOD_LOCK_UNREADABLE") {
+			return periodLockUnreadableResponse(req, res, "Reversing a Personal line",
+				{ action: "reverse_expense_personal_blocked", entity: "expense", entityId: String(id), subject: `reverse Personal line ${line.id}`, note: reason });
+		}
+		const user = req.session.user;
+		const inPlace = Number(line.in_place) === 1 && !periodWriteLocked(line.cost_period);
+		const today = appTodayKey();
+		const row = {
+			expense_id: id, kind: "reverse", reverses_id: line.id, cents: line.cents, receipt_cents: line.receipt_cents,
+			merchant: line.merchant, receipt_date: line.receipt_date,
+			cost_period: inPlace ? line.cost_period : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? line.book_date : today,
+			week_start: getWeekRange().weekStart, share_cents: personalReverseShare(line), reason,
+			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
+		};
+		const placed = await placePersonalLine({
+			row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req,
+			onCommit: (newId) => {
+				const r = db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ? AND reversed_by_id IS NULL AND voided_at = ''").run(newId, line.id);
+				if (r.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
+			},
+		});
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		logAudit(req, "reverse_expense_personal", "expense", id,
+			`Personal ${personalExpense.formatMoney(line.cents)} reversed (line ${line.id} -> ${placed.lineId}); week ${row.week_start}; ${where}; ` +
+			(row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period}`) +
+			(row.share_cents ? `; share taken back ${personalExpense.formatMoney(row.share_cents)}` : "") + (reason ? `; reason: ${reason}` : ""));
+		if (placed.invoice && !placed.created) {
+			logAudit(req, "invoice_personal_lines", "invoice", placed.invoice.id, `${placed.invoice.invoice_number}: Personal reversal for receipt ${id} added (${personalExpense.formatMoney(line.cents)})`);
+		}
+		notifyChange("expenses");
+		if (placed.invoice) notifyChange("invoices");
+		res.status(201).json({ success: true, reverse: { line_id: placed.lineId, state: placed.state, invoice_number: placed.invoice ? placed.invoice.invoice_number : "" } });
+	} catch (err) {
+		return personalErrorResponse(res, err, "Reversing a Personal line");
+	}
+});
+
+// POST /api/invoices/personal-corrections { driver, weekStart } — a Super Admin
+// creates (or adds to) the week's correction invoice from the lines flagged for
+// it. weekStart is the Saturday that starts the week. A week touching a
+// finalized month is refused for now (409 PERIOD_FINALIZED).
+app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
+	try {
+		const body = req.body || {};
+		const driver = typeof body.driver === "string" ? body.driver.trim() : "";
+		const weekStart = typeof body.weekStart === "string" ? body.weekStart.trim() : "";
+		if (!normalizeDriverName(driver) || driver.length > 100) return res.status(400).json({ error: "driver is required (max 100 characters)" });
+		const reserved = reservedDriverNameRefusal(driver, "driver");
+		if (reserved) return res.status(400).json(reserved);
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart) || getWeekRange(weekStart).weekStart !== weekStart) {
+			return res.status(400).json({ error: "weekStart must be the Saturday that starts the week, as YYYY-MM-DD" });
+		}
+		const flagged = personalWaitingRows(driver, weekStart).filter((r) => r.needs_correction_since);
+		if (!flagged.length) {
+			return res.status(409).json({ error: "No Personal line of that driver and week is waiting for a correction invoice.", code: "PERSONAL_NOTHING_TO_CORRECT" });
+		}
+		const weekEnd = getWeekRange(weekStart).weekEnd;
+		const subject = `correction invoice for ${driver}, week ${weekStart} – ${weekEnd}`;
+		const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: weekEnd });
+		if (lock.unreadable) {
+			return periodLockUnreadableResponse(req, res, "Creating a correction invoice",
+				{ action: "create_personal_correction_invoice_blocked", entity: "invoice", entityId: "", subject });
+		}
+		if (lock.blockers.length) {
+			return periodBlockedResponse(req, res, `Cannot create a correction invoice for the week of ${weekStart}`, lock.blockers,
+				"A correction for a week that touches a finalized month is not available yet.",
+				{ action: "create_personal_correction_invoice_blocked", entity: "invoice", entityId: "", subject });
+		}
+		const weekly = liveWeeklyInvoicesForDriverWeek(driver, weekStart)[0] || null;
+		const open = openPersonalCorrection(driver, weekStart);
+		const ids = flagged.map((r) => r.id);
+		let invoice;
+		if (open) {
+			invoice = (await rewriteInvoicePersonalLines(open, { attach: ids, actorName: req.session.user.username || "" })).invoice;
+			logAudit(req, "invoice_personal_lines", "invoice", open.id, `${open.invoice_number}: ${ids.length} flagged Personal line(s) added`);
+		} else {
+			invoice = (await createPersonalCorrection({ driverName: driver, weekStart, weekly, attach: ids, actor: req })).invoice;
+		}
+		notifyChange("invoices");
+		notifyChange("expenses");
+		res.status(201).json({ success: true, invoice: { ...invoice, total_due: invoiceTotalDue(invoice) } });
+	} catch (err) {
+		return personalErrorResponse(res, err, "Creating a correction invoice");
+	}
+});
+
+// GET /api/expenses/personal/waiting-corrections — Super Admin: the driver-weeks
+// whose Personal lines wait for a correction invoice (flagged, on no live
+// invoice), oldest week first, each with what its correction would total
+// (netCents()): the Expenses screen's list beside its Create button
+// (POST /api/invoices/personal-corrections). A line whose receipt names no
+// driver cannot have a correction and is not listed (its flag was audited).
+app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {
+	try {
+		if (!personalLedgerPresent()) return res.json({ groups: [] });
+		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+			WHERE ep.voided_at = '' AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
+			ORDER BY ep.week_start, ep.id`).all();
+		const groups = new Map();
+		for (const r of rows) {
+			const driverKey = normalizeDriverName(r.receipt_driver || "");
+			if (!driverKey) continue;
+			const key = `${driverKey}|${r.week_start}`;
+			if (!groups.has(key)) groups.set(key, { driver: String(r.receipt_driver || "").trim(), week_start: r.week_start, rows: [] });
+			groups.get(key).rows.push(r);
+		}
+		res.json({
+			groups: [...groups.values()].map((g) => ({
+				driver: g.driver,
+				week_start: g.week_start,
+				week_label: personalWeekLabel(g.week_start, getWeekRange(g.week_start).weekEnd),
+				lines: g.rows.length,
+				amount_text: personalExpense.signedMoney(g.rows.reduce((s, r) => s + personalExpense.netCents(r), 0)),
+			})),
+		});
+	} catch (err) {
+		console.error("Personal waiting-corrections error:", err.message);
+		res.status(500).json({ error: "Failed to list the Personal lines waiting for a correction invoice" });
+	}
+});
+
+// The receipt behind a Personal line: a session is required first, then this
+// limit (a page of invoices opens a few receipts, never hundreds), per signed-in
+// user like personalRouteLimiter (the IP only without a session).
+const personalReceiptLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 300,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many receipt requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+// GET /api/invoices/:id/personal-receipts/:lineId — the receipt behind one
+// Personal line, re-encoded (lib/receipt-images.js: upright, at most 1600 px,
+// no metadata) and served as image/jpeg, nosniff, private no-store. Super
+// Admin: any line, a deleted invoice's too. A Driver: a line on his own live
+// invoice whose receipt is his. Every other role: 403. A line not on that
+// invoice, an undone one, a PDF receipt (listed, never served here in v1) or an
+// image that cannot be read: 404; one still being prepared: 503. Not behind the
+// flag: it only ever finds lines that exist.
+app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {
+	try {
+		const user = req.session.user;
+		if (user.role !== "Super Admin" && user.role !== "Driver") return res.status(403).json({ error: "Forbidden" });
+		const invoiceId = /^\d{1,12}$/.test(String(req.params.id)) ? Number(req.params.id) : 0;
+		const lineId = /^\d{1,12}$/.test(String(req.params.lineId)) ? Number(req.params.lineId) : 0;
+		const notFound = (code, error) => res.status(404).json({ error, code });
+		if (!invoiceId || !lineId) return notFound("PERSONAL_LINE_NOT_FOUND", "Receipt not found");
+		const invoice = db.prepare("SELECT id, driver, deleted_at FROM invoices WHERE id = ?").get(invoiceId);
+		if (!invoice) return notFound("PERSONAL_LINE_NOT_FOUND", "Receipt not found");
+		const admin = user.role === "Super Admin";
+		if (!admin && !driverOwnsInvoice(user, invoice)) return res.status(403).json({ error: "Forbidden" });
+		if (!admin && invoice.deleted_at) return notFound("PERSONAL_LINE_NOT_FOUND", "Receipt not found");
+		const line = personalLedgerPresent()
+			? db.prepare(`SELECT ep.id, ep.expense_id, e.photo_data, e.driver AS receipt_driver FROM expense_personal ep LEFT JOIN expenses e ON e.id = ep.expense_id
+				WHERE ep.id = ? AND ep.invoice_id = ? AND ep.voided_at = ''`).get(lineId, invoiceId)
+			: null;
+		if (!line || line.expense_id == null) return notFound("PERSONAL_LINE_NOT_FOUND", "Receipt not found");
+		if (!admin && normalizeDriverName(line.receipt_driver || "") !== normalizeDriverName(invoice.driver)) {
+			return notFound("PERSONAL_LINE_NOT_FOUND", "Receipt not found");
+		}
+		if (receiptImagesLib.receiptImageKind(line.photo_data, RECEIPTS_DIR) === "pdf") {
+			return notFound("RECEIPT_IS_PDF", "PDF receipt on file");
+		}
+		const out = await receiptImageService().prepare({ expenseId: line.expense_id, photoData: line.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
+		if (out.status === "pdf") return notFound("RECEIPT_IS_PDF", "PDF receipt on file");
+		if (out.status !== "image") {
+			if (out.reason === "preparing" || out.reason === "busy") {
+				res.setHeader("Retry-After", "5");
+				return res.status(503).json({ error: "The receipt image is still being prepared. Try again in a few seconds.", code: "RECEIPT_IMAGE_PREPARING" });
+			}
+			return notFound("RECEIPT_IMAGE_UNAVAILABLE", "Receipt image not available");
+		}
+		const jpeg = Buffer.from(out.dataUri.slice("data:image/jpeg;base64,".length), "base64");
+		res.setHeader("Content-Type", "image/jpeg");
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader("Cache-Control", "private, no-store");
+		res.send(jpeg);
+	} catch (err) {
+		console.error("Personal receipt error:", err.message);
+		res.status(500).json({ error: "Failed to open the receipt" });
 	}
 });
 
@@ -24262,6 +25788,31 @@ app.get("/api/auth/session", (req, res) => {
 	}
 });
 
+// B21: every password change emails the account it changed — when (in
+// APP_TIMEZONE), whether "an administrator" or "you" made it, and whom to
+// contact (ADMIN_NOTIFY_EMAIL, else "your administrator"). Never the password:
+// none is passed in. lib/password-change-notice.js builds and sends it.
+// Called by change-password and PUT /api/users/:id AFTER their write commits,
+// and never awaited: a slow or failed send cannot hold or undo a change, and
+// neither route's answer says whether an address is on file. Whether mail goes
+// at all is sendEmail()'s call (nothing in replica mode; GMAIL_USER and
+// GMAIL_APP_PASSWORD both needed). Every notice not sent is logged by account
+// id. The returned promise never rejects.
+const passwordChangeNotice = require("./lib/password-change-notice");
+// The one rule for a new password (length, then upper/lower/number/symbol),
+// shared by change-password and the admin reset in PUT /api/users/:id.
+const passwordRules = require("./lib/password-rules");
+function notifyPasswordChanged(userId, addresses, { byAdmin }) {
+	return passwordChangeNotice.sendPasswordChangeNotice({
+		userId,
+		addresses,
+		byAdmin: !!byAdmin,
+		adminEmail: ADMIN_NOTIFY_EMAIL,
+		timeZone: APP_TIMEZONE,
+		send: (to, notice) => sendEmail(to, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml })),
+	});
+}
+
 // Change the current user's own password. Requires the current password
 // to prevent someone with an unattended session from locking the real user out.
 // Rate-limited (5/15min per IP) to defeat brute-force against currentPassword.
@@ -24279,30 +25830,13 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		if (!currentPassword || !newPassword) {
 			return res.status(400).json({ error: "Current and new password required" });
 		}
-		if (typeof newPassword !== "string" || newPassword.length < 8) {
-			return res.status(400).json({ code: "PASSWORD_WEAK", error: "New password must be at least 8 characters", failed: ["length"] });
-		}
-		if (newPassword.length > 200) {
-			return res.status(400).json({ error: "New password is too long" });
-		}
-		// Complexity rules — mirror the client-side checklist exactly so
-		// the API rejects weak passwords even if someone bypasses the UI.
-		// CEO requirement (2026-05-13): drivers should see what counts as a
-		// valid password instead of vague "too weak" errors.
-		const failed = [];
-		if (!/[A-Z]/.test(newPassword)) failed.push("uppercase");
-		if (!/[a-z]/.test(newPassword)) failed.push("lowercase");
-		if (!/\d/.test(newPassword)) failed.push("digit");
-		if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(newPassword)) failed.push("symbol");
-		if (failed.length > 0) {
-			const labelMap = { uppercase: "an uppercase letter", lowercase: "a lowercase letter", digit: "a number", symbol: "a symbol (!@#$ etc.)" };
-			const missing = failed.map(f => labelMap[f]).join(", ");
-			return res.status(400).json({
-				code: "PASSWORD_WEAK",
-				error: `Password must include ${missing}.`,
-				failed,
-			});
-		}
+		// Length and complexity rules (lib/password-rules.js, shared with the
+		// admin reset) mirror the client-side checklist exactly, so the API
+		// rejects weak passwords even if someone bypasses the UI. CEO requirement
+		// (2026-05-13): drivers should see what counts as a valid password
+		// instead of vague "too weak" errors.
+		const weakRefusal = passwordRules.newPasswordRefusal(newPassword);
+		if (weakRefusal) return res.status(400).json(weakRefusal);
 		// A forced change is only a change if the password actually changes:
 		// re-submitting the current one would clear must_change_password while the
 		// temporary credential stayed valid. Defence in depth today: the emailed
@@ -24378,6 +25912,10 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		// the account as re-read, not the copy this request arrived with.
 		logAudit({ session: { user: freshUser } }, "change_password", "user", userId,
 			`Password changed${requiredChange ? " (required change)" : ""}; other sessions signed out: ${sessionsRevoked}`);
+
+		// B21: tell the account, at the address on the row re-read above. Not
+		// awaited (see notifyPasswordChanged()); the answer is the same either way.
+		notifyPasswordChanged(userId, [current.email], { byAdmin: false });
 
 		// This session's live-update sockets end with its old ID, before
 		// regenerate() retires it: a socket opened on a copied cookie must not
@@ -24969,7 +26507,27 @@ function userUpdateLockBlockers(user, next) {
 }
 
 // Admin: update a user's role, driverName, or email
-app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
+// B21: password resets through PUT /api/users/:id, 5 per 15 minutes per acting
+// admin (change-password's limit). The reset refuses the acting admin's own
+// password (PASSWORD_IS_YOURS), so without a cap whoever holds an admin session
+// could use it to test guesses at that admin's password; a guess sent with an
+// invalid role writes nothing either way. So EVERY request carrying a password
+// field counts, whatever the route then answers, and this runs before any
+// validation or comparison. Edits without a password field never count.
+// Mounted after requireRole, so only a Super Admin spends the budget; keyed on
+// the session user, else the IP, like the other per-feature limiters.
+const userPasswordResetLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 5,
+	skip: (req) => !(req.body && typeof req.body === "object" && req.body.password !== undefined),
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many password changes. Try again in 15 minutes." },
+	standardHeaders: true,
+});
+app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {
 	try {
 		const id = parseInt(req.params.id);
 		const { role, email, password, fullName, companyName } = req.body;
@@ -25034,10 +26592,33 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// If you add another await, put it here too, and re-read `user` after it —
 		// see the note on that re-read. Everything from the first guard to the
 		// commit must be synchronous.
+		//
+		// B21: a password, when one is sent, meets change-password's rules
+		// (lib/password-rules.js) before anything else happens: a non-string
+		// used to reach bcrypt and answer a 500 with bcrypt's own error text.
+		// Absent, null or "" keeps the current password. Then, when the reset is
+		// for SOMEONE ELSE, the new password must not be the acting admin's own:
+		// that is a browser filling the admin's saved login into the form. The
+		// comparison runs beside the hashing, here in the await block, so no
+		// await sits between the guards and the write.
+		const passwordGiven = password !== undefined && password !== null && password !== "";
+		if (passwordGiven) {
+			const weakRefusal = passwordRules.newPasswordRefusal(password);
+			if (weakRefusal) return res.status(400).json(weakRefusal);
+		}
 		let passwordHash = null;
-		if (password) {
+		if (passwordGiven) {
 			const bcryptMod = await import("bcryptjs");
-			passwordHash = await bcryptMod.hash(password, 10);
+			const actorId = Number(req.session?.user?.id);
+			const actor = actorId !== id ? db.prepare("SELECT password_hash FROM users WHERE id = ?").get(actorId) : null;
+			const [hash, isActorsOwn] = await Promise.all([
+				bcryptMod.hash(password, 10),
+				actor && actor.password_hash ? bcryptMod.compare(password, actor.password_hash).catch(() => false) : false,
+			]);
+			if (isActorsOwn) {
+				return res.status(400).json({ code: "PASSWORD_IS_YOURS", error: "This is your own password. Enter a new password for this user." });
+			}
+			passwordHash = hash;
 		}
 
 		// Pre-resolved here, consumed synchronously by guard (d). `null` means
@@ -25728,6 +27309,13 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 			`${variantsMoved ? `; moved from another spelling, which renaming back does not restore (spacingVariants): ${variantsMoved}` : ""}` +
 			`${sessionsRevoked ? `; sessions revoked: ${sessionsRevoked}` : ""}`);
 
+		// B21: a password reset emails the account: at the address on file before
+		// this edit, and at a new one this edit wrote (the old one is the one that
+		// reaches the real person if the new one is wrong). "you" when a Super
+		// Admin reset their own password here. Not awaited (see
+		// notifyPasswordChanged()), so no await follows the write.
+		if (passwordHash) notifyPasswordChanged(id, [user.email, email], { byAdmin: !selfEdit });
+
 		// The spared session of a self-edit that revoked the account's other
 		// sessions is rebuilt from the row now, under a new session ID (see
 		// refreshOwnSession()): for a role or driver-name change so it says who
@@ -26154,6 +27742,19 @@ function userDeleteLockBlockers(user, cascadeName) {
 			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
 		).all(cascadeName);
 		const locked = rows.filter(expenseRowPeriodLocked);
+		// A Personal line (any, undone or reversed ones included) points at a
+		// receipt by id: deleting the receipts would leave the ledger, and any
+		// invoice carrying the line, pointing at nothing.
+		const personalLines = personalLedgerPresent()
+			? db.prepare("SELECT COUNT(*) AS n FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id WHERE LOWER(e.driver) = ?").get(cascadeName).n
+			: 0;
+		if (personalLines) blockers.push({
+			table: "expense_personal",
+			code: "EXPENSE_PERSONAL_LINES",
+			rows: personalLines,
+			periods: [],
+			detail: `${personalLines} Personal line${personalLines === 1 ? "" : "s"} point${personalLines === 1 ? "s" : ""} at this driver's receipts, which the delete would remove`,
+		});
 		if (locked.length) blockers.push({
 			table: "expenses",
 			// ⚠️ EVERY BLOCKER CARRIES A CODE, so the handler can SELECT the response
@@ -38376,6 +39977,12 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 				 ORDER BY id DESC`,
 			)
 			.all(nameLower);
+		// Each receipt's Personal line, if any (personalSummaryByExpense()): the
+		// amount, the week and the invoice it is on, from the server.
+		{
+			const personal = personalSummaryByExpense(driverExpenses.map((e) => e.id));
+			for (const e of driverExpenses) e.personal = personalSummaryForRole(personal[e.id], "Driver");
+		}
 
 		// Count uploaded documents per load (total + per-kind breakdown). The
 		// driver-mobile-view's DocumentUpload needs per-kind counts so BOL /
@@ -38588,17 +40195,22 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// this route applies to its loads above. `driver` is read only to match
 		// and is not returned. `adjustment` is returned: the driver already sees
 		// it on the invoice PDF. `total_due` is the invoice's total with that
-		// adjustment (invoiceTotalDue(), the PDF's "Total Due"): the figure the
-		// driver app shows. scripts/test-driver-invoice-total-due.js pins the
-		// exact fields a row carries.
+		// adjustment and its Personal lines (invoiceTotalDue(), the PDF's "Total
+		// Due"): the figure the driver app shows. personal_total and
+		// personal_share_total are returned with it (invoiceTotalDue() refuses a row
+		// without them). personal_lines: the Personal lines each carries, with their
+		// receipts (personalLinesForInvoices()). scripts/test-driver-invoice-total-due.js
+		// pins the exact fields a row carries.
 		const driverInvoices = db.prepare(
-			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, adjustment, expenses_total, status, submitted_at,
+			`SELECT id, invoice_number, driver, week_start, week_end, loads_count, total_earnings, adjustment, personal_total, personal_share_total, expenses_total, status, submitted_at,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at
 			 FROM invoices WHERE deleted_at = '' ORDER BY created_at DESC`
 		).all()
 			.filter((r) => normalizeDriverName(r.driver) === driverNameNorm)
 			.slice(0, 20)
 			.map(({ driver: _driver, ...rest }) => ({ ...rest, total_due: invoiceTotalDue(rest) }));
+		const driverInvoiceLines = personalLinesForInvoices(driverInvoices.map((r) => r.id));
+		for (const inv of driverInvoices) inv.personal_lines = driverInvoiceLines.get(inv.id) || [];
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
 		// pre-fill its navigation handoff and render static-map thumbnails
@@ -46468,7 +48080,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 				if (jtRateCol) totalRevenue += parseFloat(String(r[jtRateCol] || "0").replace(/[$,]/g, "")) || 0;
 			});
 			const expClause = isSuperAdmin
-				? db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get().t
+				? db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM ${expenseFrom("book")} WHERE ${EXPENSE_PNL_FILTER}`).get().t
 				: (() => {
 					// Shared scope, so a tax document can never report a different
 					// expense total than the portal it was generated from. Note this
@@ -46477,7 +48089,7 @@ app.get("/api/investor/tax-csv", requireRole("Super Admin", "Investor"), investo
 					// were all resolved by owner_id alone — a $0 cost line on a TAX
 					// form, in the direction that overstates income.
 					const scope = investorExpenseScopeSql(user.id, getInvestorDriverMonthWindows(user.id), EXPENSE_PERIOD_EXPR);
-					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params).t;
+					return db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params).t;
 				})();
 			netRevenueToDate = Math.round(totalRevenue - expClause);
 		} catch (sheetsErr) {
@@ -47030,7 +48642,7 @@ app.get("/api/investor/report", requireRole("Super Admin", "Investor"), investor
 				scopeParams.push(...scope.params);
 			}
 			const expRows = db.prepare(
-				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM expenses WHERE ${scopeSql}${dateWhere} AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`
+				`SELECT LOWER(type) AS t, COALESCE(SUM(amount),0) AS total FROM ${expenseFrom("book")} WHERE ${scopeSql}${dateWhere} AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(type)`
 			).all(...scopeParams, ...dateParams);
 			// Categorization per 2026-04-13 client feedback:
 			// - Fuel → Fuel Expenses
@@ -52873,19 +54485,24 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 	// futureReceipts payout rule the submitted month for one dated in the future.
 	const periodExpr = rules.futureReceipts ? futureAwarePeriodExpr() : EXPENSE_PERIOD_EXPR;
 	const tripByMonth = {};
-	const receiptCols = `id, ${periodExpr} AS month, COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS day, amount, type, truck_unit AS truck, driver, load_id AS loadId, status`;
+	// The books source (expenseFrom()): a receipt's in-place Personal part is off
+	// its amount, and a Personal line booked outside a finalized receipt month is
+	// a credit row in its own month; personalId names that line on its trip item.
+	const bookFrom = expenseFrom("book");
+	const personalCol = bookFrom === "expenses" ? "" : ", personal_id AS personalId";
+	const receiptCols = `id, ${periodExpr} AS month, COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS day, amount, type, truck_unit AS truck, driver, load_id AS loadId, status${personalCol}`;
 	let receipts = [];
 	const investorExpenseWindows = investorOwnerId ? getInvestorDriverMonthWindows(investorOwnerId) : null;
 	if (investorOwnerId) {
 		const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, periodExpr);
 		db.prepare(
-			`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+			`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM ${bookFrom} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 		).all(...scope.params).forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
-		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} ORDER BY id`).all(...scope.params);
+		receipts = db.prepare(`SELECT ${receiptCols} FROM ${bookFrom} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} ORDER BY id`).all(...scope.params);
 	} else if (isSuperAdmin) {
-		db.prepare(`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
+		db.prepare(`SELECT ${periodExpr} AS m, COALESCE(SUM(amount), 0) AS t FROM ${bookFrom} WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`)
 			.all().forEach(r => { if (r.m) tripByMonth[r.m] = r.t; });
-		receipts = db.prepare(`SELECT ${receiptCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} ORDER BY id`).all();
+		receipts = db.prepare(`SELECT ${receiptCols} FROM ${bookFrom} WHERE ${EXPENSE_PNL_FILTER} ORDER BY id`).all();
 	}
 	receipts = receipts.filter((x) => x.month);
 
@@ -52896,13 +54513,19 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 	// month ("Mar 14 fuel, posted to May").
 	let tripExpenseItems = [];
 	if (detailForMonth) {
-		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state, posted_period AS postedPeriod";
+		const expCols = "COALESCE(NULLIF(date,''), strftime('%Y-%m-%d', created_at)) AS date, type, description, amount, driver, truck_unit AS truck, location_city AS city, location_state AS state, posted_period AS postedPeriod"
+			+ (bookFrom === "expenses" ? "" : ", is_credit AS isCredit");
 		const monthExpr = periodExpr;
 		if (investorOwnerId) {
 			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, monthExpr);
-			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
+			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM ${bookFrom} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(...scope.params, detailForMonth);
 		} else if (isSuperAdmin) {
-			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM expenses WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
+			tripExpenseItems = db.prepare(`SELECT ${expCols} FROM ${bookFrom} WHERE ${EXPENSE_PNL_FILTER} AND ${monthExpr} = ? ORDER BY 1`).all(detailForMonth);
+		}
+		// A credit row's label: the investor's view never names the driver's
+		// purchase (docs/investor-portal-copy.md); isCredit is not sent on.
+		if (bookFrom !== "expenses") {
+			tripExpenseItems = tripExpenseItems.map(({ isCredit, ...item }) => (isCredit && investorOwnerId ? { ...item, description: personalExpense.INVESTOR_CREDIT_LABEL } : item));
 		}
 	}
 
@@ -54753,10 +56376,10 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// Leaving this one unbounded would make the headline totals disagree with
 			// the sum of the months that explain them.
 			const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
-			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params);
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`).get(...scope.params);
 			totalExpenses += expSum.total;
 		} else if (isSuperAdmin) {
-			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE ${EXPENSE_PNL_FILTER}`).get();
+			const expSum = db.prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM ${expenseFrom("book")} WHERE ${EXPENSE_PNL_FILTER}`).get();
 			totalExpenses += expSum.total;
 		}
 		// Truck-level costs (maintenance fund DISBURSEMENTS, compliance fees)
@@ -54969,17 +56592,17 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// than the row it opened from.
 				const scope = investorExpenseScopeSql(investorOwnerId, investorExpenseWindows, EXPENSE_PERIOD_EXPR);
 				const rows = db.prepare(
-					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
+					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m`
 				).all(...scope.params);
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
 				const catRows = db.prepare(
-					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
+					`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`
 				).all(...scope.params);
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			} else if (isSuperAdmin) {
-				const rows = db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
+				const rows = db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, COALESCE(SUM(amount), 0) AS t FROM ${expenseFrom("book")} WHERE ${EXPENSE_PNL_FILTER} GROUP BY m`).all();
 				rows.forEach(r => { if (r.m) monthlyTripExp[r.m] = r.t; });
-				const catRows = db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM expenses WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
+				const catRows = db.prepare(`SELECT ${EXPENSE_PERIOD_EXPR} AS m, LOWER(type) AS cat, COALESCE(SUM(amount), 0) AS t FROM ${expenseFrom("book")} WHERE ${EXPENSE_PNL_FILTER} GROUP BY m, LOWER(type)`).all();
 				catRows.forEach(r => { if (r.m) { if (!tripExpByCategory[r.m]) tripExpByCategory[r.m] = {}; tripExpByCategory[r.m][r.cat] = r.t; } });
 			}
 
@@ -55310,7 +56933,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			// folds in, as on the weekly invoice), counted on that driver's assigned
 			// truck. Same owner and filter as before.
 			const expRows = db.prepare(
-				`SELECT LOWER(TRIM(COALESCE(truck_unit, ''))) AS u, LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM expenses ` +
+				`SELECT LOWER(TRIM(COALESCE(truck_unit, ''))) AS u, LOWER(driver) AS d, COALESCE(SUM(amount),0) AS t FROM ${expenseFrom("book")} ` +
 				`WHERE owner_id = ? AND ${EXPENSE_PNL_FILTER} GROUP BY LOWER(TRIM(COALESCE(truck_unit, ''))), LOWER(driver)`
 			).all(user.id);
 			const expOnUnit = Object.create(null);
@@ -55863,7 +57486,10 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 
 		// created_at is UTC CURRENT_TIMESTAMP with no zone marker — emit ISO-8601 Z
 		// so the client doesn't parse it as local time.
-		let sql = "SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM expenses";
+		// The world source (expenseFrom()): investors never see the Personal part of
+		// a receipt. A fully Personal one is left out, a partial one shows the
+		// company's share; a finalized month's receipts stay as they were.
+		let sql = `SELECT id, timestamp, driver, load_id, type, amount, description, date, photo_data, status, gallons, odometer, truck_unit, owner_id, location_city, location_state, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM ${expenseFrom("world")}`;
 		if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 		sql += " ORDER BY date DESC, id DESC LIMIT 1000";
 
@@ -57372,9 +58998,11 @@ app.post("/api/periods/:period/finalize", requireRole("Super Admin"), refuseCros
 				});
 		}
 		const pending = pendingReceiptsInPeriod(period);
+		const personalWaiting = personalWaitingInPeriod(period);
 		logAudit(req, "period_finalize", "period", period,
-			`Finalized ${period} early (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"})`);
-		res.json({ success: true, period, ...result, pendingReceipts: pending });
+			`Finalized ${period} early (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+			(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") + ")");
+		res.json({ success: true, period, ...result, pendingReceipts: pending, personalWaiting });
 	} catch (err) {
 		console.error("POST /api/periods/:period/finalize error:", err.message);
 		res.status(500).json({ error: "Failed to finalize period" });
@@ -57884,6 +59512,7 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 		const invoiceRows = db.prepare(
 			`SELECT id, invoice_number, driver, week_start, week_end, status,
 			        COALESCE(total_earnings, 0) AS total_earnings, COALESCE(adjustment, 0) AS adjustment,
+			        personal_total, personal_share_total,
 			        COALESCE(paid_at, '') AS paid_at, COALESCE(is_manual, 0) AS is_manual
 			   FROM invoices WHERE COALESCE(deleted_at, '') = ''`
 		).all();
@@ -57930,7 +59559,7 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 				// noRemedy below rather than being quietly dropped from the headline by
 				// a negation. Today the column only ever holds these six values.
 				const settled = /^(paid|rejected)$/i.test(String(inv.status || ""));
-				const amount = Number(inv.total_earnings || 0) + Number(inv.adjustment || 0);
+				const amount = invoiceTotalDue(inv);
 
 				frozenAmount += amount;
 				if (cause === "PERIOD_UNRESOLVED") unresolvedDates++;
@@ -58051,11 +59680,19 @@ function closingFingerprint(periods) {
 	const ph = periods.map(() => "?").join(",");
 	const one = (sql, ...params) => db.prepare(sql).get(...params);
 	const ordered = (cols, table) => one(`SELECT COUNT(*) AS n, COALESCE(group_concat(r, '|'), '') AS v FROM (SELECT ${cols} AS r FROM ${table} ORDER BY 1)`);
+	// The Personal lines that move a closing month: booked to it, or on one of
+	// its receipts. A mark, undo or reversal during the close changes this.
+	const personalLines = personalLedgerPresent()
+		? one(`SELECT COUNT(*) AS n, COALESCE(group_concat(r, '|'), '') AS v FROM (
+			SELECT id || ',' || kind || ',' || cents || ',' || cost_period || ',' || in_place || ',' || voided_at || ',' || COALESCE(reversed_by_id, '') AS r
+			FROM expense_personal WHERE cost_period IN (${ph}) OR expense_id IN (SELECT id FROM expenses WHERE ${EXPENSE_PERIOD_EXPR} IN (${ph})) ORDER BY id)`, ...periods, ...periods)
+		: null;
 	return JSON.stringify([
 		one(`SELECT COUNT(*) AS n, COALESCE(group_concat(r, '|'), '') AS v FROM (
 			SELECT id || ',' || COALESCE(amount,'') || ',' || COALESCE(status,'') || ',' || COALESCE(driver,'') || ',' || COALESCE(truck_unit,'')
 				|| ',' || COALESCE(owner_id,'') || ',' || COALESCE(type,'') || ',' || COALESCE(posted_period,'') || ',' || COALESCE(date,'') AS r
 			FROM expenses WHERE ${EXPENSE_PERIOD_EXPR} IN (${ph}) ORDER BY id)`, ...periods),
+		personalLines,
 		one(`SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(SUM(amount), 0) AS s FROM maintenance_fund
 			WHERE strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) IN (${ph})`, ...periods),
 		one(`SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m, COALESCE(SUM(amount), 0) AS s,
@@ -58124,6 +59761,25 @@ function pendingReceiptsInPeriod(period) {
 		`SELECT id, date, amount, driver, truck_unit AS truck, type FROM expenses
 		 WHERE status = 'Pending' AND ${EXPENSE_PERIOD_EXPR} = ? ORDER BY id`
 	).all(period);
+}
+
+// Personal lines booked to `period` that no live invoice carries yet (waiting
+// for their week's invoice, or for a correction): the month's books already
+// leave them out of the company's costs, and the driver has not been charged
+// yet. The close lists them, like Pending receipts, so they are followed up.
+function personalWaitingInPeriod(period) {
+	if (!personalLedgerPresent()) return [];
+	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+		WHERE ep.voided_at = '' AND ep.cost_period = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
+		ORDER BY ep.id`).all(period).map((r) => ({
+		id: r.id,
+		expense_id: r.expense_id,
+		driver: String(r.receipt_driver || ""),
+		kind: r.kind,
+		week_start: r.week_start,
+		amount_text: personalExpense.formatMoney(r.cents),
+		state: r.needs_correction_since ? "needs_correction" : "pending",
+	}));
 }
 
 // Close a set of periods: freeze each investor's figure, then take the lock.
@@ -58425,6 +60081,8 @@ function periodsDueForClose() {
 		.filter((p) => p < cur && isPastGrace(p, graceDays) && isPlausibleLockPeriod(p));
 }
 
+// Who the automatic close's audit rows name.
+const PERIOD_CLOSE_SYSTEM_ACTOR = { session: { user: { id: 0, username: "period-close", role: "system" } } };
 async function maybeCloseFinishedPeriods() {
 	if (!PERIOD_FINALIZE_ENABLED || periodCloseRunning) return;
 
@@ -58484,12 +60142,18 @@ async function maybeCloseFinishedPeriods() {
 		for (const period of result.periods) {
 			try {
 				const pending = pendingReceiptsInPeriod(period);
+				const personalWaiting = personalWaitingInPeriod(period);
+				// The audit row the manual close writes, for the close nobody pressed
+				logAudit(PERIOD_CLOSE_SYSTEM_ACTOR, "period_finalize", "period", period,
+					`Finalized ${period} at month end (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+					(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") + ")");
 				insertDispatchNotification.run(
 					"period-close",
 					`${periodLabel(period)} is closed`,
 					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.` +
-						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : ""),
-					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id) }),
+						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : "") +
+						(personalWaiting.length ? ` ${personalWaiting.length} Personal line(s) booked to ${periodLabel(period)} are on no invoice yet; the driver has not been charged for them (receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}).` : ""),
+					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id), personalWaitingLineIds: personalWaiting.map((x) => x.id) }),
 				);
 			} catch {}
 		}
@@ -59030,19 +60694,20 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// Fuel analytics for the month — same source/filters as
 			// /api/expenses/fuel-analytics (LOWER(type)='fuel', Rejected excluded),
 			// by the receipt's own date: they measure the world, while
-			// expenseCategories are the books (a receipt's posted period).
+			// expenseCategories are the books (a receipt's posted period). The world
+			// source (expenseFrom()): a Personal part is no fuel bought for a truck.
 			const fuelTotals = db.prepare(
 				`SELECT COALESCE(SUM(amount),0) AS spend, COALESCE(SUM(gallons),0) AS gallons, COUNT(*) AS fills
-				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
+				 FROM ${expenseFrom("world")} WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
 			).get(monthParam);
 			const prevFuelSpend = db.prepare(
 				`SELECT COALESCE(SUM(amount),0) AS spend
-				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
+				 FROM ${expenseFrom("world")} WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}`
 			).get(prevMk).spend;
 			const fuelByTruckRows = db.prepare(
 				`SELECT TRIM(COALESCE(truck_unit, '')) AS unit,
 				        COALESCE(SUM(amount),0) AS spend, COALESCE(SUM(gallons),0) AS gallons, COUNT(*) AS fills
-				 FROM expenses WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}
+				 FROM ${expenseFrom("world")} WHERE LOWER(type)='fuel' AND strftime('%Y-%m', date)=? AND ${EXPENSE_PNL_FILTER}
 				 GROUP BY LOWER(TRIM(COALESCE(truck_unit, '')))
 				 ORDER BY spend DESC`
 			).all(monthParam);
@@ -59083,15 +60748,19 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 			// Null-prototype, and an invoice whose driver reads as a built-in
 			// property name is skipped like a blank one (driverNameForTotals()).
 			const invByDriver = Object.create(null);
+			// "Invoiced" is pay: earnings, adjustment and an owner-operator's share
+			// returned on Personal lines. What a driver repays on them is not pay, so
+			// it never lowers this figure (a correction invoice moves it only by a
+			// returned share).
 			db.prepare(
-				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj
+				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj, COALESCE(personal_share_total,0) AS share
 				 FROM invoices WHERE status != 'Rejected' AND deleted_at = '' AND week_start <= ? AND week_end >= ?`
 			).all(monthEndStr, monthStartStr).forEach((r) => {
 				const k = normalizeDriverName(driverNameForTotals(r.driver));
 				if (!k) return;
 				if (!invByDriver[k]) invByDriver[k] = { count: 0, invoiced: 0, adjustments: 0 };
 				invByDriver[k].count += 1;
-				invByDriver[k].invoiced += r.earned + r.adj;
+				invByDriver[k].invoiced += r.earned + r.adj + r.share;
 				invByDriver[k].adjustments += r.adj;
 			});
 
@@ -59515,11 +61184,17 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		try {
 			finalized = new Set(db.prepare("SELECT period FROM period_locks WHERE status = 'locked'").all().map((r) => r.period));
 		} catch { finalized = new Set(); }
-		const expenses = db.prepare(sql).all(...params).map((e) => {
+		// personal: the receipt's live Personal line (personalSummaryByExpense()) as
+		// this role may see it (personalSummaryForRole()), or null; personalEnabled:
+		// whether new marks are accepted. The receipt's own amount is listed as filed.
+		const rows = db.prepare(sql).all(...params);
+		const personal = personalSummaryByExpense(rows.map((e) => e.id));
+		const role = req.session.user.role;
+		const expenses = rows.map((e) => {
 			const period = expensePostedPeriod(e);
-			return { ...e, receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "" };
+			return { ...e, receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role) };
 		});
-		res.json({ expenses });
+		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
@@ -59762,6 +61437,19 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 			});
 		}
 
+		// A receipt with a live Personal line stays Approved: rejecting it would drop
+		// the company's share from the books while the driver still repays the
+		// Personal part. Undo or reverse the line first.
+		if (status !== "Approved" && personalLiveExpenseIds([id]).has(id)) {
+			logAuditRefusal(req, "update_expense_status_blocked", "expense", id,
+				`status ${expense.status || "Pending"} -> ${status} WITHHELD [EXPENSE_PERSONAL] — the receipt has a live Personal line; nothing was written`,
+				"EXPENSE_PERSONAL");
+			return res.status(409).json({
+				error: "This receipt has a Personal line, so it stays Approved. Undo or reverse the Personal line first.",
+				code: "EXPENSE_PERSONAL",
+			});
+		}
+
 		const prevStatus = expense.status || "Pending";
 		db.prepare("UPDATE expenses SET status = ? WHERE id = ?").run(status, id);
 		// ⚠️ THIS IS A MONEY WRITE AND IT USED TO LEAVE NO TRACE. Rejecting an
@@ -59901,9 +61589,14 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 		const lockReadable = periodLocksReadable();
 		const lockedRows = [];
 		const existingIds = [];
+		// A receipt with a live Personal line stays Approved (the single-row route
+		// says why): withheld from a Rejected or Pending batch, and reported.
+		const personalIds = status === "Approved" ? new Set() : personalLiveExpenseIds(existing.map((e) => e.id));
+		const personalRows = [];
 		for (const e of existing) {
 			const p = expensePostedPeriod(e);
 			if (periodWriteLocked(p)) lockedRows.push({ id: e.id, period: p, rejected: e.status === "Rejected" });
+			else if (personalIds.has(e.id)) personalRows.push(e.id);
 			else existingIds.push(e.id);
 		}
 
@@ -60005,11 +61698,18 @@ app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (
 				(reason ? ` — reason: ${reason}` : ""),
 				refusalCode);
 		}
+		if (personalRows.length) {
+			logAuditRefusal(req, "bulk_update_expense_status_blocked", "expense", String(personalRows.length),
+				`status -> ${status} WITHHELD on ${personalRows.length} of ${existing.length} expense(s): ${personalRows.join(",")} [EXPENSE_PERSONAL] — each has a live Personal line` +
+				(reason ? ` — reason: ${reason}` : ""),
+				"EXPENSE_PERSONAL");
+		}
 
 		res.json({
 			success: true,
 			updated: changed,
 			skipped: numericIds.length - existing.length,
+			...(personalRows.length ? { skippedPersonal: personalRows.length, personalIds: personalRows } : {}),
 			...(lockedRows.length ? {
 				skippedFinalized: lockedRows.length,
 				// Named `finalizedPeriods` for the existing client, but only populated
@@ -60050,9 +61750,10 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 			.forEach((r) => (config[r.key] = r.value));
 		const savingsTarget = parseFloat(config.fuel_savings_target_pct) || 15;
 
-		// All fuel expenses
+		// All fuel expenses, from the world source (expenseFrom()): a Personal part
+		// is no fuel bought for a truck.
 		const fuelExpenses = db.prepare(
-			`SELECT * FROM expenses WHERE LOWER(type) = 'fuel' AND ${EXPENSE_PNL_FILTER} ORDER BY date DESC`
+			`SELECT * FROM ${expenseFrom("world")} WHERE LOWER(type) = 'fuel' AND ${EXPENSE_PNL_FILTER} ORDER BY date DESC`
 		).all();
 
 		const totalFuelSpend = fuelExpenses.reduce((s, e) => s + (e.amount || 0), 0);
@@ -60459,7 +62160,7 @@ app.get("/api/expenses/analytics", requireRole("Super Admin", "Dispatcher"), (re
 			q: clip(q) || undefined,
 			vendor: clip(vendor) || undefined,
 		};
-		res.json(aggregateExpenses(db, filters));
+		res.json(aggregateExpenses(db, filters, { source: expenseFrom("world") }));
 	} catch (err) {
 		console.error("Error computing expense analytics:", err.message);
 		res.status(500).json({ error: "Failed to compute analytics" });
@@ -60516,7 +62217,7 @@ app.post("/api/expenses/ai/query", requireRole("Super Admin", "Dispatcher"), exp
 				chartHint: "none",
 			});
 		}
-		const table = runQuerySpec(db, spec);
+		const table = runQuerySpec(db, spec, { source: expenseFrom("world") });
 		let answer;
 		try {
 			answer = await expenseAi.answerFromResults(question, spec, table);
@@ -60564,7 +62265,12 @@ function computeInsightsCacheKey() {
 	const stat = db.prepare(
 		"SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(status = 'Pending'), 0) AS p, COALESCE(SUM(status = 'Rejected'), 0) AS r FROM expenses"
 	).get();
-	return `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${appDay()}`;
+	// A Personal mark, undo or reversal changes what the insights read
+	// (expenseFrom("world")), so it changes the key too.
+	const personal = personalLedgerPresent()
+		? db.prepare("SELECT COALESCE(MAX(id),0) AS m, COUNT(*) AS c, COALESCE(SUM(voided_at != ''), 0) AS v FROM expense_personal").get()
+		: null;
+	return `${stat.m}:${stat.c}:${stat.p}:${stat.r}:${appDay()}${personal && personal.c ? `:p${personal.m}.${personal.c}.${personal.v}` : ""}`;
 }
 // Serve a fresh cache hit BEFORE the rate limiter, so a tab-open that hits the
 // 6h cache costs neither a Gemini call nor an expenseAiLimiter token (cached
@@ -60582,7 +62288,7 @@ function insightsCacheGate(req, res, next) {
 app.get("/api/expenses/ai/insights", requireRole("Super Admin", "Dispatcher"), insightsCacheGate, expenseAiLimiter, async (req, res) => {
 	try {
 		const key = req._insightsKey || computeInsightsCacheKey();
-		const aggregates = buildInsightsAggregates(db, APP_TIMEZONE);
+		const aggregates = buildInsightsAggregates(db, APP_TIMEZONE, { source: expenseFrom("world") });
 		let insights;
 		try {
 			insights = await expenseAi.generateInsights(aggregates);
@@ -61096,7 +62802,7 @@ app.get("/api/analytics/mileage",
 		const fuelWeeks = new Map();
 		let fuelRowsTotal = 0, fuelRowsNoGallons = 0;
 		for (const f of db.prepare(
-			`SELECT date, amount, gallons FROM expenses
+			`SELECT date, amount, gallons FROM ${expenseFrom("world")}
 			 WHERE LOWER(type) = 'fuel' AND COALESCE(status,'') != 'Rejected'
 			   AND date >= ? AND date <= ?`
 		).all(from, to)) {
@@ -61284,7 +62990,7 @@ app.get("/api/analytics/mileage/detail",
 		if (units.length) {
 			for (const f of db.prepare(
 				`SELECT date, truck_unit, amount, gallons, vendor, odometer, load_id, driver
-				 FROM expenses
+				 FROM ${expenseFrom("world")}
 				 WHERE LOWER(type) = 'fuel' AND COALESCE(status,'') != 'Rejected'
 				   AND date >= ? AND date <= ?
 				   AND LOWER(truck_unit) IN (${units.map(() => "LOWER(?)").join(",")})`
@@ -62138,9 +63844,10 @@ function kpiGatherDbInputs(db, opts) {
 	).all(opts.asOfDay).map((r) => ({ day: r.day, value: Number(r.value) }));
 
 	// Fuel receipts by their own date (the purchase day), status as stored:
-	// lib/kpi-metrics.js applies the Rejected filter (EXPENSE_PNL_FILTER).
+	// lib/kpi-metrics.js applies the Rejected filter (EXPENSE_PNL_FILTER). The
+	// world source (expenseFrom()): a Personal part is no fuel bought for a truck.
 	const fuelReceipts = db.prepare(
-		"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'",
+		`SELECT date, amount, gallons, status FROM ${expenseFrom("world")} WHERE LOWER(type) = 'fuel'`,
 	).all().map((r) => {
 		const d = String(r.date || "").slice(0, 10);
 		return {
@@ -62929,7 +64636,7 @@ app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOri
 // 503 page, a missing bundle reads as a 200 or as "being updated" to a
 // browser and to every check that asks for it. no-store, so no cache keeps
 // the 404 once the build that has the file is in place.
-app.get("*", (req, res) => {
+app.get("*", pageLimiter, (req, res) => {
 	if (req.path.startsWith("/assets/")) {
 		res.status(404).set("Cache-Control", "no-store").type("text").send("Not found");
 		return;

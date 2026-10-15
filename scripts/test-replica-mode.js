@@ -259,7 +259,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		const pdf = fs.readFileSync(path.join(ROOT, "lib", "pdf-browser.js"), "utf8");
 		ok("Chromium (PDFs) starts unable to reach anything in a replica, as boot() decided (never the environment)", /require\("\.\/replica-mode"\)\.active\(\) \? require\("\.\/replica-rules"\)\.CHROMIUM_OFFLINE_ARGS : \[\]/.test(pdf));
 		ok("...those arguments send every request to a closed loopback proxy and resolve no name", rules.CHROMIUM_OFFLINE_ARGS.includes("--proxy-server=http://127.0.0.1:9") && rules.CHROMIUM_OFFLINE_ARGS.some((a) => /^--host-resolver-rules=MAP \* ~NOTFOUND/.test(a)));
-		ok("the banner is mounted ahead of the static files", at("if (REPLICA) app.use(REPLICA.bannerMiddleware(") > 0 && at("if (REPLICA) app.use(REPLICA.bannerMiddleware(") < at("app.use(express.static(clientDistPath));"));
+		ok("the banner is mounted ahead of the static files", at("if (REPLICA) app.use(pageLimiter, REPLICA.bannerMiddleware(") > 0 && at("if (REPLICA) app.use(pageLimiter, REPLICA.bannerMiddleware(") < at("app.use(express.static(clientDistPath));"));
 
 		// Every secret-named variable the app reads is a credential the boot refuses.
 		const appSrc = [SRC, ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))].join("\n");

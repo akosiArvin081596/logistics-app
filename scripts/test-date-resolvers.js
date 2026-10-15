@@ -1036,7 +1036,7 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 	const fn = new Function("ctx", `
 		const { req, res, db, calls, PERIOD_FINALIZE_ENABLED,
 			LOCKABLE_MONTH_KEY, isPlausibleLockPeriod, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR,
-			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, receiptIdList } = ctx;
+			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, personalWaitingInPeriod, receiptIdList } = ctx;
 		return (async () => ${bodySrc})();
 	`);
 	return fn({
@@ -1053,6 +1053,7 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		finalizePeriod: async (p, a) => { calls.finalized.push([p, a]); return { stamped: 3, investors: 1, periods: [p] }; },
 		logAudit: (...a) => { calls.audited.push(a); },
 		pendingReceiptsInPeriod: () => [],
+		personalWaitingInPeriod: () => [],
 		receiptIdList: () => "",
 	}).then(() => ({ status: res._status, body: res._json, calls }));
 }

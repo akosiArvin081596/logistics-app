@@ -38,6 +38,9 @@
  *      bundle that answered; a page whose path merely holds the word assets
  *      is still a page. Two mutants: the mount behind a boot-time existsSync,
  *      and a catch-all that answers bundle paths too.
+ *   §7 pages are rate limited: the catch-all and a replica's banner middleware
+ *      mount pageLimiter; past its cap a page is 429, while bundle files and
+ *      API calls are never counted.
  *
  * Pure: no server.js boot, no app.db, no network beyond 127.0.0.1 port 0.
  * SERVER_JS=<path> checks another copy of server.js (e.g. main's, to watch
@@ -56,6 +59,7 @@ const ROOT = path.join(__dirname, "..");
 const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
 const express = require(path.join(ROOT, "node_modules", "express"));
+const rateLimit = require(path.join(ROOT, "node_modules", "express-rate-limit"));
 const { APP_UPDATING_HTML, APP_UPDATING_RETRY_AFTER_S, sendAppUpdating } = require(path.join(ROOT, "lib", "app-updating-page"));
 const replicaMode = require(path.join(ROOT, "lib", "replica-mode"));
 
@@ -113,8 +117,8 @@ function buildApp(appDir, { replica = null, staticSrc = STATIC_SRC, catchAllSrc 
 	app.set("env", "test");
 	app.get("/api/thing", (req, res) => res.json({ ok: true }));
 	const REPLICA = replica ? { bannerMiddleware: replicaMode.bannerMiddleware } : null;
-	new Function("app", "express", "fs", "path", "__dirname", "REPLICA", "sendAppUpdating", `${staticSrc}\n${catchAllSrc}`)(
-		app, express, fs, path, appDir, REPLICA, send);
+	new Function("app", "express", "rateLimit", "fs", "path", "__dirname", "REPLICA", "sendAppUpdating", `${staticSrc}\n${catchAllSrc}`)(
+		app, express, rateLimit.rateLimit || rateLimit, fs, path, appDir, REPLICA, send);
 	return app;
 }
 // lib/app-updating-page.js evaluated from (possibly mutated) source text.
@@ -228,7 +232,7 @@ async function noBuildAnswers(opts = {}) {
 	{
 		// A replica with the build: the banner half, which CI's boot of server.js
 		// (test-replica-mode.js §7, run before CI builds the client) never reaches.
-		const BANNER_LINE = "if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));";
+		const BANNER_LINE = "if (REPLICA) app.use(pageLimiter, REPLICA.bannerMiddleware(clientDistPath));";
 		ok("server.js mounts the replica banner on client/dist, exactly", SRC.split("\n").filter((l) => l === BANNER_LINE).length === 1);
 		const srv = await listen(buildApp(withBuild(tmpDir()), { replica: true }));
 		try {
@@ -363,6 +367,33 @@ async function noBuildAnswers(opts = {}) {
 			!(atBoot.js.status === 200 && atBoot.js.body === "export {};\n"), atBoot.js.status);
 		const unguarded = await bundleAnswers(withBuild(tmpDir()), { catchAllSrc: mutate(CATCH_ALL_SRC, 'if (req.path.startsWith("/assets/")) {', "if (false) {") });
 		ok("MUTANT (the catch-all answers bundle paths too): a missing bundle file is no longer a 404", !isMissingBundle(unguarded.missing), unguarded.missing.status);
+	}
+
+	// =========================================================================
+	console.log("\n§7 pages are rate limited (pageLimiter); the files a page loads are not");
+	// =========================================================================
+	{
+		ok("the catch-all mounts pageLimiter first", /^app\.get\("\*", pageLimiter, \(req, res\) => \{/.test(CATCH_ALL_SRC));
+		ok("…declared in the static block as an express-rate-limit with a window and a cap",
+			/const pageLimiter = rateLimit\(\{[\s\S]*windowMs: [\d* ]+,[\s\S]*max: \d+,/.test(STATIC_SRC));
+		const cap = Number((STATIC_SRC.match(/const pageLimiter = rateLimit\(\{[\s\S]*?max: (\d+),/) || [])[1]);
+		const run = async (app, paths) => {
+			const srv = await listen(app);
+			try {
+				const out = [];
+				for (const p of paths) out.push((await ask(srv, p)).status);
+				return out;
+			} finally {
+				srv.close();
+			}
+		};
+		const pages = await run(buildApp(withBuild(tmpDir())), Array.from({ length: cap + 1 }, (_, i) => `/dashboard/${i}`));
+		ok(`with the build: ${cap} pages from one client are served, the next is 429`, [pages.slice(0, cap).every((s) => s === 200), pages[cap]], [true, 429]);
+		const files = await run(buildApp(withBuild(tmpDir())), [...Array.from({ length: cap + 5 }, () => "/assets/index-a1.js"), ...Array.from({ length: 5 }, () => "/api/thing"), "/login"]);
+		ok("…bundle files and API calls are not counted: a page after more of them than the cap is still served",
+			[files.slice(0, cap + 10).every((s) => s === 200), files[files.length - 1]], [true, 200]);
+		const replicaPages = await run(buildApp(withBuild(tmpDir()), { replica: true }), Array.from({ length: cap + 1 }, (_, i) => `/loads/${i}`));
+		ok("a replica's bannered pages are limited the same way", [replicaPages.slice(0, cap).every((s) => s === 200), replicaPages[cap]], [true, 429]);
 	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);

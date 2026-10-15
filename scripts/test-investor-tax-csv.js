@@ -207,7 +207,7 @@ const HELPER_ZERO_AS_BLANK = 'String(raw).trim() !== "" && String(raw).trim() !=
 const NAMES = [
 	"resolvePreviewUser", "parseSheet", "deduplicateLoads", "findCol",
 	"getDeletedLoadIds", "loadKeySet", "excludeDroppedLoads",
-	"getCarrierDBFromSQLite", "getInvestorDriverSet", "investorExpenseScopeSql",
+	"getCarrierDBFromSQLite", "getInvestorDriverSet", "investorExpenseScopeSql", "expenseFrom", "personalLedgerPresent",
 	"investorJobRowTest", "driverNameForTotals", "isBuiltInPropertyName", "normalizeDriverName",
 	"investorTruckPurchase",
 ];

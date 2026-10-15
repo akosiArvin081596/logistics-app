@@ -209,7 +209,7 @@ const FIXED_COST_SRC = liftFunction("truckMonthlyFixed");
 const PAY_SRC = [liftConst("let lastPayStructShadowWarnMs = "), liftFunction("getDriverPayStructures")].join("\n");
 
 const HEADS = {
-	usersPut: 'app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {',
+	usersPut: 'app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {',
 	fix: 'app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {',
 	dirPut: 'app.put("/api/drivers-directory/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
 	truckPut: 'app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
@@ -315,7 +315,7 @@ const snapshot = (db) => JSON.stringify({
 function mountRoute(routeSrc, env) {
 	let handler = null;
 	const grab = (p, ...rest) => { handler = rest[rest.length - 1]; };
-	const all = { app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), ...env };
+	const all = { app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), userPasswordResetLimiter: (req, res, next) => next(), ...env };
 	const names = Object.keys(all);
 	new Function(...names, routeSrc)(...names.map((k) => all[k]));
 	if (typeof handler !== "function") die("a lifted route did not register a handler");

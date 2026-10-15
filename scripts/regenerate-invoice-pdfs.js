@@ -274,13 +274,23 @@ async function regenerate(db, sheets, invoice) {
 	const db = new Database(path.join(__dirname, "..", "app.db"), { readonly: true });
 	const sheets = await getSheets();
 
+	// An invoice carrying Personal lines (a database the app has opened since they
+	// shipped) is left alone: this one-shot rebuilds a PDF without them, so it
+	// would print a total the row does not hold. The app redraws such an invoice
+	// itself whenever its lines change.
+	const cols = new Set(db.prepare("PRAGMA table_info(invoices)").all().map((c) => c.name));
+	const personal = cols.has("personal_total") && cols.has("personal_share_total") ? ", personal_total, personal_share_total" : "";
 	const invoices = db.prepare(
-		"SELECT id, invoice_number, driver, week_start, week_end, total_earnings, pdf_file_name FROM invoices ORDER BY id ASC"
+		`SELECT id, invoice_number, driver, week_start, week_end, total_earnings, pdf_file_name${personal} FROM invoices ORDER BY id ASC`
 	).all();
 
 	console.log(`Found ${invoices.length} invoice(s) to regenerate`);
 
 	for (const inv of invoices) {
+		if (Number(inv.personal_total || 0) !== 0 || Number(inv.personal_share_total || 0) !== 0) {
+			console.log(`  ! ${inv.invoice_number} carries Personal lines — skipping`);
+			continue;
+		}
 		try {
 			await regenerate(db, sheets, inv);
 		} catch (err) {

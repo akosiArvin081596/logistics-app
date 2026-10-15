@@ -100,6 +100,8 @@ const HELPERS = [
 	liftConst("const CANCELED_STATUS_RE = "), liftFunction("getDeletedLoadIds"), liftFunction("loadKeySet"),
 	liftFunction("excludeDroppedLoads"), liftFunction("liveJobTrackingView"),
 	liftFunction("scrubPurgeMarker"), liftFunction("auditText"), liftFunction("logAudit"),
+	// The receipt source the KPI fuel receipts read (no Personal ledger here).
+	liftFunction("expenseFrom"), liftFunction("personalLedgerPresent"),
 	liftConst("const RATECON_DOC_TYPES = "),
 ].join("\n");
 // The guards log refusals (coalesced); kept out of this runner's output.

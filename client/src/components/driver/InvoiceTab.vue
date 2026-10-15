@@ -63,6 +63,9 @@
       <div v-if="selectedInvoice" class="action-sheet">
         <div class="action-title">{{ selectedInvoice.invoice_number }}</div>
         <div class="action-subtitle">{{ typeof selectedInvoice.total_due === 'number' ? '$' + selectedInvoice.total_due.toFixed(2) : '—' }} - {{ selectedInvoice.status }}</div>
+        <!-- Personal lines (what you repay), each with its receipt. -->
+        <PersonalInvoiceLines :lines="selectedInvoice.personal_lines" />
+
         <div class="action-buttons">
           <a :href="'/api/invoices/' + selectedInvoice.id + '/pdf'" target="_blank" class="action-btn">View PDF</a>
           <button
@@ -86,6 +89,7 @@ import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 import { appTimeZone, appToday, isAfterAppTime, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
+import PersonalInvoiceLines from '../shared/PersonalInvoiceLines.vue'
 
 const driverStore = useDriverStore()
 const { show: toast } = useToast()

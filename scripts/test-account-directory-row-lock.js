@@ -92,7 +92,7 @@ function liftRoute(head, what) {
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
 }
 const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
-const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {', "PUT /api/users/:id");
+const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {', "PUT /api/users/:id");
 
 const MODULE_SRC = [
 	liftConst("const REFUSAL_AUDIT_WINDOW_MS = "),
@@ -222,7 +222,9 @@ function makeApp() {
 	let putHandler = null;
 	const putEnv = {
 		...env,
-		app: { put: (p, guard, h) => { putHandler = h; } },
+		app: { put: (p, ...handlers) => { putHandler = handlers[handlers.length - 1]; } },
+		// The password-reset limiter mounted before the handler: not this runner's subject.
+		userPasswordResetLimiter: (req, res, next) => next(),
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [["Load ID", "Driver"]] } }) } } }),
 		SPREADSHEET_ID: "not-a-sheet",
 		getJobTrackingCached: async () => { S.jtReads++; if (S.jtFails) throw new Error("Job Tracking could not be read"); return JT; },

@@ -119,6 +119,8 @@ const HELPERS = [
 	liftConst("const CANCELED_STATUS_RE = "), liftFrom(SRC, "getDeletedLoadIds"), liftFrom(SRC, "loadKeySet"),
 	liftFrom(SRC, "excludeDroppedLoads"), liftFrom(SRC, "liveJobTrackingView"),
 	liftFrom(SRC, "scrubPurgeMarker"), liftFrom(SRC, "auditText"), liftFrom(SRC, "logAudit"),
+	// The receipt source the KPI fuel receipts read (no Personal ledger here).
+	liftFrom(SRC, "expenseFrom"), liftFrom(SRC, "personalLedgerPresent"),
 	liftConst("const RATECON_DOC_TYPES = "),
 ].join("\n");
 
@@ -472,7 +474,8 @@ const gatherSection = section(async (t, block = BLOCK) => {
 	const json = JSON.stringify(g, (k, v) => (v instanceof Map ? [...v] : v));
 	t(!json.includes(PHOTO) && !json.includes(RECEIPT_TEXT), "§2 no receipt photo and no receipt text in what was gathered");
 	const fn = liftFrom(block, "kpiGatherDbInputs");
-	const sqls = fn.match(/"SELECT [^"]+"/g) || [];
+	// Quoted or template-literal SQL (the fuel receipts read a ${expenseFrom()} source).
+	const sqls = fn.match(/"SELECT [^"]+"|`SELECT [^`]+`/g) || [];
 	t(sqls.length >= 9, `§2 the gather's SQL statements found (${sqls.length})`);
 	const columnsOf = (q) => q.slice(7, q.search(/ FROM /));
 	t(sqls.every((q) => !/\*/.test(columnsOf(q))), "§2 no SELECT * anywhere in the gather");
@@ -1064,7 +1067,7 @@ const failed = (results) => results.some((x) => !x.ok);
 		["the route phase without its own budget (the run's deadline instead)", milesWiringSection, swap(BLOCK, "kpiDeadheadRouteCalls(inputs, day, kind, routesDeadlineMs)", "kpiDeadheadRouteCalls(inputs, day, kind, deadlineMs)")],
 		["route pairs chosen without the ELD truck-days", milesWiringSection, swap(BLOCK, "milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone", "milesLoads: inputs.milesLoads, timeZone")],
 		["a month refused for the contract start", milesWiringSection, swap(BLOCK, "dedicatedStart: kpiSettingMonthOrDay(r.dedicatedStart) ? r.dedicatedStart : null,", "dedicatedStart: kpiSettingDay(r.dedicatedStart) ? r.dedicatedStart : null,")],
-		["SELECT * on expenses", gatherSection, swap(BLOCK, `"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'"`, `"SELECT * FROM expenses WHERE LOWER(type) = 'fuel'"`)],
+		["SELECT * on expenses", gatherSection, swap(BLOCK, "`SELECT date, amount, gallons, status FROM ${expenseFrom(\"world\")} WHERE LOWER(type) = 'fuel'`", "`SELECT * FROM ${expenseFrom(\"world\")} WHERE LOWER(type) = 'fuel'`")],
 	];
 	const results = [];
 	for (const [name, fn, src, passSrc] of mutants) {

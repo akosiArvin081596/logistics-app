@@ -12,6 +12,9 @@
 
     <!-- ALL EXPENSES -->
     <div v-show="activeSubTab === 'all'" class="sub-panel">
+      <!-- Personal lines waiting for a correction invoice (Super Admin only;
+           hidden when none waits). -->
+      <PersonalCorrectionsPanel v-if="auth.isSuperAdmin" />
       <!-- Download Receipts — Super Admin only.
            Streams a ZIP of every receipt file for a specific truck in a
            date range, plus a manifest.csv for accounting review. -->
@@ -336,12 +339,15 @@
             </div>
             <!-- No status change on a receipt in a finalized month: the server
                  refuses it, and the receipt is already in that month's figures. -->
-            <div v-if="expenseStatusChangeable(e)" class="mobile-exp-actions" @click.stop>
+            <div v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)" class="mobile-exp-actions" @click.stop>
               <template v-if="(e.status || 'Pending') === 'Pending'">
                 <button class="btn-approve mobile-exp-btn" @click="setStatus(e.id, 'Approved')">Approve</button>
                 <button class="btn-reject mobile-exp-btn" @click="setStatus(e.id, 'Rejected')">Reject</button>
               </template>
               <button v-else-if="e.status !== 'Pending'" class="btn-undo mobile-exp-btn" @click="setStatus(e.id, 'Pending')">Undo</button>
+            </div>
+            <div class="mobile-exp-personal" @click.stop>
+              <PersonalReceiptActions :expense="e" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(e.id, p)" />
             </div>
           </div>
         </div>
@@ -434,13 +440,14 @@
                 <span :class="['status-pill', expenseStatusClass(e)]" :title="finalizedTitle(e)">{{ expenseStatusLabel(e) }}</span>
               </td>
               <td class="action-cell" @click.stop>
-                <template v-if="expenseStatusChangeable(e)">
+                <template v-if="expenseStatusChangeable(e) && !personalBlocksStatus(e)">
                   <template v-if="(e.status || 'Pending') === 'Pending'">
                     <button class="btn-approve" @click="setStatus(e.id, 'Approved')">Approve</button>
                     <button class="btn-reject" @click="setStatus(e.id, 'Rejected')">Reject</button>
                   </template>
                   <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
                 </template>
+                <PersonalReceiptActions :expense="e" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(e.id, p)" />
               </td>
             </tr>
           </tbody>
@@ -606,12 +613,15 @@
                     </div>
                   </div>
                 </div>
-                <div v-if="expenseStatusChangeable(selectedExpense)" class="exp-actions">
+                <div v-if="expenseStatusChangeable(selectedExpense) && !personalBlocksStatus(selectedExpense)" class="exp-actions">
                   <template v-if="(selectedExpense.status || 'Pending') === 'Pending'">
                     <button class="exp-btn-approve" :disabled="approveLoading" @click="approveCurrent">{{ approveLoading ? '…' : 'Approve' }}</button>
                     <button class="exp-btn-reject" :disabled="approveLoading" @click="rejectCurrent">{{ approveLoading ? '…' : 'Reject' }}</button>
                   </template>
                   <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
+                </div>
+                <div class="exp-personal">
+                  <PersonalReceiptActions :expense="selectedExpense" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(selectedExpense.id, p)" />
                 </div>
               </div>
               <!-- RIGHT column — receipt, large + contained so the whole thing is readable -->
@@ -1644,6 +1654,9 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import ExpenseAnalyticsPanel from './expenses/ExpenseAnalyticsPanel.vue'
 import BulkReceiptScan from './expenses/BulkReceiptScan.vue'
 import GallonsRecoveryPanel from './expenses/GallonsRecoveryPanel.vue'
+import PersonalReceiptActions from './expenses/PersonalReceiptActions.vue'
+import PersonalCorrectionsPanel from './expenses/PersonalCorrectionsPanel.vue'
+import { personalBlocksStatus } from '../../lib/personalReceipt'
 import { US_STATES } from '../../utils/usStates'
 import { compressImage, readFileAsDataURL } from '../../lib/imageUtils'
 import { appDayEndIso, appDayStartIso, appToday, fmtAppInstant, fmtTimestamp, fmtYmd, parseYmdLocal } from '../../utils/datetime'
@@ -1709,6 +1722,8 @@ const activeSubTab = ref('all')
 
 // All expenses
 const allExpenses = ref([])
+// GET /api/expenses/all's personalEnabled: the server accepts new Personal marks.
+const personalEnabled = ref(false)
 // Client-side pagination for the expenses list — render one page of rows at a
 // time (default 25) instead of all rows at once. Server-side filtering already
 // scopes `allExpenses`; this only pages the render (and limits how many receipt
@@ -2574,6 +2589,7 @@ async function loadAll() {
   try {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
+    personalEnabled.value = data.personalEnabled === true
     // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
       try {
@@ -2598,8 +2614,17 @@ async function quietReload() {
   try {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
+    personalEnabled.value = data.personalEnabled === true
     pruneSelection()
   } catch { /* empty — leave existing data in place */ }
+}
+
+// A Personal mark, undo or reverse landed: the row shows the server's summary at
+// once, and a quiet reload brings the rest (a Pending receipt the mark approved).
+function onPersonalChanged(id, personal) {
+  const exp = allExpenses.value.find(e => e.id === id)
+  if (exp) exp.personal = personal
+  quietReload()
 }
 
 // Resolves true once the change is saved, false when it was refused. It never
@@ -4952,6 +4977,9 @@ tr:hover td { background: var(--surface-hover); }
   padding-top: 1rem;
   border-top: 1px solid #e2e8f0;
 }
+/* The receipt's Personal line (pill and Super Admin buttons). */
+.exp-personal { margin-top: 0.75rem; }
+.mobile-exp-personal { margin-top: 0.5rem; }
 .exp-btn-approve, .exp-btn-reject, .exp-btn-undo {
   flex: 1;
   padding: 0.7rem 1rem;

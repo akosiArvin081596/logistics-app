@@ -521,14 +521,18 @@ function battery(mods) {
 		t(C.metricByKey("fuel_savings").assumptions[0] === "Compared with a truck at the baseline MPG set on this page driving the same ELD miles, priced at the average $/gal actually paid.", "§11 savings assumption text");
 		t(C.metricByKey("freight_tons_estimated").assumptions[0] === "Loads with no stated weight are assumed to weigh the average of loads that state one.", "§11 estimate assumption text");
 		const kinds = { freight_tons_estimated: "estimate", fuel_savings: "estimate", active_units: "proxy", dispatch_calls: "not_tracked" };
-		t(C.METRICS.every((m) => m.kind === (kinds[m.key] || "real") && m.definitionVersion === (m.key === "paid_mile_share" ? 2 : 1) && typeof m.definition === "string" && m.definition.length > 20), "§11 kinds and versions");
+		// At version 2: the fuel metrics (their receipts leave out what a driver
+		// bought for himself, Personal receipts) and paid_mile_share (R10's paid
+		// miles); every other metric is at 1.
+		const V2 = new Set(["fuel_mpg", "fuel_savings", "co2_tonnes", "paid_mile_share"]);
+		t(C.METRICS.every((m) => m.kind === (kinds[m.key] || "real") && m.definitionVersion === (V2.has(m.key) ? 2 : 1) && typeof m.definition === "string" && m.definition.length > 20), "§11 kinds and versions");
 		t(JSON.stringify(C.metricByKey("truck_utilization").settingsUsed) === JSON.stringify(["aiDispatchStart", "dedicatedStart"])
 			&& JSON.stringify(C.metricByKey("paid_mile_share").settingsUsed) === JSON.stringify(["dedicatedStart"])
 			&& JSON.stringify(C.metricByKey("fuel_savings").settingsUsed) === JSON.stringify(["baselineMpg"]), "§11 settingsUsed");
 		t(C.settingsHashFor("loads_delivered", { baselineMpg: 7 }) === "", "§11 a metric that reads no setting hashes to ''");
 		t(C.settingsHashFor("fuel_savings", { baselineMpg: 6.5, recipients: ["x"] }) === C.settingsHashFor("fuel_savings", { recipients: ["y"], baselineMpg: 6.5 })
 			&& C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) !== C.settingsHashFor("fuel_savings", { baselineMpg: 7 }), "§11 the hash reads only the metric's settings");
-		const ok = { approved: 1, definition_version: 1, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) };
+		const ok = { approved: 1, definition_version: 2, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) };
 		t(C.approvalIsValid(ok, "fuel_savings", { baselineMpg: 6.5 }) === true, "§11 a current approval is valid");
 		t(C.approvalIsValid({ ...ok, definition_version: 0 }, "fuel_savings", { baselineMpg: 6.5 }) === false, "§11 an approval of an earlier definition lapses");
 		t(C.approvalIsValid(ok, "fuel_savings", { baselineMpg: 7 }) === false, "§11 an approval lapses when a setting it used changes");
@@ -552,9 +556,9 @@ function battery(mods) {
 		const series = out.metrics.flatMap((m) => m.series.map((s) => ({ metric_key: m.key, period: s.period, value: s.value, display: s.display, coverage: s.coverage }))).reverse();
 		const approvals = [
 			{ metric_key: "loads_delivered", approved: 1, definition_version: 1, settings_hash: "", approved_by: "super_admin", approved_at: "2026-10-09 12:00:00" },
-			{ metric_key: "fuel_savings", approved: 1, definition_version: 1, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6 }), approved_by: "super_admin", approved_at: "2026-10-08T12:00:00Z" },
+			{ metric_key: "fuel_savings", approved: 1, definition_version: 2, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6 }), approved_by: "super_admin", approved_at: "2026-10-08T12:00:00Z" },
 			{ metric_key: "revenue", approved: 1, definition_version: 0, settings_hash: "", approved_by: "super_admin", approved_at: "2026-10-01T12:00:00Z" },
-			{ metric_key: "co2_tonnes", approved: 0, definition_version: 1, settings_hash: "", approved_by: null, approved_at: null },
+			{ metric_key: "co2_tonnes", approved: 0, definition_version: 2, settings_hash: "", approved_by: null, approved_at: null },
 		];
 		const job = { enabled: { snapshot: true, digest: true }, lastRun: { id: 3, kind: "nightly", status: "ok", startedAt: "2026-10-09T08:00:00Z", finishedAt: "2026-10-09T08:00:04Z", durationMs: 4000, errors: [] } };
 		response = M.buildKpiResponse({ asOfDay: AS_OF, timeZone: "America/New_York", job, settings, derived: out.derived, snapshots, series, approvals, generatedAt: "2026-10-09T13:00:00Z", defaultRecipientConfigured: true });
