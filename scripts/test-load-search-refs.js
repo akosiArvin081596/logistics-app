@@ -134,6 +134,8 @@ check("Documents: a date or a word gives nothing",
 	[refs.documentRefs("9/15"), refs.documentRefs("9/15/2030"), refs.documentRefs("POD"), refs.documentRefs("Received")], [[], [], [], []]);
 check("Documents: a date with a month name gives up no year (review L1)",
 	[refs.documentRefs("15 Sep 2030 POD"), refs.documentRefs("Sep 15, 2030"), refs.documentRefs("1999")], [[], [], []]);
+check("Documents: a year followed by a dot or dash gives up nothing either",
+	[refs.documentRefs("Sep 15, 2030."), refs.documentRefs("15 Sep 2030-")], [[], []]);
 check("Documents: a BOL beside such a date is still indexed", pairs(refs.documentRefs("61000003 15 Sep 2030")), ["BOL #=61000003"]);
 check("draft values: only all-digit tokens (review L3)",
 	[refs.draftValues("ADV700 7000001"), refs.draftValues("PO-AB123 2700031"), refs.draftValues("SO7000001")], [["7000001"], ["2700031"], []]);
