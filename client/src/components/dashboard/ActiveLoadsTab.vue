@@ -14,7 +14,7 @@
           Needs Review ({{ needsReviewCount }})
         </button>
       </div>
-      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
@@ -469,7 +469,8 @@
 
 <script setup>
 import { computed, ref, reactive, watch } from 'vue'
-import { usePagination } from '../../composables/usePagination'
+import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
+import { ACTIVE_LOADS_PAGE_SIZE } from '../../lib/loadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -486,8 +487,8 @@ import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
-import { normDriver } from '../../lib/driverName'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
+import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 
 import { useAuthStore } from '../../stores/auth'
@@ -516,7 +517,9 @@ const searchResult = computed(() => {
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
+// Every active load on one page; paging only above 50, with no size choice
+// (lib/loadboardPaging.js). The search covers every row; a new one starts at page 1.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(filteredJobs, { fixedSize: ACTIVE_LOADS_PAGE_SIZE, resetOn: [searchQuery, needsReviewOnly] })
 const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Delivered']
 // Columns the dispatcher can manually fix when n8n's extraction is incomplete.
 // Excludes Driver/Truck/Owner ID/Job Status/* — those are managed by the

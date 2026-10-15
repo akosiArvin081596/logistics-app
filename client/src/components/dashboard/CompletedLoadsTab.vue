@@ -14,7 +14,7 @@
           Needs Review ({{ needsReviewCount }})
         </button>
       </div>
-      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" keep-size-choice @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <!-- Per-driver history + export — Super Admin only.
@@ -252,7 +252,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { usePagination } from '../../composables/usePagination'
+import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
@@ -271,6 +271,7 @@ import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
@@ -280,7 +281,6 @@ const { show: toast } = useToast()
 const auth = useAuthStore()
 const { isMobile } = useViewport()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
-import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
 const needsReviewOnly = ref(false)
@@ -430,12 +430,11 @@ const reviewBadgeStyle = {
   color: '#92400e',
   whiteSpace: 'nowrap',
 }
-// 25/page, not usePagination's default 5 — this tab is the "every load a driver
-// did" history, and 5 rows a page turns a year of work into endless paging.
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs, 25)
+// 25/page by default with a 10/25/50/100 choice remembered per user
+// (lib/loadboardPaging.js) — this tab is the "every load a driver did" history.
 // Any filter change re-slices the list, so a carried-over page number can land
-// on a blank page (filter while on page 4 → nothing). Snap back to page 1.
-watch([searchQuery, needsReviewOnly, driverFilter, fromDate, toDate], () => goTo(1))
+// on a blank page (filter while on page 4 → nothing): resetOn snaps back to page 1.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(sortedJobs, { tab: 'completed', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly, driverFilter, fromDate, toDate] })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
@@ -809,6 +808,7 @@ const detailSections = computed(() => {
 /* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
+.addr-csz { font-size: 0.92em; color: #64748b; }
 /* Needs Review: why, and where to fix it (top of the load detail). */
 .review-note {
   margin: 0 0 1rem;
@@ -822,7 +822,6 @@ const detailSections = computed(() => {
 }
 .review-note-link { color: #92400e; font-weight: 600; text-decoration: underline; }
 .review-note-link:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; border-radius: 2px; }
-.addr-csz { font-size: 0.92em; color: #64748b; }
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */
 .doc-del {

@@ -22,7 +22,7 @@
           Needs Review ({{ needsReviewCount }})
         </button>
       </div>
-      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" keep-size-choice @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
@@ -243,7 +243,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { usePagination } from '../../composables/usePagination'
+import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useViewport } from '../../composables/useViewport'
@@ -335,7 +335,9 @@ const mapHeaders = computed(() => {
   if (selectedJob.value && selectedJob.value['Origin Lat'] && !h.some(c => /origin.*lat/i.test(c))) h.push('Origin Lat', 'Origin Lng', 'Dest Lat', 'Dest Lng')
   return h
 })
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
+// 25 a page by default, 10/25/50/100 remembered per user (lib/loadboardPaging.js);
+// the search above covers every row, and a new search starts at page 1.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(filteredJobs, { tab: 'jobBoard', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly] })
 const brokerSourceCol = computed(() => props.headers.find(h => /broker/i.test(h)) || null)
 const phoneSourceCol = computed(() => props.headers.find(h => /phone/i.test(h)) || null)
 // Display columns: pick a small set of load-shape columns, then swap any
