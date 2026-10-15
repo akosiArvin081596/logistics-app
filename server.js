@@ -63441,9 +63441,9 @@ require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folde
 // stored and logged as a CODE ({ metric, code }).
 //
 // WHEN. A 1-minute tick (started 10 minutes after boot, with a boot run then)
-// takes the snapshot at 04:00 APP_TIMEZONE (03:00 US Central), catching up a
-// missed slot the same business day, and sends the digest on Mondays at 09:00
-// (08:00 Central). Slot maths: lib/kpi-schedule.js. Two kill switches, both
+// takes the snapshot at 04:00 APP_TIMEZONE, catching up a missed slot the same
+// business day, and sends the digest on Mondays at 09:00 APP_TIMEZONE. Slot
+// maths and the schedule's words: lib/kpi-schedule.js. Two kill switches, both
 // default ON (the `!/^(false|0|no|off)$/i` shape): KPI_SNAPSHOT_ENABLED (the
 // nightly job and with it every scheduled email) and KPI_DIGEST_ENABLED (every
 // KPI email, the one-time preview included). A Super Admin's
@@ -64291,14 +64291,11 @@ async function runKpiSnapshot(kind) {
 	return { runId, status };
 }
 
-// The schedule in words, for the admin page. The Central times hold only for the
-// default business zone (US Eastern, one hour ahead of Central all year), so any
-// other zone is named as itself.
+// The schedule in words, for the admin page: the business zone only ("Eastern"
+// for the default, any other zone named as itself). One wording, in
+// lib/kpi-schedule.js scheduleText().
 function kpiScheduleText(tz) {
-	if (tz === appTime.DEFAULT_APP_TIMEZONE) {
-		return { snapshot: "Daily at 4:00 AM Eastern (3:00 AM Central)", digest: "Mondays at 9:00 AM Eastern (8:00 AM Central)" };
-	}
-	return { snapshot: `Daily at 4:00 AM (${tz})`, digest: `Mondays at 9:00 AM (${tz})` };
+	return kpiSchedule.scheduleText(tz);
 }
 
 function kpiParseErrors(text) {
@@ -64503,8 +64500,8 @@ if (KPI_SNAPSHOT_ENABLED && startsJob("KPI snapshot")) {
 		kpiTickSafely("boot");
 		setInterval(() => kpiTickSafely("nightly"), KPI_TICK_MS);
 	}, KPI_BOOT_DELAY_MS);
-	console.log(`[kpi] enabled — snapshot daily at 04:00 ${APP_TIMEZONE} (03:00 US Central), ` +
-		(KPI_DIGEST_ENABLED ? `digest Mondays at 09:00 ${APP_TIMEZONE} (08:00 US Central)` : "digest off (KPI_DIGEST_ENABLED)"));
+	console.log(`[kpi] enabled — snapshot daily at 04:00 ${APP_TIMEZONE}, ` +
+		(KPI_DIGEST_ENABLED ? `digest Mondays at 09:00 ${APP_TIMEZONE}` : "digest off (KPI_DIGEST_ENABLED)"));
 } else if (!KPI_SNAPSHOT_ENABLED) {
 	console.log("[kpi] off (KPI_SNAPSHOT_ENABLED) — no nightly KPI snapshot or digest is scheduled");
 }

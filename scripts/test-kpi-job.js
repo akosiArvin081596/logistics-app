@@ -933,7 +933,7 @@ const schedulerSection = section(async (t, block = BLOCK) => {
 	t(replica.log.timeouts.length === 0 && replica.log.intervals.length === 0 && !replica.log.logs.some((l) => l.startsWith("[kpi] enabled")), "§9 startsJob() says no: no timer, no start-up line");
 	const live = world({ block, startsJob: (name) => name === "KPI snapshot" });
 	t(live.log.timeouts.length === 1 && live.log.timeouts[0].ms === 10 * 60 * 1000 && live.log.intervals.length === 0, "§9 started: the boot run in 10 minutes, no tick before it");
-	t(live.log.logs.includes("[kpi] enabled — snapshot daily at 04:00 America/New_York (03:00 US Central), digest Mondays at 09:00 America/New_York (08:00 US Central)"), "§9 the start-up line");
+	t(live.log.logs.includes("[kpi] enabled — snapshot daily at 04:00 America/New_York, digest Mondays at 09:00 America/New_York"), "§9 the start-up line names the business zone only");
 	live.at("2026-10-09T19:00:00Z");
 	live.log.timeouts[0].fn();
 	await new Promise((r) => setTimeout(r, 20));
