@@ -10,7 +10,7 @@
 
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-        <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+        <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
         <button
           v-if="needsReviewCount > 0"
           type="button"
@@ -37,6 +37,7 @@
             <div class="mobile-job-id">
               <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
               {{ cellValue(job, loadIdCol) || '—' }}
+              <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
             </div>
             <StatusBadge :status="statusValueOf(job) || 'Unassigned'" />
           </div>
@@ -83,6 +84,7 @@
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
                 {{ cellValue(job, col) }}
+                <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
@@ -179,7 +181,7 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed, it can't be removed: closed months stay as recorded.`"
       confirm-text="Delete"
       :danger="true"
       :confirm-disabled="deleting"
@@ -260,6 +262,7 @@ import RateConReviewModal from '../shared/RateConReviewModal.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -280,13 +283,15 @@ const searchQuery = ref('')
 const needsReviewOnly = ref(false)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
-const filteredJobs = computed(() => {
+// Load ID, or a reference number GET /api/dashboard attached as _refs
+// (lib/loadSearch.js); refVia() names the reference a row was found by.
+const searchResult = computed(() => {
   let pool = props.jobs
   if (needsReviewOnly.value) pool = pool.filter(needsReview)
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q || !loadIdCol.value) return pool
-  return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
+  return searchLoads(pool, searchQuery.value, loadIdCol.value)
 })
+const filteredJobs = computed(() => searchResult.value.rows)
+function refVia(job) { return searchResult.value.via.get(job) || null }
 const reviewToggleStyle = computed(() => ({
   display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
   padding: '0.4rem 0.75rem', fontSize: '0.75rem', fontWeight: '600',
@@ -516,8 +521,8 @@ async function runDelete() {
     // This used to be a bare `catch {}` that discarded the error and left the
     // confirm sitting open, so a refused delete was indistinguishable from a
     // slow one — the admin clicked Delete again. It matters more now: the server
-    // returns 409 PERIOD_FINALIZED naming the closed month and how to reopen it,
-    // and that sentence is the whole point of the guard.
+    // returns 409 PERIOD_FINALIZED naming the closed month and saying nothing was
+    // changed, and that sentence is the whole point of the guard.
     deleteError.value = (err && err.message) || 'Failed to delete this load.'
     toast(deleteError.value, 'error')
   } finally {
@@ -663,6 +668,20 @@ const deleteBtnStyle = computed(() => ({
   min-width: 0;
 }
 .mobile-job-btn { flex-shrink: 0; }
+/* The reference a search matched (Order #, PO #, ...), under the Load ID. */
+.ref-chip {
+  display: block;
+  width: fit-content;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
 /* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
 .addr-cell, .addr-stack { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }

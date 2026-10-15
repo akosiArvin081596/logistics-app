@@ -300,6 +300,8 @@ const DDL = `
 	CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL, distance_miles REAL);
 	CREATE TABLE load_eld_miles (load_id TEXT PRIMARY KEY, loaded_miles REAL, deadhead_miles REAL, loaded_basis TEXT DEFAULT 'no-data', in_progress INTEGER DEFAULT 0);
 	CREATE TABLE load_ratecon_miles (load_id TEXT PRIMARY KEY, miles REAL NOT NULL, match TEXT NOT NULL DEFAULT '');
+	CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, order_number TEXT, overrides_json TEXT DEFAULT '');
 	CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, week_start TEXT, week_end TEXT, total_earnings REAL DEFAULT 0, adjustment REAL DEFAULT 0, status TEXT DEFAULT 'Draft', deleted_at TEXT DEFAULT '', personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0);
 	CREATE TABLE load_responses (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, driver_name TEXT, response TEXT, responded_at TEXT);
 	CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT, type TEXT, metadata TEXT, created_at TEXT);
@@ -464,6 +466,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth,
 		payoutBasisContext: () => null,
+		// GET /api/dashboard requires lib/load-search-refs.js inline.
+		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, "..", p) : p),
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
 	};
 	const fns = new Function(...Object.keys(deps), liftedFor(src))(...Object.values(deps));
