@@ -10,6 +10,8 @@
 //     out, and a recompute could only make it worse);
 //   • a running load, a load whose window is older than the retained telemetry,
 //     and a cancelled or deleted load are skipped;
+//   • a load in a closed month is skipped, its row left as recorded (closed
+//     months show exactly as settled);
 //   • "513987502" and "#513987502" are one load;
 //   • the flag and the re-entry guard hold.
 //
@@ -29,7 +31,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
 let pass = 0;
 let fail = 0;
@@ -83,7 +85,7 @@ const iso = (ms) => new Date(ms).toISOString();
 const headers = ["Load ID", "Driver", "Status"];
 const row = (id, status = "Delivered") => ({ "Load ID": id, Driver: "Driver A", Status: status });
 
-function world({ enabled = true, rows, stored = {}, phases = {}, results = {} }) {
+function world({ enabled = true, rows, stored = {}, phases = {}, results = {}, closed = [] }) {
 	const calls = [];
 	const logs = [];
 	let routeCalls = 0;
@@ -98,6 +100,8 @@ function world({ enabled = true, rows, stored = {}, phases = {}, results = {} })
 		loadEldMilesGetStmt: { get: (k) => stored[k] },
 		computeStatusPhases: (id) => phases[String(id).replace(/^#/, "")] || [],
 		getLoadCoordsFull: () => ({ origin_lat: 1, origin_lng: 2, dest_lat: 3, dest_lng: 4 }),
+		// The month-end lock's test (scripts/test-load-eld-miles-final.js runs the real one).
+		haulRowInClosedMonth: (hs, r) => closed.includes(String(r["Load ID"]).replace(/^#/, "")),
 		measureLoadEldMiles: (rawId) => {
 			calls.push(rawId);
 			const key = String(rawId).replace(/^#/, "");
@@ -132,13 +136,15 @@ const running = [{ status: "In Transit", startedAt: iso(NOW - DAY), terminal: fa
 			row("600"),            // nothing new to read: stored row returned
 			row("700"),            // no device on the truck
 			row("800", "Cancelled"),
+			row("900"),            // in a closed month, its mid-haul row still stored
 			row(""),               // no id
 		],
-		stored: { 100: { in_progress: 0 }, 200: { in_progress: 1 } },
+		stored: { 100: { in_progress: 0 }, 200: { in_progress: 1 }, 900: { in_progress: 1 } },
+		closed: ["900"],
 		phases: {
 			100: closedOut(NOW - 5 * DAY), 200: closedOut(NOW - DAY), 300: running,
 			400: closedOut(NOW - 120 * DAY), 500: closedOut(NOW - 3 * DAY), 600: closedOut(NOW - 4 * DAY),
-			700: closedOut(NOW - 2 * DAY), 800: closedOut(NOW - 2 * DAY),
+			700: closedOut(NOW - 2 * DAY), 800: closedOut(NOW - 2 * DAY), 900: closedOut(NOW - 40 * DAY),
 		},
 		results: {
 			200: { loadedMiles: 412.6, stored: false },
@@ -150,9 +156,10 @@ const running = [{ status: "In Transit", startedAt: iso(NOW - DAY), terminal: fa
 	const counts = await w.sweep();
 	check("measures exactly the loads it should, each once", w.calls, ["200", "500", "600", "700"]);
 	check("tallies every outcome", counts, {
-		already_final: 1, measured: 2, not_closed_out: 1, telemetry_purged: 1, kept_stored: 1, no_eld_device: 1,
+		already_final: 1, measured: 2, not_closed_out: 1, telemetry_purged: 1, kept_stored: 1, no_eld_device: 1, closed_month: 1,
 	});
 	check("a cancelled load is never measured", w.calls.includes("800"), false);
+	check("a load in a closed month is never measured: its row stays as recorded", w.calls.includes("900"), false);
 	check("Google Routes was never called", w.routeCalls(), 0);
 	check("the run is logged once", w.logs.filter((l) => l.startsWith("[load-eld-miles] sweep:")).length, 1);
 	check("nothing went wrong", w.logs.filter((l) => l.startsWith("ERR")), []);

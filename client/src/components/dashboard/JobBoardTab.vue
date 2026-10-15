@@ -264,6 +264,7 @@ import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
+import { offDutySuffix } from '../../lib/availabilityText'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -416,7 +417,7 @@ function driverLabel(d) {
   let suffix = ''
   if (onLoad) suffix += ' — On Load'
   if (qc > 0) suffix += ` (Queue: ${qc})`
-  return d.name + suffix
+  return d.name + suffix + offDutySuffix(d.offUntil)
 }
 
 // Per Desoren (2026-05-20): when dispatching to a driver who's already on a

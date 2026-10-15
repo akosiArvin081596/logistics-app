@@ -70,10 +70,11 @@ export const useSheetsStore = defineStore('sheets', {
       }
     },
 
-    async addRow(values) {
+    // `opts.confirmOffDuty`: "Assign anyway" after 409 DRIVER_OFF_DUTY (R11).
+    async addRow(values, opts = {}) {
       const result = await api.post(
         `/api/data?sheet=${encodeURIComponent(this.currentSheet)}`,
-        { values }
+        { values, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) }
       )
       await this.loadData()
       return result
@@ -84,10 +85,10 @@ export const useSheetsStore = defineStore('sheets', {
     // the row as it reads it, so a column sent back as shown is not rewritten.
     // No `baseline` is sent (the Active Loads editor sends one), so a cell that
     // changed on the sheet since this view loaded is written back as shown here.
-    async saveRow(rowIndex, values) {
+    async saveRow(rowIndex, values, opts = {}) {
       const result = await api.put(
         `/api/data/${rowIndex}?sheet=${encodeURIComponent(this.currentSheet)}`,
-        { values }
+        { values, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) }
       )
       this.editingRow = null
       await this.loadData()

@@ -166,6 +166,8 @@ function world({ rows, phases = {}, stored = {} }) {
 		loadEldMilesGetStmt: { get: (k) => stored[k] },
 		computeStatusPhases: (id) => phases[String(id).replace(/^#/, "")] || [],
 		getLoadCoordsFull: () => ({ origin_lat: 1, origin_lng: 2, dest_lat: 3, dest_lng: 4 }),
+		// Every month open here; scripts/test-load-eld-miles-final.js covers closed ones.
+		haulRowInClosedMonth: () => false,
 		measureLoadEldMiles: (rawId) => {
 			calls.push(rawId);
 			stored[String(rawId).replace(/^#/, "")] = { in_progress: 0 };
