@@ -128,6 +128,9 @@ const SHARED_FNS = [
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
 	"personalSnapshotOf", "personalLinesForInvoices",
+	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
+	// the paid-days release a regenerated Draft runs.
+	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
 	// The P&L's deduction and the key it folds a driver's spellings to — which,
 	// like getAllExcludedDriverDays(), reads a name through these two.
 	"isBuiltInPropertyName", "driverNameForTotals",
@@ -316,6 +319,8 @@ function buildWorld(opts = {}) {
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
+		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
+		TRIP_WORK_DAYS_FROM: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		// The document records whose invoice it is, so a test can tell which
@@ -1192,8 +1197,9 @@ function mutate(find, replace, label) {
 				[list, approve, restore, report_].map((s) => /LOWER\((driver|driver_name)\)/.test(s)), [false, false, false, false]],
 			// The two INSERTs that mint an invoice (the boot-time CHECK probe, which
 			// inserts and deletes a sentinel row, names no loads_count).
-			// Three mint an invoice: the weekly generate, the manual route and the
-			// Personal correction. Each must sit inside the insert() callback of the
+			// Four mint an invoice: the weekly generate, the manual route, the
+			// Personal correction and the work-day correction (createWorkDayCorrection()).
+			// Each must sit inside the insert() callback of the
 			// commitInvoiceWithPdf({ … }) call just above it.
 			["§7 every invoice-minting INSERT is an insert() callback of commitInvoiceWithPdf()",
 				(() => {
@@ -1205,7 +1211,7 @@ function mutate(find, replace, label) {
 					});
 					return [at.length, inside.length];
 				})(),
-				[3, 3]],
+				[4, 4]],
 			["§7 the P&L resolution §4 compares against is what /api/financials runs",
 				[SRC.includes('const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };'),
 					SRC.includes("dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);")], [true, true]],

@@ -432,11 +432,14 @@ section("§4 server.js: default off, FROM required, no lock read, one shared cop
 		[bootWarn(true, "2026-09", ["2026-08", "2026-09"]), bootWarn(true, "2026-10", ["2026-08", "2026-09"]), bootWarn(false, "2026-09", ["2026-09"]), bootWarn(true, null, ["2026-09"]), bootWarn(true, "2026-09", [])],
 		[1, 0, 0, 0, 0]);
 
-	const calls = (SRC.match(/loadPayDays\.payDaysForLoad\(/g) || []).length;
-	check("server.js: the invoice and the investor view call payDaysForLoad()", calls, 2);
+	// paidDaysForLoad() is the shared call once the trip work-day rule exists; it
+	// hands every load it does not cover to payDaysForLoad() unchanged.
+	const calls = (SRC.match(/loadPayDays\.(?:payDaysForLoad|paidDaysForLoad)\(/g) || []).length;
+	check("server.js: the invoice and the investor view call payDaysForLoad() (or paidDaysForLoad())", calls, 2);
 	check("server.js: no inline copy of the ELD intersection is left", /\.travel\.has\(|\.coverage\.has\(/.test(SRC.replace(/\/\/[^\n]*/g, "")), false);
 	const calc = fs.readFileSync(path.join(ROOT, "lib", "financials-calc.js"), "utf8");
-	check("financials-calc.js: the ledger calls payDaysForLoad() with the request's filter", /loadPayDays\.payDaysForLoad\([\s\S]{0,200}preDispatch,?\s*\)/.test(calc), true);
+	check("financials-calc.js: the ledger calls payDaysForLoad() (or paidDaysForLoad()) with the request's filter",
+		/loadPayDays\.payDaysForLoad\([\s\S]{0,200}preDispatch,?\s*\)/.test(calc) || /loadPayDays\.paidDaysForLoad\(\{[\s\S]{0,200}\bpreDispatch,/.test(calc), true);
 	check("financials-calc.js: no inline copy of the ELD intersection is left", /\.travel\.has\(|\.coverage\.has\(/.test(calc), false);
 	check("each server pay path builds the filter once per request", (SRC.match(/= preDispatchPayDayFilter\(\);/g) || []).length, 2);
 	check("the ledger's facts carry the filter", /preDispatch: preDispatchPayDayFilter\(\),/.test(SRC), true);
