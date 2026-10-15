@@ -240,6 +240,24 @@ export function formatPerMile(n) {
   return formatMoney(n)
 }
 
+/**
+ * The Fleet P&L's period columns, newest first, so the live (current) period
+ * sits beside the line names and older periods read to the right; Total stays
+ * the last column (owner request R2). Every granularity's key sorts as its
+ * calendar order ('2026-10', '2026-10-03', '2026-Q4', '2026').
+ *
+ * A reordered copy of the server's list: each period keeps its own key, so
+ * every cell still shows the server's figure for that period. Nothing is added.
+ */
+export function periodsNewestFirst(periods) {
+  const list = Array.isArray(periods) ? [...periods] : []
+  return list.sort((a, b) => {
+    const ak = String(a?.key ?? '')
+    const bk = String(b?.key ?? '')
+    return ak === bk ? 0 : (ak < bk ? 1 : -1)
+  })
+}
+
 /** Positive / negative / zero class for a figure, by sign only. */
 export function signClass(n) {
   if (!finite(n) || Number(n) === 0) return ''
