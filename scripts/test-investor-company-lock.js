@@ -88,7 +88,7 @@ function liftRoute(head, what) {
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
 }
 const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
-const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {', "PUT /api/users/:id");
+const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {', "PUT /api/users/:id");
 
 const NEW_HELPERS = ["investorAccountState", "investorCompanyMoves", "investorCompanyLockBlockers"];
 const MODULE_SRC = [
@@ -246,7 +246,8 @@ function makeApp() {
 	};
 	const register = (method, src) => {
 		let handler = null;
-		const e = { ...env, app: { [method]: (p, guard, h) => { handler = h; } } };
+		// The handler is the last argument (PUT mounts the password-reset limiter before it).
+		const e = { ...env, userPasswordResetLimiter: (req, res, next) => next(), app: { [method]: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } } };
 		const names = Object.keys(e);
 		new Function(...names, src)(...names.map((k) => e[k]));
 		if (typeof handler !== "function") die(`the lifted ${method.toUpperCase()} route did not register a handler`);

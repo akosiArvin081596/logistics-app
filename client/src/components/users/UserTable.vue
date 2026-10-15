@@ -64,13 +64,18 @@
 
     <!-- Edit Modal -->
     <Teleport to="body">
-      <div v-if="showEdit" class="confirm-overlay" @click.self="showEdit = false">
-        <div class="confirm-dialog edit-dialog">
+      <div v-if="showEdit" class="confirm-overlay" @click.self="closeEdit">
+        <!-- A form of its own, so a browser's saved-login autofill sees only these
+             fields: the edited account's username (read-only, hidden) tells it whose
+             password this is, Full Name and Email are not login fields, and both
+             password fields are new-password fields (B21). -->
+        <form class="confirm-dialog edit-dialog" autocomplete="off" novalidate @submit.prevent="handleSaveEdit">
           <h3>Edit User &mdash; {{ editForm.username }}</h3>
+          <input class="account-username" type="text" name="username" autocomplete="username" :value="editForm.username" readonly tabindex="-1" aria-hidden="true" />
 
           <div class="edit-field">
-            <label>Role</label>
-            <select v-model="editForm.role">
+            <label for="edit-user-role">Role</label>
+            <select id="edit-user-role" v-model="editForm.role">
               <option>Super Admin</option>
               <option>Dispatcher</option>
               <option>Driver</option>
@@ -79,33 +84,56 @@
           </div>
 
           <div class="edit-field">
-            <label>Linked Driver</label>
-            <select v-model="editForm.driverName">
+            <label for="edit-user-driver">Linked Driver</label>
+            <select id="edit-user-driver" v-model="editForm.driverName" aria-describedby="edit-user-driver-help">
               <option value="">None</option>
               <option v-for="name in driverNames" :key="name" :value="name">{{ name }}</option>
             </select>
+            <p id="edit-user-driver-help" class="field-help">Connects this login to a driver profile, so the user sees that driver's loads and pay.</p>
           </div>
 
           <div class="edit-field">
-            <label>Full Name</label>
-            <input v-model="editForm.fullName" type="text" placeholder="e.g. John Smith" />
+            <label for="edit-user-full-name">Full Name</label>
+            <input id="edit-user-full-name" v-model="editForm.fullName" type="text" name="edit-full-name" placeholder="e.g. John Smith" autocomplete="off" />
           </div>
 
           <div class="edit-field">
-            <label>Email</label>
-            <input v-model="editForm.email" type="email" placeholder="Email" />
+            <label for="edit-user-email">Email</label>
+            <input id="edit-user-email" v-model="editForm.email" type="email" name="edit-contact-email" placeholder="Email" autocomplete="off" />
           </div>
 
           <div class="edit-field">
-            <label>New Password <span class="hint">(leave blank to keep current)</span></label>
-            <input v-model="editForm.password" type="password" placeholder="New password" autocomplete="new-password" />
+            <label for="edit-user-new-password">New Password <span class="hint">(leave both blank to keep current)</span></label>
+            <div class="pw-wrap">
+              <input id="edit-user-new-password" v-model="editForm.password" :type="showNewPassword ? 'text' : 'password'" name="new-password" placeholder="New password" autocomplete="new-password" autocapitalize="off" spellcheck="false" @input="onPasswordInput" />
+              <button type="button" class="pw-toggle" :aria-label="showNewPassword ? 'Hide password' : 'Show password'" :aria-pressed="showNewPassword" aria-controls="edit-user-new-password" @click="showNewPassword = !showNewPassword">
+                <EyeOff v-if="showNewPassword" :size="16" aria-hidden="true" />
+                <Eye v-else :size="16" aria-hidden="true" />
+              </button>
+            </div>
           </div>
+
+          <div class="edit-field">
+            <label for="edit-user-confirm-password">Confirm New Password</label>
+            <div class="pw-wrap">
+              <input id="edit-user-confirm-password" v-model="editForm.confirmPassword" :type="showConfirmPassword ? 'text' : 'password'" name="confirm-new-password" placeholder="Type the new password again" autocomplete="new-password" autocapitalize="off" spellcheck="false" :aria-invalid="passwordState.mismatch" aria-describedby="edit-user-password-hint" @input="onPasswordInput" />
+              <button type="button" class="pw-toggle" :aria-label="showConfirmPassword ? 'Hide password' : 'Show password'" :aria-pressed="showConfirmPassword" aria-controls="edit-user-confirm-password" @click="showConfirmPassword = !showConfirmPassword">
+                <EyeOff v-if="showConfirmPassword" :size="16" aria-hidden="true" />
+                <Eye v-else :size="16" aria-hidden="true" />
+              </button>
+            </div>
+            <p id="edit-user-password-hint" class="field-error" aria-live="polite">{{ passwordHint }}</p>
+          </div>
+
+          <!-- The server's answer when it refuses the save (a weak password, the
+               admin's own password, a locked month...). The dialog stays open. -->
+          <p v-if="saveError" id="edit-user-save-error" class="field-error save-error" role="alert">{{ saveError }}</p>
 
           <div class="confirm-actions">
-            <button class="btn btn-secondary" @click="showEdit = false">Cancel</button>
-            <button class="btn btn-primary" @click="handleSaveEdit">Save</button>
+            <button type="button" class="btn btn-secondary" @click="closeEdit">Cancel</button>
+            <button type="submit" class="btn btn-primary" :disabled="!passwordState.canSave || saving">{{ saving ? 'Saving...' : 'Save' }}</button>
           </div>
-        </div>
+        </form>
       </div>
     </Teleport>
 
@@ -122,26 +150,51 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
+import { Eye, EyeOff } from 'lucide-vue-next'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
+import { passwordChange, passwordChangeHint } from '../../lib/passwordFields.js'
 // Shared app-zone formatters — they pin output to APP_TIMEZONE (a time with its
 // zone label, a date without one) and guard against bare wall-clock input, so
 // these columns do not hand-roll their own copies of that option bag.
 import { fmtAppDate, fmtTimestamp } from '@/utils/datetime'
 
-defineProps({
+const props = defineProps({
   users: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
+  // Saves an edit ({ id, data }) and resolves once the server accepted it;
+  // rejects with the server's error otherwise (UsersView.vue). The Edit User
+  // dialog waits for it: it closes on success and shows a refusal inline.
+  saveUser: { type: Function, required: true },
 })
 
-const emit = defineEmits(['delete', 'update', 'rate'])
+const emit = defineEmits(['delete', 'rate'])
 
 const showConfirm = ref(false)
 const pendingUser = ref(null)
 
 const showEdit = ref(false)
-const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', fullName: '' })
+const editForm = reactive({ id: null, username: '', role: '', driverName: '', email: '', password: '', confirmPassword: '', fullName: '' })
+const showNewPassword = ref(false)
+const showConfirmPassword = ref(false)
+// Save is disabled while the two password fields differ; both blank keeps the
+// current password (src/lib/passwordFields.js).
+const passwordState = computed(() => passwordChange(editForm.password, editForm.confirmPassword))
+const passwordHint = computed(() => passwordChangeHint(editForm.password, editForm.confirmPassword))
+
+// Both password fields start empty and hidden on every open, and are cleared on
+// every close, so a typed password never outlives the dialog.
+function clearPasswords() {
+  editForm.password = ''
+  editForm.confirmPassword = ''
+  showNewPassword.value = false
+  showConfirmPassword.value = false
+}
+
+// The save in flight, and the server's message when it refused the last one.
+const saving = ref(false)
+const saveError = ref('')
 
 function openEdit(user) {
   editForm.id = user.id
@@ -150,20 +203,49 @@ function openEdit(user) {
   editForm.driverName = user.DriverName || ''
   editForm.email = user.Email || ''
   editForm.fullName = user.FullName || ''
-  editForm.password = ''
+  clearPasswords()
+  saveError.value = ''
   showEdit.value = true
 }
 
-function handleSaveEdit() {
+// A refusal's message speaks about what was typed, so it goes as soon as either
+// password field changes. Only typing (or autofill) fires this; emptying the
+// fields after PASSWORD_IS_YOURS is not an input event, so that message stays.
+function onPasswordInput() {
+  saveError.value = ''
+}
+
+function closeEdit() {
+  showEdit.value = false
+  clearPasswords()
+  saveError.value = ''
+}
+
+// The dialog stays open until the server accepts the edit. A refusal is shown
+// inline under the password fields with what was typed kept, so the admin
+// fixes it instead of reopening and retyping. PASSWORD_IS_YOURS empties both
+// password fields: what they hold is the admin's own password.
+async function handleSaveEdit() {
+  const state = passwordState.value
+  if (!state.canSave || saving.value) return
   const data = {
     role: editForm.role,
     driverName: editForm.driverName,
     email: editForm.email,
     fullName: editForm.fullName,
   }
-  if (editForm.password) data.password = editForm.password
-  emit('update', { id: editForm.id, data })
-  showEdit.value = false
+  if (state.password) data.password = state.password
+  saving.value = true
+  saveError.value = ''
+  try {
+    await props.saveUser({ id: editForm.id, data })
+    closeEdit()
+  } catch (err) {
+    saveError.value = (err && err.message) || 'This user could not be saved. Try again.'
+    if (err && err.code === 'PASSWORD_IS_YOURS') clearPasswords()
+  } finally {
+    saving.value = false
+  }
 }
 
 function userDetail(user) {
@@ -521,6 +603,78 @@ function handleConfirmDelete() {
 .edit-field input:focus {
   outline: none;
   border-color: var(--blue);
+}
+
+/* Taller now (two password fields, a help line): scroll inside on short phones. */
+.edit-dialog {
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+/* The edited account's username, for the browser's password manager only. */
+.account-username {
+  display: none;
+}
+
+.field-help {
+  margin: 0.3rem 0 0;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.field-error {
+  margin: 0.3rem 0 0;
+  min-height: 1em;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--danger);
+}
+
+.pw-wrap {
+  position: relative;
+}
+
+.edit-field .pw-wrap input {
+  padding-right: 2.5rem;
+}
+
+.pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.25rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.pw-toggle:hover,
+.pw-toggle:focus-visible {
+  color: var(--text);
+}
+
+.pw-toggle:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.save-error {
+  margin: 0 0 0.25rem;
+  font-weight: 600;
+}
+
+.confirm-actions .btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .star-rating { display: flex; gap: 1px; }
 .star { font-size: 1.1rem; color: #d1d5db; transition: color 0.1s; }

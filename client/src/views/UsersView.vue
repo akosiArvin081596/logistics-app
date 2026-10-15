@@ -28,7 +28,7 @@
     </template>
     <template v-else>
       <PaginationBar :page="page" :page-size="pageSize" :total="store.users.length" :total-pages="totalPages" @go="goTo" @size="setSize" />
-      <UserTable :users="paginatedItems" :driver-names="store.driverNames" @delete="handleDeleteUser" @update="handleUpdateUser" @rate="handleRateUser" />
+      <UserTable :users="paginatedItems" :driver-names="store.driverNames" :save-user="saveUser" @delete="handleDeleteUser" @rate="handleRateUser" />
     </template>
   </div>
 </template>
@@ -76,13 +76,13 @@ async function handleAddUser(userData) {
   }
 }
 
-async function handleUpdateUser({ id, data }) {
-  try {
-    await store.updateUser(id, data)
-    toast('User updated')
-  } catch (err) {
-    toast(err.message || 'Failed to update user', 'error')
-  }
+// The Edit User dialog waits on this (UserTable's saveUser): a refusal rejects,
+// and the dialog shows the server's message inline and stays open. Once the
+// server has accepted the edit, a failed list reload is a toast, not a failed save.
+async function saveUser({ id, data }) {
+  await store.updateUser(id, data)
+  toast('User updated')
+  store.loadUsers().catch((err) => toast(err.message || 'Failed to reload users', 'error'))
 }
 
 async function handleRateUser(id, rating) {

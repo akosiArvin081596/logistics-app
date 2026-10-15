@@ -209,7 +209,7 @@ const SRCS = {
 	logout: liftRoute('app.post("/api/auth/logout", (req, res) => {'),
 	change: liftRoute('app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async (req, res) => {'),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
-	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {'),
+	updateUser: liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {'),
 	refresh: liftFunction("function refreshOwnSession(req) {"),
 	fixName: liftRoute('app.put("/api/admin/fix-driver-name", requireRole("Super Admin"), async (req, res) => {'),
 	accountIds: liftFunction("function driverRenameAccountIds(oldName, newName, opts = {}) {"),
@@ -392,8 +392,16 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
 	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");
-	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets", sources.change)(
-		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.liveSessionIds, helpers.disconnectSessionSockets);
+	// Both password routes email the account afterwards (notifyPasswordChanged(),
+	// B21); that email is scripts/test-password-change-notice.js's subject, so here
+	// it is a no-op that sends nothing.
+	const notifyPasswordChanged = () => Promise.resolve({ recipients: 0, sent: 0 });
+	// The shared new-password rule both routes check, as shipped.
+	const passwordRules = require("../lib/password-rules");
+	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets",
+		"notifyPasswordChanged", "passwordRules", sources.change)(
+		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.liveSessionIds, helpers.disconnectSessionSockets,
+		notifyPasswordChanged, passwordRules);
 
 	// PUT /api/users/:id on its real guard, the real purge and the real audit
 	// writer. The purge is wrapped only to record whom it was asked to revoke and
@@ -420,7 +428,8 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
-		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", sources.updateUser)(
+		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
+		"userPasswordResetLimiter", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
@@ -432,7 +441,11 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		() => null,
 		// The lock on an investor's company name (its own subject is
 		// scripts/test-investor-company-lock.js): nothing to judge.
-		() => [], () => null);
+		() => [], () => null,
+		// The password-change email (above): sends nothing.
+		notifyPasswordChanged, passwordRules,
+		// The password-reset limiter (test-password-change-notice.js section 9): lets every request through.
+		passThrough);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions
