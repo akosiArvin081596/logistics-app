@@ -5340,6 +5340,15 @@ const PRE_DISPATCH_PAY_DAY_RULE_ENABLED = /^(true|1|yes|on)$/i.test(String(proce
 // warning at boot.
 const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PAY_DAY_RULE_ENABLED, process.env.PRE_DISPATCH_PAY_DAY_RULE_FROM,
 	(msg) => console.warn(`[pre-dispatch] ${msg}`));
+// Mark Paid in a closed month records the payment only (the user's decision of
+// 2026-10-14): on, a driver invoice whose week touches a closed month can be
+// marked Paid (status, paid_at, paid_by and an audit row; no closed month's
+// revenue, P&L, payout or investor figure reads invoices), and a revert may
+// clear a paid stamp set after every closed month in the week was locked
+// (paidStampAfterLocks()). Off, both refuse in a closed month as before.
+// Dormant until the user's word (true/1/yes/on); before switching it on run
+// scripts/mark-paid-closed-month-report.js.
+const MARK_PAID_CLOSED_MONTH_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MARK_PAID_CLOSED_MONTH_ENABLED ?? "").trim());
 // The owner's trip-timestamp work-day rule for daily-rate drivers (B12,
 // lib/trip-work-days.js), dormant until the owner approves its dry run
 // (scripts/work-days-dry-run.js): TRIP_WORK_DAYS_ENABLED (true/1/yes/on; off by
@@ -24752,15 +24761,20 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 			return res.status(400).json({ error: `Cannot ${action} an invoice with status "${currentStatus}"` });
 		}
 
-		// ⚠️ ONLY THE `paid` BRANCH IS GUARDED, and that is a decision, not an
-		// oversight. approve / reject / processing move an invoice through review;
-		// `paid` is the one transition asserting money left the bank, and it is the
-		// one that stamps `paid_at` — the column invoiceRowPeriodLocked() reads, so
-		// this verb can CREATE the frozen state after the fact and make the row
-		// permanently un-renameable and un-cascadable with nothing on the record
-		// saying the month was already closed when it happened. submit / revert /
-		// delete / restore are left alone for the same reason: workflow state, not
-		// money, and each already has its own state-machine check.
+		// ⚠️ ONLY THE `paid` BRANCH CONSULTS THE MONTH LOCK. approve / reject /
+		// processing move an invoice through review; `paid` is the one transition
+		// asserting money left the bank, and it stamps `paid_at`, the column
+		// invoiceRowPeriodLocked() reads. Recording a payment changes no closed
+		// month's figure: driver pay in the ledger, Financials and the investor
+		// view comes from pay days, never from invoices
+		// (scripts/test-mark-paid-closed-month.js A4/A5). So with
+		// MARK_PAID_CLOSED_MONTH_ENABLED on, a week touching a closed month is
+		// marked Paid and the closed months are named in the pay_invoice audit row;
+		// off, it is refused as before. Either way an unreadable lock table or week
+		// date refuses: the month a payment lands against must be knowable.
+		// submit / delete / restore are workflow state, not money, and each has its
+		// own state-machine check.
+		let closedMonths = [];
 		if (action === "paid") {
 			const invoicePaidAudit = {
 				action: "pay_invoice_blocked", entity: "invoice", entityId: String(invoice.id),
@@ -24776,12 +24790,16 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 			const lock = invoiceMonthLockBlockers(invoice);
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Marking an invoice paid", invoicePaidAudit);
 			if (lock.blockers.length) {
-				// `lock.remedy` is set only on the unresolved-date branch, where the
-				// month-end remedy would name no period and point at a route that cannot
-				// edit a week date.
-				return periodBlockedResponse(req, res,
-					`Cannot mark ${invoice.invoice_number || `invoice #${invoice.id}`} paid`,
-					lock.blockers, lock.remedy || INVOICE_PAID_LOCK_REMEDY, invoicePaidAudit);
+				const unresolved = lock.blockers.some((b) => b.periods.some((p) => !p));
+				if (!MARK_PAID_CLOSED_MONTH_ENABLED || unresolved) {
+					// `lock.remedy` is set only on the unresolved-date branch, where the
+					// month-end remedy would name no period and point at a route that cannot
+					// edit a week date.
+					return periodBlockedResponse(req, res,
+						`Cannot mark ${invoice.invoice_number || `invoice #${invoice.id}`} paid`,
+						lock.blockers, lock.remedy || INVOICE_PAID_LOCK_REMEDY, invoicePaidAudit);
+				}
+				closedMonths = [...new Set(lock.blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
 			}
 		}
 
@@ -24806,12 +24824,23 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 		} else if (action === "paid") {
 			newStatus = "Paid";
 			// Same principle: paid_at / paid_by are separate from approved_*
-			// so the original approver is preserved in the audit trail.
-			db.prepare("UPDATE invoices SET status = 'Paid', paid_at = ?, paid_by = ? WHERE id = ?")
-				.run(now, adminName, invoice.id);
+			// so the original approver is preserved in the audit trail. Every
+			// payment is audited with it, in one transaction; a payment on a week
+			// touching a closed month names the month and says nothing else moved.
+			db.transaction(() => {
+				db.prepare("UPDATE invoices SET status = 'Paid', paid_at = ?, paid_by = ? WHERE id = ?")
+					.run(now, adminName, invoice.id);
+				logAudit(req, "pay_invoice", "invoice", invoice.id,
+					`marked ${invoice.invoice_number || `invoice #${invoice.id}`} PAID` +
+					` (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"},` +
+					` total due $${invoiceTotalDue(invoice).toFixed(2)}, status ${currentStatus} -> Paid, paid_at ${now})` +
+					(closedMonths.length
+						? `; the week touches closed ${closedMonths.map(periodLabel).join(", ")}: the payment is recorded only, no closed month's figure changes`
+						: ""));
+			})();
 		}
 		notifyChange("invoices");
-		res.json({ success: true, status: newStatus });
+		res.json({ success: true, status: newStatus, ...(closedMonths.length ? { closedMonths } : {}) });
 
 		// Fire-and-forget: email the driver about the status change. Best-effort.
 		// The recipient is the Driver account whose name is the invoice's in any
@@ -24989,16 +25018,19 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 // timestamps are preserved in the audit trail entry. Draft/Submitted invoices
 // are already editable and can't be reverted.
 //
-// ⚠️ PERIOD-GUARDED ON THE `paid_at` LEG, AND THAT IS THE SAME LINE THE approve
-// ROUTE DRAWS — read the two together. approve's `paid` branch is guarded because
-// it CREATES the payment stamp in a month that may be closed; this route ERASES
-// the same stamp, on the same column, in the same months. Guarding only the
-// creating direction is a guard you can walk around by reverting and re-marking,
-// and the erase is the worse half: `paid_at` is what invoiceRowPeriodLocked()
-// reads, what the user-route cascade reports as INVOICE_ALREADY_PAID, and what a
-// statement for a settled month was printed against. Clearing it in a FINALIZED
-// month restates that month's record of whether money moved, with nothing on the
-// record saying the month was already closed when it happened.
+// ⚠️ PERIOD-GUARDED ON THE `paid_at` LEG — read it with the approve route's `paid`
+// branch, which CREATES the stamp this route ERASES. A stamp that existed when a
+// month closed is part of that month's record: `paid_at` is what
+// invoiceRowPeriodLocked() reads, what the user-route cascade reports as
+// INVOICE_ALREADY_PAID, and what a settled month's statement was printed
+// against, so clearing it would restate whether money moved in a closed month.
+// That stays refused, always. With MARK_PAID_CLOSED_MONTH_ENABLED on, the one
+// stamp a revert may clear in a closed month is one set AFTER every closed month
+// in the week was locked (paidStampAfterLocks(): parsed instants, an unreadable
+// stamp or lock time refuses) — a payment recorded under that flag, for which
+// marking and un-marking are both records only. The revert is audited with the
+// closed months and both instants. Off, every stamp in a closed month is refused
+// as before.
 //
 // ⚠️ SCOPED TO A REVERT THAT ACTUALLY ERASES A STAMP, not to every revert, and the
 // criterion is the COLUMN rather than the status. An Approved / Processing /
@@ -25020,6 +25052,7 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 		// closed month gets the clearer "already editable" 400 rather than a month-end
 		// 409 about a write it was never going to make — the ordering approve uses,
 		// and no write has happened on either path.
+		let revertClosedMonths = [];
 		if (String(invoice.paid_at || "").trim()) {
 			const invoiceRevertAudit = {
 				action: "revert_invoice_blocked", entity: "invoice", entityId: String(invoice.id),
@@ -25035,12 +25068,17 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 			const lock = invoiceMonthLockBlockers(invoice);
 			if (lock.unreadable) return periodLockUnreadableResponse(req, res, "Reverting a paid invoice", invoiceRevertAudit);
 			if (lock.blockers.length) {
-				// `lock.remedy` is set only on the unresolved-date branch, where the
-				// month-end remedy would name no period and point at a route that cannot
-				// edit a week date. Same fallback as its two siblings.
-				return periodBlockedResponse(req, res,
-					`Cannot revert ${invoice.invoice_number || `invoice #${invoice.id}`}`,
-					lock.blockers, lock.remedy || INVOICE_REVERT_LOCK_REMEDY, invoiceRevertAudit);
+				const unresolved = lock.blockers.some((b) => b.periods.some((p) => !p));
+				const months = [...new Set(lock.blockers.flatMap((b) => b.periods))].filter(Boolean).sort();
+				if (!MARK_PAID_CLOSED_MONTH_ENABLED || unresolved || !paidStampAfterLocks(invoice, months)) {
+					// `lock.remedy` is set only on the unresolved-date branch, where the
+					// month-end remedy would name no period and point at a route that cannot
+					// edit a week date. Same fallback as its two siblings.
+					return periodBlockedResponse(req, res,
+						`Cannot revert ${invoice.invoice_number || `invoice #${invoice.id}`}`,
+						lock.blockers, lock.remedy || INVOICE_REVERT_LOCK_REMEDY, invoiceRevertAudit);
+				}
+				revertClosedMonths = months;
 			}
 		}
 
@@ -25061,7 +25099,11 @@ app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 			"revert_invoice",
 			"invoice",
 			invoice.id,
-			`${invoice.invoice_number}: status ${invoice.status} → Submitted${reason ? ` (${reason})` : ""}${priorState ? ` [was: ${priorState}]` : ""}`
+			`${invoice.invoice_number}: status ${invoice.status} → Submitted${reason ? ` (${reason})` : ""}${priorState ? ` [was: ${priorState}]` : ""}` +
+			(revertClosedMonths.length
+				? `; the week touches closed ${revertClosedMonths.map(periodLabel).join(", ")}: cleared paid_at ${invoice.paid_at}, set after the month locked` +
+					` (locked ${revertClosedMonths.map((p) => `${p} at ${periodLockedAt(p)}`).join(", ")}); no closed month's figure changes`
+				: "")
 		);
 		notifyChange("invoices");
 		const fresh = db.prepare(
@@ -33793,8 +33835,9 @@ function invoiceRowPeriodLocked(r) {
 // routes cannot drift into telling an admin different things. Closed months are
 // never reopened (2026-10-14): a correction to a closed month's invoice goes on a
 // separate manual invoice dated in the open month (the owner's decision), and
-// a closed-month invoice can't be marked Paid yet (a separate change will allow
-// recording the payment). The adjust route's finalized-month refusal says its own
+// a closed-month invoice is marked Paid (the payment recorded only) only while
+// MARK_PAID_CLOSED_MONTH_ENABLED is on; off, the refusal ends on
+// INVOICE_PAID_LOCK_REMEDY. The adjust route's finalized-month refusal says its own
 // plain sentence (periodBlockedResponse()'s `finalizedMessage`); its fallback and
 // the Data Issues list end on INVOICE_LOCK_REMEDY.
 const INVOICE_LOCK_REMEDY =
@@ -33819,7 +33862,12 @@ const INVOICE_MAX_SPAN_MONTHS = 120;
 // protects was guarded against being renamed into and not against being *edited*.
 // PUT /api/invoices/:id/adjust books a signed correction of up to ±$10,000 onto
 // any invoice in any month, and the `paid` branch of PUT /api/invoices/:id/approve
-// stamps paid_at, i.e. it can CREATE the frozen state after the fact.
+// stamps paid_at. adjust refuses a finalized month always. The paid branch and
+// the revert of a paid stamp use this guard to fail closed on an unreadable lock
+// table or week date and to name the closed months; whether a closed month then
+// refuses them is MARK_PAID_CLOSED_MONTH_ENABLED's call (off: refused, as before)
+// and, for a revert, paidStampAfterLocks()'s: a stamp that existed when a month
+// closed is never cleared.
 //
 // ⚠️ THE `paid_at` RUNG IS DELIBERATELY DROPPED, AND THAT IS THE WHOLE REASON THIS
 // IS A SECOND FUNCTION RATHER THAN A SECOND CALLER. Reusing the predicate verbatim
@@ -33962,6 +34010,29 @@ function invoiceMonthLockBlockers(inv) {
 				`${locked.map(periodLabel).join(", ")}`,
 		}],
 	};
+}
+
+// When a closed month was locked: its period_locks.finalized_at as stored ("" when
+// the month has no locked row).
+function periodLockedAt(period) {
+	const row = db.prepare("SELECT finalized_at FROM period_locks WHERE period = ? AND status = 'locked'").get(period);
+	return row ? String(row.finalized_at || "") : "";
+}
+
+// Was this invoice's paid stamp set AFTER every one of `periods` (the closed
+// months its week touches) was locked? Only such a stamp may be cleared by a
+// revert under MARK_PAID_CLOSED_MONTH_ENABLED: a stamp that existed when a month
+// closed is part of that month's record. Both sides are parsed as instants;
+// a stamp or a lock time that does not parse, a month with no locked row, or an
+// empty list answers false (fail closed).
+function paidStampAfterLocks(inv, periods) {
+	const paidMs = Date.parse(String((inv && inv.paid_at) || "").trim());
+	if (!Number.isFinite(paidMs) || !Array.isArray(periods) || !periods.length) return false;
+	for (const p of periods) {
+		const lockedMs = Date.parse(periodLockedAt(p).trim());
+		if (!Number.isFinite(lockedMs) || paidMs <= lockedMs) return false;
+	}
+	return true;
 }
 
 // Which locked months to NAME for a set of blocked rows. Only a month that
@@ -60814,12 +60885,15 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 				const cause = periods.length ? "PERIOD_FINALIZED" : (unresolved ? "PERIOD_UNRESOLVED" : "PERIOD_FINALIZED");
 
 				// ⚠️ CAN THIS INVOICE EVER REACH PAID? approve / submit / processing carry
-				// NO month-end guard — only the `paid` transition does — so a Draft in a
-				// finalized month walks all the way to Approved and then stops for good.
-				// Paid and Rejected are terminal and are waiting on nothing. This is the
-				// number an admin most needs, because unlike an un-adjustable invoice it
-				// has no in-app remedy at all short of reopening the month.
-				const stuckBeforePaid = ["Draft", "Submitted", "Approved", "Processing"].includes(String(inv.status || ""));
+				// NO month-end guard — only the `paid` transition does. With
+				// MARK_PAID_CLOSED_MONTH_ENABLED on, a finalized month no longer stops it
+				// (the payment is recorded only), so only an unreadable week date does;
+				// off, a Draft in a finalized month walks all the way to Approved and then
+				// stops for good. Paid and Rejected are terminal and are waiting on
+				// nothing. This is the number an admin most needs, because unlike an
+				// un-adjustable invoice it has no in-app remedy at all.
+				const stuckBeforePaid = ["Draft", "Submitted", "Approved", "Processing"].includes(String(inv.status || ""))
+					&& (!MARK_PAID_CLOSED_MONTH_ENABLED || cause === "PERIOD_UNRESOLVED");
 				// ⚠️ AN EXPLICIT TERMINAL LIST, NOT `!stuckBeforePaid`, so an
 				// UNRECOGNISED status is neither. The two lists answer different
 				// questions and an unknown value has to fall on the cautious side of
