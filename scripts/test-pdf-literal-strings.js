@@ -10,7 +10,8 @@
  *
  * §1 hand-picked cases: escapes, line breaks after a backslash, an unescaped
  *    "(" inside a literal, nested and unbalanced parentheses, octal escapes, a
- *    text with no literal at all (returned as it is).
+ *    text with no literal at all (returned as it is), values that are not
+ *    strings.
  * §2 identical output to the reference on a seeded fuzz of short texts made of
  *    "(", ")", backslashes, letters, digits, octal escapes, line breaks and
  *    Tj/TJ operators.
@@ -19,7 +20,8 @@
  *    module compiled around the reference.
  * §4 size: large inputs (2 MB of mixed text, and each token of the fuzz
  *    alphabet repeated to 1 MB, on its own and after one "(") each finish under
- *    TIMING_BUDGET_MS.
+ *    TIMING_BUDGET_MS (in a child process with a time limit, so a slow read fails
+ *    instead of stalling the run).
  *
  * Pure: no server, no network, no files.
  *
@@ -31,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const Module = require("module");
+const { spawnSync } = require("child_process");
 
 const LIB = path.join(__dirname, "..", "lib");
 const LIB_FILE = path.join(LIB, "broker-invoice.js");
@@ -38,6 +41,7 @@ const { harvestPdfStrings, extractPdfText } = require(LIB_FILE);
 
 // Generous for a shared 2-core CI runner; one pass over 2 MB takes a few ms.
 const TIMING_BUDGET_MS = 1500;
+const SIZE_CHILD_LIMIT_MS = 30000;
 const FUZZ_CASES = 20000;
 
 // The function as it was before the rewrite, verbatim (comments trimmed).
@@ -89,6 +93,48 @@ function rng(seed) {
 	};
 }
 
+const TOKENS = [
+	"(", "(", "(", ")", ")", ")", "\\", "\\", "\\(", "\\)", "\\\\",
+	"a", "b", "z", "Q", "0", "7", "8", "9", " ", "  ",
+	"\\101", "\\7", "\\12", "\\377", "\\9", "\\n", "\\r", "\\t",
+	"\n", "\r", "\r\n", "\t", "\u2028", "\u2029", "\u00e9", "\u00ff",
+	"Tj", "TJ", "[", "]", "BT", "ET", "-140",
+];
+
+// §4 runs in a child: `node test-pdf-literal-strings.js --size` prints JSON.
+if (process.argv[2] === "--size") {
+	const timed = (input) => {
+		const t0 = process.hrtime.bigint();
+		const out = harvestPdfStrings(input);
+		return { ms: Number(process.hrtime.bigint() - t0) / 1e6, out };
+	};
+	const over = [];
+	let slowest = { ms: 0, name: "" };
+	const note = (res, name) => {
+		if (res.ms > slowest.ms) slowest = { ms: res.ms, name };
+		if (res.ms >= TIMING_BUDGET_MS) over.push(`${name} ${res.ms.toFixed(0)} ms`);
+	};
+	const r = rng(99);
+	const parts = [];
+	let size = 0;
+	while (size < 2 * 1024 * 1024) {
+		const tok = TOKENS[Math.floor(r() * TOKENS.length)];
+		parts.push(tok);
+		size += tok.length;
+	}
+	const mixed = parts.join("");
+	const res = timed(mixed);
+	note(res, "2 MB of mixed text");
+	const unique = [...new Set(TOKENS)];
+	for (const tok of unique) {
+		const body = tok.repeat(Math.ceil((1024 * 1024) / tok.length));
+		note(timed(body), JSON.stringify(tok));
+		note(timed(`(${body}`), `"(" + ${JSON.stringify(tok)}`);
+	}
+	process.stdout.write(JSON.stringify({ count: 1 + unique.length * 2, over, slowest, mixedSame: res.out === referenceHarvest(mixed) }));
+	process.exit(0);
+}
+
 const started = Date.now();
 
 // §1 hand-picked cases
@@ -114,10 +160,10 @@ const CASES = [
 	["(a))b(c)", "an extra )"],
 	["(a\\\nb) (c)", "a backslash before a line feed"],
 	["(a\\\r\nb) (c)", "a backslash before a carriage return"],
-	["(a\\ b) (c)", "a backslash before U+2028"],
-	["(a\\ b) (c)", "a backslash before U+2029"],
+	["(a\\\u2028b) (c)", "a backslash before U+2028"],
+	["(a\\\u2029b) (c)", "a backslash before U+2029"],
 	["(a\nb) (c\rd)", "line breaks inside a literal"],
-	["(a b)", "U+2028 inside a literal"],
+	["(a\u2028b)", "U+2028 inside a literal"],
 	["(\\101\\102\\103) Tj", "octal escapes"],
 	["(\\7\\12\\1234) Tj", "short and long octal escapes"],
 	["(\\8\\9\\89) Tj", "digits 8 and 9 after a backslash"],
@@ -133,15 +179,13 @@ const CASES = [
 for (const [input, name] of CASES) same(input, `§1 ${name}`);
 t(harvestPdfStrings("plain text, no literal") === "plain text, no literal", "§1 no literal: the input itself is returned");
 t(harvestPdfStrings("(a) (b)") === "a b", "§1 literals are space-joined");
+for (const [value, name] of [[undefined, "undefined"], [null, "null"], [12345, "a number"], [Buffer.from("(a) (b\\)c)", "latin1"), "a Buffer"], [{ toString: () => "x (y) z" }, "an object"]]) {
+	const want = referenceHarvest(value);
+	const got = harvestPdfStrings(value);
+	t(Object.is(got, want), `§1 ${name} reads as the reference reads it`, `want ${String(want)}, got ${String(got)}`);
+}
 
 // §2 seeded fuzz
-const TOKENS = [
-	"(", "(", "(", ")", ")", ")", "\\", "\\", "\\(", "\\)", "\\\\",
-	"a", "b", "z", "Q", "0", "7", "8", "9", " ", "  ",
-	"\\101", "\\7", "\\12", "\\377", "\\9", "\\n", "\\r", "\\t",
-	"\n", "\r", "\r\n", "\t", " ", " ", "é", "ÿ",
-	"Tj", "TJ", "[", "]", "BT", "ET", "-140",
-];
 {
 	const r = rng(20261015);
 	let mismatches = 0;
@@ -206,42 +250,17 @@ function referenceModule() {
 	t(/Order #: 7007280/.test(extractPdfText(rc)) && /Weight: {2}42,000/.test(extractPdfText(rc)), "§3 a small rate-con reads its labels and numbers");
 }
 
-// §4 size
-function timed(input) {
-	const t0 = process.hrtime.bigint();
-	const out = harvestPdfStrings(input);
-	return { ms: Number(process.hrtime.bigint() - t0) / 1e6, out };
-}
+// §4 size, in a child process with a time limit
 {
-	const r = rng(99);
-	const target = 2 * 1024 * 1024;
-	const parts = [];
-	let size = 0;
-	while (size < target) {
-		const tok = TOKENS[Math.floor(r() * TOKENS.length)];
-		parts.push(tok);
-		size += tok.length;
+	const child = spawnSync(process.execPath, [__filename, "--size"], { encoding: "utf8", timeout: SIZE_CHILD_LIMIT_MS, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 });
+	if (child.status !== 0 || !child.stdout) {
+		t(false, `§4 large texts are read within ${SIZE_CHILD_LIMIT_MS / 1000} s in all`, child.error ? child.error.code || child.error.message : `exit ${child.status} ${child.signal || ""} ${(child.stderr || "").slice(0, 200)}`);
+	} else {
+		const res = JSON.parse(child.stdout);
+		t(res.over.length === 0, `§4 ${res.count} large texts each under ${TIMING_BUDGET_MS} ms`, res.over.join(", "));
+		t(res.mixedSame, "§4 the 2 MB text reads the same as the reference");
+		console.log(`  slowest large text: ${res.slowest.name} ${res.slowest.ms.toFixed(1)} ms`);
 	}
-	const mixed = parts.join("");
-	const res = timed(mixed);
-	t(res.ms < TIMING_BUDGET_MS, `§4 2 MB of mixed text under ${TIMING_BUDGET_MS} ms`, `${res.ms.toFixed(1)} ms`);
-	t(res.out === referenceHarvest(mixed), "§4 the 2 MB text reads the same as the reference");
-}
-{
-	const unique = [...new Set(TOKENS)];
-	const target = 1024 * 1024;
-	let slowest = { ms: 0, name: "" };
-	const over = [];
-	for (const tok of unique) {
-		const body = tok.repeat(Math.ceil(target / tok.length));
-		for (const [input, name] of [[body, JSON.stringify(tok)], [`(${body}`, `"(" + ${JSON.stringify(tok)}`]]) {
-			const res = timed(input);
-			if (res.ms > slowest.ms) slowest = { ms: res.ms, name };
-			if (res.ms >= TIMING_BUDGET_MS) over.push(`${name} ${res.ms.toFixed(0)} ms`);
-		}
-	}
-	t(over.length === 0, `§4 ${unique.length * 2} repeated-token texts of 1 MB each under ${TIMING_BUDGET_MS} ms`, over.join(", "));
-	console.log(`  slowest 1 MB repeated-token text: ${slowest.name} ${slowest.ms.toFixed(1)} ms`);
 }
 
 const ms = Date.now() - started;
