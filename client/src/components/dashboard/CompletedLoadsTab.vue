@@ -218,8 +218,12 @@
           </div>
           <div>
             <div class="dash-section-title">Route Map</div>
-            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
+            <!-- A delivered load has no live position: the one map draws the
+                 planned pickup → drop-off lane LoadHaulSection reads. -->
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" :planned-lane="plannedLane" dispatch-mode />
+            <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" @lane="onPlannedLane" />
           </div>
+          <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
     </Dialog>
@@ -251,6 +255,8 @@ import StarRating from '../shared/StarRating.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
+import LoadHaulSection from './LoadHaulSection.vue'
+import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
@@ -537,8 +543,12 @@ async function confirmDeleteDoc(doc) {
     deletingDocId.value = null
   }
 }
+// The planned lane for the one map, from LoadHaulSection's /haul read.
+const plannedLane = ref({ status: 'loading' })
+function onPlannedLane(lane) { plannedLane.value = lane }
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
+  plannedLane.value = { status: 'loading' }
   docError.value = ''; deletingDocId.value = null
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
