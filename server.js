@@ -53778,9 +53778,15 @@ const loadEldMilesGetStmt = db.prepare(`SELECT * FROM load_eld_miles WHERE load_
 // routemate_telemetry purges at 90 days, so a later recompute over a
 // partially-purged window sees FEWER samples and would otherwise overwrite a
 // complete historical figure with a truncated one. Failing closed on sample
-// count is what makes this table outlive the pings it was derived from. An
-// in-progress load's sample count only ever grows, so the same guard still lets
-// a live haul update on every view.
+// count is what makes this table outlive the pings it was derived from.
+//
+// A row written before the load closed out (in_progress = 1) is not a historical
+// figure, and the load's first result after close-out replaces it whatever the
+// two sample counts. The guard used to refuse that result without a word when the
+// mid-haul row held more samples: a replay that took an earlier load's visit to
+// the same shipper as this load's departure measured days of driving "so far".
+// measureLoadEldMiles() decides which writes may happen at all (never one for a
+// load in a closed month).
 const loadEldMilesUpsertStmt = db.prepare(`
 	INSERT INTO load_eld_miles (
 		load_id, routemate_vehicle_id, truck_id,
@@ -53823,16 +53829,19 @@ const loadEldMilesUpsertStmt = db.prepare(`
 		in_progress = excluded.in_progress,
 		computed_at = CURRENT_TIMESTAMP
 	WHERE excluded.samples >= load_eld_miles.samples
+	   OR (load_eld_miles.in_progress = 1 AND excluded.in_progress = 0)
 `);
 
 const HAUL_TRUCK_COL_RE = /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i;
 
 // Outer bound for the ping query, derived from the load's status history.
 //
-// Status timestamps are used HERE and for the deadhead leg's start, and nowhere
-// else. "When was this load handed to the driver" is a dispatch fact and a
-// button press is the right record of it; "when did the truck reach the shipper"
-// is a physical fact and a button press is not.
+// Status timestamps are used HERE, for the deadhead leg's start, and to tell an
+// earlier load's visit to the same shipper from this load's pickup
+// (lib/load-haul.js STALE_VISIT_BEFORE_DISPATCH_MS), and nowhere else. "When was
+// this load handed to the driver" is a dispatch fact and a button press is the
+// right record of it; "when did the truck reach the shipper" is a physical fact
+// and a button press is not.
 //
 // `closeOut` is the sheet's completion signal (haulSheetCloseOut()). It closes a
 // window the status history left open — a load typed into the sheet, or marked
@@ -53879,6 +53888,20 @@ function haulSheetCloseOut(row, headers, nowMs) {
 // is not. The modal and the sweep both read a load's window through this.
 function haulLoadWindow(rawId, row, headers, nowMs) {
 	return haulWindowFromPhases(computeStatusPhases(rawId), nowMs, haulSheetCloseOut(row, headers, nowMs));
+}
+
+// Is this load's haul row held as recorded? Closed months show exactly as settled,
+// so only an open-month load's row is written or rewritten (user, 2026-10-15).
+// The month-end lock's own test for a Job Tracking row (loadRowAccountingMonths()
+// and periodWriteLocked(), as integrityClosedMonthsOf() reads a cached row): a
+// load that books into any closed month is held, and so is one whose months can't
+// be told (an unreadable or missing date, or a lock table that can't be read).
+function haulRowInClosedMonth(headers, row) {
+	if (!row || !periodLocksReadable()) return true;
+	const hs = headers || [];
+	const months = loadRowAccountingMonths(hs, hs.map((h) => row[h]));
+	if (!months || !months.length) return true;
+	return months.some((mk) => periodWriteLocked(mk));
 }
 
 // Every OTHER load that ran on the same truck, with its status span.
@@ -54036,6 +54059,9 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 				dest: { lat: destLat, lng: destLng },
 				radiusM: HAUL_REPLAY_RADIUS_M,
 				terminal: win.terminal,
+				// The pings run 24 h past the close-out: a shipper visit after it is
+				// the truck's next load.
+				closeOutMs: win.terminal ? win.endMs : null,
 			};
 			// Two passes, because the deadhead floor depends on a physical
 			// fact the first pass is what discovers: when the truck actually
@@ -54045,14 +54071,21 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 			const otherSpans = haulSameTruckSpans(rows, headers, loadKey, truck.truck_id, truckResolver);
 			const deadheadStart = loadHaul.deadheadFloorMs(otherSpans, probe.pickupArriveMs, win.dispatchMs);
 			const computed = loadHaul.computeHaulMiles(samples, { ...legOpts, dispatchMs: deadheadStart });
-			if (computed.samples > 0) {
+			// A load in a closed month keeps its row as recorded: it is measured
+			// for this answer and never written.
+			const held = haulRowInClosedMonth(headers, row);
+			// A closed-out load replaces the row written while it ran, even when
+			// it measures nothing: handing that row back showed a delivered load
+			// "so far", from a replay that read another load's visit as its own.
+			const replacesLiveRow = !held && win.terminal && !!stored && !!stored.in_progress;
+			if (computed.samples > 0 || replacesLiveRow) {
 				const overlaps = otherSpans
 					.filter((sp) => loadHaul.windowsOverlap(
 						computed.windowStartMs, computed.windowEndMs, sp.startMs, sp.endMs))
 					.map((sp) => sp.key);
 				driven = { ...computed, overlapLoadIds: overlaps, stored: false };
 				try {
-					loadEldMilesUpsertStmt.run({
+					if (!held) loadEldMilesUpsertStmt.run({
 						load_id: loadKey,
 						routemate_vehicle_id: vid,
 						truck_id: truck ? truck.truck_id : 0,
@@ -54074,12 +54107,16 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 						max_gap_ms: computed.maxGapMs,
 						dropped_miles: computed.droppedMiles,
 						overlap_load_ids: overlaps.join(","),
-						in_progress: computed.inProgress ? 1 : 0,
+						// Measured before the load closed out, the row is provisional
+						// whatever the replay found (a truck still at the shipper, or
+						// already at the receiver), so the closed-out result replaces it.
+						in_progress: win.terminal ? 0 : 1,
 					});
 				} catch (e) { console.error("load_eld_miles upsert failed:", e.message); }
-			} else if (stored) {
+			} else if (stored && !stored.in_progress) {
 				// No pings left in the window — the 90-day purge has eaten them.
-				// The stored derivation outlives them; that is why it is stored.
+				// A final row outlives them; that is why it is stored. A row written
+				// mid-haul is no figure for the load and is not shown in its place.
 				driven = haulDrivenFromRow(stored);
 			} else {
 				driven = haulDrivenEmpty(computed.reason || "no_samples");
@@ -54095,8 +54132,9 @@ function measureLoadEldMiles(rawId, { coords, jt, nowMs, truckResolver, deviceRe
 // modal (32 of 345 loads in production), so every other load became
 // unmeasurable once its pings aged past the 90-day purge. This sweep runs
 // measureLoadEldMiles() for every live, closed-out load that has no final row
-// yet and whose window is still inside the retained telemetry. The first run
-// after a deploy is therefore the backfill.
+// yet, whose window is still inside the retained telemetry and which books into
+// no closed month (haulRowInClosedMonth()). The first run after a deploy is
+// therefore the backfill.
 //
 // Same rules as the modal, by construction (one function). "Closed out" is a
 // terminal status in load_status_history or, where there is none (a load typed
@@ -54137,6 +54175,8 @@ async function sweepLoadEldMiles() {
 			if (!win.terminal) { bump("not_closed_out"); continue; }
 			if (win.closedBy === "sheet") bump("closed_out_by_sheet");
 			if (win.endMs < nowMs - LOAD_ELD_MILES_SWEEP_MAX_AGE_MS) { bump("telemetry_purged"); continue; }
+			// Closed months show exactly as settled: their loads' rows stay as recorded.
+			if (haulRowInClosedMonth(live.headers, r)) { bump("closed_month"); continue; }
 			const { driven } = measureLoadEldMiles(rawId, {
 				coords: getLoadCoordsFull(rawId), jt, nowMs, truckResolver, deviceResolver,
 			});
