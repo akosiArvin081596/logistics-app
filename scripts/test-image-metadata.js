@@ -264,6 +264,50 @@ function scanData(jpeg) {
 		ok("§7 HEAD: the length, no body", head.status === 200 && head.body.length === 0 && Number(head.headers["content-length"]) === image.body.length);
 		ok(`§7 the serve cap is no larger than the largest receipt upload (20 MB; is ${receiptFiles.RECEIPT_SERVE_MAX_BYTES})`, receiptFiles.RECEIPT_SERVE_MAX_BYTES <= 20 * 1024 * 1024);
 
+		// One user's waiting requests are capped, so a busy user cannot fill the
+		// shared queue for everyone.
+		const get5 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 100, maxQueuedPerUser: 2, readFile: async (p) => { await sleep(120); return fs.promises.readFile(p); } });
+		const mine = Array.from({ length: 5 }, () => get5("1-aa.jpg", DRV));
+		await sleep(20);
+		const theirs = get5("1-aa.jpg", DISP);
+		const mineDone = await Promise.all(mine);
+		const mineStatuses = mineDone.map((r) => r.status).sort().join(",");
+		ok(`§7 per user: one user's requests past 1 running + 2 waiting answer 503 (got ${mineStatuses})`, mineStatuses === "200,200,200,503,503");
+		ok("§7 ... with Retry-After", mineDone.filter((r) => r.status === 503).every((r) => Number(r.headers["retry-after"]) > 0));
+		ok("§7 ... while another user's request still waits its turn and is served", (await theirs).status === 200);
+
+		// A client that stops reading cannot hold a read slot: the response is
+		// ended after sendTimeoutMs and the slot goes to the next request.
+		const big = Buffer.concat([clean.jpeg.subarray(0, clean.jpeg.indexOf(Buffer.from([0xFF, 0xDA])) + 2 + clean.jpeg.readUInt16BE(clean.jpeg.indexOf(Buffer.from([0xFF, 0xDA])) + 2)),
+			Buffer.alloc(16 * 1024 * 1024, 0x11), Buffer.from([0xFF, 0xD9])]);
+		fs.writeFileSync(path.join(dir, "3-cc.jpg"), big);
+		db.prepare("INSERT INTO expenses (id, driver, photo_data) VALUES (3, 'Tamsin Vale', '/uploads/expense-receipts/3-cc.jpg')").run();
+		const guard6 = receiptFiles.createExpenseReceiptGuard({ db, receiptsDir: dir, normalizeDriverName: norm, maxConcurrentReads: 1, queueWaitMs: 3000, sendTimeoutMs: 300 });
+		const app6 = express();
+		app6.use((req, res, next) => { req.session = { user: JSON.parse(req.headers["x-test-user"]) }; next(); });
+		app6.use("/r/:file", (req, res, next) => guard6(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
+		const server6 = http.createServer(app6);
+		await new Promise((r) => server6.listen(0, "127.0.0.1", r));
+		servers.push(server6);
+		const port6 = server6.address().port;
+		const stalled = http.request({ host: "127.0.0.1", port: port6, path: "/r/3-cc.jpg", agent: false, headers: { "x-test-user": JSON.stringify(SA) } });
+		stalled.on("response", (res) => { res.pause(); res.on("error", () => {}); res.on("aborted", () => {}); });
+		stalled.on("error", () => {});
+		stalled.end();
+		await sleep(150);
+		const started = Date.now();
+		const next = await new Promise((resolve, reject) => {
+			const req = http.request({ host: "127.0.0.1", port: port6, path: "/r/1-aa.jpg", agent: false, headers: { "x-test-user": JSON.stringify(DISP) } }, (res) => {
+				const chunks = [];
+				res.on("data", (c) => chunks.push(c));
+				res.on("end", () => resolve({ status: res.statusCode, ms: Date.now() - started }));
+			});
+			req.on("error", reject);
+			req.end();
+		});
+		ok(`§7 a client that stops reading loses its read slot: the next request is served (status ${next.status}, after ${next.ms} ms)`, next.status === 200 && next.ms < 2500);
+		stalled.destroy();
+
 		for (const s of servers) s.close();
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
