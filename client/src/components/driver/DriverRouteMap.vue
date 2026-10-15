@@ -4,10 +4,12 @@
       <div class="map-empty">No route coordinates available</div>
     </template>
     <template v-else>
-      <div class="map-info" v-if="hasCoords && !fixTooOld && (chipMiles != null || chipMinutes != null || driverDistanceInfo)">
-        <span v-if="chipMiles != null" class="info-item">{{ chipMiles }} mi</span>
-        <span v-if="chipMinutes != null" class="info-item">{{ chipEtaText }} {{ usePlannedLane ? 'drive time' : 'ETA' }}</span>
-        <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
+      <!-- A fix over 2 hours old hides the figures but not the row's Navigate
+           button; the public tracker has no button, so the row goes too. -->
+      <div class="map-info" v-if="hasCoords && (chipMiles != null || chipMinutes != null || driverDistanceInfo) && (!fixTooOld || !publicMode)">
+        <span v-if="chipMiles != null && !fixTooOld" class="info-item">{{ chipMiles }} mi</span>
+        <span v-if="chipMinutes != null && !fixTooOld" class="info-item">{{ chipEtaText }} {{ usePlannedLane ? 'drive time' : 'ETA' }}</span>
+        <span v-if="driverDistanceInfo && !fixTooOld" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
         <!-- Drive Mode is a DRIVER affordance (turn-by-turn for the truck) and
              it needs `steps`, which the public payload deliberately omits — so
              on the customer tracker the button would open an empty fullscreen
@@ -75,7 +77,7 @@ import {
   createDeviationDetector,
 } from '../../utils/routeProgress'
 import { formatMinutes } from '../../lib/duration'
-import { fixAgeMs, lastSeenText, fixAllowsEta } from '../../lib/fixAge'
+import { fixAgeMs, lastSeenText, fixHidesFigures } from '../../lib/fixAge'
 import { fmtArrivalClock } from '../../utils/datetime'
 import DriveModeOverlay from './DriveModeOverlay.vue'
 
@@ -151,7 +153,7 @@ const fixClock = ref(Date.now())
 let fixClockTimer = null
 const fixAge = computed(() => (props.fixAt == null ? null : fixAgeMs(props.fixAt, fixClock.value)))
 const fixLastSeen = computed(() => (props.fixAt != null && props.driverPosition ? lastSeenText(fixAge.value) : ''))
-const fixTooOld = computed(() => props.fixAt != null && !!props.driverPosition && !fixAllowsEta(fixAge.value))
+const fixTooOld = computed(() => !!props.driverPosition && fixHidesFigures(props.fixAt, fixClock.value))
 
 const api = useApi()
 const { load: loadGoogleMaps, createMap } = useGoogleMaps()

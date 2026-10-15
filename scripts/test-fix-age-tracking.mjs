@@ -178,6 +178,15 @@ if (fa) {
   ok('§1 ETA and distance allowed up to 2 hours exactly, not a millisecond more',
     fa.fixAllowsEta(0) === true && fa.fixAllowsEta(2 * HOUR) === true && fa.fixAllowsEta(2 * HOUR + 1) === false)
   ok('§1 never for an unknown age', fa.fixAllowsEta(null) === false && fa.fixAllowsEta(NaN) === false)
+  const hides = typeof fa.fixHidesFigures === 'function'
+  ok('§1 fixHidesFigures() is exported', hides)
+  if (hides) {
+    ok('§1 a fix over 2 hours old, or one whose time can\'t be read, hides distance and ETA',
+      fa.fixHidesFigures('2026-10-15T13:59:59Z', NOW) === true && fa.fixHidesFigures('not a time', NOW) === true)
+    ok('§1 a fix of 2 hours or less hides nothing', fa.fixHidesFigures('2026-10-15T14:00:00Z', NOW) === false)
+    ok('§1 no fix at all hides nothing: the planned figures were never measured from a fix',
+      fa.fixHidesFigures(null, NOW) === false && fa.fixHidesFigures(undefined, NOW) === false && fa.fixHidesFigures('', NOW) === false)
+  }
 }
 
 // ══ §2 DriverRouteMap ════════════════════════════════════════════════════════
@@ -235,6 +244,7 @@ if (RouteMap) {
     const oldTxt = await mountAt(ago(3 * HOUR + 5 * MIN))
     ok(`§2 mounted, a 3-hour fix: no miles, no ETA, no arrival, and "Last seen 3 h ago" (${oldTxt.slice(0, 120)})`,
       !/\bmi\b/.test(oldTxt) && !/\bETA\b/.test(oldTxt.replace('No distance or ETA until the truck reports again.', '')) && !/Estimated arrival/.test(oldTxt) && oldTxt.includes('Last seen 3 h ago'))
+    ok(`§2 mounted, a 3-hour fix: the Navigate button stays (only distance and ETA hide) (${oldTxt.slice(0, 80)})`, /\bNavigate\b/.test(oldTxt))
     const badTxt = await mountAt('not a time')
     ok('§2 mounted, an unreadable fix time: no miles, no ETA (an unknown age never shows one)', !/\bmi\b/.test(badTxt) && !/1h 35m ETA/.test(badTxt))
     const ownTxt = await mountAt(undefined)
@@ -343,6 +353,8 @@ if (Track) {
   ok('§5 the route summary hides miles and ETA for an old fix and shows its age',
     /v-if="selectedShowsEta && routeDistance != null"/.test(TM) && /v-if="selectedShowsEta && routeEta != null"/.test(TM) && /\{\{ selectedLastSeen \}\}/.test(TM))
   ok('§5 the route\'s distance label needs a fix of 2 hours or less', /if \(routeDistance\.value != null && selectedShowsEta\.value\)/.test(TM))
+  ok('§5 a selected driver with no GPS fix keeps the planned pickup-to-drop-off figures (only a fix over 2 hours old hides them)',
+    /const selectedShowsEta = computed\(\(\) => !!selectedDriverLoc\.value && !fixHidesFigures\(selectedDriverLoc\.value\.noGps \? null : selectedDriverLoc\.value\.timestamp, now\.value\)\)/.test(TM))
   ok('§5 the helpers read lib/fixAge.js on the 10 s clock',
     /return lastSeenText\(fixAgeMs\(loc && loc\.timestamp, now\.value\)\)/.test(TM) && /return fixAllowsEta\(fixAgeMs\(loc && loc\.timestamp, now\.value\)\)/.test(TM))
   const ACTIVE = read('client', 'src', 'components', 'dashboard', 'ActiveLoadsTab.vue')

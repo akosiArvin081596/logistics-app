@@ -33,3 +33,12 @@ export function lastSeenText(ageMs) {
 export function fixAllowsEta(ageMs) {
   return ageMs != null && Number.isFinite(ageMs) && ageMs <= NO_ETA_AFTER_MS
 }
+
+// Does the truck's fix hide the distance and ETA shown beside it? Yes for a fix
+// over 2 hours old or one whose time can't be read. No when there is no fix at
+// all (`at` missing): the figures then are the planned pickup-to-drop-off ones,
+// which no fix measured.
+export function fixHidesFigures(at, now = Date.now()) {
+  if (at == null || at === '') return false
+  return !fixAllowsEta(fixAgeMs(at, now))
+}

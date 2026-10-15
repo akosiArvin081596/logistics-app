@@ -213,7 +213,7 @@ import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
-import { fixAgeMs, lastSeenText, fixAllowsEta } from '../../lib/fixAge'
+import { fixAgeMs, lastSeenText, fixAllowsEta, fixHidesFigures } from '../../lib/fixAge'
 import { normDriver } from '../../lib/driverName'
 import { fmtAppInstant, fmtArrivalClock } from '../../utils/datetime'
 import {
@@ -1731,10 +1731,11 @@ const selectedDriverSpeed = computed(() => {
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
 })
 // The selected truck's fix age, for the route summary and the route's distance
-// label (B11).
+// label (B11). Only a fix over 2 hours old hides the figures; a driver with no
+// GPS fix keeps the planned pickup-to-drop-off ones, which no fix measured.
 const selectedDriverLoc = computed(() => locations.value.find(l => l.driver === selectedDriver.value) || null)
 const selectedLastSeen = computed(() => (selectedDriverLoc.value ? locLastSeen(selectedDriverLoc.value) : ''))
-const selectedShowsEta = computed(() => !!selectedDriverLoc.value && locShowsEta(selectedDriverLoc.value))
+const selectedShowsEta = computed(() => !!selectedDriverLoc.value && !fixHidesFigures(selectedDriverLoc.value.noGps ? null : selectedDriverLoc.value.timestamp, now.value))
 
 // The active load driving the FuelFinderPanel's POI query: the expanded load
 // when one is open, else the focused driver's first active load (its
