@@ -12,7 +12,12 @@
 //   - a value carrying its zone (ISO ...Z or an offset): US Eastern (APP_TIMEZONE)
 //     with EDT/EST;
 //   - a date-only value: the same calendar day, never through UTC.
-// Anything else (addresses, money, load numbers, free text) prints as before.
+// Two stored shapes are read first: an email Date header saved in a cell
+// ("Date: Wed, 28 Jan 2026 10:52:46 -0500": its offset makes it an instant, so
+// Eastern with the label) and a two-digit-year stamp with a time ("11/18/25
+// 13:00" is 2025, shown like the four-digit stamp). Trailing words keep a cell
+// as stored. Anything else (addresses, money, load numbers, free text) prints as
+// before.
 //
 //   §1 client/src/lib/loadDetail.js on a case table.
 //   §2 the three tabs use it and keep no copy of their own.
@@ -72,6 +77,19 @@ if (lib) {
     ['2026-01-01', 'Jan 1, 2026'],
     ['10/12/2026', '10/12/2026'],
     ['09/05/2026', '9/5/2026'],
+    // An email Date header saved in a cell: its offset makes it an instant, so
+    // US Eastern with the zone label, like the ISO values above.
+    ['Date: Wed, 28 Jan 2026 10:52:46 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Wed, 28 Jan 2026 10:52:46 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Date: Tue, 14 Oct 2025 21:05:00 +0000', 'Oct 14, 2025, 5:05 PM EDT'],
+    ['Date: Mon, 2 Jun 2025 08:15:00 -0700', 'Jun 2, 2025, 11:15 AM EDT'],
+    ['Date: 28 Jan 2026 10:52 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Wed, 28 Jan 2026 15:52:46 +0000 (UTC)', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Date: Wed, 28 Jan 2026 15:52:46 GMT', 'Jan 28, 2026, 10:52 AM EST'],
+    // A two-digit year with a time: 20YY, shown like the four-digit stamp (no label).
+    ['11/18/25 13:00', '11/18/2025, 1:00 PM'],
+    ['1/5/26 9:07:30', '1/5/2026, 9:07 AM'],
+    ['11/18/25 1:00 PM', '11/18/2025, 1:00 PM'],
   ]
   check('date and time cells show like the rest of the page', SHOWN.map(([v]) => cell(v)), SHOWN.map(([, want]) => want))
   const UNCHANGED = [
@@ -84,6 +102,14 @@ if (lib) {
     '10/14/2026 08:00 - 12:00', '13/45/2026 0:17', 'TBD', '',
     // A clock no stamp can hold: hour 0-23, minute and second 0-59, else as stored.
     '10/12/2026 27:15', '10/12/2026 24:00', '10/12/2026 12:60', '10/12/2026 12:30:61',
+    // Email Date headers it can't trust: trailing text, a weekday that isn't
+    // that date's, a day that doesn't exist, an impossible clock or offset, no zone.
+    'Date: Wed, 28 Jan 2026 10:52:46 -0500 extra', 'Date: Thu, 28 Jan 2026 10:52:46 -0500',
+    'Date: Mon, 30 Feb 2026 10:52:46 -0500', 'Date: Wed, 28 Jan 2026 25:52:46 -0500',
+    'Date: Wed, 28 Jan 2026 10:52:46 -2500', 'Date: Wed, 28 Jan 2026 10:52:46', 'Date: sometime next week',
+    // Two-digit years: free text after the time, an impossible clock or month,
+    // and a date with no time stay as written.
+    '1/28/26 10:00 Appt.', '11/18/25 27:00', '13/18/25 10:00', '11/18/25',
   ]
   check('every other cell prints as written', UNCHANGED.map(cell), UNCHANGED)
   check('a number prints as the number', detailValue({ C: 1800 }, 'C'), 1800)
