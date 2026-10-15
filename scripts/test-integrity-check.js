@@ -509,8 +509,8 @@ async function section5() {
 	ok("the subject counts the findings", /2 issues/.test(spy.calls[0].subject), spy.calls[0].subject);
 	ok("the email names receipt #7 and its age", /#7/.test(spy.calls[0].html) && /days/.test(spy.calls[0].html));
 	ok("a run writes no business table", businessRows(db) === before);
-	ok("its only tables are its own (the load state and the three reported lists)",
-		tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === [ic.STATE_TABLE, ic.RECEIPTS_TABLE, ic.PAYMENTS_TABLE, ic.REISSUE_GAVE_UP_TABLE].sort().join(), tables(db));
+	ok("its only tables are its own (the load state and the four reported lists)",
+		tables(db).filter((t) => !["expenses", "invoices", "period_locks"].includes(t)).join() === [ic.STATE_TABLE, ic.RECEIPTS_TABLE, ic.PAYMENTS_TABLE, ic.REISSUE_GAVE_UP_TABLE, ic.INVOICE_RATES_TABLE].sort().join(), tables(db));
 	ok("result.emailed", result.emailed === true);
 
 	const db2 = makeDb();
@@ -648,11 +648,11 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own tables",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
 	ok("the reported lists are written in the same transaction as the load state",
-		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody), txBody);
+		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody) && /markRate\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
