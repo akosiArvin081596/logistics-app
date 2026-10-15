@@ -118,6 +118,8 @@ function harness(src) {
 		db, app, ...fns,
 		requireAuth: passthrough(), requireRole: passthrough,
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
+		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
+		TRIP_WORK_DAYS_FROM: null,
 		reservedDriverNameRefusal: () => null,
 		findInvoicePayee: () => null,
 		generateInvoiceNumber: (payee, start) => `INV-M-TEST-${start}-${rendered.length + 1}`,

@@ -579,7 +579,7 @@ async function section6() {
 	const startsJobSrc = SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0];
 	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
 		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
-		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger"];
+		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger", "tripWorkDays", "TRIP_WORK_DAYS_FROM"];
 	const exec = (over) => {
 		const timers = [];
 		const seen = {};
@@ -606,6 +606,10 @@ async function section6() {
 			integrityClosedMonthsOf: () => [],
 			financialsCalc: require(path.join(ROOT, "lib", "financials-calc.js")),
 			computeFleetLedger: async () => ({ scopes: [] }),
+			// The trip work-day rule (lib/trip-work-days.js), off here: check 7's
+			// day-once month composes LEDGER_DAY_ONCE_FROM with TRIP_WORK_DAYS_FROM.
+			tripWorkDays: require(path.join(ROOT, "lib", "trip-work-days.js")),
+			TRIP_WORK_DAYS_FROM: null,
 			...over,
 		};
 		new Function(...names, `${startsJobSrc}\n${block}`)(...names.map((n) => env[n]));

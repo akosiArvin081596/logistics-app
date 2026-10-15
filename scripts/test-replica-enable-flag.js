@@ -22,10 +22,11 @@
 //      next to a refused one each exit 1 naming the reason, before anything
 //      starts (no working copy, no record); a value typed after "=", and a
 //      word in the name's place that looks like a key, are never printed
-//   §5 --from-month YYYY-MM: LEDGER_DAY_ONCE_ENABLED and
-//      PRE_DISPATCH_PAY_DAY_RULE_ENABLED do nothing without their first month,
-//      so either one without --from-month is refused, --from-month without
-//      either is refused, and a month that isn't YYYY-MM (2000-2099, 01-12) or
+//   §5 --from-month YYYY-MM: LEDGER_DAY_ONCE_ENABLED,
+//      PRE_DISPATCH_PAY_DAY_RULE_ENABLED and TRIP_WORK_DAYS_ENABLED do nothing
+//      without their first month, so any of them without --from-month is
+//      refused, --from-month without one is refused, and a month that isn't
+//      YYYY-MM (2000-2099, 01-12) or
 //      a second --from-month is refused, each before anything starts; with
 //      one, the matching *_FROM is in the server's environment only, shown in
 //      the banner and recorded
@@ -75,7 +76,7 @@ const REFUSED = rules.ENABLE_REFUSED && typeof rules.ENABLE_REFUSED === "object"
 const refusal = typeof rules.enableRefusal === "function" ? rules.enableRefusal : () => "enableRefusal() is missing";
 ok("replica-rules exports ENABLE_ALLOWED, ENABLE_REFUSED and enableRefusal()", ALLOWED.length > 0 && Object.keys(REFUSED).length > 0 && typeof rules.enableRefusal === "function");
 ok("...frozen, so nothing at run time adds to them", Object.isFrozen(rules.ENABLE_ALLOWED) && Object.isFrozen(rules.ENABLE_REFUSED));
-for (const name of ["PERSONAL_EXPENSE_DEDUCTIONS_ENABLED", "PAYOUT_RULES_V2_ENABLED", "INVESTOR_LEASE_PAYOUTS_ENABLED", "LEDGER_DAY_ONCE_ENABLED", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED"]) {
+for (const name of ["PERSONAL_EXPENSE_DEDUCTIONS_ENABLED", "PAYOUT_RULES_V2_ENABLED", "INVESTOR_LEASE_PAYOUTS_ENABLED", "LEDGER_DAY_ONCE_ENABLED", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "TRIP_WORK_DAYS_ENABLED"]) {
 	eq(`${name} is accepted`, refusal(name), null);
 }
 for (const name of ALLOWED) eq(`allowlisted ${name} is accepted`, refusal(name), null);
@@ -137,7 +138,8 @@ function readsDefaultOff(name, srcs) {
 	const shapes = [
 		new RegExp(`env\\.${n}\\s*===\\s*"true"`),
 		new RegExp(`env\\.${n}\\s*!==\\s*"true"`),
-		new RegExp(`/\\^\\(true\\|1\\|yes\\|on\\)\\$/i\\.test\\(String\\(process\\.env\\.${n} \\?\\? ""\\)\\.trim\\(\\)\\)`),
+		// process.env, or an `env` a lib function is handed (lib/trip-work-days.js ruleFromEnv()).
+		new RegExp(`/\\^\\(true\\|1\\|yes\\|on\\)\\$/i\\.test\\(String\\((?:process\\.)?env\\.${n} \\?\\? ""\\)\\.trim\\(\\)\\)`),
 		new RegExp(`String\\(process\\.env\\.${n} \\|\\| ""\\)\\.toLowerCase\\(\\) === "true"`),
 	];
 	const reads = srcs.flatMap((src) => src.split("\n")).filter((l) => new RegExp(`env\\.${n}\\b`).test(l));
@@ -292,9 +294,10 @@ const taskFor = (label) => `refused-${label.replace(/[^a-z0-9]+/gi, "-").toLower
 	}
 	eq("the settings file is still byte-for-byte unchanged", fs.readFileSync(settingsFile, "utf8"), SETTINGS);
 
-	console.log("§5 --from-month: the first month of the two rules that need one");
+	console.log("§5 --from-month: the first month of the rules that need one");
 	for (const [label, extra, why] of [
 		["LEDGER_DAY_ONCE_ENABLED without --from-month", ["--enable", "LEDGER_DAY_ONCE_ENABLED"], /LEDGER_DAY_ONCE_ENABLED does nothing without its first month.*--from-month YYYY-MM/],
+		["TRIP_WORK_DAYS_ENABLED without --from-month", ["--enable", "TRIP_WORK_DAYS_ENABLED"], /TRIP_WORK_DAYS_ENABLED does nothing without its first month.*--from-month YYYY-MM/],
 		["PRE_DISPATCH_PAY_DAY_RULE_ENABLED without --from-month", ["--enable", "PAYOUT_RULES_V2_ENABLED", "--enable", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED"],
 			/PRE_DISPATCH_PAY_DAY_RULE_ENABLED does nothing without its first month.*--from-month YYYY-MM/],
 		["--from-month without either rule", ["--from-month", "2026-10"], /--from-month sets the first month of LEDGER_DAY_ONCE_ENABLED or PRE_DISPATCH_PAY_DAY_RULE_ENABLED/],
@@ -326,6 +329,13 @@ const taskFor = (label) => `refused-${label.replace(/[^a-z0-9]+/gi, "-").toLower
 		eq("...each gets that first month", r.serverFlags, ["LEDGER_DAY_ONCE_ENABLED=true", "LEDGER_DAY_ONCE_FROM=2026-11",
 			"PRE_DISPATCH_PAY_DAY_RULE_ENABLED=true", "PRE_DISPATCH_PAY_DAY_RULE_FROM=2026-11"]);
 		ok("...the banner shows both", r.out.includes("first month for this task: LEDGER_DAY_ONCE_FROM=2026-11, PRE_DISPATCH_PAY_DAY_RULE_FROM=2026-11"), tail(r.out));
+		ok("the stand-in server has exited", r.serverExited);
+	}
+	{
+		const r = await start(fx, "from-trip", ["--enable", "TRIP_WORK_DAYS_ENABLED", "--from-month", "2026-11"]);
+		eq("TRIP_WORK_DAYS_ENABLED with --from-month 2026-11: replica:start exits 0", r.status, 0);
+		eq("...the server's environment holds the flag and TRIP_WORK_DAYS_FROM", r.serverFlags, ["TRIP_WORK_DAYS_ENABLED=true", "TRIP_WORK_DAYS_FROM=2026-11"]);
+		ok("...the banner shows the month", r.out.includes("first month for this task: TRIP_WORK_DAYS_FROM=2026-11"), tail(r.out));
 		ok("the stand-in server has exited", r.serverExited);
 	}
 	eq("the settings file is still byte-for-byte unchanged after --from-month", fs.readFileSync(settingsFile, "utf8"), SETTINGS);

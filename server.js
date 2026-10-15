@@ -97,6 +97,7 @@ const investorReportOptions = require("./lib/investor-report-options");
 const investorPayoutBasis = require("./lib/investor-payout-basis");
 const financialsCalc = require("./lib/financials-calc");
 const loadPayDays = require("./lib/load-pay-days");
+const tripWorkDays = require("./lib/trip-work-days");
 const financialsReport = require("./lib/financials-report");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
@@ -5333,6 +5334,14 @@ const PRE_DISPATCH_PAY_DAY_RULE_ENABLED = /^(true|1|yes|on)$/i.test(String(proce
 // warning at boot.
 const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PAY_DAY_RULE_ENABLED, process.env.PRE_DISPATCH_PAY_DAY_RULE_FROM,
 	(msg) => console.warn(`[pre-dispatch] ${msg}`));
+// The owner's trip-timestamp work-day rule for daily-rate drivers (B12,
+// lib/trip-work-days.js), dormant until the owner approves its dry run
+// (scripts/work-days-dry-run.js): TRIP_WORK_DAYS_ENABLED (true/1/yes/on; off by
+// default) and TRIP_WORK_DAYS_FROM=YYYY-MM, the first settle month it applies
+// to, read once here. The flag on without a month leaves the rule off, with one
+// warning. null = off. tripDayResolver() is the one place the three pay paths
+// get it from; months before FROM, closed months and frozen items never change.
+const TRIP_WORK_DAYS_FROM = tripWorkDays.ruleFromEnv(process.env, (msg) => console.warn(`[trip-work-days] ${msg}`));
 function payoutRules(overrides = null) {
 	const out = {};
 	for (const k of PAYOUT_RULE_KEYS) out[k] = overrides && typeof overrides[k] === "boolean" ? overrides[k] : PAYOUT_RULES_V2_ENABLED;
@@ -5786,6 +5795,24 @@ try { db.exec("ALTER TABLE invoices ADD COLUMN personal_total REAL NOT NULL DEFA
 try { db.exec("ALTER TABLE invoices ADD COLUMN personal_share_total REAL NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN correction_of INTEGER"); } catch {}
 try { db.exec("ALTER TABLE invoices ADD COLUMN is_correction INTEGER NOT NULL DEFAULT 0"); } catch {}
+// The days each invoice pays a daily-rate driver (B12, the trip work-day rule):
+// one row per driver-day, so no day is paid by two live invoices. driver_norm is
+// normalizeDriverName(). Written only while TRIP_WORK_DAYS is on: in the write's
+// own transaction (commitInvoiceWithPdf(), the late-day update), released by a
+// soft delete (always), re-claimed by a restore. Every row can be rebuilt from
+// the invoices themselves (invoicePaidDaysOf(): a weekly invoice's day grid, a
+// manual one's paidDays): backfillInvoicePaidDays(), scripts/backfill-invoice-paid-days.js.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS invoice_paid_days (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		driver_norm TEXT NOT NULL,
+		day TEXT NOT NULL,
+		invoice_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(driver_norm, day)
+	)
+`);
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_invoice_paid_days_invoice ON invoice_paid_days(invoice_id)"); } catch {}
 // The Personal ledger itself (lib/personal-expense.js SCHEMA_SQL): additive,
 // CREATE ... IF NOT EXISTS, one live mark per receipt by a unique partial index.
 db.exec(personalExpense.SCHEMA_SQL);
@@ -16809,6 +16836,133 @@ function invoiceWriteRefusal(code, message) {
 	return err;
 }
 
+// ============================================================
+// THE DAYS AN INVOICE PAYS — invoice_paid_days (B12, the trip work-day rule)
+// ============================================================
+// One live invoice per driver-day. Claims are written inside the invoice write's
+// own immediate transaction, after its last await, so the check and the write
+// cannot be split; a day another live invoice holds refuses the write with 409
+// INVOICE_DAY_ALREADY_PAID naming that invoice (never a UNIQUE error as a 500).
+// A row whose invoice is gone or soft-deleted holds nothing and is replaced.
+// A Rejected invoice keeps its days: it can be reverted to Submitted and still
+// holds its driver-week slot, so only a soft delete frees them.
+function invoicePaidDaysTablePresent() {
+	return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invoice_paid_days'").get();
+}
+
+// The live invoice holding each of `days` for the driver: Map day -> { invoiceId, invoiceNumber }.
+function invoicePaidDayHolders(driverNorm, days) {
+	const out = new Map();
+	if (!driverNorm || !days.length || !invoicePaidDaysTablePresent()) return out;
+	const rows = db.prepare(
+		`SELECT p.day, p.invoice_id, i.invoice_number FROM invoice_paid_days p
+		 JOIN invoices i ON i.id = p.invoice_id AND i.deleted_at = ''
+		 WHERE p.driver_norm = ? AND p.day IN (${days.map(() => "?").join(",")})`
+	).all(driverNorm, ...days);
+	for (const r of rows) out.set(r.day, { invoiceId: r.invoice_id, invoiceNumber: r.invoice_number });
+	return out;
+}
+
+// Inside a write's transaction: claim `days` for `invoiceId`, or throw the 409
+// refusal when another live invoice holds one. Stale rows (their invoice gone or
+// soft-deleted) for these days are removed first.
+function claimInvoicePaidDays(invoiceId, driverNorm, days) {
+	const list = [...new Set(days || [])].sort();
+	if (!list.length) return;
+	if (!driverNorm) throw invoiceWriteRefusal("INVOICE_DAY_UNKEYED", "The invoice names no driver, so the days it pays cannot be recorded. Nothing was saved.");
+	if (!invoicePaidDaysTablePresent()) throw invoiceWriteRefusal("INVOICE_DAYS_UNREADABLE", "The table of paid days is missing, so no day can be confirmed unpaid. Nothing was saved.");
+	const holders = invoicePaidDayHolders(driverNorm, list);
+	const taken = list.filter((d) => holders.has(d) && holders.get(d).invoiceId !== invoiceId);
+	if (taken.length) {
+		const names = [...new Set(taken.map((d) => holders.get(d).invoiceNumber || `invoice #${holders.get(d).invoiceId}`))];
+		throw invoiceWriteRefusal("INVOICE_DAY_ALREADY_PAID",
+			`${taken.join(", ")} ${taken.length === 1 ? "is" : "are"} already paid by ${names.join(", ")}. Nothing was saved.`);
+	}
+	const ph = list.map(() => "?").join(",");
+	db.prepare(
+		`DELETE FROM invoice_paid_days WHERE driver_norm = ? AND day IN (${ph})
+		 AND invoice_id NOT IN (SELECT id FROM invoices WHERE deleted_at = '')`
+	).run(driverNorm, ...list);
+	const ins = db.prepare("INSERT OR IGNORE INTO invoice_paid_days (driver_norm, day, invoice_id) VALUES (?, ?, ?)");
+	for (const d of list) ins.run(driverNorm, d, invoiceId);
+}
+
+// Frees an invoice's days (its soft delete, its regenerated Draft's removal).
+function releaseInvoicePaidDays(invoiceId) {
+	if (invoiceId == null || !invoicePaidDaysTablePresent()) return;
+	db.prepare("DELETE FROM invoice_paid_days WHERE invoice_id = ?").run(invoiceId);
+}
+
+const INVOICE_GRID_DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+// The grid name of a day key, as the weekly template lays out Saturday-Friday.
+function invoiceGridDayName(day) {
+	return INVOICE_GRID_DAYS[(new Date(`${day}T12:00:00Z`).getUTCDay() + 1) % 7];
+}
+
+// The days an invoice row pays, read from the invoice itself: a weekly invoice's
+// Saturday-Friday day grid (its week_start onward), a manual invoice's paidDays
+// (a work-day correction, or a manual invoice created with `days`). [] for
+// anything else (a percentage invoice, one stored before render data).
+function invoicePaidDaysOf(row) {
+	let snap = null;
+	try { snap = JSON.parse((row && row.render_data) || "{}"); } catch { snap = null; }
+	if (!snap) return [];
+	if (Array.isArray(snap.paidDays)) return snap.paidDays.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).sort();
+	if (Number(row.is_manual) || snap.__templateName !== "service_invoice" || !snap.days || !/^\d{4}-\d{2}-\d{2}$/.test(String(row.week_start || ""))) return [];
+	const out = [];
+	INVOICE_GRID_DAYS.forEach((name, i) => {
+		const e = snap.days[name];
+		if (e && e.completed) out.push(new Date(Date.parse(`${row.week_start}T12:00:00Z`) + i * 86400000).toISOString().slice(0, 10));
+	});
+	return out;
+}
+
+// Rebuilds invoice_paid_days from the live invoices (Rejected included; soft
+// deleted skipped), oldest invoice first: one row per paid day. Idempotent: a
+// day already held by its own invoice is skipped; a day another live invoice
+// already holds is reported as a conflict and skipped (a person decides). With
+// write false it only reports. Returns { rows, conflicts } (rows: those it
+// writes, or would write). Run before the trip work-day rule takes effect
+// (scripts/backfill-invoice-paid-days.js, --dry-run first), and at every start
+// while the rule is on, so no invoice made meanwhile is missed.
+// A database from before the table existed reads as an empty table (a report
+// only; writing to it refuses).
+function backfillInvoicePaidDays({ write = false } = {}) {
+	const present = invoicePaidDaysTablePresent();
+	if (write && !present) throw new Error("invoice_paid_days does not exist");
+	const invoices = db.prepare("SELECT id, invoice_number, driver, week_start, week_end, status, is_manual, render_data FROM invoices WHERE deleted_at = '' ORDER BY id").all();
+	const holder = new Map();
+	for (const r of present ? db.prepare(
+		`SELECT p.driver_norm, p.day, p.invoice_id FROM invoice_paid_days p JOIN invoices i ON i.id = p.invoice_id AND i.deleted_at = ''`
+	).all() : []) holder.set(`${r.driver_norm}\t${r.day}`, r.invoice_id);
+	const byId = new Map(invoices.map((r) => [r.id, r]));
+	const rows = [];
+	const conflicts = [];
+	for (const inv of invoices) {
+		const driverNorm = normalizeDriverName(inv.driver || "");
+		if (!driverNorm) continue;
+		for (const day of invoicePaidDaysOf(inv)) {
+			const k = `${driverNorm}\t${day}`;
+			const held = holder.get(k);
+			if (held === inv.id) continue;
+			if (held !== undefined) {
+				conflicts.push({ driverNorm, day, invoiceId: inv.id, invoiceNumber: inv.invoice_number, heldBy: held, heldByNumber: (byId.get(held) || {}).invoice_number || "" });
+				continue;
+			}
+			holder.set(k, inv.id);
+			rows.push({ driverNorm, day, invoiceId: inv.id, invoiceNumber: inv.invoice_number, status: inv.status });
+		}
+	}
+	if (write && rows.length) {
+		db.transaction(() => {
+			const stale = db.prepare("DELETE FROM invoice_paid_days WHERE driver_norm = ? AND day = ? AND invoice_id NOT IN (SELECT id FROM invoices WHERE deleted_at = '')");
+			const ins = db.prepare("INSERT OR IGNORE INTO invoice_paid_days (driver_norm, day, invoice_id) VALUES (?, ?, ?)");
+			for (const r of rows) { stale.run(r.driverNorm, r.day); ins.run(r.driverNorm, r.day, r.invoiceId); }
+		}).immediate();
+	}
+	return { rows, conflicts };
+}
+
 // Write an invoice's row and its PDF together, so an invoice's PDF is only ever
 // replaced by its own regeneration, and a number is only ever given to one row.
 //
@@ -16862,6 +17016,8 @@ function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing
 				throw invoiceWriteRefusal("INVOICE_WEEK_CHANGED",
 					"The Draft being regenerated changed while this one was being generated. Nothing was saved; generate it again.");
 			}
+			// The replaced Draft's paid days go with its row (invoice_paid_days).
+			if (replacing) releaseInvoicePaidDays(replacing.id);
 			const result = insert();
 			fs.renameSync(tmpPath, finalPath);
 			return result;
@@ -17999,6 +18155,798 @@ function invoiceWeekWarnings(undated) {
 	return out;
 }
 
+// ============================================================
+// THE TRIP WORK-DAY RULE ON THE WEEKLY INVOICE (B12; off unless TRIP_WORK_DAYS)
+// ============================================================
+// With the rule on, a daily-rate driver's week pays:
+//   - for each load it covers (lib/trip-work-days.js), its trip days inside the
+//     week, in place of its window, with no ELD or pre-dispatch filter;
+//   - the trip days inside the week of every other completed live load of the
+//     driver: one completed in another week, or with no completion date;
+//   - each day at the rate in effect that day (pay_rate_history), for days of
+//     FROM's month on; Total Due is the sum of the days' own rates.
+// A day found after its week's invoice was generated NEVER goes on a later
+// week's invoice (the owner's rule, 2026-10-14): settleLateWorkDays() puts it on
+// its own week's invoice while that invoice is not approved (Draft, Submitted,
+// Rejected), or on a separate correction invoice for that week, a Draft for the
+// owner to approve, once it is (Approved, Processing, Paid) or when its week
+// touches a closed month. A day in a closed month is never carried; a person
+// decides it (it is named in `warnings`).
+
+// The marker the late days start from: the Saturday of the first week the rule
+// generated an invoice for, written once in that invoice's transaction.
+const TRIP_WORK_DAYS_FLOOR_KEY = "trip_work_days_started_at";
+// Statuses whose invoice takes a late day in place.
+const LATE_WORK_DAY_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
+// How far back a day the rule cannot carry is named in `warnings` (the dry run
+// lists every one).
+const LATE_WORK_DAY_REPORT_DAYS = 35;
+
+function tripWorkDaysFloor() {
+	try {
+		const r = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(TRIP_WORK_DAYS_FLOOR_KEY);
+		return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.value || "")) ? r.value : "";
+	} catch {
+		return "";
+	}
+}
+
+function dayKeyPlus(day, n) {
+	return new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+}
+
+// The Job Tracking values (values.get) as header-keyed rows, as the handler reads them.
+function jobTrackingRowsOf(values) {
+	const headers = (values && values[0]) || [];
+	const data = (values || []).slice(1).map((r, i) => {
+		const obj = {};
+		headers.forEach((h, j) => { obj[h] = r[j] || ""; });
+		obj._rowIndex = i + 2;
+		return obj;
+	});
+	return { headers, data };
+}
+
+// Every completed, live load of one driver, one row per load (normalizeLoadId(),
+// the last row wins), whatever week it completed in or with no completion date:
+// the rows invoiceWeekVerdict() reads as "bill", "other-week" or "undated".
+function driverCompletedLiveLoads(data, headers, driverName, deletedKeys) {
+	const cols = invoiceWeekColumns(headers);
+	if (!cols.driverCol) return [];
+	const nameNorm = normalizeDriverName(driverName);
+	const out = new Map();
+	for (const row of data || []) {
+		if (normalizeDriverName(row[cols.driverCol]) !== nameNorm) continue;
+		const verdict = invoiceWeekVerdict(row, cols, "", "", deletedKeys);
+		if (verdict !== "other-week" && verdict !== "undated") continue;
+		out.set((cols.loadIdCol && normalizeLoadId(row[cols.loadIdCol])) || `_row_${row._rowIndex}`, row);
+	}
+	return [...out.values()];
+}
+
+// (row) -> the ELD vehicle id of the truck the row names, or null; the handler's
+// own truck column and unit map, read once.
+function invoiceTruckVidReader(headers) {
+	const truckCol = (headers || []).find((h) => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
+	let map = null;
+	return (row) => {
+		const unit = truckCol ? String(row[truckCol] || "").trim().toLowerCase() : "";
+		if (!unit) return null;
+		if (!map) {
+			map = Object.create(null);
+			db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''").all().forEach((t) => { map[t.u] = t.vid; });
+		}
+		return map[unit] || null;
+	};
+}
+
+// The other completed loads whose trip days fall in the week (see the header):
+// [{ key, loadId, days }], days inside weekStart..weekEnd, only loads with some.
+function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, weekEnd, resolver, deletedKeys }) {
+	const cols = invoiceWeekColumns(headers);
+	const keyOf = (row) => (cols.loadIdCol && normalizeLoadId(row[cols.loadIdCol])) || `_row_${row._rowIndex}`;
+	const billedKeys = new Set((billed || []).map(keyOf));
+	const monthCols = jobTrackingMonthCols(headers);
+	const vidOf = invoiceTruckVidReader(headers);
+	const out = [];
+	for (const row of driverCompletedLiveLoads(data, headers, driverName, deletedKeys)) {
+		const key = keyOf(row);
+		if (billedKeys.has(key)) continue;
+		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
+		if (!loadId) continue;
+		const days = resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), range: { start: weekStart, end: weekEnd }, vid: vidOf(row) });
+		if (days && days.length) out.push({ key, loadId, days });
+	}
+	return out;
+}
+
+// (day) -> the daily rate an invoice prices that day at under the rule: for a day
+// of FROM's month on, the driver's own rate in effect that day (pay_rate_history,
+// loadPayRateIndex()), else the truck rate, else $250 (resolveDailyRate()); an
+// earlier day keeps the one rate the invoice has always used.
+function invoiceDayRater({ nameNorm, payDaily, truckRate, dailyRate, fromMonth }) {
+	let rates = null;
+	return (day) => {
+		if (!fromMonth || String(day).slice(0, 7) < fromMonth) return dailyRate;
+		if (!rates) rates = loadPayRateIndex();
+		const own = rates.at("driver", nameNorm, day);
+		return resolveDailyRate(own == null ? payDaily : own, truckRate);
+	};
+}
+
+// The live manual invoices of a driver that may pay a driver-day without naming
+// it in invoice_paid_days (the cases scripts/create-correction-invoice-draft.js
+// checks): [{ invoiceNumber, weekStart, weekEnd, lines, text }], text being
+// their line descriptions and notes. A Rejected one pays nothing; one that
+// names its days (paidDays: a work-day correction, or one created with `days`)
+// is covered by its claims; a Personal correction (is_correction) holds only
+// Personal lines.
+function driverManualInvoicesForDays(driverNorm) {
+	if (!driverNorm) return [];
+	const out = [];
+	for (const r of db.prepare(
+		"SELECT invoice_number, driver, week_start, week_end, render_data FROM invoices WHERE deleted_at = '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 AND status != 'Rejected' ORDER BY id"
+	).all()) {
+		if (normalizeDriverName(r.driver || "") !== driverNorm) continue;
+		let snap = null;
+		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+		if (snap && Array.isArray(snap.paidDays)) continue;
+		const lines = snap && Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const text = [...lines.map((l) => String((l && l.description) || "")), String((snap && snap.notes) || "")].join("\n").toUpperCase();
+		out.push({ invoiceNumber: r.invoice_number, weekStart: String(r.week_start || ""), weekEnd: String(r.week_end || ""), lines, text });
+	}
+	return out;
+}
+
+// The days those invoices may already pay: a line dated that day, or every day
+// of an invoice's period when one of its lines is undated or its date cannot be
+// read (or it has no line). Map day -> invoice number.
+function manualInvoiceDayCover(driverNorm, manuals = driverManualInvoicesForDays(driverNorm)) {
+	const cover = new Map();
+	const DAY = /^\d{4}-\d{2}-\d{2}$/;
+	for (const m of manuals) {
+		const mark = (d) => { if (!cover.has(d)) cover.set(d, m.invoiceNumber); };
+		let wholePeriod = !m.lines.length;
+		for (const l of m.lines) {
+			const d = String((l && l.date) || "").trim();
+			if (DAY.test(d)) mark(d);
+			else wholePeriod = true;
+		}
+		if (wholePeriod && DAY.test(m.weekStart) && DAY.test(m.weekEnd) && m.weekEnd >= m.weekStart) {
+			for (let d = m.weekStart, i = 0; d <= m.weekEnd && i < 400; d = dayKeyPlus(d, 1), i++) mark(d);
+		}
+	}
+	return cover;
+}
+
+// Why a week's late days cannot go on its weekly invoice `inv` or a correction
+// for it, or "" (as scripts/create-correction-invoice-draft.js refuses):
+//   - a positive adjustment on it of at least one day's pay (`minRate`, the
+//     smallest rate among those days) may already pay them;
+//   - a manual invoice of the driver (`manuals`) whose lines or notes name it
+//     may already pay them, whatever date it carries.
+function lateWorkWeekBlocker(inv, { manuals = [], minRate = 0 } = {}) {
+	const adj = Number(inv && inv.adjustment) || 0;
+	if (adj > 0 && adj >= minRate) {
+		return `${inv.invoice_number} carries a $${adj.toFixed(2)} adjustment that may already pay them; a person decides`;
+	}
+	const number = String((inv && inv.invoice_number) || "").toUpperCase();
+	const naming = number ? manuals.find((m) => m.text.includes(number)) : null;
+	if (naming) return `${naming.invoiceNumber} names ${inv.invoice_number}, so it may already pay them; a person decides`;
+	return "";
+}
+
+// Inside a late-day write's transaction, after its render: why `days` may now be
+// paid elsewhere (a manual invoice or an adjustment written meanwhile), or "".
+// `weeklyRow` is the week's weekly invoice as it stands now.
+function lateDaysPaidElsewhere(driverNorm, days, weeklyRow, minRate) {
+	const manuals = driverManualInvoicesForDays(driverNorm);
+	const block = weeklyRow ? lateWorkWeekBlocker(weeklyRow, { manuals, minRate }) : "";
+	if (block) return block;
+	const cover = manualInvoiceDayCover(driverNorm, manuals);
+	const hit = days.filter((d) => cover.has(d));
+	return hit.length ? `${hit.join(", ")} may already be paid by ${[...new Set(hit.map((d) => cover.get(d)))].join(", ")}` : "";
+}
+
+// The days of one driver the rule pays that no live invoice holds, before
+// `lastDay`: { byWeek: Map weekStart -> [{ day, loads }], refused: [{ day, loadId, reason, kind }] }.
+// A day removed by an override is left out; a day another live invoice holds is
+// paid (named only when a manual invoice holds it). `holdersOf` is
+// invoicePaidDayHolders() (the dry run passes one that also sees the rows the
+// backfill would write).
+function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, holdersOf = invoicePaidDayHolders }) {
+	const nameNorm = normalizeDriverName(driverName);
+	const cols = invoiceWeekColumns(headers);
+	const monthCols = jobTrackingMonthCols(headers);
+	const vidOf = invoiceTruckVidReader(headers);
+	const ovr = getAllExcludedDriverDays()[nameNorm] || null;
+	const removed = ovr && ovr.remove ? ovr.remove : new Set();
+	const payable = new Map();
+	const candidates = [];
+	for (const row of driverCompletedLiveLoads(data, headers, driverName, loadKeySet(getDeletedLoadIds()))) {
+		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
+		if (!loadId) continue;
+		const vid = vidOf(row);
+		const t = resolver.trip(loadId, { vid });
+		if (t.basis !== "trip") continue;
+		const follows = resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), vid });
+		for (const day of t.days) {
+			if (day > lastDay || removed.has(day)) continue;
+			candidates.push({ day, loadId, follows: !!follows });
+		}
+	}
+	const holders = holdersOf(nameNorm, [...new Set(candidates.map((c) => c.day))]);
+	const manualHolder = new Map();
+	if (holders.size) {
+		const ids = [...new Set([...holders.values()].map((h) => h.invoiceId))];
+		for (const r of db.prepare(`SELECT id, is_manual, render_data FROM invoices WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids)) {
+			let snap = null;
+			try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+			manualHolder.set(r.id, !!Number(r.is_manual) && !(snap && snap.workDayCorrection));
+		}
+	}
+	const manualCover = manualInvoiceDayCover(nameNorm);
+	const refused = [];
+	const seen = new Set();
+	for (const c of candidates) {
+		const k = `${c.day}\t${c.loadId}`;
+		if (seen.has(k)) continue;
+		seen.add(k);
+		const held = holders.get(c.day);
+		const refuse = (kind, reason) => refused.push({ day: c.day, loadId: c.loadId, reason, kind });
+		if (held) {
+			if (manualHolder.get(held.invoiceId)) refuse("paid", `already paid by ${held.invoiceNumber}`);
+			continue;
+		}
+		if (manualCover.has(c.day)) { refuse("mayBePaid", `it may already be paid by ${manualCover.get(c.day)}`); continue; }
+		if (!c.follows) { refuse("beforeFrom", "its load settles before TRIP_WORK_DAYS_FROM"); continue; }
+		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week the rule invoiced`); continue; }
+		if (periodWriteLocked(c.day.slice(0, 7))) {
+			refuse("closedMonth", periodLocksReadable() ? `${periodLabel(c.day.slice(0, 7))} is closed` : "the month locks cannot be read");
+			continue;
+		}
+		if (!payable.has(c.day)) payable.set(c.day, []);
+		payable.get(c.day).push(c.loadId);
+	}
+	// A day refused through one load and payable through another is payable.
+	const refusedLeft = refused.filter((r) => !payable.has(r.day));
+	const byWeek = new Map();
+	for (const day of [...payable.keys()].sort()) {
+		const ws = getWeekRange(day).weekStart;
+		if (!byWeek.has(ws)) byWeek.set(ws, []);
+		byWeek.get(ws).push({ day, loads: payable.get(day) });
+	}
+	return { byWeek, refused: refusedLeft.sort((a, b) => a.day.localeCompare(b.day) || a.loadId.localeCompare(b.loadId)) };
+}
+
+// Puts days onto a live weekly invoice that is not approved, in place: its day
+// grid gains them at their rates, its total and PDF follow, its status and
+// adjustment stay. Render first (the only awaits), then one immediate
+// transaction re-checks that the invoice, its Personal lines and the days have
+// not moved, writes the row, claims the days and renames the PDF into place last.
+async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
+	const inv = invoiceRow;
+	const label = inv.invoice_number || `Invoice #${inv.id}`;
+	const snapshot = personalSnapshotOf(inv);
+	if (!snapshot || snapshot.__templateName !== "service_invoice" || !snapshot.days || !inv.pdf_file_name) {
+		throw invoiceWriteRefusal("INVOICE_NO_DAY_GRID", `${label} has no stored day grid to add a day to.`);
+	}
+	const next = JSON.parse(JSON.stringify(snapshot));
+	const added = [];
+	for (const e of entries) {
+		const cell = next.days[invoiceGridDayName(e.day)];
+		if (!cell || cell.completed) continue;
+		cell.completed = true;
+		cell.total = e.rate;
+		cell.loadBol = e.loads.join(", ");
+		added.push(e);
+	}
+	if (!added.length) return null;
+	const addCents = added.reduce((c, e) => c + Math.round(e.rate * 100), 0);
+	const total = (Math.round((Number(inv.total_earnings) || 0) * 100) + addCents) / 100;
+	next.totalDue = total;
+	let loadIds = [];
+	try { loadIds = JSON.parse(inv.load_ids || "[]"); } catch { loadIds = []; }
+	for (const e of added) for (const l of e.loads) if (!loadIds.includes(l)) loadIds.push(l);
+	const personalRows = personalRowsOnInvoice(inv.id);
+	const rendered = personalRenderData(next, { ...inv, total_earnings: total }, personalRows);
+	const withReceipts = await personalReceiptRenderData(rendered.data, personalRows);
+	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const dir = path.join(DATA_DIR, "uploads", "invoices");
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	const finalPath = path.join(dir, inv.pdf_file_name);
+	const tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
+	const changed = () => invoiceWriteRefusal("INVOICE_CHANGED", `${label} changed while its PDF was being redrawn. Nothing was saved; the days wait for the next run.`);
+	try {
+		fs.writeFileSync(tmpPath, pdfBuffer);
+		const updated = db.transaction(() => {
+			const now = db.prepare("SELECT * FROM invoices WHERE id = ?").get(inv.id);
+			const moved = !now || !!now.deleted_at || !LATE_WORK_DAY_OPEN_STATUSES.has(now.status) || now.pdf_file_name !== inv.pdf_file_name
+				|| ["render_data", "adjustment", "adjustment_note", "adjusted_at", "total_earnings", "load_ids", "loads_count"].some((k) => String(now[k] ?? "") !== String(inv[k] ?? ""));
+			const nowLines = personalRowsOnInvoice(inv.id).map((r) => r.id);
+			const sameLines = nowLines.length === personalRows.length && nowLines.every((id, i) => id === personalRows[i].id);
+			const shared = db.prepare("SELECT 1 FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?").get(inv.pdf_file_name, inv.id);
+			const weekLock = invoiceMonthLockBlockers(now || inv);
+			if (moved || !sameLines || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
+			// A manual invoice written while the PDF was drawn may now pay a day.
+			const elsewhere = lateDaysPaidElsewhere(normalizeDriverName(inv.driver || ""), added.map((e) => e.day), now, Math.min(...added.map((e) => e.rate)));
+			if (elsewhere) throw invoiceWriteRefusal("INVOICE_DAY_MAY_BE_PAID", `${elsewhere}. Nothing was saved.`);
+			claimInvoicePaidDays(inv.id, normalizeDriverName(inv.driver || ""), added.map((e) => e.day));
+			db.prepare("UPDATE invoices SET render_data = ?, total_earnings = ?, loads_count = loads_count + ?, load_ids = ? WHERE id = ?")
+				.run(JSON.stringify({ ...rendered.data, __templateName: rendered.templateName }), total, added.length, JSON.stringify(loadIds), inv.id);
+			fs.renameSync(tmpPath, finalPath);
+			return db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(inv.id);
+		}).immediate();
+		logAudit(req, "invoice_late_work_days", "invoice", inv.id,
+			`${label} (${inv.status}): added ${added.length} day(s) worked in its week and found after it was generated (trip timestamps): `
+			+ `${added.map((e) => `${e.day} $${e.rate.toFixed(2)}${e.loads.length ? ` (${e.loads.join(", ")})` : ""}`).join("; ")}; total $${Number(inv.total_earnings || 0).toFixed(2)} -> $${total.toFixed(2)}`);
+		return { invoice: updated, days: added };
+	} catch (err) {
+		try { fs.unlinkSync(tmpPath); } catch { /* renamed into place, or never written */ }
+		throw err;
+	}
+}
+
+// A separate correction invoice for days of a week whose weekly invoice is
+// approved (or touches a closed month): a manual Draft (is_manual, INV-M-
+// number, the service_invoice_manual template) with one line per day, "Correction
+// for <invoice>: <Weekday, Month D, YYYY>, $<rate>" (the pattern of
+// scripts/create-correction-invoice-draft.js), correction_of = the weekly
+// invoice, and paidDays naming the days it claims. Its period is the week, from
+// the first day of the earliest day's month when the week touches a closed month,
+// so the correction itself touches none. is_correction stays 0: that column
+// belongs to Personal corrections (openPersonalCorrection()).
+async function createWorkDayCorrection({ driverName, weekly, weekStart, weekEnd, entries, req }) {
+	const days = [...entries].sort((a, b) => a.day.localeCompare(b.day));
+	if (!days.length) return null;
+	let periodStart = weekStart;
+	const probe = (start) => invoiceMonthLockBlockers({ invoice_number: `the correction for the week of ${weekStart}`, week_start: start, week_end: weekEnd });
+	let lock = probe(periodStart);
+	if (lock.unreadable) throw invoiceWriteRefusal("PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. Nothing was saved.");
+	if (lock.blockers.length) {
+		const monthStart = `${days[0].day.slice(0, 7)}-01`;
+		periodStart = monthStart > weekStart ? monthStart : weekStart;
+		lock = probe(periodStart);
+		if (lock.unreadable || lock.blockers.length) throw invoiceWriteRefusal("PERIOD_FINALIZED", `The week of ${weekStart} touches a finalized month. Nothing was saved.`);
+	}
+	const display = canonicalDriverName(driverName) || String(driverName || "").trim();
+	const longDay = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+	const itemsRes = sanitizeManualInvoiceRows(days.map((e) => ({
+		date: e.day,
+		description: `Correction for ${weekly.invoice_number}: ${longDay(e.day)}, $${e.rate.toFixed(2)}${e.loads.length ? ` (load ${e.loads.join(", ")})` : ""}`,
+		amount: e.rate,
+	})), "lineItems");
+	if (itemsRes.error) throw invoiceWriteRefusal("INVOICE_LINES_INVALID", itemsRes.error);
+	const { subtotal, deductionsTotal, totalDue } = manualInvoiceTotals(itemsRes.items, []);
+	const onFile = findInvoicePayee(display);
+	const invoiceNumber = generateInvoiceNumber(display, periodStart, { prefix: "INV-M-" });
+	const pdfFileName = invoicePdfFileName(invoiceNumber);
+	const fmtPeriodDate = (s) => new Date(`${s}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+	const actorName = (req && req.session && req.session.user && req.session.user.username) || "";
+	const renderData = {
+		payeeName: display,
+		payeeRole: "Driver",
+		payeeAddress: onFile ? String(onFile.address || "").slice(0, 200) : "",
+		payeePhone: onFile ? String(onFile.phone || "").slice(0, 40) : "",
+		invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
+		issueDate: appTime.dateTextInZone(new Date(), APP_TIMEZONE),
+		billingPeriodStart: fmtPeriodDate(periodStart),
+		billingPeriodEnd: fmtPeriodDate(weekEnd),
+		lineItems: itemsRes.items,
+		deductions: [],
+		subtotal,
+		deductionsTotal,
+		totalDue,
+		notes: `Correction to ${weekly.invoice_number} (${weekly.status}), week of ${personalWeekLabel(weekStart, weekEnd)}: days worked in that week, found after it was approved (trip timestamps).`.slice(0, 500),
+		preparedBy: actorName,
+		adjustment: 0,
+		adjustmentNote: "",
+		workDayCorrection: true,
+		correctionOf: weekly.invoice_number,
+		paidDays: days.map((e) => e.day),
+	};
+	const pdfBuffer = await renderPolicy("service_invoice_manual", renderData);
+	const driverNorm = normalizeDriverName(display);
+	const result = commitInvoiceWithPdf({
+		invoiceNumber, pdfFileName, pdfBuffer,
+		insert: () => {
+			const weekLock = invoiceMonthLockBlockers({ invoice_number: invoiceNumber, week_start: periodStart, week_end: weekEnd });
+			if (weekLock.unreadable || weekLock.blockers.length) {
+				throw invoiceWriteRefusal("PERIOD_FINALIZED", `The week of ${weekStart} came to touch a finalized month while the correction was being drawn. Nothing was saved.`);
+			}
+			// An adjustment or a manual invoice written while the PDF was drawn may
+			// now pay a day (the weekly invoice re-read as it stands).
+			const weeklyNow = db.prepare("SELECT * FROM invoices WHERE id = ?").get(weekly.id);
+			const elsewhere = lateDaysPaidElsewhere(driverNorm, days.map((e) => e.day), weeklyNow || weekly, Math.min(...days.map((e) => e.rate)));
+			if (elsewhere) throw invoiceWriteRefusal("INVOICE_DAY_MAY_BE_PAID", `${elsewhere}. Nothing was saved.`);
+			const res = db.prepare(
+				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by, correction_of)
+				 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?, ?)`
+			).run(invoiceNumber, display.toLowerCase(), periodStart, weekEnd, itemsRes.items.length, totalDue, deductionsTotal,
+				pdfFileName, JSON.stringify({ ...renderData, __templateName: "service_invoice_manual" }), actorName, weekly.id);
+			claimInvoicePaidDays(Number(res.lastInsertRowid), driverNorm, days.map((e) => e.day));
+			return res;
+		},
+	});
+	const invoice = db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(result.lastInsertRowid);
+	logAudit(req, "create_work_day_correction_invoice", "invoice", invoice.id,
+		`${invoice.invoice_number} (Draft) for ${display}, ${periodStart} – ${weekEnd}, correcting ${weekly.invoice_number} (${weekly.status}): `
+		+ `${days.map((e) => `${e.day} $${e.rate.toFixed(2)}`).join("; ")}; total $${totalDue.toFixed(2)}`);
+	return { invoice, days };
+}
+
+// One driver's late days (see the section header), settled: each week's days go
+// onto that week's own invoice or a correction for it. Runs at the start of a
+// weekly generation by a Super Admin (the Friday batch included), for the weeks
+// before it, with the rule on; nothing happens before the rule's first invoice.
+// Returns { report, warnings }; a week that cannot be settled is named in
+// `warnings` and waits for the next run (the days stay unpaid, never doubled).
+async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTrackingRows, resolver, req }) {
+	const report = { updated: [], corrections: [], refused: [], noInvoice: [] };
+	const warnings = [];
+	const out = { report, warnings };
+	const nameNorm = normalizeDriverName(driverName);
+	const payStruct = getDriverPayStructures()[nameNorm] || { payType: "fixed", payPercentage: 0 };
+	if (payStruct.payType === "percentage") return out;
+	const floor = tripWorkDaysFloor();
+	if (!floor) return out;
+	const { headers, data } = jobTrackingRowsOf(await readJobTrackingRows());
+	if (!headers.length) return out;
+	const found = lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay: dayKeyPlus(beforeWeekStart, -1) });
+	const reportFrom = dayKeyPlus(beforeWeekStart, -LATE_WORK_DAY_REPORT_DAYS);
+	for (const r of found.refused) {
+		if (r.day < reportFrom) continue;
+		report.refused.push(r);
+		warnings.push(`NOT ADDED: ${r.day} (load ${r.loadId}) was worked by its trip timestamps but goes on no invoice: ${r.reason}.`);
+	}
+	const truckRate = truckDailyRateCandidates(driverName).slice(-1)[0];
+	const rateOf = invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate, dailyRate: resolveDailyRate(payStruct.payDaily, truckRate), fromMonth: resolver.fromMonth });
+	let changed = false;
+	for (const [weekStart, list] of found.byWeek) {
+		const weekEnd = getWeekRange(weekStart).weekEnd;
+		const entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
+		const dayText = entries.map((e) => e.day).join(", ");
+		try {
+			const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
+			if (weekly.length !== 1) {
+				if (!weekly.length) report.noInvoice.push({ weekStart, days: entries.map((e) => e.day) });
+				warnings.push(weekly.length
+					? `NOT ADDED: ${dayText} (week of ${weekStart}): that week has ${weekly.length} weekly invoices; delete the extra one.`
+					: `NOT ADDED: ${dayText} (week of ${weekStart}): worked by the trip timestamps, but that week has no invoice. Generate that week's invoice to pay them.`);
+				continue;
+			}
+			const inv = weekly[0];
+			const blocker = lateWorkWeekBlocker(inv, { manuals: driverManualInvoicesForDays(nameNorm), minRate: Math.min(...entries.map((e) => e.rate)) });
+			if (blocker) {
+				for (const e of entries) report.refused.push({ day: e.day, loadId: e.loads.join(", "), reason: blocker, kind: "mayBePaid" });
+				warnings.push(`NOT ADDED: ${dayText} (week of ${weekStart}): ${blocker}.`);
+				continue;
+			}
+			const lock = invoiceMonthLockBlockers(inv);
+			if (lock.unreadable) { warnings.push(`NOT ADDED: ${dayText}: the period lock table could not be read.`); continue; }
+			if (LATE_WORK_DAY_OPEN_STATUSES.has(inv.status) && !lock.blockers.length) {
+				const done = await addLateWorkDaysToInvoice(inv, entries, req);
+				if (done) {
+					changed = true;
+					report.updated.push({ invoiceNumber: inv.invoice_number, status: inv.status, days: done.days.map((e) => e.day), amount: done.days.reduce((c, e) => c + Math.round(e.rate * 100), 0) / 100 });
+				} else {
+					warnings.push(`NOT ADDED: ${dayText}: ${inv.invoice_number}'s grid already shows those weekdays; check its paid days.`);
+				}
+			} else {
+				const done = await createWorkDayCorrection({ driverName, weekly: inv, weekStart, weekEnd, entries, req });
+				if (done) {
+					changed = true;
+					report.corrections.push({ invoiceNumber: done.invoice.invoice_number, correctionOf: inv.invoice_number, days: done.days.map((e) => e.day), amount: Number(done.invoice.total_earnings) || 0 });
+				}
+			}
+		} catch (err) {
+			warnings.push(`NOT ADDED: ${dayText} (week of ${weekStart}): ${err && err.message}`);
+		}
+	}
+	if (changed) notifyChange("invoices");
+	return out;
+}
+
+// What TRIP_WORK_DAYS would change with FROM = `from`, compared with the rule
+// off, every other setting as the server has it. Read-only: nothing is written,
+// rendered or claimed. GET /api/admin/work-days/dry-run and
+// scripts/work-days-dry-run.js (the same function, lifted) both return it.
+//   perDay          each driver-day the payout ledger pays differently (added,
+//                   removed), with the load, the trip timestamp behind the day
+//                   and its flags
+//   driverMonths    per scope, driver and month: days and driver pay changed
+//   investorMonths  per investor and month: payable and driver pay, now and
+//                   with the rule (loss carried forward included)
+//   perInvoice      each live weekly invoice whose week touches from..to: the
+//                   days it pays, the days the rule pays that week, the $ of
+//                   the days it would add, the days it pays that the rule
+//                   would not (kept: an issued invoice is never reduced), and
+//                   what happens once the rule is on (a week from the late
+//                   days' floor on: in place or a correction, settleLateWorkDays())
+//   lateDays        days of weeks before this one that the rule pays and no
+//                   invoice holds yet, by week (they overlap perInvoice's
+//                   added days)
+//   refusedDays     days of from..to worked by the trip timestamps that no
+//                   invoice will carry, each with its reason and amount (before
+//                   the floor, a load settling before FROM, a closed month, may
+//                   already be paid by a manual invoice or an adjustment)
+//   lateDaysFloor   the floor used: the stored marker, else `floor` (the
+//                   Saturday of the week the first rule invoice is expected
+//                   for), else this business week's Saturday
+//   backfillRows    the invoice_paid_days rows the backfill would write first
+//   closedMonthsUnchanged, monthsBeforeFromUnchanged  false is a problem (the
+//                   script exits 1)
+// Drivers are numbered labels ("driver 1", …, per run) unless `names`.
+// Refuses a FROM at or before the latest closed month.
+async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
+	const fromMonth = String(from || "").trim();
+	const toMonth = String(to || "").trim() || fromMonth;
+	if (!tripWorkDays.FROM_MONTH_RE.test(fromMonth)) return { refused: true, reason: "from=YYYY-MM is required: the TRIP_WORK_DAYS_FROM to try" };
+	if (!tripWorkDays.FROM_MONTH_RE.test(toMonth) || toMonth < fromMonth) return { refused: true, reason: "to must be a month (YYYY-MM) on or after from" };
+	// The late days' floor the switch-on would have: the stored marker once the
+	// rule has invoiced, else `floor` (the Saturday of the week the first rule
+	// invoice is expected for), else this business week's Saturday (the Friday
+	// batch's week). Days of FROM's month before it are paid by the ledger but
+	// carried onto no invoice: refusedDays lists them with their amounts.
+	const floorGiven = String(floor || "").trim();
+	const realDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(`${d}T12:00:00Z`)) && new Date(`${d}T12:00:00Z`).toISOString().slice(0, 10) === d;
+	if (floorGiven && !realDay(floorGiven)) return { refused: true, reason: "floor must be a calendar day (YYYY-MM-DD)" };
+	const lateFloor = tripWorkDaysFloor() || (floorGiven ? getWeekRange(floorGiven).weekStart : getWeekRange().weekStart);
+	const latestClosed = financialsCalc.ledgerDayOnce.latestClosedMonth(db);
+	if (latestClosed && fromMonth <= latestClosed) {
+		return { refused: true, reason: `from=${fromMonth} is at or before ${latestClosed}, the latest closed month. The rule may only start in an open month: closed months are final as recorded.` };
+	}
+	const rangeStart = `${fromMonth}-01`;
+	const [ty, tm] = toMonth.split("-").map(Number);
+	const rangeEnd = new Date(Date.UTC(ty, tm, 0, 12)).toISOString().slice(0, 10);
+	const inRange = (mk) => mk >= fromMonth && mk <= toMonth;
+	const resolver = tripDayResolver(fromMonth);
+	const offRules = { ...payoutRules(), tripFrom: null };
+	const onRules = { ...payoutRules(), tripFrom: fromMonth };
+	const round2 = (x) => Math.round(x * 100) / 100;
+	const problems = [];
+
+	// The payout ledger, every scope, off and on: perDay and driverMonths.
+	const off = await computeFleetLedger({ rules: offRules });
+	const on = await computeFleetLedger({ rules: onRules });
+	const tripOf = (loadId) => (loadId ? resolver.trip(loadId) : null);
+	const perDay = [];
+	const driverMonths = new Map();
+	const FIGURES = ["revenue", "driverPay", "fixedCosts", "tripExpenses", "maintFundCost", "complianceCost"];
+	const onByOwner = new Map(on.scopes.map((s) => [s.ownerId, s]));
+	for (const base of off.scopes) {
+		const next = onByOwner.get(base.ownerId) || { items: [], months: [] };
+		const dayItems = (items) => new Map(items.filter((i) => i.kind === "driver_pay" && i.day).map((i) => [`${i.driver}\t${i.month}\t${i.day}`, i]));
+		const a = dayItems(base.items);
+		const b = dayItems(next.items);
+		const note = (it, change) => {
+			const t = tripOf(it.loadId);
+			// No month before FROM may change (months before FROM pay as before).
+			if (it.month < fromMonth) problems.push({ ownerId: base.ownerId, issue: `${it.month}, a month before FROM, ${change === "added" ? "gains" : "loses"} ${it.day}`, beforeFrom: true, closed: isLocked(it.month) });
+			if (inRange(it.month)) {
+				perDay.push({
+					ownerId: base.ownerId, driver: it.driver, month: it.month, day: it.day, change, loadId: it.loadId || "", added: !!it.added,
+					amount: (change === "added" ? 1 : -1) * it.cents / 100,
+					tripBasis: t ? t.basis : "", tripStartStatus: t && t.startEvent ? t.startEvent.status : "", tripStart: t && t.startEvent ? t.startEvent.at : "",
+					flags: t ? Object.keys(t.flags) : [],
+				});
+				const k = `${base.ownerId}\t${it.driver}\t${it.month}`;
+				const row = driverMonths.get(k) || { ownerId: base.ownerId, driver: it.driver, month: it.month, daysChange: 0, driverPayChange: 0 };
+				row.daysChange += change === "added" ? 1 : -1;
+				row.driverPayChange = round2(row.driverPayChange + (change === "added" ? 1 : -1) * it.cents / 100);
+				driverMonths.set(k, row);
+			}
+		};
+		for (const [k, it] of a) if (!b.has(k)) note(it, "removed");
+		for (const [k, it] of b) if (!a.has(k)) note(it, "added");
+		const monthsOf = (ms) => new Map(ms.map((m) => [m.month, m]));
+		const x = monthsOf(base.months);
+		const y = monthsOf(next.months);
+		for (const mk of new Set([...x.keys(), ...y.keys()])) {
+			const moved = FIGURES.filter((f) => Math.round(((x.get(mk) || {})[f] || 0) * 100) !== Math.round(((y.get(mk) || {})[f] || 0) * 100));
+			if (moved.length && isLocked(mk)) problems.push({ ownerId: base.ownerId, issue: `closed month ${mk} changed: ${moved.join(", ")}`, closed: true });
+		}
+	}
+	perDay.sort((p, q) => p.ownerId - q.ownerId || p.driver.localeCompare(q.driver) || p.day.localeCompare(q.day) || p.month.localeCompare(q.month));
+
+	// Each investor's payable, off and on.
+	const carrierDB = getCarrierDBFromSQLite();
+	const driverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCol = findCol(carrierDB.headers, /carrier/i);
+	const globalConfig = {};
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => { globalConfig[r.key] = r.value; });
+	const investorMonths = [];
+	for (const inv of listSettlableInvestors()) {
+		const config = { ...globalConfig };
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(inv.ownerId).forEach((r) => { config[r.key] = r.value; });
+		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, driverCol, carrierCol);
+		const payable = async (rules) => {
+			const { monthlyEarnings } = await computeInvestorMonthlyEarnings({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, config, rules });
+			const carry = computeLossCarryForward(monthlyEarnings);
+			return new Map(monthlyEarnings.map((m) => [m.month, { payable: carry[m.month].payable, driverPay: m.exact.driverPay }]));
+		};
+		const was = await payable(offRules);
+		const is = await payable(onRules);
+		for (const period of [...new Set([...was.keys(), ...is.keys()])].sort()) {
+			const p = was.get(period) || { payable: 0, driverPay: 0 };
+			const q = is.get(period) || { payable: 0, driverPay: 0 };
+			const delta = round2(q.payable - p.payable);
+			const driverPayChange = round2(q.driverPay - p.driverPay);
+			if (!delta && !driverPayChange) continue;
+			if (isLocked(period)) { problems.push({ ownerId: inv.ownerId, issue: `closed month ${period} changed its payable or driver pay`, closed: true }); continue; }
+			investorMonths.push({ ownerId: inv.ownerId, ...(names ? { investor: inv.name } : {}), period, current: round2(p.payable), withRule: round2(q.payable), delta, driverPayChange });
+		}
+	}
+
+	// Invoices, late days and refused days, against the paid days as they will
+	// stand after the backfill.
+	const backfill = backfillInvoicePaidDays({ write: false });
+	const virtual = new Map(backfill.rows.map((r) => [`${r.driverNorm}\t${r.day}`, { invoiceId: r.invoiceId, invoiceNumber: r.invoiceNumber }]));
+	const holdersOf = (driverNorm, days) => {
+		const m = invoicePaidDayHolders(driverNorm, days);
+		for (const d of days) { const v = virtual.get(`${driverNorm}\t${d}`); if (v && !m.has(d)) m.set(d, v); }
+		return m;
+	};
+	const jt = await getJobTrackingCached();
+	const headers = jt.headers || [];
+	const data = jt.data || [];
+	const cols = invoiceWeekColumns(headers);
+	const monthCols = jobTrackingMonthCols(headers);
+	const vidOf = invoiceTruckVidReader(headers);
+	const payStructs = getDriverPayStructures();
+	const deletedKeys = loadKeySet(getDeletedLoadIds());
+	const drivers = new Map();
+	for (const row of data) {
+		const nm = cols.driverCol ? normalizeDriverName(driverNameForTotals(row[cols.driverCol])) : "";
+		if (nm && !drivers.has(nm)) drivers.set(nm, String(row[cols.driverCol]).trim());
+	}
+	// Late days are those of weeks before this business week (the Friday batch
+	// settles the weeks before the one it bills), up to the end of `to`; with a
+	// floor in a later week, the days up to it too (all refused: before the floor).
+	const beforeThisWeek = dayKeyPlus(getWeekRange().weekStart, -1);
+	const beforeFloor = dayKeyPlus(lateFloor, -1);
+	const reach = beforeFloor > beforeThisWeek ? beforeFloor : beforeThisWeek;
+	const lastDay = rangeEnd < reach ? rangeEnd : reach;
+	const lateDays = [];
+	const refusedDays = [];
+	const raterFor = (nm, display) => {
+		const ps = payStructs[nm] || { payType: "fixed", payDaily: 0 };
+		const truckRate = truckDailyRateCandidates(display).slice(-1)[0];
+		return invoiceDayRater({ nameNorm: nm, payDaily: ps.payDaily, truckRate, dailyRate: resolveDailyRate(ps.payDaily, truckRate), fromMonth });
+	};
+	for (const [nm, display] of drivers) {
+		if ((payStructs[nm] || {}).payType === "percentage") continue;
+		const found = lateWorkDaysFor({ data, headers, driverName: display, resolver, floor: lateFloor, lastDay, holdersOf });
+		const rateOf = raterFor(nm, display);
+		const manuals = driverManualInvoicesForDays(nm);
+		for (const [weekStart, list] of found.byWeek) {
+			const weekly = liveWeeklyInvoicesForDriverWeek(display, weekStart);
+			const blocker = weekly.length === 1 ? lateWorkWeekBlocker(weekly[0], { manuals, minRate: Math.min(...list.map((e) => rateOf(e.day))) }) : "";
+			for (const e of list) {
+				if (blocker) refusedDays.push({ driver: nm, day: e.day, loadId: e.loads.join(", "), reason: blocker, kind: "mayBePaid", amount: rateOf(e.day) });
+				else lateDays.push({ driver: nm, weekStart, day: e.day, loadIds: e.loads, amount: rateOf(e.day), invoice: weekly.length === 1 ? weekly[0].invoice_number : "" });
+			}
+		}
+		for (const r of found.refused) {
+			if (r.day < rangeStart || r.day > rangeEnd) continue;
+			// A day before the floor in a week with no invoice yet: that week's own
+			// invoice will still pay its days, so it is not part of the floor gap.
+			const notYet = r.kind === "beforeFloor" && !liveWeeklyInvoicesForDriverWeek(display, getWeekRange(r.day).weekStart).length;
+			refusedDays.push({
+				driver: nm, day: r.day, loadId: r.loadId, amount: rateOf(r.day),
+				kind: notYet ? "beforeFloorWeekNotInvoiced" : r.kind,
+				reason: notYet ? `${r.reason}; that week has no invoice yet, and its own invoice will pay its days` : r.reason,
+			});
+		}
+	}
+	refusedDays.sort((p, q) => p.driver.localeCompare(q.driver) || p.day.localeCompare(q.day));
+
+	const perInvoice = [];
+	const invoices = db.prepare("SELECT * FROM invoices WHERE deleted_at = '' AND is_manual = 0 AND week_end >= ? AND week_start <= ? ORDER BY week_start, id").all(rangeStart, rangeEnd);
+	for (const inv of invoices) {
+		const nm = normalizeDriverName(inv.driver || "");
+		if (!nm || (payStructs[nm] || {}).payType === "percentage") continue;
+		const snap = personalSnapshotOf(inv);
+		if (!snap || snap.__templateName !== "service_invoice" || !snap.days) continue;
+		const display = drivers.get(nm) || inv.driver;
+		const loads = new Map(driverCompletedLiveLoads(data, headers, display, deletedKeys).map((row) => [normalizeLoadId(cols.loadIdCol ? row[cols.loadIdCol] : ""), row]));
+		const follows = (loadId) => {
+			const row = loads.get(normalizeLoadId(loadId));
+			return !!row && resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), vid: vidOf(row) }) !== null;
+		};
+		const current = invoicePaidDaysOf(inv);
+		const gridOf = (day) => snap.days[invoiceGridDayName(day)] || {};
+		const ruleDays = new Set();
+		for (const [, row] of loads) {
+			const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
+			const days = loadId ? resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), range: { start: inv.week_start, end: inv.week_end }, vid: vidOf(row) }) : null;
+			for (const d of days || []) ruleDays.add(d);
+		}
+		const removed = (getAllExcludedDriverDays()[nm] || { remove: new Set() }).remove;
+		for (const d of [...ruleDays]) if (removed.has(d)) ruleDays.delete(d);
+		for (const d of current) {
+			const ids = String(gridOf(d).loadBol || "").split(",").map((x) => x.trim()).filter(Boolean);
+			if (!ids.length || ids.some((id) => !follows(id))) ruleDays.add(d);
+		}
+		const added = [...ruleDays].filter((d) => !current.includes(d)).sort();
+		const dropped = current.filter((d) => !ruleDays.has(d));
+		if (!added.length && !dropped.length) continue;
+		const rateOf = raterFor(nm, display);
+		const blocker = added.length ? lateWorkWeekBlocker(inv, { manuals: driverManualInvoicesForDays(nm), minRate: Math.min(...added.map((d) => rateOf(d))) }) : "";
+		const locked = invoiceMonthLockBlockers(inv);
+		// What happens to the added days once the rule is on. An issued invoice
+		// is never reduced: its dropped days stay as issued (only a Draft
+		// regenerate would drop them).
+		const afterSwitchOn = !added.length ? "nothing is added"
+			: inv.week_start < lateFloor ? `stays as issued: the week is before ${lateFloor}, the late days' floor`
+				: blocker ? `not added: ${blocker}`
+					: LATE_WORK_DAY_OPEN_STATUSES.has(inv.status) && !locked.unreadable && !locked.blockers.length ? "added to this invoice in place"
+						: "a correction invoice (Draft) for this week";
+		perInvoice.push({
+			invoiceNumber: inv.invoice_number, driver: nm, status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end,
+			currentDays: current, ruleDays: [...ruleDays].sort(), addedDays: added, amountAdded: round2(added.reduce((c, d) => c + rateOf(d), 0)),
+			droppedDays: dropped, droppedAmountKept: round2(dropped.reduce((c, d) => c + (Number(gridOf(d).total) || 0), 0)),
+			afterSwitchOn,
+		});
+	}
+
+	const labels = new Map();
+	const label = (n) => { if (!labels.has(n)) labels.set(n, `driver ${labels.size + 1}`); return labels.get(n); };
+	const named = (list, key = "driver") => list.map((r) => ({ ...r, [key]: names ? (drivers.get(r[key]) || r[key]) : label(r[key]) }));
+	const backfillRows = backfill.rows.map((r) => ({ driver: r.driverNorm, day: r.day, invoiceNumber: r.invoiceNumber, status: r.status }));
+	const backfillConflicts = backfill.conflicts.map((c) => ({ driver: c.driverNorm, day: c.day, invoiceNumber: c.invoiceNumber, heldBy: c.heldByNumber }));
+	const months = [...driverMonths.values()].sort((p, q) => p.ownerId - q.ownerId || p.driver.localeCompare(q.driver) || p.month.localeCompare(q.month));
+	return {
+		from: fromMonth, to: toMonth, latestClosedMonth: latestClosed, lateDaysFloor: lateFloor,
+		baseline: "TRIP_WORK_DAYS off; every other setting as the server has it",
+		perDay: named(perDay), driverMonths: named(months), investorMonths, perInvoice: named(perInvoice),
+		lateDays: named(lateDays), refusedDays: named(refusedDays), backfillRows: named(backfillRows), backfillConflicts: named(backfillConflicts),
+		closedMonthsUnchanged: !problems.some((p) => p.closed),
+		monthsBeforeFromUnchanged: !problems.some((p) => p.beforeFrom),
+		problems,
+		summary: {
+			daysAdded: perDay.filter((p) => p.change === "added").length,
+			daysRemoved: perDay.filter((p) => p.change === "removed").length,
+			driverPayChange: round2(months.reduce((c, m) => c + m.driverPayChange, 0)),
+			investorPayableChange: round2(investorMonths.reduce((c, m) => c + m.delta, 0)),
+			invoicesChanged: perInvoice.length,
+			invoiceAmountAdded: round2(perInvoice.reduce((c, i) => c + i.amountAdded, 0)),
+			invoiceDaysDroppedKept: perInvoice.reduce((c, i) => c + i.droppedDays.length, 0),
+			lateDays: lateDays.length,
+			lateDaysAmount: round2(lateDays.reduce((c, d) => c + d.amount, 0)),
+			refusedDays: refusedDays.length,
+			refusedAmount: round2(refusedDays.reduce((c, d) => c + d.amount, 0)),
+			// Per reason: beforeFloor is the ledger-paid, never-invoiced gap of
+			// FROM's month before the late days' floor.
+			refusedByKind: refusedDays.reduce((acc, d) => {
+				const k = d.kind || "other";
+				acc[k] = acc[k] || { days: 0, amount: 0 };
+				acc[k].days += 1;
+				acc[k].amount = round2(acc[k].amount + d.amount);
+				return acc;
+			}, {}),
+			backfillRows: backfillRows.length,
+			backfillConflicts: backfillConflicts.length,
+			note: "lateDays and perInvoice.addedDays overlap (the same unpaid days seen per week and per invoice); dropped days stay on issued invoices",
+		},
+		generatedAt: new Date().toISOString(),
+	};
+}
+
+// GET /api/admin/work-days/dry-run?from=YYYY-MM&to=YYYY-MM[&floor=YYYY-MM-DD][&names=1] — what the
+// trip work-day rule would change (workDaysDryRun()). Super Admin; read-only.
+app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, res) => {
+	try {
+		const q = req.query || {};
+		const out = await workDaysDryRun({ from: String(q.from || ""), to: String(q.to || ""), floor: String(q.floor || ""), names: q.names === "1" || q.names === "true" });
+		if (out.refused) return res.status(400).json({ error: out.reason, code: "WORK_DAYS_DRY_RUN_REFUSED" });
+		res.json(out);
+	} catch (err) {
+		console.error("Work-days dry run error:", err.message);
+		res.status(500).json({ error: err.message });
+	}
+});
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
 // Named (not an inline arrow) so the Friday auto-invoice batch can invoke this
@@ -18043,6 +18991,33 @@ async function generateInvoiceHandler(req, res) {
 		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
 		const { weekStart, weekEnd: computedWeekEnd } = range;
 
+		// Job Tracking, read at most once for this request.
+		let jobTrackingValues = null;
+		const readJobTrackingRows = async () => {
+			if (!jobTrackingValues) {
+				const sheets = await getSheets();
+				const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+				jobTrackingValues = resp.data.values || [];
+			}
+			return jobTrackingValues;
+		};
+		// The trip work-day rule (null while off): one reading of the status
+		// history for this request. A Super Admin's call (the Friday batch
+		// included) first settles the driver's days of earlier weeks found after
+		// their week's invoice was generated: they go on that week's own invoice or
+		// a correction for it, never on this week's (settleLateWorkDays()).
+		const tripRule = tripDayResolver();
+		let lateWork = null;
+		if (tripRule && user.role === "Super Admin") {
+			try {
+				lateWork = await settleLateWorkDays({ driverName, beforeWeekStart: weekStart, readJobTrackingRows, resolver: tripRule, req });
+			} catch (err) {
+				lateWork = { report: null, warnings: [`Days of earlier weeks were not checked: ${err && err.message}`] };
+			}
+		}
+		const lateOut = lateWork ? { lateWorkDays: lateWork.report, warnings: lateWork.warnings } : {};
+		const lateWarnings = lateWork ? lateWork.warnings : [];
+
 		// Check for existing invoice this week — this driver's, in ANY stored
 		// spelling. Soft-deleted invoices and manual (admin-created) invoices never
 		// block a weekly regenerate — the partial unique index
@@ -18061,21 +19036,21 @@ async function generateInvoiceHandler(req, res) {
 				error: `Invoice already exists for this week (${settled.invoice_number}, status: ${settled.status}). Contact admin if this needs to be regenerated.`,
 				code: "INVOICE_EXISTS",
 				invoice: settled,
+				...lateOut,
 			});
 		}
 		if (weekInvoices.length > 1) {
 			return res.status(409).json({
 				error: `This driver already has ${weekInvoices.length} Draft invoices for the week of ${weekStart} (${weekInvoices.map((r) => r.invoice_number).join(", ")}). Delete the extra one, then generate again.`,
 				code: "INVOICE_WEEK_DUPLICATE",
+				...lateOut,
 			});
 		}
 		const existing = weekInvoices[0] || null;
 
 		// Fetch loads from Google Sheets
-		const sheets = await getSheets();
-		const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
-		const rows = resp.data.values || [];
-		if (rows.length < 2) return res.status(400).json({ error: "No data in Job Tracking" });
+		const rows = await readJobTrackingRows();
+		if (rows.length < 2) return res.status(400).json({ error: "No data in Job Tracking", ...lateOut });
 		const headers = rows[0];
 		const data = rows.slice(1).map((r, i) => {
 			const obj = {};
@@ -18105,17 +19080,29 @@ async function generateInvoiceHandler(req, res) {
 			});
 		}
 		const uniqueLoads = week.loads;
-		const warnings = invoiceWeekWarnings(week.undated);
-		const undatedInWeek = week.undated.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
+		// The trip work-day rule for a daily-rate driver (null while off, and for a
+		// percentage driver, whose pay reads revenue, not days): the trip days in
+		// this week of the driver's other completed loads (see the section header).
+		const weekRule = tripRule && (getDriverPayStructures()[nameNorm] || { payType: "fixed" }).payType !== "percentage" ? tripRule : null;
+		const extraRuleLoads = weekRule
+			? invoiceExtraRuleLoads({ data, headers, driverName, billed: uniqueLoads, weekStart, weekEnd: computedWeekEnd, resolver: weekRule, deletedKeys: loadKeySet(getDeletedLoadIds()) })
+			: [];
+		// An undated load the rule pays is billed, not missing.
+		const ruleKeys = new Set(extraRuleLoads.map((x) => x.key));
+		const undatedLeft = ruleKeys.size
+			? week.undated.filter((u) => !ruleKeys.has((week.cols.loadIdCol && normalizeLoadId(u.row[week.cols.loadIdCol])) || `_row_${u.row._rowIndex}`))
+			: week.undated;
+		const warnings = [...invoiceWeekWarnings(undatedLeft), ...lateWarnings];
+		const undatedInWeek = undatedLeft.filter((u) => u.scheduledInWeek).map((u) => u.loadId);
 
-		if (uniqueLoads.length === 0) {
+		if (uniqueLoads.length === 0 && extraRuleLoads.length === 0) {
 			// The driver app shows only `error`, so a load that was worked this week but
 			// cannot be billed is named there — not just in `warnings`. History outside
 			// the week keeps the plain message: nothing about it is actionable this week.
 			const error = undatedInWeek.length
 				? `No completed loads with a completion date this week — ${undatedInWeek.join(", ")} ${undatedInWeek.length === 1 ? "is" : "are"} marked completed but ${undatedInWeek.length === 1 ? "has" : "have"} no Status Update Date. Ask dispatch to set it, then generate again.`
 				: "No completed loads found for this week";
-			return res.status(400).json({ error, weekStart, weekEnd: computedWeekEnd, warnings, undatedInWeek });
+			return res.status(400).json({ error, weekStart, weekEnd: computedWeekEnd, warnings, undatedInWeek, ...(lateWork ? { lateWorkDays: lateWork.report } : {}) });
 		}
 
 		// Fetch expenses for this week — this driver's in any stored spelling (the
@@ -18141,6 +19128,8 @@ async function generateInvoiceHandler(req, res) {
 		const dailyRate = resolveDailyRate(payStruct.payDaily, truckDailyRateCandidates(driverName).slice(-1)[0]);
 		const expensesTotal = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
 		const loadIds = uniqueLoads.map(l => loadIdCol ? l[loadIdCol] : "").filter(Boolean);
+		// The other loads whose trip days this week pays (the trip work-day rule).
+		for (const x of extraRuleLoads) if (!loadIds.includes(x.loadId)) loadIds.push(x.loadId);
 		const expenseIds = expenses.map(e => e.id);
 		// Personal lines (the PERSONAL RECEIPTS section): which ones this invoice may
 		// carry and, for a percentage driver, what its base leaves out. Read here,
@@ -18236,7 +19225,7 @@ async function generateInvoiceHandler(req, res) {
 		// The pre-dispatch rule (off unless enabled) and the month each load's days
 		// settle in, read as the ledger reads it (the load's Assigned month).
 		const preDispatch = preDispatchPayDayFilter();
-		const monthCols = preDispatch ? jobTrackingMonthCols(headers) : null;
+		const monthCols = preDispatch || weekRule ? jobTrackingMonthCols(headers) : null;
 
 		const activeDaySet = new Set();
 		const dayLoadMap = {}; // date string → [load IDs]
@@ -18254,6 +19243,21 @@ async function generateInvoiceHandler(req, res) {
 			// completion timestamp instead so the driver gets credited.
 			if (!dropoff && completionCol && /delivered|completed|pod received/i.test(load[statusCol] || "")) {
 				dropoff = parseInvoiceDate(load[completionCol]);
+			}
+			// The trip work-day rule first, before the pickup gate (weekRule is null
+			// while it is off): a load it covers pays its trip days in this week.
+			if (weekRule) {
+				const ruleLid = String(loadIdCol ? (load[loadIdCol] || "") : "").trim();
+				const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
+				const trip = weekRule.forLoad({ loadId: ruleLid, settleMonth: loadAssignedMonthKey(load, monthCols), range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null });
+				if (trip) {
+					for (const ds of trip) {
+						activeDaySet.add(ds);
+						if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+						if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
+					}
+					continue;
+				}
 			}
 			if (!pickup) continue;
 			const start = new Date(pickup); start.setHours(12, 0, 0, 0);
@@ -18290,6 +19294,14 @@ async function generateInvoiceHandler(req, res) {
 				if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
 			}
 		}
+		// The trip days in this week of the driver's other completed loads.
+		for (const x of extraRuleLoads) {
+			for (const ds of x.days) {
+				activeDaySet.add(ds);
+				if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+				if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
+			}
+		}
 
 		// Apply admin overrides — Super Admin's manual (driver, date) adjustments
 		// from /api/admin/excluded-days. CLAUDE.md requires the three pay paths
@@ -18320,8 +19332,13 @@ async function generateInvoiceHandler(req, res) {
 		}
 
 		const activeDays = activeDaySet.size;
+		// Under the trip work-day rule each day is priced at its own rate
+		// (invoiceDayRater()) and the total is their sum; otherwise one rate.
+		const rateOf = weekRule
+			? invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate: truckDailyRateCandidates(driverName).slice(-1)[0], dailyRate, fromMonth: weekRule.fromMonth })
+			: null;
 		// `let` because owner-op (percentage) drivers override this further down.
-		let totalEarnings = activeDays * dailyRate;
+		let totalEarnings = rateOf ? [...activeDaySet].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : activeDays * dailyRate;
 
 		// Generate invoice number
 		// An existing Draft is regenerated, not deleted here: commitInvoiceWithPdf()
@@ -18357,7 +19374,7 @@ async function generateInvoiceHandler(req, res) {
 			const jsDay = dt.getDay(); // 0=Sun..6=Sat
 			const templateDay = DAY_NAMES[(jsDay + 1) % 7]; // shift so 6(Sat)→0, 0(Sun)→1, ...
 			const entry = daysMap[templateDay];
-			entry.total += dailyRate;
+			entry.total += rateOf ? rateOf(ds) : dailyRate;
 			entry.completed = true;
 			const bols = dayLoadMap[ds] || [];
 			entry.loadBol = entry.loadBol
@@ -18541,6 +19558,14 @@ async function generateInvoiceHandler(req, res) {
 				// fits, flag what does not (personalCommitGeneration()).
 				const invoiceId = Number(inserted.lastInsertRowid);
 				personalCommitGeneration(invoiceId, personal, personalFit);
+				// The trip work-day rule: the days this invoice pays, claimed in this
+				// transaction (409 INVOICE_DAY_ALREADY_PAID when another live invoice
+				// holds one), and the late days' floor, written once.
+				if (tripRule) {
+					if (weekRule) claimInvoicePaidDays(invoiceId, nameNorm, [...activeDaySet]);
+					db.prepare("INSERT OR IGNORE INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, 'system')")
+						.run(TRIP_WORK_DAYS_FLOOR_KEY, weekStart, new Date().toISOString());
+				}
 				return inserted;
 			},
 		});
@@ -18560,7 +19585,7 @@ async function generateInvoiceHandler(req, res) {
 		// A line marked while this was rendering goes on through the attach path.
 		invoice = await attachLatePersonalLines(invoice, req);
 		const late = isAfterDeadline(computedWeekEnd);
-		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek });
+		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek, ...(lateWork ? { lateWorkDays: lateWork.report } : {}) });
 	} catch (err) {
 		// A write the re-check refused: nothing was saved, and generating again
 		// is the remedy. The Friday batch reports it as an error, never as billed.
@@ -23006,6 +24031,18 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			}
 		}
 		const notes = (body.notes || "").toString().trim().slice(0, 500);
+		// Under the trip work-day rule a manual invoice may name the driver-days it
+		// pays (`days`, inside its period): it claims them, so no other invoice pays
+		// them too. Without `days` it claims none. Ignored while the rule is off.
+		let paidDays = null;
+		if (TRIP_WORK_DAYS_FROM && body.days !== undefined && body.days !== null) {
+			const list = Array.isArray(body.days) ? body.days.map((d) => String(d || "").trim()) : null;
+			if (!list || list.length > 62 || list.some((d) => !DATE_RE.test(d) || d < periodStart || d > periodEnd)) {
+				return res.status(400).json({ error: "days must be a list of up to 62 YYYY-MM-DD days inside the period" });
+			}
+			if (!normalizeDriverName(payee)) return res.status(400).json({ error: "days need a payee that names a driver" });
+			paidDays = [...new Set(list)].sort();
+		}
 
 		const { subtotal, deductionsTotal, totalDue } = manualInvoiceTotals(itemsRes.items, dedRes.items);
 		const adminName = req.session.user.username || "";
@@ -23041,6 +24078,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			preparedBy: adminName,
 			adjustment: 0,
 			adjustmentNote: "",
+			...(paidDays && paidDays.length ? { paidDays } : {}),
 		};
 
 		const pdfBuffer = await renderPolicy("service_invoice_manual", renderData);
@@ -23060,14 +24098,18 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// invoice sits outside the one-per-driver-week rule.
 		const result = commitInvoiceWithPdf({
 			invoiceNumber, pdfFileName, pdfBuffer,
-			insert: () => db.prepare(
-				`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
-				 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?)`
-			).run(
-				invoiceNumber, payee.toLowerCase(), periodStart, periodEnd,
-				itemsRes.items.length, totalDue, deductionsTotal,
-				pdfFileName, JSON.stringify(renderSnapshot), adminName
-			),
+			insert: () => {
+				const inserted = db.prepare(
+					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
+					 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, '[]', '[]', ?, 1, ?)`
+				).run(
+					invoiceNumber, payee.toLowerCase(), periodStart, periodEnd,
+					itemsRes.items.length, totalDue, deductionsTotal,
+					pdfFileName, JSON.stringify(renderSnapshot), adminName
+				);
+				if (paidDays && paidDays.length) claimInvoicePaidDays(Number(inserted.lastInsertRowid), normalizeDriverName(payee), paidDays);
+				return inserted;
+			},
 		});
 
 		// created_at wrapped as ISO-8601 Z (see note in generateInvoiceHandler).
@@ -23946,8 +24988,12 @@ app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
 		const reason = ((req.query && req.query.reason) || "").toString().trim().slice(0, 500);
 		const now = new Date().toISOString();
 		const adminName = req.session.user.username || "";
-		db.prepare("UPDATE invoices SET deleted_at = ?, deleted_by = ?, delete_reason = ? WHERE id = ?")
-			.run(now, adminName, reason, invoice.id);
+		// The soft delete frees the days the invoice paid (invoice_paid_days), with it.
+		db.transaction(() => {
+			db.prepare("UPDATE invoices SET deleted_at = ?, deleted_by = ?, delete_reason = ? WHERE id = ?")
+				.run(now, adminName, reason, invoice.id);
+			releaseInvoicePaidDays(invoice.id);
+		}).immediate();
 		const totalDue = invoiceTotalDue(invoice);
 		logAudit(
 			req,
@@ -23990,7 +25036,19 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		}
 		const personalMoved = personalRestoreBlocker(invoice);
 		if (personalMoved) return res.status(409).json({ error: personalMoved, code: "PERSONAL_LINES_MOVED" });
-		db.prepare("UPDATE invoices SET deleted_at = '', deleted_by = '', delete_reason = '' WHERE id = ?").run(invoice.id);
+		// Under the trip work-day rule the restored invoice re-claims the days it
+		// pays (invoicePaidDaysOf()), in the same transaction; a day another live
+		// invoice took meanwhile refuses the restore (409, nothing written).
+		const restoreDays = TRIP_WORK_DAYS_FROM ? invoicePaidDaysOf(invoice) : [];
+		try {
+			db.transaction(() => {
+				db.prepare("UPDATE invoices SET deleted_at = '', deleted_by = '', delete_reason = '' WHERE id = ?").run(invoice.id);
+				if (restoreDays.length) claimInvoicePaidDays(invoice.id, normalizeDriverName(invoice.driver || ""), restoreDays);
+			}).immediate();
+		} catch (err) {
+			if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: `Cannot restore ${invoice.invoice_number}: ${err.message}`, code: err.code });
+			throw err;
+		}
 		logAudit(
 			req,
 			"restore_invoice",
@@ -39176,6 +40234,47 @@ function warnLedgerDayOnceFromClosedMonth() {
 	if (msg) console.warn(`[ledger-day-once] ${msg}`);
 }
 warnLedgerDayOnceFromClosedMonth();
+
+// The trip work-day rule for one request (lib/trip-work-days.js), or null while
+// it is off. POST /api/invoices/generate asks it first, before its pickup gate,
+// so a load with blank appointments still pays from its timestamps; GET
+// /api/investor and the payout ledger build the same resolver through
+// financialsCalc.tripWorkDays.ledgerFacts(), so the three move together.
+// `fromMonth` is TRIP_WORK_DAYS_FROM; only the dry run passes another. It reads
+// no month lock. With the rule on, the payout ledger and GET /api/investor also
+// count a driver-day in one month only from the earlier of LEDGER_DAY_ONCE_FROM
+// and TRIP_WORK_DAYS_FROM (dayOnceFromFor(), B12 plan H3).
+function tripDayResolver(fromMonth = TRIP_WORK_DAYS_FROM) {
+	if (!fromMonth) return null;
+	return tripWorkDays.createTripDayResolver({ db, enabled: true, fromMonth, zone: APP_TIMEZONE, radiusM: GEOFENCE_RADIUS });
+}
+
+// One notice at boot when TRIP_WORK_DAYS_FROM is at or before the latest closed
+// month, built like the two above. The rule keeps running either way.
+function warnTripWorkDaysFromClosedMonth() {
+	if (!TRIP_WORK_DAYS_FROM) return;
+	const msg = tripWorkDays.fromMonthClosedWarning(TRIP_WORK_DAYS_FROM, financialsCalc.ledgerDayOnce.latestClosedMonth(db));
+	if (msg) console.warn(`[trip-work-days] ${msg}`);
+}
+warnTripWorkDaysFromClosedMonth();
+// While the rule is on, every start brings invoice_paid_days up to the live
+// invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
+// rule was off is never paid twice. Review its dry run first
+// (scripts/backfill-invoice-paid-days.js --dry-run).
+if (TRIP_WORK_DAYS_FROM) {
+	try {
+		const filled = backfillInvoicePaidDays({ write: true });
+		if (filled.rows.length) {
+			logAudit({ session: { user: { id: 0, username: "system: paid-days backfill at start", role: "system" } } },
+				"backfill_invoice_paid_days", "invoice_paid_days", "",
+				`recorded ${filled.rows.length} paid day(s) from ${new Set(filled.rows.map((r) => r.invoiceId)).size} live invoice(s); ${filled.conflicts.length} conflict(s) skipped`);
+		}
+		console.log(`[trip-work-days] paid days recorded at start: ${filled.rows.length} new, ${filled.conflicts.length} conflict(s)`
+			+ `${filled.conflicts.length ? ` (${filled.conflicts.slice(0, 5).map((c) => `${c.day} on ${c.invoiceNumber} and ${c.heldByNumber}`).join("; ")})` : ""}`);
+	} catch (e) {
+		console.error(`[trip-work-days] paid days not recorded at start: ${e.message}`);
+	}
+}
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
 // for every admin override. Consumed by /api/investor, /api/financials, and
@@ -54601,7 +55700,13 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// The pre-dispatch rule (off unless enabled), the filter GET /api/investor
 		// and the weekly invoice pass to payDaysForLoad() too.
 		preDispatch: preDispatchPayDayFilter(),
-		dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
+		// The trip work-day rule and the day-once month (LEDGER_DAY_ONCE_FROM, or
+		// the trip rule's FROM when earlier), both off by default:
+		// { tripDays, dayOnceFrom }. `rules.tripFrom`, when present, is the dry
+		// run's candidate FROM; `rules.tripFacts`, one reading shared by every
+		// scope of computeFleetLedger(). Reached through financialsCalc, as the
+		// day-once rule is, so every lifted copy of this function keeps its names.
+		...(rules.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules })),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -54768,7 +55873,10 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // load whose driver is in two investors' driver sets, a receipt inside two
 // expense scopes). Each of those investors' ledgers counts it, so the fleet does
 // too; it is reported, not split.
-async function computeFleetLedger({ rules = payoutRules() } = {}) {
+async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
+	// One trip work-day reading (the status history) for every scope
+	// (gatherLedgerScopeFacts() takes it from rules.tripFacts).
+	const rules = { ...given, tripFacts: financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
 	// One Job Tracking snapshot for every scope, so they all read the same sheet.
 	const jobTracking = await getJobTrackingCached();
 	const carrierDB = getCarrierDBFromSQLite();
@@ -56176,14 +57284,25 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// The pre-dispatch rule (off unless enabled), shared with the ledger and
 		// the weekly invoice through payDaysForLoad().
 		const preDispatch = preDispatchPayDayFilter();
-		// Per-driver-per-month ELD-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est} } }
+		// The trip work-day rule and the day-once month, exactly as the payout
+		// ledger reads them (financialsCalc.tripWorkDays.ledgerFacts(); both off
+		// unless enabled). The rule is asked first, for daily-rate drivers (their
+		// pay structures read once, only while it is on).
+		const { tripDays, dayOnceFrom } = financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env });
+		const tripPayStructures = tripDays ? getDriverPayStructures() : null;
+		// Per-driver-per-month day-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est,trip} } }.
+		// `trip` (days from the trip timestamps) only exists while that rule is on.
 		const driverDaySource = Object.create(null);
-		const daySrcLabel = (o) => o ? (o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated") : "estimated";
+		const daySrcLabel = (o) => {
+			if (!o) return "estimated";
+			if (o.trip) return o.eld || o.est ? "mixed" : "trip";
+			return o.eld && o.est ? "mixed" : o.eld ? "eld" : "estimated";
+		};
 		const driverSrcAllTime = (drv) => {
 			const m = driverDaySource[drv]; if (!m) return "estimated";
-			let eld = false, est = false;
-			for (const k in m) { if (m[k].eld) eld = true; if (m[k].est) est = true; }
-			return daySrcLabel({ eld, est });
+			let eld = false, est = false, trip = false;
+			for (const k in m) { if (m[k].eld) eld = true; if (m[k].est) est = true; if (m[k].trip) trip = true; }
+			return daySrcLabel(trip ? { eld, est, trip } : { eld, est });
 		};
 
 		filteredJobData.forEach((r) => {
@@ -56264,20 +57383,31 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// read the cell through the shared resolver, a present-but-unreadable
 				// pickup landed here too, contradicting this comment.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
-				if (pickup && !isNaN(pickup)) {
-					const windowDays = expandDateRange(pickup, dropoff || pickup);
-					const vid = truckUnit ? unitToVid[truckUnit] : null;
+				// The trip work-day rule first, before the pickup gate (null when off).
+				const vid = truckUnit ? unitToVid[truckUnit] : null;
+				const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
+				// Daily-rate drivers only: a percentage driver's pay reads revenue, not days.
+				const trip = tripDays && (tripPayStructures[driver] || {}).payType !== "percentage"
+					? tripDays.forLoad({ loadId: lid, settleMonth: assignedMonthKey || "", vid })
+					: null;
+				// A load the rule pays with no Assigned Date settles in its days' own
+				// months, so the month list starts no later than its first day.
+				if (trip && trip.length && !assignedMonthKey) {
+					const first = new Date(`${trip[0]}T12:00:00`);
+					if (!earliestDate || first < earliestDate) earliestDate = first;
+				}
+				if (trip || (pickup && !isNaN(pickup))) {
+					const windowDays = trip ? [] : expandDateRange(pickup, dropoff || pickup);
 					const eld = vid ? eldByVid[vid] : null;
 					// Intersect with real travel days ONLY when the ELD covered this
 					// load's window (≥1 ping). Uncovered windows (load predates the
 					// feed, or no link) fall back to the full window so historical pay
 					// isn't zeroed; a covered-but-parked window stays 0. The rule is
-					// lib/load-pay-days.js payDaysForLoad(), shared with the ledger and
-					// the weekly invoice, the pre-dispatch rule included.
-					const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
-					const { covered, days: eldCounted } = loadPayDays.payDaysForLoad(
-						windowDays, eld, { loadId: lid, vid, settleMonth: assignedMonthKey || "" }, preDispatch,
-					);
+					// lib/load-pay-days.js paidDaysForLoad(), shared with the ledger and
+					// the weekly invoice, the pre-dispatch and trip rules included.
+					const { covered, days: eldCounted, basis } = loadPayDays.paidDaysForLoad({
+						windowDays, eld, load: { loadId: lid, vid, settleMonth: assignedMonthKey || "" }, preDispatch, tripDays: trip,
+					});
 					// Drop admin-removed days last. The ELD/estimated source flag
 					// still reflects the underlying day source — an override is a
 					// manual adjustment, not a change to how the day was originally
@@ -56286,7 +57416,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const ovr = driverDayOverrides[driver] || null;
 					const skipSet = ovr ? ovr.remove : null;
 					const counted = skipSet && skipSet.size ? eldCounted.filter(d => !skipSet.has(d)) : eldCounted;
-					const srcKey = covered ? "eld" : "est";
+					const srcKey = basis === "trip" ? "trip" : covered ? "eld" : "est";
 					const displayDriver = jtDriverCol ? (r[jtDriverCol] || "").trim() : "";
 					if (displayDriver && !driverDisplayName[driver]) driverDisplayName[driver] = displayDriver;
 					// All-time set (for totals)
@@ -56356,8 +57486,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				driverDaySource[drv][bucket].est = true;
 			}
 		}
-		// The ledger day-once rule, as the payout ledger applies it (off unless enabled).
-		financialsCalc.ledgerDayOnce.dropRepeatedDays(driverMonthlyDays, financialsCalc.ledgerDayOnce.ruleFromEnv(process.env), driverMonthlyDayLoads);
+		// The ledger day-once rule, as the payout ledger applies it (off unless it or
+		// the trip work-day rule is on).
+		financialsCalc.ledgerDayOnce.dropRepeatedDays(driverMonthlyDays, dayOnceFrom, driverMonthlyDayLoads);
 
 		// Avg daily revenue = 30-day average (S2).
 		// Gross = raw top-line from completed loads in the trailing 30 days.
@@ -60297,8 +61428,10 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			to: ADMIN_NOTIFY_EMAIL,
 			emailHtml: ({ heading, bodyHtml }) => invoiceEmailHtml({ heading, bodyHtml }),
 			closedMonthsOf: integrityClosedMonthsOf,
-			// Check 7, only while the ledger day-once rule is on (lib/ledger-day-once.js).
-			dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
+			// Check 7, only while the ledger day-once rule is on (lib/ledger-day-once.js),
+			// on its own flag or through the trip work-day rule (lib/trip-work-days.js
+			// dayOnceFromFor(), the composition the payout ledger runs).
+			dayOnceFrom: tripWorkDays.dayOnceFromFor(process.env, TRIP_WORK_DAYS_FROM),
 			readFleetLedger: computeFleetLedger,
 		}),
 	});
