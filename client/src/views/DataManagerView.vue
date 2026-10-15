@@ -206,8 +206,8 @@ async function handleSave(rowIndex, values) {
   } catch (err) {
     // Same reasoning as confirmDelete below: an edit to a finalized month comes
     // back as 409 PERIOD_FINALIZED naming the month AND the money-bearing column
-    // that triggered it, and tells you to reopen the period. "Failed to update
-    // row" throws away every actionable part of that.
+    // that triggered it, and the fields that can still be edited. "Failed to
+    // update row" throws away every actionable part of that.
     toast((err && err.message) || 'Failed to update row', 'error')
   }
 }

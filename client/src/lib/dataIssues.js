@@ -358,11 +358,12 @@ export function normalizeDuplicateGroup(raw) {
  *
  * ⚠️ CLOSED IS NOT ONE STATE, AND CONFLATING THE TWO IS WHY THIS PAGE READ AS A
  * DEAD END. A finalized month whose payout is still `owed` has moved NO MONEY:
- * the fix is an ordinary reopen → void → re-finalize, with nothing to recover
- * from anyone. A month already `paid` cannot be un-sent and is a genuine
+ * nothing has to be recovered from anyone, and an adjustment on an open month
+ * corrects the investor (closed months are never reopened, 2026-10-14). A
+ * month already `paid` cannot be un-sent and is a genuine
  * adjustment conversation. Measured on production 2026-08-12, $700 of the
  * $1,115 of known duplicates was in the first bucket and only $415 in the
- * second — so treating them alike wrote off most of the recoverable money.
+ * second — so treating them alike hid that most of it was not paid out yet.
  *
  * Note the SIGN while reading this: a duplicate EXPENSE depresses net profit, so
  * it UNDERPAYS the investor. Every correction here pays them more. There is no
@@ -504,14 +505,15 @@ export function voidableRows(group) {
  * its own is what made this page read as a dead end in the first place.
  *
  * ⚠️ 'correctable' IS A REFUSAL, NOT AN OVERSIGHT. That month is finalized with
- * its payout still owed, so the money is genuinely recoverable — but recovering
- * it means reopening a closed month, which restates a period and belongs on the
- * Payouts console with its required reason and its audit row. Offering it from
- * a data-hygiene page would let a cleanup click reopen a settlement.
+ * its payout still owed, but a closed month is final as recorded (2026-10-14):
+ * its copies are never voided. The correction is the same one the receipt status
+ * refusal names (closedMonthReceiptRefusal() in server.js): a Super Admin's
+ * adjustment on an open month's investor payout, which carries its own reason and
+ * audit row. A company truck has no payout row to adjust.
  */
 export function voidBlockedReason(group) {
   if (!group) return 'Nothing to void.'
-  const month = group.period || 'This month'
+  const month = monthLabel(group.period) || group.period || 'This month'
   if (group.remedy === 'open') {
     // The empty branch is unreachable against today's server — 'open' means at
     // least one row is unlocked — and it is kept because this function is what
@@ -520,8 +522,8 @@ export function voidBlockedReason(group) {
     return voidableRows(group).length ? '' : 'No copy in this group is in an open month.'
   }
   if (group.remedy === 'correctable') {
-    return `${month} is finalized, but its payout has not been sent — no money has moved, so this is still recoverable. `
-      + 'Reopen the month in Payouts first; voiding a receipt is not something to do from here while the period is closed.'
+    return `${month} is closed, so its copies can't be voided. Its payout has not been sent, and the copies count in its figures as they stand. `
+      + "A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. A company truck's closed month stays as recorded."
   }
   if (group.remedy === 'settled') {
     return `${month} is finalized and its payout has already gone out. Voiding the copy now would not change what was sent — `
@@ -1140,8 +1142,9 @@ export function refusalCauseText(code) {
  * transition carries a month-end guard — submit, approve and processing do not —
  * so a Draft in a finalized month walks all the way to Approved and then stops
  * for good. Unlike an un-adjustable invoice, which needs nothing unless somebody
- * wants to change it, this one is waiting on a payment that cannot arrive, and
- * there is no in-app remedy short of reopening the month.
+ * wants to change it, this one is waiting on a payment the app can't record yet:
+ * closed months are never reopened (2026-10-14), and recording the payment on a
+ * closed-month invoice waits on a separate change.
  *
  * `adjustable` is server-told and always false here by construction: a row only
  * reaches this list because invoiceMonthLockBlockers() refused it.
@@ -1201,10 +1204,14 @@ export function frozenInvoiceImpact(inv) {
       : "Neither adjustable nor payable, and no route in the app can edit an invoice's billing dates — "
         + 'this one has to be regenerated.'
   }
+  // Closed months are never reopened (2026-10-14): the invoice stays as
+  // recorded and recording its payment waits on a separate change. What to do
+  // about a difference is the server's `remedy`, shown beneath this sentence on
+  // the page, so it is not repeated here.
   const months = inv.periodLabels.length ? periodList(inv.periods) : ''
-  const where = months ? `${months} would have to be reopened first` : 'the month would have to be reopened first'
+  const where = months ? `${months} ${inv.periodLabels.length === 1 ? 'is' : 'are'} closed` : 'its month is closed'
   if (inv.neverPayable) {
-    return `Can't be adjusted, and can never be marked Paid — it is ${inv.status || 'unpaid'}, and ${where}.`
+    return `Can't be adjusted, and can't be marked Paid in the app yet — it is ${inv.status || 'unpaid'}, and ${where}.`
   }
   return `Can't be adjusted. It is already ${inv.status || 'settled'}, so nothing is waiting on it.`
 }

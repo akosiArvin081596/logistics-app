@@ -255,14 +255,13 @@
               <strong>{{ backfill.skippedLockedPeriod }} legacy
               {{ backfill.skippedLockedPeriod === 1 ? 'receipt is' : 'receipts are' }} unattributed.</strong>
               Their month was already closed, so the attribution pass refused to write into it rather than
-              restating a settled figure. Until that is resolved they count against no investor.
+              restating a settled figure. They count against no investor.
               <template v-if="backfill.skippedPeriods && backfill.skippedPeriods.length">
                 Affected:
                 <span class="bf-periods">{{ backfill.skippedPeriods.join(', ') }}</span>.
               </template>
               <span class="bf-how">
-                To take them in, reopen the listed {{ backfill.skippedPeriods && backfill.skippedPeriods.length === 1 ? 'month' : 'months' }} above
-                &mdash; the attribution runs at server start, so it completes on the next restart.
+                Closed months stay as recorded, so these receipts stay as they are.
               </span>
             </div>
             <div v-if="backfill.error" class="bf-error">

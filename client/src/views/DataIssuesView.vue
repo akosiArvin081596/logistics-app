@@ -138,7 +138,7 @@
           </p>
           <ul class="remedy-key">
             <li><span class="remedy-chip remedy-open">open month</span> Tick the copy and reject it here.</li>
-            <li><span class="remedy-chip remedy-correctable">closed &middot; unpaid</span> Month is finalized but the payout has not been sent, so no money has moved and this is still recoverable. It needs the month reopened first, which is a settlement decision &mdash; do it in Payouts, not from a cleanup screen.</li>
+            <li><span class="remedy-chip remedy-correctable">closed &middot; unpaid</span> Month is closed but its payout has not been sent. The copies count in its figures as they stand. A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. A company truck's closed month stays as recorded.</li>
             <li><span class="remedy-chip remedy-settled">closed &middot; paid</span> The payout already went out, so voiding the copy now would not change what was sent. The correction is a payout adjustment &mdash; a decision, not a cleanup.</li>
             <li><span class="remedy-chip remedy-unknown">closed &middot; unknown</span> The settlement state could not be read, so it is treated as already settled until someone checks the payout for that month.</li>
           </ul>
@@ -925,6 +925,7 @@
 import { ref, computed, onMounted, h, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { fmtYmd, fmtTimestamp } from '../utils/datetime'
+import { monthLabel } from '../lib/monthLabel'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import ConfirmModal from '../components/shared/ConfirmModal.vue'
@@ -1031,10 +1032,11 @@ function remedyLabel(g) {
   return REMEDY_LABEL[g.remedy] || REMEDY_LABEL.unknown
 }
 function remedyTitle(g) {
-  const month = g.period || 'This month'
+  const month = monthLabel(g.period) || g.period || 'This month'
   if (g.remedy === 'open') return `${month} is still open — reject the duplicate copy in Expenses.`
   if (g.remedy === 'correctable') {
-    return `${month} is finalized, but its payout has not been sent — no money has moved. Reopen the month, reject the copy, then close it again.`
+    return `${month} is closed, but its payout has not been sent. The copies count in its figures as they stand. `
+      + "A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. A company truck's closed month stays as recorded."
   }
   if (g.remedy === 'settled') {
     return `${month} is finalized AND its payout has already gone out. Correcting this means a payout adjustment, which is a decision rather than a cleanup.`
@@ -1570,9 +1572,10 @@ const decisions = computed(() => {
   // voided?", and it is answered — an open month's copies are voided in the
   // section above, by whoever is looking at them. Leaving it standing would ask
   // the owner to decide something the page now does. What genuinely still needs
-  // a decision is the money in months that are already closed: one bucket is
-  // recoverable but needs a month reopened, the other needs a payout adjustment,
-  // and neither is a cleanup click. So the card renders ONLY when such a group
+  // a decision is the money in months that are already closed: one bucket's
+  // payout has not gone out, the other's has, and both are corrected only by a
+  // payout adjustment on an open month (closed months stay as recorded,
+  // 2026-10-14), never a cleanup click. So the card renders ONLY when such a group
   // exists, and disappears once the queue holds nothing but open months.
   const blocked = dupBlocked.value
   if (answered('duplicates') && blocked.groups.length > 0) {
@@ -1586,9 +1589,9 @@ const decisions = computed(() => {
     ]
     if (blocked.correctable.length) {
       evidence.push({
-        label: 'Recoverable — payout not sent',
+        label: 'Not paid out yet',
         value: `${money(blocked.correctableExcess)} · ${n(blocked.correctable, 'group')}`,
-        note: 'the month is finalized but no money has moved, so reopening it costs nothing but the reopen',
+        note: 'the month is closed but no money has moved yet',
       })
     }
     if (blocked.settled.length) {
@@ -1613,13 +1616,12 @@ const decisions = computed(() => {
       evidence,
       impact:
         'Each of these was booked twice, which depresses net profit for that month and therefore UNDERPAYS '
-        + 'the investor — so correcting one pays them more and asks nobody for money back. The recoverable '
-        + 'ones only need the month reopened; the paid ones need an adjustment on a settlement that has '
-        + 'already gone out.',
+        + 'the investor — so correcting one pays them more and asks nobody for money back. Closed months stay '
+        + 'as recorded, so the copies stay in them, whether or not that month has been paid out.',
       unblocks:
-        'A decision per bucket: reopen those months in Payouts and the copies become voidable here like any '
-        + 'other open month, or book the paid ones as adjustments. Either way fuel cost-per-mile stops '
-        + 'reading high for those months.',
+        'Each group is a decision. '
+        + "A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. "
+        + "A company truck's closed month stays as recorded.",
       jumpTo: 'duplicates',
     })
   }

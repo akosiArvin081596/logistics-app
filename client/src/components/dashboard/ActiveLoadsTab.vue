@@ -413,7 +413,7 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed, it can't be removed: closed months stay as recorded.`"
       confirm-text="Delete"
       :danger="true"
       :confirm-disabled="deleting"
@@ -860,7 +860,7 @@ async function runDelete() {
     // Was a bare `catch {}` whose comment promised a toast "via watcher" that
     // does not exist — a failed delete produced no feedback at all and left the
     // confirm open, which reads as a hung click. The server now returns 409
-    // PERIOD_FINALIZED naming the closed month and how to reopen it; discarding
+    // PERIOD_FINALIZED naming the closed month and saying nothing was changed; discarding
     // that is how an admin retries, gives up, and never learns why.
     deleteError.value = (err && err.message) || 'Failed to delete this load.'
     toast(deleteError.value, 'error')
