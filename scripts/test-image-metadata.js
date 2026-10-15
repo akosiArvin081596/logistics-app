@@ -276,6 +276,32 @@ function scanData(jpeg) {
 		ok("§7 ... with Retry-After", mineDone.filter((r) => r.status === 503).every((r) => Number(r.headers["retry-after"]) > 0));
 		ok("§7 ... while another user's request still waits its turn and is served", (await theirs).status === 200);
 
+		// The shipped caps fit an investor's receipt list: over HTTP/2 the browser
+		// asks for every photo at once (one user, ~250 at a time), and none of them
+		// may be refused.
+		ok(`§7 shipped caps: 300 waiting per user, 1000 server-wide (are ${receiptFiles.RECEIPT_SERVE_LIMITS.maxQueuedPerUser} and ${receiptFiles.RECEIPT_SERVE_LIMITS.maxQueuedReads})`,
+			receiptFiles.RECEIPT_SERVE_LIMITS.maxQueuedPerUser === 300 && receiptFiles.RECEIPT_SERVE_LIMITS.maxQueuedReads === 1000);
+		const getPage = await serve({ readFile: async (p) => { await sleep(5); return fs.promises.readFile(p); } });
+		const page = await Promise.all(Array.from({ length: 250 }, () => getPage("1-aa.jpg", SA)));
+		const pageTally = page.reduce((t, r) => ((t[r.status] = (t[r.status] || 0) + 1), t), {});
+		ok(`§7 shipped caps: one user's burst of 250 photos is served in full, no 503 (got ${JSON.stringify(pageTally)})`, pageTally[200] === 250);
+
+		// Past the per-user cap the shipped guard still refuses: reads are held
+		// until every request has arrived, so 4 run, 300 wait and the rest answer
+		// 503 with Retry-After.
+		let open;
+		const gate = new Promise((r) => { open = r; });
+		const getCap = await serve({ readFile: async (p) => { await gate; return fs.promises.readFile(p); } });
+		const capped = Array.from({ length: 309 }, () => getCap("1-aa.jpg", DISP));
+		const early = [];
+		capped.forEach((p) => p.then((r) => early.push(r)));
+		for (let waited = 0; early.length < 5 && waited < 5000; waited += 25) await sleep(25);
+		open();
+		const cappedDone = await Promise.all(capped);
+		const refusedNow = cappedDone.filter((r) => r.status === 503);
+		ok(`§7 shipped caps: past 4 running + 300 waiting, one user's extra requests answer 503 (got ${refusedNow.length} of 309)`, refusedNow.length === 5 && cappedDone.filter((r) => r.status === 200).length === 304);
+		ok("§7 ... each with Retry-After", refusedNow.length > 0 && refusedNow.every((r) => Number(r.headers["retry-after"]) > 0));
+
 		// A client that stops reading cannot hold a read slot: the response is
 		// ended after sendTimeoutMs and the slot goes to the next request.
 		const big = Buffer.concat([clean.jpeg.subarray(0, clean.jpeg.indexOf(Buffer.from([0xFF, 0xDA])) + 2 + clean.jpeg.readUInt16BE(clean.jpeg.indexOf(Buffer.from([0xFF, 0xDA])) + 2)),
