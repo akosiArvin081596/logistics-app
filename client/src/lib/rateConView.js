@@ -23,15 +23,13 @@ export function rateConFailureText(status, serverMessage) {
 }
 
 // ── Viewer zoom ──────────────────────────────────────────────────────────────
-// Zoom 1 is "fit to page": the whole page inside the tile. The rendered width
-// is the fit width times the zoom.
+// Zoom 1 is "fit to page": the whole page inside the tile, and the least the
+// viewer zooms to. The drawn width is the fit width times the zoom, up to 400 %.
+// Where the page sits at a zoom, and how input moves it: rateConZoom.js.
 export const FIT_ZOOM = 1
-export const MIN_ZOOM = 0.5
+export const MIN_ZOOM = FIT_ZOOM
+export const MAX_ZOOM = 4
 export const ZOOM_STEP = 1.25
-const MAX_ZOOM_CAP = 4
-// iOS Safari refuses canvases past ~16.7 million pixels and paints them blank;
-// the deepest zoom stays under that at the screen's pixel density.
-const MAX_CANVAS_PIXELS = 16 * 1000 * 1000
 // A US Letter page, until the document says otherwise.
 export const DEFAULT_PAGE_ASPECT = 11 / 8.5
 
@@ -45,23 +43,14 @@ export function fitPageWidth(stageW, stageH, aspect = DEFAULT_PAGE_ASPECT) {
   return Math.max(1, Math.floor(Math.min(w, h / a)))
 }
 
-export function maxZoomFor(fitWidth, aspect = DEFAULT_PAGE_ASPECT, dpr = 1) {
-  const fw = Number(fitWidth)
-  const a = Number(aspect) > 0 ? Number(aspect) : DEFAULT_PAGE_ASPECT
-  const d = Number(dpr) > 0 ? Number(dpr) : 1
-  if (!(fw > 0)) return FIT_ZOOM
-  const widestCss = Math.sqrt(MAX_CANVAS_PIXELS / a) / d
-  return Math.max(FIT_ZOOM, Math.min(MAX_ZOOM_CAP, widestCss / fw))
-}
-
-export function clampZoom(z, maxZoom) {
+export function clampZoom(z, maxZoom = MAX_ZOOM) {
   const n = Number(z)
-  const hi = Math.max(FIT_ZOOM, Number(maxZoom) || FIT_ZOOM)
+  const hi = Math.max(FIT_ZOOM, Math.min(MAX_ZOOM, Number(maxZoom) || MAX_ZOOM))
   if (!Number.isFinite(n)) return FIT_ZOOM
   return Math.min(hi, Math.max(MIN_ZOOM, n))
 }
 
-export function stepZoom(z, direction, maxZoom) {
+export function stepZoom(z, direction, maxZoom = MAX_ZOOM) {
   const next = direction > 0 ? z * ZOOM_STEP : z / ZOOM_STEP
   // Land exactly on fit when a step crosses it, so "fit" is reachable by +/-.
   if ((z < FIT_ZOOM && next > FIT_ZOOM) || (z > FIT_ZOOM && next < FIT_ZOOM)) return FIT_ZOOM

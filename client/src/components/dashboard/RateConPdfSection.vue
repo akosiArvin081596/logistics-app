@@ -16,7 +16,7 @@
     <div class="dash-section-title">Rate Con</div>
     <div v-if="state === 'loading'" class="rc-state" role="status">Loading the rate con…</div>
     <div v-else-if="state === 'error'" class="rc-state">{{ message }}</div>
-    <RateConViewer v-else-if="state === 'ready'" :src="src" />
+    <RateConViewer v-else-if="state === 'ready'" class="rc-viewer" :src="src" />
   </div>
 </template>
 
@@ -93,6 +93,14 @@ onBeforeUnmount(release)
 
 <style scoped>
 .rc-section { margin-top: 1rem; }
+/* On a phone the viewer takes 1rem of the load dialog's 1.25rem body padding
+   on each side (390 px wide: about 302 -> 334 px); the dialog and the section
+   title stay as they are. The CSS full-screen fallback (fixed, inset 0) takes
+   no margin; native full screen resets margins itself. */
+@media (max-width: 480px) {
+  .rc-section .rc-viewer { margin-left: -1rem; margin-right: -1rem; max-width: none; }
+  .rc-section .rc-viewer.rcv-expanded { margin: 0; }
+}
 .rc-state {
   font-size: 0.82rem; color: #6b7280; padding: 0.9rem 0.75rem;
   border: 1px dashed #e5e7eb; border-radius: 8px; text-align: center;
