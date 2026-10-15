@@ -118,11 +118,13 @@ function makeDb() {
 	const ping = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, odometer, location_date_ms) VALUES (?, ?, ?, ?, ?)");
 	const coords = db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, ?, ?, ?, ?)");
 	const status = db.prepare("INSERT INTO load_status_history (load_id, new_status, source, changed_at) VALUES (?, ?, 'manual', ?)");
+	// One transaction for the ~1,100 pings: one commit (one disk sync) instead of one each.
+	const pings = db.transaction((vid) => { for (const r of run1.rows) ping.run(vid, r.lat, r.lng, r.odo, r.ms); });
 	const closedOut = (id, vid) => {
 		coords.run(id, SHIPPER.lat, SHIPPER.lng, RECEIVER.lat, RECEIVER.lng);
 		status.run(id, "Dispatched", sqlTime(DISPATCH));
 		status.run(id, "Delivered", sqlTime(DELIVERED));
-		if (vid) for (const r of run1.rows) ping.run(vid, r.lat, r.lng, r.odo, r.ms);
+		if (vid) pings(vid);
 	};
 	closedOut("900001", "V1");   // its row holds the load before's haul
 	closedOut("900009", "V9");   // its row is what the replay measures
