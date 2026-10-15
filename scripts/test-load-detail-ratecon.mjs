@@ -19,7 +19,7 @@
 //      "can't be loaded" on 503; the viewer on 200
 //   §5 RateConViewer: the controls (page X of Y, zoom in/out, fit to page, full
 //      screen), starting at fit to page; the zoom maths; phone height and
-//      native scrolling
+//      touch (wheel, drag and pinch: scripts/test-ratecon-viewer-zoom.mjs)
 //   §6 pdf.js: no eval( / new Function( in the build the app loads, enableXfa
 //      never true, pdfjs-dist at or above 6.4.299, essential entry only
 //   §7 the driver app, the job board and the public tracker pass none of it
@@ -425,7 +425,7 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
   }
   ok('§5 pdf.js gets only { url } (every option at its default, enableXfa off)', /const pdfSource = computed\(\(\) => \(\{ url: props\.src \}\)\)/.test(VIEWER))
   ok('§5 no text or annotation layer (nothing in the PDF is clickable)', VIEWER.length > 0 && !/text-layer|annotation-layer|textLayer|annotationLayer|:forms/.test(templateOf(VIEWER)))
-  ok('§5 one page at a time', /:page="page"/.test(VIEWER))
+  ok('§5 one page at a time (one page fetched per draw, one canvas on screen)', /p = await d\.getPage\(n\)/.test(VIEWER) && /host\.appendChild\(canvas\)/.test(VIEWER) && /host\.removeChild\(old\)/.test(VIEWER))
   ok('§5 the essential vue-pdf-embed entry with its worker', /import\('vue-pdf-embed\/dist\/index\.essential\.mjs'\)/.test(VIEWER) && /import\('pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url'\)/.test(VIEWER))
   ok('§5 phone: the tile is 55% of the screen height', /@media \(max-width: 640px\) \{\s*\.rcv \{ height: 55vh; \}/.test(VIEWER))
   ok('§5 the tile is capped to the scroll area it sits in (outside full screen)',
@@ -552,15 +552,19 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
   }
   ok('§5 phone: one finger scrolls natively, two fingers pinch (touch-action pan-x pan-y, touchmove not passive)',
     /touch-action: pan-x pan-y/.test(VIEWER) && /addEventListener\('touchmove', onTouchMove, \{ passive: false \}\)/.test(VIEWER))
-  ok('§5 no horizontal page scroll: the tile is capped to its column and scrolls inside', /\.rcv \{[^}]*max-width: 100%/.test(VIEWER) && /\.rcv-stage \{[^}]*overflow: auto/.test(VIEWER) && /min-width: 0/.test(VIEWER))
+  ok('§5 no horizontal page scroll: the tile is capped to its column and the page moves inside it', /\.rcv \{[^}]*max-width: 100%/.test(VIEWER) && /\.rcv-stage \{[^}]*overflow: hidden/.test(VIEWER) && /min-width: 0/.test(VIEWER))
   if (view) {
     ok('§5 fit on a desktop tile: the page height decides', view.fitPageWidth(800, 700, 11 / 8.5) === 540)
     ok('§5 fit on a 390 px phone: the width decides', view.fitPageWidth(356, 520, 11 / 8.5) === 356)
     ok('§5 fit for a landscape page', view.fitPageWidth(800, 700, 8.5 / 11) === 800)
     ok('§5 zoom steps land exactly on fit', view.stepZoom(view.stepZoom(1, 1, 4), -1, 4) === 1 && view.stepZoom(0.8, 1, 4) === 1)
     ok('§5 zoom is bounded', view.clampZoom(99, 3) === 3 && view.clampZoom(0.01, 3) === view.MIN_ZOOM && view.clampZoom(NaN, 3) === 1)
-    const mz = view.maxZoomFor(356, 11 / 8.5, 3)
-    ok(`§5 the deepest zoom keeps the canvas under the phone limit (${mz.toFixed(2)})`, mz > 1 && Math.pow(356 * mz * 3, 2) * (11 / 8.5) <= 16.1e6)
+    // 400 % everywhere; on a dense phone screen the sharp render's density is
+    // what gives way, so its canvas stays under the iOS limit (rateConZoom.js).
+    const zoomLib = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'rateConZoom.js')).href).catch(() => null)
+    const deepW = 356 * view.MAX_ZOOM
+    const density = zoomLib ? zoomLib.renderDensity(deepW, deepW * (11 / 8.5), 3) : 0
+    ok(`§5 the deepest zoom keeps the canvas under the phone limit (density ${density.toFixed(2)})`, view.MAX_ZOOM === 4 && density > 1 && Math.pow(deepW * density, 2) * (11 / 8.5) <= 16.1e6)
     ok('§5 pages are bounded', view.clampPage(0, 3) === 1 && view.clampPage(9, 3) === 3 && view.clampPage(2, 3) === 2)
     ok('§5 the request URL', view.rateConPdfUrl(' 7700123 ') === '/api/loads/7700123/ratecon.pdf')
   }
