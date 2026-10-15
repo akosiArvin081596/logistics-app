@@ -233,9 +233,9 @@ async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = fa
 		req.on("error", reject);
 		req.end();
 	});
-	const addDoc = (loadId, driveUrl, driveFileId = "", uploadedAt = "2026-09-10 12:00:00", fileName = "x.pdf") =>
-		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, uploaded_at) VALUES (?, '', 'RATECON', ?, ?, ?, ?)")
-			.run(loadId, fileName, driveFileId, driveUrl, uploadedAt);
+	const addDoc = (loadId, driveUrl, driveFileId = "", uploadedAt = "2026-09-10 12:00:00", fileName = "x.pdf", type = "RATECON") =>
+		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, uploaded_at) VALUES (?, '', ?, ?, ?, ?, ?)")
+			.run(loadId, type, fileName, driveFileId, driveUrl, uploadedAt);
 	const close = async () => {
 		await new Promise((r) => server.close(r));
 		db.close();
@@ -456,6 +456,27 @@ async function main() {
 		w.addDoc("7700950", "/uploads/7700950_RATECON_1760000000000.pdf", "", "2026-09-30 12:00:00", "7700950_RATECON_1760000000000.pdf");
 		const u = await w.call(url("7700950"));
 		t(u.status === 200 && u.body.equals(BYTES.local), `§8 an uploaded rate con under uploads/ is served (${u.status})`);
+		await w.close();
+	}
+	{
+		// The documents type is what keeps every other upload out: a POD and a
+		// BOL stored directly under uploads/ for the same load are passed over,
+		// even when newer than the rate con.
+		const w = await startWorld({ folderId: "" });
+		const POD = pdf("a proof of delivery");
+		const BOL = pdf("a bill of lading");
+		fs.writeFileSync(path.join(w.uploadsDir, "7700960_POD_1760000000001.pdf"), POD);
+		fs.writeFileSync(path.join(w.uploadsDir, "7700960_BOL_1760000000002.pdf"), BOL);
+		w.addDoc("7700960", "/uploads/7700960_POD_1760000000001.pdf", "", "2026-10-01 12:00:00", "7700960_POD_1760000000001.pdf", "POD");
+		w.addDoc("7700960", "/uploads/7700960_BOL_1760000000002.pdf", "", "2026-10-02 12:00:00", "7700960_BOL_1760000000002.pdf", "BOL");
+		reads.length = 0;
+		const only = await w.call(url("7700960"));
+		t(only.status === 404 && only.json && only.json.code === "RATECON_NOT_FOUND" && !isPdfBody(only), `§8 a POD and a BOL under uploads/ are not rate cons: 404 RATECON_NOT_FOUND (${only.status} ${only.json && only.json.code})`);
+		t(!reads.some((p) => /_(POD|BOL)_/.test(p)), "§8 ...and neither file is opened");
+		fs.writeFileSync(path.join(w.uploadsDir, "7700960_RATECON_1760000000000.pdf"), BYTES.local);
+		w.addDoc("7700960", "/uploads/7700960_RATECON_1760000000000.pdf", "", "2026-09-30 12:00:00", "7700960_RATECON_1760000000000.pdf");
+		const rc = await w.call(url("7700960"));
+		t(rc.status === 200 && rc.body.equals(BYTES.local), `§8 with a RATECON row beside them, the rate con is served, never the newer POD or BOL (${rc.status})`);
 		await w.close();
 	}
 
