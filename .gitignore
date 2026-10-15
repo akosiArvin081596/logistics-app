@@ -173,6 +173,9 @@ backups/
 # `storage/` would silently hide any future tracked file added under it, and an
 # invisible file is how the onboarding templates got deleted twice.
 storage/payout-statements/
+# Re-encoded receipt images for invoice receipt pages (lib/receipt-images.js):
+# real receipts, rebuilt on demand.
+storage/receipt-images/
 
 # Written by the deploy drift monitor on the VPS — one heal attempt per commit.
 .drift-heal-attempted

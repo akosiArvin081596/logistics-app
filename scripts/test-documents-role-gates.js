@@ -442,6 +442,11 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((x) => ({ ...x })),
 		stripSigningEvidence: (rows) => rows,
+		// No receipt or invoice here carries a Personal line
+		// (scripts/test-personal-expense-routes.js, test-personal-expense-receipts.js).
+		personalSummaryByExpense: () => Object.create(null),
+		personalSummaryForRole: () => null,
+		personalLinesForInvoices: () => new Map(),
 		ONBOARDING_DOCS: [],
 		console: quiet,
 	};

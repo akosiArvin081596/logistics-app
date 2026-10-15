@@ -93,7 +93,7 @@ const FNS = [
 	"driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName", "isBuiltInPropertyName",
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
 	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
-	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseDriverKey",
+	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "expenseDriverKey",
 	"resolveDailyRate", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckMonthlyFixed", "resolveInvestorSplitPct", "payoutBasisContext", "getCarrierDBFromSQLite",

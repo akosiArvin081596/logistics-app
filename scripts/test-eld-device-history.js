@@ -199,7 +199,8 @@ const ROLLUP_SRC = [
 	fn("rollupEldMilesDaily", { optional: true }),
 ].join("");
 const ROUTE_SRC = lift(/\napp\.get\("\/api\/analytics\/mileage",[\s\S]*?\n}\);\n/g, "GET /api/analytics/mileage");
-const UTIL_SRC = [fn("getWeekRange"), fn("appDay")].join("");
+// expenseFrom(): the fuel receipts the route reads (no Personal ledger here).
+const UTIL_SRC = [fn("getWeekRange"), fn("appDay"), fn("personalLedgerPresent"), fn("expenseFrom")].join("");
 check("§3.0 the per-load measurement reads the device the truck held then",
 	/deviceResolver\.vehicleForTruckAt\(truck\.truck_id, win\.endMs\)/.test(fn("measureLoadEldMiles")), true);
 

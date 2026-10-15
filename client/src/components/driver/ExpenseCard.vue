@@ -5,6 +5,8 @@
       <div class="expense-details">
         <div class="expense-type">{{ expense.type || 'Other' }}</div>
         <div class="expense-desc">{{ expense.description || expense.date || '' }}</div>
+        <!-- A Personal line on this receipt: the server's amount and invoice. -->
+        <div v-if="personalText" class="expense-personal">{{ personalText }}</div>
       </div>
       <img
         v-if="expense.photoData"
@@ -23,12 +25,15 @@
 
 <script setup>
 import { computed } from 'vue'
+import { personalDriverText } from '../../lib/personalReceipt'
 
 const props = defineProps({
   expense: { type: Object, required: true },
 })
 
 defineEmits(['preview'])
+
+const personalText = computed(() => personalDriverText(props.expense.personal))
 
 const typeIcons = {
   Fuel: '&#9981;',
@@ -110,6 +115,12 @@ function formatCurrency(val) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.expense-personal {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #b45309;
 }
 
 .expense-amount {

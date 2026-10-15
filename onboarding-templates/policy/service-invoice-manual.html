@@ -189,6 +189,11 @@
     }
     .pay-summary .total-row .value { font-size: 20px; }
 
+    /* Receipt pages after a Personal correction: one receipt per sheet. */
+    .receipt-page { break-before: page; page-break-before: always; }
+    .receipt-page h2 { font-size: 13px; margin: 0 0 12px; }
+    .receipt-page img { display: block; max-width: 100%; max-height: 8.3in; margin: 0 auto; object-fit: contain; }
+
     @media print {
       html, body { background: #fff; }
       .document { box-shadow: none; margin: 0; padding: 0; max-width: none; }
@@ -324,6 +329,12 @@
         <span class="label">TOTAL DUE</span>
         <span class="value">$&nbsp;<span aria-label="Total due"></span></span>
       </div>
+      <!-- A Personal correction that leaves the driver owing; hidden by the
+           renderer when empty. -->
+      <div class="row owed-row" data-show-when-owed>
+        <span class="label">DRIVER OWES</span>
+        <span class="value"><span aria-label="Amount owed"></span></span>
+      </div>
     </div>
 
     <h2>NOTES</h2>
@@ -344,5 +355,15 @@
       <input type="text" class="blank blank-xs" aria-label="Signature date">
     </div>
   </main>
+
+  <!-- Receipt pages (a Personal correction's lines): the renderer clones the
+       hidden page once per receipt image, then removes it; with none, nothing
+       prints. -->
+  <section class="document receipt-pages" data-receipt-pages style="display:none">
+    <div class="receipt-page" data-receipt-page-template style="display:none">
+      <h2 data-cell="header"></h2>
+      <img data-cell="image" alt="Receipt">
+    </div>
+  </section>
 </body>
 </html>

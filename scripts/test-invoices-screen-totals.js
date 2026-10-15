@@ -94,7 +94,8 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '',
 	paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '',
 	adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '',
-	delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '')`;
+	delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '',
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0)`;
 
 function harness(src) {
 	const db = new Database(":memory:");
@@ -128,6 +129,9 @@ function harness(src) {
 		logAudit: () => {},
 		notifyChange: () => {},
 		console: { log() {}, warn() {}, error() {} },
+		// Each row's Personal lines (none here; scripts/test-personal-expense-receipts.js
+		// covers them).
+		personalLinesForInvoices: () => new Map(),
 	};
 	const routeTexts = [liftRoute(src, LIST_ROUTE), liftRoute(src, MANUAL_ROUTE), liftRoute(src, TOTALS_ROUTE, true)].filter(Boolean);
 	new Function(...Object.keys(deps), routeTexts.join("\n"))(...Object.values(deps));
@@ -247,11 +251,15 @@ async function batterySummary(src) {
 	t("§2 invoiceListSummary() counts only rows that are not deleted, at invoiceTotalDue()",
 		typeof w.invoiceListSummary === "function"
 			? w.invoiceListSummary([
-				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "" },
-				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z" },
-				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "" },
+				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "", personal_total: 0, personal_share_total: 0 },
+				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z", personal_total: 0, personal_share_total: 0 },
+				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "", personal_total: 0, personal_share_total: 0 },
 			]).Paid
 			: "no invoiceListSummary()", { count: 1, total_due: 15 });
+	t("§2 …and a card's total includes Personal lines (the share returned, less what the driver repays)",
+		typeof w.invoiceListSummary === "function"
+			? w.invoiceListSummary([{ status: "Submitted", total_earnings: 800, adjustment: 0, deleted_at: "", personal_total: 100, personal_share_total: 25 }]).Submitted
+			: "no invoiceListSummary()", { count: 1, total_due: 725 });
 
 	// The cards follow the list the route answers: the screen sends no filter, so
 	// they cover every live invoice; a filtered call (the route's own ?driver=)
@@ -421,8 +429,8 @@ const SERVER_BATTERIES = [
 // Each mutant rewrites the fix back to a narrower rule and must flip at least
 // one assertion. A test that passes on both has not tested anything.
 const SERVER_MUTANTS = [
-	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r) }));",
-		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings }));"],
+	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));",
+		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings, personal_lines: personalLines.get(r.id) || [] }));"],
 	["the cards count deleted rows", "rows.filter((r) => !r.deleted_at && r.status === status)", "rows.filter((r) => r.status === status)"],
 	["the cards sum total_earnings", "live.reduce((s, r) => s + invoiceTotalDue(r), 0)", "live.reduce((s, r) => s + (r.total_earnings || 0), 0)"],
 	["the manual totals ignore the deductions", "totalDue: round2(subtotal - deductionsTotal)", "totalDue: round2(subtotal)"],

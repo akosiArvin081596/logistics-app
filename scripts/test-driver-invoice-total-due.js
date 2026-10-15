@@ -70,7 +70,8 @@ function harness(src) {
 		rate_per_load REAL NOT NULL DEFAULT 250, total_earnings REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'Draft', submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP, paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
-		adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0)`);
+		adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0,
+		personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0)`);
 	// §1 asserts invoiceTotalDue() exists; the other batteries run without it,
 	// so a tree that lacks it still shows what its driver list serves.
 	const hasTotalDue = src.includes("\nfunction invoiceTotalDue(");
@@ -90,11 +91,11 @@ function harness(src) {
 function insertInvoice(db, row) {
 	const r = {
 		week_end: "", loads_count: 3, total_earnings: 0, expenses_total: 0, status: "Submitted",
-		adjustment: 0, adjustment_note: "", deleted_at: "", ...row,
+		adjustment: 0, adjustment_note: "", deleted_at: "", personal_total: 0, personal_share_total: 0, ...row,
 	};
 	db.prepare(
-		`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, adjustment, adjustment_note, deleted_at)
-		 VALUES (@invoice_number, @driver, @week_start, @week_end, @loads_count, @total_earnings, @expenses_total, @status, @adjustment, @adjustment_note, @deleted_at)`
+		`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, total_earnings, expenses_total, status, adjustment, adjustment_note, deleted_at, personal_total, personal_share_total)
+		 VALUES (@invoice_number, @driver, @week_start, @week_end, @loads_count, @total_earnings, @expenses_total, @status, @adjustment, @adjustment_note, @deleted_at, @personal_total, @personal_share_total)`
 	).run(r);
 }
 
@@ -105,14 +106,21 @@ function batteryDefinition(src) {
 	const { invoiceTotalDue } = harness(src);
 	t("§1 server.js defines invoiceTotalDue() once", typeof invoiceTotalDue, "function");
 	if (typeof invoiceTotalDue !== "function") return out;
-	t("§1 total_earnings plus a negative adjustment", invoiceTotalDue({ total_earnings: 1500, adjustment: -300 }), 1200);
-	t("§1 …plus a positive adjustment", invoiceTotalDue({ total_earnings: 600, adjustment: 75.5 }), 675.5);
+	// Every row carries the two Personal columns, as every stored invoice does.
+	const P = { personal_total: 0, personal_share_total: 0 };
+	t("§1 total_earnings plus a negative adjustment", invoiceTotalDue({ ...P, total_earnings: 1500, adjustment: -300 }), 1200);
+	t("§1 …plus a positive adjustment", invoiceTotalDue({ ...P, total_earnings: 600, adjustment: 75.5 }), 675.5);
 	t("§1 …no adjustment adds nothing (0, null, missing)",
-		[invoiceTotalDue({ total_earnings: 900, adjustment: 0 }), invoiceTotalDue({ total_earnings: 900, adjustment: null }), invoiceTotalDue({ total_earnings: 900 })],
+		[invoiceTotalDue({ ...P, total_earnings: 900, adjustment: 0 }), invoiceTotalDue({ ...P, total_earnings: 900, adjustment: null }), invoiceTotalDue({ ...P, total_earnings: 900 })],
 		[900, 900, 900]);
-	t("§1 …rounded to the cent", invoiceTotalDue({ total_earnings: 0.1, adjustment: 0.2 }), 0.3);
-	t("§1 …an adjustment larger than the earnings gives a negative total", invoiceTotalDue({ total_earnings: 200, adjustment: -300 }), -100);
-	t("§1 …an empty row is $0", invoiceTotalDue({}), 0);
+	t("§1 …rounded to the cent", invoiceTotalDue({ ...P, total_earnings: 0.1, adjustment: 0.2 }), 0.3);
+	t("§1 …an adjustment larger than the earnings gives a negative total", invoiceTotalDue({ ...P, total_earnings: 200, adjustment: -300 }), -100);
+	t("§1 …a row with only the Personal columns is $0", invoiceTotalDue({ ...P }), 0);
+	t("§1 …less what the driver repays on Personal lines, plus a share returned ($800 + $25 - $100)",
+		invoiceTotalDue({ total_earnings: 800, adjustment: 0, personal_total: 100, personal_share_total: 25 }), 725);
+	const throws = (row) => { try { invoiceTotalDue(row); return false; } catch (e) { return /personal_(share_)?total/.test(e.message); } };
+	t("§1 …a row read without personal_total or personal_share_total throws, never reads as $0",
+		[throws({ total_earnings: 900, personal_share_total: 0 }), throws({ total_earnings: 900, personal_total: 0 }), throws({})], [true, true, true]);
 	return out;
 }
 
@@ -125,6 +133,7 @@ const W41 = { start: "2026-10-10", end: "2026-10-16" };
 // until this list names it.
 const DRIVER_ROW_FIELDS = [
 	"adjustment", "created_at", "expenses_total", "id", "invoice_number", "loads_count",
+	"personal_share_total", "personal_total",
 	"status", "submitted_at", "total_due", "total_earnings", "week_end", "week_start",
 ];
 
@@ -134,6 +143,8 @@ function seed(w) {
 	insertInvoice(w.db, { invoice_number: "INV-SK-2026W38-01", driver: "SOREN KING", week_start: W38.start, week_end: W38.end, total_earnings: 1050, status: "Paid" });
 	insertInvoice(w.db, { invoice_number: "INV-SK-2026W41-01", driver: "Soren King", week_start: W41.start, week_end: W41.end, total_earnings: 200, adjustment: -300, status: "Draft" });
 	insertInvoice(w.db, { invoice_number: "INV-HR-2026W40-01", driver: "Hal Rowe", week_start: W40.start, week_end: W40.end, total_earnings: 800, adjustment: 50 });
+	// Personal lines: $100 repaid, a $25 share returned.
+	insertInvoice(w.db, { invoice_number: "INV-HR-2026W41-01", driver: "Hal Rowe", week_start: W41.start, week_end: W41.end, total_earnings: 800, personal_total: 100, personal_share_total: 25 });
 }
 
 function batteryDriverList(src) {
@@ -162,6 +173,9 @@ function batteryDriverList(src) {
 	t("§2 `driver` is still not returned", list.every((r) => !("driver" in r)), true);
 	t("§2 every row carries exactly the listed fields (adjustment yes; driver, adjustment_note, adjusted_by no)",
 		[...new Set(list.map((r) => JSON.stringify(Object.keys(r).sort())))], [JSON.stringify(DRIVER_ROW_FIELDS)]);
+	const hal = Object.fromEntries(w.driverAppList("Hal Rowe").map((r) => [r.invoice_number, r]));
+	t("§2 Personal lines: the list's total_due is the invoice's ($800 + $25 - $100), with both columns",
+		[hal["INV-HR-2026W41-01"].total_due, hal["INV-HR-2026W41-01"].personal_total, hal["INV-HR-2026W41-01"].personal_share_total], [725, 100, 25]);
 	return out;
 }
 
@@ -216,10 +230,11 @@ const MUTANTS = [
 	["the driver app's list drops the adjustment",
 		"total_due: invoiceTotalDue(rest)", "total_due: rest.total_earnings"],
 	["the driver app's list also sends the adjustment's note and author",
-		"total_earnings, adjustment, expenses_total", "total_earnings, adjustment, adjustment_note, adjusted_by, expenses_total"],
+		"total_earnings, adjustment, personal_total, personal_share_total, expenses_total",
+		"total_earnings, adjustment, adjustment_note, adjusted_by, personal_total, personal_share_total, expenses_total"],
 	["invoiceTotalDue() ignores the adjustment",
-		"return Math.round(((row.total_earnings || 0) + (row.adjustment || 0)) * 100) / 100;",
-		"return Math.round((row.total_earnings || 0) * 100) / 100;"],
+		"return Math.round(((row.total_earnings || 0) + (row.adjustment || 0) + (row.personal_share_total || 0) - (row.personal_total || 0)) * 100) / 100;",
+		"return Math.round(((row.total_earnings || 0) + (row.personal_share_total || 0) - (row.personal_total || 0)) * 100) / 100;"],
 ];
 
 // ───────────────────────────────────────────────────────────────── runner

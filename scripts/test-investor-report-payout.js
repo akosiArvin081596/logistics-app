@@ -572,6 +572,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				resolveDailyRate: (perDriver, perTruck) => perDriver || perTruck || 250,
 				getInvestorDriverMonthWindows: () => new Map(),
 				investorExpenseScopeSql: () => ({ sql: "1=0", params: [] }),
+				// The receipt source with no Personal ledger: the plain table.
+				expenseFrom: () => "expenses",
 				EXPENSE_PERIOD_EXPR: "date",
 				EXPENSE_PNL_FILTER: "1=1",
 				truckChargedInMonth: () => false,
