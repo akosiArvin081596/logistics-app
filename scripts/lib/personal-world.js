@@ -66,7 +66,7 @@ const ROUTE_HEADS = {
 // { receipts: true }, so the phase 1 runners lift exactly what they did.
 const RECEIPT_ROUTE_HEADS = {
 	receipt: 'app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {',
-	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {',
+	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {',
 	invoices: 'app.get("/api/invoices", requireAuth, (req, res) => {',
 };
 const RECEIPT_ROOTS = ["paymentReportColumns", "personalLinesForInvoices", "personalWaitingInPeriod", "warmPersonalReceiptsForWeek"];
@@ -83,7 +83,7 @@ const ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
-	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter"];
+	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE"];
 
 const lifted = new Map();
@@ -264,6 +264,7 @@ function buildPersonalWorld(opts = {}) {
 		fuelAnalyticsLimiter: (req, res, next) => next(),
 		personalReceiptLimiter: (req, res, next) => next(),
 		personalRouteLimiter: (req, res, next) => next(),
+		personalListLimiter: (req, res, next) => next(),
 	};
 	const { roots, code } = liftedCode(!!opts.receipts);
 	const body = [

@@ -241,18 +241,27 @@ const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
 			'app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
 			'app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
 			'app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
-			'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {',
+			'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {',
 			'app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {',
 		];
-		check("mark, undo, reverse, the correction, the waiting list: personalRouteLimiter; the receipt: personalReceiptLimiter",
+		check("mark, undo, reverse, the correction: personalRouteLimiter; the waiting list its own personalListLimiter; the receipt: personalReceiptLimiter",
 			heads.map((h) => SRC.split(`\n${h}\n`).length - 1), [1, 1, 1, 1, 1, 1]);
+		const NAMES = ["personalRouteLimiter", "personalListLimiter", "personalReceiptLimiter"];
 		const limiter = (name) => {
 			const at = SRC.indexOf(`\nconst ${name} = rateLimit({`);
 			return at < 0 ? "" : SRC.slice(at, SRC.indexOf("\n});", at));
 		};
 		check("…each an express-rate-limit with a window and a cap, declared before its first route",
-			["personalRouteLimiter", "personalReceiptLimiter"].map((n) => [/windowMs: [\d* ]+,/.test(limiter(n)), /max: \d+,/.test(limiter(n)), SRC.indexOf(`\nconst ${n} = rateLimit(`) < SRC.indexOf(`, ${n}, `)]),
-			[[true, true, true], [true, true, true]]);
+			NAMES.map((n) => [/windowMs: [\d* ]+,/.test(limiter(n)), /max: \d+,/.test(limiter(n)), SRC.indexOf(`\nconst ${n} = rateLimit(`) < SRC.indexOf(`, ${n}, `)]),
+			[[true, true, true], [true, true, true], [true, true, true]]);
+		// One office shares one IP: each signed-in user has his own count, the IP
+		// only for a request with no session (the gate has refused it by then).
+		check("…each keyed per signed-in user, falling back to the IP",
+			NAMES.map((n) => /keyGenerator: \(req\) => \{\s*const id = req\.session\?\.user\?\.id;\s*return id \? `u:\$\{id\}` : `ip:\$\{ipKeyGenerator\(req\.ip\)\}`;\s*\},/.test(limiter(n))),
+			[true, true, true]);
+		const cap = (n) => Number((limiter(n).match(/max: (\d+),/) || [])[1]);
+		check("…the waiting list (re-read on every expenses or invoices change) has a read-sized cap, above the writes'",
+			cap("personalListLimiter") > cap("personalRouteLimiter"), true);
 	}
 
 	finish();

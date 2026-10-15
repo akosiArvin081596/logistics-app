@@ -25006,13 +25006,32 @@ function personalExpenseById(req) {
 	return Number.isInteger(id) && id > 0 ? db.prepare("SELECT * FROM expenses WHERE id = ?").get(id) || null : null;
 }
 
-// The Personal routes below (mark, undo, reverse, the correction invoice, the
-// waiting list), after their gate: each write redraws an invoice PDF, and a
-// Super Admin makes a handful of them at a time, never hundreds.
+// The Personal writes below (mark, undo, reverse, the correction invoice), after
+// their gate: each redraws an invoice PDF, and a Super Admin makes a handful at a
+// time, never hundreds. The waiting list has its own read-sized count
+// (personalListLimiter): the Expenses screen re-reads it on every expenses or
+// invoices change, which must never use up the writes'.
+// ⚠️ PER-USER, NOT PER-IP (periodIssueLimiter's reasoning): the whole office
+// behind one NAT would otherwise share one count. Falls back to the IP for a
+// request with no session, which the gate has already refused by then.
 const personalRouteLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 120,
-	message: { error: "Too many Personal receipt requests. Try again in a few minutes." },
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many Personal receipt changes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+const personalListLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests for the Personal lines waiting for a correction. Try again in a few minutes." },
 	standardHeaders: true,
 });
 
@@ -25252,7 +25271,7 @@ app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refus
 // (netCents()): the Expenses screen's list beside its Create button
 // (POST /api/invoices/personal-corrections). A line whose receipt names no
 // driver cannot have a correction and is not listed (its flag was audited).
-app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {
+app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {
 	try {
 		if (!personalLedgerPresent()) return res.json({ groups: [] });
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
@@ -25282,10 +25301,15 @@ app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin")
 });
 
 // The receipt behind a Personal line: a session is required first, then this
-// limit (a page of invoices opens a few receipts, never hundreds).
+// limit (a page of invoices opens a few receipts, never hundreds), per signed-in
+// user like personalRouteLimiter (the IP only without a session).
 const personalReceiptLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 300,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
 	message: { error: "Too many receipt requests. Try again in a few minutes." },
 	standardHeaders: true,
 });
