@@ -55,10 +55,18 @@ function optionValue(argv, name) {
 	return i >= 0 ? argv[i + 1] : undefined;
 }
 
+// A refused --enable word as it may be printed: what follows "=" is never
+// shown, and a word that looks like a key (rules.looksLikeToken) is not shown
+// at all, so a value typed by mistake never reaches the screen or a log.
+function shownWord(word) {
+	const name = word.replace(/=.*$/s, "");
+	if (rules.looksLikeToken(name)) return "(not shown: it looks like a key)";
+	return (name === word ? name : `${name}=...`).slice(0, 64);
+}
+
 // The flags --enable names (each --enable takes the next word), checked against
 // lib/replica-rules.js before anything starts: sorted, without repeats. Any
-// refusal ends the run. A word holding "=" is shown without what follows it, so
-// a value typed by mistake is never printed.
+// refusal ends the run.
 function enableArgs(argv) {
 	const names = new Set();
 	const refused = [];
@@ -67,12 +75,36 @@ function enableArgs(argv) {
 		const name = argv[i + 1];
 		if (name === undefined || name.startsWith("--")) fail("--enable needs a setting name, e.g. --enable PERSONAL_EXPENSE_DEDUCTIONS_ENABLED");
 		const why = rules.enableRefusal(name);
-		if (why) refused.push(`--enable ${name.replace(/=.*$/s, "=...").slice(0, 64)}: ${why}`);
+		if (why) refused.push(`--enable ${shownWord(name)}: ${why}`);
 		else names.add(name);
 		i++;
 	}
 	if (refused.length) fail(`refusing to start:\n  ${refused.join("\n  ")}`);
 	return [...names].sort();
+}
+
+// --from-month YYYY-MM, given once, for the enabled flags that need a first
+// month (rules.ENABLE_FROM): the settings to add to the task's environment,
+// e.g. { LEDGER_DAY_ONCE_FROM: "2026-10" }. Refused before anything starts
+// when such a flag has no month, when there is a month but no such flag, or
+// when the month isn't YYYY-MM (the value is never printed).
+function fromMonthArg(argv, enabled) {
+	const at = argv.reduce((acc, a, i) => (a === "--from-month" ? [...acc, i] : acc), []);
+	if (at.length > 1) fail("give --from-month once (it applies to every enabled rule that needs a first month)");
+	const needing = enabled.filter((name) => Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM, name));
+	if (!at.length) {
+		if (needing.length) {
+			fail(`refusing to start: ${needing.map((n) => `${n} does nothing without its first month (${rules.ENABLE_FROM[n]})`).join("; ")}. ` +
+				"Add --from-month YYYY-MM, which sets it for this task only.");
+		}
+		return {};
+	}
+	const month = argv[at[0] + 1];
+	if (!rules.isFromMonth(month)) fail("--from-month needs a month, YYYY-MM (a year 2000-2099, a month 01-12), e.g. --from-month 2026-10");
+	if (!needing.length) {
+		fail(`--from-month sets the first month of ${Object.keys(rules.ENABLE_FROM).join(" or ")}; enable one of them with --enable too`);
+	}
+	return Object.fromEntries(needing.map((n) => [rules.ENABLE_FROM[n], month]));
 }
 
 function readJson(file) {
@@ -184,6 +216,7 @@ module.exports = {
 	taskArg,
 	optionValue,
 	enableArgs,
+	fromMonthArg,
 	readJson,
 	writePrivate,
 	realOf,
