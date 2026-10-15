@@ -564,7 +564,7 @@ function battery(mods) {
 		response = M.buildKpiResponse({ asOfDay: AS_OF, timeZone: "America/New_York", job, settings, derived: out.derived, snapshots, series, approvals, generatedAt: "2026-10-09T13:00:00Z", defaultRecipientConfigured: true });
 		const rm = (key) => response.metrics.find((m) => m.key === key);
 		t(response.asOfDay === AS_OF && response.timeZone === "America/New_York" && response.generatedAt === "2026-10-09T13:00:00Z", "§12 header fields");
-		t(response.job.enabled.snapshot === true && response.job.lastRun.id === 3 && response.job.snapshotSchedule === "Daily at 4:00 AM Eastern (3:00 AM Central)"
+		t(response.job.enabled.snapshot === true && response.job.lastRun.id === 3 && response.job.snapshotSchedule === "Daily at 4:00 AM Eastern"
 			&& response.job.preview.status === "pending", "§12 job passes through over the defaults");
 		t(response.settings.aiDispatchStart.value === "2026-04-09" && response.settings.aiDispatchStart.source === "derived" && /from 2026-04-09/.test(response.settings.aiDispatchStart.evidence),
 			"§12 the derived AI start and its evidence", JSON.stringify(response.settings.aiDispatchStart));

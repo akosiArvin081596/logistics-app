@@ -363,7 +363,7 @@ function shapeErrors(r) {
     payload: JSON.stringify({ current: m.current, totals: m.totals, comparisons: m.comparisons, beforeAfter: m.beforeAfter, coverage: m.coverage, warnings: m.warnings, assumptions: m.assumptions, breakdown: m.breakdown, missingReason: m.missingReason }),
   }))
   const series = out.metrics.flatMap((m) => m.series.map((x) => ({ metric_key: m.key, period: x.period, value: x.value, display: x.display, coverage: x.coverage, computed_at: computedAt })))
-  const job = { enabled: { snapshot: true, digest: true }, snapshotSchedule: 'Daily at 4:00 AM Eastern (3:00 AM Central)', digestSchedule: 'Mondays at 9:00 AM Eastern (8:00 AM Central)',
+  const job = { enabled: { snapshot: true, digest: true }, snapshotSchedule: 'Daily at 4:00 AM Eastern', digestSchedule: 'Mondays at 9:00 AM Eastern',
     lastRun: { id: 1, kind: 'nightly', status: 'ok', startedAt: computedAt, finishedAt: computedAt, durationMs: 900, errors: [] },
     nextSnapshotAt: '2026-10-10T08:00:00.000Z', nextDigestAt: '2026-10-12T13:00:00.000Z', preview: { status: 'pending', at: null }, lastDigest: null }
   const response = M.buildKpiResponse({ asOfDay: day, timeZone: 'America/New_York', generatedAt: computedAt, job,
