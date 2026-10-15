@@ -9,23 +9,27 @@
  * from every served copy.
  *
  * Covered, per role (Super Admin, Dispatcher, the receipt's driver, another
- * driver, an Investor with no claim on the receipt, an unknown role, signed out):
+ * driver, Investors, an unknown role, signed out):
  *   §1 originals under /uploads/expense-receipts/, every path spelling
  *   §2 cached thumbnails under /uploads/expense-receipts/thumbs/ (the list's
  *      thumbnails come from the API; nothing links to the folder)
  *   §3 GET /api/expenses/:id/receipt-thumbnail (its role gate, and its fallback
  *      to the original, which must also go out stripped)
  *   §4 saveReceiptToDisk(): a new upload is stored without metadata; a stored
- *      path sent as photoData is refused (it would make a second row name
- *      another driver's file)
+ *      path sent as photoData is refused (400)
  *   §5 GET /api/expenses/receipts-download streams stripped copies
- * The Investor who owns the receipt's truck is NOT covered: that view is a
- * pending owner decision.
+ *   §6 the Investor rule (INVESTOR_RECEIPT_IMAGES, the owner's choice pending),
+ *      run under BOTH options whichever one ships: "own-trucks" (A: photos of
+ *      receipts on the investor's own trucks, none with a Personal part) and
+ *      "none" (B: no receipt photos). The receipt file and the investor's
+ *      receipt list (GET /api/investor/expenses) must agree under each.
  *
  * WHAT IS REAL: every /uploads mount in file order, normalizedUploadPath,
  * uploadsPathGuard, GUARDED_UPLOAD_DIRS, uploadMissLimiter and its constants,
- * the receipt guard (when server.js has one), the thumbnail route,
- * saveReceiptToDisk and sniffImageFormat, all LIFTED from server.js, plus
+ * the receipt guard and the Investor rule (when server.js has them), the
+ * thumbnail route, GET /api/investor/expenses with every declaration it reaches
+ * (scripts/lib/server-lift.js), saveReceiptToDisk and sniffImageFormat, all
+ * LIFTED from server.js, plus
  * lib/receipt-files.js, lib/image-metadata.js and lib/image-size.js; mounted on
  * a real Express app over a temp uploads/ tree and driven over HTTP on
  * 127.0.0.1. FIXTURES: an in-memory SQLite, a header-driven session, stubs for
@@ -43,6 +47,8 @@ const crypto = require("crypto");
 const express = require("express");
 const Database = require("better-sqlite3");
 const fx = require("./lib/exif-fixtures");
+const { closure } = require("./lib/server-lift");
+const personalExpense = require("../lib/personal-expense");
 
 let failed = 0;
 const ok = (name, cond) => {
@@ -119,7 +125,27 @@ const L = {
 	// Source text only (read, never run): from its head to the route's closing line.
 	zipRoute: ((at) => (at < 0 ? "" : SRC.slice(at, SRC.indexOf("\n});\n", at))))(SRC.indexOf('\napp.get("/api/expenses/receipts-download"')),
 };
+// The Investor rule and the investor's receipt list, with every declaration they
+// reach. Names lifted above or passed in below are provided, never lifted twice.
+const PROVIDED = [
+	"app", "express", "path", "fs", "crypto", "DATA_DIR", "RECEIPTS_DIR", "db", "requireAuth", "requireRole", "imageLimits",
+	"receiptFiles", "imageMetadata", "console", "require", "INLINE_SAFE_UPLOAD_EXTS", "UPLOAD_MISS_WINDOW_MS", "UPLOAD_MISS_MAX",
+	"UPLOAD_MISS_BURST_MAX", "UPLOAD_MISS_KEYS_MAX", "uploadMissCounts", "RECEIPT_IMAGE_EXTS", "MAX_IMAGE_RECEIPT_BYTES",
+	"RECEIPT_OCR_MAX_PIXELS", "expenseReceiptGuard", "guardExpenseReceipt", "GUARDED_UPLOAD_DIRS", "normalizeDriverName",
+	"sniffImageFormat", "normalizedUploadPath", "uploadMissLimiter", "uploadsPathGuard", "saveReceiptToDisk",
+	"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "guardRootLoadDocument",
+];
+const INVESTOR_LIST_HEAD = 'app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async (req, res) => {';
+const INVESTOR_RULE_RE = /\nconst INVESTOR_RECEIPT_IMAGES = "([a-z-]+)";/;
+const SHIPPED_OPTION = (SRC.match(INVESTOR_RULE_RE) || [])[1] || "";
+L.investor = closure(SRC, {
+	roots: ["investorMaySeeReceipt", "investorReceiptImageIds"].filter((n) => SRC.includes(`\nfunction ${n}(`)),
+	routes: [INVESTOR_LIST_HEAD],
+	provided: PROVIDED,
+	denied: ["server", "io", "httpServer"],
+}).text;
 ok(`lifted every /uploads mount from server.js (${L.mounts.length})`, L.mounts.length === 4);
+ok(`server.js ships one of the two Investor options (found ${JSON.stringify(SHIPPED_OPTION)})`, ["own-trucks", "none"].includes(SHIPPED_OPTION));
 ok("lifted the thumbnail and ZIP routes", !!L.thumbRoute && !!L.zipRoute);
 
 // ---------------------------------------------------------------------------
@@ -134,6 +160,7 @@ const F = {
 	ORPHAN: "1788000000004-d4d4d4d4d4d4.jpg",    // a file no row names
 	A_UNREADABLE: "1788000000005-e5e5e5e5e5e5.jpg", // A's receipt: readable header, undecodable picture, GPS EXIF
 	A_BROKEN: "1788000000006-f6f6f6f6f6f6.jpg",  // A's receipt cut inside its metadata
+	A_PERSONAL: "1788000000007-a7a7a7a7a7a7.jpg", // A's receipt with a live Personal deduction
 };
 const U = {
 	sa: { id: 1, role: "Super Admin", username: "admin_t" },
@@ -142,7 +169,9 @@ const U = {
 	drvAspaced: { id: 10, role: "Driver", username: "drv_a", driverName: "  tamsin   VALE " },
 	drvB: { id: 11, role: "Driver", username: "drv_b", driverName: DRIVER_B },
 	drvBlank: { id: 12, role: "Driver", username: "drv_blank", driverName: "" },
-	inv: { id: 50, role: "Investor", username: "inv_t" },
+	inv: { id: 50, role: "Investor", username: "inv_t" },          // owns truck T-1 (Driver A's)
+	invOther: { id: 51, role: "Investor", username: "inv_u" },     // owns truck T-2 (Driver B's)
+	invNone: { id: 52, role: "Investor", username: "inv_v" },      // owns no truck
 	odd: { id: 60, role: "Auditor", username: "odd_t" },
 };
 
@@ -159,31 +188,52 @@ function writeTree() {
 	fs.writeFileSync(path.join(RECEIPTS_DIR, F.ORPHAN), IMG.bJpg);
 	fs.writeFileSync(path.join(RECEIPTS_DIR, F.A_UNREADABLE), IMG.unreadable);
 	fs.writeFileSync(path.join(RECEIPTS_DIR, F.A_BROKEN), IMG.broken);
+	fs.writeFileSync(path.join(RECEIPTS_DIR, F.A_PERSONAL), IMG.aJpg);
 	fs.writeFileSync(path.join(RECEIPTS_DIR, "thumbs", "1.jpg"), IMG.thumb);
 	fs.writeFileSync(path.join(RECEIPTS_DIR, "thumbs", "2.jpg"), IMG.thumb);
 	fs.mkdirSync(path.join(UP, "chat"), { recursive: true });
 	fs.writeFileSync(path.join(UP, "chat", "chat_1_abcde.jpg"), IMG.bJpg);
 }
 
-function makeDb() {
+// `noTrucks`: a database whose trucks table cannot be read (the Investor
+// check's "could not tell").
+function makeDb({ noTrucks = false } = {}) {
 	const db = new Database(":memory:");
-	db.exec(`CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT, type TEXT DEFAULT 'Fuel', amount REAL DEFAULT 10,
-		date TEXT DEFAULT '2026-10-01', photo_data TEXT DEFAULT '', load_id TEXT DEFAULT '', description TEXT DEFAULT '',
-		gallons REAL DEFAULT 0, odometer REAL DEFAULT 0, truck_unit TEXT DEFAULT 'T-1', status TEXT DEFAULT 'Pending')`);
-	const add = (driver, file) => db.prepare("INSERT INTO expenses (driver, photo_data) VALUES (?, ?)").run(driver, file ? `/uploads/expense-receipts/${file}` : "").lastInsertRowid;
-	add(DRIVER_A, F.A_JPG);         // 1
-	add(DRIVER_B, F.B_JPG);         // 2
-	add(DRIVER_A, F.A_PDF);         // 3
-	add(DRIVER_B, F.A_JPG);         // 4: a later row naming A's file (the old photoData pass-through)
-	add(DRIVER_A, F.A_UNREADABLE);  // 5
-	add(DRIVER_A, F.A_BROKEN);      // 6
+	db.exec(`CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT '', driver TEXT, load_id TEXT DEFAULT '',
+		type TEXT DEFAULT 'Fuel', amount REAL DEFAULT 10, description TEXT DEFAULT '', date TEXT DEFAULT '2026-10-01',
+		photo_data TEXT DEFAULT '', status TEXT DEFAULT 'Pending', gallons REAL DEFAULT 0, odometer REAL DEFAULT 0,
+		truck_unit TEXT DEFAULT '', owner_id INTEGER DEFAULT 0, location_city TEXT DEFAULT '', location_state TEXT DEFAULT '',
+		posted_period TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+	db.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, company_name TEXT DEFAULT '');
+		CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY, truck_id INTEGER, driver_name TEXT DEFAULT '', start_date TEXT DEFAULT '', end_date TEXT DEFAULT '');
+		CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT);
+		INSERT INTO users (id, username, role) VALUES (1, 'admin_t', 'Super Admin'), (50, 'inv_t', 'Investor'), (51, 'inv_u', 'Investor'), (52, 'inv_v', 'Investor');`);
+	if (!noTrucks) {
+		db.exec(`CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, assigned_driver TEXT DEFAULT '',
+			created_at TEXT DEFAULT '2026-01-05 00:00:00', in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', status TEXT DEFAULT 'Active');
+			INSERT INTO trucks (id, unit_number, owner_id, assigned_driver) VALUES (1, 'T-1', 50, '${DRIVER_A}'), (2, 'T-2', 51, '${DRIVER_B}');`);
+	}
+	db.exec(personalExpense.SCHEMA_SQL);
+	const add = (driver, file, owner, unit) => db.prepare("INSERT INTO expenses (driver, photo_data, owner_id, truck_unit) VALUES (?, ?, ?, ?)")
+		.run(driver, file ? `/uploads/expense-receipts/${file}` : "", owner, unit).lastInsertRowid;
+	add(DRIVER_A, F.A_JPG, 50, "T-1");         // 1
+	add(DRIVER_B, F.B_JPG, 51, "T-2");         // 2
+	add(DRIVER_A, F.A_PDF, 50, "T-1");         // 3
+	add(DRIVER_B, F.A_JPG, 51, "T-2");         // 4: a second row, another driver's, naming the same file
+	add(DRIVER_A, F.A_UNREADABLE, 50, "T-1");  // 5
+	add(DRIVER_A, F.A_BROKEN, 50, "T-1");      // 6
+	const personalId = add(DRIVER_A, F.A_PERSONAL, 50, "T-1");  // 7: $4 of its $10 is Personal
+	db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, cost_period, in_place, book_date, week_start,
+		created_at, created_by, created_by_id, created_role) VALUES (?, 'deduct', 400, 1000, '2026-10', 1, '2026-10-01', '2026-09-26',
+		'2026-10-02T00:00:00Z', 'admin_t', 1, 'Super Admin')`).run(personalId);
 	return db;
 }
 
 const agent = new http.Agent({ keepAlive: false });
 const servers = [];
 
-async function build() {
+// `option` replaces the shipped INVESTOR_RECEIPT_IMAGES value, so both options run.
+async function build({ option = SHIPPED_OPTION, db = makeDb() } = {}) {
 	const app = express();
 	app.use((req, res, next) => {
 		const raw = req.headers["x-test-user"];
@@ -200,12 +250,14 @@ async function build() {
 	const stub = (name) => (req, res) => { res.setHeader("X-Test-Guard", name); res.status(404).end(); };
 	const logs = [];
 	const fakeConsole = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
-	const db = makeDb();
+	const investorText = option ? L.investor.replace(INVESTOR_RULE_RE, `\nconst INVESTOR_RECEIPT_IMAGES = "${option}";`) : L.investor;
 	const body = [
 		'"use strict";',
-		...L.consts, ...L.fns, L.receiptGuardFn, L.receiptGuardConst, L.guardedDirs, ...L.mounts, L.thumbRoute,
+		...L.consts, ...L.fns, investorText, L.receiptGuardFn, L.receiptGuardConst, L.guardedDirs, ...L.mounts, L.thumbRoute,
 		"return { saveReceiptToDisk };",
 	].join("\n");
+	// server.js's own require("./lib/…") calls resolve from the repo root.
+	const serverRequire = (m) => require(m.startsWith("./lib/") ? path.join(__dirname, "..", m) : m);
 	const mod = new Function(
 		"app", "express", "path", "fs", "crypto", "DATA_DIR", "RECEIPTS_DIR", "db", "requireAuth", "requireRole",
 		"imageLimits", "receiptFiles", "imageMetadata", "guardDriverSignedDoc", "guardInvestorSignedDoc",
@@ -214,7 +266,7 @@ async function build() {
 	)(app, express, path, fs, crypto, TMP, RECEIPTS_DIR, db, requireAuth, requireRole,
 		require("../lib/image-size"), require("../lib/receipt-files"), require("../lib/image-metadata"),
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"),
-		stub("guardRootLoadDocument"), fakeConsole, require);
+		stub("guardRootLoadDocument"), fakeConsole, serverRequire);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -269,9 +321,10 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 		ok("§1 the receipt's own driver opens it, stripped", isImage(own) && clean(own));
 		const spaced = await T.get(R(F.A_JPG), U.drvAspaced);
 		ok("§1 ... also under a spacing / case variant of the name", isImage(spaced));
-		ok("§1 another driver is refused (404), even with a later row naming the same file", refused(await T.get(R(F.A_JPG), U.drvB)));
+		ok("§1 another driver is refused (404); the first row naming the file decides", refused(await T.get(R(F.A_JPG), U.drvB)));
 		ok("§1 a driver with no driver name is refused", refused(await T.get(R(F.A_JPG), U.drvBlank)));
-		ok("§1 an Investor with no claim on it is refused", refused(await T.get(R(F.A_JPG), U.inv)));
+		ok("§1 an Investor with no claim on it (no truck) is refused", refused(await T.get(R(F.A_JPG), U.invNone)));
+		ok("§1 an Investor whose truck carries only a LATER row naming the file is refused", refused(await T.get(R(F.A_JPG), U.invOther)));
 		ok("§1 an unknown role is refused", refused(await T.get(R(F.A_JPG), U.odd)));
 		ok("§1 signed out: 401", (await T.get(R(F.A_JPG), null)).status === 401);
 		ok("§1 Driver B opens B's own receipt", isImage(await T.get(R(F.B_JPG), U.drvB)));
@@ -290,7 +343,7 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 		const pdfOwn = await T.get(R(F.A_PDF), U.drvA);
 		ok("§1 a PDF receipt opens for its driver as application/pdf, unchanged", pdfOwn.status === 200 && /application\/pdf/.test(pdfOwn.headers["content-type"]) && pdfOwn.body.equals(IMG.pdf));
 		ok("§1 ... and for a Dispatcher", (await T.get(R(F.A_PDF), U.disp)).status === 200);
-		ok("§1 ... and is refused to another driver and an Investor", refused(await T.get(R(F.A_PDF), U.drvB)) && refused(await T.get(R(F.A_PDF), U.inv)));
+		ok("§1 ... and is refused to another driver and an Investor", refused(await T.get(R(F.A_PDF), U.drvB)) && refused(await T.get(R(F.A_PDF), U.invNone)));
 
 		ok("§1 a file no row names is refused, Super Admin included", refused(await T.get(R(F.ORPHAN), U.sa)) && refused(await T.get(R(F.ORPHAN), U.disp)));
 		ok("§1 an image cut inside its metadata is refused, never sent as stored", refused(await T.get(R(F.A_BROKEN), U.sa)));
@@ -345,6 +398,57 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 	// §5 The receipts ZIP (Super Admin)
 	ok("§5 the receipts ZIP streams each file through lib/receipt-files.js, not the stored bytes",
 		/receiptFiles\.receiptFileStream\(/.test(L.zipRoute) && !/archive\.file\(/.test(L.zipRoute));
+
+	// §6 The Investor rule, under both options. [label, user, file, A, B]: the
+	// status each option answers. Investor 50 owns Driver A's truck, 51 Driver B's.
+	{
+		const CASES = [
+			["their own truck's photo receipt", U.inv, F.A_JPG, 200, 404],
+			["their own truck's PDF receipt", U.inv, F.A_PDF, 200, 404],
+			["their own truck's receipt with a Personal part", U.inv, F.A_PERSONAL, 404, 404],
+			["another investor's truck's receipt", U.inv, F.B_JPG, 404, 404],
+			["the other investor's own receipt", U.invOther, F.B_JPG, 200, 404],
+			["a receipt whose first row is on another investor's truck", U.invOther, F.A_JPG, 404, 404],
+			["any receipt, owning no truck", U.invNone, F.A_JPG, 404, 404],
+		];
+		const shown = (list, id) => (list.find((e) => Number(e.id) === id) || {}).photo_data;
+		for (const [option, col] of [["own-trucks", 3], ["none", 4]]) {
+			const tag = option === "own-trucks" ? "A (own trucks)" : "B (none)";
+			const T6 = await build({ option });
+			for (const c of CASES) {
+				const r = await T6.get(R(c[2]), c[1]);
+				ok(`§6 option ${tag}: an Investor opening ${c[0]} gets ${c[col]}`, r.status === c[col] && (c[col] !== 200 || r.body.length > 0));
+				if (c[col] === 200 && r.status === 200 && /^image\//.test(String(r.headers["content-type"]))) {
+					ok(`§6 option ${tag}: ... and the copy is stripped`, clean(r));
+				}
+			}
+			ok(`§6 option ${tag}: Super Admin still opens the Personal receipt`, isImage(await T6.get(R(F.A_PERSONAL), U.sa)));
+			ok(`§6 option ${tag}: the receipt's driver still opens the Personal receipt`, isImage(await T6.get(R(F.A_PERSONAL), U.drvA)));
+
+			const parse = (r) => { try { return JSON.parse(r.body.toString("utf8")).expenses || []; } catch { return []; } };
+			const inv = parse(await T6.get("/api/investor/expenses", U.inv));
+			const preview = parse(await T6.get("/api/investor/expenses?as_user_id=50", U.sa));
+			const admin = parse(await T6.get("/api/investor/expenses", U.sa));
+			ok(`§6 option ${tag}: the investor's list holds their five receipts`, inv.length === 5);
+			if (option === "own-trucks") {
+				ok("§6 option A: the list links the photos the investor may open", shown(inv, 1) === R(F.A_JPG) && shown(inv, 3) === R(F.A_PDF));
+				ok("§6 option A: the list sends no photo for the receipt with a Personal part", inv.length === 5 && shown(inv, 7) === "");
+			} else {
+				ok("§6 option B: the list sends no receipt photo at all", inv.length === 5 && inv.every((e) => e.photo_data === ""));
+			}
+			ok(`§6 option ${tag}: every photo the list links opens for the investor`,
+				(await Promise.all(inv.filter((e) => e.photo_data && ![5, 6].includes(Number(e.id)))
+					.map((e) => T6.get(e.photo_data, U.inv)))).every((r) => r.status === 200));
+			ok(`§6 option ${tag}: a Super Admin preview shows what the investor sees`,
+				JSON.stringify(preview.map((e) => [e.id, e.photo_data])) === JSON.stringify(inv.map((e) => [e.id, e.photo_data])));
+			ok(`§6 option ${tag}: a Super Admin's own list keeps every photo`, admin.length === 7 && shown(admin, 7) === R(F.A_PERSONAL) && shown(admin, 1) === R(F.A_JPG));
+		}
+		const TU = await build({ option: "own-trucks", db: makeDb({ noTrucks: true }) });
+		const unverified = await TU.get(R(F.A_JPG), U.inv);
+		ok("§6 an Investor check that cannot read the database answers a retryable 503, never the file",
+			unverified.status === 503 && /RECEIPT_ACCESS_UNVERIFIED/.test(unverified.body.toString("utf8")) && unverified.headers["retry-after"] === "5");
+		ok("§6 ... while Super Admin is unaffected", isImage(await TU.get(R(F.A_JPG), U.sa)));
+	}
 
 	for (const s of servers) s.close();
 	fs.rmSync(TMP, { recursive: true, force: true });
