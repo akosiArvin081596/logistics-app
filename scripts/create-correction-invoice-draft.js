@@ -32,16 +32,26 @@
 // frozen item is touched. A manual invoice feeds no pay-day math, so no P&L
 // line moves.
 //
+// Idempotent, checked first: when a live correction for the original (a manual
+// invoice of the driver, not deleted, not Rejected, whose lines start
+// "Correction for <original>:") already names exactly these days, it prints
+// "already drafted" with its number, status and total and writes nothing
+// (exit 0), whatever the date and the month locks say now. That correction at
+// another daily rate is refused.
+//
 // Refused (exit 2, nothing written) when:
 //   - the original is missing, deleted, rejected, a manual invoice, has no daily
 //     day grid to read, or carries an adjustment (the days may already be
 //     corrected);
 //   - a day is outside the original's week, or the original bills it;
 //   - a day is already billed on another live invoice of the driver (any status
-//     but Rejected, not deleted): a weekly invoice whose day grid bills it, or a
-//     manual invoice with a line dated that day; or the script can't tell (a
-//     weekly invoice with no day grid, a manual one covering the day with an
-//     undated line);
+//     but Rejected, not deleted, the driver's name in any spelling): a weekly
+//     invoice whose day grid bills it; a manual invoice with a line dated
+//     exactly that day; or a manual invoice whose line or notes name the
+//     original invoice and that day (written as 2026-01-05, 1/5, 1/5/2026,
+//     January 5 or Jan 5), or name the original with no date the script can
+//     read. Or the script can't tell: a weekly invoice covering the day with no
+//     day grid, or a manual one covering the day with an undated line;
 //   - a correction for the original names some of the days but not exactly
 //     these (partly drafted);
 //   - --date is not a calendar day, is after today (APP_TIMEZONE), is before the
@@ -49,9 +59,9 @@
 //     table counts as closed);
 //   - the state read before rendering the PDF changed by the time the database
 //     is held (checked again inside the write's transaction).
-// Idempotent: when a live correction for the original already names exactly
-// these days, it prints "already drafted" with its number and writes nothing
-// (exit 0).
+// Every run (the dry run, the write, "already drafted") lists the driver's live
+// manual invoices whose period ends on or after the original's week start: their
+// number, status, total due and line descriptions, for a person to check.
 //
 // --dry-run opens the database read-only, prints exactly what it would write
 // (the invoice row, its lines and totals, its PDF file name and the audit row)
@@ -62,11 +72,14 @@
 //   node scripts/create-correction-invoice-draft.js --invoice <number> --days <YYYY-MM-DD,...> --rate <dollars> --date <YYYY-MM-DD>
 //   --db <file>        default: the app's own database (DATABASE_PATH, from the
 //                      environment or the app's .env, else app.db in the app
-//                      directory, as server.js opens it). Another file must be a
-//                      copy outside any app directory (its folder holds no
-//                      server.js and no .env).
-//   --data-dir <dir>   with a copy only: the folder whose uploads/invoices/ gets
-//                      the PDF (default: the copy's folder)
+//                      directory, as server.js opens it), refused while
+//                      LOCAL_REPLICA is set (a replica's database is never the
+//                      app's own). Another file must be a copy outside this
+//                      repository and outside any app directory (its folder
+//                      holds no server.js and no .env); scripts/lib/app-database.js.
+//   --data-dir <dir>   with a copy only, outside this repository: the folder
+//                      whose uploads/invoices/ gets the PDF (default: the copy's
+//                      folder)
 // Exit codes: 0 written, already drafted, or dry run; 1 error (nothing
 // written); 2 refused (nothing written).
 //
@@ -80,7 +93,7 @@ const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 const { parseArgs } = require("./lib/ledger-world");
-const { resolveDatabase, DatabaseRefusal } = require("./lib/app-database");
+const { resolveDatabase, insideRoot, DatabaseRefusal } = require("./lib/app-database");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "system: correction-invoice script";
@@ -88,6 +101,8 @@ const SYSTEM_USER = Object.freeze({ id: 0, username: ACTOR, role: "system" });
 const AUDIT_ACTION = "create_correction_invoice";
 const OPTIONS = ["invoice", "days", "rate", "date", "db", "data-dir", "dry-run"];
 const TEMPLATE = "service_invoice_manual";
+// What the PDF prints under "Prepared by".
+const PREPARED_BY = "LogisX correction (script)";
 // The weekly template's day grid, keyed by weekday name.
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -116,7 +131,7 @@ const longDay = (day) => `${MONTHS[Number(day.slice(5, 7)) - 1]} ${Number(day.sl
 const monthLabel = (period) => `${MONTHS[Number(period.slice(5, 7)) - 1]} ${period.slice(0, 4)}`;
 const cents = (v) => Math.round(Number(v || 0) * 100);
 const usd = (v) => `$${(cents(v) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-// "$300" for whole dollars, "$312.50" otherwise: the line text's amount.
+// "$250" for whole dollars, "$262.50" otherwise: the line text's amount.
 const usdShort = (v) => (cents(v) % 100 === 0 ? `$${(cents(v) / 100).toLocaleString("en-US")}` : usd(v));
 const parseJson = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
 // Every calendar month a day range touches, as YYYY-MM.
@@ -168,11 +183,11 @@ function readOptions(argv) {
 // Which database to open (scripts/lib/app-database.js) and where the PDF goes:
 // { scope, file, dataDir }. The app's own database keeps its PDFs in the app
 // directory, as the server does; a copy's go beside it, or in --data-dir.
-function resolveTarget({ db, dataDir }, root) {
+function resolveTarget({ db, dataDir }, root, { env = process.env } = {}) {
 	const onlyForCopy = "--data-dir is only for a copy of the database; the app's own database keeps its PDFs in the app directory";
 	if (!db && dataDir) throw new Refusal(onlyForCopy);
 	let target;
-	try { target = resolveDatabase(db, root); } catch (err) {
+	try { target = resolveDatabase(db, root, { env }); } catch (err) {
 		if (err instanceof DatabaseRefusal) throw new Refusal(err.message);
 		throw err;
 	}
@@ -181,7 +196,10 @@ function resolveTarget({ db, dataDir }, root) {
 		return { ...target, dataDir: root };
 	}
 	if (!dataDir) return { ...target, dataDir: path.dirname(target.file) };
-	try { return { ...target, dataDir: fs.realpathSync(dataDir) }; } catch { throw new Refusal(`--data-dir ${dataDir} does not exist`); }
+	let dir;
+	try { dir = fs.realpathSync(dataDir); } catch { throw new Refusal(`--data-dir ${dataDir} does not exist`); }
+	if (insideRoot(dir, root)) throw new Refusal(`--data-dir ${dataDir} is inside the repository; a copy's PDFs go outside it`);
+	return { ...target, dataDir: dir };
 }
 
 // The server code this script runs, lifted from `root`'s server.js, on `db`.
@@ -209,16 +227,43 @@ function buildWorld({ root = ROOT, db, dataDir, render = null }) {
 	return { api, liftedNames: lifted.names };
 }
 
-// The day a weekly invoice's grid bills `day` on: true, false, or null (no grid).
-function gridBills(row, day) {
+// A weekly day-grid line bills its day when it is marked completed or carries
+// an amount.
+const lineBills = (line) => !!line && (!!line.completed || cents(line.total) !== 0);
+
+// A weekly invoice's day grid (render snapshot), or null when it has none.
+function dayGrid(row) {
 	const render = parseJson(row.render_data || "", null);
 	if (!render || render.__templateName !== "service_invoice" || !render.days || typeof render.days !== "object") return null;
-	const line = render.days[weekdayOf(day)];
+	return render.days;
+}
+
+// Whether a weekly invoice's grid bills `day`: true, false, or null (no grid,
+// or no line for that weekday).
+function gridBills(row, day) {
+	const grid = dayGrid(row);
+	if (!grid) return null;
+	const line = grid[weekdayOf(day)];
 	if (!line) return null;
-	return !!line.completed || cents(line.total) !== 0;
+	return lineBills(line);
 }
 
 const correctionPrefix = (originalNumber) => `Correction for ${originalNumber}:`;
+
+// Whether free text names `day`: 2026-01-05, 1/5 or 01/05 (with this year or
+// none), January 5 or Jan 5 (any case).
+function namesDay(text, day) {
+	const t = String(text || "");
+	if (t.includes(day)) return true;
+	const y = day.slice(0, 4);
+	const m = Number(day.slice(5, 7));
+	const d = Number(day.slice(8, 10));
+	if (new RegExp(`(^|[^\\d/])0?${m}/0?${d}(/(${y}|${y.slice(2)}))?(?![\\d/])`).test(t)) return true;
+	const month = MONTHS[m - 1];
+	return new RegExp(`\\b(${month}|${month.slice(0, 3)})\\.?\\s{1,3}0?${d}(?!\\d)`, "i").test(t);
+}
+// Any date the script can read in free text, in the forms namesDay() reads.
+const READABLE_DATE_RE = /\d{4}-\d{2}-\d{2}|(^|[^\d/])\d{1,2}\/\d{1,2}(?!\d)|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?\s{1,3}\d{1,2}(?!\d)/i;
 
 // Everything the run would write, read from the database. Synchronous (no
 // await), so it runs again inside the write's transaction. Returns
@@ -228,6 +273,37 @@ function plan(db, api, opts, { today = null } = {}) {
 	const todayKey = today || api.appTodayKey();
 	const original = db.prepare("SELECT * FROM invoices WHERE invoice_number = ?").get(invoiceNumber);
 	if (!original) throw new Refusal(`invoice ${invoiceNumber} was not found`);
+
+	// The driver's live invoices: not deleted, not Rejected, in any stored spelling.
+	const key = api.normalizeDriverName(original.driver);
+	const live = db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' AND status != 'Rejected' ORDER BY id")
+		.all().filter((r) => api.normalizeDriverName(r.driver) === key);
+	const manualLines = (r) => parseJson(r.render_data || "", {}).lineItems || [];
+	// Listed on every run, for a person to check.
+	const manualSince = live.filter((r) => Number(r.is_manual) && String(r.week_end || "") >= original.week_start).map((r) => ({
+		invoiceNumber: r.invoice_number, status: r.status, totalDue: api.invoiceTotalDue(r),
+		lines: manualLines(r).map((l) => String(l.description || "")),
+	}));
+	// This script's corrections for the original: their lines start with its prefix.
+	const prefix = correctionPrefix(invoiceNumber);
+	const corrections = [];
+	for (const r of live.filter((x) => Number(x.is_manual))) {
+		const lines = manualLines(r).filter((l) => String(l.description || "").startsWith(prefix));
+		if (lines.length) corrections.push({ row: r, lines, days: [...new Set(lines.map((l) => String(l.date || "")))].sort() });
+	}
+
+	// Idempotent first: a correction already naming exactly these days is the
+	// answer, whatever the date or the month locks say now.
+	const wanted = days.join(",");
+	const exact = corrections.find((c) => c.days.join(",") === wanted);
+	if (exact) {
+		const rates = [...new Set(exact.lines.map((l) => cents(l.amount)))];
+		if (rates.length !== 1 || rates[0] !== cents(rate)) {
+			throw new Refusal(`${exact.row.invoice_number} (${exact.row.status}, total due ${usd(api.invoiceTotalDue(exact.row))}) already corrects ${invoiceNumber} for these days at ${rates.map((c) => usd(c / 100)).join(" / ")} a day, not ${usd(rate)}; nothing was drafted`);
+		}
+		return { state: "already", existing: exact.row, existingTotal: api.invoiceTotalDue(exact.row), original, manualSince };
+	}
+
 	if (original.deleted_at) throw new Refusal(`${invoiceNumber} is deleted`);
 	if (original.status === "Rejected") throw new Refusal(`${invoiceNumber} is Rejected`);
 	if (Number(original.is_manual)) throw new Refusal(`${invoiceNumber} is a manual invoice; this script corrects weekly driver invoices`);
@@ -248,40 +324,42 @@ function plan(db, api, opts, { today = null } = {}) {
 	const period = date.slice(0, 7);
 	if (api.periodWriteLocked(period)) throw new Refusal(`${monthLabel(period)} is closed (or the month locks can't be read), so a correction can't be dated ${date}; use a day in the open month`);
 
-	const key = api.normalizeDriverName(original.driver);
 	const payee = origRender.driverName && api.normalizeDriverName(origRender.driverName) === key ? String(origRender.driverName).trim() : String(original.driver).trim();
 	const reserved = api.reservedDriverNameRefusal(payee, "payee");
 	if (reserved) throw new Refusal(`${invoiceNumber}'s driver name can't be a payee: ${reserved.error}`);
 
-	// The driver's live invoices: not deleted, not Rejected, in any stored spelling.
-	const live = db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' AND status != 'Rejected' ORDER BY id")
-		.all().filter((r) => api.normalizeDriverName(r.driver) === key);
-	const prefix = correctionPrefix(invoiceNumber);
-	const corrections = [];
-	for (const r of live.filter((x) => Number(x.is_manual))) {
-		const lines = (parseJson(r.render_data || "", {}).lineItems || []).filter((l) => String(l.description || "").startsWith(prefix));
-		if (lines.length) corrections.push({ row: r, days: [...new Set(lines.map((l) => String(l.date || "")))].sort() });
-	}
-	const wanted = days.join(",");
-	const exact = corrections.find((c) => c.days.join(",") === wanted);
-	if (exact) return { state: "already", existing: exact.row, original };
 	const partial = corrections.find((c) => c.days.some((d) => days.includes(d)));
 	if (partial) throw new Refusal(`${partial.row.invoice_number} already corrects ${invoiceNumber} for ${partial.days.join(", ")}, which overlaps these days; nothing was drafted`);
 
-	for (const d of days) {
-		for (const r of live) {
-			if (corrections.some((c) => c.row.id === r.id)) continue;
-			if (!Number(r.is_manual)) {
+	const originalUpper = invoiceNumber.toUpperCase();
+	for (const r of live) {
+		// This script's corrections of other days of the original: checked above.
+		if (corrections.some((c) => c.row.id === r.id)) continue;
+		if (!Number(r.is_manual)) {
+			for (const d of days) {
 				if (!(r.week_start <= d && d <= r.week_end)) continue;
 				const bills = gridBills(r, d);
 				if (bills === null) throw new Refusal(`${r.invoice_number} covers ${d} but has no day grid, so the script can't tell whether it pays that day`);
 				if (bills) throw new Refusal(`${weekdayOf(d)} ${d} is already billed on ${r.invoice_number} (${r.status})`);
-				continue;
 			}
-			const lines = parseJson(r.render_data || "", {}).lineItems || [];
+			continue;
+		}
+		const lines = manualLines(r);
+		for (const d of days) {
 			if (lines.some((l) => String(l.date || "") === d)) throw new Refusal(`${r.invoice_number} (${r.status}) has a line dated ${d}; it may already pay that day`);
 			if (r.week_start <= d && d <= r.week_end && lines.some((l) => !String(l.date || "").trim())) {
 				throw new Refusal(`${r.invoice_number} (${r.status}) covers ${d} with an undated line, so the script can't tell whether it pays that day`);
+			}
+		}
+		// A line or the notes naming the original: a hand-made correction.
+		const texts = [...lines.map((l) => ({ text: String(l.description || ""), date: String(l.date || "").trim() })),
+			{ text: String(parseJson(r.render_data || "", {}).notes || ""), date: "" }];
+		for (const t of texts) {
+			if (!t.text.toUpperCase().includes(originalUpper)) continue;
+			const named = days.find((d) => namesDay(t.text, d));
+			if (named) throw new Refusal(`${r.invoice_number} (${r.status}) names ${invoiceNumber} and ${named}; it may already pay that day`);
+			if (!t.date && !READABLE_DATE_RE.test(t.text)) {
+				throw new Refusal(`${r.invoice_number} (${r.status}) names ${invoiceNumber} with no date the script can read, so it can't tell whether it already pays these days`);
 			}
 		}
 	}
@@ -316,7 +394,7 @@ function plan(db, api, opts, { today = null } = {}) {
 		deductionsTotal: totals.deductionsTotal,
 		totalDue: totals.totalDue,
 		notes: notes.slice(0, 500),
-		preparedBy: ACTOR,
+		preparedBy: PREPARED_BY,
 		adjustment: 0,
 		adjustmentNote: "",
 	};
@@ -343,7 +421,7 @@ function plan(db, api, opts, { today = null } = {}) {
 		details: `${invoiceNumberNew} (Draft) for ${payee}: correction for ${invoiceNumber} (invoice id ${original.id}), ` +
 			`days ${days.join(", ")} at ${usd(rate)} = ${usd(totals.totalDue)}, dated ${date}`,
 	};
-	return { state: "draft", original, payee, renderData, row, audit, closed, period };
+	return { state: "draft", original, payee, renderData, row, audit, closed, period, manualSince };
 }
 
 // The route's INSERT (POST /api/invoices/manual), and the audit row.
@@ -383,8 +461,11 @@ async function run(db, api, opts, { today = null } = {}) {
 function describe(p, opts, dirRow) {
 	const o = p.original;
 	const out = [];
-	const billed = WEEKDAYS.filter((w) => { const l = (parseJson(o.render_data, {}).days || {})[w]; return l && l.completed; });
-	out.push(`Original: ${o.invoice_number} (id ${o.id}, ${o.status}, week ${o.week_start} to ${o.week_end}, ${usd(o.rate_per_load)}/day, bills ${billed.join(", ") || "no day"})`);
+	const grid = dayGrid(o);
+	const billed = grid ? WEEKDAYS.filter((w) => lineBills(grid[w])).join(", ") || "no day" : "unknown (no day grid)";
+	out.push(`Original: ${o.invoice_number} (id ${o.id}, ${o.status}, week ${o.week_start} to ${o.week_end}, ${usd(o.rate_per_load)}/day, bills ${billed})`);
+	out.push(`Live manual invoices for this driver from ${o.week_start} on: ${p.manualSince.length ? "" : "none"}`);
+	for (const m of p.manualSince) out.push(`  ${m.invoiceNumber} (${m.status}, total due ${usd(m.totalDue)}): ${m.lines.map((l) => JSON.stringify(l)).join(" | ") || "no lines"}`);
 	if (p.state === "already") return out;
 	const r = p.row;
 	const rd = p.renderData;
@@ -423,7 +504,7 @@ async function main() {
 			.find((d) => api.normalizeDriverName(d.driver_name) === api.normalizeDriverName(p.original.driver)) || null;
 		if (out.state === "already") {
 			for (const line of describe(p, opts, directory)) console.log(line);
-			console.log(`already drafted: ${p.existing.invoice_number} (id ${p.existing.id}, ${p.existing.status}) corrects ${opts.invoiceNumber} for ${opts.days.join(", ")}; nothing written`);
+			console.log(`already drafted: ${p.existing.invoice_number} (id ${p.existing.id}, ${p.existing.status}, total due ${usd(p.existingTotal)}) corrects ${opts.invoiceNumber} for ${opts.days.join(", ")}; nothing written`);
 		} else if (opts.dryRun) {
 			console.log("DRY RUN: nothing written.");
 			for (const line of describe(p, opts, directory)) console.log(line);
@@ -447,6 +528,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-	ACTOR, AUDIT_ACTION, ROOTS, PROVIDED, DENIED, TEMPLATE, INSERT_INVOICE, Refusal,
-	readOptions, resolveTarget, buildWorld, plan, run, describe, monthsBetween,
+	ACTOR, AUDIT_ACTION, PREPARED_BY, ROOTS, PROVIDED, DENIED, TEMPLATE, INSERT_INVOICE, Refusal,
+	readOptions, resolveTarget, buildWorld, plan, run, describe, monthsBetween, namesDay,
 };

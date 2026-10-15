@@ -61,7 +61,7 @@ function fixture(mutate) {
 	const db = new Database(file);
 	db.exec(SCHEMA);
 	db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'settlement_grace_days', '7'), (0, 'investor_split_pct', '50'), (0, 'maintenance_fund_monthly', '800'), (12, 'investor_split_pct', '45')").run();
-	db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-08', 'locked', '2026-09-08T05:00:00Z'), ('2026-09', 'locked', '2026-10-09T14:45:52Z')").run();
+	db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES ('2026-08', 'locked', '2026-09-08T04:00:00Z'), ('2026-09', 'locked', '2026-10-08T04:00:00Z')").run();
 	db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('2026-10-01T12:00:00Z', 1, 'admin', 'Super Admin', 'update_investor_config', 'investor_config', 'owner:12', 'investor_split_pct: 50 → 45')").run();
 	if (mutate) mutate(db);
 	return { dir, file, db };

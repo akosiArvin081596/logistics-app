@@ -30,8 +30,9 @@
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/set-settlement-grace-days.js --days 14 --dry-run
 //   node scripts/set-settlement-grace-days.js --days 14
-//   --db <file>   default: the app's own database (scripts/lib/app-database.js);
-//                 another file must be a copy outside any app directory
+//   --db <file>   default: the app's own database (scripts/lib/app-database.js),
+//                 refused while LOCAL_REPLICA is set; another file must be a
+//                 copy outside this repository and outside any app directory
 // Exit codes: 0 written, already set, or dry run; 1 error (nothing written);
 // 2 refused (nothing written).
 //
@@ -146,10 +147,11 @@ function plan(db, api, { days }, { today = null } = {}) {
 	return { state, oldStored, oldDays, newDays, value: read.value, closes, warnings, auditDetails };
 }
 
-// Sets the value through the route, in one transaction with the audit check.
+// Sets the value through the route, in one IMMEDIATE transaction (the database
+// is held from the first read) with the audit check.
 function apply(db, call, p) {
-	const before = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM audit_trail").get().id;
 	return db.transaction(() => {
+		const before = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM audit_trail").get().id;
 		const res = call({ query: { ownerId: "global" }, body: { [KEY]: p.value }, session: { user: SYSTEM_USER } });
 		if (res.status !== 200 || !res.body || !Array.isArray(res.body.changed) || !res.body.changed.includes(KEY)) {
 			throw new Refusal(`PUT /api/investor/config answered ${res.status}: ${JSON.stringify(res.body)}; nothing written`);
@@ -159,7 +161,7 @@ function apply(db, call, p) {
 			&& audits[0].role === "system" && Number(audits[0].user_id) === 0 && audits[0].entity_id === "global" && audits[0].details === p.auditDetails;
 		if (!ok) throw new Error(`the route's audit row is not the one expected (${JSON.stringify(audits)}); nothing written`);
 		return audits[0].id;
-	})();
+	}).immediate();
 }
 
 function describe(p) {
