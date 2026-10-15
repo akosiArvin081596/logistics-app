@@ -34019,17 +34019,32 @@ function periodLockedAt(period) {
 	return row ? String(row.finalized_at || "") : "";
 }
 
+// A stored instant as epoch ms, or NaN: only the strict ISO shape the app writes
+// (toISOString(): "YYYY-MM-DDTHH:MM:SS[.mmm]Z"). Date.parse alone also takes
+// zone-less text (read in the server's own zone), words and offsets, and rolls a
+// day that does not exist (2026-09-31) into the next month; each of those is
+// NaN here, as is any surrounding whitespace.
+const STRICT_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+function strictIsoInstantMs(value) {
+	const s = typeof value === "string" ? value : "";
+	if (!STRICT_ISO_INSTANT_RE.test(s)) return NaN;
+	const ms = Date.parse(s);
+	if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return NaN;
+	return ms;
+}
+
 // Was this invoice's paid stamp set AFTER every one of `periods` (the closed
 // months its week touches) was locked? Only such a stamp may be cleared by a
 // revert under MARK_PAID_CLOSED_MONTH_ENABLED: a stamp that existed when a month
-// closed is part of that month's record. Both sides are parsed as instants;
-// a stamp or a lock time that does not parse, a month with no locked row, or an
-// empty list answers false (fail closed).
+// closed is part of that month's record. A month reopened and locked again
+// counts from its latest lock (the close rewrites finalized_at). Both sides must
+// be strict ISO instants (strictIsoInstantMs()); a stamp or a lock time that is
+// not, a month with no locked row, or an empty list answers false (fail closed).
 function paidStampAfterLocks(inv, periods) {
-	const paidMs = Date.parse(String((inv && inv.paid_at) || "").trim());
+	const paidMs = strictIsoInstantMs(inv && inv.paid_at);
 	if (!Number.isFinite(paidMs) || !Array.isArray(periods) || !periods.length) return false;
 	for (const p of periods) {
-		const lockedMs = Date.parse(periodLockedAt(p).trim());
+		const lockedMs = strictIsoInstantMs(periodLockedAt(p));
 		if (!Number.isFinite(lockedMs) || paidMs <= lockedMs) return false;
 	}
 	return true;

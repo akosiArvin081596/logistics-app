@@ -1139,12 +1139,13 @@ export function refusalCauseText(code) {
  * An invoice a closed month is holding.
  *
  * ⚠️ `neverPayable` IS THE FIGURE THIS QUEUE EXISTS FOR. Only the `paid`
- * transition carries a month-end guard — submit, approve and processing do not —
- * so a Draft in a finalized month walks all the way to Approved and then stops
- * for good. Unlike an un-adjustable invoice, which needs nothing unless somebody
- * wants to change it, this one is waiting on a payment the app can't record yet:
- * closed months are never reopened (2026-10-14), and recording the payment on a
- * closed-month invoice waits on a separate change.
+ * transition carries a month-end guard — submit, approve and processing do not.
+ * With MARK_PAID_CLOSED_MONTH_ENABLED off, a Draft in a finalized month walks all
+ * the way to Approved and then stops for good: closed months are never reopened
+ * (2026-10-14), so it is waiting on a payment the app can't record. With the
+ * flag on, the server records the payment (no closed month's figure changes) and
+ * sends neverPayable:false for it; such a row is still waiting on that payment,
+ * which frozenInvoiceImpact() must say.
  *
  * `adjustable` is server-told and always false here by construction: a row only
  * reaches this list because invoiceMonthLockBlockers() refused it.
@@ -1205,13 +1206,23 @@ export function frozenInvoiceImpact(inv) {
         + 'this one has to be regenerated.'
   }
   // Closed months are never reopened (2026-10-14): the invoice stays as
-  // recorded and recording its payment waits on a separate change. What to do
-  // about a difference is the server's `remedy`, shown beneath this sentence on
-  // the page, so it is not repeated here.
+  // recorded. Whether its payment can be recorded is the server's neverPayable
+  // (MARK_PAID_CLOSED_MONTH_ENABLED). What to do about a difference is the
+  // server's `remedy`, shown beneath this sentence on the page, so it is not
+  // repeated here.
   const months = inv.periodLabels.length ? periodList(inv.periods) : ''
-  const where = months ? `${months} ${inv.periodLabels.length === 1 ? 'is' : 'are'} closed` : 'its month is closed'
+  const plural = inv.periodLabels.length > 1
+  const where = months ? `${months} ${plural ? 'are' : 'is'} closed` : 'its month is closed'
   if (inv.neverPayable) {
     return `Can't be adjusted, and can't be marked Paid in the app yet — it is ${inv.status || 'unpaid'}, and ${where}.`
+  }
+  // Still waiting on its payment, which the server will now record. Only the
+  // known unpaid statuses: an unrecognised one is never told it can be paid.
+  const PAYABLE_NOW = ['Approved', 'Processing']
+  const PAYABLE_AFTER_APPROVAL = ['Draft', 'Submitted']
+  if (!inv.settled && (PAYABLE_NOW.includes(inv.status) || PAYABLE_AFTER_APPROVAL.includes(inv.status))) {
+    const when = PAYABLE_NOW.includes(inv.status) ? 'can be marked Paid' : 'can be marked Paid once it is approved'
+    return `Can't be adjusted. It is ${inv.status} and ${when}; ${where}, and ${plural ? 'their' : 'its'} figures don't change.`
   }
   return `Can't be adjusted. It is already ${inv.status || 'settled'}, so nothing is waiting on it.`
 }

@@ -40,12 +40,14 @@ export const useInvoicesStore = defineStore('invoices', {
       await this.load()
     },
 
-    // action: 'approve' | 'reject' | 'processing' | 'paid'
+    // action: 'approve' | 'reject' | 'processing' | 'paid'. Returns the server's
+    // answer (a payment on a closed-month week names the months in closedMonths).
     async updateStatus(id, action, rejectionNote) {
       const body = { action }
       if (action === 'reject' && rejectionNote) body.rejectionNote = rejectionNote
-      await api.put(`/api/invoices/${id}/approve`, body)
+      const res = await api.put(`/api/invoices/${id}/approve`, body)
       await this.load()
+      return res
     },
 
     // Super Admin only. Sets a +/- adjustment line on ANY invoice (including

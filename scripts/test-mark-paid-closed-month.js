@@ -30,7 +30,11 @@
  * A15: the read-only report (scripts/mark-paid-closed-month-report.js) lists
  * what the flag would let through and fingerprints the closed months' rows
  * only: a closed-month Mark Paid leaves the fingerprint as it was, while an
- * open month's payout row may move.
+ * open month's payout row may move. A16 (failed before the strict-instant
+ * check): a paid stamp or lock time that is not a strict ISO instant ending in
+ * Z refuses the revert. A17: a week spanning two closed months reverts only a
+ * stamp set after both locks. A18: a month reopened and locked again counts
+ * from its latest lock.
  *
  * The routes and the money paths run lifted from server.js
  * (scripts/lib/money-plans-world.js). Made-up data only: one driver at $300 a
@@ -255,6 +259,49 @@ const R = M.createRunner("Money plan A: Mark Paid in a closed month records the 
 		eq("W39 now paid and revertible", second.paid.map((x) => [x.invoice, x.revert.startsWith("allowed")]), [["INV-AB-2026W39-01", true]]);
 		eq("closed months' fingerprint", second.closedMonthFingerprint, first.closedMonthFingerprint);
 		ok("the fingerprint covers the September payout row", first.closedMonthFingerprint.investor_payouts.rows === 1, JSON.stringify(first.closedMonthFingerprint));
+	});
+
+	await R.test("A16 Flag on: a paid stamp or lock time that is not a strict ISO instant ending in Z refuses the revert, even when it reads as after the lock. Base: a loose stamp was accepted", async ({ eq }) => {
+		const loose = [
+			["stamp without a zone", "2026-10-14 15:00:00", SEP_LOCKED_AT],
+			["stamp in words", "Oct 14 2026 15:00 UTC", SEP_LOCKED_AT],
+			["stamp with an offset", "2026-10-14T15:00:00+00:00", SEP_LOCKED_AT],
+			["stamp on a day that does not exist", "2026-09-31T15:00:00.000Z", "2026-09-08T04:00:00.000Z"],
+			["lock time without a zone", "2026-10-14T15:00:00.000Z", "2026-10-08 04:00:00"],
+		];
+		for (const [label, paidAt, lockedAt] of loose) {
+			const w = world(FLAG_ON, { lockedAt });
+			stamp(w, w.inv.span, paidAt);
+			const r = await revert(w, w.inv.span);
+			eq(`${label}: refused, row unchanged`, [r.status, row(w, w.inv.span).status], [409, "Paid"]);
+		}
+	});
+
+	await R.test("A17 Flag on: a week spanning two closed months (Aug locked 9/8, Sep locked 10/8): a stamp set between the two locks refuses the revert; one set after both is cleared", async ({ eq }) => {
+		const run = async (paidAt) => {
+			const w = world(FLAG_ON);
+			M.lockMonth(w.db, "2026-08", "2026-09-08T04:00:00.000Z");
+			const id = M.insertInvoice(w.db, { invoice_number: "INV-AB-2026W35-01", driver: AMY, week_start: "2026-08-29", week_end: "2026-09-04", status: "Approved", total_earnings: 600 });
+			stamp(w, id, paidAt);
+			const r = await revert(w, id);
+			return [r.status, row(w, id).status];
+		};
+		eq("stamp 9/20 (after August's lock, before September's): refused", await run("2026-09-20T15:00:00.000Z"), [409, "Paid"]);
+		eq("stamp 10/14 (after both locks): cleared", await run("2026-10-14T15:00:00.000Z"), [200, "Submitted"]);
+	});
+
+	await R.test("A18 Flag on: a month reopened and locked again counts from its latest lock: a stamp set between the first lock (10/8) and the re-lock (10/12) refuses the revert; one set after the re-lock is cleared", async ({ eq }) => {
+		const run = async (paidAt) => {
+			const w = world(FLAG_ON);
+			w.db.prepare("UPDATE period_locks SET status = 'reopened', reopened_at = '2026-10-09T15:00:00.000Z', reopened_by = 'test', reopen_reason = 'test' WHERE period = '2026-09'").run();
+			// The close's own write (finalizePeriods() takeLock): the re-lock replaces the lock time.
+			w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-09', 'locked', '2026-10-12T04:00:00.000Z', 'test') ON CONFLICT(period) DO UPDATE SET status = 'locked', finalized_at = excluded.finalized_at, finalized_by = excluded.finalized_by").run();
+			stamp(w, w.inv.span, paidAt);
+			const r = await revert(w, w.inv.span);
+			return [r.status, row(w, w.inv.span).status];
+		};
+		eq("stamp 10/10 (while reopened, before the re-lock): refused", await run("2026-10-10T15:00:00.000Z"), [409, "Paid"]);
+		eq("stamp 10/14 (after the re-lock): cleared", await run("2026-10-14T15:00:00.000Z"), [200, "Submitted"]);
 	});
 
 	R.finish();

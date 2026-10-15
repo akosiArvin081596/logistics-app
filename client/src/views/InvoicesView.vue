@@ -371,6 +371,7 @@ import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { appToday, fmtAppDate, fmtAppInstant } from '../utils/datetime'
 import { usePagination } from '../composables/usePagination'
+import { invoiceActionToast } from '../lib/invoiceActionToast'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -655,8 +656,8 @@ async function removeAdjustment() {
 
 async function quickAction(inv, action) {
   try {
-    await store.updateStatus(inv.id, action)
-    toast(`Invoice ${action === 'paid' ? 'marked as paid' : 'approved'}`, 'success')
+    const result = await store.updateStatus(inv.id, action)
+    toast(invoiceActionToast(action, result), 'success')
   } catch (err) {
     toast(err.message || 'Action failed', 'error')
   }
@@ -665,10 +666,10 @@ async function quickAction(inv, action) {
 async function doAction(action) {
   if (!selectedInvoice.value) return
   try {
-    await store.updateStatus(selectedInvoice.value.id, action)
+    const result = await store.updateStatus(selectedInvoice.value.id, action)
     const fresh = store.invoices.find(i => i.id === selectedInvoice.value.id)
     if (fresh) selectedInvoice.value = fresh
-    toast(`Invoice ${action === 'paid' ? 'marked as paid' : 'approved'}`, 'success')
+    toast(invoiceActionToast(action, result), 'success')
   } catch (err) {
     toast(err.message || 'Action failed', 'error')
   }
