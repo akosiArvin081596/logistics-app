@@ -125,12 +125,20 @@
                    been quiet, and Change re-points the link without unlinking
                    first. The server decides "silent" (EldSilent); nothing here
                    re-derives the threshold. -->
-              <div v-if="truck.RoutemateVehicleId && (truck.EldSilent || canEdit)" class="rm-cell-extra">
+              <div v-if="truck.RoutemateVehicleId && (truck.EldSilent || canEdit || truck.DriverOffUntil)" class="rm-cell-extra">
                 <span
                   v-if="truck.EldSilent"
                   class="rm-silent-badge"
                   :title="silentTitle(truck.EldLastFixMs)"
                 >{{ silentChipText(truck.EldLastFixMs) }}</span>
+                <!-- The truck's driver is recorded off (R11): a quiet feed is
+                     expected, and the silence alert pauses. DriverOffUntil is
+                     sent to staff only, and only while availability is on. -->
+                <span
+                  v-if="truck.DriverOffUntil"
+                  class="rm-off-badge"
+                  title="The truck's driver is recorded off; the ELD silence alert pauses until a day after he is back."
+                >Driver off until {{ availabilityRangeText(truck.DriverOffUntil, truck.DriverOffUntil) }}</span>
                 <button
                   v-if="canEdit"
                   class="btn-change-rm"
@@ -598,6 +606,7 @@ import { formFromTruck, changedFields, bodyForFields, changedUnderneath, inServi
 import { fmtOdometer } from '../../lib/fuelReview'
 import { formatAgeMs } from '../../lib/duration'
 import { fmtTimestamp, fmtYmd } from '../../utils/datetime'
+import { availabilityRangeText } from '../../lib/availabilityText'
 
 const api = useApi()
 
@@ -1385,6 +1394,13 @@ async function handleUnlink(truck) {
   padding: 0.15rem 0.5rem; border-radius: 10px;
   font-size: 0.62rem; font-weight: 600; line-height: 1.3;
   background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+  cursor: help;
+}
+.rm-off-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem; border-radius: 10px;
+  font-size: 0.62rem; font-weight: 600; line-height: 1.3;
+  background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
   cursor: help;
 }
 .btn-change-rm {

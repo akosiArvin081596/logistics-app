@@ -9,7 +9,7 @@
               <div style="font-size:0.6875rem;color:#9ca3af;font-family:'JetBrains Mono',monospace;margin-top:2px;">{{ f.Truck || 'No truck assigned' }}</div>
             </div>
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.35rem;">
-              <span :class="['fleet-status', statusClass(f.Status)]">{{ f.Status }}</span>
+              <span :class="['fleet-status', f.offUntil ? 'fleet-status-off' : statusClass(f.Status)]">{{ fleetPillText(f) }}</span>
               <span v-if="f.QueueCount" class="fleet-queue-pill">+{{ f.QueueCount }} queued</span>
             </div>
           </div>
@@ -35,6 +35,7 @@
               <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
                 <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Availability</span>
                 <span :class="['fleet-status', statusClass(selected?.Status)]" style="width:fit-content;">{{ selected?.Status }}</span>
+                <span v-if="selected?.offUntil" class="fleet-status fleet-status-off" style="width:fit-content;">{{ offUntilText(selected.offUntil) }}</span>
               </div>
               <div style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;">
                 <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Current Load</span>
@@ -62,6 +63,13 @@
               <div style="font-size:0.875rem;margin-top:4px;">{{ selected?.Phone }}</div>
             </div>
           </div>
+          <!-- Time off (R11), for Super Admin and Dispatcher. The fleet entry
+               carries offUntil only while availability is on. -->
+          <DriverAvailabilityPanel
+            v-if="selected && 'offUntil' in selected"
+            :driver-name="selected.Driver"
+            @changed="emit('availability-changed')"
+          />
         </div>
       </DialogContent>
     </Dialog>
@@ -73,8 +81,11 @@ import { ref } from 'vue'
 import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import EmptyState from '../shared/EmptyState.vue'
+import DriverAvailabilityPanel from '../drivers-db/DriverAvailabilityPanel.vue'
+import { fleetPillText, offUntilText } from '../../lib/availabilityText'
 
 defineProps({ fleet: { type: Array, required: true }, activeJobs: { type: Array, default: () => [] }, headers: { type: Array, default: () => [] } })
+const emit = defineEmits(['availability-changed'])
 const selected = ref(null)
 function openDetail(f) { selected.value = f }
 function statusClass(s) {

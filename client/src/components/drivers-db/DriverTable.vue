@@ -28,6 +28,9 @@
           <td class="name-cell">{{ d[h.driver] || '\u2014' }}</td>
           <td>
             <span class="status-badge" :class="statusClass(d)">{{ (d.Status || 'active').toUpperCase() }}</span>
+            <!-- Time off now or next (R11); OffFrom / OffTo come only while
+                 availability is on. -->
+            <span v-if="d.OffFrom && d.OffTo" class="off-chip">Off {{ availabilityRangeText(d.OffFrom, d.OffTo) }}</span>
           </td>
           <td>{{ locStr(d) }}</td>
           <td>{{ d[h.phone] || '\u2014' }}</td>
@@ -281,6 +284,15 @@
             <p class="status-help">Drivers become Active automatically after passing their drug test. Use this toggle to override.</p>
           </div>
 
+          <!-- Time off (R11), saved on its own (not by Save below). Shown only
+               when the directory list carried OffFrom, i.e. availability is on. -->
+          <DriverAvailabilityPanel
+            v-if="editDriverRow && 'OffFrom' in editDriverRow"
+            :directory-id="editRowIndex"
+            :driver-name="editDriverRow.Driver || ''"
+            @changed="emit('availability-changed')"
+          />
+
           <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): a
                disabled fieldset shows the terms and disables every control in it. -->
           <fieldset class="pay-section" :disabled="!canEditPay">
@@ -341,6 +353,8 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import StarRating from '../shared/StarRating.vue'
 import AvatarPlaceholder from '../shared/AvatarPlaceholder.vue'
 import LegalDocumentPortal from '../investor/LegalDocumentPortal.vue'
+import DriverAvailabilityPanel from './DriverAvailabilityPanel.vue'
+import { availabilityRangeText } from '../../lib/availabilityText'
 
 const api = useApi()
 
@@ -362,7 +376,7 @@ function getAssignedTruck(driver) {
   return `${assignment.unit_number} (${assignment.year || ''} ${assignment.make || ''} ${assignment.model || ''})`.trim()
 }
 
-const emit = defineEmits(['delete', 'update', 'picture-updated'])
+const emit = defineEmits(['delete', 'update', 'picture-updated', 'availability-changed'])
 
 const viewDrv = ref(null)
 const docsLoading = ref(false)
@@ -384,6 +398,9 @@ const showConfirm = ref(false)
 const pendingDrv = ref(null)
 const showEdit = ref(false)
 const editRowIndex = ref(null)
+// The directory row the drawer opened with (its OffFrom key says whether
+// availability is on).
+const editDriverRow = ref(null)
 const picUploading = ref(false)
 
 // Drag-and-drop + the only real type/size gate on this surface: `accept` on the
@@ -560,6 +577,7 @@ function locStr(d) {
 
 function openEdit(d) {
   editRowIndex.value = d._rowIndex
+  editDriverRow.value = d
   editForm.driver = d[h.value.driver] || ''
   editForm.state = d[h.value.state] || ''
   editForm.city = d[h.value.city] || ''
@@ -665,6 +683,11 @@ function handleConfirmDelete() {
 .status-badge.status-active { background: #dcfce7; color: #166534; }
 .status-badge.status-pending { background: #fef3c7; color: #92400e; }
 .status-badge.status-inactive { background: #f1f5f9; color: #64748b; }
+.off-chip {
+  display: inline-block; margin-left: 0.35rem; padding: 0.15rem 0.5rem; border-radius: 10px;
+  font-size: 0.65rem; font-weight: 600; white-space: nowrap;
+  background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+}
 
 .status-help {
   font-size: 0.68rem;
