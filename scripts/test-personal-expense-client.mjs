@@ -47,6 +47,34 @@ function check(label, actual, expected) {
 }
 const section = (t) => console.log(`\n${t}`)
 
+// A file's code without its comments, in one pass: each <!-- ... -->, /* ... */
+// and // comment (a "//" right after ":" is a URL, kept) is skipped to its end.
+function code(src) {
+  const s = String(src)
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    if (s.startsWith('<!--', i)) {
+      const end = s.indexOf('-->', i + 4)
+      i = end === -1 ? s.length : end + 3
+      continue
+    }
+    if (s.startsWith('/*', i)) {
+      const end = s.indexOf('*/', i + 2)
+      i = end === -1 ? s.length : end + 2
+      continue
+    }
+    if (s.startsWith('//', i) && s[i - 1] !== ':') {
+      const end = s.indexOf('\n', i + 2)
+      i = end === -1 ? s.length : end
+      continue
+    }
+    out += s[i]
+    i++
+  }
+  return out
+}
+
 const SA = { isSuperAdmin: true, enabled: true }
 const line = (state, extra = {}) => ({ line_id: 7, state, amount_text: '$45.00', week_label: 'Oct 10-16', invoice_number: '', can_undo: true, ...extra })
 const receipt = (status, personal = null) => ({ id: 11, status, amount: 45, personal })
@@ -141,7 +169,7 @@ section('§5 no money computed in the browser')
     'client/src/components/shared/PersonalInvoiceLines.vue',
   ]
   for (const f of files) {
-    const src = read(f).replace(/\/\/.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '')
+    const src = code(read(f))
     const arithmetic = src.match(/\b(?:cents|amount|share|total)\w*\s*[*/+-]\s*\d|\d\s*[*/]\s*\b(?:cents|amount|share|total)|\/\s*100\b|\*\s*100\b|\.reduce\(/g) || []
     check(`${f}: no arithmetic on a money figure`, arithmetic, [])
   }
