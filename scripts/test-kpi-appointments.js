@@ -54,8 +54,10 @@ function swap(src, from, to) {
 }
 
 const MUTANTS = [
-	["business zone used instead of the receiver's", "§2", "return usTzForLongitude(destLng);", "return \"America/New_York\";"],
-	["zone written in the text ignored", "§2", "const fromText = zoneInText(s);", "const fromText = null;"],
+	["business zone used instead of the receiver's", "§2", "return stopZone({ text: s, address: w.destAddress, lat: w.destLat, lng: w.destLng });", "return { zone: \"America/New_York\", source: \"band\" };"],
+	["zone written in the text ignored", "§2", "return stopZone({ text: s, address:", "return stopZone({ text: \"\", address:"],
+	["the receiver's state ignored", "§8", "return stopZone({ text: s, address: w.destAddress,", "return stopZone({ text: s, address: \"\","],
+	["\"open\" with a window read as first come", "§8", "if (open && !isWindow) return finish(\"fcfs\");", "if (open) return finish(\"fcfs\");"],
 	["event stamp read as local time", "§4", "const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));", "const ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();"],
 	["date-only read as midnight", "§1", "if (times.length === 0) return finish(\"date_only\");", "if (times.length === 0) times.push({ h: 0, mi: 0, start: 0, end: 0 });"],
 	["12 PM read as 00:xx", "§1", "if (h === 12) return ap === \"a\" ? 0 : 12;", "if (h === 12) return 0;"],
@@ -203,6 +205,32 @@ function battery(A) {
 		verdict("§5 fall back (2026-11-01): 08:30 EST is on time for 09:00", J("11/1/2026 09:00", LNG.miami, Z("2026-11-01T13:30:00Z")), "judged", true, true, true);
 		verdict("§5 spring forward (2026-03-08): 08:45 CDT is on time for 09:00", J("3/8/2026 09:00", LNG.dallas, Z("2026-03-08T13:45:00Z")), "judged", true, true, true);
 		verdict("§5 spring forward: 09:15 CDT is late", J("3/8/2026 09:00", LNG.dallas, Z("2026-03-08T14:15:00Z")), "judged", false, true, true);
+	}
+
+	// §8 the receiver's state, from its address or its coordinates (lib/stop-zone.js),
+	// before its longitude band; and "open" hours with a window.
+	{
+		const at = (text, place) => A.parseAppointment(text, place);
+		const zoneOf = (place) => at("10/1/2026 14:00", place).zone;
+		t(zoneOf({ destAddress: "Indianapolis, IN 46204", destLng: -86.16 }) === "America/New_York", "§8 Indianapolis is Eastern, though its longitude is in the Central band");
+		t(zoneOf({ destAddress: "Louisville, KY 40202", destLng: -85.76 }) === "America/New_York", "§8 Louisville is Eastern");
+		t(zoneOf({ destAddress: "Chattanooga, TN 37402", destLng: -85.31 }) === "America/New_York", "§8 Chattanooga is Eastern");
+		t(zoneOf({ destLat: 39.77, destLng: -86.16 }) === "America/New_York", "§8 ...and so is Indianapolis placed by its coordinates alone");
+		t(zoneOf({ destAddress: "Gary, IN 46402", destLat: 41.6, destLng: -87.35 }) === "America/Chicago", "§8 Gary, in Indiana's Central corner, is Central");
+		t(zoneOf({ destAddress: "Nashville, TN 37203", destLng: -86.78 }) === "America/Chicago", "§8 Nashville is Central");
+		const phx = at("7/15/2026 14:00", { destAddress: "Phoenix, AZ 85003", destLng: -112.07 });
+		t(phx.zone === "America/Phoenix" && iso(phx.deadlineMs) === "2026-07-15T21:00:00.000Z", "§8 Phoenix keeps MST in July (not MDT)", JSON.stringify(phx));
+		const phxText = at("7/15/2026 14:00 MST", { destAddress: "Phoenix, AZ 85003" });
+		t(iso(phxText.deadlineMs) === "2026-07-15T21:00:00.000Z", "§8 ...and 'MST' written in an Arizona cell is Arizona's clock", JSON.stringify(phxText));
+		t(at("10/1/2026 14:00 CST", { destAddress: "Indianapolis, IN 46204" }).zone === "America/Chicago", "§8 a zone written in the cell still wins");
+		t(at("10/1/2026 14:00", { destAddress: "Indianapolis, IN 46204", destLng: -86.16 }).zoneSource === "state", "§8 ...and the state is said to be the source");
+		verdict("§8 14:30 EDT at an Indianapolis receiver is late for 2 PM",
+			A.judgeArrival({ appointmentText: "10/1/2026 14:00", destAddress: "Indianapolis, IN 46204", destLng: -86.16, eldArriveMs: Z("2026-10-01T18:30:00Z"), receiverEvents: [], deliveredDay: null }),
+			"judged", false, true, true);
+		parsed("10/9/2026 Receiving open 0700-1500", LNG.dallas, "window", "2026-10-09T20:00:00.000Z");
+		parsed("10/9/2026 open", LNG.dallas, "fcfs", null, "2026-10-09");
+		verdict("§8 'Receiving open 0700-1500': 4 PM is late, not on time by day",
+			J("10/9/2026 Receiving open 0700-1500", LNG.dallas, Z("2026-10-09T21:00:00Z")), "judged", false, true, true);
 	}
 	return r;
 }

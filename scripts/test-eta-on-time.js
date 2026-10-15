@@ -101,6 +101,17 @@ if (lib && lib.etaVerdict) {
 	check("§1.16 no arrival, no verdict", [lib.etaOnTime(null, "10/15/2026 14:00", { destLng: CENTRAL }), lib.etaOnTime(NaN, "10/15/2026 14:00")], [null, null]);
 	check("§1.17 the appointment column is the Drop-off Appointment",
 		HEADERS.find((h) => lib.DROPOFF_APPOINTMENT_COL_RE.test(h)), "Drop-off Appointment");
+	// The receiver's STATE before its longitude band (lib/stop-zone.js).
+	const at = (text, place) => lib.etaVerdict(Z("2026-10-15T00:00:00Z"), text, place);
+	check("§1.18 an Indianapolis receiver is Eastern, though its longitude is in the Central band",
+		at("10/15/2026 14:00", { destAddress: "Indianapolis, IN 46204", destLat: 39.77, destLng: -86.16 }).deadlineMs, Z("2026-10-15T18:00:00Z"));
+	check("§1.19 ...placed by its coordinates alone too",
+		at("10/15/2026 14:00", { destLat: 39.77, destLng: -86.16 }).zone, "America/New_York");
+	check("§1.20 a Phoenix receiver keeps MST (no daylight time): 2 PM is 21:00 UTC in October",
+		at("10/15/2026 14:00", { destAddress: "Phoenix, AZ 85003", destLat: 33.45, destLng: -112.07 }).deadlineMs, Z("2026-10-15T21:00:00Z"));
+	check("§1.21 ...and its ETA reads MST",
+		lib.etaVerdict(Z("2026-10-15T20:30:00Z"), "10/15/2026 14:00", { destAddress: "Phoenix, AZ 85003", destLng: -112.07 }).arrivalLocal,
+		"Oct 15, 1:30 PM MST");
 } else {
 	fail++;
 	console.error("FAIL  §1 lib/eta-on-time.js has no etaVerdict()");

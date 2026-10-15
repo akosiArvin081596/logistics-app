@@ -99,7 +99,10 @@
               <div>
                 <div class="track-eta-label">Estimated arrival</div>
                 <div class="track-eta-value">{{ formatEta(data.eta.minutesRemaining) }}</div>
-                <div class="track-eta-sub">~{{ data.eta.distanceMiles }} mi &middot; {{ formatFriendlyDate(data.eta.expectedAt) }}</div>
+                <!-- One clock for the ETA on this card: the receiver's when the
+                     server read it (arrivalLocal, the badge's too), else US Eastern;
+                     each labelled with its zone. -->
+                <div class="track-eta-sub">~{{ data.eta.distanceMiles }} mi &middot; {{ data.eta.arrivalLocal || formatFriendlyDate(data.eta.expectedAt) }}</div>
                 <div v-if="lastSeen" class="track-eta-sub track-last-seen">{{ lastSeen }}</div>
               </div>
               <!-- The verdict judges the ETA against the appointment on the
