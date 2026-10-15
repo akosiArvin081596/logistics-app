@@ -25,7 +25,8 @@
  *    ("Daily at 4:00 AM Eastern", "Mondays at 9:00 AM Eastern"; no Central
  *    time, 2026-10-15); another business zone is named as itself; the KPI
  *    response's default job says the same; no Central schedule time is left
- *    in lib/, client/src or docs/manual.
+ *    in lib/, client/src or docs/manual, and server.js and .env.example name
+ *    no "US Central" time.
  *
  * Pure: no server, no database, no network; children get the module source on
  * stdin and write nothing.
@@ -205,6 +206,10 @@ console.log("\n§8 the schedule in words: Eastern only");
 		.filter((p) => centralTime.test(fs.readFileSync(p, "utf8")))
 		.map((p) => path.relative(ROOT, p));
 	t(hits.length === 0, `§8 no Central schedule time in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
+	// server.js and .env.example describe the same schedule; neither adds the
+	// Central hour (other server.js comments name Central for unrelated history).
+	const usCentral = ["server.js", ".env.example"].filter((f) => /US\s+Central/.test(fs.readFileSync(path.join(ROOT, f), "utf8").replace(/\n#\s*/g, " ")));
+	t(usCentral.length === 0, `§8 server.js and .env.example name no US Central schedule time (found in: ${usCentral.join(", ") || "none"})`);
 	record(out);
 }
 
