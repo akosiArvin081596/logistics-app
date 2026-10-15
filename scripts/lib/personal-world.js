@@ -69,14 +69,14 @@ const RECEIPT_ROUTE_HEADS = {
 	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), (req, res) => {',
 	invoices: 'app.get("/api/invoices", requireAuth, (req, res) => {',
 };
-const RECEIPT_ROOTS = ["paymentReportColumns", "personalLinesForInvoices", "personalWaitingInPeriod"];
+const RECEIPT_ROOTS = ["paymentReportColumns", "personalLinesForInvoices", "personalWaitingInPeriod", "warmPersonalReceiptsForWeek"];
 
 const ROOTS = [
 	"generateInvoiceHandler", "runPersonalSweep", "invoiceTotalDue", "buildPaymentReport", "invoiceListSummary",
 	"expenseFrom", "gatherLedgerScopeFacts", "computeInvestorMonthlyEarnings", "getDeductibleExpensesByDriverMonth",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet", "deduplicateLoads", "findCol",
 	"kpiGatherDbInputs", "fuelCpgBandFromFleet", "computeInsightsCacheKey", "closingFingerprint",
-	"personalSummaryByExpense", "requireAuth", "userDeleteLockBlockers",
+	"personalSummaryByExpense", "personalSummaryForRole", "requireAuth", "userDeleteLockBlockers",
 	// Called right after a comment that ends in a full stop, which the closure
 	// walker reads as a property access (lib/server-lift.js), so named here.
 	"assertInvoiceFileStillOwn",

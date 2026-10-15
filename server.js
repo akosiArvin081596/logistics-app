@@ -18751,6 +18751,8 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// of those a delivered channel actually showed.
 	const undatedInWeek = [];
 	const undatedInWeekIds = [];
+	// The week's Personal receipt images, cached before any invoice renders
+	await warmPersonalReceiptsForWeek(range.weekStart);
 	for (const driver of rosterDrivers) {
 		const norm = normalizeDriverName(driver);
 		try {
@@ -24170,6 +24172,35 @@ async function personalReceiptRenderData(data, rows) {
 	return out;
 }
 
+// Before the Friday batch renders: every image receipt behind a Personal line of
+// that week (waiting, or on one of its invoices) is re-encoded and cached first,
+// one at a time, so the batch's renders read the cache instead of racing the
+// re-encode; an image not ready within a render's wait would print "Receipt image
+// not available" on an invoice nothing redraws. Bounded by
+// PERSONAL_RECEIPT_WARM_MS overall (each re-encode by its own deadline); never
+// throws. { receipts, prepared }.
+const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
+async function warmPersonalReceiptsForWeek(weekStart) {
+	const out = { receipts: 0, prepared: 0 };
+	try {
+		if (!personalLedgerPresent()) return out;
+		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
+			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
+			.filter((e) => receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) === "image");
+		out.receipts = list.length;
+		const service = receiptImageService();
+		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
+		for (const e of list) {
+			if (Date.now() > deadline) break;
+			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
+			if (res.status === "image") out.prepared += 1;
+		}
+	} catch (err) {
+		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
+	}
+	return out;
+}
+
 // The Personal lines of each invoice, for the screens: { invoiceId: [{ line_id,
 // kind, label, amount, receipt }] } as a Map, in print order. receipt is null on
 // a share line, else { kind: image | pdf | none, url, expense_id }; url is the
@@ -24629,6 +24660,7 @@ function personalSummaryByExpense(ids) {
 // One receipt's Personal summary as a role may see it. Super Admin: all of it,
 // plus can_undo (personalUndoBlocker(): Undo while it applies, Reverse after).
 // A Dispatcher: the state, the amount and the week — no share, invoice or books.
+// A Driver (his own receipts): the same, plus which of his invoices carries it.
 function personalSummaryForRole(summary, role) {
 	if (!summary) return null;
 	if (role === "Super Admin") {
@@ -24636,7 +24668,8 @@ function personalSummaryForRole(summary, role) {
 		return { ...summary, can_undo: live && summary.row ? !personalUndoBlocker(summary.row) : false };
 	}
 	const { line_id, state, cents, amount_text, week_start, week_label } = summary;
-	return { line_id, state, cents, amount_text, week_start, week_label };
+	const shown = { line_id, state, cents, amount_text, week_start, week_label };
+	return role === "Driver" ? { ...shown, invoice_number: summary.invoice_number || "" } : shown;
 }
 
 // The receipts among `ids` with a live (unreversed) Personal deduction.
@@ -39807,7 +39840,7 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// amount, the week and the invoice it is on, from the server.
 		{
 			const personal = personalSummaryByExpense(driverExpenses.map((e) => e.id));
-			for (const e of driverExpenses) e.personal = personal[e.id] || null;
+			for (const e of driverExpenses) e.personal = personalSummaryForRole(personal[e.id], "Driver");
 		}
 
 		// Count uploaded documents per load (total + per-kind breakdown). The
@@ -59901,6 +59934,8 @@ function periodsDueForClose() {
 		.filter((p) => p < cur && isPastGrace(p, graceDays) && isPlausibleLockPeriod(p));
 }
 
+// Who the automatic close's audit rows name.
+const PERIOD_CLOSE_SYSTEM_ACTOR = { session: { user: { id: 0, username: "period-close", role: "system" } } };
 async function maybeCloseFinishedPeriods() {
 	if (!PERIOD_FINALIZE_ENABLED || periodCloseRunning) return;
 
@@ -59961,6 +59996,10 @@ async function maybeCloseFinishedPeriods() {
 			try {
 				const pending = pendingReceiptsInPeriod(period);
 				const personalWaiting = personalWaitingInPeriod(period);
+				// The audit row the manual close writes, for the close nobody pressed
+				logAudit(PERIOD_CLOSE_SYSTEM_ACTOR, "period_finalize", "period", period,
+					`Finalized ${period} at month end (${result.stamped} payout row(s) frozen; ${pending.length} receipt(s) still Pending review: ${receiptIdList(pending) || "none"}` +
+					(personalWaiting.length ? `; ${personalWaiting.length} Personal line(s) on no invoice yet: receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}` : "") + ")");
 				insertDispatchNotification.run(
 					"period-close",
 					`${periodLabel(period)} is closed`,

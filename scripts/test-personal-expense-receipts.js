@@ -20,9 +20,11 @@
  *   §4 GET /api/expenses/personal/waiting-corrections: the weeks waiting for a
  *      correction invoice, Super Admin only
  *   §5 the month close lists the Personal lines booked to the month that no
- *      invoice carries yet
+ *      invoice carries yet; the automatic close audits them like the manual one
  *   §6 the payment report PDF prints its "Personal" column only when an invoice
  *      in it carries Personal lines
+ *   §7 the Friday batch re-encodes and caches the week's receipt images before
+ *      it renders any invoice (a cold cache never leaves "not available")
  *
  * Pure apart from the re-encode's child process: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-receipts.js    # exits 1 on failure
@@ -217,6 +219,32 @@ const rowFor = (list, id) => (list || []).find((r) => r.id === id) || {};
 		check("the close route answers and audits them", [/personalWaitingInPeriod\(period\)/.test(finalize), /personalWaiting/.test(finalize.slice(finalize.indexOf("res.json({ success: true, period")))], [true, true]);
 		const auto = SRC.slice(SRC.indexOf("// Notify only for periods this pass actually closed."), SRC.indexOf("// Notify only for periods this pass actually closed.") + 2400);
 		check("the automatic close's notice names them", /personalWaitingInPeriod\(period\)/.test(auto), true);
+		const autoAudit = auto.slice(0, auto.indexOf("periodCloseFailStreak = 0;"));
+		check("…and it writes the period_finalize audit row the manual close writes, naming them",
+			[/logAudit\(PERIOD_CLOSE_SYSTEM_ACTOR, "period_finalize", "period", period,/.test(autoAudit), /Personal line\(s\) on no invoice yet/.test(autoAudit), /still Pending review/.test(autoAudit)],
+			[true, true, true]);
+		w.cleanup();
+	}
+
+	section("§7 the Friday batch prepares the week's receipt images first");
+	{
+		const w = world();
+		await putImage(w, 1);
+		// A line marked before receipts were prepared (or whose cache was cleared):
+		// written directly, so nothing has started its image.
+		w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, created_at, created_by, created_by_id, created_role)
+			VALUES (1, 'deduct', 20000, 20000, 'Pilot #123', '2026-10-12', '2026-10', 1, '2026-10-12', '2026-10-10', 't', 'super_admin', 1, 'Super Admin')`).run();
+		const cacheDir = path.join(w.dataDir, "storage", "receipt-images");
+		const cached = () => (fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : []).filter((f) => /^v1-1-/.test(f)).length;
+		check("setup: a cold cache", cached(), 0);
+		const out = await w.api.warmPersonalReceiptsForWeek("2026-10-10");
+		check("warmPersonalReceiptsForWeek() re-encodes and caches the week's receipt images", [out.receipts, out.prepared, cached()], [1, 1, 1]);
+		check("…another week's prepares nothing", (await w.api.warmPersonalReceiptsForWeek("2026-10-03")).receipts, 0);
+		const g = await w.generate(DRIVER_A);
+		check("…and the batch's render prints the page from the cache", [g.status, (lastRender(w).data.receiptPages || []).length], [200, 1]);
+		const batch = SRC.slice(SRC.indexOf("async function runWeeklyInvoiceBatch("), SRC.indexOf("async function runWeeklyInvoiceBatch(") + 6000);
+		const warmAt = batch.indexOf("await warmPersonalReceiptsForWeek(range.weekStart)");
+		check("runWeeklyInvoiceBatch() awaits it before it generates any invoice", warmAt > 0 && warmAt < batch.indexOf("for (const driver of rosterDrivers)"), true);
 		w.cleanup();
 	}
 

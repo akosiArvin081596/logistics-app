@@ -137,7 +137,7 @@ const SHARED_FNS = [
 	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
-	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines", "personalReceiptRenderData"];
+	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines", "personalReceiptRenderData", "warmPersonalReceiptsForWeek"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
 	'app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {',

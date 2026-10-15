@@ -225,6 +225,12 @@ const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
 			[summary[1] && summary[1].cents, summary[5] && summary[5].cents, summary[7] || null], [20000, 5000, null]);
 		const driverRoute = SRC.slice(SRC.indexOf('\napp.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (req, res) => {') + 1);
 		check("T22 GET /api/driver/:driverName adds each receipt's personal summary", /personalSummaryByExpense\(/.test(driverRoute.slice(0, driverRoute.indexOf("\n});\n"))), true);
+		const asDriver = w.api.personalSummaryForRole(summary[1], "Driver");
+		check("…driver-shaped: the state, amount, week and invoice; no share or books (in_place, cost_period)",
+			[Object.keys(asDriver || {}).sort(), asDriver && asDriver.amount_text, asDriver && asDriver.week_label],
+			[["amount_text", "cents", "invoice_number", "line_id", "state", "week_label", "week_start"], "$200.00", "Oct 10-16, 2026"]);
+		check("…and the driver route passes each summary through personalSummaryForRole(…, \"Driver\")",
+			/personalSummaryForRole\(personal\[e\.id\], "Driver"\)/.test(driverRoute.slice(0, driverRoute.indexOf("\n});\n"))), true);
 		w.cleanup();
 	}
 
