@@ -67,6 +67,7 @@ const METRIC_KEYS = [
   'freight_tons_stated', 'freight_tons_estimated', 'loads_delivered', 'revenue', 'miles_driven', 'on_time_rate',
   'fleet_trucks', 'active_units', 'fuel_mpg', 'fuel_savings', 'co2_tonnes', 'ai_tasks', 'automated_tasks',
   'dispatch_calls', 'truck_utilization', 'paid_mile_share',
+  'loaded_miles', 'paid_miles', 'deadhead_miles', 'unloaded_miles',
 ]
 const ENUM = {
   kind: ['real', 'estimate', 'proxy', 'not_tracked'],
@@ -76,6 +77,7 @@ const ENUM = {
   comparisonKind: ['mom', 'yoy', 't3m_yoy'],
   comparisonStatus: ['ok', 'missing'],
   event: ['ai_dispatch', 'dedicated'],
+  precision: ['month', 'day'],
   beforeAfterStatus: ['ok', 'date_not_set', 'missing', 'insufficient'],
   runKind: ['nightly', 'manual', 'boot'],
   runStatus: ['ok', 'partial', 'failed', 'running'],
@@ -156,9 +158,11 @@ function shapeErrors(r) {
       need(['derived', 'admin'].includes(s.aiDispatchStart.source), 'settings.aiDispatchStart.source', 'not derived/admin')
       need(isStr(s.aiDispatchStart.evidence), 'settings.aiDispatchStart.evidence', 'not a string')
     }
-    if (exactKeys(s.dedicatedStart, ['value', 'source'], 'settings.dedicatedStart')) {
-      need(s.dedicatedStart.value === null || isYmd(s.dedicatedStart.value), 'settings.dedicatedStart.value', 'not YYYY-MM-DD or null')
-      need(s.dedicatedStart.source === null || s.dedicatedStart.source === 'admin', 'settings.dedicatedStart.source', 'not admin/null')
+    if (exactKeys(s.dedicatedStart, ['value', 'source', 'precision'], 'settings.dedicatedStart')) {
+      const d = s.dedicatedStart
+      need(d.value === null || isYmd(d.value) || isYm(d.value), 'settings.dedicatedStart.value', 'not YYYY-MM, YYYY-MM-DD or null')
+      need(d.precision === (d.value === null ? null : (isYm(d.value) ? 'month' : 'day')), 'settings.dedicatedStart.precision', 'does not match the value (month / day / null)')
+      need(d.source === null || d.source === 'admin', 'settings.dedicatedStart.source', 'not admin/null')
     }
     need(s.baselineMpg === null || (isNum(s.baselineMpg) && s.baselineMpg >= 3 && s.baselineMpg <= 15), 'settings.baselineMpg', 'not 3-15 or null')
     need(Array.isArray(s.recipients) && s.recipients.length <= 10 && s.recipients.every(isStr), 'settings.recipients', 'not up to 10 strings')
@@ -229,12 +233,43 @@ function shapeErrors(r) {
     need(Array.isArray(m.beforeAfter), `${at}.beforeAfter`, 'not an array')
     for (const [i, b] of (Array.isArray(m.beforeAfter) ? m.beforeAfter : []).entries()) {
       const w = `${at}.beforeAfter[${i}]`
-      if (!exactKeys(b, ['event', 'date', 'status', 'before', 'after', 'deltaPct', 'display', 'note'], w)) continue
+      // R10: a whole-month entry (paid-mile share) carries its precision, its
+      // months per side and the contract-month and month-to-date rows.
+      const whole = b && typeof b === 'object' && Object.prototype.hasOwnProperty.call(b, 'precision')
+      const keys = whole
+        ? ['event', 'date', 'precision', 'status', 'before', 'after', 'contractMonth', 'monthToDate', 'deltaPct', 'display', 'note']
+        : ['event', 'date', 'status', 'before', 'after', 'deltaPct', 'display', 'note']
+      if (!exactKeys(b, keys, w)) continue
       need(ENUM.event.includes(b.event), `${w}.event`, `"${b.event}" not allowed`)
       need(ENUM.beforeAfterStatus.includes(b.status), `${w}.status`, `"${b.status}" not allowed`)
-      need(b.date === null || isYmd(b.date), `${w}.date`, 'not YYYY-MM-DD or null')
+      if (whole) {
+        need(ENUM.precision.includes(b.precision), `${w}.precision`, `"${b.precision}" not allowed`)
+        need(b.precision === 'month' ? isYm(b.date) : isYmd(b.date), `${w}.date`, 'not the precision\'s shape (YYYY-MM for a month, YYYY-MM-DD for a day)')
+        const period = (p, where) => {
+          if (!exactKeys(p, ['label', 'from', 'to', 'value', 'display', 'n', 'coverage', 'loadedLegOnly', 'nothingOnFile'], where)) return
+          figure(p, where)
+          need(isStr(p.label) && p.label.length > 0 && isYmd(p.from) && isYmd(p.to), where, 'label/from/to')
+          need([p.n, p.loadedLegOnly, p.nothingOnFile].every((x) => Number.isInteger(x) && x >= 0), where, 'counts not counts')
+          if (exactKeys(p.coverage, ['num', 'den'], `${where}.coverage`)) need(Number.isInteger(p.coverage.num) && Number.isInteger(p.coverage.den), `${where}.coverage`, 'not counts')
+        }
+        need(Array.isArray(b.contractMonth), `${w}.contractMonth`, 'not an array')
+        for (const [j, p] of (Array.isArray(b.contractMonth) ? b.contractMonth : []).entries()) period(p, `${w}.contractMonth[${j}]`)
+        if (b.monthToDate !== null) period(b.monthToDate, `${w}.monthToDate`)
+      } else {
+        need(b.date === null || isYmd(b.date), `${w}.date`, 'not YYYY-MM-DD or null')
+      }
       if (b.status === 'date_not_set') need(b.date === null, w, 'date_not_set carries a date')
       for (const side of ['before', 'after']) {
+        if (whole && b[side] !== null) {
+          const sw = `${w}.${side}`
+          if (exactKeys(b[side], ['value', 'n', 'display', 'months', 'label', 'dropped', 'coverage', 'loadedLegOnly', 'nothingOnFile'], sw)) {
+            figure(b[side], sw)
+            need(Array.isArray(b[side].months) && b[side].months.every(isYm) && Array.isArray(b[side].dropped) && b[side].dropped.every(isYm), sw, 'months/dropped not YYYY-MM lists')
+            need(isStr(b[side].label) && [b[side].n, b[side].loadedLegOnly, b[side].nothingOnFile].every((x) => Number.isInteger(x) && x >= 0), sw, 'label/counts')
+            if (exactKeys(b[side].coverage, ['num', 'den'], `${sw}.coverage`)) need(Number.isInteger(b[side].coverage.num) && Number.isInteger(b[side].coverage.den), `${sw}.coverage`, 'not counts')
+          }
+          continue
+        }
         if (b[side] !== null && exactKeys(b[side], ['value', 'n', 'display'], `${w}.${side}`)) {
           figure(b[side], `${w}.${side}`)
           need(Number.isInteger(b[side].n) && b[side].n >= 0, `${w}.${side}.n`, 'not a count')
@@ -286,6 +321,9 @@ function shapeErrors(r) {
     ['a missing metric shown as 0', (r) => { r.metrics[9].value = 0; r.metrics[9].current.value = 0 }],
     ['a run status the contract does not name', (r) => { r.job.lastRun.status = 'done' }],
     ['eleven recipients', (r) => { r.settings.recipients = Array.from({ length: 11 }, (_, i) => `r${i}@example.test`) }],
+    ['a contract start whose precision does not match its value', (r) => { r.settings.dedicatedStart = { value: '2026-09', source: 'admin', precision: 'day' } }],
+    ['a whole-month side listing a day as a month', (r) => { r.metrics[15].beforeAfter[0].before.months = ['2026-04-01'] }],
+    ['a whole-month entry without its contract-month rows', (r) => { delete r.metrics[15].beforeAfter[0].contractMonth }],
   ]
   for (const [name, breakIt] of broken) {
     const copy = clone(FIXTURE)
@@ -355,6 +393,7 @@ function shapeErrors(r) {
   for (const s of ['date_not_set', 'insufficient', 'ok']) {
     check(`fixture has a before/after row ${s}`, ms.some((m) => m.beforeAfter.some((b) => b.status === s)))
   }
+  check('fixture has a whole-month before/after row with a dropped month', ms.some((m) => m.beforeAfter.some((b) => b.precision === 'month' && b.before && b.before.dropped.length)))
   check('fixture has a missing comparison', ms.some((m) => m.comparisons.some((c) => c.status === 'missing')))
   check('fixture has a breakdown and a null breakdown', ms.some((m) => m.breakdown) && ms.some((m) => m.breakdown === null))
   check('fixture has an empty series', ms.some((m) => m.series.length === 0))
@@ -478,6 +517,16 @@ function viewChecks(v) {
     same('insufficient row', [insufficient.statusLabel, insufficient.before, insufficient.after, insufficient.muted], ['Not enough data', 'No data', '70.0%', true])
     same('missing row label', v.beforeAfterRow({ event: 'dedicated', status: 'missing' }).statusLabel, 'Missing data')
     same('ok row has no status label', v.beforeAfterRow({ event: 'dedicated', date: '2026-09-14', status: 'ok', before: { display: 'a' }, after: { display: 'b' }, display: '+1%', note: '' }).statusLabel, '')
+    // R10: a whole-month entry, as sent.
+    const share = FIXTURE.metrics.find((m) => m.key === 'paid_mile_share').beforeAfter[0]
+    const wm = v.beforeAfterRow(share, (d) => v.fmtSettingDate(d))
+    same('whole months: the month in words', wm.dateText, 'June 2026')
+    same('whole months: each side names its months, as sent', [wm.wholeMonths, wm.beforeMonths.label, wm.beforeMonths.display, wm.afterMonths.label], [true, 'April-May 2026', '61.2%', 'July-September 2026'])
+    same('whole months: counts, never a share', wm.beforeMonths.counts, '38 of 41 loads fully known · 1 loaded leg only · 2 nothing on file')
+    same('whole months: the dropped month', wm.beforeMonths.dropped, ['2026-03'])
+    same('whole months: contract month and month to date', [wm.contractRows.map((r) => [r.label, r.display]), wm.monthToDate.label, wm.monthToDate.display], [[['June 2026', '70.4%']], 'October 1-9, 2026', '75.0%'])
+    const equalWindows = v.beforeAfterRow(FIXTURE.metrics.find((m) => m.key === 'truck_utilization').beforeAfter[0])
+    same('equal windows: no whole-month fields', [equalWindows.wholeMonths, equalWindows.beforeMonths, equalWindows.contractRows, equalWindows.monthToDate], [false, null, [], null])
 
     for (const m of FIXTURE.metrics) {
       const text = v.coverageText(m.coverage)
@@ -534,6 +583,22 @@ function viewChecks(v) {
     }
     for (const okMpg of ['3', '15', '6.5']) check(`MPG "${okMpg}" is accepted`, !v.settingsChanges(fx, form({ baselineMpg: okMpg })).errors.baselineMpg)
     check('a date that is not YYYY-MM-DD is refused', !!v.settingsChanges(fx, form({ dedicatedStart: '06/01/2026' })).errors.dedicatedStart)
+    // R10 (test 27): the contract start takes a month or a day; the AI start a day only.
+    same('the contract start as a month', v.settingsChanges(fx, form({ dedicatedStart: '2026-09' })).body, { dedicatedStart: '2026-09' })
+    same('the contract start as a day', v.settingsChanges(fx, form({ dedicatedStart: '2026-09-15' })).body, { dedicatedStart: '2026-09-15' })
+    for (const bad of ['2026-13', '2026-9', '2019-12', '2101-01', 'September']) {
+      check(`contract start "${bad}" is refused before asking`, !!v.settingsChanges(fx, form({ dedicatedStart: bad })).errors.dedicatedStart && !('dedicatedStart' in v.settingsChanges(fx, form({ dedicatedStart: bad })).body))
+    }
+    check('the AI dispatch start still refuses a month', !!v.settingsChanges(fx, form({ aiDispatchStart: '2026-09' })).errors.aiDispatchStart)
+    same('a month in words', v.fmtSettingDate('2026-09'), 'September 2026')
+    same('a day through the day formatter', v.fmtSettingDate('2026-09-15', (d) => `<${d}>`), '<2026-09-15>')
+    same('nothing readable is blank', [v.fmtSettingDate(''), v.fmtSettingDate(null), v.fmtSettingDate('soon')], ['', '', ''])
+    same('split a day', v.splitDedicatedStart('2026-09-05'), { month: '2026-09', day: '5' })
+    same('split a month', v.splitDedicatedStart('2026-09'), { month: '2026-09', day: '' })
+    same('join', [v.joinDedicatedStart('2026-09', ''), v.joinDedicatedStart('2026-09', '5'), v.joinDedicatedStart('2026-09', '15'), v.joinDedicatedStart('', '5')], ['2026-09', '2026-09-05', '2026-09-15', ''])
+    const monthAdmin = { ...fx, dedicatedStart: { value: '2026-09', source: 'admin', precision: 'month' } }
+    same('form from a month setting', v.settingsFormFrom(monthAdmin).dedicatedStart, '2026-09')
+    same('a month setting made exact', v.settingsChanges(monthAdmin, { ...v.settingsFormFrom(monthAdmin), dedicatedStart: '2026-09-15' }).body, { dedicatedStart: '2026-09-15' })
     same('recipients trimmed, lower-cased, each once', v.parseRecipients(' A@Example.test\na@example.test, b@example.test;\n\n'), ['a@example.test', 'b@example.test'])
     same('recipients changed', v.settingsChanges(fx, form({ recipients: 'B@example.test' })).body, { recipients: ['b@example.test'] })
     same('recipients only re-cased are no change', v.settingsChanges(admin, adminForm({ recipients: 'OPS@example.test' })).body, {})
