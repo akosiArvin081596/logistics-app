@@ -72,10 +72,16 @@
               </div>
             </div>
             <div class="field">
-              <label class="field-label">PASSWORD</label>
+              <label class="field-label" for="login-password">PASSWORD</label>
               <div class="input-wrap">
                 <span class="input-icon">&#128274;</span>
-                <input v-model="loginForm.password" type="password" placeholder="Enter your password" autocomplete="current-password" @keydown.enter="doLogin" />
+                <input id="login-password" ref="loginPasswordInput" v-model="loginForm.password" :type="showLoginPassword ? 'text' : 'password'" placeholder="Enter your password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" @keydown.enter="doLogin" />
+                <!-- The same eye button as Users > Edit User's password fields. A press
+                     doesn't take focus from the field, so the caret stays put. -->
+                <button type="button" class="pw-toggle" :aria-label="showLoginPassword ? 'Hide password' : 'Show password'" :aria-pressed="showLoginPassword" aria-controls="login-password" @mousedown.prevent @click="toggleLoginPassword">
+                  <EyeOff v-if="showLoginPassword" :size="16" aria-hidden="true" />
+                  <Eye v-else :size="16" aria-hidden="true" />
+                </button>
               </div>
             </div>
             <button type="submit" class="submit-btn" :disabled="loginLoading">
@@ -94,8 +100,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import { Eye, EyeOff } from 'lucide-vue-next'
 import { isLeavingPage, useAuthStore } from '../stores/auth'
 
 const router = useRouter()
@@ -110,6 +117,22 @@ const loginError = ref('')
 
 const setupForm = reactive({ username: '', password: '', email: '' })
 const loginForm = reactive({ username: '', password: '' })
+const showLoginPassword = ref(false)
+const loginPasswordInput = ref(null)
+
+// Show or hide the password. When the field has focus (a mouse or touch press on
+// the eye button doesn't take it), the caret and selection are put back once the
+// field's type has changed.
+async function toggleLoginPassword() {
+  const input = loginPasswordInput.value
+  const hadFocus = !!input && document.activeElement === input
+  const start = hadFocus ? input.selectionStart : null
+  const end = hadFocus ? input.selectionEnd : null
+  showLoginPassword.value = !showLoginPassword.value
+  if (!hadFocus || start === null) return
+  await nextTick()
+  input.setSelectionRange(start, end)
+}
 
 onMounted(async () => {
   try {
@@ -159,6 +182,9 @@ async function doLogin() {
     loginError.value = 'Enter username and password.'
     return
   }
+  // Hidden again before it is sent: it isn't left on screen, and the browser's
+  // password manager sees a password field when it offers to save the sign-in.
+  showLoginPassword.value = false
   loginLoading.value = true
   let freshPageComing = false
   try {
@@ -349,6 +375,7 @@ async function doLogin() {
 
 .input-wrap input {
   flex: 1;
+  min-width: 0;
   border: none;
   outline: none;
   background: transparent;
@@ -360,6 +387,33 @@ async function doLogin() {
 
 .input-wrap input::placeholder {
   color: #c4c8d0;
+}
+
+/* The eye button: Users > Edit User's .pw-toggle, in this page's colours. */
+.pw-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  margin-right: 0.35rem;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+}
+
+.pw-toggle:hover,
+.pw-toggle:focus-visible {
+  color: #374151;
+}
+
+.pw-toggle:focus-visible {
+  outline: 2px solid hsl(199, 89%, 48%);
+  outline-offset: 1px;
 }
 
 /* Submit button */

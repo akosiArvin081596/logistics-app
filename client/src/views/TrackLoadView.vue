@@ -94,17 +94,24 @@
             <div class="track-eta-label">Delivered</div>
             <div class="track-eta-value">{{ formatFriendlyDate(data.deliveredAt) }}</div>
           </template>
-          <template v-else-if="data.eta">
+          <template v-else-if="etaShown">
             <div class="track-eta-top">
               <div>
                 <div class="track-eta-label">Estimated arrival</div>
                 <div class="track-eta-value">{{ formatEta(data.eta.minutesRemaining) }}</div>
                 <div class="track-eta-sub">~{{ data.eta.distanceMiles }} mi &middot; {{ formatFriendlyDate(data.eta.expectedAt) }}</div>
+                <div v-if="lastSeen" class="track-eta-sub track-last-seen">{{ lastSeen }}</div>
               </div>
               <div v-if="data.eta.onTime !== null" class="track-eta-badge" :class="data.eta.onTime ? 'on-time' : 'delayed'">
                 {{ data.eta.onTime ? 'On time' : 'Delayed' }}
               </div>
             </div>
+          </template>
+          <template v-else-if="fixTooOld">
+            <!-- B11: a position older than 2 hours gives no ETA or distance. -->
+            <div class="track-eta-label">Estimated arrival</div>
+            <div class="track-eta-value track-eta-muted">Not available</div>
+            <div class="track-eta-sub">{{ lastSeen ? `${lastSeen}.` : 'The truck has not reported its position recently.' }} We'll show an ETA when it reports again.</div>
           </template>
           <template v-else>
             <div class="track-eta-label">Estimated arrival</div>
@@ -137,6 +144,8 @@
           show-arrival keys off `eta` because the server omits it for delivered
           loads and when there is no ping — exactly the cases where a fallback
           would have invented an arrival for a truck that already got there.
+          etaShown is `eta` withheld for a fix older than 2 hours (B11), and
+          fix-at lets the map say how old the position is.
         -->
         <div v-if="mapLoad" class="track-card track-map-card">
           <div class="track-map-title">Route &amp; current location</div>
@@ -144,11 +153,12 @@
             :load="mapLoad"
             :headers="mapHeaders"
             :driver-position="driverPosition"
+            :fix-at="data.lastPing ? data.lastPing.at : null"
             :preset-route="presetRoute"
             :public-mode="true"
             :dispatch-mode="!data.lastPing"
-            :show-arrival="!!data.eta"
-            :arrival-at="data.eta?.expectedAt"
+            :show-arrival="etaShown"
+            :arrival-at="etaShown ? data.eta.expectedAt : null"
           />
           <div v-if="!data.lastPing" class="track-map-hint">
             GPS not available. We'll refresh automatically when the driver reports in.
@@ -172,6 +182,7 @@ import { io } from 'socket.io-client'
 import StatusTimeline from '../components/shared/StatusTimeline.vue'
 import DriverRouteMap from '../components/driver/DriverRouteMap.vue'
 import { fmtSheetMoment } from '../utils/datetime'
+import { fixAgeMs, lastSeenText, fixAllowsEta } from '../lib/fixAge'
 
 const route = useRoute()
 const router = useRouter()
@@ -352,6 +363,14 @@ const driverPosition = computed(() => {
   if (!data.value || !data.value.lastPing) return null
   return { latitude: data.value.lastPing.lat, longitude: data.value.lastPing.lng }
 })
+
+// B11 (owner decision 2026-10-15): the last fix's age, on the page's 10 s clock.
+// Older than 30 minutes the page says "Last seen X ago"; older than 2 hours it
+// shows no ETA or distance, even from a payload that still carries one.
+const fixAge = computed(() => fixAgeMs(data.value && data.value.lastPing ? data.value.lastPing.at : null, _nowTick.value))
+const lastSeen = computed(() => lastSeenText(fixAge.value))
+const fixTooOld = computed(() => !!(data.value && data.value.lastPing) && !fixAllowsEta(fixAge.value))
+const etaShown = computed(() => !!(data.value && data.value.eta) && !fixTooOld.value)
 
 // The route line arrives ON the tracker payload. DriverRouteMap would otherwise
 // fetch it from GET /api/route, which is role-gated — an anonymous customer got
@@ -675,6 +694,7 @@ const lastUpdatedText = computed(() => {
 }
 .track-eta-value.track-eta-muted { color: #94a3b8; font-size: 1.1rem; font-weight: 600; }
 .track-eta-sub { font-size: 0.78rem; color: #64748b; margin-top: 0.35rem; }
+.track-eta-sub.track-last-seen { color: #b45309; font-weight: 600; }
 .track-eta-badge {
   padding: 0.3rem 0.65rem;
   font-size: 0.7rem;

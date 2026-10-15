@@ -68,7 +68,10 @@
         <!-- A form of its own, so a browser's saved-login autofill sees only these
              fields: the edited account's username (read-only, hidden) tells it whose
              password this is, Full Name and Email are not login fields, and both
-             password fields are new-password fields (B21). -->
+             password fields are new-password fields (B21). Full Name and Email hold
+             the edited account's details, never the signed-in admin's: Chrome ignores
+             autocomplete="off" for its address autofill (name, email) but fills no
+             field whose autocomplete token it doesn't recognise. -->
         <form class="confirm-dialog edit-dialog" autocomplete="off" novalidate @submit.prevent="handleSaveEdit">
           <h3>Edit User &mdash; {{ editForm.username }}</h3>
           <input class="account-username" type="text" name="username" autocomplete="username" :value="editForm.username" readonly tabindex="-1" aria-hidden="true" />
@@ -94,12 +97,12 @@
 
           <div class="edit-field">
             <label for="edit-user-full-name">Full Name</label>
-            <input id="edit-user-full-name" v-model="editForm.fullName" type="text" name="edit-full-name" placeholder="e.g. John Smith" autocomplete="off" />
+            <input id="edit-user-full-name" v-model="editForm.fullName" type="text" name="edit-full-name" placeholder="e.g. John Smith" autocomplete="edited-account-full-name" />
           </div>
 
           <div class="edit-field">
             <label for="edit-user-email">Email</label>
-            <input id="edit-user-email" v-model="editForm.email" type="email" name="edit-contact-email" placeholder="Email" autocomplete="off" />
+            <input id="edit-user-email" v-model="editForm.email" type="email" name="edit-contact-email" placeholder="Email" autocomplete="edited-account-email" />
           </div>
 
           <div class="edit-field">

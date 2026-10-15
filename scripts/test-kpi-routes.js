@@ -356,7 +356,8 @@ async function getSection(block) {
 		t(g.body.metrics.every((m) => m.approval && m.approval.approved === false), "§3 no approval row: every metric not approved, whatever the builder said");
 		t(w.log.computes === 0 && w.log.sheetReads === 0, "§3 GET computed nothing and read no sheet");
 		t(g.body.job && g.body.job.lastRun === null && g.body.job.preview.status === "pending", "§3 the job block: no run yet, preview pending");
-		t(g.body.job.snapshotSchedule === "Daily at 4:00 AM Eastern (3:00 AM Central)" && g.body.job.enabled.snapshot === false, "§3 the schedule in words; not enabled where the job did not start");
+		t(g.body.job.snapshotSchedule === "Daily at 4:00 AM Eastern" && g.body.job.digestSchedule === "Mondays at 9:00 AM Eastern" && g.body.job.enabled.snapshot === false,
+			`§3 the schedule in words, Eastern only (got ${JSON.stringify([g.body.job.snapshotSchedule, g.body.job.digestSchedule])}); not enabled where the job did not start`);
 		t(g.body.settings.defaultRecipientConfigured === true && g.body.settings.baselineMpg === null, "§3 settings: defaults, the default recipient configured");
 		const b = w.log.lastBuild;
 		t(b && Object.keys(b.settings).sort().join() === "aiDispatchStart,baselineMpg,dedicatedStart,recipients" && b.defaultRecipientConfigured === true && /Z$/.test(b.generatedAt) && b.timeZone === "America/New_York",
