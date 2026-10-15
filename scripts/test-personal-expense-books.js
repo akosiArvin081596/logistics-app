@@ -207,7 +207,8 @@ const fuelCard = (w, month) => {
 		const catalog = require(path.join(ROOT, "lib", "kpi-catalog.js"));
 		const v = (k) => (catalog.METRICS.find((m) => m.key === k) || {}).definitionVersion;
 		check("the fuel KPIs' definitionVersion moved to 2 (their source changed)", [v("fuel_mpg"), v("fuel_savings"), v("co2_tonnes")], [2, 2, 2]);
-		check("…and no other metric's did", catalog.METRICS.filter((m) => !["fuel_mpg", "fuel_savings", "co2_tonnes"].includes(m.key)).every((m) => m.definitionVersion === 1), true);
+		// paid_mile_share is at 2 for its own reason (R10's paid miles, #517).
+		check("…and no other metric's did", catalog.METRICS.filter((m) => !["fuel_mpg", "fuel_savings", "co2_tonnes", "paid_mile_share"].includes(m.key)).every((m) => m.definitionVersion === 1), true);
 		w.cleanup();
 	}
 

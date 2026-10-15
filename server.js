@@ -63395,6 +63395,12 @@ const kpiMetrics = require("./lib/kpi-metrics");
 const kpiWeight = require("./lib/kpi-weight");
 const kpiSchedule = require("./lib/kpi-schedule");
 const kpiDigest = require("./lib/kpi-digest");
+// R10: the rate-con pass (weight and stated miles), the deadhead route calls,
+// the mile metrics' gatherer and their per-load facts.
+const kpiRateconPass = require("./lib/kpi-ratecon-pass");
+const kpiDeadheadRoutes = require("./lib/kpi-deadhead-routes");
+const kpiMilesData = require("./lib/kpi-miles-data");
+const kpiMiles = require("./lib/kpi-miles");
 
 // One row per run: nightly, boot (the catch-up 10 minutes after a start) or
 // manual (POST /api/admin/kpis/recompute). `errors` is a JSON array of
@@ -63490,6 +63496,11 @@ db.exec(`
 		sent_at TEXT
 	)
 `);
+// R10: kpi_load_ratecon_miles (the miles each rate con states) and
+// kpi_deadhead_routes (route distances keyed by their two points); their DDL
+// and what each column means live in the two modules.
+kpiRateconPass.ensureTables(db);
+kpiDeadheadRoutes.ensureTables(db);
 // A run still marked 'running' at start-up belonged to a process that stopped
 // mid-run; nothing will ever finish it.
 try {
@@ -63501,19 +63512,27 @@ try {
 
 const KPI_SNAPSHOT_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_SNAPSHOT_ENABLED ?? "").trim());
 const KPI_DIGEST_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.KPI_DIGEST_ENABLED ?? "").trim());
+// The nightly deadhead route calls (paid Google Routes calls, about $0 inside the
+// free tier): default OFF, on only for true/1/yes/on (kpiDeadheadRoutes.routesEnabled()).
+const KPI_DEADHEAD_ROUTES_ENABLED = kpiDeadheadRoutes.routesEnabled(process.env.KPI_DEADHEAD_ROUTES_ENABLED);
 
-// The run's time box, and the Drive phase's share of it.
+// The run's time box, and the Drive phase's and the deadhead route phase's
+// shares of it.
 const KPI_RUN_TIME_LIMIT_MS = 4 * 60 * 1000;
 const KPI_DRIVE_TIME_LIMIT_MS = 2 * 60 * 1000;
+const KPI_ROUTES_TIME_LIMIT_MS = 60 * 1000;
+// What the route phase always leaves of the run's time box for computing and
+// storing the figures.
+const KPI_ROUTES_RESERVE_MS = 30 * 1000;
 // One Drive request (a list or a download).
 const KPI_DRIVE_TIMEOUT_MS = 20 * 1000;
-// Rate-con PDFs read per scheduled run, and how long a not_found / error answer
-// stands before that load is tried again.
-const KPI_WEIGHT_MAX_PER_RUN = 40;
+// Rate-con PDFs read per business day, shared by the weight and the miles
+// parsers (lib/kpi-ratecon-pass.js, which also keeps not_found / error answers
+// for 30 days before trying a load again).
+const KPI_WEIGHT_MAX_PER_RUN = kpiRateconPass.NIGHTLY_MAX_LOADS;
 // The most text one rate-con may yield (lib/broker-invoice.js extractPdfText()'s
 // maxInflatedBytes): a 3 MB file that inflates to gigabytes stops here.
 const KPI_PDF_TEXT_MAX_BYTES = 8 * 1024 * 1024;
-const KPI_WEIGHT_RETRY_MS = 30 * 24 * 60 * 60 * 1000;
 // Which lib/kpi-weight.js classifyPdfText() rule a 'no_text' answer came from.
 // Rule 1 (the first nightly run, 2026-10-09) called every real rate con
 // unreadable; a 'no_text' row from an earlier rule is read again.
@@ -63551,6 +63570,14 @@ function kpiIsDay(v) {
 // A date the KPI page may set: a real calendar date from 2020 to 2100.
 function kpiSettingDay(v) {
 	return kpiIsDay(v) && v >= "2020-01-01" && v <= "2100-12-31";
+}
+
+// The contract start (dedicatedStart only): a month YYYY-MM from 2020-01 to
+// 2100-12, or a date as kpiSettingDay(). The same rule as lib/kpi-catalog.js
+// dedicatedStartPrecision(), which the metrics read (scripts/test-kpi-routes.js
+// pins the two equal); the AI dispatch start stays a date only.
+function kpiSettingMonthOrDay(v) {
+	return kpiSettingDay(v) || (typeof v === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(v) && v >= "2020-01" && v <= "2100-12");
 }
 
 // The business day (APP_TIMEZONE) of a stored instant: SQLite's
@@ -63594,7 +63621,7 @@ function kpiNormalizeSettings(raw) {
 		const v = typeof e === "string" ? e.trim().toLowerCase() : "";
 		if (v && publicFormInput.checkPublicEmail(v).ok && !recipients.includes(v) && recipients.length < KPI_MAX_RECIPIENTS) recipients.push(v);
 	}
-	return { aiDispatchStart: day(r.aiDispatchStart), dedicatedStart: day(r.dedicatedStart), baselineMpg: mpg, recipients };
+	return { aiDispatchStart: day(r.aiDispatchStart), dedicatedStart: kpiSettingMonthOrDay(r.dedicatedStart) ? r.dedicatedStart : null, baselineMpg: mpg, recipients };
 }
 
 function kpiReadSettings() {
@@ -63635,8 +63662,11 @@ function kpiSettingsPatch(body) {
 	for (const k of Object.keys(body)) {
 		if (!KPI_SETTING_FIELDS.includes(k)) return { error: "That is not a KPI setting.", field: String(k).slice(0, 40) };
 		const v = body[k];
-		if (k === "aiDispatchStart" || k === "dedicatedStart") {
+		if (k === "aiDispatchStart") {
 			if (v !== null && !kpiSettingDay(v)) return { error: `${k} must be a date (YYYY-MM-DD) or empty.`, field: k };
+			patch[k] = v;
+		} else if (k === "dedicatedStart") {
+			if (v !== null && !kpiSettingMonthOrDay(v)) return { error: "dedicatedStart must be a month (YYYY-MM), a date (YYYY-MM-DD) or empty.", field: k };
 			patch[k] = v;
 		} else if (k === "baselineMpg") {
 			if (v !== null && !(typeof v === "number" && Number.isFinite(v) && v >= 3 && v <= 15)) {
@@ -63699,6 +63729,10 @@ function kpiSheetLoads(jt) {
 			truckKey: cell(r, truckCol, 200).trim().toLowerCase(),
 			detailsText: cell(r, detailsCol, 2000),
 			revenue: paymentCol ? brokerInvoice.parseMoney(cell(r, paymentCol, 200)) : null,
+			// R10: the cells the deadhead chain turns into instants (lib/kpi-deadhead.js).
+			pickupText: cell(r, pickupCol, 200),
+			dropoffText: cell(r, dropoffCol, 200),
+			completionText: cell(r, completionCol, 200),
 		});
 		if (KPI_DELIVERED_RE.test(status)) arrivals.push({ loadId, appointmentText: cell(r, dropoffCol, 200), deliveredDay: day });
 	}
@@ -63810,14 +63844,16 @@ function kpiGatherDbInputs(db, opts) {
 		if (k) destLng.set(k, finite(r.dest_lng));
 	}
 
-	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng };
+	// R10: what the mile metrics read (lib/kpi-miles-data.js, named columns only).
+	const milesData = kpiMilesData.gatherMilesData(db);
+
+	return { eldDaily, trucks, fleetHistory, fuelReceipts, activity, ratecon, receiverEvents, loadEld, destLng, milesData };
 }
 
-// The inputs lib/kpi-metrics.js computeKpis() takes. Load miles are kept for
-// live loads only (a cancelled or deleted load's miles are not the fleet's work)
-// and take that load's day.
+// The inputs lib/kpi-metrics.js computeKpis() takes. The mile records cover live
+// loads only (a cancelled or deleted load's miles are not the fleet's work) and
+// take that load's day.
 function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
-	const loadsByKey = new Map(sheet.loads.filter((l) => l.loadId).map((l) => [l.loadId, l]));
 	const arrivals = sheet.arrivals.map((a) => {
 		const eld = dbIn.loadEld.get(a.loadId);
 		return {
@@ -63829,15 +63865,6 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 			deliveredDay: a.deliveredDay,
 		};
 	});
-	const loadMiles = [];
-	for (const [k, e] of dbIn.loadEld) {
-		const load = loadsByKey.get(k);
-		if (!load) continue;
-		loadMiles.push({
-			loadId: k, day: load.day, loadedMiles: e.loadedMiles, deadheadMiles: e.deadheadMiles,
-			basis: e.basis, loadedBasis: e.loadedBasis, deadheadBasis: e.deadheadBasis, inProgress: e.inProgress, overlap: e.overlap,
-		});
-	}
 	return {
 		asOfDay,
 		settings: { aiDispatchStart: settings.aiDispatchStart, dedicatedStart: settings.dedicatedStart, baselineMpg: settings.baselineMpg },
@@ -63848,24 +63875,18 @@ function kpiAssembleInputs({ asOfDay, settings, sheet, dbIn }) {
 		fleetHistory: dbIn.fleetHistory,
 		fuelReceipts: dbIn.fuelReceipts,
 		arrivals,
-		loadMiles,
 		activity: dbIn.activity,
+		// R10: the mile metrics' per-load records, the Truck-column map, the cached
+		// route distances, the dated driver-to-truck resolver and the business zone.
+		milesLoads: kpiMilesData.assembleMilesLoads(sheet.loads, dbIn.milesData),
+		truckIdByUnit: dbIn.milesData.truckIdByUnit,
+		deadheadRoutes: dbIn.milesData.routes,
+		truckAt: buildHaulTruckResolver(),
+		timeZone: APP_TIMEZONE,
 	};
 }
 
-// A rate-con PDF -> what its text says about the load's weight.
-function kpiWeightFromPdf(buffer, fileId) {
-	const size = buffer.length;
-	if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", weightLb: null, fileId, fileSize: size };
-	const text = brokerInvoice.extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES });
-	const cls = kpiWeight.classifyPdfText(text, size);
-	if (cls !== "ok") return { status: cls, weightLb: null, fileId, fileSize: size };
-	const w = kpiWeight.parseWeight(text);
-	if (w.status === "ok") return { status: "ok", weightLb: w.weightLb, fileId, fileSize: size };
-	return { status: w.status === "conflict" ? "conflict" : "no_weight", weightLb: null, fileId, fileSize: size };
-}
-
-// A stored RATECON document's bytes for the weight phase: its local /uploads
+// A stored RATECON document's bytes for the rate-con phase: its local /uploads
 // copy (kept inside DATA_DIR/uploads, its size checked before it is read), else
 // its Drive file (its size read first, then a download capped at MAX_PDF_BYTES,
 // within the KPI timeout, each request counted). Returns { buffer }, or
@@ -63909,112 +63930,111 @@ async function kpiStoredRateConBytes(doc, counter, deadlineMs) {
 	return { buffer: Buffer.from(resp.data) };
 }
 
-// One load's rate-con: the stored RATECON document first, then, only where the
-// rate-con Drive folder is configured, ONE Drive list by file name and the
-// newest matching file (never a search by content, never getRateConBytes()).
-// `counter.driveFetches` counts this function's Drive requests.
-async function kpiRateConWeight(loadId, counter, deadlineMs) {
-	const doc = db.prepare(
-		`SELECT id, load_id, type, file_name, drive_file_id, drive_url FROM documents
-		 WHERE LOWER(TRIM(load_id)) IN (?, ?) AND UPPER(type) IN (${RATECON_DOC_TYPES.map(() => "?").join(", ")}) AND deleted_at IS NULL
-		 ORDER BY uploaded_at DESC LIMIT 1`,
-	).get(loadId, `#${loadId}`, ...RATECON_DOC_TYPES);
-	if (doc) {
-		const stored = await kpiStoredRateConBytes(doc, counter, deadlineMs);
-		if (stored && stored.status) return { status: stored.status, weightLb: null, fileId: `document:${doc.id}`, fileSize: stored.fileSize };
-		if (stored && stored.buffer && stored.buffer.length) return kpiWeightFromPdf(stored.buffer, `document:${doc.id}`);
-	}
+// One load's rate-con sources for lib/kpi-ratecon-pass.js: first() is the
+// stored RATECON document, else the newest matching Drive file; next() is the
+// next-newest file from the SAME Drive list (only the miles parser asks, after an
+// unreadable first file). Only where the rate-con Drive folder is configured, and
+// ONE Drive list by file name per load (never a search by content, never
+// getRateConBytes()). A source is { buffer, fileId, fileSize }, or
+// { status: 'too_large' | 'error', fileId, fileSize }, or null when there is none.
+// `counter.driveFetches` counts the Drive requests.
+function kpiRateConSources(loadId, counter, deadlineMs) {
 	// Drive is searched by file name, so a short id (one that sits inside many
 	// other numbers) is never looked up, and a name must carry the id as a whole
 	// token, not inside a longer number.
 	const safe = String(loadId).replace(/[^A-Za-z0-9]/g, "");
-	if (safe.length < rcIndexShared.MIN_LOAD_ID_LEN) return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
-	if (RATECON_DRIVE_FOLDER_ID && safe) {
+	let files = null;
+	let nextIndex = 0;
+	async function driveFile() {
+		if (safe.length < rcIndexShared.MIN_LOAD_ID_LEN) return null;
+		if (!RATECON_DRIVE_FOLDER_ID) return null;
 		const drive = await getDrive();
 		const timeout = Math.max(1000, Math.min(KPI_DRIVE_TIMEOUT_MS, deadlineMs - Date.now()));
-		counter.driveFetches++;
-		const list = await drive.files.list({
-			q: `'${RATECON_DRIVE_FOLDER_ID}' in parents and trashed = false and name contains '${safe}'`,
-			fields: "files(id,name,size,createdTime)",
-			orderBy: "createdTime desc",
-			pageSize: 10,
-			supportsAllDrives: true,
-			includeItemsFromAllDrives: true,
-		}, { timeout });
-		// Our keys are lowercased; the file name is compared the same way.
-		const files = ((list && list.data && list.data.files) || [])
-			.filter((f) => rcIndexShared.filenameCarriesLoadId(String(f.name || "").toLowerCase(), loadId)
-				&& rcIndexShared.textHasToken(String(f.name || "").toLowerCase(), safe.toLowerCase()))
-			.sort((a, b) => String(b.createdTime || "").localeCompare(String(a.createdTime || "")));
-		const newest = files[0];
-		if (!newest) return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
-		const size = Number(newest.size);
-		if (!(size > 0)) return { status: "error", weightLb: null, fileId: String(newest.id || ""), fileSize: null };
-		if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", weightLb: null, fileId: String(newest.id || ""), fileSize: size };
+		if (files === null) {
+			counter.driveFetches++;
+			const list = await drive.files.list({
+				q: `'${RATECON_DRIVE_FOLDER_ID}' in parents and trashed = false and name contains '${safe}'`,
+				fields: "files(id,name,size,createdTime)",
+				orderBy: "createdTime desc",
+				pageSize: 10,
+				supportsAllDrives: true,
+				includeItemsFromAllDrives: true,
+			}, { timeout });
+			// Our keys are lowercased; the file name is compared the same way.
+			files = ((list && list.data && list.data.files) || [])
+				.filter((f) => rcIndexShared.filenameCarriesLoadId(String(f.name || "").toLowerCase(), loadId)
+					&& rcIndexShared.textHasToken(String(f.name || "").toLowerCase(), safe.toLowerCase()))
+				.sort((a, b) => String(b.createdTime || "").localeCompare(String(a.createdTime || "")));
+		}
+		const file = files[nextIndex++];
+		if (!file) return null;
+		const fileId = String(file.id || "");
+		const size = Number(file.size);
+		if (!(size > 0)) return { status: "error", fileId, fileSize: null };
+		if (size > kpiWeight.MAX_PDF_BYTES) return { status: "too_large", fileId, fileSize: size };
 		counter.driveFetches++;
 		const resp = await drive.files.get(
-			{ fileId: newest.id, alt: "media", supportsAllDrives: true },
+			{ fileId: file.id, alt: "media", supportsAllDrives: true },
 			{ responseType: "arraybuffer", timeout, maxContentLength: kpiWeight.MAX_PDF_BYTES },
 		);
-		return kpiWeightFromPdf(Buffer.from(resp.data), String(newest.id || ""));
+		return { buffer: Buffer.from(resp.data), fileId, fileSize: size };
 	}
-	return { status: "not_found", weightLb: null, fileId: "", fileSize: null };
+	return {
+		async first() {
+			const doc = db.prepare(
+				`SELECT id, load_id, type, file_name, drive_file_id, drive_url FROM documents
+				 WHERE LOWER(TRIM(load_id)) IN (?, ?) AND UPPER(type) IN (${RATECON_DOC_TYPES.map(() => "?").join(", ")}) AND deleted_at IS NULL
+				 ORDER BY uploaded_at DESC LIMIT 1`,
+			).get(loadId, `#${loadId}`, ...RATECON_DOC_TYPES);
+			if (doc) {
+				const stored = await kpiStoredRateConBytes(doc, counter, deadlineMs);
+				if (stored && stored.status) return { status: stored.status, fileId: `document:${doc.id}`, fileSize: stored.fileSize };
+				if (stored && stored.buffer && stored.buffer.length) return { buffer: stored.buffer, fileId: `document:${doc.id}`, fileSize: stored.buffer.length };
+			}
+			return driveFile();
+		},
+		next: driveFile,
+	};
 }
 
-// The weight phase of a scheduled run: delivered live loads whose Details state
-// no weight and that have no answer on file yet (or a not_found / error answer
-// older than 30 days), newest first, until `deadlineMs`. At most
-// KPI_WEIGHT_MAX_PER_RUN loads per business day `day`, whatever the number of
-// runs (a failed run is retried): loads already checked that day count against
-// it. Each load is recorded as 'error' BEFORE its rate-con is fetched, so a load
-// whose file takes the process down is not tried again for 30 days.
+// The rate-con phase of a scheduled run (lib/kpi-ratecon-pass.js): delivered live
+// loads that need their weight (Details state none) or their stated miles, newest
+// first, until `deadlineMs`. One download feeds both parsers; at most `maxLoads`
+// loads per business day `day` across both tables, whatever the number of runs.
+// Each load is recorded as 'error' BEFORE its rate-con is fetched, so a load whose
+// file takes the process down is not tried again for 30 days.
 // Returns { driveFetches, checked, codes }.
-async function kpiBackfillWeights(deadlineMs, loads, day) {
-	const out = { driveFetches: 0, checked: 0, codes: new Set() };
-	const nowMs = Date.now();
-	const checkedToday = db.prepare("SELECT checked_at FROM kpi_load_weights WHERE checked_at >= ?")
-		.all(new Date(nowMs - 2 * 86400000).toISOString())
-		.filter((r) => kpiInstantDay(r.checked_at, APP_TIMEZONE) === day).length;
-	const budget = Math.max(0, KPI_WEIGHT_MAX_PER_RUN - checkedToday);
-	const known = new Map(db.prepare("SELECT load_id, status, checked_at, text_rule FROM kpi_load_weights").all().map((r) => [r.load_id, r]));
-	const candidates = [];
-	for (const load of loads) {
-		if (!load.loadId || !KPI_DELIVERED_RE.test(load.status)) continue;
-		const row = known.get(load.loadId);
-		if (row) {
-			const retry = ((row.status === "not_found" || row.status === "error") && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS))
-				|| (row.status === "no_text" && (Number(row.text_rule) || 1) < KPI_TEXT_RULE);
-			if (!retry) continue;
-		}
-		if (kpiWeight.parseWeight(load.detailsText).status === "ok") continue;
-		candidates.push(load);
-	}
-	candidates.sort((a, b) => String(b.day || "").localeCompare(String(a.day || "")));
-	const upsert = db.prepare(`
-		INSERT INTO kpi_load_weights (load_id, weight_lb, source, status, file_id, file_size, checked_at, text_rule)
-		VALUES (?, ?, 'ratecon_pdf', ?, ?, ?, ?, ${KPI_TEXT_RULE})
-		ON CONFLICT(load_id) DO UPDATE SET
-			weight_lb = excluded.weight_lb, source = excluded.source, status = excluded.status,
-			file_id = excluded.file_id, file_size = excluded.file_size, checked_at = excluded.checked_at, text_rule = excluded.text_rule
-	`);
-	for (const load of candidates.slice(0, budget)) {
-		if (Date.now() >= deadlineMs) {
-			out.codes.add("RATECON_TIME_LIMIT");
-			break;
-		}
-		upsert.run(load.loadId, null, "error", "", null, new Date().toISOString());
-		let result;
-		try {
-			result = await kpiWithin(kpiRateConWeight(load.loadId, out, deadlineMs), deadlineMs - Date.now());
-		} catch (e) {
-			result = { status: "error", weightLb: null, fileId: "", fileSize: null };
-			out.codes.add(e && e.kpiCode === "TIME_LIMIT" ? "RATECON_TIME_LIMIT" : "RATECON_FETCH_FAILED");
-		}
-		upsert.run(load.loadId, Number.isFinite(result.weightLb) ? result.weightLb : null, result.status, result.fileId || "", Number.isFinite(result.fileSize) ? result.fileSize : null, new Date().toISOString());
-		out.checked++;
-		await kpiYield();
-	}
-	return out;
+async function kpiBackfillWeights(deadlineMs, loads, day, maxLoads = KPI_WEIGHT_MAX_PER_RUN) {
+	return kpiRateconPass.runRateconPass({
+		db, loads, day, timeZone: APP_TIMEZONE, deadlineMs, maxLoads, weightTextRule: KPI_TEXT_RULE,
+		openSources: kpiRateConSources,
+		readText: (buffer) => brokerInvoice.extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES }),
+		weightLib: kpiWeight,
+		within: kpiWithin,
+		now: () => Date.now(),
+		pause: kpiYield,
+	});
+}
+
+// The nightly deadhead route phase (lib/kpi-deadhead-routes.js): distance-only
+// Routes calls for the chained pairs the mile metrics can use that the cache
+// has no good answer for (newest first; a failed pair after 30 days), at most 50
+// a business day, never in a replica, never with KPI_DEADHEAD_ROUTES_ENABLED off,
+// and only until `deadlineMs` (the phase's own budget): no call starts after it
+// and none runs past it. New distances go back into `inputs` so this run's
+// figures use them.
+async function kpiDeadheadRouteCalls(inputs, day, kind, deadlineMs) {
+	if (kind !== "nightly" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;
+	const pending = kpiMiles.pendingRoutePairs({
+		milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone: APP_TIMEZONE, truckAt: inputs.truckAt,
+		truckIdByUnit: inputs.truckIdByUnit, routes: inputs.deadheadRoutes,
+	});
+	const res = await kpiDeadheadRoutes.runRouteCalls({
+		db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,
+		apiKey: GOOGLE_MAPS_API_KEY, fetchFn: fetch, day, timeZone: APP_TIMEZONE, now: () => Date.now(), deadlineMs,
+	});
+	if (res.calls) inputs.deadheadRoutes = kpiDeadheadRoutes.readRoutes(db);
+	return res;
 }
 
 // One metric's stored payload, cut to KPI_PAYLOAD_MAX_BYTES: the breakdown goes
@@ -64131,9 +64151,13 @@ async function runKpiSnapshot(kind) {
 			try {
 				const w = await kpiBackfillWeights(Math.min(Date.now() + KPI_DRIVE_TIME_LIMIT_MS, deadlineMs), sheet.loads, day);
 				driveFetches = w.driveFetches;
-				for (const code of w.codes) note("freight_tons_stated", code);
+				for (const code of w.codes) {
+					note("freight_tons_stated", code);
+					note("paid_miles", code);
+				}
 			} catch {
 				note("freight_tons_stated", "RATECON_PHASE_FAILED");
+				note("paid_miles", "RATECON_PHASE_FAILED");
 			}
 			await kpiYield();
 		}
@@ -64145,6 +64169,20 @@ async function runKpiSnapshot(kind) {
 			inputs = kpiAssembleInputs({ asOfDay: day, settings, sheet, dbIn });
 		} catch {
 			throw kpiStop("DB_READ_FAILED");
+		}
+		await kpiYield();
+
+		// R10: deadhead route distances, nightly runs only (and only with the flag on),
+		// within the phase's own budget: KPI_ROUTES_TIME_LIMIT_MS, ending at least
+		// KPI_ROUTES_RESERVE_MS before the run's deadline, so a slow or hanging
+		// Routes call can never cost the night its snapshot. kpiWithin() is the
+		// backstop for a call that ignores its abort signal.
+		const routesDeadlineMs = Math.min(Date.now() + KPI_ROUTES_TIME_LIMIT_MS, deadlineMs - KPI_ROUTES_RESERVE_MS);
+		try {
+			const r = await kpiWithin(kpiDeadheadRouteCalls(inputs, day, kind, routesDeadlineMs), Math.max(0, routesDeadlineMs - Date.now()) + 1000);
+			for (const code of r ? r.codes : []) note("deadhead_miles", code);
+		} catch (e) {
+			note("deadhead_miles", e && e.kpiCode === "TIME_LIMIT" ? "ROUTES_TIME_LIMIT" : "ROUTES_PHASE_FAILED");
 		}
 		await kpiYield();
 

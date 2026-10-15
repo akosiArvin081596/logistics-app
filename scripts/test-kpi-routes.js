@@ -131,7 +131,7 @@ const DEP_DDL = [
 	tableDdl("expenses"), alterDdl("expenses", "gallons"), alterDdl("expenses", "receipt_details"),
 	tableDdl("audit_trail"), tableDdl("load_status_history"), tableDdl("invoice_autogen_runs"),
 	tableDdl("load_eld_miles"), tableDdl("load_coordinates"), tableDdl("documents"), alterDdl("documents", "deleted_at"),
-	tableDdl("app_settings"), tableDdl("server_state"), tableDdl("deleted_loads"),
+	tableDdl("app_settings"), tableDdl("server_state"), tableDdl("deleted_loads"), tableDdl("load_ratecon_miles"),
 ];
 
 // ── contract-shaped fakes of Backend A's modules ───────────────────────────
@@ -222,11 +222,19 @@ async function startWorld(block = BLOCK) {
 			const map = {
 				"./lib/kpi-catalog": libs.catalog, "./lib/kpi-metrics": libs.metrics, "./lib/kpi-weight": libs.weight,
 				"./lib/kpi-schedule": require(path.join(ROOT, "lib", "kpi-schedule.js")), "./lib/kpi-digest": require(path.join(ROOT, "lib", "kpi-digest.js")),
+				"./lib/kpi-ratecon-pass": require(path.join(ROOT, "lib", "kpi-ratecon-pass.js")),
+				"./lib/kpi-deadhead-routes": require(path.join(ROOT, "lib", "kpi-deadhead-routes.js")),
+				"./lib/kpi-miles-data": require(path.join(ROOT, "lib", "kpi-miles-data.js")),
+				"./lib/kpi-miles": require(path.join(ROOT, "lib", "kpi-miles.js")),
 			};
 			if (!(p in map)) throw new Error(`the KPI block required an unexpected module: ${p}`);
 			return map[p];
 		},
 		process: { env: {} },
+		buildHaulTruckResolver: () => ({ forDriverAt: () => null }),
+		REPLICA: null,
+		GOOGLE_MAPS_API_KEY: "",
+		fetch: async () => { throw new Error("no network in this runner"); },
 		console: { log: (...a) => log.logs.push(a.join(" ")), warn: (...a) => log.logs.push(a.join(" ")), error: (...a) => log.logs.push(a.join(" ")) },
 		db, app,
 		appTime: require(path.join(ROOT, "lib", "app-time.js")),
@@ -426,6 +434,11 @@ async function settingsSection(block) {
 			["MPG \"8\" (a string)", { baselineMpg: "8" }, "baselineMpg"],
 			["2026-02-31", { dedicatedStart: "2026-02-31" }, "dedicatedStart"],
 			["2026-1-05", { dedicatedStart: "2026-1-05" }, "dedicatedStart"],
+			// R10 (test 27): a contract-start month must be a real one in range.
+			["month 2026-13", { dedicatedStart: "2026-13" }, "dedicatedStart"],
+			["month 2026-9", { dedicatedStart: "2026-9" }, "dedicatedStart"],
+			["month 2019-12", { dedicatedStart: "2019-12" }, "dedicatedStart"],
+			["a month for the AI dispatch start", { aiDispatchStart: "2026-09" }, "aiDispatchStart"],
 			["an ISO timestamp", { aiDispatchStart: "2026-01-05T00:00:00Z" }, "aiDispatchStart"],
 			["a number for a date", { aiDispatchStart: 20260105 }, "aiDispatchStart"],
 			["a date in 1999", { aiDispatchStart: "1999-01-05" }, "aiDispatchStart"],
@@ -457,6 +470,19 @@ async function settingsSection(block) {
 		t(same.status === 200 && same.body.changed.length === 0 && auditsOf(w, "kpi_settings_update").length === 1, "§5 a no-op save: changed [], no audit row");
 		const cleared = await put({ dedicatedStart: null, baselineMpg: 3 });
 		t(cleared.status === 200 && JSON.parse(stored().value).dedicatedStart === null && JSON.parse(stored().value).baselineMpg === 3, "§5 null clears a date; 3 is accepted");
+		// R10 (test 27): the contract start as a month, then made exact.
+		const month = await put({ dedicatedStart: "2026-09" });
+		t(month.status === 200 && JSON.parse(stored().value).dedicatedStart === "2026-09" && month.body.changed.join() === "dedicatedStart", `§5 a month is accepted for the contract start (${month.status})`);
+		const exact = await put({ dedicatedStart: "2026-09-15" });
+		t(exact.status === 200 && JSON.parse(stored().value).dedicatedStart === "2026-09-15", "§5 ...and so is a full date");
+		const monthErr = w.internals.kpiSettingsPatch({ dedicatedStart: "2026-13" });
+		t(monthErr.error === "dedicatedStart must be a month (YYYY-MM), a date (YYYY-MM-DD) or empty.", `§5 the contract start's own error text (${monthErr.error})`);
+		// The server's rule and lib/kpi-catalog.js dedicatedStartPrecision() (which
+		// the metrics read) agree on every value.
+		const realCatalog = require(path.join(ROOT, "lib", "kpi-catalog.js"));
+		const samples = ["2026-09", "2020-01", "2100-12", "2019-12", "2101-01", "2026-13", "2026-00", "2026-9", "2026-09-15", "2026-02-29", "2028-02-29", "2019-12-31", "2100-12-31", "2026-09-31", "", "Sep 2026", "2026-09 "];
+		const disagree = samples.filter((v) => !w.internals.kpiSettingsPatch({ dedicatedStart: v }).error !== !!realCatalog.dedicatedStartPrecision(v));
+		t(disagree.length === 0, `§5 the server's month-or-day rule equals the catalog's (${disagree.join(", ") || "all agree"})`);
 	} catch (e) {
 		t(false, `section threw: ${e && e.message}`);
 	} finally { await w.close(); }

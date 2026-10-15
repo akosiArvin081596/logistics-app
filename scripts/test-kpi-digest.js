@@ -20,7 +20,16 @@
  * §9 the module is pure: no require, no process.env.
  * §10 MUTANTS: the preview marker with a hyphen, the approved mark inverted,
  *    escaping removed, missing data shown as 0, an estimate without its
- *    assumption, the breakdown printed (sentinels leak).
+ *    assumption, the breakdown printed (sentinels leak), the hold off or
+ *    missing a key or holding truck utilization, equal-window entries printed,
+ *    the month-to-date note dropped.
+ * §11 R10 hold: the five mile metrics are absent from both bodies while
+ *    DIGEST_HOLD is on (the default), every other metric's lines unchanged,
+ *    truck utilization included; the held list is exactly those five.
+ * §12 a month-mode before/after entry prints one line (months named, the
+ *    contract-month label or the two exact-date rows) and the month-to-date
+ *    note, after the comparisons; an equal-window entry prints none; no
+ *    coverage line or count.
  *
  * Pure: no server, no database, no network.
  *
@@ -165,6 +174,75 @@ function checks(d) {
 		t(leaks.length === 0, `§8 "${s}" appears nowhere (${leaks.join(", ") || "clean"})`);
 	}
 	t(!/@example\.test/.test(weekly.html + weekly.text), "§8 the settings (recipients) are not printed");
+	return out.concat(holdChecks(d), beforeAfterChecks(d));
+}
+
+// R10: the five mile metrics are held out of the digest until the user lifts
+// the hold; truck utilization (its figure unchanged) is not.
+const HELD = ["loaded_miles", "paid_miles", "deadhead_miles", "unloaded_miles", "paid_mile_share"];
+const MONTH_MODE = {
+	event: "dedicated", date: "2026-09", precision: "month", status: "insufficient",
+	before: { value: 65.3, n: 52, display: "65.3%", months: ["2026-07", "2026-08"], label: "July-August 2026", dropped: ["2026-06"], coverage: { num: 49, den: 52 }, loadedLegOnly: 0, nothingOnFile: 3 },
+	after: { value: null, n: 0, display: "No full month yet", months: [], label: "", dropped: [], coverage: { num: 0, den: 0 }, loadedLegOnly: 0, nothingOnFile: 0 },
+	contractMonth: [{ label: "September 2026", from: "2026-09-01", to: "2026-09-30", value: 92.9, display: "92.9%", n: 50, coverage: { num: 49, den: 50 }, loadedLegOnly: 1, nothingOnFile: 0 }],
+	monthToDate: { label: "October 1-14, 2026", from: "2026-10-01", to: "2026-10-14", value: 75, display: "75.0%", n: 29, coverage: { num: 27, den: 29 }, loadedLegOnly: 2, nothingOnFile: 0 },
+	deltaPct: null, display: "65.3% → No full month yet", note: "Whole months.",
+};
+const EXACT = {
+	...MONTH_MODE, date: "2026-09-15", precision: "day",
+	contractMonth: [
+		{ label: "September 1-14, before the start", from: "2026-09-01", to: "2026-09-14", value: 90.1, display: "90.1%", n: 20, coverage: { num: 19, den: 20 }, loadedLegOnly: 0, nothingOnFile: 1 },
+		{ label: "September 15-30, from the start", from: "2026-09-15", to: "2026-09-30", value: null, display: "Not enough data", n: 30, coverage: { num: 25, den: 30 }, loadedLegOnly: 3, nothingOnFile: 2 },
+	],
+};
+const EQUAL_WINDOWS = { event: "dedicated", date: "2026-09-01", status: "ok", before: { value: 80, n: 80, display: "80.0%" }, after: { value: 85, n: 80, display: "85.0%" }, deltaPct: 6.3, display: "80.0% → 85.0% (+5.0 pts)", note: "40 days on each side." };
+function holdFixture() {
+	const f = fixture();
+	f.metrics.push(
+		metric("truck_utilization", "Truck utilization (active days)", { display: "71.0%", beforeAfter: [EQUAL_WINDOWS] }),
+		metric("paid_mile_share", "Paid-mile share (paid ÷ total ELD miles)", { display: "92.9%", beforeAfter: [MONTH_MODE] }),
+		metric("loaded_miles", "Loaded miles", { display: "17,164 mi" }),
+		metric("paid_miles", "Paid miles (rate confirmations)", { display: "20,669 mi" }),
+		metric("deadhead_miles", "Deadhead miles", { display: "3,505 mi", status: "partial" }),
+		metric("unloaded_miles", "Unloaded miles (ELD total minus loaded)", { display: "5,081 mi" }),
+	);
+	return f;
+}
+function holdChecks(d) {
+	const out = [];
+	const t = (cond, name) => out.push({ ok: !!cond, name });
+	t(d.DIGEST_HOLD && d.DIGEST_HOLD.enabled === true && Object.isFrozen(d.DIGEST_HOLD) && Object.isFrozen(d.DIGEST_HOLD.keys), "§11 the hold is on by default, and frozen");
+	t(d.DIGEST_HOLD && JSON.stringify([...d.DIGEST_HOLD.keys].sort()) === JSON.stringify([...HELD].sort()) && d.DIGEST_HOLD.keys.length === 5, "§11 the held list is exactly the five mile metrics");
+	const digest = d.buildDigest({ response: holdFixture(), preview: false, asOfDay: "2026-10-14" });
+	const plain = d.buildDigest({ response: fixture(), preview: false, asOfDay: "2026-10-14" });
+	for (const label of ["Loaded miles", "Paid miles (rate confirmations)", "Deadhead miles", "Unloaded miles", "Paid-mile share"]) {
+		t(!digest.html.includes(label) && !digest.text.includes(label), `§11 "${label}" is in neither body while the hold is on`);
+	}
+	t(!/17,164|20,669|3,505|5,081|92\.9%/.test(digest.html + digest.text), "§11 no held figure is printed");
+	t(digest.html.includes("Truck utilization (active days)") && digest.html.includes("71.0% (September 2026)"), "§11 truck utilization is not held");
+	t((digest.html.match(/<tr>/g) || []).length === fixture().metrics.length + 1, "§11 every other metric keeps its row");
+	const rest = (s) => s.replace(/<tr><td[^>]*>Truck utilization \(active days\)<\/td>[\s\S]*?<\/tr>\n?/, "").replace(/Truck utilization \(active days\)\n(?: {2}.*\n)*\n/, "");
+	t(rest(digest.html) === plain.html && rest(digest.text) === plain.text, "§11 the other metrics' lines are unchanged");
+	return out;
+}
+function beforeAfterChecks(d) {
+	const out = [];
+	const t = (cond, name) => out.push({ ok: !!cond, name });
+	const lines = typeof d.beforeAfterLines === "function" ? d.beforeAfterLines({ beforeAfter: [MONTH_MODE] }) : [];
+	t(lines[0] === "Before: 65.3% (July-August 2026). Contract month: 92.9% (September 2026). After: no full month yet.", `§12 a month-mode entry: its before/after line, months named (${JSON.stringify(lines[0])})`);
+	t(lines[1] === "Month to date (October 1-14, 2026): 75.0%. Loads still under way are in the total miles but not yet in the paid miles.", `§12 the month-to-date note (${JSON.stringify(lines[1])})`);
+	const exact = typeof d.beforeAfterLines === "function" ? d.beforeAfterLines({ beforeAfter: [EXACT] }) : [];
+	t(exact[0] === "Before: 65.3% (July-August 2026). September 1-14, before the start: 90.1%. September 15-30, from the start: not enough data. After: no full month yet.", `§12 an exact date: the two contract-month rows (${JSON.stringify(exact[0])})`);
+	const equal = typeof d.beforeAfterLines === "function" ? d.beforeAfterLines({ beforeAfter: [EQUAL_WINDOWS] }) : ["x"];
+	t(equal.length === 0, "§12 an equal-window entry prints no before/after line");
+	// Through buildDigest, on a metric the hold does not cover.
+	const f = fixture();
+	f.metrics.push(metric("zed_month_mode", "Zed month-mode metric", { display: "92.9%", beforeAfter: [MONTH_MODE] }));
+	const digest = d.buildDigest({ response: f, preview: false, asOfDay: "2026-10-14" });
+	const row = digest.text.split("\n\n").find((b) => b.startsWith("Zed month-mode metric")) || "";
+	t(/Before: 65\.3% \(July-August 2026\)\. Contract month: 92\.9% \(September 2026\)\. After: no full month yet\./.test(row) && /Month to date \(October 1-14, 2026\)/.test(row), "§12 buildDigest prints the line after the comparisons");
+	t(row.indexOf("Before:") > row.indexOf("Year over year") && row.indexOf("Before:") < row.indexOf("Measured."), "§12 ...between the comparisons and the kind");
+	t(!/coverage|of 52|49|nothing on file|loaded leg/i.test(row), "§12 no coverage line and no counts in the digest");
 	return out;
 }
 
@@ -203,8 +281,13 @@ console.log("\n§10 MUTANTS");
 		["an estimate without its assumption",
 			swap(SRC, "return `Estimate — ${why} Confidence: ${confidence}.`;", "return `Estimate. Confidence: ${confidence}.`;")],
 		["the breakdown printed (sentinel names leak)",
-			swap(SRC, "details: [valueText(m), ...comparisonLines(m), kindText(m), ...noteLines(m), approvedText(m)],",
-				"details: [valueText(m), ...comparisonLines(m), kindText(m), ...noteLines(m), ...(m.breakdown || []).map((b) => `${b.label}: ${b.display}`), approvedText(m)],")],
+			swap(SRC, "details: [valueText(m), ...comparisonLines(m), ...beforeAfterLines(m), kindText(m), ...noteLines(m), approvedText(m)],",
+				"details: [valueText(m), ...comparisonLines(m), ...beforeAfterLines(m), kindText(m), ...noteLines(m), ...(m.breakdown || []).map((b) => `${b.label}: ${b.display}`), approvedText(m)],")],
+		["the hold switched off", swap(SRC, "\tenabled: true,\n\tkeys: Object.freeze([", "\tenabled: false,\n\tkeys: Object.freeze([")],
+		["a mile metric missing from the held list", swap(SRC, "\"loaded_miles\", \"paid_miles\", \"deadhead_miles\", \"unloaded_miles\", \"paid_mile_share\"", "\"loaded_miles\", \"paid_miles\", \"unloaded_miles\", \"paid_mile_share\"")],
+		["truck utilization held too", swap(SRC, "\"unloaded_miles\", \"paid_mile_share\"]),", "\"unloaded_miles\", \"paid_mile_share\", \"truck_utilization\"]),")],
+		["equal-window entries printed", swap(SRC, "(b.precision !== \"month\" && b.precision !== \"day\")) continue;", "false) continue;")],
+		["the month-to-date note dropped", swap(SRC, "if (mtd && line(mtd.label, 60)) out.push(", "if (false) out.push(")],
 	];
 	record(mutants.map(([name, src]) => ({ ok: caught(src), name: `MUTANT ${name}: caught` })));
 }

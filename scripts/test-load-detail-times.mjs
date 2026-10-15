@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// Load detail times on the loadboard (B14 leftover).
+//
+// The Job Board, Active Loads and Completed detail panels printed every sheet
+// cell as stored, so a stamp read "10/12/2026 0:17:10" while the rest of the page
+// says "10/12/2026, 12:17 AM". Each tab carried its own copy of detailValue();
+// the one copy now lives in client/src/lib/loadDetail.js and passes a cell
+// shaped like a date or time through fmtSheetMoment() (client/src/utils/datetime.js),
+// which already decides how each kind shows:
+//   - a bare sheet stamp (no zone): its wall clock as written, 12 h, no label,
+//     never converted, whatever era it was written in;
+//   - a value carrying its zone (ISO ...Z or an offset): US Eastern (APP_TIMEZONE)
+//     with EDT/EST;
+//   - a date-only value: the same calendar day, never through UTC.
+// Two stored shapes are read first: an email Date header saved in a cell
+// ("Date: Wed, 28 Jan 2026 10:52:46 -0500": its offset makes it an instant, so
+// Eastern with the label) and a two-digit-year stamp with a time ("11/18/25
+// 13:00" is 2025, shown like the four-digit stamp). Trailing words keep a cell
+// as stored. Anything else (addresses, money, load numbers, free text) prints as
+// before.
+//
+//   §1 client/src/lib/loadDetail.js on a case table.
+//   §2 the three tabs use it and keep no copy of their own.
+//
+// No network, no DOM, no build.
+//   node scripts/test-load-detail-times.mjs      # exits 1 on any failure
+
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath, pathToFileURL } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const SRC = path.join(__dirname, '..', 'client', 'src')
+const LIB_PATH = path.join(SRC, 'lib', 'loadDetail.js')
+
+let pass = 0
+let fail = 0
+function check(name, actual, expected) {
+  const a = JSON.stringify(actual)
+  const e = JSON.stringify(expected)
+  if (a === e) { pass++; return }
+  fail++
+  console.log(`  FAIL  ${name}\n          expected ${e}\n          actual   ${a}`)
+}
+
+let lib
+try {
+  lib = await import(pathToFileURL(LIB_PATH).href)
+} catch (err) {
+  check('client/src/lib/loadDetail.js loads', String(err.message).split('\n')[0], 'loaded')
+}
+
+// ---------------------------------------------------------------------------
+console.log('§1 lib/loadDetail.js')
+// ---------------------------------------------------------------------------
+if (lib) {
+  const { detailValue, parseJsonCell } = lib
+  const cell = (v) => detailValue({ C: v }, 'C')
+  const SHOWN = [
+    // A stamp written since 2026-10-09 (Eastern): shown as written, 12 h.
+    ['10/12/2026 0:17:10', '10/12/2026, 12:17 AM'],
+    ['10/12/2026 13:05', '10/12/2026, 1:05 PM'],
+    ['10/14/2026 12:09:59', '10/14/2026, 12:09 PM'],
+    ['10/12/2026, 9:51:00 PM', '10/12/2026, 9:51 PM'],
+    ['10/12/2026 23:59:59', '10/12/2026, 11:59 PM'],
+    ['10/12/2026 0:00', '10/12/2026, 12:00 AM'],
+    // Older stamps (saved in Houston time, or UTC before 2026-08-03): the same
+    // wall clock as written, no zone label, not converted.
+    ['9/15/2026 14:05:00', '9/15/2026, 2:05 PM'],
+    ['7/20/2026 23:59:59', '7/20/2026, 11:59 PM'],
+    // A value that carries its zone: US Eastern, labelled.
+    ['2026-10-12T04:17:10.000Z', 'Oct 12, 2026, 12:17 AM EDT'],
+    ['2026-12-01T17:00:00Z', 'Dec 1, 2026, 12:00 PM EST'],
+    ['2026-10-12T00:17:10-04:00', 'Oct 12, 2026, 12:17 AM EDT'],
+    // Date only: the calendar day as written.
+    ['2026-10-12', 'Oct 12, 2026'],
+    ['2026-01-01', 'Jan 1, 2026'],
+    ['10/12/2026', '10/12/2026'],
+    ['09/05/2026', '9/5/2026'],
+    // An email Date header saved in a cell: its offset makes it an instant, so
+    // US Eastern with the zone label, like the ISO values above.
+    ['Date: Wed, 28 Jan 2026 10:52:46 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Wed, 28 Jan 2026 10:52:46 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Date: Tue, 14 Oct 2025 21:05:00 +0000', 'Oct 14, 2025, 5:05 PM EDT'],
+    ['Date: Mon, 2 Jun 2025 08:15:00 -0700', 'Jun 2, 2025, 11:15 AM EDT'],
+    ['Date: 28 Jan 2026 10:52 -0500', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Wed, 28 Jan 2026 15:52:46 +0000 (UTC)', 'Jan 28, 2026, 10:52 AM EST'],
+    ['Date: Wed, 28 Jan 2026 15:52:46 GMT', 'Jan 28, 2026, 10:52 AM EST'],
+    // A two-digit year with a time: 20YY, shown like the four-digit stamp (no label).
+    ['11/18/25 13:00', '11/18/2025, 1:00 PM'],
+    ['1/5/26 9:07:30', '1/5/2026, 9:07 AM'],
+    ['11/18/25 1:00 PM', '11/18/2025, 1:00 PM'],
+    // February 29th in a leap year is a real day.
+    ['2/29/2028 10:00', '2/29/2028, 10:00 AM'],
+    ['2/29/24 9:00', '2/29/2024, 9:00 AM'],
+    ['2028-02-29', 'Feb 29, 2028'],
+  ]
+  check('date and time cells show like the rest of the page', SHOWN.map(([v]) => cell(v)), SHOWN.map(([, want]) => want))
+  const UNCHANGED = [
+    '$1,800.00', '540000001', '#540000001', '1 Main St, Dallas, TX 75201', 'Dry Van',
+    // isZoned() would call these zoned (a trailing offset, a UTC/GMT word); they
+    // aren't dates and print as written.
+    'Truck 2-1200', 'Pickup before 10:00 UTC', 'GMT freight',
+    // No zone on an ISO time: not a sheet stamp, print as written.
+    '2026-10-12T00:17:10',
+    '10/14/2026 08:00 - 12:00', '13/45/2026 0:17', 'TBD', '',
+    // A clock no stamp can hold: hour 0-23, minute and second 0-59, else as stored.
+    '10/12/2026 27:15', '10/12/2026 24:00', '10/12/2026 12:60', '10/12/2026 12:30:61',
+    // Email Date headers it can't trust: trailing text, a weekday that isn't
+    // that date's, a day that doesn't exist, an impossible clock or offset, no zone.
+    'Date: Wed, 28 Jan 2026 10:52:46 -0500 extra', 'Date: Thu, 28 Jan 2026 10:52:46 -0500',
+    'Date: Mon, 30 Feb 2026 10:52:46 -0500', 'Date: Wed, 28 Jan 2026 25:52:46 -0500',
+    'Date: Wed, 28 Jan 2026 10:52:46 -2500', 'Date: Wed, 28 Jan 2026 10:52:46', 'Date: sometime next week',
+    // Two-digit years: free text after the time, an impossible clock or month,
+    // and a date with no time stay as written.
+    '1/28/26 10:00 Appt.', '11/18/25 27:00', '13/18/25 10:00', '11/18/25',
+    // A day the calendar doesn't have, in any of the stamp shapes.
+    '2/29/27 10:00', '2/30/2026 10:00', '2/30/2026', '4/31/2026 8:00', '2/29/2027', '2026-02-30', '2027-02-29',
+  ]
+  check('every other cell prints as written', UNCHANGED.map(cell), UNCHANGED)
+  check('a number prints as the number', detailValue({ C: 1800 }, 'C'), 1800)
+  check('a missing cell is blank', detailValue({}, 'C'), '')
+  check('a JSON cell lists its non-blank entries, times shown the same way',
+    cell('{"Name":"Acme DC","Appointment":"10/14/2026 8:00","Ref":"","Date":"2026-10-14"}'),
+    'Name: Acme DC, Appointment: 10/14/2026, 8:00 AM, Date: Oct 14, 2026')
+  check('parseJsonCell: an object cell, else null',
+    [parseJsonCell('{"a":1}'), parseJsonCell('{bad'), parseJsonCell('x'), parseJsonCell(''), parseJsonCell(null), parseJsonCell(5)],
+    [{ a: 1 }, null, null, null, null, null])
+}
+
+// ---------------------------------------------------------------------------
+console.log('§2 the tabs')
+// ---------------------------------------------------------------------------
+const DASH = path.join(SRC, 'components', 'dashboard')
+for (const file of ['JobBoardTab.vue', 'ActiveLoadsTab.vue', 'CompletedLoadsTab.vue']) {
+  const src = fs.readFileSync(path.join(DASH, file), 'utf8')
+  check(`${file}: imports detailValue and parseJsonCell from lib/loadDetail`,
+    src.includes("import { parseJsonCell, detailValue } from '../../lib/loadDetail'"), true)
+  check(`${file}: no copy of detailValue of its own`, /function detailValue\(/.test(src), false)
+  check(`${file}: no copy of parseJsonCell of its own`, /function parseJsonCell\(/.test(src), false)
+  check(`${file}: the detail sections read through detailValue`,
+    (src.match(/value: detailValue\(selectedJob\.value, c\)/g) || []).length, 2)
+}
+
+console.log(`\n${pass} passed, ${fail} failed`)
+process.exit(fail ? 1 : 0)

@@ -14,7 +14,7 @@
           Needs Review ({{ needsReviewCount }})
         </button>
       </div>
-      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <div class="overflow-x-auto">
@@ -27,7 +27,7 @@
         <div v-for="job in paginatedItems" :key="job._rowIndex" class="mobile-load-card" @click="openDetail(job)">
           <div class="mobile-load-head">
             <div class="mobile-load-id">
-              <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+              <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
               {{ cellValue(job, loadIdCol) || '—' }}
               <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
             </div>
@@ -89,7 +89,7 @@
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
               <template v-else-if="col === loadIdCol">
-                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract — open and Edit to fix">⚠ Review</span>
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
                 {{ cellValue(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
@@ -469,7 +469,8 @@
 
 <script setup>
 import { computed, ref, reactive, watch } from 'vue'
-import { usePagination } from '../../composables/usePagination'
+import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
+import { ACTIVE_LOADS_PAGE_SIZE } from '../../lib/loadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -484,8 +485,9 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
-import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -515,7 +517,9 @@ const searchResult = computed(() => {
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(filteredJobs)
+// Every active load on one page; paging only above 50, with no size choice
+// (lib/loadboardPaging.js). The search covers every row; a new one starts at page 1.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(filteredJobs, { fixedSize: ACTIVE_LOADS_PAGE_SIZE, resetOn: [searchQuery, needsReviewOnly] })
 const statusOptions = ['Dispatched', 'Heading to Shipper', 'At Shipper', 'Loading', 'In Transit', 'At Receiver', 'Delivered']
 // Columns the dispatcher can manually fix when n8n's extraction is incomplete.
 // Excludes Driver/Truck/Owner ID/Job Status/* — those are managed by the
@@ -953,7 +957,6 @@ const displayCols = computed(() => {
   if (!dropDone) out.splice(Math.min(4, out.length), 0, 'Drop-off')
   return out
 })
-function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 function cellValue(j, c) {
   if (c === 'Pickup') return j._pickupLocation || '\u2014'
   if (c === 'Drop-off') return j._dropLocation || '\u2014'
@@ -964,7 +967,6 @@ function cellValue(j, c) {
 // Two-line address parts for the synthetic Pickup/Drop-off columns (see JobBoardTab).
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
-function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },

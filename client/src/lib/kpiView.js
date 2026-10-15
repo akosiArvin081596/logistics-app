@@ -226,13 +226,41 @@ export function comparisonRow(comparison) {
 }
 
 /**
- * A before/after row. `formatDate` turns the event's 'YYYY-MM-DD' into words
- * (the page passes utils/datetime.js fmtYmd); a date the admins have not set
- * reads "Date not set".
+ * A whole-month side's counts as the server sent them: "49 of 52 loads fully
+ * known · 1 loaded leg only · 3 nothing on file". Counts only; no share.
+ */
+export function sideCountsText(side) {
+  const c = side?.coverage
+  if (!Number.isFinite(c?.num) || !Number.isFinite(c?.den)) return ''
+  const parts = [`${c.num.toLocaleString('en-US')} of ${c.den.toLocaleString('en-US')} loads fully known`]
+  if (Number.isFinite(side?.loadedLegOnly) && side.loadedLegOnly > 0) parts.push(`${side.loadedLegOnly.toLocaleString('en-US')} loaded leg only`)
+  if (Number.isFinite(side?.nothingOnFile) && side.nothingOnFile > 0) parts.push(`${side.nothingOnFile.toLocaleString('en-US')} nothing on file`)
+  return parts.join(' · ')
+}
+
+/** One period of a whole-month entry (a side, a contract-month row, month to date), as sent. */
+function periodView(p, fallbackLabel = '') {
+  if (!p || typeof p !== 'object') return null
+  return {
+    label: String(p.label ?? '') || fallbackLabel,
+    display: String(p.display ?? ''),
+    counts: sideCountsText(p),
+    dropped: Array.isArray(p.dropped) ? p.dropped.map(String) : [],
+  }
+}
+
+/**
+ * A before/after row. `formatDate` turns the event's date into words (the page
+ * passes fmtSettingDate with utils/datetime.js fmtYmd: a month setting reads
+ * "September 2026"); a date the admins have not set reads "Date not set". A
+ * whole-month entry (paid-mile share, `precision` set) also carries its months
+ * per side, the contract-month row(s) and month to date, each as the server
+ * sent it.
  */
 export function beforeAfterRow(row, formatDate = (d) => d) {
   const status = String(row?.status ?? '')
   const date = typeof row?.date === 'string' && row.date ? row.date : null
+  const wholeMonths = row?.precision === 'month' || row?.precision === 'day'
   return {
     event: eventLabel(row?.event),
     dateText: date ? formatDate(date) : BEFORE_AFTER_STATUS_LABELS.date_not_set,
@@ -244,6 +272,11 @@ export function beforeAfterRow(row, formatDate = (d) => d) {
     display: String(row?.display ?? ''),
     note: String(row?.note ?? ''),
     muted: status !== 'ok',
+    wholeMonths,
+    beforeMonths: wholeMonths ? periodView(row?.before) : null,
+    afterMonths: wholeMonths ? periodView(row?.after) : null,
+    contractRows: wholeMonths && Array.isArray(row?.contractMonth) ? row.contractMonth.map((r) => periodView(r)).filter(Boolean) : [],
+    monthToDate: wholeMonths ? periodView(row?.monthToDate) : null,
   }
 }
 
@@ -322,6 +355,43 @@ export const MPG_MAX = 15
 export const RECIPIENTS_MAX = 10
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
+const YM_RE = /^\d{4}-(0[1-9]|1[0-2])$/
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+/** A contract-start month the page may set: 'YYYY-MM' from 2020-01 to 2100-12 (the server checks again). */
+export function isSettingMonth(text) {
+  const s = String(text ?? '')
+  return YM_RE.test(s) && s >= '2020-01' && s <= '2100-12'
+}
+
+/**
+ * A setting's date in words: "September 2026" for a month ('YYYY-MM'),
+ * `formatDay` for a day (the page passes utils/datetime.js fmtYmd), '' for
+ * anything else.
+ */
+export function fmtSettingDate(value, formatDay = (d) => d) {
+  const s = String(value ?? '').trim()
+  if (YM_RE.test(s)) return `${MONTH_NAMES[parseInt(s.slice(5, 7), 10) - 1]} ${s.slice(0, 4)}`
+  if (YMD_RE.test(s)) return formatDay(s)
+  return ''
+}
+
+/** The contract start as the form edits it: a month box and an optional day box. */
+export function splitDedicatedStart(value) {
+  const s = String(value ?? '').trim()
+  if (YMD_RE.test(s)) return { month: s.slice(0, 7), day: String(parseInt(s.slice(8, 10), 10)) }
+  if (YM_RE.test(s)) return { month: s, day: '' }
+  return { month: '', day: '' }
+}
+
+/** The two boxes back into one value: '2026-09', '2026-09-05', or '' with no month. */
+export function joinDedicatedStart(month, day) {
+  const m = String(month ?? '').trim()
+  if (!m) return ''
+  const d = String(day ?? '').trim()
+  if (!d) return m
+  return /^\d{1,2}$/.test(d) ? `${m}-${d.padStart(2, '0')}` : `${m}-${d}`
+}
 
 /** The server's 400 { error, code, field } as { field, message }; field is null when it names none of the form's. */
 export function settingsErrorFrom(err) {
@@ -373,10 +443,14 @@ export function settingsChanges(settings, form) {
   const body = {}
   const errors = {}
 
+  // The AI dispatch start is a full date; the contract start a month or a date.
   for (const field of ['aiDispatchStart', 'dedicatedStart']) {
     const next = dateOrNull(form?.[field])
-    if (next !== null && !YMD_RE.test(next)) {
-      errors[field] = 'Enter a date as YYYY-MM-DD, or leave it empty.'
+    const monthOk = field === 'dedicatedStart' && next !== null && isSettingMonth(next)
+    if (next !== null && !YMD_RE.test(next) && !monthOk) {
+      errors[field] = field === 'dedicatedStart'
+        ? 'Enter a month (YYYY-MM) or a date (YYYY-MM-DD), or leave it empty.'
+        : 'Enter a date as YYYY-MM-DD, or leave it empty.'
       continue
     }
     if (next !== dateOrNull(original[field])) body[field] = next

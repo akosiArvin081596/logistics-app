@@ -172,6 +172,9 @@ function buildDb(personalSchemaSql) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) throw new Error(`DDL failed: ${e.message}\n${sql.slice(0, 160)}`); }
 	}
 	db.exec(personalSchemaSql);
+	// The KPI tables whose DDL lives in their modules, created as server.js does.
+	appRequire("./lib/kpi-ratecon-pass").ensureTables(db);
+	appRequire("./lib/kpi-deadhead-routes").ensureTables(db);
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, company_name, driver_name) VALUES (?, ?, 'x', ?, ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "", "");
 	user.run(2, "ops_admin", "Super Admin", "", "");
