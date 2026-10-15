@@ -1,9 +1,9 @@
 // The payout ledger and the Financials freeze, run in a script exactly as the
 // server runs them: their code is lifted from this checkout's server.js at run
 // time (lib/server-lift.js), so a script always computes what the deployed
-// endpoint would. Used by scripts/payout-rules-dry-run.js and
-// scripts/freeze-closed-months.js, which run on the server over ssh, with no
-// login.
+// endpoint would. Used by scripts/payout-rules-dry-run.js,
+// scripts/ledger-day-once-dry-run.js and scripts/freeze-closed-months.js, which
+// run on the server over ssh, with no login.
 //
 // What the lifted code gets in place of the server's process:
 //   - db: its own better-sqlite3 handle on the given app.db (read-only for a
@@ -28,7 +28,10 @@ const { createRequire } = require("module");
 const { closure } = require("./server-lift");
 
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';
-const ROOTS = ["payoutRulesDryRun", "closedMonthFreezePlan", "buildFinancialsLedger", "installPeriodLockTriggers", "parseSheet", "deduplicateLoads"];
+const ROOTS = ["payoutRulesDryRun", "closedMonthFreezePlan", "buildFinancialsLedger", "installPeriodLockTriggers", "parseSheet", "deduplicateLoads",
+	// scripts/ledger-day-once-dry-run.js: every scope's ledger, and each investor's payable.
+	"computeFleetLedger", "computeInvestorMonthlyEarnings", "computeLossCarryForward", "listSettlableInvestors", "getCarrierDBFromSQLite",
+	"getInvestorDriverSet", "findCol", "isLocked"];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "getJobTrackingCached", "fetch"];
 const DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "jtCacheInvalidate", "sendEmail", "transporter", "getDrive"];
 // What the lifted code may require: Node's crypto and the app's own lib/.
@@ -102,8 +105,9 @@ function readEnv(root, appRequire) {
 
 // `envFile`: the .env to read in place of the app directory's, for a copy of
 // the database only (tests pass an empty one, so a developer's flags never
-// reach them).
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null }) {
+// reach them). `envOverrides`: settings laid over that environment for this
+// world only (a dry run comparing a rule off and on).
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
@@ -117,7 +121,7 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null })
 	const register = (method) => (p, ...h) => { routes[`${method} ${p}`] = h[h.length - 1]; };
 	const app = { get: register("GET"), post: register("POST"), put: register("PUT"), delete: register("DELETE") };
 	const pass = () => (req, res, next) => next && next();
-	const scriptProcess = { env: { ...fileEnv }, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } };
+	const scriptProcess = { env: { ...fileEnv, ...(envOverrides || {}) }, argv: [], exit: () => { throw new Error("lifted code called process.exit()"); } };
 	const liftedRequire = (m) => {
 		if (!LIFTED_REQUIRE_OK(m)) throw new Error(`lifted code required ${m}, which a script does not load`);
 		return appRequire(m);
@@ -135,7 +139,9 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null })
 		"\t}",
 		"\treturn _scriptJobTracking;",
 		"}",
-		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc };",
+		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc,",
+		"\tcomputeFleetLedger, computeInvestorMonthlyEarnings, computeLossCarryForward, listSettlableInvestors, getCarrierDBFromSQLite,",
+		"\tgetInvestorDriverSet, findCol, isLocked };",
 	].join("\n");
 	const api = new Function("db", "require", "console", "process", "__dirname", "app", "requireRole", "refuseCrossOrigin", "notifyChange", "fetch", "__sheetData", body)(
 		db, liftedRequire, console, scriptProcess, root, app, pass, pass(), () => {}, noFetch, sheetData,
