@@ -37528,6 +37528,19 @@ function warnPreDispatchFromClosedMonth() {
 	if (msg) console.warn(`[pre-dispatch] ${msg}`);
 }
 warnPreDispatchFromClosedMonth();
+// A driver-day counted in one month only, from LEDGER_DAY_ONCE_FROM on, in the
+// payout ledger and GET /api/investor (lib/ledger-day-once.js ruleFromEnv(); on
+// only when process.env.LEDGER_DAY_ONCE_ENABLED === "true"). Dormant until the
+// owner approves the dry run (scripts/ledger-day-once-dry-run.js). At boot: one
+// warning when the flag is on without a month, and the notice above for a FROM
+// at or before the latest closed month.
+function warnLedgerDayOnceFromClosedMonth() {
+	const dayOnce = financialsCalc.ledgerDayOnce;
+	const fromMonth = dayOnce.ruleFromEnv(process.env, (msg) => console.warn(`[ledger-day-once] ${msg}`));
+	const msg = fromMonth ? dayOnce.fromMonthClosedWarning(fromMonth, dayOnce.latestClosedMonth(db)) : null;
+	if (msg) console.warn(`[ledger-day-once] ${msg}`);
+}
+warnLedgerDayOnceFromClosedMonth();
 
 // Returns { normalizedDriverName: { remove: Set<"YYYY-MM-DD">, add: Set<"YYYY-MM-DD"> } }
 // for every admin override. Consumed by /api/investor, /api/financials, and
@@ -52931,6 +52944,7 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// The pre-dispatch rule (off unless enabled), the filter GET /api/investor
 		// and the weekly invoice pass to payDaysForLoad() too.
 		preDispatch: preDispatchPayDayFilter(),
+		dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -54682,6 +54696,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				driverDaySource[drv][bucket].est = true;
 			}
 		}
+		// The ledger day-once rule, as the payout ledger applies it (off unless enabled).
+		financialsCalc.ledgerDayOnce.dropRepeatedDays(driverMonthlyDays, financialsCalc.ledgerDayOnce.ruleFromEnv(process.env), driverMonthlyDayLoads);
 
 		// Avg daily revenue = 30-day average (S2).
 		// Gross = raw top-line from completed loads in the trailing 30 days.
