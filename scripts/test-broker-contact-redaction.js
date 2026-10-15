@@ -110,34 +110,58 @@ function extractRoute(head) {
 	if (end < 0) throw new Error(`no column-0 "});" after ${head}`);
 	return SRC.slice(start, end + "\n});".length);
 }
+// Every top-level declaration of server.js, indexed ONCE. A lifted route asks
+// the scope about every free name it touches (JSON, String and the other
+// globals included), so scanning the whole source per question is what once
+// made this runner take minutes on CI. Each answer below is also memoized.
+const TOP_FUNCTION_STARTS = new Map(); // name -> [index of each `function name(` / `async function name(` line]
+for (const m of SRC.matchAll(/\n(?:async )?function ([A-Za-z_$][\w$]*)\(/g)) {
+	const starts = TOP_FUNCTION_STARTS.get(m[1]) || [];
+	starts.push(m.index + 1);
+	TOP_FUNCTION_STARTS.set(m[1], starts);
+}
+const TOP_CONST_STARTS = new Map(); // name -> index of its first `const name = ` line
+for (const m of SRC.matchAll(/^const ([A-Za-z_$][\w$]*) = /gm)) {
+	if (!TOP_CONST_STARTS.has(m[1])) TOP_CONST_STARTS.set(m[1], m.index);
+}
+const FUNCTION_SRC = new Map();
+const CONST_SRC = new Map();
 // A top-level function (column-0 `function name(` / `async function name(`) up to
 // its column-0 closing brace, or null.
 function topLevelFunction(name) {
-	for (const kw of ["function", "async function"]) {
-		const needle = `\n${kw} ${name}(`;
-		const hits = SRC.split(needle).length - 1;
-		if (hits > 1) throw new Error(`${hits} top-level definitions of ${name}()`);
-		if (hits === 1) {
-			const start = SRC.indexOf(needle) + 1;
-			const end = SRC.indexOf("\n}\n", start);
-			return SRC.slice(start, end + 3);
-		}
+	if (FUNCTION_SRC.has(name)) return FUNCTION_SRC.get(name);
+	const starts = TOP_FUNCTION_STARTS.get(name) || [];
+	if (starts.length > 1) throw new Error(`${starts.length} top-level definitions of ${name}()`);
+	let out = null;
+	if (starts.length === 1) {
+		const end = SRC.indexOf("\n}\n", starts[0]);
+		out = SRC.slice(starts[0], end + 3);
 	}
-	return null;
+	FUNCTION_SRC.set(name, out);
+	return out;
 }
 // A top-level `const name = <expr>;`, or null: one line, or a literal that
 // closes at column 0 ("];", "};", "]);" ...).
 function topLevelConst(name) {
-	const esc = name.replace(/\$/g, "\\$");
-	const one = new RegExp(`^const ${esc} = (.+);[ \\t]*$`, "m").exec(SRC);
-	if (one) return one[1];
-	const head = new RegExp(`^const ${esc} = `, "m").exec(SRC);
-	if (!head) return null;
-	const start = head.index + head[0].length;
-	const close = /\n([\]})]+);[ \t]*\n/g;
-	close.lastIndex = start;
-	const m = close.exec(SRC);
-	return m ? SRC.slice(start, m.index + 1 + m[1].length) : null;
+	if (CONST_SRC.has(name)) return CONST_SRC.get(name);
+	let out = null;
+	if (TOP_CONST_STARTS.has(name)) {
+		const lineStart = TOP_CONST_STARTS.get(name);
+		const lineEnd = SRC.indexOf("\n", lineStart);
+		const line = SRC.slice(lineStart, lineEnd < 0 ? SRC.length : lineEnd);
+		const start = lineStart + `const ${name} = `.length;
+		const one = /^(.+);[ \t]*$/.exec(line.slice(`const ${name} = `.length));
+		if (one) {
+			out = one[1];
+		} else {
+			const close = /\n([\]})]+);[ \t]*\n/g;
+			close.lastIndex = start;
+			const m = close.exec(SRC);
+			out = m ? SRC.slice(start, m.index + 1 + m[1].length) : null;
+		}
+	}
+	CONST_SRC.set(name, out);
+	return out;
 }
 
 // THE SCOPE. A lifted route runs inside `with (scope)`: a name the stubs give
