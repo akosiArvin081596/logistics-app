@@ -7,9 +7,12 @@
 //      password sent); one filled, or two that differ, cannot be saved; two
 //      that match send that password; the hint under the pair
 //   §2 the form, MOUNTED: both password fields are new-password fields that
-//      open empty and hidden; Full Name and Email are autocomplete="off"; the
-//      edited account's username sits read-only in an autocomplete="username"
-//      field, so no saved login can be dropped into it; it is one <form>
+//      open empty and hidden; Full Name and Email carry an autocomplete token
+//      Chrome's autofill doesn't recognise (it ignores "off" for a name or an
+//      email and offered the signed-in admin's own), and open with the edited
+//      account's stored values; the edited account's username sits read-only
+//      in an autocomplete="username" field, so no saved login can be dropped
+//      into it; it is one <form>
 //   §3 Save: enabled with both blank (and the update carries no password);
 //      disabled while only one is filled (what autofill does) or the two
 //      differ, with the hint; enabled once they match (and the update carries
@@ -19,6 +22,11 @@
 //      will do, and is a type="button" (it never submits)
 //   §5 the Linked Driver help line, tied to its select
 //   §6 the login page keeps autocomplete="username" / "current-password"
+//   §7 the login page's eye button, MOUNTED: a type="button" beside the
+//      password field that shows and hides it, says which it will do
+//      (aria-label, aria-pressed), names the field (aria-controls), keeps the
+//      value and puts the caret back, doesn't take focus on a press, and the
+//      password is hidden again when Sign In (or Enter) sends it
 //
 // No DOM, no server: the component is compiled from its .vue file and mounted
 // on an in-memory renderer. Vue comes from client/node_modules; the component
@@ -53,17 +61,37 @@ globalThis.document = globalThis.document || { activeElement: null }
 globalThis.Document = globalThis.Document || class Document {}
 globalThis.ShadowRoot = globalThis.ShadowRoot || class ShadowRoot {}
 
+// The autocomplete field names a browser fills from its own records (HTML's
+// autofill field names), plus "on" and "off", which Chrome's address autofill
+// ignores. A token outside this list is one Chrome doesn't fill.
+const AUTOFILL_TOKENS = new Set([
+  'on', 'off', 'name', 'honorific-prefix', 'given-name', 'additional-name', 'family-name', 'honorific-suffix',
+  'nickname', 'username', 'new-password', 'current-password', 'one-time-code', 'organization-title', 'organization',
+  'street-address', 'address-line1', 'address-line2', 'address-line3', 'address-level4', 'address-level3',
+  'address-level2', 'address-level1', 'country', 'country-name', 'postal-code', 'cc-name', 'cc-given-name',
+  'cc-additional-name', 'cc-family-name', 'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc', 'cc-type',
+  'transaction-currency', 'transaction-amount', 'language', 'bday', 'bday-day', 'bday-month', 'bday-year', 'sex',
+  'url', 'photo', 'tel', 'tel-country-code', 'tel-national', 'tel-area-code', 'tel-local', 'tel-local-prefix',
+  'tel-local-suffix', 'tel-extension', 'email', 'impp', 'webauthn',
+])
+const notAutofilled = (el) => {
+  const value = el && typeof el.props.autocomplete === 'string' ? el.props.autocomplete.trim().toLowerCase() : ''
+  return value !== '' && !AUTOFILL_TOKENS.has(value.split(/\s+/).pop())
+}
+
 const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
 
 // Compile a committed SFC's <script setup> + <template> into a component.
 // Imports come from `overrides` first; a .vue import becomes an empty stub; a
-// relative .js import is loaded from ROOT.
+// relative .js import is loaded from ROOT. Static hoisting is off: a long
+// static run (the login page's brand panel) would otherwise become an HTML
+// string that only a DOM renderer can insert.
 async function compileComponent(rel, overrides = {}) {
   const file = path.join(ROOT, rel)
   if (!fs.existsSync(file)) throw new Error(`${rel} does not exist`)
   const dir = path.dirname(file)
   const { descriptor } = parse(fs.readFileSync(file, 'utf8'), { filename: path.basename(file) })
-  let body = compileScript(descriptor, { id: path.basename(file), inlineTemplate: true }).content
+  let body = compileScript(descriptor, { id: path.basename(file), inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } }).content
   const specs = []
   body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, names, q, spec) => {
     specs.push(spec)
@@ -216,8 +244,9 @@ if (UserTable) {
   ok('§2 "New password" is a new-password field', !!newPw && newPw.props.autocomplete === 'new-password')
   ok('§2 "Confirm new password" exists and is a new-password field', !!confirmPw && confirmPw.props.autocomplete === 'new-password')
   ok('§2 both open empty and hidden', !!newPw && !!confirmPw && newPw.value === '' && confirmPw.value === '' && newPw.props.type === 'password' && confirmPw.props.type === 'password')
-  ok('§2 Full Name does not take autofill', !!fullName && fullName.props.autocomplete === 'off')
-  ok('§2 Email does not take autofill', !!email && email.props.autocomplete === 'off')
+  ok(`§2 Full Name carries a token Chrome's autofill doesn't fill (${fullName && fullName.props.autocomplete})`, notAutofilled(fullName))
+  ok(`§2 Email carries a token Chrome's autofill doesn't fill (${email && email.props.autocomplete})`, notAutofilled(email))
+  ok('§2 Email and Full Name open with the edited account\'s stored values', !!email && email.value === 'second@example.test' && !!fullName && fullName.value === 'Second Admin')
   ok('§2 the edited account\'s username is a read-only autocomplete="username" field (no saved login can be dropped in)',
     !!username && username.props.readonly !== undefined && username.props.readonly !== false && username.props.value === 'second.admin' && username.props.tabindex === '-1')
   ok('§2 no existing password is ever put in a field', !m.findAll((n) => n.tag === 'input' && /password/.test(String(n.props.autocomplete))).some((n) => n.value))
@@ -380,6 +409,72 @@ const login = fs.readFileSync(path.join(ROOT, 'client', 'src', 'views', 'LoginVi
 const loginForm = login.slice(login.indexOf('<!-- LOGIN FORM -->'), login.indexOf('</form>', login.indexOf('<!-- LOGIN FORM -->')))
 ok('§6 login: the username field is autocomplete="username"', /v-model="loginForm\.username"[^>]*autocomplete="username"/.test(loginForm))
 ok('§6 login: the password field is autocomplete="current-password"', /v-model="loginForm\.password"[^>]*autocomplete="current-password"/.test(loginForm))
+
+// ══ §7 the login page's eye button, MOUNTED ══════════════════════════════════
+{
+  const logins = []
+  const auth = { checkSetupNeeded: async () => false, login: async (username, password) => { logins.push({ username, password }) }, roleHome: '/' }
+  let LoginView = null
+  try {
+    LoginView = await compileComponent('client/src/views/LoginView.vue', {
+      'vue-router': { useRouter: () => ({ push() {}, replace() {} }) },
+      '../stores/auth': { isLeavingPage: () => false, useAuthStore: () => auth },
+      'lucide-vue-next': OVERRIDES['lucide-vue-next'],
+    })
+  } catch (err) { ok(`§7 LoginView compiles in this harness (${err.message})`, false) }
+  if (LoginView) {
+    const m = mountInMemory(LoginView, {})
+    await drain()
+    const pw = () => m.find((n) => n.tag === 'input' && n.props.autocomplete === 'current-password')
+    const user = m.find((n) => n.tag === 'input' && n.props.autocomplete === 'username')
+    const toggle = () => m.find((n) => n.tag === 'button' && /^(Show|Hide) password$/.test(String(n.props['aria-label'] || '')))
+    const form = m.find((n) => n.tag === 'form')
+    ok('§7 setup: the sign-in form renders', !!pw() && !!user && !!form)
+    const t = toggle()
+    ok('§7 the password field has an eye button', !!t)
+    if (pw() && user && form && t) {
+      const field = pw()
+      ok('§7 it is a type="button" (it never submits) and keyboard reachable', t.props.type === 'button' && (t.props.tabindex == null || Number(t.props.tabindex) >= 0) && !t.props.disabled)
+      ok('§7 the form\'s only submit button is Sign In', m.findAll((n) => n.tag === 'button' && n.props.type === 'submit').map((n) => m.textOf(n)).join('|') === 'SIGN IN')
+      ok('§7 it names the field it controls, and sits in the field\'s box', !!field.props.id && t.props['aria-controls'] === field.props.id && t.parent === field.parent)
+      ok('§7 it starts as "Show password", not pressed, with the field hidden', t.props['aria-label'] === 'Show password' && t.props['aria-pressed'] === false && field.props.type === 'password')
+      ok('§7 the field asks for no spellcheck or capitals (it may be shown)', field.props.spellcheck === 'false' && field.props.autocapitalize === 'off')
+      let prevented = false
+      if (typeof t.props.onMousedown === 'function') t.props.onMousedown({ preventDefault() { prevented = true }, stopPropagation() {} })
+      ok('§7 a mouse or touch press does not take focus from the field', prevented)
+
+      await type(user, 'dispatch.one')
+      await type(field, 'Typed-Pass-1!')
+      const restored = []
+      Object.assign(field, { selectionStart: 4, selectionEnd: 7, setSelectionRange: (a, b) => restored.push([a, b]) })
+      globalThis.document.activeElement = field
+      await click(t)
+      ok('§7 a click shows the password', pw() === field && field.props.type === 'text')
+      ok('§7 ...and now says "Hide password", pressed', toggle().props['aria-label'] === 'Hide password' && toggle().props['aria-pressed'] === true)
+      ok('§7 ...the value is kept', field.value === 'Typed-Pass-1!')
+      ok('§7 ...and the caret and selection are put back', restored.length === 1 && restored[0][0] === 4 && restored[0][1] === 7)
+      await click(toggle())
+      ok('§7 clicking again hides it', field.props.type === 'password' && toggle().props['aria-label'] === 'Show password' && toggle().props['aria-pressed'] === false)
+      globalThis.document.activeElement = null
+      restored.length = 0
+      await click(toggle())
+      ok('§7 with the focus elsewhere it still toggles, and moves no caret', field.props.type === 'text' && restored.length === 0)
+
+      form.props.onSubmit(evt())
+      await drain()
+      ok('§7 Sign In sends the typed password while it is shown', logins.length === 1 && logins[0].username === 'dispatch.one' && logins[0].password === 'Typed-Pass-1!')
+      ok('§7 ...and hides it again first', field.props.type === 'password' && toggle().props['aria-pressed'] === false)
+      await click(toggle())
+      if (typeof field.props.onKeydown === 'function') field.props.onKeydown({ key: 'Enter', preventDefault() {}, stopPropagation() {} })
+      await drain()
+      ok('§7 Enter in the shown field signs in too, and hides it', logins.length === 2 && logins[1].password === 'Typed-Pass-1!' && field.props.type === 'password')
+    }
+    m.unmount()
+  }
+  const loginSrc = fs.readFileSync(path.join(ROOT, 'client', 'src', 'views', 'LoginView.vue'), 'utf8')
+  ok('§7 phone width: the field may shrink, so the eye button is never pushed out of its box',
+    /\.input-wrap input \{[^}]*min-width: 0;/.test(loginSrc) && /\.pw-toggle \{[^}]*flex-shrink: 0;/.test(loginSrc))
+}
 
 console.log(`\n${pass} passed, ${failures.length} failed`)
 process.exit(failures.length ? 1 : 0)
