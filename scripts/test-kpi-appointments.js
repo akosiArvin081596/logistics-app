@@ -218,6 +218,16 @@ function battery(A) {
 		t(zoneOf({ destLat: 39.77, destLng: -86.16 }) === "America/New_York", "§8 ...and so is Indianapolis placed by its coordinates alone");
 		t(zoneOf({ destAddress: "Gary, IN 46402", destLat: 41.6, destLng: -87.35 }) === "America/Chicago", "§8 Gary, in Indiana's Central corner, is Central");
 		t(zoneOf({ destAddress: "Nashville, TN 37203", destLng: -86.78 }) === "America/Chicago", "§8 Nashville is Central");
+		// Kentucky's line along the county borders, each county seat on its side.
+		const ky = (town, lat, lng) => zoneOf({ destAddress: `${town}, KY`, destLat: lat, destLng: lng });
+		const kyEast = [["Elizabethtown", 37.69, -85.86], ["Radcliff", 37.84, -85.95], ["Brandenburg", 38.0, -86.17], ["Hodgenville", 37.57, -85.74],
+			["Campbellsville", 37.34, -85.34], ["Liberty", 37.32, -84.94], ["Monticello", 36.83, -84.85], ["Louisville", 38.25, -85.76]];
+		const kyCentral = [["Hardinsburg", 37.78, -86.46], ["Leitchfield", 37.48, -86.29], ["Munfordville", 37.27, -85.89], ["Greensburg", 37.26, -85.5],
+			["Columbia", 37.1, -85.31], ["Jamestown", 36.98, -85.06], ["Albany", 36.69, -85.13], ["Glasgow", 37.0, -85.91]];
+		t(kyEast.every(([n, la, ln]) => ky(n, la, ln) === "America/New_York"), "§8 Kentucky's Eastern border counties read Eastern (Elizabethtown, Hardin County, among them)",
+			JSON.stringify(kyEast.filter(([n, la, ln]) => ky(n, la, ln) !== "America/New_York").map(([n]) => n)));
+		t(kyCentral.every(([n, la, ln]) => ky(n, la, ln) === "America/Chicago"), "§8 ...and its Central border counties Central",
+			JSON.stringify(kyCentral.filter(([n, la, ln]) => ky(n, la, ln) !== "America/Chicago").map(([n]) => n)));
 		const phx = at("7/15/2026 14:00", { destAddress: "Phoenix, AZ 85003", destLng: -112.07 });
 		t(phx.zone === "America/Phoenix" && iso(phx.deadlineMs) === "2026-07-15T21:00:00.000Z", "§8 Phoenix keeps MST in July (not MDT)", JSON.stringify(phx));
 		const phxText = at("7/15/2026 14:00 MST", { destAddress: "Phoenix, AZ 85003" });
