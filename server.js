@@ -105,6 +105,7 @@ const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
 const eldFeedHealth = require("./lib/eld-feed-health");
+const driverAvailability = require("./lib/driver-availability");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
 const { buildPayoutStatementHtml } = require("./lib/payout-statement");
@@ -3197,6 +3198,47 @@ function eldFixCountsByVehicle(vehicleIds, sinceMs) {
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// DRIVER AVAILABILITY (R11): the reads. Every caller sits behind
+// DRIVER_AVAILABILITY_ENABLED, so with the flag off nothing reads the table.
+//
+// The live rows of every driver still in the directory, keyed by
+// normalizeDriverName() of the directory row's CURRENT name (a renamed driver
+// keeps his rows). The JOIN is what keeps an orphan inert: a row whose directory
+// row is gone matches no one. Rows that ended before `sinceDay` are left out.
+function driverAvailabilityByName(sinceDay) {
+	const rows = db.prepare(`
+		SELECT a.id, a.directory_id, a.kind, a.from_date, a.to_date, a.cancelled_at, d.driver_name AS directory_name
+		FROM driver_availability a
+		JOIN drivers_directory d ON d.id = a.directory_id
+		WHERE a.cancelled_at IS NULL AND a.to_date >= ?
+		ORDER BY a.from_date ASC, a.id ASC
+	`).all(String(sinceDay || ""));
+	return driverAvailability.groupAvailabilityByDriver(rows, normalizeDriverName);
+}
+
+// Every truck's current driver's time off, Map(truck id -> { driverName,
+// driverOffUntil, driverLastOffTo, driverReturningFromMs }). The truck's driver
+// is its newest open assignment, else trucks.assigned_driver, matched through
+// normalizeDriverName() (lib/driver-availability.js truckAvailabilityFields()).
+// Rows that ended longer ago than the returning grace can last are not read.
+function truckDriverAvailability() {
+	const today = appTodayKey();
+	const byDriver = driverAvailabilityByName(driverAvailability.shiftAvailabilityDay(today, -(Math.ceil(ELD_STALE_HOURS / 24) + 2)));
+	const openByTruck = new Map();
+	for (const a of db.prepare("SELECT id, truck_id, driver_name, start_date FROM truck_assignments WHERE COALESCE(end_date, '') = ''").all()) {
+		if (!openByTruck.has(a.truck_id)) openByTruck.set(a.truck_id, []);
+		openByTruck.get(a.truck_id).push(a);
+	}
+	const out = new Map();
+	for (const t of db.prepare("SELECT id, assigned_driver FROM trucks").all()) {
+		out.set(t.id, driverAvailability.truckAvailabilityFields({
+			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, byDriver, todayKey: today, normalize: normalizeDriverName,
+		}));
+	}
+	return out;
+}
+
 // Everything the judge needs, read in four bounded queries.
 //
 // ⚠️ THE ORPHAN CANDIDATE SET COMES FROM TELEMETRY. routemate_vehicles CANNOT
@@ -3243,6 +3285,18 @@ function eldFeedSnapshot(nowMs) {
 	const latest = eldLatestCleanFixByVehicle(allIds);
 	const counts = eldFixCountsByVehicle(allIds, now - 24 * 60 * 60 * 1000);
 
+	// The truck's driver's recorded time off (R11), only while the flag is on.
+	// A failed read judges every truck without it, i.e. alerting as before: a
+	// detector that goes quiet on an error is the failure this sweep exists for.
+	let availabilityByTruck = null;
+	if (DRIVER_AVAILABILITY_ENABLED) {
+		try {
+			availabilityByTruck = truckDriverAvailability();
+		} catch (e) {
+			console.error("[eld-feed] driver availability unreadable; judging without it:", e.message);
+		}
+	}
+
 	return {
 		// ⚠️ `last_fix_ms`, NOT `location_date_ms`. The staleness clock is the newest
 		// moment the DEVICE reported, never the timestamp on the last row we
@@ -3260,6 +3314,7 @@ function eldFeedSnapshot(nowMs) {
 				lastFixMs: tel ? tel.last_fix_ms : null,
 				fixes24h: vid ? (counts[vid] || 0) : 0,
 				source: tel ? (tel.source || "") : "",
+				...(availabilityByTruck && availabilityByTruck.has(t.id) ? availabilityByTruck.get(t.id) : {}),
 			};
 		}),
 		orphans: orphanIds.map((vid) => {
@@ -3363,6 +3418,11 @@ function eldFeedHealthReport(nowMs) {
 				&& eldFeedHealth.reopenCooldownActive(led.alerted_at, now, ELD_STALE_REOPEN_COOLDOWN_MS)
 				? new Date(eldFeedHealth.stampMs(led.alerted_at) + ELD_STALE_REOPEN_COOLDOWN_MS).toISOString()
 				: null,
+			// The truck's driver is recorded off (driver_off: his last day off) or
+			// just back (driver_returning: when a dark feed alerts again). Only
+			// these two states carry them, so with the flag off neither key exists.
+			...(f.driverOffUntil ? { driverOffUntil: f.driverOffUntil } : {}),
+			...(f.alertsResumeMs ? { alertsResumeAt: new Date(f.alertsResumeMs).toISOString() } : {}),
 		};
 	});
 
@@ -3592,7 +3652,9 @@ async function alertEldFeedSilence(verdict) {
 				? `<p>This device is pushing telemetry that is filed under no truck. Link it under <b>Trucks → ELD device</b>, or have the provider deactivate it if it is not ours.</p>`
 				: v.state === "never_reported"
 					? `<p>This truck has an ELD device id saved but has never produced a single fix. Check the id is the right one, and that the device is installed and powered.</p>`
-					: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set its status to OOS or Maintenance, or record its retirement date — either stops this alert at the source.</p>`) +
+					: DRIVER_AVAILABILITY_ENABLED
+						? `<p>Check the device is powered and in coverage. If the driver is away, record the driver's time off under Drivers (Availability): the alert pauses while he is off and resumes a day after he is back. If the truck itself is out of service, set its status to OOS or Maintenance, or record its retirement date.</p>`
+						: `<p>Check the device is powered and in coverage. If the truck is genuinely out of service, set its status to OOS or Maintenance, or record its retirement date — either stops this alert at the source.</p>`) +
 			`<p style="color:#888;font-size:12px;">Reported once per feed. Reported again only after it recovers and goes silent a second time, and no sooner than a day after this report.</p>`;
 
 		// Only the channels the row still owes are sent: both on a new alert, the
@@ -6236,6 +6298,43 @@ db.exec(`
 `);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_truck ON truck_assignments(truck_id)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(driver_name)`); } catch {}
+
+// DRIVER AVAILABILITY (R11), default OFF (the shape reads off: only
+// true/1/yes/on turns it on), off in production until the owner approves it.
+// A driver's recorded time off, kept apart from every truck status: setting a
+// truck Inactive for a vacation took its fixed costs out of every month, and OOS
+// silenced its ELD alert with no end date. Availability touches no truck, no pay
+// day and no money: it only pauses the ELD silence alert while the truck's driver
+// is away (and for one stale window after he returns) and warns a dispatcher who
+// assigns him a load inside his off days (409 DRIVER_OFF_DUTY, "Assign anyway").
+// Off, nothing reads or writes the table below: the six routes answer like an
+// unknown path, no response carries an availability key, the sweep and the
+// assign routes run as before. Only this additive migration runs either way, so
+// turning the flag on needs no other step; rows saved while it was on stay, inert.
+const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_ENABLED ?? "").trim());
+// One row per period off. `directory_id` is drivers_directory.id: a row follows
+// a rename, and a deleted driver's rows are cancelled with the directory row
+// (a re-added driver gets a new id and starts with none). Dates are calendar days
+// on the business clock, both included. Rows are cancelled, never deleted.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS driver_availability (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		directory_id INTEGER NOT NULL,
+		driver_name TEXT NOT NULL,
+		kind TEXT NOT NULL CHECK(kind IN ('vacation', 'off_duty', 'other')),
+		from_date TEXT NOT NULL,
+		to_date TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		created_by TEXT NOT NULL,
+		created_by_user_id INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT,
+		cancelled_at TEXT,
+		cancelled_by TEXT,
+		CHECK(from_date <= to_date)
+	);
+	CREATE INDEX IF NOT EXISTS idx_driver_avail_dir ON driver_availability(directory_id, from_date);
+`);
 
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
 // ingestion webhook POST /api/n8n/job (~270 lines below). That endpoint has
@@ -9147,6 +9246,31 @@ function getCarrierDBFromSQLite() {
 app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const drivers = db.prepare("SELECT * FROM drivers_directory ORDER BY driver_name ASC").all();
+		// Each driver's time off for the directory chip (R11), only while the flag
+		// is on: the period covering today, else the next one, as OffFrom / OffTo
+		// (null when none). Staff only, like this whole route. A failed read leaves
+		// the keys out, as the flag off does.
+		let offByDirectory = null;
+		let today = "";
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			try {
+				today = appTodayKey();
+				offByDirectory = new Map();
+				for (const rows of driverAvailabilityByName(today).values()) {
+					for (const r of rows) {
+						if (!offByDirectory.has(r.directory_id)) offByDirectory.set(r.directory_id, []);
+						offByDirectory.get(r.directory_id).push(r);
+					}
+				}
+			} catch (e) {
+				console.error("[drivers-directory] driver availability unreadable:", e.message);
+				offByDirectory = null;
+			}
+		}
+		const offFields = (id) => {
+			const off = driverAvailability.currentOrNextOff(offByDirectory.get(id) || [], today);
+			return { OffFrom: off ? off.from : null, OffTo: off ? off.to : null };
+		};
 		// Return in a format compatible with the old sheet-based response
 		const headers = ["Driver", "Carrier Name", "State", "City", "ZIP", "Address", "Trucks", "Hazmat", "PhoneNumber", "CellNumber", "Email", "DOT", "MC", "Rating", "Status", "PayType", "PayPercentage", "PayDaily"];
 		const data = drivers.map(d => ({
@@ -9158,6 +9282,7 @@ app.get("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), (req
 			PayPercentage: d.pay_percentage || 0,
 			PayDaily: d.pay_daily || 0,
 			ProfilePictureUrl: d.profile_picture_url || '',
+			...(offByDirectory ? offFields(d.id) : {}),
 			_rowIndex: d.id, _id: d.id,
 		}));
 		res.json({ headers, data, total: data.length });
@@ -9682,7 +9807,18 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 			} catch (err) { console.error("Failed to unlink driver profile pic on cascade:", err.message); }
 		}
 		db.prepare("DELETE FROM legal_documents WHERE driver_id = ?").run(id);
-		db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		// The driver's live time off (R11) is cancelled with the row, in one
+		// transaction, while the flag is on. A re-added driver gets a new id and
+		// starts with none; with the flag off the rows stay, inert, because every
+		// read joins on an existing directory row.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			db.transaction(() => {
+				db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+				cancelDirectoryAvailability(req, id, dirRow.driver_name);
+			})();
+		} else {
+			db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(id);
+		}
 
 		// ⚠️ THE MONEY LINE, AND IT IS THE WHOLE RECORD THAT THIS ROW EVER EXISTED.
 		// getDriverPayStructures() reads drivers_directory; with the row gone the
@@ -9704,6 +9840,252 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 		res.json({ success: true, cascadedDocs: orphanedDocs.length });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// ============================================================
+// DRIVER AVAILABILITY (R11) — a driver's recorded time off
+// ============================================================
+// Super Admin and Dispatcher record, edit, end early and cancel; a Driver reads
+// his own current and upcoming rows (no reason); Investors get nothing. The
+// rules (dates, the 60-day cap, the Dispatcher's 30-day and end-early limits)
+// are lib/driver-availability.js validateAvailability(), one validator for
+// create and edit; the overlap check runs in the write's own transaction.
+// Rows are cancelled, never deleted. Nothing here reaches pay or money.
+
+// The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
+// request moves on as if the route were never registered (an unknown path),
+// before any role check, so no 401 or 403 says it exists.
+function availabilityFlagGate(req, res, next) {
+	if (!DRIVER_AVAILABILITY_ENABLED) return next("route");
+	return next();
+}
+
+// One stored row as the staff screens get it.
+function availabilityRowView(r, todayKey) {
+	return {
+		id: r.id,
+		directoryId: r.directory_id,
+		kind: r.kind,
+		from: r.from_date,
+		to: r.to_date,
+		reason: r.reason || "",
+		createdBy: r.created_by,
+		createdAt: r.created_at,
+		updatedAt: r.updated_at || null,
+		cancelledAt: r.cancelled_at || null,
+		cancelledBy: r.cancelled_by || null,
+		status: r.cancelled_at ? "cancelled" : r.to_date < todayKey ? "past" : r.from_date > todayKey ? "upcoming" : "current",
+	};
+}
+
+// Cancels a deleted directory row's live time off (the system's cancel,
+// audited per row). Runs inside the delete's transaction.
+function cancelDirectoryAvailability(req, directoryId, driverName) {
+	const live = db.prepare("SELECT id, kind, from_date, to_date FROM driver_availability WHERE directory_id = ? AND cancelled_at IS NULL").all(directoryId);
+	const now = new Date().toISOString();
+	const stamp = db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = 'system:directory-delete' WHERE id = ? AND cancelled_at IS NULL");
+	for (const r of live) {
+		stamp.run(now, r.id);
+		logAudit(req, "driver_availability_cancel", "driver", String(directoryId),
+			`${driverName}: off ${r.from_date}..${r.to_date} (${r.kind}) cancelled by the system: directory row deleted`);
+	}
+	return live.length;
+}
+
+// A stored row with its directory row's current name, or undefined when either
+// is gone (an orphan is answered 404 like an unknown id).
+function availabilityRowWithDriver(id) {
+	if (!Number.isInteger(id) || id <= 0) return undefined;
+	return db.prepare(`SELECT a.*, d.driver_name AS directory_name FROM driver_availability a JOIN drivers_directory d ON d.id = a.directory_id WHERE a.id = ?`).get(id);
+}
+
+// The live row of the same driver that overlaps from..to, other than `exceptId`.
+function availabilityOverlap(directoryId, exceptId, from, to) {
+	return db.prepare(`
+		SELECT id, from_date, to_date FROM driver_availability
+		WHERE directory_id = ? AND cancelled_at IS NULL AND id <> ? AND from_date <= ? AND to_date >= ?
+		ORDER BY from_date ASC LIMIT 1
+	`).get(directoryId, exceptId, to, from);
+}
+
+function availabilityOverlapBody(name, clash) {
+	return {
+		error: `${name} already has time off ${driverAvailability.availabilityRangeText(clash.from_date, clash.to_date)} that overlaps these dates. Change or cancel that one instead.`,
+		code: "AVAILABILITY_OVERLAP",
+		overlapping: { id: clash.id, from: clash.from_date, to: clash.to_date },
+	};
+}
+
+// What a refused request asked for, for the refusal's audit line (bounded:
+// the body is the caller's text).
+function availabilityAttempt(body) {
+	const b = body && typeof body === "object" ? body : {};
+	return ["kind", "from", "to"].map((k) => `${k} ${auditText(b[k], 20) || "-"}`).join(", ");
+}
+
+// GET /api/drivers-directory/:id/availability — one driver's rows, newest first.
+app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
+		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
+		const today = appTodayKey();
+		const rows = db.prepare("SELECT * FROM driver_availability WHERE directory_id = ? ORDER BY from_date DESC, id DESC").all(id);
+		res.json({ directoryId: dir.id, driver: dir.driver_name, today, rows: rows.map((r) => availabilityRowView(r, today)) });
+	} catch (err) {
+		console.error("[availability] list failed:", err.message);
+		res.status(500).json({ error: "This driver's time off could not be read." });
+	}
+});
+
+// POST /api/drivers-directory/:id/availability — record a period off.
+// Body { kind, from, to, reason }. 400 INVALID_KIND / INVALID_REASON /
+// REASON_TOO_LONG / INVALID_DATE / RANGE_REVERSED / RANGE_TOO_LONG /
+// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP.
+app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
+		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin" });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
+				`${dir.driver_name}: ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		const { kind, from, to, reason } = v.value;
+		const outcome = db.transaction(() => {
+			const clash = availabilityOverlap(id, 0, from, to);
+			if (clash) return { clash };
+			const info = db.prepare(`
+				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(id, dir.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+			logAudit(req, "driver_availability_create", "driver", String(id), `${dir.driver_name}: off ${from}..${to} (${kind})`);
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid) };
+		})();
+		if (outcome.clash) {
+			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
+				`${dir.driver_name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(dir.driver_name, outcome.clash));
+		}
+		notifyChange("drivers");
+		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today) });
+	} catch (err) {
+		console.error("[availability] create failed:", err.message);
+		res.status(500).json({ error: "The time off could not be saved." });
+	}
+});
+
+// PUT /api/driver-availability/:id — change a period (a partial body over the
+// stored row; "end early" is a new `to`). The create's codes, plus 409
+// AVAILABILITY_CANCELLED; 404 for an unknown id or a row whose driver is gone.
+app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const name = row.directory_name;
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
+				`${name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		const { kind, from, to, reason } = v.value;
+		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && reason === String(row.reason || "");
+		const outcome = db.transaction(() => {
+			const clash = availabilityOverlap(row.directory_id, row.id, from, to);
+			if (clash) return { clash };
+			if (!unchanged) {
+				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
+					.run(kind, from, to, reason, new Date().toISOString(), row.id);
+				logAudit(req, "driver_availability_update", "driver", String(row.directory_id),
+					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})`);
+			}
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id) };
+		})();
+		if (outcome.clash) {
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
+				`${name}: row ${row.id} to ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(name, outcome.clash));
+		}
+		if (!unchanged) notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(outcome.row, today), ...(unchanged ? { unchanged: true } : {}) });
+	} catch (err) {
+		console.error("[availability] update failed:", err.message);
+		res.status(500).json({ error: "The time off could not be saved." });
+	}
+});
+
+// POST /api/driver-availability/:id/cancel — cancel a period (stamped, never
+// deleted). 409 AVAILABILITY_CANCELLED; 400 BACKDATE_LIMIT for a Dispatcher on
+// a row that starts more than 30 days back.
+app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const row = availabilityRowWithDriver(Number(req.params.id));
+		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		const user = req.session.user;
+		const today = appTodayKey();
+		const v = driverAvailability.validateAvailability({}, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		if (!v.ok) {
+			logAuditRefusal(req, "driver_availability_cancel_blocked", "driver", String(row.directory_id),
+				`${row.directory_name}: cancel row ${row.id} (${row.from_date}..${row.to_date}) [${v.code}]`, v.code);
+			return res.status(v.status).json({ error: v.error, code: v.code });
+		}
+		db.transaction(() => {
+			db.prepare("UPDATE driver_availability SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cancelled_at IS NULL")
+				.run(new Date().toISOString(), String(user.username || ""), row.id);
+			logAudit(req, "driver_availability_cancel", "driver", String(row.directory_id),
+				`${row.directory_name}: off ${row.from_date}..${row.to_date} (${row.kind}) cancelled`);
+		})();
+		notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today) });
+	} catch (err) {
+		console.error("[availability] cancel failed:", err.message);
+		res.status(500).json({ error: "The time off could not be cancelled." });
+	}
+});
+
+// GET /api/driver/me/availability — the signed-in driver's own current and
+// upcoming time off, read-only, without the reason. Two path segments under
+// /api/driver/, so `/api/driver/:driverName` can never capture it.
+app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
+	try {
+		const today = appTodayKey();
+		const me = normalizeDriverName(req.session.user.driverName);
+		const rows = me ? driverAvailabilityByName(today).get(me) || [] : [];
+		res.json({
+			today,
+			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
+		});
+	} catch (err) {
+		console.error("[availability] driver view failed:", err.message);
+		res.status(500).json({ error: "Your time off could not be read." });
+	}
+});
+
+// GET /api/driver-availability — every driver's current and upcoming time off
+// (staff), for the assign screens' driver lists.
+app.get("/api/driver-availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	try {
+		const today = appTodayKey();
+		const rows = [...driverAvailabilityByName(today).values()].flat()
+			.sort((a, b) => (a.from_date < b.from_date ? -1 : a.from_date > b.from_date ? 1 : a.id - b.id));
+		res.json({
+			today,
+			rows: rows.map((r) => ({
+				id: r.id, directoryId: r.directory_id, driver: r.directory_name, kind: r.kind, from: r.from_date, to: r.to_date,
+				status: r.from_date > today ? "upcoming" : "current",
+			})),
+		});
+	} catch (err) {
+		console.error("[availability] list failed:", err.message);
+		res.status(500).json({ error: "Time off could not be read." });
 	}
 });
 
@@ -30022,6 +30404,20 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 		console.error("/api/trucks: ELD last-fix read failed:", err.message);
 	}
 
+	// The truck's driver's time off (R11): for a Super Admin or a Dispatcher
+	// only, never for an Investor nor a Super Admin previewing an investor's
+	// portal (investors see nothing of a driver's time off), and only while the
+	// flag is on. A failed read leaves the key out, as the flag off does.
+	let truckOff = null;
+	if (DRIVER_AVAILABILITY_ENABLED && !preview.isPreview && (user.role === "Super Admin" || user.role === "Dispatcher")) {
+		try {
+			truckOff = truckDriverAvailability();
+		} catch (err) {
+			truckOff = null;
+			console.error("/api/trucks: driver availability unreadable:", err.message);
+		}
+	}
+
 	const trucks = rows.map((t) => {
 		const unitLower = (t.unit_number || "").toLowerCase();
 		const driverLower = normalizeDriverName(t.assigned_driver);
@@ -30082,6 +30478,8 @@ app.get("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), asy
 			EldProvider: eld ? eld.provider : '',
 			EldSilent: eld ? eld.silent : false,
 			EldVehicleNumber: eld ? (eldNumberByVid[eldVid] || '') : '',
+			// His last day off, back-to-back periods joined; null when not off.
+			...(truckOff ? { DriverOffUntil: (truckOff.get(t.id) || {}).driverOffUntil || null } : {}),
 		};
 	});
 	res.json({ trucks });
@@ -36991,6 +37389,13 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			}
 		}
 
+		// A new Job Tracking row that names a driver asks the off-duty check (R11);
+		// the caller confirms with confirmOffDuty: true.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: appendHeaders ? sheetRowNewDriver(appendHeaders, [], values) : "", headers: appendHeaders, row: values, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "POST /api/data" });
+			if (offDuty) return res.status(409).json(offDuty);
+		}
+
 		const response = await sheets.spreadsheets.values.append({
 			spreadsheetId: SPREADSHEET_ID,
 			range: `${sheetName}`,
@@ -37367,6 +37772,14 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 					code: "SHEET_CHANGED",
 				});
 			}
+		}
+
+		// A save that puts another driver on a Job Tracking load asks the off-duty
+		// check (R11) last, after the re-read, so nothing awaits between it and the
+		// write; the caller confirms with confirmOffDuty: true.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowNewDriver(headers, before, after) : "", headers, row: after, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "PUT /api/data/:rowIndex" });
+			if (offDuty) return res.status(409).json(offDuty);
 		}
 
 		// Only the cells this save changes, one range each (sheetRowCellWrites()):
@@ -37929,6 +38342,66 @@ function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
 //
 // ⚠️ PERIOD-GUARDED — see dispatchWriteBlocker() above for where the line is
 // drawn and why it is not a blanket refusal.
+// The Driver a row save puts on a Job Tracking row: the row's new Driver cell
+// when it differs (normalizeDriverName()) from the stored one and is not blank,
+// else "". `before` and `after` are cell arrays in `headers` order.
+function sheetRowNewDriver(headers, before, after) {
+	if (!Array.isArray(headers) || !Array.isArray(after)) return "";
+	const col = jobTrackingMonthCols(headers).driverCol;
+	const i = col ? headers.indexOf(col) : -1;
+	if (i < 0) return "";
+	const next = String(after[i] == null ? "" : after[i]).trim();
+	const was = Array.isArray(before) ? before[i] : "";
+	return next && normalizeDriverName(next) !== normalizeDriverName(was) ? next : "";
+}
+
+// THE OFF-DUTY CHECK (R11), shared by the five routes that put a driver on a
+// load: POST /api/dispatch, POST /api/dispatch/reassign, PUT /api/data/:rowIndex
+// and PUT /api/load/:loadId on a Driver change, and POST /api/data. Each calls it
+// inside `if (DRIVER_AVAILABILITY_ENABLED)`, so with the flag off it never runs
+// and an error in it or its table can never break a dispatch; n8n and system
+// writes never call it. It warns, never blocks (the owner's rule): when the
+// load's window (lib/driver-availability.js offDutyLoadWindow(), from the row's
+// Pickup and Drop-off Appointment read with sheetDayKey()) overlaps one of the
+// driver's live off rows and ends today or later, the answer is the 409
+// DRIVER_OFF_DUTY body naming the dates; the caller re-sends with the
+// confirmation, and the assignment is audited with the dates. `row` is the
+// load's row as it will be written. Returns null to go ahead.
+function driverOffDutyRefusal(req, { driver, headers, row, loadId, confirmed, via }) {
+	const name = String(driver || "").trim();
+	if (!name || !Array.isArray(headers) || !Array.isArray(row)) return null;
+	const today = appTodayKey();
+	const rows = driverAvailabilityByName(today).get(normalizeDriverName(name)) || [];
+	if (!rows.length) return null;
+	const cols = jobTrackingMonthCols(headers);
+	const day = (col) => {
+		const i = col ? headers.indexOf(col) : -1;
+		return i < 0 ? "" : sheetDayKey(row[i]);
+	};
+	const conflict = driverAvailability.offDutyConflict({ rows, pickupKey: day(cols.pickupDateCol), dropoffKey: day(cols.dropoffDateCol), todayKey: today });
+	if (!conflict) return null;
+	const loadIdx = cols.loadIdCol ? headers.indexOf(cols.loadIdCol) : -1;
+	const load = String(loadId || (loadIdx >= 0 ? row[loadIdx] || "" : "")).trim();
+	if (confirmed) {
+		logAudit(req, "dispatch_off_duty_confirmed", "load", load,
+			`${name} assigned to load ${load || "(unknown)"} while off ${conflict.from}..${conflict.to} (${conflict.kind}); ` +
+			`load window ${conflict.windowStart}..${conflict.windowEnd}; confirmed (${via})`);
+		return null;
+	}
+	const kindText = { vacation: "vacation", off_duty: "off duty", other: "time off" }[conflict.kind] || "time off";
+	return {
+		error: `${name} is off ${driverAvailability.availabilityRangeText(conflict.from, conflict.to)} (${kindText}), and this load runs ` +
+			`${driverAvailability.availabilityRangeText(conflict.windowStart, conflict.windowEnd)}. Assign anyway?`,
+		code: "DRIVER_OFF_DUTY",
+		driver: name,
+		offFrom: conflict.from,
+		offTo: conflict.to,
+		kind: conflict.kind,
+		loadFrom: conflict.windowStart,
+		loadTo: conflict.windowEnd,
+	};
+}
+
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
@@ -38037,6 +38510,13 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 					`Assigning ${driver} to load ${loadId || "(unknown)"}`
 				);
 			}
+		}
+
+		// The driver's recorded time off (R11): a warning the caller confirms
+		// with confirmOffDuty: true. Before the first write.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch" });
+			if (offDuty) return res.status(409).json(offDuty);
 		}
 
 		// Ensure Truck and Owner ID columns exist in sheet
@@ -38204,6 +38684,12 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 					`Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
 				);
 			}
+		}
+
+		// The new driver's recorded time off (R11), as POST /api/dispatch asks it.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: newDriver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch/reassign" });
+			if (offDuty) return res.status(409).json(offDuty);
 		}
 
 		// Ensure Truck and Owner ID columns exist (same approach as /api/dispatch).
@@ -39514,6 +40000,28 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			};
 		});
 
+		// Drivers recorded off today (R11), only while the flag is on: each fleet
+		// entry's `offUntil` (his last day off, back-to-back periods joined; null
+		// when not off) for the Fleet & Drivers pill, and an `offUntil` map of the
+		// dropdown's drivers who are off, for the assign dropdowns. A failed read
+		// leaves both out, as the flag off does.
+		let offUntilByName = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			try {
+				const today = appTodayKey();
+				offUntilByName = new Map();
+				for (const [key, rows] of driverAvailabilityByName(today)) {
+					const until = driverAvailability.availabilityFields(rows, today).driverOffUntil;
+					if (until) offUntilByName.set(key, until);
+				}
+				for (const f of fleet) f.offUntil = offUntilByName.get(normalizeDriverName(f.Driver)) || null;
+			} catch (e) {
+				console.error("[dashboard] driver availability unreadable:", e.message);
+				offUntilByName = null;
+				for (const f of fleet) delete f.offUntil;
+			}
+		}
+
 		// Pre-resolve origin/destination address columns so we can enrich every
 		// job row with plain "City, ST ZIP" strings that the new Pickup/Drop-off
 		// table columns render. Desoren asked for this 2026-04-20 because the
@@ -39581,6 +40089,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			fleet,
 			drivers: driverList,
 			driverQueues,
+			...(offUntilByName
+				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
+				: {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -51978,6 +52489,14 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// as read, is not rewritten, so a formula shown as its value and a text cell
 		// showing "=…" stay as they are. Nothing changed, nothing written, and no
 		// audit line: there is no write to reverse.
+		// A Driver change asks the off-duty check (R11), as PUT /api/data/:rowIndex
+		// does. Every body key here is a column name, so the confirmation is the
+		// query flag ?confirmOffDuty=true.
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowNewDriver(headers, before, after) : "", headers, row: after, loadId, confirmed: req.query.confirmOffDuty === "true", via: "PUT /api/load/:loadId" });
+			if (offDuty) return res.status(409).json(offDuty);
+		}
+
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (cellWrites.length) {
 			try {

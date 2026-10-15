@@ -211,6 +211,9 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 		`const ELD_STALE_MIN_FIXES = ${env.ELD_STALE_MIN_FIXES};\n` +
 		`const ELD_UNLINKED_LOOKBACK_HOURS = ${env.ELD_UNLINKED_LOOKBACK_HOURS};\n` +
 		`const ELD_STALE_ALERT_MAX_PER_DAY = ${env.ELD_STALE_ALERT_MAX_PER_DAY};\n` +
+		// The sweep with driver availability off, as production runs it until the
+		// flag is approved; scripts/test-driver-availability.js runs it on.
+		`const DRIVER_AVAILABILITY_ENABLED = false;\n` +
 		`${extractConst("ELD_STALE_REOPEN_COOLDOWN_MS")}\n` +
 		`${extractConst("ELD_ALERT_SEND_LOG_KEY")}\n` +
 		`const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastAlerted: 0, lastResolved: 0 };\n` +
@@ -599,6 +602,130 @@ section("§2 pure — lib/eld-feed-health.js");
 	eq("§2.57 …one alerted 25 h ago may alert again", feedLib.reopenCooldownActive(new Date(T - 25 * HOUR).toISOString(), T, C), false);
 	eq("§2.58 …and one never delivered has no cooldown", feedLib.reopenCooldownActive(null, T, C), false);
 	eq("§2.59 the cooldown is a day", feedLib.DEFAULT_REOPEN_COOLDOWN_HOURS, 24);
+}
+
+// ═══════════════════════════════════════ §2b PURE — driver availability (R11)
+// A truck whose driver is recorded off is expected to be quiet: the alert
+// pauses while he is off and for one stale window after he returns, counted
+// from the day after his last day off at 00:00 Eastern, then a feed still dark
+// alerts as a fresh stale alert. No database: the rows-to-fields function and
+// the name matching live in lib/driver-availability.js, with server.js's own
+// normalizeDriverName() passed in (lifted out of the source).
+section("§2b pure — driver availability pauses and resumes the alert");
+{
+	// Values compared as JSON here: several checks compare pairs.
+	const eq = (name, actual, expected) => ok(name, JSON.stringify(actual) === JSON.stringify(expected),
+		`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+	let availLib = null;
+	try { availLib = require(path.join(ROOT, "lib", "driver-availability.js")); } catch { availLib = null; }
+	ok("§2b.0 lib/driver-availability.js exists", !!availLib);
+	const A = availLib || {};
+	const call = (name, ...args) => (typeof A[name] === "function" ? A[name](...args) : undefined);
+	const normalizeDriverName = new Function(`${extract("normalizeDriverName")}\nreturn normalizeDriverName;`)();
+	const ET = "America/New_York";
+	const O = { staleHours: 24, minFixes24h: 10, unlinkedLookbackHours: 168 };
+	// #91's shape: linked, Active, dark for days.
+	const dark = (nowMs, fields) => feedLib.judgeTruckFeed({
+		truckId: 11, unitNumber: "LogisX-#91", status: "Active", retiredAt: "", vehicleId: "wL8e55NU0KjcB2ynE2wf1g",
+		lastFixMs: nowMs - 6 * DAY, fixes24h: 0, ...fields,
+	}, { ...O, nowMs, todayKey: fields.todayKey || "" });
+	const fieldsOn = (rows, todayKey) => call("availabilityFields", rows, todayKey) || {};
+	const truckFields = (todayKey, rows, nowMs) => {
+		const f = fieldsOn(rows, todayKey);
+		return { todayKey, driverOffUntil: f.driverOffUntil, driverLastOffTo: f.driverLastOffTo,
+			driverReturningFromMs: call("returningFromMs", f.driverLastOffTo, ET), nowMs };
+	};
+	const row = (id, from, to, extra) => ({ id, directory_id: 1, kind: "vacation", from_date: from, to_date: to, cancelled_at: null, ...extra });
+
+	{
+		const now = Date.parse("2026-10-16T16:00:00Z");   // Oct 16 noon EDT
+		const v = dark(now, truckFields("2026-10-16", [row(1, "2026-10-14", "2026-10-20")]));
+		eq("§2b.1 driver off today: state driver_off", v.state, "driver_off");
+		eq("§2b.2 ...and no alert", v.alert, false);
+		eq("§2b.3 ...the verdict names the last day off", v.driverOffUntil, "2026-10-20");
+	}
+	{
+		// Off Oct 14-20: grace from Oct 21 00:00 EDT (04:00Z) for 24 h.
+		const from = call("returningFromMs", "2026-10-20", ET);
+		eq("§2b.4 grace starts the day after the last day off, 00:00 Eastern", from, Date.parse("2026-10-21T04:00:00Z"));
+		const rows = [row(1, "2026-10-14", "2026-10-20")];
+		const at = (iso, today) => dark(Date.parse(iso), truckFields(today, rows));
+		eq("§2b.5 back on Oct 21, 10:00 PM EDT: driver_returning, no alert",
+			[at("2026-10-22T02:00:00Z", "2026-10-21").state, at("2026-10-22T02:00:00Z", "2026-10-21").alert], ["driver_returning", false]);
+		eq("§2b.6 Oct 21, 11:59 PM EDT: still inside the grace", at("2026-10-22T03:59:00Z", "2026-10-21").state, "driver_returning");
+		eq("§2b.7 Oct 22, 12:01 AM EDT: grace over, the dark feed alerts as stale",
+			[at("2026-10-22T04:01:00Z", "2026-10-22").state, at("2026-10-22T04:01:00Z", "2026-10-22").alert], ["stale", true]);
+	}
+	{
+		// Off through Oct 31: grace from Nov 1 00:00 EDT (04:00Z) for 24 elapsed
+		// hours, i.e. until Nov 1 11:00 PM EST, across the clock change.
+		const rows = [row(1, "2026-10-25", "2026-10-31")];
+		eq("§2b.8 Oct 31: grace starts Nov 1 00:00 EDT", call("returningFromMs", "2026-10-31", ET), Date.parse("2026-11-01T04:00:00Z"));
+		const before = dark(Date.parse("2026-11-02T03:59:00Z"), truckFields("2026-11-01", rows));   // Nov 1 10:59 PM EST
+		const after = dark(Date.parse("2026-11-02T04:01:00Z"), truckFields("2026-11-01", rows));    // Nov 1 11:01 PM EST
+		eq("§2b.9 Nov 1, 10:59 PM EST: no alert (24 elapsed hours, not 24 wall hours)", [before.state, before.alert], ["driver_returning", false]);
+		eq("§2b.10 Nov 1, 11:01 PM EST: alert", [after.state, after.alert], ["stale", true]);
+	}
+	{
+		// Back-to-back rows: "off" is checked before "returning".
+		const now = Date.parse("2026-10-21T16:00:00Z");
+		const b2b = truckFields("2026-10-21", [row(1, "2026-10-14", "2026-10-20"), row(2, "2026-10-21", "2026-10-25")]);
+		eq("§2b.11 back-to-back rows (Oct 14-20, Oct 21-25) on Oct 21: driver_off, not driver_returning", dark(now, b2b).state, "driver_off");
+		eq("§2b.12 ...off until the end of the second row", b2b.driverOffUntil, "2026-10-25");
+		const gap = truckFields("2026-10-21", [row(1, "2026-10-14", "2026-10-20"), row(2, "2026-10-22", "2026-10-25")]);
+		eq("§2b.13 a one-day gap (Oct 14-20, Oct 22-25) on Oct 21: driver_returning", dark(now, gap).state, "driver_returning");
+		eq("§2b.14 ...with the last finished row's end as driverLastOffTo", gap.driverLastOffTo, "2026-10-20");
+	}
+	{
+		const f = fieldsOn([row(1, "2026-10-14", "2026-10-20", { cancelled_at: "2026-10-15T12:00:00Z" })], "2026-10-16");
+		eq("§2b.15 a cancelled row covering today: not off", [f.driverOffUntil, f.driverLastOffTo], [null, null]);
+		const f2 = fieldsOn([row(1, "2026-10-01", "2026-10-03"), row(2, "2026-10-08", "2026-10-10"), row(3, "2026-10-20", "2026-10-22")], "2026-10-16");
+		eq("§2b.16 no row covering today: driverOffUntil null; driverLastOffTo the latest end before today",
+			[f2.driverOffUntil, f2.driverLastOffTo], [null, "2026-10-10"]);
+		eq("§2b.17 no rows at all", [fieldsOn([], "2026-10-16").driverOffUntil, fieldsOn([], "2026-10-16").driverLastOffTo], [null, null]);
+	}
+	{
+		// Whose availability counts for a truck: its driver's. The newest open
+		// assignment, else trucks.assigned_driver, matched through
+		// normalizeDriverName() on both sides.
+		const off = [{ ...row(1, "2026-10-14", "2026-10-20"), directory_name: "Hollis  Renner" }];
+		const byDriver = call("groupAvailabilityByDriver", off, normalizeDriverName) || new Map();
+		const forTruck = (openAssignments, assignedDriver) => call("truckAvailabilityFields", {
+			openAssignments, assignedDriver, byDriver, todayKey: "2026-10-16", normalize: normalizeDriverName, timeZone: ET,
+		}) || {};
+		eq("§2b.18 the truck's open assignment names him (other spacing and case): off",
+			forTruck([{ id: 27, driver_name: "hollis renner ", start_date: "2026-09-22T01:28:00.000Z" }], "").driverOffUntil, "2026-10-20");
+		eq("§2b.19 no open assignment: trucks.assigned_driver decides",
+			forTruck([], "HOLLIS RENNER").driverOffUntil, "2026-10-20");
+		const relief = forTruck([
+			{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" },
+			{ id: 31, driver_name: "Soren King", start_date: "2026-10-15T13:00:00.000Z" },
+		], "Hollis Renner");
+		eq("§2b.20 a relief driver on the newest open assignment: the truck's driver is not off", [relief.driverName, relief.driverOffUntil], ["Soren King", null]);
+		const now = Date.parse("2026-10-16T16:00:00Z");
+		eq("§2b.21 ...so the dark feed alerts", dark(now, { ...relief, todayKey: "2026-10-16" }).alert, true);
+		const own = forTruck([{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" }], "");
+		eq("§2b.22 his own truck while he is off: no alert", dark(now, { ...own, todayKey: "2026-10-16" }).alert, false);
+	}
+	{
+		// The judge's order: retirement, link and status come first.
+		const now = Date.parse("2026-10-16T16:00:00Z");
+		const offFields = truckFields("2026-10-16", [row(1, "2026-10-14", "2026-10-20")]);
+		eq("§2b.23 an OOS truck whose driver is off is still 'inactive'", dark(now, { ...offFields, status: "OOS" }).state, "inactive");
+		eq("§2b.24 a truck with no device whose driver is off is still 'no_device'", dark(now, { ...offFields, vehicleId: "" }).state, "no_device");
+		eq("§2b.25 with no availability fields the verdict is unchanged (stale)", dark(now, { todayKey: "2026-10-16" }).state, "stale");
+	}
+	{
+		const now = Date.parse("2026-10-21T16:00:00Z");
+		const feeds = [
+			dark(now, truckFields("2026-10-21", [row(1, "2026-10-20", "2026-10-24")])),
+			dark(now, truckFields("2026-10-21", [row(2, "2026-10-14", "2026-10-20")])),
+			dark(now, { todayKey: "2026-10-21" }),
+		];
+		const sum = feedLib.summarizeFeeds(feeds);
+		eq("§2b.26 summarizeFeeds counts driver_off and driver_returning", [sum.driver_off, sum.driver_returning, sum.stale, sum.alerting, sum.total], [1, 1, 1, 1, 3]);
+		eq("§2b.27 ...and has both keys when none are present", [feedLib.summarizeFeeds([]).driver_off, feedLib.summarizeFeeds([]).driver_returning], [0, 0]);
+	}
 }
 
 // ════════════════════════════════════ §3 BEHAVIOURAL — real DB, shipped queries

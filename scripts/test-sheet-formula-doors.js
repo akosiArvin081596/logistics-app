@@ -348,6 +348,7 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 	const env = {
 		app: { post: (p, gate, limiter, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		rateConLimiter: null,
 		formulaCellRefusal: H.formulaCellRefusal,
 		RATECON_SHEET_FIELDS,
@@ -618,6 +619,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 	const env = {
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
+		DRIVER_AVAILABILITY_ENABLED: false,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db: { prepare: (sql) => ({
 			get: () => (/FROM users/.test(sql) ? (account ? { driver_name: account } : undefined)
