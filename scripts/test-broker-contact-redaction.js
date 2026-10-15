@@ -387,6 +387,10 @@ const realRequire = (p) => {
 	if (/^\.\/lib\//.test(p)) return require(path.join(ROOT, p));
 	return require(p);
 };
+// server.js destructures these from lib/eta-on-time.js (`const { … } = require(…)`),
+// a form the scope's top-level lookup does not read: the shipped exports themselves.
+const ETA_ON_TIME = (({ etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE }) => ({ etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE }))(
+	require(path.join(ROOT, "lib", "eta-on-time")));
 
 const sections = [];
 function section(name, fn) { sections.push([name, fn]); }
@@ -473,7 +477,7 @@ section("§1 GET /api/locations/latest", async () => {
 	const sheet = fakeSheets(SHEET_ROWS());
 	const run = lift('app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async (req, res) => {', {
 		requireRole: () => null, getSheets: sheet.getSheets, SPREADSHEET_ID: "sheet-under-test",
-		db: emptyDb(DIRECTORY), normalizeLoadId, console: quietConsole(errors), require: realRequire,
+		db: emptyDb(DIRECTORY), normalizeLoadId, console: quietConsole(errors), require: realRequire, ...ETA_ON_TIME,
 	});
 	const disp = await run({ session: session("Dispatcher") });
 	const admin = await run({ session: session("Super Admin") });
@@ -1065,7 +1069,7 @@ section("§5 GET /api/public/track/:loadId", async () => {
 		trackPublicLimiter: null, getSheets: sheet.getSheets, SPREADSHEET_ID: "sheet-under-test",
 		trackResponseCache: new Map(), TRACK_CACHE_TTL_MS: 30000, TRACK_CACHE_MAX: 100,
 		db: emptyDb(), getRoute: async () => null, findTruckForDriverStamp: () => null,
-		require: realRequire, console: quietConsole(errors),
+		require: realRequire, console: quietConsole(errors), ...ETA_ON_TIME,
 	});
 	const out = [await run({ params: { loadId: "80000011" } }), await run({ params: { loadId: "80000015" } })];
 	check("public tracker: 200 for both loads with no error logged", out.map((o) => o.code).concat(errors), [200, 200]);

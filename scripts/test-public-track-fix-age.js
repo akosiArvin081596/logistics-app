@@ -30,8 +30,9 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
 const { closure } = require("./lib/server-lift");
+const appRequire = require("module").createRequire(path.join(ROOT, "server.js"));
 
 let Database;
 try {
@@ -59,7 +60,9 @@ const lifted = closure(SRC, {
 });
 
 const HEADERS = ["Load ID", "Status", "Driver", "Pickup Address", "Drop-off Address", "Origin Lat", "Origin Lng", "Dest Lat", "Dest Lng", "Delivery Date"];
-function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
+// `appointment` adds a Drop-off Appointment column after Delivery Date; `dest`
+// replaces the receiver's address and coordinates.
+function world({ status = "In Transit", eldAgeMs = null, phoneAt = null, appointment = null, dest = null }) {
 	const db = new Database(":memory:");
 	db.exec(`
 		CREATE TABLE load_coordinates (load_id TEXT PRIMARY KEY, pickup_address TEXT, dropoff_address TEXT, origin_lat REAL, origin_lng REAL, dest_lat REAL, dest_lng REAL);
@@ -77,8 +80,11 @@ function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
 		const fromPickup = from.latitude === 29.7 && from.longitude === -95.3;
 		return { points: [{ latitude: from.latitude, longitude: from.longitude }, { latitude: to.latitude, longitude: to.longitude }], distanceMiles: fromPickup ? 812.4 : 210.5, durationMin: fromPickup ? 750 : 205 };
 	};
-	const row = ["T-100", status, "Driver A", "Town A, TX 77001", "Town B, GA 30301", "29.7", "-95.3", "33.7", "-84.4", ""];
-	const getSheets = async () => ({ spreadsheets: { values: { batchGet: async () => ({ data: { valueRanges: [{ values: [HEADERS, row] }] } }) } } });
+	const d = dest || { address: "Town B, GA 30301", lat: "33.7", lng: "-84.4" };
+	const row = ["T-100", status, "Driver A", "Town A, TX 77001", d.address, "29.7", "-95.3", d.lat, d.lng, ""];
+	const headers = appointment === null ? HEADERS : [...HEADERS, "Drop-off Appointment"];
+	if (appointment !== null) row.push(appointment);
+	const getSheets = async () => ({ spreadsheets: { values: { batchGet: async () => ({ data: { valueRanges: [{ values: [headers, row] }] } }) } } });
 	const routes = {};
 	const app = { get(p, ...h) { routes[p] = h[h.length - 1]; } };
 	const deps = {
@@ -86,7 +92,8 @@ function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
 		findTruckForDriverStamp: () => ({ routemate_vehicle_id: "V-1", unit_number: "101" }),
 		computeStatusPhases: () => [], geolib, trackPublicLimiter: (req, res, next) => next(),
 	};
-	new Function(...PROVIDED, "require", lifted.text)(...PROVIDED.map((k) => deps[k]), require);
+	// The lifted code's own require()s ("./lib/…") resolve from server.js's folder.
+	new Function(...PROVIDED, "require", lifted.text)(...PROVIDED.map((k) => deps[k]), appRequire);
 	const handler = routes["/api/public/track/:loadId"];
 	return {
 		routeCalls, fixMs,
@@ -150,6 +157,17 @@ function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
 	{
 		const d = await world({ status: "Delivered", eldAgeMs: 10 * MIN }).call();
 		ok("§6 a delivered load: no ETA", d.body && d.body.eta === null);
+	}
+	console.log("§7 the badge reads the Drop-off Appointment, on the receiver's clock");
+	{
+		// Tomorrow 11 PM on the receiver's (Eastern) calendar: well after the ETA.
+		const day = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "numeric", day: "numeric" })
+			.format(new Date(Date.now() + 24 * 60 * MIN));
+		const w = world({ eldAgeMs: 10 * MIN, appointment: `${day} 23:00`, dest: { address: "Indianapolis, IN 46204", lat: "39.77", lng: "-86.16" } });
+		const b = (await w.call()).body || {};
+		ok("§7 the appointment column is read, not the Delivery Date before it: a badge", b.eta && b.eta.onTime === true, b.eta);
+		ok("§7 ...and the ETA beside it is on the Indianapolis receiver's clock (Eastern, not the Central band)",
+			b.eta && /E[SD]T$/.test(String(b.eta.arrivalLocal || "")), b.eta && b.eta.arrivalLocal);
 	}
 })().then(() => {
 	if (failures.length) {
