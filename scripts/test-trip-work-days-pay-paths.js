@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * B12 runner B: the trip-timestamp work-day rule on the three pay paths (plan
- * section 4.1(2)-(8), cases B1-B14, and B15-B18 for the owner's late-day rule
- * of 2026-10-14), behind TRIP_WORK_DAYS_ENABLED and TRIP_WORK_DAYS_FROM
+ * section 4.1(2)-(8), cases B1-B14; B15-B21 for the owner's late-day rule of
+ * 2026-10-14; B22 for its floor, FROM's first week, of 2026-10-15), behind
+ * TRIP_WORK_DAYS_ENABLED and TRIP_WORK_DAYS_FROM
  * (FROM=2026-09 unless a case says otherwise).
  * Written before the fix, which they failed. On main the flags are ignored, so the
  * new-rule cases fail with today's days (the reproduction); B7, B8 and B11 pin
@@ -671,6 +672,35 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			eq("Approved W39, a $260 adjustment put on it during the correction's render: no correction, nothing claimed", [corrections(w).length, claimsFor(w)], [0, []]);
 			ok("…and the refusal is in warnings", refusedIn(g40), JSON.stringify(g40.warnings));
 		}
+	});
+
+	await R.test("B22 (the owner's decision of 2026-10-15) Late days start at FROM's first week, not at the rule's first invoice: with FROM=2026-10, W40 (10/3-10/9) made before the rule's first invoice week (the stored marker says 10/10) still takes the late Thu 10/8 and Fri 10/9 of a load delivered after it, in place; W41 pays its own Sat-Mon. Base: refused as before the floor", async ({ eq, ok }) => {
+		const D = "Tam Vale";
+		const w = W.startWorld({
+			env: TRIP("2026-10"),
+			drivers: [{ name: D }],
+			rows: [
+				loadRow({ id: "Q2201", driver: D, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck: "T1" }),
+				loadRow({ id: "Q2202", driver: D, pickup: "2026-10-08 9:00", dropoff: "2026-10-12 14:00", assigned: "2026-10-08", done: "", status: "In Transit", truck: "T1" }),
+			],
+			status: [
+				s("Q2201", "At Shipper", "2026-10-05 12:00:00"), s("Q2201", "Delivered", "2026-10-06 21:00:00"),
+				s("Q2202", "At Shipper", "2026-10-08 13:00:00"), s("Q2202", "In Transit", "2026-10-08 18:00:00"),
+			],
+			now: etMs("2026-10-09 20:00"),
+		});
+		const g40 = await W.generate(w, D, W40);
+		eq("W40 as made: Mon and Tue", W.dayList(W.gridDays(g40.data, W40)), ["2026-10-05", "2026-10-06"]);
+		// As if the rule's first invoice had been the next week's: W40 came before the switch-on.
+		w.db.prepare("UPDATE app_settings SET value = '2026-10-10' WHERE key = 'trip_work_days_started_at'").run();
+		w.addStatus([s("Q2202", "At Receiver", "2026-10-12 15:00:00"), s("Q2202", "Delivered", "2026-10-12 17:00:00")]);
+		w.setRow("Q2202", { "Job Status": "Delivered", "Status Update Date": "10/12/2026", "Completion Date": "10/12/2026" });
+		w.clock.ms = etMs("2026-10-16 20:00");
+		const g41 = await W.generate(w, D, "2026-10-16");
+		eq("W40 now pays Thu and Fri too, in place", W.dayList(storedGrid(w, g40.invoice.id, W40)), ["2026-10-05", "2026-10-06", "2026-10-08", "2026-10-09"]);
+		eq("the W41 response reports the update", g41.body && g41.body.lateWorkDays && g41.body.lateWorkDays.updated.map((u) => [u.invoiceNumber, u.days]), [[g40.invoice.invoice_number, ["2026-10-08", "2026-10-09"]]]);
+		eq("W41 pays its own Sat-Mon", W.dayList(W.gridDays(g41.data, "2026-10-16")), ["2026-10-10", "2026-10-11", "2026-10-12"]);
+		ok("no day is refused as before the floor", !(g41.warnings || []).some((x) => /before 20\d\d-\d\d-\d\d/.test(x)), JSON.stringify(g41.warnings));
 	});
 
 	R.finish();
