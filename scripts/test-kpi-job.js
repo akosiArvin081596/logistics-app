@@ -55,6 +55,13 @@
  * §10 aggregates only: sentinel driver and broker names, load IDs, file names,
  *    receipt photos and error text appear in no kpi table, no stored payload,
  *    no email, no log line and no GET answer.
+ * §12 R10 wiring: the two new tables; one download feeds the weight and the
+ *    stated miles; the mile metrics' inputs (no cancelled or soft-deleted load,
+ *    the cells, coordinates, zone, resolver and unit map); a month as the
+ *    contract start; route calls on a nightly run with the flag on only (never
+ *    a manual run, the flag off, a replica or no key), cached by their points.
+ *    The weight phase's loop now lives in lib/kpi-ratecon-pass.js; its mutants
+ *    edit that module and run the shipped block over it.
  * §11 MUTANTS: claim-before-send dropped; the preview latch set although the
  *    send failed; the preview sent to the page's recipients; no first-start
  *    digest marker; a 41st Drive load; the not-found cache ignored; the time
@@ -70,6 +77,7 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const Module = require("module");
 const os = require("os");
 
 const ROOT = path.join(__dirname, "..");
@@ -130,6 +138,7 @@ const DEP_DDL = [
 	tableDdl("expenses"), alterDdl("expenses", "gallons"), alterDdl("expenses", "receipt_details"),
 	tableDdl("audit_trail"), tableDdl("load_status_history"), tableDdl("invoice_autogen_runs"),
 	tableDdl("load_eld_miles"), tableDdl("load_coordinates"), tableDdl("documents"), alterDdl("documents", "deleted_at"),
+	tableDdl("load_ratecon_miles"),
 	tableDdl("app_settings"), tableDdl("server_state"), tableDdl("deleted_loads"),
 ];
 
@@ -178,6 +187,16 @@ function weightSheet(n, start = 512000001) {
 function deepFreeze(o) {
 	if (o && typeof o === "object" && !Object.isFrozen(o)) { Object.freeze(o); for (const v of Object.values(o)) deepFreeze(v); }
 	return o;
+}
+// A readable rate con: a weight for the weight parser, a per-mile table with no
+// Empty Movement line for the miles parser (none_stated, 333 loaded miles).
+const DEFAULT_RATECON = "Rate confirmation for the carrier. Pickup at the shipper, deliver to the consignee, load reference below. Weight: 42,000 lbs. Amount Rate Extended 333 333 $1.80 $0.75 $599.40 $249.75 Line Haul - PER MILE Fuel Surcharge - PER MILE Total: $849.15";
+// Marks loads' stated miles as read already (R10), so a weight-phase case
+// exercises the weight alone: those loads are no longer miles candidates.
+function milesDone(db, ids) {
+	require(path.join(ROOT, "lib", "kpi-ratecon-pass.js")).ensureTables(db);
+	const ins = db.prepare("INSERT OR REPLACE INTO kpi_load_ratecon_miles (load_id, loaded_miles, empty_miles, status, file_id, file_size, checked_at, text_rule) VALUES (?, 333, 0, 'none_stated', '', NULL, '2026-01-01T00:00:00.000Z', 1)");
+	for (const id of ids) ins.run(id);
 }
 function pdfWith(text) {
 	return Buffer.concat([Buffer.from("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n"), zlib.deflateSync(Buffer.from(`BT (${text}) Tj ET`)), Buffer.from("\nendstream\nendobj\n%%EOF\n")]);
@@ -282,6 +301,8 @@ function fakeLibs(log) {
 // ({ files(safe) -> [...], advanceMs, throws, bytes(fileId), metaSize(fileId) }),
 // localDocs (file name under DATA_DIR/uploads -> Buffer, or a byte count for a
 // sparse file), sendResult, db (reuse a database: a restart), seed.
+// A mutant of lib/kpi-ratecon-pass.js, put in the block's require map while one runs (§11).
+let PASS_MUTANT = null;
 const tmpDirs = [];
 process.on("exit", () => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
 function world(opts = {}) {
@@ -297,7 +318,7 @@ function world(opts = {}) {
 		const file = path.join(dataDir, "uploads", name);
 		if (typeof content === "number") { fs.writeFileSync(file, ""); fs.truncateSync(file, content); } else fs.writeFileSync(file, content);
 	}
-	const log = { inputs: [], builds: [], sheetReads: 0, drive: [], mails: [], events: [], logs: [], timeouts: [], intervals: [], computeThrows: false, bigBreakdown: false };
+	const log = { inputs: [], builds: [], sheetReads: 0, drive: [], mails: [], events: [], logs: [], timeouts: [], intervals: [], computeThrows: false, bigBreakdown: false, fetches: [] };
 	const libs = fakeLibs(log);
 	const db = opts.db || new Database(":memory:");
 	if (!opts.db) {
@@ -313,6 +334,11 @@ function world(opts = {}) {
 			const map = {
 				"./lib/kpi-catalog": libs.catalog, "./lib/kpi-metrics": libs.metrics, "./lib/kpi-weight": libs.weight,
 				"./lib/kpi-schedule": require(path.join(ROOT, "lib", "kpi-schedule.js")), "./lib/kpi-digest": require(path.join(ROOT, "lib", "kpi-digest.js")),
+				// R10: the real modules (a mutant of the rate-con pass when one is set).
+				"./lib/kpi-ratecon-pass": PASS_MUTANT || require(path.join(ROOT, "lib", "kpi-ratecon-pass.js")),
+				"./lib/kpi-deadhead-routes": require(path.join(ROOT, "lib", "kpi-deadhead-routes.js")),
+				"./lib/kpi-miles-data": require(path.join(ROOT, "lib", "kpi-miles-data.js")),
+				"./lib/kpi-miles": require(path.join(ROOT, "lib", "kpi-miles.js")),
 			};
 			if (!(p in map)) throw new Error(`the KPI block required an unexpected module: ${p}`);
 			return map[p];
@@ -348,7 +374,7 @@ function world(opts = {}) {
 					const marked = db.prepare("SELECT status FROM kpi_load_weights WHERE load_id = ?").get(String(params.fileId).replace(/^[a-z]+-/, ""));
 					log.drive.push({ op: "get", fileId: params.fileId, timeout: options && options.timeout, maxContentLength: options && options.maxContentLength, markedAtFetch: marked ? marked.status : null });
 					clock.ms += drive.advanceMs || 0;
-					return { data: drive.bytes ? drive.bytes(params.fileId) : pdfWith("Weight: 42,000 lbs") };
+					return { data: drive.bytes ? drive.bytes(params.fileId) : pdfWith(DEFAULT_RATECON) };
 				},
 			},
 		}),
@@ -361,6 +387,17 @@ function world(opts = {}) {
 		startsJob: opts.startsJob || (() => false),
 		requireRole: () => (req, res, next) => next(), refuseCrossOrigin: (req, res, next) => next(),
 		rateLimit: () => (req, res, next) => next(), ipKeyGenerator: (ip) => ip,
+		// R10: the dated driver-to-truck resolver, replica mode, the Maps key and
+		// fetch (recorded; the route calls are the only caller).
+		buildHaulTruckResolver: () => ({ forDriverAt: () => (opts.truckAt ? { truck_id: opts.truckAt } : null) }),
+		REPLICA: opts.replica ? { fetch: async () => { throw new Error("replica refuses"); } } : null,
+		GOOGLE_MAPS_API_KEY: opts.mapsKey === undefined ? "maps-key-under-test" : opts.mapsKey,
+		fetch: async (url, init) => {
+			log.fetches.push({ url, body: init && init.body, mask: init && init.headers && init.headers["X-Goog-FieldMask"] });
+			// opts.fetch(n, init, clock) shapes an answer (a slow or a hanging call).
+			if (opts.fetch) return opts.fetch(log.fetches.length, init, clock);
+			return { ok: true, status: 200, json: async () => ({ routes: [{ distanceMeters: 80467.2 }] }) };
+		},
 	};
 	const names = Object.keys(deps);
 	const body = `"use strict";\n${HELPERS}\n${opts.block || BLOCK}\nreturn { runKpiSnapshot, kpiTick, kpiResponse, kpiClaimAndSend, kpiMaybeSendPreview, kpiMaybeSendDigest, kpiGatherDbInputs, kpiSheetLoads, liveJobTrackingView, state: () => ({ kpiRunning, kpiCurrentRunId, kpiJobStarted }) };`;
@@ -399,7 +436,7 @@ const storageSection = section(async (t, block = BLOCK) => {
 	const closed = one(w, "SELECT status, errors FROM kpi_runs WHERE day = '2026-10-08'");
 	t(closed.status === "failed" && JSON.parse(closed.errors)[0].code === "INTERRUPTED", "§1 a run left 'running' by a stopped process is closed as INTERRUPTED");
 	const again = world({ block, db: w.db });
-	t(again.k && all(w, "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'kpi_%'").length === 6, "§1 the DDL runs again on an existing database (a restart)");
+	t(again.k && all(w, "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'kpi_%'").length === 8, "§1 the DDL runs again on an existing database (a restart; 8 tables since R10)");
 	const shape = (name) => new RegExp(`^const ${name} = !/\\^\\(false\\|0\\|no\\|off\\)\\$/i\\.test\\(String\\(process\\.env\\.${name} \\?\\? ""\\)\\.trim\\(\\)\\);$`, "m").test(block);
 	t(shape("KPI_SNAPSHOT_ENABLED") && shape("KPI_DIGEST_ENABLED"), "§1 both switches have the kill-switch shape");
 	for (const [v, on] of [[undefined, true], ["", true], ["true", true], ["yes", true], ["false", false], ["0", false], ["no", false], [" OFF ", false]]) {
@@ -487,12 +524,14 @@ const runSection = section(async (t, block = BLOCK) => {
 	t(out.status === "ok" && run.status === "ok" && run.kind === "nightly" && run.day === "2026-10-09" && run.errors === "[]" && run.finished_at && run.duration_ms >= 0, `§5 the run row: ok, nightly, the business day (${run && run.status} ${run && run.errors})`);
 	t(/Z$/.test(run.started_at) && /Z$/.test(run.finished_at), "§5 timestamps are ISO Z");
 	const inputs = w.log.inputs[0];
-	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "loadMiles", "activity"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
+	t(inputs && ["asOfDay", "settings", "loads", "ratecon", "eldDaily", "trucks", "fleetHistory", "fuelReceipts", "arrivals", "activity", "milesLoads", "timeZone"].every((k) => k in inputs), "§5 computeKpis() gets every input the contract names");
 	t(inputs.asOfDay === "2026-10-09" && JSON.stringify(inputs.settings) === JSON.stringify({ aiDispatchStart: "2026-04-01", dedicatedStart: null, baselineMpg: 8 }), "§5 asOfDay and the settings (no recipients)");
 	t(inputs.loads.find((l) => l.loadId === "l-1002").revenue === 0 && !("revenueByMonth" in inputs), "§5 revenue rides on each load; no books are read");
 	const a2 = inputs.arrivals.find((a) => a.loadId === "l-1002");
 	t(a2 && a2.destLng === -95.3 && a2.eldArriveMs === Date.parse("2026-09-12T13:00:00Z") && a2.receiverEvents.length === 1 && a2.receiverEvents[0].source === "geofence", "§5 an arrival joined to its coordinates, ELD arrival and receiver events");
-	t(inputs.loadMiles.map((m) => m.loadId).sort().join() === "l-1002,l-1003" && inputs.loadMiles.find((m) => m.loadId === "l-1002").day === "2026-09-12", "§5 load miles for live loads only (a cancelled load's dropped), with the load's day");
+	// R10: paid-mile share v2 reads milesLoads; the ELD-leg loadMiles input is gone.
+	t(!("loadMiles" in inputs) && inputs.milesLoads.find((m) => m.key === "l-1002").day === "2026-09-12" && !inputs.milesLoads.some((m) => m.key === "l-1004"),
+		"§5 no unused loadMiles input; the mile records are live loads only, with the load's day");
 	const snaps = all(w, "SELECT * FROM kpi_snapshots WHERE day = '2026-10-09'");
 	t(snaps.length === 16 && snaps.every((s) => s.definition_version === 1 && /Z$/.test(s.computed_at)), "§5 sixteen snapshot rows for the day");
 	t(snaps.every((s) => Buffer.byteLength(s.payload) <= 4096), "§5 every payload within 4 KB");
@@ -578,6 +617,7 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 			ins.run("512000004", "not_found", new Date(nowMs - 31 * day).toISOString());
 			ins.run("512000005", "error", new Date(nowMs - 2 * day).toISOString());
 			db.prepare("INSERT INTO documents (id, load_id, driver, type, file_name, uploaded_at) VALUES (9, '512000001', 'x', 'RateCon', ?, '2026-09-01 00:00:00')").run(`${BROKER} rate con.pdf`);
+			milesDone(db, ["512000001", "512000002", "512000003", "512000004", "512000005", "512000006"]);
 		} });
 	await w.k.runKpiSnapshot("nightly");
 	const listed = w.log.drive.filter((d) => d.op === "list").map((d) => d.q.match(/'(\d+)'$/)[1]).sort();
@@ -602,7 +642,8 @@ const weightCacheSection = section(async (t, block = BLOCK) => {
 	const broken = world({ block, sheet: weightSheet(2), drive: { files: driveFiles, throws: secret } });
 	const out = await broken.k.runKpiSnapshot("nightly");
 	const run = one(broken, "SELECT status, errors FROM kpi_runs WHERE id = ?", out.runId);
-	t(run.status === "partial" && run.errors === JSON.stringify([{ metric: "freight_tons_stated", code: "RATECON_FETCH_FAILED" }]), `§6 a Drive failure: the run is partial with a code (${run.errors})`);
+	t(run.status === "partial" && run.errors === JSON.stringify([{ metric: "freight_tons_stated", code: "RATECON_FETCH_FAILED" }, { metric: "paid_miles", code: "RATECON_FETCH_FAILED" }]),
+		`§6 a Drive failure: the run is partial with a code, on both metrics the rate-con phase feeds (${run.errors})`);
 	t(all(broken, "SELECT status FROM kpi_load_weights").every((x) => x.status === "error"), "§6 ...and the loads are marked error, to be tried again later");
 	const everything = JSON.stringify(all(broken, "SELECT * FROM kpi_runs")) + JSON.stringify(all(broken, "SELECT * FROM kpi_load_weights")) + broken.log.logs.join("\n");
 	t(!everything.includes("/srv/private") && !everything.includes(BROKER), "§6 ...and the error's text is stored and logged nowhere");
@@ -618,6 +659,7 @@ const textRuleSection = section(async (t, block = BLOCK) => {
 	ins.run("512000001", yesterday, 1);
 	ins.run("512000002", yesterday, 2);
 	ins.run("512000003", yesterday, 2);
+	milesDone(w.db, ["512000001", "512000002", "512000003"]);
 	await w.k.runKpiSnapshot("nightly");
 	const listed = w.log.drive.filter((d) => d.op === "list").map((d) => d.q.match(/'(\d+)'$/)[1]);
 	t(listed.join() === "512000001", `§6c a 'no_text' judged under the earlier rule is read again; one under the current rule is not (${listed})`);
@@ -648,6 +690,7 @@ const weightLimitsSection = section(async (t, block = BLOCK) => {
 			ins.run(11, "512000001", "big.pdf", null);
 			ins.run(12, "512000002", "not-on-disk.pdf", "drive-ok");
 			ins.run(13, "512000003", "not-on-disk-either.pdf", "drive-big");
+			milesDone(db, ["512000001", "512000002", "512000003"]);
 		} });
 	await stored.k.runKpiSnapshot("nightly");
 	const r = (id) => one(stored, "SELECT * FROM kpi_load_weights WHERE load_id = ?", id);
@@ -672,6 +715,101 @@ const weightLimitsSection = section(async (t, block = BLOCK) => {
 	await bomb.k.runKpiSnapshot("nightly");
 	const b = one(bomb, "SELECT status, weight_lb FROM kpi_load_weights");
 	t(b && b.status !== "ok" && b.weight_lb === null, `§6b a rate-con that inflates past 8 MB is not read past the cap (${b && b.status})`);
+});
+
+// ─────────────────────────────────────────── §12 R10 wiring
+// The two new tables, one download for both parsers, the mile metrics' inputs,
+// the contract start as a month, and the nightly route calls (flag, kind,
+// replica and key gates) through the block's own fetch.
+function routeWorld(o = {}) {
+	const sheet = { headers: HEADERS, data: [
+		row(0, { "Load ID": "R-2001", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/10/2026 08:00", "Completion Date": "2026-09-10" }),
+		row(1, { "Load ID": "R-2002", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/11/2026 08:00", "Completion Date": "2026-09-11" }),
+		...(o.third ? [row(2, { "Load ID": "R-2003", Status: "Delivered", Driver: DRIVER, Truck: "101", "Pickup Appointment": "9/12/2026 08:00", "Completion Date": "2026-09-12" })] : []),
+	] };
+	return world({ ...o, sheet, before: (db) => {
+		const lem = db.prepare("INSERT INTO load_eld_miles (load_id, truck_id, pickup_arrive_ms, dest_arrive_ms) VALUES (?, 1, ?, ?)");
+		lem.run("r-2001", Date.parse("2026-09-10T13:00:00Z"), Date.parse("2026-09-10T20:00:00Z"));
+		lem.run("r-2002", Date.parse("2026-09-11T13:00:00Z"), Date.parse("2026-09-11T20:00:00Z"));
+		const c = db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES (?, ?, ?, ?, ?)");
+		c.run("r-2001", 29.1, -95.1, 30.2, -96.2);
+		c.run("r-2002", 30.5, -96.5, 31.6, -97.6);
+		// Truck 1's ELD records cover both loads' days (the seed has Sep 10), so
+		// both are in the mile metrics' scope and the pair is usable.
+		db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, truck_id, miles) VALUES ('rv-1', '2026-09-11', 'a', ?, 1, 200)").run(DRIVER);
+		if (o.third) {
+			lem.run("r-2003", Date.parse("2026-09-12T13:00:00Z"), Date.parse("2026-09-12T20:00:00Z"));
+			c.run("r-2003", 32.1, -98.1, 33.2, -99.2);
+			db.prepare("INSERT INTO eld_miles_daily (routemate_vehicle_id, local_day, driver_key, driver_name, truck_id, miles) VALUES ('rv-1', '2026-09-12', 'a', ?, 1, 200)").run(DRIVER);
+		}
+	} });
+}
+const milesWiringSection = section(async (t, block = BLOCK) => {
+	const w = world({ block, sheet: weightSheet(3), drive: { files: driveFiles } });
+	const cols = (tbl) => all(w, `PRAGMA table_info(${tbl})`).map((c) => c.name).join(",");
+	t(cols("kpi_load_ratecon_miles") === "load_id,loaded_miles,empty_miles,status,file_id,file_size,checked_at,text_rule", "§12 kpi_load_ratecon_miles: figures, status, file id and size; no name or text");
+	t(cols("kpi_deadhead_routes") === "pair_key,distance_miles,status,checked_at", "§12 kpi_deadhead_routes: keyed by points, no load id");
+	await w.k.runKpiSnapshot("nightly");
+	const gets = w.log.drive.filter((d) => d.op === "get");
+	const weights = all(w, "SELECT load_id, status, weight_lb FROM kpi_load_weights");
+	const miles = all(w, "SELECT load_id, status, loaded_miles, empty_miles, file_id FROM kpi_load_ratecon_miles");
+	t(gets.length === 3 && weights.length === 3 && weights.every((r) => r.status === "ok" && r.weight_lb === 42000), `§12 one download a load (${gets.length}) feeds the weight`);
+	t(miles.length === 3 && miles.every((r) => r.status === "none_stated" && r.loaded_miles === 333 && r.empty_miles === 0 && r.file_id === `f-${r.load_id}`), "§12 ...and the stated miles", );
+
+	const b = world({ block });
+	b.settings({ dedicatedStart: "2026-09", recipients: [] });
+	await b.k.runKpiSnapshot("manual");
+	const inputs = b.log.inputs[b.log.inputs.length - 1];
+	const keys = inputs.milesLoads.map((l) => l.key);
+	t(!keys.includes("l-1004") && !keys.includes("l-1005") && keys.includes("l-1002"), `§12 the mile inputs: cancelled and soft-deleted loads are not in them (${keys.join(",")})`);
+	const l2 = inputs.milesLoads.find((l) => l.key === "l-1002");
+	t(l2.pickupText === "09/11/2026" && l2.dropoffText === "09/12/2026 14:00" && l2.destLat === 29.7 && l2.destLng === -95.3, "§12 each load carries its pickup and drop-off cells and its coordinates", JSON.stringify(l2));
+	t(inputs.timeZone === "America/New_York" && inputs.truckAt && typeof inputs.truckAt.forDriverAt === "function" && inputs.truckIdByUnit.get("101") === "1", "§12 the business zone, the dated resolver and the Truck-column map");
+	t(inputs.settings.dedicatedStart === "2026-09", "§12 a month is a valid contract start", JSON.stringify(inputs.settings));
+	b.settings({ dedicatedStart: "2026-13", recipients: [] });
+	b.clock.ms += 3600000;
+	await b.k.runKpiSnapshot("manual");
+	t(b.log.inputs[b.log.inputs.length - 1].settings.dedicatedStart === null, "§12 an impossible month reads as not set");
+
+	const on = routeWorld({ block, env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" } });
+	await on.k.runKpiSnapshot("nightly");
+	const routes = all(on, "SELECT pair_key, status, distance_miles FROM kpi_deadhead_routes");
+	t(on.log.fetches.length === 1 && on.log.fetches[0].mask === "routes.distanceMeters" && /computeRoutes$/.test(on.log.fetches[0].url), `§12 a nightly run with the flag on: one distance-only route call (${on.log.fetches.length})`);
+	t(routes.length === 1 && routes[0].pair_key === "30.2,-96.2>30.5,-96.5" && routes[0].status === "ok" && routes[0].distance_miles === 50, "§12 ...cached by its two points", JSON.stringify(routes));
+	const used = on.log.inputs[on.log.inputs.length - 1].deadheadRoutes.get("30.2,-96.2>30.5,-96.5");
+	t(used && used.distanceMiles === 50, "§12 ...and this run's figures use it");
+	t(one(on, "SELECT status FROM kpi_runs ORDER BY id DESC LIMIT 1").status === "ok", "§12 the run stays ok");
+	await on.k.runKpiSnapshot("nightly");
+	t(on.log.fetches.length === 1, "§12 a cached pair is never asked again");
+	for (const [label, o, kind] of [
+		["the flag off (its default)", {}, "nightly"],
+		["a manual run", { env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" } }, "manual"],
+		["replica mode", { env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, replica: true }, "nightly"],
+		["no Maps key", { env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, mapsKey: "" }, "nightly"],
+	]) {
+		const x = routeWorld({ block, ...o });
+		await x.k.runKpiSnapshot(kind);
+		t(x.log.fetches.length === 0 && one(x, "SELECT COUNT(*) AS n FROM kpi_deadhead_routes").n === 0, `§12 ${label}: no route call, no row`);
+	}
+
+	// Review Low 2: the route phase's own budget (60 s, within the run's), so a
+	// slow or hanging Routes call can never fail the night's snapshot.
+	const okAnswer = { ok: true, status: 200, json: async () => ({ routes: [{ distanceMeters: 80467.2 }] }) };
+	const slow = routeWorld({ block, third: true, env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, fetch: async (n, init, clock) => { clock.ms += 61000; return okAnswer; } });
+	const sr = await slow.k.runKpiSnapshot("nightly");
+	const srun = one(slow, "SELECT status, errors FROM kpi_runs WHERE id = ?", sr.runId);
+	t(slow.log.fetches.length === 1 && srun.status === "partial" && srun.errors.includes("ROUTES_TIME_LIMIT") && one(slow, "SELECT COUNT(*) AS n FROM kpi_snapshots").n > 0,
+		`§12 a call that spends the 60 s budget is the last one; the snapshot is stored (${slow.log.fetches.length} call(s), ${srun.status} ${srun.errors})`);
+	const hang = routeWorld({ block, third: true, env: { KPI_DEADHEAD_ROUTES_ENABLED: "true" }, fetch: (n, init, clock) => {
+		if (n === 1) { clock.ms += 59950; return Promise.resolve(okAnswer); }
+		return new Promise((resolve, reject) => init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+	} });
+	const startedAt = Date.now();
+	const hr = await hang.k.runKpiSnapshot("nightly");
+	const hrun = one(hang, "SELECT status FROM kpi_runs WHERE id = ?", hr.runId);
+	t(hang.log.fetches.length === 2 && Date.now() - startedAt < 5000 && hrun.status !== "failed" && one(hang, "SELECT COUNT(*) AS n FROM kpi_snapshots").n > 0
+		&& one(hang, "SELECT COUNT(*) AS n FROM kpi_deadhead_routes WHERE status = 'failed'").n === 1,
+		`§12 a hanging call is cut to the budget left (50 ms here): stored failed, and the snapshot still stored (${hrun.status}, ${Date.now() - startedAt} ms)`);
 });
 
 // ─────────────────────────────────────────── §7 the time box
@@ -710,7 +848,10 @@ const emailSection = section(async (t, block = BLOCK) => {
 	await w.k.kpiMaybeSendPreview(w.clock.ms);
 	t(w.log.mails.length === 1, "§8 ...and never sent again");
 	const g = w.k.kpiResponse(w.clock.ms);
-	t(g.metrics.every((m) => w.log.mails[0].html.includes(m.label)) && g.job.preview.status === "sent", "§8 built from the same object GET returns");
+	// R10: the five mile metrics are held out of the digest (lib/kpi-digest.js DIGEST_HOLD).
+	const held = new Set(["loaded_miles", "paid_miles", "deadhead_miles", "unloaded_miles", "paid_mile_share"]);
+	t(g.metrics.filter((m) => !held.has(m.key)).every((m) => w.log.mails[0].html.includes(m.label)) && g.job.preview.status === "sent", "§8 built from the same object GET returns");
+	t(g.metrics.filter((m) => held.has(m.key)).every((m) => !w.log.mails[0].html.includes(m.label)), "§8 ...without the held mile metrics");
 
 	const failing = world({ block, sendResult: false });
 	await failing.k.runKpiSnapshot("nightly");
@@ -864,7 +1005,7 @@ const failed = (results) => results.some((x) => !x.ok);
 		["§1 storage", storageSection], ["§2 gathering", gatherSection], ["§3 the sheet", sheetSection], ["§4 revenue", revenueSection],
 		["§5 a nightly run", runSection], ["§6 the weight phase", weightSection], ["§6 the weight cache and sources", weightCacheSection], ["§6b the weight phase's limits", weightLimitsSection], ["§6c an earlier text rule's no_text", textRuleSection],
 		["§7 the time box", timeSection], ["§8 emails", emailSection], ["§8 the first-start digest marker", seedSection],
-		["§9 the scheduler", schedulerSection], ["§10 aggregates only", aggregateSection],
+		["§9 the scheduler", schedulerSection], ["§10 aggregates only", aggregateSection], ["§12 R10 wiring", milesWiringSection],
 	];
 	for (const [title, fn] of sections) {
 		console.log(`\n${title}`);
@@ -874,30 +1015,66 @@ const failed = (results) => results.some((x) => !x.ok);
 	console.log("\n§11 MUTANTS");
 	const swap = (src, from, to) => { if (!src.includes(from)) die(`mutant anchor not found: ${from}`); return src.replace(from, to); };
 	const swapAll = (src, from, to) => { if (!src.includes(from)) die(`mutant anchor not found: ${from}`); return src.split(from).join(to); };
+	// lib/kpi-ratecon-pass.js with each (from, to) pair swapped once.
+	const PASS_SRC = fs.readFileSync(path.join(ROOT, "lib", "kpi-ratecon-pass.js"), "utf8");
+	const passSwap = (...pairs) => {
+		let src = PASS_SRC;
+		for (let i = 0; i < pairs.length; i += 2) {
+			if (src.split(pairs[i]).length !== 2) die(`lib mutant anchor not found exactly once: ${pairs[i]}`);
+			src = src.replace(pairs[i], () => pairs[i + 1]);
+		}
+		return src;
+	};
+	const compilePass = (src) => {
+		const file = path.join(ROOT, "lib", "kpi-ratecon-pass.js");
+		const m = { exports: {} };
+		new Function("module", "exports", "require", src)(m, m.exports, Module.createRequire(file));
+		return m.exports;
+	};
 	const mutants = [
 		["claim-before-send dropped", emailSection, swap(BLOCK, `if (!claim.changes) return "already_claimed";`, "")],
 		["the preview latch set although sendEmail() returned false", emailSection, swap(BLOCK, `const status = finish(sent ? "sent" : "failed", sent ? new Date().toISOString() : null);`, `const status = finish("sent", new Date().toISOString());`)],
 		["the preview sent to the page's recipients", emailSection, swap(BLOCK, "const recipients = ADMIN_NOTIFY_EMAIL ? [ADMIN_NOTIFY_EMAIL] : [];\n\treturn kpiClaimAndSend({ slotKey: \"preview\"", "const recipients = kpiReadSettings().recipients;\n\treturn kpiClaimAndSend({ slotKey: \"preview\"")],
 		["no first-start digest marker", seedSection, swap(BLOCK, "\t\tkpiSeedDigestMarker(Date.now());\n", "")],
-		["a no_text from an earlier text rule never read again", textRuleSection, swap(BLOCK, "\n\t\t\t\t|| (row.status === \"no_text\" && (Number(row.text_rule) || 1) < KPI_TEXT_RULE);", ";")],
-		["a 41st Drive load", weightSection, swap(BLOCK, "candidates.slice(0, budget)", "candidates.slice(0, budget + 1)")],
-		["the 40 counted per run, not per business day", weightLimitsSection, swap(BLOCK, "KPI_WEIGHT_MAX_PER_RUN - checkedToday", "KPI_WEIGHT_MAX_PER_RUN - 0")],
-		["a load not recorded before its rate-con is fetched", weightLimitsSection, swap(BLOCK, "upsert.run(load.loadId, null, \"error\", \"\", null, new Date().toISOString());\n", "")],
+		// Since R10 the weight phase's loop lives in lib/kpi-ratecon-pass.js: these
+		// mutants edit that module (passSwap) and run the shipped block over it.
+		["a no_text from an earlier text rule never read again", textRuleSection, BLOCK, passSwap("\n\t\t\t|| (row.status === \"no_text\" && (Number(row.text_rule) || 1) < weightTextRule);", ";")],
+		["a 41st Drive load", weightSection, BLOCK, passSwap("candidates.slice(0, budget)", "candidates.slice(0, budget + 1)")],
+		["the 40 counted per run, not per business day", weightLimitsSection, BLOCK, passSwap("(a.maxLoads || NIGHTLY_MAX_LOADS) - checkedToday(db, a.day, a.timeZone, nowMs)", "(a.maxLoads || NIGHTLY_MAX_LOADS) - 0")],
+		["a load not recorded before its rate-con is fetched", weightLimitsSection, BLOCK, passSwap("\t\tif (c.weight) upsertWeight.run(id, null, \"error\", \"\", null, stamp(), a.weightTextRule);\n", "")],
 		["a Drive download not capped", weightLimitsSection, swap(BLOCK, "{ responseType: \"arraybuffer\", timeout, maxContentLength: kpiWeight.MAX_PDF_BYTES }", "{ responseType: \"arraybuffer\", timeout }")],
 		["a stored Drive file downloaded before its size is checked", weightLimitsSection, swap(BLOCK, "if (size > max) return { status: \"too_large\", fileSize: size };\n\tcounter.driveFetches++;", "counter.driveFetches++;")],
 		["the PDF text cap raised", weightLimitsSection, swap(BLOCK, "extractPdfText(buffer, { maxInflatedBytes: KPI_PDF_TEXT_MAX_BYTES })", "extractPdfText(buffer, { maxInflatedBytes: 64 * 1024 * 1024 })")],
 		["a short load id looked up by file name", weightLimitsSection, swap(BLOCK, "if (safe.length < rcIndexShared.MIN_LOAD_ID_LEN) return", "if (false) return")],
-		["a file name matched inside a longer number", weightLimitsSection, swap(BLOCK, "\n\t\t\t\t&& rcIndexShared.textHasToken(String(f.name || \"\").toLowerCase(), safe.toLowerCase()))", ")")],
-		["the not-found cache ignored", weightCacheSection, swap(BLOCK, " && !(nowMs - Date.parse(row.checked_at) < KPI_WEIGHT_RETRY_MS)", "")],
-		["the Drive phase's time limit ignored", timeSection, swap(BLOCK, "if (Date.now() >= deadlineMs) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");", "if (false) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");")],
+		["a file name matched inside a longer number", weightLimitsSection, swap(BLOCK, "\n\t\t\t\t\t&& rcIndexShared.textHasToken(String(f.name || \"\").toLowerCase(), safe.toLowerCase()))", ")")],
+		["the not-found cache ignored", weightCacheSection, BLOCK, passSwap("const youngerThanRetry = (row, nowMs) => nowMs - Date.parse(row.checked_at) < RETRY_MS;", "const youngerThanRetry = () => false;")],
+		["the Drive phase's time limit ignored", timeSection, BLOCK, passSwap("if (now() >= a.deadlineMs) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");", "if (false) {\n\t\t\tout.codes.add(\"RATECON_TIME_LIMIT\");")],
 		["the run's time limit ignored", timeSection, swapAll(BLOCK, `if (Date.now() >= deadlineMs) throw kpiStop("TIME_LIMIT");`, "")],
 		["the startsJob gate removed", schedulerSection, swap(BLOCK, 'if (KPI_SNAPSHOT_ENABLED && startsJob("KPI snapshot")) {', "if (KPI_SNAPSHOT_ENABLED) {")],
-		["raw error text stored", weightCacheSection, swap(BLOCK, "result = { status: \"error\", weightLb: null, fileId: \"\", fileSize: null };\n\t\t\tout.codes.add(e && e.kpiCode === \"TIME_LIMIT\" ? \"RATECON_TIME_LIMIT\" : \"RATECON_FETCH_FAILED\");",
-			"result = { status: \"error\", weightLb: null, fileId: String(e.message), fileSize: null };\n\t\t\tout.codes.add(String(e.message));")],
+		["raw error text stored", weightCacheSection, BLOCK, passSwap("\t\t\tweight = { status: \"error\", weightLb: null, fileId: \"\", fileSize: null };\n",
+			"\t\t\tweight = { status: \"error\", weightLb: null, fileId: String(e.message), fileSize: null };\n", "out.codes.add(e && e.kpiCode === \"TIME_LIMIT\" ? \"RATECON_TIME_LIMIT\" : \"RATECON_FETCH_FAILED\");", "out.codes.add(String(e.message));")],
+		// R10: the wiring.
+		["the miles table not written by the pass", milesWiringSection, BLOCK, passSwap("\t\tif (c.miles) upsertMiles.run(id, finite(miles.loadedMiles), finite(miles.emptyMiles), miles.status, miles.fileId || \"\", finite(miles.fileSize), stamp());\n", "")],
+		["route calls on a manual run", milesWiringSection, swap(swap(BLOCK, "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;", "if (!KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;"),
+			"db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,", "db, pending, kind: \"nightly\", enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,")],
+		["route calls with the flag off", milesWiringSection, swap(swap(BLOCK, "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;", "if (kind !== \"nightly\" || REPLICA) return null;"),
+			"db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,", "db, pending, kind, enabled: true, replica: !!REPLICA,")],
+		["route calls in a replica", milesWiringSection, swap(swap(BLOCK, "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED || REPLICA) return null;", "if (kind !== \"nightly\" || !KPI_DEADHEAD_ROUTES_ENABLED) return null;"),
+			"db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: !!REPLICA,", "db, pending, kind, enabled: KPI_DEADHEAD_ROUTES_ENABLED, replica: false,")],
+		["the route phase without its own budget (the run's deadline instead)", milesWiringSection, swap(BLOCK, "kpiDeadheadRouteCalls(inputs, day, kind, routesDeadlineMs)", "kpiDeadheadRouteCalls(inputs, day, kind, deadlineMs)")],
+		["route pairs chosen without the ELD truck-days", milesWiringSection, swap(BLOCK, "milesLoads: inputs.milesLoads, eldRows: inputs.eldDaily, timeZone", "milesLoads: inputs.milesLoads, timeZone")],
+		["a month refused for the contract start", milesWiringSection, swap(BLOCK, "dedicatedStart: kpiSettingMonthOrDay(r.dedicatedStart) ? r.dedicatedStart : null,", "dedicatedStart: kpiSettingDay(r.dedicatedStart) ? r.dedicatedStart : null,")],
 		["SELECT * on expenses", gatherSection, swap(BLOCK, `"SELECT date, amount, gallons, status FROM expenses WHERE LOWER(type) = 'fuel'"`, `"SELECT * FROM expenses WHERE LOWER(type) = 'fuel'"`)],
 	];
 	const results = [];
-	for (const [name, fn, src] of mutants) results.push({ ok: failed(await fn(src)), name: `MUTANT ${name}: caught` });
+	for (const [name, fn, src, passSrc] of mutants) {
+		PASS_MUTANT = passSrc ? compilePass(passSrc) : null;
+		try {
+			results.push({ ok: failed(await fn(src)), name: `MUTANT ${name}: caught` });
+		} finally {
+			PASS_MUTANT = null;
+		}
+	}
 	record(results);
 
 	if (failures.length) {

@@ -58,6 +58,38 @@
               <span v-if="row.display && row.display !== row.statusLabel" class="kpi-ba-change">{{ row.display }}</span>
             </div>
             <div v-else-if="row.display && row.display !== row.statusLabel" class="kpi-ba-sides">{{ row.display }}</div>
+            <dl v-if="row.wholeMonths" class="kpi-ba-months">
+              <template v-if="row.beforeMonths">
+                <dt>Before</dt>
+                <dd>
+                  {{ row.beforeMonths.display }}<template v-if="row.beforeMonths.label"> ({{ row.beforeMonths.label }})</template>
+                  <span v-if="row.beforeMonths.counts" class="kpi-ba-note">{{ row.beforeMonths.counts }}</span>
+                  <span v-if="row.beforeMonths.dropped.length" class="kpi-ba-note">Left out (under 90% known): {{ row.beforeMonths.dropped.map((m) => fmtSettingDate(m)).join(', ') }}</span>
+                </dd>
+              </template>
+              <template v-for="(c, ci) in row.contractRows" :key="`c${ci}`">
+                <dt>{{ row.contractRows.length === 1 ? 'Contract month' : c.label }}</dt>
+                <dd>
+                  {{ c.display }}<template v-if="row.contractRows.length === 1 && c.label"> ({{ c.label }})</template>
+                  <span v-if="c.counts" class="kpi-ba-note">{{ c.counts }}</span>
+                </dd>
+              </template>
+              <template v-if="row.afterMonths">
+                <dt>After</dt>
+                <dd>
+                  {{ row.afterMonths.display }}<template v-if="row.afterMonths.label"> ({{ row.afterMonths.label }})</template>
+                  <span v-if="row.afterMonths.counts" class="kpi-ba-note">{{ row.afterMonths.counts }}</span>
+                  <span v-if="row.afterMonths.dropped.length" class="kpi-ba-note">Left out (under 90% known): {{ row.afterMonths.dropped.map((m) => fmtSettingDate(m)).join(', ') }}</span>
+                </dd>
+              </template>
+              <template v-if="row.monthToDate">
+                <dt>Month to date</dt>
+                <dd>
+                  {{ row.monthToDate.display }} ({{ row.monthToDate.label }})
+                  <span v-if="row.monthToDate.counts" class="kpi-ba-note">{{ row.monthToDate.counts }}</span>
+                </dd>
+              </template>
+            </dl>
             <p v-if="row.note" class="kpi-ba-note">{{ row.note }}</p>
           </li>
         </ul>
@@ -125,7 +157,7 @@ import KpiBadge from './KpiBadge.vue'
 import KpiSparkline from './KpiSparkline.vue'
 import KpiApprovalToggle from './KpiApprovalToggle.vue'
 import {
-  PARTIAL_BADGE, beforeAfterRow, comparisonRow, confidenceBadge, coverageText, kindBadge,
+  PARTIAL_BADGE, beforeAfterRow, comparisonRow, confidenceBadge, coverageText, fmtSettingDate as settingDate, kindBadge,
 } from '../../lib/kpiView.js'
 import { monthLabel } from '../../lib/monthLabel.js'
 import { fmtYmd } from '../../utils/datetime'
@@ -145,7 +177,9 @@ const kind = computed(() => kindBadge(props.metric))
 const confidence = computed(() => confidenceBadge(props.metric.confidence))
 const hasFigure = computed(() => props.metric.value !== null && props.metric.value !== undefined)
 const comparisons = computed(() => (props.metric.comparisons || []).map(comparisonRow))
-const beforeAfter = computed(() => (props.metric.beforeAfter || []).map((row) => beforeAfterRow(row, (d) => fmtYmd(d))))
+// A setting's date in words: "September 2026" for a month, fmtYmd for a day.
+const fmtSettingDate = (d) => settingDate(d, (day) => fmtYmd(day))
+const beforeAfter = computed(() => (props.metric.beforeAfter || []).map((row) => beforeAfterRow(row, fmtSettingDate)))
 const coverage = computed(() => coverageText(props.metric.coverage))
 const coverageRange = computed(() => {
   const c = props.metric.coverage
@@ -322,6 +356,17 @@ const coverageRange = computed(() => {
   font-size: 0.74rem;
   color: var(--text-dim);
 }
+.kpi-ba-months {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.2rem 0.6rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-ba-months dt { font-weight: 600; color: var(--text-dim); }
+.kpi-ba-months dd { margin: 0; overflow-wrap: anywhere; }
+.kpi-ba-months dd .kpi-ba-note { display: block; margin-top: 0.1rem; }
 .kpi-coverage {
   margin: 0;
   font-size: 0.78rem;
