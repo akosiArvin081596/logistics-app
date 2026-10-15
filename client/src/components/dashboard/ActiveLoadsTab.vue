@@ -280,24 +280,23 @@
             <div class="dash-section-title" style="display:flex;align-items:center;gap:0.5rem;">
               <span>Route Map</span>
               <span
-                v-if="selectedDriverPosition && ['routemate','linxup','eld'].includes(selectedDriverPosition.source)"
+                v-if="mapDriverPosition && ['routemate','linxup','eld'].includes(mapDriverPosition.source)"
                 style="font-size:0.6rem;font-weight:700;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;"
-                :title="`Live position from the truck's ELD/GPS device${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
+                :title="`Live position from the truck's ELD/GPS device${mapDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(mapDriverPosition.lastPingAge) + ' ago' : ''}`"
               >ELD</span>
               <span
-                v-else-if="selectedDriverPosition && selectedDriverPosition.source === 'phone'"
+                v-else-if="mapDriverPosition && mapDriverPosition.source === 'phone'"
                 style="font-size:0.6rem;font-weight:700;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;background:#f3f4f6;color:#4b5563;border:1px solid #e5e7eb;"
-                :title="`Live position from the driver's phone${selectedDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(selectedDriverPosition.lastPingAge) + ' ago' : ''}`"
+                :title="`Live position from the driver's phone${mapDriverPosition.lastPingAge != null ? ' — ' + formatPingAge(mapDriverPosition.lastPingAge) + ' ago' : ''}`"
               >Phone</span>
             </div>
-            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="selectedDriverPosition" dispatch-mode show-arrival />
+            <!-- ONE map: live (truck → next stop, ETA, miles left) while the
+                 truck has a position, otherwise the planned pickup → drop-off
+                 lane that LoadHaulSection reads from /haul. -->
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :planned-lane="plannedLane" dispatch-mode show-arrival />
+            <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
-          <!-- The whole booked haul, under the phase-scoped map rather than
-               instead of it. The map above answers "where is the truck now and
-               how far to its next stop"; this answers "how long is this lane and
-               how far did the truck actually run for it". Both are wanted — see
-               LoadHaulSection.vue for why it does not reuse DriverRouteMap. -->
-          <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" />
+          <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
     </Dialog>
@@ -414,7 +413,7 @@
     <ConfirmModal
       :open="showDeleteConfirm"
       title="Delete this load?"
-      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed the server will refuse — reopen the period first.`"
+      :message="`Removes ${loadIdValue || 'this load'} from every list and KPI (revenue, financials, investor dashboards). The sheet row stays for external audit; a Super Admin can restore the load via SQL if needed.\n\nIf the load's month is already closed, it can't be removed: closed months stay as recorded.`"
       confirm-text="Delete"
       :danger="true"
       :confirm-disabled="deleting"
@@ -481,6 +480,7 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
+import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { normDriver } from '../../lib/driverName'
@@ -656,6 +656,12 @@ const isSelectedLoadCompleted = computed(() => {
   const sc = props.headers.find(h => /status/i.test(h))
   return sc && /^(delivered|completed|pod received)$/i.test((selectedJob.value[sc] || '').trim())
 })
+// A delivered load has no live position of its own: the truck's current fix is
+// about whatever it does next, so the map shows the planned lane instead.
+const mapDriverPosition = computed(() => isSelectedLoadCompleted.value ? null : selectedDriverPosition.value)
+// The planned lane for the one map, from LoadHaulSection's /haul read.
+const plannedLane = ref({ status: 'loading' })
+function onPlannedLane(lane) { plannedLane.value = lane }
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in statusSelections)) statusSelections[j._rowIndex] = ''; if (!(j._rowIndex in reassignSelections)) reassignSelections[j._rowIndex] = '' }) }, { immediate: true })
 const mapHeaders = computed(() => {
   const h = [...props.headers]
@@ -854,7 +860,7 @@ async function runDelete() {
     // Was a bare `catch {}` whose comment promised a toast "via watcher" that
     // does not exist — a failed delete produced no feedback at all and left the
     // confirm open, which reads as a hung click. The server now returns 409
-    // PERIOD_FINALIZED naming the closed month and how to reopen it; discarding
+    // PERIOD_FINALIZED naming the closed month and saying nothing was changed; discarding
     // that is how an admin retries, gives up, and never learns why.
     deleteError.value = (err && err.message) || 'Failed to delete this load.'
     toast(deleteError.value, 'error')
@@ -884,6 +890,7 @@ watch([() => props.focusLoadId, () => props.jobs], ([focus, jobs]) => {
 async function openDetail(job) {
   docError.value = ''; deletingDocId.value = null
   selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
+  plannedLane.value = { status: 'loading' }
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
   const p = []

@@ -711,7 +711,11 @@ check("refusal extraction picked up the 409 and its code selection", [
 		check("409/locked: unchanged — still PERIOD_FINALIZED", body.code, "PERIOD_FINALIZED");
 		check("409/locked: names the finalized month", body.periods, ["2026-05"]);
 		check("409/locked: unresolved stays false", body.unresolved, false);
-		check("409/locked: the reopen remedy is offered", /reopen/i.test(body.error), true);
+		// Closed months are never reopened (2026-10-14): the remedy is to keep the
+		// account, and no reopen step or API path is offered.
+		check("409/locked: the remedy is to leave the account in place",
+			/Leave the account in place — a closed month's figures are attributed to it\./.test(body.error), true);
+		check("409/locked: no reopen step and no API path", /reopen|\/api\//i.test(body.error), false);
 		db.close();
 	}
 

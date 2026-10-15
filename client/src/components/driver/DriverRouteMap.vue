@@ -4,9 +4,9 @@
       <div class="map-empty">No route coordinates available</div>
     </template>
     <template v-else>
-      <div class="map-info" v-if="hasCoords && (remainingDistanceMiles != null || remainingEtaMinutes != null || driverDistanceInfo)">
-        <span v-if="remainingDistanceMiles != null" class="info-item">{{ remainingDistanceMiles }} mi</span>
-        <span v-if="remainingEtaMinutes != null" class="info-item">{{ etaFormatted }} ETA</span>
+      <div class="map-info" v-if="hasCoords && (chipMiles != null || chipMinutes != null || driverDistanceInfo)">
+        <span v-if="chipMiles != null" class="info-item">{{ chipMiles }} mi</span>
+        <span v-if="chipMinutes != null" class="info-item">{{ chipEtaText }} {{ usePlannedLane ? 'drive time' : 'ETA' }}</span>
         <span v-if="driverDistanceInfo" :class="['info-item', driverDistanceInfo.mi > 500 ? 'info-danger' : 'info-warn']">{{ driverDistanceInfo.mi }} mi {{ driverDistanceInfo.label }}</span>
         <!-- Drive Mode is a DRIVER affordance (turn-by-turn for the truck) and
              it needs `steps`, which the public payload deliberately omits — so
@@ -23,13 +23,17 @@
            .map-info is a flex row with no wrap, and a date long enough to carry
            the weekday and the zone label pushes the Navigate button off the
            edge at phone width. -->
-      <div v-if="showArrival && arrivalClock" class="map-arrival">
+      <div v-if="showArrival && arrivalClock && !usePlannedLane" class="map-arrival">
         <span class="map-arrival-label">{{ arrivalLabel }}</span>
         <span class="map-arrival-value">{{ arrivalClock }}</span>
       </div>
       <div v-if="!hasCoords" class="map-label">Your Current Location</div>
       <div v-else-if="!driverLatLng && !dispatchMode" class="map-eld-hint">
         Showing route only — truck position unavailable (ELD offline)
+      </div>
+      <div v-else-if="usePlannedLane" class="map-planned-hint">
+        Planned route, pickup → drop-off. No live truck position.
+        <span v-if="plannedLaneShown && plannedLane.source === 'straight_line'">Straight-line distance: Google could not route this lane.</span>
       </div>
       <div ref="mapContainer" class="map-container"></div>
 
@@ -114,6 +118,18 @@ const props = defineProps({
   // contradicting times on one customer-facing page. TrackLoadView passes the
   // server's eta.expectedAt, so the two agree by construction.
   arrivalAt: { type: [String, Number], default: null },
+  // The admin load-detail modals only (ActiveLoadsTab, CompletedLoadsTab): the
+  // load's planned pickup → drop-off lane from GET /api/loads/:loadId/haul,
+  // emitted by LoadHaulSection as
+  //   { status: 'loading' | 'ready' | 'none', route, distanceMiles, etaMinutes, source }.
+  // While the truck has no live position, this one map draws that lane with
+  // both end markers, its chips read "mi" and "drive time", and no
+  // /api/route call is made ('loading' waits for it, 'none' falls back to the
+  // usual origin → drop-off fetch). A live position takes over as before.
+  // Default null: the driver app, the job board and the public tracker never
+  // pass it, and every branch below reads usePlannedLane, so they render
+  // exactly as they did.
+  plannedLane: { type: Object, default: null },
 })
 
 const emit = defineEmits(['route-data', 'update:selectedAltIdx'])
@@ -244,6 +260,11 @@ const driverLatLng = computed(() => {
   if (!props.driverPosition) return null
   return { lat: props.driverPosition.latitude, lng: props.driverPosition.longitude }
 })
+
+// The planned-lane fallback (see the plannedLane prop). Off unless a caller
+// passes the prop; never in publicMode.
+const usePlannedLane = computed(() => !props.publicMode && !!props.plannedLane && !driverLatLng.value)
+const plannedLaneShown = computed(() => usePlannedLane.value && props.plannedLane.status === 'ready')
 
 // Match "Status" AND "Job Status" (the Job Tracking sheet's column name used on
 // the dispatcher dashboard). Anchored so it never grabs "Status Update Date" or
@@ -480,8 +501,9 @@ function renderMarkers() {
   // Alternatives first so they render BELOW the active route.
   altPolylines = renderAlternatives(map, props.selectedAltIdx)
 
-  // After pickup, hide origin marker — driver is now Point A
-  if (originLatLng.value && hasCoords.value && !pickedUp.value) {
+  // After pickup, hide origin marker — driver is now Point A. A planned lane
+  // (no live position) is the whole haul, so it keeps both ends.
+  if (originLatLng.value && hasCoords.value && (!pickedUp.value || usePlannedLane.value)) {
     originMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
@@ -608,6 +630,24 @@ function applyPresetRoute(force = false) {
   if (map) renderMarkers()
 }
 
+// The admin planned lane (see the plannedLane prop). Like applyPresetRoute,
+// whole-haul figures with no steps and no alternatives. A later live position
+// must route from the truck, so the leg counts as not yet routed from it.
+function applyPlannedLane() {
+  const lane = props.plannedLane
+  const pts = lane && Array.isArray(lane.route) ? lane.route : []
+  allRoutes.value = []
+  recommendedIdx.value = 0
+  routePoints.value = pts.length >= 2 ? pts : []
+  routeSteps.value = []
+  routeDistanceMiles.value = lane?.distanceMiles ?? null
+  routeEtaMinutes.value = lane?.etaMinutes ?? null
+  routedFromDriverPosition = false
+  resetLegRouteAttempts()
+  onRouteGeometryChanged()
+  if (map) renderMarkers()
+}
+
 // Called whenever routePoints is replaced. Keeps three things that must never
 // disagree in lockstep: the match offset (measured against the old polyline),
 // the deviation counter (the driver is on the new route by definition), and the
@@ -636,6 +676,13 @@ async function fetchRoute(doFit = false) {
   // Force: the three refs above were just cleared, so the signature guard must
   // not short-circuit the re-apply.
   if (props.publicMode) { applyPresetRoute(true); return }
+
+  // Admin load detail with no live position: draw the planned lane, or wait
+  // for it, instead of routing; 'none' falls through to the fetch below.
+  if (usePlannedLane.value) {
+    if (props.plannedLane.status === 'loading') { if (map) renderMarkers(); return }
+    if (props.plannedLane.status === 'ready') { applyPlannedLane(); return }
+  }
 
   // Pick the right leg to render:
   //   - Has ELD + picked up:     truck→drop-off (current trajectory)
@@ -893,6 +940,26 @@ const remainingEtaMinutes = computed(() => {
 // header says so). Same output; one implementation.
 const etaFormatted = computed(() => formatMinutes(remainingEtaMinutes.value))
 
+// The header chips. Without a planned lane on screen they are exactly the live
+// figures above; with one they are the lane's own distance and drive time, read
+// straight off the prop so they show even before (or without) the map script.
+// A lane figure of 0 or unknown is an absence (an empty stored lane), so its
+// chip is left out rather than reading "0 mi".
+function positiveOrNull(v) {
+  const n = Number(v)
+  return v != null && Number.isFinite(n) && n > 0 ? n : null
+}
+const chipMiles = computed(() => {
+  if (!plannedLaneShown.value) return remainingDistanceMiles.value
+  const mi = positiveOrNull(props.plannedLane.distanceMiles)
+  return mi == null ? null : Math.round(mi * 10) / 10
+})
+const chipMinutes = computed(() => {
+  if (!plannedLaneShown.value) return remainingEtaMinutes.value
+  return positiveOrNull(props.plannedLane.etaMinutes)
+})
+const chipEtaText = computed(() => plannedLaneShown.value ? formatMinutes(chipMinutes.value) : etaFormatted.value)
+
 // ── ABSOLUTE ARRIVAL CLOCK ───────────────────────────────────────────────────
 //
 // "5h 0m ETA" answers how long, not when, and a dispatcher relaying an arrival
@@ -1084,6 +1151,12 @@ watch(() => props.presetRoute, () => {
   if (props.publicMode) applyPresetRoute()
 })
 
+// The planned lane arrived (or changed), or the live position went away:
+// redraw from the lane. Never fires for a caller that passes no plannedLane.
+watch(() => [usePlannedLane.value, props.plannedLane], () => {
+  if (usePlannedLane.value && map && destLatLng.value) fetchRoute(true)
+})
+
 // Driver swapped to a different alternative (or recommended changed). Re-sync
 // the active polyline + info strip + traffic overlay against the new pick
 // WITHOUT hitting the network — the alternatives payload already has every
@@ -1201,6 +1274,7 @@ onMounted(() => {
 .map-arrival-value { color: var(--text); font-weight: 600; }
 .map-label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); margin-bottom: 0.4rem; }
 .map-eld-hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 500; }
+.map-planned-hint { font-size: 0.75rem; margin-bottom: 0.4rem; padding: 0.3rem 0.5rem; background: #eff6ff; color: #1e40af; border-radius: 6px; font-weight: 500; }
 .gps-waiting { display: flex; align-items: center; justify-content: center; background: var(--bg, #f5f6fa); border: 1px solid var(--border, #e5e7eb); }
 .gps-overlay { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; color: var(--text-dim); font-size: 0.82rem; font-weight: 500; }
 .gps-spinner { width: 28px; height: 28px; border: 3px solid var(--border, #e5e7eb); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }

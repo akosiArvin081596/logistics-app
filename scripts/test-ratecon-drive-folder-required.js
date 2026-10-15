@@ -291,6 +291,9 @@ function liftArchive(folder) {
 				/^q: `'\$\{RATECON_DRIVE_FOLDER_ID\}' in parents and trashed = false`,$/,
 				/^q: `'\$\{RATECON_DRIVE_FOLDER_ID\}' in parents and trashed = false and name contains '\$\{safe\}'`,$/,
 				/^parents: \[RATECON_DRIVE_FOLDER_ID\],$/,
+				// The rate con viewer: with the setting empty it lists nothing
+				// (scripts/test-ratecon-pdf-route.js §5 checks that).
+				/^require\("\.\/lib\/ratecon-pdf-route"\)\.mount\(app, \{ [^}]*\bfolderId: RATECON_DRIVE_FOLDER_ID, [^}]*\}\);$/,
 			];
 			const refs = SRC.split("\n").map((l, i) => ({ n: i + 1, l: l.trim() }))
 				.filter((x) => /RATECON_DRIVE_FOLDER_ID/.test(x.l) && !/^(\/\/|\*)/.test(x.l) && !/^"/.test(x.l));

@@ -30,9 +30,10 @@
 const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
-const { parseArgs, sheetFor, envFor } = require("./lib/ledger-world");
+const { parseArgs, sheetFor, envFor, buildLedgerWorld } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
 const integrityCheck = require("../lib/integrity-check");
+const ledgerDayOnce = require("../lib/ledger-day-once");
 const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
@@ -119,6 +120,18 @@ async function main() {
 		mailboxNote = readRateConEmails ? "the rate-con label, read-only (EXAMINE, BODY.PEEK)" : "not read (the app's .env sets no GMAIL_USER / GMAIL_APP_PASSWORD)";
 	}
 
+	// Check 7, only while the app's settings switch the ledger day-once rule on:
+	// the payout ledger lifted from this checkout's server.js on its own
+	// read-only handle (scripts/lib/ledger-world.js).
+	const dayOnceFrom = ledgerDayOnce.ruleFromEnv(env);
+	let ledgerWorld = null;
+	const readFleetLedger = dayOnceFrom
+		? async () => {
+			ledgerWorld = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData, envFile });
+			return ledgerWorld.api.computeFleetLedger();
+		}
+		: null;
+
 	const lines = [];
 	const log = { log: (...a) => lines.push(a.join(" ")), error: (...a) => lines.push(a.join(" ")) };
 	const to = String(env.ADMIN_NOTIFY_EMAIL || "").trim();
@@ -132,8 +145,11 @@ async function main() {
 		log,
 		appZone: appTime.resolveAppTimeZone(env.APP_TIMEZONE, (m) => console.error(m)),
 		closedMonthsOf: closedMonthsRule(db, server.loadRowAccountingMonths),
+		dayOnceFrom,
+		readFleetLedger,
 	});
 	db.close();
+	if (ledgerWorld) ledgerWorld.db.close();
 
 	const lastRun = result.baseline ? "none yet: the server's first run would take the baseline" : "from the job's state table";
 	console.log("Daily integrity check, read-only (nothing written, nothing sent)");

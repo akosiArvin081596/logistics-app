@@ -180,7 +180,7 @@
       </p>
       <p v-else-if="selectedMonthClosed" class="period-note" role="status">
         {{ selectedMonthLabel }} is closed — its statement has already been published against these figures, so pay overrides are refused.
-        Reopen the period first if it genuinely needs restating.
+        Closed months stay as recorded.
       </p>
 
       <!-- Calendar grid -->
