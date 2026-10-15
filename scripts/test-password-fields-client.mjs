@@ -143,10 +143,12 @@ function mountInMemory(Comp, props) {
 }
 const evt = () => ({ preventDefault() {}, stopPropagation() {}, target: null })
 // Type into a mounted input the way a person (or autofill) does: set its value
-// and fire the input listeners v-model registered.
+// and fire its input event, which reaches both the listener v-model registered
+// and any @input handler the template put on the element.
 async function type(el, value) {
   el.value = value
   for (const fn of el.listeners.input || []) fn({ target: el })
+  if (typeof el.props.onInput === 'function') el.props.onInput({ target: el })
   await drain()
 }
 async function click(el) {
@@ -298,6 +300,34 @@ if (UserTable) {
     ok('§3b a success closes the dialog', !byId('edit-user-new-password') && !!last && last.data.password === 'Accepted-Pass-1!')
     if (edit) await click(edit)
     ok('§3b the next open shows no old error', saveError() === '')
+
+    // A refusal's message goes as soon as either password field changes: it
+    // speaks about what was typed, and stops being true once that changes.
+    for (const [field, value] of [['edit-user-new-password', 'Retyped-1!'], ['edit-user-confirm-password', 'Retyped-1!'], ['edit-user-new-password', '']]) {
+      answer = refuse(400, 'PASSWORD_WEAK', 'New password must be at least 8 characters')
+      await fill('Short-1!')
+      await submit()
+      const shown = saveError()
+      await type(byId(field), value)
+      ok(`§3b after a refusal, changing ${field === 'edit-user-new-password' ? '"New password"' : '"Confirm new password"'}${value ? '' : ' to blank'} clears the server's message (${shown} -> ${saveError() || 'none'})`,
+        shown === 'New password must be at least 8 characters' && saveError() === '' && !!byId('edit-user-new-password'))
+    }
+    answer = refuse(400, 'PASSWORD_WEAK', 'New password must be at least 8 characters')
+    await fill('Short-1!')
+    await submit()
+    await type(byId('edit-user-new-password'), '')
+    await type(byId('edit-user-confirm-password'), '')
+    ok('§3b clearing both password fields after a refusal leaves no message, and Save keeps the current password', saveError() === '' && !save().props.disabled)
+    await type(m.find((n) => n.tag === 'input' && n.props.placeholder === 'e.g. John Smith'), 'Second Admin B')
+    answer = refuse(409, 'PERIOD_FINALIZED', 'That month is closed.')
+    await submit()
+    await type(m.find((n) => n.tag === 'input' && n.props.placeholder === 'e.g. John Smith'), 'Second Admin C')
+    ok('§3b ...while editing another field leaves a refusal\'s message in place', saveError() === 'That month is closed.')
+    answer = refuse(400, 'PASSWORD_IS_YOURS', 'This is your own password. Enter a new password for this user.')
+    await fill('Own-Pass-1!')
+    await submit()
+    ok('§3b PASSWORD_IS_YOURS keeps its message although it empties the fields itself', saveError() === 'This is your own password. Enter a new password for this user.')
+    answer = () => Promise.resolve()
 
     // §4 the eye buttons
     const t = toggles()

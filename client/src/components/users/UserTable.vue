@@ -105,7 +105,7 @@
           <div class="edit-field">
             <label for="edit-user-new-password">New Password <span class="hint">(leave both blank to keep current)</span></label>
             <div class="pw-wrap">
-              <input id="edit-user-new-password" v-model="editForm.password" :type="showNewPassword ? 'text' : 'password'" name="new-password" placeholder="New password" autocomplete="new-password" autocapitalize="off" spellcheck="false" />
+              <input id="edit-user-new-password" v-model="editForm.password" :type="showNewPassword ? 'text' : 'password'" name="new-password" placeholder="New password" autocomplete="new-password" autocapitalize="off" spellcheck="false" @input="onPasswordInput" />
               <button type="button" class="pw-toggle" :aria-label="showNewPassword ? 'Hide password' : 'Show password'" :aria-pressed="showNewPassword" aria-controls="edit-user-new-password" @click="showNewPassword = !showNewPassword">
                 <EyeOff v-if="showNewPassword" :size="16" aria-hidden="true" />
                 <Eye v-else :size="16" aria-hidden="true" />
@@ -116,7 +116,7 @@
           <div class="edit-field">
             <label for="edit-user-confirm-password">Confirm New Password</label>
             <div class="pw-wrap">
-              <input id="edit-user-confirm-password" v-model="editForm.confirmPassword" :type="showConfirmPassword ? 'text' : 'password'" name="confirm-new-password" placeholder="Type the new password again" autocomplete="new-password" autocapitalize="off" spellcheck="false" :aria-invalid="passwordState.mismatch" aria-describedby="edit-user-password-hint" />
+              <input id="edit-user-confirm-password" v-model="editForm.confirmPassword" :type="showConfirmPassword ? 'text' : 'password'" name="confirm-new-password" placeholder="Type the new password again" autocomplete="new-password" autocapitalize="off" spellcheck="false" :aria-invalid="passwordState.mismatch" aria-describedby="edit-user-password-hint" @input="onPasswordInput" />
               <button type="button" class="pw-toggle" :aria-label="showConfirmPassword ? 'Hide password' : 'Show password'" :aria-pressed="showConfirmPassword" aria-controls="edit-user-confirm-password" @click="showConfirmPassword = !showConfirmPassword">
                 <EyeOff v-if="showConfirmPassword" :size="16" aria-hidden="true" />
                 <Eye v-else :size="16" aria-hidden="true" />
@@ -206,6 +206,13 @@ function openEdit(user) {
   clearPasswords()
   saveError.value = ''
   showEdit.value = true
+}
+
+// A refusal's message speaks about what was typed, so it goes as soon as either
+// password field changes. Only typing (or autofill) fires this; emptying the
+// fields after PASSWORD_IS_YOURS is not an input event, so that message stays.
+function onPasswordInput() {
+  saveError.value = ''
 }
 
 function closeEdit() {
