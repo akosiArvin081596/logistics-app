@@ -18295,10 +18295,14 @@ function invoiceWeekWarnings(undated) {
 // Rejected), or on a separate correction invoice for that week, a Draft for the
 // owner to approve, once it is (Approved, Processing, Paid) or when its week
 // touches a closed month. A day in a closed month is never carried; a person
-// decides it (it is named in `warnings`).
+// decides it (it is named in `warnings`). Late days start at FROM's first week
+// (the Saturday of the week holding FROM's first day: the owner's decision of
+// 2026-10-15), so the weeks of FROM's month invoiced before the switch-on are
+// brought to the rule too, in place or by a correction.
 
-// The marker the late days start from: the Saturday of the first week the rule
-// generated an invoice for, written once in that invoice's transaction.
+// The record of the first week the rule generated an invoice for, written once
+// in that invoice's transaction. A record only: the late days start at FROM's
+// first week, whatever it says.
 const TRIP_WORK_DAYS_FLOOR_KEY = "trip_work_days_started_at";
 // Statuses whose invoice takes a late day in place.
 const LATE_WORK_DAY_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
@@ -18306,13 +18310,10 @@ const LATE_WORK_DAY_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
 // lists every one).
 const LATE_WORK_DAY_REPORT_DAYS = 35;
 
-function tripWorkDaysFloor() {
-	try {
-		const r = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(TRIP_WORK_DAYS_FLOOR_KEY);
-		return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.value || "")) ? r.value : "";
-	} catch {
-		return "";
-	}
+// The first day late days may be carried for, under TRIP_WORK_DAYS_FROM
+// `fromMonth`: the Saturday of the week holding its first day.
+function tripWorkDaysFloor(fromMonth) {
+	return getWeekRange(`${fromMonth}-01`).weekStart;
 }
 
 function dayKeyPlus(day, n) {
@@ -18524,7 +18525,7 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 		}
 		if (manualCover.has(c.day)) { refuse("mayBePaid", `it may already be paid by ${manualCover.get(c.day)}`); continue; }
 		if (!c.follows) { refuse("beforeFrom", "its load settles before TRIP_WORK_DAYS_FROM"); continue; }
-		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week the rule invoiced`); continue; }
+		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week of TRIP_WORK_DAYS_FROM`); continue; }
 		if (periodWriteLocked(c.day.slice(0, 7))) {
 			refuse("closedMonth", periodLocksReadable() ? `${periodLabel(c.day.slice(0, 7))} is closed` : "the month locks cannot be read");
 			continue;
@@ -18702,7 +18703,7 @@ async function createWorkDayCorrection({ driverName, weekly, weekStart, weekEnd,
 // One driver's late days (see the section header), settled: each week's days go
 // onto that week's own invoice or a correction for it. Runs at the start of a
 // weekly generation by a Super Admin (the Friday batch included), for the weeks
-// before it, with the rule on; nothing happens before the rule's first invoice.
+// before it from FROM's first week (tripWorkDaysFloor()), with the rule on.
 // Returns { report, warnings }; a week that cannot be settled is named in
 // `warnings` and waits for the next run (the days stay unpaid, never doubled).
 async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTrackingRows, resolver, req }) {
@@ -18712,8 +18713,7 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 	const nameNorm = normalizeDriverName(driverName);
 	const payStruct = getDriverPayStructures()[nameNorm] || { payType: "fixed", payPercentage: 0 };
 	if (payStruct.payType === "percentage") return out;
-	const floor = tripWorkDaysFloor();
-	if (!floor) return out;
+	const floor = tripWorkDaysFloor(resolver.fromMonth);
 	const { headers, data } = jobTrackingRowsOf(await readJobTrackingRows());
 	if (!headers.length) return out;
 	const found = lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay: dayKeyPlus(beforeWeekStart, -1) });
@@ -18728,8 +18728,8 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 	let changed = false;
 	for (const [weekStart, list] of found.byWeek) {
 		const weekEnd = getWeekRange(weekStart).weekEnd;
-		const entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
-		const dayText = entries.map((e) => e.day).join(", ");
+		let entries = list.map((e) => ({ day: e.day, loads: e.loads, rate: rateOf(e.day) }));
+		let dayText = entries.map((e) => e.day).join(", ");
 		try {
 			const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
 			if (weekly.length !== 1) {
@@ -18740,6 +18740,27 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 				continue;
 			}
 			const inv = weekly[0];
+			// A day already on the week's own invoice grid is paid, even when no
+			// invoice_paid_days row holds it (invoiced before the switch-on and
+			// the start-up backfill not run yet): it is recorded as that
+			// invoice's (no amount changes) and left out. A day another live
+			// invoice already holds stays with it.
+			const onGrid = new Set(invoicePaidDaysOf(inv));
+			const gridDays = entries.filter((e) => onGrid.has(e.day)).map((e) => e.day);
+			if (gridDays.length) {
+				const invNorm = normalizeDriverName(inv.driver || "");
+				try {
+					db.transaction(() => {
+						const holders = invoicePaidDayHolders(invNorm, gridDays);
+						claimInvoicePaidDays(inv.id, invNorm, gridDays.filter((d) => !holders.has(d)));
+					}).immediate();
+				} catch (err) {
+					warnings.push(`NOT RECORDED: ${gridDays.join(", ")} on ${inv.invoice_number}'s grid: ${err && err.message}`);
+				}
+			}
+			entries = entries.filter((e) => !onGrid.has(e.day));
+			if (!entries.length) continue;
+			dayText = entries.map((e) => e.day).join(", ");
 			const blocker = lateWorkWeekBlocker(inv, { manuals: driverManualInvoicesForDays(nameNorm), minRate: Math.min(...entries.map((e) => e.rate)) });
 			if (blocker) {
 				for (const e of entries) report.refused.push({ day: e.day, loadId: e.loads.join(", "), reason: blocker, kind: "mayBePaid" });
@@ -18790,32 +18811,29 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 //   lateDays        days of weeks before this one that the rule pays and no
 //                   invoice holds yet, by week (they overlap perInvoice's
 //                   added days)
-//   refusedDays     days of from..to worked by the trip timestamps that no
-//                   invoice will carry, each with its reason and amount (before
-//                   the floor, a load settling before FROM, a closed month, may
-//                   already be paid by a manual invoice or an adjustment)
-//   lateDaysFloor   the floor used: the stored marker, else `floor` (the
-//                   Saturday of the week the first rule invoice is expected
-//                   for), else this business week's Saturday
+//   refusedDays     days of from..to (and any day before the floor, or in a
+//                   closed month, of a load settling in FROM or later) worked
+//                   by the trip timestamps
+//                   that no invoice will carry, each with its reason and amount
+//                   (before the floor, a load settling before FROM, a closed
+//                   month, may already be paid by a manual invoice or an
+//                   adjustment)
+//   lateDaysFloor   the floor: the Saturday of FROM's first week
+//                   (tripWorkDaysFloor()), as the switch-on uses it
 //   backfillRows    the invoice_paid_days rows the backfill would write first
 //   closedMonthsUnchanged, monthsBeforeFromUnchanged  false is a problem (the
 //                   script exits 1)
 // Drivers are numbered labels ("driver 1", …, per run) unless `names`.
 // Refuses a FROM at or before the latest closed month.
-async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
+async function workDaysDryRun({ from, to = "", names = false }) {
 	const fromMonth = String(from || "").trim();
 	const toMonth = String(to || "").trim() || fromMonth;
 	if (!tripWorkDays.FROM_MONTH_RE.test(fromMonth)) return { refused: true, reason: "from=YYYY-MM is required: the TRIP_WORK_DAYS_FROM to try" };
 	if (!tripWorkDays.FROM_MONTH_RE.test(toMonth) || toMonth < fromMonth) return { refused: true, reason: "to must be a month (YYYY-MM) on or after from" };
-	// The late days' floor the switch-on would have: the stored marker once the
-	// rule has invoiced, else `floor` (the Saturday of the week the first rule
-	// invoice is expected for), else this business week's Saturday (the Friday
-	// batch's week). Days of FROM's month before it are paid by the ledger but
-	// carried onto no invoice: refusedDays lists them with their amounts.
-	const floorGiven = String(floor || "").trim();
-	const realDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(`${d}T12:00:00Z`)) && new Date(`${d}T12:00:00Z`).toISOString().slice(0, 10) === d;
-	if (floorGiven && !realDay(floorGiven)) return { refused: true, reason: "floor must be a calendar day (YYYY-MM-DD)" };
-	const lateFloor = tripWorkDaysFloor() || (floorGiven ? getWeekRange(floorGiven).weekStart : getWeekRange().weekStart);
+	// The late days' floor, as the switch-on uses it: FROM's first week. A day
+	// before it is paid by the ledger but carried onto no invoice: refusedDays
+	// lists such days with their amounts.
+	const lateFloor = tripWorkDaysFloor(fromMonth);
 	const latestClosed = financialsCalc.ledgerDayOnce.latestClosedMonth(db);
 	if (latestClosed && fromMonth <= latestClosed) {
 		return { refused: true, reason: `from=${fromMonth} is at or before ${latestClosed}, the latest closed month. The rule may only start in an open month: closed months are final as recorded.` };
@@ -18925,8 +18943,9 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 		if (nm && !drivers.has(nm)) drivers.set(nm, String(row[cols.driverCol]).trim());
 	}
 	// Late days are those of weeks before this business week (the Friday batch
-	// settles the weeks before the one it bills), up to the end of `to`; with a
-	// floor in a later week, the days up to it too (all refused: before the floor).
+	// settles the weeks before the one it bills), up to the end of `to`; with
+	// FROM in a later month, the days up to its floor too (all refused: before
+	// the floor).
 	const beforeThisWeek = dayKeyPlus(getWeekRange().weekStart, -1);
 	const beforeFloor = dayKeyPlus(lateFloor, -1);
 	const reach = beforeFloor > beforeThisWeek ? beforeFloor : beforeThisWeek;
@@ -18952,7 +18971,10 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 			}
 		}
 		for (const r of found.refused) {
-			if (r.day < rangeStart || r.day > rangeEnd) continue;
+			// A day before FROM refused before the floor or for its closed month
+			// (only in FROM's first week) is listed too: its load settles in FROM,
+			// so the ledger pays it there and a person decides it.
+			if (r.day > rangeEnd || (r.day < rangeStart && r.kind !== "beforeFloor" && r.kind !== "closedMonth")) continue;
 			// A day before the floor in a week with no invoice yet: that week's own
 			// invoice will still pay its days, so it is not part of the floor gap.
 			const notYet = r.kind === "beforeFloor" && !liveWeeklyInvoicesForDriverWeek(display, getWeekRange(r.day).weekStart).length;
@@ -18992,7 +19014,8 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 			const ids = String(gridOf(d).loadBol || "").split(",").map((x) => x.trim()).filter(Boolean);
 			if (!ids.length || ids.some((id) => !follows(id))) ruleDays.add(d);
 		}
-		const added = [...ruleDays].filter((d) => !current.includes(d)).sort();
+		// A closed month's day is never added (refusedDays lists it), as live.
+		const added = [...ruleDays].filter((d) => !current.includes(d) && !periodWriteLocked(d.slice(0, 7))).sort();
 		const dropped = current.filter((d) => !ruleDays.has(d));
 		if (!added.length && !dropped.length) continue;
 		const rateOf = raterFor(nm, display);
@@ -19057,12 +19080,12 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 	};
 }
 
-// GET /api/admin/work-days/dry-run?from=YYYY-MM&to=YYYY-MM[&floor=YYYY-MM-DD][&names=1] — what the
+// GET /api/admin/work-days/dry-run?from=YYYY-MM&to=YYYY-MM[&names=1] — what the
 // trip work-day rule would change (workDaysDryRun()). Super Admin; read-only.
 app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, res) => {
 	try {
 		const q = req.query || {};
-		const out = await workDaysDryRun({ from: String(q.from || ""), to: String(q.to || ""), floor: String(q.floor || ""), names: q.names === "1" || q.names === "true" });
+		const out = await workDaysDryRun({ from: String(q.from || ""), to: String(q.to || ""), names: q.names === "1" || q.names === "true" });
 		if (out.refused) return res.status(400).json({ error: out.reason, code: "WORK_DAYS_DRY_RUN_REFUSED" });
 		res.json(out);
 	} catch (err) {
@@ -19684,7 +19707,8 @@ async function generateInvoiceHandler(req, res) {
 				personalCommitGeneration(invoiceId, personal, personalFit);
 				// The trip work-day rule: the days this invoice pays, claimed in this
 				// transaction (409 INVOICE_DAY_ALREADY_PAID when another live invoice
-				// holds one), and the late days' floor, written once.
+				// holds one), and the record of the rule's first invoice week,
+				// written once.
 				if (tripRule) {
 					if (weekRule) claimInvoicePaidDays(invoiceId, nameNorm, [...activeDaySet]);
 					db.prepare("INSERT OR IGNORE INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, 'system')")
