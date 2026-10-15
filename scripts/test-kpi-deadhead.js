@@ -211,6 +211,16 @@ function battery(mod) {
 		t(D.pairKey({ lat: 29.76044, lng: -95.36980 }, { lat: 32.77666, lng: -96.79699 }) === k, "a change in the 5th decimal is the same key");
 		t(D.pairKey({ lat: 29.7605, lng: -95.36980 }, { lat: 32.77666, lng: -96.79699 }) !== k, "a change in the 4th decimal is a new key");
 		t(D.pairKey({ lat: null, lng: -95 }, { lat: 1, lng: 2 }) === null && D.pairKey({ lat: 91, lng: -95 }, { lat: 1, lng: 2 }) === null, "a missing or impossible coordinate has no key");
+		// Exactly 0,0 is a blank stored as zeros, never a dock: missing, so two of
+		// them never read as "same place, 0 mi".
+		t(D.pairKey({ lat: 0, lng: 0 }, { lat: 31, lng: -96 }) === null && D.pairKey({ lat: 31, lng: -96 }, { lat: 0, lng: 0 }) === null, "a 0,0 coordinate is missing: no pair key");
+		t(!D.samePoint({ lat: 0, lng: 0 }, { lat: 0, lng: 0 }) && D.roundPoint(0, 0) === null, "two 0,0 points are not the same place");
+		t(D.pairKey({ lat: 0, lng: -95 }, { lat: 31, lng: 0 }) !== null, "a single zero coordinate (the equator or the prime meridian) is still a point");
+		const zz = run([
+			L("z1", { pickupArriveMs: Z("2026-09-01T10:00:00Z"), destArriveMs: Z("2026-09-01T15:00:00Z"), destLat: 0, destLng: 0 }),
+			L("z2", { pickupArriveMs: Z("2026-09-02T10:00:00Z"), destArriveMs: Z("2026-09-02T15:00:00Z"), originLat: 0, originLng: 0 }),
+		], { routes: new Map() });
+		t(zz.get("z2").state === "chained" && zz.get("z2").deadheadMiles === null && zz.out.pending.length === 0, "a pair whose ends are both 0,0 is unknown (null), never 0 mi, and asks no route", JSON.stringify(zz.get("z2")));
 		t(D.samePoint({ lat: 29.76043, lng: -95.3698 }, { lat: 29.76044, lng: -95.36981 }) && !D.samePoint({ lat: 29.7604, lng: -95.3698 }, { lat: 29.7605, lng: -95.3698 }), "equal after rounding is the same point");
 	}
 
@@ -354,6 +364,8 @@ const MUTANTS = [
 		"if (stated != null) {", "if (stated != null && false) {"],
 	["a failed route dropped from pending (never retried)", "a failed route is unknown and stays pending",
 		"} else if (!cached || cached.status !== \"ok\") {", "} else if (!cached) {"],
+	["0,0 read as a place", "a pair whose ends are both 0,0 is unknown",
+		"\tif (lat === 0 && lng === 0) return null;\n", ""],
 	["the 3b window widened past 72 h", "more than 72 h before the marker's delivery still chains",
 		"const MARKER_LOOKBACK_MS = 72 * HOUR_MS;", "const MARKER_LOOKBACK_MS = 96 * HOUR_MS;"],
 ];
