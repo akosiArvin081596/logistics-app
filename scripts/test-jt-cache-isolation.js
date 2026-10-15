@@ -33,6 +33,8 @@
  *   §5 the readers that must NOT see dropped loads now filter them themselves
  *      (they used to lean, unknowingly, on another route's in-place filter)
  *   §6 DISCRIMINATION — mutants of the helper, and of server.js for the sweep
+ *   §7 the dashboard's search references (`_refs`, lib/load-search-refs.js)
+ *      land on the view's rows, never on the cache
  *
  * ⚠️ §3 is a HEURISTIC over source text. It catches the shapes this bug has
  * actually taken and the obvious variants; it cannot follow a row into a helper
@@ -425,6 +427,43 @@ ok("(geofence mutation anchor present)", GEO_SKIP_RE.test(GEO_SRC));
 pending.push(geofenceReads(GEO_SRC.replace(GEO_SKIP_RE, "\n"), DELETED_ID).then(({ reads }) => {
 	ok("MUTANT geofence without its soft-delete check: it reads the deleted load's row — §5 flips", reads === 1);
 }));
+
+// ===========================================================================
+console.log("\n§7  the dashboard's search references (_refs) never land on cached rows");
+// GET /api/dashboard attaches `_refs` (lib/load-search-refs.js) to the rows it
+// serves. Those rows come from liveJobTrackingView(), so the annotation stays
+// on request-local copies. The module runs in strict mode: a write to a frozen
+// (cached) row would fail, be logged and leave the row as it was.
+// ===========================================================================
+{
+	const refs = require("../lib/load-search-refs");
+	const H = ["Load ID", "Job Status", "Pickup Info", "Documents"];
+	const makeRefCache = () => ({
+		headers: [...H],
+		data: [
+			{ _rowIndex: 2, "Load ID": "86000001", "Job Status": "Delivered", "Pickup Info": "REF/PU#: 86000002", Documents: "86000003" },
+			{ _rowIndex: 3, "Load ID": "86000004", "Job Status": "In Transit", "Pickup Info": "PO: 86000005", Documents: "" },
+		],
+	});
+	const cache = deepFreeze(makeRefCache());
+	const before = JSON.stringify(cache);
+	const logger = { errors: [], error(m) { this.errors.push(String(m)); } };
+	const view = liveJobTrackingView(cache);
+	refs.annotateLoadSearchRefs({ db: null, headers: view.headers, rows: view.data, includeDraftRefs: false, logger });
+	ok("annotating the view's rows: no error, every row carries its _refs",
+		logger.errors.length === 0 && view.data.every((r) => Array.isArray(r._refs) && r._refs.length > 0));
+	ok("...and the cache is byte-identical afterwards", JSON.stringify(cache) === before);
+	ok("the next caller's view carries no _refs", liveJobTrackingView(cache).data.every((r) => !("_refs" in r)));
+	const rawLogger = { errors: [], error(m) { this.errors.push(String(m)); } };
+	refs.annotateLoadSearchRefs({ db: null, headers: cache.headers, rows: cache.data, includeDraftRefs: false, logger: rawLogger });
+	ok("MUTANT annotating the raw cached rows: refused (logged), nothing written to the cache",
+		rawLogger.errors.length > 0 && JSON.stringify(cache) === before);
+	const dash = routeSource("get", "/api/dashboard");
+	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	ok("server.js calls the module once, in /api/dashboard, on the three served lists built from the view",
+		code(SRC).split("annotateLoadSearchRefs(").length - 1 === 1 &&
+		/rows: \[\.\.\.respUnassigned, \.\.\.respActive, \.\.\.respCompleted\],/.test(code(dash)) && dash.includes(BINDING));
+}
 
 Promise.allSettled(pending).then((results) => {
 	for (const r of results) if (r.status === "rejected") ok(`async check did not throw (${r.reason && r.reason.message})`, false);
