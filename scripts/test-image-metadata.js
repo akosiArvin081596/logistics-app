@@ -207,11 +207,15 @@ function scanData(jpeg) {
 		const DISP = { id: 2, role: "Dispatcher" };
 		const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
 		const servers = [];
+		// The test routes sit behind a rate limiter like every route in server.js;
+		// its ceiling is far above any burst below, so it never answers here.
+		const rateLimit = require("express-rate-limit");
+		const testRouteLimiter = () => rateLimit({ windowMs: 60_000, limit: 100_000, standardHeaders: false, legacyHeaders: false });
 		async function serve(opts) {
 			const guard = receiptFiles.createExpenseReceiptGuard({ db, receiptsDir: dir, normalizeDriverName: norm, ...opts });
 			const app = express();
 			app.use((req, res, next) => { req.session = { user: JSON.parse(req.headers["x-test-user"]) }; next(); });
-			app.use("/r/:file", (req, res, next) => guard(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
+			app.use("/r/:file", testRouteLimiter(), (req, res, next) => guard(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
 			const server = http.createServer(app);
 			await new Promise((r) => server.listen(0, "127.0.0.1", r));
 			servers.push(server);
@@ -311,7 +315,7 @@ function scanData(jpeg) {
 		const guard6 = receiptFiles.createExpenseReceiptGuard({ db, receiptsDir: dir, normalizeDriverName: norm, maxConcurrentReads: 1, queueWaitMs: 3000, sendTimeoutMs: 300 });
 		const app6 = express();
 		app6.use((req, res, next) => { req.session = { user: JSON.parse(req.headers["x-test-user"]) }; next(); });
-		app6.use("/r/:file", (req, res, next) => guard6(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
+		app6.use("/r/:file", testRouteLimiter(), (req, res, next) => guard6(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
 		const server6 = http.createServer(app6);
 		await new Promise((r) => server6.listen(0, "127.0.0.1", r));
 		servers.push(server6);
