@@ -125,9 +125,13 @@
             <p id="edit-user-password-hint" class="field-error" aria-live="polite">{{ passwordHint }}</p>
           </div>
 
+          <!-- The server's answer when it refuses the save (a weak password, the
+               admin's own password, a locked month...). The dialog stays open. -->
+          <p v-if="saveError" id="edit-user-save-error" class="field-error save-error" role="alert">{{ saveError }}</p>
+
           <div class="confirm-actions">
             <button type="button" class="btn btn-secondary" @click="closeEdit">Cancel</button>
-            <button type="submit" class="btn btn-primary" :disabled="!passwordState.canSave">Save</button>
+            <button type="submit" class="btn btn-primary" :disabled="!passwordState.canSave || saving">{{ saving ? 'Saving...' : 'Save' }}</button>
           </div>
         </form>
       </div>
@@ -156,12 +160,16 @@ import { passwordChange, passwordChangeHint } from '../../lib/passwordFields.js'
 // these columns do not hand-roll their own copies of that option bag.
 import { fmtAppDate, fmtTimestamp } from '@/utils/datetime'
 
-defineProps({
+const props = defineProps({
   users: { type: Array, default: () => [] },
   driverNames: { type: Array, default: () => [] },
+  // Saves an edit ({ id, data }) and resolves once the server accepted it;
+  // rejects with the server's error otherwise (UsersView.vue). The Edit User
+  // dialog waits for it: it closes on success and shows a refusal inline.
+  saveUser: { type: Function, required: true },
 })
 
-const emit = defineEmits(['delete', 'update', 'rate'])
+const emit = defineEmits(['delete', 'rate'])
 
 const showConfirm = ref(false)
 const pendingUser = ref(null)
@@ -184,6 +192,10 @@ function clearPasswords() {
   showConfirmPassword.value = false
 }
 
+// The save in flight, and the server's message when it refused the last one.
+const saving = ref(false)
+const saveError = ref('')
+
 function openEdit(user) {
   editForm.id = user.id
   editForm.username = user.Username
@@ -192,17 +204,23 @@ function openEdit(user) {
   editForm.email = user.Email || ''
   editForm.fullName = user.FullName || ''
   clearPasswords()
+  saveError.value = ''
   showEdit.value = true
 }
 
 function closeEdit() {
   showEdit.value = false
   clearPasswords()
+  saveError.value = ''
 }
 
-function handleSaveEdit() {
+// The dialog stays open until the server accepts the edit. A refusal is shown
+// inline under the password fields with what was typed kept, so the admin
+// fixes it instead of reopening and retyping. PASSWORD_IS_YOURS empties both
+// password fields: what they hold is the admin's own password.
+async function handleSaveEdit() {
   const state = passwordState.value
-  if (!state.canSave) return
+  if (!state.canSave || saving.value) return
   const data = {
     role: editForm.role,
     driverName: editForm.driverName,
@@ -210,8 +228,17 @@ function handleSaveEdit() {
     fullName: editForm.fullName,
   }
   if (state.password) data.password = state.password
-  emit('update', { id: editForm.id, data })
-  closeEdit()
+  saving.value = true
+  saveError.value = ''
+  try {
+    await props.saveUser({ id: editForm.id, data })
+    closeEdit()
+  } catch (err) {
+    saveError.value = (err && err.message) || 'This user could not be saved. Try again.'
+    if (err && err.code === 'PASSWORD_IS_YOURS') clearPasswords()
+  } finally {
+    saving.value = false
+  }
 }
 
 function userDetail(user) {
@@ -631,6 +658,11 @@ function handleConfirmDelete() {
 .pw-toggle:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 1px;
+}
+
+.save-error {
+  margin: 0 0 0.25rem;
+  font-weight: 600;
 }
 
 .confirm-actions .btn:disabled {

@@ -63,9 +63,11 @@ export const useUsersStore = defineStore('users', {
       return result
     },
 
+    // The save alone: resolves once the server accepted the edit, rejects with
+    // its refusal. The caller reloads the list, so a reload that fails after a
+    // successful save is never reported as a failed save.
     async updateUser(id, data) {
       await api.put(`/api/users/${id}`, data)
-      await this.loadUsers()
     },
 
     async rateUser(id, rating) {

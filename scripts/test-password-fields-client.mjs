@@ -46,9 +46,12 @@ function ok(name, cond) {
 const clientRequire = createRequire(path.join(CLIENT_DIR, 'package.json'))
 const Vue = clientRequire('vue')
 const { parse, compileScript } = clientRequire('vue/compiler-sfc')
-// vModelText reads document.activeElement when the model changes under a
-// mounted input; there is no DOM here.
+// vModelText asks whether a mounted input has focus when the model changes
+// under it (el.getRootNode(), then instanceof Document / ShadowRoot); there is
+// no DOM here, so nothing ever has focus.
 globalThis.document = globalThis.document || { activeElement: null }
+globalThis.Document = globalThis.Document || class Document {}
+globalThis.ShadowRoot = globalThis.ShadowRoot || class ShadowRoot {}
 
 const drain = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)) }
 
@@ -91,6 +94,7 @@ function mountInMemory(Comp, props) {
     type, tag, children: [], parent: null, props: {}, text: '', value: '', listeners: {},
     addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn) },
     removeEventListener(ev, fn) { this.listeners[ev] = (this.listeners[ev] || []).filter((f) => f !== fn) },
+    getRootNode() { return {} },
     get options() { return this.children.filter((c) => c.tag === 'option') },
   })
   const ops = {
@@ -181,16 +185,20 @@ const OVERRIDES = {
 let UserTable = null
 try { UserTable = await compileComponent('client/src/components/users/UserTable.vue', OVERRIDES) } catch (err) { ok(`§2 UserTable compiles in this harness (${err.message})`, false) }
 if (UserTable) {
+  // The page hands the table a saveUser(payload) that resolves once the server
+  // accepted the edit (UsersView.vue). Each scenario decides how it answers.
   const updates = []
+  let answer = () => Promise.resolve()
+  const saveUser = (p) => { updates.push(p); return answer(p) }
   const USERS = [{ id: 7, Username: 'second.admin', Role: 'Super Admin', DriverName: '', Email: 'second@example.test', FullName: 'Second Admin' }]
-  const m = mountInMemory(UserTable, { users: USERS, driverNames: ['Driver A'], onUpdate: (p) => updates.push(p) })
+  const m = mountInMemory(UserTable, { users: USERS, driverNames: ['Driver A'], saveUser })
   await drain()
   const edit = m.find((n) => n.tag === 'button' && n.props.class === 'btn-edit')
   ok('§2 setup: the Edit button renders', !!edit)
   if (edit) await click(edit)
   const byId = (id) => m.find((n) => n.tag === 'input' && n.props.id === id)
   const currentForm = () => m.find((n) => n.tag === 'form')
-  const submit = async () => { currentForm().props.onSubmit(evt()); await drain() }
+  const submit = async () => { const f = currentForm(); if (f) f.props.onSubmit(evt()); await drain() }
   const form = currentForm()
   const newPw = byId('edit-user-new-password')
   const confirmPw = byId('edit-user-confirm-password')
@@ -243,6 +251,54 @@ if (UserTable) {
     if (edit) await click(edit)
     ok('§3 a cancelled password is gone on the next open', byId('edit-user-new-password').value === '' && !save().props.disabled)
 
+    // §3b the dialog waits for the server: it closes only on success, and a
+    // refusal is shown inline, under the password fields, with what was typed
+    // kept (so the admin fixes it instead of reopening and retyping).
+    const saveError = () => { const p = m.find((n) => n.tag === 'p' && n.props.id === 'edit-user-save-error'); return p ? m.textOf(p) : '' }
+    const refuse = (status, code, message) => () => Promise.reject(Object.assign(new Error(message), { status, code, data: { code, error: message } }))
+    const fill = async (pw) => {
+      if (!byId('edit-user-new-password') && edit) await click(edit)
+      await type(byId('edit-user-new-password'), pw)
+      await type(byId('edit-user-confirm-password'), pw)
+    }
+    const valueOf = (id) => (byId(id) ? byId(id).value : null)
+    let release = null
+    answer = () => new Promise((resolve, reject) => { release = { resolve, reject } })
+    await fill('Pending-Pass-1!')
+    const sentBefore = updates.length
+    await submit()
+    ok('§3b while the save is in flight: the dialog stays open', !!byId('edit-user-new-password') && updates.length === sentBefore + 1)
+    const busy = m.find((n) => n.tag === 'button' && n.props.type === 'submit')
+    ok('§3b ...and its submit button is disabled and says so', !!busy && busy.props.disabled === true && m.textOf(busy) === 'Saving...')
+    await submit()
+    ok('§3b ...and a second submit sends nothing more', updates.length === sentBefore + 1)
+    if (release) release.reject(Object.assign(new Error('Password must include an uppercase letter.'), { status: 400, code: 'PASSWORD_WEAK' }))
+    await drain()
+    ok('§3b a 400 PASSWORD_WEAK: the dialog stays open', !!byId('edit-user-new-password'))
+    ok(`§3b ...the server's message is shown inline (${saveError()})`, saveError() === 'Password must include an uppercase letter.')
+    const errAt = m.findAll((n) => n.tag === 'p').map((n) => n.props.id)
+    ok('§3b ...under the password fields, before the buttons', errAt.indexOf('edit-user-password-hint') >= 0 && errAt.indexOf('edit-user-save-error') > errAt.indexOf('edit-user-password-hint'))
+    const errP = m.find((n) => n.tag === 'p' && n.props.id === 'edit-user-save-error')
+    ok('§3b ...announced as an alert', !!errP && errP.props.role === 'alert')
+    ok('§3b ...what was typed is kept, and Save works again', valueOf('edit-user-new-password') === 'Pending-Pass-1!' && valueOf('edit-user-confirm-password') === 'Pending-Pass-1!' && !!save() && !save().props.disabled)
+    answer = refuse(400, 'PASSWORD_IS_YOURS', 'This is your own password. Enter a new password for this user.')
+    await submit()
+    ok('§3b a 400 PASSWORD_IS_YOURS: the dialog stays open with that message', !!byId('edit-user-new-password') && saveError() === 'This is your own password. Enter a new password for this user.')
+    ok('§3b ...and both password fields are emptied (they held the admin\'s own password)', valueOf('edit-user-new-password') === '' && valueOf('edit-user-confirm-password') === '')
+    answer = refuse(409, 'CONCURRENT_MODIFICATION', 'This account was modified by another request while this one was in progress.')
+    await submit()
+    ok('§3b any other refusal also stays open and shows the server\'s message', !!byId('edit-user-new-password') && saveError().startsWith('This account was modified'))
+    answer = () => Promise.reject(new Error(''))
+    await submit()
+    ok('§3b a failure with no message says the user was not saved', !!byId('edit-user-new-password') && saveError() === 'This user could not be saved. Try again.')
+    answer = () => Promise.resolve()
+    await fill('Accepted-Pass-1!')
+    await submit()
+    const last = updates[updates.length - 1]
+    ok('§3b a success closes the dialog', !byId('edit-user-new-password') && !!last && last.data.password === 'Accepted-Pass-1!')
+    if (edit) await click(edit)
+    ok('§3b the next open shows no old error', saveError() === '')
+
     // §4 the eye buttons
     const t = toggles()
     ok(`§4 one eye button per password field (${t.length})`, t.length === 2)
@@ -273,6 +329,20 @@ if (UserTable) {
   ok('§5 ...tied to its select', !!driverSelect && driverSelect.props['aria-describedby'] === 'edit-user-driver-help')
   ok('§5 the Linked Driver field shows for a Super Admin account too (it stays for every role)', !!driverSelect && USERS[0].Role === 'Super Admin' && m.text().includes('Linked Driver'))
   m.unmount()
+}
+
+// ══ §3c the page's side of the wait ══════════════════════════════════════════
+{
+  const view = fs.readFileSync(path.join(ROOT, 'client', 'src', 'views', 'UsersView.vue'), 'utf8')
+  const store = fs.readFileSync(path.join(ROOT, 'client', 'src', 'stores', 'users.js'), 'utf8')
+  const fnAt = view.indexOf('async function saveUser({ id, data }) {')
+  const fn = fnAt >= 0 ? view.slice(fnAt, view.indexOf('\n}\n', fnAt)) : ''
+  ok('§3c UsersView hands the table its save as saveUser', /<UserTable\b[^>]*:save-user="saveUser"/.test(view) && !/@update="/.test(view))
+  ok('§3c ...which awaits the save and lets a refusal reach the dialog (no catch around it)', fn.includes('await store.updateUser(id, data)') && !/\bcatch\s*\(/.test(fn.slice(0, fn.indexOf('toast('))))
+  ok('§3c ...and reloads the list after a success without turning a failed reload into a failed save',
+    /store\.loadUsers\(\)\.catch\(/.test(fn) && !/await store\.loadUsers\(\)/.test(fn))
+  const upd = store.slice(store.indexOf('async updateUser(id, data) {'), store.indexOf('},', store.indexOf('async updateUser(id, data) {')))
+  ok('§3c the store\'s updateUser is the save alone', upd.includes('await api.put(`/api/users/${id}`, data)') && !upd.includes('loadUsers'))
 }
 
 // ══ §6 the login page's autofill hints ═══════════════════════════════════════
