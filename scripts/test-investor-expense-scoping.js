@@ -302,7 +302,9 @@ const S = loadShipped(db);
 	// the hand-rolled shape for a further round after the other six were fixed — see §11,
 	// which pins that handler specifically. This COUNT alone would have been satisfied by
 	// six correct sites plus one wrong one, because a wrong site does not call the builder.
-	ok(callers === 8, `§1 investorExpenseScopeSql should have 1 definition + 7 callers; found ${callers}`);
+	// The eighth (2026-10-15) is investorMaySeeReceipt(): may an Investor open a receipt
+	// photo, i.e. is that receipt in the scope GET /api/investor/expenses lists.
+	ok(callers === 9, `§1 investorExpenseScopeSql should have 1 definition + 8 callers; found ${callers}`);
 
 	for (const marker of [
 		'FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m',

@@ -117,6 +117,8 @@ const personalExpense = require("./lib/personal-expense");
 // Their receipts on the invoice: the re-encode service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
 const invoiceReceipts = require("./lib/invoice-receipts");
+// Stored receipt files: who may open one, and the copy (metadata stripped).
+const receiptFiles = require("./lib/receipt-files");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
@@ -568,6 +570,9 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_i
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`); } catch {}
+// The receipt file guard finds a stored receipt's rows by its path, once per
+// photo a page shows (guardExpenseReceipt).
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_photo_data ON expenses(photo_data)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`); } catch {}
 // These tables are created later in the file — guard for fresh-DB bootstrap.
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`); } catch {}
@@ -2122,9 +2127,10 @@ function getInvestorDriverMonthWindows(userId) {
 // Build the WHERE fragment that scopes `expenses` to one investor, with the month
 // dimension the driver leg never had.
 //
-// ONE definition, SEVEN callers (/api/investor's monthly + category + all-time sums,
+// ONE definition, EIGHT callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
-// /api/investor/tax-csv, and GET /api/investor/report's itemized P&L). That is the
+// /api/investor/tax-csv, GET /api/investor/report's itemized P&L, and
+// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15). That is the
 // DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
 // hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
 // investor expense surface gets it.
@@ -10745,8 +10751,10 @@ function guardInvoicePdf(req, res, next, url, file) {
 //   Swept at the same time and deliberately left (all timestamped, so the URL is
 //   a weak secret rather than a free enumeration):
 //     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
-//     uploads/expense-receipts/  `${Date.now()}-${12 hex}.<ext>`
 //     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
+//   uploads/expense-receipts/ was on that list too, and is guarded since
+//   2026-10-15 (owner's rule: the receipt's driver, Super Admin and the roles
+//   that review receipts). See guardExpenseReceipt.
 //   The uploads ROOT was on that list too — `${loadId}_${docType}_${Date.now()}`
 //   PODs, BOLs and receipts — and is now guarded by guardRootLoadDocument (see
 //   there). It is not a GUARDED_UPLOAD_DIRS entry because it is not a directory
@@ -10954,10 +10962,93 @@ async function guardRootLoadDocument(req, res, next, file) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// uploads/expense-receipts/ — receipt photos and PDF receipts (owner, 2026-10-15).
+//
+// Opened by the receipt's own driver, Super Admin and the roles that review
+// receipts (approve / reject: Super Admin, Dispatcher), plus the Investor rule
+// below, and always sent without location or other metadata. The rule and the
+// copy live in lib/receipt-files.js; this wires them to the database. The
+// guard serves the file itself, so express.static never sends a stored
+// receipt, and carries its own limits (RECEIPT_SERVE_LIMITS there: a few image
+// reads at a time server-wide behind a bounded queue, 503 past it; a per-user
+// ceiling, 429; PDFs streamed). thumbs/ (the thumbnail route's cache) is a nested path, which
+// uploadsPathGuard answers 404 for everyone: list thumbnails come from
+// GET /api/expenses/:id/receipt-thumbnail.
+// ---------------------------------------------------------------------------
+
+// THE INVESTOR RULE, in one place (the owner's choice between two options is
+// pending, 2026-10-15):
+//   "own-trucks" (option A): an Investor opens the photo of a receipt their
+//     receipt list shows (GET /api/investor/expenses: their trucks, the months
+//     a driver was theirs), except a receipt with a live Personal deduction.
+//   "none" (option B): an Investor opens no receipt photo and the list sends none.
+// The /uploads guard and the list both go through investorReceiptImageIds(), so
+// a photo the list shows opens and a photo it withholds does not.
+const INVESTOR_RECEIPT_IMAGES = "own-trucks";
+
+// The receipts among `ids` whose photo the Investor rule allows, before the
+// Investor's own scope is applied.
+function investorReceiptImageIds(ids) {
+	if (INVESTOR_RECEIPT_IMAGES !== "own-trucks") return new Set();
+	const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+	const personal = personalLiveExpenseIds(list);
+	return new Set(list.filter((id) => !personal.has(id)));
+}
+
+// An investor's receipt list asks for every photo at once, so the investor's
+// driver windows (getInvestorDriverMonthWindows()) are built once per
+// INVESTOR_RECEIPT_WINDOWS_TTL_MS for the photo check, not once per photo. The
+// list itself always builds them fresh; a pairing change reaches the photo
+// check within the minute. A failed build is not kept.
+const INVESTOR_RECEIPT_WINDOWS_TTL_MS = 60 * 1000;
+const INVESTOR_RECEIPT_WINDOWS_MAX = 1000;
+const investorReceiptWindows = new Map();   // userId -> { at, windows }
+function investorReceiptWindowsFor(uid) {
+	const now = Date.now();
+	const hit = investorReceiptWindows.get(uid);
+	if (hit && now - hit.at < INVESTOR_RECEIPT_WINDOWS_TTL_MS) return hit.windows;
+	const windows = getInvestorDriverMonthWindows(uid);
+	investorReceiptWindows.delete(uid);
+	investorReceiptWindows.set(uid, { at: now, windows });
+	if (investorReceiptWindows.size > INVESTOR_RECEIPT_WINDOWS_MAX) investorReceiptWindows.delete(investorReceiptWindows.keys().next().value);
+	return windows;
+}
+
+// May this Investor open the photo of the receipt on `row` ({ id })? true,
+// false, or null when it could not be read (the guard answers a retryable 503).
+// The scope is the receipt list's own (investorExpenseScopeSql()); the plain
+// table is enough here, because the only rows the list's "world" source leaves
+// out are fully Personal ones, which the rule above already withholds.
+function investorMaySeeReceipt(user, row) {
+	try {
+		const uid = Number(user && user.id);
+		const id = Number(row && row.id);
+		if (!(uid > 0) || !investorReceiptImageIds([id]).has(id)) return false;
+		const scope = investorExpenseScopeSql(uid, investorReceiptWindowsFor(uid), EXPENSE_PERIOD_EXPR);
+		return !!db.prepare(`SELECT 1 FROM expenses WHERE id = ? AND ${scope.sql} LIMIT 1`).get(id, ...scope.params);
+	} catch (err) {
+		console.error("[uploads] investor receipt check failed:", err && err.message);
+		return null;
+	}
+}
+
+const expenseReceiptGuard = receiptFiles.createExpenseReceiptGuard({
+	db,
+	receiptsDir: path.join(DATA_DIR, "uploads", "expense-receipts"),
+	normalizeDriverName,
+	investorMaySee: investorMaySeeReceipt,
+	logError: (msg) => console.error(msg),
+});
+function guardExpenseReceipt(req, res, next, url, file) {
+	return expenseReceiptGuard(req, res, next, url, file);
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
 	{ dir: "/invoices/", guard: guardInvoicePdf },
+	{ dir: "/expense-receipts/", guard: guardExpenseReceipt },
 	// ⚠️ THE TRAILING SLASH IS LOAD-BEARING. The match is a startsWith, so
 	// "/onboarding" without it would also swallow /onboarding-signed/ and
 	// /onboarding-templates/, routing signed W-9s to the drug-test guard. With
@@ -11128,7 +11219,10 @@ const INLINE_SAFE_UPLOAD_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp
 // place): GET /api/invoices/:id/pdf, GET /api/driver/shared-documents/:id/download,
 // GET /api/driver/truck-documents/:id/view.
 //
-// Deliberately NOT a caller: GET /api/expenses/:id/receipt-thumbnail. It serves
+// Deliberately NOT a caller: the expense-receipts guard (guardExpenseReceipt),
+// which sends a stripped copy rather than the stored file and sets nosniff and
+// its own Content-Type in lib/receipt-files.js; and
+// GET /api/expenses/:id/receipt-thumbnail. It serves
 // a jimp-GENERATED JPEG rather than a stored file, so it owns its own
 // Content-Type and Cache-Control; it sets nosniff inline at that site and needs
 // no disposition (it is only ever rendered in an <img>).
@@ -44228,9 +44322,21 @@ const MAX_IMAGE_RECEIPT_BYTES = 20 * 1024 * 1024; // 20 MB decoded — far above
 // sessions worth stealing. The label a client sends is a hint and is now used
 // for NOTHING; sniffImageFormat decides both whether we store the file and what
 // we name it.
+//
+// A receipt arrives as its bytes, never as a reference: a string that is not a
+// data URI is refused (400 RECEIPT_REFERENCE_NOT_ALLOWED), so every stored
+// receipt path belongs to the one row whose insert wrote it (the receipt file
+// guard, lib/receipt-files.js, reads that row). No client sends a reference.
+//
+// The stored copy carries no metadata (2026-10-15, owner): location, camera and
+// text blocks are dropped and the orientation kept (lib/image-metadata.js), so
+// a photo's GPS position never reaches the disk. An image the strip cannot walk
+// is refused like one whose header cannot be read (415).
 function saveReceiptToDisk(photoData) {
 	if (!photoData || typeof photoData !== "string") return { url: "" }; // no receipt attached — normal
-	if (!photoData.startsWith("data:")) return { url: photoData }; // already a URL/path (legacy rows)
+	if (!photoData.startsWith("data:")) {
+		return { error: "Attach the receipt as a photo or a PDF file.", code: "RECEIPT_REFERENCE_NOT_ALLOWED", status: 400 };
+	}
 	// The MIME token is captured only so a malformed URI can be told apart from a
 	// well-formed one; it is never read. Matching `[^;,]*` rather than the old
 	// `image/(\w+)` means a mislabelled payload is REFUSED here instead of
@@ -44257,9 +44363,14 @@ function saveReceiptToDisk(photoData) {
 		const body = imageLimits.refusalBody(dims, "photo");
 		return { error: body.error, code: body.code, status: dims.status };
 	}
+	const stripped = receiptFiles.strippedImage(buf);
+	if (!stripped) {
+		const body = imageLimits.refusalBody({ status: 415, code: imageLimits.UNSUPPORTED_IMAGE_TYPE }, "photo");
+		return { error: body.error, code: body.code, status: 415 };
+	}
 	const fname = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
 	try {
-		fs.writeFileSync(path.join(RECEIPTS_DIR, fname), buf);
+		fs.writeFileSync(path.join(RECEIPTS_DIR, fname), stripped);
 		return { url: `/uploads/expense-receipts/${fname}` };
 	} catch (err) {
 		console.error("Receipt save failed:", err.message);
@@ -44886,12 +44997,11 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		let photoUrlOrPath = "";
 		// ⚠️ ONLY SET WHEN THIS REQUEST ACTUALLY WROTE THE BYTES, and that
 		// distinction is load-bearing for the UNIQUE-constraint cleanup below.
-		// saveReceiptToDisk() has a pass-through branch — `if
-		// (!photoData.startsWith("data:")) return { url: photoData }` for legacy
-		// rows — so photoUrlOrPath can be a CLIENT-SUPPLIED path naming a file that
-		// belongs to a DIFFERENT expense. Deleting that on a failed insert would
-		// destroy another row's receipt, which is strictly worse than the orphan the
-		// cleanup exists to avoid. Only a data-URI request creates a new file.
+		// saveReceiptToDisk() once passed a non-data-URI string through as the
+		// stored path; it refuses one since 2026-10-15 (400
+		// RECEIPT_REFERENCE_NOT_ALLOWED), but the cleanup still keys on this, so a
+		// file this request did not write can never be deleted by it. Only a
+		// data-URI request creates a new file.
 		let wroteReceiptFile = "";
 		if (typeof photoData === "string" && /^data:application\/pdf;base64,/i.test(photoData)) {
 			const role = req.session.user.role;
@@ -45432,13 +45542,17 @@ app.get("/api/expenses/:id/receipt-thumbnail", requireRole("Super Admin", "Dispa
 			// image/jpeg asserted above. Receipts written before the magic-byte
 			// check existed are still on disk and nothing ever removes them, so
 			// "jimp couldn't read it" and "it isn't an image" overlap exactly here.
+			// The original goes out without its metadata, like every other served
+			// copy of a receipt (lib/receipt-files.js); one the strip cannot walk is
+			// not sent.
 			console.warn("thumbnail gen failed, serving original:", genErr && genErr.message);
 			try {
 				const raw = source;
 				const fmt = raw ? sniffImageFormat(raw) : null;
-				if (raw && fmt) {
+				const safe = fmt ? receiptFiles.strippedImage(raw) : null;
+				if (safe) {
 					res.type(fmt === "jpg" ? "image/jpeg" : `image/${fmt}`);
-					return res.send(raw);
+					return res.send(safe);
 				}
 			} catch { /* ignore */ }
 			return res.status(404).end();
@@ -58641,6 +58755,14 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		sql += " ORDER BY date DESC, id DESC LIMIT 1000";
 
 		const expenses = db.prepare(sql).all(...params);
+		// Receipt photos follow the Investor rule (investorReceiptImageIds(), beside
+		// the receipt file guard): a photo it withholds is sent blank, so the list
+		// never links a receipt the guard refuses. A Super Admin preview sees what
+		// the investor sees.
+		if (!isSuperAdmin) {
+			const shown = investorReceiptImageIds(expenses.map((e) => e.id));
+			for (const e of expenses) if (!shown.has(Number(e.id))) e.photo_data = "";
+		}
 		res.json({ expenses });
 	} catch (err) {
 		console.error("GET /api/investor/expenses error:", err.message);
@@ -62417,7 +62539,13 @@ app.get("/api/expenses/receipts-download", requireRole("Super Admin"), (req, res
 				if (srcPath.startsWith(receiptsDir) && fs.existsSync(srcPath)) {
 					const ext = path.extname(srcPath).toLowerCase() || ".bin";
 					fileName = `${exp.date}_exp-${exp.id}${exp.load_id ? "_load-" + exp.load_id : ""}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
-					archive.file(srcPath, { name: `receipts/${fileName}` });
+					// The copy every receipt read gets: an image without its metadata,
+					// a PDF as stored (lib/receipt-files.js). Read one file at a time,
+					// as the archive reaches it; a file that cannot be sent is an
+					// empty entry, logged.
+					archive.append(receiptFiles.receiptFileStream(srcPath, {
+						onRefused: () => console.warn(`Receipt zip: expense ${exp.id} receipt could not be read; its entry is empty`),
+					}), { name: `receipts/${fileName}` });
 					attachedCount++;
 				}
 			}
