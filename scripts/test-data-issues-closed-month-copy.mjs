@@ -90,6 +90,8 @@ function checkCopy(label, text, { namesMonth = true } = {}) {
   const card = VIEW.slice(start, end)
   check('duplicates card: no "reopen" in any case', !/reopen/i.test(card), card.match(/.*reopen.*/gi)?.join(' | ') || '')
   check('duplicates card: names the adjustment and company trucks', ADJUST.test(card) && COMPANY.test(card), '')
+  check('duplicates card: no "recoverable" bucket (nothing is recovered by reopening)', !/recoverable/i.test(card), card.match(/.*recoverable.*/gi)?.join(' | ') || '')
+  check('duplicates card: the unpaid bucket reads "Not paid out yet"', card.includes("label: 'Not paid out yet'"), '')
 }
 
 console.log(failed ? `\n${failed} check(s) FAILED` : '\nall checks passed')

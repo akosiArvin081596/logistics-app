@@ -363,7 +363,7 @@ export function normalizeDuplicateGroup(raw) {
  * month already `paid` cannot be un-sent and is a genuine
  * adjustment conversation. Measured on production 2026-08-12, $700 of the
  * $1,115 of known duplicates was in the first bucket and only $415 in the
- * second — so treating them alike wrote off most of the recoverable money.
+ * second — so treating them alike hid that most of it was not paid out yet.
  *
  * Note the SIGN while reading this: a duplicate EXPENSE depresses net profit, so
  * it UNDERPAYS the investor. Every correction here pays them more. There is no

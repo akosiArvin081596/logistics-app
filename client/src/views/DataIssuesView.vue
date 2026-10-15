@@ -1589,7 +1589,7 @@ const decisions = computed(() => {
     ]
     if (blocked.correctable.length) {
       evidence.push({
-        label: 'Recoverable — payout not sent',
+        label: 'Not paid out yet',
         value: `${money(blocked.correctableExcess)} · ${n(blocked.correctable, 'group')}`,
         note: 'the month is closed but no money has moved yet',
       })
