@@ -12,7 +12,7 @@
 import { fmtSheetMoment } from '../utils/datetime.js'
 
 // M/D/YYYY, optionally with H:MM[:SS] and AM/PM: fmtSheetMoment's bare shape.
-const SHEET_STAMP_RE = /^(\d{1,2})\/(\d{1,2})\/\d{4}(?:[ ,]+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)?$/i
+const SHEET_STAMP_RE = /^(\d{1,2})\/(\d{1,2})\/\d{4}(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:AM|PM)?)?$/i
 // YYYY-MM-DD, or an ISO time that names its zone (Z or an offset).
 const ISO_RE = /^\d{4}-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2}))?$/
 
@@ -22,11 +22,17 @@ function inRange(month, day) {
   return m >= 1 && m <= 12 && d >= 1 && d <= 31
 }
 
+// Hour 0-23, minute and second 0-59; a stamp with no time passes.
+function clockInRange(hour, minute, second) {
+  if (hour == null) return true
+  return Number(hour) <= 23 && Number(minute) <= 59 && (second == null || Number(second) <= 59)
+}
+
 export function isMomentCell(v) {
   if (typeof v !== 'string') return false
   const s = v.trim()
   const stamp = s.match(SHEET_STAMP_RE)
-  if (stamp) return inRange(stamp[1], stamp[2])
+  if (stamp) return inRange(stamp[1], stamp[2]) && clockInRange(stamp[3], stamp[4], stamp[5])
   const iso = s.match(ISO_RE)
   return !!iso && inRange(iso[1], iso[2])
 }

@@ -57,6 +57,8 @@ if (lib) {
     ['10/12/2026 13:05', '10/12/2026, 1:05 PM'],
     ['10/14/2026 12:09:59', '10/14/2026, 12:09 PM'],
     ['10/12/2026, 9:51:00 PM', '10/12/2026, 9:51 PM'],
+    ['10/12/2026 23:59:59', '10/12/2026, 11:59 PM'],
+    ['10/12/2026 0:00', '10/12/2026, 12:00 AM'],
     // Older stamps (saved in Houston time, or UTC before 2026-08-03): the same
     // wall clock as written, no zone label, not converted.
     ['9/15/2026 14:05:00', '9/15/2026, 2:05 PM'],
@@ -80,6 +82,8 @@ if (lib) {
     // No zone on an ISO time: not a sheet stamp, print as written.
     '2026-10-12T00:17:10',
     '10/14/2026 08:00 - 12:00', '13/45/2026 0:17', 'TBD', '',
+    // A clock no stamp can hold: hour 0-23, minute and second 0-59, else as stored.
+    '10/12/2026 27:15', '10/12/2026 24:00', '10/12/2026 12:60', '10/12/2026 12:30:61',
   ]
   check('every other cell prints as written', UNCHANGED.map(cell), UNCHANGED)
   check('a number prints as the number', detailValue({ C: 1800 }, 'C'), 1800)
