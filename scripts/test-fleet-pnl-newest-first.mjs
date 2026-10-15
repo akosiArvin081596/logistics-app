@@ -10,6 +10,11 @@
 //      Total; every cell stays under its own period's heading (each figure is the
 //      server's figure for that period, moved with its column); Total shows the
 //      server's report.total, never a sum made in the browser
+//   §3 StateMilesPanel.vue (shown under the pickup/delivery state groupings),
+//      mounted: its period columns run in the same order, newest first, after
+//      State / Miles / Share; each state's miles stay under their own period and
+//      the Total row is still last, so switching the grouping never flips the
+//      column order
 //
 // Display only: no figure is computed here or in the component. The fixture is
 // made up (round numbers, no real loads, trucks or people).
@@ -61,9 +66,10 @@ if (newestFirst) {
 }
 
 // ══ §2 FleetPnlTable, rendered ═══════════════════════════════════════════════
-// Compile a committed SFC's <script setup> + <template>. A .vue import becomes an
-// empty stub; a relative .js import is loaded from ROOT.
-async function compileComponent(rel) {
+// Compile a committed SFC's <script setup> + <template>. Imports are resolved
+// from `overrides` first; a .vue import becomes an empty stub; a relative .js
+// import is loaded from ROOT.
+async function compileComponent(rel, overrides = {}) {
   const file = path.join(ROOT, rel)
   const dir = path.dirname(file)
   const { descriptor } = parse(fs.readFileSync(file, 'utf8'), { filename: path.basename(file) })
@@ -83,7 +89,8 @@ async function compileComponent(rel) {
   const deps = { vue: Vue }
   for (const spec of specs) {
     if (spec === 'vue') continue
-    if (spec.endsWith('.vue')) deps[spec] = { default: Vue.defineComponent({ name: path.basename(spec, '.vue'), render: () => null }) }
+    if (spec in overrides) deps[spec] = overrides[spec]
+    else if (spec.endsWith('.vue')) deps[spec] = { default: Vue.defineComponent({ name: path.basename(spec, '.vue'), render: () => null }) }
     else deps[spec] = await import(pathToFileURL(path.join(dir, spec.endsWith('.js') ? spec : `${spec}.js`)).href)
   }
   return new Function('__deps', body)(deps)
@@ -156,6 +163,80 @@ if (html) {
   ok('§2 the month buttons keep their own month', /Open the Oct 2026 breakdown[\s\S]*Open the Sep 2026 breakdown[\s\S]*Open the Aug 2026 breakdown/.test(html))
   ok('§2 the report\'s periods are left as the server sent them', JSON.stringify(report.periods) === periodsBefore)
 }
+
+// ══ §3 StateMilesPanel, mounted ══════════════════════════════════════════════
+// The panel fetches its own data (GET /api/financials/state-miles) on mount, so
+// it is mounted in a minimal in-memory renderer (watchers run, the await
+// resolves, the template re-renders) instead of server-rendered.
+function mountInMemory(Comp, props) {
+  const node = (type, tag) => Vue.markRaw({ type, tag, children: [], parent: null, props: {}, text: '' })
+  const ops = {
+    insert(child, parent, anchor) {
+      if (child.parent) ops.remove(child)
+      const i = anchor ? parent.children.indexOf(anchor) : -1
+      if (i >= 0) parent.children.splice(i, 0, child); else parent.children.push(child)
+      child.parent = parent
+    },
+    remove(child) {
+      const p = child.parent
+      if (!p) return
+      const i = p.children.indexOf(child)
+      if (i >= 0) p.children.splice(i, 1)
+      child.parent = null
+    },
+    createElement: (tag) => node('el', tag),
+    createText: (t) => Object.assign(node('text'), { text: t }),
+    createComment: (t) => Object.assign(node('comment'), { text: t }),
+    setText(n, t) { n.text = t },
+    setElementText(el, t) { el.children = []; if (t) ops.insert(Object.assign(node('text'), { text: t }), el) },
+    parentNode: (n) => n.parent,
+    nextSibling(n) { const p = n.parent; if (!p) return null; return p.children[p.children.indexOf(n) + 1] || null },
+    querySelector: () => null,
+    setScopeId() {},
+    patchProp(el, key, prev, next) { el.props[key] = next },
+  }
+  const root = node('el', 'root')
+  const app = Vue.createRenderer(ops).createApp(Comp, props)
+  app.mount(root)
+  const textOf = (n) => (n.type === 'text' ? n.text : n.type === 'el' ? n.children.map(textOf).join(' ') : '')
+  const all = (n, tag, out = []) => { if (n.tag === tag) out.push(n); (n.children || []).forEach((c) => all(c, tag, out)); return out }
+  const clean = (s) => s.replace(/\s+/g, ' ').trim()
+  return { rows: (tag) => all(root, tag).map((n) => clean(textOf(n))), unmount: () => app.unmount() }
+}
+const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)) }
+
+// Made-up miles: distinct per period, so a cell under the wrong heading shows.
+const stateMiles = {
+  periods: [
+    { key: '2026-08', label: 'Aug 2026' },
+    { key: '2026-09', label: 'Sep 2026' },
+    { key: '2026-10', label: 'Oct 2026' },
+  ],
+  states: [{ state: 'TX', total: 700, share: 100, byPeriod: { '2026-08': 100, '2026-09': 200, '2026-10': 400 }, byTruck: {} }],
+  total: 700,
+  recordedFrom: '',
+}
+const stateMilesBefore = JSON.stringify(stateMiles.periods)
+try {
+  const Panel = await compileComponent('client/src/components/financials/StateMilesPanel.vue', {
+    'lucide-vue-next': { MapPinned: Vue.defineComponent({ name: 'MapPinned', render: () => null }) },
+    '../../composables/useApi': { useApi: () => ({ get: async () => stateMiles }) },
+  })
+  const m = mountInMemory(Panel, { from: '2026-08-01', to: '2026-10-15', granularity: 'month' })
+  await drain()
+  const rows = m.rows('tr')
+  const head = rows.find((t) => t.startsWith('State')) || ''
+  ok(`§3 state miles headings: State, Miles, Share, then newest to oldest ("${head}")`, head === 'State Miles Share Oct 2026 Sep 2026 Aug 2026')
+  const tx = rows.find((t) => t.includes('TX')) || ''
+  ok(`§3 each state's miles stay under their own period ("${tx}")`, /TX 700 100\.0% 400 200 100$/.test(tx))
+  ok(`§3 the Total row is still last ("${rows[rows.length - 1]}")`, /^Total 700$/.test(rows[rows.length - 1] || ''))
+  ok('§3 the server\'s period list is left as sent', JSON.stringify(stateMiles.periods) === stateMilesBefore)
+  m.unmount()
+} catch (err) {
+  ok(`§3 StateMilesPanel mounts (${err.message})`, false)
+}
+const PANEL = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'financials', 'StateMilesPanel.vue'), 'utf8')
+ok('§3 StateMilesPanel orders its columns with periodsNewestFirst()', /periodsNewestFirst\(data\.value\?\.periods\)/.test(PANEL))
 
 // ══ the component reads the order from the helper, and adds nothing up ═══════
 const SFC = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'financials', 'FleetPnlTable.vue'), 'utf8')
