@@ -13,7 +13,7 @@
       No status history recorded yet. The timeline begins tracking at this load’s next status update.
     </div>
     <ol v-else class="st-list">
-      <li v-for="(p, i) in rows" :key="i" class="st-item" :class="{ current: p.inProgress }">
+      <li v-for="(p, i) in phases" :key="i" class="st-item" :class="{ current: p.inProgress }">
         <span class="st-rail"><span class="st-dot" :style="{ background: colorsFor(p.status).fg }"></span></span>
         <div class="st-body">
           <div class="st-row1">
@@ -24,14 +24,6 @@
           <div class="st-times">
             <span>Started {{ fmt(p.startedAt) }}</span>
             <span v-if="p.endedAt"> · Ended {{ fmt(p.endedAt) }}</span>
-          </div>
-          <!-- Secondary, viewer-zone echo. The app-zone time above stays the
-               value of record; this is only an orientation aid and renders for
-               nobody whose browser is in the app zone (both notes are '' there,
-               so the whole line disappears). -->
-          <div v-if="p.startedNote || p.endedNote" class="st-viewer-tz">
-            <span v-if="p.startedNote">Started {{ p.startedNote }}</span>
-            <span v-if="p.endedNote"> · Ended {{ p.endedNote }}</span>
           </div>
           <!-- `reason` carries how far the truck was from the MAPPED point when a
                GPS transition fired. A geocode lands on a gate or centroid, not the
@@ -48,9 +40,9 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { useApi } from '@/composables/useApi'
-import { fmtTimestamp, viewerZoneNote } from '@/utils/datetime'
+import { fmtTimestamp } from '@/utils/datetime'
 
 const props = defineProps({
   // When provided (non-null), phases are rendered directly and no fetch happens —
@@ -117,23 +109,11 @@ function pillStyle(status) {
 // CDT rendered "Aug 4, 9:05 PM GMT+8" for the Manila dev while the row beside it
 // showed the business clock — same load, two clocks, permanently, on every new
 // load. The year is shown, so a Jun 30 <-> Jul 1 crossing says which year it is.
+//
+// Eastern only, for every viewer (B14, 2026-10-15). A second line in the
+// browser's own zone ("(PH Time: …)", "(Your time: …)") used to follow each
+// phase; it put a second clock, 12 hours off, under the business one.
 const fmt = (iso) => fmtTimestamp(iso, { fallback: '' })
-// Secondary line: the same instant in the VIEWER's own zone, shown only when the
-// browser is not set to the app zone (viewerZoneNote, keyed on the browser zone
-// because the owner and the Manila developer share one super_admin login).
-//
-// Safe HERE specifically because these values are true ISO-Z instants from
-// load_status_history, so a real equivalent in another zone exists. Do NOT copy
-// this onto a bare sheet wall clock — those carry no instant, and an "equivalent"
-// would be a guess about which zone the text was typed in.
-//
-// Decorated onto each phase once, rather than calling viewerZoneNote() four
-// times per row straight from the template (v-if + both spans).
-const rows = computed(() => phases.value.map((p) => ({
-  ...p,
-  startedNote: viewerZoneNote(p.startedAt),
-  endedNote: p.endedAt ? viewerZoneNote(p.endedAt) : '',
-})))
 function humanizeDuration(ms) {
   if (ms == null || ms < 0) return ''
   const m = Math.floor(ms / 60000)
@@ -171,13 +151,9 @@ function sourceLabel(s) { return SOURCE_LABELS[s] || s }
 .st-dur { color: #6b7280; font-size: 0.75rem; font-weight: 600; }
 .st-live { color: #047857; background: #d1fae5; padding: 1px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
 .st-times { color: #6b7280; font-size: 0.78rem; margin-top: 2px; }
-/* Clearly subordinate to .st-times above — lighter and smaller, so the app-zone
-   time reads as the value of record and this as the aside it is. */
-.st-viewer-tz { color: #9ca3af; font-size: 0.72rem; margin-top: 1px; }
 .st-src { color: #9ca3af; font-size: 0.72rem; margin-top: 1px; }
 .st-item.current .st-pill { box-shadow: 0 0 0 2px rgba(4, 120, 87, 0.15); }
 .compact { font-size: 0.8rem; }
 .compact .st-item { padding-bottom: 0.7rem; }
 .compact .st-times { font-size: 0.74rem; }
-.compact .st-viewer-tz { font-size: 0.7rem; }
 </style>

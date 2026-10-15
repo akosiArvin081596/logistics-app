@@ -125,10 +125,10 @@
 import { ref, reactive } from 'vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
-// Shared app-zone instant formatters — they pin output to APP_TIMEZONE with a
-// zone label and guard against bare wall-clock input, so these columns do not
-// hand-roll their own copies of that option bag.
-import { fmtAppInstant, fmtTimestamp } from '@/utils/datetime'
+// Shared app-zone formatters — they pin output to APP_TIMEZONE (a time with its
+// zone label, a date without one) and guard against bare wall-clock input, so
+// these columns do not hand-roll their own copies of that option bag.
+import { fmtAppDate, fmtTimestamp } from '@/utils/datetime'
 
 defineProps({
   users: { type: Array, default: () => [] },
@@ -203,12 +203,12 @@ function avatarClass(role) {
 }
 
 // `user.CreatedAt` is a true instant \u2014 /api/users emits it as ISO-Z
-// (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Rendered in the app zone
-// (APP_TIMEZONE, US Eastern) with a visible zone label so the "Created" column
-// shows the business calendar day rather than the viewer's.
+// (strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at)). Its day in the app zone
+// (APP_TIMEZONE, US Eastern), so the "Created" column shows the business
+// calendar day rather than the viewer's; a date-only value has no zone label (B14).
 function formatDate(dateStr) {
   if (!dateStr) return '\u2014'
-  return fmtAppInstant(dateStr, { month: 'short', day: 'numeric', year: 'numeric', fallback: dateStr })
+  return fmtAppDate(dateStr, { fallback: dateStr })
 }
 
 // "Last Sign-In". Hybrid on purpose, matching AdminToolsView's formatRmTs and

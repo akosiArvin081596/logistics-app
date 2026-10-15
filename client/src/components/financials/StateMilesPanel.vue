@@ -18,7 +18,7 @@
             <th scope="col">State</th>
             <th scope="col" class="num">Miles</th>
             <th scope="col" class="num">Share</th>
-            <th v-for="p in data.periods" :key="p.key" scope="col" class="num">{{ p.label }}</th>
+            <th v-for="p in periods" :key="p.key" scope="col" class="num">{{ p.label }}</th>
           </tr>
         </thead>
         <tbody>
@@ -31,12 +31,12 @@
               </th>
               <td class="num">{{ formatCount(s.total) }}</td>
               <td class="num">{{ s.share === 0 && s.total > 0 ? '<0.1%' : formatPct(s.share) }}</td>
-              <td v-for="p in data.periods" :key="p.key" class="num">{{ s.byPeriod[p.key] ? formatCount(s.byPeriod[p.key]) : '—' }}</td>
+              <td v-for="p in periods" :key="p.key" class="num">{{ s.byPeriod[p.key] ? formatCount(s.byPeriod[p.key]) : '—' }}</td>
             </tr>
             <tr v-for="t in trucksOf(s)" v-show="open.has(s.state)" :key="s.state + ':' + t.unit" class="truck-row">
               <th scope="row" class="truck">{{ t.unit }}</th>
               <td class="num">{{ formatCount(t.miles) }}</td>
-              <td :colspan="1 + data.periods.length"></td>
+              <td :colspan="1 + periods.length"></td>
             </tr>
           </template>
         </tbody>
@@ -44,7 +44,7 @@
           <tr>
             <th scope="row">Total</th>
             <td class="num">{{ formatCount(data.total) }}</td>
-            <td :colspan="1 + data.periods.length"></td>
+            <td :colspan="1 + periods.length"></td>
           </tr>
         </tfoot>
       </table>
@@ -57,11 +57,12 @@ import { computed, ref, watch } from 'vue'
 import { MapPinned } from 'lucide-vue-next'
 import { useApi } from '../../composables/useApi'
 import { fmtYmd } from '../../utils/datetime'
-import { formatCount, formatPct } from '../../lib/financialsView'
+import { formatCount, formatPct, periodsNewestFirst } from '../../lib/financialsView'
 
 // Miles driven in each state, as the ELD measured them (GET /api/financials/
 // state-miles), for the report's range and periods. Every figure is the
-// server's; this only lays them out.
+// server's; this only lays them out. Periods run newest first, as in the Fleet
+// P&L, so switching the grouping never flips the column order.
 const props = defineProps({
   from: { type: String, required: true },
   to: { type: String, required: true },
@@ -72,6 +73,7 @@ const api = useApi()
 const data = ref(null)
 const error = ref('')
 const open = ref(new Set())
+const periods = computed(() => periodsNewestFirst(data.value?.periods))
 let reqId = 0
 
 async function load() {
