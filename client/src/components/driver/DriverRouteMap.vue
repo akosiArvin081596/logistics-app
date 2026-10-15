@@ -943,15 +943,20 @@ const etaFormatted = computed(() => formatMinutes(remainingEtaMinutes.value))
 // The header chips. Without a planned lane on screen they are exactly the live
 // figures above; with one they are the lane's own distance and drive time, read
 // straight off the prop so they show even before (or without) the map script.
+// A lane figure of 0 or unknown is an absence (an empty stored lane), so its
+// chip is left out rather than reading "0 mi".
+function positiveOrNull(v) {
+  const n = Number(v)
+  return v != null && Number.isFinite(n) && n > 0 ? n : null
+}
 const chipMiles = computed(() => {
   if (!plannedLaneShown.value) return remainingDistanceMiles.value
-  const mi = Number(props.plannedLane.distanceMiles)
-  return props.plannedLane.distanceMiles != null && Number.isFinite(mi) ? Math.round(mi * 10) / 10 : null
+  const mi = positiveOrNull(props.plannedLane.distanceMiles)
+  return mi == null ? null : Math.round(mi * 10) / 10
 })
 const chipMinutes = computed(() => {
   if (!plannedLaneShown.value) return remainingEtaMinutes.value
-  const m = Number(props.plannedLane.etaMinutes)
-  return props.plannedLane.etaMinutes != null && Number.isFinite(m) ? m : null
+  return positiveOrNull(props.plannedLane.etaMinutes)
 })
 const chipEtaText = computed(() => plannedLaneShown.value ? formatMinutes(chipMinutes.value) : etaFormatted.value)
 

@@ -16,7 +16,7 @@
   PDF is clickable here. scripts/test-load-detail-ratecon.mjs pins all of it.
 -->
 <template>
-  <div ref="tileEl" class="rcv" :class="{ 'rcv-expanded': expanded }">
+  <div ref="tileEl" class="rcv" :class="{ 'rcv-expanded': expanded }" :style="tileStyle">
     <div class="rcv-toolbar" role="toolbar" aria-label="Rate con viewer">
       <div class="rcv-group">
         <button type="button" class="rcv-btn" aria-label="Previous page" title="Previous page" :disabled="!numPages || page <= 1" @click="goPage(page - 1)">&lsaquo;</button>
@@ -45,17 +45,15 @@
         />
       </div>
       <div v-if="loading && !failed" class="rcv-status" role="status">Loading rate con…</div>
-      <div v-if="failed" class="rcv-status rcv-status-fail">
-        <span>Couldn't show the rate con here.</span>
-        <a :href="src" target="_blank" rel="noopener" class="rcv-open">Open PDF</a>
-      </div>
+      <!-- No "open the file" link: the PDF is only ever shown in this viewer. -->
+      <div v-if="failed" class="rcv-status rcv-status-fail">Couldn't show the rate con here.</div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { FIT_ZOOM, MIN_ZOOM, DEFAULT_PAGE_ASPECT, fitPageWidth, maxZoomFor, clampZoom, stepZoom, clampPage } from '../../lib/rateConView'
+import { FIT_ZOOM, MIN_ZOOM, DEFAULT_PAGE_ASPECT, fitPageWidth, maxZoomFor, clampZoom, stepZoom, clampPage, tileMaxHeight } from '../../lib/rateConView'
 
 const props = defineProps({
   // A blob: URL of the PDF bytes (RateConPdfSection fetched them).
@@ -90,6 +88,27 @@ const maxZoom = computed(() => maxZoomFor(fitWidth.value, aspect.value, dpr))
 const renderWidth = computed(() => Math.floor(fitWidth.value * zoom.value))
 // Live feedback while two fingers move; committed as a real zoom on release.
 const pinchStyle = computed(() => (pinchScale.value === 1 ? null : { transform: `scale(${pinchScale.value})`, transformOrigin: 'center top' }))
+
+// The tile never stands taller than the scroll area it sits in (the dialog
+// body), so the controls and the whole fitted page are on screen together.
+// The CSS height is the size; this is only its ceiling, and full screen has none.
+const tileCap = ref(0)
+const tileStyle = computed(() => (!isFull.value && tileCap.value > 0 ? { maxHeight: `${tileCap.value}px` } : null))
+let scrollArea = null
+function findScrollArea() {
+  let el = tileEl.value && tileEl.value.parentElement
+  while (el && el !== document.body) {
+    const oy = getComputedStyle(el).overflowY
+    if (oy === 'auto' || oy === 'scroll') return el
+    el = el.parentElement
+  }
+  return null
+}
+function measureCap() {
+  if (!scrollArea) return
+  const cs = getComputedStyle(scrollArea)
+  tileCap.value = tileMaxHeight(scrollArea.clientHeight, parseFloat(cs.paddingTop), parseFloat(cs.paddingBottom))
+}
 
 function measure() {
   const el = stageEl.value
@@ -168,8 +187,25 @@ function toggleFullscreen() {
     expanded.value = true
   }
 }
+let fullExitedAt = 0
 function onFullscreenChange() {
+  const wasFull = nativeFull.value
   nativeFull.value = !!tileEl.value && document.fullscreenElement === tileEl.value
+  if (wasFull && !nativeFull.value) fullExitedAt = Date.now()
+}
+// Escape in full screen leaves full screen and nothing else. The load dialog
+// closes on Escape too (reka-ui listens on window, in the bubble phase), so this
+// listens on window in the CAPTURE phase, which runs first, and stops the
+// event there. The browser may already have left native full screen by the
+// time the key event arrives, so a press just after that is held back too.
+function onKeydown(e) {
+  if (e.key !== 'Escape' && e.key !== 'Esc') return
+  if (!isFull.value && Date.now() - fullExitedAt > 600) return
+  e.preventDefault()
+  e.stopImmediatePropagation()
+  e.stopPropagation()
+  if (expanded.value) expanded.value = false
+  else if (nativeFull.value && document.fullscreenElement) document.exitFullscreen().catch(() => {})
 }
 
 // Two-finger pinch. Touch events rather than pointer events: once the browser
@@ -225,6 +261,7 @@ watch(page, () => {
 })
 
 let ro = null
+let areaRo = null
 onMounted(() => {
   measure()
   loadPdfComp()
@@ -239,11 +276,22 @@ onMounted(() => {
     el.addEventListener('touchend', onTouchEnd, { passive: true })
     el.addEventListener('touchcancel', onTouchEnd, { passive: true })
   }
+  scrollArea = findScrollArea()
+  measureCap()
+  if (scrollArea && 'ResizeObserver' in window) {
+    areaRo = new ResizeObserver(measureCap)
+    areaRo.observe(scrollArea)
+  }
   document.addEventListener('fullscreenchange', onFullscreenChange)
+  window.addEventListener('keydown', onKeydown, true)
 })
 onBeforeUnmount(() => {
   ro?.disconnect()
   ro = null
+  areaRo?.disconnect()
+  areaRo = null
+  scrollArea = null
+  window.removeEventListener('keydown', onKeydown, true)
   const el = stageEl.value
   if (el) {
     el.removeEventListener('touchstart', onTouchStart)
@@ -263,7 +311,7 @@ onBeforeUnmount(() => {
   border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #f1f5f9;
 }
 @media (max-width: 640px) {
-  .rcv { height: 65vh; }
+  .rcv { height: 55vh; }
 }
 .rcv:fullscreen { height: 100%; border-radius: 0; border: 0; }
 .rcv-expanded { position: fixed; inset: 0; z-index: 70; height: auto; border-radius: 0; border: 0; }
@@ -299,5 +347,4 @@ onBeforeUnmount(() => {
   font-size: 0.82rem; color: #6b7280; pointer-events: none;
 }
 .rcv-status-fail { pointer-events: auto; background: #f1f5f9; }
-.rcv-open { color: #2563eb; font-weight: 600; }
 </style>

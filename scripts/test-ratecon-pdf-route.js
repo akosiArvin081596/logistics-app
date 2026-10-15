@@ -116,6 +116,7 @@ const LISTING = [
 		{ id: "drv-old-7700123-bbbb", name: "7700123-ratecon.pdf", createdTime: "2026-09-01T15:00:00.000Z", size: String(BYTES.driveOld.length) },
 		{ id: "drv-long-77001234-cc", name: "Re: Load 77001234 rate con.pdf", createdTime: "2026-09-25T15:00:00.000Z", size: "100" },
 		{ id: "drv-pref-7700123-dd", name: "LD7700123 confirmation.pdf", createdTime: "2026-09-26T15:00:00.000Z", size: "100" },
+		{ id: "drv-suffix-7700123-2", name: "Load 7700123-2 rate con.pdf", createdTime: "2026-09-27T15:00:00.000Z", size: "100" },
 		{ id: "drv-big-7700300-eeee", name: "Order 7700300.pdf", createdTime: "2026-09-10T15:00:00.000Z", size: String(16 * MB) },
 		{ id: "drv-html-7700400-fff", name: "Order 7700400.pdf", createdTime: "2026-09-10T15:00:00.000Z", size: String(BYTES.notPdf.length) },
 		{ id: "drv-alpha-ldmp4-gggg", name: "Rate con ld-mp4w4lp1.pdf", createdTime: "2026-09-12T15:00:00.000Z", size: String(BYTES.alpha.length) },
@@ -155,10 +156,13 @@ fs.readFileSync = function (p, ...rest) { if (typeof p === "string" && p.include
 
 async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = false } = {}) {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ratecon-pdf-route-"));
-	const rateconDir = path.join(tmp, "uploads", "rate-cons");
+	const uploadsDir = path.join(tmp, "uploads");
+	const rateconDir = path.join(uploadsDir, "rate-cons");
 	fs.mkdirSync(rateconDir, { recursive: true });
-	// A file outside the archive folder, that a poisoned row points at.
-	fs.writeFileSync(path.join(tmp, "uploads", "secret.pdf"), pdf("must never be served"));
+	fs.mkdirSync(path.join(uploadsDir, "sub"), { recursive: true });
+	// Files outside the stored-file shapes, that poisoned rows point at.
+	fs.writeFileSync(path.join(tmp, "secret.pdf"), pdf("must never be served"));
+	fs.writeFileSync(path.join(uploadsDir, "sub", "nested.pdf"), pdf("must never be served either"));
 	const db = new Database(":memory:");
 	db.exec(tableDdl("documents"));
 	db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL");
@@ -201,7 +205,7 @@ async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = fa
 			return drive;
 		},
 		folderId,
-		rateconDir,
+		uploadsDir,
 		docTypes: RATECON_DOC_TYPES,
 		logger: { log: (...a) => log.logs.push(a.join(" ")), warn: (...a) => log.logs.push(a.join(" ")), error: (...a) => log.logs.push(a.join(" ")) },
 	};
@@ -237,7 +241,7 @@ async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = fa
 		db.close();
 		fs.rmSync(tmp, { recursive: true, force: true });
 	};
-	return { app, db, log, call, addDoc, rateconDir, tmp, close };
+	return { app, db, log, call, addDoc, uploadsDir, rateconDir, tmp, close };
 }
 
 const isPdfBody = (r) => r.body.length >= 5 && r.body.subarray(0, 5).toString("latin1") === "%PDF-";
@@ -358,7 +362,7 @@ async function main() {
 		t(r.status === 200 && r.body.equals(BYTES.local), `§5 no Drive folder configured: the local copy is served (${r.status})`);
 		t(w.log.lists === 0, "§5 ...without listing anything");
 		const n = await w.call(url("7709999"));
-		t(n.status === 503 && n.json && n.json.error, `§5 no Drive folder configured and nothing local: 503 (${n.status})`);
+		t(n.status === 404 && n.json && n.json.code === "RATECON_NOT_FOUND", `§5 no Drive folder configured and nothing local: 404 RATECON_NOT_FOUND (${n.status} ${n.json && n.json.code})`);
 		await w.close();
 	}
 	{
@@ -367,6 +371,8 @@ async function main() {
 		w.addDoc("7700123", "/uploads/rate-cons/7700123.pdf");
 		const r = await w.call(url("7700123"));
 		t(r.status === 200 && r.body.equals(BYTES.local), `§5 a local replica (Drive off by design) serves its archive copy (${r.status})`);
+		const n = await w.call(url("7709999"));
+		t(n.status === 404 && n.json && n.json.code === "RATECON_NOT_FOUND", `§5 a local replica with nothing local: 404 RATECON_NOT_FOUND, not 503 (${n.status} ${n.json && n.json.code})`);
 		await w.close();
 	}
 
@@ -397,6 +403,9 @@ async function main() {
 		t(!m("Rate con LD-MP4W4LP12.pdf", "LD-MP4W4LP1"), "§7 matcher: ...and not inside a longer ID");
 		t(!m("", "7700123") && !m("7700123.pdf", "") && !m("7700123.pdf", "#"), "§7 matcher: empty name or ID never matches");
 		t(m("x 7700123 y 77001234", "7700123"), "§7 matcher: a later bounded occurrence still matches after an unbounded one");
+		t(!m("Load 7700123-2 rate con.pdf", "7700123") && !m("7700123_2.pdf", "7700123") && !m("7700123.1.pdf", "7700123"), "§7 matcher: '-', '_' or '.' then a digit continues the ID (7700123-2 is another load)");
+		t(!m("Load 2-7700123.pdf", "7700123"), "§7 matcher: ...on the leading side too");
+		t(m("7700123.pdf", "7700123") && m("Order 7700123-$700 ADV.pdf", "7700123") && m("7700123_ratecon.pdf", "7700123"), "§7 matcher: a separator followed by a non-digit still ends the ID");
 	} else {
 		t(false, "§7 lib/ratecon-drive-index.js exports filenameCarriesLoadIdBounded()");
 	}
@@ -405,7 +414,7 @@ async function main() {
 		const a = await w.call(url("7700123"));
 		const b = await w.call(url("#7700123"));
 		t(a.status === 200 && b.status === 200 && a.body.equals(b.body), `§7 "7700123" and "#7700123" serve the same file (${a.status}/${b.status})`);
-		t(!w.log.media.includes("drv-long-77001234-cc") && !w.log.media.includes("drv-pref-7700123-dd"), "§7 a longer or letter-prefixed name is never downloaded for this load");
+		t(!w.log.media.includes("drv-long-77001234-cc") && !w.log.media.includes("drv-pref-7700123-dd") && !w.log.media.includes("drv-suffix-7700123-2"), "§7 a longer, letter-prefixed or '-2' name is never downloaded for this load (even when newer)");
 		t(w.log.lists === LISTING.length, `§7 the folder is listed page by page once, then cached (${w.log.lists} list calls for ${LISTING.length} pages over two requests)`);
 		const p2 = await w.call(url("7700600"));
 		t(p2.status === 200 && p2.body.equals(BYTES.page2), `§7 a file on the listing's second page is found (${p2.status})`);
@@ -428,12 +437,25 @@ async function main() {
 			t((r.status === 400 || r.status === 404) && !isPdfBody(r), `§8 load ID ${JSON.stringify(bad.length > 20 ? bad.slice(0, 8) + "…" : bad)} is refused (${r.status})`);
 			t(!reads.some((p) => p.startsWith(w.tmp)), `§8 ...with no file read (${JSON.stringify(bad.slice(0, 12))})`);
 		}
-		w.addDoc("7700900", "/uploads/rate-cons/../secret.pdf", "", "2026-09-30 12:00:00", "../secret.pdf");
+		w.addDoc("7700900", "/uploads/rate-cons/../../secret.pdf", "", "2026-09-30 12:00:00", "../secret.pdf");
+		w.addDoc("7700900", "/uploads/../secret.pdf", "", "2026-09-30 12:00:00");
+		w.addDoc("7700900", "/uploads/sub/nested.pdf", "", "2026-09-30 12:00:00");
+		w.addDoc("7700900", "/elsewhere/7700900.pdf", "", "2026-09-30 12:00:00");
 		reads.length = 0;
 		const p = await w.call(url("7700900"));
-		t(p.status === 404 && !isPdfBody(p), `§8 a poisoned documents row (drive_url with "..") is skipped, not served (${p.status})`);
-		t(!reads.some((r) => r.endsWith("secret.pdf")), "§8 ...and the file it names is never opened");
-		t(w.log.logs.some((s) => /skip/i.test(s)), "§8 ...and the skip is logged");
+		t(p.status === 404 && !isPdfBody(p), `§8 poisoned documents rows ("..", a subfolder, another root) are skipped, not served (${p.status})`);
+		t(!reads.some((r) => r.endsWith("secret.pdf") || r.endsWith("nested.pdf")), "§8 ...and the files they name are never opened");
+		t(w.log.logs.filter((s) => /skip/i.test(s)).length >= 4, "§8 ...and each skip is logged");
+		await w.close();
+	}
+	{
+		// A rate con a Super Admin uploaded through POST /api/documents/upload:
+		// stored directly under uploads/, type RATECON.
+		const w = await startWorld({ folderId: "" });
+		fs.writeFileSync(path.join(w.uploadsDir, "7700950_RATECON_1760000000000.pdf"), BYTES.local);
+		w.addDoc("7700950", "/uploads/7700950_RATECON_1760000000000.pdf", "", "2026-09-30 12:00:00", "7700950_RATECON_1760000000000.pdf");
+		const u = await w.call(url("7700950"));
+		t(u.status === 200 && u.body.equals(BYTES.local), `§8 an uploaded rate con under uploads/ is served (${u.status})`);
 		await w.close();
 	}
 
@@ -452,6 +474,25 @@ async function main() {
 		const first = layer && layer.route.stack[0] && layer.route.stack[0].handle;
 		t(!!layer && layer.route.methods.get === true, "§9 the route is a GET");
 		t(!!first && Array.isArray(first.__roles) && first.__roles.length === 1 && first.__roles[0] === "Super Admin", "§9 ...whose first handler is requireRole(\"Super Admin\")");
+		const second = layer && layer.route.stack[1] && layer.route.stack[1].handle;
+		t(!!layer && layer.route.stack.length === 3 && !!second && !second.__roles, `§9 ...then the rate limiter, then the handler (${layer ? layer.route.stack.length : 0} handlers)`);
+		await w.close();
+	}
+
+	// ── §10 the rate limiter: after the role gate ────────────────────────────
+	{
+		const w = await startWorld();
+		const limit = routeModule && routeModule.RATE_LIMIT;
+		t(limit === 60, `§10 60 requests per window (${limit})`);
+		let refused = 0;
+		for (let i = 0; i < 70; i++) if ((await w.call(url("7709999"), { user: USERS.Dispatcher })).status === 403) refused++;
+		for (let i = 0; i < 5; i++) if ((await w.call(url("7709999"), { user: null })).status === 401) refused++;
+		t(refused === 75, `§10 refused callers stay refused (${refused}/75)`);
+		let served = 0;
+		for (let i = 0; i < (limit || 60); i++) if ((await w.call(url("7709999"))).status === 404) served++;
+		t(served === (limit || 60), `§10 ...and spent none of the budget: a Super Admin still gets ${limit} answers (${served})`);
+		const over = await w.call(url("7709999"));
+		t(over.status === 429 && over.json && over.json.code === "RATECON_RATE_LIMITED", `§10 the next request is 429 RATECON_RATE_LIMITED (${over.status})`);
 		await w.close();
 	}
 }

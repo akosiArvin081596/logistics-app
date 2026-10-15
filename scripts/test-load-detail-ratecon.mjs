@@ -101,7 +101,7 @@ async function ssr(Comp, props) {
 // A minimal in-memory renderer, so a component can be MOUNTED (watchers run,
 // awaits resolve, the template re-renders) without a DOM.
 function mountInMemory(Comp, props) {
-  const node = (type, tag) => ({ type, tag, children: [], parent: null, props: {}, text: '' })
+  const node = (type, tag) => ({ type, tag, children: [], parent: null, props: {}, text: '', addEventListener() {}, removeEventListener() {} })
   const ops = {
     insert(child, parent, anchor) {
       if (child.parent) ops.remove(child)
@@ -192,6 +192,16 @@ if (RouteMap) {
   ok('§2 while the lane loads: the planned hint, and no chip invented', /Planned route/.test(waiting) && !/\bmi\b/.test(waiting))
   const straight = await ssr(RouteMap, { load: mapLoad('Dispatched'), headers: MAP_HEADERS, driverPosition: null, dispatchMode: true, plannedLane: { status: 'ready', route: null, distanceMiles: 700, etaMinutes: null, source: 'straight_line' } })
   ok('§2 a straight-line lane says so', /Straight-line distance/.test(straight) && straight.includes('700 mi') && !/drive time/.test(straight))
+  // An empty stored lane: distance 0, drive time unknown. No "0 mi", no chip.
+  for (const lane of [
+    { status: 'ready', route: LANE.route, distanceMiles: 0, etaMinutes: null, source: 'stored' },
+    { status: 'ready', route: LANE.route, distanceMiles: null, etaMinutes: 0, source: 'stored' },
+  ]) {
+    const empty = await ssr(RouteMap, { load: mapLoad('Delivered'), headers: MAP_HEADERS, driverPosition: null, dispatchMode: true, plannedLane: lane })
+    ok(`§2 a lane of ${lane.distanceMiles} mi / ${lane.etaMinutes} min shows no chip for either (${empty.slice(0, 60)})`, !/\b0 mi\b/.test(empty) && !/\bmi\b/.test(empty) && !/drive time/.test(empty) && !/\b0m\b/.test(empty))
+  }
+  const halfLane = await ssr(RouteMap, { load: mapLoad('Delivered'), headers: MAP_HEADERS, driverPosition: null, dispatchMode: true, plannedLane: { status: 'ready', route: LANE.route, distanceMiles: 412, etaMinutes: null, source: 'stored' } })
+  ok('§2 a known distance with an unknown drive time: the miles chip alone', halfLane.includes('412 mi') && !/drive time/.test(halfLane))
   // Every other surface passes no plannedLane: identical to before.
   const none = await ssr(RouteMap, { load: mapLoad('Dispatched'), headers: MAP_HEADERS, driverPosition: null, dispatchMode: true })
   ok('§2 without the prop (job board, completed before, driver app): no planned route, no drive time', !/Planned route|drive time/.test(none))
@@ -200,6 +210,39 @@ if (RouteMap) {
   ok('§2 the prop defaults to null and every new branch reads usePlannedLane',
     /plannedLane: \{ type: Object, default: null \}/.test(ROUTE_MAP) &&
     /const usePlannedLane = computed\(\(\) => !props\.publicMode && !!props\.plannedLane && !driverLatLng\.value\)/.test(ROUTE_MAP))
+  // Live mode, mounted: the map script and /api/route answer, as in
+  // production. The ETA chip is there, as it was on main.
+  {
+    class Marker { constructor(o) { Object.assign(this, o) } addEventListener() {} }
+    class Polyline { constructor(o) { this.o = { ...o } } setMap() {} get(k) { return this.o[k] } set(k, v) { this.o[k] = v } setPath() {} }
+    class LatLngBounds { extend() {} getCenter() { return { lat: 0, lng: 0 } } }
+    globalThis.google = { maps: { marker: { AdvancedMarkerElement: Marker }, Polyline, LatLngBounds, MapTypeControlStyle: { HORIZONTAL_BAR: 1 }, ControlPosition: { TOP_LEFT: 1 } } }
+    const routeCalls = []
+    const liveDeps = {
+      ...MAP_DEPS,
+      '../../composables/useApi': { useApi: () => ({ get: async (u) => { routeCalls.push(u); return { routes: [{ route: [{ latitude: 30.1, longitude: -94.2 }, { latitude: 32, longitude: -88 }, { latitude: 33.7, longitude: -84.4 }], distanceMiles: 85.2, etaMinutes: 95, steps: [] }], recommendedIdx: 0 } } }) },
+      '../../composables/useGoogleMaps': { useGoogleMaps: () => ({ load: async () => globalThis.google.maps, createMap: async () => ({ fitBounds() {}, setCenter() {}, setZoom() {}, panTo() {} }) }), createDotPin: () => ({ addEventListener() {} }) },
+    }
+    let LiveMap = null
+    try { LiveMap = await compileComponent('client/src/components/driver/DriverRouteMap.vue', liveDeps) } catch (err) { ok(`§2 DriverRouteMap mounts in this harness (${err.message})`, false) }
+    if (LiveMap) {
+      for (const [label, extra] of [['with the planned lane passed (Active)', { plannedLane: LANE }], ['without it (as on main)', {}]]) {
+        routeCalls.length = 0
+        const m = mountInMemory(LiveMap, { load: mapLoad('In Transit'), headers: MAP_HEADERS, driverPosition: LIVE, dispatchMode: true, ...extra })
+        await drain()
+        const txt = m.text()
+        ok(`§2 live, ${label}: routed from the truck`, routeCalls.length >= 1 && routeCalls[0].startsWith('/api/route?fromLat=30.1&fromLng=-94.2'))
+        ok(`§2 live, ${label}: the miles-left and ETA chips (${txt.slice(0, 70)})`, txt.includes('85.2 mi') && txt.includes('1h 35m ETA') && !/drive time|Planned route/.test(txt))
+        m.unmount()
+      }
+      routeCalls.length = 0
+      const p = mountInMemory(LiveMap, { load: mapLoad('Dispatched'), headers: MAP_HEADERS, driverPosition: null, dispatchMode: true, plannedLane: LANE })
+      await drain()
+      ok('§2 planned, mounted: the lane is drawn with no /api/route call', routeCalls.length === 0 && p.text().includes('812.4 mi') && p.text().includes('12h 30m drive time'))
+      p.unmount()
+    }
+    delete globalThis.google
+  }
   ok('§2 with a planned lane on screen no /api/route call is made',
     /if \(usePlannedLane\.value\) \{\s*if \(props\.plannedLane\.status === 'loading'\)[^\n]*return \}\s*if \(props\.plannedLane\.status === 'ready'\) \{ applyPlannedLane\(\); return \}/.test(ROUTE_MAP))
 }
@@ -253,6 +296,12 @@ if (miles) {
     await drain()
     ok('§3 no coordinates: the lane is "none" (the map falls back to its own route fetch)', (lanes2[lanes2.length - 1] || {}).status === 'none')
     nocoord.unmount()
+    const lanes3 = []
+    answer = { origin: { lat: 1, lng: 1 }, destination: { lat: 2, lng: 2 }, lane: { route: null, distanceMiles: 0, etaMinutes: null, source: 'stored' }, driven: { basis: 'no-data', reason: 'no_samples' } }
+    const emptyLane = mountInMemory(Haul, { loadId: '7700127', open: true, onLane: (l) => lanes3.push(l) })
+    await drain()
+    ok('§3 an empty stored lane (0 mi, no route) is "none", not a lane to draw', (lanes3[lanes3.length - 1] || {}).status === 'none')
+    emptyLane.unmount()
     const before = api.calls.length
     const closed = mountInMemory(Haul, { loadId: '7700126', open: false })
     await drain()
@@ -352,7 +401,60 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
   ok('§5 no text or annotation layer (nothing in the PDF is clickable)', VIEWER.length > 0 && !/text-layer|annotation-layer|textLayer|annotationLayer|:forms/.test(templateOf(VIEWER)))
   ok('§5 one page at a time', /:page="page"/.test(VIEWER))
   ok('§5 the essential vue-pdf-embed entry with its worker', /import\('vue-pdf-embed\/dist\/index\.essential\.mjs'\)/.test(VIEWER) && /import\('pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url'\)/.test(VIEWER))
-  ok('§5 phone: the tile is 65% of the screen height', /@media \(max-width: 640px\) \{\s*\.rcv \{ height: 65vh; \}/.test(VIEWER))
+  ok('§5 phone: the tile is 55% of the screen height', /@media \(max-width: 640px\) \{\s*\.rcv \{ height: 55vh; \}/.test(VIEWER))
+  ok('§5 the tile is capped to the scroll area it sits in (outside full screen)',
+    /const tileStyle = computed\(\(\) => \(!isFull\.value && tileCap\.value > 0 \? \{ maxHeight: `\$\{tileCap\.value\}px` \} : null\)\)/.test(VIEWER) && /:style="tileStyle"/.test(VIEWER))
+  ok('§5 no link out of the viewer (no "Open PDF", no href)', VIEWER.length > 0 && !/Open PDF|<a\b|:href=/.test(templateOf(VIEWER)))
+  ok('§5 Escape is caught on window in the capture phase', /window\.addEventListener\('keydown', onKeydown, true\)/.test(VIEWER) && /window\.removeEventListener\('keydown', onKeydown, true\)/.test(VIEWER))
+  ok('§5 rateConView.js has tileMaxHeight()', !!view && typeof view.tileMaxHeight === 'function')
+  if (view && typeof view.tileMaxHeight === 'function') {
+    ok('§5 tile ceiling at 390x844: the ~495 px dialog body less its padding', view.tileMaxHeight(495, 20, 20) === 447)
+    ok('§5 tile ceiling: never under 240 px, none when nothing was measured', view.tileMaxHeight(150, 20, 20) === 240 && view.tileMaxHeight(0) === 0 && view.tileMaxHeight(NaN) === 0)
+  }
+  // Mounted: full screen (the CSS fallback, as on an iPhone), then Escape.
+  if (VIEWER) {
+    const winListeners = []
+    globalThis.window = {
+      devicePixelRatio: 2,
+      addEventListener: (type, fn, capture) => winListeners.push({ type, fn, capture }),
+      removeEventListener: (type, fn) => { const i = winListeners.findIndex((l) => l.type === type && l.fn === fn); if (i >= 0) winListeners.splice(i, 1) },
+    }
+    globalThis.document = { addEventListener() {}, removeEventListener() {}, fullscreenEnabled: false, fullscreenElement: null, body: {} }
+    globalThis.getComputedStyle = () => ({ overflowY: 'visible', paddingTop: '0px', paddingBottom: '0px' })
+    try {
+      const Viewer2 = await compileComponent('client/src/components/shared/RateConViewer.vue')
+      const m = mountInMemory(Viewer2, { src: 'blob:test' })
+      await drain()
+      const tile = m.find((n) => n.type === 'el' && /\brcv\b/.test(String(n.props.class || '')))
+      const fsBtn = m.find((n) => n.type === 'el' && n.props['aria-label'] === 'Full screen')
+      const keydown = winListeners.find((l) => l.type === 'keydown')
+      ok('§5 mounted: a capture-phase keydown listener on window', !!keydown && keydown.capture === true)
+      ok('§5 mounted: no link in the failure state either', !m.find((n) => n.type === 'el' && n.tag === 'a'))
+      if (tile && fsBtn && keydown) {
+        fsBtn.props.onClick()
+        await drain()
+        ok('§5 Full screen expands the tile', /rcv-expanded/.test(String(tile.props.class)))
+        const esc = { key: 'Escape', defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.stopped = true }, stopImmediatePropagation() { this.stoppedNow = true } }
+        keydown.fn(esc)
+        await drain()
+        ok('§5 Escape in full screen leaves full screen', !/rcv-expanded/.test(String(tile.props.class)))
+        ok('§5 ...and goes no further, so the load dialog stays open (stopped, default prevented)', esc.defaultPrevented && esc.stopped && esc.stoppedNow)
+        const esc2 = { key: 'Escape', defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.stopped = true }, stopImmediatePropagation() { this.stoppedNow = true } }
+        keydown.fn(esc2)
+        ok('§5 Escape outside full screen is left alone (the dialog closes as usual)', !esc2.defaultPrevented && !esc2.stopped)
+      } else {
+        ok('§5 mounted: the tile, the Full screen button and the keydown listener are found', false)
+      }
+      m.unmount()
+      ok('§5 unmount removes the keydown listener', !winListeners.some((l) => l.type === 'keydown'))
+    } catch (err) {
+      ok(`§5 RateConViewer mounts in this harness (${err.message})`, false)
+    } finally {
+      delete globalThis.window
+      delete globalThis.document
+      delete globalThis.getComputedStyle
+    }
+  }
   ok('§5 phone: one finger scrolls natively, two fingers pinch (touch-action pan-x pan-y, touchmove not passive)',
     /touch-action: pan-x pan-y/.test(VIEWER) && /addEventListener\('touchmove', onTouchMove, \{ passive: false \}\)/.test(VIEWER))
   ok('§5 no horizontal page scroll: the tile is capped to its column and scrolls inside', /\.rcv \{[^}]*max-width: 100%/.test(VIEWER) && /\.rcv-stage \{[^}]*overflow: auto/.test(VIEWER) && /min-width: 0/.test(VIEWER))

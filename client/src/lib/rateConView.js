@@ -68,6 +68,17 @@ export function stepZoom(z, direction, maxZoom) {
   return clampZoom(next, maxZoom)
 }
 
+// The tallest the tile may stand inside the scroll area holding it (the
+// dialog body): its visible height less its padding and a small margin, so the
+// controls and the fitted page show without scrolling. Never under 240 px, the
+// least a page is readable at; 0 (no ceiling) when there is nothing to measure.
+export function tileMaxHeight(clientHeight, padTop = 0, padBottom = 0) {
+  const h = Number(clientHeight)
+  if (!(h > 0)) return 0
+  const usable = h - (Number(padTop) || 0) - (Number(padBottom) || 0) - 8
+  return Math.max(240, Math.floor(usable))
+}
+
 export function clampPage(p, numPages) {
   const n = Math.max(1, Number(numPages) || 1)
   const v = Math.round(Number(p))

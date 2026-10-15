@@ -112,7 +112,11 @@ async function fetchHaul() {
   driven.value = d.driven || null
   loading.value = false
   const lane = d.lane || null
-  const ready = !!(lane && d.origin && d.destination && lane.source !== 'none')
+  // A lane with no geometry and no distance (an empty stored lane) is no lane:
+  // the map then routes origin → drop-off itself, as it did before.
+  const hasRoute = !!(lane && Array.isArray(lane.route) && lane.route.length >= 2)
+  const hasDistance = !!(lane && Number(lane.distanceMiles) > 0)
+  const ready = !!(lane && d.origin && d.destination && lane.source !== 'none' && (hasRoute || hasDistance))
   emit('lane', ready
     ? { status: 'ready', route: Array.isArray(lane.route) ? lane.route : null, distanceMiles: lane.distanceMiles ?? null, etaMinutes: lane.etaMinutes ?? null, source: lane.source || '' }
     : { status: 'none' })

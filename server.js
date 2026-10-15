@@ -61631,7 +61631,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 });
 
 // GET /api/loads/:loadId/ratecon.pdf (Super Admin): above app.get("*") on purpose; scripts/test-ratecon-pdf-route.js pins it.
-require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, rateconDir: path.join(DATA_DIR, "uploads", "rate-cons"), docTypes: RATECON_DOC_TYPES });
+require("./lib/ratecon-pdf-route").mount(app, { requireRole, db, getDrive, folderId: RATECON_DRIVE_FOLDER_ID, uploadsDir: path.join(DATA_DIR, "uploads"), docTypes: RATECON_DOC_TYPES });
 
 // ============================================================
 // KPI BOT — nightly KPI snapshots, the admin KPI API and the weekly digest
