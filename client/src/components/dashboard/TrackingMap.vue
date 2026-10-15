@@ -102,22 +102,23 @@
                 </span>
                 <span v-else class="driver-meta">
                   <span :class="['status-text', movementState(loc)]">{{ movementLabel(loc) }}</span>
-                  <span class="driver-ago">{{ timeAgo(loc.timestamp) }}</span>
+                  <span :class="['driver-ago', { 'last-seen': locLastSeen(loc) }]">{{ locLastSeen(loc) || timeAgo(loc.timestamp) }}</span>
                 </span>
                 <span v-if="inTransitLoad(loc)" class="driver-load">{{ inTransitLoad(loc) }}</span>
                 <span v-if="driverOutOfRange(loc)" class="driver-warning">{{ driverOutOfRange(loc) }}</span>
                 <!-- Quick-glance metrics (no click): absolute ETA + countdown,
-                     MPH, distance remaining, fuel % — each degrading to "—". -->
+                     MPH, distance remaining, fuel % — each degrading to "—".
+                     A fix older than 2 hours gives no distance or ETA (B11). -->
                 <DriverGlanceMetrics
                   v-if="!loc.noGps"
                   :speed="numOrNull(loc.speed)"
-                  :distance-miles="numOrNull(loc.distanceMiles)"
+                  :distance-miles="locShowsEta(loc) ? numOrNull(loc.distanceMiles) : null"
                   :fuel-pct="numOrNull(loc.fuelPct)"
-                  :eta-epoch-ms="numOrNull(loc._etaEpochMs)"
-                  :eta-minutes="numOrNull(loc.etaMinutes)"
-                  :eta-status="loc.etaStatus || 'unknown'"
-                  :pickup-eta-epoch-ms="numOrNull(loc._pickupEtaEpochMs)"
-                  :pickup-eta-minutes="numOrNull(loc.pickupEtaMinutes)"
+                  :eta-epoch-ms="locShowsEta(loc) ? numOrNull(loc._etaEpochMs) : null"
+                  :eta-minutes="locShowsEta(loc) ? numOrNull(loc.etaMinutes) : null"
+                  :eta-status="locShowsEta(loc) ? (loc.etaStatus || 'unknown') : 'unknown'"
+                  :pickup-eta-epoch-ms="locShowsEta(loc) ? numOrNull(loc._pickupEtaEpochMs) : null"
+                  :pickup-eta-minutes="locShowsEta(loc) ? numOrNull(loc.pickupEtaMinutes) : null"
                   :now="now"
                 />
               </div>
@@ -174,10 +175,11 @@
                     </div>
                     <div class="route-point-coords">{{ al.destLat.toFixed(5) }}, {{ al.destLng.toFixed(5) }}</div>
                   </div>
-                  <div v-if="routeDistance != null || routeEta != null || selectedDriverSpeed != null" class="route-summary">
-                    <span v-if="routeDistance != null" class="route-stat">{{ routeDistance }} mi</span>
-                    <span v-if="routeEta != null" class="route-stat">{{ formatMinutes(routeEta) }} ETA</span>
+                  <div v-if="(selectedShowsEta && (routeDistance != null || routeEta != null)) || selectedDriverSpeed != null || selectedLastSeen" class="route-summary">
+                    <span v-if="selectedShowsEta && routeDistance != null" class="route-stat">{{ routeDistance }} mi</span>
+                    <span v-if="selectedShowsEta && routeEta != null" class="route-stat">{{ formatMinutes(routeEta) }} ETA</span>
                     <span v-if="selectedDriverSpeed != null" class="route-stat speed">{{ selectedDriverSpeed }} mph</span>
+                    <span v-if="selectedLastSeen" class="route-stat last-seen">{{ selectedLastSeen }}</span>
                   </div>
                   <div v-if="weatherData" class="route-weather">
                     <span class="weather-temp">{{ weatherData.tempF != null ? Math.round(weatherData.tempF) + '°F' : '' }}</span>
@@ -211,6 +213,7 @@ import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } from '../../composables/useGoogleMaps'
 import { formatMinutes, formatClockMs } from '../../lib/duration'
+import { fixAgeMs, lastSeenText, fixAllowsEta } from '../../lib/fixAge'
 import { normDriver } from '../../lib/driverName'
 import { fmtAppInstant, fmtArrivalClock } from '../../utils/datetime'
 import {
@@ -832,8 +835,9 @@ function renderSingleLoadRoute() {
     })
     routeAnim = animatePolyline(routePolyline)
 
-    // Distance label at midpoint of the route.
-    if (routeDistance.value != null) {
+    // Distance label at midpoint of the route; none from a fix older than 2
+    // hours (B11), like the panel's route summary.
+    if (routeDistance.value != null && selectedShowsEta.value) {
       const mid = Math.floor(path.length / 2)
       const midPt = path[mid]
       const labelEl = document.createElement('div')
@@ -1107,8 +1111,13 @@ function buildDriverPopupContent(loc) {
   }
   // Headline ETA (absolute time + countdown) and remaining distance from the
   // enriched /api/locations/latest fields. Only Dates/Numbers interpolated here
-  // → injection-safe.
-  if (loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
+  // → injection-safe. A fix older than 2 hours shows neither, and one older
+  // than 30 minutes says how old it is (B11); lastSeenText() emits only digits
+  // and fixed words.
+  const lastSeen = locLastSeen(loc)
+  if (lastSeen) html += `<div style="color:#b45309;font-size:0.8rem;font-weight:600">${lastSeen}</div>`
+  const showEta = locShowsEta(loc)
+  if (showEta && loc.etaMinutes != null && Number.isFinite(Number(loc.etaMinutes))) {
     const epoch = loc._etaEpochMs || (Date.now() + Number(loc.etaMinutes) * 60000)
     // The app-zone rule (APP_TIMEZONE + a visible zone label) lives in
     // fmtArrivalClock, shared with the glance panel above and the route map's
@@ -1120,10 +1129,10 @@ function buildDriverPopupContent(loc) {
     const late = loc.etaStatus === 'delayed'
     html += `<div style="color:${late ? '#b91c1c' : '#15803d'};font-size:0.8rem;font-weight:600">ETA ${clock}${dur ? ' &middot; ' + dur : ''}${late ? ' (delayed)' : ''}</div>`
   }
-  if (loc.distanceMiles != null && Number.isFinite(Number(loc.distanceMiles))) {
+  if (showEta && loc.distanceMiles != null && Number.isFinite(Number(loc.distanceMiles))) {
     html += `<div style="color:#555;font-size:0.8rem">${Math.round(Number(loc.distanceMiles))} mi remaining</div>`
   }
-  if (selectedDriver.value === loc.driver && originLatLng.value && expandedLoadId.value) {
+  if (showEta && selectedDriver.value === loc.driver && originLatLng.value && expandedLoadId.value) {
     html += `<div style="font-weight:600;font-size:0.8rem">${driverToPickupMi(loc)} mi to Pickup</div>`
   }
   html += `<div style="color:#999;font-size:0.7rem;margin-top:3px">${formatTime(loc.timestamp)}</div>`
@@ -1663,6 +1672,16 @@ function timeAgo(ts) {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+// B11 (owner decision 2026-10-15), on the 10 s `now` clock: a fix older than
+// 30 minutes reads "Last seen X ago" (lib/fixAge.js); one older than 2 hours
+// shows no distance and no ETA anywhere on this map.
+function locLastSeen(loc) {
+  return lastSeenText(fixAgeMs(loc && loc.timestamp, now.value))
+}
+function locShowsEta(loc) {
+  return fixAllowsEta(fixAgeMs(loc && loc.timestamp, now.value))
+}
+
 const locationsWithGps = computed(() => locations.value.filter(loc => !loc.noGps && loc.latitude != null))
 // Active = has a live load in progress (assigned/dispatched/at shipper/
 // loading/in transit/at receiver/... — the server's workingRe fills
@@ -1711,6 +1730,11 @@ const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   return loc?.speed ? Math.round(loc.speed * 2.237) : null
 })
+// The selected truck's fix age, for the route summary and the route's distance
+// label (B11).
+const selectedDriverLoc = computed(() => locations.value.find(l => l.driver === selectedDriver.value) || null)
+const selectedLastSeen = computed(() => (selectedDriverLoc.value ? locLastSeen(selectedDriverLoc.value) : ''))
+const selectedShowsEta = computed(() => !!selectedDriverLoc.value && locShowsEta(selectedDriverLoc.value))
 
 // The active load driving the FuelFinderPanel's POI query: the expanded load
 // when one is open, else the focused driver's first active load (its
@@ -2335,6 +2359,10 @@ onUnmounted(() => {
   color: #aaa;
   font-family: 'JetBrains Mono', monospace;
 }
+.driver-ago.last-seen {
+  color: #b45309;
+  font-weight: 600;
+}
 
 .driver-load {
   font-size: 0.65rem;
@@ -2618,6 +2646,10 @@ onUnmounted(() => {
 .route-stat.speed {
   color: #0f766e;
   background: #d1fae5;
+}
+.route-stat.last-seen {
+  color: #b45309;
+  background: #fef3c7;
 }
 
 .route-weather {

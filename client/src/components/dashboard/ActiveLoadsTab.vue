@@ -295,7 +295,7 @@
             <!-- ONE map: live (truck → next stop, ETA, miles left) while the
                  truck has a position, otherwise the planned pickup → drop-off
                  lane that LoadHaulSection reads from /haul. -->
-            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :planned-lane="plannedLane" dispatch-mode show-arrival />
+            <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :fix-at="mapDriverPosition ? mapDriverPosition.fixAt : null" :planned-lane="plannedLane" dispatch-mode show-arrival />
             <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
@@ -905,8 +905,10 @@ async function openDetail(job) {
   const p = []
   // The panel names each driver by the directory's spelling, the sheet's Driver
   // cell may space or case it otherwise: both are compared as the server's
-  // normalizeDriverName() does (normDriver()).
-  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => normDriver(x.driver) === normDriver(dn) && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null } }).catch(() => {}))
+  // normalizeDriverName() does (normDriver()). fixAt is when the ELD took the
+  // fix, so the map can say how old it is and drop a stale ETA (B11); a row
+  // without a timestamp falls back to its age at this read.
+  if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => normDriver(x.driver) === normDriver(dn) && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null, fixAt: l.timestamp || (Number.isFinite(l.lastPingAge) ? Date.now() - l.lastPingAge : null) } }).catch(() => {}))
   if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
