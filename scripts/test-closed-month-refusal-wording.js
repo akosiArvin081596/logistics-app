@@ -182,18 +182,21 @@ function scanJs(file, text, baseLine = 1) {
 	return n;
 }
 
+// The tag patterns take any letter case and any end-tag form a browser accepts
+// (`</script >`, `</SCRIPT foo>`, a comment closed by `--!>`), so a block is never
+// skipped, or a comment kept, because of how its tag happens to be spelled.
 function scanVue(file, text) {
 	let n = 0;
-	const script = /<script\b[^>]*>([\s\S]*?)<\/script>/g;
+	const script = /<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi;
 	let m;
 	while ((m = script.exec(text))) {
 		const baseLine = text.slice(0, m.index + m[0].indexOf(">") + 1).split("\n").length;
 		n += scanJs(file, m[1], baseLine);
 	}
-	const tpl = /<template>([\s\S]*)<\/template>/.exec(text);
+	const tpl = /<template\b[^>]*>([\s\S]*)<\/template\b[^>]*>/i.exec(text);
 	if (tpl) {
 		const start = text.slice(0, tpl.index).split("\n").length;
-		const body = tpl[1].replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, " "));
+		const body = tpl[1].replace(/<!--[\s\S]*?--!?>/g, (c) => c.replace(/[^\n]/g, " "));
 		body.split("\n").forEach((l, k) => {
 			n++;
 			judge(file, { text: l.trim(), line: start + k, callees: [] });
@@ -238,6 +241,11 @@ function check(name, ok, detail = "") {
 	check("self-test: a sentence starting with a SQL word is user-facing", userFacing({ text: "Create the account, or reopen", callees: [] }));
 	check("self-test: a refusal code in a sentence is caught", INTERNAL_CODE.test("Refusing — the same reasoning as PERIOD_LOCK_UNREADABLE."));
 	check("self-test: the PERIOD_FINALIZE_ENABLED setting is not a refusal code", !INTERNAL_CODE.test("turn on PERIOD_FINALIZE_ENABLED to restore it"));
+	check("self-test: an upper-case <SCRIPT> block closed by `</script >` is read",
+		scanVue("probe.vue", "<SCRIPT setup>\nconst a = 'x'\n</script >\n") === 1);
+	const before = findings.length;
+	scanVue("probe.vue", "<TEMPLATE>\n<!-- reopen --!>\n<p>Closed months stay as recorded.</p>\n</template >\n");
+	check("self-test: a template comment closed by `--!>` is skipped", findings.length === before, findings.slice(before).join(" | "));
 }
 
 let scanned = 0;
