@@ -98,9 +98,10 @@ function pngWithMetadata(cleanPng, { orientation = 6 } = {}) {
 	]);
 }
 
-// A WebP container (VP8X + an odd-length VP8L payload + EXIF + XMP). Not
-// decodable: it exercises the container walk only.
-function webpWithMetadata({ orientation = 6 } = {}) {
+// A WebP container (VP8X + an odd-length VP8L payload + EXIF + XMP, then any
+// `extraChunks` as [fourcc, text]). Not decodable: it exercises the container
+// walk only.
+function webpWithMetadata({ orientation = 6, extraChunks = [] } = {}) {
 	const chunk = (fourcc, data) => {
 		const head = Buffer.alloc(8);
 		head.write(fourcc, 0, "latin1");
@@ -114,6 +115,7 @@ function webpWithMetadata({ orientation = 6 } = {}) {
 		chunk("VP8L", Buffer.from("VP8L-PAYLOAD-ODD", "latin1").subarray(0, 15)),
 		chunk("EXIF", gpsTiff({ orientation, le: true })),
 		chunk("XMP ", Buffer.from(`<x:xmpmeta>${MARKERS.xmp}</x:xmpmeta>`, "latin1")),
+		...extraChunks.map(([fourcc, text]) => chunk(fourcc, Buffer.from(text, "latin1"))),
 	]);
 	const head = Buffer.alloc(12);
 	head.write("RIFF", 0, "latin1");
@@ -172,6 +174,6 @@ async function cleanImages() {
 }
 
 module.exports = {
-	MARKERS, gpsTiff, jpegWithMetadata, undecodableJpegWithMetadata, pngWithMetadata, webpWithMetadata,
+	MARKERS, gpsTiff, jpegWithMetadata, undecodableJpegWithMetadata, pngWithMetadata, webpWithMetadata, pngChunk,
 	surviving, hasGpsTag, orientationOf, cleanImages,
 };

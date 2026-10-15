@@ -351,9 +351,8 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 
 		const head = await T.get(R(F.A_JPG), U.drvA, { method: "HEAD" });
 		ok("§1 HEAD answers like GET, with no body", head.status === 200 && head.body.length === 0);
-		const etag = own.headers.etag;
-		const again = etag ? await T.get(R(F.A_JPG), U.drvA, { headers: { "if-none-match": etag } }) : { status: 0 };
-		ok("§1 an unchanged receipt revalidates as 304 (the investor and expenses pages load many)", again.status === 304);
+		ok("§1 a served receipt may not be stored by any cache (private, no-store, no ETag)",
+			own.headers["cache-control"] === "private, no-store" && !own.headers.etag);
 		ok("§1 a POST is not served", (await T.get(R(F.A_JPG), U.sa, { method: "POST" })).status === 404);
 		ok("§1 another unguarded folder is unchanged (chat/ still opens for a Driver)", (await T.get("/uploads/chat/chat_1_abcde.jpg", U.drvA)).status === 200);
 	}

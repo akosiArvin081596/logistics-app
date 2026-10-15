@@ -144,6 +144,130 @@ function scanData(jpeg) {
 		ok("resolveReceiptPath: a flat name resolves inside the folder", receiptFiles.resolveReceiptPath("/x/r", "1-ab.jpg") === path.join("/x/r", "1-ab.jpg"));
 	}
 
+	// §6 Only what draws the image survives (an allowlist, not a list of known
+	// metadata): unknown and provenance blocks go too.
+	{
+		const seg = (marker, text) => {
+			const payload = Buffer.from(text, "latin1");
+			const head = Buffer.from([0xFF, marker, 0, 0]);
+			head.writeUInt16BE(payload.length + 2, 2);
+			return Buffer.concat([head, payload]);
+		};
+		const j = clean.jpeg;
+		const jpeg = Buffer.concat([j.subarray(0, 2),
+			seg(0xEE, "Adobe\0\x64\0\0\0\0\x01"),                 // APP14 Adobe: kept
+			seg(0xEE, "NOTADOBE-JPEG-APP14-MARKER"),                // APP14 that is not Adobe
+			seg(0xE0, "XTRA\0JPEG-APP0-MARKER"),                    // APP0 that is not JFIF
+			seg(0xF1, "JPEG-F1-MARKER"),                            // JPG1 extension segment
+			seg(0xFD, "JPEG-FD-MARKER"),                            // JPG13 extension segment
+			j.subarray(2)]);
+		const jo = stripImageMetadata(jpeg);
+		ok("JPEG allowlist: a non-JFIF APP0, a non-Adobe APP14 and 0xF0-0xFD segments are dropped",
+			jo.ok && !/JPEG-(APP0|APP14|F1|FD)-MARKER/.test(jo.buf.toString("latin1")));
+		ok("JPEG allowlist: the Adobe APP14 colour block is kept", jo.ok && jo.buf.includes(Buffer.from("Adobe\0", "latin1")));
+		const jimg = jo.ok ? await Jimp.read(jo.buf).catch(() => null) : null;
+		ok("JPEG allowlist: still decodes", !!jimg && jimg.bitmap.width === 24);
+
+		const chunk = (type, text) => fx.pngChunk(type, Buffer.from(text, "latin1"));
+		const idat = clean.png.indexOf(Buffer.from("IDAT", "latin1")) - 4;
+		const png = Buffer.concat([clean.png.subarray(0, idat),
+			chunk("caBX", "PNG-CABX-MARKER"), chunk("zxIf", "PNG-ZXIF-MARKER"), chunk("exIf", "PNG-EXIF-LOWER-MARKER"),
+			fx.pngChunk("gAMA", Buffer.from([0, 0, 0xB1, 0x8F])), fx.pngChunk("pHYs", Buffer.from([0, 0, 0x0B, 0x13, 0, 0, 0x0B, 0x13, 1])),
+			clean.png.subarray(idat)]);
+		const po = stripImageMetadata(png);
+		ok("PNG allowlist: caBX (provenance), zxIf, exIf and other unknown chunks are dropped",
+			po.ok && !/PNG-(CABX|ZXIF|EXIF-LOWER)-MARKER/.test(po.buf.toString("latin1")));
+		ok("PNG allowlist: gAMA and pHYs (needed to draw it) are kept", po.ok && po.buf.includes(Buffer.from("gAMA", "latin1")) && po.buf.includes(Buffer.from("pHYs", "latin1")));
+		const pimg = po.ok ? await Jimp.read(po.buf).catch(() => null) : null;
+		ok("PNG allowlist: still decodes", !!pimg && pimg.bitmap.width === 24);
+
+		const webp = fx.webpWithMetadata({ orientation: 1, extraChunks: [["C2PA", "WEBP-C2PA-MARKER"], ["ICCP", "WEBP-ICCP-KEPT"]] });
+		const wo = stripImageMetadata(webp);
+		ok("WebP allowlist: an unknown (C2PA) chunk is dropped", wo.ok && !wo.buf.includes(Buffer.from("WEBP-C2PA-MARKER", "latin1")));
+		ok("WebP allowlist: the ICC profile chunk is kept, RIFF size consistent", wo.ok && wo.buf.includes(Buffer.from("WEBP-ICCP-KEPT", "latin1")) && wo.buf.readUInt32LE(4) + 8 === wo.buf.length);
+	}
+
+	// §7 The receipt file guard's limits: a few reads at a time server-wide (the
+	// rest wait in a bounded queue, then 503), a per-user cap (429), PDFs streamed
+	// from disk, a size cap, and no cache may keep a copy.
+	{
+		const express = require("express");
+		const http = require("http");
+		const Database = require("better-sqlite3");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "receipt-guard-limits-"));
+		const img = fx.jpegWithMetadata(clean.jpeg);
+		const pdf = Buffer.from("%PDF-1.4\n% made-up receipt for the limits runner\n%%EOF\n", "latin1");
+		fs.writeFileSync(path.join(dir, "1-aa.jpg"), img);
+		fs.writeFileSync(path.join(dir, "2-bb.pdf"), pdf);
+		const db = new Database(":memory:");
+		db.exec("CREATE TABLE expenses (id INTEGER PRIMARY KEY, driver TEXT, photo_data TEXT)");
+		db.prepare("INSERT INTO expenses (id, driver, photo_data) VALUES (1, 'Tamsin Vale', '/uploads/expense-receipts/1-aa.jpg'), (2, 'Tamsin Vale', '/uploads/expense-receipts/2-bb.pdf')").run();
+		const SA = { id: 1, role: "Super Admin" };
+		const DRV = { id: 10, role: "Driver", driverName: "Tamsin Vale" };
+		const DISP = { id: 2, role: "Dispatcher" };
+		const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+		const servers = [];
+		async function serve(opts) {
+			const guard = receiptFiles.createExpenseReceiptGuard({ db, receiptsDir: dir, normalizeDriverName: norm, ...opts });
+			const app = express();
+			app.use((req, res, next) => { req.session = { user: JSON.parse(req.headers["x-test-user"]) }; next(); });
+			app.use("/r/:file", (req, res, next) => guard(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
+			const server = http.createServer(app);
+			await new Promise((r) => server.listen(0, "127.0.0.1", r));
+			servers.push(server);
+			const port = server.address().port;
+			return (file, user, { method = "GET", headers = {} } = {}) => new Promise((resolve, reject) => {
+				const req = http.request({ host: "127.0.0.1", port, method, path: `/r/${file}`, agent: false, headers: { "x-test-user": JSON.stringify(user), ...headers } }, (res) => {
+					const chunks = [];
+					res.on("data", (c) => chunks.push(c));
+					res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+				});
+				req.on("error", reject);
+				req.end();
+			});
+		}
+		const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+		const counter = { now: 0, max: 0, calls: 0 };
+		const slowRead = async (p) => {
+			counter.calls++; counter.now++; counter.max = Math.max(counter.max, counter.now);
+			try { await sleep(60); return await fs.promises.readFile(p); } finally { counter.now--; }
+		};
+
+		const get1 = await serve({ maxConcurrentReads: 2, maxQueuedReads: 2, readFile: slowRead });
+		const burst = await Promise.all(Array.from({ length: 6 }, () => get1("1-aa.jpg", SA)));
+		const statuses = burst.map((r) => r.status).sort().join(",");
+		ok(`§7 six reads at once with a cap of 2 running and 2 waiting: never more than 2 read at once (saw ${counter.max})`, counter.max === 2);
+		ok(`§7 ... four are served and two answer 503 (got ${statuses})`, statuses === "200,200,200,200,503,503");
+		const busy = burst.find((r) => r.status === 503);
+		ok("§7 ... the 503 says when to retry and is not cached", !!busy && Number(busy.headers["retry-after"]) > 0 && /RECEIPT_SERVER_BUSY/.test(busy.body.toString("utf8")));
+
+		const get2 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 5, queueWaitMs: 30, readFile: async (p) => { await sleep(250); return fs.promises.readFile(p); } });
+		const waited = await Promise.all([get2("1-aa.jpg", SA), get2("1-aa.jpg", SA)]);
+		ok("§7 a read that waits longer than the queue allows answers 503 instead of waiting on", waited.map((r) => r.status).sort().join(",") === "200,503");
+
+		const get3 = await serve({ perUserWindowMs: 60_000, perUserMax: 3 });
+		const seq = [];
+		for (let k = 0; k < 4; k++) seq.push(await get3("1-aa.jpg", DRV));
+		ok("§7 per user: the reads past the cap answer 429 with Retry-After", seq.slice(0, 3).every((r) => r.status === 200) && seq[3].status === 429 && Number(seq[3].headers["retry-after"]) > 0);
+		ok("§7 per user: another user is not held back", (await get3("1-aa.jpg", DISP)).status === 200);
+
+		counter.calls = 0;
+		const get4 = await serve({ readFile: slowRead });
+		const ranged = await get4("2-bb.pdf", DRV, { headers: { range: "bytes=0-3" } });
+		ok("§7 a PDF receipt streams from disk (a range request answers 206 with those bytes)", ranged.status === 206 && ranged.body.toString("latin1") === "%PDF");
+		const whole = await get4("2-bb.pdf", DRV);
+		ok("§7 ... and is never read whole into memory", whole.status === 200 && whole.body.equals(pdf) && counter.calls === 0 && /application\/pdf/.test(whole.headers["content-type"]));
+		ok("§7 ... and is not cached either", /no-store/.test(String(whole.headers["cache-control"])));
+		const image = await get4("1-aa.jpg", DRV);
+		ok("§7 an image is sent private, no-store, with no ETag", image.status === 200 && image.headers["cache-control"] === "private, no-store" && !image.headers.etag);
+		const head = await get4("1-aa.jpg", DRV, { method: "HEAD" });
+		ok("§7 HEAD: the length, no body", head.status === 200 && head.body.length === 0 && Number(head.headers["content-length"]) === image.body.length);
+		ok(`§7 the serve cap is no larger than the largest receipt upload (20 MB; is ${receiptFiles.RECEIPT_SERVE_MAX_BYTES})`, receiptFiles.RECEIPT_SERVE_MAX_BYTES <= 20 * 1024 * 1024);
+
+		for (const s of servers) s.close();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+
 	console.log(failed ? `\n${failed} FAILED` : "\nall passed");
 	process.exit(failed ? 1 : 0);
 })().catch((err) => { console.error(err); process.exit(1); });
