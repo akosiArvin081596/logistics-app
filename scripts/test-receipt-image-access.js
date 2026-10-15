@@ -250,7 +250,12 @@ async function build({ option = SHIPPED_OPTION, db = makeDb() } = {}) {
 	const stub = (name) => (req, res) => { res.setHeader("X-Test-Guard", name); res.status(404).end(); };
 	const logs = [];
 	const fakeConsole = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
-	const investorText = option ? L.investor.replace(INVESTOR_RULE_RE, `\nconst INVESTOR_RECEIPT_IMAGES = "${option}";`) : L.investor;
+	// getInvestorDriverMonthWindows() runs as shipped, behind a counter (§6 counts
+	// how often a page of photos rebuilds an investor's windows).
+	const investorText = (option ? L.investor.replace(INVESTOR_RULE_RE, `\nconst INVESTOR_RECEIPT_IMAGES = "${option}";`) : L.investor)
+		.replace("\nfunction getInvestorDriverMonthWindows(", "\nfunction getInvestorDriverMonthWindowsShipped(")
+		+ "\nfunction getInvestorDriverMonthWindows(userId) { windowCalls.n++; return getInvestorDriverMonthWindowsShipped(userId); }";
+	const windowCalls = { n: 0 };
 	const body = [
 		'"use strict";',
 		...L.consts, ...L.fns, investorText, L.receiptGuardFn, L.receiptGuardConst, L.guardedDirs, ...L.mounts, L.thumbRoute,
@@ -261,12 +266,12 @@ async function build({ option = SHIPPED_OPTION, db = makeDb() } = {}) {
 	const mod = new Function(
 		"app", "express", "path", "fs", "crypto", "DATA_DIR", "RECEIPTS_DIR", "db", "requireAuth", "requireRole",
 		"imageLimits", "receiptFiles", "imageMetadata", "guardDriverSignedDoc", "guardInvestorSignedDoc",
-		"guardInvoicePdf", "guardDrugTestFile", "guardRootLoadDocument", "console", "require",
+		"guardInvoicePdf", "guardDrugTestFile", "guardRootLoadDocument", "console", "require", "windowCalls",
 		body,
 	)(app, express, path, fs, crypto, TMP, RECEIPTS_DIR, db, requireAuth, requireRole,
 		require("../lib/image-size"), require("../lib/receipt-files"), require("../lib/image-metadata"),
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"),
-		stub("guardRootLoadDocument"), fakeConsole, serverRequire);
+		stub("guardRootLoadDocument"), fakeConsole, serverRequire, windowCalls);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -284,7 +289,7 @@ async function build({ option = SHIPPED_OPTION, db = makeDb() } = {}) {
 		req.on("error", reject);
 		req.end();
 	});
-	return { ...mod, get, logs, db };
+	return { ...mod, get, logs, db, windowCalls };
 }
 
 const R = (name) => `/uploads/expense-receipts/${name}`;
@@ -447,6 +452,26 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 		ok("§6 an Investor check that cannot read the database answers a retryable 503, never the file",
 			unverified.status === 503 && /RECEIPT_ACCESS_UNVERIFIED/.test(unverified.body.toString("utf8")) && unverified.headers["retry-after"] === "5");
 		ok("§6 ... while Super Admin is unaffected", isImage(await TU.get(R(F.A_JPG), U.sa)));
+	}
+
+	// §7 The cost of a page of photos: an investor's driver windows are built once
+	// for a burst of photos, not once per photo, and the file lookup uses an index.
+	{
+		const T7 = await build({ option: "own-trucks" });
+		T7.windowCalls.n = 0;
+		for (const f of [F.A_JPG, F.A_PDF, F.A_JPG, F.A_UNREADABLE, F.A_JPG, F.A_PDF]) await T7.get(R(f), U.inv);
+		ok(`§7 six photos for one investor build their driver windows once (built ${T7.windowCalls.n} times)`, T7.windowCalls.n === 1);
+		await T7.get(R(F.B_JPG), U.invOther);
+		ok("§7 ... and another investor gets their own", T7.windowCalls.n === 2);
+
+		const m = SRC.match(/\ntry \{ db\.exec\(`(CREATE INDEX IF NOT EXISTS (\w+) ON expenses\(photo_data\))`\); \} catch \{\}/);
+		ok("§7 server.js indexes expenses.photo_data", !!m);
+		if (m) {
+			const db = makeDb();
+			db.exec(m[1]);
+			const plan = db.prepare("EXPLAIN QUERY PLAN SELECT id, driver FROM expenses WHERE photo_data = ?").all("x").map((r) => r.detail).join(" ");
+			ok(`§7 ... and the receipt lookup uses it (${plan})`, plan.includes(m[2]));
+		}
 	}
 
 	for (const s of servers) s.close();

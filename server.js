@@ -569,6 +569,9 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner ON expenses(owner_i
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_owner_date ON expenses(owner_id, date)`); } catch {}
+// The receipt file guard finds a stored receipt's rows by its path, once per
+// photo a page shows (guardExpenseReceipt).
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_expenses_photo_data ON expenses(photo_data)`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_trucks_owner ON trucks(owner_id)`); } catch {}
 // These tables are created later in the file — guard for fresh-DB bootstrap.
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_maintenance_truck ON maintenance_fund(truck)`); } catch {}
@@ -10940,7 +10943,9 @@ async function guardRootLoadDocument(req, res, next, file) {
 // below, and always sent without location or other metadata. The rule and the
 // copy live in lib/receipt-files.js; this wires them to the database. The
 // guard serves the file itself, so express.static never sends a stored
-// receipt. thumbs/ (the thumbnail route's cache) is a nested path, which
+// receipt, and carries its own limits (RECEIPT_SERVE_LIMITS there: a few image
+// reads at a time server-wide behind a bounded queue, 503 past it; a per-user
+// ceiling, 429; PDFs streamed). thumbs/ (the thumbnail route's cache) is a nested path, which
 // uploadsPathGuard answers 404 for everyone: list thumbnails come from
 // GET /api/expenses/:id/receipt-thumbnail.
 // ---------------------------------------------------------------------------
@@ -10964,6 +10969,25 @@ function investorReceiptImageIds(ids) {
 	return new Set(list.filter((id) => !personal.has(id)));
 }
 
+// An investor's receipt list asks for every photo at once, so the investor's
+// driver windows (getInvestorDriverMonthWindows()) are built once per
+// INVESTOR_RECEIPT_WINDOWS_TTL_MS for the photo check, not once per photo. The
+// list itself always builds them fresh; a pairing change reaches the photo
+// check within the minute. A failed build is not kept.
+const INVESTOR_RECEIPT_WINDOWS_TTL_MS = 60 * 1000;
+const INVESTOR_RECEIPT_WINDOWS_MAX = 1000;
+const investorReceiptWindows = new Map();   // userId -> { at, windows }
+function investorReceiptWindowsFor(uid) {
+	const now = Date.now();
+	const hit = investorReceiptWindows.get(uid);
+	if (hit && now - hit.at < INVESTOR_RECEIPT_WINDOWS_TTL_MS) return hit.windows;
+	const windows = getInvestorDriverMonthWindows(uid);
+	investorReceiptWindows.delete(uid);
+	investorReceiptWindows.set(uid, { at: now, windows });
+	if (investorReceiptWindows.size > INVESTOR_RECEIPT_WINDOWS_MAX) investorReceiptWindows.delete(investorReceiptWindows.keys().next().value);
+	return windows;
+}
+
 // May this Investor open the photo of the receipt on `row` ({ id })? true,
 // false, or null when it could not be read (the guard answers a retryable 503).
 // The scope is the receipt list's own (investorExpenseScopeSql()); the plain
@@ -10974,7 +10998,7 @@ function investorMaySeeReceipt(user, row) {
 		const uid = Number(user && user.id);
 		const id = Number(row && row.id);
 		if (!(uid > 0) || !investorReceiptImageIds([id]).has(id)) return false;
-		const scope = investorExpenseScopeSql(uid, getInvestorDriverMonthWindows(uid), EXPENSE_PERIOD_EXPR);
+		const scope = investorExpenseScopeSql(uid, investorReceiptWindowsFor(uid), EXPENSE_PERIOD_EXPR);
 		return !!db.prepare(`SELECT 1 FROM expenses WHERE id = ? AND ${scope.sql} LIMIT 1`).get(id, ...scope.params);
 	} catch (err) {
 		console.error("[uploads] investor receipt check failed:", err && err.message);
