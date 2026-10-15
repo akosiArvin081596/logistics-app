@@ -90,6 +90,7 @@
       </table>
     </div>
     <p class="table-foot">
+      Newest period first; Total covers the whole range.
       Lines marked "not counted" are switched off in Cost settings; their values are shown but left out of total costs
       and margin. Closed months keep the settings they closed with.
       <template v-if="monthClickable"> Select a month's heading for its full breakdown.</template>
@@ -100,17 +101,18 @@
 <script setup>
 import { computed } from 'vue'
 import BasisBadge from './BasisBadge.vue'
-import { formatCount, formatMoney, formatPct, formatPerMile, signClass } from '../../lib/financialsView'
+import { formatCount, formatMoney, formatPct, formatPerMile, periodsNewestFirst, signClass } from '../../lib/financialsView'
 
 // Fleet P&L: lines down, periods across, every cell a server figure
 // (report.totalByPeriod[period], report.total). A period with nothing recorded
-// has no figures object and shows "—".
+// has no figures object and shows "—". Periods run newest first, so the live
+// month is the first column after the line names; Total stays far right.
 const props = defineProps({
   report: { type: Object, required: true },
 })
 const emit = defineEmits(['open-month'])
 
-const periods = computed(() => props.report.periods || [])
+const periods = computed(() => periodsNewestFirst(props.report.periods))
 const lines = computed(() => props.report.lines || [])
 const total = computed(() => props.report.total || {})
 const byPeriod = computed(() => props.report.totalByPeriod || {})
