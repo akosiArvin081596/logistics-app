@@ -51,6 +51,11 @@
 // requireRole(). The other routes that refuse a formula from a non-Super-Admin
 // (from-ratecon, dispatch, reassign) are run by scripts/test-sheet-formula-doors.js.
 //
+// THE DASHBOARD'S SEARCH REFERENCES (B19, §8b). GET /api/dashboard is lifted
+// whole and run for a Dispatcher and a Super Admin: the `_refs` it attaches
+// carry nothing from a withheld column, no draft-derived number for a
+// Dispatcher, and never the recipient, the broker name or the order text.
+//
 // ⚠️ THE FIXTURE IS THE TEST. The ordering bug is entirely about header ORDER, so
 // a synthetic list like ["Broker", "Phone"] reproduces nothing. Every case runs
 // against the verbatim 26-column production header row (identical to the fixture
@@ -1037,6 +1042,150 @@ async function getDataGate(routeSrc) {
 }
 
 // ---------------------------------------------------------------------------
+// §8b THE DASHBOARD'S SEARCH REFERENCES (B19). GET /api/dashboard attaches
+// `_refs: [{ label, value }]` to each row it serves (lib/load-search-refs.js),
+// after the broker columns are blanked, so a Dispatcher's references come only
+// from cells already served to them. Draft-derived numbers (Order #, PO #,
+// Move #, Invoice #) are Super Admin only, numbers only, never the recipient,
+// the broker name or the order text. The route is lifted whole and run with the
+// shipped liveJobTrackingView(), excludeDroppedLoads(), findCol(),
+// sanitizeBrokerColumns() and module, a real in-memory SQLite and stubs for the
+// rest. No other route adds `_refs`: liveJobTrackingView() feeds
+// /api/driver, /api/investor and /api/financials too.
+// ---------------------------------------------------------------------------
+const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {';
+const DASH_SRC = extractRoute(DASH_HEAD);
+const loadSearchRefs = require("../lib/load-search-refs");
+const VIEW = new Function("getDeletedLoadIds", "normalizeLoadId",
+	`"use strict";\n${(SRC.match(/const CANCELED_STATUS_RE = [^\n]+;/) || [""])[0]}\n${extract("findCol")}\n${extract("loadKeySet")}\n` +
+	`${extract("excludeDroppedLoads")}\n${extract("liveJobTrackingView")}\nreturn { liveJobTrackingView, findCol };`)(() => new Set(), normalizeLoadId);
+function dashDb() {
+	const Database = require("better-sqlite3");
+	const d = new Database(":memory:");
+	d.exec(`
+		CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, assigned_driver TEXT DEFAULT '');
+		CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT,
+			recipient_source TEXT, total TEXT, broker_name TEXT, order_number TEXT, via TEXT, created_at TEXT, created_by TEXT,
+			edited INTEGER DEFAULT 0, edited_fields TEXT DEFAULT '', overrides_json TEXT DEFAULT '', total_source TEXT DEFAULT '',
+			sheet_total TEXT DEFAULT '', ratecon_total TEXT DEFAULT '', invoice_id_minted TEXT DEFAULT '', notes TEXT DEFAULT '');
+	`);
+	// Made-up numbers only. The alias names a cancelled duplicate's number.
+	d.prepare("INSERT INTO ratecon_load_aliases (alias, load_id, source) VALUES ('7000005', '80000001', 'drive-content')").run();
+	const ins = d.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, total, broker_name, order_number, overrides_json, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+	ins.run("80000001", "09012030-1", "ap.desk@example.invalid", "$1,100.00", "Example Freight Brokers", "7000002-$700 ADV",
+		JSON.stringify({ poNumber: "2700021", moveNumber: "20100021", billToName: "Example Freight Brokers" }), "Advance taken 0717");
+	ins.run("#80000001", "09012030-2", "ap.desk@example.invalid", "$1,800.00", "Example Freight Brokers", "7000004", "", "");
+	return d;
+}
+// The Job Tracking cache the route reads: a completed load with labelled
+// references and a labelled number planted in each broker contact cell, an
+// unassigned one, an active one, and a cancelled duplicate under the alias.
+function dashCache() {
+	return {
+		headers: HEADERS.slice(),
+		data: [
+			rowObject(HEADERS, row({ "Load ID": "80000001", "Job Status": "Delivered", "Pickup Info": "Example Foods DC - REF/PU#: 41000017",
+				"Drop-off Info": "Sample Receiver - DEL#: 2700011", "Broker Contact Name": "PO#: 9900001", "Phone Number": "REF#: 9900002", Email: "XID: 9900003" })),
+			rowObject(HEADERS, row({ "Load ID": "80000002", "Job Status": "Unassigned", "Pickup Info": "APPT: 20100003" })),
+			rowObject(HEADERS, row({ "Load ID": "80000003", "Job Status": "In Transit" })),
+			rowObject(HEADERS, row({ "Load ID": "7000005", "Job Status": "Cancelled", "Pickup Info": "PU#: 41000099" })),
+		].map((r, i) => ({ _rowIndex: i + 2, ...r })),
+	};
+}
+function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
+	let handler = null;
+	const errors = [];
+	const env = {
+		app: { get: (p, gate, h) => { handler = h; } },
+		requireRole: () => null,
+		getJobTrackingCached: async () => cache,
+		liveJobTrackingView: VIEW.liveJobTrackingView,
+		findCol: VIEW.findCol,
+		getCarrierDBFromSQLite: () => ({ headers: ["Driver", "Truck", "Status"], data: [] }),
+		appDay: () => "2030-01-15",
+		db: dashDb(),
+		computeDriverQueues: () => ({}),
+		normalizeDriverName: (s) => String(s || "").trim().toLowerCase(),
+		driverNameForTotals: (s) => s,
+		findTruckForDriver: () => null,
+		pickAddressColumn: () => null,
+		resolveAddressParts: () => ({ cityStateZip: "", street: "" }),
+		sanitizeBrokerColumns: G.sanitizeBrokerColumns,
+		require: (p) => {
+			if (p === "./lib/load-search-refs") return loadSearchRefs;
+			throw new Error(`unexpected require(${JSON.stringify(p)}) in the dashboard handler`);
+		},
+		console: { error: (...a) => errors.push(a.join(" ")), log() {}, warn() {} },
+	};
+	const names = Object.keys(env);
+	new Function(...names, routeSrc)(...names.map((k) => env[k]));
+	if (typeof handler !== "function") throw new Error("the lifted dashboard route did not register a handler");
+	const run = async (role) => {
+		const res = { code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } };
+		await handler({ query: {}, params: {}, session: { user: { id: role === "Super Admin" ? 1 : 2, role, username: "u" } } }, res);
+		return res;
+	};
+	return { run, cache, errors };
+}
+const DRAFT_VALUES = ["7000002", "7000004", "2700021", "20100021", "09012030-1", "09012030-2"];
+const refValues = (r) => ((r && r._refs) || []).map((e) => e.value);
+const byId = (list, id) => (list || []).find((r) => r["Load ID"] === id);
+async function dashboardSection(routeSrc = DASH_SRC) {
+	const { results, t } = collector();
+	const app = mountDashboard(routeSrc);
+	const disp = await app.run("Dispatcher");
+	const admin = await app.run("Super Admin");
+	const dBody = disp.body || {}, aBody = admin.body || {};
+	const dDone = byId(dBody.completedJobs, "80000001");
+	const aDone = byId(aBody.completedJobs, "80000001");
+	t("dashboard: 200 for both roles, no error logged", [disp.code, admin.code, app.errors], [200, 200, []]);
+	t("dashboard, Dispatcher: _refs hold the alias Order # and the labelled Pickup / Drop-off values",
+		((dDone && dDone._refs) || []).map((e) => `${e.label}=${e.value}`), ["Order #=7000005", "REF/PU #=41000017", "DEL #=2700011"]);
+	t("dashboard, Dispatcher: no draft value (order, PO, move, invoice id)", refValues(dDone).filter((v) => DRAFT_VALUES.includes(v)), []);
+	t("dashboard, Dispatcher: nothing from the withheld broker cells", refValues(dDone).filter((v) => /^99000/.test(v)), []);
+	t("dashboard, Dispatcher: the withheld cells themselves are blank",
+		dDone ? WITHHELD.map((c) => dDone[c]) : null, ["", "", ""]);
+	t("dashboard, Dispatcher: the body holds neither the recipient, the broker name, the draft notes nor 'ADV'",
+		JSON.stringify(dBody).match(/ap\.desk@example\.invalid|Example Freight Brokers|Advance taken|ADV/g), null);
+	t("dashboard, Dispatcher: an unassigned row's labelled value", refValues(byId(dBody.unassignedJobs, "80000002")), ["20100003"]);
+	t("dashboard: a row with no reference carries no _refs key", "_refs" in (byId(dBody.activeJobs, "80000003") || { _refs: 1 }), false);
+	t("dashboard: the cancelled duplicate under the alias number is served in no list",
+		["unassignedJobs", "activeJobs", "completedJobs"].some((k) => byId(dBody[k], "7000005") || byId(aBody[k], "7000005")), false);
+	t("dashboard, Super Admin: the draft numbers are there",
+		DRAFT_VALUES.filter((v) => refValues(aDone).includes(v)), DRAFT_VALUES);
+	t("dashboard, Super Admin: numbers only (no 'ADV', no recipient, no broker name, no draft notes in any _refs)",
+		JSON.stringify(((aBody.completedJobs || []).map((r) => r._refs || []))).match(/ADV|\$|example\.invalid|Example Freight|Advance taken/g), null);
+	t("dashboard: the shared cache carries no _refs after both runs", app.cache.data.some((r) => "_refs" in r), false);
+	// /api/driver, /api/investor and /api/financials read liveJobTrackingView()
+	// on the same cached object: no _refs reach them.
+	t("liveJobTrackingView() after a dashboard run on the same cache: no row carries _refs",
+		VIEW.liveJobTrackingView(app.cache).data.some((r) => "_refs" in r), false);
+	return results;
+}
+asyncChecks.push(dashboardSection().then(record).catch((e) => check(`§8b the dashboard section ran (${e && e.message})`, false, true)));
+{
+	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+	const call = code(DASH_SRC);
+	const at = call.indexOf("annotateLoadSearchRefs(");
+	check("the module is called once in server.js, inside the dashboard handler",
+		[code(SRC).split("annotateLoadSearchRefs(").length - 1, at > 0, code(SRC).split("load-search-refs").length - 1], [1, true, 1]);
+	check("...after the three served lists are built (broker columns blanked) and before the answer",
+		[call.indexOf("const respCompleted = ") < at, at < call.indexOf("res.json({")], [true, true]);
+	check("...on the three served lists, with draft numbers for a Super Admin only",
+		/annotateLoadSearchRefs\(\{\n\t\t\tdb,\n\t\t\theaders: jobTracking\.headers,\n\t\t\trows: \[\.\.\.respUnassigned, \.\.\.respActive, \.\.\.respCompleted\],\n\t\t\tincludeDraftRefs: req\.session\.user\.role === "Super Admin",\n\t\t\}\);/.test(call), true);
+	const others = [
+		["GET /api/driver/:driverName", 'app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (req, res) => {'],
+		["GET /api/investor", 'app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res) => {'],
+		["GET /api/financials", 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {'],
+	];
+	for (const [label, head] of others) {
+		check(`${label} names neither _refs nor the module`, /_refs|load-search-refs|annotateLoadSearchRefs/.test(extractRoute(head)), false);
+	}
+	check("liveJobTrackingView() names neither _refs nor the module", /_refs|load-search-refs|annotateLoadSearchRefs/.test(extract("liveJobTrackingView")), false);
+}
+
+// ---------------------------------------------------------------------------
 // §9 MUTANTS — proof this suite fails against the earlier code.
 // ---------------------------------------------------------------------------
 const withResolver = (reSrc, fn) => fn(buildModule({}, reSrc));
@@ -1129,6 +1278,10 @@ const mutants = [
 		caughtBy(await routeSection(G, { load: M16_LOAD, data: DATA_PUT_SRC }))],
 	["M17 POST /api/data without the driver-name refusal", async () =>
 		caughtBy(await postDataSection(G, M17_POST))],
+	// Built inside the probe: on a server.js without the call the target is
+	// missing, the probe throws and the check fails.
+	["M18 the dashboard's draft numbers for every role (a Dispatcher gets them)", async () =>
+		caughtBy(await dashboardSection(mutate(DASH_SRC, 'includeDraftRefs: req.session.user.role === "Super Admin",', "includeDraftRefs: true,")))],
 ];
 
 (async () => {

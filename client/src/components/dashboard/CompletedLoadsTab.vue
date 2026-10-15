@@ -2,7 +2,7 @@
   <div>
     <div class="dash-search-bar" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-        <Input v-model="searchQuery" type="text" placeholder="Search load number..." class="max-w-[320px]" />
+        <Input v-model="searchQuery" type="text" :placeholder="isMobile ? SEARCH_PLACEHOLDER_PHONE : SEARCH_PLACEHOLDER" class="max-w-[320px]" />
         <button
           v-if="needsReviewCount > 0"
           type="button"
@@ -86,6 +86,7 @@
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract">⚠ Review</span>
                 {{ cellValue(job, col) }}
+                <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
@@ -260,12 +261,15 @@ import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
 const auth = useAuthStore()
+const { isMobile } = useViewport()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
@@ -360,13 +364,15 @@ function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.v
 // PaginationBar is fed `filteredJobs.length` while the page slice is computed
 // over sortedJobs — so every predicate has to live here, not in sortedJobs, or
 // the page count silently desyncs from the rows on screen.
-const filteredJobs = computed(() => {
+// Load ID, or a reference number GET /api/dashboard attached as _refs
+// (lib/loadSearch.js); refVia() names the reference a row was found by.
+const searchResult = computed(() => {
   let pool = exportMatches.value
   if (needsReviewOnly.value) pool = pool.filter(needsReview)
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q || !loadIdCol.value) return pool
-  return pool.filter(j => (j[loadIdCol.value] || '').toString().toLowerCase().includes(q))
+  return searchLoads(pool, searchQuery.value, loadIdCol.value)
 })
+const filteredJobs = computed(() => searchResult.value.rows)
+function refVia(job) { return searchResult.value.via.get(job) || null }
 const emptyMessage = computed(() => {
   if (needsReviewOnly.value) return 'No completed loads need review.'
   if (searchQuery.value.trim()) return 'No loads match your search.'
@@ -778,6 +784,20 @@ const detailSections = computed(() => {
 </script>
 
 <style scoped>
+/* The reference a search matched (Order #, PO #, ...), under the Load ID. */
+.ref-chip {
+  display: block;
+  width: fit-content;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
 /* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }

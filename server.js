@@ -36780,6 +36780,16 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
 			: completedJobs;
 
+		// Search references for the load search (lib/load-search-refs.js), on the
+		// rows as served: a Dispatcher's come only from cells already served to
+		// them, and invoice-draft numbers are for a Super Admin only.
+		require("./lib/load-search-refs").annotateLoadSearchRefs({
+			db,
+			headers: jobTracking.headers,
+			rows: [...respUnassigned, ...respActive, ...respCompleted],
+			includeDraftRefs: req.session.user.role === "Super Admin",
+		});
+
 		res.json({
 			timestamp: new Date().toISOString(),
 			kpis: {

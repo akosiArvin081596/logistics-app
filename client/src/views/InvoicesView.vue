@@ -357,7 +357,7 @@ import { useInvoicesStore } from '../stores/invoices'
 import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
-import { appToday, fmtAppInstant } from '../utils/datetime'
+import { appToday, fmtAppDate, fmtAppInstant } from '../utils/datetime'
 import { usePagination } from '../composables/usePagination'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -716,17 +716,16 @@ function dueText(v) {
 }
 // Both of these take a true instant — submitted_at / approved_at / paid_at /
 // adjusted_at / deleted_at are all written server-side as new Date().toISOString().
-// The app zone (APP_TIMEZONE, US Eastern) with a visible zone label, never the
-// viewer's zone.
+// The app zone (APP_TIMEZONE, US Eastern), never the viewer's zone.
 //
 // The pin matters MORE for the date-only formatter than for the datetime one:
 // an instant late in the Eastern evening rendered date-only in a zone ahead of
 // it shows TOMORROW's date, so an invoice submitted Fri Aug 7 reads "Aug 8" —
-// the wrong billing week — on a Manila session of the shared login. The ", EDT"
-// the label adds to a bare date is deliberate: it says which zone's calendar day
-// this is, which is the whole point of pinning it.
+// the wrong billing week — on a Manila session of the shared login. fmtAppDate
+// gives the Eastern day with no label: a date reads like every other date in the
+// app ("Oct 9, 2026", not "Oct 9, 2026, EDT"; B14). A time keeps its label.
 function formatDate(d) {
-  return fmtAppInstant(d, { month: 'short', day: 'numeric', year: 'numeric', fallback: '' })
+  return fmtAppDate(d, { fallback: '' })
 }
 function formatDateTime(d) {
   return fmtAppInstant(d, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', fallback: '' })
