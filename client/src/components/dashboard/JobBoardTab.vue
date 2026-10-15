@@ -263,6 +263,7 @@ import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -375,7 +376,6 @@ const displayCols = computed(() => {
   if (!dropDone) out.splice(Math.min(3, out.length), 0, 'Drop-off')
   return out
 })
-function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 function cellValue(j, c) {
   if (c === 'Pickup') return j._pickupLocation || '\u2014'
   if (c === 'Drop-off') return j._dropLocation || '\u2014'
@@ -388,7 +388,6 @@ function cellValue(j, c) {
 // is city/state/zip, shown only when a distinct street exists on line 1.
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
-function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },

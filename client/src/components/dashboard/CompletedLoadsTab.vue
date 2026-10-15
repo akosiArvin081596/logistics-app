@@ -271,6 +271,7 @@ const { show: toast } = useToast()
 const auth = useAuthStore()
 const { isMobile } = useViewport()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
+import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
 const needsReviewOnly = ref(false)
@@ -606,7 +607,6 @@ const displayCols = computed(() => {
   out.push('Delivery Date') // actual delivery date/time as the last column (replaces the old Assigned Date)
   return out
 })
-function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 // Delivery date/time. The stored value is a bare wall clock, so fmtSheetMoment
 // prints it WITHOUT conversion — the same basis as recordedDay() above, so the
 // date in this column can never disagree with the date the row filters,
@@ -630,7 +630,6 @@ const fmtUploaded = (t) => fmtTimestamp(t)
 function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; if (c === 'Delivery Date') return fmtDeliveryDate(completionCol.value ? j[completionCol.value] : ''); const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
-function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
