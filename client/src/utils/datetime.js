@@ -178,7 +178,10 @@ const APP_INSTANT_FORMAT = Object.freeze({
  *
  *   fmtAppInstant('2026-10-14T04:30:00Z')                                    -> "Oct 14, 2026, 12:30 AM EDT"
  *   fmtAppInstant(ms, { hour: 'numeric', minute: '2-digit' })                -> "12:30 AM EDT"
- *   fmtAppInstant(iso, { month: 'short', day: 'numeric', year: 'numeric' })  -> "Oct 14, 2026, EDT"
+ *
+ * For a date without a time use fmtAppDate ("Oct 14, 2026"): asked for a date
+ * only, this one still adds the zone ("Oct 14, 2026, EDT"), which no date on
+ * screen carries (B14; scripts/test-date-only-no-zone-label.mjs).
  *
  * Other options are Intl date and time fields and replace the default set; a
  * `timeZone` or `timeZoneName` among them is ignored, because the zone is the
@@ -275,41 +278,11 @@ export function fmtSheetMoment(v, { fallback = '—' } = {}) {
   return `${+mo}/${+day}/${yr}, ${h12}:${mi} ${suffix}`
 }
 
-/**
- * A secondary "(PH Time: …)" line, for a viewer whose browser is not set to the
- * app zone.
- *
- * Keyed on the BROWSER'S timezone, never on the account or role — the owner in
- * the US and the developer in Manila SHARE one super_admin login, so an
- * account-scoped setting would leak between them. They do not share a device.
- *
- * Returns '' for a browser already in the app zone, so that UI is untouched.
- *
- * Only meaningful for a ZONED value: a bare wall clock carries no instant, so
- * there is no other zone to express it in. Returning '' there is not a
- * limitation — inventing an equivalent would mean guessing which zone the bare
- * text was written in, which is the bug this module exists to prevent.
- *
- * Presentational only. Keep it OUT of the primary formatter, or it leaks into
- * the CSV export and generated PDFs.
- */
-export function viewerZoneNote(v) {
-  const s = String(v || '').trim()
-  if (!s || !isZoned(s)) return ''
-  const dt = new Date(s)
-  if (isNaN(dt.getTime())) return ''
-
-  let viewerTz = ''
-  try { viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
-  if (!viewerTz || viewerTz === appZone) return ''
-
-  const label = viewerTz === 'Asia/Manila' ? 'PH Time' : 'Your time'
-  const when = new Intl.DateTimeFormat('en-US', {
-    timeZone: viewerTz,
-    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
-  }).format(dt)
-  return `(${label}: ${when})`
-}
+// NOTE: viewerZoneNote() lived here and was deleted on purpose (B14,
+// 2026-10-15). It echoed an instant in the BROWSER's own zone ("(PH Time: …)",
+// "(Your time: …)") under the Status Timeline's Eastern time: a second clock,
+// 12 hours off, against the rule that every time on screen is APP_TIMEZONE.
+// Do not bring back a viewer-zone helper.
 
 /**
  * A comparable key for ordering, derived the SAME way the value is displayed —

@@ -10,7 +10,8 @@
 //   - "today" defaults and an instant's day are the app zone's;
 //   - the driver invoice tab's Friday 6:30 PM cutoff is read on the app zone's
 //     clock, as the server's isAfterDeadline() is;
-//   - the viewer-zone echo shows for a browser outside the app zone;
+//   - no second clock in the viewer's own zone (the Status Timeline's
+//     "(PH Time: …)" echo was removed, B14 2026-10-15);
 //   - a bare sheet stamp resolves by its era: UTC before 2026-08-03, Houston to
 //     2026-10-08, the app zone from 2026-10-09 (stored stamps are never rewritten).
 // Under the old pins, 11:30 PM Central on Oct 13 read "Oct 13 ... CDT" and was
@@ -20,10 +21,9 @@
 // processes, TZ=America/New_York, America/Chicago, Asia/Manila and UTC, and every
 // child must pass and print byte-identical results. Chicago is in the set because
 // a value read off the machine's clock there looks exactly like the old Houston
-// pin. The viewer-zone echo is the one answer that SHOULD differ by machine, so
-// each child reports it and the parent checks it per zone. Last, the parent reads
-// client/src: no Houston pin, no hard-coded zone and no Central wording is left,
-// and each fixed site imports and calls the shared helpers.
+// pin. Last, the parent reads client/src: no Houston pin, no hard-coded zone and
+// no Central wording is left, and each fixed site imports and calls the shared
+// helpers.
 //
 // No network, no DOM, no database: client/src under plain Node.
 //
@@ -49,7 +49,7 @@ const ZONES = [
 ]
 
 const NEEDED = ['setAppTimeZone', 'appTimeZone', 'appToday', 'appDayOf', 'fmtAppDate', 'fmtAppInstant', 'isAfterAppTime',
-  'fmtTimestamp', 'fmtSheetMoment', 'fmtYmd', 'fmtArrivalClock', 'sheetSortKey', 'parseSheetStamp', 'viewerZoneNote']
+  'fmtTimestamp', 'fmtSheetMoment', 'fmtYmd', 'fmtArrivalClock', 'sheetSortKey', 'parseSheetStamp']
 
 // 11:30 PM Central on Tuesday Oct 13 = 12:30 AM Eastern on Wednesday Oct 14.
 const A = '2026-10-14T04:30:00Z'
@@ -158,13 +158,10 @@ async function corpus() {
   check('f.4 Chicago: a stamp from the app-zone era is a Chicago wall clock', iso(dt.parseSheetStamp('10/09/2026 9:05:00')), '2026-10-09T14:05:00.000Z')
   check('f.5 back to the default', dt.setAppTimeZone('America/New_York'), 'America/New_York')
   check('f.6 ...and the formatters follow it back', dt.fmtTimestamp(A), 'Oct 14, 2026, 12:30 AM EDT')
+  // B14 (2026-10-15): no second clock in the viewer's zone, on any machine.
+  check('f.7 the viewer-zone echo is gone', typeof mod.viewerZoneNote, 'undefined')
 
-  // The viewer-zone echo depends on the machine by design; the parent checks it.
-  const notes = [dt.viewerZoneNote(A), dt.viewerZoneNote('10/13/2026 23:30')]
-  dt.setAppTimeZone('America/Chicago')
-  notes.push(dt.viewerZoneNote(A))
-  dt.setAppTimeZone('America/New_York')
-  return { local, checks, notes }
+  return { local, checks }
 }
 
 if (process.env[CHILD_FLAG]) {
@@ -209,24 +206,6 @@ if (done.length === ZONES.length) {
   console.log(`  identical results in all four zones: ${same ? 'yes' : 'NO'}`)
 }
 
-// The echo: '' for a browser already in the app zone, else the same instant on
-// the viewer's own clock. A bare wall clock has no instant, so never an echo.
-// The third value is with the setting on Chicago.
-const NOTES = {
-  'America/New_York': ['', '', '(Your time: Oct 14, 12:30 AM)'],
-  'America/Chicago': ['(Your time: Oct 13, 11:30 PM)', '', ''],
-  'Asia/Manila': ['(PH Time: Oct 14, 12:30 PM)', '', '(PH Time: Oct 14, 12:30 PM)'],
-  UTC: ['(Your time: Oct 14, 4:30 AM)', '', '(Your time: Oct 14, 4:30 AM)'],
-}
-let notesOk = 0
-for (const r of done) {
-  const a = JSON.stringify(r.report.notes)
-  const e = JSON.stringify(NOTES[r.tz])
-  if (a === e) notesOk++
-  else fail(`TZ=${r.tz}  viewerZoneNote: the echo shows only outside the app zone\n        expected ${e}\n        actual   ${a}`)
-}
-console.log(`  viewer-zone echo right for each machine zone: ${notesOk}/${ZONES.length}`)
-
 // ══ client/src: no Houston pin, no hard-coded zone ═══════════════════════════
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -256,11 +235,12 @@ for (const [rel, text] of KEEP_ZONE_LINES) {
   if (!f || !f.src.includes(text)) fail(`${rel}: the line kept on purpose is gone; drop it from KEEP_ZONE_LINES`)
 }
 
-// In utils/datetime.js the zones are the setting's default, the Manila label of
-// the viewer echo, and Houston only as the history of the 2026-08-03..10-08 stamps.
+// In utils/datetime.js the zones are the setting's default, and Houston only as
+// the history of the 2026-08-03..10-08 stamps. (The Manila label of the
+// viewer-zone echo went with the echo, B14.)
 const zonesInDatetime = [...new Set((datetimeSrc.match(new RegExp(IANA_RE.source, 'g')) || []).map((s) => s.slice(1, -1)))].sort()
-if (JSON.stringify(zonesInDatetime) !== JSON.stringify(['America/Chicago', 'America/New_York', 'Asia/Manila'])) {
-  fail(`utils/datetime.js names the zones ${JSON.stringify(zonesInDatetime)}; expected only the default, the Manila label and the Houston stamp era`)
+if (JSON.stringify(zonesInDatetime) !== JSON.stringify(['America/Chicago', 'America/New_York'])) {
+  fail(`utils/datetime.js names the zones ${JSON.stringify(zonesInDatetime)}; expected only the default and the Houston stamp era`)
 }
 if (!/^const SHEET_STAMP_HOUSTON_ZONE = 'America\/Chicago'$/m.test(datetimeSrc)) fail('utils/datetime.js: America/Chicago may appear only as SHEET_STAMP_HOUSTON_ZONE')
 // lib/app-time.js on the server holds the same two names and values.
@@ -289,8 +269,8 @@ const SITES = [
     ["isAfterAppTime(weekEnd.value, '18:30')", 'Friday 6:30 PM {{ zoneLabel }}', "zoneName('shortGeneric')", "catch { return zoneName('short') }"], ['toLocaleString(', '6:30 PM CST', '6:30 PM ET)']],
   ['client/src/components/data-manager/AddRowModal.vue', ['fmtAppDate'],
     ["'Assigned Date': appDayText", "'Status Update Date': appDayText"], ['toLocaleDateString(']],
-  ['client/src/components/shared/StatusTimeline.vue', ['fmtTimestamp', 'viewerZoneNote'],
-    ['viewerZoneNote(p.startedAt)', 'viewerZoneNote(p.endedAt)'], ['resolvedOptions', 'Intl.DateTimeFormat']],
+  ['client/src/components/shared/StatusTimeline.vue', ['fmtTimestamp'],
+    ['fmtTimestamp(iso, {'], ['viewerZoneNote', 'st-viewer-tz', 'resolvedOptions', 'Intl.DateTimeFormat']],
   ['client/src/components/dashboard/ChatBubble.vue', ['fmtAppInstant'], ['fmtAppInstant('], ['toLocaleTimeString(']],
   ['client/src/components/dashboard/MessagingPanel.vue', ['fmtAppInstant'], ['fmtAppInstant('], ['toLocaleTimeString(']],
   ['client/src/components/driver/ChatView.vue', ['fmtAppInstant'], ['fmtAppInstant('], ['toLocaleTimeString(']],
@@ -299,11 +279,11 @@ const SITES = [
   ['client/src/components/dashboard/ExpensesTab.vue', ['appToday', 'fmtAppInstant'], ['fmtAppInstant(iso, {', 'date: appToday()', 'paidDate: appToday()'], ['toLocaleTimeString(']],
   ['client/src/components/dashboard/TrackingMap.vue', ['fmtAppInstant'], ['fmtAppInstant(ts, {'], ['toLocaleTimeString(']],
   ['client/src/views/InvoicesView.vue', ['appToday', 'fmtAppInstant'], ['invoices-${appToday()}.csv'], ['toLocaleDateString(\'en-CA\'', 'new Date(d).toLocaleString(', 'new Date(d).toLocaleDateString(']],
-  ['client/src/views/ApplicationsView.vue', ['fmtAppInstant'], ['fmtAppInstant(d, {'], []],
+  ['client/src/views/ApplicationsView.vue', ['fmtAppDate'], ["fmtAppDate(d, { fallback: '' })"], ['fmtAppInstant(d, {']],
   ['client/src/views/InvestorApplicationsView.vue', ['fmtAppInstant'], ['fmtAppInstant('], []],
   ['client/src/views/AdminToolsView.vue', ['fmtAppInstant'], ['fmtAppInstant(ts, {'], []],
   ['client/src/views/DashboardView.vue', ['fmtAppInstant'], ['fmtAppInstant(store.timestamp, {'], ['new Date(store.timestamp).toLocaleTimeString(']],
-  ['client/src/components/users/UserTable.vue', ['fmtAppInstant', 'fmtTimestamp'], ['fmtAppInstant(dateStr, {'], ['toLocaleDateString(']],
+  ['client/src/components/users/UserTable.vue', ['fmtAppDate', 'fmtTimestamp'], ['fmtAppDate(dateStr, { fallback: dateStr })'], ['toLocaleDateString(', 'fmtAppInstant(dateStr, {']],
   ['client/src/components/investors/InvestorInvitesPanel.vue', ['fmtAppDate', 'fmtTimestamp'], ['fmtAppDate(iso)'], ['new Intl.DateTimeFormat(']],
   ['client/src/components/investors/InvestorPaymentTermsSection.vue', ['fmtAppDate'], ['fmtAppDate('], ['new Intl.DateTimeFormat(']],
   ['client/src/components/apply/StepReferences.vue', ['appToday'], ['props.form.signature_date = appToday()'], []],
