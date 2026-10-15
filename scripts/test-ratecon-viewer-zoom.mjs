@@ -705,7 +705,7 @@ if (VIEWER) {
       ok('§2 unmount in the middle of a draw cancels it', pending.task.cancelled)
       ok('§2 ...frees its off-screen canvas', pending.canvas.width === 0 && pending.canvas.height === 0)
       ok('§2 ...and frees the page that was on screen only once it is off screen', first2.canvas.width === 0 && log.every((e) => !e.attached))
-      ok('§2 ...and removes every listener it added', stage2.listeners.length === 0)
+      ok('§2 ...and removes every listener it added (page area, window, document)', stage2.listeners.length === 0 && winListeners.length === 0 && docListeners.length === 0)
     }
   } catch (err) {
     ok(`§2 RateConViewer mounts in this harness (${err.message})`, false)
