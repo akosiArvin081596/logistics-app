@@ -387,6 +387,8 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 		logAudit: (req, action) => { audits.push(action); },
 		insertDispatchNotification: { run: () => ({}) },
 		io: { to: () => ({ emit: () => {} }) },
+		// The New Load notice, per role (scripts/test-broker-contact-redaction.js runs it).
+		emitDispatchByRole: () => {},
 		notifyChange: () => {},
 		console: QUIET,
 		Buffer,

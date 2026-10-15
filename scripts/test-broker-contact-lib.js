@@ -59,6 +59,24 @@ for (const [label, s, expect] of [
 	["cut by an ellipsis", "agent.one@exam…", "agent.one@exam"],
 ]) check(`email found: ${label}`, found(`write ${s}, thanks`), [expect]);
 check("email: a sentence's full stop is not part of it", found("Write agent.one@example.invalid."), ["agent.one@example.invalid"]);
+for (const [label, s] of [
+	["spaces around the @", "agent.one @ example.com"],
+	["\"at\" and \"dot\" spelled out", "agent.one at example dot com"],
+	["(at) and (dot)", "agent.one (at) example (dot) com"],
+	["[at] and [dot], no spaces", "agent.one[at]example[dot]com"],
+	["{at} and a real dot", "agent.one {at} mail.example.com"],
+	["\"at\" and a real dot", "agent.one at example.com"],
+]) check(`email found whole: ${label}`, found(`write ${s}, thanks`), [s]);
+
+// A label, then a bare 10-digit number: a phone (only the number goes).
+for (const [label, s, n] of [
+	["Tel:", "Tel: 5550100142", "5550100142"],
+	["Phone, with a 1", "Phone 15550100142", "15550100142"],
+	["cell#", "cell#5550100142", "5550100142"],
+	["Ph.", "Ph. 5550100142", "5550100142"],
+	["Fax no.", "Fax no. 5550100142", "5550100142"],
+	["call", "call 5550100142 at the gate", "5550100142"],
+]) check(`phone found: ${label} before a bare 10-digit number`, found(`${s}`), [n]);
 
 // ------------------------------------------------- not contact (kept as is)
 for (const s of [
@@ -66,6 +84,8 @@ for (const s of [
 	"08:00-14:00", "0800-1400", "08:00 - 14:00", "Dallas, TX 75201", "75201-1234", "42,000 lb", "$1,800.00",
 	"Dock 4", "Reefer 34F", "+1500.50", "+7", "Dry van 53', 38,500 lb", "PO Box 12", "Appt@0800", "Dock 100…",
 	"Seal 1234 5678 9012", "Load 30080873 / 209875716", "2030-01-10T08:00:00.000Z", "user@localhost",
+	"Meet at gate. Com check", "arrive at 0800", "Dock 4 at Acme dot", "load at Dallas, TX", "BOL 5550100142",
+	"Contract 5550100142", "PO 5550100142", "Appt @ 0800", "Unload at door 5. Dot inspection",
 ]) check(`not contact: ${JSON.stringify(s)}`, [found(s), served(s)], [[], s]);
 
 // ------------------------------------------------------ redactContactText
@@ -111,8 +131,12 @@ timed("repeated digit-dash pairs", "1-".repeat(60000));
 timed("repeated parentheses", "(555) ".repeat(30000));
 timed("repeated plus groups", "+1 2 ".repeat(30000));
 timed("repeated ellipses after digits", "555-0…".repeat(30000));
+timed("repeated \"x at y dot\" words", "agent at example dot ".repeat(10000));
+timed("repeated bracketed at", "a (at) ".repeat(20000));
+timed("a label then long whitespace before digits", `Tel:${" ".repeat(100000)}5550100142`);
+timed("repeated spaced @", "a @ ".repeat(30000));
 
-// -------------------------------------------------------- redactLoadRows
+// ------------------------------------------------------- redactLoadValues
 const HEADERS = ["Contract ID", "Load ID", "Details", "Pickup Info", "Pickup Address", "Broker Contact Name", "Phone Number", "Email", ""];
 const ROW = {
 	"Contract ID": "agent.one@example.invalid", "Load ID": "80000011",
@@ -122,7 +146,13 @@ const ROW = {
 	_rowIndex: 2, _pickupStreet: "300 Pine Rd Tel 555-010-0157", _refs: [{ label: "PU", value: "41000017" }, { label: "x", value: "555-010-0150" }],
 };
 const ORIGINAL = JSON.stringify(ROW);
-const [out] = bc.redactLoadRows(HEADERS, [ROW], { withheldRe: WITHHELD_RE });
+// A row as server.js sanitizeBrokerColumns() serves it: redactLoadValues(), then
+// every withheld column that holds anything blank.
+const servedRows = (headers, rows) => bc.redactLoadValues(headers, rows, { withheldRe: WITHHELD_RE }).map((r) => {
+	for (const h of headers) if (WITHHELD_RE.test(h) && r[h]) r[h] = "";
+	return r;
+});
+const [out] = servedRows(HEADERS, [ROW]);
 check("rows: the row given is not changed", JSON.stringify(ROW), ORIGINAL);
 check("rows: withheld columns are blank", [out["Broker Contact Name"], out["Phone Number"], out.Email], ["", "", ""]);
 check("rows: a Contract ID holding only an email is blank", out["Contract ID"], "");
@@ -133,17 +163,28 @@ check("rows: derived fields are redacted (a string and an array of objects)",
 	[out._pickupStreet, out._refs], [`300 Pine Rd Tel ${W}`, [{ label: "PU", value: "41000017" }, { label: "x", value: "" }]]);
 check("rows: the sheet cells redacted by value are listed, in header order", out._withheldCells, ["Contract ID", "Details", "Pickup Address", ""]);
 check("rows: non-contact cells and numbers as they were", [out["Load ID"], out["Pickup Info"], out._rowIndex], ["80000011", "REF/PU#: 41000017", 2]);
-const [off] = bc.redactLoadRows(HEADERS, [ROW], { withheldRe: WITHHELD_RE, values: false });
-check("rows, value redaction off: only the withheld columns are blanked, as before",
-	[off["Contract ID"], off.Details, off.Email, "_withheldCells" in off], [ROW["Contract ID"], ROW.Details, "", false]);
 const [valuesOnly] = bc.redactLoadValues(HEADERS, [ROW], { withheldRe: WITHHELD_RE });
-check("values only: the same redaction, the withheld columns left as stored for the caller to blank",
-	[valuesOnly.Details, valuesOnly["Contract ID"], valuesOnly._withheldCells, valuesOnly["Phone Number"], valuesOnly.Email],
-	[out.Details, "", out._withheldCells, ROW["Phone Number"], ROW.Email]);
+check("values only: the withheld columns are left as stored for the caller to blank",
+	[valuesOnly["Phone Number"], valuesOnly.Email], [ROW["Phone Number"], ROW.Email]);
 check("values only: the row given is not changed", JSON.stringify(ROW), ORIGINAL);
-const [clean] = bc.redactLoadRows(HEADERS, [{ "Load ID": "1", Details: "Dock 4", _withheldCells: ["Details"] }], { withheldRe: WITHHELD_RE });
+const [clean] = bc.redactLoadValues(HEADERS, [{ "Load ID": "1", Details: "Dock 4", _withheldCells: ["Details"] }], { withheldRe: WITHHELD_RE });
 check("rows: a row with nothing to redact carries no _withheldCells (a stale one is dropped)", "_withheldCells" in clean, false);
-check("rows: the withheld rule is required", (() => { try { bc.redactLoadRows(HEADERS, [ROW]); return "no throw"; } catch (e) { return e.name; } })(), "TypeError");
+check("rows: the withheld rule is required", (() => { try { bc.redactLoadValues(HEADERS, [ROW]); return "no throw"; } catch (e) { return e.name; } })(), "TypeError");
+check("rows: the one row entry point is redactLoadValues() (no unused whole-row variant)", typeof bc.redactLoadRows, "undefined");
+// The agent's NAME is looked for in free-text cells only (Details, the Info
+// columns, notes, Contract ID): a one-word name must never touch the Driver, an
+// address, a facility or any other structural cell.
+{
+	const H2 = ["Load ID", "Driver", "Details", "Pickup Info", "Pickup Address", "Trailer Number", "Broker Contact Name"];
+	const [r] = servedRows(H2, [{
+		"Load ID": "80000020", Driver: "Kevin", Details: "Kevin from the broker will call", "Pickup Info": "Ask for Kevin at gate",
+		"Pickup Address": "12 Kevin Ave, Dallas, TX 75201", "Trailer Number": "KEVIN", "Broker Contact Name": "Kevin",
+		_pickupStreet: "12 Kevin Ave",
+	}]);
+	check("rows: a one-word agent name is withheld in free text only, never in Driver, an address, a trailer or a derived field",
+		[r.Driver, r.Details, r["Pickup Info"], r["Pickup Address"], r["Trailer Number"], r._pickupStreet],
+		["Kevin", `${W} from the broker will call`, `Ask for ${W} at gate`, "12 Kevin Ave, Dallas, TX 75201", "KEVIN", "12 Kevin Ave"]);
+}
 
 // ---------------------------------------------------- restoreContactCells
 const STORED = HEADERS.map((h) => (h in ROW ? ROW[h] : ""));
@@ -200,9 +241,18 @@ check("notice value: contact inside text is withheld; a value that was only cont
 	check("notice stored before the fix: title, id and the rest kept", [out.title, out.id, out.read, out.metadata], [legacy.title, 1, 0, legacy.metadata]);
 	const withFields = bc.redactDispatchNotice({ ...legacy, metadata: JSON.stringify({ loadId: "80000011", fields: [{ column: "Details", kind: "changed" }, { column: "Drop-off Info", kind: "held" }] }) });
 	check("notice stored before the fix: column names from metadata.fields when present", withFields.body, `Details: ${W}; Drop-off Info (held): ${W}`);
-	const fresh = bc.redactDispatchNotice({ ...legacy, body: `Details: call ${W} → Reefer 34F, 555.010.0177`, metadata: JSON.stringify({ loadId: "80000011", valuesRedacted: true, note: "x@example.invalid" }) });
-	check("notice stored after the fix: served as stored, redacted again (metadata too)",
-		[fresh.body, JSON.parse(fresh.metadata).note], [`Details: call ${W} → Reefer 34F, ${W}`, ""]);
+	// Stored since the fix: the full body (a Super Admin's), and in its metadata
+	// the copy redacted before the 100-character cut, which every other role gets.
+	const full = { ...legacy, body: "Details: call 555-010-0142 → Reefer 34F, 555.010.0177",
+		metadata: JSON.stringify({ loadId: "80000011", redactedBody: `Details: call ${W} → Reefer 34F, ${W}`, note: "x@example.invalid" }) };
+	const fresh = bc.redactDispatchNotice(full);
+	check("notice stored since the fix, a non-Super-Admin: the redacted copy, and no copy left in the metadata",
+		[fresh.body, JSON.parse(fresh.metadata).note, "redactedBody" in JSON.parse(fresh.metadata)], [`Details: call ${W} → Reefer 34F, ${W}`, "", false]);
+	const forAdmin = bc.fullDispatchNotice(full);
+	check("notice stored since the fix, a Super Admin: the full body as stored, the copy dropped from the metadata",
+		[forAdmin.body, JSON.parse(forAdmin.metadata).note, "redactedBody" in JSON.parse(forAdmin.metadata)],
+		[full.body, "x@example.invalid", false]);
+	check("a Super Admin's notice without a copy is served exactly as stored", bc.fullDispatchNotice(legacy), legacy);
 	const other = bc.redactDispatchNotice({ type: "new-load", title: "New Load 80000016", body: "Dallas, TX → Tulsa, OK Tel 555-010-0157", metadata: "not json 555-010-0142" });
 	check("other notices: title, body and metadata redacted", [other.title, other.body, other.metadata],
 		["New Load 80000016", `Dallas, TX → Tulsa, OK Tel ${W}`, `not json ${W}`]);
@@ -238,6 +288,30 @@ const asServed = Object.fromEntries(Object.entries(red).map(([k, v]) => [k, v ==
 		[EXTRACTED["Pickup Notes/Instructions"], EXTRACTED.Details, "$1,900.00"]);
 	const edited = bc.rateConCreateFields({ ...asServed, Details: "Dry van, dock 5" }, EXTRACTED, { withheldRe: WITHHELD_RE });
 	check("create: a redacted field the person changed is written as sent", edited.fields.Details, "Dry van, dock 5");
+	check("create: the fields taken from the extract are listed (every broker field, and each field put back)",
+		[...r.fromHeld].sort(), ["BOL Number", "Broker Email", "Broker Name", "Broker Phone", "Delivery Notes/Instructions", "Details",
+			"Documents Email", "Pickup Notes/Instructions"]);
+	check("create: an edited field is not listed", edited.fromHeld.includes("Details"), false);
+}
+// The kill switch governs free-text redaction only: off, the broker fields are
+// still null in the extract and still taken from the extract on the create.
+{
+	const offRed = bc.redactRateConFields(EXTRACTED, { withheldRe: WITHHELD_RE, values: false });
+	check("extract, value redaction off: the broker fields are still null; the rest as read",
+		[offRed["Broker Name"], offRed["Documents Email"], offRed["Pickup Notes/Instructions"], offRed.Details],
+		[null, null, EXTRACTED["Pickup Notes/Instructions"], EXTRACTED.Details]);
+	const asShownOff = Object.fromEntries(Object.entries(offRed).map(([k, v]) => [k, v == null ? "" : v]));
+	const r = bc.rateConCreateFields({ ...asShownOff, "Broker Email": "typed@example.invalid" }, EXTRACTED, { withheldRe: WITHHELD_RE, values: false });
+	check("create, value redaction off: the broker fields still come from the extract, the rest as sent",
+		[r.fields["Broker Email"], r.fields.Details, [...r.fromHeld].sort()],
+		[EXTRACTED["Broker Email"], EXTRACTED.Details, ["Broker Email", "Broker Name", "Broker Phone", "Documents Email"]]);
+}
+// The agent's name in the extract: free-text fields only.
+{
+	const named = bc.redactRateConFields({ "Broker Name": "Kevin", "Driver Name": "Kevin", Details: "ask Kevin", "Pickup Company Information": "Kevin's Dock" },
+		{ withheldRe: WITHHELD_RE });
+	check("extract: the agent's name is withheld in free text, never in Driver Name",
+		[named["Driver Name"], named.Details, named["Pickup Company Information"]], ["Kevin", `ask ${W}`, `${W}'s Dock`]);
 }
 {
 	const r = bc.rateConCreateFields({ "Load Number": "80000014", "Broker Email": "typed@example.invalid", "Broker Name": "Typed Name" }, null, { withheldRe: WITHHELD_RE });

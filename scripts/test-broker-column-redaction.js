@@ -944,13 +944,16 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 		// PUT /api/data/:rowIndex refuses a row that now holds another load
 		// (409 ROW_MOVED) before these rules judge the row, and audits it there.
 		// That line records the form's own edits (as opened and as sent), never a
-		// stored cell (scripts/test-row-save-cell-writes.js). Every other audit
-		// line comes after the two rules.
+		// stored cell (scripts/test-row-save-cell-writes.js). So does the 409
+		// CONTACT_CELL_READ_ONLY refusal just before the two rules, which records
+		// the column only (scripts/test-broker-contact-redaction.js). Every other
+		// audit line comes after the two rules.
 		const rowMovedEnd = c.indexOf("return res.status(409).json(moved.body);");
-		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd));
-		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED refusal's`,
+		const readOnlyEnd = c.indexOf("return res.status(409).json(readOnly);");
+		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd, readOnlyEnd));
+		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED and CONTACT_CELL_READ_ONLY refusals'`,
 			[c.split("restoreWithheldBrokerCells(").length - 1, c.split("formulaCellRefusal(").length - 1,
-				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt],
+				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt && readOnlyEnd < restoreAt],
 			[1, 1, true]);
 		check(`${label}: no answer names a withheld column`, /\bpreserved\b/.test(c), false);
 	}

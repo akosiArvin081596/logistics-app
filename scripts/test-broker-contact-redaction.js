@@ -16,7 +16,7 @@
 // stored: Job Tracking's "Contract ID" holds the broker's email on a block of
 // 2025 rows, and "Details" / "Pickup Info" are free text that can hold either.
 // Now sanitizeBrokerColumns() also redacts every value (lib/broker-contact.js,
-// redactLoadRows()), behind the kill switch BROKER_CONTACT_VALUE_REDACTION_ENABLED
+// redactLoadValues()), behind the kill switch BROKER_CONTACT_VALUE_REDACTION_ENABLED
 // (default on).
 //
 // WHAT EACH SECTION RUNS. Every route is lifted whole out of server.js and run
@@ -185,11 +185,15 @@ function makeScope(stubs) {
 // from `stubs`, and returns a runner: (req) => { code, body, headers }. `require`
 // loads the shipped lib/ modules (and node's own) unless a section stubs it, so a
 // top-level `const x = require("./lib/...")` the route reads resolves as shipped.
+// A stub given as SHIPPED is dropped, so that name resolves to server.js's own
+// top-level definition (a section overriding a shared stub list).
+const SHIPPED = Symbol("the shipped definition");
 function lift(head, stubs) {
 	const src = extractRoute(head);
 	let handler = null;
 	const register = (...args) => { handler = args[args.length - 1]; };
-	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, ...stubs });
+	const kept = Object.fromEntries(Object.entries(stubs).filter(([, v]) => v !== SHIPPED));
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, ...kept });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {
@@ -416,7 +420,7 @@ section("§1 GET /api/load/:loadId", async () => {
 
 // PUT /api/load/:loadId with its guards stubbed as scripts/test-broker-column-redaction.js
 // stubs them (their own runners cover them); the broker rules are the shipped code.
-function liftLoadPut(rows, errors) {
+function liftLoadPut(rows, errors, overrides = {}) {
 	const sheet = fakeSheets(rows);
 	const run = lift('app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {', {
 		requireRole: () => null, getSheets: sheet.getSheets, SPREADSHEET_ID: "sheet-under-test",
@@ -424,6 +428,7 @@ function liftLoadPut(rows, errors) {
 		sheetRowUpdateBlocker: () => null, buildSheetUpdateAudit: (o) => o, sheetAuditWithCode: (d) => d,
 		logAudit: () => {}, logAuditRefusal: () => {}, jtCacheInvalidate: () => {}, notifyChange: () => {},
 		console: quietConsole(errors),
+		...overrides,
 	});
 	return { run, sheet };
 }
@@ -529,7 +534,7 @@ section("§1 POST /api/loads/from-ratecon (the broker contact it writes)", async
 	const extracted = {
 		"Load Number": "80000016", "Broker Name": "Pat Agent", "Broker Phone": "(555) 010-0142",
 		"Broker Email": "agent.one@example.invalid", "Documents Email": "billing.desk@example.invalid", Rate: "$1,800.00",
-		"Pickup Address": "100 Main St, Dallas, TX 75201", "Drop-off Address": "200 Oak Ave, Tulsa, OK 74103",
+		"Pickup Address": "100 Main St, Dallas, TX 75201", "Drop-off Address": "200 Oak Ave, Tulsa, OK 74103 Tel 555-010-0157",
 		"Pickup Company Information": "Example DC", "P/U Reference Number": "41000021",
 		"Pickup Appointment Time": "01/20/2030 08:00", "Delivery Appointment Time": "01/21/2030 14:00",
 		"Pickup Notes/Instructions": "Call 1-555-010-0151 one hour out", Details: "Dry van",
@@ -538,18 +543,22 @@ section("§1 POST /api/loads/from-ratecon (the broker contact it writes)", async
 	// share the server's one rate-con stash as the server's routes do.
 	const common = { requireRole: () => null, rateConLimiter: null, console: quietConsole(errors) };
 	let geminiAnswer = extracted;
-	const extract = lift('app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+	const extractWith = (more = {}) => lift('app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
 		...common, GEMINI_API_KEY: "test-key", runRateConGemini: async () => ({ ...geminiAnswer }), rateConNormalizeOptions: () => ({}),
 		rateconNormalize: require(path.join(ROOT, "lib", "ratecon-normalize")), rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
+		...more,
 	});
-	const create = (tabs) => lift('app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+	const extract = extractWith();
+	// `rec` collects the dispatch notice the create stores and emits.
+	const create = (tabs, rec = { stored: [], emitted: [] }, more = {}) => lift('app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
 		...common, getSheets: fakeTabs(tabs).getSheets, SPREADSHEET_ID: "sheet-under-test",
 		rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
 		getDeletedLoadIds: () => new Set(), GOOGLE_MAPS_API_KEY: "", geocodeAddress: async () => null, appDay: () => "2030-01-19",
 		validateOwnerIdCell: () => null, jtCacheInvalidate: () => {}, notifyChange: () => {}, logAudit: () => {},
 		DATA_DIR: path.join(ROOT, "no-such-dir"), fs: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
 		db: emptyDb(), RATECON_DRIVE_FOLDER_ID: "",
-		insertDispatchNotification: { run: () => ({ lastInsertRowid: 1 }) }, io: { to: () => ({ emit() {} }) },
+		insertDispatchNotification: { run: (...args) => { rec.stored.push(args); return { lastInsertRowid: 1 }; } }, io: fakeIo(rec.emitted),
+		...more,
 	});
 	const newTabs = () => ({
 		"Job Tracking": [HEADERS.slice()],
@@ -566,11 +575,61 @@ section("§1 POST /api/loads/from-ratecon (the broker contact it writes)", async
 	const brokerCells = (tabs) => ["Broker Contact Name", "Phone Number", "Email"].map((h) => cell(tabs, h));
 
 	const tabs = newTabs();
-	const made = await create(tabs)({ body: { fields: typed, pdfBase64, fileName: "rc.pdf" }, session: session("Dispatcher") });
+	const rec = { stored: [], emitted: [] };
+	const made = await create(tabs, rec)({ body: { fields: typed, pdfBase64, fileName: "rc.pdf" }, session: session("Dispatcher") });
 	check("rate-con create, Dispatcher: 200 with no error logged", [served.code, made.code, errors], [200, 200, []]);
 	check("rate-con create, Dispatcher: the load's broker cells hold the rate con's own contact, not what the client sent",
 		[brokerCells(tabs), (tabs["Payments Table"][1] || [])[1]], [["Pat Agent", "(555) 010-0142", "agent.one@example.invalid"], "Pat Agent"]);
 	check("rate-con create, Dispatcher: no broker email or phone anywhere in the answer", contactIn(made.body), []);
+	// The "New Load" notice names the route, whose address can hold a phone: per
+	// role, as the re-issue notice (Super Admins in full, the rest of the room not).
+	const newLoadMeta = (() => { try { return JSON.parse((rec.stored[0] || [])[3]); } catch { return {}; } })();
+	check("rate-con create: the New Load notice goes in full to Super Admins and without the phone to the rest of the dispatch room, never to the whole room",
+		[missingFrom(toSuperAdmins(rec.emitted, "dispatch-notification"), ["555-010-0157"]),
+			toDispatchers(rec.emitted, "dispatch-notification").length, contactIn(toDispatchers(rec.emitted, "dispatch-notification")),
+			toWholeRoom(rec.emitted, "dispatch-notification").length],
+		[[], 1, [], 0]);
+	check("rate-con create: the New Load notice is stored in full with a copy for every other role",
+		[missingFrom((rec.stored[0] || [])[2], ["555-010-0157"]), contactIn(newLoadMeta.redactedBody), typeof newLoadMeta.redactedBody],
+		[[], [], "string"]);
+
+	// A non-broker field the server puts back from its copy (it was sent as
+	// served, with "[contact withheld]" in it) that the sheet would read as a
+	// formula: the person cannot see the value to fix it, so it is written blank
+	// with a warning naming the field, instead of refusing the load.
+	geminiAnswer = { ...extracted, "Load Number": "80000021", Details: "+1 555-010-0142 call before arrival" };
+	const plusPdf = Buffer.from("%PDF-1.4 a formula-shaped detail").toString("base64");
+	const plusServed = await extract({ body: { pdfBase64: plusPdf }, session: session("Dispatcher") });
+	const plusTabs = newTabs();
+	const plus = await create(plusTabs)({
+		body: { fields: Object.fromEntries(Object.entries((plusServed.body || {}).fields || {}).map(([k, v]) => [k, v == null ? "" : v])), pdfBase64: plusPdf },
+		session: session("Dispatcher"),
+	});
+	check("rate-con create, Dispatcher, a put-back field the sheet would read as a formula: 200, that cell blank, a warning naming it",
+		[plus.code, cell(plusTabs, "Details"), ((plus.body || {}).warnings || []).some((w) => /left blank/i.test(w) && w.includes("Details"))],
+		[200, "", true]);
+	geminiAnswer = extracted;
+
+	// The kill switch governs free-text redaction only: off, a non-Super-Admin's
+	// extract still answers the broker fields null, and the create still takes them
+	// from the extract the server holds.
+	{
+		const off = { BROKER_CONTACT_VALUE_REDACTION_ENABLED: false };
+		geminiAnswer = { ...extracted, "Load Number": "80000022" };
+		const offPdf = Buffer.from("%PDF-1.4 with the switch off").toString("base64");
+		const offServed = await extractWith(off)({ body: { pdfBase64: offPdf }, session: session("Dispatcher") });
+		const f = (offServed.body || {}).fields || {};
+		check("rate-con extract, value redaction switched off, Dispatcher: the broker fields still null, the billing inbox too",
+			[f["Broker Name"], f["Broker Phone"], f["Broker Email"], f["Documents Email"]], [null, null, null, null]);
+		const offTabs = newTabs();
+		const offShown = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v == null ? "" : v]));
+		const offMade = await create(offTabs, undefined, off)({
+			body: { fields: { ...offShown, "Broker Email": "typed@example.invalid" }, pdfBase64: offPdf }, session: session("Dispatcher"),
+		});
+		check("rate-con create, value redaction switched off, Dispatcher: the broker cells still come from the extract",
+			[offMade.code, brokerCells(offTabs)], [200, ["Pat Agent", "(555) 010-0142", "agent.one@example.invalid"]]);
+		geminiAnswer = extracted;
+	}
 
 	const missTabs = newTabs();
 	const missed = await create(missTabs)({
@@ -593,7 +652,7 @@ section("§1 POST /api/loads/from-ratecon (the broker contact it writes)", async
 		session: session("Dispatcher"),
 	});
 	check("rate-con create, Dispatcher, a held broker phone the sheet would read as a formula: 200, that cell blank, the rest kept, a warning",
-		[intl.code, brokerCells(intlTabs), ((intl.body || {}).warnings || []).some((w) => /broker contact detail/i.test(w))],
+		[intl.code, brokerCells(intlTabs), ((intl.body || {}).warnings || []).some((w) => /left blank/i.test(w) && w.includes("Broker Phone"))],
 		[200, ["Pat Agent", "", "agent.one@example.invalid"], true]);
 	geminiAnswer = extracted;
 
@@ -629,12 +688,40 @@ section("§1 GET /api/dispatch-notifications", async () => {
 		[first(disp).title, /^Details: /.test(first(disp).body || "")], [NOTICE_TITLE, true]);
 	check("dispatch notices, Super Admin: the notice still names the values",
 		missingFrom(admin.body, ["555-010-0142", "agent.three+loads@mail.example.invalid"]), []);
+	// A notice stored since the fix: the full body, and the copy for other roles.
+	db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES (?, ?, ?, ?)").run(
+		"new-load", "New Load 80000016", "Dallas, TX 75201 → Tulsa, OK 74103 Tel 555-010-0157",
+		JSON.stringify({ loadId: "80000016", redactedBody: "Dallas, TX 75201 → Tulsa, OK 74103 Tel [contact withheld]" }));
+	const disp2 = await run({ session: session("Dispatcher") });
+	const admin2 = await run({ session: session("Super Admin") });
+	const newest = (r) => (((r.body || {}).notifications || [])[0] || {});
+	check("dispatch notices, a notice stored with its copy: a Dispatcher gets the copy, a Super Admin the full body, neither the copy in the metadata",
+		[newest(disp2).body, contactIn(disp2.body), newest(admin2).body, /redactedBody/.test(JSON.stringify([disp2.body, admin2.body]))],
+		["Dallas, TX 75201 → Tulsa, OK 74103 Tel [contact withheld]", [], "Dallas, TX 75201 → Tulsa, OK 74103 Tel 555-010-0157", false]);
 });
 
-// The re-issue notice as the alert SENDS it: the row it stores and the payload
-// it emits to the dispatch room (Super Admins and Dispatchers share that room,
-// so what is sent there has to be fit for a Dispatcher; the email to
-// ADMIN_NOTIFY_EMAIL is the Super Admin's copy with the values).
+// A socket.io stand-in that records every emit with its room and the room it
+// excludes (`io.to(room).except(other).emit(...)`).
+// The Super Admin room is the one the dispatch room is sent "except".
+const SA_ROOM = (/io\.to\("dispatch"\)\.except\("([^"]+)"\)/.exec(SRC) || [])[1] || "(no Super Admin room in server.js)";
+function fakeIo(emitted) {
+	const emitter = (room, except) => ({
+		emit: (event, payload) => emitted.push({ room, except, event, payload }),
+		except: (other) => emitter(room, other),
+	});
+	return { to: (room) => emitter(room, null) };
+}
+// What the dispatch room's other roles (Dispatchers) get, and what Super Admins get.
+const toDispatchers = (emitted, event) => emitted.filter((e) => e.event === event && e.room === "dispatch" && e.except === SA_ROOM).map((e) => e.payload);
+const toSuperAdmins = (emitted, event) => emitted.filter((e) => e.event === event && e.room === SA_ROOM).map((e) => e.payload);
+const toWholeRoom = (emitted, event) => emitted.filter((e) => e.event === event && e.room === "dispatch" && !e.except).map((e) => e.payload);
+
+// The re-issue notice as the alert SENDS it: the row it stores and what it
+// emits. Super Admins and Dispatchers share the dispatch room, so it is sent per
+// role: the Super Admin room gets the values in full (as before), the rest of the
+// room a copy with broker contact withheld, made before any value is cut to 100
+// characters. The row stores the full body and that copy (metadata.redactedBody),
+// which GET /api/dispatch-notifications serves to every role but Super Admin.
 section("§1 the re-issue notice as sent (sendReissueAlert)", async () => {
 	const errors = [];
 	const stored = [];
@@ -642,7 +729,7 @@ section("§1 the re-issue notice as sent (sendReissueAlert)", async () => {
 	const send = liftFunction("sendReissueAlert", {
 		db: emptyDb(),
 		insertDispatchNotification: { run: (...args) => { stored.push(args); return { lastInsertRowid: 1 }; } },
-		io: { to: (room) => ({ emit: (event, payload) => emitted.push({ room, event, payload }) }) },
+		io: fakeIo(emitted),
 		ADMIN_NOTIFY_EMAIL: "",
 		sendEmail: async () => true,
 		console: quietConsole(errors),
@@ -655,14 +742,38 @@ section("§1 the re-issue notice as sent (sendReissueAlert)", async () => {
 		],
 		claimedAt: "2030-01-15T12:00:00.000Z", now: new Date("2030-01-15T12:00:00.000Z"),
 	});
-	const dispatchPayloads = emitted.filter((e) => e.room === "dispatch").map((e) => e.payload);
-	check("re-issue notice: sent in-app once, no error logged", [out && out.notified, stored.length, dispatchPayloads.length, errors], [true, 1, 1, []]);
-	check("re-issue notice, as emitted to the dispatch room: no broker email or phone", contactIn(dispatchPayloads), []);
-	check("re-issue notice, as stored for GET /api/dispatch-notifications: no broker email or phone", contactIn(stored), []);
+	const dispatchPayloads = toDispatchers(emitted, "dispatch-notification");
+	const adminPayloads = toSuperAdmins(emitted, "dispatch-notification");
+	check("re-issue notice: stored once, sent once to Super Admins and once to the rest of the dispatch room, never to the whole room, no error logged",
+		[out && out.notified, stored.length, adminPayloads.length, dispatchPayloads.length, toWholeRoom(emitted, "dispatch-notification").length, errors],
+		[true, 1, 1, 1, 0, []]);
+	check("re-issue notice, as emitted to the dispatch room's other roles: no broker email or phone", contactIn(dispatchPayloads), []);
+	check("re-issue notice, as emitted to Super Admins: the values in full, as before",
+		missingFrom(adminPayloads, ["555-010-0142", "agent.three+loads@mail.example.invalid", "(555)010-0155"]), []);
+	const storedMeta = (() => { try { return JSON.parse((stored[0] || [])[3]); } catch { return {}; } })();
+	check("re-issue notice, as stored: the body in full, and a copy with broker contact withheld for every other role",
+		[missingFrom((stored[0] || [])[2], ["555-010-0142", "agent.three+loads@mail.example.invalid"]), contactIn(storedMeta.redactedBody),
+			typeof storedMeta.redactedBody], [[], [], "string"]);
 	check("re-issue notice: still sent: the load in the title, both columns and the rest of the text",
 		[String((dispatchPayloads[0] || {}).title || "").includes("80000011"),
 			keptIn(dispatchPayloads, ["Details", "Pickup Info", "41000017", "Reefer 34F"])],
 		[true, ["Details", "Pickup Info", "41000017", "Reefer 34F"]]);
+	// A value longer than the 100-character cut: its phone sits past the cut, so a
+	// copy made after cutting could split it; the copy is made before.
+	const long = [];
+	const sendLong = liftFunction("sendReissueAlert", {
+		db: emptyDb(),
+		insertDispatchNotification: { run: (...args) => { long.push(args); return { lastInsertRowid: 2 }; } },
+		io: fakeIo([]), ADMIN_NOTIFY_EMAIL: "", sendEmail: async () => true, console: quietConsole(errors),
+	});
+	await sendLong({
+		key: "80000012", label: "80000012", reason: "the load is delivered",
+		rows: [{ column: "Details", stored: "Dock 4", sent: `${"Dry van, keep sealed. ".repeat(4)}call 555-010-0143`, kind: "changed", email: false, inApp: true }],
+		claimedAt: "2030-01-15T12:00:00.000Z", now: new Date("2030-01-15T12:00:00.000Z"),
+	});
+	const longMeta = (() => { try { return JSON.parse((long[0] || [])[3]); } catch { return {}; } })();
+	check("re-issue notice: a phone past the 100-character cut is withheld whole in the copy, never split",
+		[contactIn(longMeta.redactedBody), /555-010-01…|010-014…/.test(String(longMeta.redactedBody))], [[], false]);
 });
 
 // ==================================================================== §2 Writers
@@ -686,7 +797,7 @@ section("§2 PUT /api/load/:loadId: a blank Contract ID sent back as served", as
 	check("load save, Dispatcher: the stored broker email in Contract ID is kept", rows[1][0], "agent.one@example.invalid");
 	check("load save, Dispatcher: the rest of the edit is written", rows[1][HEADERS.indexOf("Trailer Number")], "TR-9");
 });
-function liftDataPut(rows, errors) {
+function liftDataPut(rows, errors, overrides = {}) {
 	const sheet = fakeSheets(rows);
 	const run = lift('app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (req, res) => {', {
 		requireRole: () => null, getSheets: sheet.getSheets, SPREADSHEET_ID: "sheet-under-test",
@@ -697,6 +808,7 @@ function liftDataPut(rows, errors) {
 		sheetRowUpdateBlocker: () => null, buildSheetUpdateAudit: (o) => o, sheetAuditWithCode: (d) => d,
 		logAudit: () => {}, logAuditRefusal: () => {}, jtCacheInvalidate: () => {}, notifyChange: () => {},
 		console: quietConsole(errors),
+		...overrides,
 	});
 	return { run, sheet };
 }
@@ -730,9 +842,13 @@ section("§2 PUT /api/data/:rowIndex: the served row sent back", async () => {
 // never dropped without a word, and nothing is written.
 section("§2 a non-Super-Admin save that changes a contact cell: 409 CONTACT_CELL_READ_ONLY", async () => {
 	const errors = [];
+	// Each refusal is on the audit trail (a repeated one says someone is testing
+	// what a withheld cell holds), through logAuditRefusal() with its code.
+	const refusals = [];
+	const recordRefusal = { logAuditRefusal: (req, action, entity, id, details, code) => refusals.push({ action, code, details: String(details) }) };
 	{
 		const rows = SHEET_ROWS();
-		const { run, sheet } = liftDataPut(rows, errors);
+		const { run, sheet } = liftDataPut(rows, errors, recordRefusal);
 		const values = cells({ ...LEGACY_SERVED, Details: "Rate agreed with the broker. 42,000 lb", "Trailer Number": "TR-9" });
 		const r = await run({ params: { rowIndex: "2" }, query: { sheet: "Job Tracking" }, body: { values, baseline: cells(LEGACY_SERVED) }, session: session("Dispatcher") });
 		check("row save, Dispatcher, Details changed: 409 CONTACT_CELL_READ_ONLY naming the column, nothing written",
@@ -741,12 +857,15 @@ section("§2 a non-Super-Admin save that changes a contact cell: 409 CONTACT_CEL
 	}
 	{
 		const rows = SHEET_ROWS();
-		const { run, sheet } = liftLoadPut(rows, errors);
+		const { run, sheet } = liftLoadPut(rows, errors, recordRefusal);
 		const r = await run({ params: { loadId: "80000011" }, body: { "Contract ID": "29284990" }, session: session("Dispatcher") });
 		check("load save, Dispatcher, Contract ID (holding a broker email) changed: 409 CONTACT_CELL_READ_ONLY, nothing written",
 			[r.code, (r.body || {}).code, (r.body || {}).field, sheet.writes.length, rows[1][0]],
 			[409, "CONTACT_CELL_READ_ONLY", "Contract ID", 0, LEGACY["Contract ID"]]);
 	}
+	check("contact cell refusals: both audited through logAuditRefusal() with their code, naming the column",
+		refusals.map((a) => [a.action, a.code, /Details|Contract ID/.test(a.details)]),
+		[["update_sheet_row_blocked", "CONTACT_CELL_READ_ONLY", true], ["update_sheet_row_blocked", "CONTACT_CELL_READ_ONLY", true]]);
 	{
 		const rows = SHEET_ROWS();
 		const { run } = liftLoadPut(rows, errors);
@@ -784,6 +903,83 @@ section("§2 an email or phone typed into Contract ID: 400 CONTACT_NOT_ALLOWED",
 		check("load save, Dispatcher, a reference number in Contract ID: 200 and written", [r.code, rows[3][0]], [200, "29284991"]);
 	}
 	check("Contract ID saves: no error logged", errors, []);
+});
+
+// A period refusal names the date cells it cannot read, quoting them; a cell
+// holding broker contact is quoted to a non-Super-Admin with it withheld. The
+// period guard here is the shipped one, with the lock table readable.
+section("§2 a period refusal (PERIOD_UNRESOLVED) quotes no broker contact to a non-Super-Admin", async () => {
+	const errors = [];
+	const shipped = { changedGuardedCells: SHIPPED, guardedColumnReason: SHIPPED, sheetRowUpdateBlocker: SHIPPED, periodLocksReadable: () => true };
+	const appt = "Call 555-010-0142 for appt";
+	const runAs = async (role) => {
+		const rows = SHEET_ROWS();
+		rows[4][HEADERS.indexOf("Pickup Appointment")] = appt;
+		const { run, sheet } = liftLoadPut(rows, errors, shipped);
+		const r = await run({ params: { loadId: "80000015" }, body: { "  Payment  ": "$2,000.00" }, session: session(role) });
+		return { r, writes: sheet.writes.length };
+	};
+	const disp = await runAs("Dispatcher");
+	const admin = await runAs("Super Admin");
+	check("period refusal: both roles 409 PERIOD_UNRESOLVED, nothing written, no error logged",
+		[disp.r.code, (disp.r.body || {}).code, disp.writes, admin.r.code, (admin.r.body || {}).code, admin.writes, errors],
+		[409, "PERIOD_UNRESOLVED", 0, 409, "PERIOD_UNRESOLVED", 0, []]);
+	check("period refusal, Dispatcher: no broker email or phone in it; it still names the cell",
+		[contactIn(disp.r.body), /Pickup Appointment/.test(JSON.stringify((disp.r.body || {}).unreadable || []))], [[], true]);
+	check("period refusal, Super Admin: the cell quoted as stored", missingFrom(admin.r.body, [appt]), []);
+});
+
+// ========================================================= §7 Stored addresses
+// load_coordinates holds each load's addresses as written when it was created
+// (the rate-con create writes the rate con's own), so an address can carry a
+// phone. Every route that serves them redacts them for every role but Super Admin.
+section("§7 addresses from load_coordinates: geocode, haul, mileage detail", async () => {
+	const errors = [];
+	const coords = {
+		load_id: "80000015", origin_lat: 32.78, origin_lng: -96.8, dest_lat: 30.27, dest_lng: -97.74, distance_miles: 195,
+		pickup_address: "100 Main St, Dallas, TX 75201", dropoff_address: "300 Pine Rd, Austin, TX 78701 Tel 555-010-0157",
+	};
+	const driverSession = session("Driver", { driverName: DRIVER, driver_name: DRIVER });
+	const geo = lift('app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {', {
+		requireAuth: () => null, loadBelongsToDriver: async () => true, db: emptyDb([[/FROM load_coordinates/i, [coords]]]), console: quietConsole(errors),
+	});
+	const haul = lift('app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) => {', {
+		requireAuth: () => null, haulLimiter: null, loadBelongsToDriver: async () => true, getLoadCoordsFull: () => ({ ...coords }),
+		getRoute: async () => null, getJobTrackingCached: async () => jtCache(),
+		measureLoadEldMiles: () => ({ driven: null, truckUnit: "", vid: null }), buildHaulTruckResolver: () => null, buildEldDeviceResolver: () => null,
+		console: quietConsole(errors),
+	});
+	const mileage = lift('app.get("/api/analytics/mileage/detail",', {
+		requireRole: () => null, mileageAnalyticsLimiter: null,
+		db: emptyDb([
+			[/FROM eld_miles_daily/i, [{ local_day: "2030-01-09", driver_name: DRIVER, driver_key: "test driver", miles: 100, basis: "eld", samples: 10,
+				rejected_deltas: 0, dropped_miles: 0, max_gap_ms: 0, first_ms: 0, last_ms: 0, vid: "v1" }]],
+			[/FROM trucks/i, []],
+			[/FROM load_status_history/i, [{ day: "2030-01-09", load_id: "80000015", new_status: "Delivered", changed_at: "2030-01-09T15:00:00Z",
+				actor: DRIVER, pickup_address: coords.pickup_address, dropoff_address: coords.dropoff_address }]],
+		]),
+		buildEldDeviceResolver: () => ({ truckForVehicleOnDay: () => null }),
+		console: quietConsole(errors),
+	});
+	const geoReq = (s) => ({ params: { loadId: "80000015" }, session: s });
+	const mileReq = (s) => ({ query: { from: "2030-01-09", to: "2030-01-09", driver: "test driver" }, session: s });
+	const answers = {
+		geoDisp: await geo(geoReq(session("Dispatcher"))), geoDriver: await geo(geoReq(driverSession)), geoAdmin: await geo(geoReq(session("Super Admin"))),
+		haulDisp: await haul(geoReq(session("Dispatcher"))), haulDriver: await haul(geoReq(driverSession)), haulAdmin: await haul(geoReq(session("Super Admin"))),
+		mileDisp: await mileage(mileReq(session("Dispatcher"))), mileAdmin: await mileage(mileReq(session("Super Admin"))),
+	};
+	check("stored addresses: every answer 200, no error logged",
+		[Object.values(answers).map((a) => a.code), errors], [Object.values(answers).map(() => 200), []]);
+	check("stored addresses: the mileage detail lists the load (the checks below are not vacuous)",
+		JSON.stringify(answers.mileAdmin.body || {}).includes("80000015"), true);
+	for (const [label, key] of [["geocode, Dispatcher", "geoDisp"], ["geocode, Driver", "geoDriver"], ["haul, Dispatcher", "haulDisp"],
+		["haul, Driver", "haulDriver"], ["mileage detail, Dispatcher", "mileDisp"]]) {
+		check(`stored addresses, ${label}: no broker email or phone; the street still served`,
+			[contactIn(answers[key].body), keptIn(answers[key].body, ["300 Pine Rd", "100 Main St"])], [[], ["300 Pine Rd", "100 Main St"]]);
+	}
+	check("stored addresses, Super Admin: geocode, haul and mileage detail serve the address as stored",
+		[missingFrom(answers.geoAdmin.body, coords.dropoff_address), missingFrom(answers.haulAdmin.body, coords.dropoff_address),
+			missingFrom(answers.mileAdmin.body, coords.dropoff_address)], [[], [], []]);
 });
 
 // ====================================================================== §3 Driver
