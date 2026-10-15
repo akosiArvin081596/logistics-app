@@ -18715,8 +18715,22 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 			const inv = weekly[0];
 			// A day already on the week's own invoice grid is paid, even when no
 			// invoice_paid_days row holds it (invoiced before the switch-on and
-			// the start-up backfill not run yet).
+			// the start-up backfill not run yet): it is recorded as that
+			// invoice's (no amount changes) and left out. A day another live
+			// invoice already holds stays with it.
 			const onGrid = new Set(invoicePaidDaysOf(inv));
+			const gridDays = entries.filter((e) => onGrid.has(e.day)).map((e) => e.day);
+			if (gridDays.length) {
+				const invNorm = normalizeDriverName(inv.driver || "");
+				try {
+					db.transaction(() => {
+						const holders = invoicePaidDayHolders(invNorm, gridDays);
+						claimInvoicePaidDays(inv.id, invNorm, gridDays.filter((d) => !holders.has(d)));
+					}).immediate();
+				} catch (err) {
+					warnings.push(`NOT RECORDED: ${gridDays.join(", ")} on ${inv.invoice_number}'s grid: ${err && err.message}`);
+				}
+			}
 			entries = entries.filter((e) => !onGrid.has(e.day));
 			if (!entries.length) continue;
 			dayText = entries.map((e) => e.day).join(", ");

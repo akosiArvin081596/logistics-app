@@ -2,7 +2,8 @@
 /**
  * B12 runner B: the trip-timestamp work-day rule on the three pay paths (plan
  * section 4.1(2)-(8), cases B1-B14; B15-B21 for the owner's late-day rule of
- * 2026-10-14; B22 for its floor, FROM's first week, of 2026-10-15), behind
+ * 2026-10-14; B22 for its floor, FROM's first week, of 2026-10-15; B23-B24 for
+ * a week invoiced before the switch-on), behind
  * TRIP_WORK_DAYS_ENABLED and TRIP_WORK_DAYS_FROM
  * (FROM=2026-09 unless a case says otherwise).
  * Written before the fix, which they failed. On main the flags are ignored, so the
@@ -713,6 +714,21 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		deliverBoundaryLoad(w);
 		await W.generate(w, D, W40);
 		eq("one correction for W39: Thu and Fri only, $520", corrections(w).map((c) => [c.correction_of, paidDaysOf(c), c.total_earnings]), [[g39.invoice.id, ["2026-10-01", "2026-10-02"], 520]]);
+	});
+
+	await R.test("B24 (re-review of 410ae4f) The Mon and Tue left out because the Approved W39's own grid already shows them are recorded as paid by W39 (invoice_paid_days), its amount and grid unchanged, so no later check reads them as unrecorded", async ({ eq }) => {
+		const D = "Vic Wynn";
+		const w = boundaryWorld(D);
+		const g39 = await W.generate(w, D, W39);
+		w.db.prepare("DELETE FROM invoice_paid_days").run();
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = '2026-10-04T00:00:00.000Z', approved_by = 'super_admin' WHERE id = ?").run(g39.invoice.id);
+		const before = invoiceRow(w, g39.invoice.id);
+		deliverBoundaryLoad(w);
+		await W.generate(w, D, W40);
+		const fix = corrections(w)[0] || {};
+		eq("W39's days are held: Mon and Tue by W39, Thu and Fri by its correction", claimRows(w).filter(([d]) => WEEK39.includes(d)), [["2026-09-28", g39.invoice.id], ["2026-09-29", g39.invoice.id], ["2026-10-01", fix.id], ["2026-10-02", fix.id]]);
+		const after = invoiceRow(w, g39.invoice.id);
+		eq("W39's amount, status and grid are as approved", [after.total_earnings, after.status, after.render_data], [before.total_earnings, before.status, before.render_data]);
 	});
 
 	R.finish();
