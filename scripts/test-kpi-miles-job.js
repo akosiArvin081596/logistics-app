@@ -405,6 +405,24 @@ const one = (db, table, id) => db.prepare(`SELECT * FROM ${table} WHERE load_id 
 		t(MILES.pendingRoutePairs({ milesLoads, timeZone: TZ, routes: new Map() }).length === 0, "Low 3: with no ELD records given, no pair is usable");
 	}
 
+	// Review Low 2 (lib half): the route phase has its own time budget; once it
+	// is spent no further call starts, and the run is told so.
+	{
+		const db = freshDb();
+		const clock = { ms: Date.parse("2026-10-14T08:10:00Z") };
+		const start = clock.ms;
+		const pairs = [];
+		for (let i = 0; i < 5; i++) pairs.push({ pairKey: DEADHEAD.pairKey({ lat: 40 + i, lng: -95 }, { lat: 31, lng: -96 }), from: { lat: 40 + i, lng: -95 }, to: { lat: 31, lng: -96 } });
+		const log = [];
+		const res = await ROUTES.runRouteCalls({
+			db, pending: pairs, kind: "nightly", enabled: true, replica: false, apiKey: "test-key", day: "2026-10-14", timeZone: TZ,
+			now: () => clock.ms, deadlineMs: start + 8000,
+			fetchFn: async () => { log.push(clock.ms); clock.ms += 5000; return { ok: true, json: async () => ({ routes: [{ distanceMeters: 1609.344 }] }) }; },
+		});
+		t(log.length === 2 && res.calls === 2 && res.codes.has("ROUTES_TIME_LIMIT"), `Low 2: an 8 s budget at 5 s a call starts 2 calls, then stops with ROUTES_TIME_LIMIT (${log.length}, ${[...res.codes]})`);
+		t(db.prepare("SELECT COUNT(*) AS n FROM kpi_deadhead_routes").get().n === 2, "Low 2: no row is written for a pair that was never called");
+	}
+
 	// The gatherer.
 	{
 		const db = freshDb();
