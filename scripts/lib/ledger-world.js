@@ -111,10 +111,13 @@ function readEnv(root, appRequire) {
 // world only (a dry run comparing a rule off and on). `extraRoots`: more
 // server.js functions to lift and return, for the script that asks for them
 // (scripts/work-days-dry-run.js, scripts/backfill-invoice-paid-days.js); the
-// other scripts lift exactly what they always did. `now`: epoch ms the lifted
-// code's `new Date()` and `Date.now()` read instead of the clock (null, the
-// default, is the clock); a script's own code keeps the real clock.
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], now = null }) {
+// other scripts lift exactly what they always did. `extraRoutes`: GET routes to
+// register beside the freeze route, as paths ("/api/investor"), for the script
+// that reads them through call() (scripts/month-end-clock-report.js). `now`:
+// epoch ms the lifted code's `new Date()` and `Date.now()` read instead of the
+// clock (null, the default, is the clock); a script's own code keeps the real
+// clock.
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
@@ -124,7 +127,12 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, e
 	db.pragma("busy_timeout = 10000");
 
 	const extra = (extraRoots || []).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && !ROOTS.includes(n));
-	const lifted = closure(SRC, { roots: [...ROOTS, ...extra], routes: [FREEZE_HEAD], provided: PROVIDED, denied: DENIED });
+	const getHeads = (extraRoutes || []).map((p) => {
+		const heads = SRC.split("\n").filter((l) => l.startsWith(`app.get(${JSON.stringify(p)},`));
+		if (heads.length !== 1) throw new Error(`expected one registration of GET ${p} in server.js, found ${heads.length}`);
+		return heads[0];
+	});
+	const lifted = closure(SRC, { roots: [...ROOTS, ...extra], routes: [FREEZE_HEAD, ...getHeads], provided: PROVIDED, denied: DENIED });
 	const routes = {};
 	const register = (method) => (p, ...h) => { routes[`${method} ${p}`] = h[h.length - 1]; };
 	const app = { get: register("GET"), post: register("POST"), put: register("PUT"), delete: register("DELETE") };

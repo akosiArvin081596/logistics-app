@@ -35,6 +35,7 @@ process.env.TZ = "UTC"; // production's clock zone
 
 const fs = require("fs");
 const path = require("path");
+const { spawnSync } = require("child_process");
 function findRoot(dir) {
 	while (!fs.existsSync(path.join(dir, "server.js"))) {
 		const up = path.dirname(dir);
@@ -140,6 +141,26 @@ const R = M.createRunner("Money plan B: the month-end loops read the business mo
 		eq("differences", r.json && r.json.differences, []);
 		eq("what it compared", r.json && [r.json.currentMonth, r.json.trucks, r.json.processZone], [{ before: "2026-10", after: "2026-10" }, 1, "UTC"]);
 		eq("the copy is unchanged", M.fileHash(copy.db), before);
+	});
+
+	await R.test("B9 The after-deploy check also reads each investor's dashboard (GET /api/investor as the investor): one investor view compared, its months and figures the same at both times", async ({ eq, ok }) => {
+		const copy = M.saveCopy(world(OCT31_1900_ET));
+		const r = M.runScript("scripts/month-end-clock-report.js", ["--db", copy.db, "--values-json", copy.values, "--env-file", copy.envFile, "--day", "2026-10-31", "--json"]);
+		ok("the report ran", r.json, r.stderr.slice(0, 300));
+		eq("investor dashboards compared", r.json && r.json.investorViews, 1);
+		eq("exit code and differences", [r.code, r.json && r.json.differences], [0, []]);
+	});
+
+	await R.test("B10 On a machine outside UTC the check still compares on production's zone, UTC, and says which zone the machine runs in", async ({ eq }) => {
+		const copy = M.saveCopy(world(OCT31_1900_ET));
+		const script = path.join(M.ROOT, "scripts", "month-end-clock-report.js");
+		for (const zone of ["America/Los_Angeles", "Asia/Manila"]) {
+			const r = spawnSync(process.execPath, [script, "--db", copy.db, "--values-json", copy.values, "--env-file", copy.envFile, "--day", "2026-10-31", "--json"],
+				{ cwd: M.ROOT, encoding: "utf8", env: { ...process.env, TZ: zone }, timeout: 45000 });
+			let json = null;
+			try { json = JSON.parse(r.stdout); } catch { json = null; }
+			eq(`${zone}: [process zone, machine zone, exit code]`, json && [json.processZone, json.machineZone, r.status], ["UTC", zone, 0]);
+		}
 	});
 
 	R.finish();
