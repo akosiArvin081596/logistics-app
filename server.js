@@ -123,6 +123,8 @@ const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
 const loadHaul = require("./lib/load-haul");
+// A live ETA against the Drop-off Appointment, on the receiver's clock.
+const { etaOnTime, etaVerdict, DROPOFF_APPOINTMENT_COL_RE } = require("./lib/eta-on-time");
 const loadMilesLib = require("./lib/load-miles");
 const poiFuelStops = require("./lib/poi-fuel-stops");
 const rateconNormalize = require("./lib/ratecon-normalize");
@@ -15069,13 +15071,18 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				minutesRemaining = Math.round(etaSeconds / 60);
 				expectedAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
 			}
+			// The appointment is a wall clock at the receiver (lib/eta-on-time.js),
+			// never the server's UTC one. `arrivalLocal` is the ETA on that same
+			// clock with its zone, shown beside the badge; an unreadable cell shows
+			// no badge.
 			let onTime = null;
+			let arrivalLocal = null;
 			const schedRaw = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
 			if (schedRaw) {
-				const scheduled = new Date(schedRaw);
-				if (!isNaN(scheduled)) onTime = new Date(expectedAt) <= scheduled;
+				const verdict = etaVerdict(Date.parse(expectedAt), schedRaw, { destLng });
+				if (verdict) { onTime = verdict.onTime; arrivalLocal = verdict.arrivalLocal; }
 			}
-			eta = { distanceMiles, minutesRemaining, expectedAt, onTime };
+			eta = { distanceMiles, minutesRemaining, expectedAt, onTime, arrivalLocal };
 		}
 
 		// --- Route line ------------------------------------------------------
@@ -51264,7 +51271,10 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const originLngCol = headers.find((h) => /origin.*l(on|ng)|pickup.*l(on|ng)|shipper.*l(on|ng)/i.test(h));
 			const destLatCol = headers.find((h) => /dest.*lat|drop.*lat|receiver.*lat|delivery.*lat/i.test(h));
 			const destLngCol = headers.find((h) => /dest.*l(on|ng)|drop.*l(on|ng)|receiver.*l(on|ng)|delivery.*l(on|ng)/i.test(h));
-			const deliveryTimeCol = headers.find((h) => /delivery.*time|drop.*time|delivery.*date|drop.*date/i.test(h));
+			// The receiver's appointment ("Drop-off Appointment"). The old
+			// /delivery.*time|drop.*date/-style match found no Job Tracking column, so
+			// the on-time / delayed status never fired.
+			const deliveryTimeCol = findCol(headers, DROPOFF_APPOINTMENT_COL_RE);
 
 			if (loadIdCol) {
 				// Build load lookup, null-prototype, filed and read through
@@ -51444,14 +51454,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						loc.etaMinutes = Math.round(etaSeconds / 60);
 					}
 
+					// The same verdict as the customer tracker's badge: the appointment
+					// on the receiver's clock (lib/eta-on-time.js).
 					if (deliveryTimeCol && load[deliveryTimeCol]) {
-						try {
-							const scheduled = new Date(load[deliveryTimeCol]);
-							if (!isNaN(scheduled)) {
-								const arrival = new Date(Date.now() + etaSeconds * 1000);
-								loc.etaStatus = arrival <= scheduled ? "on-time" : "delayed";
-							}
-						} catch { /* ignore parse error */ }
+						const onTime = etaOnTime(Date.now() + etaSeconds * 1000, String(load[deliveryTimeCol]), { destLng: dLng });
+						if (onTime !== null) loc.etaStatus = onTime ? "on-time" : "delayed";
 					}
 				}));
 

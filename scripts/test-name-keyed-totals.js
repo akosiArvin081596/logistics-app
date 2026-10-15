@@ -451,6 +451,9 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 			/!1:1$/.test(range) ? [[...HEADERS]] : [[...HEADERS], ...rows.map((r) => HEADERS.map((h) => r[h] || ""))] } }) } } }),
 		SPREADSHEET_ID: "test-sheet",
 		getRoute: async () => null,
+		// GET /api/locations/latest judges each ETA against the Drop-off Appointment.
+		etaOnTime: require("../lib/eta-on-time").etaOnTime,
+		DROPOFF_APPOINTMENT_COL_RE: require("../lib/eta-on-time").DROPOFF_APPOINTMENT_COL_RE,
 		duplicateReceiptGroups: () => ({ groups: [], summary: { groups: 0 } }),
 		fuelReconciliationSnapshot: () => null,
 		fuelTankCalibrationWire: () => null,

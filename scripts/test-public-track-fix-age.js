@@ -32,6 +32,7 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 const { closure } = require("./lib/server-lift");
+const appRequire = require("module").createRequire(path.join(ROOT, "server.js"));
 
 let Database;
 try {
@@ -86,7 +87,8 @@ function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
 		findTruckForDriverStamp: () => ({ routemate_vehicle_id: "V-1", unit_number: "101" }),
 		computeStatusPhases: () => [], geolib, trackPublicLimiter: (req, res, next) => next(),
 	};
-	new Function(...PROVIDED, "require", lifted.text)(...PROVIDED.map((k) => deps[k]), require);
+	// The lifted code's own require()s ("./lib/…") resolve from server.js's folder.
+	new Function(...PROVIDED, "require", lifted.text)(...PROVIDED.map((k) => deps[k]), appRequire);
 	const handler = routes["/api/public/track/:loadId"];
 	return {
 		routeCalls, fixMs,

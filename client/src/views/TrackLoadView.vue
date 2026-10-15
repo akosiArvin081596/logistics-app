@@ -102,8 +102,12 @@
                 <div class="track-eta-sub">~{{ data.eta.distanceMiles }} mi &middot; {{ formatFriendlyDate(data.eta.expectedAt) }}</div>
                 <div v-if="lastSeen" class="track-eta-sub track-last-seen">{{ lastSeen }}</div>
               </div>
+              <!-- The verdict judges the ETA against the appointment on the
+                   receiver's clock; arrivalLocal is the ETA on that same clock,
+                   zone named, so the time shown is the one compared. -->
               <div v-if="data.eta.onTime !== null" class="track-eta-badge" :class="data.eta.onTime ? 'on-time' : 'delayed'">
                 {{ data.eta.onTime ? 'On time' : 'Delayed' }}
+                <span v-if="data.eta.arrivalLocal" class="track-eta-badge-time">ETA {{ data.eta.arrivalLocal }}</span>
               </div>
             </div>
           </template>
@@ -704,6 +708,13 @@ const lastUpdatedText = computed(() => {
   text-transform: uppercase;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.track-eta-badge-time {
+  display: block;
+  margin-top: 0.15rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 .track-eta-badge.on-time  { background: #dcfce7; color: #166534; }
 .track-eta-badge.delayed  { background: #fee2e2; color: #b91c1c; }
