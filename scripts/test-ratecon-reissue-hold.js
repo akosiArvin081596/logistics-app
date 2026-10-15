@@ -473,7 +473,7 @@ async function section2() {
 		const lift = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "require",
 			`"use strict";\n${lifted.text}\nreturn { fn: alertRateConReissueHold, sweep: ${hasSweep ? "sweepRateConReissueHolds" : "null"} };`)(
 			db, async (to, subject, html) => { order.push("email"); sends.push({ to, subject, html }); return send(to, subject, html); },
-			notify || { run: (...a) => { order.push("in-app"); notes.push(a); } }, { to: () => ({ emit: () => {} }) },
+			notify || { run: (...a) => { order.push("in-app"); notes.push(a); } }, { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) },
 			logs ? { ...quiet, log: capture, warn: capture } : quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } }, rootRequire,
 		);
 		return { fn: lift.fn, sweep: lift.sweep, sends, notes, order };
@@ -998,7 +998,7 @@ async function section2Sweep(make, flaky, ledger, pay) {
 		const fakeInterval = (fn, ms) => { const t = { fn, ms, unref() { t.unrefd = true; } }; timers.push(t); return t; };
 		const started = new Function("db", "sendEmail", "insertDispatchNotification", "io", "console", "process", "REPLICA", "setInterval", "require",
 			`"use strict";\n${lift.text}\nreturn startRateConReissueSweep();`)(
-			new Database(":memory:"), async () => true, { run: () => {} }, { to: () => ({ emit: () => {} }) }, quiet, { env }, REPLICA, fakeInterval, rootRequire);
+			new Database(":memory:"), async () => true, { run: () => {} }, { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) }, quiet, { env }, REPLICA, fakeInterval, rootRequire);
 		return { started, timers };
 	};
 	const notStarted = [];

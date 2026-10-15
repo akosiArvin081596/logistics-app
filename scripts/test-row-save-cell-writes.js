@@ -140,9 +140,18 @@ const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
 // The load-id comparison key server.js imports, the shipped module.
 const { normalizeLoadId } = require("../lib/ratecon-load");
 // The shipped helpers, with `overrides` swapping one source for a mutant.
+// The broker contact value rule the reader and both saves apply: the shipped
+// module and kill switch, handed to the routes with the helpers.
+const BROKER_CONTACT_SRC = [
+	extractConst("const brokerContact = "),
+	extractConst("const BROKER_CONTACT_VALUE_REDACTION_ENABLED = "),
+].join("\n");
+const libRequire = (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, "..", p) : p);
 function buildHelpers(overrides = {}) {
 	const s = { ...HELPER_SRC, ...overrides };
-	return new Function("normalizeLoadId", `"use strict";\n${CONSTS}\n${HELPERS.map((n) => s[n]).join("\n")}\nreturn { ${HELPERS.join(", ")} };`)(normalizeLoadId);
+	return new Function("normalizeLoadId", "require",
+		`"use strict";\n${CONSTS}\n${BROKER_CONTACT_SRC}\n${HELPERS.map((n) => s[n]).join("\n")}\n` +
+		`return { ${HELPERS.join(", ")}, BROKER_WITHHELD_RE, brokerContact, BROKER_CONTACT_VALUE_REDACTION_ENABLED };`)(normalizeLoadId, libRequire);
 }
 const H = buildHelpers();
 
