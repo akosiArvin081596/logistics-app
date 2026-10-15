@@ -14,7 +14,7 @@
           Needs Review ({{ needsReviewCount }})
         </button>
       </div>
-      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
+      <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" keep-size-choice @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
 
     <!-- Per-driver history + export — Super Admin only.
@@ -84,7 +84,7 @@
                 <span v-if="addrStreet(job, col) && addrCsz(job, col)" class="addr-csz">{{ addrCsz(job, col) }}</span>
               </div>
               <template v-else-if="col === loadIdCol">
-                <span v-if="needsReview(job)" :style="reviewBadgeStyle" title="Rate / address missing from the rate-con extract">⚠ Review</span>
+                <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
                 {{ cellValue(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
@@ -100,7 +100,7 @@
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
             <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
-            <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
+            <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
                  draft route answers anyone else 403. -->
             <button v-if="auth.isSuperAdmin" type="button" :disabled="drafting" :style="draftBtnStyle" @click="draftInvoice" title="Preview the invoice, POD, and rate-con and verify the recipient, then approve to save a Gmail draft for you to send.">{{ drafting ? 'Preparing…' : '✉ Draft Invoice Email' }}</button>
@@ -118,6 +118,15 @@
           <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
+          <!-- Why the load is flagged, and where it can be fixed: a completed load
+               isn't listed in Active Loads, so the fix is its Job Tracking row in
+               Data Manager (Super Admin only; that page refuses a Payment change in
+               a closed month). -->
+          <p v-if="selectedJob && needsReview(selectedJob)" class="review-note" role="note">
+            {{ reviewReasonText(selectedJob) }}
+            <template v-if="auth.isSuperAdmin">Fix it on the load's Job Tracking row in <RouterLink to="/data" class="review-note-link">Data Manager</RouterLink>. A closed month's Payment can't be changed.</template>
+            <template v-else>A Super Admin can fix it in Data Manager. A closed month's Payment can't be changed.</template>
+          </p>
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
             <div class="dash-section-title">Pickup &amp; Drop-off</div>
             <div class="dash-detail-grid">
@@ -243,7 +252,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { usePagination } from '../../composables/usePagination'
+import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
@@ -260,8 +269,9 @@ import LoadHaulSection from './LoadHaulSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
-import { needsReview, countNeedsReview } from '../../lib/loadReview'
+import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
+import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
@@ -420,12 +430,11 @@ const reviewBadgeStyle = {
   color: '#92400e',
   whiteSpace: 'nowrap',
 }
-// 25/page, not usePagination's default 5 — this tab is the "every load a driver
-// did" history, and 5 rows a page turns a year of work into endless paging.
-const { page, pageSize, totalPages, paginatedItems, goTo, setSize } = usePagination(sortedJobs, 25)
+// 25/page by default with a 10/25/50/100 choice remembered per user
+// (lib/loadboardPaging.js) — this tab is the "every load a driver did" history.
 // Any filter change re-slices the list, so a carried-over page number can land
-// on a blank page (filter while on page 4 → nothing). Snap back to page 1.
-watch([searchQuery, needsReviewOnly, driverFilter, fromDate, toDate], () => goTo(1))
+// on a blank page (filter while on page 4 → nothing): resetOn snaps back to page 1.
+const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(sortedJobs, { tab: 'completed', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly, driverFilter, fromDate, toDate] })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
@@ -606,7 +615,6 @@ const displayCols = computed(() => {
   out.push('Delivery Date') // actual delivery date/time as the last column (replaces the old Assigned Date)
   return out
 })
-function parseJsonCell(r) { if (!r || typeof r !== 'string' || r[0] !== '{') return null; try { return JSON.parse(r) } catch { return null } }
 // Delivery date/time. The stored value is a bare wall clock, so fmtSheetMoment
 // prints it WITHOUT conversion — the same basis as recordedDay() above, so the
 // date in this column can never disagree with the date the row filters,
@@ -630,7 +638,6 @@ const fmtUploaded = (t) => fmtTimestamp(t)
 function cellValue(j, c) { if (c === 'Pickup') return j._pickupLocation || '\u2014'; if (c === 'Drop-off') return j._dropLocation || '\u2014'; if (c === 'Delivery Date') return fmtDeliveryDate(completionCol.value ? j[completionCol.value] : ''); const v = j[c] || ''; const p = parseJsonCell(v); return p ? (p.Name || p.name || Object.values(p).filter(Boolean).join(' \u2022 ')) : v }
 function addrStreet(j, c) { return c === 'Pickup' ? j._pickupStreet : j._dropStreet }
 function addrCsz(j, c) { return c === 'Pickup' ? j._pickupLocation : j._dropLocation }
-function detailValue(j, c) { const v = j[c] || ''; const p = parseJsonCell(v); return p ? Object.entries(p).filter(([,x]) => x).map(([k,x]) => `${k}: ${x}`).join(', ') : v }
 const sectionPatterns = [
   { title: 'Load Information', test: /load|job|id|status|driver|truck|trailer|equipment|type|commodity|weight|miles|details/i, wide: /details|commodity/i },
   { title: 'Route', test: /origin|pickup|shipper|dest|drop|receiver|delivery|consignee|city|state|zip|address|location/i, wide: /address/i },
@@ -736,7 +743,7 @@ async function draftInvoice() {
     // A server still on the pre-relaxation build answers 422 here. Say what to do
     // instead of echoing "Invoice total unknown", which reads as a dead end.
     const msg = e && e.code === 'INVOICE_TOTAL_UNKNOWN'
-      ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on the load (Active Loads → Edit), then try again.'
+      ? 'No invoice total could be derived — this load has no rate on its rate-con and no Payment in Job Tracking. Add the Payment on this load in Data Manager (Job Tracking), then try again.'
       : (e && e.message) || 'Failed to prepare the invoice preview.'
     draftResult.value = { tone: 'error', msg }
   } finally {
@@ -802,6 +809,19 @@ const detailSections = computed(() => {
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
 .addr-csz { font-size: 0.92em; color: #64748b; }
+/* Needs Review: why, and where to fix it (top of the load detail). */
+.review-note {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.review-note-link { color: #92400e; font-weight: 600; text-decoration: underline; }
+.review-note-link:focus-visible { outline: 2px solid #f59e0b; outline-offset: 1px; border-radius: 2px; }
 /* Per-document delete. Muted until hover so it never competes with View, but a
    28px hit box so it stays tappable in the same dialog on a phone. */
 .doc-del {
