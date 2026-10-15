@@ -466,6 +466,10 @@ function cli(args, env = {}) {
 			["May 31, Jun 5", "2026-06-05", true],
 			["6/1 and 6/5", "2026-06-05", true],
 			["6/1,6/5", "2026-06-05", true],
+			["September 1", "2026-09-01", true],
+			["December 12, 2026", "2026-12-12", true],
+			["6/1/27", "2026-06-01", false],
+			["2026/06/01", "2026-06-01", false],
 		];
 		for (const [text, day, want] of cases) check(`§9 namesDay(${JSON.stringify(text)}, ${day}) is ${want}`, fix.namesDay(text, day) === want);
 
