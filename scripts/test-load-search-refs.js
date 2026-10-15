@@ -105,6 +105,11 @@ check("a value too short or without a digit is dropped; the list stops at the ne
 	pairs(refs.labelledRefs("PU#: 123; ABCD; 41000018, XID: 200000046")), ["PU #=41000018", "XID=200000046"]);
 check("a date or time after APPT is not a value",
 	refs.labelledRefs("APPT: 10/15/2030 08:00, APPT: 2030-10-15"), []);
+check("a time or time range after APPT / Appointment is not a value (review L2)",
+	[refs.labelledRefs("APPT: 0800-1400"), refs.labelledRefs("APPT# 0800"), refs.labelledRefs("Appointment#: 2359; 0730-1500"), refs.labelledRefs("APPT: 0730 - 1500")],
+	[[], [], [], []]);
+check("...while an appointment number and a 4-digit value after another label are kept",
+	pairs(refs.labelledRefs("APPT: 20100004, APPT: 2460, PU#: 0800")), ["APPT #=20100004", "APPT #=2460", "PU #=0800"]);
 check("a value longer than 40 characters is dropped, not cut",
 	refs.labelledRefs(`PO#: ${"1".repeat(41)}`), []);
 check("blank, null and non-string cells give nothing",
@@ -127,6 +132,11 @@ check("Documents: a BOL number is indexed as BOL #", pairs(refs.documentRefs("61
 check("Documents: a 'BOL#' prefix is not part of the value", pairs(refs.documentRefs("BOL# 61000002")), ["BOL #=61000002"]);
 check("Documents: a date or a word gives nothing",
 	[refs.documentRefs("9/15"), refs.documentRefs("9/15/2030"), refs.documentRefs("POD"), refs.documentRefs("Received")], [[], [], [], []]);
+check("Documents: a date with a month name gives up no year (review L1)",
+	[refs.documentRefs("15 Sep 2030 POD"), refs.documentRefs("Sep 15, 2030"), refs.documentRefs("1999")], [[], [], []]);
+check("Documents: a BOL beside such a date is still indexed", pairs(refs.documentRefs("61000003 15 Sep 2030")), ["BOL #=61000003"]);
+check("draft values: only all-digit tokens (review L3)",
+	[refs.draftValues("ADV700 7000001"), refs.draftValues("PO-AB123 2700031"), refs.draftValues("SO7000001")], [["7000001"], ["2700031"], []]);
 check("order number '7000001-$700 ADV' gives 7000001 only", refs.draftValues("7000001-$700 ADV"), ["7000001"]);
 check("order number '7000001  -' gives 7000001 only", refs.draftValues("7000001  -"), ["7000001"]);
 check("order number '$1,500 ADV' gives nothing", refs.draftValues("$1,500 ADV"), []);
