@@ -847,5 +847,23 @@ ok('§3 the PDF area never scrolls itself: the page is moved by transform inside
 ok('§3 the pinch listener may cancel (touchmove not passive)', /addEventListener\('touchmove', onTouchMove, \{ passive: false \}\)/.test(VIEWER))
 ok('§3 the template has no link out of the viewer', VIEWER.length > 0 && !/Open PDF|<a\b|:href=/.test(templateOf(VIEWER)))
 
+// Phone width: the load dialog's body keeps its 1.25rem padding (it belongs to
+// the dialog). On a screen up to 480 px the rate con section lets its viewer
+// bleed 1rem into it on each side (390 px: ~302 -> ~334 px), the section title
+// staying in line with the other sections; the CSS full-screen fallback
+// (position: fixed, inset 0) takes no margin.
+{
+  const SECTION = read('client', 'src', 'components', 'dashboard', 'RateConPdfSection.vue')
+  const ACTIVE_TAB = read('client', 'src', 'components', 'dashboard', 'ActiveLoadsTab.vue')
+  const COMPLETED_TAB = read('client', 'src', 'components', 'dashboard', 'CompletedLoadsTab.vue')
+  const narrow = /@media \(max-width: 480px\) \{([\s\S]*?)\n\}/.exec(SECTION)
+  const rules = narrow ? narrow[1] : ''
+  ok('§3 phone: the section hands its viewer the rc-viewer class', /<RateConViewer\b[^>]*class="rc-viewer"/.test(SECTION))
+  ok('§3 phone: up to 480 px the viewer bleeds 1rem into the dialog padding on each side', /\.rc-section \.rc-viewer \{[^}]*margin-left: -1rem;[^}]*margin-right: -1rem;[^}]*max-width: none;/.test(rules))
+  ok('§3 phone: the CSS full-screen fallback takes no margin', /\.rc-section \.rc-viewer\.rcv-expanded \{ margin: 0; \}/.test(rules))
+  ok('§3 phone: the section title is not moved', !/dash-section-title/.test(rules))
+  ok('§3 the load dialogs keep their own body padding', /<div style="padding:1\.25rem;overflow-y:auto;flex:1;">/.test(ACTIVE_TAB) && /<div style="padding:1\.25rem;overflow-y:auto;flex:1;">/.test(COMPLETED_TAB))
+}
+
 console.log(`\n${pass} passed, ${failures.length} failed`)
 if (failures.length) process.exit(1)
