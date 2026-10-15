@@ -146,7 +146,9 @@ const SHARED_CONSTS = [
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 ];
-const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines"];
+const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines",
+	// The batch caches the week's Personal receipt images first (none here).
+	"warmPersonalReceiptsForWeek"];
 
 // Build the lifted world against one database. `src` defaults to the shipping
 // server.js; §6 passes mutated copies. `overrides` replaces a lifted binding
