@@ -247,5 +247,21 @@ const R = W.createRunner("B12 A: tripDaysForLoad() and createTripDayResolver() (
 		ok("a flag says the trip was capped, and it is not a late tap", W.anyFlag(t.flags) && !W.hasFlag(t.flags, "lateTap"), JSON.stringify(t.flags));
 	});
 
+	await R.test("A16 (review L2) A multi-stop load: At Shipper Mon, At Receiver Mon (first stop) and Wed (last stop), Delivered Wed: Mon to Wed, not cut at the first stop", ({ eq, ok }) => {
+		const t = trip([ev("At Shipper", "2026-09-28 13:00:00"), ev("At Receiver", "2026-09-28 20:00:00"), ev("In Transit", "2026-09-29 13:00:00"),
+			ev("At Receiver", "2026-09-30 15:00:00"), ev("Delivered", "2026-09-30 17:00:00")]);
+		eq("days", sorted(t.days), ["2026-09-28", "2026-09-29", "2026-09-30"]);
+		ok("not a late tap", !W.hasFlag(t.flags, "lateTap"), JSON.stringify(t.flags));
+	});
+
+	await R.test("A17 (review L1) A load with no Assigned Date follows the rule only when its first trip day is FROM or later, so no month before FROM changes: a trip Fri 10/30 to Mon 11/2 with FROM=2026-11 is null (today's rule); one Sun 11/1 to Mon 11/2 pays its days", ({ eq }) => {
+		const straddle = [ev("At Shipper", "2026-10-30 13:00:00"), ev("Delivered", "2026-11-02 17:00:00")];
+		const inside = [ev("At Shipper", "2026-11-01 15:00:00"), ev("Delivered", "2026-11-02 17:00:00")];
+		const r = resolverOn([...rowsOf("a171", straddle), ...rowsOf("a172", inside)], { fromMonth: "2026-11" });
+		eq("straddling FROM, no Assigned Date: null", r.forLoad({ loadId: "A171", settleMonth: "" }), null);
+		eq("…with an Assigned Date in FROM it follows the rule", daysOf(r.forLoad({ loadId: "A171", settleMonth: "2026-11" })), ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"]);
+		eq("inside FROM, no Assigned Date: its days", daysOf(r.forLoad({ loadId: "A172", settleMonth: "" })), ["2026-11-01", "2026-11-02"]);
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

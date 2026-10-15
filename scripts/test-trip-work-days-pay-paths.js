@@ -471,17 +471,17 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			[...daysFrom("2026-10-24", "2026-10-30"), ...daysFrom("2026-11-07", "2026-11-13")], ["2026-10-30"]);
 	});
 
-	await R.test("B15 [Q8, 2026-10-14] Late days for a week whose invoice is Submitted (not approved): that invoice is updated in place and stays Submitted, its admin adjustment kept and printed; W40 carries none of them; W39 holds Thu and Fri", async ({ eq }) => {
+	await R.test("B15 [Q8, 2026-10-14] Late days for a week whose invoice is Submitted (not approved): that invoice is updated in place and stays Submitted, its admin adjustment (a deduction, which cannot be paying a missed day) kept and printed; W40 carries none of them; W39 holds Thu and Fri", async ({ eq }) => {
 		const D = "Cy Dunn";
 		const w = boundaryWorld(D);
 		const g39 = await W.generate(w, D, W39);
-		w.db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = '2026-10-03T00:00:00.000Z', adjustment = 25, adjustment_note = 'bonus', adjusted_by = 'super_admin', adjusted_at = '2026-10-03T01:00:00.000Z' WHERE id = ?").run(g39.invoice.id);
+		w.db.prepare("UPDATE invoices SET status = 'Submitted', submitted_at = '2026-10-03T00:00:00.000Z', adjustment = -25, adjustment_note = 'advance', adjusted_by = 'super_admin', adjusted_at = '2026-10-03T01:00:00.000Z' WHERE id = ?").run(g39.invoice.id);
 		deliverBoundaryLoad(w);
 		const g40 = await W.generate(w, D, W40);
 		const row = invoiceRow(w, g39.invoice.id);
 		eq("W39 still Submitted, adjustment kept, Thu and Fri added", [row.status, row.adjustment, row.adjustment_note, row.total_earnings, W.dayList(storedGrid(w, row.id, W39))],
-			["Submitted", 25, "bonus", 1040, ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]]);
-		eq("the redrawn W39 prints the adjustment and the new total", [JSON.parse(row.render_data).adjustment, JSON.parse(row.render_data).totalDue], [25, 1040]);
+			["Submitted", -25, "advance", 1040, ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]]);
+		eq("the redrawn W39 prints the adjustment and the new total", [JSON.parse(row.render_data).adjustment, JSON.parse(row.render_data).totalDue], [-25, 1040]);
 		eq("W40 carries none of them", [g40.status, g40.data && g40.data.earlierDays, W.dayList(W.gridDays(g40.data, W40))], [200, undefined, ["2026-10-03", "2026-10-04", "2026-10-05"]]);
 		eq("Thu and Fri are held by W39", claimRows(w).filter(([d]) => d === "2026-10-01" || d === "2026-10-02").map(([, id]) => id), [row.id, row.id]);
 	});
@@ -536,6 +536,43 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("the line is still on W39, not voided", w.db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?").get(line), { invoice_id: row.id, voided_at: "" });
 		eq("W39: four days, pay $1,040, the Personal line printed, $50", [W.dayList(storedGrid(w, row.id, W39)).length, row.total_earnings, data.personalTotal, Array.isArray(data.personalLines) && data.personalLines.length > 0, row.personal_total],
 			[4, 1040, 50, true, 50]);
+	});
+
+	await R.test("B19 (review M1) A late day that may already be paid is not carried, and is named in warnings: a manual invoice with a line dated Thu 10/1 (as scripts/create-correction-invoice-draft.js writes) keeps Thu off W39 while Fri goes on; a manual invoice with an undated line covers every day of its period; a positive adjustment on W39 keeps both days off it and makes no correction", async ({ eq, ok }) => {
+		const warned = (g, day) => (g.warnings || []).some((x) => String(x).includes(day));
+		const manualFor = (w, D, lines, period) => W.route(w, "POST /api/invoices/manual", { body: { payee: D, periodStart: period[0], periodEnd: period[1], lineItems: lines } });
+		{
+			const D = "Gus Holt";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			const m = await manualFor(w, D, [{ date: "2026-10-01", description: "Missed day, Thursday", amount: 260 }], ["2026-10-01", "2026-10-01"]);
+			eq("dated line: the manual invoice is made", m.status, 200);
+			deliverBoundaryLoad(w);
+			const g40 = await W.generate(w, D, W40);
+			eq("dated line: W39 gains Fri only", W.dayList(storedGrid(w, g39.invoice.id, W39)), ["2026-09-28", "2026-09-29", "2026-10-02"]);
+			ok("dated line: Thu named in warnings, with the manual invoice", warned(g40, "2026-10-01") && (g40.warnings || []).some((x) => x.includes(m.body.invoice.invoice_number)), JSON.stringify(g40.warnings));
+		}
+		{
+			const D = "Hal Iver";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			const m = await manualFor(w, D, [{ description: "Catch-up pay", amount: 520 }], ["2026-10-01", "2026-10-02"]);
+			eq("undated line: the manual invoice is made", m.status, 200);
+			deliverBoundaryLoad(w);
+			const g40 = await W.generate(w, D, W40);
+			eq("undated line: W39 gains neither day", W.dayList(storedGrid(w, g39.invoice.id, W39)), ["2026-09-28", "2026-09-29"]);
+			ok("undated line: both named in warnings", warned(g40, "2026-10-01") && warned(g40, "2026-10-02"), JSON.stringify(g40.warnings));
+		}
+		{
+			const D = "Ike Jory";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			w.db.prepare("UPDATE invoices SET adjustment = 260, adjustment_note = 'missed day', adjusted_by = 'super_admin', adjusted_at = '2026-10-03T01:00:00.000Z' WHERE id = ?").run(g39.invoice.id);
+			deliverBoundaryLoad(w);
+			const g40 = await W.generate(w, D, W40);
+			eq("positive adjustment: W39 unchanged, no correction", [W.dayList(storedGrid(w, g39.invoice.id, W39)), corrections(w).length], [["2026-09-28", "2026-09-29"], 0]);
+			ok("positive adjustment: both named in warnings, with the adjustment", warned(g40, "2026-10-01") && warned(g40, "2026-10-02") && (g40.warnings || []).some((x) => /adjustment/.test(x)), JSON.stringify(g40.warnings));
+		}
 	});
 
 	R.finish();

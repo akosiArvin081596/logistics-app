@@ -15,22 +15,31 @@
 //   - investorMonths: per investor and month, the payable now and with the rule
 //     (the loss carried forward included), and driver pay;
 //   - perInvoice: each live weekly invoice whose week touches --from..--to, the
-//     days it pays, the days the rule pays that week and the $ difference;
-//   - lateDays: days the rule pays that no invoice holds yet, by week (from the
-//     rule's first invoice week on, they go on that week's invoice while it is
+//     days it pays, the days the rule pays that week, the $ of the days it would
+//     add, and the days the rule would not pay (kept: an issued invoice is never
+//     reduced);
+//   - lateDays: days of earlier weeks the rule pays that no invoice holds yet
+//     (from the late days' floor on, they go on that week's invoice while it is
 //     not approved, else on a correction invoice for that week);
-//   - refusedDays: days worked by the trip timestamps that no invoice will carry,
-//     with the reason (a load settling before FROM, a closed month, ...);
+//   - refusedDays: days of --from..--to worked by the trip timestamps that no
+//     invoice will carry, with the reason and amount (before the floor: paid by
+//     the ledger, on no invoice; a load settling before FROM; a closed month; a
+//     manual invoice or an adjustment that may already pay it);
 //   - backfillRows / backfillConflicts: what scripts/backfill-invoice-paid-days.js
 //     would write first;
-//   - closedMonthsUnchanged: every closed month identical with and without the
-//     rule. If not, the run exits 1 after printing.
+//   - closedMonthsUnchanged and monthsBeforeFromUnchanged: every closed month,
+//     and every month before FROM, identical with and without the rule. If not,
+//     the run exits 1 after printing.
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/work-days-dry-run.js --from=YYYY-MM [--to=YYYY-MM] --db=app.db --sheet-id=<id> [--key=service-account-key.json] [--names] [--json]
 //   --from=YYYY-MM         the TRIP_WORK_DAYS_FROM to try. Refused unless it is
 //                          after the latest closed month
 //   --to=YYYY-MM           the last month the lists cover (default --from)
+//   --floor=YYYY-MM-DD     a day in the week the first rule invoice is expected
+//                          for (the switch-on week); default this business
+//                          week. Ignored once the rule has invoiced (the stored
+//                          floor applies)
 //   --sheet-id=env         the SPREADSHEET_ID the .env sets (refused when none)
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
 //   --env-file=<file>      with a copy of the database under the temp directory only
@@ -72,9 +81,10 @@ function latestClosedOf(dbFile) {
 function printText(r) {
 	const s = r.summary;
 	const lines = [];
-	lines.push(`Trip work-day dry run: TRIP_WORK_DAYS_FROM=${r.from}, lists ${r.from} to ${r.to} (latest closed month: ${r.latestClosedMonth || "none"}). Nothing was written.`);
+	lines.push(`Trip work-day dry run: TRIP_WORK_DAYS_FROM=${r.from}, lists ${r.from} to ${r.to} (latest closed month: ${r.latestClosedMonth || "none"}; late days' floor ${r.lateDaysFloor}). Nothing was written.`);
 	lines.push(`Ledger driver-days: +${s.daysAdded} / -${s.daysRemoved}; driver pay ${usd(s.driverPayChange)}; investor payable ${usd(s.investorPayableChange)}.`);
-	lines.push(`Invoices whose week the rule pays differently: ${s.invoicesChanged} (${usd(s.invoiceAmountChange)}). Late days: ${s.lateDays} (${usd(s.lateDaysAmount)}). Refused days: ${s.refusedDays}.`);
+	lines.push(`Invoices whose week the rule pays differently: ${s.invoicesChanged} (days the rule adds: ${usd(s.invoiceAmountAdded)}; ${s.invoiceDaysDroppedKept} day(s) it would not pay stay as issued).`);
+	lines.push(`Late days: ${s.lateDays} (${usd(s.lateDaysAmount)}; overlapping the invoices' added days). Refused days: ${s.refusedDays} (${usd(s.refusedAmount)}).`);
 	lines.push(`Backfill: ${s.backfillRows} row(s), ${s.backfillConflicts} conflict(s).`);
 	lines.push("", "Driver-days (scope, driver, month, day, change, load, trip start, flags):");
 	for (const d of r.perDay) lines.push(`  owner ${d.ownerId}  ${d.driver}  ${d.month}  ${d.day}  ${d.change} ${usd(d.amount)}  ${d.added ? "added day" : `load ${d.loadId}`}  ${d.tripStartStatus ? `${d.tripStartStatus} ${d.tripStart}` : "(no trip)"}  ${d.flags.join(",")}`);
@@ -82,16 +92,16 @@ function printText(r) {
 	for (const m of r.driverMonths) lines.push(`  owner ${m.ownerId}  ${m.driver}  ${m.month}  ${m.daysChange > 0 ? "+" : ""}${m.daysChange} day(s)  ${usd(m.driverPayChange)}`);
 	lines.push("", "Investor payable by month:");
 	for (const i of r.investorMonths) lines.push(`  owner ${i.ownerId}${i.investor ? ` (${i.investor})` : ""}  ${i.period}  ${usd(i.current)} -> ${usd(i.withRule)}  (${usd(i.delta)}; driver pay ${usd(i.driverPayChange)})`);
-	lines.push("", "Invoices (number, status, week, days added / dropped, $):");
-	for (const i of r.perInvoice) lines.push(`  ${i.invoiceNumber}  ${i.status}  ${i.weekStart}  ${i.driver}  +[${i.addedDays.join(", ")}] -[${i.droppedDays.join(", ")}]  ${usd(i.amountChange)}`);
-	lines.push("", "Late days (driver, week, day, loads, $):");
-	for (const d of r.lateDays) lines.push(`  ${d.driver}  ${d.weekStart}  ${d.day}  ${d.loadIds.join(", ")}  ${usd(d.amount)}`);
-	lines.push("", "Refused days (driver, day, load, reason):");
-	for (const d of r.refusedDays) lines.push(`  ${d.driver}  ${d.day}  ${d.loadId}  ${d.reason}`);
+	lines.push("", "Invoices (number, status, week, days the rule adds, $; days it would not pay, kept; once the rule is on):");
+	for (const i of r.perInvoice) lines.push(`  ${i.invoiceNumber}  ${i.status}  ${i.weekStart}  ${i.driver}  +[${i.addedDays.join(", ")}] ${usd(i.amountAdded)}  kept [${i.droppedDays.join(", ")}]  ${i.afterSwitchOn}`);
+	lines.push("", "Late days (driver, week, day, loads, $, invoice):");
+	for (const d of r.lateDays) lines.push(`  ${d.driver}  ${d.weekStart}  ${d.day}  ${d.loadIds.join(", ")}  ${usd(d.amount)}  ${d.invoice || "(no invoice for that week)"}`);
+	lines.push("", "Refused days (driver, day, load, $, reason):");
+	for (const d of r.refusedDays) lines.push(`  ${d.driver}  ${d.day}  ${d.loadId}  ${usd(d.amount)}  ${d.reason}`);
 	lines.push("", "Backfill rows (day, invoice, status, driver):");
 	for (const b of r.backfillRows) lines.push(`  ${b.day}  ${b.invoiceNumber}  ${b.status}  ${b.driver}`);
 	for (const c of r.backfillConflicts) lines.push(`  CONFLICT ${c.day}  ${c.invoiceNumber} (held by ${c.heldBy})  ${c.driver}`);
-	lines.push("", `Closed months unchanged: ${r.closedMonthsUnchanged ? "yes" : "NO"}`);
+	lines.push("", `Closed months unchanged: ${r.closedMonthsUnchanged ? "yes" : "NO"}. Months before FROM unchanged: ${r.monthsBeforeFromUnchanged ? "yes" : "NO"}.`);
 	for (const p of r.problems) lines.push(`PROBLEM: owner ${p.ownerId}: ${p.issue}`);
 	console.log(lines.join("\n"));
 }
@@ -122,11 +132,12 @@ async function main() {
 		extraRoots: ["workDaysDryRun"],
 	});
 	try {
-		const result = await world.api.workDaysDryRun({ from, to, names: args.names === true });
+		const floor = typeof args.floor === "string" ? args.floor.trim() : "";
+		const result = await world.api.workDaysDryRun({ from, to, floor, names: args.names === true });
 		if (result.refused) refuse(result.reason);
 		if (args.json === true) console.log(JSON.stringify(result, null, 1));
 		else printText(result);
-		if (!result.closedMonthsUnchanged) process.exitCode = 1;
+		if (!result.closedMonthsUnchanged || !result.monthsBeforeFromUnchanged) process.exitCode = 1;
 	} finally {
 		world.db.close();
 	}

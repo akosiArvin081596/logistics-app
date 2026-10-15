@@ -135,5 +135,20 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		}
 	});
 
+	await R.test("F5 (review M2, L4, L1) The late days' floor is this business week's Saturday unless given (floor=2026-09-28 gives 2026-09-26); refused days carry their amount; Ann's W40 shows $520 of added days and what happens once the rule is on (added in place: a Draft at or after the floor), dropped days apart; no month before FROM changes", async ({ eq, ok }) => {
+		const o = await get();
+		requireBoth(ok, o);
+		const body = o.route.body || {};
+		eq("default floor: the Saturday of the clock's week (Fri 10/9)", body.lateDaysFloor, "2026-10-03");
+		const given = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-09-28" } });
+		eq("floor=2026-09-28: its week's Saturday", given.body && given.body.lateDaysFloor, "2026-09-26");
+		ok("every refused day carries a number amount", Array.isArray(body.refusedDays) && body.refusedDays.length > 0 && body.refusedDays.every((d) => typeof d.amount === "number"), JSON.stringify(body.refusedDays).slice(0, 200));
+		const number = o.f.ann40.invoice && o.f.ann40.invoice.invoice_number;
+		const inv = (body.perInvoice || []).find((i) => i.invoiceNumber === number);
+		eq("Ann's W40: added days, their amount, nothing dropped, added in place", inv && [inv.addedDays, inv.amountAdded, inv.droppedDays, inv.afterSwitchOn],
+			[["2026-10-06", "2026-10-07"], 520, [], "added to this invoice in place"]);
+		eq("months before FROM unchanged", body.monthsBeforeFromUnchanged, true);
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
