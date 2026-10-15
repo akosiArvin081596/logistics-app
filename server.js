@@ -18817,13 +18817,12 @@ async function workDaysDryRun({ from, to = "", names = false, floor = "" }) {
 		for (const r of found.refused) {
 			if (r.day < rangeStart || r.day > rangeEnd) continue;
 			// A day before the floor in a week with no invoice yet: that week's own
-			// invoice (made before the switch-on, by the old rule) will still pay
-			// the days the old rule pays, so it is not all a gap.
+			// invoice will still pay its days, so it is not part of the floor gap.
 			const notYet = r.kind === "beforeFloor" && !liveWeeklyInvoicesForDriverWeek(display, getWeekRange(r.day).weekStart).length;
 			refusedDays.push({
 				driver: nm, day: r.day, loadId: r.loadId, amount: rateOf(r.day),
 				kind: notYet ? "beforeFloorWeekNotInvoiced" : r.kind,
-				reason: notYet ? `${r.reason}; that week has no invoice yet, and its own invoice will pay what the old rule pays` : r.reason,
+				reason: notYet ? `${r.reason}; that week has no invoice yet, and its own invoice will pay its days` : r.reason,
 			});
 		}
 	}

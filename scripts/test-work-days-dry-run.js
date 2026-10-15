@@ -156,5 +156,22 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		eq("a floor that is no calendar day: 400", bad.status, 400);
 	});
 
+	await R.test("F6 (round-three review) A day before a later floor in a week with no invoice yet is its own kind (beforeFloorWeekNotInvoiced): that week's own invoice will pay its days, so the floor gap (beforeFloor) leaves it out", async ({ eq }) => {
+		const D = "Cleo Dyer";
+		const w = W.startWorld({
+			env: ENV,
+			drivers: [{ name: D }],
+			rows: [loadRow({ id: "F601", driver: D, pickup: "2026-10-13 8:00", dropoff: "2026-10-14 18:00", assigned: "2026-10-13", done: "2026-10-14", truck: "T1" })],
+			status: [s("F601", "At Shipper", "2026-10-13 13:00:00"), s("F601", "Delivered", "2026-10-14 20:00:00")],
+			now: etMs("2026-10-16 12:00"),
+		});
+		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-10-19" } });
+		eq("status", r.status, 200);
+		eq("10/13 and 10/14, this week, no invoice yet: their own kind", ((r.body && r.body.refusedDays) || []).map((d) => [d.day, d.kind]),
+			[["2026-10-13", "beforeFloorWeekNotInvoiced"], ["2026-10-14", "beforeFloorWeekNotInvoiced"]]);
+		eq("…and not in the floor gap", r.body && [r.body.summary.refusedByKind.beforeFloor, r.body.summary.refusedByKind.beforeFloorWeekNotInvoiced],
+			[undefined, { days: 2, amount: 520 }]);
+	});
+
 	R.finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

@@ -579,7 +579,8 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		const run = async (D, prepare) => {
 			const w = boundaryWorld(D);
 			const g39 = await W.generate(w, D, W39);
-			await prepare(w, g39);
+			const made = await prepare(w, g39);
+			if (made && "status" in made) eq(`${D}: the manual invoice is made`, made.status, 200);
 			deliverBoundaryLoad(w);
 			const g40 = await W.generate(w, D, W40);
 			return { w, g39, g40, grid: W.dayList(storedGrid(w, g39.invoice.id, W39)) };
@@ -603,6 +604,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			const r = await run("Mo Nash", async (w, g39) => {
 				const m = await manualFor(w, "Mo Nash", { lineItems: [{ date: "2026-10-01", description: `Missed day (${g39.invoice.invoice_number})`, amount: 260 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
 				w.db.prepare("UPDATE invoices SET status = 'Rejected' WHERE id = ?").run(m.body.invoice.id);
+				return m;
 			});
 			eq("a Rejected manual invoice does not block", r.grid, BOTH);
 		}
@@ -610,6 +612,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			const r = await run("Ned Oaks", async (w, g39) => {
 				const m = await manualFor(w, "Ned Oaks", { lineItems: [{ date: "2026-10-01", description: `Missed day (${g39.invoice.invoice_number})`, amount: 260 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
 				w.db.prepare("UPDATE invoices SET deleted_at = '2026-10-05T00:00:00.000Z', deleted_by = 'super_admin' WHERE id = ?").run(m.body.invoice.id);
+				return m;
 			});
 			eq("a soft-deleted manual invoice does not block", r.grid, BOTH);
 		}
@@ -617,6 +620,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			const r = await run("Oli Pratt", async (w, g39) => {
 				const m = await manualFor(w, "Oli Pratt", { lineItems: [{ date: "2026-10-01", description: `Personal line (${g39.invoice.invoice_number})`, amount: 20 }], periodStart: "2026-10-01", periodEnd: "2026-10-01" });
 				w.db.prepare("UPDATE invoices SET is_correction = 1 WHERE id = ?").run(m.body.invoice.id);
+				return m;
 			});
 			eq("a Personal correction does not block", r.grid, BOTH);
 		}
@@ -632,7 +636,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			 VALUES (?, ?, ?, ?, 1, 0, 260, 0, 'Draft', ?, '[]', '[]', ?, 1, 'super_admin')`
 		).run(`INV-M-T${Math.floor(Math.random() * 1e9)}`, norm(D), period[0], period[1], `m${Math.floor(Math.random() * 1e9)}.pdf`, JSON.stringify({ __templateName: "service_invoice_manual", lineItems: lines, notes }));
 		const claimsFor = (w) => claimRows(w).filter(([d]) => d === "2026-10-01" || d === "2026-10-02");
-		const refusedIn = (g) => (g.warnings || []).some((x) => /may already|Nothing was saved/.test(x));
+		const refusedIn = (g) => (g.warnings || []).some((x) => /may already (be paid|pay them)/.test(x));
 		{
 			const D = "Quinn Ray";
 			const w = boundaryWorld(D);
