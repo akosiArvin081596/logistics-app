@@ -48,10 +48,10 @@ const DRIVER_B = "Test Driver B";
 const OWNER_OP = "Test Owner Op";
 
 const ROUTE_HEADS = {
-	mark: 'app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
-	undo: 'app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
-	reverse: 'app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
-	corrections: 'app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
+	mark: 'app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+	undo: 'app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+	reverse: 'app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+	corrections: 'app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
 	status: 'app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	bulk: 'app.put("/api/expenses/bulk-status", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	adjust: 'app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
@@ -66,7 +66,7 @@ const ROUTE_HEADS = {
 // { receipts: true }, so the phase 1 runners lift exactly what they did.
 const RECEIPT_ROUTE_HEADS = {
 	receipt: 'app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {',
-	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), (req, res) => {',
+	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {',
 	invoices: 'app.get("/api/invoices", requireAuth, (req, res) => {',
 };
 const RECEIPT_ROOTS = ["paymentReportColumns", "personalLinesForInvoices", "personalWaitingInPeriod", "warmPersonalReceiptsForWeek"];
@@ -83,7 +83,7 @@ const ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
-	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter"];
+	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE"];
 
 const lifted = new Map();
@@ -263,6 +263,7 @@ function buildPersonalWorld(opts = {}) {
 		sendEmail: async () => undefined,
 		fuelAnalyticsLimiter: (req, res, next) => next(),
 		personalReceiptLimiter: (req, res, next) => next(),
+		personalRouteLimiter: (req, res, next) => next(),
 	};
 	const { roots, code } = liftedCode(!!opts.receipts);
 	const body = [

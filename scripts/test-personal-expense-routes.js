@@ -234,5 +234,26 @@ const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
 		w.cleanup();
 	}
 
+	section("§10 every Personal route is rate limited, after its gate");
+	{
+		const heads = [
+			'app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+			'app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+			'app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+			'app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {',
+			'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {',
+			'app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {',
+		];
+		check("mark, undo, reverse, the correction, the waiting list: personalRouteLimiter; the receipt: personalReceiptLimiter",
+			heads.map((h) => SRC.split(`\n${h}\n`).length - 1), [1, 1, 1, 1, 1, 1]);
+		const limiter = (name) => {
+			const at = SRC.indexOf(`\nconst ${name} = rateLimit({`);
+			return at < 0 ? "" : SRC.slice(at, SRC.indexOf("\n});", at));
+		};
+		check("…each an express-rate-limit with a window and a cap, declared before its first route",
+			["personalRouteLimiter", "personalReceiptLimiter"].map((n) => [/windowMs: [\d* ]+,/.test(limiter(n)), /max: \d+,/.test(limiter(n)), SRC.indexOf(`\nconst ${n} = rateLimit(`) < SRC.indexOf(`, ${n}, `)]),
+			[[true, true, true], [true, true, true]]);
+	}
+
 	finish();
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

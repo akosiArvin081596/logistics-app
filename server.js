@@ -8457,9 +8457,20 @@ function invoiceStatusChangeEmail(invoice, newStatus, rejectionNote = "") {
 // request, so a process started while the build was missing (a deploy swaps
 // it in with two renames) serves the bundle files as soon as it is back.
 const clientDistPath = path.join(__dirname, "client", "dist");
+// Pages (index.html, or the replica's bannered copy) per client: a navigation
+// asks for one; the bundle files, API calls, uploads and sockets a page uses
+// are never counted.
+const pageLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	max: 300,
+	message: "Too many page requests. Try again in a minute.",
+	standardHeaders: true,
+	legacyHeaders: false,
+	skip: (req) => (req.method !== "GET" && req.method !== "HEAD") || /^\/(api|uploads|socket\.io|assets)(\/|$)/i.test(req.path),
+});
 // A replica answers every page with the "LOCAL COPY OF PRODUCTION" banner in
 // it, the login page included (lib/replica-mode.js), ahead of the static files.
-if (REPLICA) app.use(REPLICA.bannerMiddleware(clientDistPath));
+if (REPLICA) app.use(pageLimiter, REPLICA.bannerMiddleware(clientDistPath));
 app.use(express.static(clientDistPath));
 
 // ============================================================
@@ -24995,12 +25006,22 @@ function personalExpenseById(req) {
 	return Number.isInteger(id) && id > 0 ? db.prepare("SELECT * FROM expenses WHERE id = ?").get(id) || null : null;
 }
 
+// The Personal routes below (mark, undo, reverse, the correction invoice, the
+// waiting list), after their gate: each write redraws an invoice PDF, and a
+// Super Admin makes a handful of them at a time, never hundreds.
+const personalRouteLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 120,
+	message: { error: "Too many Personal receipt requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
 // POST /api/expenses/:id/personal { amount?, reason? } — mark all or part of a
 // receipt Personal. amount is dollars (absent = the whole receipt). A Pending
 // receipt in an open month is approved in the same write; a receipt in a
 // finalized month keeps its status and its month: its credit books to the open
 // month (in_place 0). 201 { personal }; the same mark again 200 alreadyMarked.
-app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		if (!PERSONAL_EXPENSE_DEDUCTIONS_ENABLED) {
 			return res.status(403).json({ error: "Marking receipts Personal is switched off on this server.", code: "PERSONAL_DISABLED" });
@@ -25074,7 +25095,7 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 // voided (the row stays), unlinked, and its invoice redrawn; a correction left
 // empty is soft-deleted. Otherwise 409, "use Reverse". The receipt keeps the
 // status the mark gave it.
-app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const expense = personalExpenseById(req);
 		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
@@ -25122,7 +25143,7 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 // the same placement rules; the original line stays on its invoice. Its cost
 // month is the line's own while that month is open, else the open month (a
 // credit row). After a reversal the receipt can be marked again.
-app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const expense = personalExpenseById(req);
 		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
@@ -25180,7 +25201,7 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 // creates (or adds to) the week's correction invoice from the lines flagged for
 // it. weekStart is the Saturday that starts the week. A week touching a
 // finalized month is refused for now (409 PERIOD_FINALIZED).
-app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const body = req.body || {};
 		const driver = typeof body.driver === "string" ? body.driver.trim() : "";
@@ -25231,7 +25252,7 @@ app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refus
 // (netCents()): the Expenses screen's list beside its Create button
 // (POST /api/invoices/personal-corrections). A line whose receipt names no
 // driver cannot have a correction and is not listed (its flag was audited).
-app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), (req, res) => {
+app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalRouteLimiter, (req, res) => {
 	try {
 		if (!personalLedgerPresent()) return res.json({ groups: [] });
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
@@ -64491,7 +64512,7 @@ app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOri
 // 503 page, a missing bundle reads as a 200 or as "being updated" to a
 // browser and to every check that asks for it. no-store, so no cache keeps
 // the 404 once the build that has the file is in place.
-app.get("*", (req, res) => {
+app.get("*", pageLimiter, (req, res) => {
 	if (req.path.startsWith("/assets/")) {
 		res.status(404).set("Cache-Control", "no-store").type("text").send("Not found");
 		return;
