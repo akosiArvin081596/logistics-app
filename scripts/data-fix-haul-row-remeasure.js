@@ -17,14 +17,25 @@
 // its values stay on record until the app replaces them, and the audit row holds
 // every column as it was.
 //
+// THE REPLAY IS THE PROOF. Before anything is written the load's pings are
+// replayed the way the app measures a closed-out load (its window, coordinates,
+// ping query and replay radius lifted from this checkout's server.js; the replay is
+// this checkout's lib/load-haul.js), and the stored figure is printed beside the
+// replayed one. A row the replay agrees with is refused: a correct final row is
+// never re-opened, so a wrong --load-id changes nothing. The replay leaves out the
+// app's deadhead floor (the end of the truck's previous load), so its deadhead leg
+// can read longer; the loaded leg, the pickup departure and the receiver arrival
+// are the app's own.
+//
 // Refused (exit 2, nothing written) when: this checkout lacks the fix (run it only
 // after that release is deployed: the old rules could measure the row wrong again
 // or refuse the new figure); the load is not on exactly one Job Tracking row; any
 // month the app books the load into is closed, or can't be told
 // (loadRowAccountingMonths() and periodWriteLocked(), lifted from this checkout's
 // server.js, the check the app's own writes use); the load has no load_eld_miles
-// row; the row is not final. Idempotent: once this script's audit row for the load
-// exists, a run writes nothing, whatever the row holds since.
+// row; the row is not final; the load is not closed out; no ping of its window is
+// retained; the replay agrees with the row. Idempotent: once this script's audit
+// row for the load exists, a run writes nothing, whatever the row holds since.
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/data-fix-haul-row-remeasure.js --db=app.db --sheet-id=<id> --load-id=<id> --dry-run
@@ -53,17 +64,54 @@ const ROOT = path.join(__dirname, "..");
 const ACTOR = "script:data-fix-haul-row-remeasure";
 const REF = "HAUL-REMEASURE-2026-10";
 const OPTIONS = ["db", "sheet-id", "values-json", "key", "load-id", "dry-run", "apply"];
-const ROOTS = ["loadRowAccountingMonths", "periodWriteLocked", "periodLocksReadable", "normLoadKey"];
+const ROOTS = ["loadRowAccountingMonths", "periodWriteLocked", "periodLocksReadable", "normLoadKey",
+	// The closed-out load's replay, as measureLoadEldMiles() runs it.
+	"haulLoadWindow", "getLoadCoordsFull", "haulSamplesStmt", "HAUL_LOOKBACK_MS", "HAUL_LOOKAHEAD_MS", "HAUL_REPLAY_RADIUS_M"];
+const PROVIDED = ["db", "loadHaul", "process", "console"];
 const DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "sendEmail", "io", "server"];
 
 class Refusal extends Error {}
 
-// The app's own closed-month check and load key, lifted from `root`'s server.js
-// over `db`.
-function liftChecks(root, db) {
+// The app's own closed-month check, load key and haul replay pieces, lifted from
+// `root`'s server.js over `db`, with `loadHaul` (that checkout's lib/load-haul.js)
+// and the app's environment (the replay radius reads it).
+function liftChecks(root, db, loadHaul, env) {
 	const src = fs.readFileSync(path.join(root, "server.js"), "utf8");
-	const lifted = closure(src, { roots: ROOTS, provided: ["db"], denied: DENIED });
-	return new Function("db", `"use strict";\n${lifted.text}\nreturn { ${ROOTS.join(", ")} };`)(db);
+	const lifted = closure(src, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
+	const scriptProcess = { env: { ...(env || {}) } };
+	return new Function(...PROVIDED, `"use strict";\n${lifted.text}\nreturn { ${ROOTS.join(", ")}, loadHaul };`)(db, loadHaul, scriptProcess, console);
+}
+
+// The closed-out load replayed as the app measures it. Returns the replay, or
+// throws Refusal when nothing can be proven.
+function replay({ checks, key, rowObj, headers, vid, nowMs }) {
+	const win = checks.haulLoadWindow(key, rowObj, headers, nowMs);
+	if (!win.terminal) throw new Refusal(`load ${key} is not closed out; the app measures it when it is`);
+	const c = checks.getLoadCoordsFull(key);
+	const lat = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
+	if (!c || !Number.isFinite(lat(c.origin_lat)) || !Number.isFinite(lat(c.dest_lat))) throw new Refusal(`load ${key} has no coordinates to replay against`);
+	const anchor = win.dispatchMs != null ? Math.min(win.dispatchMs, win.endMs) : win.endMs;
+	const samples = checks.haulSamplesStmt.all(vid, anchor - checks.HAUL_LOOKBACK_MS, win.endMs + checks.HAUL_LOOKAHEAD_MS);
+	if (!samples.length) throw new Refusal(`no ping of load ${key}'s window is retained; nothing proves its row wrong`);
+	const computed = checks.loadHaul.computeHaulMiles(samples, {
+		origin: { lat: c.origin_lat, lng: c.origin_lng },
+		dest: { lat: c.dest_lat, lng: c.dest_lng },
+		radiusM: checks.HAUL_REPLAY_RADIUS_M,
+		terminal: true,
+		closeOutMs: win.endMs,
+		dispatchMs: win.dispatchMs,
+	});
+	return { computed, pings: samples.length, radiusM: checks.HAUL_REPLAY_RADIUS_M };
+}
+
+// Does the stored row say what the replay says? Loaded miles to the tenth, the
+// reason, the pickup departure and the receiver arrival.
+function replayAgrees(stored, computed) {
+	const miles = (v) => (v === null || v === undefined ? null : Math.round(Number(v) * 10) / 10);
+	return miles(stored.loaded_miles) === miles(computed.loadedMiles)
+		&& String(stored.reason || "") === String(computed.reason || "")
+		&& Number(stored.pickup_depart_ms || 0) === Number(computed.pickupDepartMs || 0)
+		&& Number(stored.dest_arrive_ms || 0) === Number(computed.destArriveMs || 0);
 }
 
 // The fix this script relies on: the release that ships it exports the stale-visit
@@ -78,9 +126,9 @@ function audited(db, key) {
 		.get(ACTOR, key, `%[${REF}]%`);
 }
 
-// What a run would do: { done: line } or { key, before, after, months }. Throws
-// Refusal for anything it must not touch.
-function plan({ db, values, loadId, checks }) {
+// What a run would do: { done: line } or { key, before, after, months, replayed }.
+// Throws Refusal for anything it must not touch.
+function plan({ db, values, loadId, checks, nowMs = Date.now() }) {
 	const key = checks.normLoadKey(loadId);
 	if (!key) throw new Refusal("--load-id is empty");
 	if (audited(db, key)) return { done: `${key}: re-opened by this script already (its audit row is on record); nothing to write` };
@@ -101,7 +149,26 @@ function plan({ db, values, loadId, checks }) {
 	const before = db.prepare("SELECT * FROM load_eld_miles WHERE load_id = ?").get(key);
 	if (!before) throw new Refusal(`load ${key} has no load_eld_miles row`);
 	if (Number(before.in_progress) !== 0) throw new Refusal(`load ${key}'s load_eld_miles row is not final (in_progress = ${before.in_progress}); the app measures it already`);
-	return { key, before, after: { ...before, in_progress: 1 }, months };
+
+	const rowObj = Object.fromEntries(headers.map((h, i) => [h, hits[0][i] == null ? "" : hits[0][i]]));
+	const replayed = replay({ checks, key, rowObj, headers, vid: before.routemate_vehicle_id, nowMs });
+	if (replayAgrees(before, replayed.computed)) {
+		throw new Refusal(`load ${key}'s row is what the replay measures (loaded ${before.loaded_miles} mi); a correct final row is not re-opened`);
+	}
+	return { key, before, after: { ...before, in_progress: 1 }, months, replayed };
+}
+
+const at = (ms) => (Number(ms) > 0 ? new Date(Number(ms)).toISOString().replace(/:\d\d\.\d{3}Z$/, "Z") : "none");
+function showReplay(before, r) {
+	const c = r.computed;
+	return [
+		`  replay (${r.pings} pings, radius ${r.radiusM} m):`,
+		`    loaded miles:      stored ${JSON.stringify(before.loaded_miles)}  replay ${JSON.stringify(c.loadedMiles)}`,
+		`    reason:            stored ${JSON.stringify(before.reason || "")}  replay ${JSON.stringify(c.reason || "")}`,
+		`    pickup departure:  stored ${at(before.pickup_depart_ms)}  replay ${at(c.pickupDepartMs)}`,
+		`    receiver arrival:  stored ${at(before.dest_arrive_ms)}  replay ${at(c.destArriveMs)}`,
+		`    deadhead miles:    stored ${JSON.stringify(before.deadhead_miles)}  replay ${JSON.stringify(c.deadheadMiles)} (no previous-load floor; the app's may read shorter)`,
+	].join("\n");
 }
 
 function showRow(row) {
@@ -116,7 +183,7 @@ function appSheetId(env, root) {
 	return path.resolve(root) === sheetIds.PRODUCTION_DIR ? sheetIds.PRODUCTION_SPREADSHEET_ID : "";
 }
 
-// `opts` (tests): root (the app directory), loadHaul (its lib/load-haul.js),
+// `opts` (tests): root (the app directory), loadHaul (its lib/load-haul.js), nowMs,
 // log / err (output).
 async function main(argv = process.argv.slice(2), opts = {}) {
 	const root = opts.root || ROOT;
@@ -138,8 +205,11 @@ async function main(argv = process.argv.slice(2), opts = {}) {
 	let scope;
 	let dbFile;
 	try { ({ scope, file: dbFile } = dbScope(args.db, root)); } catch (err) { throw new Refusal(err.message); }
+	// The app directory's own .env for its own database (the replay radius reads
+	// it); a copy under the temp directory runs on the defaults.
+	const env = scope === "app" ? envFor({ root, dbPath: args.db }).env : {};
 	if (scope === "app" && typeof args["sheet-id"] === "string") {
-		const own = appSheetId(envFor({ root, dbPath: args.db }).env, root);
+		const own = appSheetId(env, root);
 		if (!own || own !== args["sheet-id"]) throw new Refusal("--sheet-id is not this app's own sheet; the closed-month check must read the load's own row");
 	}
 	const sheet = await sheetFor({ "sheet-id": args["sheet-id"], "values-json": args["values-json"], key: args.key }, root);
@@ -149,12 +219,13 @@ async function main(argv = process.argv.slice(2), opts = {}) {
 	if (dryRun && !db.readonly) throw new Refusal("the dry run's handle on the database is not read-only");
 	db.pragma("busy_timeout = 10000");
 	try {
-		const checks = liftChecks(root, db);
+		const checks = liftChecks(root, db, loadHaul, env);
 		say(`Data fix ${REF}: re-open one final load_eld_miles row for the app to measure again. Mode: ${dryRun ? "dry run (nothing is written)" : "apply"}.`);
-		const p = plan({ db, values: sheet.values, loadId: args["load-id"], checks });
+		const p = plan({ db, values: sheet.values, loadId: args["load-id"], checks, nowMs: opts.nowMs || Date.now() });
 		if (p.done) { say(`done: ${p.done}`); return 0; }
 		say(`load ${p.key}: months ${p.months.join(", ")}, all open. One row matches.`);
 		say(`  before:\n${showRow(p.before)}`);
+		say(showReplay(p.before, p.replayed));
 		say(`  ${dryRun ? "would change" : "change"}: in_progress 0 -> 1 (every other column stays until the sweep measures the load again)`);
 		if (dryRun) { say("1 row would change. Nothing written."); return 0; }
 
@@ -184,4 +255,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { ACTOR, REF, ROOTS, plan, liftChecks, fixDeployed, main, Refusal };
+module.exports = { ACTOR, REF, ROOTS, plan, liftChecks, replay, replayAgrees, fixDeployed, main, Refusal };
