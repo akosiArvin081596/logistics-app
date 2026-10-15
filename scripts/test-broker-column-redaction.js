@@ -150,11 +150,20 @@ if (!reMatch) throw new Error("BROKER_WITHHELD_RE not found in server.js");
 const REAL = ["resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
 	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal"];
 const REAL_SRC = Object.fromEntries(REAL.map((n) => [n, extract(n)]));
+// The reader also redacts every other value by its content (lib/broker-contact.js,
+// behind the kill switch; scripts/test-broker-contact-redaction.js covers that):
+// the shipped switch and the shipped module are built in with it.
+const flagMatch = SRC.match(/\nconst BROKER_CONTACT_VALUE_REDACTION_ENABLED = (.*);\n/);
+if (!flagMatch) throw new Error("BROKER_CONTACT_VALUE_REDACTION_ENABLED not found in server.js");
+const BROKER_CONTACT = require("../lib/broker-contact");
+const SHIPPED_WITHHELD_RE = new Function(`return ${reMatch[1]};`)();
+const SHIPPED_VALUE_REDACTION = new Function(`return ${flagMatch[1]};`)();
 function buildModule(overrides = {}, reSrc = reMatch[1]) {
 	const s = { ...REAL_SRC, ...overrides };
-	return new Function(
-		`const BROKER_WITHHELD_RE = ${reSrc};\n${REAL.map((n) => s[n]).join("\n")}\nreturn { ${REAL.join(", ")} };`
-	)();
+	return new Function("brokerContact",
+		`const BROKER_WITHHELD_RE = ${reSrc};\nconst BROKER_CONTACT_VALUE_REDACTION_ENABLED = ${flagMatch[1]};\n` +
+		`${REAL.map((n) => s[n]).join("\n")}\nreturn { ${REAL.join(", ")} };`
+	)(BROKER_CONTACT);
 }
 const G = buildModule();
 
@@ -692,6 +701,9 @@ function mountPut(routeSrc, M, rows) {
 		formulaCellRefusal: M.formulaCellRefusal,
 		driverCellRefusal: M.driverCellRefusal,
 		sanitizeBrokerColumns: M.sanitizeBrokerColumns,
+		brokerContact: BROKER_CONTACT,
+		BROKER_WITHHELD_RE: SHIPPED_WITHHELD_RE,
+		BROKER_CONTACT_VALUE_REDACTION_ENABLED: SHIPPED_VALUE_REDACTION,
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const names = Object.keys(env);
@@ -867,6 +879,7 @@ function mountPostData(routeSrc, M, rows) {
 		logAuditRefusal: (req, action) => { audits.push(action); },
 		db: { prepare: () => { throw new Error("the database is not reached by this fixture"); } },
 		driverCellRefusal: M.driverCellRefusal,
+		brokerContact: BROKER_CONTACT,
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const names = Object.keys(env);
@@ -920,8 +933,8 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 	const unguarded = calls.filter((at) => !/req\.session\.user\.role !== "Super Admin"/.test(SRC.slice(Math.max(0, at - 160), at)));
 	check("every route call of the reader or the two writer rules is for a non-Super-Admin only",
 		unguarded.map((at) => SRC.slice(at, SRC.indexOf("\n", at)).trim()), []);
-	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x2, dispatch, reassign)",
-		calls.length, 14);
+	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x3 (the third blanks a held broker field), dispatch, reassign)",
+		calls.length, 15);
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	for (const [label, src, rowVar] of [["PUT /api/data/:rowIndex", DATA_PUT_SRC, "values"], ["PUT /api/load/:loadId", LOAD_PUT_SRC, "updatedRow"]]) {
 		const c = code(src);
@@ -931,13 +944,16 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 		// PUT /api/data/:rowIndex refuses a row that now holds another load
 		// (409 ROW_MOVED) before these rules judge the row, and audits it there.
 		// That line records the form's own edits (as opened and as sent), never a
-		// stored cell (scripts/test-row-save-cell-writes.js). Every other audit
-		// line comes after the two rules.
+		// stored cell (scripts/test-row-save-cell-writes.js). So does the 409
+		// CONTACT_CELL_READ_ONLY refusal just before the two rules, which records
+		// the column only (scripts/test-broker-contact-redaction.js). Every other
+		// audit line comes after the two rules.
 		const rowMovedEnd = c.indexOf("return res.status(409).json(moved.body);");
-		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd));
-		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED refusal's`,
+		const readOnlyEnd = c.indexOf("return res.status(409).json(readOnly);");
+		const auditAt = c.indexOf("logAudit", Math.max(0, rowMovedEnd, readOnlyEnd));
+		check(`${label}: the restore, then the formula rule, each once, both before the write and before any audit line but the ROW_MOVED and CONTACT_CELL_READ_ONLY refusals'`,
 			[c.split("restoreWithheldBrokerCells(").length - 1, c.split("formulaCellRefusal(").length - 1,
-				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt],
+				restoreAt > 0 && restoreAt < formulaAt && formulaAt < writeAt && formulaAt < auditAt && rowMovedEnd < restoreAt && readOnlyEnd < restoreAt],
 			[1, 1, true]);
 		check(`${label}: no answer names a withheld column`, /\bpreserved\b/.test(c), false);
 	}
@@ -1242,8 +1258,11 @@ const mutants = [
 	}],
 	["M2 union without /phone/ (Phone Number leaks)", () => withResolver("/broker|e-?mail|contact/i", (M) =>
 		served(row(), M)["Phone Number"] !== "")],
+	// The Email cell holds text that is not an address here: an address would be
+	// withheld by its value anyway (lib/broker-contact.js), which would hide what
+	// this mutant removes, the column rule.
 	["M3 union without /e-?mail/ (Email leaks)", () => withResolver("/broker|phone|contact/i", (M) =>
-		served(row(), M)["Email"] !== "")],
+		served(row({ Email: "ask the billing desk" }), M)["Email"] !== "")],
 	["M4 over-broad union blanks Payment/Owner ID", () => withResolver("/broker|phone|e-?mail|contact|payment|owner/i", (M) => {
 		const out = served(row(), M);
 		return out["  Payment  "] !== "$1,800.00" || out["Owner ID"] !== "5";
