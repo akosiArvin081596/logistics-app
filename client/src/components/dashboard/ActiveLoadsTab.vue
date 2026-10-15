@@ -377,6 +377,32 @@
               :id="fieldId(col) + '-hint'"
               style="margin:0.25rem 0 0;font-size:0.7rem;color:#9ca3af;"
             >Only a Super Admin can view or change this.</p>
+            <!-- A cell the API served with broker contact details withheld
+                 (`_withheldCells`): shown as served, read-only, since the
+                 server refuses a save that changes it. -->
+            <template v-else-if="contactCells.has(col)">
+              <textarea
+                v-if="MULTILINE_COLS.has(col)"
+                :id="fieldId(col)"
+                :data-contact-withheld="col"
+                :value="selectedJob[col] || ''"
+                rows="3"
+                readonly
+                :aria-describedby="fieldId(col) + '-hint'"
+                style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #e5e7eb;border-radius:6px;font-family:inherit;font-size:0.875rem;background:#f9fafb;color:#6b7280;cursor:not-allowed;resize:none;"
+              />
+              <input
+                v-else
+                :id="fieldId(col)"
+                :data-contact-withheld="col"
+                :value="selectedJob[col] || ''"
+                type="text"
+                readonly
+                :aria-describedby="fieldId(col) + '-hint'"
+                style="width:100%;margin-top:0.3rem;padding:0.5rem 0.65rem;border:1px solid #e5e7eb;border-radius:6px;font-family:inherit;font-size:0.875rem;background:#f9fafb;color:#6b7280;cursor:not-allowed;"
+              />
+              <p :id="fieldId(col) + '-hint'" style="margin:0.25rem 0 0;font-size:0.7rem;color:#9ca3af;">{{ CONTACT_CELL_HINT }}</p>
+            </template>
             <textarea
               v-else-if="MULTILINE_COLS.has(col)"
               :id="fieldId(col)"
@@ -488,6 +514,7 @@ import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
+import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
 import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -583,6 +610,13 @@ const withheldCols = computed(() => {
   if (auth.isSuperAdmin) return new Set()
   return new Set(editableHeaders.value.filter(h => BROKER_WITHHELD_RE.test(String(h || ''))))
 })
+// Cells of the open row the API served with broker contact details withheld
+// (its `_withheldCells`): shown as served and read-only. The server writes them
+// back as stored when sent as served and refuses any other value
+// (409 CONTACT_CELL_READ_ONLY). Empty for a Super Admin.
+const contactCells = computed(() => new Set(
+  contactReadOnlyCells(selectedJob.value, editableHeaders.value, auth.isSuperAdmin).filter(h => !withheldCols.value.has(h)),
+))
 // Header names carry spaces ("Broker Contact Name") and the Payment column is
 // literally "  Payment  ", but an HTML id may not contain whitespace — so a raw
 // name would silently break the label's `for` and the hint's aria-describedby.
@@ -772,10 +806,11 @@ function openEdit() {
   editError.value = ''
   editBaseline = Object.fromEntries(props.headers.map(col => [col, selectedJob.value[col] || '']))
   for (const col of editableHeaders.value) {
-    // A withheld column must not acquire a key at all: submitEdit falls back to
-    // the row's own (redacted) value when the key is absent, which is byte-identical
-    // to what this form sent before and is what the server's splice restores.
-    if (withheldCols.value.has(col)) { delete editForm[col]; continue }
+    // A withheld column, or a cell holding withheld contact details, must not
+    // acquire a key at all: submitEdit falls back to the row's own (redacted)
+    // value when the key is absent, which equals its baseline, so the server
+    // leaves the stored value as it is.
+    if (withheldCols.value.has(col) || contactCells.value.has(col)) { delete editForm[col]; continue }
     editForm[col] = selectedJob.value[col] || ''
   }
   showEdit.value = true
@@ -809,7 +844,7 @@ async function submitEdit() {
     )
     const patch = {}
     for (const col of editableHeaders.value) {
-      if (withheldCols.value.has(col)) continue
+      if (withheldCols.value.has(col) || contactCells.value.has(col)) continue
       patch[col] = editForm[col]
     }
     selectedJob.value = { ...selectedJob.value, ...patch }

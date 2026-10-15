@@ -20,10 +20,11 @@
  *     writes one row per paid day of the day grid of every live weekly invoice,
  *     Rejected included, soft-deleted skipped; idempotent;
  *   - a late day (payable after its week's invoice was made) is carried only when
- *     its load settles in FROM or later, the day is on or after the floor
- *     (app_settings trip_work_days_started_at, the first Saturday the rule
- *     invoiced, written once in that invoice's transaction), no live invoice
- *     holds it, and its month is not closed; a refused day is named in
+ *     its load settles in FROM or later, the day is on or after the floor (the
+ *     Saturday of FROM's first week, the owner's decision of 2026-10-15; the
+ *     app_settings marker trip_work_days_started_at, written once in the first
+ *     rule invoice's transaction, is a record only), no live invoice holds it,
+ *     and its month is not closed; a refused day is named in
  *     `warnings`. A carried day goes on its own week's invoice, never a later
  *     one (the owner's rule, 2026-10-14): in place while that invoice is not
  *     approved, else on a correction invoice for that week.
@@ -223,7 +224,7 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 		eq("second run: exit 0 and the same rows", [again.code, read()], [0, want]);
 	});
 
-	await R.test("C9 [Q16, revised 2026-10-14] Late-day limits, each refused day named in `warnings`: a load settling before FROM, a day before the stored floor marker, a day another live invoice holds, a day in a closed month (invoiceMonthLockBlockers()); a day within every limit goes on its own week's invoice (W39, a Draft) or, when that week touches a closed month, on a correction for it, never on W40", async ({ eq, ok }) => {
+	await R.test("C9 [Q16, revised 2026-10-14 and 2026-10-15] Late-day limits, each refused day named in `warnings`: a load settling before FROM, a week with no invoice (the stored marker of the rule's first invoice no longer limits: late days start at FROM's first week), a day another live invoice holds, a day in a closed month (invoiceMonthLockBlockers()); a day within every limit goes on its own week's invoice (W39, a Draft) or, when that week touches a closed month, on a correction for it, never on W40", async ({ eq, ok }) => {
 		const warned = (g, day) => (g.warnings || []).some((x) => String(x).includes(day));
 		// (a) FROM=2026-10: a Sep-assigned load completed after W39 is refused; an Oct-assigned one is carried.
 		{
@@ -249,7 +250,9 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 				[[["2026-09-28", ["C900"]], ["2026-09-29", ["C900"]], ["2026-10-02", ["C902"]]], undefined]);
 			ok("(a) the Sep-assigned load's 9/30 and 10/1 are named in warnings", warned(g, "2026-09-30") && warned(g, "2026-10-01"), JSON.stringify(g.warnings));
 		}
-		// (b) the stored floor marker is 2026-10-03: nothing before it is carried, and the marker is not rewritten.
+		// (b) the stored marker of the rule's first invoice is 2026-10-03, and it no
+		// longer limits (the floor is FROM's first week): 10/1 and 10/2 are named
+		// because their week, W39, has no invoice; the marker is not rewritten.
 		{
 			const D = "Tia Voss";
 			const w = W.startWorld({
@@ -262,7 +265,7 @@ const R = W.createRunner("B12 C: invoice_paid_days, the days each invoice pays")
 			w.db.prepare("INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES ('trip_work_days_started_at', '2026-10-03', '2026-10-03T00:00:00.000Z', 'system')").run();
 			const g = await W.generate(w, D, W40);
 			eq("(b) grid 10/3, no earlier day, no correction", [W.dayList(W.gridDays(g.data, W40)), g.data && g.data.earlierDays, corrections(w).length], [["2026-10-03"], undefined, 0]);
-			ok("(b) 10/1 and 10/2 (before the floor) named in warnings", warned(g, "2026-10-01") && warned(g, "2026-10-02"), JSON.stringify(g.warnings));
+			ok("(b) 10/1 and 10/2 named in warnings: their week has no invoice", (g.warnings || []).some((x) => x.includes("2026-10-01") && x.includes("2026-10-02") && /has no invoice/.test(x)), JSON.stringify(g.warnings));
 			eq("(b) the marker stays 2026-10-03", marker(w), "2026-10-03");
 		}
 		// (c) a day a live manual invoice holds is refused; the next day is carried.
