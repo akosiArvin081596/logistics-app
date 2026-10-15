@@ -708,6 +708,31 @@ section("§2b pure — driver availability pauses and resumes the alert");
 		eq("§2b.22 his own truck while he is off: no alert", dark(now, { ...own, todayKey: "2026-10-16" }).alert, false);
 	}
 	{
+		// The owner's rule (2026-10-15): after "Assign anyway", a confirmed load
+		// covering today overrides the time off, so the truck's dark-ELD alert
+		// fires as normal; one that does not cover today changes nothing.
+		const off = [{ ...row(1, "2026-10-14", "2026-10-22"), directory_name: "Hollis Renner" }];
+		const byDriver = call("groupAvailabilityByDriver", off, normalizeDriverName) || new Map();
+		const conf = (from, to) => call("groupAvailabilityByDriver", [{ id: 9, directory_name: "hollis  renner", load_from: from, load_to: to }], normalizeDriverName) || new Map();
+		const fields = (todayKey, confirmedByDriver) => call("truckAvailabilityFields", {
+			openAssignments: [{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" }], assignedDriver: "",
+			byDriver, confirmedByDriver, todayKey, normalize: normalizeDriverName, timeZone: ET,
+		}) || {};
+		const now = Date.parse("2026-10-16T16:00:00Z");
+		const covering = fields("2026-10-16", conf("2026-10-16", "2026-10-17"));
+		eq("§2b.28 a confirmed load covering today: driverConfirmedLoadToday", covering.driverConfirmedLoadToday, true);
+		eq("§2b.29 ...the dark feed alerts as stale, not driver_off", [dark(now, { ...covering, todayKey: "2026-10-16" }).state, dark(now, { ...covering, todayKey: "2026-10-16" }).alert], ["stale", true]);
+		const later = fields("2026-10-16", conf("2026-10-19", "2026-10-20"));
+		eq("§2b.30 a confirmed load on later days: still driver_off, no alert", [later.driverConfirmedLoadToday, dark(now, { ...later, todayKey: "2026-10-16" }).state], [false, "driver_off"]);
+		eq("§2b.31 no confirmations: driver_off", dark(now, { ...fields("2026-10-16", new Map()), todayKey: "2026-10-16" }).state, "driver_off");
+		// Back on Oct 23 (grace) with a confirmed load that day: it wins over
+		// driver_returning too.
+		const back = fields("2026-10-23", conf("2026-10-23", "2026-10-24"));
+		const backNow = Date.parse("2026-10-23T16:00:00Z");
+		eq("§2b.32 a confirmed load covering a returning day: stale, not driver_returning", dark(backNow, { ...back, todayKey: "2026-10-23" }).state, "stale");
+		eq("§2b.33 ...without it: driver_returning", dark(backNow, { ...fields("2026-10-23", new Map()), todayKey: "2026-10-23" }).state, "driver_returning");
+	}
+	{
 		// The judge's order: retirement, link and status come first.
 		const now = Date.parse("2026-10-16T16:00:00Z");
 		const offFields = truckFields("2026-10-16", [row(1, "2026-10-14", "2026-10-20")]);

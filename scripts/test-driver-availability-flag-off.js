@@ -6,17 +6,21 @@
 // The world starts with the flag unset and a live row covering today for the
 // driver of a dark, linked, Active truck (#91), as if it had been saved while
 // the flag was on. Then:
-//   §1 the six availability routes answer like an unknown /api path (404 here,
-//      where nothing else matches), for a Super Admin too: no 401 or 403 shows
-//      that a route exists
+//   §1 the six availability routes answer exactly like an unknown /api path,
+//      for a Super Admin too: no 401 or 403 shows that a route exists. Here,
+//      where nothing else is registered, that is Express's 404. In production
+//      it is not always a 404: a GET falls through to the SPA catch-all and
+//      gets the app's page (200), as every unknown /api GET does, and a POST or
+//      PUT gets Express's 404
 //   §2 each of the five assign routes puts him on a load inside his off dates
 //      without confirmOffDuty (200), and no off-duty confirmation is audited
 //   §3 the ELD sweep opens the stale alert for #91
 //   §4 GET /api/dashboard, GET /api/trucks and GET /api/drivers-directory carry
 //      no offUntil / DriverOffUntil / OffFrom / OffTo key at all
-//   §5 the table is dropped under the running server, and the five assign
-//      routes, the sweep, those three responses and the directory delete still
-//      answer: no flag-off path touches the table
+//   §5 the tables (the time off and its "Assign anyway" confirmations) are
+//      dropped under the running server, and the five assign routes, the
+//      sweep, those three responses and the directory delete still answer: no
+//      flag-off path touches either
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -76,7 +80,7 @@ const assign = (w, driver, n) => [
 				POST: await w.call("POST", "/api/no-such-route-r11", { body: {} }),
 				PUT: await w.call("PUT", "/api/no-such-route-r11", { body: {} }),
 			};
-			eq("§1.0 an unknown /api path here: 404", [unknown.GET.status, unknown.POST.status, unknown.PUT.status], [404, 404, 404]);
+			eq("§1.0 an unknown /api path in this harness (no SPA catch-all): 404", [unknown.GET.status, unknown.POST.status, unknown.PUT.status], [404, 404, 404]);
 			const like = (r, method, url) => r.status === unknown[method].status && r.text === unknown[method].text.replace("/api/no-such-route-r11", url);
 			const ROUTES = [
 				["GET", `/api/drivers-directory/${DIR.hollis}/availability`, undefined],
@@ -125,7 +129,7 @@ const assign = (w, driver, n) => [
 
 		section("§5 the table dropped under the running server");
 		await R.guard("§5", async () => {
-			w.db.exec("DROP TABLE driver_availability");
+			w.db.exec("DROP TABLE driver_availability; DROP TABLE IF EXISTS driver_availability_confirmations;");
 			for (const [label, send] of assign(w, "Tamsin Vale", 2)) {
 				const r = await send();
 				eq(`§5 ${label}: still 200`, r.status, 200);

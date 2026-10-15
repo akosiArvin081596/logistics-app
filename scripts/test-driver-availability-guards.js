@@ -44,10 +44,10 @@ const eq = (name, a, e) => ok(name, JSON.stringify(a) === JSON.stringify(e), `ex
 
 // ── tracked names ──────────────────────────────────────────────────────────────
 const SERVER_HELPERS = ["driverAvailabilityByName", "truckDriverAvailability", "driverOffDutyRefusal", "cancelDirectoryAvailability",
-	"availabilityRowWithDriver", "availabilityOverlap", "availabilityOverlapBody"];
+	"availabilityRowWithDriver", "availabilityOverlap", "availabilityOverlapBody", "recordOffDutyConfirmation", "sheetRowOffDutyDriver"];
 let libExports = [];
 try { libExports = Object.keys(require("../lib/driver-availability")); } catch { libExports = []; }
-const TRACKED = ["driver_availability", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports];
+const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports];
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A tracked name as a whole word ("driver_availability_create", an audit
 // action, is not the table).

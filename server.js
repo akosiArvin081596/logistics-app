@@ -3218,13 +3218,21 @@ function driverAvailabilityByName(sinceDay) {
 }
 
 // Every truck's current driver's time off, Map(truck id -> { driverName,
-// driverOffUntil, driverLastOffTo, driverReturningFromMs }). The truck's driver
-// is its newest open assignment, else trucks.assigned_driver, matched through
-// normalizeDriverName() (lib/driver-availability.js truckAvailabilityFields()).
-// Rows that ended longer ago than the returning grace can last are not read.
+// driverOffUntil, driverLastOffTo, driverReturningFromMs, driverConfirmedLoadToday }).
+// The truck's driver is its newest open assignment, else trucks.assigned_driver,
+// matched through normalizeDriverName() (lib/driver-availability.js
+// truckAvailabilityFields()). Rows that ended longer ago than the returning grace
+// can last are not read. A load given him with "Assign anyway" that covers today
+// (driver_availability_confirmations) lets his truck alert as normal.
 function truckDriverAvailability() {
 	const today = appTodayKey();
 	const byDriver = driverAvailabilityByName(driverAvailability.shiftAvailabilityDay(today, -(Math.ceil(ELD_STALE_HOURS / 24) + 2)));
+	const confirmedByDriver = driverAvailability.groupAvailabilityByDriver(db.prepare(`
+		SELECT c.id, c.load_from, c.load_to, d.driver_name AS directory_name
+		FROM driver_availability_confirmations c
+		JOIN drivers_directory d ON d.id = c.directory_id
+		WHERE c.load_from <= ? AND c.load_to >= ?
+	`).all(today, today), normalizeDriverName);
 	const openByTruck = new Map();
 	for (const a of db.prepare("SELECT id, truck_id, driver_name, start_date FROM truck_assignments WHERE COALESCE(end_date, '') = ''").all()) {
 		if (!openByTruck.has(a.truck_id)) openByTruck.set(a.truck_id, []);
@@ -3233,7 +3241,7 @@ function truckDriverAvailability() {
 	const out = new Map();
 	for (const t of db.prepare("SELECT id, assigned_driver FROM trucks").all()) {
 		out.set(t.id, driverAvailability.truckAvailabilityFields({
-			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, byDriver, todayKey: today, normalize: normalizeDriverName,
+			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, byDriver, confirmedByDriver, todayKey: today, normalize: normalizeDriverName,
 		}));
 	}
 	return out;
@@ -6307,15 +6315,19 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // day and no money: it only pauses the ELD silence alert while the truck's driver
 // is away (and for one stale window after he returns) and warns a dispatcher who
 // assigns him a load inside his off days (409 DRIVER_OFF_DUTY, "Assign anyway").
-// Off, nothing reads or writes the table below: the six routes answer like an
-// unknown path, no response carries an availability key, the sweep and the
-// assign routes run as before. Only this additive migration runs either way, so
+// Off, nothing reads or writes the tables below: the six routes answer as an
+// unknown path does (a GET reaches the SPA catch-all page, a POST or PUT gets
+// Express's 404), no response carries an availability key, and the sweep and
+// the assign routes run as before. Only this additive migration runs either way, so
 // turning the flag on needs no other step; rows saved while it was on stay, inert.
 const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
 // on the business clock, both included. Rows are cancelled, never deleted.
+// driver_availability_confirmations: one row per "Assign anyway" whose sheet
+// write succeeded, with the load's window. A confirmed load covering today lets
+// the driver's truck alert as normal (the owner's rule, 2026-10-15).
 db.exec(`
 	CREATE TABLE IF NOT EXISTS driver_availability (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6334,6 +6346,19 @@ db.exec(`
 		CHECK(from_date <= to_date)
 	);
 	CREATE INDEX IF NOT EXISTS idx_driver_avail_dir ON driver_availability(directory_id, from_date);
+	CREATE TABLE IF NOT EXISTS driver_availability_confirmations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		availability_id INTEGER NOT NULL,
+		directory_id INTEGER NOT NULL,
+		load_id TEXT NOT NULL DEFAULT '',
+		load_from TEXT NOT NULL,
+		load_to TEXT NOT NULL,
+		via TEXT NOT NULL DEFAULT '',
+		confirmed_by TEXT NOT NULL DEFAULT '',
+		confirmed_by_user_id INTEGER NOT NULL DEFAULT 0,
+		confirmed_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_driver_avail_conf_dir ON driver_availability_confirmations(directory_id, load_to);
 `);
 
 // Local mirror of the Google Sheet's "Job Tracking" tab, written by the n8n
@@ -9854,8 +9879,10 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // Rows are cancelled, never deleted. Nothing here reaches pay or money.
 
 // The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
-// request moves on as if the route were never registered (an unknown path),
-// before any role check, so no 401 or 403 says it exists.
+// request moves on as if the route were never registered, before any role
+// check, so no 401 or 403 says it exists: it gets what an unknown path gets,
+// which for a GET is the SPA catch-all page (200), not a 404, and for a POST or
+// PUT is Express's 404.
 function availabilityFlagGate(req, res, next) {
 	if (!DRIVER_AVAILABILITY_ENABLED) return next("route");
 	return next();
@@ -37390,10 +37417,13 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 		}
 
 		// A new Job Tracking row that names a driver asks the off-duty check (R11);
-		// the caller confirms with confirmOffDuty: true.
+		// the caller confirms with confirmOffDuty: true, recorded only once the
+		// append succeeded.
+		let offDutyConfirmed = null;
 		if (DRIVER_AVAILABILITY_ENABLED) {
-			const offDuty = driverOffDutyRefusal(req, { driver: appendHeaders ? sheetRowNewDriver(appendHeaders, [], values) : "", headers: appendHeaders, row: values, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "POST /api/data" });
-			if (offDuty) return res.status(409).json(offDuty);
+			const offDuty = driverOffDutyRefusal(req, { driver: appendHeaders ? sheetRowOffDutyDriver(appendHeaders, [], values) : "", headers: appendHeaders, row: values, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "POST /api/data" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
 		const response = await sheets.spreadsheets.values.append({
@@ -37404,6 +37434,7 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				values: [values],
 			},
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// The append had no audit line either — and unlike the update there is no
 		// prior value to record, so the row's own contents ARE the record.
@@ -37774,12 +37805,15 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 			}
 		}
 
-		// A save that puts another driver on a Job Tracking load asks the off-duty
-		// check (R11) last, after the re-read, so nothing awaits between it and the
-		// write; the caller confirms with confirmOffDuty: true.
+		// A save that puts another driver on a Job Tracking load, or moves an
+		// assigned load's dates, asks the off-duty check (R11) last, after the
+		// re-read, so nothing awaits between it and the write; the caller confirms
+		// with confirmOffDuty: true, recorded only once the write succeeded.
+		let offDutyConfirmed = null;
 		if (DRIVER_AVAILABILITY_ENABLED) {
-			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowNewDriver(headers, before, after) : "", headers, row: after, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "PUT /api/data/:rowIndex" });
-			if (offDuty) return res.status(409).json(offDuty);
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowOffDutyDriver(headers, before, after) : "", headers, row: after, confirmed: !!(req.body && req.body.confirmOffDuty === true), via: "PUT /api/data/:rowIndex" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
 		// Only the cells this save changes, one range each (sheetRowCellWrites()):
@@ -37805,6 +37839,7 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		}
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
@@ -38338,70 +38373,115 @@ function sendLoadBindRefusal(req, res, refusal, action, loadId, what) {
 	return res.status(refusal.http).json(body);
 }
 
+// Which driver a row save asks the off-duty check about (R11), or "": a new
+// driver on the load, or the load's driver when the save moves its Pickup or
+// Drop-off day (the owner's rule, 2026-10-15; a new time on the same day is no
+// move). lib/driver-availability.js offDutyCheckDriver() decides, on days read
+// with sheetDayKey(). `before` and `after` are cell arrays in `headers` order;
+// a new row passes `before` as []. Only the Driver column is checked: Job
+// Tracking has no co-driver column.
+function sheetRowOffDutyDriver(headers, before, after) {
+	if (!Array.isArray(headers) || !Array.isArray(after)) return "";
+	const cols = jobTrackingMonthCols(headers);
+	const cell = (cells, col) => {
+		const i = col ? headers.indexOf(col) : -1;
+		return i < 0 || !Array.isArray(cells) ? "" : cells[i];
+	};
+	if (!cols.driverCol || headers.indexOf(cols.driverCol) < 0) return "";
+	return driverAvailability.offDutyCheckDriver({
+		driverBefore: cell(before, cols.driverCol),
+		driverAfter: cell(after, cols.driverCol),
+		pickupBefore: sheetDayKey(cell(before, cols.pickupDateCol)),
+		pickupAfter: sheetDayKey(cell(after, cols.pickupDateCol)),
+		dropoffBefore: sheetDayKey(cell(before, cols.dropoffDateCol)),
+		dropoffAfter: sheetDayKey(cell(after, cols.dropoffDateCol)),
+		normalize: normalizeDriverName,
+	});
+}
+
+// THE OFF-DUTY CHECK (R11), shared by the five routes that put a driver on a
+// load or move an assigned load's dates: POST /api/dispatch, POST
+// /api/dispatch/reassign, PUT /api/data/:rowIndex and PUT /api/load/:loadId (a
+// new driver, or new dates: sheetRowOffDutyDriver()), and POST /api/data. Each
+// calls it inside `if (DRIVER_AVAILABILITY_ENABLED)`, so with the flag off it
+// never runs; n8n and system writes never call it. It warns, never blocks (the
+// owner's rule): when the load's window (lib/driver-availability.js
+// offDutyLoadWindow(), from the row's Pickup and Drop-off Appointment read with
+// sheetDayKey()) overlaps one of the driver's live off rows and ends today or
+// later, it answers { refusal }, the 409 DRIVER_OFF_DUTY body naming the dates;
+// with the caller's confirmation it answers { confirmed }, which the route
+// records with recordOffDutyConfirmation() only once its sheet write
+// succeeded. `row` is the load's row as it will be written. null: go ahead with
+// nothing to record. A read that fails is logged and answers null: the check is
+// a warning, and must never be the reason a dispatch fails.
+function driverOffDutyRefusal(req, { driver, headers, row, loadId, confirmed, via }) {
+	try {
+		const name = String(driver || "").trim();
+		if (!name || !Array.isArray(headers) || !Array.isArray(row)) return null;
+		const today = appTodayKey();
+		const rows = driverAvailabilityByName(today).get(normalizeDriverName(name)) || [];
+		if (!rows.length) return null;
+		const cols = jobTrackingMonthCols(headers);
+		const day = (col) => {
+			const i = col ? headers.indexOf(col) : -1;
+			return i < 0 ? "" : sheetDayKey(row[i]);
+		};
+		const conflict = driverAvailability.offDutyConflict({ rows, pickupKey: day(cols.pickupDateCol), dropoffKey: day(cols.dropoffDateCol), todayKey: today });
+		if (!conflict) return null;
+		const loadIdx = cols.loadIdCol ? headers.indexOf(cols.loadIdCol) : -1;
+		const load = String(loadId || (loadIdx >= 0 ? row[loadIdx] || "" : "")).trim();
+		if (confirmed) {
+			const offRow = rows.find((r) => r.id === conflict.id);
+			return { confirmed: { driver: name, load, via, conflict, directoryId: offRow ? offRow.directory_id : 0 } };
+		}
+		const kindText = { vacation: "vacation", off_duty: "off duty", other: "time off" }[conflict.kind] || "time off";
+		return {
+			refusal: {
+				error: `${name} is off ${driverAvailability.availabilityRangeText(conflict.from, conflict.to)} (${kindText}), and this load runs ` +
+					`${driverAvailability.availabilityRangeText(conflict.windowStart, conflict.windowEnd)}. Assign anyway?`,
+				code: "DRIVER_OFF_DUTY",
+				driver: name,
+				offFrom: conflict.from,
+				offTo: conflict.to,
+				kind: conflict.kind,
+				loadFrom: conflict.windowStart,
+				loadTo: conflict.windowEnd,
+			},
+		};
+	} catch (e) {
+		console.error(`[availability] off-duty check failed; assigning without it (${via}):`, e.message);
+		return null;
+	}
+}
+
+// An "Assign anyway" whose sheet write succeeded (driverOffDutyRefusal()'s
+// { confirmed }): the confirmation row, which lets the driver's truck alert as
+// normal while the load covers today, and its audit line, naming the driver, his
+// off dates and the load's window. Called only after the write: a confirmed
+// assignment that was never written leaves neither. A failure here is logged,
+// never answered: the assignment itself went through.
+function recordOffDutyConfirmation(req, c) {
+	try {
+		const user = (req.session && req.session.user) || {};
+		const { conflict } = c;
+		db.prepare(`
+			INSERT INTO driver_availability_confirmations
+				(availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by, confirmed_by_user_id, confirmed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(conflict.id, Number(c.directoryId) || 0, c.load, conflict.windowStart, conflict.windowEnd, String(c.via || ""),
+			String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+		logAudit(req, "dispatch_off_duty_confirmed", "load", c.load,
+			`${c.driver} assigned to load ${c.load || "(unknown)"} while off ${conflict.from}..${conflict.to} (${conflict.kind}); ` +
+			`load window ${conflict.windowStart}..${conflict.windowEnd}; confirmed (${c.via})`);
+	} catch (e) {
+		console.error("[availability] an \"Assign anyway\" was written but could not be recorded:", e.message);
+	}
+}
+
 // POST /api/dispatch — Assign driver to a load and notify via Socket.IO
 //
 // ⚠️ PERIOD-GUARDED — see dispatchWriteBlocker() above for where the line is
 // drawn and why it is not a blanket refusal.
-// The Driver a row save puts on a Job Tracking row: the row's new Driver cell
-// when it differs (normalizeDriverName()) from the stored one and is not blank,
-// else "". `before` and `after` are cell arrays in `headers` order.
-function sheetRowNewDriver(headers, before, after) {
-	if (!Array.isArray(headers) || !Array.isArray(after)) return "";
-	const col = jobTrackingMonthCols(headers).driverCol;
-	const i = col ? headers.indexOf(col) : -1;
-	if (i < 0) return "";
-	const next = String(after[i] == null ? "" : after[i]).trim();
-	const was = Array.isArray(before) ? before[i] : "";
-	return next && normalizeDriverName(next) !== normalizeDriverName(was) ? next : "";
-}
-
-// THE OFF-DUTY CHECK (R11), shared by the five routes that put a driver on a
-// load: POST /api/dispatch, POST /api/dispatch/reassign, PUT /api/data/:rowIndex
-// and PUT /api/load/:loadId on a Driver change, and POST /api/data. Each calls it
-// inside `if (DRIVER_AVAILABILITY_ENABLED)`, so with the flag off it never runs
-// and an error in it or its table can never break a dispatch; n8n and system
-// writes never call it. It warns, never blocks (the owner's rule): when the
-// load's window (lib/driver-availability.js offDutyLoadWindow(), from the row's
-// Pickup and Drop-off Appointment read with sheetDayKey()) overlaps one of the
-// driver's live off rows and ends today or later, the answer is the 409
-// DRIVER_OFF_DUTY body naming the dates; the caller re-sends with the
-// confirmation, and the assignment is audited with the dates. `row` is the
-// load's row as it will be written. Returns null to go ahead.
-function driverOffDutyRefusal(req, { driver, headers, row, loadId, confirmed, via }) {
-	const name = String(driver || "").trim();
-	if (!name || !Array.isArray(headers) || !Array.isArray(row)) return null;
-	const today = appTodayKey();
-	const rows = driverAvailabilityByName(today).get(normalizeDriverName(name)) || [];
-	if (!rows.length) return null;
-	const cols = jobTrackingMonthCols(headers);
-	const day = (col) => {
-		const i = col ? headers.indexOf(col) : -1;
-		return i < 0 ? "" : sheetDayKey(row[i]);
-	};
-	const conflict = driverAvailability.offDutyConflict({ rows, pickupKey: day(cols.pickupDateCol), dropoffKey: day(cols.dropoffDateCol), todayKey: today });
-	if (!conflict) return null;
-	const loadIdx = cols.loadIdCol ? headers.indexOf(cols.loadIdCol) : -1;
-	const load = String(loadId || (loadIdx >= 0 ? row[loadIdx] || "" : "")).trim();
-	if (confirmed) {
-		logAudit(req, "dispatch_off_duty_confirmed", "load", load,
-			`${name} assigned to load ${load || "(unknown)"} while off ${conflict.from}..${conflict.to} (${conflict.kind}); ` +
-			`load window ${conflict.windowStart}..${conflict.windowEnd}; confirmed (${via})`);
-		return null;
-	}
-	const kindText = { vacation: "vacation", off_duty: "off duty", other: "time off" }[conflict.kind] || "time off";
-	return {
-		error: `${name} is off ${driverAvailability.availabilityRangeText(conflict.from, conflict.to)} (${kindText}), and this load runs ` +
-			`${driverAvailability.availabilityRangeText(conflict.windowStart, conflict.windowEnd)}. Assign anyway?`,
-		code: "DRIVER_OFF_DUTY",
-		driver: name,
-		offFrom: conflict.from,
-		offTo: conflict.to,
-		kind: conflict.kind,
-		loadFrom: conflict.windowStart,
-		loadTo: conflict.windowEnd,
-	};
-}
-
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
@@ -38513,10 +38593,13 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		}
 
 		// The driver's recorded time off (R11): a warning the caller confirms
-		// with confirmOffDuty: true. Before the first write.
+		// with confirmOffDuty: true. Before the first write; a confirmation is
+		// recorded only once the write below succeeded.
+		let offDutyConfirmed = null;
 		if (DRIVER_AVAILABILITY_ENABLED) {
 			const offDuty = driverOffDutyRefusal(req, { driver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch" });
-			if (offDuty) return res.status(409).json(offDuty);
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
 		// Ensure Truck and Owner ID columns exist in sheet
@@ -38549,6 +38632,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// Persist notification and notify the driver in real-time
 		const route = [origin, destination].filter(Boolean).join(' → ') || '';
@@ -38686,10 +38770,13 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			}
 		}
 
-		// The new driver's recorded time off (R11), as POST /api/dispatch asks it.
+		// The new driver's recorded time off (R11), as POST /api/dispatch asks it;
+		// a confirmation is recorded only once the write below succeeded.
+		let offDutyConfirmed = null;
 		if (DRIVER_AVAILABILITY_ENABLED) {
 			const offDuty = driverOffDutyRefusal(req, { driver: newDriver, headers, row: snapshot.row, loadId, confirmed: req.body.confirmOffDuty === true, via: "POST /api/dispatch/reassign" });
-			if (offDuty) return res.status(409).json(offDuty);
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
 		}
 
 		// Ensure Truck and Owner ID columns exist (same approach as /api/dispatch).
@@ -38720,6 +38807,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			spreadsheetId: SPREADSHEET_ID,
 			requestBody: { valueInputOption: "USER_ENTERED", data: updates },
 		});
+		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
 		// Notify new driver
 		insertNotification.run(
@@ -52484,19 +52572,22 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 		}
 
+		// A new driver or new dates ask the off-duty check (R11), as PUT
+		// /api/data/:rowIndex does. Every body key here is a column name, so the
+		// confirmation is the query flag ?confirmOffDuty=true; it is recorded only
+		// once the write succeeded.
+		let offDutyConfirmed = null;
+		if (DRIVER_AVAILABILITY_ENABLED) {
+			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowOffDutyDriver(headers, before, after) : "", headers, row: after, loadId, confirmed: req.query.confirmOffDuty === "true", via: "PUT /api/load/:loadId" });
+			if (offDuty && offDuty.refusal) return res.status(409).json(offDuty.refusal);
+			offDutyConfirmed = offDuty && offDuty.confirmed;
+		}
+
 		// Only the cells this save changes, one range each (sheetRowCellWrites(), as
 		// PUT /api/data/:rowIndex writes): a column the body left out, or sent back
 		// as read, is not rewritten, so a formula shown as its value and a text cell
 		// showing "=…" stay as they are. Nothing changed, nothing written, and no
 		// audit line: there is no write to reverse.
-		// A Driver change asks the off-duty check (R11), as PUT /api/data/:rowIndex
-		// does. Every body key here is a column name, so the confirmation is the
-		// query flag ?confirmOffDuty=true.
-		if (DRIVER_AVAILABILITY_ENABLED) {
-			const offDuty = driverOffDutyRefusal(req, { driver: guarded ? sheetRowNewDriver(headers, before, after) : "", headers, row: after, loadId, confirmed: req.query.confirmOffDuty === "true", via: "PUT /api/load/:loadId" });
-			if (offDuty) return res.status(409).json(offDuty);
-		}
-
 		const cellWrites = sheetRowCellWrites(a1, rowIndex, before, after);
 		if (cellWrites.length) {
 			try {
@@ -52513,6 +52604,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			}
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
+			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 			// The 60s Job Tracking cache would otherwise keep serving the old figures.
 			if (guarded) jtCacheInvalidate();
 		}

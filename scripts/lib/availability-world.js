@@ -129,10 +129,13 @@ const HOUR = 3600000;
 const DAY = 24 * HOUR;
 
 // A fake Sheets client over one Job Tracking tab. Reads serve displayed values
-// with trailing empty cells dropped; writes land as sent.
+// with trailing empty cells dropped; writes land as sent, or every write throws
+// while control.failWrites is set (a Sheets write that failed).
 function fakeSheet(initialRows) {
 	const tabs = { "Job Tracking": initialRows.map((r) => r.slice()) };
 	const log = { reads: [], writes: [] };
+	const control = { failWrites: false };
+	const refuseWrite = () => { if (control.failWrites) throw new Error("fake sheet: write failed"); };
 	const parse = (range) => {
 		const s = String(range);
 		const bang = s.lastIndexOf("!");
@@ -187,12 +190,14 @@ function fakeSheet(initialRows) {
 				get: async ({ range }) => { log.reads.push(range); return { data: { values: read(range) } }; },
 				batchGet: async ({ ranges }) => { log.reads.push(...ranges); return { data: { valueRanges: ranges.map((r) => ({ range: r, values: read(r) })) } }; },
 				batchUpdate: async ({ requestBody }) => {
+					refuseWrite();
 					let cells = 0;
 					for (const d of requestBody.data) { write(d.range, d.values); cells += d.values.flat().length; }
 					return { data: { totalUpdatedCells: cells } };
 				},
-				update: async ({ range, requestBody }) => { write(range, requestBody.values); return { data: {} }; },
+				update: async ({ range, requestBody }) => { refuseWrite(); write(range, requestBody.values); return { data: {} }; },
 				append: async ({ range, requestBody }) => {
+					refuseWrite();
 					const { tab } = parse(range);
 					for (const r of requestBody.values) tabs[tab].push(r.map((v) => (v == null ? "" : String(v))));
 					const n = tabs[tab].length;
@@ -202,7 +207,7 @@ function fakeSheet(initialRows) {
 			},
 		},
 	};
-	return { api, tabs, log };
+	return { api, tabs, log, control };
 }
 
 function seed(db, clockMs) {

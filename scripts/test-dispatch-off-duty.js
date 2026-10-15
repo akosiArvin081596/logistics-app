@@ -18,6 +18,17 @@
 //   §4 the call sites: exactly the five routes, each inside
 //      `if (DRIVER_AVAILABILITY_ENABLED)`, so n8n and system writes never pass
 //      through the check
+//   §5 a read of the availability table that fails is logged and the
+//      assignment goes ahead, as every other availability read degrades: the
+//      check is a warning, never a reason a dispatch cannot be made
+//   §6 the "Assign anyway" audit row is written only after the sheet write
+//      succeeded: a confirmed assignment whose write fails leaves none
+//   §7 the owner's rule (2026-10-15): moving an assigned load's dates into its
+//      driver's time off asks the same question as changing the driver, on
+//      both row saves (the only routes that change an assigned load's dates;
+//      n8n and re-issue writes are system writes and never checked). A new
+//      time on the same day is no move. The Driver column is the one checked:
+//      Job Tracking has no co-driver column.
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js) over a fake Job Tracking sheet; "today"
@@ -143,6 +154,83 @@ const ROUTES = [
 		eq("§3.14 pickup \"TBD\", drop-off 2026-10-18: Tamsin off Oct 18 warns", code(await dispatch(8, "7203", "Tamsin Vale")), [409, "DRIVER_OFF_DUTY"]);
 		eq("§3.15 drop-off before the pickup: the pickup day (Oct 20); Tamsin off Oct 18 does not", (await dispatch(9, "7204", "Tamsin Vale")).status, 200);
 	});
+
+	section("§5 an availability read that fails never stops an assignment");
+	for (const [label, send] of ROUTES) {
+		await R.guard(`§5 ${label}`, async () => {
+			const w = await W.startWorld();
+			await off(w, DIR.tamsin, "2026-10-18", "2026-10-22");
+			// The table gone under the running server: every read of it throws.
+			w.db.exec("DROP TABLE driver_availability");
+			const logsBefore = w.logs.length;
+			const r = await send(w, "Tamsin Vale", false);
+			eq(`§5 ${label}, the availability read fails: 200, the assignment goes ahead`, r.status, 200);
+			const rows = w.sheet.tabs["Job Tracking"];
+			const written = label === "POST /api/data" ? rows[rows.length - 1][COL.Driver] : driverAt(w, 4);
+			eq(`§5 ${label}: the Driver cell is written`, written, "Tamsin Vale");
+			ok(`§5 ${label}: the failed read is logged as the availability check's`,
+				w.logs.slice(logsBefore).some((l) => /off-duty check/i.test(l) && /no such table/i.test(l)), w.logs.slice(logsBefore).join(" | "));
+		});
+	}
+
+	section("§6 a confirmed assignment is audited only once it is written");
+	for (const [label, send] of ROUTES) {
+		await R.guard(`§6 ${label}`, async () => {
+			const w = await W.startWorld();
+			await off(w, DIR.tamsin, "2026-10-18", "2026-10-22");
+			w.sheet.control.failWrites = true;
+			const failed = await send(w, "Tamsin Vale", true);
+			ok(`§6 ${label}, confirmed but the sheet write fails: not answered 200`, failed.status !== 200, `status ${failed.status}`);
+			eq(`§6 ${label}: ...and no dispatch_off_duty_confirmed audit row`, confirmed(w).length, 0);
+			w.sheet.control.failWrites = false;
+			const done = await send(w, "Tamsin Vale", true);
+			eq(`§6 ${label}, confirmed again with the sheet writable: 200 and one audit row`, [done.status, confirmed(w).length], [200, 1]);
+		});
+	}
+
+	section("§7 moving an assigned load's dates into the driver's time off");
+	await R.guard("§7 the rule", async () => {
+		const pick = (o) => (lib && lib.offDutyCheckDriver ? lib.offDutyCheckDriver({ normalize: (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " "), ...o }) : undefined);
+		const same = { driverBefore: "Soren King", driverAfter: "Soren King", pickupBefore: "2026-10-16", pickupAfter: "2026-10-16", dropoffBefore: "2026-10-17", dropoffAfter: "2026-10-17" };
+		eq("§7.1 nothing moved, same driver: no check", pick(same), "");
+		eq("§7.2 a new driver: checked", pick({ ...same, driverAfter: "Tamsin Vale" }), "Tamsin Vale");
+		eq("§7.3 the same driver in other spacing and case: no check", pick({ ...same, driverAfter: " soren   KING " }), "");
+		eq("§7.4 the pickup day moved: the driver is checked", pick({ ...same, pickupAfter: "2026-10-20" }), "Soren King");
+		eq("§7.5 the drop-off day moved: checked", pick({ ...same, dropoffAfter: "2026-10-21" }), "Soren King");
+		eq("§7.6 a load with no driver whose dates move: no check", pick({ ...same, driverBefore: "", driverAfter: "", pickupAfter: "2026-10-20" }), "");
+		eq("§7.7 the driver cleared: no check", pick({ ...same, driverAfter: "" }), "");
+	});
+	for (const [label, move] of [
+		["PUT /api/data/:rowIndex", (w, rowIndex, loadId, patch, confirm) => w.call("PUT", `/api/data/${rowIndex}`, { user: USERS.disp,
+			body: { values: rowValues(w, rowIndex, patch), ...(confirm ? { confirmOffDuty: true } : {}) } })],
+		["PUT /api/load/:loadId", (w, rowIndex, loadId, patch, confirm) => w.call("PUT", `/api/load/${loadId}${confirm ? "?confirmOffDuty=true" : ""}`, { user: USERS.disp,
+			body: Object.fromEntries(Object.entries(patch).map(([k, v]) => [W.HEADERS.find((h) => h.trim() === k), v])) })],
+	]) {
+		await R.guard(`§7 ${label}`, async () => {
+			const w = await W.startWorld();
+			await off(w, DIR.soren, "2026-10-20", "2026-10-21");
+			await off(w, DIR.hollis, "2026-10-20", "2026-10-21");
+			const into = { "Pickup Appointment": "10/20/2026 09:00", "Drop-off Appointment": "10/21/2026 15:00" };
+			const writesBefore = w.sheet.log.writes.length;
+			const r = await move(w, 3, "7002", into, false);
+			eq(`§7 ${label}: Soren's load (Oct 16-17) moved to Oct 20-21, inside his time off: 409 DRIVER_OFF_DUTY naming it`,
+				[r.status, r.body && r.body.code, r.body && r.body.offFrom, r.body && r.body.offTo], [409, "DRIVER_OFF_DUTY", "2026-10-20", "2026-10-21"]);
+			eq(`§7 ${label}: ...nothing written, nothing audited`, [w.sheet.log.writes.length - writesBefore, confirmed(w).length], [0, 0]);
+			const c = await move(w, 3, "7002", into, true);
+			const row3 = w.sheet.tabs["Job Tracking"][2];
+			eq(`§7 ${label}, confirmed: 200, the dates written, one confirmation audited`,
+				[c.status, row3[COL["Pickup Appointment"]], confirmed(w).length], [200, "10/20/2026 09:00", 1]);
+			ok(`§7 ${label}: ...the audit names the move's window`, /2026-10-20\.\.2026-10-21/.test((confirmed(w)[0] || {}).details || ""));
+			eq(`§7 ${label}: Hollis's load (Oct 20-22, already inside his time off) given a new pickup time the same day: 200, no warning`,
+				(await move(w, 2, "7001", { "Pickup Appointment": "10/20/2026 10:00" }, false)).status, 200);
+			eq(`§7 ${label}: ...its pickup moved to another day still inside the time off (Oct 21): 409`,
+				(await move(w, 2, "7001", { "Pickup Appointment": "10/21/2026 10:00" }, false)).status, 409);
+			eq(`§7 ${label}: Soren's load moved out of his time off (Oct 23-24): 200`,
+				(await move(w, 3, "7002", { "Pickup Appointment": "10/23/2026 09:00", "Drop-off Appointment": "10/24/2026 15:00" }, false)).status, 200);
+			eq(`§7 ${label}: an unassigned load (7003) moved onto Oct 20-21: 200`,
+				(await move(w, 4, "7003", into, false)).status, 200);
+		});
+	}
 
 	section("§4 the call sites");
 	await R.guard("§4", async () => {

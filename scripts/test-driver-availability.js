@@ -23,7 +23,9 @@
 //      starts with none; an orphan row pauses nothing
 //   §7 the sweep: the open alert resolves while the driver is off, stays quiet
 //      through the grace after he returns, then re-opens; a row still owing an
-//      email retry (#507) resolves and is not retried
+//      email retry (#507) resolves and is not retried; a load given him with
+//      "Assign anyway" that covers today makes his truck alert as normal (the
+//      owner's rule, 2026-10-15)
 //
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // and sweep lifted out of server.js on an in-memory SQLite, over HTTP.
@@ -64,6 +66,9 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			"created_by_user_id", "created_at", "updated_at", "cancelled_at", "cancelled_by"]);
 		ok("§1.4 the (directory_id, from_date) index exists",
 			db.prepare("PRAGMA index_list(driver_availability)").all().some((i) => i.name === "idx_driver_avail_dir"));
+		eq("§1.4b the same migration records \"Assign anyway\" confirmations, with the load's window",
+			db.prepare("PRAGMA table_info(driver_availability_confirmations)").all().map((c) => c.name),
+			["id", "availability_id", "directory_id", "load_id", "load_from", "load_to", "via", "confirmed_by", "confirmed_by_user_id", "confirmed_at"]);
 		const ins = (kind, from, to) => {
 			try {
 				db.prepare("INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_at) VALUES (1, 'x', ?, ?, ?, 'test', '2026-10-15T00:00:00Z')").run(kind, from, to);
@@ -289,6 +294,28 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§7.11 he is recorded off: the row resolves and the email is not retried", [!!row().resolved_at, w.emails.length], [true, tried]);
 		await w.sweep();
 		eq("§7.12 ...nor on the sweep after", w.emails.length, tried);
+	});
+	await R.guard("§7d", async () => {
+		// The owner's rule (2026-10-15): after "Assign anyway", a confirmed load
+		// covering today overrides the time off, so the truck's dark-ELD alert
+		// fires as normal.
+		const w = await W.startWorld();
+		await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20"));
+		const load = W.jtRow({ id: "7300", driver: "Hollis Renner", pickup: "10/15/2026 08:00", dropoff: "10/16/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" });
+		const asked = await w.call("POST", "/api/data", { body: { values: load } });
+		eq("§7.14 a load covering today for Hollis, off Oct 14-20: 409 DRIVER_OFF_DUTY", [asked.status, asked.body && asked.body.code], [409, "DRIVER_OFF_DUTY"]);
+		const done = await w.call("POST", "/api/data", { body: { values: load, confirmOffDuty: true } });
+		eq("§7.15 ...\"Assign anyway\": 200", done.status, 200);
+		await w.sweep();
+		const row = w.db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`);
+		ok("§7.16 the sweep alerts on his dark truck as normal", !!row && !row.resolved_at && !!row.alerted_at);
+		const feed = w.api.eldFeedHealthReport(w.clock.ms).feeds.find((f) => f.vehicleId === W.VID.t91);
+		eq("§7.17 ...the health report says stale, not driver_off", feed && feed.state, "stale");
+		w.clock.ms = Date.parse("2026-10-18T16:00:00Z");
+		await w.sweep();
+		eq("§7.18 Oct 18, after that load's days (still off): driver_off again, the alert resolved",
+			[w.api.eldFeedHealthReport(w.clock.ms).feeds.find((f) => f.vehicleId === W.VID.t91).state, !!w.db.prepare("SELECT resolved_at FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`).resolved_at],
+			["driver_off", true]);
 	});
 	await R.guard("§7c", async () => {
 		const w = await W.startWorld();
