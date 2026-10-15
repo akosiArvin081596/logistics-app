@@ -44,7 +44,12 @@
  *      and given the same payee, period, lines and notes on an identical
  *      database, stores the same row (every column but created_at) and the same
  *      snapshot (every key; the issue date, which the route takes from the
- *      clock, and "Prepared by", which it takes from the session, may differ).
+ *      clock, and "Prepared by", which it takes from the session, may differ);
+ *   §9 namesDay() reads 6/1, 06/01/26, 6/1/2026, June 1, Jun. 01 and the ISO
+ *      day, and not another year, 16/1, 6/10, Junebug 1 or June 12; an original
+ *      invoice number holding . + ( ) [ ] * drafts and re-runs as written, a
+ *      look-alike of it in a manual line does not block, the exact number with
+ *      the day does.
  *
  * Pure: a temp directory, child processes of the script itself (dry runs
  * only), no server, no network, no Chromium (the PDF renderer is a stub).
@@ -441,6 +446,50 @@ function cli(args, env = {}) {
 		}
 		scriptSide.db.close();
 		routeSide.db.close();
+	}
+
+	// ── §9 dates in free text; an invoice number with pattern characters ─────────
+	{
+		const cases = [
+			["Missed 6/1 for the week", "2026-06-01", true],
+			["06/01/26 make-up", "2026-06-01", true],
+			["paid 6/1/2026", "2026-06-01", true],
+			["paid 6/1/2027", "2026-06-01", false],
+			["16/1", "2026-06-01", false],
+			["6/10", "2026-06-01", false],
+			["6/1/", "2026-06-01", false],
+			["June 1", "2026-06-01", true],
+			["jun. 01", "2026-06-01", true],
+			["Junebug 1", "2026-06-01", false],
+			["June 12", "2026-06-01", false],
+			["2026-06-01", "2026-06-01", true],
+			["May 31, Jun 5", "2026-06-05", true],
+			["6/1 and 6/5", "2026-06-05", true],
+			["6/1,6/5", "2026-06-05", true],
+		];
+		for (const [text, day, want] of cases) check(`§9 namesDay(${JSON.stringify(text)}, ${day}) is ${want}`, fix.namesDay(text, day) === want);
+
+		// The original's number holds . + ( ) [ ] *: matched as text, never as a pattern.
+		const META = "INV-JT.2026W22+01(a)[*]";
+		const renumber = (db) => db.prepare("UPDATE invoices SET invoice_number = ? WHERE id = 70").run(META);
+		const metaRun = async (extra) => {
+			const f = fixture((db) => { renumber(db); if (extra) extra(db); });
+			const first = await attempt(f, { invoiceNumber: META });
+			const second = first.out ? await attempt(f, { invoiceNumber: META }) : null;
+			f.db.close();
+			return { first, second };
+		};
+		const plain = await metaRun(null);
+		const lines = plain.first.out && plain.first.out.invoice ? JSON.parse(plain.first.out.invoice.render_data).lineItems : [];
+		check("§9 a number with pattern characters drafts, its lines naming it as written", plain.first.out && plain.first.out.state === "written"
+			&& lines.length === 3 && lines.every((l) => l.description.startsWith(`Correction for ${META}: `)), plain.first.err && plain.first.err.message);
+		check("§9 and its re-run is already drafted", plain.second && plain.second.out && plain.second.out.state === "already", plain.second && plain.second.err && plain.second.err.message);
+		// Text the number would match if it were read as a pattern ("." any
+		// character, "2+" several 2s, "(a)" a, "[*]" a star) does not name it.
+		const lookalike = await metaRun(manual("INV-M-JT-2026W24-04", [{ date: "2026-06-10", description: "INV-JTx2026W222201a* make-up 6/1", amount: 275 }]));
+		check("§9 a look-alike of the number does not block", lookalike.first.out && lookalike.first.out.state === "written", lookalike.first.err && lookalike.first.err.message);
+		const named = await metaRun(manual("INV-M-JT-2026W24-05", [{ date: "2026-06-10", description: `Make-up 6/1 for ${META}`, amount: 275 }]));
+		check("§9 a line naming the number exactly and the day refuses", named.first.err instanceof fix.Refusal && named.first.err.message.includes(`names ${META} and 2026-06-01`), named.first.err ? named.first.err.message : "drafted");
 	}
 
 	fs.rmSync(tmp, { recursive: true, force: true });

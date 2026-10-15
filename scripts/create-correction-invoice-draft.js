@@ -250,6 +250,13 @@ function gridBills(row, day) {
 
 const correctionPrefix = (originalNumber) => `Correction for ${originalNumber}:`;
 
+// Dates written M/D or MM/DD, with an optional /YYYY or /YY; and a word then a
+// day number ("January 5", "Jan. 5"). Fixed patterns: the text's dates are
+// found first and then compared with the day as numbers, so nothing from the
+// command line or the database is ever compiled into a pattern.
+const SLASH_DATE_RE = /(^|[^\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])/g;
+const WORD_DATE_RE = /\b([a-z]{3,9})\.?\s{1,3}(\d{1,2})(?!\d)/gi;
+
 // Whether free text names `day`: 2026-01-05, 1/5 or 01/05 (with this year or
 // none), January 5 or Jan 5 (any case).
 function namesDay(text, day) {
@@ -258,9 +265,15 @@ function namesDay(text, day) {
 	const y = day.slice(0, 4);
 	const m = Number(day.slice(5, 7));
 	const d = Number(day.slice(8, 10));
-	if (new RegExp(`(^|[^\\d/])0?${m}/0?${d}(/(${y}|${y.slice(2)}))?(?![\\d/])`).test(t)) return true;
-	const month = MONTHS[m - 1];
-	return new RegExp(`\\b(${month}|${month.slice(0, 3)})\\.?\\s{1,3}0?${d}(?!\\d)`, "i").test(t);
+	for (const hit of t.matchAll(SLASH_DATE_RE)) {
+		if (Number(hit[2]) === m && Number(hit[3]) === d && (!hit[4] || hit[4] === y || hit[4] === y.slice(2))) return true;
+	}
+	const month = MONTHS[m - 1].toLowerCase();
+	for (const hit of t.matchAll(WORD_DATE_RE)) {
+		const word = hit[1].toLowerCase();
+		if ((word === month || word === month.slice(0, 3)) && Number(hit[2]) === d) return true;
+	}
+	return false;
 }
 // Any date the script can read in free text, in the forms namesDay() reads.
 const READABLE_DATE_RE = /\d{4}-\d{2}-\d{2}|(^|[^\d/])\d{1,2}\/\d{1,2}(?!\d)|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?\s{1,3}\d{1,2}(?!\d)/i;
