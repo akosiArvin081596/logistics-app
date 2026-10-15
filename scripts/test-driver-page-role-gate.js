@@ -148,9 +148,9 @@ const TABLES = {
 		{ id: 3, driver: "", amount: 55 },
 	],
 	invoices: [
-		{ id: 1, driver: "desoren king", total_earnings: 1800 },
-		{ id: 2, driver: "soren king", total_earnings: 1500 },
-		{ id: 3, driver: "", total_earnings: 999 },
+		{ id: 1, driver: "desoren king", total_earnings: 1800, personal_total: 0, personal_share_total: 0 },
+		{ id: 2, driver: "soren king", total_earnings: 1500, personal_total: 0, personal_share_total: 0 },
+		{ id: 3, driver: "", total_earnings: 999, personal_total: 0, personal_share_total: 0 },
 	],
 	trucks: [{ id: 7, unit_number: "33", assigned_driver: "Desoren King" }],
 	drivers_directory: [{ id: 11, driver_name: "Desoren King" }, { id: 12, driver_name: "Soren King" }],
@@ -190,6 +190,12 @@ function makeDeps() {
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),
+		// No receipt carries a Personal line here (its subject is
+		// scripts/test-personal-expense-routes.js).
+		personalSummaryByExpense: () => Object.create(null),
+		personalSummaryForRole: () => null,
+		// Nor does an invoice (scripts/test-personal-expense-receipts.js).
+		personalLinesForInvoices: () => new Map(),
 		stripSigningEvidence: (rows) => rows,
 		// Which stored files exist, from their bytes (its own subject is
 		// scripts/test-stored-file-serving.js).

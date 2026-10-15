@@ -674,6 +674,16 @@ An investor sees their own trucks here, in the same table and cards the office u
 
 ---
 
+## 20. Receipts a driver repays ("Personal" receipts; behind a switch that ships off)
+
+When a Super Admin marks part or all of a receipt as the driver's own purchase, that part is no truck cost: it leaves the month's Trip Expenses, and the investor's share of the month rises by their split of it. An investor never sees that a receipt was personal. A wholly personal receipt leaves the **Expenses** table; a partly personal one shows only the company's share. A receipt in a month already finalized stays exactly as it settled there; the personal part comes back as a credit in the open month, and that is the one line an investor can read:
+
+| Flag | Exact text | Where / when | Status |
+|---|---|---|---|
+| ⚪ | `Receipt credit (not a truck cost)` | Payouts → a month's **Trip Expenses** breakdown, as a negative line, only in the open month that carries such a credit. | **New — awaiting client approval; off until PERSONAL_EXPENSE_DEDUCTIONS_ENABLED is switched on** |
+
+---
+
 ## The ones I'd raise first
 
 0. **§2 / §12, the loss carry-forward** — the line you actually asked about. Two things to settle: (a) **one wording**, since the same deduction is currently called three different things across the PDF, the Earnings screen and the Payouts table; and (b) whether `Payable` / `Projected payout` is the right name for the figure that lands under it. Everything else in this file can wait — this one is live in August.

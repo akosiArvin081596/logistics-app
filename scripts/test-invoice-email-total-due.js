@@ -79,7 +79,8 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	submitted_at TEXT DEFAULT '', approved_at TEXT DEFAULT '', approved_by TEXT DEFAULT '',
 	processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
 	adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '',
-	deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0)`;
+	deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0,
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0)`;
 
 const ROOTS = [];
 function buildWorld(src) {

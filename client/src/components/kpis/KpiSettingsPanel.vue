@@ -42,15 +42,29 @@
         </fieldset>
 
         <div class="kpi-field">
-          <label for="kpi-dedicated" class="form-label">Dedicated contracts start</label>
+          <label for="kpi-dedicated" class="form-label">Contract start month</label>
           <div class="kpi-field-row">
             <input
               id="kpi-dedicated"
-              v-model="form.dedicatedStart"
-              type="date"
+              v-model="dedicatedMonth"
+              type="month"
+              min="2020-01"
+              max="2100-12"
               class="form-input"
               :aria-invalid="!!errorFor('dedicatedStart')"
               :aria-describedby="errorFor('dedicatedStart') ? 'kpi-err-dedicatedStart' : 'kpi-hint-dedicatedStart'"
+              @input="clearServerError('dedicatedStart')"
+            />
+            <input
+              id="kpi-dedicated-day"
+              v-model="dedicatedDay"
+              type="text"
+              inputmode="numeric"
+              maxlength="2"
+              class="form-input kpi-day-input"
+              aria-label="Exact start day (optional)"
+              placeholder="Day"
+              :disabled="!dedicatedMonth"
               @input="clearServerError('dedicatedStart')"
             />
             <Button
@@ -62,7 +76,7 @@
               @click="clearField('dedicatedStart')"
             >Clear</Button>
           </div>
-          <p id="kpi-hint-dedicatedStart" class="kpi-field-hint">Not in the data. Empty leaves the dedicated-contracts before/after unset.</p>
+          <p id="kpi-hint-dedicatedStart" class="kpi-field-hint">Not in the data. The month the dedicated contracts began; add a day only if the exact date is known. Paid miles and the paid-mile share stay unset until this is set.</p>
           <p v-if="errorFor('dedicatedStart')" id="kpi-err-dedicatedStart" class="kpi-field-error" role="alert">{{ errorFor('dedicatedStart') }}</p>
         </div>
 
@@ -123,7 +137,7 @@ import { Button } from '@/components/ui/button'
 import KpiBadge from './KpiBadge.vue'
 import { useKpisStore } from '../../stores/kpis'
 import {
-  MPG_MAX, MPG_MIN, RECIPIENTS_MAX, parseRecipients, settingsChanges, settingsFormFrom,
+  MPG_MAX, MPG_MIN, RECIPIENTS_MAX, fmtSettingDate, joinDedicatedStart, parseRecipients, settingsChanges, settingsFormFrom, splitDedicatedStart,
 } from '../../lib/kpiView.js'
 import { fmtYmd } from '../../utils/datetime'
 
@@ -141,6 +155,17 @@ const saving = computed(() => store.settingsSaving)
 const base = ref(props.settings)
 const form = reactive(settingsFormFrom(props.settings))
 const serverError = ref({ field: null, message: '' })
+
+// The contract start is one value ('2026-09' or '2026-09-15') edited as a month
+// box and an optional day box.
+const dedicatedMonth = computed({
+  get: () => splitDedicatedStart(form.dedicatedStart).month || (form.dedicatedStart || '').slice(0, 7),
+  set: (month) => { form.dedicatedStart = joinDedicatedStart(month, month ? splitDedicatedStart(form.dedicatedStart).day : '') },
+})
+const dedicatedDay = computed({
+  get: () => splitDedicatedStart(form.dedicatedStart).day,
+  set: (day) => { form.dedicatedStart = joinDedicatedStart(dedicatedMonth.value, day) },
+})
 
 const pending = computed(() => settingsChanges(base.value, form))
 const canSave = computed(() => !saving.value && pending.value.changed.length > 0 && !Object.keys(pending.value.errors).length)
@@ -188,7 +213,7 @@ const summary = computed(() => {
   const ai = s.aiDispatchStart?.value
     ? `${fmtYmd(s.aiDispatchStart.value)} (${s.aiDispatchStart.source === 'admin' ? 'set by admin' : 'from data'})`
     : 'not found'
-  const dedicated = s.dedicatedStart?.value ? fmtYmd(s.dedicatedStart.value) : 'not set'
+  const dedicated = s.dedicatedStart?.value ? fmtSettingDate(s.dedicatedStart.value, (d) => fmtYmd(d)) : 'not set'
   const mpg = typeof s.baselineMpg === 'number' ? String(s.baselineMpg) : 'not set'
   const count = parseRecipients((s.recipients || []).join('\n')).length
   const recipients = count ? `${count} recipient${count === 1 ? '' : 's'}` : 'admin inbox'
@@ -251,6 +276,7 @@ async function save() {
   gap: 0.5rem;
 }
 .kpi-field-row .form-input { flex: 1 1 auto; min-width: 0; }
+.kpi-field-row .kpi-day-input { flex: 0 0 4.5rem; }
 .kpi-field-hint {
   margin: 0;
   font-size: 0.74rem;

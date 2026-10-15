@@ -30,11 +30,17 @@
         Receipts filed: ${{ invoice.expenses_total.toFixed(2) }}
       </span>
     </div>
+    <!-- Personal lines (what you repay, already in "your pay"), each with its
+         receipt. A tap on a link opens the receipt, not the card's sheet. -->
+    <div v-if="invoice.personal_lines && invoice.personal_lines.length" class="inv-personal" @click.stop>
+      <PersonalInvoiceLines :lines="invoice.personal_lines" />
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import PersonalInvoiceLines from '../shared/PersonalInvoiceLines.vue'
 
 const props = defineProps({
   invoice: { type: Object, required: true },
@@ -91,6 +97,10 @@ const statusColor = computed(() => {
 .inv-status {
   font-size: 0.68rem;
   font-weight: 600;
+}
+.inv-personal {
+  margin-top: 0.35rem;
+  padding-left: 1.6rem;
 }
 .inv-meta {
   display: flex;

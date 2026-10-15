@@ -13,7 +13,8 @@
  * §4  revenue: each delivered load's Payment, per month; gaps, YoY, coverage.
  * §5  ELD miles and truck utilization: distinct truck-days, service dates, the
  *     before/after windows (equal, never overlapping, event day = after).
- * §6  paid-mile share: full-ELD loads only, an unmeasured leg is never 0.
+ * §6  paid-mile share v2 and the R10 mile metrics: missing (never 0) with no
+ *     rate-con miles gathered; their formulas: scripts/test-kpi-miles.js.
  * §7  on-time: strict and by-day rates, exclusions counted, the review warning.
  * §8  fleet: today's count applies Inactive, history never does, snapshots win.
  * §9  fuel: MPG over months with both, savings vs a baseline (missing without
@@ -428,13 +429,15 @@ function battery(mods) {
 		t(u.coverage.num === 2 && u.coverage.den === 5 && u.status === "partial", "§5 coverage: 2 of 5 trucks have ELD mileage", JSON.stringify(u.coverage));
 	}
 
-	// §6 paid-mile share
+	// §6 paid-mile share: v2 (R10) reads the rate-con miles, not the ELD legs of
+	// load_eld_miles; its formulas are pinned in scripts/test-kpi-miles.js. Here:
+	// the old ELD-leg input alone gives no figure, never a 0.
 	{
 		const m = get(out, "paid_mile_share");
-		t(m.value === 75, "§6 September 2026: 3,000 loaded of 4,000 (in-progress, overlap, partial and unmeasured legs left out)", m.value);
-		t(ser(m, "2026-07").display === "No data", "§6 before the first fully measured load: No data");
-		t(m.coverage.num === 6 && m.coverage.den === 9, "§6 coverage: 6 of 9 finished loads measured", JSON.stringify(m.coverage));
-		t(m.beforeAfter.length === 1 && m.beforeAfter[0].event === "dedicated" && m.beforeAfter[0].status === "missing", "§6 nothing measured before the dedicated start");
+		t(m.status === "missing" && m.value === null && m.beforeAfter.length === 0, "§6 with no rate-con miles gathered, paid-mile share is missing (the load_eld_miles legs no longer feed it)", JSON.stringify({ s: m.status, v: m.value }));
+		for (const k of ["loaded_miles", "paid_miles", "deadhead_miles", "unloaded_miles"]) {
+			t(get(out, k).status === "missing" && get(out, k).value === null, `§6 ${k}: no loads gathered, missing, never 0`);
+		}
 	}
 
 	// §7 on time
@@ -508,8 +511,9 @@ function battery(mods) {
 	// §11 catalog
 	{
 		const keys = ["freight_tons_stated", "freight_tons_estimated", "loads_delivered", "revenue", "miles_driven", "on_time_rate", "fleet_trucks",
-			"active_units", "fuel_mpg", "fuel_savings", "co2_tonnes", "ai_tasks", "automated_tasks", "dispatch_calls", "truck_utilization", "paid_mile_share"];
-		t(JSON.stringify(C.METRIC_KEYS) === JSON.stringify(keys), "§11 the sixteen keys, in order");
+			"active_units", "fuel_mpg", "fuel_savings", "co2_tonnes", "ai_tasks", "automated_tasks", "dispatch_calls", "truck_utilization", "paid_mile_share",
+			"loaded_miles", "paid_miles", "deadhead_miles", "unloaded_miles"];
+		t(JSON.stringify(C.METRIC_KEYS) === JSON.stringify(keys), "§11 the twenty keys, in order");
 		t(JSON.stringify(out.metrics.map((m) => m.key)) === JSON.stringify(keys), "§11 computeKpis returns them in that order");
 		t(C.CO2_KG_PER_GALLON_DIESEL === 10.18 && C.LB_PER_TON === 2000 && C.KPI_SERIES_START === "2025-04", "§11 constants");
 		t(/EPA-420-F-23-014/.test(C.CO2_SOURCE.label) && C.CO2_SOURCE.url === "https://www.epa.gov/greenvehicles/greenhouse-gas-emissions-typical-passenger-vehicle", "§11 the EPA source");
@@ -517,14 +521,18 @@ function battery(mods) {
 		t(C.metricByKey("fuel_savings").assumptions[0] === "Compared with a truck at the baseline MPG set on this page driving the same ELD miles, priced at the average $/gal actually paid.", "§11 savings assumption text");
 		t(C.metricByKey("freight_tons_estimated").assumptions[0] === "Loads with no stated weight are assumed to weigh the average of loads that state one.", "§11 estimate assumption text");
 		const kinds = { freight_tons_estimated: "estimate", fuel_savings: "estimate", active_units: "proxy", dispatch_calls: "not_tracked" };
-		t(C.METRICS.every((m) => m.kind === (kinds[m.key] || "real") && m.definitionVersion === 1 && typeof m.definition === "string" && m.definition.length > 20), "§11 kinds and versions");
+		// At version 2: the fuel metrics (their receipts leave out what a driver
+		// bought for himself, Personal receipts) and paid_mile_share (R10's paid
+		// miles); every other metric is at 1.
+		const V2 = new Set(["fuel_mpg", "fuel_savings", "co2_tonnes", "paid_mile_share"]);
+		t(C.METRICS.every((m) => m.kind === (kinds[m.key] || "real") && m.definitionVersion === (V2.has(m.key) ? 2 : 1) && typeof m.definition === "string" && m.definition.length > 20), "§11 kinds and versions");
 		t(JSON.stringify(C.metricByKey("truck_utilization").settingsUsed) === JSON.stringify(["aiDispatchStart", "dedicatedStart"])
 			&& JSON.stringify(C.metricByKey("paid_mile_share").settingsUsed) === JSON.stringify(["dedicatedStart"])
 			&& JSON.stringify(C.metricByKey("fuel_savings").settingsUsed) === JSON.stringify(["baselineMpg"]), "§11 settingsUsed");
 		t(C.settingsHashFor("loads_delivered", { baselineMpg: 7 }) === "", "§11 a metric that reads no setting hashes to ''");
 		t(C.settingsHashFor("fuel_savings", { baselineMpg: 6.5, recipients: ["x"] }) === C.settingsHashFor("fuel_savings", { recipients: ["y"], baselineMpg: 6.5 })
 			&& C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) !== C.settingsHashFor("fuel_savings", { baselineMpg: 7 }), "§11 the hash reads only the metric's settings");
-		const ok = { approved: 1, definition_version: 1, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) };
+		const ok = { approved: 1, definition_version: 2, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6.5 }) };
 		t(C.approvalIsValid(ok, "fuel_savings", { baselineMpg: 6.5 }) === true, "§11 a current approval is valid");
 		t(C.approvalIsValid({ ...ok, definition_version: 0 }, "fuel_savings", { baselineMpg: 6.5 }) === false, "§11 an approval of an earlier definition lapses");
 		t(C.approvalIsValid(ok, "fuel_savings", { baselineMpg: 7 }) === false, "§11 an approval lapses when a setting it used changes");
@@ -548,9 +556,9 @@ function battery(mods) {
 		const series = out.metrics.flatMap((m) => m.series.map((s) => ({ metric_key: m.key, period: s.period, value: s.value, display: s.display, coverage: s.coverage }))).reverse();
 		const approvals = [
 			{ metric_key: "loads_delivered", approved: 1, definition_version: 1, settings_hash: "", approved_by: "super_admin", approved_at: "2026-10-09 12:00:00" },
-			{ metric_key: "fuel_savings", approved: 1, definition_version: 1, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6 }), approved_by: "super_admin", approved_at: "2026-10-08T12:00:00Z" },
+			{ metric_key: "fuel_savings", approved: 1, definition_version: 2, settings_hash: C.settingsHashFor("fuel_savings", { baselineMpg: 6 }), approved_by: "super_admin", approved_at: "2026-10-08T12:00:00Z" },
 			{ metric_key: "revenue", approved: 1, definition_version: 0, settings_hash: "", approved_by: "super_admin", approved_at: "2026-10-01T12:00:00Z" },
-			{ metric_key: "co2_tonnes", approved: 0, definition_version: 1, settings_hash: "", approved_by: null, approved_at: null },
+			{ metric_key: "co2_tonnes", approved: 0, definition_version: 2, settings_hash: "", approved_by: null, approved_at: null },
 		];
 		const job = { enabled: { snapshot: true, digest: true }, lastRun: { id: 3, kind: "nightly", status: "ok", startedAt: "2026-10-09T08:00:00Z", finishedAt: "2026-10-09T08:00:04Z", durationMs: 4000, errors: [] } };
 		response = M.buildKpiResponse({ asOfDay: AS_OF, timeZone: "America/New_York", job, settings, derived: out.derived, snapshots, series, approvals, generatedAt: "2026-10-09T13:00:00Z", defaultRecipientConfigured: true });
@@ -586,7 +594,7 @@ function battery(mods) {
 			coverage: m.coverage, warnings: m.warnings, assumptions: m.assumptions, breakdown: m.breakdown, missingReason: m.missingReason }), "utf8"));
 		t(Math.max(...big) <= 4096, "§12 every payload fits in 4 KB", `largest ${Math.max(...big)} bytes`);
 		const empty = M.computeKpis({ asOfDay: AS_OF });
-		t(empty.errors.length === 0 && empty.metrics.length === 16 && empty.metrics.every((m) => m.status === (m.key === "dispatch_calls" ? "not_tracked" : "missing")),
+		t(empty.errors.length === 0 && empty.metrics.length === 20 && empty.metrics.every((m) => m.status === (m.key === "dispatch_calls" ? "not_tracked" : "missing")),
 			"§12 no inputs at all: every metric missing, nothing thrown", JSON.stringify(empty.metrics.filter((m) => m.status !== "missing").map((m) => m.key)));
 		t(out.errors.length === 0 && out2.errors.length === 0, "§12 no metric failed on the fixtures", JSON.stringify(out.errors));
 	}
@@ -637,7 +645,7 @@ const MUTANTS = [
 	["fuel savings computed without a baseline", "§9", { metrics: [["if (!hasBaseline) return missingResult(", "if (false) return missingResult("]] }],
 	["fuel savings sign flipped", "§9", { metrics: [["return (fw.miles / baseline - fw.gal) * pricePerGallon;", "return (fw.gal - fw.miles / baseline) * pricePerGallon;"]] }],
 	["truck-days counted per row, not per distinct (truck, day)", "§5", { metrics: [["for (const td of truckDays.values()) {", "for (const td of eldRows) {"]] }],
-	["unmeasured (null) loaded miles read as 0", "§6", { metrics: [["if (!measured(loaded) || !measured(empty)) continue;", "if (!measured(empty)) continue;"]] }],
+	["paid-mile share shown with no load in scope (ELD miles alone)", "§6", { metrics: [["return start ? minDay([start, eldStart]) : null;", "return eldStart;"]] }],
 	["today's Inactive applied to history", "§8", { metrics: [["return snapshots.has(day) ? snapshots.get(day) : fleetCount(day, false);", "return snapshots.has(day) ? snapshots.get(day) : fleetCount(day, true);"]] }],
 	["before/after windows overlap on the event day", "§1", { metrics: [["const beforeTo = addDays(date, -1);", "const beforeTo = date;"]] }],
 	["an approval survives a definition change", "§12", { catalog: [["\t\t&& row.definition_version === def.definitionVersion\n", ""]] }],
