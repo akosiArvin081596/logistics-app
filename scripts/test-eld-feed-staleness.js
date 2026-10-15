@@ -721,8 +721,13 @@ section("§2b pure — driver availability pauses and resumes the alert");
 		const conf = { id: 9, load_id: "7300", directory_name: "hollis  renner", load_from: "2026-10-16", load_to: "2026-10-17" };
 		const sheet = (o) => new Map([["7300", { driver: "Hollis Renner", truck: "Logisx-#91", pickupKey: "2026-10-16", dropoffKey: "2026-10-17", cancelled: false, ...o }]]);
 		const standing = (todayKey, loads, confs = [conf]) => call("standingConfirmations", { confirmations: confs, loads, todayKey, normalize: normalizeDriverName, loadKey }) || [];
-		const fields = (todayKey, st, unitNumber = "LogisX-#91") => call("truckAvailabilityFields", {
+		// The fleet's own unit-number rule, lifted from server.js (the one ELD
+		// linking uses), and the fleet's units.
+		const unitNumberToken = new Function(`${extract("unitNumberToken")}\nreturn unitNumberToken;`)();
+		const FLEET = ["LogisX-#91", "LogisX-#33", "INV-24-A"];
+		const fields = (todayKey, st, unitNumber = "LogisX-#91", knownUnits = FLEET) => call("truckAvailabilityFields", {
 			openAssignments: [{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" }], assignedDriver: "", unitNumber,
+			unitToken: unitNumberToken, knownUnits,
 			byDriver, standing: st, todayKey, normalize: normalizeDriverName, timeZone: ET,
 		}) || {};
 		const now = Date.parse("2026-10-16T16:00:00Z");
@@ -749,6 +754,20 @@ section("§2b pure — driver availability pauses and resumes the alert");
 		eq("§2b.38 a confirmed load covering a returning day: stale, not driver_returning",
 			judge(fields("2026-10-23", standing("2026-10-23", backLoads)), "2026-10-23", backNow).state, "stale");
 		eq("§2b.39 ...without it: driver_returning", judge(fields("2026-10-23", []), "2026-10-23", backNow).state, "driver_returning");
+		// The re-check's rule (2026-10-15), the safe direction: a Truck cell spelled
+		// otherwise ("91") still names his truck, through the fleet's unit-number
+		// rule; a cell naming no known unit counts on his own truck; one naming
+		// another known truck ("33") leaves his own paused.
+		eq("§2b.40 the load's Truck cell reads \"91\": it names LogisX-#91, which alerts",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "91" })))).state, "stale");
+		eq("§2b.41 the Truck cell names no known unit (\"T-999\"): counts on his own truck, which alerts",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "T-999" })))).state, "stale");
+		eq("§2b.42 the Truck cell reads \"33\" (another known truck): his own stays driver_off",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "33" })))).state, "driver_off");
+		eq("§2b.43 a unit with no trailing digits matches as written (\"inv-24-a\" names INV-24-A, not his truck)",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "inv-24-a" })))).state, "driver_off");
+		eq("§2b.44 with no fleet list given, a cell naming another truck still counts on his own (never a missed alert)",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "LogisX-#33" })), "LogisX-#91", null)).state, "stale");
 	}
 	{
 		// The judge's order: retirement, link and status come first.

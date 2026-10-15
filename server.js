@@ -3281,10 +3281,15 @@ function truckDriverAvailability() {
 		openByTruck.get(a.truck_id).push(a);
 	}
 	const out = new Map();
-	for (const t of db.prepare("SELECT id, unit_number, assigned_driver FROM trucks").all()) {
+	const trucks = db.prepare("SELECT id, unit_number, assigned_driver FROM trucks").all();
+	// A load's Truck cell is matched with the fleet's unit-number rule
+	// (unitNumberToken(), as ELD linking matches); one naming none of the fleet's
+	// units counts on the driver's own truck, so it can never keep a dark truck quiet.
+	const knownUnits = trucks.map((t) => t.unit_number);
+	for (const t of trucks) {
 		out.set(t.id, driverAvailability.truckAvailabilityFields({
 			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, unitNumber: t.unit_number,
-			byDriver, standing, todayKey: today, normalize: normalizeDriverName,
+			unitToken: unitNumberToken, knownUnits, byDriver, standing, todayKey: today, normalize: normalizeDriverName,
 		}));
 	}
 	return out;

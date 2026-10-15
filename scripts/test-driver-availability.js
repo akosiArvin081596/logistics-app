@@ -356,6 +356,24 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const s = t91(w);
 		eq("§7.25 ...the confirmation no longer counts: #91 back to driver_off, the alert resolved", [s.state, !!(s.row && s.row.resolved_at)], ["driver_off", true]);
 	});
+	// The re-check's rule (2026-10-15), the safe direction: a Truck cell is
+	// matched with the fleet's unit-number rule (unitNumberToken(), "91" names
+	// "LogisX-#91"), and a cell naming no known unit counts on the driver's own
+	// truck, so a misspelt cell never keeps a dark truck quiet.
+	await R.guard("§7h", async () => {
+		const w = await W.startWorld();
+		eq("§7.26 \"Assign anyway\" of a load whose Truck cell reads \"91\": 200", (await confirmLoad(w, "91")).status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§7.27 ...it names #91: the dark truck alerts", [s.state, !!(s.row && !s.row.resolved_at)], ["stale", true]);
+	});
+	await R.guard("§7i", async () => {
+		const w = await W.startWorld();
+		eq("§7.28 \"Assign anyway\" of a load whose Truck cell names no known unit (\"T-999\"): 200", (await confirmLoad(w, "T-999")).status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§7.29 ...it counts on his own truck: #91 alerts", [s.state, !!(s.row && !s.row.resolved_at)], ["stale", true]);
+	});
 	await R.guard("§7c", async () => {
 		const w = await W.startWorld();
 		w.db.prepare("INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_at) VALUES (999, 'Hollis Renner', 'vacation', '2026-10-14', '2026-10-20', 'test', '2026-10-14T00:00:00Z')").run();
