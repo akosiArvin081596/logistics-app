@@ -26,6 +26,9 @@
  *   §4 no lock table to read: every differing invoice is counted as
  *      "can't be placed", none raised; an invoices table without the rate
  *      columns skips the check and says so, and the other checks still run
+ *   §4b a drivers directory without its pay_daily column skips the check (no
+ *      throw; the daily run still completes and says so); an invoice billed at
+ *      the directory's rate is passed over before its snapshot is parsed
  *   §5 it only reads: invoices, the directory and the locks are byte-identical
  *      after every run (no money figure or rate changes)
  *   §6 one rule, not a copy: defaultDriverKey() answers as server.js's
@@ -67,6 +70,10 @@ const EXPENSE_PERIOD_EXPR = JSON.parse(periodDef[1]);
 const ADMIN = "admin@example.test";
 const SERVICE = JSON.stringify({ __templateName: "service_invoice", days: {} });
 const OWNER_OP = JSON.stringify({ __templateName: "service_invoice_owner_op", payPercentage: 88 });
+// A daily-rate snapshot marked so §4b can tell whether it was ever parsed: the
+// invoices carrying it bill the directory's own rate, so the check needs no
+// snapshot to pass them over.
+const EQUAL_PROBE = JSON.stringify({ __templateName: "service_invoice", days: {}, probe: "equal-rate" });
 
 function makeDb() {
 	const db = new Database(":memory:");
@@ -94,7 +101,7 @@ function makeDb() {
 		VALUES (@id, @num, @driver, @ws, @we, @rate, @status, @rd, @del, @manual, @corr)`);
 	const add = (o) => inv.run({ status: "Draft", rd: SERVICE, del: "", manual: 0, corr: 0, ws: "2026-10-03", we: "2026-10-09", ...o });
 	add({ id: 1, num: "INV-T1-A", driver: "driver one", rate: 300 });                                      // raised
-	add({ id: 2, num: "INV-T2-B", driver: "driver two", rate: 300 });                                      // equal
+	add({ id: 2, num: "INV-T2-B", driver: "driver two", rate: 300, rd: EQUAL_PROBE });                    // equal
 	add({ id: 3, num: "INV-T3-C", driver: "driver three", rate: 250 });                                    // directory not set
 	add({ id: 4, num: "INV-T4-D", driver: "owner op", rate: 88, rd: OWNER_OP });                          // percentage
 	add({ id: 5, num: "INV-T1-E", driver: "driver one", rate: 300, ws: "2026-09-26", we: "2026-10-02" }); // touches closed September
@@ -104,7 +111,7 @@ function makeDb() {
 	add({ id: 9, num: "INV-T9-I", driver: "nobody here", rate: 300 });                                     // no directory row
 	add({ id: 10, num: "INV-T1-J", driver: "driver one", rate: 300, ws: "not a date", we: "2026-10-30" });  // week can't be placed
 	add({ id: 11, num: "INV-T1-K", driver: " Driver   ONE ", rate: 325.5, status: "Approved", ws: "2026-08-01", we: "2026-08-07" }); // spacing, case; an unlocked lock row is open
-	add({ id: 12, num: "INV-T1-L", driver: "driver one", rate: 350.004, ws: "2026-10-24", we: "2026-10-30" }); // the same rate in cents
+	add({ id: 12, num: "INV-T1-L", driver: "driver one", rate: 350.004, ws: "2026-10-24", we: "2026-10-30", rd: EQUAL_PROBE }); // the same rate in cents
 	return db;
 }
 
@@ -225,6 +232,27 @@ const reportedRows = (db) => db.prepare(`SELECT invoice_id, invoice_rate_cents, 
 		skipped.result.report.invoiceRates.skipped === "invoices record no daily rate" &&
 		skipped.result.report.notes.includes("Invoice daily rates were not checked: invoices record no daily rate.") &&
 		/#7/.test(skipped.result.mail.html) && /invoice daily rates not checked \(invoices record no daily rate\)/.test(skipped.log.lines.join("\n")), skipped.result.report.notes);
+
+	console.log("§4b a directory without a daily rate column, and the snapshot read");
+	{
+		const dbNoRate = makeDb();
+		dbNoRate.exec("ALTER TABLE drivers_directory DROP COLUMN pay_daily");
+		let threw = null;
+		let res = null;
+		try { res = ic.invoiceRateMismatches(dbNoRate); } catch (e) { threw = e; }
+		ok("§4b no pay_daily column: the check does not throw, raises nothing and says it was skipped",
+			threw === null && res && res.mismatches.length === 0 && res.skipped === "the drivers directory has no daily rate column", threw ? threw.message : res);
+		let daily = null;
+		try { daily = await run(dbNoRate); } catch (e) { daily = { error: e.message }; }
+		ok("§4b ...and the daily run still completes, saying so in its notes",
+			daily && daily.result && daily.result.ok === true && daily.result.report.notes.includes("Invoice daily rates were not checked: the drivers directory has no daily rate column."), daily && (daily.error || daily.result.report.notes));
+		const realParse = JSON.parse;
+		const parsed = [];
+		JSON.parse = function (text, ...rest) { parsed.push(String(text)); return realParse.call(this, text, ...rest); };
+		try { ic.invoiceRateMismatches(makeDb()); } finally { JSON.parse = realParse; }
+		ok("§4b an invoice billed at the directory's rate is passed over before its snapshot is parsed",
+			parsed.length > 0 && !parsed.some((t) => t.includes("equal-rate")), parsed.filter((t) => t.includes("equal-rate")).length);
+	}
 
 	console.log("§5 it only reads");
 	ok("§5 invoices, the directory and the locks are unchanged by the check and three recorded runs (but the one directory edit this test made and undid)", snapshot(db) === before);
