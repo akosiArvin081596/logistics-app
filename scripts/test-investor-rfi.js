@@ -552,9 +552,12 @@ const asForm = (origin, payload, { referer } = {}) => ({
 	ok("§6 every time zone shows its label",
 		["Eastern", "Central", "Mountain", "Pacific"].every((label) => hasRow(labelled("timeZone", label.toLowerCase()), "Time zone", label)));
 	ok("§6 every topic shows its label, in the subject too",
-		[["truck-fund", "Truck Fund"], ["owning-logisx", "Owning part of LogisX"], ["broker-free-platform", "Broker-free platform"], ["other", "Other"]].every(([v, label]) =>
+		[["truck-fund", "Truck Fund"], ["owning-logisx", "Owning part of LogisX"], ["broker-free-platform", "Digital freight hub"], ["other", "Other"]].every(([v, label]) =>
 			hasRow(labelled("topic", v), "Topic", label) &&
 			rfi.buildCallRequestEmail(checkCall({ ...CALL, topic: v }).value, { staging: false, submittedAt: at }).subject === `Call request: ${label}`));
+	const hub = rfi.buildCallRequestEmail(checkCall({ ...CALL, topic: "broker-free-platform" }).value, { staging: false, submittedAt: at });
+	ok("§6 the website's broker-free-platform value is shown as \"Digital freight hub\", never \"Broker-free platform\"",
+		hub.subject === "Call request: Digital freight hub" && !/broker-free platform/i.test(`${hub.subject} ${hub.html}`));
 	ok("§6 the preferred date is formatted as the day it names",
 		hasRow(labelled("preferredDate", "2027-01-01"), "Preferred date", "Fri, Jan 1, 2027") && hasRow(labelled("preferredDate", "2026-10-07"), "Preferred date", "Wed, Oct 7, 2026"));
 	// The phone check refuses markup now (§6 above), so the email builder is
