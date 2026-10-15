@@ -31,7 +31,17 @@
  *      GMAIL_APP_PASSWORD; with both set, the branded email reaches the
  *      account with no password in it
  *   §6 SOURCE pins (comment-stripped): each route calls the notice once, after
- *      its write, without awaiting it, and hands it no password
+ *      its write, without awaiting it, and hands it no password; both check a
+ *      new password through lib/password-rules.js; the reset compares with the
+ *      acting admin's hash beside its hashing, above the guards
+ *   §7 lib/password-rules.js: change-password's rule, word for word (at least
+ *      8 characters of text, at most 200, upper, lower, number, symbol)
+ *   §8 PUT /api/users/:id applies that rule: a non-string, short, weak or long
+ *      password is a 400 PASSWORD_WEAK with no internal error text and nothing
+ *      written; resetting ANOTHER account to the acting admin's own password is
+ *      a 400 PASSWORD_IS_YOURS (the B21 incident: a saved login filled into
+ *      both fields); "" or null keeps the current password; change-password
+ *      answers exactly as before
  *
  * Runs the SHIPPED code: the login, change-password and PUT /api/users/:id
  * routes, notifyPasswordChanged(), sendEmail(), invoiceEmailHtml(),
@@ -174,6 +184,13 @@ const AUDIT_CREATE = (() => {
 
 let lib = null;
 try { lib = require(LIB_PATH); } catch { lib = null; }
+// The shared new-password rule (lib/password-rules.js). On a base without it a
+// stand-in that refuses nothing is injected, so the routes still run and the
+// assertions say what is missing.
+let rules = null;
+try { rules = require(path.join(ROOT, "lib", "password-rules.js")); } catch { rules = null; }
+ok(!!rules, "§7 lib/password-rules.js exists and loads");
+const passwordRules = rules || { newPasswordRefusal: () => null };
 ok(!!lib, "§1 lib/password-change-notice.js exists and loads");
 ok(!!SRCS.notify, "§2 server.js defines notifyPasswordChanged(userId, addresses, { byAdmin })");
 
@@ -272,8 +289,8 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "" } = {
 	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", SRCS.login)(
 		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, TZ);
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds",
-		"disconnectSessionSockets", "notifyPasswordChanged", SRCS.change)(
-		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, logAudit, liveSessionIds, noSockets, notifyPasswordChanged);
+		"disconnectSessionSockets", "notifyPasswordChanged", "passwordRules", SRCS.change)(
+		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, logAudit, liveSessionIds, noSockets, notifyPasswordChanged, passwordRules);
 
 	const noSheetRows = async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: [["Load ID", "Driver"]] } }) } } });
 	const auditText = (v, max) => String(v == null ? "" : v).slice(0, max);
@@ -282,14 +299,14 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "" } = {
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
-		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged",
+		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
 		SRCS.updateUser)(
 		app, requireRole, db, noSheetRows, "b21-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, purgeUserSessions, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
 		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {},
 		new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
-		() => null, () => [], () => null, notifyPasswordChanged);
+		() => null, () => [], () => null, notifyPasswordChanged, passwordRules);
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
@@ -612,6 +629,91 @@ async function sectionRealMailer() {
 	}
 }
 
+// ═══ §7 the shared new-password rule ════════════════════════════════════════
+const WEAK_LENGTH = { code: "PASSWORD_WEAK", error: "New password must be at least 8 characters", failed: ["length"] };
+const TOO_LONG = { code: "PASSWORD_WEAK", error: "New password is too long", failed: ["length"] };
+function sectionRule() {
+	if (!rules) return;
+	const r = rules.newPasswordRefusal;
+	const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+	ok(r("Abc-1234!") === null && r(RESET_PW) === null && r(NEW_PW) === null, "§7 a password meeting every rule passes");
+	ok(same(r("Ab-1234"), WEAK_LENGTH), "§7 7 characters: too short");
+	for (const v of [123, true, {}, ["Abc-1234!"], null, undefined, ""]) {
+		ok(same(r(v), WEAK_LENGTH), `§7 not a string (or empty): refused as too short, never handed to bcrypt (${JSON.stringify(v)})`);
+	}
+	ok(same(r(`Ab1!${"x".repeat(197)}`), TOO_LONG) && r(`Ab1!${"x".repeat(196)}`) === null, "§7 at most 200 characters");
+	ok(same(r("abc-12345!"), { code: "PASSWORD_WEAK", error: "Password must include an uppercase letter.", failed: ["uppercase"] }), "§7 no uppercase letter");
+	ok(same(r("ABC-12345!"), { code: "PASSWORD_WEAK", error: "Password must include a lowercase letter.", failed: ["lowercase"] }), "§7 no lowercase letter");
+	ok(same(r("Abc-defgh!"), { code: "PASSWORD_WEAK", error: "Password must include a number.", failed: ["digit"] }), "§7 no number");
+	ok(same(r("abcdefgh"), { code: "PASSWORD_WEAK", error: "Password must include an uppercase letter, a number, a symbol (!@#$ etc.).", failed: ["uppercase", "digit", "symbol"] }),
+		"§7 every missing kind is listed, in change-password's wording");
+	ok(!JSON.stringify(r("abcdefgh")).includes("abcdefgh"), "§7 the refusal never echoes the password");
+	ok(!/require\(/.test(stripComments(fs.readFileSync(path.join(ROOT, "lib", "password-rules.js"), "utf8"))), "§7 the module is pure");
+}
+
+// ═══ §8 PUT /api/users/:id: the reset's input rules ═════════════════════════
+async function sectionResetRules() {
+	const w = await startWorld();
+	try {
+		const admin = await login(w, "root", PW.root);
+		const bob = await login(w, "bob", PW.bob);
+		const bobHash = storedHash(w.db, 2);
+		const unchanged = () => storedHash(w.db, 2) === bobHash && liveSid(w, bob) && w.sent.length === 0;
+		for (const [what, password] of [["a number", 123], ["true", true], ["an object", {}], ["an array", ["Abc-1234!"]]]) {
+			const r = await editUser(w, admin, 2, { email: "changed@example.test", password });
+			await settle();
+			ok(r.status === 400 && r.json && r.json.code === "PASSWORD_WEAK", `§8 a password that is ${what}: 400 PASSWORD_WEAK (${r.status} ${r.raw})`);
+			ok(!/bcrypt|Illegal arguments|salt|undefined/i.test(r.raw), `§8 ...with no internal error text (${r.raw})`);
+		}
+		ok(unchanged() && w.db.prepare("SELECT email FROM users WHERE id = 2").get().email === "bob@example.test",
+			"§8 ...and nothing is written: not the password, not the other fields; no notice; the account stays signed in");
+		const short = await editUser(w, admin, 2, { password: "Ab-1234" });
+		ok(short.status === 400 && short.raw === JSON.stringify(WEAK_LENGTH), `§8 a 7-character password: change-password's 400 (${short.raw})`);
+		const weak = await editUser(w, admin, 2, { password: "abc-12345!" });
+		ok(weak.status === 400 && weak.json && weak.json.code === "PASSWORD_WEAK" && JSON.stringify(weak.json.failed) === JSON.stringify(["uppercase"]),
+			`§8 a password without an uppercase letter: 400 PASSWORD_WEAK naming it (${weak.raw})`);
+		const long = await editUser(w, admin, 2, { password: `Ab1!${"x".repeat(197)}` });
+		ok(long.status === 400 && long.raw === JSON.stringify(TOO_LONG), `§8 a 201-character password: 400 (${long.status})`);
+		await settle();
+		ok(unchanged(), "§8 no refused reset wrote anything or sent a notice");
+
+		// The incident: the admin's saved login filled into both fields.
+		const mark = auditDetails(w.db, "update_user").length;
+		const own = await editUser(w, admin, 2, { password: PW.root });
+		await settle();
+		ok(own.status === 400 && own.json && own.json.error === "This is your own password. Enter a new password for this user.",
+			`§8 resetting another account to the admin's own password: 400 with the plain message (${own.status} ${own.raw})`);
+		ok(own.json && own.json.code === "PASSWORD_IS_YOURS", "§8 ...code PASSWORD_IS_YOURS");
+		ok(!own.raw.includes(PW.root), "§8 ...which never echoes the password");
+		ok(unchanged() && auditDetails(w.db, "update_user").length === mark, "§8 ...and nothing is written, audited as an update, or sent; the account stays signed in");
+
+		// Allowed: blank or null keeps the current password; a different
+		// password goes through; a Super Admin may set their own account to
+		// anything that meets the rules (the refusal is about SOMEONE ELSE).
+		const blank = await editUser(w, admin, 2, { fullName: "Bob A", password: "" });
+		const nul = await editUser(w, admin, 2, { fullName: "Bob B", password: null });
+		await settle();
+		ok(blank.status === 200 && nul.status === 200 && unchanged(), `§8 "" or null keeps the current password and sends nothing (${blank.status}/${nul.status})`);
+		const good = await editUser(w, admin, 2, { password: RESET_PW });
+		await settle();
+		ok(good.status === 200 && bcrypt.compareSync(RESET_PW, storedHash(w.db, 2)), "§8 a password that meets the rules and is not the admin's own is saved");
+		const self = await editUser(w, admin, 4, { password: PW.root });
+		ok(self.status === 200, `§8 a Super Admin re-setting their OWN account's password is not refused as "your own" (${self.status} ${self.raw})`);
+
+		// change-password answers with the same rule, unchanged.
+		const alice = await login(w, "alice", PW.alice);
+		const cp1 = await changePassword(w, alice, PW.alice, "Ab-1234");
+		const cp2 = await changePassword(w, alice, PW.alice, "abc-12345!");
+		const cp3 = await changePassword(w, alice, PW.alice, 12345678);
+		ok(cp1.status === 400 && cp1.raw === JSON.stringify(WEAK_LENGTH), `§8 change-password: too short, as before (${cp1.raw})`);
+		ok(cp2.status === 400 && cp2.raw === JSON.stringify({ code: "PASSWORD_WEAK", error: "Password must include an uppercase letter.", failed: ["uppercase"] }),
+			`§8 change-password: a missing kind, as before (${cp2.raw})`);
+		ok(cp3.status === 400 && cp3.raw === JSON.stringify(WEAK_LENGTH), `§8 change-password: not a string, as before (${cp3.raw})`);
+	} finally {
+		await w.close();
+	}
+}
+
 // ═══ §6 the source ══════════════════════════════════════════════════════════
 function sectionSource() {
 	const at = (s, needle) => s.indexOf(needle);
@@ -646,6 +748,21 @@ function sectionSource() {
 		"§6 notifyPasswordChanged() sends through the module, with ADMIN_NOTIFY_EMAIL and APP_TIMEZONE");
 	ok(/sendEmail\(to, notice\.subject, invoiceEmailHtml\(/.test(notify), "§6 ...over the shared sendEmail(), which holds the replica and mailbox guards");
 	ok(/\nconst passwordChangeNotice = require\("\.\/lib\/password-change-notice"\);\n/.test(SRC), "§6 server.js loads the module once");
+
+	// The new-password rule: one copy, in lib/password-rules.js.
+	ok(/\nconst passwordRules = require\("\.\/lib\/password-rules"\);\n/.test(SRC), "§6 server.js loads lib/password-rules.js once");
+	ok((change.match(/passwordRules\.newPasswordRefusal\(newPassword\)/g) || []).length === 1, "§6 change-password checks the new password through the shared rule");
+	ok((upd.match(/passwordRules\.newPasswordRefusal\(password\)/g) || []).length === 1, "§6 PUT /api/users/:id checks it through the same rule");
+	ok(!/\/\[A-Z\]\//.test(change) && !/\/\[A-Z\]\//.test(upd), "§6 ...and neither route keeps a copy of the rule's patterns");
+	const uRule = at(upd, "passwordRules.newPasswordRefusal(password)");
+	const uHash = at(upd, "bcryptMod.hash(password, 10)");
+	const uOwn = at(upd, "bcryptMod.compare(password, ");
+	// The re-read after the last await (the first read, at the top, is `let user = …`).
+	const uReread = at(upd, "const stale = user;");
+	ok(uRule > 0 && uRule < uHash, "§6 PUT checks the rule before it hashes (nothing malformed reaches bcrypt)");
+	ok(uOwn > 0 && uOwn < uReread && Math.abs(uOwn - uHash) < 600,
+		"§6 PUT compares with the acting admin's hash alongside the hashing, in the await block above the re-read and the guards");
+	ok(/"PASSWORD_IS_YOURS"/.test(upd) && /This is your own password\. Enter a new password for this user\./.test(upd), "§6 ...and refuses with its code and message");
 }
 
 function finish() {
@@ -670,6 +787,8 @@ function finish() {
 	await sectionAdminReset();
 	await sectionFailures();
 	await sectionRealMailer();
+	sectionRule();
+	await sectionResetRules();
 	finish();
 })().catch((e) => {
 	restoreConsole();

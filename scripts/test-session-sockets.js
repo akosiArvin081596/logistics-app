@@ -396,10 +396,12 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 	// B21); that email is scripts/test-password-change-notice.js's subject, so here
 	// it is a no-op that sends nothing.
 	const notifyPasswordChanged = () => Promise.resolve({ recipients: 0, sent: 0 });
+	// The shared new-password rule both routes check, as shipped.
+	const passwordRules = require("../lib/password-rules");
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds", "disconnectSessionSockets",
-		"notifyPasswordChanged", sources.change)(
+		"notifyPasswordChanged", "passwordRules", sources.change)(
 		app, requireAuth, passThrough, db, bcryptImpl, purgeUserSessions, logAudit, helpers.liveSessionIds, helpers.disconnectSessionSockets,
-		notifyPasswordChanged);
+		notifyPasswordChanged, passwordRules);
 
 	// PUT /api/users/:id on its real guard, the real purge and the real audit
 	// writer. The purge is wrapped only to record whom it was asked to revoke and
@@ -426,7 +428,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"periodLabel", "driverRenameMergeScan", "applyDriverRenameSqlite", "syncDriverToCarrierSheet", "purgeUserSessions", "logAudit",
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
-		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged",
+		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
 		sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
@@ -441,7 +443,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		// scripts/test-investor-company-lock.js): nothing to judge.
 		() => [], () => null,
 		// The password-change email (above): sends nothing.
-		notifyPasswordChanged);
+		notifyPasswordChanged, passwordRules);
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions

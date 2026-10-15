@@ -24273,6 +24273,9 @@ app.get("/api/auth/session", (req, res) => {
 // GMAIL_APP_PASSWORD both needed). Every notice not sent is logged by account
 // id. The returned promise never rejects.
 const passwordChangeNotice = require("./lib/password-change-notice");
+// The one rule for a new password (length, then upper/lower/number/symbol),
+// shared by change-password and the admin reset in PUT /api/users/:id.
+const passwordRules = require("./lib/password-rules");
 function notifyPasswordChanged(userId, addresses, { byAdmin }) {
 	return passwordChangeNotice.sendPasswordChangeNotice({
 		userId,
@@ -24301,30 +24304,13 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		if (!currentPassword || !newPassword) {
 			return res.status(400).json({ error: "Current and new password required" });
 		}
-		if (typeof newPassword !== "string" || newPassword.length < 8) {
-			return res.status(400).json({ code: "PASSWORD_WEAK", error: "New password must be at least 8 characters", failed: ["length"] });
-		}
-		if (newPassword.length > 200) {
-			return res.status(400).json({ error: "New password is too long" });
-		}
-		// Complexity rules — mirror the client-side checklist exactly so
-		// the API rejects weak passwords even if someone bypasses the UI.
-		// CEO requirement (2026-05-13): drivers should see what counts as a
-		// valid password instead of vague "too weak" errors.
-		const failed = [];
-		if (!/[A-Z]/.test(newPassword)) failed.push("uppercase");
-		if (!/[a-z]/.test(newPassword)) failed.push("lowercase");
-		if (!/\d/.test(newPassword)) failed.push("digit");
-		if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(newPassword)) failed.push("symbol");
-		if (failed.length > 0) {
-			const labelMap = { uppercase: "an uppercase letter", lowercase: "a lowercase letter", digit: "a number", symbol: "a symbol (!@#$ etc.)" };
-			const missing = failed.map(f => labelMap[f]).join(", ");
-			return res.status(400).json({
-				code: "PASSWORD_WEAK",
-				error: `Password must include ${missing}.`,
-				failed,
-			});
-		}
+		// Length and complexity rules (lib/password-rules.js, shared with the
+		// admin reset) mirror the client-side checklist exactly, so the API
+		// rejects weak passwords even if someone bypasses the UI. CEO requirement
+		// (2026-05-13): drivers should see what counts as a valid password
+		// instead of vague "too weak" errors.
+		const weakRefusal = passwordRules.newPasswordRefusal(newPassword);
+		if (weakRefusal) return res.status(400).json(weakRefusal);
 		// A forced change is only a change if the password actually changes:
 		// re-submitting the current one would clear must_change_password while the
 		// temporary credential stayed valid. Defence in depth today: the emailed
@@ -25060,10 +25046,33 @@ app.put("/api/users/:id", requireRole("Super Admin"), async (req, res) => {
 		// If you add another await, put it here too, and re-read `user` after it —
 		// see the note on that re-read. Everything from the first guard to the
 		// commit must be synchronous.
+		//
+		// B21: a password, when one is sent, meets change-password's rules
+		// (lib/password-rules.js) before anything else happens: a non-string
+		// used to reach bcrypt and answer a 500 with bcrypt's own error text.
+		// Absent, null or "" keeps the current password. Then, when the reset is
+		// for SOMEONE ELSE, the new password must not be the acting admin's own:
+		// that is a browser filling the admin's saved login into the form. The
+		// comparison runs beside the hashing, here in the await block, so no
+		// await sits between the guards and the write.
+		const passwordGiven = password !== undefined && password !== null && password !== "";
+		if (passwordGiven) {
+			const weakRefusal = passwordRules.newPasswordRefusal(password);
+			if (weakRefusal) return res.status(400).json(weakRefusal);
+		}
 		let passwordHash = null;
-		if (password) {
+		if (passwordGiven) {
 			const bcryptMod = await import("bcryptjs");
-			passwordHash = await bcryptMod.hash(password, 10);
+			const actorId = Number(req.session?.user?.id);
+			const actor = actorId !== id ? db.prepare("SELECT password_hash FROM users WHERE id = ?").get(actorId) : null;
+			const [hash, isActorsOwn] = await Promise.all([
+				bcryptMod.hash(password, 10),
+				actor && actor.password_hash ? bcryptMod.compare(password, actor.password_hash).catch(() => false) : false,
+			]);
+			if (isActorsOwn) {
+				return res.status(400).json({ code: "PASSWORD_IS_YOURS", error: "This is your own password. Enter a new password for this user." });
+			}
+			passwordHash = hash;
 		}
 
 		// Pre-resolved here, consumed synchronously by guard (d). `null` means
