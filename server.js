@@ -17944,6 +17944,19 @@ function appMonthKey() {
 	return appTodayKey().slice(0, 7);
 }
 
+// The first day of the business month (APP_TIMEZONE) that `now` falls in, as a
+// server-local midnight Date: the end of the month loops, which walk a
+// server-local cursor (new Date(y, m, 1) and getMonth()). Never
+// new Date(now.getFullYear(), now.getMonth(), 1): that is the SERVER's month,
+// which on the UTC VPS is already next month from 8 PM EDT / 7 PM EST on a
+// month's last day, and for those hours the payout ledger, the investor view
+// and Financials showed a month that had not begun and the investor's totals
+// moved (scripts/test-month-end-business-clock.js).
+function appMonthStart(now = new Date()) {
+	const [y, m] = appDay(now).slice(0, 7).split("-").map(Number);
+	return new Date(y, m - 1, 1);
+}
+
 // Configured grace window, clamped to something sane. 0 = close at month end
 // (no window); 28 keeps the window inside the following month.
 function settlementGraceDays() {
@@ -56469,11 +56482,12 @@ function truckBilledMonthCount(t, now) {
 	const sy = parseInt(from.slice(0, 4), 10);
 	const sm = parseInt(from.slice(5, 7), 10) - 1;
 	if (!Number.isFinite(sy) || !Number.isFinite(sm)) return null;
-	// End month = the current month, pulled back to the retirement month when the
-	// truck has one. Never pushed FORWARD: a truck retired in the future is still
-	// accruing today, so a later retired_at must not invent months it has not
-	// lived through.
-	let ey = now.getFullYear(), em = now.getMonth();
+	// End month = the current business month (appMonthStart(), not the server's
+	// clock), pulled back to the retirement month when the truck has one. Never
+	// pushed FORWARD: a truck retired in the future is still accruing today, so a
+	// later retired_at must not invent months it has not lived through.
+	const thisMonth = appMonthStart(now);
+	let ey = thisMonth.getFullYear(), em = thisMonth.getMonth();
 	const until = truckChargeUntilMonth(t);
 	if (until) {
 		const uy = parseInt(until.slice(0, 4), 10), um = parseInt(until.slice(5, 7), 10) - 1;
@@ -56770,7 +56784,8 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// month with no activity still exists, and pays as the downtime setting says.
 		startMonthFor: (earliestKey) => investorPayoutBasis.firstPayoutMonth(earliestKey || currentMonthKey, payoutBasis),
 		currentMonthKey,
-		endDate: new Date(now.getFullYear(), now.getMonth(), 1),
+		// The business month's first day, as currentMonthKey (appMonthStart()).
+		endDate: appMonthStart(now),
 		ownerId: investorOwnerId || 0,
 		payoutBasis,
 		detailForMonth,
@@ -58869,7 +58884,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				: currentMonthKey;
 			const startMonth = investorPayoutBasis.firstPayoutMonth(activityStartMonth, payoutBasis);
 			let cursor = new Date(parseInt(startMonth.slice(0, 4)), parseInt(startMonth.slice(5, 7)) - 1, 1);
-			const endDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			// The business month's first day, as currentMonthKey (appMonthStart()).
+			const endDate = appMonthStart(now);
 			let deferredAccrual = 0;
 			const months = [];
 			while (cursor <= endDate) {
