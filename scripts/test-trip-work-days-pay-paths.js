@@ -621,8 +621,51 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			eq("a Personal correction does not block", r.grid, BOTH);
 		}
 		{
-			const r = await run("Pam Quin", (w) => manualFor(w, "Pam Quin", { days: ["2026-10-20"] }));
-			eq("a manual invoice naming its days (another day) does not block", r.grid, BOTH);
+			const r = await run("Pam Quin", (w, g39) => manualFor(w, "Pam Quin", { days: ["2026-10-20"], notes: `Follows ${g39.invoice.invoice_number}` }));
+			eq("a manual invoice naming its days (another day) does not block, though its notes name W39", r.grid, BOTH);
+		}
+	});
+
+	await R.test("B21 (round-three review) The checks run again inside the write, after the render: a manual invoice naming W39 written while W39's update renders, a manual invoice dated Thu written while an Approved W39's correction renders, and a $260 adjustment put on the Approved W39 meanwhile each refuse the write (INVOICE_DAY_MAY_BE_PAID): nothing written, no day claimed, the refusal in warnings", async ({ eq, ok }) => {
+		const insertManual = (w, D, { lines, period, notes = "" }) => w.db.prepare(
+			`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
+			 VALUES (?, ?, ?, ?, 1, 0, 260, 0, 'Draft', ?, '[]', '[]', ?, 1, 'super_admin')`
+		).run(`INV-M-T${Math.floor(Math.random() * 1e9)}`, norm(D), period[0], period[1], `m${Math.floor(Math.random() * 1e9)}.pdf`, JSON.stringify({ __templateName: "service_invoice_manual", lineItems: lines, notes }));
+		const claimsFor = (w) => claimRows(w).filter(([d]) => d === "2026-10-01" || d === "2026-10-02");
+		const refusedIn = (g) => (g.warnings || []).some((x) => /may already|Nothing was saved/.test(x));
+		{
+			const D = "Quinn Ray";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			deliverBoundaryLoad(w);
+			const before = invoiceRow(w, g39.invoice.id);
+			w.renderHook = () => { w.renderHook = null; insertManual(w, D, { lines: [{ date: "2026-10-20", description: `Missed days (${before.invoice_number})`, amount: 520 }], period: ["2026-10-20", "2026-10-20"] }); };
+			const g40 = await W.generate(w, D, W40);
+			const after = invoiceRow(w, g39.invoice.id);
+			eq("Draft W39: the update refused, W39 as it was, Thu and Fri unclaimed", [after.render_data === before.render_data, after.total_earnings, claimsFor(w)], [true, 520, []]);
+			ok("…and the refusal is in warnings", refusedIn(g40), JSON.stringify(g40.warnings));
+		}
+		{
+			const D = "Rae Sloan";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(g39.invoice.id);
+			deliverBoundaryLoad(w);
+			w.renderHook = () => { w.renderHook = null; insertManual(w, D, { lines: [{ date: "2026-10-01", description: "Missed Thursday", amount: 260 }], period: ["2026-10-01", "2026-10-01"] }); };
+			const g40 = await W.generate(w, D, W40);
+			eq("Approved W39, a dated manual invoice written during the correction's render: no correction, nothing claimed", [corrections(w).length, claimsFor(w)], [0, []]);
+			ok("…and the refusal is in warnings", refusedIn(g40), JSON.stringify(g40.warnings));
+		}
+		{
+			const D = "Sid Tate";
+			const w = boundaryWorld(D);
+			const g39 = await W.generate(w, D, W39);
+			w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(g39.invoice.id);
+			deliverBoundaryLoad(w);
+			w.renderHook = () => { w.renderHook = null; w.db.prepare("UPDATE invoices SET adjustment = 260, adjustment_note = 'missed day' WHERE id = ?").run(g39.invoice.id); };
+			const g40 = await W.generate(w, D, W40);
+			eq("Approved W39, a $260 adjustment put on it during the correction's render: no correction, nothing claimed", [corrections(w).length, claimsFor(w)], [0, []]);
+			ok("…and the refusal is in warnings", refusedIn(g40), JSON.stringify(g40.warnings));
 		}
 	});
 
