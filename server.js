@@ -53130,8 +53130,8 @@ async function computeFleetLedger({ rules = payoutRules() } = {}) {
 		for (const x of facts.receipts) claim(claimed.receipt, x.id, inv.ownerId);
 		for (const x of facts.maintRows) claim(claimed.maintenance, x.id, inv.ownerId);
 		for (const x of facts.complianceRows) claim(claimed.compliance, x.id, inv.ownerId);
-		const { months, items } = financialsCalc.computeLedgerScope(facts);
-		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items });
+		const { months, items, dayOnceDrops } = financialsCalc.computeLedgerScope(facts);
+		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items, ...(dayOnceDrops && { dayOnceDrops }) });
 	}
 	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking, rules });
 	const investorIds = new Set(investors.map((i) => i.ownerId));
@@ -53155,7 +53155,7 @@ async function computeFleetLedger({ rules = payoutRules() } = {}) {
 		detailForMonth: null,
 		startMonthFor: (earliestKey) => earliestKey || fleet.currentMonthKey,
 	});
-	scopes.push({ ownerId: 0, name: "Company", months: company.months, items: company.items });
+	scopes.push({ ownerId: 0, name: "Company", months: company.months, items: company.items, ...(company.dayOnceDrops && { dayOnceDrops: company.dayOnceDrops }) });
 
 	// Each load's pickup and delivery state, on its revenue item: the two-letter
 	// state of the city-level address (resolveCityState(), the reduction investors
@@ -58596,6 +58596,9 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			to: ADMIN_NOTIFY_EMAIL,
 			emailHtml: ({ heading, bodyHtml }) => invoiceEmailHtml({ heading, bodyHtml }),
 			closedMonthsOf: integrityClosedMonthsOf,
+			// Check 7, only while the ledger day-once rule is on (lib/ledger-day-once.js).
+			dayOnceFrom: financialsCalc.ledgerDayOnce.ruleFromEnv(process.env),
+			readFleetLedger: computeFleetLedger,
 		}),
 	});
 	// The ticker never rejects; a rejection here is a defect in its own guard.

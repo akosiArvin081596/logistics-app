@@ -9,7 +9,8 @@
 //
 // It reports:
 //   - droppedDays: each driver-day the rule would drop, with its scope (owner
-//     id; 0 is the company), the driver, the month it leaves and that month's
+//     id; 0 is the company), the driver (a per-run label unless --names), the
+//     month it leaves and that month's
 //     load, and the earlier month that keeps it and that month's load
 //     ("" for an admin-added day). keptMonthFrozen says whether the earlier
 //     month has frozen line items (a closed month's settled record);
@@ -34,7 +35,9 @@
 //   --values-json=<file>   a saved values.get of Job Tracking, in place of --sheet-id
 //   --env-file=<file>      with a copy of the database under the temp directory
 //                          only: read the other settings from this file
-//   --names                add investor names (drivers are always named)
+//   --names                name the drivers and investors. Without it drivers show
+//                          as "driver 1", "driver 2", … (numbered per run, so
+//                          rows still group) and investors by owner id only
 //   --json                 print the whole result as JSON (default: a text report)
 // The database is this checkout's own app.db or a copy under the temp
 // directory; any other is refused (it may be another deployment's).
@@ -92,9 +95,10 @@ function monthCents(months) {
 	return out;
 }
 
+// A problem the run found: { ownerId, driver?, issue, closed } (closed: a closed
+// month moved).
 async function scopeChanges({ off, on, db, isLocked }) {
-	const frozenMonth = db.prepare("SELECT 1 FROM financials_ledger_items WHERE period = ? AND owner_id = ? LIMIT 1");
-	const frozenDay = db.prepare("SELECT 1 FROM financials_ledger_items WHERE period = ? AND owner_id = ? AND kind = 'driver_pay' AND LOWER(driver) = ? AND day = ? LIMIT 1");
+	const frozen = ledgerDayOnce.frozenDriverDays(db);
 	const onByOwner = new Map(on.scopes.map((s) => [s.ownerId, s]));
 	const droppedDays = [];
 	const driverMonths = new Map();
@@ -108,7 +112,7 @@ async function scopeChanges({ off, on, db, isLocked }) {
 	};
 	for (const base of off.scopes) {
 		const next = onByOwner.get(base.ownerId);
-		if (!next) { problems.push(`scope ${base.ownerId} is missing with the rule on`); continue; }
+		if (!next) { problems.push({ ownerId: base.ownerId, issue: "the scope is missing with the rule on", closed: false }); continue; }
 		const a = payItems(base.items);
 		const b = payItems(next.items);
 		// The earliest month that pays each driver-day today, and its load.
@@ -120,19 +124,22 @@ async function scopeChanges({ off, on, db, isLocked }) {
 		for (const [key, it] of a.days) {
 			if (b.days.has(key)) continue;
 			const kept = firstPay.get(`${it.driver}\t${it.day}`);
-			if (!kept || kept.month >= it.month) { problems.push(`scope ${base.ownerId}: ${it.driver} ${it.day} left ${it.month} with no earlier month paying it`); continue; }
-			const keptMonthFrozen = !!frozenMonth.get(kept.month, base.ownerId);
+			if (!kept || kept.month >= it.month) {
+				problems.push({ ownerId: base.ownerId, driver: it.driver, issue: `${it.day} left ${it.month} with no earlier month paying it`, closed: false });
+				continue;
+			}
+			const keptMonthFrozen = frozen.hasMonth(kept.month, base.ownerId);
 			droppedDays.push({
 				ownerId: base.ownerId, driver: it.driver, day: it.day,
 				month: it.month, loadId: it.loadId || "", added: !!it.added, cents: it.cents,
 				keptMonth: kept.month, keptLoadId: kept.loadId || "", keptAdded: !!kept.added,
 				keptMonthFrozen,
-				inKeptMonthFrozenItems: keptMonthFrozen ? !!frozenDay.get(kept.month, base.ownerId, String(it.driver).toLowerCase(), it.day) : null,
+				inKeptMonthFrozenItems: keptMonthFrozen ? frozen.holds(kept.month, base.ownerId, it.driver, it.day) : null,
 			});
 			tally(base.ownerId, it.driver, it.month, 1, -it.cents, "fixed");
 		}
-		for (const key of b.days.keys()) {
-			if (!a.days.has(key)) problems.push(`scope ${base.ownerId}: ${key.replace(/\t/g, " ")} is paid only with the rule on`);
+		for (const [key, it] of b.days) {
+			if (!a.days.has(key)) problems.push({ ownerId: base.ownerId, driver: it.driver, issue: `${it.month} ${it.day} is paid only with the rule on`, closed: false });
 		}
 		for (const [key, it] of a.months) {
 			const now = b.months.get(key);
@@ -147,8 +154,8 @@ async function scopeChanges({ off, on, db, isLocked }) {
 			const y = is.get(mk) || {};
 			const moved = FIGURES.filter((k) => (x[k] || 0) !== (y[k] || 0));
 			if (!moved.length) continue;
-			if (isLocked(mk)) problems.push(`closed month ${mk} of scope ${base.ownerId} changed: ${moved.join(", ")}`);
-			else if (moved.some((k) => k !== "driverPay")) problems.push(`open month ${mk} of scope ${base.ownerId}: ${moved.filter((k) => k !== "driverPay").join(", ")} changed besides driver pay`);
+			if (isLocked(mk)) problems.push({ ownerId: base.ownerId, issue: `closed month ${mk} changed: ${moved.join(", ")}`, closed: true });
+			else if (moved.some((k) => k !== "driverPay")) problems.push({ ownerId: base.ownerId, issue: `open month ${mk}: ${moved.filter((k) => k !== "driverPay").join(", ")} changed besides driver pay`, closed: false });
 		}
 	}
 	droppedDays.sort((x, y) => x.ownerId - y.ownerId || x.driver.localeCompare(y.driver) || x.month.localeCompare(y.month) || x.day.localeCompare(y.day));
@@ -195,7 +202,7 @@ function investorChanges(was, is, { db, isLocked, names }) {
 			const delta = round2(y.payable - x.payable);
 			const driverPayChange = round2(y.driverPay - x.driverPay);
 			if (!delta && !driverPayChange) continue;
-			if (isLocked(period)) { problems.push(`closed month ${period} of investor ${ownerId} changed its payable or driver pay`); continue; }
+			if (isLocked(period)) { problems.push({ ownerId, issue: `closed month ${period} changed its payable or driver pay`, closed: true }); continue; }
 			const status = statusOf.get(ownerId, period);
 			rows.push({
 				ownerId, ...(names ? { investor: a.name } : {}), period, payoutStatus: status ? status.status : "no row yet",
@@ -220,8 +227,23 @@ function printText(r) {
 	lines.push("", "Investor payable by open month:");
 	for (const i of r.investorMonths) lines.push(`  owner ${i.ownerId}${i.investor ? ` (${i.investor})` : ""}  ${i.period}  ${i.payoutStatus}  ${usd(i.current)} -> ${usd(i.withRule)}  (${usd(i.delta)}; driver pay ${usd(i.driverPayChange)})`);
 	lines.push("", `Closed months unchanged: ${r.closedMonthsUnchanged ? "yes" : "NO"}`);
-	for (const p of r.problems) lines.push(`PROBLEM: ${p}`);
+	for (const p of r.problems) lines.push(`PROBLEM: owner ${p.ownerId}${p.driver ? `, ${p.driver}` : ""}: ${p.issue}`);
 	console.log(lines.join("\n"));
+}
+
+// Without --names, each driver becomes "driver 1", "driver 2", … in the order
+// they first appear, numbered for this run only, so rows still group by driver
+// but name nobody.
+function labelDrivers(result) {
+	const labels = new Map();
+	const label = (name) => {
+		if (!labels.has(name)) labels.set(name, `driver ${labels.size + 1}`);
+		return labels.get(name);
+	};
+	for (const list of [result.droppedDays, result.driverMonths, result.problems]) {
+		for (const row of list) if (row.driver) row.driver = label(row.driver);
+	}
+	return result;
 }
 
 async function main() {
@@ -252,7 +274,7 @@ async function main() {
 		const result = {
 			from, latestClosedMonth: latestClosed, baseline: "LEDGER_DAY_ONCE off; every other setting as the app's .env has it",
 			droppedDays: fleet.droppedDays, driverMonths: fleet.driverMonths, investorMonths: inv.rows,
-			closedMonthsUnchanged: !problems.some((p) => p.startsWith("closed month")), problems,
+			closedMonthsUnchanged: !problems.some((p) => p.closed), problems,
 			summary: {
 				droppedDays: fleet.droppedDays.length,
 				driverPayChange: round2(fleet.driverMonths.reduce((s, m) => s + m.driverPayChange, 0)),
@@ -260,6 +282,7 @@ async function main() {
 			},
 			generatedAt: new Date().toISOString(),
 		};
+		if (args.names !== true) labelDrivers(result);
 		if (args.json === true) console.log(JSON.stringify(result, null, 1));
 		else printText(result);
 		if (problems.length) process.exitCode = 1;
