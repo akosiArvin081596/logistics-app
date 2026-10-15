@@ -129,6 +129,9 @@ function harness(src) {
 		logAudit: () => {},
 		notifyChange: () => {},
 		console: { log() {}, warn() {}, error() {} },
+		// Each row's Personal lines (none here; scripts/test-personal-expense-receipts.js
+		// covers them).
+		personalLinesForInvoices: () => new Map(),
 	};
 	const routeTexts = [liftRoute(src, LIST_ROUTE), liftRoute(src, MANUAL_ROUTE), liftRoute(src, TOTALS_ROUTE, true)].filter(Boolean);
 	new Function(...Object.keys(deps), routeTexts.join("\n"))(...Object.values(deps));
@@ -426,8 +429,8 @@ const SERVER_BATTERIES = [
 // Each mutant rewrites the fix back to a narrower rule and must flip at least
 // one assertion. A test that passes on both has not tested anything.
 const SERVER_MUTANTS = [
-	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r) }));",
-		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings }));"],
+	["the list drops the adjustment", "invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));",
+		"invoices = invoices.map((r) => ({ ...r, total_due: r.total_earnings, personal_lines: personalLines.get(r.id) || [] }));"],
 	["the cards count deleted rows", "rows.filter((r) => !r.deleted_at && r.status === status)", "rows.filter((r) => r.status === status)"],
 	["the cards sum total_earnings", "live.reduce((s, r) => s + invoiceTotalDue(r), 0)", "live.reduce((s, r) => s + (r.total_earnings || 0), 0)"],
 	["the manual totals ignore the deductions", "totalDue: round2(subtotal - deductionsTotal)", "totalDue: round2(subtotal)"],

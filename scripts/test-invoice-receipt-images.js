@@ -164,6 +164,10 @@ const SLOW = scratchChild("slow-child.js", "process.once('message', (job) => set
 		check("a PDF receipt is 'pdf' (listed, never rendered)", await st(pPdf), "pdf");
 		check("…and an old row's inline PDF too", await st("data:application/pdf;base64,JVBERi0xLjQK"), "pdf");
 		check("an inline WebP or SVG data URI is unavailable", [await st("data:image/webp;base64,UklGRg=="), await st("data:image/svg+xml;base64,PHN2Zz4=")], ["unavailable", "unavailable"]);
+		const kind = (p) => ri.receiptImageKind(p, RECEIPTS);
+		check("receiptImageKind(), for a listing without reading: image, pdf, none",
+			[kind(pJ1), kind(pP1), kind(pPdf), kind(pWebp), kind(""), kind("/uploads/expense-receipts/1760000009999-000000000000.jpg"), kind("/uploads/other/x.jpg"), kind("data:application/pdf;base64,JVBE"), kind("data:image/png;base64,iVBO")],
+			["image", "image", "pdf", "none", "none", "none", "none", "pdf", "image"]);
 	}
 
 	section("§3 the cache");
@@ -254,6 +258,9 @@ const SLOW = scratchChild("slow-child.js", "process.once('message', (job) => set
 			[{ id: 1, expense_id: 11 }, { id: 5, expense_id: 11 }], prepared);
 		check("one receipt on two lines: one page, both lines point to it", [twice.pages.length, twice.entries.map((e) => e.receiptHref)], [1, ["#receipt-1", "#receipt-1"]]);
 		check("no image receipt: no pages", layoutLib.receiptLayout(entries.slice(2, 4), rows, prepared).pages, []);
+		const overCap = layoutLib.receiptLayout(entries.slice(0, 1), rows, new Map([[11, { status: "over_cap" }]]));
+		check("an image receipt the caller left unprepared past the cap: \"More receipts on file\", no page", [overCap.entries[0].receiptNote, overCap.pages.length],
+			["More receipts on file: open this receipt in the app", 0]);
 	}
 
 	section("§9 the invoice templates and field maps");

@@ -87,6 +87,8 @@ section('§3 the texts')
   check('pill: needs a correction', personalPillText(line('needs_correction')), 'Personal -$45.00 · needs a correction invoice for the week of Oct 10-16')
   check('pill: reversed', personalPillText(line('reversed')), 'Personal -$45.00 · reversed')
   check('pill: nothing, or an unknown state', [personalPillText(null), personalPillText(line('odd'))], ['', ''])
+  check('pill for a Dispatcher (no invoice number in the summary)', [personalPillText(line('invoiced')), personalPillText(line('correction'))],
+    ["Personal -$45.00 · on the week of Oct 10-16's invoice", 'Personal -$45.00 · on a correction invoice, the week of Oct 10-16'])
   check('driver: on the weekly invoice', personalDriverText(line('invoiced')), 'Personal: -$45.00 on your Oct 10-16 invoice')
   check('driver: waiting reads the same', personalDriverText(line('pending')), 'Personal: -$45.00 on your Oct 10-16 invoice')
   check('driver: on a correction', personalDriverText(line('correction', { invoice_number: 'INV-M-2026-0007' })), 'Personal: -$45.00 on correction INV-M-2026-0007')

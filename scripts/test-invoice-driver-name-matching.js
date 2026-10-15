@@ -127,6 +127,7 @@ const SHARED_FNS = [
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
+	"personalSnapshotOf", "personalLinesForInvoices",
 	// The P&L's deduction and the key it folds a driver's spellings to — which,
 	// like getAllExcludedDriverDays(), reads a name through these two.
 	"isBuiltInPropertyName", "driverNameForTotals",
@@ -136,7 +137,7 @@ const SHARED_FNS = [
 	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
-	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines"];
+	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines", "personalReceiptRenderData"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
 	'app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {',

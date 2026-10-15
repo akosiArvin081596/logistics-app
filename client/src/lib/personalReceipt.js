@@ -48,14 +48,15 @@ function weekWords(p) {
   return p.week_label ? `the week of ${p.week_label}` : 'its week'
 }
 
-// The Expenses screen's pill.
+// The Expenses screen's pill. A Dispatcher's summary carries no invoice number.
 export function personalPillText(personal) {
   if (!personal) return ''
   const amount = personal.amount_text ? `Personal -${personal.amount_text}` : 'Personal'
+  const number = personal.invoice_number || ''
   switch (personal.state) {
     case 'pending': return `${amount} · waiting for ${weekWords(personal)}'s invoice`
-    case 'invoiced': return `${amount} · on ${personal.invoice_number}`
-    case 'correction': return `${amount} · on correction ${personal.invoice_number}, ${weekWords(personal)}`
+    case 'invoiced': return number ? `${amount} · on ${number}` : `${amount} · on ${weekWords(personal)}'s invoice`
+    case 'correction': return number ? `${amount} · on correction ${number}, ${weekWords(personal)}` : `${amount} · on a correction invoice, ${weekWords(personal)}`
     case 'needs_correction': return `${amount} · needs a correction invoice for ${weekWords(personal)}`
     case 'reversed': return `${amount} · reversed`
     default: return ''

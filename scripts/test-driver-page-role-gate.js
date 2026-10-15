@@ -193,6 +193,8 @@ function makeDeps() {
 		// No receipt carries a Personal line here (its subject is
 		// scripts/test-personal-expense-routes.js).
 		personalSummaryByExpense: () => Object.create(null),
+		// Nor does an invoice (scripts/test-personal-expense-receipts.js).
+		personalLinesForInvoices: () => new Map(),
 		stripSigningEvidence: (rows) => rows,
 		// Which stored files exist, from their bytes (its own subject is
 		// scripts/test-stored-file-serving.js).

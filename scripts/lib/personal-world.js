@@ -62,6 +62,14 @@ const ROUTE_HEADS = {
 	userDelete: 'app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {',
 	fuelAnalytics: 'app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher"), fuelAnalyticsLimiter, (req, res) => {',
 };
+// Phase 2 (receipts on invoices): lifted only for a world built with
+// { receipts: true }, so the phase 1 runners lift exactly what they did.
+const RECEIPT_ROUTE_HEADS = {
+	receipt: 'app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalReceiptLimiter, async (req, res) => {',
+	waitingCorrections: 'app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), (req, res) => {',
+	invoices: 'app.get("/api/invoices", requireAuth, (req, res) => {',
+};
+const RECEIPT_ROOTS = ["paymentReportColumns", "personalLinesForInvoices", "personalWaitingInPeriod"];
 
 const ROOTS = [
 	"generateInvoiceHandler", "runPersonalSweep", "invoiceTotalDue", "buildPaymentReport", "invoiceListSummary",
@@ -75,13 +83,18 @@ const ROOTS = [
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
-	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter"];
+	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE"];
 
-let lifted = null;
-function liftedCode() {
-	if (!lifted) lifted = closure(SRC, { roots: ROOTS, routes: Object.values(ROUTE_HEADS), provided: PROVIDED, denied: DENIED });
-	return lifted;
+const lifted = new Map();
+function liftedCode(receipts) {
+	const key = receipts ? "receipts" : "base";
+	if (!lifted.has(key)) {
+		const roots = receipts ? [...ROOTS, ...RECEIPT_ROOTS] : ROOTS;
+		const routes = Object.values(receipts ? { ...ROUTE_HEADS, ...RECEIPT_ROUTE_HEADS } : ROUTE_HEADS);
+		lifted.set(key, { roots, code: closure(SRC, { roots, routes, provided: PROVIDED, denied: DENIED }) });
+	}
+	return lifted.get(key);
 }
 
 const TABLES = ["users", "investors", "truck_assignments", "carrier_driver_history", "drivers_directory", "expenses",
@@ -205,7 +218,7 @@ class Res {
 	end(b) { if (b !== undefined) this.body = b; this._done(); return this; }
 }
 
-// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer> }.
+// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer>, receipts }.
 function buildPersonalWorld(opts = {}) {
 	const personalExpense = appRequire("./lib/personal-expense");
 	const db = buildDb(personalExpense.SCHEMA_SQL);
@@ -249,13 +262,14 @@ function buildPersonalWorld(opts = {}) {
 		io: null,
 		sendEmail: async () => undefined,
 		fuelAnalyticsLimiter: (req, res, next) => next(),
+		personalReceiptLimiter: (req, res, next) => next(),
 	};
-	const code = liftedCode();
+	const { roots, code } = liftedCode(!!opts.receipts);
 	const body = [
 		'"use strict";',
 		code.text,
 		"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet.rows.map((r) => [...r]) }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
-		`return { ${ROOTS.join(", ")} };`,
+		`return { ${roots.join(", ")} };`,
 	].join("\n");
 	const api = new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), sheet);
 
@@ -300,7 +314,7 @@ function buildPersonalWorld(opts = {}) {
 		await done;
 		clearTimeout(timer);
 		if (res.body === undefined) throw new Error(`no response from ${method} ${url}`);
-		return { status: res.statusCode, body: res.body };
+		return { status: res.statusCode, body: res.body, headers: res.headers };
 	}
 	async function generate(driver, weekEnd = "2026-10-16", as = "admin") {
 		const out = { status: 200, body: null };
@@ -344,4 +358,4 @@ function makeChecker() {
 // Eastern wall clock to epoch ms, for the runners' clock moves (EDT, UTC-4, in October).
 const edt = (day, h = 12, m = 0) => Date.parse(`${day}T00:00:00Z`) + (h + 4) * 3600000 + m * 60000;
 
-module.exports = { buildPersonalWorld, makeChecker, edt, NOW_MS, DRIVER_A, DRIVER_B, OWNER_OP, USERS, ROUTE_HEADS, ROOT, SRC };
+module.exports = { buildPersonalWorld, makeChecker, edt, NOW_MS, DRIVER_A, DRIVER_B, OWNER_OP, USERS, ROUTE_HEADS, RECEIPT_ROUTE_HEADS, ROOT, SRC };

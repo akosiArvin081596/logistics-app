@@ -44,6 +44,11 @@
  *   §15 totals: invoiceTotalDue() includes both new columns and throws on a row
  *            read without them; the payment report and the driver app list
  *            select them; Financials "invoiced" adds the share returned only
+ *   §16 the money review's Lows: L1 a regenerate moves a reversed line's base
+ *            with it (a mark again gets its share); L2 the correction refreshes
+ *            the share and re-checks the week's month inside its write; L3 the
+ *            sweep never flags a line attached meanwhile; L4 a Dispatcher's list
+ *            carries no share or invoice; L5 a detach updates the stored render data
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-invoice.js    # exits 1 on failure
@@ -525,6 +530,130 @@ const SAT_0630 = edt("2026-10-17", 6, 30);
 		check("Financials \"invoiced\" adds the share returned and never subtracts repayments", [/personal_share_total/.test(fin), /personal_total\b(?!_)/.test(fin.replace(/personal_share_total/g, ""))], [true, false]);
 		const delAudit = SRC.slice(SRC.indexOf('app.delete("/api/invoices/:id"'), SRC.indexOf('app.put("/api/invoices/:id/restore"'));
 		check("the delete audit's total is invoiceTotalDue()", /invoiceTotalDue\(invoice\)/.test(delAudit), true);
+		w.cleanup();
+	}
+
+	section("§16 the money review's Lows");
+	{
+		// L1: a regenerate whose base leaves out a reversed line's cents takes that
+		// line's base with it, so the receipt marked again gets its share back.
+		const w = world();
+		await mark(w, 8);
+		const g = await w.generate(OWNER_OP);
+		approve(w, g.body.invoice.id);
+		w.setNow(edt("2026-10-22", 12));
+		const rv = await w.call("POST", "/api/expenses/8/personal/reverse", { body: {} });
+		await w.call("DELETE", `/api/invoices/${g.body.invoice.id}`, { query: { reason: "redo" } });
+		const g2 = await w.generate(OWNER_OP, "2026-10-16");
+		const again = await mark(w, 8);
+		const reversed = w.lines("kind = 'deduct' AND reversed_by_id IS NOT NULL")[0];
+		check("L1 soft-delete and regenerate an approved owner-operator week after a reversal: the base still leaves the $100 out ($825)",
+			[rv.status, g2.status, g2.body.invoice && g2.body.invoice.total_earnings], [201, 200, 825]);
+		check("…the reversed line's base moves to the new invoice", reversed.base_invoice_id === (g2.body.invoice && g2.body.invoice.id), true);
+		check("…and the receipt marked again carries the $25 share (not $0)", [again.status, w.lines("kind = 'deduct' AND voided_at = '' AND reversed_by_id IS NULL").map((r) => r.share_cents)], [201, [2500]]);
+		w.cleanup();
+	}
+	{
+		// L2: a line marked during the Friday render whose attach failed, the
+		// invoice approved before the sweep: the correction refreshes its share.
+		const w = world();
+		let n = 0;
+		w.hooks.render = async (t, d, def) => {
+			n++;
+			if (n === 1) await mark(w, 8);
+			if (n === 2) throw new Error("render failed");
+			return def(t, d);
+		};
+		const g = await w.generate(OWNER_OP);
+		w.hooks.render = null;
+		approve(w, g.body.invoice.id);
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		check("L2 setup: the line waits for the correction with a $0 share", [w.lines()[0].invoice_id, !!w.lines()[0].needs_correction_since, w.lines()[0].share_cents], [null, true, 0]);
+		const c = await w.call("POST", "/api/invoices/personal-corrections", { body: { driver: OWNER_OP, weekStart: "2026-10-10" } });
+		const inv = (c.body && c.body.invoice) || {};
+		check("…the correction refreshes it: +$25 / -$100 = -$75", [c.status, inv.personal_share_total, inv.personal_total, inv.total_due, w.lines()[0].share_cents], [201, 25, 100, -75, 2500]);
+		check("…and prints the share as a line item", (lastRender(w).data.lineItems || []).map((i) => i.amount), [25]);
+		w.cleanup();
+	}
+	{
+		// L2: the week's month finalized while the correction was being drawn.
+		const w = world();
+		await mark(w, 11);
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		w.hooks.render = async (t, d, def) => {
+			w.db.prepare("INSERT OR IGNORE INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-10', 'locked', 't', 'test')").run();
+			return def(t, d);
+		};
+		const c = await w.call("POST", "/api/invoices/personal-corrections", { body: { driver: DRIVER_B, weekStart: "2026-10-10" } });
+		check("L2 October finalized during the correction's render: 409 PERIOD_FINALIZED, no invoice, the line still waits",
+			[c.status, c.body && c.body.code, w.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE is_correction = 1").get().n, w.lines()[0].invoice_id, !!w.lines()[0].needs_correction_since],
+			[409, "PERIOD_FINALIZED", 0, null, true]);
+		w.cleanup();
+	}
+	{
+		// L3: a line the sweep read as waiting but that was attached meanwhile is
+		// not flagged.
+		const w = world();
+		const g = await w.generate(DRIVER_A);
+		await mark(w, 1);
+		w.db.prepare("UPDATE expense_personal SET invoice_id = NULL WHERE expense_id = 1").run();
+		w.db.prepare("UPDATE invoices SET personal_total = 0 WHERE id = ?").run(g.body.invoice.id);
+		await mark(w, 11);
+		const other = w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, pdf_file_name, render_data, is_manual)
+			VALUES ('INV-M-TEST-0001', 'test driver b', '2026-10-10', '2026-10-16', 1, 0, 0, 'Draft', 'INV-M-TEST-0001.pdf', '{}', 1)`).run().lastInsertRowid;
+		w.hooks.render = async (t, d, def) => {
+			w.db.prepare("UPDATE expense_personal SET invoice_id = ? WHERE expense_id = 11").run(other);
+			return def(t, d);
+		};
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		check("L3 the sweep attaches A's line, and B's line, attached meanwhile, is not flagged",
+			[w.lines("expense_id = 1")[0].invoice_id === g.body.invoice.id, w.lines("expense_id = 11")[0].invoice_id === Number(other), w.lines("expense_id = 11")[0].needs_correction_since],
+			[true, true, ""]);
+		check("…and no flag is audited for it", w.audits("flag_personal_expense").filter((a) => String(a.entity_id) === "11").length, 0);
+		w.cleanup();
+	}
+	{
+		// L4: a Dispatcher's expense list carries no share or invoice number.
+		const w = world();
+		await mark(w, 1);
+		const g = await w.generate(DRIVER_A);
+		const disp = await w.call("GET", "/api/expenses/all", { as: "dispatcher" });
+		const p = ((disp.body.expenses || []).find((e) => e.id === 1) || {}).personal || {};
+		check("L4 Dispatcher: the state and the amount, no share, invoice or books",
+			[p.state, p.amount_text, ["share_cents", "invoice_number", "invoice_id", "in_place", "cost_period", "can_undo"].filter((k) => k in p)],
+			["invoiced", "$200.00", []]);
+		const admin = await w.call("GET", "/api/expenses/all", { as: "admin" });
+		const a = ((admin.body.expenses || []).find((e) => e.id === 1) || {}).personal || {};
+		check("…Super Admin: the share, the invoice, the week and whether Undo still applies",
+			[a.share_cents, a.invoice_number === g.body.invoice.invoice_number, a.week_label, a.amount_text, a.can_undo], [0, true, "Oct 10-16, 2026", "$200.00", true]);
+		approve(w, g.body.invoice.id);
+		const after = await w.call("GET", "/api/expenses/all", { as: "admin" });
+		check("…once the invoice is approved, Undo no longer applies (Reverse)", (((after.body.expenses || []).find((e) => e.id === 1) || {}).personal || {}).can_undo, false);
+		w.cleanup();
+	}
+	{
+		// L5: an adjustment that takes lines off an invoice takes them off its
+		// stored render data too, and puts them back if the PDF fails.
+		const w = world();
+		w.db.prepare("UPDATE drivers_directory SET pay_daily = 150 WHERE driver_name = ?").run(DRIVER_B);
+		const add = w.db.prepare("INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description) VALUES (?, 't', ?, 'Food', ?, ?, 'Approved', ?, 'T-3', 0, ?, '')");
+		add.run(12, DRIVER_B, 200, "2026-10-13", "Diner #2", "2026-10-13 15:00:00");
+		await mark(w, 12);
+		const g = await w.generate(DRIVER_B);
+		submit(w, g.body.invoice.id);
+		const stored = () => JSON.parse(w.invoice(g.body.invoice.id).render_data);
+		check("L5 setup: the stored render data lists the $200 line", (stored().personalLines || []).length, 1);
+		w.hooks.render = async () => { throw new Error("render failed"); };
+		const failed = await w.call("PUT", `/api/invoices/${g.body.invoice.id}/adjust`, { body: { adjustment: -150, adjustmentNote: "Advance" } });
+		check("…the PDF fails: 409, the line and the stored render data both put back",
+			[failed.status, w.lines("expense_id = 12")[0].invoice_id === g.body.invoice.id, (stored().personalLines || []).length, stored().personalTotal], [409, true, 1, 200]);
+		w.hooks.render = null;
+		const adj = await w.call("PUT", `/api/invoices/${g.body.invoice.id}/adjust`, { body: { adjustment: -150, adjustmentNote: "Advance" } });
+		check("…the adjustment detaches the line: the stored render data no longer lists it",
+			[adj.status, w.lines("expense_id = 12")[0].invoice_id, (stored().personalLines || []).length, stored().personalTotal || 0], [200, null, 0, 0]);
 		w.cleanup();
 	}
 
