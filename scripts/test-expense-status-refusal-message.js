@@ -18,9 +18,12 @@
  *   - the receipt's status is unchanged, and exactly one refusal audit row is
  *     written per request, as before;
  *   - the message names the month, says the receipt already counts in that
- *     month's figures (or, for a rejected one, that it is left out), names the
- *     correction (a payout adjustment in the current month), and contains no
- *     "reopen" in any case, no "/api/" and no internal code.
+ *     month's figures (or, for a rejected one, that it is left out), says who
+ *     can correct what (a Super Admin, an investor's payout, with an adjustment
+ *     on an open month in Payouts; a company truck's closed month stays as
+ *     recorded), says the status can't be changed (true for an approve, a
+ *     reject and a reset to Pending alike), and contains no "reopen" in any
+ *     case, no "/api/" and no internal code.
  * It also checks the gallons-recovery refusal in lib/, the other receipt
  * refusal that used to give the same advice.
  *
@@ -62,6 +65,7 @@ const ROWS = [
 	{ id: 3, date: "2026-08-15", status: "Rejected" },  // August, closed, left out of the figures
 	{ id: 4, date: "2026-09-15", status: "Pending" },   // September, open
 	{ id: 5, date: "2025-09-10", status: "Pending" },   // September 2025, closed
+	{ id: 6, date: "2026-07-10", status: "Pending" },   // July 2026, closed
 ];
 
 function buildDb() {
@@ -72,6 +76,7 @@ function buildDb() {
 	}
 	const lock = db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', '2026-09-08T05:00:00.000Z')");
 	lock.run("2025-09");
+	lock.run("2026-07");
 	lock.run("2026-08");
 	const add = db.prepare(`INSERT INTO expenses (id, timestamp, driver, load_id, type, amount, date, status, created_at, posted_period)
 		VALUES (@id, '2026-09-29T20:00:00.000Z', 'Driver A', '', 'Fuel', 10, @date, @status, '2026-09-29 20:00:00', '')`);
@@ -117,13 +122,15 @@ function checkClean(label, msg) {
 	check(`${label}: no "reopen" in any case`, !/reopen/i.test(text), text);
 	check(`${label}: no API path`, !text.includes("/api/"), text);
 	check(`${label}: no internal code`, !/PERIOD_[A-Z_]+/.test(text), text);
-	check(`${label}: names the correction (a payout adjustment in the current month)`, /payout adjustment in the current month/.test(text), text);
+	check(`${label}: says a Super Admin can adjust an investor's payout on an open month`, /A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts\./.test(text), text);
+	check(`${label}: says a company truck's closed month stays as recorded`, /A company truck's closed (month stays|months stay) as recorded\./.test(text), text);
+	check(`${label}: says the status can't be changed, not "approved or rejected"`, /status can't be changed/.test(text) && !/approved or rejected/.test(text), text);
 }
 
 const statusOf = (db, id) => db.prepare("SELECT status FROM expenses WHERE id = ?").get(id).status;
 const auditRows = (db, action) => db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = ? ORDER BY id").all(action);
 
-const SINGLE_SENTENCE = "August 2026 is closed, so this receipt can't be approved or rejected. It already counts in August 2026's figures as it stands. If it shouldn't have counted, record the correction as a payout adjustment in the current month.";
+const SINGLE_SENTENCE = "August 2026 is closed, so this receipt's status can't be changed. It already counts in August 2026's figures as it stands. A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. A company truck's closed month stays as recorded.";
 
 // ---- single receipt: approve and reject ------------------------------------
 for (const target of ["Approved", "Rejected"]) {
@@ -140,6 +147,20 @@ for (const target of ["Approved", "Rejected"]) {
 	check(`${label}: no success audit row`, auditRows(db, "update_expense_status").length === 0);
 	check(`${label}: names the month`, /August 2026/.test(b.error), b.error);
 	check(`${label}: says it already counts`, /already counts in August 2026's figures/.test(b.error), b.error);
+	check(`${label}: the exact sentence`, b.error === SINGLE_SENTENCE, b.error);
+	checkClean(label, b.error);
+}
+
+// ---- single receipt reset to Pending (the Undo on an approved receipt) ----
+{
+	const db = buildDb();
+	const put = world(db)["PUT /api/expenses/:id/status"];
+	const res = call(put, { params: { id: "2" }, body: { status: "Pending" } });
+	const b = res.body || {};
+	const label = "single reset to Pending";
+	check(`${label}: 409 PERIOD_FINALIZED with period 2026-08`, res.status === 409 && b.code === "PERIOD_FINALIZED" && b.period === "2026-08", `${res.status} ${JSON.stringify(b)}`);
+	check(`${label}: the receipt is unchanged`, statusOf(db, 2) === "Approved", statusOf(db, 2));
+	check(`${label}: one refusal audit row`, auditRows(db, "update_expense_status_blocked").length === 1);
 	check(`${label}: the exact sentence`, b.error === SINGLE_SENTENCE, b.error);
 	checkClean(label, b.error);
 }
@@ -201,6 +222,33 @@ for (const target of ["Approved", "Rejected"]) {
 	check(`${label}: both withheld, both months named`, b.skippedFinalized === 2 && JSON.stringify(b.finalizedPeriods) === '["2025-09","2026-08"]', JSON.stringify(b));
 	check(`${label}: the message names both months`, /September 2025 and August 2026 are closed/.test(b.message), b.message);
 	check(`${label}: says they already count`, /already count in those months' figures/.test(b.message), b.message);
+	checkClean(label, b.message);
+}
+
+// ---- batch: three closed months --------------------------------------------
+{
+	const db = buildDb();
+	const bulk = world(db)["PUT /api/expenses/bulk-status"];
+	const res = call(bulk, { body: { ids: [1, 5, 6], status: "Approved" } });
+	const b = res.body || {};
+	const label = "batch, three closed months";
+	check(`${label}: all withheld, all three months named`, b.skippedFinalized === 3 && JSON.stringify(b.finalizedPeriods) === '["2025-09","2026-07","2026-08"]', JSON.stringify(b));
+	check(`${label}: the message reads "A, B and C are closed"`, /September 2025, July 2026 and August 2026 are closed/.test(b.message), b.message);
+	check(`${label}: company trucks' closed months, plural`, /A company truck's closed months stay as recorded\./.test(b.message), b.message);
+	checkClean(label, b.message);
+	check(`${label}: the receipts are unchanged`, [1, 5, 6].every((id) => statusOf(db, id) === "Pending"));
+}
+
+// ---- batch: reset to Pending -----------------------------------------------
+{
+	const db = buildDb();
+	const bulk = world(db)["PUT /api/expenses/bulk-status"];
+	const res = call(bulk, { body: { ids: [2], status: "Pending" } });
+	const b = res.body || {};
+	const label = "batch reset to Pending";
+	check(`${label}: nothing updated, 1 withheld`, res.status === 200 && b.updated === 0 && b.skippedFinalized === 1, `${res.status} ${JSON.stringify(b)}`);
+	check(`${label}: the receipt is unchanged`, statusOf(db, 2) === "Approved", statusOf(db, 2));
+	check(`${label}: the message`, b.message === `0 updated. 1 skipped. ${SINGLE_SENTENCE}`, b.message);
 	checkClean(label, b.message);
 }
 

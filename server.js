@@ -59611,25 +59611,30 @@ function expenseStatusReason(body) {
 // PUT /api/expenses/bulk-status, so the two cannot drift. Closed months are
 // final and never reopened (2026-10-14), so it never suggests reopening: it says
 // the receipt already counts in that month as it stands (a Rejected one is left
-// out, EXPENSE_PNL_FILTER), and that a correction is a payout adjustment in the
-// current month (the Payouts page's Adjust, on an open month). Plain words only:
-// no route, no code. `periods` are the closed 'YYYY-MM' months, `count` the
-// receipts refused and `rejected` how many of those are Rejected.
+// out, EXPENSE_PNL_FILTER), and who can correct what. Both routes admit
+// Dispatchers, but a payout adjustment (PUT /api/investor/payouts/:id/adjust) is
+// Super Admin only and exists only on an investor's payout row, so the sentence
+// names the Super Admin and says a company truck's closed month stays as
+// recorded. "Status can't be changed" covers an approve, a reject and a reset to
+// Pending (Undo) alike. Plain words only: no route, no code. `periods` are the
+// closed 'YYYY-MM' months, `count` the receipts refused and `rejected` how many
+// of those are Rejected.
 function closedMonthReceiptRefusal(periods, count, rejected) {
 	const names = periods.map(periodLabel);
 	const many = names.length > 1;
 	const months = many ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0] || "";
 	const figures = many ? "those months' figures" : `${months}'s figures`;
 	const one = count === 1;
-	const closed = `${months} ${many ? "are" : "is"} closed, so ${one ? "this receipt" : "these receipts"} can't be approved or rejected.`;
-	const fix = "record the correction as a payout adjustment in the current month.";
+	const closed = `${months} ${many ? "are" : "is"} closed, so ${one ? "this receipt's" : "these receipts'"} status can't be changed.`;
+	const fix = "A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. " +
+		`A company truck's ${many ? "closed months stay" : "closed month stays"} as recorded.`;
 	if (!rejected) {
-		return `${closed} ${one ? "It already counts" : "They already count"} in ${figures} as ${one ? "it stands" : "they stand"}. If ${one ? "it" : "they"} shouldn't have counted, ${fix}`;
+		return `${closed} ${one ? "It already counts" : "They already count"} in ${figures} as ${one ? "it stands" : "they stand"}. ${fix}`;
 	}
 	if (rejected >= count) {
-		return `${closed} ${one ? "It was rejected, so it is" : "They were rejected, so they are"} left out of ${figures}. If ${one ? "it" : "they"} should have counted, ${fix}`;
+		return `${closed} ${one ? "It was rejected, so it is" : "They were rejected, so they are"} left out of ${figures}. ${fix}`;
 	}
-	return `${closed} They already count in ${figures} as they stand, except the ${rejected === 1 ? "rejected one, which is" : `${rejected} rejected ones, which are`} left out. If any of them should count differently, ${fix}`;
+	return `${closed} They already count in ${figures} as they stand, except the ${rejected === 1 ? "rejected one, which is" : `${rejected} rejected ones, which are`} left out. ${fix}`;
 }
 
 // PUT /api/expenses/:id/status — Approve or reject an expense

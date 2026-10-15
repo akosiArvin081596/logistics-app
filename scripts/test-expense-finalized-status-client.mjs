@@ -67,7 +67,7 @@ check('open Pending is changeable', expenseStatusChangeable({ status: 'Pending',
 check('a server without the field changes nothing', [expenseStatusLabel({ status: 'Pending' }), expenseStatusChangeable({ status: 'Pending' })], ['Pending', true])
 check('an unreadable month is not printed', expenseStatusLabel({ status: 'Pending', finalized_period: '2026-13' }), 'Pending')
 
-const refusal = Object.assign(new Error("August 2026 is closed, so this receipt can't be approved or rejected. It already counts in August 2026's figures as it stands. If it shouldn't have counted, record the correction as a payout adjustment in the current month."), { status: 409, code: 'PERIOD_FINALIZED' })
+const refusal = Object.assign(new Error("August 2026 is closed, so this receipt's status can't be changed. It already counts in August 2026's figures as it stands. A Super Admin can correct an investor's payout with an adjustment on an open month in Payouts. A company truck's closed month stays as recorded."), { status: 409, code: 'PERIOD_FINALIZED' })
 check('a refusal shows the server reason', statusChangeFailureMessage(refusal), refusal.message)
 check('a timeout shows its own sentence', statusChangeFailureMessage(Object.assign(new Error('The request timed out. Please check your connection and try again.'), { code: 'TIMEOUT' })), 'The request timed out. Please check your connection and try again.')
 check('no reason at all falls back', statusChangeFailureMessage(new Error('')), 'Failed to update status')

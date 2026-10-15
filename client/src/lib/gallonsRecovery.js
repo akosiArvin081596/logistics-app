@@ -224,9 +224,9 @@ export function recoveryRows(payload) {
  * money, and — when every row in it says the same thing — the reason hoisted out
  * of the rows and onto the section.
  *
- * THE HOIST IS THE WHOLE POINT OF THIS FUNCTION. All 25 receipts in production
- * today carry the byte-identical sentence "This receipt is in a closed month, so
- * its gallons can't be filled in. Closed months stay as they were recorded."
+ * THE HOIST IS THE WHOLE POINT OF THIS FUNCTION. Every receipt in a closed month
+ * carries the byte-identical `locked_period` reason from judgeGallonsRecovery()
+ * in lib/receipt-gallons-recovery.js (25 of 25 in production when written).
  * Rendering it per row is 25 reads of one fact — precisely the thing the brief
  * asks to replace with a single glance. Some reasons DO differ per row (the
  * refusals interpolate the actual figures: "$90.00 over 10 gal implies
