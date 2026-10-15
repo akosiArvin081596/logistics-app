@@ -145,17 +145,34 @@ const USERS = {
 	Investor: { id: 4, username: "investor1", role: "Investor" },
 };
 
-// File reads are counted where the module makes them.
+// File reads are counted where the module makes them (it reads through
+// fs.promises.stat / readFile only). Every attempt is recorded; only a path
+// that resolves inside the current world's fixture folder reaches the disk, so
+// nothing here ever opens a file outside it, whatever path the module asks for.
 const reads = [];
+let fixtureRoot = null;
 const origReadFile = fs.promises.readFile;
 const origStat = fs.promises.stat;
-const origReadFileSync = fs.readFileSync;
-fs.promises.readFile = function (p, ...rest) { reads.push(String(p)); return origReadFile.call(this, p, ...rest); };
-fs.promises.stat = function (p, ...rest) { reads.push(String(p)); return origStat.call(this, p, ...rest); };
-fs.readFileSync = function (p, ...rest) { if (typeof p === "string" && p.includes("ratecon-pdf-route-")) reads.push(p); return origReadFileSync.call(this, p, ...rest); };
+function insideFixtures(p) {
+	if (!fixtureRoot) return null;
+	const resolved = path.resolve(String(p));
+	return resolved.startsWith(fixtureRoot + path.sep) ? resolved : null;
+}
+const outsideFixtures = (p) => Promise.reject(Object.assign(new Error(`ENOENT: outside the fixture folder, ${p}`), { code: "ENOENT" }));
+fs.promises.readFile = function (p, ...rest) {
+	reads.push(String(p));
+	const safe = insideFixtures(p);
+	return safe ? origReadFile.call(this, safe, ...rest) : outsideFixtures(p);
+};
+fs.promises.stat = function (p, ...rest) {
+	reads.push(String(p));
+	const safe = insideFixtures(p);
+	return safe ? origStat.call(this, safe, ...rest) : outsideFixtures(p);
+};
 
 async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = false } = {}) {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ratecon-pdf-route-"));
+	fixtureRoot = path.resolve(tmp);
 	const uploadsDir = path.join(tmp, "uploads");
 	const rateconDir = path.join(uploadsDir, "rate-cons");
 	fs.mkdirSync(rateconDir, { recursive: true });
@@ -240,6 +257,7 @@ async function startWorld({ folderId = FOLDER, driveMode = "ok", replicaOff = fa
 		await new Promise((r) => server.close(r));
 		db.close();
 		fs.rmSync(tmp, { recursive: true, force: true });
+		fixtureRoot = null;
 	};
 	return { app, db, log, call, addDoc, uploadsDir, rateconDir, tmp, close };
 }
@@ -523,7 +541,6 @@ main()
 	.finally(() => {
 		fs.promises.readFile = origReadFile;
 		fs.promises.stat = origStat;
-		fs.readFileSync = origReadFileSync;
 		console.log(`\nratecon-pdf-route: ${pass} passed, ${failures.length} failed`);
 		process.exit(failures.length ? 1 : 0);
 	});

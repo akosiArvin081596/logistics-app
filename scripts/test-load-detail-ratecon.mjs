@@ -53,7 +53,18 @@ const Vue = clientRequire('vue')
 const { parse, compileScript } = clientRequire('vue/compiler-sfc')
 const { renderToString } = clientRequire('vue/server-renderer')
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)) }
-const text = (html) => html.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]+>/g, ' ').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+// Rendered HTML to its visible text. Comments and tags are removed until none
+// is left (one pass can leave a "<!--" that two halves join into), then the two
+// entities the server renderer emits here are decoded, &amp; last.
+function text(html) {
+  let s = String(html)
+  let prev
+  do {
+    prev = s
+    s = s.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]*>/g, ' ')
+  } while (s !== prev)
+  return s.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+}
 
 // Compile a committed SFC's <script setup> + <template> into a component.
 // Imports are resolved from `overrides` first; a .vue import becomes a stub
