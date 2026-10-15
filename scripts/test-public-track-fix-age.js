@@ -16,8 +16,10 @@
  *      etaMinutes beside the line; the router is never asked for the fix's leg
  *   §4 a phone fix stored with an offset ("...-04:00") is sent as the same
  *      instant in ISO (…Z), so every browser reads its age the same way
- *   §5 unchanged: no fix at all keeps the planned lane's figures; a delivered
- *      load has no ETA
+ *   §5 no fix within 2 hours at all (none on record, or a truck silent past the
+ *      3-hour window): no distance, no drive time and no ETA, not even the
+ *      planned lane's; the lane is still drawn
+ *   §6 unchanged: a delivered load has no ETA
  *
  * Hermetic: in-memory SQLite, made-up loads; no network.
  *   node scripts/test-public-track-fix-age.js    # exits 1 on failure
@@ -132,13 +134,22 @@ function world({ status = "In Transit", eldAgeMs = null, phoneAt = null }) {
 		ok("§4 sent as the same instant in ISO", b.lastPing && b.lastPing.at === new Date(Math.floor(stamp.getTime() / 1000) * 1000).toISOString(), [b.lastPing, `${local}-04:00`]);
 		ok("§4 a 20-minute phone fix still gives an ETA", !!b.eta);
 	}
-	console.log("§5 unchanged");
+	console.log("§5 no fix within 2 hours at all");
 	{
 		const r = await world({}).call();
 		const b = r.body || {};
-		ok("§5 no fix: no lastPing, no ETA, the planned lane's figures", b.lastPing === null && b.eta === null && b.distanceMiles === 812.4 && b.etaMinutes === 750, [b.lastPing, b.eta, b.distanceMiles, b.etaMinutes]);
+		ok("§5 no fix: no lastPing, no ETA, and no distance or drive time from the planned lane either",
+			b.lastPing === null && b.eta === null && b.distanceMiles === null && b.etaMinutes === null, [b.lastPing, b.eta, b.distanceMiles, b.etaMinutes]);
+		ok("§5 ...the lane is still drawn", Array.isArray(b.route) && b.route.length === 2);
+		const silent = await world({ eldAgeMs: 4 * 60 * MIN }).call();
+		const s = silent.body || {};
+		ok("§5 an In Transit truck silent for 4 hours (no position sent): no distance, no drive time, no ETA",
+			s.lastPing === null && s.eta === null && s.distanceMiles === null && s.etaMinutes === null, [s.lastPing, s.eta, s.distanceMiles, s.etaMinutes]);
+	}
+	console.log("§6 unchanged");
+	{
 		const d = await world({ status: "Delivered", eldAgeMs: 10 * MIN }).call();
-		ok("§5 a delivered load: no ETA", d.body && d.body.eta === null);
+		ok("§6 a delivered load: no ETA", d.body && d.body.eta === null);
 	}
 })().then(() => {
 	if (failures.length) {

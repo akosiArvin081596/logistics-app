@@ -14558,8 +14558,9 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 //   - Driver GPS privacy: only the last ping is returned, and only if it's
 //     within the last 3 hours (MAX_PING_AGE_MS) — prevents leaking a driver's
 //     off-shift location after they stop reporting.
-//   - A ping older than 2 hours gives no ETA and no distance (B11, owner
-//     decision 2026-10-15); the page shows its age from lastPing.at instead.
+//   - With no ping within the last 2 hours there is no ETA, distance or drive
+//     time in the payload (B11, owner decision 2026-10-15); the page shows the
+//     age of a ping it still has from lastPing.at instead.
 const trackPublicLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 60, // higher than publicFormLimiter — customers refresh a lot
@@ -15024,16 +15025,18 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			}
 		}
 		// The figures rendered beside the line describe the trip the customer is
-		// actually being told about: what is LEFT once the truck is reporting,
-		// otherwise the planned haul the line itself depicts. Taken verbatim
-		// from `eta` rather than recomputed, so the map's info strip can never
-		// contradict the ETA card sitting directly above it.
+		// actually being told about: what is LEFT once the truck is reporting.
+		// Taken verbatim from `eta` rather than recomputed, so the map's info
+		// strip can never contradict the ETA card sitting directly above it.
+		// With no fix within 2 hours (none at all, a truck silent past
+		// MAX_PING_AGE_MS, or one older than ETA_MAX_PING_AGE_MS) no distance or
+		// drive time is sent either: the page shows the planned lane's as an ETA,
+		// and the customer link shows none from an old or missing fix (B11). A
+		// delivered load with a fresh fix keeps the lane's figures, as before.
 		if (eta) {
 			routeDistanceMiles = eta.distanceMiles;
 			routeEtaMinutes = eta.minutesRemaining;
-		} else if (lastPing && !pingFreshForEta) {
-			// A ping older than 2 hours: no distance or ETA beside the line either,
-			// where the page would read the planned lane's as the truck's (B11).
+		} else if (!pingFreshForEta) {
 			routeDistanceMiles = null;
 			routeEtaMinutes = null;
 		}
