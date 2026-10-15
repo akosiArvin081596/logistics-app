@@ -456,6 +456,13 @@ function battery(mods) {
 		t(ser(m, "2025-09").display === "No data", "§7 2025 has no arrivals: No data");
 		const mtd = get(out2, "on_time_rate").totals.find((x) => x.label === "Month to date");
 		t(mtd.value === 100, "§7 the fall-back day: 08:30 EST arrival for a 09:00 Eastern appointment is on time", JSON.stringify(mtd));
+		// The receiver's address reaches the reading (lib/stop-zone.js): one with no
+		// longitude but an address is placed by its state, not left out.
+		const placed = world();
+		placed.arrivals = placed.arrivals.map((a) => (a.appointmentText === "9/23/2026 09:00" ? { ...a, destAddress: "Indianapolis, IN 46204" } : a));
+		const pm = get(M.computeKpis(placed), "on_time_rate");
+		const pn = (re) => (pm.breakdown.find((b) => re.test(b.label)) || {}).value;
+		t(pn(/receiver location/) === 0, "§7 a receiver with an address and no longitude is placed by its state", JSON.stringify(pm.breakdown));
 	}
 
 	// §8 fleet

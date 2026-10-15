@@ -587,7 +587,7 @@ const SCENARIOS = {
 			}
 			const settled = await waitUntil(() => all.every((x) => w.received.some((r) => r.id === x.id && r.args[0] === "__sentinel__")));
 			const expected = {
-				root: ["dispatch", "user:root"],
+				root: ["dispatch", "super-admin", "user:root"],
 				ops: ["dispatch", "user:investor"],
 				mike: ["investor", "user:mike"],
 				desk: ["investor", "user:dispatch"],
@@ -671,7 +671,7 @@ const SCENARIOS = {
 			u.s.emit("register", "__sentinel__");
 			root.s.emit("register", "__sentinel__");
 			const settled = await waitUntil(() => [root, u].every((x) => w.received.some((r) => r.id === x.id && r.args[0] === "__sentinel__")));
-			p.unlinkedJoinsOwnRoomOnly = settled && sameSet(roomsOf(w, u), ["user:dispatch"]) && sameSet(roomsOf(w, root), ["dispatch", "user:root"]);
+			p.unlinkedJoinsOwnRoomOnly = settled && sameSet(roomsOf(w, u), ["user:dispatch"]) && sameSet(roomsOf(w, root), ["dispatch", "super-admin", "user:root"]);
 			w.io.to("dispatch").emit("dispatch-notification", { n: 4 });
 			const delivered = await barrier(w, [root, u], 2);
 			p.unlinkedGetsNoDispatchEvents = delivered && copies(u, "dispatch-notification") === 0 && copies(root, "dispatch-notification") === 1;
@@ -809,7 +809,11 @@ const isCallOf = (arg, names) => {
 	const m = arg.match(/^([A-Za-z_$][\w$]*)\s*\(/);
 	return !!m && names.includes(m[1]) && closeParen(arg, arg.indexOf("(")) === arg.length - 1;
 };
-const ROLE_LITERAL = /^"(dispatch|investor)"$/;
+// "super-admin": Super Admins' own role room (2026-10-15), joined by role on
+// register beside "dispatch", so a notice that carries broker contact reaches
+// them in full while the rest of the dispatch room gets a redacted copy, sent as
+// io.to("dispatch").except("super-admin") (server.js emitDispatchByRole()).
+const ROLE_LITERAL = /^"(dispatch|investor|super-admin)"$/;
 const IDENTITY_HELPERS = ["driverRoom", "userRoom", "chatRooms"];
 // Events addressed to one driver. Each site must name its room with driverRoom().
 const DRIVER_EVENTS = { "load-assigned": 2, "load-cancelled": 2, "fuel-low": 1, "location-update": 2, "geofence-trigger": 1 };
@@ -848,6 +852,10 @@ function roomPinProblems(fullSrc) {
 		const close = closeParen(code, open);
 		const arg = code.slice(open + 1, close).trim();
 		if (method === "to" && recv === "io") toCalls.push({ arg, at });
+		// The one exclusion: the dispatch room without the Super Admin room.
+		if (method === "except" && arg === '"super-admin"' && /io\s*\.\s*to\(\s*"dispatch"\s*\)\s*$/.test(code.slice(Math.max(0, at - 40), at + 1))) {
+			continue;
+		}
 		if (["in", "except", "socketsJoin", "socketsLeave"].includes(method)) {
 			bad(at, `${recv}.${method}(${arg}) — no room method but to/join/leave is used; name the room with a helper and add it here`);
 			continue;
@@ -866,7 +874,7 @@ function roomPinProblems(fullSrc) {
 			continue;
 		}
 		if (!ROLE_LITERAL.test(arg) && !isCallOf(arg, IDENTITY_HELPERS)) {
-			bad(at, `room ${arg} — must be "dispatch", "investor", or driverRoom()/userRoom()/chatRooms()`);
+			bad(at, `room ${arg} — must be "dispatch", "investor", "super-admin", or driverRoom()/userRoom()/chatRooms()`);
 			continue;
 		}
 		if (method === "join") joins.push(arg);
@@ -909,7 +917,7 @@ function roomPinProblems(fullSrc) {
 		}
 	}
 	// `register` joins exactly these.
-	const wantJoins = ['"dispatch"', '"investor"', "userRoom(usernameLower)", "userRoom(usernameLower)", "userRoom(usernameLower)",
+	const wantJoins = ['"dispatch"', '"super-admin"', '"investor"', "userRoom(usernameLower)", "userRoom(usernameLower)", "userRoom(usernameLower)",
 		"driverRoom(driverNameLower)", "driverRoom(driverNameLower)"];
 	if (!sameSet(joins, wantJoins)) problems.push(`register joins ${JSON.stringify(joins)}, expected ${JSON.stringify(wantJoins)}`);
 	// Emits to EVERY socket: only the dev reload. And no other way to a room.

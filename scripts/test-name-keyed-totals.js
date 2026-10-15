@@ -123,11 +123,15 @@ function liftDecl(src, kind, name) {
 
 const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
+	// The broker contact value rule the dashboard and locations answers apply.
+	"brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
 	// The fuel-gallons recovery's thresholds (§3b).
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
 	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI",
 	// GET /api/trucks' ELD status (eldDeviceStatus()).
 	"ELD_STALE_HOURS",
+	// Driver availability (R11): read off the env this world has, i.e. off.
+	"DRIVER_AVAILABILITY_ENABLED",
 	// GET /api/financials reads the report (buildFinancialsReport()).
 	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR"];
 const LETS = ["lastPayStructShadowWarnMs"];
@@ -451,6 +455,9 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 			/!1:1$/.test(range) ? [[...HEADERS]] : [[...HEADERS], ...rows.map((r) => HEADERS.map((h) => r[h] || ""))] } }) } } }),
 		SPREADSHEET_ID: "test-sheet",
 		getRoute: async () => null,
+		// GET /api/locations/latest judges each ETA against the Drop-off Appointment.
+		etaOnTime: require("../lib/eta-on-time").etaOnTime,
+		DROPOFF_APPOINTMENT_COL_RE: require("../lib/eta-on-time").DROPOFF_APPOINTMENT_COL_RE,
 		duplicateReceiptGroups: () => ({ groups: [], summary: { groups: 0 } }),
 		fuelReconciliationSnapshot: () => null,
 		fuelTankCalibrationWire: () => null,

@@ -37,6 +37,7 @@
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.load()"
+        @availability-changed="store.load()"
       />
     </template>
   </div>

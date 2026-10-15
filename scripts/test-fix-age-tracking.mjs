@@ -293,6 +293,13 @@ if (Track) {
   ok('§3 ...and the map gets the arrival', attr(mid.map, 'show-arrival', 'showArrival') === true && attr(mid.map, 'arrival-at', 'arrivalAt') === ETA.expectedAt && attr(mid.map, 'fix-at', 'fixAt') === midAt)
   const fresh = await page(payload({ lat: 31, lng: -92, at: ago(5 * MIN) }, ETA))
   ok('§3 a 5-minute fix: the ETA and no age', fresh.t.includes('2h 5m') && !/Last seen/.test(fresh.t))
+  // The badge shows the ETA on the receiver's clock, zone named (lib/eta-on-time.js).
+  const zoned = await page(payload({ lat: 31, lng: -92, at: ago(5 * MIN) }, { ...ETA, onTime: false, arrivalLocal: 'Oct 15, 2:30 PM CDT' }))
+  ok(`§3 the badge names the verdict and the ETA with its zone (${zoned.t.slice(0, 200)})`, /Delayed\s*ETA Oct 15, 2:30 PM CDT/.test(zoned.t))
+  ok(`§3 ...and the ETA line above it reads the same clock, so one ETA never shows as two times (${zoned.t.slice(0, 200)})`,
+    /~120\.5 mi · Oct 15, 2:30 PM CDT/.test(zoned.t) && !/~120\.5 mi · [A-Z][a-z]{2} \d+, \d{4}, \d+:\d+ [AP]M E[SD]T/.test(zoned.t))
+  ok(`§3 without the receiver's clock the ETA line keeps US Eastern, labelled (${fresh.t.slice(0, 200)})`, /~120\.5 mi · [A-Z][a-z]{2} \d+, \d{4}, \d+:\d+ [AP]M E[SD]T/.test(fresh.t))
+  ok('§3 ...and a payload without it shows the verdict alone', /On time/.test(fresh.t) && !/ETA Oct/.test(fresh.t))
   const noEta = await page(payload({ lat: 31, lng: -92, at: ago(5 * MIN) }, null))
   ok(`§3 a 5-minute fix with no ETA (no drop-off coordinates): "Not available yet", not the old-fix wording (${noEta.t.slice(0, 160)})`,
     /Not available yet/.test(noEta.t) && !/not reported its position recently/.test(noEta.t) && !/Last seen/.test(noEta.t))

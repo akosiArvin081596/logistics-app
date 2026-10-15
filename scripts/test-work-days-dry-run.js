@@ -135,42 +135,77 @@ const R = W.createRunner("B12 F: the work-days dry run (route and script)");
 		}
 	});
 
-	await R.test("F5 (review M2, L4, L1) The late days' floor is this business week's Saturday unless given (floor=2026-09-28 gives 2026-09-26); refused days carry their amount; Ann's W40 shows $520 of added days and what happens once the rule is on (added in place: a Draft at or after the floor), dropped days apart; no month before FROM changes", async ({ eq, ok }) => {
+	await R.test("F5 (review M2, L4, L1; floor at FROM's first week, 2026-10-15) The late days' floor is the Saturday of FROM's first week (2026-09-26 for FROM 2026-10), whatever the clock; refused days carry their amount; Ann's W40 shows $520 of added days, added in place (a Draft at or after the floor), dropped days apart; no month before FROM changes", async ({ eq, ok }) => {
 		const o = await get();
 		requireBoth(ok, o);
 		const body = o.route.body || {};
-		eq("default floor: the Saturday of the clock's week (Fri 10/9)", body.lateDaysFloor, "2026-10-03");
-		const given = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-09-28" } });
-		eq("floor=2026-09-28: its week's Saturday", given.body && given.body.lateDaysFloor, "2026-09-26");
+		eq("the floor: FROM's first week", body.lateDaysFloor, "2026-09-26");
 		ok("every refused day carries a number amount", Array.isArray(body.refusedDays) && body.refusedDays.length > 0 && body.refusedDays.every((d) => typeof d.amount === "number"), JSON.stringify(body.refusedDays).slice(0, 200));
 		const number = o.f.ann40.invoice && o.f.ann40.invoice.invoice_number;
 		const inv = (body.perInvoice || []).find((i) => i.invoiceNumber === number);
 		eq("Ann's W40: added days, their amount, nothing dropped, added in place", inv && [inv.addedDays, inv.amountAdded, inv.droppedDays, inv.afterSwitchOn],
 			[["2026-10-06", "2026-10-07"], 520, [], "added to this invoice in place"]);
 		eq("months before FROM unchanged", body.monthsBeforeFromUnchanged, true);
-		const later = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-10-12" } });
-		const gap = ((later.body && later.body.refusedDays) || []).filter((d) => d.kind === "beforeFloor").map((d) => [d.day, d.loadId, d.amount]);
-		eq("a later floor (week of 10/10): Ann's 10/6 and 10/7 are refused as before the floor, $260 each", gap, [["2026-10-06", "F101", 260], ["2026-10-07", "F101", 260]]);
-		eq("…totalled on their own", later.body && later.body.summary.refusedByKind.beforeFloor, { days: 2, amount: 520 });
-		const bad = await W.route(o.f.w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", floor: "2026-13-45" } });
-		eq("a floor that is no calendar day: 400", bad.status, 400);
 	});
 
-	await R.test("F6 (round-three review) A day before a later floor in a week with no invoice yet is its own kind (beforeFloorWeekNotInvoiced): that week's own invoice will pay its days, so the floor gap (beforeFloor) leaves it out", async ({ eq }) => {
+	await R.test("F6 A load settling in FROM with trip days before FROM's first week: those days are refused as before the floor, listed though they fall before FROM; in a week with no invoice yet they are their own kind (beforeFloorWeekNotInvoiced), and in an invoiced week a day it did not pay is the floor gap (beforeFloor)", async ({ eq }) => {
 		const D = "Cleo Dyer";
-		const w = W.startWorld({
+		const world = () => W.startWorld({
 			env: ENV,
 			drivers: [{ name: D }],
-			rows: [loadRow({ id: "F601", driver: D, pickup: "2026-10-13 8:00", dropoff: "2026-10-14 18:00", assigned: "2026-10-13", done: "2026-10-14", truck: "T1" })],
-			status: [s("F601", "At Shipper", "2026-10-13 13:00:00"), s("F601", "Delivered", "2026-10-14 20:00:00")],
+			rows: [loadRow({ id: "F601", driver: D, pickup: "2026-09-24 8:00", dropoff: "2026-09-24 18:00", assigned: "2026-10-01", done: "2026-09-24", truck: "T1" })],
+			status: [s("F601", "At Shipper", "2026-09-23 13:00:00"), s("F601", "Delivered", "2026-09-24 20:00:00")],
 			now: etMs("2026-10-16 12:00"),
 		});
-		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10", floor: "2026-10-19" } });
-		eq("status", r.status, 200);
-		eq("10/13 and 10/14, this week, no invoice yet: their own kind", ((r.body && r.body.refusedDays) || []).map((d) => [d.day, d.kind]),
-			[["2026-10-13", "beforeFloorWeekNotInvoiced"], ["2026-10-14", "beforeFloorWeekNotInvoiced"]]);
-		eq("…and not in the floor gap", r.body && [r.body.summary.refusedByKind.beforeFloor, r.body.summary.refusedByKind.beforeFloorWeekNotInvoiced],
-			[undefined, { days: 2, amount: 520 }]);
+		const kinds = (r) => ((r.body && r.body.refusedDays) || []).map((d) => [d.day, d.kind, d.amount]);
+		{
+			const w = world();
+			const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+			eq("no invoice for the week of 9/19: 9/23 and 9/24 are their own kind", [r.status, kinds(r)],
+				[200, [["2026-09-23", "beforeFloorWeekNotInvoiced", 260], ["2026-09-24", "beforeFloorWeekNotInvoiced", 260]]]);
+			eq("…and not in the floor gap", [r.body.summary.refusedByKind.beforeFloor, r.body.summary.refusedByKind.beforeFloorWeekNotInvoiced], [undefined, { days: 2, amount: 520 }]);
+		}
+		{
+			const w = world();
+			const g = await W.generate(w, D, "2026-09-25");
+			eq("the week of 9/19's invoice pays 9/24 (its window, the rule off)", W.dayList(W.gridDays(g.data, "2026-09-25")), ["2026-09-24"]);
+			const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+			eq("invoiced week: 9/23, which it did not pay, is the floor gap", kinds(r), [["2026-09-23", "beforeFloor", 260]]);
+		}
+	});
+
+	await R.test("F7 (money review of 1cf2c20) The floor week, the dry run as live: FROM=2026-10, September closed, a load Assigned 10/1 with trip days 9/30-10/3, W39 already invoiced: the dry run adds only 10/1 and 10/2 ($520) to W39, as a correction (its week touches September), and lists 9/30 as refused (closed month, $260); live writes that same $520 correction", async ({ eq }) => {
+		const D = "Dot Ellis";
+		const build = (env) => W.startWorld({
+			env,
+			drivers: [{ name: D }],
+			rows: [
+				loadRow({ id: "F701", driver: D, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+				loadRow({ id: "F702", driver: D, pickup: "2026-09-30 8:00", dropoff: "2026-10-03 12:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+			],
+			status: [s("F701", "At Shipper", "2026-09-28 12:00:00"), s("F701", "Delivered", "2026-09-29 21:00:00"), s("F702", "At Shipper", "2026-09-30 13:00:00")],
+			now: etMs("2026-10-02 20:00"),
+		});
+		const finish = (w) => {
+			w.addStatus([s("F702", "Delivered", "2026-10-03 16:00:00")]);
+			w.setRow("F702", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
+			w.lock(["2026-09"]);
+			w.clock.ms = etMs("2026-10-09 20:00");
+		};
+		const w = build(ENV);
+		const g39 = await W.generate(w, D, "2026-10-02");
+		finish(w);
+		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+		const inv = ((r.body && r.body.perInvoice) || []).find((i) => i.invoiceNumber === g39.invoice.invoice_number);
+		eq("dry run: W39 adds 10/1 and 10/2, $520, as a correction", inv && [inv.addedDays, inv.amountAdded, inv.afterSwitchOn],
+			[["2026-10-01", "2026-10-02"], 520, "a correction invoice (Draft) for this week"]);
+		eq("dry run: 9/30 is refused, closed month, $260", ((r.body && r.body.refusedDays) || []).filter((d) => d.day === "2026-09-30").map((d) => [d.kind, d.amount]), [["closedMonth", 260]]);
+		const live = build({ TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-10" });
+		const l39 = await W.generate(live, D, "2026-10-02");
+		finish(live);
+		await W.generate(live, D, "2026-10-09");
+		const cs = live.db.prepare("SELECT total_earnings, render_data FROM invoices WHERE is_manual = 1 AND correction_of = ?").all(l39.invoice.id);
+		eq("live: one correction for W39, $520, 10/1 and 10/2", cs.map((c) => [c.total_earnings, JSON.parse(c.render_data).paidDays]), [[520, ["2026-10-01", "2026-10-02"]]]);
 	});
 
 	R.finish();
