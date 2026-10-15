@@ -157,6 +157,18 @@
                   <span class="meta-label">Adjusted by</span>
                   <span class="text-gray-600 text-[12px]">{{ selectedInvoice.adjusted_by }}{{ selectedInvoice.adjusted_at ? ' · ' + formatDateTime(selectedInvoice.adjusted_at) : '' }}</span>
                 </div>
+                <div v-if="!hasPersonalLines(selectedInvoice)" class="meta-row" style="border-top:1px solid #e8edf2; padding-top:0.4rem; margin-top:0.2rem;">
+                  <span class="meta-label font-bold">Total due</span>
+                  <span class="font-bold text-emerald-700 text-[15px]">{{ dueText(selectedInvoice.total_due) }}</span>
+                </div>
+              </template>
+              <!-- Personal lines (R3): what the driver repays and any share returned,
+                   each with its receipt; the server's figures, then its total due. -->
+              <template v-if="hasPersonalLines(selectedInvoice)">
+                <div class="meta-row full">
+                  <span class="meta-label">Personal</span>
+                  <PersonalInvoiceLines :lines="selectedInvoice.personal_lines" :is-super-admin="!!auth.isSuperAdmin" />
+                </div>
                 <div class="meta-row" style="border-top:1px solid #e8edf2; padding-top:0.4rem; margin-top:0.2rem;">
                   <span class="meta-label font-bold">Total due</span>
                   <span class="font-bold text-emerald-700 text-[15px]">{{ dueText(selectedInvoice.total_due) }}</span>
@@ -368,6 +380,7 @@ import ManualInvoiceDialog from '../components/invoices/ManualInvoiceDialog.vue'
 import PaymentReportDialog from '../components/invoices/PaymentReportDialog.vue'
 import PaginationBar from '../components/shared/PaginationBar.vue'
 import PdfZoomViewer from '../components/shared/PdfZoomViewer.vue'
+import PersonalInvoiceLines from '../components/shared/PersonalInvoiceLines.vue'
 
 const store = useInvoicesStore()
 const auth = useAuthStore()
@@ -466,6 +479,10 @@ function openDetail(inv) {
 // --- Adjustment helpers ---
 function hasAdjustment(inv) {
   return inv && Number(inv.adjustment || 0) !== 0
+}
+// The server's personal_lines on this invoice (R3), if any.
+function hasPersonalLines(inv) {
+  return !!inv && Array.isArray(inv.personal_lines) && inv.personal_lines.length > 0
 }
 // Any status is adjustable now (owner request) — post-approval edits get a
 // warning in the prompt and an explicit audit-trail marker server-side.

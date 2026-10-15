@@ -291,6 +291,13 @@
 
     .page-break { page-break-before: always; }
 
+    /* Personal lines: where each receipt is; receipt pages after the invoice. */
+    .receipt-note { display: block; font-size: 10px; color: #444; margin-top: 2px; }
+    .receipt-note a { color: #1a4f8b; text-decoration: underline; }
+    .receipt-page { break-before: page; page-break-before: always; }
+    .receipt-page h2 { font-size: 13px; margin: 0 0 12px; }
+    .receipt-page img { display: block; max-width: 100%; max-height: 8.3in; margin: 0 auto; object-fit: contain; }
+
     @media print {
       html, body { background: #fff; }
       .document {
@@ -415,6 +422,15 @@
     </div>
   </main>
 
+  <!-- Receipt pages (Personal lines): the renderer clones the hidden page once
+       per receipt image, then removes it; with none, nothing prints. -->
+  <section class="document receipt-pages" data-receipt-pages style="display:none">
+    <div class="receipt-page" data-receipt-page-template style="display:none">
+      <h2 data-cell="header"></h2>
+      <img data-cell="image" alt="Receipt">
+    </div>
+  </section>
+
   <script>
     // Generate the 7 day rows and wire up auto-calc for Total Due
     (function () {
@@ -446,7 +462,7 @@
       personalRow.setAttribute('data-personal-line-template', '');
       personalRow.style.display = 'none';
       personalRow.innerHTML = `
-        <td colspan="4"><span data-cell="label"></span></td>
+        <td colspan="4"><span data-cell="label"></span><span class="receipt-note" data-cell="note"></span></td>
         <td class="total-cell"><span data-cell="amount"></span></td>
       `;
       tbody.appendChild(personalRow);
