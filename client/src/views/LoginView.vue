@@ -75,7 +75,7 @@
               <label class="field-label" for="login-password">PASSWORD</label>
               <div class="input-wrap">
                 <span class="input-icon">&#128274;</span>
-                <input id="login-password" ref="loginPasswordInput" v-model="loginForm.password" :type="showLoginPassword ? 'text' : 'password'" placeholder="Enter your password" autocomplete="current-password" autocapitalize="off" spellcheck="false" @keydown.enter="doLogin" />
+                <input id="login-password" ref="loginPasswordInput" v-model="loginForm.password" :type="showLoginPassword ? 'text' : 'password'" placeholder="Enter your password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" @keydown.enter="doLogin" />
                 <!-- The same eye button as Users > Edit User's password fields. A press
                      doesn't take focus from the field, so the caret stays put. -->
                 <button type="button" class="pw-toggle" :aria-label="showLoginPassword ? 'Hide password' : 'Show password'" :aria-pressed="showLoginPassword" aria-controls="login-password" @mousedown.prevent @click="toggleLoginPassword">

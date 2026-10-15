@@ -439,6 +439,7 @@ ok('§6 login: the password field is autocomplete="current-password"', /v-model=
       ok('§7 it names the field it controls, and sits in the field\'s box', !!field.props.id && t.props['aria-controls'] === field.props.id && t.parent === field.parent)
       ok('§7 it starts as "Show password", not pressed, with the field hidden', t.props['aria-label'] === 'Show password' && t.props['aria-pressed'] === false && field.props.type === 'password')
       ok('§7 the field asks for no spellcheck or capitals (it may be shown)', field.props.spellcheck === 'false' && field.props.autocapitalize === 'off')
+      ok('§7 ...and no autocorrect, so iOS never changes a shown password', field.props.autocorrect === 'off')
       let prevented = false
       if (typeof t.props.onMousedown === 'function') t.props.onMousedown({ preventDefault() { prevented = true }, stopPropagation() {} })
       ok('§7 a mouse or touch press does not take focus from the field', prevented)
