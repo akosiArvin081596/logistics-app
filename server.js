@@ -3217,31 +3217,74 @@ function driverAvailabilityByName(sinceDay) {
 	return driverAvailability.groupAvailabilityByDriver(rows, normalizeDriverName);
 }
 
+// The live Job Tracking loads "Assign anyway" confirmations are checked against
+// (R11): Map(normLoadKey(load id) -> { driver, truck, pickupKey, dropoffKey,
+// cancelled }). Cancelled and removed loads are not in it (excludeDroppedLoads()),
+// so their confirmations stop counting, as do those of a load that now has
+// another driver. Built by each ELD sweep from the cached sheet (read only, never
+// written) before it judges, and read by every later truckDriverAvailability()
+// until the next; null until a sweep built it or when the sheet could not be
+// read, and then each confirmation counts as recorded (an extra alert rather than
+// a missed one).
+let availabilityLoadIndex = null;
+async function refreshAvailabilityLoadIndex() {
+	try {
+		const jt = await getJobTrackingCached();
+		const cols = jobTrackingMonthCols(jt.headers);
+		const truckCol = findCol(jt.headers, /^truck$/i);
+		const index = new Map();
+		for (const r of excludeDroppedLoads(jt.data, jt.headers)) {
+			const key = normLoadKey(cols.loadIdCol ? r[cols.loadIdCol] : "");
+			if (!key) continue;
+			index.set(key, {
+				driver: cols.driverCol ? r[cols.driverCol] || "" : "",
+				truck: truckCol ? r[truckCol] || "" : "",
+				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
+				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
+				cancelled: false,
+			});
+		}
+		availabilityLoadIndex = index;
+	} catch (e) {
+		availabilityLoadIndex = null;
+		console.error("[eld-feed] Job Tracking unreadable; \"Assign anyway\" confirmations count as recorded:", e.message);
+	}
+}
+
 // Every truck's current driver's time off, Map(truck id -> { driverName,
 // driverOffUntil, driverLastOffTo, driverReturningFromMs, driverConfirmedLoadToday }).
 // The truck's driver is its newest open assignment, else trucks.assigned_driver,
 // matched through normalizeDriverName() (lib/driver-availability.js
 // truckAvailabilityFields()). Rows that ended longer ago than the returning grace
-// can last are not read. A load given him with "Assign anyway" that covers today
-// (driver_availability_confirmations) lets his truck alert as normal.
+// can last are not read. A load given him with "Assign anyway"
+// (driver_availability_confirmations) that still has him and covers today lets
+// the truck it names, or his own when it names none, alert as normal
+// (standingConfirmations(), against availabilityLoadIndex).
 function truckDriverAvailability() {
 	const today = appTodayKey();
 	const byDriver = driverAvailabilityByName(driverAvailability.shiftAvailabilityDay(today, -(Math.ceil(ELD_STALE_HOURS / 24) + 2)));
-	const confirmedByDriver = driverAvailability.groupAvailabilityByDriver(db.prepare(`
-		SELECT c.id, c.load_from, c.load_to, d.driver_name AS directory_name
-		FROM driver_availability_confirmations c
-		JOIN drivers_directory d ON d.id = c.directory_id
-		WHERE c.load_from <= ? AND c.load_to >= ?
-	`).all(today, today), normalizeDriverName);
+	const standing = driverAvailability.standingConfirmations({
+		confirmations: db.prepare(`
+			SELECT c.id, c.load_id, c.load_from, c.load_to, d.driver_name AS directory_name
+			FROM driver_availability_confirmations c
+			JOIN drivers_directory d ON d.id = c.directory_id
+			WHERE c.load_to >= ?
+		`).all(driverAvailability.shiftAvailabilityDay(today, -60)),
+		loads: availabilityLoadIndex,
+		todayKey: today,
+		normalize: normalizeDriverName,
+		loadKey: normLoadKey,
+	});
 	const openByTruck = new Map();
 	for (const a of db.prepare("SELECT id, truck_id, driver_name, start_date FROM truck_assignments WHERE COALESCE(end_date, '') = ''").all()) {
 		if (!openByTruck.has(a.truck_id)) openByTruck.set(a.truck_id, []);
 		openByTruck.get(a.truck_id).push(a);
 	}
 	const out = new Map();
-	for (const t of db.prepare("SELECT id, assigned_driver FROM trucks").all()) {
+	for (const t of db.prepare("SELECT id, unit_number, assigned_driver FROM trucks").all()) {
 		out.set(t.id, driverAvailability.truckAvailabilityFields({
-			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, byDriver, confirmedByDriver, todayKey: today, normalize: normalizeDriverName,
+			openAssignments: openByTruck.get(t.id) || [], assignedDriver: t.assigned_driver, unitNumber: t.unit_number,
+			byDriver, standing, todayKey: today, normalize: normalizeDriverName,
 		}));
 	}
 	return out;
@@ -3737,6 +3780,9 @@ const eldFeedSweepHealth = { lastRun: null, lastError: null, lastFeeds: 0, lastA
 // to do about a dead ELD is a human call; this feature's whole job is to put
 // that call in front of one.
 async function sweepEldFeedSilence() {
+	// "Assign anyway" confirmations are judged against the loads as Job Tracking
+	// has them now (R11, refreshAvailabilityLoadIndex(); a read only).
+	if (DRIVER_AVAILABILITY_ENABLED) await refreshAvailabilityLoadIndex();
 	const judged = eldFeedVerdicts(Date.now());
 	const alerting = judged.alerts;
 

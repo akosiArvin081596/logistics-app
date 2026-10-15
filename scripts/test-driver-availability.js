@@ -317,6 +317,45 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			[w.api.eldFeedHealthReport(w.clock.ms).feeds.find((f) => f.vehicleId === W.VID.t91).state, !!w.db.prepare("SELECT resolved_at FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`).resolved_at],
 			["driver_off", true]);
 	});
+	// The review's rules (2026-10-15): a confirmation counts on the truck its
+	// load names, and only while the load still has that driver and is live.
+	const confirmLoad = async (w, truck) => {
+		await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20"));
+		const load = W.jtRow({ id: "7300", driver: "Hollis Renner", pickup: "10/15/2026 08:00", dropoff: "10/16/2026 17:00", status: "Dispatched", truck, owner: "5" });
+		return w.call("POST", "/api/data", { body: { values: load, confirmOffDuty: true } });
+	};
+	const t91 = (w) => ({
+		row: w.db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`),
+		state: w.api.eldFeedHealthReport(w.clock.ms).feeds.find((f) => f.vehicleId === W.VID.t91).state,
+	});
+	await R.guard("§7e", async () => {
+		const w = await W.startWorld();
+		eq("§7.19 \"Assign anyway\" of a load that runs in another truck (#33): 200", (await confirmLoad(w, "LogisX-#33")).status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§7.20 ...his own parked truck (#91) stays driver_off: no alert", [s.state, !!(s.row && !s.row.resolved_at)], ["driver_off", false]);
+	});
+	await R.guard("§7f", async () => {
+		const w = await W.startWorld();
+		await confirmLoad(w, "LogisX-#91");
+		await w.sweep();
+		eq("§7.21 the confirmed load runs in his own truck: #91 alerts", t91(w).state, "stale");
+		const moved = await w.call("PUT", "/api/load/7300", { user: USERS.disp, body: { Driver: "Soren King" } });
+		eq("§7.22 the load reassigned to another driver: 200", moved.status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§7.23 ...the confirmation no longer counts: #91 back to driver_off, the alert resolved", [s.state, !!(s.row && s.row.resolved_at)], ["driver_off", true]);
+	});
+	await R.guard("§7g", async () => {
+		const w = await W.startWorld();
+		await confirmLoad(w, "LogisX-#91");
+		await w.sweep();
+		const cancelled = await w.call("PUT", "/api/load/7300", { body: { "Job Status": "Cancelled" } });
+		eq("§7.24 the confirmed load cancelled: 200", cancelled.status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§7.25 ...the confirmation no longer counts: #91 back to driver_off, the alert resolved", [s.state, !!(s.row && s.row.resolved_at)], ["driver_off", true]);
+	});
 	await R.guard("§7c", async () => {
 		const w = await W.startWorld();
 		w.db.prepare("INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, created_by, created_at) VALUES (999, 'Hollis Renner', 'vacation', '2026-10-14', '2026-10-20', 'test', '2026-10-14T00:00:00Z')").run();

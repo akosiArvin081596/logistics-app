@@ -710,27 +710,45 @@ section("§2b pure — driver availability pauses and resumes the alert");
 	{
 		// The owner's rule (2026-10-15): after "Assign anyway", a confirmed load
 		// covering today overrides the time off, so the truck's dark-ELD alert
-		// fires as normal; one that does not cover today changes nothing.
+		// fires as normal; one that does not cover today changes nothing. The
+		// review's rules (2026-10-15): a confirmation counts on the truck its
+		// load names (the driver's own truck only when it names none), and only
+		// while the load, as Job Tracking has it now, still has that driver and
+		// is not cancelled or removed. Its days are the load's days now.
 		const off = [{ ...row(1, "2026-10-14", "2026-10-22"), directory_name: "Hollis Renner" }];
 		const byDriver = call("groupAvailabilityByDriver", off, normalizeDriverName) || new Map();
-		const conf = (from, to) => call("groupAvailabilityByDriver", [{ id: 9, directory_name: "hollis  renner", load_from: from, load_to: to }], normalizeDriverName) || new Map();
-		const fields = (todayKey, confirmedByDriver) => call("truckAvailabilityFields", {
-			openAssignments: [{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" }], assignedDriver: "",
-			byDriver, confirmedByDriver, todayKey, normalize: normalizeDriverName, timeZone: ET,
+		const loadKey = (s) => String(s == null ? "" : s).trim().toLowerCase().replace(/^#/, "");
+		const conf = { id: 9, load_id: "7300", directory_name: "hollis  renner", load_from: "2026-10-16", load_to: "2026-10-17" };
+		const sheet = (o) => new Map([["7300", { driver: "Hollis Renner", truck: "Logisx-#91", pickupKey: "2026-10-16", dropoffKey: "2026-10-17", cancelled: false, ...o }]]);
+		const standing = (todayKey, loads, confs = [conf]) => call("standingConfirmations", { confirmations: confs, loads, todayKey, normalize: normalizeDriverName, loadKey }) || [];
+		const fields = (todayKey, st, unitNumber = "LogisX-#91") => call("truckAvailabilityFields", {
+			openAssignments: [{ id: 27, driver_name: "Hollis Renner", start_date: "2026-09-22T01:28:00.000Z" }], assignedDriver: "", unitNumber,
+			byDriver, standing: st, todayKey, normalize: normalizeDriverName, timeZone: ET,
 		}) || {};
 		const now = Date.parse("2026-10-16T16:00:00Z");
-		const covering = fields("2026-10-16", conf("2026-10-16", "2026-10-17"));
-		eq("§2b.28 a confirmed load covering today: driverConfirmedLoadToday", covering.driverConfirmedLoadToday, true);
-		eq("§2b.29 ...the dark feed alerts as stale, not driver_off", [dark(now, { ...covering, todayKey: "2026-10-16" }).state, dark(now, { ...covering, todayKey: "2026-10-16" }).alert], ["stale", true]);
-		const later = fields("2026-10-16", conf("2026-10-19", "2026-10-20"));
-		eq("§2b.30 a confirmed load on later days: still driver_off, no alert", [later.driverConfirmedLoadToday, dark(now, { ...later, todayKey: "2026-10-16" }).state], [false, "driver_off"]);
-		eq("§2b.31 no confirmations: driver_off", dark(now, { ...fields("2026-10-16", new Map()), todayKey: "2026-10-16" }).state, "driver_off");
+		const judge = (f, todayKey = "2026-10-16", at = now) => dark(at, { ...f, todayKey });
+		const own = fields("2026-10-16", standing("2026-10-16", sheet({})));
+		eq("§2b.28 a confirmed load covering today, naming his truck (other case): driverConfirmedLoadToday", own.driverConfirmedLoadToday, true);
+		eq("§2b.29 ...his dark truck alerts as stale, not driver_off", [judge(own).state, judge(own).alert], ["stale", true]);
+		eq("§2b.30 a load naming no truck counts on his own truck: alerts", judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "" })))).state, "stale");
+		eq("§2b.31 a load naming another truck (#33): his own parked truck stays driver_off",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ truck: "LogisX-#33" })))).state, "driver_off");
+		eq("§2b.32 the load reassigned to another driver since: ignored, driver_off",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ driver: "Soren King" })))).state, "driver_off");
+		eq("§2b.33 the load cancelled: ignored, driver_off", judge(fields("2026-10-16", standing("2026-10-16", sheet({ cancelled: true })))).state, "driver_off");
+		eq("§2b.34 the load gone from Job Tracking: ignored, driver_off", judge(fields("2026-10-16", standing("2026-10-16", new Map()))).state, "driver_off");
+		eq("§2b.35 the load's days moved to Oct 19-20 since: not today, driver_off",
+			judge(fields("2026-10-16", standing("2026-10-16", sheet({ pickupKey: "2026-10-19", dropoffKey: "2026-10-20" })))).state, "driver_off");
+		eq("§2b.36 Job Tracking unreadable (no load index): the confirmation counts as recorded, on his own truck",
+			judge(fields("2026-10-16", standing("2026-10-16", null))).state, "stale");
+		eq("§2b.37 no confirmations: driver_off", judge(fields("2026-10-16", [])).state, "driver_off");
 		// Back on Oct 23 (grace) with a confirmed load that day: it wins over
 		// driver_returning too.
-		const back = fields("2026-10-23", conf("2026-10-23", "2026-10-24"));
 		const backNow = Date.parse("2026-10-23T16:00:00Z");
-		eq("§2b.32 a confirmed load covering a returning day: stale, not driver_returning", dark(backNow, { ...back, todayKey: "2026-10-23" }).state, "stale");
-		eq("§2b.33 ...without it: driver_returning", dark(backNow, { ...fields("2026-10-23", new Map()), todayKey: "2026-10-23" }).state, "driver_returning");
+		const backLoads = sheet({ pickupKey: "2026-10-23", dropoffKey: "2026-10-24" });
+		eq("§2b.38 a confirmed load covering a returning day: stale, not driver_returning",
+			judge(fields("2026-10-23", standing("2026-10-23", backLoads)), "2026-10-23", backNow).state, "stale");
+		eq("§2b.39 ...without it: driver_returning", judge(fields("2026-10-23", []), "2026-10-23", backNow).state, "driver_returning");
 	}
 	{
 		// The judge's order: retirement, link and status come first.
