@@ -19,7 +19,9 @@
 //   • the close-out instant reaches the replay, so the truck's next visit to the
 //     same shipper is not this load's departure;
 //   • unchanged: a final row is never recomputed, a live load's row never loses
-//     samples, and a load with no row and nothing measured writes nothing.
+//     samples, and a load with no row and nothing measured writes nothing;
+//   • a load in a closed month (the month-end lock's own test, lifted with its
+//     reads) is measured for the answer and never written (user, 2026-10-15).
 //
 // measureLoadEldMiles(), haulDrivenFromRow(), haulDrivenEmpty(), the table and
 // the upsert are lifted verbatim (SERVER_JS=<path> runs another copy of
@@ -35,6 +37,7 @@ const path = require("path");
 const geolib = require("geolib");
 const Database = require("better-sqlite3");
 const loadHaul = require("../lib/load-haul");
+const { closure } = require("./lib/server-lift");
 
 const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -69,7 +72,13 @@ const lifted = [
 	lift(/\nfunction haulDrivenFromRow\([\s\S]*?\n}\n/g, "haulDrivenFromRow"),
 	lift(/\nfunction haulDrivenEmpty\([\s\S]*?\n}\n/g, "haulDrivenEmpty"),
 	lift(/\nfunction measureLoadEldMiles\([\s\S]*?\n}\n/g, "measureLoadEldMiles"),
+	// The month-end lock's own test and everything it reads (a server.js that
+	// predates the closed-month rule has none: §7 then shows it failing).
+	/\nfunction haulRowInClosedMonth\(/.test(SHIPPED)
+		? `\n${closure(SHIPPED, { roots: ["haulRowInClosedMonth"], provided: ["db"], denied: [] }).text}\n`
+		: "",
 ].join("");
+const periodLocksSql = lift(/CREATE TABLE IF NOT EXISTS period_locks \([\s\S]*?\n\t\)/g, "period_locks table");
 
 // ---------------------------------------------------------------------------
 // Fixture: a self-consistent ping series (odometer follows the geometry).
@@ -113,9 +122,13 @@ function cleanHaul() {
 // ---------------------------------------------------------------------------
 // The world: a real table, the lifted code, stubbed reads.
 // ---------------------------------------------------------------------------
-function world() {
+function world({ lockedMonths = [], assigned = "9/20/2026, 8:00:00 AM" } = {}) {
 	const db = new Database(":memory:");
 	db.exec(createSql);
+	db.exec(periodLocksSql);
+	for (const mk of lockedMonths) {
+		db.prepare("INSERT INTO period_locks (period, status, finalized_at) VALUES (?, 'locked', '2026-10-15T04:00:00Z')").run(mk);
+	}
 	const state = { win: null, samples: [] };
 	const logs = [];
 	const deps = {
@@ -133,7 +146,7 @@ function world() {
 	const measure = new Function(...names, `${lifted}\nreturn measureLoadEldMiles;`)(...names.map((n) => deps[n]));
 	const ctx = {
 		coords: { origin_lat: SHIPPER.lat, origin_lng: SHIPPER.lng, dest_lat: RECEIVER.lat, dest_lng: RECEIVER.lng },
-		jt: { headers: ["Load ID", "Driver"], data: [{ "Load ID": "L-1", Driver: "Driver A" }] },
+		jt: { headers: ["Load ID", "Driver", "Assigned Date"], data: [{ "Load ID": "L-1", Driver: "Driver A", "Assigned Date": assigned }] },
 		truckResolver: { forDriverAt: () => null },
 		deviceResolver: { vehicleForTruckAt: () => "V7" },
 	};
@@ -245,6 +258,31 @@ const closed = { dispatchMs: T0 - 5 * MIN, terminal: true, endMs: lastMs };
 	const { driven } = w.run({ dispatchMs: T0 - 5 * MIN, terminal: false, endMs: T0 + 50 * MIN }, []);
 	check("6.1 a live load is not shown its stale row", [driven.stored, driven.loadedMiles, driven.reason], [false, null, "no_samples"]);
 	check("6.2 ...which stays as it was", w.row().samples, 5000);
+}
+
+// 7. Closed months show exactly as settled: a load that books into one keeps its
+//    row as recorded, whatever the replay says now.
+{
+	const w = world({ lockedMonths: ["2026-09"] });
+	w.seedInProgress(50);   // fewer samples than the final: only the lock holds it
+	const before = w.row();
+	const { driven } = w.run(closed, haul.rows);
+	check("7.1 a closed-month load's mid-haul row is left as recorded", w.row(), before);
+	near("7.2 ...while the answer is the fresh measurement", driven.loadedMiles, LANE_LOADED, 3);
+	check("7.3 ...not presented as stored", driven.stored, false);
+
+	const nothing = world({ lockedMonths: ["2026-09"] });
+	nothing.run(closed, haul.rows);
+	check("7.4 a closed-month load with no row gets none", nothing.row(), null);
+
+	const unplaced = world({ assigned: "" });
+	unplaced.run(closed, haul.rows);
+	check("7.5 a load whose month can't be told is held the same way", unplaced.row(), null);
+
+	const open = world({ lockedMonths: ["2026-08"] });
+	open.seedInProgress(5000);
+	open.run(closed, haul.rows);
+	check("7.6 an open-month load's row is replaced as usual", open.row().in_progress, 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
