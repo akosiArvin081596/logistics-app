@@ -95,15 +95,19 @@ const ROUTE_SRC = routeSource("get", "/api/driver/:driverName");
 // each lifts into a bare Function with nothing injected.
 const requireRole = new Function(`${liftFn("requireRole")}\nreturn requireRole;`)();
 const requireAuth = new Function(`${liftFn("requireAuth")}\nreturn requireAuth;`)();
-const helpers = new Function([
+// The reader's value redaction loads the shipped lib/broker-contact.js through
+// the `require` handed in (server.js's own `./lib/` path, resolved from ROOT).
+const helpers = new Function("require", [
 	liftFn("normalizeDriverName"),
 	liftFn("findCol"),
 	liftConstLine("BROKER_WITHHELD_RE"),
+	liftConstLine("brokerContact"),
+	liftConstLine("BROKER_CONTACT_VALUE_REDACTION_ENABLED"),
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),
 	liftFn("invoiceTotalDue"),
 	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue };",
-].join("\n"))();
+].join("\n"))((p) => require(/^\.\/lib\//.test(p) ? path.join(ROOT, p) : p));
 // The route finds the driver's directory row through findDirectoryRowForDriver(),
 // which reads `db`, so it is built over whichever db a route runs on.
 const DIRECTORY_LOOKUP_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverNameClashes"), liftFn("findDirectoryRowForDriver")].join("\n");

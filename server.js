@@ -7926,16 +7926,27 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			// Each listed column with its old and new value, so a change the email cap
 			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
 			// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
-			// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them).
+			// named without its values (the email, to ADMIN_NOTIFY_EMAIL, has them), and
+			// with BROKER_CONTACT_VALUE_REDACTION_ENABLED every other value has its
+			// broker contact withheld WHOLE, before it is cut to 100 characters, so the
+			// cut can never split a phone or an email (brokerContact.redactNoticeValue()).
+			// The notice is stored and emitted that way; `valuesRedacted` marks it so a
+			// read can tell it from one stored before the rule.
+			const redactValues = BROKER_CONTACT_VALUE_REDACTION_ENABLED;
 			const shown = (v) => {
-				const s = String(v).replace(/\s+/g, " ").trim();
+				const whole = redactValues ? brokerContact.redactNoticeValue(v) : String(v);
+				const s = whole.replace(/\s+/g, " ").trim();
 				if (!s) return "(blank)";
 				return s.length > 100 ? `${s.slice(0, 100)}…` : s;
 			};
+			const shownNote = note && redactValues ? brokerContact.redactNoticeValue(note) : note;
 			const body = toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ") + (note ? `. ${note}` : "");
-			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
+				: `${fieldName(e)}: ${shown(e.stored)} → ${shown(e.sent)}`)).join("; ") + (shownNote ? `. ${shownNote}` : "");
+			const metadata = {
+				loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })),
+				...(redactValues ? { valuesRedacted: true } : {}),
+			};
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(metadata));
 				io.to("dispatch").emit("dispatch-notification", { type: "ratecon-reissue-held", title, body, metadata });
@@ -36966,6 +36977,10 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			// covers; an append to any other tab is not judged.
 			const reservedDriver = driverCellRefusal(hdrs, [], values);
 			if (reservedDriver) return res.status(400).json(reservedDriver);
+			// Likewise an email or phone in Contract ID, 400 CONTACT_NOT_ALLOWED
+			// (brokerContact.contactNotAllowedRefusal(), as the row saves refuse it).
+			const contactInId = brokerContact.contactNotAllowedRefusal(hdrs, [], values);
+			if (contactInId) return res.status(400).json(contactInId);
 			const appendChanges = changedGuardedCells(hdrs, [], values);
 			const appendBlocker = sheetRowUpdateBlocker(true, hdrs, [], values, appendChanges);
 			if (appendBlocker) {
@@ -37211,11 +37226,26 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// written "" over the stored address. A disclosure bug turns into DATA LOSS
 		// the instant the reader and the writer disagree about which columns are
 		// withheld, so both ask resolveBrokerWithheldColumns().
+		// And first, with BROKER_CONTACT_VALUE_REDACTION_ENABLED: a cell (outside
+		// those columns) whose stored value holds broker contact, served to these
+		// callers redacted, is read-only. Sent back as stored or as served it is
+		// written back as stored; sent with anything else the save is refused, 409
+		// CONTACT_CELL_READ_ONLY naming the column (brokerContact.restoreContactCells()).
+		if (req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED) {
+			const readOnly = brokerContact.restoreContactCells(headers, before, values, { withheldRe: BROKER_WITHHELD_RE });
+			if (readOnly) return res.status(409).json(readOnly);
+		}
 		if (req.session.user.role !== "Super Admin") {
 			restoreWithheldBrokerCells(headers, before, values);
 			const formula = formulaCellRefusal(headers, before, values);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: an email or a formatted phone
+		// newly typed into Contract ID is refused, 400 CONTACT_NOT_ALLOWED naming the
+		// column (brokerContact.contactNotAllowedRefusal()); a stored value resent
+		// unchanged is not judged.
+		const contactInId = brokerContact.contactNotAllowedRefusal(headers, before, values);
+		if (contactInId) return res.status(400).json(contactInId);
 		// For every caller, Super Admin included: a changed cell in a Driver column
 		// that reads as a built-in property name is refused, 400
 		// DRIVER_NAME_RESERVED naming the column (driverCellRefusal()), judged on
@@ -39708,14 +39738,33 @@ function resolveBrokerWithheldColumns(headers) {
 	return (headers || []).filter((h) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h)));
 }
 
+// BROKER CONTACT BY VALUE (the owner, 2026-10-15). The columns above are not the
+// only place a broker email or phone can sit: any column, free text included,
+// can hold one. For every role but Super Admin, every value a load response
+// carries goes through lib/broker-contact.js: an email or a formatted phone
+// (and the row's own broker phone, email and agent name) reads
+// "[contact withheld]", a cell holding only contact is blank, such a cell is
+// read-only (409 CONTACT_CELL_READ_ONLY), and the rate-con extract answers with
+// its broker fields empty. Kill switch, defaults ON like PII_MASK_ENABLED:
+// "false" restores the column-only rule for every response. An email or phone
+// typed into Contract ID is refused either way (400 CONTACT_NOT_ALLOWED).
+const brokerContact = require("./lib/broker-contact");
+const BROKER_CONTACT_VALUE_REDACTION_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.BROKER_CONTACT_VALUE_REDACTION_ENABLED ?? "").trim());
+
 // A copy of the rows with every withheld cell that holds anything served as "",
 // plain text and JSON contact blobs alike (the owner's decision above). An
-// absent or empty cell is left as it is. Callers apply it to every role but
-// Super Admin.
+// absent or empty cell is left as it is. With BROKER_CONTACT_VALUE_REDACTION_ENABLED
+// every other value is redacted first (brokerContact.redactLoadValues(), which
+// reads the row's own contact from the withheld cells as stored and lists the
+// cells it redacted in `_withheldCells`). Callers apply it to every role but
+// Super Admin, last before the answer, after any enrichment.
 function sanitizeBrokerColumns(headers, rows) {
 	const withheld = resolveBrokerWithheldColumns(headers);
-	if (!withheld.length) return rows;
-	return rows.map((row) => {
+	const source = BROKER_CONTACT_VALUE_REDACTION_ENABLED
+		? brokerContact.redactLoadValues(headers, rows, { withheldRe: BROKER_WITHHELD_RE })
+		: rows;
+	if (!withheld.length) return source;
+	return source.map((row) => {
 		const cleaned = { ...row };
 		for (const col of withheld) {
 			if (cleaned[col]) cleaned[col] = "";
@@ -44184,7 +44233,13 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		const unreadCount = db.prepare(
 			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0`
 		).get().count;
-		res.json({ notifications, unreadCount });
+		// Every role but Super Admin: each notice's title, body and metadata with
+		// broker contact withheld; a re-issue notice stored before that rule names
+		// its columns only (brokerContact.redactDispatchNotice()).
+		const served = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin"
+			? notifications.map((n) => brokerContact.redactDispatchNotice(n))
+			: notifications;
+		res.json({ notifications: served, unreadCount });
 	} catch (error) {
 		res.status(500).json({ error: error.message });
 	}
@@ -45958,6 +46013,18 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 					fields = rateconNormalize.mergeExtractions(fields, retry);
 				} catch { /* keep the first-pass fields if the retry fails */ }
 			}
+			// Every role but Super Admin (BROKER CONTACT BY VALUE): the whole answer
+			// redacted, the broker fields (Broker Name, Phone, Email, Documents Email)
+			// null. The original is kept in memory for this PDF, so the create that
+			// follows writes the rate con's own broker contact (POST
+			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()).
+			if (BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin") {
+				brokerContact.rateConStash.put(brokerContact.rateConStashKey(base64), fields);
+				return res.json({
+					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE }),
+					warnings: rateconLoad.extractionWarnings(fields),
+				});
+			}
 			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
 		} catch (err) {
 			// A rejected key or an exhausted quota is the same state as having no key
@@ -46007,9 +46074,33 @@ const RATECON_SHEET_FIELDS = [
 // dispatcher "fixing" a hard error by re-dropping the PDF would create a twin.
 app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {
 	try {
-		const { fields, pdfBase64, fileName } = req.body || {};
+		const { pdfBase64, fileName } = req.body || {};
+		let { fields } = req.body || {};
 		if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
 			return res.status(400).json({ error: "fields required" });
+		}
+		// Every role but Super Admin (BROKER CONTACT BY VALUE): the extract served
+		// them the fields redacted, so the broker fields come from the extract's own
+		// answer for this PDF, never from the body; a field sent back exactly as
+		// served gets its original, an edited one is written as sent. With no
+		// extract held (another PDF, or more than 30 minutes ago) the broker fields
+		// are written blank and a warning says so. Before every check below, so
+		// they judge the fields as they will be written.
+		let brokerContactMissed = false;
+		if (BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin") {
+			const held = brokerContact.rateConStash.get(brokerContact.rateConStashKey(pdfBase64));
+			const merged = brokerContact.rateConCreateFields(fields, held, { withheldRe: BROKER_WITHHELD_RE });
+			fields = merged.fields;
+			brokerContactMissed = merged.missed;
+		}
+		// A broker field the rate con gave that the sheet would store as a formula
+		// (an international "+52 ..." phone) is written blank, with a warning: the
+		// person cannot see it to fix it, and check 1 below would refuse the load.
+		let brokerContactBlanked = false;
+		if (BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin") {
+			for (const k of Object.keys(fields)) {
+				if (BROKER_WITHHELD_RE.test(k) && formulaCellRefusal([k], [], [fields[k]])) { fields[k] = ""; brokerContactBlanked = true; }
+			}
 		}
 
 		// ---- 1) Validate Load ID (n8n "Validate Load ID" filter) ----
@@ -46094,6 +46185,11 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		res.on("close", () => rateConCreateInFlight.delete(loadKey));
 
 		const warnings = [];
+		if (brokerContactMissed) {
+			warnings.push("The broker's contact details could not be taken from this rate con (it was not read here in the last 30 minutes), so the load has none. A Super Admin can add them.");
+		} else if (brokerContactBlanked) {
+			warnings.push("A broker contact detail on this rate con could not be saved as read, so it was left blank. A Super Admin can add it.");
+		}
 		const sheets = await getSheets();
 
 		// ---- 2) Dedupe against Job Tracking (n8n "Check Existing Load") ----
@@ -46495,9 +46591,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// Same "new-load" notification the n8n webhook raises, so a dropped load
 		// surfaces identically to an email-ingested one. loadId lives inside
 		// metadata for the NotificationsView click-routing convention.
-		const route = rpm.details && rpm.details !== "Distance unavailable"
+		// The dispatch room holds Dispatchers too, so its text carries no broker
+		// contact (BROKER CONTACT BY VALUE): an address can hold a phone.
+		const routeText = rpm.details && rpm.details !== "Distance unavailable"
 			? rpm.details
 			: [pickupAddress, dropoffAddress].filter(Boolean).join(" → ");
+		const route = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactNoticeValue(routeText) : routeText;
 		insertDispatchNotification.run(
 			"new-load",
 			`New Load ${loadId}`,
@@ -51294,6 +51393,8 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// blank one (driverNameForTotals()); both maps are null-prototype and
 				// filed by fileByDriver(), so a Driver cell with other spacing than the
 				// directory's still reaches its driver (readByDriver()).
+				const redactEntries = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin";
+				const brokerWithheld = resolveBrokerWithheldColumns(headers);
 				const driverActiveLoadMap = Object.create(null);   // driver → first active loadId (for override, includes dispatched)
 				const driverActiveLoadsMap = Object.create(null);  // driver → working loads for panel (matches /api/dashboard activeStatuses)
 				if (statusCol && driverCol && loadIdCol) {
@@ -51341,7 +51442,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 									if (!entry.destLat && lc.dest_lat) { entry.destLat = lc.dest_lat; entry.destLng = lc.dest_lng; }
 								}
 							}
-							loadsBySpelling[spelling].push(entry);
+							// Every role but Super Admin: the entry's text (details and the
+							// address parts) with broker contact withheld, the row's own
+							// contact included (BROKER CONTACT BY VALUE).
+							loadsBySpelling[spelling].push(redactEntries
+								? brokerContact.redactContactDeep(entry, brokerContact.ownContact(brokerWithheld.map((h) => [h, obj[h]])))
+								: entry);
 						}
 					}
 				}
@@ -51843,12 +51949,23 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		// before anything is written: every broker contact column is written back
 		// exactly as stored, whatever the body sent (restoreWithheldBrokerCells()),
 		// and a changed cell the sheet would store as a formula is refused 400
-		// FORMULA_NOT_ALLOWED (formulaCellRefusal()).
+		// FORMULA_NOT_ALLOWED (formulaCellRefusal()); and first, with
+		// BROKER_CONTACT_VALUE_REDACTION_ENABLED, a cell holding broker contact is
+		// read-only, 409 CONTACT_CELL_READ_ONLY (brokerContact.restoreContactCells()).
+		if (req.session.user.role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED) {
+			const readOnly = brokerContact.restoreContactCells(headers, before, updatedRow, { withheldRe: BROKER_WITHHELD_RE });
+			if (readOnly) return res.status(409).json(readOnly);
+		}
 		if (req.session.user.role !== "Super Admin") {
 			restoreWithheldBrokerCells(headers, before, updatedRow);
 			const formula = formulaCellRefusal(headers, before, updatedRow);
 			if (formula) return res.status(400).json(formula);
 		}
+		// For every caller, Super Admin included: an email or phone newly typed into
+		// Contract ID is refused, 400 CONTACT_NOT_ALLOWED, as PUT /api/data/:rowIndex
+		// refuses it (brokerContact.contactNotAllowedRefusal()).
+		const contactInId = brokerContact.contactNotAllowedRefusal(headers, before, updatedRow);
+		if (contactInId) return res.status(400).json(contactInId);
 		// For every caller, Super Admin included: a changed Driver cell that reads
 		// as a built-in property name is refused, 400 DRIVER_NAME_RESERVED naming
 		// the column (driverCellRefusal(), as PUT /api/data/:rowIndex refuses it).

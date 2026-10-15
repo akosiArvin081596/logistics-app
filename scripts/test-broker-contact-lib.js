@@ -187,6 +187,27 @@ check("Contract ID: another column is not judged", refuse(["1", "", ""], ["1", "
 check("Contract ID: the header is matched by name, any spacing or case",
 	(bc.contactNotAllowedRefusal(["contract  id "], [""], ["agent.one@example.invalid"]) || {}).field, "contract  id ");
 
+// ------------------------------------------------------- dispatch notices
+check("notice value: contact inside text is withheld; a value that was only contact reads as withheld, not blank",
+	[bc.redactNoticeValue("call 555-010-0142 first"), bc.redactNoticeValue("agent.one@example.invalid"), bc.redactNoticeValue(""), bc.redactNoticeValue("Dock 4")],
+	[`call ${W} first`, W, "", "Dock 4"]);
+{
+	const legacy = { id: 1, type: "ratecon-reissue-held", title: "Load 80000011: re-issued rate con changed fields",
+		body: "Details: call 555-010-01… → email agent.one@exam…; Pickup Info (held): REF 41000017 → REF 41000017 (555) 010-0199",
+		metadata: JSON.stringify({ loadId: "80000011" }), read: 0 };
+	const out = bc.redactDispatchNotice(legacy);
+	check("notice stored before the fix: column names only, from the body", out.body, `Details: ${W}; Pickup Info (held): ${W}`);
+	check("notice stored before the fix: title, id and the rest kept", [out.title, out.id, out.read, out.metadata], [legacy.title, 1, 0, legacy.metadata]);
+	const withFields = bc.redactDispatchNotice({ ...legacy, metadata: JSON.stringify({ loadId: "80000011", fields: [{ column: "Details", kind: "changed" }, { column: "Drop-off Info", kind: "held" }] }) });
+	check("notice stored before the fix: column names from metadata.fields when present", withFields.body, `Details: ${W}; Drop-off Info (held): ${W}`);
+	const fresh = bc.redactDispatchNotice({ ...legacy, body: `Details: call ${W} → Reefer 34F, 555.010.0177`, metadata: JSON.stringify({ loadId: "80000011", valuesRedacted: true, note: "x@example.invalid" }) });
+	check("notice stored after the fix: served as stored, redacted again (metadata too)",
+		[fresh.body, JSON.parse(fresh.metadata).note], [`Details: call ${W} → Reefer 34F, ${W}`, ""]);
+	const other = bc.redactDispatchNotice({ type: "new-load", title: "New Load 80000016", body: "Dallas, TX → Tulsa, OK Tel 555-010-0157", metadata: "not json 555-010-0142" });
+	check("other notices: title, body and metadata redacted", [other.title, other.body, other.metadata],
+		["New Load 80000016", `Dallas, TX → Tulsa, OK Tel ${W}`, `not json ${W}`]);
+}
+
 // -------------------------------------------------------------- rate cons
 const EXTRACTED = {
 	"Load Number": "80000014", "Broker Name": "Pat Agent", "Broker Phone": "(555) 010-0142",

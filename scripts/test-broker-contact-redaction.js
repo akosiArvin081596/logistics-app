@@ -4,16 +4,20 @@
 // and signed-out callers get no broker emails or phones in any API response,
 // whatever column holds them; a Super Admin's responses are unchanged).
 //
-// PENDING: this runner lives in scripts/pending/ so `npm run check` (which runs
-// scripts/test-*.js only) does not run it while the fix is planned. It FAILS on
-// main for every response listed in the plan as leaking, and passes for Super
-// Admin. The fix moves it to scripts/ beside test-broker-column-redaction.js.
+// Written before the fix (in scripts/pending/, outside `npm run check`), it
+// failed on main for every response listed in the plan as leaking; the fix moved
+// it here beside test-broker-column-redaction.js. The value rules themselves
+// (patterns, the row's own contact, the writer rules) are unit-tested by
+// scripts/test-broker-contact-lib.js; this file runs the routes that use them.
 //
-// WHAT main DOES. sanitizeBrokerColumns() blanks the columns whose HEADER reads
+// WHAT main DID. sanitizeBrokerColumns() blanked the columns whose HEADER reads
 // as broker contact (BROKER_WITHHELD_RE: "Broker Contact Name", "Phone Number",
-// "Email"). A broker email or phone stored under any other header is served as
+// "Email"). A broker email or phone stored under any other header was served as
 // stored: Job Tracking's "Contract ID" holds the broker's email on a block of
 // 2025 rows, and "Details" / "Pickup Info" are free text that can hold either.
+// Now sanitizeBrokerColumns() also redacts every value (lib/broker-contact.js,
+// redactLoadRows()), behind the kill switch BROKER_CONTACT_VALUE_REDACTION_ENABLED
+// (default on).
 //
 // WHAT EACH SECTION RUNS. Every route is lifted whole out of server.js and run
 // with only its I/O stubbed (sheet reads, SQLite, Gemini, sockets). Any other
@@ -35,18 +39,25 @@
 //       (its answer), GET /api/locations/latest, POST /api/loads/ratecon/extract,
 //       GET /api/dispatch-notifications, and the re-issue notice as SENT to the
 //       dispatch room (stored row and socket payload, sendReissueAlert())
+//       and POST /api/loads/from-ratecon: the broker contact of the load it
+//       creates comes from the extract the server holds, never from the client
 //   §2  Writers: a non-Super-Admin save that sends a cell back as now served
 //       (blank, or with "[contact withheld]" in place of the contact) keeps the
-//       stored value; a Super Admin's save of a legacy row is not refused
+//       stored value; a Super Admin's save of a legacy row is not refused; a
+//       non-Super-Admin save that changes a contact cell is refused (409
+//       CONTACT_CELL_READ_ONLY); an email or phone typed into Contract ID is
+//       refused for every role (400 CONTACT_NOT_ALLOWED)
 //   §3  Driver: GET /api/driver/:driverName
 //   §4  Investor: GET /api/investor/load-report (no free-text column today; a guard)
 //   §5  Signed out: GET /api/public/track/:loadId (a fixed field list; a guard)
 //   Super Admin: every route above, every planted value of the rows it serves
 //   "Still served": what is not contact data reaches every role (over-redaction)
 //
-// ON main (c998301): 39 passed, 15 failed. The 15 are 13 leak checks (§1, §3)
-// and the 2 writer checks with no baseline to fall back on (§2). §4, §5, every Super Admin check and every "still served" check
-// pass on main and must keep passing.
+// ON main before the fix (503367d): the 13 leak checks (§1, §3), the 2 writer
+// checks with no baseline to fall back on (§2), and the checks added with the
+// fix for the create (§1), CONTACT_CELL_READ_ONLY and CONTACT_NOT_ALLOWED (§2)
+// failed. §4, §5, every Super Admin check and every "still served" check passed
+// on main and must keep passing.
 //
 // DECISIONS THESE CHECKS ASSUME (the plan's recommendations; change the check,
 // not the fixture, if the user picks otherwise):
@@ -58,19 +69,23 @@
 //   - contact inside text becomes "[contact withheld]", a cell that is only
 //     contact becomes blank (Q2);
 //   - a cell that holds contact data is read-only for a non-Super-Admin: a save
-//     that sends it back as served keeps the stored value (§2);
+//     that sends it back as served keeps the stored value, and one that changes
+//     it is refused, 409 CONTACT_CELL_READ_ONLY (§2);
 //   - the rate-con extract answers a non-Super-Admin with every field redacted
 //     (not a field list), the broker's name included; the server keeps the
-//     original for the create that follows.
+//     original for the create that follows, and the create ignores the broker
+//     fields a non-Super-Admin sends;
+//   - an email or phone typed into Contract ID is refused, 400
+//     CONTACT_NOT_ALLOWED, judged only on a cell whose value changed (§2).
 //
-//   node scripts/pending/test-broker-contact-redaction.js     # exits 1 on any failure
+//   node scripts/test-broker-contact-redaction.js     # exits 1 on any failure
 
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = path.join(__dirname, "..", "..");
+const ROOT = path.join(__dirname, "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
 
@@ -167,12 +182,14 @@ function makeScope(stubs) {
 	return proxy;
 }
 // Lifts the route registered by `head`, runs its registration in a scope built
-// from `stubs`, and returns a runner: (req) => { code, body, headers }.
+// from `stubs`, and returns a runner: (req) => { code, body, headers }. `require`
+// loads the shipped lib/ modules (and node's own) unless a section stubs it, so a
+// top-level `const x = require("./lib/...")` the route reads resolves as shipped.
 function lift(head, stubs) {
 	const src = extractRoute(head);
 	let handler = null;
 	const register = (...args) => { handler = args[args.length - 1]; };
-	const scope = makeScope({ app: { get: register, put: register, post: register }, ...stubs });
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, ...stubs });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {
@@ -192,7 +209,7 @@ function lift(head, stubs) {
 // A top-level function of server.js, compiled in a scope built from `stubs`.
 function liftFunction(name, stubs) {
 	if (!topLevelFunction(name)) throw new Error(`no top-level function ${name}() in server.js`);
-	return makeScope(stubs)[name];
+	return makeScope({ require: realRequire, ...stubs })[name];
 }
 const session = (role, extra = {}) => ({ user: { id: role === "Super Admin" ? 1 : 2, role, username: role === "Super Admin" ? "super_admin" : "u2", ...extra } });
 
@@ -475,6 +492,118 @@ section("§1 POST /api/loads/ratecon/extract", async () => {
 			extracted["Pickup Notes/Instructions"], extracted["Delivery Notes/Instructions"]]), []);
 });
 
+// POST /api/loads/from-ratecon after the extract, with the fields as the review
+// modal sends them back: the redacted copy, plus broker fields the client typed.
+// The load it creates carries the rate con's own broker contact, taken from the
+// extract the server holds for that PDF, never what a non-Super-Admin sent;
+// with no extract held, the broker cells are left blank and a warning says so.
+// Every sheet is a fake; the PDF archive's file writes are stubbed.
+function fakeTabs(tabs) {
+	const tabOf = (range) => String(range || "").split("!")[0].replace(/^'|'$/g, "");
+	const colIndex = (letters) => [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
+	const values = {
+		get: async ({ range }) => ({ data: { values: (tabs[tabOf(range)] || []).map((r) => r.slice()) } }),
+		append: async ({ range, requestBody }) => {
+			const rows = tabs[tabOf(range)];
+			rows.push(requestBody.values[0].slice());
+			return { data: { updates: { updatedRange: `${tabOf(range)}!A${rows.length}:Z${rows.length}` } } };
+		},
+		update: async ({ range, requestBody }) => {
+			const m = /!A(\d+)$/.exec(range);
+			tabs[tabOf(range)][Number(m[1]) - 1] = requestBody.values[0].slice();
+			return { data: {} };
+		},
+		batchUpdate: async ({ requestBody }) => {
+			for (const d of requestBody.data || []) {
+				const m = /!([A-Z]+)(\d+)$/.exec(d.range);
+				const r = tabs[tabOf(d.range)][Number(m[2]) - 1];
+				r[colIndex(m[1])] = d.values[0][0];
+			}
+			return { data: {} };
+		},
+	};
+	return { getSheets: async () => ({ spreadsheets: { values } }) };
+}
+section("§1 POST /api/loads/from-ratecon (the broker contact it writes)", async () => {
+	const errors = [];
+	const extracted = {
+		"Load Number": "80000016", "Broker Name": "Pat Agent", "Broker Phone": "(555) 010-0142",
+		"Broker Email": "agent.one@example.invalid", "Documents Email": "billing.desk@example.invalid", Rate: "$1,800.00",
+		"Pickup Address": "100 Main St, Dallas, TX 75201", "Drop-off Address": "200 Oak Ave, Tulsa, OK 74103",
+		"Pickup Company Information": "Example DC", "P/U Reference Number": "41000021",
+		"Pickup Appointment Time": "01/20/2030 08:00", "Delivery Appointment Time": "01/21/2030 14:00",
+		"Pickup Notes/Instructions": "Call 1-555-010-0151 one hour out", Details: "Dry van",
+	};
+	// Both routes load the shipped lib/ modules through the one `require`, so they
+	// share the server's one rate-con stash as the server's routes do.
+	const common = { requireRole: () => null, rateConLimiter: null, console: quietConsole(errors) };
+	let geminiAnswer = extracted;
+	const extract = lift('app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+		...common, GEMINI_API_KEY: "test-key", runRateConGemini: async () => ({ ...geminiAnswer }), rateConNormalizeOptions: () => ({}),
+		rateconNormalize: require(path.join(ROOT, "lib", "ratecon-normalize")), rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
+	});
+	const create = (tabs) => lift('app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+		...common, getSheets: fakeTabs(tabs).getSheets, SPREADSHEET_ID: "sheet-under-test",
+		rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
+		getDeletedLoadIds: () => new Set(), GOOGLE_MAPS_API_KEY: "", geocodeAddress: async () => null, appDay: () => "2030-01-19",
+		validateOwnerIdCell: () => null, jtCacheInvalidate: () => {}, notifyChange: () => {}, logAudit: () => {},
+		DATA_DIR: path.join(ROOT, "no-such-dir"), fs: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
+		db: emptyDb(), RATECON_DRIVE_FOLDER_ID: "",
+		insertDispatchNotification: { run: () => ({ lastInsertRowid: 1 }) }, io: { to: () => ({ emit() {} }) },
+	});
+	const newTabs = () => ({
+		"Job Tracking": [HEADERS.slice()],
+		"Payments Table": [[" Job ID", "Contract ID", "Payment Amount"]],
+		"Job Details": [["Load ID", "Rate Per Mile", "Distance", "Details", "Payment"]],
+	});
+	const pdfBase64 = Buffer.from("%PDF-1.4 the rate con under test").toString("base64");
+	const served = await extract({ body: { pdfBase64 }, session: session("Dispatcher") });
+	// The modal sends every field back as shown (null as ""), and the broker
+	// fields a client can type in whatever the screen shows.
+	const asShown = Object.fromEntries(Object.entries((served.body || {}).fields || {}).map(([k, v]) => [k, v == null ? "" : v]));
+	const typed = { ...asShown, "Broker Name": "Typed Name", "Broker Phone": "555-010-0188", "Broker Email": "typed@example.invalid" };
+	const cell = (tabs, h) => (tabs["Job Tracking"][1] || [])[HEADERS.indexOf(h)];
+	const brokerCells = (tabs) => ["Broker Contact Name", "Phone Number", "Email"].map((h) => cell(tabs, h));
+
+	const tabs = newTabs();
+	const made = await create(tabs)({ body: { fields: typed, pdfBase64, fileName: "rc.pdf" }, session: session("Dispatcher") });
+	check("rate-con create, Dispatcher: 200 with no error logged", [served.code, made.code, errors], [200, 200, []]);
+	check("rate-con create, Dispatcher: the load's broker cells hold the rate con's own contact, not what the client sent",
+		[brokerCells(tabs), (tabs["Payments Table"][1] || [])[1]], [["Pat Agent", "(555) 010-0142", "agent.one@example.invalid"], "Pat Agent"]);
+	check("rate-con create, Dispatcher: no broker email or phone anywhere in the answer", contactIn(made.body), []);
+
+	const missTabs = newTabs();
+	const missed = await create(missTabs)({
+		body: { fields: { ...typed, "Load Number": "80000017" }, pdfBase64: Buffer.from("%PDF-1.4 never extracted").toString("base64") },
+		session: session("Dispatcher"),
+	});
+	check("rate-con create, Dispatcher, no extract held for the PDF: 200, the broker cells blank, a warning says so",
+		[missed.code, brokerCells(missTabs), ((missed.body || {}).warnings || []).some((w) => /broker/i.test(w))],
+		[200, ["", "", ""], true]);
+
+	// A broker phone the sheet would store as a formula ("+52 ..."): the person
+	// cannot see it to fix it, so the load is created with that cell blank and a
+	// warning, instead of being refused over a field they cannot see.
+	geminiAnswer = { ...extracted, "Load Number": "80000019", "Broker Phone": "+52 55 1234 5678" };
+	const intlPdf = Buffer.from("%PDF-1.4 an international broker").toString("base64");
+	const intlServed = await extract({ body: { pdfBase64: intlPdf }, session: session("Dispatcher") });
+	const intlTabs = newTabs();
+	const intl = await create(intlTabs)({
+		body: { fields: Object.fromEntries(Object.entries((intlServed.body || {}).fields || {}).map(([k, v]) => [k, v == null ? "" : v])), pdfBase64: intlPdf },
+		session: session("Dispatcher"),
+	});
+	check("rate-con create, Dispatcher, a held broker phone the sheet would read as a formula: 200, that cell blank, the rest kept, a warning",
+		[intl.code, brokerCells(intlTabs), ((intl.body || {}).warnings || []).some((w) => /broker contact detail/i.test(w))],
+		[200, ["Pat Agent", "", "agent.one@example.invalid"], true]);
+	geminiAnswer = extracted;
+
+	const adminTabs = newTabs();
+	const adminTyped = { ...extracted, "Load Number": "80000018", "Broker Email": "typed@example.invalid" };
+	const admin = await create(adminTabs)({ body: { fields: adminTyped, pdfBase64 }, session: session("Super Admin") });
+	check("rate-con create, Super Admin: the fields are written as sent, as before",
+		[admin.code, brokerCells(adminTabs)], [200, ["Pat Agent", "(555) 010-0142", "typed@example.invalid"]]);
+});
+
 const NOTICE_TITLE = "Load 80000011: re-issued rate con changed fields";
 section("§1 GET /api/dispatch-notifications", async () => {
 	const errors = [];
@@ -594,6 +723,67 @@ section("§2 PUT /api/data/:rowIndex: the served row sent back", async () => {
 	const r = await run({ params: { rowIndex: "2" }, query: { sheet: "Job Tracking" }, body: { values: cells({ ...LEGACY, "Trailer Number": "TR-9" }) }, session: session("Super Admin") });
 	check("row save, Super Admin, a legacy row with an unrelated edit: 200, the edit written, the stored cells unchanged",
 		[r.code, errors, rows[1][HEADERS.indexOf("Trailer Number")], kept(rows)], [200, [], "TR-9", stored]);
+});
+
+// A cell holding contact data is read-only for a non-Super-Admin: a save that
+// sends anything but the stored or the served copy is refused, so an edit is
+// never dropped without a word, and nothing is written.
+section("§2 a non-Super-Admin save that changes a contact cell: 409 CONTACT_CELL_READ_ONLY", async () => {
+	const errors = [];
+	{
+		const rows = SHEET_ROWS();
+		const { run, sheet } = liftDataPut(rows, errors);
+		const values = cells({ ...LEGACY_SERVED, Details: "Rate agreed with the broker. 42,000 lb", "Trailer Number": "TR-9" });
+		const r = await run({ params: { rowIndex: "2" }, query: { sheet: "Job Tracking" }, body: { values, baseline: cells(LEGACY_SERVED) }, session: session("Dispatcher") });
+		check("row save, Dispatcher, Details changed: 409 CONTACT_CELL_READ_ONLY naming the column, nothing written",
+			[r.code, (r.body || {}).code, (r.body || {}).field, sheet.writes.length, rows[1][HEADERS.indexOf("Details")]],
+			[409, "CONTACT_CELL_READ_ONLY", "Details", 0, LEGACY.Details]);
+	}
+	{
+		const rows = SHEET_ROWS();
+		const { run, sheet } = liftLoadPut(rows, errors);
+		const r = await run({ params: { loadId: "80000011" }, body: { "Contract ID": "29284990" }, session: session("Dispatcher") });
+		check("load save, Dispatcher, Contract ID (holding a broker email) changed: 409 CONTACT_CELL_READ_ONLY, nothing written",
+			[r.code, (r.body || {}).code, (r.body || {}).field, sheet.writes.length, rows[1][0]],
+			[409, "CONTACT_CELL_READ_ONLY", "Contract ID", 0, LEGACY["Contract ID"]]);
+	}
+	{
+		const rows = SHEET_ROWS();
+		const { run } = liftLoadPut(rows, errors);
+		const r = await run({ params: { loadId: "80000011" }, body: { Details: "Rate agreed with the broker. 42,000 lb" }, session: session("Super Admin") });
+		check("load save, Super Admin, the same Details edit: 200 and written", [r.code, rows[1][HEADERS.indexOf("Details")]], [200, "Rate agreed with the broker. 42,000 lb"]);
+	}
+	check("contact cell saves: no error logged", errors, []);
+});
+
+// An email or a formatted phone typed into Contract ID is refused for every
+// role, judged only on a cell whose value changed (a stored legacy email resent
+// unchanged is pinned in the section above).
+section("§2 an email or phone typed into Contract ID: 400 CONTACT_NOT_ALLOWED", async () => {
+	const errors = [];
+	{
+		const rows = SHEET_ROWS();
+		const { run, sheet } = liftLoadPut(rows, errors);
+		const r = await run({ params: { loadId: "80000013" }, body: { "Contract ID": "new.agent@example.invalid" }, session: session("Super Admin") });
+		check("load save, Super Admin, an email typed into Contract ID: 400 CONTACT_NOT_ALLOWED naming the column, nothing written",
+			[r.code, (r.body || {}).code, (r.body || {}).field, sheet.writes.length, rows[3][0]],
+			[400, "CONTACT_NOT_ALLOWED", "Contract ID", 0, UNASSIGNED["Contract ID"]]);
+	}
+	{
+		const rows = SHEET_ROWS();
+		const { run, sheet } = liftDataPut(rows, errors);
+		const values = cells({ ...UNASSIGNED, "Contract ID": "(555) 010-0188" });
+		const r = await run({ params: { rowIndex: "4" }, query: { sheet: "Job Tracking" }, body: { values, baseline: cells(UNASSIGNED) }, session: session("Dispatcher") });
+		check("row save, Dispatcher, a phone typed into Contract ID: 400 CONTACT_NOT_ALLOWED, nothing written",
+			[r.code, (r.body || {}).code, (r.body || {}).field, sheet.writes.length], [400, "CONTACT_NOT_ALLOWED", "Contract ID", 0]);
+	}
+	{
+		const rows = SHEET_ROWS();
+		const { run } = liftLoadPut(rows, errors);
+		const r = await run({ params: { loadId: "80000013" }, body: { "Contract ID": "29284991" }, session: session("Dispatcher") });
+		check("load save, Dispatcher, a reference number in Contract ID: 200 and written", [r.code, rows[3][0]], [200, "29284991"]);
+	}
+	check("Contract ID saves: no error logged", errors, []);
 });
 
 // ====================================================================== §3 Driver
