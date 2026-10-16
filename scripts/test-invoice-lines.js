@@ -674,7 +674,7 @@ test("recordDraftLines: lines_json and gross_total on the draft row, each line s
 	add(db, "41000017");
 	const id = db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, total) VALUES ('41000017', '10162026-1', '$1,750.00')").run().lastInsertRowid;
 	const summary = resolve(db, "41000017").summary;
-	eq("marked", L().recordDraftLines(db, { draftId: id, summary, invoiceId: "10162026-1" }), { marked: 1 });
+	eq("marked", L().recordDraftLines(db, { draftId: id, summary, invoiceId: "10162026-1" }), { marked: 1, voidedIds: [] });
 	const row = db.prepare("SELECT total, gross_total, lines_json FROM load_invoice_drafts WHERE id = ?").get(id);
 	eq("total stays the balance due, gross_total is the line haul", [row.total, row.gross_total], ["$1,750.00", "$2,400.00"]);
 	eq("lines_json", JSON.parse(row.lines_json), {
@@ -683,21 +683,47 @@ test("recordDraftLines: lines_json and gross_total on the draft row, each line s
 	});
 	eq("the line carries the first invoice that printed it", L().listLines(db, "41000017")[0].invoiceId, "10162026-1");
 	const id2 = db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, total) VALUES ('41000017', '10162026-2', '$1,750.00')").run().lastInsertRowid;
-	eq("a re-print stamps nothing new", L().recordDraftLines(db, { draftId: id2, summary, invoiceId: "10162026-2" }), { marked: 0 });
+	eq("a re-print stamps nothing new", L().recordDraftLines(db, { draftId: id2, summary, invoiceId: "10162026-2" }), { marked: 0, voidedIds: [] });
 	eq("…the first invoice # stays", L().listLines(db, "41000017")[0].invoiceId, "10162026-1");
 });
-test("the draft's audit text names the rule", ({ eq }) => {
+test("a line voided while the draft was being made is not stamped, and is named", ({ eq }) => {
+	const db = schemaDb();
+	add(db, "41000017");
+	add(db, "41000017", { amountCents: 10000, label: "Cash advance" });
+	const summary = resolve(db, "41000017").summary;
+	// The approve resolved both lines; one is voided before its record is written.
+	L().voidLine(db, { loadId: "41000017", lineId: 2, reason: "Entered twice", actor: "super_admin" }, { audit: () => {} });
+	const id = db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, total) VALUES ('41000017', '10162026-1', '$1,650.00')").run().lastInsertRowid;
+	eq("one stamped, the voided one named", L().recordDraftLines(db, { draftId: id, summary, invoiceId: "10162026-1" }), { marked: 1, voidedIds: [2] });
+	eq("the voided line carries no invoice #", L().listLines(db, "41000017").map((l) => [l.id, l.invoiceId, l.voided]), [[1, "10162026-1", false], [2, "", true]]);
+});
+test("the draft's audit text: the figures first, then the lines, then an edited footnote", ({ eq }) => {
 	const { auditDraftDetail } = L();
 	eq("default footnote", auditDraftDetail(SUMMARY),
-		"lines: line haul $2,400.00, less advances $650.00 (#1 Fuel advance $650.00) → balance due $1,750.00 (INVOICE ONLY — Job Tracking Payment unchanged)");
+		"lines: line haul $2,400.00, less advances $650.00, balance due $1,750.00 (INVOICE ONLY — Job Tracking Payment unchanged); items: #1 Fuel advance $650.00");
 	eq("edited footnote", auditDraftDetail({ ...SUMMARY, footnote: "*Paid by EFS" }),
-		"lines: line haul $2,400.00, less advances $650.00 (#1 Fuel advance $650.00) → balance due $1,750.00 (INVOICE ONLY — Job Tracking Payment unchanged); footnote: \"*Paid by EFS\"");
+		"lines: line haul $2,400.00, less advances $650.00, balance due $1,750.00 (INVOICE ONLY — Job Tracking Payment unchanged); items: #1 Fuel advance $650.00; footnote: \"*Paid by EFS\"");
 });
-test("the n8n fallback's fields: the reviewed lines and the balance, as printed", ({ eq }) => {
-	eq("fields", L().n8nFields(SUMMARY), {
-		lines: [{ label: "Fuel advance", amount: "-$650.00", receivedOn: "2026-10-12", reference: "EFS-55501" }],
-		lineHaul: "$2,400.00", balanceDue: "$1,750.00", footnote: "*$650 for fuel advance",
+test("twenty long lines: the 1000-character audit cap never cuts the balance due", ({ ok }) => {
+	const items = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, kind: "advance", label: `Fuel advance ${"x".repeat(60)} ${i + 1}`, amountCents: 1000, receivedOn: "", reference: "" }));
+	const detail = L().auditDraftDetail({ ...SUMMARY, items, advancesCents: 20000, balanceCents: 220000, footnote: "f".repeat(500), footnoteDefault: "" });
+	// The route prefixes "<invoice #> load <id> — " and caps the whole line at 1000.
+	const capped = `10162026-1 load 41000017 — ${detail}`.slice(0, 1000);
+	ok("the balance due survives the cap", capped.includes("balance due $2,200.00"));
+	ok("…ahead of the first line", detail.indexOf("balance due") < detail.indexOf("#1 "));
+});
+test("the n8n fallback's fields: the reviewed lines and the balance; nothing a sheet could read as a formula", ({ eq, ok }) => {
+	const fields = L().n8nFields(SUMMARY);
+	eq("fields", fields, {
+		lines: [{ kind: "advance", label: "Fuel advance", amount: "$650.00", receivedOn: "2026-10-12", reference: "EFS-55501" }],
+		lineHaul: "$2,400.00", balanceDue: "$1,750.00",
 	});
+	// The workflow never read a footnote (the PDF carries it), so none is sent;
+	// every value sent starts with neither = + - nor @.
+	const values = [];
+	const walk = (v) => { if (v && typeof v === "object") Object.values(v).forEach(walk); else values.push(String(v)); };
+	walk(fields);
+	ok("no value starts like a formula", values.every((v) => !/^[=+\-@]/.test(v)));
 });
 test("summaryWire: the figures the editor shows, formatted on the server", ({ eq }) => {
 	eq("wire", L().summaryWire(SUMMARY), {

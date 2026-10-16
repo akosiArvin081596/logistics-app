@@ -162,9 +162,11 @@ const N8N = Object.freeze({ N8N_INVOICE_WEBHOOK_URL: "https://n8n.example.invali
 const ON = Object.freeze({ BROKER_INVOICE_LINES_ENABLED: "true" });
 const BISON_REFS = Object.freeze({ orderNumber: "7000002", poNumber: "2700011" });
 const ADVANCE = Object.freeze({ amount: "650", receivedOn: "2026-10-12", reference: "EFS-55501" });
+const BALANCE_NOT_APPLIED_WARNING =
+	"The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.";
 
 // The routes over a fresh in-memory database.
-function harness(env = {}, { closedMonths = [] } = {}) {
+function harness(env = {}, { closedMonths = [], duringDraft = null } = {}) {
 	const Lf = lifted();
 	const db = new Database(":memory:");
 	db.exec(Lf.createSql);
@@ -212,7 +214,9 @@ function harness(env = {}, { closedMonths = [] } = {}) {
 		safeAttachmentName: S.safeAttachmentName,
 		logAudit: (req, action, entity, id, detail) => seen.audits.push({ action, entity, id, detail }),
 		sanitizeEvidenceText: S.sanitizeEvidenceText,
-		appendGmailDraft: async (msg) => { seen.drafts.push(msg); },
+		// `duringDraft(db)` runs while the Gmail draft is being written: what a
+		// second editor could do between the approve's checks and its record.
+		appendGmailDraft: async (msg) => { if (duringDraft) duringDraft(db); seen.drafts.push(msg); },
 		sentIfRendererBusy: () => false,
 		REPLICA: null,
 		process: processStub,
@@ -427,7 +431,7 @@ test("bills the balance due, keeps the line haul, records and stamps the lines, 
 	ok("edited_fields names the lines", String(row.edited_fields).split(",").includes("lines"));
 	eq("the line carries this invoice #", h.lines()[0].invoice_id, MINTED);
 	const edit = h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {};
-	ok("the edit audit names the rule", String(edit.detail).includes("lines: line haul $3,000.00, less advances $650.00 (#1 Fuel advance $650.00) → balance due $2,350.00 (INVOICE ONLY — Job Tracking Payment unchanged)"));
+	ok("the edit audit names the rule, the figures first", String(edit.detail).includes("lines: line haul $3,000.00, less advances $650.00, balance due $2,350.00 (INVOICE ONLY — Job Tracking Payment unchanged); items: #1 Fuel advance $650.00"));
 	eq("invoice_draft_created is unchanged", (h.seen.audits.find((a) => a.action === "invoice_draft_created") || {}).detail, `${MINTED} → ${DEFAULT_TO} (imap)`);
 	ok("the Gmail draft's message carries the balance", String((h.seen.drafts[0] || {}).html).includes("Balance due $2,350.00 after the $650.00 fuel advance."));
 	ok("the PDF prints the balance", lastHtml(h).includes('<span class="lbl">Balance due*</span><span class="amt">$2,350.00</span>'));
@@ -506,15 +510,55 @@ test("a bad selection is 400 before anything is read", async ({ eq }) => {
 	const r = await h.approve("41000018", { lineIds: ["1"] });
 	eq("400", [r.status, (r.body || {}).code, h.seen.sheetReads], [400, "INVOICE_LINE_IDS_INVALID", 0]);
 });
-test("the n8n fallback is sent the reviewed lines and the balance", async ({ eq }) => {
+test("the n8n fallback is sent the reviewed lines and the balance (no footnote: the PDF carries it)", async ({ eq, ok }) => {
 	const h = harness({ ...N8N, ...ON });
 	await h.addLine("41000018", ADVANCE);
 	const r = await h.approve("41000018", { lineIds: [1] });
 	eq(withErrors("via n8n", r), (r.body || {}).via, "n8n");
 	const p = (h.seen.posts[0] || {}).payload || {};
-	eq("lines, line haul, balance, footnote", [p.lines, p.lineHaul, p.balanceDue, p.footnote],
-		[[{ label: "Fuel advance", amount: "-$650.00", receivedOn: "2026-10-12", reference: "EFS-55501" }], "$3,000.00", "$2,350.00", "*$650 for fuel advance"]);
+	eq("lines, line haul, balance", [p.lines, p.lineHaul, p.balanceDue],
+		[[{ kind: "advance", label: "Fuel advance", amount: "$650.00", receivedOn: "2026-10-12", reference: "EFS-55501" }], "$3,000.00", "$2,350.00"]);
+	ok("no footnote key", !Object.prototype.hasOwnProperty.call(p, "footnote"));
 	eq("the row", [h.draft().via, h.draft().total], ["n8n", "$2,350.00"]);
+});
+test("the n8n fallback writes its own email: the answer warns the balance sentence is missing, the audit line says so", async ({ eq, ok }) => {
+	const h = harness({ ...N8N, ...ON });
+	await h.addLine("41000018", ADVANCE);
+	const r = await h.approve("41000018", { lineIds: [1] });
+	eq(withErrors("via n8n", r), (r.body || {}).via, "n8n");
+	eq("the warning", (r.body || {}).warnings, [BALANCE_NOT_APPLIED_WARNING]);
+	ok("the audit note", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
+		.includes("items: #1 Fuel advance $650.00; email balance sentence NOT APPLIED (the fallback service used its own message)"));
+	const plain = harness(N8N);
+	const pr = await plain.approve("41000018");
+	eq("no line, no such warning", (pr.body || {}).warnings, []);
+	const imap = harness({ ...GMAIL, ...ON });
+	await imap.addLine("41000018", ADVANCE);
+	eq("the IMAP path writes the sentence itself: no warning", ((await imap.approve("41000018", { lineIds: [1] })).body || {}).warnings, []);
+});
+test("a line voided while the Gmail draft is being made: printed, but not stamped; the answer and the audit line say so", async ({ eq, ok }) => {
+	const h = harness({ ...GMAIL, ...ON }, {
+		duringDraft: (db) => brokerInvoice.invoiceLines.voidLine(db, { loadId: "41000018", lineId: 1, reason: "Entered twice", actor: "super_admin" }, { audit: () => {} }),
+	});
+	await h.addLine("41000018", ADVANCE);
+	const r = await h.approve("41000018", { lineIds: [1] });
+	eq(withErrors("200", r), r.status, 200);
+	eq("the warning", (r.body || {}).warnings, ["Advance line #1 was voided while this draft was made; check the Gmail draft."]);
+	eq("the voided line carries no invoice #", h.lines()[0].invoice_id, "");
+	ok("the audit note", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
+		.includes("items: #1 Fuel advance $650.00; line #1 was voided while this draft was made; check the Gmail draft"));
+	eq("the draft row still records what was printed", [h.draft().total, JSON.parse(h.draft().lines_json).lines.map((l) => l.id)], ["$2,350.00", [1]]);
+});
+test("a line record that fails leaves no draft row without its audit rows", async ({ eq, ok }) => {
+	const h = harness({ ...GMAIL, ...ON });
+	await h.addLine("41000018", ADVANCE);
+	const auditsBefore = h.seen.audits.length;
+	h.db.exec("CREATE TEMP TRIGGER test_fail_line_record BEFORE UPDATE ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END");
+	const r = await h.approve("41000018", { lineIds: [1] });
+	eq(withErrors("the Gmail draft exists, so 200", r), [r.status, h.seen.drafts.length], [200, 1]);
+	eq("no draft row and no draft audit row: one write, then the audit", [h.drafts(), h.seen.audits.slice(auditsBefore).map((a) => a.action)], [0, []]);
+	eq("…and no line stamped", h.lines()[0].invoice_id, "");
+	ok("the failure is logged", h.seen.errors.some((e) => /draft record persist failed/.test(e)));
 });
 
 // ════════════════════════════════════════════════════════════════════════════
