@@ -27,10 +27,9 @@
  *
  * Issued invoices are never regenerated, and no render_data is rewritten.
  *
- * Every case fails on the base (73be100). A4 checks server.js, which this
- * change edits through a patch main applies (three call sites): it fails until
- * that patch is in. What the boxes look like in a real PDF is checked on the
- * replica; this runner pins the markup and the values.
+ * Every case fails on the base (73be100); A4 checks the three server.js call
+ * sites. What the boxes look like in a real PDF is checked on the replica; this
+ * runner pins the markup and the values.
  *
  * Made-up data only. Pure: no server, no app.db, no network, no browser.
  * Run: node scripts/test-invoice-pdf-layout.js    # exits 1 on failure
@@ -168,7 +167,7 @@ test("A3 A date it can't read prints no weekday rather than a wrong one, and nei
 	}
 });
 
-test("A4 server.js builds every directory address with providerAddressLine(): the weekly generate route, the manual invoice's payee list and the Personal correction draft; no hand-rolled address/city/state/zip join is left. Base: three joins (fails until main applies layout-server-patch.diff)", ({ eq, ok }) => {
+test("A4 server.js builds every directory address with providerAddressLine(): the weekly generate route, the manual invoice's payee list and the Personal correction draft; no hand-rolled address/city/state/zip join is left. Base: three joins", ({ eq, ok }) => {
 	const src = read("server.js");
 	const joins = src.match(/\[\s*\w+\.address,\s*\w+\.city,\s*\w+\.state,\s*\w+\.zip\s*\]\.filter\(Boolean\)\.join\(", "\)/g) || [];
 	eq("address/city/state/zip joins left in server.js", joins.length, 0);
@@ -209,30 +208,71 @@ test("B2 invoiceDateFromStamp(): a SQLite UTC stamp, an ISO Z stamp, a custom zo
 	], ["Oct 15, 2026", "Oct 15, 2026", "Oct 15, 2026", "Oct 16, 2026", "Oct 16, 2026", "", "", ""]);
 });
 
-test("C1 providerAddressLine(): a street field already holding the whole address prints once, without the country; a split address prints \"street, city, ST zip\"; a street named after the city keeps the city; partial streets get only what they lack. Base: no lib/invoice-header.js", ({ eq }) => {
+test("B3 invoiceDateFromStamp() prints nothing for a stamp that names no real moment, instead of rolling it into another day: month 13, Feb 30, hour 24, minute 60, second 60. Before the fix: Jan 1 2027, Mar 2, Oct 16, Oct 16, Oct 16", ({ eq }) => {
+	const { invoiceDateFromStamp } = header();
+	eq("out-of-range stamps", ["2026-13-01 12:00:00", "2026-02-30 12:00:00", "2026-10-16 24:00:00", "2026-10-16 12:60:00", "2026-10-16 12:00:60", "2026-00-10 12:00:00"].map((s) => invoiceDateFromStamp(s)), ["", "", "", "", "", ""]);
+	eq("the last real second of a day still dates it", invoiceDateFromStamp("2026-10-16 23:59:59", "UTC"), "Oct 16, 2026");
+});
+
+test("C1 providerAddressLine(): a street field already holding the whole address prints once, without the country; a street holding none of the city, state or zip prints exactly as before (street, city, state, zip); a part is never dropped (a repeat is better than a loss): a state abbreviation inside the street (Ct, NE, Co Rd) is not the state, nor is the city before the zip, nor a one-part street ending with the zip but no state. Base: no lib/invoice-header.js", ({ eq }) => {
 	const { providerAddressLine } = header();
 	const tx = { city: "Houston", state: "TX", zip: "77002" };
 	const cases = [
+		// The street field already holds the whole address.
 		[{ address: "1200 Elm St, Houston, TX 77002, USA", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St, Houston, TX 77002, United States", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St, Houston, TX 77002, U.S.A.", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St Apt 4, Houston, TX 77002-1234, USA", ...tx }, "1200 Elm St Apt 4, Houston, TX 77002-1234"],
 		[{ address: "1200 Elm St,  houston ,  tx 77002 , usa", ...tx }, "1200 Elm St, houston, tx 77002"],
 		[{ address: "1200 Elm St, Houston, Texas 77002, USA", ...tx }, "1200 Elm St, Houston, Texas 77002"],
+		[{ address: "1200 Elm St, Houston, Texas, 77002", ...tx }, "1200 Elm St, Houston, Texas, 77002"],
+		[{ address: "1200 Elm St, Houston, TX, 77002, USA", ...tx }, "1200 Elm St, Houston, TX, 77002"],
+		[{ address: "1200 Elm St, Houston, TX 77002", city: "Houston", state: "Texas", zip: "77002" }, "1200 Elm St, Houston, TX 77002"],
+		[{ address: "1200 Elm St, Suite 100, Houston, TX 77002, USA", ...tx }, "1200 Elm St, Suite 100, Houston, TX 77002"],
+		[{ address: "45 Houston Ave, Houston, TX 77002", ...tx }, "45 Houston Ave, Houston, TX 77002"],
 		[{ address: "1200 Elm St Houston TX 77002 USA", ...tx }, "1200 Elm St Houston TX 77002"],
-		[{ address: "1200 Elm St", ...tx }, "1200 Elm St, Houston, TX 77002"],
-		[{ address: "45 Houston Ave", ...tx }, "45 Houston Ave, Houston, TX 77002"],
+		[{ address: "1 Main St, Toronto, ON M5V 3L9", city: "Toronto", state: "ON", zip: "M5V 3L9" }, "1 Main St, Toronto, ON M5V 3L9"],
+		[{ address: "1200 Elm St, Houston, TX", city: "Houston", state: "TX", zip: "" }, "1200 Elm St, Houston, TX"],
+		[{ address: "1200 Elm St, Houston, TX 77002, USA", city: "", state: "", zip: "" }, "1200 Elm St, Houston, TX 77002"],
+		// It holds some of the parts: only what it lacks is added.
 		[{ address: "1200 Elm St, Houston, TX", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St, Houston", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St, TX 77002", ...tx }, "1200 Elm St, Houston, TX 77002"],
 		[{ address: "1200 Elm St, Houston, 77002", ...tx }, "1200 Elm St, Houston, TX 77002"],
-		[{ address: "1200 Elm St, Houston, TX 77002, USA", city: "", state: "", zip: "" }, "1200 Elm St, Houston, TX 77002"],
-		[{ address: "", ...tx }, "Houston, TX 77002"],
+		[{ address: "1200 Elm St, Houston 77002", ...tx }, "1200 Elm St, Houston TX 77002"],
+		[{ address: "1200 Elm St, 77002", ...tx }, "1200 Elm St, Houston, TX 77002"],
+		[{ address: "1200 Elm St, TX", city: "", state: "TX", zip: "77002" }, "1200 Elm St, TX 77002"],
+		[{ address: "Unit 4, 12 Oak Ct, Hartford", city: "Hartford", state: "CT", zip: "06103" }, "Unit 4, 12 Oak Ct, Hartford, CT 06103"],
+		[{ address: "Bldg 2, 4500 NE 5th Ave, Omaha", city: "Omaha", state: "NE", zip: "68102" }, "Bldg 2, 4500 NE 5th Ave, Omaha, NE 68102"],
+		[{ address: "Ranch 5, Co Rd 12, Greeley", city: "Greeley", state: "CO", zip: "80631" }, "Ranch 5, Co Rd 12, Greeley, CO 80631"],
+		// Saved parts that disagree with the street are printed, never dropped.
+		[{ address: "1200 Elm St, Houston, TX 77002", city: "Houston", state: "TX", zip: "77008" }, "1200 Elm St, Houston, TX 77002, 77008"],
+		[{ address: "1200 Elm St, Katy, TX 77494", city: "Houston", state: "TX", zip: "77494" }, "1200 Elm St, Katy, Houston, TX 77494"],
+		[{ address: "1200 Elm St, Houston Heights, TX 77008", city: "Houston", state: "TX", zip: "77008" }, "1200 Elm St, Houston Heights, Houston, TX 77008"],
+		[{ address: "1 Main St, New York, NY 10001", city: "York", state: "NY", zip: "10001" }, "1 Main St, New York, York, NY 10001"],
+		[{ address: "1 Main St, York, PA 17401", city: "New York", state: "PA", zip: "17401" }, "1 Main St, York, New York, PA 17401"],
+		// A state typed on a public form is text, never a replacement pattern.
+		[{ address: "1200 Elm St, Houston, 77002", city: "Houston", state: "$'X", zip: "77002" }, "1200 Elm St, Houston, $'X 77002"],
+		[{ address: "1200 Elm St, Houston, 77002", city: "Houston", state: "$&$1", zip: "77002" }, "1200 Elm St, Houston, $&$1 77002"],
+		// It holds none of them: exactly the old join, as before this change.
+		[{ address: "1200 Elm St", ...tx }, "1200 Elm St, Houston, TX, 77002"],
+		[{ address: "1200 Elm St, Apt 4", ...tx }, "1200 Elm St, Apt 4, Houston, TX, 77002"],
+		[{ address: "1200 Elm St", city: "Houston", state: "TX", zip: "77002-1234" }, "1200 Elm St, Houston, TX, 77002-1234"],
+		[{ address: "45 Houston Ave", ...tx }, "45 Houston Ave, Houston, TX, 77002"],
+		[{ address: "1200 Elm St 77002", ...tx }, "1200 Elm St 77002, Houston, TX, 77002"],
+		[{ address: "1200 Elm St Houston TX", ...tx }, "1200 Elm St Houston TX, Houston, TX, 77002"],
+		[{ address: "USA", ...tx }, "USA, Houston, TX, 77002"],
+		[{ address: ", , ,", ...tx }, ", , ,, Houston, TX, 77002"],
+		[{ address: "", ...tx }, "Houston, TX, 77002"],
 		[{ address: "1200 Elm St", city: "", state: "TX", zip: "" }, "1200 Elm St, TX"],
 		[{ address: null, city: null, state: null, zip: null }, ""],
 		[null, ""],
 	];
 	for (const [row, want] of cases) eq(JSON.stringify(row), providerAddressLine(row), want);
+	const t0 = Date.now();
+	providerAddressLine({ address: `${"a".repeat(200000)}${" ".repeat(200000)}b${",x".repeat(50000)}`, city: "c", state: "TX", zip: "77002" });
+	const ms = Date.now() - t0;
+	eq("a 500 KB street with 50,000 parts finishes in under 1 s", ms < 1000, true);
 });
 
 test("D1 Every text value the renderer fills on the three invoices is a box that grows and wraps: no <input>, no fixed width, the .fill rule wraps anywhere and sets no width. Covers Invoice Number, Submission/Issue Date, signature Date, Address, each day's Load / BOL #, Notes. Base: fixed-width inputs", ({ eq, ok }) => {
