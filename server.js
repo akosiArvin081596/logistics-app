@@ -10013,7 +10013,7 @@ function availabilityFlagGate(req, res, next) {
 
 // One stored row as the staff screens get it, with what `viewer` (the session
 // user) may change on it: `editable` "full" | "end_early" | "none" and `limits`
-// { fromMin, toMin, toMax } (null on "none").
+// { fromMin, toMin, toMax, maxDays } (null on "none").
 function availabilityRowView(r, todayKey, viewer) {
 	const scope = { todayKey, isSuperAdmin: !!viewer && viewer.role === "Super Admin" };
 	return {

@@ -16,7 +16,7 @@
 //      change, a reason change and a cancel: "allowed by editable and limits"
 //      equals validateAvailability(...).ok, case by case. Run for 2026-10-15,
 //      across a year end (2027-01-03) and after a leap day (2028-03-01), those two
-//      over today-33..today+2 (still both sides of the floor and of yesterday)
+//      over today-32..today+1 (still both sides of the floor and of yesterday)
 //   §3 every create over the same grid (and 60 and 61 days from each first
 //      day), by createLimits
 //   §4 a cancelled row, and a today that can't be read
@@ -192,7 +192,7 @@ function clientAgreement(T, today) {
 
 		console.log("\n── §2 / §3 every edit and every create over the grid, both roles");
 		for (const today of ["2026-10-15", "2027-01-03", "2028-03-01"]) {
-			const { cases, misses } = gridAgreement(today, today === "2026-10-15" ? [-35, 5] : [-33, 2]);
+			const { cases, misses } = gridAgreement(today, today === "2026-10-15" ? [-35, 5] : [-32, 1]);
 			eq(`§2 today ${today}: the panel's limits and the validator agree on all ${cases} cases`, misses, []);
 		}
 

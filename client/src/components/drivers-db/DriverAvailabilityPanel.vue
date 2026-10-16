@@ -3,10 +3,11 @@
        The server owns every rule (dates, the 60-day cap, a Dispatcher's 30-day
        and end-early limits, overlaps). It says per row what the caller may
        change (`editable`: "full" / "end_early" / "none") and between which days
-       (`limits`), and for the add form (`createLimits`); this shows exactly
-       those buttons and days, sends only the fields that changed, and shows the
-       server's words when it refuses. Rendered only by screens whose data says
-       availability is on. -->
+       (`limits`, with the range cap `maxDays`), and for the add form
+       (`createLimits`, which also names the Dispatcher's back-dating window);
+       this shows exactly those buttons and days, sends only the fields that
+       changed, and shows the server's words when it refuses. Rendered only by
+       screens whose data says availability is on. -->
   <section ref="panelEl" class="avail" aria-label="Time off">
     <!-- One row's buttons and its inline edit form, shared by the live and the
          past lists. -->
@@ -34,7 +35,7 @@
           </label>
         </div>
         <template v-else>
-          <p class="avail-note">Started more than 30 days ago: only a Super Admin can change the other details.</p>
+          <p class="avail-note">{{ endEarlyNote(createLimits) }}</p>
           <label class="avail-label avail-label-end">
             Last day off
             <input v-model="editForm.to" type="date" class="avail-input" :min="editBounds.toMin || undefined" :max="editBounds.toMax || undefined" required data-avail-first />
@@ -132,7 +133,7 @@ import { useApi } from '../../composables/useApi'
 import { normDriver } from '../../lib/driverName'
 import {
   AVAILABILITY_KINDS, availabilityRangeText, canSaveEdit, createDateBounds, datesWithinBounds,
-  editDateBounds, editFormFor, editPatch, kindLabel, rowActions,
+  editDateBounds, editFormFor, editPatch, endEarlyNote, kindLabel, rowActions,
 } from '../../lib/availabilityText'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 

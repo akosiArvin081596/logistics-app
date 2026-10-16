@@ -11,6 +11,9 @@
 // helpers below.
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const DAY_MS = 24 * 60 * 60 * 1000
+// Whole days on the UTC calendar (Date.UTC), which no zone can shift.
+const dayIndex = (key) => Date.UTC(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, Number(key.slice(8, 10))) / DAY_MS
 
 export const AVAILABILITY_KINDS = [
   { value: 'vacation', label: 'Vacation' },
@@ -82,14 +85,16 @@ export function sortDriversForAssign(names, offUntil) {
 // ── Staff edit (R11 follow-up) ──────────────────────────────────────────────
 // The server decides what the caller may change: each row of
 // GET /api/drivers-directory/:id/availability carries `editable` ("full",
-// "end_early" or "none") and `limits` ({ fromMin, toMin, toMax }, null = no
-// limit), and the reply carries `createLimits` for the add form. Nothing here
-// knows the 30-day or the yesterday rule: the panel applies the days it is
-// sent, adds only "the last day is not before the first", and the server's
-// validator stays the authority (its answer shows in words when it refuses).
+// "end_early" or "none") and `limits` ({ fromMin, toMin, toMax, maxDays }, null
+// = no limit), and the reply carries `createLimits` ({ fromMin, toMin, maxDays,
+// dispatcherBackDays }) for the add form. Nothing here knows the 30-day, the
+// 60-day or the yesterday rule: the panel applies the days it is sent, adds
+// only "the last day is not before the first", and the server's validator
+// stays the authority (its answer shows in words when it refuses).
 
 const EDIT_FIELDS = ['kind', 'from', 'to', 'reason']
 const dayOrNull = (v) => (isAvailabilityDay(v) ? v : null)
+const countOrNull = (v) => (Number.isInteger(v) && v > 0 ? v : null)
 const laterDay = (a, b) => {
   const x = dayOrNull(a)
   const y = dayOrNull(b)
@@ -141,6 +146,7 @@ export function editDateBounds(row, form) {
     fromMin: mode === 'full' ? dayOrNull(limits.fromMin) : null,
     toMin: laterDay(from, limits.toMin),
     toMax: dayOrNull(limits.toMax),
+    maxDays: countOrNull(limits.maxDays),
   }
 }
 
@@ -151,10 +157,12 @@ export function createDateBounds(createLimits, form) {
     fromMin: dayOrNull(limits.fromMin),
     toMin: laterDay((form || {}).from, limits.toMin),
     toMax: dayOrNull(limits.toMax),
+    maxDays: countOrNull(limits.maxDays),
   }
 }
 
-// Both days are real days and inside the bounds (false without bounds).
+// Both days are real days, inside the bounds, and the range no longer than
+// maxDays, both days included (false without bounds).
 export function datesWithinBounds(form, bounds) {
   if (!bounds) return false
   const f = form || {}
@@ -162,7 +170,17 @@ export function datesWithinBounds(form, bounds) {
   if (bounds.fromMin && f.from < bounds.fromMin) return false
   if (bounds.toMin && f.to < bounds.toMin) return false
   if (bounds.toMax && f.to > bounds.toMax) return false
+  if (bounds.maxDays && dayIndex(f.to) - dayIndex(f.from) + 1 > bounds.maxDays) return false
   return true
+}
+
+// The note on an "end_early" form: why only the last day can change, naming
+// the server's back-dating window (createLimits.dispatcherBackDays).
+export function endEarlyNote(createLimits) {
+  const days = countOrNull((createLimits || {}).dispatcherBackDays)
+  return days
+    ? `Started more than ${days} days ago: only a Super Admin can change the other details.`
+    : 'Started too long ago: only a Super Admin can change the other details.'
 }
 
 // Save is offered once something changed and the days sit inside the limits.
@@ -196,9 +214,6 @@ export function editFormFor(row, today) {
 // rebuilt from those five fields, so nothing else the payload might carry
 // reaches his screen.
 
-const DAY_MS = 24 * 60 * 60 * 1000
-// Whole days on the UTC calendar (Date.UTC), which no zone can shift.
-const dayIndex = (key) => Date.UTC(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, Number(key.slice(8, 10))) / DAY_MS
 const DRIVER_STATUSES = ['current', 'upcoming']
 const BANNER_LEAD_DAYS = 7
 
