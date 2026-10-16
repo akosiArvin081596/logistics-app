@@ -432,11 +432,13 @@
   </section>
 
   <script>
-    // Generate the 7 day rows and wire up auto-calc for Total Due
+    // Generate the 7 day rows and wire up auto-calc for Total Due. Each row's
+    // Daily Rate is the rate that day was priced at, filled by the renderer
+    // ("${day} daily rate", lib/policy-field-maps.js); a day not worked leaves
+    // it blank.
     (function () {
       const days = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
       const tbody = document.getElementById('invoice-rows');
-      const DAILY_RATE = 300;
 
       days.forEach((day, i) => {
         const tr = document.createElement('tr');
@@ -448,7 +450,7 @@
             /
             <label><input type="checkbox" class="na" data-row="${i}"> N/A</label>
           </td>
-          <td class="rate-cell">$300.00</td>
+          <td class="rate-cell" aria-label="${day} daily rate"></td>
           <td class="total-cell"><span class="dollar">$</span><input type="text" class="blank row-total" data-row="${i}" aria-label="${day} total"></td>
         `;
         tbody.appendChild(tr);
@@ -493,8 +495,9 @@
       `;
       tbody.appendChild(totalRow);
 
-      // Auto-calc: when Completed ticked, fill row total with 300; untick clears it.
-      // Completed and N/A are mutually exclusive.
+      // Auto-calc: when Completed ticked, fill row total with that row's Daily
+      // Rate (when it shows one); untick clears it. Completed and N/A are
+      // mutually exclusive.
       const rows = Array.from(tbody.querySelectorAll('tr:not(.total-row):not(.adjustment-row):not(.personal-row)'));
       const grandTotalInput = document.getElementById('grand-total');
 
@@ -511,11 +514,13 @@
         const completed = row.querySelector('.completed');
         const na        = row.querySelector('.na');
         const rowTotal  = row.querySelector('.row-total');
+        const rateCell  = row.querySelector('.rate-cell');
 
         completed.addEventListener('change', () => {
           if (completed.checked) {
             na.checked = false;
-            rowTotal.value = DAILY_RATE.toFixed(2);
+            const rate = parseFloat(String(rateCell.textContent || '').replace(/[$,\s]/g, ''));
+            rowTotal.value = rate > 0 ? rate.toFixed(2) : '';
           } else {
             rowTotal.value = '';
           }

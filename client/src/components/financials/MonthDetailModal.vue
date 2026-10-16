@@ -268,7 +268,7 @@
                     <td class="num">{{ t.activeDays }}</td>
                     <td class="num">
                       ${{ t.dailyRate }}
-                      <span v-if="t.dailyRateIsDefault" class="default-badge" title="No daily rate set on this truck — using the $250 default">default</span>
+                      <span v-if="t.dailyRateIsDefault" class="default-badge" :title="t.dailyRateDefaultFor === 'driver' ? 'No daily rate set on this driver — using the $250 default' : 'No daily rate set on this truck — using the $250 default'">default</span>
                     </td>
                     <td class="num dim">{{ t.estDriverPay === null ? '—' : fmt(t.estDriverPay) }}</td>
                   </tr>

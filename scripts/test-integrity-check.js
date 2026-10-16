@@ -579,7 +579,8 @@ async function section6() {
 	const startsJobSrc = SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0];
 	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
 		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
-		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger", "tripWorkDays", "TRIP_WORK_DAYS_FROM"];
+		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger", "tripWorkDays", "TRIP_WORK_DAYS_FROM",
+		"DRIVER_RATE_ONLY_FROM", "driverRateOnlyDayRule"];
 	const exec = (over) => {
 		const timers = [];
 		const seen = {};
@@ -610,6 +611,10 @@ async function section6() {
 			// day-once month composes LEDGER_DAY_ONCE_FROM with TRIP_WORK_DAYS_FROM.
 			tripWorkDays: require(path.join(ROOT, "lib", "trip-work-days.js")),
 			TRIP_WORK_DAYS_FROM: null,
+			// The daily-rate rule (lib/driver-rate-only.js), off here: check 8 then
+			// compares rate_per_load as before.
+			DRIVER_RATE_ONLY_FROM: null,
+			driverRateOnlyDayRule: () => ({ rule: true }),
 			...over,
 		};
 		new Function(...names, `${startsJobSrc}\n${block}`)(...names.map((n) => env[n]));
@@ -637,6 +642,10 @@ async function section6() {
 		ok("it wraps the email in the app's template", typeof o.emailHtml === "function" && /<h2>x<\/h2>/.test(o.emailHtml({ heading: "x", bodyHtml: "" })));
 		ok("check 5 gets the server's closed-month rule", o.closedMonthsOf === on.env.integrityClosedMonthsOf);
 		ok("check 7 gets the server's payout ledger, and with the ledger day-once rule off no FROM month", o.readFleetLedger === on.env.computeFleetLedger && o.dayOnceFrom === null);
+		ok("check 8: with the daily-rate rule off, no day-by-day rule", o.dailyRateRuleFor === null);
+		const rateOn = exec({ DRIVER_RATE_ONLY_FROM: "2026-10" });
+		rateOn.seen.ticker.run(now);
+		ok("check 8: with the daily-rate rule on, the server's driverRateOnlyDayRule()", (rateOn.seen.run || {}).dailyRateRuleFor === rateOn.env.driverRateOnlyDayRule);
 		const dayOnceOn = exec({ process: { env: { LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2026-10" } } });
 		dayOnceOn.seen.ticker.run(now);
 		ok("...and with the rule on, its FROM month", (dayOnceOn.seen.run || {}).dayOnceFrom === "2026-10");

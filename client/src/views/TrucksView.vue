@@ -28,6 +28,7 @@
         :investor-users="store.investorUsers"
         :show-owner="true"
         :can-edit-pay="authStore.user?.role === 'Super Admin'"
+        :daily-rate-rule="store.dailyRateRule"
         :submit-handler="handleAddTruck"
       />
     </details>
@@ -64,6 +65,7 @@
         :show-owner="authStore.user?.role === 'Super Admin'"
         :can-edit="authStore.user?.role === 'Super Admin' || authStore.user?.role === 'Dispatcher'"
         :can-edit-pay="authStore.user?.role === 'Super Admin'"
+        :daily-rate-rule="store.dailyRateRule"
         :save-handler="handleUpdateTruck"
         @delete="handleDeleteTruck"
         @linkage-changed="handleLinkageChanged"

@@ -96,10 +96,10 @@ function trucksDdl() {
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
 const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {';
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
-const LETS = ["lastPayStructShadowWarnMs", "_jtEpoch"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
 const FNS = [
 	// Under test.
 	"computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "reconcileInvestorPayouts", "finalizePeriods",
@@ -109,7 +109,7 @@ const FNS = [
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads", "liveJobTrackingView",
 	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "appMonthStart", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "expenseDriverKey", "foldExpenseTotalsByDriver",
-	"resolveDailyRate", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
+	"resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward", "resolveInvestorSplitPct",
 	"lastFridayOfFollowingMonth", "periodLabel", "payoutRowBreakdown", "frozenPayoutBreakdown",

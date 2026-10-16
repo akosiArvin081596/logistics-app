@@ -317,9 +317,11 @@ function routeWorld(db, verb, route, deps = {}) {
 			};
 			const routes = {};
 			const app = { get: (p, ...h) => { routes[p] = h[h.length - 1]; } };
-			build(counting, [...FIX_FNS, routeBody("get", "/api/trucks")], {
+			build(counting, [...FIX_FNS, extractFunction("driverRateOnlyInfo"), routeBody("get", "/api/trucks")], {
 				errors,
 				deps: {
+					// The daily-rate rule is off, as production runs until it is approved.
+					DRIVER_RATE_ONLY_FROM: null,
 					app, requireRole: () => null,
 					resolvePreviewUser: () => ({ isPreview: false }),
 					getJobTrackingCached: async () => ({ headers: [], data: [] }),

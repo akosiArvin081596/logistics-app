@@ -127,7 +127,7 @@ const SHARED_FNS = [
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
-	"resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
+	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
 	// The handler's driver identity, pay lookups and guarded write (see
 	// scripts/test-invoice-driver-name-matching.js for what they decide).
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "invoiceWriteRefusal",
@@ -194,6 +194,10 @@ function buildWorld(db, opts = {}) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
+		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;
+		// scripts/test-driver-rate-only.js runs the handler with it on).
+		DRIVER_RATE_ONLY_FROM: null,
+		driverRateOnlyStart: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },

@@ -144,8 +144,11 @@
           <label class="form-label">Driver Pay ($/day)</label>
           <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): anyone
                else adds the truck on the $250/day default. -->
-          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
-          <div v-if="canEditPay" class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
+          <!-- Read-only while the daily-rate rule is on: a driver is paid his own
+               rate (Drivers Database), else $250, whatever the truck says. -->
+          <input v-model.number="form.driverPayDaily" class="form-input" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay || !!dailyRateRule" />
+          <div v-if="dailyRateRule" class="field-hint">{{ truckPayRuleNote(dailyRateRule) }}</div>
+          <div v-else-if="canEditPay" class="field-hint">Daily rate for this truck's driver. Leave blank to use the $250/day default.</div>
           <div v-else class="field-hint">Uses the $250/day default. Only a Super Admin can set driver pay.</div>
         </div>
       </div>
@@ -202,6 +205,7 @@ import FileDropZone from '../shared/FileDropZone.vue'
 import { compressImage, DEFAULT_MAX_EDGE, isDecodedImage, dataUrlHasImageBytes } from '../../lib/imageUtils'
 import { amountError, AMOUNT_CAPS } from '../../lib/truckAmounts'
 import { replyLost } from '../../lib/saveOutcome'
+import { truckPayRuleNote } from '../../lib/driverPay'
 
 const truckMakes = [
   'Freightliner', 'Kenworth', 'Peterbilt', 'Volvo', 'International',
@@ -233,6 +237,9 @@ const props = defineProps({
   showOwner: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else adds on the default rate.
   canEditPay: { type: Boolean, default: false },
+  // The server's daily-rate rule ({ from } while it is on, else null): the
+  // Driver Pay field is read-only while it is on.
+  dailyRateRule: { type: Object, default: null },
   // The add itself, awaited in the manner of ExpenseForm's `submit-handler`.
   // submitHandler(data) resolves once the truck exists and rejects with the
   // server's refusal (an Error carrying its message). The fields clear only on
@@ -432,8 +439,9 @@ function buildPayload() {
     in_service_date: form.inServiceDate || '',
     inServiceDate: form.inServiceDate || '',
     // Blank input = no custom rate (server stores 0 = use $250 default). Only a
-    // Super Admin sends a rate; anyone else's truck starts on the default.
-    driverPayDaily: !props.canEditPay || form.driverPayDaily === '' ? 0 : form.driverPayDaily,
+    // Super Admin sends a rate; anyone else's truck starts on the default, and
+    // so does every new truck while the daily-rate rule is on.
+    driverPayDaily: !props.canEditPay || props.dailyRateRule || form.driverPayDaily === '' ? 0 : form.driverPayDaily,
     purchasePrice: form.purchasePrice,
     titleStatus: form.titleStatus,
     maintenanceFundMonthly: form.maintenanceFundMonthly,

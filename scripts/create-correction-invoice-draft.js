@@ -94,6 +94,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, insideRoot, DatabaseRefusal } = require("./lib/app-database");
+const driverRateOnly = require("../lib/driver-rate-only");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = "system: correction-invoice script";
@@ -471,8 +472,13 @@ async function run(db, api, opts, { today = null } = {}) {
 	return { state: "written", plan: first, invoice, auditId };
 }
 
-function describe(p, opts, dirRow) {
+// `env` decides the daily-rate rule's wording (lib/driver-rate-only.js): from
+// DRIVER_RATE_ONLY_FROM on, a driver with no rate of his own is paid the $250
+// default, not his truck's rate.
+function describe(p, opts, dirRow, env = process.env) {
 	const o = p.original;
+	const ruleFrom = driverRateOnly.ruleFromEnv(env);
+	const ruleCovers = !!ruleFrom && String(o.week_end || "").slice(0, 7) >= ruleFrom;
 	const out = [];
 	const grid = dayGrid(o);
 	const billed = grid ? WEEKDAYS.filter((w) => lineBills(grid[w])).join(", ") || "no day" : "unknown (no day grid)";
@@ -491,7 +497,7 @@ function describe(p, opts, dirRow) {
 	out.push(`PDF: uploads/invoices/${r.pdf_file_name}`);
 	out.push(`Audit row: ${p.audit.action}, ${p.audit.entity} <new id>, by "${p.audit.username}" (${p.audit.role}): ${p.audit.details}`);
 	const dirRate = dirRow ? Number(dirRow.pay_daily) || 0 : null;
-	out.push(`Rate: --rate ${usd(opts.rate)}; the original invoice's rate ${usd(o.rate_per_load)}; drivers directory now ${dirRate == null ? "no row" : dirRate > 0 ? usd(dirRate) : "not set (truck rate applies)"}`);
+	out.push(`Rate: --rate ${usd(opts.rate)}; the original invoice's rate ${usd(o.rate_per_load)}; drivers directory now ${dirRate == null ? "no row" : dirRate > 0 ? usd(dirRate) : ruleCovers ? "not set ($250 default)" : "not set (truck rate applies)"}`);
 	if (cents(opts.rate) !== cents(o.rate_per_load) || (dirRate && cents(opts.rate) !== cents(dirRate))) out.push("NOTE: the rates above differ; confirm the rate before approving the draft.");
 	if (!p.closed.length) out.push(`NOTE: ${o.invoice_number}'s week is in open months; an adjustment on it (PUT /api/invoices/:id/adjust) would also work.`);
 	return out;

@@ -183,7 +183,7 @@ function functionBody(src, head) {
   const table = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'drivers-db', 'DriverTable.vue'), 'utf8')
   const open = functionBody(table, 'function openEdit(d) {')
   ok('§3 DriverTable.vue: imports directoryPayType from lib/driverPay',
-    /^import \{ directoryPayCells, directoryPayType \} from '\.\.\/\.\.\/lib\/driverPay'$/m.test(table))
+    (table.match(/^import \{ ([^}]+) \} from '\.\.\/\.\.\/lib\/driverPay'$/m) || [, ''])[1].split(',').map((s) => s.trim()).includes('directoryPayType'))
   ok('§3 DriverTable.vue: openEdit() opens the stored type through directoryPayType(), and assigns it once',
     open.includes('editForm.payType = directoryPayType(d.PayType)') && open.split('editForm.payType =').length - 1 === 1)
   report(results)

@@ -8,6 +8,9 @@ export const useDriversDbStore = defineStore('driversDb', {
     headers: [],
     drivers: [],
     isLoading: false,
+    // The server's daily-rate rule ({ from } while it is on, else null), for
+    // the Daily Rate field's help text.
+    dailyRateRule: null,
   }),
 
   actions: {
@@ -17,6 +20,7 @@ export const useDriversDbStore = defineStore('driversDb', {
         const data = await api.get('/api/drivers-directory')
         this.headers = data.headers || []
         this.drivers = data.data || []
+        this.dailyRateRule = data.dailyRateRule || null
       } finally {
         this.isLoading = false
       }
