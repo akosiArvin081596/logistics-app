@@ -400,7 +400,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 	});
 
 	// Today 2026-10-15: a Dispatcher's floor is Sep 15 (30 days back), yesterday Oct 14.
-	const NO_LIMITS = { fromMin: null, toMin: null, toMax: null };
+	const NO_LIMITS = { fromMin: null, toMin: null, toMax: null, maxDays: 60 };
 	const scopeOf = (r, id) => {
 		const x = r.body && Array.isArray(r.body.rows) ? r.body.rows.find((y) => y.id === id) : null;
 		return x ? [x.editable, x.limits === undefined ? "missing" : x.limits] : null;
@@ -417,31 +417,31 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		ok("§11.0 five rows: a recent current one, a recent ended one, an old live one, an old ended one, a cancelled one",
 			[recent, recentEnded, oldLive, oldEnded, gone].every(Boolean));
 		const sa = { h: await list(w, DIR.hollis), t: await list(w, DIR.tamsin), s: await list(w, DIR.soren) };
-		eq("§11.1 Super Admin: every live row \"full\", with no limits",
+		eq("§11.1 Super Admin: every live row \"full\", no date limits, the 60-day cap",
 			[scopeOf(sa.h, recent), scopeOf(sa.h, recentEnded), scopeOf(sa.t, oldLive), scopeOf(sa.s, oldEnded)], Array(4).fill(["full", NO_LIMITS]));
 		eq("§11.2 ...a cancelled row: \"none\", limits null", scopeOf(sa.s, gone), ["none", null]);
-		eq("§11.3 ...createLimits: none", sa.h.body && sa.h.body.createLimits, { fromMin: null, toMin: null });
+		eq("§11.3 ...createLimits: no first-day limit, the 60-day cap, the Dispatcher window named", sa.h.body && sa.h.body.createLimits, { fromMin: null, toMin: null, maxDays: 60, dispatcherBackDays: 30 });
 		const d = { h: await list(w, DIR.hollis, USERS.disp), t: await list(w, DIR.tamsin, USERS.disp), s: await list(w, DIR.soren, USERS.disp) };
 		eq("§11.4 Dispatcher, a recent current row (Oct 5-25): \"full\", from no earlier than Sep 15, an earlier end no earlier than yesterday",
-			scopeOf(d.h, recent), ["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null }]);
+			scopeOf(d.h, recent), ["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null, maxDays: 60 }]);
 		eq("§11.5 ...a recent ended row (Sep 20 - Oct 2): \"full\", its end may stay or move later",
-			scopeOf(d.h, recentEnded), ["full", { fromMin: "2026-09-15", toMin: "2026-10-02", toMax: null }]);
+			scopeOf(d.h, recentEnded), ["full", { fromMin: "2026-09-15", toMin: "2026-10-02", toMax: null, maxDays: 60 }]);
 		eq("§11.6 ...an old live row (Sep 10 - Oct 25): \"end_early\", the end from yesterday to the day before its end",
-			scopeOf(d.t, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-24" }]);
+			scopeOf(d.t, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-24", maxDays: 60 }]);
 		eq("§11.7 ...an old ended row (Sep 1-12): \"none\"", scopeOf(d.s, oldEnded), ["none", null]);
 		eq("§11.8 ...a cancelled row: \"none\"", scopeOf(d.s, gone), ["none", null]);
-		eq("§11.9 ...createLimits: from no earlier than Sep 15", d.h.body && d.h.body.createLimits, { fromMin: "2026-09-15", toMin: null });
+		eq("§11.9 ...createLimits: from no earlier than Sep 15", d.h.body && d.h.body.createLimits, { fromMin: "2026-09-15", toMin: null, maxDays: 60, dispatcherBackDays: 30 });
 
 		const made = await create(w, DIR.soren, vacation("2026-10-28", "2026-10-29"), USERS.disp);
 		eq("§11.10 a Dispatcher's POST answer carries his editable and limits", made.body && made.body.row && [made.body.row.editable, made.body.row.limits],
-			["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null }]);
+			["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null, maxDays: 60 }]);
 		const ended = await edit(w, oldLive, { to: "2026-10-20" }, USERS.disp);
 		eq("§11.11 ...his PUT answer too (the old row ended early at Oct 20 stays \"end_early\")", ended.body && ended.body.row && [ended.status, ended.body.row.editable, ended.body.row.limits],
-			[200, "end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-19" }]);
+			[200, "end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-19", maxDays: 60 }]);
 		const c = await cancel(w, rowId(made), USERS.disp);
 		eq("§11.12 ...and his cancel answer: \"none\"", c.body && c.body.row && [c.body.row.editable, c.body.row.limits], ["none", null]);
 		const saEdit = await edit(w, oldEnded, { reason: "Personal" });
-		eq("§11.13 a Super Admin's PUT answer: \"full\", no limits", saEdit.body && saEdit.body.row && [saEdit.body.row.editable, saEdit.body.row.limits], ["full", NO_LIMITS]);
+		eq("§11.13 a Super Admin's PUT answer: \"full\", no date limits, the 60-day cap", saEdit.body && saEdit.body.row && [saEdit.body.row.editable, saEdit.body.row.limits], ["full", NO_LIMITS]);
 	});
 	await R.guard("§11b", async () => {
 		// Each limit a Dispatcher is served is a day the server accepts; one day past it is refused.
@@ -456,7 +456,12 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			[code(await edit(w, oldLive, { to: "2026-10-13" }, USERS.disp)), code(await edit(w, oldLive, { to: "2026-10-25" }, USERS.disp)), (await edit(w, oldLive, { to: "2026-10-24" }, USERS.disp)).status],
 			[[400, "BACKDATE_LIMIT"], [400, "BACKDATE_LIMIT"], 200]);
 		const after = await list(w, DIR.tamsin, USERS.disp);
-		eq("§11.17 ...served again: \"end_early\", toMax the day before its new end (Oct 23)", scopeOf(after, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-23" }]);
+		eq("§11.17 ...served again: \"end_early\", toMax the day before its new end (Oct 23)", scopeOf(after, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-23", maxDays: 60 }]);
+		// The recent row is now Sep 15 - Oct 14. maxDays as served is the cap the server enforces.
+		const served = scopeOf(await list(w, DIR.hollis, USERS.disp), recent);
+		eq("§11.18 the recent row's served maxDays is 60; one day longer (Sep 15 - Nov 14, 61 days): 400 RANGE_TOO_LONG; at it (Sep 15 - Nov 13): 200",
+			[served && served[1] && served[1].maxDays, code(await edit(w, recent, { to: "2026-11-14" }, USERS.disp)), (await edit(w, recent, { to: "2026-11-13" }, USERS.disp)).status],
+			[60, [400, "RANGE_TOO_LONG"], 200]);
 	});
 
 	section("§12 the edit audit names a reason change, never the reason");

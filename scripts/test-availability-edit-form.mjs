@@ -4,10 +4,11 @@
 //
 // The server owns every rule. Each row of GET /api/drivers-directory/:id/availability
 // carries `editable` ("full" / "end_early" / "none") and `limits`
-// ({ fromMin, toMin, toMax }, null = no limit); the reply carries `createLimits`.
-// The client only applies what it is sent: the one thing it adds is that the
-// last day off is never before the form's own first day. An edit sends only
-// the fields that changed.
+// ({ fromMin, toMin, toMax, maxDays }, null = no limit); the reply carries
+// `createLimits` ({ fromMin, toMin, maxDays, dispatcherBackDays }). The client
+// only applies what it is sent: the one thing it adds is that the last day off
+// is never before the form's own first day. An edit sends only the fields that
+// changed.
 //
 // The driver's rows ride on GET /api/driver/:driverName as
 // `timeOff: { today, rows: [{ id, kind, from, to, status }] }`, only while the
@@ -21,7 +22,9 @@
 //   §2 editPatch(): only the changed fields; an end-only edit is exactly { to }
 //   §3 editDateBounds() / createDateBounds(): the server's limits, plus "not
 //      before the form's first day"
-//   §4 canSaveEdit() / datesWithinBounds(): Save only for a change inside them
+//   §4 canSaveEdit() / datesWithinBounds(): Save only for a change inside them,
+//      never longer than maxDays; endEarlyNote(): the Dispatcher's back-dating
+//      window in words, from the server's dispatcherBackDays
 //   §5 editFormFor(): the form starts from the stored row; End early starts at
 //      today, kept inside the server's limits
 //   §6 driverTimeOffRows(): current and upcoming only, five fields only
@@ -60,7 +63,7 @@ try {
 }
 eq('§0 client/src/lib/availabilityText.js loads', !!text, true)
 const T = text || {}
-const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner']
+const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
 const call = (name, ...args) => (typeof T[name] === 'function' ? T[name](...args) : undefined)
 
@@ -69,14 +72,16 @@ const TODAY = '2026-10-16'
 const stored = (over) => ({
   id: 7, directoryId: 3, kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family',
   createdBy: 'dispatch_demo', createdAt: '2026-10-01T14:00:00Z', updatedAt: null, cancelledAt: null, cancelledBy: null,
-  status: 'current', editable: 'full', limits: { fromMin: null, toMin: null, toMax: null }, ...over,
+  status: 'current', editable: 'full', limits: { fromMin: null, toMin: null, toMax: null, maxDays: 60 }, ...over,
 })
 const formOf = (r, over) => ({ kind: r.kind, from: r.from, to: r.to, reason: r.reason, ...over })
 // A Super Admin's row, a Dispatcher's recent row, a Dispatcher's old live row
 // (end early only) and a Dispatcher's old ended row.
 const SA = stored({})
-const DISP = stored({ limits: { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null } })
-const OLD = stored({ id: 8, from: '2026-09-01', to: '2026-10-20', limits: { fromMin: null, toMin: '2026-10-15', toMax: '2026-10-19' }, editable: 'end_early' })
+const DISP = stored({ limits: { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null, maxDays: 60 } })
+const OLD = stored({ id: 8, from: '2026-09-01', to: '2026-10-20', limits: { fromMin: null, toMin: '2026-10-15', toMax: '2026-10-19', maxDays: 60 }, editable: 'end_early' })
+const CREATE_DISP = { fromMin: '2026-09-16', toMin: null, maxDays: 60, dispatcherBackDays: 30 }
+const CREATE_SA = { fromMin: null, toMin: null, maxDays: 60, dispatcherBackDays: 30 }
 const ENDED = stored({ id: 9, from: '2026-08-20', to: '2026-09-05', status: 'past', editable: 'none', limits: null })
 
 function scenario() {
@@ -107,18 +112,18 @@ function scenario() {
   rec('§2 no `editable`: empty', call('editPatch', stored({ editable: undefined }), formOf(SA, { to: '2026-10-18' })), {})
 
   // §3 the date limits a form shows.
-  rec('§3 Super Admin: no limit but "not before the first day"', call('editDateBounds', SA, formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null })
-  rec('§3 Super Admin: the first day moved later moves the end\'s minimum', call('editDateBounds', SA, formOf(SA, { from: '2026-10-14' })), { fromMin: null, toMin: '2026-10-14', toMax: null })
-  rec('§3 Dispatcher recent row: the server\'s limits', call('editDateBounds', DISP, formOf(DISP)), { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null })
-  rec('§3 Dispatcher recent row: a later first day wins over toMin', call('editDateBounds', DISP, formOf(DISP, { from: '2026-10-18' })), { fromMin: '2026-09-16', toMin: '2026-10-18', toMax: null })
-  rec('§3 "end_early": the stored first day, the server\'s end limits', call('editDateBounds', OLD, formOf(OLD, { from: '2026-10-18' })), { fromMin: null, toMin: '2026-10-15', toMax: '2026-10-19' })
+  rec('§3 Super Admin: no limit but "not before the first day"', call('editDateBounds', SA, formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null, maxDays: 60 })
+  rec('§3 Super Admin: the first day moved later moves the end\'s minimum', call('editDateBounds', SA, formOf(SA, { from: '2026-10-14' })), { fromMin: null, toMin: '2026-10-14', toMax: null, maxDays: 60 })
+  rec('§3 Dispatcher recent row: the server\'s limits', call('editDateBounds', DISP, formOf(DISP)), { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null, maxDays: 60 })
+  rec('§3 Dispatcher recent row: a later first day wins over toMin', call('editDateBounds', DISP, formOf(DISP, { from: '2026-10-18' })), { fromMin: '2026-09-16', toMin: '2026-10-18', toMax: null, maxDays: 60 })
+  rec('§3 "end_early": the stored first day, the server\'s end limits', call('editDateBounds', OLD, formOf(OLD, { from: '2026-10-18' })), { fromMin: null, toMin: '2026-10-15', toMax: '2026-10-19', maxDays: 60 })
   rec('§3 "none": no form', call('editDateBounds', ENDED, formOf(ENDED)), null)
-  rec('§3 no limits sent: only "not before the first day"', call('editDateBounds', stored({ limits: undefined }), formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null })
-  rec('§3 an unreadable limit is ignored', call('editDateBounds', stored({ limits: { fromMin: '2026-9-1', toMin: 'soon', toMax: 5 } }), formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null })
-  rec('§3 an empty first day: the server\'s toMin alone', call('editDateBounds', DISP, formOf(DISP, { from: '' })), { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null })
-  rec('§3 create, Dispatcher', call('createDateBounds', { fromMin: '2026-09-16', toMin: null }, { from: '2026-10-16', to: '2026-10-16' }), { fromMin: '2026-09-16', toMin: '2026-10-16', toMax: null })
-  rec('§3 create, Super Admin', call('createDateBounds', { fromMin: null, toMin: null }, { from: '2026-01-02', to: '2026-01-03' }), { fromMin: null, toMin: '2026-01-02', toMax: null })
-  rec('§3 create, no createLimits sent', call('createDateBounds', undefined, { from: '2026-10-16', to: '' }), { fromMin: null, toMin: '2026-10-16', toMax: null })
+  rec('§3 no limits sent: only "not before the first day"', call('editDateBounds', stored({ limits: undefined }), formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null, maxDays: null })
+  rec('§3 an unreadable limit is ignored', call('editDateBounds', stored({ limits: { fromMin: '2026-9-1', toMin: 'soon', toMax: 5, maxDays: '60' } }), formOf(SA)), { fromMin: null, toMin: '2026-10-10', toMax: null, maxDays: null })
+  rec('§3 an empty first day: the server\'s toMin alone', call('editDateBounds', DISP, formOf(DISP, { from: '' })), { fromMin: '2026-09-16', toMin: '2026-10-15', toMax: null, maxDays: 60 })
+  rec('§3 create, Dispatcher', call('createDateBounds', CREATE_DISP, { from: '2026-10-16', to: '2026-10-16' }), { fromMin: '2026-09-16', toMin: '2026-10-16', toMax: null, maxDays: 60 })
+  rec('§3 create, Super Admin', call('createDateBounds', CREATE_SA, { from: '2026-01-02', to: '2026-01-03' }), { fromMin: null, toMin: '2026-01-02', toMax: null, maxDays: 60 })
+  rec('§3 create, no createLimits sent', call('createDateBounds', undefined, { from: '2026-10-16', to: '' }), { fromMin: null, toMin: '2026-10-16', toMax: null, maxDays: null })
 
   // §4 Save only for a change that sits inside the limits.
   rec('§4 unchanged: no Save', call('canSaveEdit', DISP, formOf(DISP)), false)
@@ -137,6 +142,19 @@ function scenario() {
   rec('§4 create inside its bounds', call('datesWithinBounds', { from: '2026-09-16', to: '2026-09-20' }, { fromMin: '2026-09-16', toMin: '2026-09-16', toMax: null }), true)
   rec('§4 create before fromMin', call('datesWithinBounds', { from: '2026-09-15', to: '2026-09-20' }, { fromMin: '2026-09-16', toMin: '2026-09-15', toMax: null }), false)
   rec('§4 no bounds: no Save', call('datesWithinBounds', { from: '2026-09-15', to: '2026-09-20' }, null), false)
+  rec('§4 an edit to 60 days (Oct 10 - Dec 8, maxDays 60): Save', call('canSaveEdit', SA, formOf(SA, { to: '2026-12-08' })), true)
+  rec('§4 an edit to 61 days (Oct 10 - Dec 9): no Save (the server answers 400 RANGE_TOO_LONG)', call('canSaveEdit', SA, formOf(SA, { to: '2026-12-09' })), false)
+  rec('§4 a Dispatcher\'s 61-day edit, the first day moved earlier: no Save', call('canSaveEdit', DISP, formOf(DISP, { from: '2026-09-21', to: '2026-11-20' })), false)
+  rec('§4 no maxDays sent: no cap on this side (the server still refuses)', call('canSaveEdit', stored({ limits: { fromMin: null, toMin: null, toMax: null } }), formOf(SA, { to: '2026-12-09' })), true)
+  rec('§4 an unreadable maxDays is ignored', call('canSaveEdit', stored({ limits: { fromMin: null, toMin: null, toMax: null, maxDays: 0 } }), formOf(SA, { to: '2026-12-09' })), true)
+  const add = (from, to) => call('datesWithinBounds', { from, to }, call('createDateBounds', CREATE_DISP, { from, to }))
+  rec('§4 add 60 days (Oct 16 - Dec 14): allowed', add('2026-10-16', '2026-12-14'), true)
+  rec('§4 add 61 days (Oct 16 - Dec 15): not allowed', add('2026-10-16', '2026-12-15'), false)
+  rec('§4 add across a year end, 61 days (Dec 1 - Jan 30): not allowed', add('2026-12-01', '2027-01-30'), false)
+  rec('§4 the end-early note names the server\'s window', call('endEarlyNote', CREATE_DISP), 'Started more than 30 days ago: only a Super Admin can change the other details.')
+  rec('§4 ...whatever number it sends', call('endEarlyNote', { ...CREATE_DISP, dispatcherBackDays: 45 }), 'Started more than 45 days ago: only a Super Admin can change the other details.')
+  rec('§4 ...and names no number when none was sent', call('endEarlyNote', null), 'Started too long ago: only a Super Admin can change the other details.')
+  rec('§4 ...or an unreadable one', call('endEarlyNote', { dispatcherBackDays: 'thirty' }), 'Started too long ago: only a Super Admin can change the other details.')
 
   // §5 where the form starts.
   rec('§5 "full" starts from the stored row', call('editFormFor', DISP, TODAY), { kind: 'vacation', from: '2026-10-10', to: '2026-10-20', reason: 'Family' })
@@ -223,6 +241,7 @@ eq('§9 the panel\'s buttons come from rowActions()', /rowActions\(/.test(panel)
 eq('§9 the panel\'s edit sends editPatch()', /api\.put\([^\n]*editPatch\(/.test(panel), true)
 eq('§9 the panel\'s Save waits for canSaveEdit()', /canSaveEdit\(/.test(panel), true)
 eq('§9 the panel shows the server\'s create limits', /createDateBounds\(/.test(panel), true)
+eq('§9 the end-early note comes from endEarlyNote(), with no day count of its own', /endEarlyNote\(/.test(panel) && !/more than \d+ days/.test(panel), true)
 
 console.log(`\ntest-availability-edit-form: ${pass} passed, ${failures.length} failed`)
 if (failures.length) process.exit(1)
