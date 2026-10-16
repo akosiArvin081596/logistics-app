@@ -84,6 +84,9 @@
       <div><dt>Less advances</dt><dd>{{ summary.advances }}</dd></div>
       <div class="ial-balance"><dt>Balance due</dt><dd>{{ summary.balanceDue }}</dd></div>
     </dl>
+    <p v-else-if="selectedIds.length && previewPausedReason" class="ial-hint ial-hint-warn">
+      The preview is paused until this is fixed: {{ previewPausedReason }}
+    </p>
     <p v-else-if="selectedIds.length && !error" class="ial-hint">The balance due shows once the preview updates.</p>
     <div v-if="error" class="ial-warn" role="status">
       <strong>These lines can't be printed as they are.</strong>
@@ -182,6 +185,8 @@ const props = defineProps({
   // The server's refusal of the ticked lines ({ code, message }), or null.
   error: { type: Object, default: null },
   receiptWarnings: { type: Array, default: () => [] },
+  // Why the editor's live preview cannot run right now ('' when it can).
+  previewPausedReason: { type: String, default: '' },
   disabled: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:available', 'update:selectedIds', 'update:footnote'])

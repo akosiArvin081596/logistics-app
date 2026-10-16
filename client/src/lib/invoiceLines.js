@@ -126,6 +126,21 @@ export function newLineErrors(form) {
   return out
 }
 
+// The footnote the server writes for these lines (defaultFootnote() in
+// lib/broker-invoice-lines.js), shown in the box the moment a line is ticked,
+// before the preview answers with the server's own. Text only: each line's
+// amount is the server's formatted string ("$650.00"), shortened to "$650" for
+// whole dollars; the label reads mid-sentence ("Fuel advance" -> "fuel
+// advance", an acronym kept). One line per advance, in the order given.
+export function footnoteDefaultFor(lines) {
+  return (Array.isArray(lines) ? lines : []).map((l) => {
+    const amount = text(l && l.amount).replace(/\.00$/, '')
+    const label = text(l && l.label)
+    const mid = /^\p{Lu}\p{Ll}/u.test(label) ? label.charAt(0).toLowerCase() + label.slice(1) : label
+    return `*${amount} for ${mid}`
+  }).join('\n')
+}
+
 // The body POST /api/loads/:loadId/invoice-lines receives: raw text (the
 // server cleans and judges it again), an advance, the default label when the
 // label is blank.

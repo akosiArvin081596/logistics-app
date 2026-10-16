@@ -543,6 +543,7 @@
             :summary="linesSummary"
             :error="linesError"
             :receipt-warnings="linesReceiptWarnings"
+            :preview-paused-reason="linesPreviewPausedReason"
             :disabled="approving"
             @update:available="linesAvailable = $event"
             @update:selected-ids="onLinesSelect"
@@ -633,6 +634,7 @@ import {
   ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError, notesLength,
   INVOICE_EMAIL_BODY_MAX, emailBodyLength, validateInvoiceEmailBody,
 } from '../../lib/invoiceFields'
+import { footnoteDefaultFor } from '../../lib/invoiceLines'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -973,12 +975,37 @@ const LINES_REFUSALS = new Set([
   'INVOICE_LINE_IDS_INVALID', 'INVOICE_FOOTNOTE_INVALID', 'INVOICE_FOOTNOTE_TOO_LONG',
 ])
 const linesLockTotal = computed(() => !!linesState.value && form.lineIds.length > 0)
+// The live preview's own gate. Flag off it is formValid, exactly as before. With
+// advance lines on, a recipient nobody has typed yet does not hold the preview
+// back (a replica or staging names no AP inbox, so its dryRun often has none,
+// and the lines' figures only ever come from a preview): the preview sends
+// nothing and leaves a blank recipient out of its body, while the approve still
+// requires one (canApprove reads formValid).
+const previewFormValid = computed(() => {
+  if (formValid.value) return true
+  if (!linesState.value || recipient.value.trim()) return false
+  return Object.keys(fieldErrors.value).every((k) => k === 'recipient')
+})
+// What holds the preview back, for the lines section ('' while it can run).
+const linesPreviewPausedReason = computed(() => {
+  if (!linesState.value || previewFormValid.value) return ''
+  for (const k of FIELD_ORDER) if (k !== 'recipient' && fieldErrors.value[k]) return fieldErrors.value[k]
+  return firstFieldError.value
+})
 
 // A line ticked or unticked. While any is ticked the Total is the line haul the
-// dryRun derived, so a typed total is put back before the render.
+// dryRun derived, so a typed total is put back before the render. An untouched
+// footnote shows the documented default for the lines now ticked at once; the
+// preview's answer then brings the server's own (adoptLines).
 function onLinesSelect(ids) {
   form.lineIds = Array.isArray(ids) ? ids.slice() : []
   if (form.lineIds.length) form.total = str(seeded.value.total)
+  if (!edited.value.footnote) {
+    const ticked = form.lineIds.map((id) => linesAvailable.value.find((l) => l && l.id === id)).filter(Boolean)
+    const next = footnoteDefaultFor(ticked)
+    form.footnote = next
+    seeded.value = { ...seeded.value, footnote: next }
+  }
   schedulePreview({ immediate: true })
 }
 function onFootnoteInput(value) {
@@ -1143,7 +1170,7 @@ function schedulePreview({ immediate = false } = {}) {
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
   if (!props.open) return
   // Never spend a render on a body the server will refuse.
-  if (!formValid.value) { previewPending.value = false; return }
+  if (!previewFormValid.value) { previewPending.value = false; return }
   previewPending.value = true
   if (immediate) { runPreview(); return }
   previewTimer = setTimeout(runPreview, PREVIEW_DEBOUNCE_MS)
@@ -1151,7 +1178,7 @@ function schedulePreview({ immediate = false } = {}) {
 
 async function runPreview() {
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
-  if (!props.open || !formValid.value) { previewPending.value = false; return }
+  if (!props.open || !previewFormValid.value) { previewPending.value = false; return }
   if (!previewTabActive.value) return // stays pending; flushed on tab activation
   previewPending.value = false
 
@@ -1328,10 +1355,13 @@ function buildOverrideBody({ forPreview = false } = {}) {
   // ALWAYS named on both bodies, [] included: an absent key means "every active
   // line" to the server, which a line saved after the preview would join. The
   // footnote goes only once edited, so an untouched one is the server's default
-  // for the lines it prints. Never an amount: the server prints its own.
+  // for the lines it prints. Never an amount: the server prints its own. A
+  // preview leaves a blank recipient out (previewFormValid lets it run before one
+  // is typed; the server refuses an empty address but renders without one).
   if (pv.value.invoiceLines) {
     body.lineIds = form.lineIds.slice()
     if (edited.value.footnote) body.footnote = form.footnote
+    if (forPreview && !body.recipientEmail) delete body.recipientEmail
   }
   return body
 }
