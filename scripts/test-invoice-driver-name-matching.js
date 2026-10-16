@@ -117,7 +117,7 @@ const SHARED_FNS = [
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
-	"driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
+	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
 	// Under test.
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
@@ -324,6 +324,7 @@ function buildWorld(opts = {}) {
 		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;
 		// scripts/test-driver-rate-only.js runs the handler with it on).
 		DRIVER_RATE_ONLY_FROM: null,
+		driverRateOnlyStart: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		// The document records whose invoice it is, so a test can tell which

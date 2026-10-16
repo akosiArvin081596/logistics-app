@@ -131,7 +131,7 @@ const FUNCTIONS = [
 	// what the guard reads
 	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "findCol", "moneySheetDate", "lockedPeriodsDesc",
 	"truckFixedCostLockedMonths", "truckChargedInMonth", "truckChargeFromMonth", "truckChargeUntilMonth", "truckMonthlyFixed",
-	"truckFeeLockedRows", "getDriverPayStructures", "driverRateOnlyApplies", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
+	"truckFeeLockedRows", "getDriverPayStructures", "driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "truckDailyRateCandidates", "investorsHoldingDriver",
 	// what the route calls
 	"parsePlainDecimal", "parseDriverPayDaily", "parseInServiceDate", "parseAdminFeePct", "parseTruckAmount", "parseTruckAmounts",
 	"parseUnitNumber", "isUnitNumberTaken",
@@ -145,6 +145,7 @@ const CONSTS = [
 	// The daily-rate rule (DRIVER_RATE_ONLY_FROM) is off in this runner;
 	// scripts/test-driver-rate-only-guards.js runs the guards with it on.
 	"const DRIVER_RATE_ONLY_FROM = null;",
+	"let driverRateOnlyStart = null;",
 	liftConst("const RFC2822_MONTHS = "),
 	liftConst("const EXPENSE_PERIOD_EXPR ="),
 	liftConst("let lastPayStructShadowWarnMs = "),

@@ -149,7 +149,8 @@ async function report({ off, on, from, names }) {
 		const m = A.loadAssignedMonthKey(r, cols);
 		assignedMonthOf.set(id, driverRateOnly.payMonthOf("", [assignedMonthOf.get(id), m]));
 	}
-	const payMonthOfDay = (day, loadIds) => driverRateOnly.payMonthOf(day, loadIds.map((id) => assignedMonthOf.get(A.normalizeLoadId(id))));
+	// A load with no Assigned Date (or not on the sheet) pays in the day's own month.
+	const payMonthOfDay = (day, loadIds) => driverRateOnly.payMonthOf(day, loadIds.map((id) => assignedMonthOf.get(A.normalizeLoadId(id)) || String(day).slice(0, 7)));
 
 	// The rate each pay path hands a driver's day: his own, the last truck naming him.
 	const truckOf = (k) => {

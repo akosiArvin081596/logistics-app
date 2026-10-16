@@ -100,7 +100,7 @@ function trucksDdl() {
 }
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory"];
 const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
@@ -112,7 +112,7 @@ const FNS = [
 	"driverNameHeldByOtherSpelling", "driverNameHeldByOtherAccount", "findDriverNameClashes", "normalizeDriverName",
 	"isBuiltInPropertyName", "driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
 	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "appMonthStart", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
-	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "expenseDriverKey", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose",
+	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "expenseDriverKey", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths",
 	"getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey", "intersectMonthWindow",
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "truckMonthlyFixed",
 	"computeLossCarryForward", "resolveInvestorSplitPct", "lastFridayOfFollowingMonth", "periodLabel",

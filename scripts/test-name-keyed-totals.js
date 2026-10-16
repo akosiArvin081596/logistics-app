@@ -121,7 +121,7 @@ function liftDecl(src, kind, name) {
 	return src.slice(start, end);
 }
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
 	// The broker contact value rule the dashboard and locations answers apply.
 	"brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
@@ -147,7 +147,7 @@ const FNS = [
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "driverRateOnlyInfo", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "driverRateOnlyInfo", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",

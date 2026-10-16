@@ -23,7 +23,7 @@
  * fills no Daily Rate label.
  *
  * Made-up data only: investor 5 owns T1 ($150 a day on the truck) and T2
- * ($300). Hal Reed has no rate of his own and drives T1; Ana Moss has her own
+ * ($300). Cal Burke has no rate of his own and drives T1; Ana Moss has her own
  * $350 and drives T2. Pure: no server, no app.db, no network, no browser.
  *
  * Run: node scripts/test-invoice-daily-rate-label.js    # exits 1 on failure
@@ -47,7 +47,7 @@ const FIELD_MAPS = require(path.join(ROOT, "lib", "policy-field-maps.js"));
 const TEMPLATE = fs.readFileSync(path.join(ROOT, "onboarding-templates", "policy", "service-invoice.html"), "utf8");
 const { loadRow, et } = M;
 
-const HAL = "Hal Reed";
+const CAL = "Cal Burke";
 const ANA = "Ana Moss";
 const WEEK = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const ON = { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-10" };
@@ -59,10 +59,10 @@ const s = (lid, status, wall) => [lid, status, "manual", et(wall), ""];
 function world({ env = {}, rows = null, status = [], now = Date.parse("2026-10-16T17:00:00Z") } = {}) {
 	return M.startWorld({
 		env, status, now,
-		drivers: [{ name: HAL, payDaily: 0 }, { name: ANA, payDaily: 350 }],
-		trucks: [{ unit: "T1", driver: HAL, payDaily: 150 }, { unit: "T2", driver: ANA, payDaily: 300 }],
+		drivers: [{ name: CAL, payDaily: 0 }, { name: ANA, payDaily: 350 }],
+		trucks: [{ unit: "T1", driver: CAL, payDaily: 150 }, { unit: "T2", driver: ANA, payDaily: 300 }],
 		rows: rows || [
-			loadRow({ id: "H902", driver: HAL, pickup: "2026-10-05 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-05", done: "2026-10-07", truck: "T1" }),
+			loadRow({ id: "H902", driver: CAL, pickup: "2026-10-05 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-05", done: "2026-10-07", truck: "T1" }),
 			loadRow({ id: "A901", driver: ANA, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck: "T2" }),
 		],
 	});
@@ -75,7 +75,7 @@ const R = M.createRunner("The weekly invoice PDF's Daily Rate column shows each 
 
 (async () => {
 	await R.test("L1 A $150 driver (no rate of his own, on a $150 truck): Mon-Wed print $150.00 in the Daily Rate column, the other days nothing. Base: no Daily Rate figure is filled (the template's fixed $300.00 shows)", async ({ eq }) => {
-		const g = await M.generate(world(), HAL, W40);
+		const g = await M.generate(world(), CAL, W40);
 		eq("status", g.status, 200);
 		eq("Daily Rate column", rateColumn(g.data), ["", "", "$150.00", "$150.00", "$150.00", "", ""]);
 	});
@@ -87,7 +87,7 @@ const R = M.createRunner("The weekly invoice PDF's Daily Rate column shows each 
 
 	await R.test("L3 The stored invoice (render_data) keeps each paid day's rate beside its total, so a later re-render prints the same. Base: no rate stored", async ({ eq }) => {
 		const w = world();
-		const g = await M.generate(w, HAL, W40);
+		const g = await M.generate(w, CAL, W40);
 		const days = storedGrid(w, g.invoice.id);
 		eq("Monday-Wednesday", ["Monday", "Tuesday", "Wednesday"].map((d) => [days[d].total, days[d].rate]), [[150, 150], [150, 150], [150, 150]]);
 		eq("a day not worked has none", days.Saturday.rate, undefined);
@@ -109,11 +109,11 @@ const R = M.createRunner("The weekly invoice PDF's Daily Rate column shows each 
 		const w = world({
 			env: ON,
 			rows: [
-				loadRow({ id: "S901", driver: HAL, pickup: "2026-09-29 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-09-29", done: "2026-10-01", truck: "T1" }),
-				loadRow({ id: "S902", driver: HAL, pickup: "2026-10-02 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-10-02", done: "2026-10-02", truck: "T1" }),
+				loadRow({ id: "S901", driver: CAL, pickup: "2026-09-29 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-09-29", done: "2026-10-01", truck: "T1" }),
+				loadRow({ id: "S902", driver: CAL, pickup: "2026-10-02 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-10-02", done: "2026-10-02", truck: "T1" }),
 			],
 		});
-		const g = await M.generate(w, HAL, W39);
+		const g = await M.generate(w, CAL, W39);
 		eq("Daily Rate column", rateColumn(g.data), ["", "", "", "$150.00", "$150.00", "$150.00", "$250.00"]);
 	});
 
@@ -121,19 +121,19 @@ const R = M.createRunner("The weekly invoice PDF's Daily Rate column shows each 
 		const w = world({
 			env: { ...ON, ...TRIP_OCT }, now: M.etMs("2026-10-02 20:00"),
 			rows: [
-				loadRow({ id: "Q301", driver: HAL, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
-				loadRow({ id: "Q302", driver: HAL, pickup: "2026-10-01 9:00", dropoff: "2026-10-05 14:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+				loadRow({ id: "Q301", driver: CAL, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+				loadRow({ id: "Q302", driver: CAL, pickup: "2026-10-01 9:00", dropoff: "2026-10-05 14:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
 			],
 			status: [
 				s("Q301", "At Shipper", "2026-09-28 08:00"), s("Q301", "Delivered", "2026-09-29 17:00"),
 				s("Q302", "At Shipper", "2026-10-01 10:00"), s("Q302", "In Transit", "2026-10-01 14:00"),
 			],
 		});
-		const g39 = await M.generate(w, HAL, W39);
+		const g39 = await M.generate(w, CAL, W39);
 		w.addStatus([s("Q302", "At Receiver", "2026-10-05 11:00"), s("Q302", "Delivered", "2026-10-05 13:00")]);
 		w.setRow("Q302", { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
 		w.clock.ms = M.etMs("2026-10-09 20:00");
-		await M.generate(w, HAL, W40);
+		await M.generate(w, CAL, W40);
 		eq("W39's Daily Rate column after the late days", rateColumn({ days: storedGrid(w, g39.invoice.id) }), ["", "", "$150.00", "$150.00", "", "$250.00", "$250.00"]);
 	});
 

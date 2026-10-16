@@ -17837,25 +17837,44 @@ function stampFutureReceipts(periods) {
 	return rows;
 }
 
-// The daily-rate rule's start record ({ from, startedAt }, lib/driver-rate-only.js
-// ensureStart()), read or stamped the first time the rule runs: at boot
-// (warnDriverRateOnlyFromClosedMonth()), else on first use.
-let driverRateOnlyStart = null;
+// The daily-rate rule's start record ({ from, startedAt }, lib/driver-rate-only.js):
+// read once, at boot (warnDriverRateOnlyFromClosedMonth()) or else on first use,
+// and stamped then while the flag is on (ensureStart()). undefined until read;
+// null while the rule has never run.
+let driverRateOnlyStart = undefined;
 function driverRateOnlyStartRecord() {
-	if (!driverRateOnlyStart) driverRateOnlyStart = financialsCalc.driverRateOnly.ensureStart(db, DRIVER_RATE_ONLY_FROM, new Date().toISOString());
+	if (driverRateOnlyStart === undefined) {
+		driverRateOnlyStart = DRIVER_RATE_ONLY_FROM
+			? financialsCalc.driverRateOnly.ensureStart(db, DRIVER_RATE_ONLY_FROM, new Date().toISOString())
+			: financialsCalc.driverRateOnly.readStart(db);
+	}
 	return driverRateOnlyStart;
 }
 
-// Whether the daily-rate rule (DRIVER_RATE_ONLY_FROM) prices the days that pay
-// in `month` ('YYYY-MM'): the flag on, `month` FROM or later, and the month not
-// closed outside the rule (its close record, else a lock taken before the rule
-// first ran: lib/driver-rate-only.js closedOutsideRule()). Off, false for every
-// month, and nothing else is read.
+// driverRateOnlyApplies()'s answer per month, kept until a month closes or
+// reopens (forgetDriverRateOnlyMonths(): finalizePeriods() and the reopen route).
+const driverRateOnlyMonths = new Map();
+function forgetDriverRateOnlyMonths() {
+	driverRateOnlyMonths.clear();
+}
+
+// Whether the daily-rate rule prices the days that pay in `month` ('YYYY-MM').
+// While it has never run (no start record) false, and nothing more is read.
+// Once it has run, a closed month answers by its close record whatever the flag
+// and FROM say now, so switching the flag off or moving FROM never restates a
+// month closed under the rule (lib/driver-rate-only.js closedMonthAnswer(); a
+// month closed before the rule first ran keeps the old rule). Any other month:
+// the flag on (DRIVER_RATE_ONLY_FROM) and `month` FROM or later.
 function driverRateOnlyApplies(month) {
-	if (!DRIVER_RATE_ONLY_FROM) return false;
+	const start = driverRateOnlyStartRecord();
+	if (!start) return false;
 	const mk = String(month || "");
-	if (!financialsCalc.driverRateOnly.MONTH_KEY_RE.test(mk) || mk < DRIVER_RATE_ONLY_FROM) return false;
-	return !financialsCalc.driverRateOnly.closedOutsideRule(db, mk, driverRateOnlyStartRecord());
+	if (!financialsCalc.driverRateOnly.MONTH_KEY_RE.test(mk)) return false;
+	if (driverRateOnlyMonths.has(mk)) return driverRateOnlyMonths.get(mk);
+	const closed = financialsCalc.driverRateOnly.closedMonthAnswer(db, mk, start);
+	const answer = closed !== null ? closed : !!DRIVER_RATE_ONLY_FROM && mk >= DRIVER_RATE_ONLY_FROM;
+	driverRateOnlyMonths.set(mk, answer);
+	return answer;
 }
 
 // What the pay screens are told about the daily-rate rule: { from } while it is
@@ -17868,11 +17887,13 @@ function driverRateOnlyInfo() {
 // Check 8 of the daily integrity check under the daily-rate rule
 // (lib/integrity-check.js invoiceRateMismatches()): { from, appliesTo(month),
 // payMonthOf(day, loadIds) }, a grid day's pay month read from the Job Tracking
-// snapshot `jt` as the invoice reads it (its loads' Assigned month, the earliest,
-// else the day's own month); null while the rule is off.
+// snapshot `jt` as the invoice reads it (each load's Assigned month, a load with
+// none counting as the day's own month, the earliest of them; else the day's own
+// month); null while the rule is off.
 function driverRateOnlyDayRule(jt) {
 	if (!DRIVER_RATE_ONLY_FROM) return null;
 	const cols = jobTrackingMonthCols((jt && jt.headers) || []);
+	// Load ID -> its Assigned month (the earliest of its rows; "" when none has one).
 	const monthOf = new Map();
 	for (const r of (jt && jt.data) || []) {
 		const id = cols.loadIdCol ? normalizeLoadId(r[cols.loadIdCol]) : "";
@@ -17881,28 +17902,23 @@ function driverRateOnlyDayRule(jt) {
 	return {
 		from: DRIVER_RATE_ONLY_FROM,
 		appliesTo: driverRateOnlyApplies,
-		payMonthOf: (day, loadIds) => financialsCalc.driverRateOnly.payMonthOf(day, (loadIds || []).map((id) => monthOf.get(normalizeLoadId(id)))),
+		payMonthOf: (day, loadIds) => financialsCalc.driverRateOnly.payMonthOf(day, (loadIds || []).map((id) => monthOf.get(normalizeLoadId(id)) || String(day).slice(0, 7))),
 	};
 }
 
 // Records, as `period` closes (inside the close's transaction, before its lock),
 // whether the daily-rate rule priced it (lib/driver-rate-only.js
-// writeCloseRecord()); from then on that record answers for the month, so
-// switching the flag off and on again never restates a closed month. Nothing is
-// written while the rule has never run (no start record): a month closed then
-// keeps the old rule by the start record's own test. The write is a savepoint
-// of its own: a failed one is undone alone and logged, and the close goes ahead;
-// an error that ended the whole transaction stops the close, before any lock.
+// writeCloseRecord()); from then on that record answers for the closed month
+// (driverRateOnlyApplies()), so switching the flag off, or on again, or moving
+// FROM never restates it. Nothing is written while the rule has never run (no
+// start record): a month closed then keeps the old rule by the start record's
+// own test. A failed write fails the close: the whole close rolls back, before
+// any lock, and the next pass tries again.
 function recordDriverRateOnlyAtClose(period, closedAt) {
-	const start = DRIVER_RATE_ONLY_FROM ? driverRateOnlyStartRecord() : financialsCalc.driverRateOnly.readStart(db);
+	const start = driverRateOnlyStartRecord();
 	if (!start) return;
 	const applied = driverRateOnlyApplies(period);
-	try {
-		db.transaction(() => financialsCalc.driverRateOnly.writeCloseRecord(db, period, { applied, from: DRIVER_RATE_ONLY_FROM || "", closedAt }))();
-	} catch (e) {
-		if (!db.inTransaction) throw e;
-		console.error(`[driver-rate-only] ${period}: whether the daily-rate rule priced it was not recorded at its close: ${e.message}`);
-	}
+	financialsCalc.driverRateOnly.writeCloseRecord(db, period, { applied, from: DRIVER_RATE_ONLY_FROM || "", closedAt });
 }
 
 // Resolve a fixed-pay driver's daily rate for the days that pay in `month`
@@ -19602,7 +19618,8 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 			const days = loadId ? resolver.forLoad({ loadId, settleMonth: assignedMonth, range: { start: inv.week_start, end: inv.week_end }, vid: vidOf(row) }) : null;
 			for (const d of days || []) {
 				ruleDays.add(d);
-				payMonth.set(d, financialsCalc.driverRateOnly.payMonthOf(d, [payMonth.get(d), assignedMonth]));
+				// A load with no Assigned Date pays in the day's own month.
+				payMonth.set(d, financialsCalc.driverRateOnly.payMonthOf(d, [payMonth.get(d), assignedMonth || d.slice(0, 7)]));
 			}
 		}
 		const dayRate = (d) => {
@@ -41441,13 +41458,14 @@ function warnTripWorkDaysFromClosedMonth() {
 }
 warnTripWorkDaysFromClosedMonth();
 // The daily-rate rule at boot (DRIVER_RATE_ONLY_FROM, lib/driver-rate-only.js):
-// stamps its start record the first time it runs (a month closed before then
-// keeps the old rule), names a start record made under another FROM, and gives
-// the notice built like the two above when FROM is at or before the latest
-// closed month.
+// reads its start record (with the flag off too: a month that closed under the
+// rule keeps answering by its close record), stamps it the first time the rule
+// runs (a month closed before then keeps the old rule), names a start record
+// made under another FROM, and gives the notice built like the two above when
+// FROM is at or before the latest closed month.
 function warnDriverRateOnlyFromClosedMonth() {
-	if (!DRIVER_RATE_ONLY_FROM) return;
 	const start = driverRateOnlyStartRecord();
+	if (!DRIVER_RATE_ONLY_FROM) return;
 	if (start.from && start.from !== DRIVER_RATE_ONLY_FROM) {
 		console.warn(`[driver-rate-only] DRIVER_RATE_ONLY_FROM is ${DRIVER_RATE_ONLY_FROM}, but the rule first ran with ${start.from} (${start.startedAt}). Never change DRIVER_RATE_ONLY_FROM once the rule has run.`);
 	}
@@ -59459,13 +59477,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// months): each truck gets the sum of its own days' rates, and its
 				// segments, instead of a share by day count.
 				const dayRates = det.payType === "percentage" ? null : driverDayRates[driver] || null;
+				const rateOfDay = dayRates ? dayRateOf(driver, payStructures[driver] || { payType: "fixed", payPercentage: 0 }) : null;
 				for (const unit of Object.keys(weight)) {
 					if (!unit || !(weight[unit] > 0)) continue;
 					let pay = det.totalPay * weight[unit] / whole;
 					let dailyRate = det.dailyRate;
 					let rates = null;
 					if (dayRates) {
-						const rateOfDay = dayRateOf(driver, payStructures[driver] || { payType: "fixed", payPercentage: 0 });
 						const list = [...daysOn[unit]].map((d) => dayRates.get(d) || rateOfDay(d));
 						const segments = financialsCalc.driverRateOnly.rateSegments(list);
 						pay = segments.reduce((c, s) => c + Math.round(s.days * s.rate * 100), 0) / 100;
@@ -61877,6 +61895,7 @@ app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossO
 			return { relinkedRows, unfrozen };
 		});
 		const { relinkedRows: relinked, unfrozen } = reopenTx();
+		forgetDriverRateOnlyMonths(); // a month reopened: the daily-rate rule's answers per month are read again
 
 		logAudit(req, "period_reopen", "period", period,
 			`REOPENED ${period} (${relinked} owed row(s) re-linked to live earnings; ${unfrozen} frozen Financials item(s) released; ${diverted.c} redirected receipt(s) left in place): ${reason}`);
@@ -62551,6 +62570,8 @@ async function finalizePeriods(periods, actor) {
 	} catch (e) {
 		if (!(e instanceof CloseRetry)) throw e;
 		outcome = { retry: true, reason: "changed" };
+	} finally {
+		forgetDriverRateOnlyMonths(); // a month closed: the daily-rate rule's answers per month are read again
 	}
 	if (outcome.retry) {
 		console.warn(`[period-close] ${toClose.join(", ")} not closed: ${outcome.reason === "closed" ? "another close locked one of them first" : "their figures changed while they were being computed; the next pass recomputes"}.`);
