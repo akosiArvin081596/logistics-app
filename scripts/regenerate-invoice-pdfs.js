@@ -20,6 +20,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const { google } = require("googleapis");
 const { renderPolicy } = require("../lib/policy-renderer");
+const { providerAddressLine, invoiceDateFromStamp } = require("../lib/invoice-header");
 
 // The sheet is always named (lib/sheet-id.js): there is no default, so a run
 // never reaches the production sheet unless the command says so.
@@ -150,15 +151,16 @@ async function regenerate(db, sheets, invoice) {
 	const driverRow = db.prepare(
 		"SELECT address, city, state, zip, phone, cell, pay_type, pay_percentage FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?)"
 	).get(driverName);
-	const providerAddress = driverRow
-		? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
-		: "";
+	const providerAddress = driverRow ? providerAddressLine(driverRow) : "";
 	const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
 	const payType = (driverRow?.pay_type || "fixed").toLowerCase() === "percentage" ? "percentage" : "fixed";
 	const payPercentage = Math.max(0, Math.min(100, Number(driverRow?.pay_percentage || 0)));
 
 	const createdAt = db.prepare("SELECT datetime(created_at) AS c FROM invoices WHERE id = ?").get(id).c;
-	const submissionDate = new Date(createdAt + "Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+	// The day it was created in APP_TIMEZONE, as the app dates a new invoice, not
+	// in this process's zone (UTC on the VPS, where 8 PM Eastern is already
+	// tomorrow). The template prints its weekday beside it.
+	const submissionDate = invoiceDateFromStamp(createdAt);
 	const fmtWeekDate = (s) =>
 		new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 

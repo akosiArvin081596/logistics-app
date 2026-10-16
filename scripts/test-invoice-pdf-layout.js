@@ -114,18 +114,20 @@ function grows(html, label) {
 	if (/\bstyle="[^"]*\bwidth\s*:/.test(s.attrs)) return `"${label}" has an inline width`;
 	return "";
 }
-// One CSS rule's body, by its exact selector.
+// One CSS rule's body, by its exact selector at the start of a line (so
+// ".from-cell .fill {" is never read as ".fill {").
 function rule(html, selector) {
 	const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const m = new RegExp(`(?:^|[\\s}])${esc}\\s*\\{([^}]*)\\}`).exec(html);
+	const m = new RegExp(`(?:^|\\n)[ \\t]*${esc}[ \\t]*\\{([^}]*)\\}`).exec(html);
 	return m ? m[1] : "";
 }
 // Every selector list a declaration appears under, joined: "does any rule give
 // <selector> this declaration?".
 function declares(html, selector, declaration) {
+	const css = html.replace(/\/\*[\s\S]*?\*\//g, "");
 	const re = /([^{}]+)\{([^}]*)\}/g;
 	let m;
-	while ((m = re.exec(html))) {
+	while ((m = re.exec(css))) {
 		const selectors = m[1].split(",").map((s) => s.trim());
 		if (selectors.includes(selector) && m[2].includes(declaration)) return true;
 	}
