@@ -7,21 +7,28 @@
  *
  * The planned switch, a money flag like the others: DRIVER_RATE_ONLY_ENABLED
  * (true/1/yes/on; off by default) and DRIVER_RATE_ONLY_FROM=YYYY-MM, the first
- * month the rule applies to. Months before FROM, and every closed month, keep
- * the rate they were paid at (the driver's, else the truck's, else $250). The
- * flag on without a month leaves the rule off with one warning, and a FROM at
- * or before the latest closed month is named in a warning at boot.
+ * month the rule applies to. A day's month is the month it pays in: the
+ * Assigned month of its load (the earliest, when several loads pay the day),
+ * else the day's own month, on the invoice as in the ledger. Months before
+ * FROM, and a month already closed when the rule first ran, keep the rate they
+ * were paid at (the driver's, else the truck's, else $250). The flag on
+ * without a month leaves the rule off with one warning, and a FROM at or
+ * before the latest closed month is named in a warning at boot.
  *
  * Written before the fix. A case whose title ends in "Base: ..." fails on main,
- * where resolveDailyRate() falls back to the truck's rate; the controls (C1-C4)
+ * where resolveDailyRate() falls back to the truck's rate; the controls (C1-C6)
  * pin what must not move and pass on main and after the fix.
  *
  * The pay paths, as scripts/lib/money-plans-world.js lifts them out of
- * server.js: the weekly invoice (POST /api/invoices/generate), the payout
- * ledger (computeInvestorMonthlyEarnings(), which Financials and the payouts
- * read), the investor view (GET /api/investor) and the Financials month detail
- * (GET /api/financials?month=). D10 runs the planned read-only "what would
- * change" report on a copy of this world's database.
+ * server.js: the weekly invoice (POST /api/invoices/generate) and its late
+ * days, the payout ledger (computeInvestorMonthlyEarnings(), which Financials
+ * and the payouts read), the investor view (GET /api/investor, its all-time
+ * figures and the Fleet Breakdown), the Financials month detail
+ * (GET /api/financials?month=) and the work-days dry run
+ * (GET /api/admin/work-days/dry-run); the Fleet Breakdown's text
+ * (client/src/lib/driverPay.js). D10, D10b and D14 run the planned read-only
+ * "what would change" report on a copy of this world's database. The month-end
+ * guards and the payout-rules dry run are in test-driver-rate-only-guards.js.
  *
  * Made-up data only: investor 5 owns T1 ($150 a day on the truck), T2 ($300)
  * and T3 ($300). Hal Reed has no rate of his own and drives T1; Kim Lowe has
@@ -47,6 +54,9 @@ function findRoot(dir) {
 	return dir;
 }
 const M = require(path.join(findRoot(__dirname), "scripts", "lib", "money-plans-world.js"));
+// The first world's own routes (the invoice routes and the work-days dry run);
+// M.route() calls the routes money-plans-world adds.
+const W = require(path.join(findRoot(__dirname), "scripts", "lib", "work-days-world.js"));
 const { loadRow, et } = M;
 
 const HAL = "Hal Reed";
@@ -61,16 +71,16 @@ const s = (lid, status, wall) => [lid, status, "manual", et(wall), ""];
 // One world: September and October loads for Hal on T1, an October load for
 // Kim on T3 and for Ana on T2. No ELD on any truck, so each load pays the days
 // of its window.
-function world({ env = {}, locks = [], payRates = [], status = [], extraDrivers = [], extraRows = [] } = {}) {
+function world({ env = {}, locks = [], payRates = [], status = [], extraDrivers = [], extraRows = [], rows = null, halRate = 0, now = NOW } = {}) {
 	return M.startWorld({
-		env, locks, payRates, status, now: NOW,
-		drivers: [{ name: HAL, payDaily: 0 }, { name: ANA, payDaily: 350 }, { name: KIM, payDaily: 0 }, ...extraDrivers],
+		env, locks, payRates, status, now,
+		drivers: [{ name: HAL, payDaily: halRate }, { name: ANA, payDaily: 350 }, { name: KIM, payDaily: 0 }, ...extraDrivers],
 		trucks: [
 			{ unit: "T1", driver: HAL, payDaily: 150 },
 			{ unit: "T2", driver: ANA, payDaily: 300 },
 			{ unit: "T3", driver: KIM, payDaily: 300 },
 		],
-		rows: [
+		rows: rows || [
 			loadRow({ id: "H901", driver: HAL, pickup: "2026-09-15 8:00", dropoff: "2026-09-16 18:00", assigned: "2026-09-15", done: "2026-09-16", truck: "T1" }),
 			loadRow({ id: "H902", driver: HAL, pickup: "2026-10-05 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-05", done: "2026-10-07", truck: "T1" }),
 			loadRow({ id: "K901", driver: KIM, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck: "T3" }),
@@ -79,6 +89,45 @@ function world({ env = {}, locks = [], payRates = [], status = [], extraDrivers 
 		],
 	});
 }
+// The investor view's production block (as investor 5).
+async function production(w) {
+	const inv = await M.investorDays(w);
+	return (inv.body && inv.body.production) || {};
+}
+// A stored invoice's paid grid days as [day, total].
+const storedGrid = (w, id, weekEnd) => M.gridDays(JSON.parse(w.db.prepare("SELECT render_data FROM invoices WHERE id = ?").get(id).render_data || "{}"), weekEnd).map((e) => [e.day, e.total]);
+// The week Sat 9/26 - Fri 10/2, and the boundary trip: a September load
+// (Mon-Tue) and a load Assigned Thu 10/1, At Shipper that morning, still in
+// transit when W39 is made (Fri 10/2 20:00 ET) and delivered Mon 10/5.
+const W39 = "2026-10-02";
+const etMs = (wall) => M.etMs(wall);
+function boundaryWorld(env) {
+	return world({
+		env, now: etMs("2026-10-02 20:00"),
+		rows: [
+			loadRow({ id: "Q301", driver: HAL, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+			loadRow({ id: "Q302", driver: HAL, pickup: "2026-10-01 9:00", dropoff: "2026-10-05 14:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+		],
+		status: [
+			s("Q301", "At Shipper", "2026-09-28 08:00"), s("Q301", "Delivered", "2026-09-29 17:00"),
+			s("Q302", "At Shipper", "2026-10-01 10:00"), s("Q302", "In Transit", "2026-10-01 14:00"),
+		],
+	});
+}
+function deliverBoundaryLoad(w) {
+	w.addStatus([s("Q302", "At Receiver", "2026-10-05 11:00"), s("Q302", "Delivered", "2026-10-05 13:00")]);
+	w.setRow("Q302", { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
+	w.clock.ms = etMs("2026-10-09 20:00");
+}
+const TRIP_OCT = { TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-10" };
+// The client's Fleet Breakdown text (an ES module), loaded once.
+let driverPayLib = null;
+async function driverPayText() {
+	if (!driverPayLib) driverPayLib = await import(require("url").pathToFileURL(path.join(M.ROOT, "client", "src", "lib", "driverPay.js")).href);
+	return driverPayLib;
+}
+// The report's rows as plain tuples, for comparing.
+const tuples = (list, keys) => (Array.isArray(list) ? list : []).map((r) => keys.map((k) => (k === "driver" ? norm(String(r[k] || "")) : r[k]))).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
 // A driver's ledger day items as [month, day, cents], sorted.
 async function ledgerDays(w, driver) {
@@ -185,17 +234,107 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		eq("ledger", await ledgerDays(w, NED), [["2026-10", "2026-10-06", 25000]]);
 	});
 
-	await R.test("D10 The read-only report (scripts/driver-rate-only-report.js --from=2026-10) on a copy: lists Hal $150 -> $250 and Kim $300 -> $250 (rate today vs under the rule), not Ana; closed months unchanged; exit 0; the copy unchanged. Base: the script does not exist", async ({ eq, ok }) => {
+	await R.test("D8b Flag on with FROM 2026-09, September closed (10/15) before the rule first ran (10/16): September stays at the truck's $150 on the investor view and the ledger, October is $250. Base: October at $150", async ({ eq }) => {
+		const w = world({ env: { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-09" } });
+		M.lockMonth(w.db, "2026-09", "2026-10-15T05:00:00.000Z");
+		eq("investor view September", await investorMonth(w, HAL, "2026-09"), { dailyRate: 150, totalPay: 300 });
+		eq("investor view October", await investorMonth(w, HAL, "2026-10"), { dailyRate: 250, totalPay: 750 });
+		eq("ledger", (await ledgerDays(w, HAL)).map((x) => [x[0], x[2]]), [["2026-09", 15000], ["2026-09", 15000], ["2026-10", 25000], ["2026-10", 25000], ["2026-10", 25000]]);
+	});
+
+	await R.test("D10 The read-only report (scripts/driver-rate-only-report.js --from=2026-10) on a copy, after the W40 invoices were issued at today's rates: drivers Hal $150 -> $250 and Kim $300 -> $250, not Ana; October driver pay Hal $450 -> $750, Kim $600 -> $500; the issued (non-Draft) W40 invoices whose printed rate differs: Hal +$300, Kim -$100; closed months unchanged; exit 0; the copy unchanged. Base: the script does not exist", async ({ eq, ok }) => {
 		const w = world({ locks: ["2026-09"] });
+		for (const d of [HAL, KIM, ANA]) {
+			const g = await M.generate(w, d, W40);
+			if (g.invoice) w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g.invoice.id);
+		}
 		const copy = M.saveCopy(w, {});
 		const before = M.fileHash(copy.db);
 		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-10", "--names", "--json"]);
 		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
 		eq("exit code", r.code, 0);
-		const list = (r.json && Array.isArray(r.json.drivers) ? r.json.drivers : []).map((d) => [norm(String(d.driver || "")), d.rateToday, d.rateUnderRule]).sort();
-		eq("drivers whose rate changes", list, [[norm(HAL), 150, 250], [norm(KIM), 300, 250]]);
-		eq("closed months unchanged", r.json && r.json.closedMonthsUnchanged, true);
+		const j = r.json || {};
+		eq("drivers whose rate changes", tuples(j.drivers, ["driver", "rateToday", "rateUnderRule"]), [[norm(HAL), 150, 250], [norm(KIM), 300, 250]]);
+		eq("driver months", tuples(j.driverMonths, ["driver", "month", "days", "payNow", "payUnderRule"]), [[norm(HAL), "2026-10", 3, 450, 750], [norm(KIM), "2026-10", 2, 600, 500]]);
+		eq("issued invoices whose printed rate differs", tuples(j.invoices, ["driver", "status", "printedRate", "ruleRate", "difference"]), [[norm(HAL), "Submitted", 150, 250, 300], [norm(KIM), "Submitted", 300, 250, -100]]);
+		eq("closed months unchanged", j.closedMonthsUnchanged, true);
 		eq("the copy is unchanged", M.fileHash(copy.db), before);
+	});
+
+	await R.test("D10b The report refuses --from=2026-09 while September is closed: exit 2, nothing printed as a result. Base: the script does not exist", async ({ eq, ok }) => {
+		const w = world({ locks: ["2026-09"] });
+		const copy = M.saveCopy(w, {});
+		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-09", "--json"]);
+		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
+		eq("exit code", r.code, 2);
+		eq("no result", r.json, null);
+	});
+
+	await R.test("D11 A week straddling FROM (W39, Sat 9/26 - Fri 10/2) is priced by each day's Assigned month: a load Assigned 9/29 (days 9/29-10/1) keeps the truck's $150, including Thu 10/1; a load Assigned 10/2 pays $250; Total Due $700; the ledger files the same days in the same months at the same rates. Base: 10/2 at $150, $600", async ({ eq }) => {
+		const w = world({
+			env: ON,
+			rows: [
+				loadRow({ id: "S901", driver: HAL, pickup: "2026-09-29 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-09-29", done: "2026-10-01", truck: "T1" }),
+				loadRow({ id: "S902", driver: HAL, pickup: "2026-10-02 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-10-02", done: "2026-10-02", truck: "T1" }),
+			],
+		});
+		const inv = await weekly(w, HAL, W39);
+		eq("grid", inv.days, [["2026-09-29", 150], ["2026-09-30", 150], ["2026-10-01", 150], ["2026-10-02", 250]]);
+		eq("Total Due", inv.totalDue, 700);
+		eq("ledger", await ledgerDays(w, HAL), [
+			["2026-09", "2026-09-29", 15000], ["2026-09", "2026-09-30", 15000], ["2026-09", "2026-10-01", 15000], ["2026-10", "2026-10-02", 25000],
+		]);
+	});
+
+	await R.test("D12 Flag on, FROM 2026-10: the investor view's all-time figure prices each day by its month (2 x $150 + 3 x $250 = $1,050, segments [2 days $150, 3 days $250]); the Fleet Breakdown's T1 pay is the same $1,050 with the same segments. Base: 5 x $150 = $750, no segments", async ({ eq }) => {
+		const p = await production(world({ env: ON }));
+		const det = (p.driverPayDetails || {})[norm(HAL)] || {};
+		eq("all-time pay", det.totalPay, 1050);
+		eq("all-time segments", det.rates, [{ days: 2, rate: 150 }, { days: 3, rate: 250 }]);
+		const t1 = (p.perTruckData && p.perTruckData.T1 && p.perTruckData.T1.driverPay) || {};
+		eq("Fleet Breakdown T1 pay", t1.totalPay, 1050);
+		eq("Fleet Breakdown T1 driver segments", (t1.drivers || []).map((d) => [d.totalPay, d.rates]), [[1050, [{ days: 2, rate: 150 }, { days: 3, rate: 250 }]]]);
+	});
+
+	await R.test("D13 The Fleet Breakdown's text for a driver paid at two rates reads \"2 days x $150 + 3 days x $250\" (client/src/lib/driverPay.js). Base: \"5 days x $250\"", async ({ eq }) => {
+		const lib = await driverPayText();
+		eq("text", lib.driverPayBasis({ payType: "fixed", activeDays: 5, dailyRate: 0, totalPay: 1050, rates: [{ days: 2, rate: 150 }, { days: 3, rate: 250 }] }), "2 days x $150 + 3 days x $250");
+	});
+
+	await R.test("D14 The report lists dated-history gaps: Hal's own $150 was set on 10/16 but pay_rate_history reads $0 for 10/1-10/15, days the dated-rate and trip rules would pay at $250 under the rule while the ledger and invoice pay $150. Base: the script does not exist", async ({ eq, ok }) => {
+		const w = world({
+			halRate: 150,
+			payRates: [
+				{ subject: "driver", key: norm(HAL), rate: 0, from: "2026-10-02T03:00:20.000Z" },
+				{ subject: "truck", key: "1", rate: 150, from: "2026-10-02T03:00:20.000Z" },
+				{ subject: "driver", key: norm(HAL), rate: 150, from: "2026-10-16T12:00:00.000Z" },
+			],
+		});
+		const copy = M.saveCopy(w, {});
+		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-10", "--names", "--json"]);
+		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
+		eq("history gaps", tuples(r.json && r.json.historyGaps, ["driver", "from", "to"]), [[norm(HAL), "2026-10-01", "2026-10-15"]]);
+	});
+
+	await R.test("D15 Late days (TRIP_WORK_DAYS, FROM 2026-10, settleLateWorkDays()): W39 is made with the October load in transit; when W40 is made, its Thu 10/1 and Fri 10/2 go onto the W39 Draft at $250 each (an October load), its September days stay $150, and W40's trip days are $250. Base: $150", async ({ eq }) => {
+		const w = boundaryWorld({ ...ON, ...TRIP_OCT });
+		const g39 = await M.generate(w, HAL, W39);
+		eq("W39 made", g39.status, 200);
+		deliverBoundaryLoad(w);
+		const g40 = await weekly(w, HAL, W40);
+		eq("W40 grid", g40.days, [["2026-10-03", 250], ["2026-10-04", 250], ["2026-10-05", 250]]);
+		eq("W39 after the late days", storedGrid(w, g39.invoice.id, W39), [["2026-09-28", 150], ["2026-09-29", 150], ["2026-10-01", 250], ["2026-10-02", 250]]);
+	});
+
+	await R.test("D16 The work-days dry run (GET /api/admin/work-days/dry-run, from 2026-10) prices the days it would add to W39 (Thu 10/1, Fri 10/2 of an October load) at $250 each: $500. Base: $300", async ({ eq }) => {
+		const w = boundaryWorld(ON);
+		const g39 = await M.generate(w, HAL, W39);
+		deliverBoundaryLoad(w);
+		await M.generate(w, HAL, W40);
+		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+		eq("status", r.status, 200);
+		const inv = ((r.body && r.body.perInvoice) || []).find((i) => g39.invoice && i.invoiceNumber === g39.invoice.invoice_number) || null;
+		eq("W39 added days and amount", inv && [inv.addedDays, inv.amountAdded], [["2026-10-01", "2026-10-02"], 500]);
 	});
 
 	await R.test("C1 Control, flag off (also with FROM set and the flag off): Hal at the truck's $150 on the invoice, the ledger and the investor view; Kim at $300", async ({ eq }) => {
@@ -231,6 +370,19 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		const r = await M.route(w, "GET /api/financials", { query: { month: "2026-09" } });
 		const row = ((r.body && r.body.monthDetail && r.body.monthDetail.drivers) || []).find((d) => norm(d.name) === norm(HAL)) || null;
 		eq("September's Hal row", row && { dailyRate: row.dailyRate, pay: row.pay }, { dailyRate: 150, pay: 300 });
+	});
+
+	await R.test("C5 Control, flag off: the investor view's all-time figure and the Fleet Breakdown keep days x one rate (5 x $150 = $750)", async ({ eq }) => {
+		const p = await production(world());
+		const det = (p.driverPayDetails || {})[norm(HAL)] || {};
+		eq("all-time", [det.activeDays, det.dailyRate, det.totalPay], [5, 150, 750]);
+		const t1 = (p.perTruckData && p.perTruckData.T1 && p.perTruckData.T1.driverPay) || {};
+		eq("Fleet Breakdown T1", [t1.totalPay, (t1.drivers || []).map((d) => [d.activeDays, d.dailyRate, d.totalPay])], [750, [[5, 150, 750]]]);
+	});
+
+	await R.test("C6 Control: the Fleet Breakdown's text for one rate is unchanged (\"5 days x $150\")", async ({ eq }) => {
+		const lib = await driverPayText();
+		eq("text", lib.driverPayBasis({ payType: "fixed", activeDays: 5, dailyRate: 150, totalPay: 750 }), "5 days x $150");
 	});
 
 	R.finish();
