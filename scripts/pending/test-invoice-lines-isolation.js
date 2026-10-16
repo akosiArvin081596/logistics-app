@@ -177,7 +177,13 @@ const R = M.createRunner("B20: advance lines on a broker invoice are invoice-onl
 			regionOf("function brokerInvoiceLinesGate(", "the flag gate"),
 		];
 		const BOOT = "if (brokerInvoice.invoiceLines.linesEnabled(process.env)) brokerInvoice.invoiceLines.ensureSchema(db);";
-		const NAMES = /broker_invoice_lines|invoiceLines\b|brokerInvoiceLinesGate|lines_json|gross_total|BROKER_INVOICE_LINES_ENABLED/;
+		// This module's names: the table, its columns, the flag, the gate, and
+		// `invoiceLines` as brokerInvoice's property or the routes' local for it,
+		// never another object's method of that name (R3's
+		// personalExpense.invoiceLines() is the weekly driver invoice's own).
+		const NAMES = /broker_invoice_lines|brokerInvoice\.invoiceLines|(?<![\w.])invoiceLines\b|brokerInvoiceLinesGate|lines_json|gross_total|BROKER_INVOICE_LINES_ENABLED/;
+		ok("(control) the pattern skips another object's invoiceLines()", !NAMES.test("const { lines } = personalExpense.invoiceLines(rows);"));
+		ok("(control) …and catches this module's", NAMES.test("const invoiceLines = brokerInvoice.invoiceLines;") && NAMES.test("invoiceLines.resolveInvoiceLines(db, {"));
 		const stray = lines.map((l, i) => [i, l]).filter(([i, l]) => NAMES.test(l))
 			.filter(([i, l]) => !/^\s*\/\//.test(l) && l !== BOOT && !regions.some(([s, e]) => i >= s && i <= e))
 			.map(([i, l]) => `${i + 1}: ${l.trim().slice(0, 100)}`);

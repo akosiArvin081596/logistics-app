@@ -421,6 +421,7 @@ console.log("\n§4 the approve");
 test("bills the balance due, keeps the line haul, records and stamps the lines, audits the rule", async ({ eq, ok }) => {
 	const h = harness({ ...GMAIL, ...ON });
 	await h.addLine("41000018", ADVANCE);
+	const readsBefore = h.seen.sheetReads;
 	const r = await h.approve("41000018", { lineIds: [1], total: "3000.00" });
 	eq(withErrors("200 via imap", r), [r.status, (r.body || {}).via], [200, "imap"]);
 	const row = h.draft();
@@ -433,7 +434,7 @@ test("bills the balance due, keeps the line haul, records and stamps the lines, 
 	eq("invoice_draft_created is unchanged", (h.seen.audits.find((a) => a.action === "invoice_draft_created") || {}).detail, `${MINTED} → ${DEFAULT_TO} (imap)`);
 	ok("the Gmail draft's message carries the balance", String((h.seen.drafts[0] || {}).html).includes("Balance due $2,350.00 after the $650.00 fuel advance."));
 	ok("the PDF prints the balance", lastHtml(h).includes('<span class="lbl">Balance due*</span><span class="amt">$2,350.00</span>'));
-	eq("one invoice number, one sheet read (the lookup)", [h.seen.minted, h.seen.sheetReads], [1, 1]);
+	eq("one invoice number, one sheet read (the lookup)", [h.seen.minted, h.seen.sheetReads - readsBefore], [1, 1]);
 });
 test("a typed net total with a line → 422 INVOICE_LINE_HAUL_CONFLICT, before any number is minted", async ({ eq }) => {
 	const h = harness({ ...GMAIL, ...ON });
