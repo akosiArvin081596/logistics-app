@@ -49,3 +49,16 @@ export function expensesForLoad(expenses, loadId) {
   if (!Array.isArray(expenses) || loadIdKey(loadId) === '') return []
   return expenses.filter((e) => sameLoadId(expenseLoadId(e), loadId))
 }
+
+// The expenses filed against none of `loadIds`, in their original order: filed
+// with no load, or against a load the list does not hold. A load's page lists
+// only its own (expensesForLoad()), so these were on no screen of the driver
+// app, a Personal receipt with no load included; the Invoices tab lists them.
+// Compared with loadIdKey(), as expensesForLoad() compares, so each receipt is
+// on its load's page or in this list, never both and never neither.
+// scripts/test-personal-expense-driver-receipts.mjs pins it.
+export function expensesOffLoads(expenses, loadIds) {
+  if (!Array.isArray(expenses)) return []
+  const keys = new Set((Array.isArray(loadIds) ? loadIds : []).map(loadIdKey).filter((k) => k !== ''))
+  return expenses.filter((e) => !keys.has(loadIdKey(expenseLoadId(e))))
+}
