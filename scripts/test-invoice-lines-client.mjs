@@ -445,6 +445,25 @@ if (vue && compiler) {
       eq('§7 a wrong Order # pauses the preview', previews().length, 0)
       ok('§7 …and the section is told why', typeof ed.linesPreviewPausedReason === 'string' && ed.linesPreviewPausedReason.length > 10)
     }
+    // A preview answered, then a field pauses the next one: a new selection
+    // must not keep showing the old selection's figures over the paused hint.
+    {
+      const { ed, previews } = await editor()
+      ed.linesAvailable = [LINE, { ...LINE, id: 2, label: 'Cash advance', amount: '$100.00' }]
+      ed.onLinesSelect([1])
+      await sleep(20)
+      eq('§7 (control) the first preview answered', ed.linesSummary && ed.linesSummary.balanceDue, '$1,750.00')
+      ed.form.orderNumber = '#bad'
+      ed.onLinesSelect([1, 2])
+      await sleep(20)
+      eq('§7 a changed selection drops the old figures while the preview is paused', [ed.linesSummary, previews().length], [null, 1])
+      ok('§7 …so the section shows why it is paused', typeof ed.linesPreviewPausedReason === 'string' && ed.linesPreviewPausedReason.length > 10)
+      ed.form.orderNumber = '41000018'
+      ed.onLinesSelect([2])
+      eq('§7 …and a change with the preview running shows no stale figures before its answer', ed.linesSummary, null)
+      await sleep(20)
+      eq('§7 …then the answer\'s', ed.linesSummary && ed.linesSummary.balanceDue, '$1,750.00')
+    }
     // Flag off: the editor is the one it always was.
     {
       const { ed, previews } = await editor({ linesOn: false, to: '' })
