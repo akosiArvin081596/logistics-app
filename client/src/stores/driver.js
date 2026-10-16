@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
 import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
 import { replyLost } from '../lib/saveOutcome'
+import { expensesOffLoads } from '../lib/loadId'
 
 const api = useApi()
 
@@ -141,6 +142,16 @@ export const useDriverStore = defineStore('driver', {
         const hasId = loadIdCol ? !!(l[loadIdCol] || '').trim() : true
         return hasId && completedRe.test((l[statusCol] || '').trim())
       })
+    },
+
+    // The driver's receipts that no load page in his lists (Active, Pending,
+    // History) shows: filed with no load, or against a load those lists don't
+    // hold. The Invoices tab lists them, so every receipt of his is on a screen.
+    // state.expenses is the payload's: his own receipts only (the server's filter).
+    receiptsOffLoads(state) {
+      const loadIdCol = findCol(state.headers.jobTracking, /load.?id|job.?id/i)
+      const listed = [...this.workingLoads, ...this.pendingLoads, ...this.historicalLoads]
+      return expensesOffLoads(state.expenses, loadIdCol ? listed.map((l) => l[loadIdCol]) : [])
     },
 
     hasActiveJob() {

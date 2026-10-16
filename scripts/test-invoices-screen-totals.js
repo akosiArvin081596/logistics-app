@@ -134,6 +134,9 @@ function harness(src) {
 		// Each row's Personal lines (none here; scripts/test-personal-expense-receipts.js
 		// covers them).
 		personalLinesForInvoices: () => new Map(),
+		// Each row's Expenses figure: with no Personal line it is the stored one
+		// (scripts/test-personal-expense-expenses-ref.js covers the rest).
+		invoiceExpensesRefTotals: (rows) => new Map(rows.map((r) => [r.id, r.expenses_total])),
 	};
 	const routeTexts = [liftRoute(src, LIST_ROUTE), liftRoute(src, MANUAL_ROUTE), liftRoute(src, TOTALS_ROUTE, true)].filter(Boolean);
 	new Function(...Object.keys(deps), routeTexts.join("\n"))(...Object.values(deps));

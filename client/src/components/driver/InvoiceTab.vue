@@ -58,6 +58,26 @@
       />
     </div>
 
+    <!-- Receipts no load page shows (filed with no load, or against a load not
+         in the driver's lists), so every receipt of his is on a screen. The card
+         prints a Personal one's line as the server sent it. -->
+    <template v-if="otherReceipts.length">
+      <div class="section-header" style="margin-top: 1rem;">
+        Other Receipts
+        <span class="section-count">{{ otherReceipts.length }}</span>
+      </div>
+      <div class="receipts-note">Receipts not filed under one of your loads.</div>
+      <div class="invoice-list">
+        <ExpenseCard
+          v-for="exp in otherReceipts"
+          :key="exp.id"
+          :expense="exp"
+          @preview="receiptPreview = $event"
+        />
+      </div>
+    </template>
+    <ZoomableImage :src="receiptPreview" alt="Receipt preview" @close="receiptPreview = ''" />
+
     <!-- Invoice action popup -->
     <van-popup v-model:show="showActions" position="bottom" round :style="{ padding: '1rem' }">
       <div v-if="selectedInvoice" class="action-sheet">
@@ -89,7 +109,9 @@ import { useDriverStore } from '../../stores/driver'
 import { useToast } from '../../composables/useToast'
 import { appTimeZone, appToday, isAfterAppTime, satFriWeekOf, shiftYmd } from '../../utils/datetime'
 import InvoiceCard from './InvoiceCard.vue'
+import ExpenseCard from './ExpenseCard.vue'
 import PersonalInvoiceLines from '../shared/PersonalInvoiceLines.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const driverStore = useDriverStore()
 const { show: toast } = useToast()
@@ -131,6 +153,9 @@ const zoneLabel = computed(() => {
 })
 
 const invoices = computed(() => driverStore.invoices || [])
+// The driver's receipts on no load page (the store's receiptsOffLoads).
+const otherReceipts = computed(() => driverStore.receiptsOffLoads || [])
+const receiptPreview = ref('')
 
 function prevWeek() { weekOffset.value++ }
 function nextWeek() { if (weekOffset.value > 0) weekOffset.value-- }
@@ -273,6 +298,10 @@ async function handleSubmit() {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+}
+.receipts-note {
+  font-size: 0.75rem;
+  color: var(--text-dim);
 }
 .action-sheet { text-align: center; }
 .action-title {

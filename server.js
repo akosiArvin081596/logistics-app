@@ -24835,9 +24835,13 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 		// `summary` is the status cards over the rows listed here
 		// (invoiceListSummary()): the Invoices screen shows both and adds nothing.
 		// personal_lines: the Personal lines each carries, with their receipts
-		// (personalLinesForInvoices()); [] for none.
+		// (personalLinesForInvoices()); [] for none. expenses_ref_total: the
+		// Expenses figure the screen shows, a weekly invoice's receipts without
+		// their Personal parts (invoiceExpensesRefTotals()).
 		const personalLines = personalLinesForInvoices(invoices.map((r) => r.id));
 		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));
+		const expensesRef = invoiceExpensesRefTotals(invoices);
+		for (const r of invoices) r.expenses_ref_total = expensesRef.get(r.id);
 		res.json({ invoices, summary: invoiceListSummary(invoices) });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
@@ -25988,6 +25992,40 @@ function personalLinesForInvoices(invoiceIds) {
 				};
 			}));
 		}
+	}
+	return out;
+}
+
+// The Expenses figure the Invoices screen shows for each row ("Expenses (ref)",
+// and its CSV's Expenses column), { invoiceId: dollars } as a Map:
+//   weekly  the receipts total it stored (expenses_total, the week's receipts as
+//           filed) less the Personal part of each of its receipts
+//           (personalExpense.expensesRefTotal()): a Personal amount is the
+//           driver's, not a company cost;
+//   manual  its own expenses_total (its deductions), as stored.
+// Read when the list is served: the stored row never changes, and the figure
+// follows marks, undos and reversals made after the invoice. Only in-place lines
+// count, as in the books (expenseFrom()): a line booked outside a closed month
+// (in_place 0) leaves that month's invoice as recorded. With no in-place line on
+// any of a row's receipts its figure IS its expenses_total.
+function invoiceExpensesRefTotals(rows) {
+	const out = new Map();
+	const list = rows || [];
+	for (const r of list) out.set(r.id, r.expenses_total);
+	if (!list.length || !personalLedgerPresent()) return out;
+	const parts = new Map();
+	for (const p of db.prepare(`SELECT p.expense_id, p.adj_cents, e.amount FROM (${personalExpense.IN_PLACE_SQL}) p
+		JOIN expenses e ON e.id = p.expense_id WHERE p.adj_cents > 0`).all()) {
+		parts.set(p.expense_id, { personalCents: p.adj_cents, receiptCents: personalExpense.receiptCents(p.amount) });
+	}
+	if (!parts.size) return out;
+	for (const r of list) {
+		if (r.is_manual) continue;
+		let ids;
+		try { ids = JSON.parse(r.expense_ids || "[]"); } catch { ids = []; }
+		if (!Array.isArray(ids)) continue;
+		const mine = [...new Set(ids.map(Number))].map((id) => parts.get(id)).filter(Boolean);
+		if (mine.length) out.set(r.id, personalExpense.expensesRefTotal(r.expenses_total, mine));
 	}
 	return out;
 }
