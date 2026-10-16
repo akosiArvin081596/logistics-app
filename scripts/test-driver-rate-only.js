@@ -375,6 +375,53 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		eq("W39 grid", (await weekly(tripCalendarWorld(ON), CAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 250]]);
 	});
 
+	// The rule from November: an October day keeps the truck's $150, a November
+	// day pays $250 (Cal has no rate of his own).
+	const NOV = { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-11" };
+
+	await R.test("D21 The work-days dry run (from 2026-10) prices a day paid by a load with no Assigned Date and by a load Assigned the next month in the day's own month: W39's Thu 10/1 and Fri 10/2 (undated load U951 and load V951 Assigned Nov 2) are October days at $150, $300 added. Before: November days, $500 (the undated load was skipped)", async ({ eq }) => {
+		const w = world({
+			env: NOV, now: etMs("2026-10-02 20:00"),
+			rows: [
+				loadRow({ id: "Q301", driver: CAL, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
+				// The dated load first, so the undated one is weighed second.
+				loadRow({ id: "V951", driver: CAL, pickup: "2026-10-01 9:00", dropoff: "2026-10-02 14:00", assigned: "2026-11-02", done: "", status: "In Transit", truck: "T1" }),
+				loadRow({ id: "U951", driver: CAL, pickup: "2026-10-01 9:00", dropoff: "2026-10-02 14:00", assigned: "", done: "", status: "In Transit", truck: "T1" }),
+			],
+			status: [
+				s("Q301", "At Shipper", "2026-09-28 08:00"), s("Q301", "Delivered", "2026-09-29 17:00"),
+				s("U951", "At Shipper", "2026-10-01 10:00"), s("V951", "At Shipper", "2026-10-01 10:00"),
+			],
+		});
+		const g39 = await M.generate(w, CAL, W39);
+		w.addStatus([s("U951", "Delivered", "2026-10-02 13:00"), s("V951", "Delivered", "2026-10-02 13:00")]);
+		for (const id of ["U951", "V951"]) w.setRow(id, { "Job Status": "Delivered", "Status Update Date": "10/5/2026", "Completion Date": "10/5/2026" });
+		w.clock.ms = etMs("2026-10-09 20:00");
+		const r = await W.route(w, "GET /api/admin/work-days/dry-run", { query: { from: "2026-10", to: "2026-10" } });
+		eq("status", r.status, 200);
+		const inv = ((r.body && r.body.perInvoice) || []).find((i) => g39.invoice && i.invoiceNumber === g39.invoice.invoice_number) || null;
+		eq("W39 added days and amount", inv && [inv.addedDays, inv.amountAdded], [["2026-10-01", "2026-10-02"], 300]);
+	});
+
+	await R.test("D22 The report (--from=2026-11) reads a grid day paid by a load with no Assigned Date and by a load Assigned the next month in the day's own month: an issued week of Sat 10/31 (loads U961 undated and V961 Assigned Nov 2) and Mon 11/2 (V961) at $150 is listed for Mon 11/2 only ($250 under the rule); Sat 10/31 is an October day, before FROM. Before: both days listed", async ({ eq, ok }) => {
+		const w = world({
+			rows: [
+				loadRow({ id: "U961", driver: CAL, pickup: "2026-10-31 8:00", dropoff: "2026-10-31 18:00", assigned: "", done: "2026-10-31", truck: "T1" }),
+				loadRow({ id: "V961", driver: CAL, pickup: "2026-10-31 8:00", dropoff: "2026-11-02 18:00", assigned: "2026-11-02", done: "2026-11-02", truck: "T1" }),
+			],
+		});
+		const days = M.dayGrid("2026-10-31", ["2026-10-31", "2026-11-02"], 150, (d) => (d === "2026-10-31" ? "U961, V961" : "V961"));
+		M.insertInvoice(w.db, {
+			invoice_number: "INV-CB-2026W44-01", driver: CAL, week_start: "2026-10-31", week_end: "2026-11-06", loads_count: 2, rate_per_load: 150,
+			total_earnings: 300, status: "Submitted", render_data: JSON.stringify({ __templateName: "service_invoice", days }),
+		});
+		const copy = M.saveCopy(w, {});
+		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-11", "--names", "--json"]);
+		ok("the script ran", r.code === 0, r.stderr.split("\n")[0]);
+		const listed = ((r.json && r.json.invoices) || []).find((i) => i.invoiceNumber === "INV-CB-2026W44-01") || null;
+		eq("the days listed", listed && listed.days.map((d) => [d.day, d.month, d.printed, d.rule]), [["2026-11-02", "2026-11", 150, 250]]);
+	});
+
 	await R.test("C7 Control, flag off with the trip work-day rule: the same week as today: Sept 30 at Cal's one rate ($300), Oct 1 on the dated path ($0 dated, so the truck's $150)", async ({ eq }) => {
 		eq("W39 grid", (await weekly(tripCalendarWorld({}), CAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 150]]);
 	});
