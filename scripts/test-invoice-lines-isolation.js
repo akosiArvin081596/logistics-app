@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * scripts/pending/test-invoice-lines-isolation.js — B20 Phase 1: advance lines
- * are INVOICE-ONLY.
+ * scripts/test-invoice-lines-isolation.js — B20 Phase 1: advance lines are
+ * INVOICE-ONLY.
  *
- * PENDING until the server.js half of B20 lands (§2 lifts the new add route);
- * then it moves to scripts/. SERVER_JS=<file> runs it against another copy of
- * server.js (scripts/lib/work-days-world.js reads the same variable).
+ * Written before the B20 build (it failed on every case there). SERVER_JS=<file>
+ * runs it against another copy of server.js (scripts/lib/work-days-world.js
+ * reads the same variable).
  *
  * The owner's rule (product-decisions.md, "B20 broker invoice lines"): a Super
  * Admin adds advance lines on the broker invoice; Job Tracking, revenue, driver
@@ -23,7 +23,7 @@
  *      preview, the three invoice-lines routes, their gate and the boot line
  *
  * Every fixture is made up. Pure: no server, no network.
- * Run: node scripts/pending/test-invoice-lines-isolation.js
+ * Run: node scripts/test-invoice-lines-isolation.js
  */
 "use strict";
 

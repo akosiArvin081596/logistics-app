@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * scripts/pending/test-invoice-lines-admin-only.js — the three invoice-lines
- * routes are Super Admin only, and dormant with the flag off.
+ * scripts/test-invoice-lines-admin-only.js — the three invoice-lines routes are
+ * Super Admin only, and dormant with the flag off.
  *
- * PENDING until the server.js half of B20 lands; then its checks join
- * scripts/test-invoice-draft-admin-only.js (whose list of invoice-draft paths
- * grows by these three in the same change) and this file goes.
- * SERVER_JS=<file> runs it against another copy of server.js.
+ * scripts/test-invoice-draft-admin-only.js lists these three among the
+ * invoice-draft paths and checks their role gate the way it checks the others;
+ * this file adds the flag gate behind it. SERVER_JS=<file> runs it against
+ * another copy of server.js.
  *
  *   GET  /api/loads/:loadId/invoice-lines
  *   POST /api/loads/:loadId/invoice-lines
@@ -20,15 +20,14 @@
  * does today. The handler is captured, never run.
  *
  * Pure: no server, no port, no app.db, no network.
- * Run: node scripts/pending/test-invoice-lines-admin-only.js
+ * Run: node scripts/test-invoice-lines-admin-only.js
  */
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 
-// The repo root, found from here, so the file runs from scripts/pending/ now and
-// from scripts/ once it moves.
+// The repo root, found from here (scripts/lib/work-days-world.js's rule).
 function findRoot(start) {
 	for (let d = start; ; d = path.dirname(d)) {
 		if (fs.existsSync(path.join(d, "server.js")) && fs.existsSync(path.join(d, "package.json"))) return d;

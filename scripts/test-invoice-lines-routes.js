@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 /**
- * scripts/pending/test-invoice-lines-routes.js — B20 Phase 1, the routes.
+ * scripts/test-invoice-lines-routes.js — B20 Phase 1, the routes.
  *
- * PENDING: written before the server.js half of B20. It passes once server.js
- * carries the draft-route changes, the three invoice-lines routes and their
- * flag gate; then it moves to scripts/ (scripts/run-unit-tests.js runs the top
- * level only). SERVER_JS=<file> runs it against another copy of server.js.
+ * Written before the server.js half of B20 (it failed on every case there).
+ * SERVER_JS=<file> runs it against another copy of server.js.
  *
  * Each route is lifted from server.js and run over an in-memory database, the
  * way scripts/test-invoice-email-body.js runs the draft routes: Sheets, Drive,
@@ -25,15 +23,14 @@
  *   §6 wiring that no value can prove (order of the guards, the flag reads)
  *
  * Every fixture is made up. Pure: no server, no network.
- * Run: node scripts/pending/test-invoice-lines-routes.js
+ * Run: node scripts/test-invoice-lines-routes.js
  */
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 
-// The repo root, found from here, so the file runs from scripts/pending/ now and
-// from scripts/ once it moves.
+// The repo root, found from here (scripts/lib/work-days-world.js's rule).
 function findRoot(start) {
 	for (let d = start; ; d = path.dirname(d)) {
 		if (fs.existsSync(path.join(d, "server.js")) && fs.existsSync(path.join(d, "package.json"))) return d;

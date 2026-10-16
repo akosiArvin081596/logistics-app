@@ -11,6 +11,10 @@
  *                                           ?dryRun=1 included)
  *   POST /api/loads/:loadId/invoice-preview
  *   GET  /api/loads/:loadId/invoice-draft
+ *   GET  /api/loads/:loadId/invoice-lines, POST …/invoice-lines and
+ *   POST …/invoice-lines/:id/void (B20 advance lines; their flag gate,
+ *        brokerInvoiceLinesGate, sits after the role gate and is pinned by
+ *        scripts/test-invoice-lines-admin-only.js)
  * and the dashboard offers them to nobody else: CompletedLoadsTab.vue shows the
  * Draft Invoice button, the approved-draft line and its Review link to Super
  * Admin only, and asks GET …/invoice-draft for nobody else.
@@ -116,8 +120,8 @@ const passThrough = (req, res, next) => { stubs.calls++; next(); };
 function build(reg) {
 	let captured = null;
 	const app = { [reg.verb]: (p, ...chain) => { captured = { paths: [].concat(p), chain }; } };
-	new Function("app", "requireRole", "refuseCrossSite", "draftInvoiceLimiter", "invoicePreviewLimiter", reg.text)(
-		app, requireRole, passThrough, passThrough, passThrough);
+	new Function("app", "requireRole", "refuseCrossSite", "draftInvoiceLimiter", "invoicePreviewLimiter", "brokerInvoiceLinesGate", reg.text)(
+		app, requireRole, passThrough, passThrough, passThrough, passThrough);
 	if (!captured) fatal(`the lifted registration for ${reg.paths.join(", ")} did not register`);
 	return captured;
 }
@@ -221,11 +225,14 @@ console.log("\n§1  every invoice-draft route admits Super Admin alone");
 // ===========================================================================
 const regs = draftRegs(SRC);
 const paths = regs.flatMap((r) => r.paths.map((p) => `${r.verb.toUpperCase()} ${p}`)).sort();
-ok(`the invoice-draft registrations are exactly the known four paths (${paths.join(", ")})`,
+ok(`the invoice-draft registrations are exactly the known seven paths (${paths.join(", ")})`,
 	paths.join() === [
 		"GET /api/loads/:loadId/invoice-draft",
+		"GET /api/loads/:loadId/invoice-lines",
 		"POST /api/loads/:loadId/draft-bison-invoice",
 		"POST /api/loads/:loadId/draft-invoice",
+		"POST /api/loads/:loadId/invoice-lines",
+		"POST /api/loads/:loadId/invoice-lines/:id/void",
 		"POST /api/loads/:loadId/invoice-preview",
 	].join());
 for (const reg of regs) {
