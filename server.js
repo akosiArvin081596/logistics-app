@@ -6418,6 +6418,15 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_ta_driver ON truck_assignments(dri
 // the assign routes run as before. Only this additive migration runs either way, so
 // turning the flag on needs no other step; rows saved while it was on stay, inert.
 const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_ENABLED ?? "").trim());
+// The driver's own time-off screen (R11 follow-up), default OFF (true/1/yes/on
+// turns it on), and only while DRIVER_AVAILABILITY_ENABLED is on (folded in
+// here, so main off means screen off). On, the driver app's payload
+// (GET /api/driver/:driverName) carries `timeOff`: his own current and upcoming
+// rows (dates, kind, off now or upcoming), never the reason, history or who
+// recorded them; the app shows them as a "My time off" card on the Kit tab and a
+// Loads banner. Off, the payload has no `timeOff` key and the app shows nothing;
+// the rest of R11 runs as before. GET /api/driver/me/availability is not behind it.
+const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_SCREEN_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
@@ -9980,12 +9989,17 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // ============================================================
 // DRIVER AVAILABILITY (R11) — a driver's recorded time off
 // ============================================================
-// Super Admin and Dispatcher record, edit, end early and cancel; a Driver reads
-// his own current and upcoming rows (no reason); Investors get nothing. The
-// rules (dates, the 60-day cap, the Dispatcher's 30-day and end-early limits)
-// are lib/driver-availability.js validateAvailability(), one validator for
-// create and edit; the overlap check runs in the write's own transaction.
-// Rows are cancelled, never deleted. Nothing here reaches pay or money.
+// Super Admin and Dispatcher record, edit (every field, ended rows too), end
+// early and cancel; a Driver reads his own current and upcoming rows (no
+// reason); Investors get nothing. The rules (dates, the 60-day cap, the
+// Dispatcher's 30-day and end-early limits) are lib/driver-availability.js
+// validateAvailability(), one validator for create and edit; the overlap check
+// runs in the write's own transaction. Each staff row says what its viewer may
+// change (`editable`, `limits`) and the list says what a new row may use
+// (`createLimits`): availabilityEditScope() / availabilityEditLimits() /
+// availabilityCreateLimits() restate the validator for the panel, and the
+// validator still decides every write. Rows are cancelled, never deleted.
+// Nothing here reaches pay or money.
 
 // The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
 // request moves on as if the route were never registered, before any role
@@ -9997,8 +10011,11 @@ function availabilityFlagGate(req, res, next) {
 	return next();
 }
 
-// One stored row as the staff screens get it.
-function availabilityRowView(r, todayKey) {
+// One stored row as the staff screens get it, with what `viewer` (the session
+// user) may change on it: `editable` "full" | "end_early" | "none" and `limits`
+// { fromMin, toMin, toMax, maxDays } (null on "none").
+function availabilityRowView(r, todayKey, viewer) {
+	const scope = { todayKey, isSuperAdmin: !!viewer && viewer.role === "Super Admin" };
 	return {
 		id: r.id,
 		directoryId: r.directory_id,
@@ -10012,6 +10029,8 @@ function availabilityRowView(r, todayKey) {
 		cancelledAt: r.cancelled_at || null,
 		cancelledBy: r.cancelled_by || null,
 		status: r.cancelled_at ? "cancelled" : r.to_date < todayKey ? "past" : r.from_date > todayKey ? "upcoming" : "current",
+		editable: driverAvailability.availabilityEditScope(r, scope),
+		limits: driverAvailability.availabilityEditLimits(r, scope),
 	};
 }
 
@@ -10060,15 +10079,21 @@ function availabilityAttempt(body) {
 	return ["kind", "from", "to"].map((k) => `${k} ${auditText(b[k], 20) || "-"}`).join(", ");
 }
 
-// GET /api/drivers-directory/:id/availability — one driver's rows, newest first.
+// GET /api/drivers-directory/:id/availability — one driver's rows, newest first,
+// each with what the caller may change, and `createLimits` for a new row.
 app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const id = Number(req.params.id);
 		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
 		if (!dir) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
+		const user = req.session.user;
 		const today = appTodayKey();
 		const rows = db.prepare("SELECT * FROM driver_availability WHERE directory_id = ? ORDER BY from_date DESC, id DESC").all(id);
-		res.json({ directoryId: dir.id, driver: dir.driver_name, today, rows: rows.map((r) => availabilityRowView(r, today)) });
+		res.json({
+			directoryId: dir.id, driver: dir.driver_name, today,
+			createLimits: driverAvailability.availabilityCreateLimits({ todayKey: today, isSuperAdmin: user.role === "Super Admin" }),
+			rows: rows.map((r) => availabilityRowView(r, today, user)),
+		});
 	} catch (err) {
 		console.error("[availability] list failed:", err.message);
 		res.status(500).json({ error: "This driver's time off could not be read." });
@@ -10109,7 +10134,7 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 			return res.status(409).json(availabilityOverlapBody(dir.driver_name, outcome.clash));
 		}
 		notifyChange("drivers");
-		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today) });
+		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user) });
 	} catch (err) {
 		console.error("[availability] create failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -10133,15 +10158,17 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
 		const { kind, from, to, reason } = v.value;
-		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && reason === String(row.reason || "");
+		const reasonChanged = reason !== String(row.reason || "");
+		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && !reasonChanged;
 		const outcome = db.transaction(() => {
 			const clash = availabilityOverlap(row.directory_id, row.id, from, to);
 			if (clash) return { clash };
 			if (!unchanged) {
 				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
 					.run(kind, from, to, reason, new Date().toISOString(), row.id);
+				// That the reason changed, never the reason itself (as the create line).
 				logAudit(req, "driver_availability_update", "driver", String(row.directory_id),
-					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})`);
+					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}`);
 			}
 			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id) };
 		})();
@@ -10151,7 +10178,7 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 			return res.status(409).json(availabilityOverlapBody(name, outcome.clash));
 		}
 		if (!unchanged) notifyChange("drivers");
-		res.json({ success: true, row: availabilityRowView(outcome.row, today), ...(unchanged ? { unchanged: true } : {}) });
+		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(unchanged ? { unchanged: true } : {}) });
 	} catch (err) {
 		console.error("[availability] update failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -10180,29 +10207,47 @@ app.post("/api/driver-availability/:id/cancel", availabilityFlagGate, requireRol
 				`${row.directory_name}: off ${row.from_date}..${row.to_date} (${row.kind}) cancelled`);
 		})();
 		notifyChange("drivers");
-		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today) });
+		res.json({ success: true, row: availabilityRowView(db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id), today, user) });
 	} catch (err) {
 		console.error("[availability] cancel failed:", err.message);
 		res.status(500).json({ error: "The time off could not be cancelled." });
 	}
 });
 
-// GET /api/driver/me/availability — the signed-in driver's own current and
-// upcoming time off, read-only, without the reason. Two path segments under
-// /api/driver/, so `/api/driver/:driverName` can never capture it.
-app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
+// One driver's own current and upcoming time off, as a driver may see it:
+// { today, rows: [{ id, kind, from, to, status: "current" | "upcoming" }] },
+// never the reason, the directory id or who recorded a row. `name` is matched
+// through normalizeDriverName() against each directory row's CURRENT name
+// (driverAvailabilityByName(), the lookup dispatch and the sweep use), so two
+// legacy directory rows whose names normalize alike give their rows combined.
+// A blank name has none. A failed read gives { today, rows: [], error: true }
+// with one logged error, so a caller never fails on it. Callers sit behind
+// DRIVER_AVAILABILITY_ENABLED (the me route below, and the driver app's payload
+// behind DRIVER_TIME_OFF_SCREEN_ENABLED, which folds it in).
+function driverOwnTimeOff(name, todayKey) {
+	let today = todayKey || "";
 	try {
-		const today = appTodayKey();
-		const me = normalizeDriverName(req.session.user.driverName);
-		const rows = me ? driverAvailabilityByName(today).get(me) || [] : [];
-		res.json({
+		if (!today) today = appTodayKey();
+		const key = normalizeDriverName(name);
+		const rows = key ? driverAvailabilityByName(today).get(key) || [] : [];
+		return {
 			today,
 			rows: rows.map((r) => ({ id: r.id, kind: r.kind, from: r.from_date, to: r.to_date, status: r.from_date > today ? "upcoming" : "current" })),
-		});
+		};
 	} catch (err) {
-		console.error("[availability] driver view failed:", err.message);
-		res.status(500).json({ error: "Your time off could not be read." });
+		console.error("[availability] driver's own time off could not be read:", err.message);
+		return { today, rows: [], error: true };
 	}
+}
+
+// GET /api/driver/me/availability — the signed-in driver's own current and
+// upcoming time off, read-only, without the reason; 500 when it can't be read.
+// Two path segments under /api/driver/, so `/api/driver/:driverName` can never
+// capture it.
+app.get("/api/driver/me/availability", availabilityFlagGate, requireRole("Driver"), (req, res) => {
+	const own = driverOwnTimeOff(req.session.user.driverName);
+	if (own.error) return res.status(500).json({ error: "Your time off could not be read." });
+	res.json({ today: own.today, rows: own.rows });
 });
 
 // GET /api/driver-availability — every driver's current and upcoming time off
@@ -42621,6 +42666,11 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			profilePictureUrl,
 			driverDirectoryId,
 			...(Object.keys(diagnostic).length ? { diagnostic } : {}),
+			// The driver's own time off (R11 follow-up), only while the screen
+			// sub-flag is on: a non-Super-Admin's rows by his SESSION's name,
+			// never the URL's; a Super Admin's by the URL's. The only availability
+			// read in this route (scripts/test-driver-availability-guards.js).
+			...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName) } : {}),
 		});
 	} catch (error) {
 		console.error("Error fetching driver data:", error.message);

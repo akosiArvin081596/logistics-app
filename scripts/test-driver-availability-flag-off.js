@@ -17,10 +17,13 @@
 //   §3 the ELD sweep opens the stale alert for #91
 //   §4 GET /api/dashboard, GET /api/trucks and GET /api/drivers-directory carry
 //      no offUntil / DriverOffUntil / OffFrom / OffTo key at all
+//   §4b the driver app's payload (GET /api/driver/:driverName) answers 200 with
+//      his loads and no `timeOff` key, though DRIVER_TIME_OFF_SCREEN_ENABLED is
+//      set: the driver's time-off screen works only while the main flag is on
 //   §5 the tables (the time off and its "Assign anyway" confirmations) are
 //      dropped under the running server, and the five assign routes, the
-//      sweep, those three responses and the directory delete still answer: no
-//      flag-off path touches either
+//      sweep, those three responses, the driver app's payload and the directory
+//      delete still answer: no flag-off path touches either
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js). On a server.js without the table, the
@@ -62,8 +65,13 @@ const assign = (w, driver, n) => [
 	["POST /api/data", () => w.call("POST", "/api/data", { user: USERS.sa, body: { values: W.jtRow({ id: `78${n}0`, driver, pickup: "10/16/2026", dropoff: "10/17/2026", status: "Dispatched" }) } })],
 ];
 
+// The driver app's payload for Hollis, as he asks for it.
+const page = (w) => w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.driver });
+const pageSays = (r) => [r.status, Array.isArray(r.body && r.body.loads) && r.body.loads.length > 0, !!r.body && "timeOff" in r.body];
+
 (async () => {
-	const w = await W.startWorld({ flag: false });
+	// The screen sub-flag is set; without the main flag it must do nothing.
+	const w = await W.startWorld({ flag: false, env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
 	let seeded = false;
 	try {
 		w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at)
@@ -127,6 +135,14 @@ const assign = (w, driver, n) => [
 			}
 		});
 
+		section("§4b the driver app's payload, with the screen sub-flag set");
+		await R.guard("§4b", async () => {
+			eq("§4b.0 the world serves the payload route", w.found.includes("driverPage"), true);
+			eq("§4b.1 GET /api/driver/:driverName as the driver: 200 with his loads, no timeOff key", pageSays(await page(w)), [200, true, false]);
+			const admin = await w.call("GET", `/api/driver/${encodeURIComponent("Hollis Renner")}`, { user: USERS.sa });
+			eq("§4b.2 ...as a Super Admin: 200 with his loads, no timeOff key", pageSays(admin), [200, true, false]);
+		});
+
 		section("§5 the table dropped under the running server");
 		await R.guard("§5", async () => {
 			w.db.exec("DROP TABLE driver_availability; DROP TABLE IF EXISTS driver_availability_confirmations;");
@@ -140,6 +156,7 @@ const assign = (w, driver, n) => [
 			for (const [url, user] of [["/api/dashboard", USERS.sa], ["/api/trucks", USERS.disp], ["/api/drivers-directory", USERS.sa]]) {
 				eq(`§5 GET ${url}: still 200`, (await w.call("GET", url, { user })).status, 200);
 			}
+			eq("§5 GET /api/driver/:driverName: still 200 with his loads, no timeOff key", pageSays(await page(w)), [200, true, false]);
 			eq("§5.2 the directory delete still answers 200", (await w.call("DELETE", `/api/drivers-directory/${DIR.tamsin}`)).status, 200);
 			ok("§5.3 nothing logged an error", !w.logs.some((l) => /driver_availability|no such table/i.test(l)), w.logs.join(" | ").slice(0, 300));
 		});

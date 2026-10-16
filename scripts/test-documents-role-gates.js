@@ -448,6 +448,9 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		personalSummaryForRole: () => null,
 		personalLinesForInvoices: () => new Map(),
 		ONBOARDING_DOCS: [],
+		// The driver's own time-off screen is off here (its subject is
+		// scripts/test-driver-page-role-gate.js §7).
+		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 		console: quiet,
 	};
 	const driverRoute = buildRoute("get", "/api/driver/:driverName", driverDeps);

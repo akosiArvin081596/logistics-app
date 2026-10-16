@@ -10,6 +10,7 @@
 //   responses      GET /api/dashboard, GET /api/trucks
 //   assign         POST /api/dispatch, POST /api/dispatch/reassign,
 //                  PUT /api/data/:rowIndex, PUT /api/load/:loadId, POST /api/data
+//   driver app     GET /api/driver/:driverName (the driver app's payload)
 //   sweep          sweepEldFeedSilence() and eldFeedHealthReport()
 //
 // What stands in for the server's process: a header-driven session
@@ -17,7 +18,8 @@
 // writes in A1 notation, as the API answers them), a clock the test moves
 // (world.clock.ms; "today" is the business day of that instant), and recording
 // stubs for mail, sockets and notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
-// is read from the world's own process.env, as the server reads it at boot.
+// is read from the world's own process.env, as the server reads it at boot, and
+// so is DRIVER_TIME_OFF_SCREEN_ENABLED (pass it in `env`).
 // A route server.js does not have yet is simply not registered, so a request to
 // it answers like any unknown path.
 //
@@ -54,6 +56,7 @@ const ROUTES = {
 	dataPut: ["put", "/api/data/:rowIndex"],
 	loadPut: ["put", "/api/load/:loadId"],
 	dataPost: ["post", "/api/data"],
+	driverPage: ["get", "/api/driver/:driverName"],
 };
 const AVAILABILITY_ROUTES = ["availabilityList", "availabilityCreate", "availabilityEdit", "availabilityCancel", "availabilityMine", "availabilityAll"];
 const ASSIGN_ROUTES = ["dispatch", "reassign", "dataPut", "loadPut", "dataPost"];
