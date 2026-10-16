@@ -996,15 +996,20 @@ const linesPreviewPausedReason = computed(() => {
 // A line ticked or unticked. While any is ticked the Total is the line haul the
 // dryRun derived, so a typed total is put back before the render. An untouched
 // footnote shows the documented default for the lines now ticked at once; the
-// preview's answer then brings the server's own (adoptLines).
+// preview's answer then brings the server's own (adoptLines). A changed
+// selection drops the last answer's figures, which were for other lines: until
+// the server answers, the section says the figures are coming, or why the
+// preview is paused.
 function onLinesSelect(ids) {
-  form.lineIds = Array.isArray(ids) ? ids.slice() : []
+  const picked = Array.isArray(ids) ? ids.slice() : []
+  if (picked.join(',') !== form.lineIds.join(',')) linesSummary.value = null
+  form.lineIds = picked
   if (form.lineIds.length) form.total = str(seeded.value.total)
   if (!edited.value.footnote) {
     const ticked = form.lineIds.map((id) => linesAvailable.value.find((l) => l && l.id === id)).filter(Boolean)
-    const next = footnoteDefaultFor(ticked)
-    form.footnote = next
-    seeded.value = { ...seeded.value, footnote: next }
+    const footnote = footnoteDefaultFor(ticked)
+    form.footnote = footnote
+    seeded.value = { ...seeded.value, footnote }
   }
   schedulePreview({ immediate: true })
 }
