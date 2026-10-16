@@ -76,9 +76,12 @@ const REFUSED = rules.ENABLE_REFUSED && typeof rules.ENABLE_REFUSED === "object"
 const refusal = typeof rules.enableRefusal === "function" ? rules.enableRefusal : () => "enableRefusal() is missing";
 ok("replica-rules exports ENABLE_ALLOWED, ENABLE_REFUSED and enableRefusal()", ALLOWED.length > 0 && Object.keys(REFUSED).length > 0 && typeof rules.enableRefusal === "function");
 ok("...frozen, so nothing at run time adds to them", Object.isFrozen(rules.ENABLE_ALLOWED) && Object.isFrozen(rules.ENABLE_REFUSED));
-for (const name of ["PERSONAL_EXPENSE_DEDUCTIONS_ENABLED", "PAYOUT_RULES_V2_ENABLED", "INVESTOR_LEASE_PAYOUTS_ENABLED", "LEDGER_DAY_ONCE_ENABLED", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "TRIP_WORK_DAYS_ENABLED"]) {
+for (const name of ["PERSONAL_EXPENSE_DEDUCTIONS_ENABLED", "PAYOUT_RULES_V2_ENABLED", "INVESTOR_LEASE_PAYOUTS_ENABLED", "LEDGER_DAY_ONCE_ENABLED", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "TRIP_WORK_DAYS_ENABLED", "BROKER_INVOICE_LINES_ENABLED"]) {
 	eq(`${name} is accepted`, refusal(name), null);
 }
+// B20 advance lines: an allowed flag the app reads in a default-off shape (the
+// generic checks below), and one that needs no first month.
+ok("BROKER_INVOICE_LINES_ENABLED needs no --from-month", !Object.prototype.hasOwnProperty.call(rules.ENABLE_FROM || {}, "BROKER_INVOICE_LINES_ENABLED"));
 for (const name of ALLOWED) eq(`allowlisted ${name} is accepted`, refusal(name), null);
 // The switches that reach outside this machine, by what they reach.
 const OUTBOUND = {
