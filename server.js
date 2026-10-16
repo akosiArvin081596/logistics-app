@@ -49636,13 +49636,19 @@ app.post(
 			// it was edited, its length, and — when the n8n fallback wrote the draft
 			// with the generated message instead — that the edit was not applied.
 			// An applied edit's words are in the Gmail draft itself.
+			// B20: notes on the lines' part of the audit line that are only known later
+			// (a line voided while the draft was made, recordDraft(); the balance
+			// sentence the n8n fallback's own email leaves out). editEmailApplied keeps
+			// the n8n path's answer for the message when the line is rebuilt for them.
+			const lineAuditNotes = [];
+			let editEmailApplied = true;
 			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
 				f === "total"
 					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
 					: f === "emailBody"
 						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
 						: f === "lines"
-							? to
+							? [to, ...lineAuditNotes].join("; ")
 							: `${f}: "${from}" → "${to}"`,
 			).join("; ");
 			// Replaced on the n8n path only, before recordDraft() logs it.
@@ -49653,25 +49659,39 @@ app.post(
 			// never fails the draft. Only called on a real (non-dryRun) success.
 			const recordDraft = (via) => {
 				try {
-					const draftRow = db.prepare(
-						"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-					).run(
-						loadId, invoiceId, invoiceTo.email, recipientSource, billedTotal, effBrokerName, orderNumber, via,
-						(req.session.user && req.session.user.username) || "",
-						editedFields.length ? 1 : 0,
-						editedFields.join(","),
-						// Without the email message, by the audit line's rule: edited_fields
-						// records that it changed, and the text is not kept here.
-						editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
-						totalSource,
-						sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
-						rcTotal > 0 ? fmtMoney(rcTotal) : "",
-						invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
-						notes,
-					);
-					// B20: the printed lines and the line haul on this row, and each line
-					// stamped with the first invoice # that printed it.
-					if (lineSummary) invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId });
+					// The draft row and, with B20 advance lines, its printed lines are ONE
+					// write: a line record that fails takes the row with it, so no draft
+					// row ever stands without the audit rows that follow.
+					const lineRecord = db.transaction(() => {
+						const draftRow = db.prepare(
+							"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+						).run(
+							loadId, invoiceId, invoiceTo.email, recipientSource, billedTotal, effBrokerName, orderNumber, via,
+							(req.session.user && req.session.user.username) || "",
+							editedFields.length ? 1 : 0,
+							editedFields.join(","),
+							// Without the email message, by the audit line's rule: edited_fields
+							// records that it changed, and the text is not kept here.
+							editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
+							totalSource,
+							sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
+							rcTotal > 0 ? fmtMoney(rcTotal) : "",
+							invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
+							notes,
+						);
+						// B20: the printed lines and the line haul on this row, and each
+						// line still active stamped with the first invoice # that printed it.
+						return lineSummary ? invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId }) : null;
+					})();
+					// A line voided after this draft resolved its lines is in the Gmail
+					// draft but carries no invoice #: the answer and the audit line say so.
+					if (lineRecord && lineRecord.voidedIds.length) {
+						for (const id of lineRecord.voidedIds) {
+							draftWarnings.push(`Advance line #${id} was voided while this draft was made; check the Gmail draft.`);
+							lineAuditNotes.push(`line #${id} was voided while this draft was made; check the Gmail draft`);
+						}
+						editDetail = describeEdits(editEmailApplied);
+					}
 					// ⚠️ BYTE-IDENTICAL for the unedited case, deliberately — historical
 					// queries over invoice_draft_created must not change shape. The edit
 					// is a SEPARATE action, per the naming discipline beside logAudit():
@@ -49719,7 +49739,16 @@ app.post(
 				// as not applied. Drop both once the workflow sends emailHtml.
 				if (editedFields.includes("emailBody")) {
 					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
+					editEmailApplied = false;
 					editDetail = describeEdits(false);
+				}
+				// B20: for the same reason the balance due sentence of an invoice with
+				// advance lines is not in this path's email. The PDF it attaches prints
+				// the figures; the answer and the audit line say the sentence is missing.
+				if (lineSummary) {
+					draftWarnings.push("The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.");
+					lineAuditNotes.push("email balance sentence NOT APPLIED (the fallback service used its own message)");
+					editDetail = describeEdits(editEmailApplied);
 				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
