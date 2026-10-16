@@ -32,7 +32,15 @@
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = path.join(__dirname, "..", "..");
+// The repo root, found from here, so the file runs from scripts/pending/ now and
+// from scripts/ once it moves.
+function findRoot(start) {
+	for (let d = start; ; d = path.dirname(d)) {
+		if (fs.existsSync(path.join(d, "server.js")) && fs.existsSync(path.join(d, "package.json"))) return d;
+		if (path.dirname(d) === d) throw new Error(`no repo root above ${start}`);
+	}
+}
+const ROOT = findRoot(__dirname);
 const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
 const SRC = fs.readFileSync(SERVER, "utf8");
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
