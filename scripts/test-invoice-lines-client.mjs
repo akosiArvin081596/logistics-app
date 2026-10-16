@@ -265,7 +265,9 @@ guard('§5', () => {
   })
   const files = walk(rel('client/src'))
   const relOf = (f) => path.relative(ROOT, f).split(path.sep).join('/')
-  const callers = files.filter((f) => /\/invoice-lines\b/.test(fs.readFileSync(f, 'utf8'))).map(relOf).sort()
+  // Comment lines name routes without calling them (the admin-only runner's rule).
+  const code = (f) => fs.readFileSync(f, 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|<!--)/.test(l)).join('\n')
+  const callers = files.filter((f) => /\/invoice-lines\b/.test(code(f))).map(relOf).sort()
   eq('only InvoiceAdvanceLines.vue calls /invoice-lines', callers, [COMPONENT])
   const mounts = files.filter((f) => /<InvoiceAdvanceLines\b/.test(fs.readFileSync(f, 'utf8'))).map(relOf)
   eq('only the invoice editor mounts it (and the editor is Super Admin only)', mounts, [MODAL_REL])

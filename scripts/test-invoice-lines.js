@@ -160,6 +160,41 @@ test("formatCents prints dollars with commas, a minus for a deduction", ({ eq })
 	}
 });
 
+// The server's own text clean-up, lifted from server.js: the module keeps a
+// copy (it requires nothing), and a copy that drifts is how two fields of one
+// invoice come to be cleaned two ways.
+function liftServerCleaners() {
+	const src = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const fnText = (name) => {
+		const at = src.indexOf(`\nfunction ${name}(`);
+		if (at < 0) throw new Error(`no ${name}() in server.js`);
+		let depth = 0;
+		for (let j = src.indexOf("{", at); j < src.length; j++) {
+			if (src[j] === "{") depth++;
+			else if (src[j] === "}" && --depth === 0) return src.slice(at + 1, j + 1);
+		}
+		throw new Error(`unbalanced ${name}()`);
+	};
+	const strip = src.slice(src.indexOf("\nconst EVIDENCE_TEXT_STRIP = ") + 1).split("\n")[0];
+	return new Function(`${strip}\n${fnText("sanitizeEvidenceText")}\n${fnText("sanitizeInvoiceNotes")}\nreturn { EVIDENCE_TEXT_STRIP, sanitizeEvidenceText, sanitizeInvoiceNotes };`)();
+}
+test("the module's text clean-up is server.js's: same strip, same results on a corpus", ({ eq }) => {
+	const S = liftServerCleaners();
+	const { cleanLine, cleanText } = L();
+	const cp = (...c) => String.fromCodePoint(...c);
+	const corpus = ["", "  Fuel advance  ", "Fuel" + cp(9) + "advance", "a" + cp(0x200b) + "b", "x" + cp(0x2028) + "y", "e" + cp(0x301), cp(0x958),
+		cp(0x1f69a) + " truck", "Line one" + cp(13, 10) + "Line two", "soft" + cp(0xad) + "hyphen", cp(0xfeff) + "bom", "r" + cp(0x202e) + "lo", "a".repeat(900)];
+	for (const v of corpus) {
+		for (const max of [40, 80, 200]) {
+			eq(`cleanLine(${JSON.stringify(v).slice(0, 24)}, ${max})`, cleanLine(v, max), S.sanitizeEvidenceText(v, max));
+		}
+		eq(`cleanText(${JSON.stringify(v).slice(0, 24)})`, cleanText(v, 2000), S.sanitizeInvoiceNotes(v, 2000));
+	}
+	const mod = fs.readFileSync(LIB_FILE, "utf8");
+	const mine = mod.slice(mod.indexOf("\nconst TEXT_STRIP = ") + 1).split("\n")[0];
+	eq("the strip pattern is EVIDENCE_TEXT_STRIP's, character for character", mine, `const TEXT_STRIP = ${S.EVIDENCE_TEXT_STRIP.toString()};`);
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 section("§3 a new line's input (POST …/invoice-lines)");
 test("defaults: kind advance, label \"Fuel advance\", blank date, reference and note", ({ eq }) => {

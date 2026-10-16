@@ -301,10 +301,14 @@
             </p>
           </div>
 
-          <!-- 4. Total — the highest-risk field on the form. -->
+          <!-- 4. Total — the highest-risk field on the form. While an advance line
+               is ticked it is the LINE HAUL, read-only: the server bills the balance
+               due from the rate con's or Job Tracking's figure, and a typed total
+               beside a line would take the advance off twice (422
+               INVOICE_LINE_HAUL_CONFLICT). -->
           <div class="idp-field">
             <label class="idp-label" for="idp-total">
-              Total
+              {{ linesLockTotal ? 'Line haul' : 'Total' }}
               <span class="idp-badge" :class="totalBadge.cls">{{ totalBadge.text }}</span>
             </label>
             <input
@@ -317,9 +321,14 @@
               :class="{ 'is-invalid': !!(form.total && fieldErrors.total), 'is-edited': edited.total }"
               :aria-invalid="!!fieldErrors.total"
               :disabled="approving"
+              :readonly="linesLockTotal"
               placeholder="3000.00"
               @input="onFieldInput"
             />
+            <p v-if="linesLockTotal" class="idp-hint">
+              With advance lines on the invoice, the line haul comes from the rate con or Job Tracking, and the
+              balance due is that less the advances. Untick the lines to type a different total.
+            </p>
             <p v-if="fieldErrors.total" class="idp-hint idp-hint-warn">{{ fieldErrors.total }}</p>
             <p v-else-if="pv.needsTotal && !edited.total" class="idp-hint idp-hint-warn">
               No total could be derived from the rate-con or Job Tracking. Type the amount from the
@@ -520,6 +529,26 @@
             </p>
           </div>
 
+          <!-- 8b. Advance lines (B20), only when the dryRun carried them
+               (BROKER_INVOICE_LINES_ENABLED on). The section adds and voids lines
+               through its own routes and ticks which ones print; the figures it
+               shows are the server's last answer. -->
+          <InvoiceAdvanceLines
+            v-if="linesState"
+            :load-id="loadId"
+            :available="linesAvailable"
+            :selected-ids="form.lineIds"
+            :footnote="form.footnote"
+            :footnote-default="str(seeded.footnote)"
+            :summary="linesSummary"
+            :error="linesError"
+            :receipt-warnings="linesReceiptWarnings"
+            :disabled="approving"
+            @update:available="linesAvailable = $event"
+            @update:selected-ids="onLinesSelect"
+            @update:footnote="onFootnoteInput"
+          />
+
           <!-- 9. Subject — read-only and taken verbatim from the server response,
                never re-derived here. The point of showing it is that the subject
                you reviewed is provably the subject that gets sent; a client-side
@@ -599,6 +628,7 @@ import { computed, nextTick, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { useApi } from '../../composables/useApi'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
+import InvoiceAdvanceLines from './InvoiceAdvanceLines.vue'
 import {
   ORDER_NUMBER_MAX, orderNumberError, NOTES_MAX, notesError, notesLength,
   INVOICE_EMAIL_BODY_MAX, emailBodyLength, validateInvoiceEmailBody,
@@ -703,10 +733,12 @@ const badge = computed(() => {
 // untouched server response. The one field whose snapshot moves is emailBody:
 // its baseline is the message generated for the fields as they are NOW, so every
 // render replaces it (adoptEmailMessage).
+// lineIds and footnote are the advance lines' (B20): empty, and never sent,
+// unless the dryRun carried `invoiceLines`.
 const EMPTY_FORM = () => ({
   billToName: '', brokerName: '', total: '',
   invoiceId: '', invoiceDate: '', orderNumber: '', poNumber: '', deliveryDate: '',
-  notes: '', emailBody: '',
+  notes: '', emailBody: '', lineIds: [], footnote: '',
 })
 const form = reactive(EMPTY_FORM())
 const seeded = ref(EMPTY_FORM())
@@ -728,6 +760,9 @@ const seededTotalAmount = computed(() => {
 function seedForm() {
   const p = pv.value
   const t = Number(p.totalAmount)
+  // Advance lines (B20), only when the dryRun carried them: the lines it
+  // printed, and the footnote the server wrote for them.
+  const lines = p.invoiceLines && typeof p.invoiceLines === 'object' ? p.invoiceLines : null
   const next = {
     billToName: str(p.billToName),
     brokerName: str(p.brokerName),
@@ -747,6 +782,8 @@ function seedForm() {
     // The message generated for exactly these values — which is also why Reset,
     // putting the fields back to them, puts the message back to this.
     emailBody: emailBodyText(p.emailBodyDefault),
+    lineIds: lines && Array.isArray(lines.selectedIds) ? lines.selectedIds.filter((id) => Number.isInteger(id)) : [],
+    footnote: str(lines && lines.summary ? lines.summary.footnoteDefault : ''),
   }
   Object.assign(form, next)
   seeded.value = { ...next }
@@ -774,6 +811,9 @@ const edited = computed(() => {
     // "differs from what the server would write" — the badge, and the one case
     // approve sends the text.
     emailBody: str(form.emailBody).trim() !== str(s.emailBody).trim(),
+    // Against the footnote the server wrote for the lines ticked NOW (it moves
+    // with every render, adoptLines), so an untouched footnote follows them.
+    footnote: str(form.footnote).trim() !== str(s.footnote).trim(),
   }
 })
 // A note counts even when it is unedited: one carried over from the last
@@ -915,6 +955,54 @@ const canCopyBrokerToBillTo = computed(
 function copyBrokerToBillTo() {
   form.billToName = form.brokerName.trim()
   schedulePreview()
+}
+
+// --- Advance lines (B20) ------------------------------------------------------
+// Only when the dryRun carried `invoiceLines` (BROKER_INVOICE_LINES_ENABLED on);
+// otherwise nothing here shows, and buildOverrideBody() sends nothing new. The
+// server owns every figure: linesSummary is its last answer (the dryRun's, then
+// each preview's), shown as given. Nothing in this file adds or subtracts money.
+const linesState = computed(() => (pv.value.invoiceLines && typeof pv.value.invoiceLines === 'object' ? pv.value.invoiceLines : null))
+const linesAvailable = ref([])
+const linesSummary = ref(null)
+const linesError = ref(null)
+const linesReceiptWarnings = ref([])
+// The preview's refusals of the ticked lines, shown in the lines section too.
+const LINES_REFUSALS = new Set([
+  'INVOICE_LINE_INVALID', 'INVOICE_LINE_HAUL_CONFLICT', 'INVOICE_BALANCE_INVALID',
+  'INVOICE_LINE_IDS_INVALID', 'INVOICE_FOOTNOTE_INVALID', 'INVOICE_FOOTNOTE_TOO_LONG',
+])
+const linesLockTotal = computed(() => !!linesState.value && form.lineIds.length > 0)
+
+// A line ticked or unticked. While any is ticked the Total is the line haul the
+// dryRun derived, so a typed total is put back before the render.
+function onLinesSelect(ids) {
+  form.lineIds = Array.isArray(ids) ? ids.slice() : []
+  if (form.lineIds.length) form.total = str(seeded.value.total)
+  schedulePreview({ immediate: true })
+}
+function onFootnoteInput(value) {
+  form.footnote = str(value)
+  schedulePreview()
+}
+// A voided line never stays ticked, whatever ticked it (the void itself, or
+// Reset putting back the dryRun's selection).
+watch([linesAvailable, () => form.lineIds], () => {
+  if (!linesState.value) return
+  const active = new Set(linesAvailable.value.filter((l) => l && !l.voided).map((l) => l.id))
+  const kept = form.lineIds.filter((id) => active.has(id))
+  if (kept.length !== form.lineIds.length) onLinesSelect(kept)
+})
+// A render's figures for the ticked lines, and the footnote the server wrote for
+// them: an untouched footnote takes the new one, a typed one is kept.
+function adoptLines(r) {
+  if (!linesState.value) return
+  const s = r && r.invoiceLines && r.invoiceLines.summary ? r.invoiceLines.summary : null
+  linesSummary.value = s
+  linesError.value = null
+  const next = s ? str(s.footnoteDefault) : ''
+  if (!edited.value.footnote) form.footnote = next
+  seeded.value = { ...seeded.value, footnote: next }
 }
 
 // --- Attachment tabs + PDF blob URLs ----------------------------------------
@@ -1086,6 +1174,7 @@ async function runPreview() {
     previewError.value = ''
     previewSubject.value = str(r.subject)
     adoptEmailMessage(r)
+    adoptLines(r)
     previewWarnings.value = Array.isArray(r.warnings) ? r.warnings.filter(Boolean).map(str) : []
     // Adopt the peeked number only if we never had one (an older cached dryRun).
     // Refreshing it per render would make the divergence badge flicker.
@@ -1096,6 +1185,10 @@ async function runPreview() {
     // useApi maps a caller abort to code 'ABORT', distinct from its own 'TIMEOUT'.
     // We aborted this one on purpose; a newer render is already running.
     if (e && e.code === 'ABORT') return
+    if (linesState.value && e && LINES_REFUSALS.has(e.code)) {
+      linesError.value = { code: e.code, message: e.message }
+      linesSummary.value = null
+    }
     previewError.value = (e && e.message) || 'Could not render the preview.'
   } finally {
     // Only the newest request owns the flag — an older one settling later must
@@ -1230,6 +1323,16 @@ function buildOverrideBody({ forPreview = false } = {}) {
   // Strict boolean: the server ignores anything that is not true/false and falls
   // back to deriving, so a "false" STRING would silently flip it back on.
   if (forPreview && typeof pinnedIsBison.value === 'boolean') body.isBison = pinnedIsBison.value
+
+  // Advance lines (B20): only when the dryRun carried them. The ticked lines are
+  // ALWAYS named on both bodies, [] included: an absent key means "every active
+  // line" to the server, which a line saved after the preview would join. The
+  // footnote goes only once edited, so an untouched one is the server's default
+  // for the lines it prints. Never an amount: the server prints its own.
+  if (pv.value.invoiceLines) {
+    body.lineIds = form.lineIds.slice()
+    if (edited.value.footnote) body.footnote = form.footnote
+  }
   return body
 }
 
@@ -1326,6 +1429,12 @@ watch(
       previewSubject.value = str(pv.value.subject)
       emailSignatureHtml.value = str(pv.value.emailSignatureHtml)
       emailBodyRefusal.value = null
+      // The advance lines exactly as the dryRun answered (nothing when it had none).
+      const ls = linesState.value
+      linesAvailable.value = ls && Array.isArray(ls.available) ? ls.available.slice() : []
+      linesSummary.value = ls && ls.summary ? ls.summary : null
+      linesError.value = ls && ls.error ? ls.error : null
+      linesReceiptWarnings.value = ls && Array.isArray(ls.receiptWarnings) ? ls.receiptWarnings.slice() : []
     } else if (!isOpen) {
       revokeBlobs()
     }
