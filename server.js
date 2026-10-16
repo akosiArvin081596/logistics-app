@@ -56111,9 +56111,13 @@ async function approachStopsFor(loadId, pickupLat, pickupLng) {
 
 	const fix = db.prepare(`SELECT latitude, longitude, location_date_ms FROM routemate_telemetry
 		WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vid);
+	// Nor a fix the device took before it was linked to this truck (B11,
+	// lib/eld-position.js): it was taken on another vehicle, and the billed
+	// Routes and Places calls below would search around that one.
 	const fresh = fix && fix.location_date_ms
 		&& Date.now() - fix.location_date_ms < 6 * 60 * 60 * 1000
-		&& Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude);
+		&& Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude)
+		&& !eldPosition.fixPredatesLink(fix.location_date_ms, eldDeviceLinkedSinceMs(truck.id, vid));
 	if (!fresh) return [];
 
 	const awayMi = geolib.getDistance(

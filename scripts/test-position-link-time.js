@@ -26,6 +26,8 @@
  *      distance, ETA and verdict empty; a fresher fix is routed as before
  *   §6 GET /api/locations/trail: no point from before the link; a last point
  *      over 2 hours old is not routed from (the planned lane is)
+ *   §7 approachStopsFor() (fuel stops on the run to the shipper, billed Routes
+ *      and Places calls): never searched around a fix from before the link
  *
  * The routes are lifted whole from server.js (scripts/lib/server-lift.js), with
  * the shipped eld_device_assignments DDL and telemetry indexes, and run against
@@ -88,8 +90,10 @@ const ROUTES = {
 const PROVIDED = [
 	"app", "db", "getSheets", "SPREADSHEET_ID", "getRoute", "geolib", "requireRole",
 	"driverPositionLimiter", "trackPublicLimiter", "findTruckForDriverStamp", "computeStatusPhases", "geocodeReverse",
+	"getJobTrackingCached", "poiFuelStops", "GOOGLE_MAPS_API_KEY",
 ];
 const lifted = closure(SRC, {
+	roots: ["approachStopsFor"],
 	routes: Object.values(ROUTES),
 	provided: PROVIDED,
 	denied: ["server", "io", "transporter", "sendEmail"],
@@ -154,6 +158,7 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		routeCalls.push([from, to]);
 		return { points: [{ latitude: from.latitude, longitude: from.longitude }, { latitude: to.latitude, longitude: to.longitude }], distanceMiles: 321.5, durationMin: 300 };
 	};
+	const poiCalls = [];
 	const handlers = {};
 	const register = (p, ...h) => { for (const one of [].concat(p)) handlers[one] = h[h.length - 1]; };
 	const deps = {
@@ -161,15 +166,19 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		requireRole: () => (req, res, next) => next(), driverPositionLimiter: null, trackPublicLimiter: null,
 		findTruckForDriverStamp: () => ({ id: TRUCK_ID, routemate_vehicle_id: DEVICE, unit_number: "LogisX-#901" }),
 		computeStatusPhases: () => [], geocodeReverse: async () => "",
+		getJobTrackingCached: async () => ({ headers: HEADERS, data: [Object.fromEntries(HEADERS.map((h, i) => [h, row[i]]))] }),
+		poiFuelStops: { findFuelStopsAlongRoute: async (o) => { poiCalls.push(o); return [{ name: "Stop 1", dieselPrice: 3.49, aboutMilesFromRoute: 1 }]; } },
+		GOOGLE_MAPS_API_KEY: "test-key",
 	};
-	new Function(...PROVIDED, "require", lifted.text)(...PROVIDED.map((k) => deps[k]), appRequire);
+	const fns = new Function(...PROVIDED, "require", `${lifted.text}\nreturn { approachStopsFor };`)(...PROVIDED.map((k) => deps[k]), appRequire);
 	const call = async (route, req) => {
 		const res = { statusCode: 200, body: null, setHeader() {}, set() { return this; }, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
 		await handlers[route]({ params: {}, query: {}, body: {}, headers: {}, ...req }, res);
 		return res;
 	};
 	return {
-		fixMs, routeCalls,
+		fixMs, routeCalls, poiCalls,
+		approach: () => fns.approachStopsFor("T-200", PICKUP.lat, PICKUP.lng),
 		latest: async () => {
 			const r = await call("/api/locations/latest", { session: { user: { role: "Super Admin", username: "admin_test" } } });
 			return { res: r, loc: ((r.body && r.body.locations) || []).find((l) => l.driver === DRIVER) || null };
@@ -351,6 +360,27 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		const r = await w.trail();
 		const lats = ((r.body && r.body.trail) || []).map((p) => p.latitude);
 		ok("§6 a seed row: the trail before it is kept", JSON.stringify(lats) === JSON.stringify([AWAY.lat, NEAR.lat]), lats);
+	}
+
+	// ══ §7 fuel stops on the run to the shipper ══════════════════════════════
+	console.log("§7 approachStopsFor()");
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR }], link: { ago: 30 * MIN, by: "admin_test" }, status: "Dispatched" });
+		const stops = await w.approach();
+		ok("§7 a fix taken before the link (inside the 6-hour window): no stops, and no Routes or Places call",
+			Array.isArray(stops) && stops.length === 0 && w.routeCalls.length === 0 && w.poiCalls.length === 0, [stops, w.routeCalls, w.poiCalls.length]);
+	}
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: AWAY }, { ago: 10 * MIN, at: NEAR }], link: { ago: 30 * MIN, by: "admin_test" }, status: "Dispatched" });
+		const stops = await w.approach();
+		ok("§7 a fix after the link: stops searched from it, as before",
+			stops.length === 1 && w.routeCalls.length === 1 && fromFix(w.routeCalls[0], NEAR) && w.poiCalls.length === 1 && w.poiCalls[0].originLat === NEAR.lat,
+			[stops.length, w.routeCalls, w.poiCalls.length]);
+	}
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR }], status: "Dispatched" });
+		const stops = await w.approach();
+		ok("§7 no link row: stops searched from the fix, as before", stops.length === 1 && w.routeCalls.length === 1 && fromFix(w.routeCalls[0], NEAR), w.routeCalls);
 	}
 })().then(() => {
 	if (failures.length) {
