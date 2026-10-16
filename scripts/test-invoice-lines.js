@@ -711,6 +711,16 @@ test("twenty long lines: the 1000-character audit cap never cuts the balance due
 	const capped = `10162026-1 load 41000017 — ${detail}`.slice(0, 1000);
 	ok("the balance due survives the cap", capped.includes("balance due $2,200.00"));
 	ok("…ahead of the first line", detail.indexOf("balance due") < detail.indexOf("#1 "));
+	// The route's later notes (a line voided mid-draft, the fallback's email)
+	// sit right after the figures, so the cap cannot trim them either.
+	const NOTE = "line #3 was voided while this draft was made; check the Gmail draft";
+	const withNote = `10162026-1 load 41000017 — ${L().auditDraftDetail({ ...SUMMARY, items, advancesCents: 20000, balanceCents: 220000, footnote: "f".repeat(500), footnoteDefault: "" }, [NOTE])}`;
+	ok("a note survives the cap", withNote.slice(0, 1000).includes(NOTE));
+});
+test("the route's notes go after the figures, before the lines", ({ eq }) => {
+	eq("two notes", L().auditDraftDetail(SUMMARY, ["note one", "note two"]),
+		"lines: line haul $2,400.00, less advances $650.00, balance due $1,750.00 (INVOICE ONLY — Job Tracking Payment unchanged); note one; note two; items: #1 Fuel advance $650.00");
+	eq("no notes is the plain text", L().auditDraftDetail(SUMMARY, []), L().auditDraftDetail(SUMMARY));
 });
 test("the n8n fallback's fields: the reviewed lines and the balance; nothing a sheet could read as a formula", ({ eq, ok }) => {
 	const fields = L().n8nFields(SUMMARY);

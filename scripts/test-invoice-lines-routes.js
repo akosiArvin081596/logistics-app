@@ -166,7 +166,7 @@ const BALANCE_NOT_APPLIED_WARNING =
 	"The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.";
 
 // The routes over a fresh in-memory database.
-function harness(env = {}, { closedMonths = [], duringDraft = null } = {}) {
+function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudits = [] } = {}) {
 	const Lf = lifted();
 	const db = new Database(":memory:");
 	db.exec(Lf.createSql);
@@ -212,7 +212,11 @@ function harness(env = {}, { closedMonths = [], duringDraft = null } = {}) {
 		invoiceIdAlreadyUsed: fn("invoiceIdAlreadyUsed", { db }),
 		renderHtmlToPdf: async (html) => { seen.html.push(String(html)); return Buffer.from("%PDF-1.4 invoice"); },
 		safeAttachmentName: S.safeAttachmentName,
-		logAudit: (req, action, entity, id, detail) => seen.audits.push({ action, entity, id, detail }),
+		// `failingAudits` names actions whose audit write throws.
+		logAudit: (req, action, entity, id, detail) => {
+			if (failingAudits.includes(action)) throw new Error("audit write failed (test)");
+			seen.audits.push({ action, entity, id, detail });
+		},
 		sanitizeEvidenceText: S.sanitizeEvidenceText,
 		// `duringDraft(db)` runs while the Gmail draft is being written: what a
 		// second editor could do between the approve's checks and its record.
@@ -527,8 +531,8 @@ test("the n8n fallback writes its own email: the answer warns the balance senten
 	const r = await h.approve("41000018", { lineIds: [1] });
 	eq(withErrors("via n8n", r), (r.body || {}).via, "n8n");
 	eq("the warning", (r.body || {}).warnings, [BALANCE_NOT_APPLIED_WARNING]);
-	ok("the audit note", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
-		.includes("items: #1 Fuel advance $650.00; email balance sentence NOT APPLIED (the fallback service used its own message)"));
+	ok("the audit note, right after the figures (before the lines, out of the cap's reach)", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
+		.includes("(INVOICE ONLY — Job Tracking Payment unchanged); email balance sentence NOT APPLIED (the fallback service used its own message); items: #1 Fuel advance $650.00"));
 	const plain = harness(N8N);
 	const pr = await plain.approve("41000018");
 	eq("no line, no such warning", (pr.body || {}).warnings, []);
@@ -545,20 +549,36 @@ test("a line voided while the Gmail draft is being made: printed, but not stampe
 	eq(withErrors("200", r), r.status, 200);
 	eq("the warning", (r.body || {}).warnings, ["Advance line #1 was voided while this draft was made; check the Gmail draft."]);
 	eq("the voided line carries no invoice #", h.lines()[0].invoice_id, "");
-	ok("the audit note", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
-		.includes("items: #1 Fuel advance $650.00; line #1 was voided while this draft was made; check the Gmail draft"));
+	ok("the audit note, right after the figures (before the lines, out of the cap's reach)", String((h.seen.audits.find((a) => a.action === "invoice_draft_edited") || {}).detail)
+		.includes("(INVOICE ONLY — Job Tracking Payment unchanged); line #1 was voided while this draft was made; check the Gmail draft; items: #1 Fuel advance $650.00"));
 	eq("the draft row still records what was printed", [h.draft().total, JSON.parse(h.draft().lines_json).lines.map((l) => l.id)], ["$2,350.00", [1]]);
 });
-test("a line record that fails leaves no draft row without its audit rows", async ({ eq, ok }) => {
+const RECORD_FAILED_WARNING = `The Gmail draft was created as invoice #${MINTED} but LogisX could not record it; check before sending.`;
+test("a line record that fails leaves no draft row without its audit rows; the answer and a _failed audit row say so", async ({ eq, ok }) => {
 	const h = harness({ ...GMAIL, ...ON });
 	await h.addLine("41000018", ADVANCE);
 	const auditsBefore = h.seen.audits.length;
 	h.db.exec("CREATE TEMP TRIGGER test_fail_line_record BEFORE UPDATE ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END");
 	const r = await h.approve("41000018", { lineIds: [1] });
 	eq(withErrors("the Gmail draft exists, so 200", r), [r.status, h.seen.drafts.length], [200, 1]);
-	eq("no draft row and no draft audit row: one write, then the audit", [h.drafts(), h.seen.audits.slice(auditsBefore).map((a) => a.action)], [0, []]);
+	eq("the answer warns", (r.body || {}).warnings, [RECORD_FAILED_WARNING]);
+	const after = h.seen.audits.slice(auditsBefore);
+	eq("no draft row; no created or edited row, one invoice_draft_record_failed row", [h.drafts(), after.map((a) => a.action)], [0, ["invoice_draft_record_failed"]]);
+	ok("…naming the invoice # and the send path", after.length === 1 && after[0].detail.startsWith(`${MINTED} (imap): `) && after[0].entity === "load" && after[0].id === "41000018");
 	eq("…and no line stamped", h.lines()[0].invoice_id, "");
 	ok("the failure is logged", h.seen.errors.some((e) => /draft record persist failed/.test(e)));
+});
+test("the warning does not depend on the failure's own audit row being written", async ({ eq }) => {
+	const h = harness({ ...GMAIL, ...ON }, { failingAudits: ["invoice_draft_record_failed"] });
+	await h.addLine("41000018", ADVANCE);
+	h.db.exec("CREATE TEMP TRIGGER test_fail_line_record BEFORE UPDATE ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END");
+	const r = await h.approve("41000018", { lineIds: [1] });
+	eq(withErrors("200, warned", r), [r.status, (r.body || {}).warnings], [200, [RECORD_FAILED_WARNING]]);
+	const n = harness(N8N);
+	n.db.exec("CREATE TEMP TRIGGER test_fail_record BEFORE INSERT ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END");
+	const nr = await n.approve("41000018");
+	eq("the n8n path, flag off: warned, and the audit row names n8n", [(nr.body || {}).via, (nr.body || {}).warnings, n.seen.audits.map((a) => a.action), String((n.seen.audits[0] || {}).detail).startsWith(`${MINTED} (n8n): `)],
+		["n8n", [RECORD_FAILED_WARNING], ["invoice_draft_record_failed"], true]);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
