@@ -232,6 +232,7 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 			["not JSON", [...base, "--b4-ready={A902:2026-10-07}"]],
 			["a list", [...base, '--b4-ready=["A902"]']],
 			["no such date", [...base, '--b4-ready={"A902":"2026-02-30"}']],
+			["no such month", [...base, '--b4-ready={"A902":"2026-13-01"}']],
 			["a blank load id", [...base, '--b4-ready={" ":"2026-10-07"}']],
 			["one load twice", [...base, '--b4-ready={"A902":"2026-10-07","#a902":"2026-10-07"}']],
 			["a load not on Job Tracking", [...base, '--b4-ready={"Z999":"2026-10-07"}']],
