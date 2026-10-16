@@ -1036,7 +1036,8 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 	const fn = new Function("ctx", `
 		const { req, res, db, calls, PERIOD_FINALIZE_ENABLED,
 			LOCKABLE_MONTH_KEY, isPlausibleLockPeriod, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR,
-			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, personalWaitingInPeriod, receiptIdList } = ctx;
+			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, personalWaitingInPeriod, receiptIdList,
+			forgetDriverRateOnlyMonths } = ctx;
 		return (async () => ${bodySrc})();
 	`);
 	return fn({
@@ -1055,6 +1056,8 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		pendingReceiptsInPeriod: () => [],
 		personalWaitingInPeriod: () => [],
 		receiptIdList: () => "",
+		// The daily-rate rule's per-month answers, cleared after a reopen (none kept here).
+		forgetDriverRateOnlyMonths: () => {},
 	}).then(() => ({ status: res._status, body: res._json, calls }));
 }
 
