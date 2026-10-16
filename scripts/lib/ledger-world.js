@@ -7,7 +7,7 @@
 //
 // What the lifted code gets in place of the server's process:
 //   - db: its own better-sqlite3 handle on the given app.db (read-only for a
-//     dry run; checked);
+//     dry run; checked), or one handle the script shares between its worlds;
 //   - getJobTrackingCached(): one snapshot of the Job Tracking tab, read with
 //     the spreadsheets.readonly scope (or a saved values.get, for tests), put
 //     through the server's own parseSheet() and deduplicateLoads(); returned
@@ -107,6 +107,17 @@ function readEnv(root, appRequire) {
 	return appRequire("dotenv").parse(fs.readFileSync(file));
 }
 
+// A better-sqlite3 handle on `dbFile` (the file envFor() resolved), as every
+// world opens its own: the database must exist, and a read-only handle is
+// checked to be one.
+function openDb({ root, dbFile, readonly }) {
+	const Database = createRequire(path.join(root, "server.js"))("better-sqlite3");
+	const db = new Database(dbFile, { readonly, fileMustExist: true });
+	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
+	db.pragma("busy_timeout = 10000");
+	return db;
+}
+
 // `envFile`: the .env to read in place of the app directory's, for a copy of
 // the database only (tests pass an empty one, so a developer's flags never
 // reach them). `envOverrides`: settings laid over that environment for this
@@ -118,15 +129,16 @@ function readEnv(root, appRequire) {
 // that reads them through call() (scripts/month-end-clock-report.js). `now`:
 // epoch ms the lifted code's `new Date()` and `Date.now()` read instead of the
 // clock (null, the default, is the clock); a script's own code keeps the real
-// clock.
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null }) {
+// clock. `db`: a handle the script already opened on `dbPath` (from
+// openDb()), shared by several worlds so they all read one snapshot
+// (scripts/october-flags-report.js); null, the default, opens the world's own.
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null, db: given = null }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
-	const Database = appRequire("better-sqlite3");
-	const db = new Database(dbFile, { readonly, fileMustExist: true });
+	if (given && given.name !== dbFile) throw new Error(`refusing: the shared SQLite handle is on ${given.name}, not ${dbFile}`);
+	const db = given || openDb({ root, dbFile, readonly });
 	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
-	db.pragma("busy_timeout = 10000");
 
 	const extra = (extraRoots || []).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && !ROOTS.includes(n));
 	const getHeads = (extraRoutes || []).map((p) => {
@@ -211,4 +223,4 @@ async function sheetFor(args, root) {
 	return readJobTracking({ sheetId, keyFile, appRequire });
 }
 
-module.exports = { buildLedgerWorld, parseArgs, sheetFor, envFor, dbScope, FREEZE_HEAD };
+module.exports = { buildLedgerWorld, openDb, parseArgs, sheetFor, envFor, dbScope, FREEZE_HEAD };
