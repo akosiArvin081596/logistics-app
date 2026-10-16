@@ -294,6 +294,8 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		eq("exit code", r.code, 0);
 		ok("the text report says nothing was written", /Nothing was written/.test(r.stdout), r.stdout.slice(0, 200));
 		ok("it starts with a note to run it under nice with --max-old-space-size=4096 and a run-time estimate (review L3)", /nice/.test(r.stderr) && /--max-old-space-size=4096/.test(r.stderr) && /estimate/i.test(r.stderr), r.stderr.slice(0, 300));
+		// Some of B12's days are paid by their week's own invoice later (beforeFloorWeekNotInvoiced): the heading claims no outcome; each line keeps its reason.
+		ok("the B12 days heading is neutral (re-review)", /Days B12 would not add automatically/.test(r.stdout) && !/corrected by hand/.test(r.stdout), (r.stdout.match(/.*B12.*refused.*|.*B12 would not.*/) || [""])[0]);
 		eq("the file's bytes and modified time", [M.fileHash(copy.db), fs.statSync(copy.db).mtimeMs], before);
 	});
 
@@ -308,13 +310,14 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 			["a blank load id", [...base, '--b4-ready={" ":"2026-10-07"}']],
 			["one load twice", [...base, '--b4-ready={"A902":"2026-10-07","#a902":"2026-10-07"}']],
 			["one key twice (review L9)", [...base, '--b4-ready={"A902":"2026-10-07","A902":"2026-10-08"}']],
+			["one key twice, the first value not a string (re-review)", [...base, '--b4-ready={"A902":5,"A902":"2026-10-07"}']],
 			["501 loads (review L7)", [...base, `--b4-ready=${JSON.stringify(Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`L${i}`, "2026-10-07"])))}`]],
 			["a 65-character load id (review L7)", [...base, `--b4-ready=${JSON.stringify({ ["9".repeat(65)]: "2026-10-07" })}`]],
 			["a load not on Job Tracking", [...base, '--b4-ready={"Z999":"2026-10-07"}']],
 			["no --b4-ready", base],
 			["no --db", base.slice(1).concat(['--b4-ready={"A902":"2026-10-07"}'])],
 		];
-		const why = { "501 loads (review L7)": /at most 500/, "a 65-character load id (review L7)": /overlong/, "one key twice (review L9)": /twice/ };
+		const why = { "501 loads (review L7)": /at most 500/, "a 65-character load id (review L7)": /overlong/, "one key twice (review L9)": /twice/, "one key twice, the first value not a string (re-review)": /twice/ };
 		for (const [label, args] of cases) {
 			const r = M.runScript(SCRIPT, args);
 			ok(`${label}: the script exists`, !r.missing, r.stderr.split("\n")[0]);

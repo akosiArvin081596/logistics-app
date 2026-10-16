@@ -142,6 +142,11 @@ function parseReady(raw) {
 		refuse("--b4-ready is not JSON: give an object of load id -> YYYY-MM-DD");
 	}
 	if (!value || typeof value !== "object" || Array.isArray(value)) refuse("--b4-ready must be a JSON object of load id -> YYYY-MM-DD");
+	const written = new Set();
+	for (const id of topLevelKeys(raw)) {
+		if (written.has(id)) refuse(`--b4-ready names load ${String(id).trim().slice(0, LOAD_ID_MAX)} twice`);
+		written.add(id);
+	}
 	const entries = Object.entries(value);
 	if (entries.length > B4_MAX_LOADS) refuse(`--b4-ready names ${entries.length} loads; at most ${B4_MAX_LOADS}`);
 	const out = new Map();
@@ -153,16 +158,34 @@ function parseReady(raw) {
 		if (out.has(key)) refuse(`--b4-ready names load ${given} twice`);
 		out.set(key, { given, ready: day });
 	}
-	// JSON.parse keeps the last of two equal keys. Every value is a string
-	// (checked above), so the text's string tokens alternate key, value.
-	const seen = new Set();
-	const tokens = raw.match(/"(?:[^"\\]|\\.)*"/g) || [];
-	for (let i = 0; i < tokens.length; i += 2) {
-		const id = JSON.parse(tokens[i]);
-		if (seen.has(id)) refuse(`--b4-ready names load ${String(id).trim().slice(0, LOAD_ID_MAX)} twice`);
-		seen.add(id);
-	}
 	return out;
+}
+
+// The keys of a JSON object's top level, as written (`text` already parsed as
+// one object, so it is valid JSON): JSON.parse keeps the last of two equal keys,
+// whatever their values, so a duplicate shows only here.
+function topLevelKeys(text) {
+	const keys = [];
+	let depth = 0;
+	let expectKey = false;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c === "\"") {
+			let j = i + 1;
+			while (j < text.length && text[j] !== "\"") j += text[j] === "\\" ? 2 : 1;
+			if (depth === 1 && expectKey) keys.push(JSON.parse(text.slice(i, j + 1)));
+			expectKey = false;
+			i = j;
+		} else if (c === "{" || c === "[") {
+			depth++;
+			expectKey = depth === 1;
+		} else if (c === "}" || c === "]") {
+			depth--;
+		} else if (c === "," && depth === 1) {
+			expectKey = true;
+		}
+	}
+	return keys;
 }
 
 // sha256 of the .env the run reads (or "absent"), to tell whether it changed
@@ -739,7 +762,7 @@ function printText(r) {
 		}
 		if (PARTS[k].trip) {
 			const refused = r.refusedDays[k] || [];
-			lines.push(`  B12's refused days (worked by the trip timestamps, on no invoice; corrected by hand): ${refused.length || "none"}`);
+			lines.push(`  Days B12 would not add automatically (worked by the trip timestamps; each with its own reason): ${refused.length || "none"}`);
 			for (const d of refused) lines.push(`    ${d.driver}  ${d.day}  load ${d.loadId}  ${usd(d.amount)}  ${d.kind}: ${d.reason}`);
 		}
 	}
