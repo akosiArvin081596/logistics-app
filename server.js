@@ -19150,6 +19150,8 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 		if (!cell || cell.completed) continue;
 		cell.completed = true;
 		cell.total = e.rate;
+		// The Daily Rate column's figure for the day, as a generated invoice stores it.
+		cell.rate = e.rate;
 		cell.loadBol = e.loads.join(", ");
 		added.push(e);
 	}
@@ -20140,7 +20142,11 @@ async function generateInvoiceHandler(req, res) {
 			const jsDay = dt.getDay(); // 0=Sun..6=Sat
 			const templateDay = DAY_NAMES[(jsDay + 1) % 7]; // shift so 6(Sat)→0, 0(Sun)→1, ...
 			const entry = daysMap[templateDay];
-			entry.total += rateOf ? rateOf(ds) : dailyRate;
+			const dayRate = rateOf ? rateOf(ds) : dailyRate;
+			entry.total += dayRate;
+			// The rate this day was priced at, printed in the PDF's Daily Rate column
+			// (one day per grid row, so it is the day's total).
+			entry.rate = dayRate;
 			entry.completed = true;
 			const bols = dayLoadMap[ds] || [];
 			entry.loadBol = entry.loadBol
