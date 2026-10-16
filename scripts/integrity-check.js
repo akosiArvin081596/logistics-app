@@ -34,6 +34,7 @@ const { parseArgs, sheetFor, envFor, buildLedgerWorld } = require("./lib/ledger-
 const { closure } = require("./lib/server-lift");
 const integrityCheck = require("../lib/integrity-check");
 const ledgerDayOnce = require("../lib/ledger-day-once");
+const driverRateOnly = require("../lib/driver-rate-only");
 const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
@@ -132,6 +133,18 @@ async function main() {
 		}
 		: null;
 
+	// Check 8 day by day, only while the app's settings switch the daily-rate
+	// rule on (lib/driver-rate-only.js): the server's driverRateOnlyDayRule(),
+	// lifted on its own read-only handle (a month closed before this run keeps
+	// the old rule unless the server's start record says otherwise).
+	let rateWorld = null;
+	const dailyRateRuleFor = driverRateOnly.ruleFromEnv(env)
+		? (jt) => {
+			rateWorld = buildLedgerWorld({ root: ROOT, dbPath: args.db, readonly: true, sheetData, envFile, extraRoots: ["driverRateOnlyDayRule"] });
+			return rateWorld.api.driverRateOnlyDayRule(jt);
+		}
+		: null;
+
 	const lines = [];
 	const log = { log: (...a) => lines.push(a.join(" ")), error: (...a) => lines.push(a.join(" ")) };
 	const to = String(env.ADMIN_NOTIFY_EMAIL || "").trim();
@@ -147,9 +160,11 @@ async function main() {
 		closedMonthsOf: closedMonthsRule(db, server.loadRowAccountingMonths),
 		dayOnceFrom,
 		readFleetLedger,
+		dailyRateRuleFor,
 	});
 	db.close();
 	if (ledgerWorld) ledgerWorld.db.close();
+	if (rateWorld) rateWorld.db.close();
 
 	const lastRun = result.baseline ? "none yet: the server's first run would take the baseline" : "from the job's state table";
 	console.log("Daily integrity check, read-only (nothing written, nothing sent)");

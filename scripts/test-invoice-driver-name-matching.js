@@ -117,7 +117,7 @@ const SHARED_FNS = [
 	"getDeletedLoadIds", "excludeDroppedLoads", "loadKeySet",
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
-	"resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
+	"driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
 	// Under test.
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
@@ -153,8 +153,8 @@ const ROUTES = [
 const DRIVER_APP_LIST_ANCHOR = "const driverInvoices = db.prepare(";
 // The P&L's truck-rate map: the fleet-wide P&L (GET /api/financials) is the
 // payout ledger's own calculation, so its map is gatherLedgerScopeFacts()'s,
-// read fleet-wide (no investor driver set).
-const PNL_TRUCKS_ANCHOR = 'const trucksByDriver = Object.create(null);\n\t{\n\t\tconst truckQuery = investorDriverSet';
+// truckRatesByDriver(), read fleet-wide (no investor driver set, so no owner).
+const PNL_TRUCKS_ANCHOR = "function truckRatesByDriver(ownerId = null) {";
 // GET /api/investor's per-truck expense map for receipts naming no truck, folded
 // by driver and counted on the truck whose assigned driver normalizes to that key
 // (one investor's receipts). GET /api/financials keeps no such map: its
@@ -280,7 +280,7 @@ function liftedFor(src) {
 		driverAppList: new Function("db", "normalizeDriverName", "driverNameNorm", "driverName", "invoiceTotalDue",
 			`${liftFragment(src, DRIVER_APP_LIST_ANCHOR, ";\n", "the driver app's invoice list")}\nreturn driverInvoices;`),
 		pnlTrucks: new Function("db", "normalizeDriverName",
-			`const investorDriverSet = null;\nconst user = { id: 0 };\n${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n\t}", "the P&L's trucksByDriver block")}\nreturn trucksByDriver;`),
+			`${liftFragment(src, PNL_TRUCKS_ANCHOR, "\n}\n", "the P&L's truckRatesByDriver()")}\nreturn truckRatesByDriver(null);`),
 		investorTruckExp: new Function("db", "foldExpenseTotalsByDriver", "EXPENSE_PNL_FILTER", "user", "expenseFrom",
 			`${liftFragment(src, INVESTOR_TRUCK_EXP_ANCHOR, INVESTOR_TRUCK_EXP_END, "GET /api/investor's per-truck expense map")}\nreturn expByDriver;`),
 	};
@@ -321,6 +321,9 @@ function buildWorld(opts = {}) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
+		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;
+		// scripts/test-driver-rate-only.js runs the handler with it on).
+		DRIVER_RATE_ONLY_FROM: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		// The document records whose invoice it is, so a test can tell which
@@ -877,7 +880,7 @@ async function batteryPay(src) {
 		// The P&L's answer, from GET /api/financials' own code on the same rows.
 		const key = w.normalizeDriverName(spelling);
 		const struct = w.getDriverPayStructures()[key] || { payType: "fixed", payPercentage: 0 };
-		const pnlRate = w.resolveDailyRate(struct.payDaily, w.pnlTrucks()[key]);
+		const pnlRate = w.resolveDailyRate(struct.payDaily, w.pnlTrucks()[key], W38.param.slice(0, 7));
 		const r = await generate(w, SUPER, spelling, W38);
 		const inv = r.body && r.body.invoice;
 		const tpl = w.rendered[0] && w.rendered[0].templateName;
@@ -1119,8 +1122,8 @@ const BATTERIES = [
 // flip at least one assertion above.
 const MUTANTS = [
 	["M1 normalized matching — the daily rate from origin/main's exact-spelling lookups",
-		"const dailyRate = resolveDailyRate(payStruct.payDaily, truckDailyRateCandidates(driverName).slice(-1)[0]);",
-		"const truckRateRow = db.prepare(\"SELECT driver_pay_daily FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) AND COALESCE(driver_pay_daily, 0) > 0 LIMIT 1\").get(driverName); const driverDailyRow = db.prepare(\"SELECT pay_daily FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) LIMIT 1\").get(driverName); const dailyRate = resolveDailyRate(driverDailyRow && driverDailyRow.pay_daily, truckRateRow && truckRateRow.driver_pay_daily);"],
+		"const dailyRate = resolveDailyRate(payStruct.payDaily, truckRate, computedWeekEnd.slice(0, 7));",
+		"const truckRateRow = db.prepare(\"SELECT driver_pay_daily FROM trucks WHERE LOWER(assigned_driver) = LOWER(?) AND COALESCE(driver_pay_daily, 0) > 0 LIMIT 1\").get(driverName); const driverDailyRow = db.prepare(\"SELECT pay_daily FROM drivers_directory WHERE LOWER(driver_name) = LOWER(?) LIMIT 1\").get(driverName); const dailyRate = resolveDailyRate(driverDailyRow && driverDailyRow.pay_daily, truckRateRow && truckRateRow.driver_pay_daily, computedWeekEnd.slice(0, 7));"],
 	["M2 the existing-invoice check matches the exact spelling",
 		"const weekInvoices = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);",
 		"const weekInvoices = db.prepare(\"SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE LOWER(driver) = ? AND week_start = ? AND deleted_at = '' AND is_manual = 0\").all(driverName.toLowerCase(), weekStart);"],
@@ -1214,7 +1217,8 @@ function mutate(find, replace, label) {
 				[4, 4]],
 			["§7 the P&L resolution §4 compares against is what /api/financials runs",
 				[SRC.includes('const struct = payStructures[driver] || { payType: "fixed", payPercentage: 0 };'),
-					SRC.includes("dailyRate = resolveDailyRate(struct.payDaily, trucksByDriver[driver]);")], [true, true]],
+					SRC.includes("rateFor: (driver, struct, month) => resolveDailyRate(struct.payDaily, trucksByDriver[driver], month),"),
+					SRC.includes("const trucksByDriver = truckRatesByDriver(investorDriverSet ? user.id : null);")], [true, true, true]],
 			// The fold is only right because every lookup asks for the normalized name.
 			["§7 getDeductibleExpensesByDriverMonth() keys through expenseDriverKey(), its query and filters unchanged",
 				[deduction.includes("const key = expenseDriverKey(r.name_lc);"),

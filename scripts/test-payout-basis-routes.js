@@ -278,7 +278,9 @@ const ledgerIdle = (f) => investorPayoutBasis.isZeroActivityMonth({ ...f, compli
 const ledgerNet = (f) => f.revenue - f.driverPay - (ledgerIdle(f) ? 0 : f.fixedCosts) - f.tripExpenses - f.maintFundCost;
 const LEDGER_CTX = { sessionUser: SUPER, carrierDB: { headers: ["Driver", "Carrier"], data: [] }, globalConfig: { investor_split_pct: "50" } };
 const resolveSplit = new Function(`${liftFunction("resolveInvestorSplitPct")}\nreturn resolveInvestorSplitPct;`)();
-const LEDGER_NAMES = ["lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward", "payoutRowBreakdown", "frozenPayoutBreakdown", "resolveInvestorSplitPct", "logAudit", "noteLateItemInClosedMonth", "reconcileInvestorPayouts", "finalizePeriods"];
+const LEDGER_NAMES = ["lastFridayOfFollowingMonth", "periodLabel", "computeLossCarryForward", "payoutRowBreakdown", "frozenPayoutBreakdown", "resolveInvestorSplitPct", "logAudit", "noteLateItemInClosedMonth", "reconcileInvestorPayouts", "finalizePeriods",
+	// The close's record of the daily-rate rule (off here: no start record, nothing written).
+	"driverRateOnlyApplies", "recordDriverRateOnlyAtClose"];
 function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {}) {
 	const src = LEDGER_NAMES.map((n) => (n === "reconcileInvestorPayouts" ? reconcile(liftFunction(n)) : liftFunction(n))).join("\n");
 	const locked = (p) => !!srv.db.prepare("SELECT 1 FROM period_locks WHERE period = ? AND status = 'locked'").get(p);
@@ -313,6 +315,8 @@ function ledgerWorld(srv, { reconcile = (s) => s, fixture = LEDGER_FIXTURE } = {
 		financialsSettings: () => require("../lib/financials-report").DEFAULT_SETTINGS,
 		insertDispatchNotification: { run() {} },
 		console: { warn() {}, log() {}, error() {} },
+		// The daily-rate rule is off, as production runs until it is approved.
+		DRIVER_RATE_ONLY_FROM: null, financialsCalc: require("../lib/financials-calc"),
 	};
 	const fns = new Function(...Object.keys(deps), `"use strict";\n${src}\nreturn { reconcileInvestorPayouts, finalizePeriods };`)(...Object.values(deps));
 	return { db: srv.db, fns };

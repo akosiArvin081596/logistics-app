@@ -15,9 +15,9 @@
  * without a month leaves the rule off with one warning, and a FROM at or
  * before the latest closed month is named in a warning at boot.
  *
- * Written before the fix. A case whose title ends in "Base: ..." fails on main,
- * where resolveDailyRate() falls back to the truck's rate; the controls (C1-C6)
- * pin what must not move and pass on main and after the fix.
+ * Written before the fix. A case whose title ends in "Base: ..." fails on the
+ * base, where resolveDailyRate() falls back to the truck's rate; the controls
+ * (C1-C7) pin what must not move and pass before and after the fix.
  *
  * The pay paths, as scripts/lib/money-plans-world.js lifts them out of
  * server.js: the weekly invoice (POST /api/invoices/generate) and its late
@@ -26,19 +26,19 @@
  * figures and the Fleet Breakdown), the Financials month detail
  * (GET /api/financials?month=) and the work-days dry run
  * (GET /api/admin/work-days/dry-run); the Fleet Breakdown's text
- * (client/src/lib/driverPay.js). D10, D10b and D14 run the planned read-only
- * "what would change" report on a copy of this world's database. The month-end
- * guards and the payout-rules dry run are in test-driver-rate-only-guards.js.
+ * (client/src/lib/driverPay.js), and its Drivers Database and Trucks page text
+ * (D18, D19). D10, D10b, D14 and D17 run the read-only "what would change"
+ * report (scripts/driver-rate-only-report.js) on a copy of this world's
+ * database. D20 and C7 pin the trip rater's TRIP_WORK_DAYS_FROM check on the
+ * calendar month. The month-end guards, the close record and the payout-rules
+ * dry run are in test-driver-rate-only-guards.js.
  *
  * Made-up data only: investor 5 owns T1 ($150 a day on the truck), T2 ($300)
  * and T3 ($300). Hal Reed has no rate of his own and drives T1; Kim Lowe has
  * none and drives T3; Ana Moss has her own $350 and drives T2. The process runs
  * in UTC, production's zone. Pure: no server, no app.db, no network.
  *
- * They live in scripts/pending/, which scripts/run-unit-tests.js does not read,
- * so npm run check is unchanged; the fix moves this runner to scripts/.
- *
- * Run: node scripts/pending/test-driver-rate-only.js    # exits 1 on failure
+ * Run: node scripts/test-driver-rate-only.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC"; // production's clock zone
@@ -335,6 +335,48 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		eq("status", r.status, 200);
 		const inv = ((r.body && r.body.perInvoice) || []).find((i) => g39.invoice && i.invoiceNumber === g39.invoice.invoice_number) || null;
 		eq("W39 added days and amount", inv && [inv.addedDays, inv.amountAdded], [["2026-10-01", "2026-10-02"], 500]);
+	});
+
+	await R.test("D17 The report lists the ledger days whose pay changes and that no live weekly invoice carries: Hal's W41 load (10/12-10/13, no invoice yet) at $150 -> $250 each; his invoiced W40 days are not listed. Base: the script does not exist", async ({ eq, ok }) => {
+		const w = world({
+			locks: ["2026-09"],
+			extraRows: [loadRow({ id: "H903", driver: HAL, pickup: "2026-10-12 8:00", dropoff: "2026-10-13 18:00", assigned: "2026-10-12", done: "2026-10-13", truck: "T1" })],
+		});
+		const g = await M.generate(w, HAL, W40);
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g.invoice.id);
+		const copy = M.saveCopy(w, {});
+		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-10", "--names", "--json"]);
+		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
+		eq("Hal's ledger days on no invoice", tuples(((r.json && r.json.ledgerDaysOnNoInvoice) || []).filter((d) => norm(d.driver) === norm(HAL)), ["driver", "day", "payNow", "payUnderRule"]),
+			[[norm(HAL), "2026-10-12", 150, 250], [norm(HAL), "2026-10-13", 150, 250]]);
+	});
+
+	await R.test("D18 The Drivers Database's Daily Rate help says blank/0 is the $250 default while the rule is on, and keeps today's truck-rate wording while it is off (client/src/lib/driverPay.js dailyRateHelpText()). Base: no such text", async ({ eq }) => {
+		const lib = await driverPayText();
+		eq("on", typeof lib.dailyRateHelpText === "function" ? lib.dailyRateHelpText({ from: "2026-10" }) : null, "Driver earns this × active days. Leave blank/0 for the $250 default.");
+		eq("off", typeof lib.dailyRateHelpText === "function" ? lib.dailyRateHelpText(null) : null, "Driver earns this × active days. Leave blank/0 to use the assigned truck's rate (default $250).");
+	});
+
+	await R.test("D19 The Trucks page's Driver Pay field reads \"Not used for pay from October 2026.\" while the rule is on, and nothing while it is off (truckPayRuleNote()). Base: no such text", async ({ eq }) => {
+		const lib = await driverPayText();
+		eq("on", typeof lib.truckPayRuleNote === "function" ? lib.truckPayRuleNote({ from: "2026-10" }) : null, "Not used for pay from October 2026.");
+		eq("off", typeof lib.truckPayRuleNote === "function" ? lib.truckPayRuleNote(null) : null, "");
+	});
+
+	// A Sept 30 trip day of a load Assigned Oct 1, under the trip work-day rule
+	// (FROM 2026-10): Hal's own rate is $300 now, but his dated rate reads $0.
+	const tripCalendarWorld = (env) => world({
+		env: { ...TRIP_OCT, ...env }, halRate: 300, now: etMs("2026-10-02 20:00"),
+		payRates: [{ subject: "driver", key: norm(HAL), rate: 0, from: "2026-09-01T12:00:00.000Z" }],
+		rows: [loadRow({ id: "Q401", driver: HAL, pickup: "2026-09-30 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-10-01", done: "2026-10-01", truck: "T1" })],
+		status: [s("Q401", "At Shipper", "2026-09-30 09:00"), s("Q401", "Delivered", "2026-10-01 17:00")],
+	});
+	await R.test("D20 Flag on with the trip work-day rule: the trip rater keeps its TRIP_WORK_DAYS_FROM check on the calendar month. Sept 30 (a September day, though its load pays in October) keeps Hal's one rate, $300; Oct 1 takes the dated path, $0 dated so the rule's $250. Base: Oct 1 at the truck's $150", async ({ eq }) => {
+		eq("W39 grid", (await weekly(tripCalendarWorld(ON), HAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 250]]);
+	});
+
+	await R.test("C7 Control, flag off with the trip work-day rule: the same week as today: Sept 30 at Hal's one rate ($300), Oct 1 on the dated path ($0 dated, so the truck's $150)", async ({ eq }) => {
+		eq("W39 grid", (await weekly(tripCalendarWorld({}), HAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 150]]);
 	});
 
 	await R.test("C1 Control, flag off (also with FROM set and the flag off): Hal at the truck's $150 on the invoice, the ledger and the investor view; Kim at $300", async ({ eq }) => {

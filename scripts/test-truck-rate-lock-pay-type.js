@@ -52,6 +52,7 @@ function extractFunction(name) {
 }
 
 const harness = [
+  extractFunction("driverRateOnlyApplies"),
   extractFunction("resolveDailyRate"),
   extractFunction("truckEditLockBlockers"),
 ].join("\n") + "\nreturn { truckEditLockBlockers };";
@@ -64,6 +65,9 @@ const S = {
 };
 const norm = (s) => String(s || "").trim().toLowerCase();
 const stubs = {
+  // The daily-rate rule is off in this runner (scripts/test-driver-rate-only-guards.js
+  // runs the guards with it on).
+  DRIVER_RATE_ONLY_FROM: null,
   periodLocksReadable: () => true,
   lockedPeriodsDesc: () => LOCKED.slice().reverse(),
   truckFixedCostLockedMonths: () => [],
@@ -129,6 +133,7 @@ eq(rateBlock(truck("Pat Percent", 20), { driver_pay_daily: 900, assigned_driver:
 // the daily rates without looking at the pay type, as check (6) did.
 console.log("Truck create and truck delete — the daily rate against the driver's pay type");
 const cdHarness = [
+  extractFunction("driverRateOnlyApplies"),
   extractFunction("resolveDailyRate"),
   extractFunction("truckCreateLockBlockers"),
   extractFunction("truckDeleteLockBlockers"),
@@ -190,9 +195,10 @@ eq(ledgerPay(() => 900, null), pay20, "a different daily rate pays them exactly 
 eq(ledgerPay(() => 900, () => 900), pay20, "so does a different rate for each day (the dated-rates rule)");
 
 console.log("Premise 2 — switching them to a day rate is still guarded (directoryEditLockBlockers)");
-const dirHarness = [extractFunction("directoryPayStruct"), extractFunction("resolveDailyRate"), extractFunction("directoryEditLockBlockers")].join("\n") +
+const dirHarness = [extractFunction("directoryPayStruct"), extractFunction("driverRateOnlyApplies"), extractFunction("resolveDailyRate"), extractFunction("directoryEditLockBlockers")].join("\n") +
   "\nreturn { directoryEditLockBlockers };";
 const dirStubs = {
+  DRIVER_RATE_ONLY_FROM: null,
   periodLocksReadable: () => true,
   lockedPeriodsDesc: () => LOCKED.slice().reverse(),
   driverPayLockedMonths: stubs.driverPayLockedMonths,

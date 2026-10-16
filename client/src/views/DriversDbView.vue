@@ -34,6 +34,7 @@
         :driver-ratings="driverRatings"
         :truck-assignments="truckAssignments"
         :can-edit-pay="auth.isSuperAdmin"
+        :daily-rate-rule="store.dailyRateRule"
         @delete="handleDelete"
         @update="handleUpdate"
         @picture-updated="store.load()"

@@ -18,10 +18,13 @@
  *     those months, and still refuse the months before FROM it does reprice).
  * G4: the payout-rules dry run's dated-rates variant reads the driver's dated
  * rate, else $250, for the rule's months, so it reports no truck-rate change
- * there.
+ * there (and, with the flag off, it does report one).
+ * G5: a month close records whether the rule priced the month, and that record
+ * answers for the closed month from then on (a month closed while the flag was
+ * off keeps the old rule when the flag goes on again).
  *
- * Written before the fix: G1-G4 fail on main; C1 is the control (flag off: the
- * guards answer as today) and passes on main and after.
+ * Written before the fix: G1-G5 fail on the base; C1 is the control (flag off:
+ * the guards answer as today) and passes before and after.
  *
  * The guards and the dry run are lifted out of server.js (scripts/lib/server-lift.js)
  * onto the same in-memory database, sheet and clock as money-plans-world's
@@ -33,7 +36,7 @@
  * rate, hired October 1). September and October are closed. Pure: no server,
  * no app.db, no network.
  *
- * Run: node scripts/pending/test-driver-rate-only-guards.js    # exits 1 on failure
+ * Run: node scripts/test-driver-rate-only-guards.js    # exits 1 on failure
  */
 "use strict";
 process.env.TZ = "UTC";
@@ -62,7 +65,10 @@ const BOOT = Date.parse("2026-10-16T17:00:00Z");
 const ASKED = Date.parse("2026-11-20T17:00:00Z");
 
 // The guards and the payout-rules dry run, lifted once.
-const ROOTS = ["truckEditLockBlockers", "truckDeleteLockBlockers", "truckCreateLockBlockers", "directoryEditLockBlockers", "payoutRulesDryRun", "parseSheet", "deduplicateLoads"];
+// The close record's two functions are lifted when server.js has them (the fix
+// adds them; G5 fails without them, and the other cases still run).
+const ROOTS = ["truckEditLockBlockers", "truckDeleteLockBlockers", "truckCreateLockBlockers", "directoryEditLockBlockers", "payoutRulesDryRun",
+	...["recordDriverRateOnlyAtClose", "driverRateOnlyApplies"].filter((n) => M.SRC.includes(`\nfunction ${n}(`)), "parseSheet", "deduplicateLoads"];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "requireAuth", "refuseCrossOrigin",
 	"notifyChange", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR", "fetch", "io", "sendEmail"];
 let LIFTED = null;
@@ -139,7 +145,7 @@ const R = M.createRunner("The owner's daily-rate rule in the month-end guards an
 		eq("create", periodsOf(x.truckCreateLockBlockers(NEW_TRUCK, { floor: "2026-10", unbounded: false }), (b) => b.field === "driver_pay_daily"), []);
 	});
 
-	await R.test("G4 Flag on with dated rates in the payout-rules dry run: Hal's dated rate is $0 and T1's history says $200 for October; the dated-rates variant pays his October days at $250 like the current variant, so investor 5's October shows no dated-rates change. Base: a dated-rates change (the truck's $200 vs $150)", async ({ eq }) => {
+	await R.test("G4 Flag on with dated rates in the payout-rules dry run: Hal's dated rate is $0 and T1's history says $200 for October; the dated-rates variant pays his October days at $250 like the current variant, so investor 5's October shows no dated-rates change. Base: a dated-rates change (the truck's $200 vs $150)", async ({ eq, ok }) => {
 		const w = M.startWorld({
 			env: ON, now: BOOT,
 			drivers: [{ name: HAL, payDaily: 0 }],
@@ -150,6 +156,30 @@ const R = M.createRunner("The owner's daily-rate rule in the month-end guards an
 		const out = await liftOnto(w, ON).payoutRulesDryRun();
 		const oct = ((out && out.changes) || []).find((c) => c.ownerId === 5 && c.period === "2026-10") || null;
 		eq("dated-rates change for investor 5's October", oct && oct.byRule ? oct.byRule.datedRates : undefined, undefined);
+		// The positive check: the same dry run with the flag off does see the
+		// truck's dated $200 against $150 (3 days, $150 more driver pay, so a lower
+		// payable), so the check above can tell a change from none.
+		const offOut = await liftOnto(w, {}).payoutRulesDryRun();
+		const offOct = ((offOut && offOut.changes) || []).find((c) => c.ownerId === 5 && c.period === "2026-10") || null;
+		ok("flag off: a dated-rates change for investor 5's October", !!(offOct && offOct.byRule && offOct.byRule.datedRates < 0), JSON.stringify(offOct));
+	});
+
+	await R.test("G5 The close record: October closes while the flag is off after the rule once ran (the start record is there), so its close records that the rule did not price it; with the flag on again, October keeps the old rule (setting Hal's own rate to his truck's $150 moves nothing there and is allowed), and finalizePeriods() records it before the lock. Base: no close record", async ({ eq, ok }) => {
+		const w = M.startWorld({
+			env: ON, now: BOOT, locks: ["2026-09"],
+			drivers: [{ name: HAL, payDaily: 0 }],
+			trucks: [{ unit: "T1", driver: HAL, payDaily: 150 }],
+			rows: [loadRow({ id: "H902", driver: HAL, pickup: "2026-10-05 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-05", done: "2026-10-07", truck: "T1" })],
+		});
+		w.clock.ms = Date.parse("2026-11-15T05:00:00Z");
+		liftOnto(w, {}).recordDriverRateOnlyAtClose("2026-10", "2026-11-15T05:00:00.000Z");
+		M.lockMonth(w.db, "2026-10", "2026-11-15T05:00:00.000Z");
+		w.clock.ms = ASKED;
+		const x = liftOnto(w, ON);
+		eq("the rule prices October", x.driverRateOnlyApplies("2026-10"), false);
+		eq("pay_daily blocker periods", periodsOf(x.directoryEditLockBlockers(dirRow(w, HAL), { pay_daily: 150 }), (b) => b.field === "pay_daily"), []);
+		const close = M.SRC.indexOf("for (const p of toClose) recordDriverRateOnlyAtClose(p, nowIso);");
+		ok("finalizePeriods() records it, before the lock", close > 0 && close < M.SRC.indexOf("for (const p of toClose) takeLock.run(p, nowIso, actor || \"system\");", close));
 	});
 
 	await R.test("C1 Control, flag off: the guards answer as today: Hal's own $150 allowed; T1 refused over Sep and Oct; T4 refused over Oct (change and delete); the $400 truck for Ned refused over Oct", async ({ eq }) => {

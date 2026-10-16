@@ -570,6 +570,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				getDriverPayStructures: () => ({}),
 				getDeductibleExpensesByDriverMonth: () => ({}),
 				resolveDailyRate: (perDriver, perTruck) => perDriver || perTruck || 250,
+				// No trucks in this world (the db above reads nothing).
+				truckRatesByDriver: () => Object.create(null),
 				getInvestorDriverMonthWindows: () => new Map(),
 				investorExpenseScopeSql: () => ({ sql: "1=0", params: [] }),
 				// The receipt source with no Personal ledger: the plain table.

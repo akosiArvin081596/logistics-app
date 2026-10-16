@@ -89,7 +89,8 @@
               {{ truck.AssignedDriver || '\u2014' }}
             </td>
             <td class="mono">
-              <span v-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
+              <span v-if="dailyRateRule" class="pay-default" :title="truckPayRuleNote(dailyRateRule)">{{ truck.DriverPayDaily > 0 ? `$${truck.DriverPayDaily}/day` : '—' }} (not used)</span>
+              <span v-else-if="truck.DriverPayDaily > 0">${{ truck.DriverPayDaily }}/day</span>
               <span v-else class="pay-default" title="No custom rate set; pay calculations use the $250/day default">$250/day default</span>
             </td>
             <td class="mono">
@@ -379,8 +380,11 @@
             <label>Driver Pay ($/day)</label>
             <!-- Pay is Super Admin only (403 PAY_EDIT_ADMIN_ONLY otherwise): shown
                  to everyone who can edit the truck, editable only by them. -->
-            <input v-model.number="editForm.driverPayDaily" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay" />
-            <div v-if="canEditPay" class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
+            <!-- Read-only while the daily-rate rule is on: a driver is paid his own
+                 rate (Drivers Database), else $250, whatever the truck says. -->
+            <input v-model.number="editForm.driverPayDaily" type="number" min="0" :max="AMOUNT_CAPS.driverPayDaily" step="any" placeholder="250 (default)" :disabled="!canEditPay || !!dailyRateRule" />
+            <div v-if="dailyRateRule" class="field-hint">{{ truckPayRuleNote(dailyRateRule) }}</div>
+            <div v-else-if="canEditPay" class="field-hint">Daily rate paid to this truck's driver (used by invoices, financials, and the investor P&amp;L). Leave blank to use the $250/day default.</div>
             <div v-else class="field-hint">Only a Super Admin can change driver pay.</div>
           </div>
 
@@ -560,7 +564,7 @@
           <div class="view-row"><span class="view-label">Insurance</span><span>{{ viewTruck.InsuranceMonthly ? '$' + viewTruck.InsuranceMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">ELD</span><span>{{ viewTruck.EldMonthly ? '$' + viewTruck.EldMonthly + '/mo' : '\u2014' }}</span></div>
           <div class="view-row"><span class="view-label">Truck Payment</span><span>{{ viewTruck.TruckPaymentMonthly ? '$' + Number(viewTruck.TruckPaymentMonthly).toLocaleString() + '/mo' : '\u2014' }}</span></div>
-          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}</span></div>
+          <div class="view-row"><span class="view-label">Driver Pay</span><span>{{ viewTruck.DriverPayDaily ? '$' + viewTruck.DriverPayDaily + '/day' : '$250/day (default)' }}<template v-if="dailyRateRule"> ({{ truckPayRuleNote(dailyRateRule) }})</template></span></div>
           <!-- Current mileage, derived from the latest ELD fix. Never 0: half
                the fleet has no ELD link at all, and a confident "0 mi" on a
                working tractor is worse than admitting we don't know. -->
@@ -607,6 +611,7 @@ import { fmtOdometer } from '../../lib/fuelReview'
 import { formatAgeMs } from '../../lib/duration'
 import { fmtTimestamp, fmtYmd } from '../../utils/datetime'
 import { availabilityRangeText } from '../../lib/availabilityText'
+import { truckPayRuleNote } from '../../lib/driverPay'
 
 const api = useApi()
 
@@ -647,6 +652,9 @@ const props = defineProps({
   canEdit: { type: Boolean, default: false },
   // Driver pay is Super Admin only; everyone else sees the rate read-only.
   canEditPay: { type: Boolean, default: false },
+  // The server's daily-rate rule ({ from } while it is on, else null): the
+  // Driver Pay field is read-only while it is on.
+  dailyRateRule: { type: Object, default: null },
   // The Edit dialog's save, awaited in the manner of ExpenseForm's
   // `submit-handler`. saveHandler(id, data) resolves once the truck is saved and
   // rejects with the server's refusal (an Error carrying its message). The

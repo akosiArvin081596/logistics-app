@@ -80,15 +80,15 @@ function liftDecl(kind, name) {
 	if (/=\s*$/.test(SRC.slice(start, end))) end = SRC.indexOf("\n", end + 1);
 	return SRC.slice(start, end);
 }
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE",
 	"RFC2822_MONTHS", "BROKER_WITHHELD_RE"];
-const LETS = ["lastPayStructShadowWarnMs"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart"];
 const FNS = [
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
 	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules",
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "expenseFrom", "personalLedgerPresent",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",

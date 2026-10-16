@@ -311,7 +311,7 @@
             <div v-if="editForm.payType === 'fixed'" class="edit-field" style="margin-top:0.5rem;">
               <label>Daily Rate ($/day)</label>
               <input v-model.number="editForm.payDaily" type="number" min="0" step="1" placeholder="e.g. 250" />
-              <p class="status-help">Driver earns this &times; active days. Leave blank/0 to use the assigned truck's rate (default $250).</p>
+              <p class="status-help">{{ dailyRateHelpText(dailyRateRule) }}</p>
             </div>
             <div v-if="editForm.payType === 'percentage'" class="edit-field" style="margin-top:0.5rem;">
               <label>Owner-Operator Share (%)</label>
@@ -345,7 +345,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useFileDrop } from '../../composables/useFileDrop'
 import { AVATAR_MAX_EDGE, compressImage, isDecodedImage } from '../../lib/imageUtils'
-import { directoryPayCells, directoryPayType } from '../../lib/driverPay'
+import { directoryPayCells, directoryPayType, dailyRateHelpText } from '../../lib/driverPay'
 import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 import EmptyState from '../shared/EmptyState.vue'
@@ -365,6 +365,8 @@ const props = defineProps({
   truckAssignments: { type: Array, default: () => [] },
   // Driver pay is Super Admin only; everyone else sees the terms read-only.
   canEditPay: { type: Boolean, default: false },
+  // The server's daily-rate rule ({ from } while it is on, else null).
+  dailyRateRule: { type: Object, default: null },
 })
 
 function getAssignedTruck(driver) {

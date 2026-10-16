@@ -79,6 +79,9 @@ export const useTrucksStore = defineStore('trucks', {
     hasLoaded: false,
     // Why the latest truck-list load failed, until a load succeeds; '' otherwise.
     loadError: '',
+    // The server's daily-rate rule ({ from } while it is on, else null): the
+    // Driver Pay field is read-only while it is on.
+    dailyRateRule: null,
   }),
 
   getters: {
@@ -107,6 +110,7 @@ export const useTrucksStore = defineStore('trucks', {
       this.isLoading = false
       this.hasLoaded = false
       this.loadError = ''
+      this.dailyRateRule = null
     },
 
     // Rejects when the list could not be read, and keeps the reason in
@@ -119,6 +123,7 @@ export const useTrucksStore = defineStore('trucks', {
         const data = await api.get('/api/trucks')
         if (truckLoads.claim(ticket)) {
           this.trucks = data.trucks || []
+          this.dailyRateRule = data.dailyRateRule || null
           this.hasLoaded = true
           this.loadError = ''
         }

@@ -9,7 +9,8 @@
 // mapping stays, so a page loaded before this rule never wipes stored terms
 // with its zeros. The TEXT "0" is a value. On the daily rate it clears the
 // driver's own rate, and resolveDailyRate() falls back to the truck's rate,
-// else $250. On the share it is 0 %. So:
+// else $250 (with the daily-rate rule on, straight to $250). On the share it
+// is 0 %. So:
 //   • the active pay type's amount goes as text, "0" included. A blank field
 //     goes as "0", which is what the form says blank means ("Leave blank/0 to
 //     use the assigned truck's rate"). Anything else goes as typed, so the
@@ -59,18 +60,50 @@ export function directoryPayType(stored) {
   return String(stored || 'fixed').toLowerCase()
 }
 
+// The daily-rate rule (the server's dailyRateRule: { from: 'YYYY-MM' } while
+// DRIVER_RATE_ONLY is on, else null): a daily rate belongs to the driver, and
+// $250 is the default only when he has none; a truck's rate no longer prices
+// his days from that month. Text only.
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+// 'YYYY-MM' as "October 2026" (no Date, so no time zone can move it).
+export function ruleMonthLabel(month) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(month || ''))
+  const name = m ? MONTH_NAMES[Number(m[2]) - 1] : ''
+  return name ? `${name} ${m[1]}` : String(month || '')
+}
+
+// The Drivers Database's help under the Daily Rate field.
+export function dailyRateHelpText(rule) {
+  return rule && rule.from
+    ? 'Driver earns this × active days. Leave blank/0 for the $250 default.'
+    : 'Driver earns this × active days. Leave blank/0 to use the assigned truck\'s rate (default $250).'
+}
+
+// The Trucks page's note on its read-only Driver Pay field while the rule is
+// on; "" while it is off.
+export function truckPayRuleNote(rule) {
+  return rule && rule.from ? `Not used for pay from ${ruleMonthLabel(rule.from)}.` : ''
+}
+
 // How a driver's pay was worked out, shown beside the Driver Pay figure in the
 // investor's Fleet Breakdown. `details` is one entry of the server's
 // production.driverPayDetails. A percentage-paid driver is paid a share of
 // revenue after deductible trip expenses, and the server sends them a daily
 // rate of 0, so the day-rate wording read "N days x $250" for them. Text only:
 // the figure beside it is the server's totalPay. A driver with no pay entry
-// was paid nothing: "No pay this period", not "0 days x $250".
+// was paid nothing: "No pay this period", not "0 days x $250". A driver paid at
+// more than one rate (the daily-rate rule priced some months at the driver's
+// own rate, else $250) comes with the server's segments, `rates: [{ days, rate
+// }]` in month order, and reads "2 days x $150 + 3 days x $250".
 export function driverPayBasis(details) {
   if (!details) return 'No pay this period'
   const d = details
   if (d.payType === 'percentage') {
     return `${Number(d.payPercentage) || 0}% of revenue after deductible trip expenses`
+  }
+  if (Array.isArray(d.rates) && d.rates.length > 1) {
+    return d.rates.map((s) => `${Number(s.days) || 0} days x $${Number(s.rate) || 0}`).join(' + ')
   }
   return `${d.activeDays || 0} days x $${d.dailyRate || 250}`
 }

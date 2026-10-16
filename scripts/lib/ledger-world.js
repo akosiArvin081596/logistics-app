@@ -10,7 +10,9 @@
 //     dry run; checked);
 //   - getJobTrackingCached(): one snapshot of the Job Tracking tab, read with
 //     the spreadsheets.readonly scope (or a saved values.get, for tests), put
-//     through the server's own parseSheet() and deduplicateLoads();
+//     through the server's own parseSheet() and deduplicateLoads(); returned
+//     too, for a script that reads the loads the ledger read
+//     (scripts/driver-rate-only-report.js);
 //   - process.env: the app directory's .env, as the server loads it;
 //   - app / requireRole / refuseCrossOrigin: enough to register the freeze
 //     route so its handler runs as written;
@@ -155,7 +157,7 @@ function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, e
 		"\t}",
 		"\treturn _scriptJobTracking;",
 		"}",
-		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc,",
+		"return { payoutRulesDryRun, closedMonthFreezePlan, buildFinancialsLedger, installPeriodLockTriggers, logAudit, financialsCalc, getJobTrackingCached,",
 		"\tcomputeFleetLedger, computeInvestorMonthlyEarnings, computeLossCarryForward, listSettlableInvestors, getCarrierDBFromSQLite,",
 		`\tgetInvestorDriverSet, findCol, isLocked${extra.map((n) => `, ${n}`).join("")} };`,
 	].join("\n");

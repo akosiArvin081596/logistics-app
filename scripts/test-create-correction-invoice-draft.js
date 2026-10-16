@@ -251,6 +251,16 @@ function cli(args, env = {}) {
 		check("§3 it lists the driver's live manual invoices from the original's week on", lines.includes("Live manual invoices for this driver from 2026-05-30 on: ")
 			&& lines.includes('  INV-M-JT-2026W23-01 (Submitted, total due $120.00): "Yard move"'), lines.join("\n"));
 		check("§3 it notes the rates differ (directory $290)", lines.some((l) => /rates above differ/.test(l)));
+		// The daily-rate rule (DRIVER_RATE_ONLY_FROM): a driver with no rate of his
+		// own is paid the $250 default from FROM's month on, not his truck's rate.
+		const rateLine = (dirRow, env) => (out ? fix.describe(out.plan, { ...OPTS }, dirRow, env) : []).find((l) => l.startsWith("Rate: ")) || "";
+		check("§3 a directory rate not set: the truck's rate applies while the daily-rate rule is off",
+			rateLine({ pay_daily: 0 }, {}).endsWith("drivers directory now not set (truck rate applies)"), rateLine({ pay_daily: 0 }, {}));
+		check("§3 ...and the $250 default for a week from the rule's FROM month on",
+			rateLine({ pay_daily: 0 }, { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-06" }).endsWith("drivers directory now not set ($250 default)"),
+			rateLine({ pay_daily: 0 }, { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-06" }));
+		check("§3 ...but the truck's rate for a week before FROM",
+			rateLine({ pay_daily: 0 }, { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-07" }).endsWith("drivers directory now not set (truck rate applies)"));
 		f.db.close();
 
 		const g = fixture();

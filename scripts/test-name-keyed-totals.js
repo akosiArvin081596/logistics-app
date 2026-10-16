@@ -121,7 +121,7 @@ function liftDecl(src, kind, name) {
 	return src.slice(start, end);
 }
 
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
+const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
 	// The broker contact value rule the dashboard and locations answers apply.
 	"brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
@@ -134,7 +134,7 @@ const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "PRE_DISPATCH_PAY
 	"DRIVER_AVAILABILITY_ENABLED",
 	// GET /api/financials reads the report (buildFinancialsReport()).
 	"FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS", "LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR"];
-const LETS = ["lastPayStructShadowWarnMs"];
+const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart"];
 const FNS = [
 	// Under test.
 	"normalizeDriverName", "isBuiltInPropertyName", "driverNameForTotals",
@@ -147,7 +147,7 @@ const FNS = [
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "driverRateOnlyInfo", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
@@ -1036,11 +1036,13 @@ const PINNED = [
 	["computeDriverQueues()", "computeDriverQueues", ["byDriver"]],
 	// The payout ledger: its facts (gatherLedgerScopeFacts()) here, its month math
 	// in lib/financials-calc.js (pinned below).
-	["gatherLedgerScopeFacts()", "gatherLedgerScopeFacts", ["unitToVid", "trucksByDriver"]],
+	["gatherLedgerScopeFacts()", "gatherLedgerScopeFacts", ["unitToVid"]],
+	// The truck rate each driver is handed, built for both by truckRatesByDriver().
+	["truckRatesByDriver()", "truckRatesByDriver", ["out"]],
 	["GET /api/investor", ROUTES.investor,
 		["milesByLoadId", "milesByDriver", "milesByTruck", "loadsByTruck", "revenueByTruckMonth",
 			"driverDaySets", "driverMonthlyDays", "driverMonthlyDayLoads", "driverDisplayName", "driverMonthlyRevenue", "unitToVid",
-			"driverDaySource", "driverPayDetails", "trucksByDriver",
+			"driverDaySource", "driverPayDetails", "driverDayRates",
 			"loadsByDriverTruck", "revenueByDriverTruck", "dayTruckByDriver", "homeUnit",
 			// keyed by unit number
 			"revenueByTruck", "revenueOnUnit", "loadsOnUnit", "payOnUnit", "expOnUnit",

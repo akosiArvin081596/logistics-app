@@ -146,6 +146,10 @@ const MODULE_SRC = [
 	liftFunction("lockedPeriodsDesc"),
 	liftFunction("driverPayLockedMonths"),
 	liftFunction("truckDailyRateCandidates"),
+	// The daily-rate rule (DRIVER_RATE_ONLY_FROM) is off in this runner;
+	// scripts/test-driver-rate-only-guards.js runs the guards with it on.
+	"const DRIVER_RATE_ONLY_FROM = null;",
+	liftFunction("driverRateOnlyApplies"),
 	liftFunction("resolveDailyRate"),
 	liftFunction("directoryEditLockBlockers"),
 	liftFunction("directoryDefaultRow"),

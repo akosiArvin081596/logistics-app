@@ -279,6 +279,44 @@ const reportedRows = (db) => db.prepare(`SELECT invoice_id, invoice_rate_cents, 
 	ok("§6 ...and every drivers_directory and period_locks column", has("drivers_directory", ["id", "driver_name", "pay_daily"]) && has("period_locks", ["period", "status"]));
 	ok("§6 a daily-rate invoice is the service_invoice template, an owner-operator's service_invoice_owner_op, as server.js names them",
 		/templateName = "service_invoice";/.test(SRC) && /templateName = "service_invoice_owner_op";/.test(SRC));
+
+	console.log("§7 under the daily-rate rule (DRIVER_RATE_ONLY): each grid day it prices against the driver's own rate, else $250");
+	{
+		const rdb = makeDb();
+		rdb.prepare("DELETE FROM invoices").run();
+		rdb.prepare("DELETE FROM period_locks").run();
+		const grid = (cells) => JSON.stringify({ __templateName: "service_invoice", days: cells });
+		const cell = (load, total) => ({ loadBol: load, total, completed: true });
+		const inv = rdb.prepare(`INSERT INTO invoices (id, invoice_number, driver, week_start, week_end, rate_per_load, status, render_data)
+			VALUES (?, ?, ?, ?, ?, ?, 'Submitted', ?)`);
+		// Driver Three has no directory rate: his truck's $150 was billed.
+		inv.run(21, "INV-R3-W40", "driver three", "2026-10-03", "2026-10-09", 150, grid({ Monday: cell("L1", 150), Tuesday: cell("L1", 150) }));
+		// Driver Two's own $300, billed as such.
+		inv.run(22, "INV-R2-W40", "driver two", "2026-10-03", "2026-10-09", 300, grid({ Monday: cell("L2", 300) }));
+		// A week straddling FROM: Thu 10/1 on a load assigned in September (not the
+		// rule's), Fri 10/2 on an October load (the rule's).
+		inv.run(23, "INV-R3-W39", "driver three", "2026-09-26", "2026-10-02", 150, grid({ Thursday: cell("L9", 150), Friday: cell("L3", 150) }));
+		const rule = { from: "2026-10", appliesTo: (m) => m >= "2026-10", payMonthOf: (day, loads) => (loads.includes("L9") ? "2026-09" : day.slice(0, 7)) };
+		const on = ic.invoiceRateMismatches(rdb, { dailyRateRule: rule });
+		const byId = Object.fromEntries(on.mismatches.map((m) => [m.invoiceId, m]));
+		ok("§7 raised: Driver Three's W40 at $150 against the $250 default, both days named",
+			!!byId[21] && byId[21].invoiceCents === 15000 && byId[21].directoryCents === 25000 && byId[21].defaultRate === true && JSON.stringify(byId[21].days) === JSON.stringify(["2026-10-05", "2026-10-06"]), on.mismatches);
+		ok("§7 not raised: Driver Two at his own $300", !byId[22], on.mismatches);
+		ok("§7 the straddling week: only Fri 10/2 (an October load) is compared; Thu 10/1 (a September load) is not",
+			!!byId[23] && JSON.stringify(byId[23].days) === JSON.stringify(["2026-10-02"]), on.mismatches);
+		const off = ic.invoiceRateMismatches(rdb);
+		ok("§7 the rule off: as today, a driver with no directory rate is not compared", off.mismatches.length === 0, off.mismatches);
+		const r = await ic.runIntegrityCheck({
+			db: rdb, now: new Date("2026-10-15T12:00:30Z"), write: false, sendEmail: mailSpy(), to: ADMIN, log: quietLog(),
+			readJobTracking: async () => jt(), expensePeriodExpr: EXPENSE_PERIOD_EXPR, appZone: "America/New_York",
+			dailyRateRuleFor: () => rule,
+		});
+		ok("§7 the email names the days and the $250 default",
+			r.mail && r.mail.text.includes("Invoice INV-R3-W40 (driver driver three, week 2026-10-03 to 2026-10-09, Submitted): billed at $150.00 a day on 2026-10-05, 2026-10-06; no daily rate is set in the drivers directory, so the daily rate is the $250.00 default."),
+			r.mail && r.mail.text);
+		ok("§7 server.js hands the daily run the rule while DRIVER_RATE_ONLY is on",
+			SRC.includes("dailyRateRuleFor: DRIVER_RATE_ONLY_FROM ? driverRateOnlyDayRule : null,"));
+	}
 })().then(() => {
 	if (failures.length) {
 		console.error(`\n${passed} passed, ${failures.length} failed`);
