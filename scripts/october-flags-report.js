@@ -6,9 +6,12 @@
 // written anywhere.
 //
 // One read: the database is opened once, read-only, and read inside one read
-// transaction (one snapshot); Job Tracking is read once (--sheet-id, with the
-// read-only scope, or --values-json). Every scenario computes from that data,
-// with the lifted code's clock stopped at the read instant. Each scenario is this
+// transaction (one snapshot); Job Tracking is read once inside it (--sheet-id,
+// with the read-only scope, or --values-json), within 120 s, and both read times
+// are printed. Every scenario computes from that data, with the lifted code's
+// clock stopped at the snapshot. The app's .env is compared by hash at the start
+// and the end (a change mid-run exits 1), and its APP_TIMEZONE must be the
+// shell's (lib/ reads the shell's). Each scenario is this
 // checkout's server.js lifted with its own settings (scripts/lib/ledger-world.js),
 // the app's .env as the server reads it being "today":
 //   b12                   TRIP_WORK_DAYS on from October (lib/trip-work-days.js)
@@ -46,8 +49,11 @@
 // every scenario, the closed months' frozen-row fingerprint, and the earlier
 // figures this report replaces, each beside this run's own.
 //
-// Usage (on the server, from the app directory, with the Node pm2 runs it with):
-//   node scripts/october-flags-report.js --db=app.db --sheet-id=<id> --b4-ready='{"<load id>":"YYYY-MM-DD"}' [--key=service-account-key.json] [--names] [--json]
+// Usage (on the server, from the app directory, with the Node pm2 runs it with;
+// it lifts server.js 8 times and computes about 12 payout ledgers, so run it at
+// low priority with room for the heap, and expect several minutes: the run
+// prints an estimate on stderr after its first ledger):
+//   nice -n 10 node --max-old-space-size=4096 scripts/october-flags-report.js --db=app.db --sheet-id=<id> --b4-ready='{"<load id>":"YYYY-MM-DD"}' [--key=service-account-key.json] [--names] [--json]
 //   --b4-ready=<json>      the drop-trailer loads' Ready dates, read beforehand from
 //                          their rate cons (the script reads no PDF and makes no
 //                          other call): an object of load id -> YYYY-MM-DD, {} for none
@@ -80,6 +86,11 @@ const MONTH = "2026-10";
 const W40_START = "2026-10-03";
 const B4_MAX_LOADS = 500;
 const LOAD_ID_MAX = 64;
+const SHEET_READ_TIMEOUT_MS = 120000;
+// The worlds the run lifts and the payout ledgers it computes (six scenarios,
+// and the work-days dry run twice for each of three), for the run-time note.
+const LIFTS = 8;
+const LEDGER_RUNS = 12;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TRIP = { TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: MONTH };
 const RATE = { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: MONTH };
@@ -142,7 +153,38 @@ function parseReady(raw) {
 		if (out.has(key)) refuse(`--b4-ready names load ${given} twice`);
 		out.set(key, { given, ready: day });
 	}
+	// JSON.parse keeps the last of two equal keys. Every value is a string
+	// (checked above), so the text's string tokens alternate key, value.
+	const seen = new Set();
+	const tokens = raw.match(/"(?:[^"\\]|\\.)*"/g) || [];
+	for (let i = 0; i < tokens.length; i += 2) {
+		const id = JSON.parse(tokens[i]);
+		if (seen.has(id)) refuse(`--b4-ready names load ${String(id).trim().slice(0, LOAD_ID_MAX)} twice`);
+		seen.add(id);
+	}
 	return out;
+}
+
+// sha256 of the .env the run reads (or "absent"), to tell whether it changed
+// during the run. The hash is compared, never printed.
+function envHash(file) {
+	try {
+		return require("crypto").createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+	} catch (err) {
+		if (err.code === "ENOENT") return "absent";
+		throw err;
+	}
+}
+
+// Job Tracking, once, or an error after SHEET_READ_TIMEOUT_MS: the database
+// snapshot is held while it reads, so a stalled call must not hold it.
+class SheetTimeout extends Error {}
+function readSheetOnce(loadSheet, args) {
+	let timer = null;
+	const late = new Promise((resolve, reject) => {
+		timer = setTimeout(() => reject(new SheetTimeout(`Job Tracking was not read within ${SHEET_READ_TIMEOUT_MS / 1000} s; nothing was computed. Run it again.`)), SHEET_READ_TIMEOUT_MS);
+	});
+	return Promise.race([Promise.resolve(loadSheet(args, ROOT)), late]).finally(() => clearTimeout(timer));
 }
 
 // The app checkout's commit: git's HEAD, else the client build's record.
@@ -256,8 +298,10 @@ function b4Plan(A, sheetData, ready) {
 function ledgerDays(fleet) {
 	const month = new Map();
 	const days = new Map();
+	const percentage = new Map();
 	for (const s of fleet.scopes) {
 		for (const it of s.items) {
+			if (it.kind === "driver_pay" && it.payType === "percentage" && it.month === MONTH) percentage.set(it.driver, (percentage.get(it.driver) || 0) + it.cents);
 			if (it.kind !== "driver_pay" || it.payType !== "fixed" || !it.day) continue;
 			if (!days.has(it.driver)) days.set(it.driver, new Map());
 			const d = days.get(it.driver);
@@ -269,10 +313,10 @@ function ledgerDays(fleet) {
 			month.set(it.driver, m);
 		}
 	}
-	return { month, days };
+	return { month, days, percentage };
 }
 
-async function compute(args, { now, loadSheet }) {
+async function compute(args, { now, loadSheet, log }) {
 	if (!args.db || args.db === true) refuse("--db is required");
 	const ready = parseReady(args["b4-ready"]);
 	if (!args["values-json"] && (typeof args["sheet-id"] !== "string" || !args["sheet-id"])) refuse("--sheet-id (or --values-json) is required; there is no default sheet");
@@ -284,17 +328,26 @@ async function compute(args, { now, loadSheet }) {
 	} catch (err) {
 		refuse(err.message);
 	}
+	const envPath = envFile || path.join(ROOT, ".env");
+	const envAtStart = envHash(envPath);
 	const quiet = () => {};
 	const tripNow = tripWorkDays.ruleFromEnv(env, quiet);
 	const rateNow = driverRateOnly.ruleFromEnv(env, quiet);
 	if (tripNow || rateNow) {
 		refuse(`the app's .env already has ${tripNow ? `TRIP_WORK_DAYS on from ${tripNow}` : `DRIVER_RATE_ONLY on from ${rateNow}`}, so "today" would already include it`);
 	}
+	// The lifted code reads the .env's APP_TIMEZONE; lib/ (the trip work-day
+	// rule's days, app-time) reads this shell's. They must name one zone.
 	const zone = appTime.resolveAppTimeZone(env.APP_TIMEZONE, quiet);
+	const shellZone = appTime.appTimeZone();
+	if (zone !== shellZone) refuse(`the app's .env sets APP_TIMEZONE ${zone}, but this shell runs ${shellZone}; run it with APP_TIMEZONE=${zone}`);
+	log(`October flags report: read-only, one snapshot; it lifts server.js ${LIFTS} times and computes about ${LEDGER_RUNS} payout ledgers plus the investor payables. `
+		+ "On the server run it as: nice -n 10 node --max-old-space-size=4096 scripts/october-flags-report.js ... A run-time estimate follows the first ledger.");
 
 	const db = openDb({ root: ROOT, dbFile, readonly: true });
 	try {
-		// One snapshot for every world: a read transaction held to the end.
+		// One snapshot for every world: a read transaction held to the end. Job
+		// Tracking is read inside it, under a time limit (readSheetOnce()).
 		db.exec("BEGIN");
 		if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'period_locks'").get()) {
 			refuse("the database has no period_locks table, so its closed months cannot be told");
@@ -303,13 +356,16 @@ async function compute(args, { now, loadSheet }) {
 		if (latestClosed && MONTH <= latestClosed) {
 			refuse(`${MONTH} is at or before ${latestClosed}, the latest closed month. The rules may only start in an open month: closed months are final as recorded.`);
 		}
-		const readAt = Number.isFinite(now) ? now : Date.now();
+		const snapshotAt = Number.isFinite(now) ? now : Date.now();
 		const commit = appCommit();
-		const sheetData = await loadSheet(args, ROOT);
-		const result = await report({ db, args, envFile, sheetData, ready, readAt, zone, env, latestClosed, names: args.names === true });
+		const sheetData = await readSheetOnce(loadSheet, args);
+		const sheetAt = Number.isFinite(now) ? now : Date.now();
+		const result = await report({ db, args, envFile, sheetData, ready, snapshotAt, sheetAt, zone, env, latestClosed, names: args.names === true, log });
 		result.commit = commit;
 		const after = appCommit();
 		if (after !== commit) result.problems.push({ scenario: "", issue: `the app's commit changed during the run (${commit} -> ${after}); run it again` });
+		result.envUnchanged = envHash(envPath) === envAtStart;
+		if (!result.envUnchanged) result.problems.push({ scenario: "", issue: "the app's .env changed during the run (compared by hash; no value is printed); run it again" });
 		return result;
 	} finally {
 		if (db.inTransaction) db.exec("ROLLBACK");
@@ -317,9 +373,9 @@ async function compute(args, { now, loadSheet }) {
 	}
 }
 
-async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, latestClosed, names }) {
+async function report({ db, args, envFile, sheetData, ready, snapshotAt, sheetAt, zone, env, latestClosed, names, log }) {
 	const world = (overrides, sheet) => buildLedgerWorld({
-		root: ROOT, dbPath: args.db, readonly: true, sheetData: sheet, envFile, envOverrides: overrides, extraRoots: EXTRA_ROOTS, now: readAt, db,
+		root: ROOT, dbPath: args.db, readonly: true, sheetData: sheet, envFile, envOverrides: overrides, extraRoots: EXTRA_ROOTS, now: snapshotAt, db,
 	});
 	const W = { today: world(null, sheetData) };
 	const A = W.today.api;
@@ -376,7 +432,12 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 	const keys = SCENARIOS.map(([k]) => k);
 	const ledger = new Map();
 	const payables = new Map();
-	for (const k of keys) ledger.set(k, ledgerDays(await fleetOf(k)));
+	const started = Date.now();
+	ledger.set("today", ledgerDays(await fleetOf("today")));
+	const first = (Date.now() - started) / 1000;
+	// Rough: the ledgers, and the investor payables at about half a ledger each world.
+	log(`Run-time estimate: the first payout ledger took ${first.toFixed(1)} s; the run needs about ${LEDGER_RUNS} of them plus the payables: about ${Math.max(1, Math.ceil((first * LEDGER_RUNS * 1.5) / 60))} min.`);
+	for (const k of keys) if (!ledger.has(k)) ledger.set(k, ledgerDays(await fleetOf(k)));
 	for (const k of [...keys, "b12B4"]) payables.set(k, await payablesOf(k));
 
 	// Drivers: every daily-rate driver the ledger pays in October in any scenario.
@@ -398,6 +459,10 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 		byScenario: Object.fromEntries(keys.map((k) => [k, octPayable(k, inv.ownerId)])),
 	}));
 	const investorTotals = Object.fromEntries(keys.map((k) => [k, round2(investors.reduce((t, inv) => t + octPayable(k, inv.ownerId).payable, 0))]));
+	// Percentage drivers: none of the three changes touches their pay, so their
+	// October pay must be the same in every scenario.
+	const percentageKeys = sorted(keys.flatMap((k) => [...ledger.get(k).percentage.keys()]));
+	const percentageDrivers = percentageKeys.map((d) => ({ driver: label(d), byScenario: Object.fromEntries(keys.map((k) => [k, (ledger.get(k).percentage.get(d) || 0) / 100])) }));
 
 	// Invoices, by scenario.
 	const live = db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' ORDER BY week_start, id").all();
@@ -455,7 +520,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 		if (parts.trip) {
 			const dry = await dryRunOf(withoutTrip[k]);
 			if (!dry.closedMonthsUnchanged || !dry.monthsBeforeFromUnchanged) {
-				for (const p of dry.problems) problems.push({ scenario: k, ownerId: p.ownerId, issue: `B12 dry run: ${p.issue}`, closed: !!p.closed });
+				for (const p of dry.problems) problems.push({ scenario: k, ownerId: p.ownerId, issue: `B12 dry run: ${p.issue}`, closed: !!p.closed, beforeMonth: !!p.beforeFrom });
 			}
 			for (const p of dry.perInvoice) {
 				const row = rowOf(p.invoiceNumber);
@@ -555,7 +620,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 				if (!guarded(m)) continue;
 				const same = JSON.stringify(a.months.get(m) || null) === JSON.stringify(b.months.get(m) || null)
 					&& JSON.stringify(a.items.filter((i) => i.month === m)) === JSON.stringify(b.items.filter((i) => i.month === m));
-				if (!same) problems.push({ scenario: k, ownerId, month: m, closed: A.isLocked(m), issue: `${m}'s payout ledger would change` });
+				if (!same) problems.push({ scenario: k, ownerId, month: m, closed: A.isLocked(m), beforeMonth: !A.isLocked(m), issue: `${m}'s payout ledger would change` });
 			}
 		}
 		for (const inv of investors) {
@@ -566,9 +631,17 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 				const x = a.get(m) || { payable: 0, driverPay: 0 };
 				const y = b.get(m) || { payable: 0, driverPay: 0 };
 				if (cents(x.payable) !== cents(y.payable) || cents(x.driverPay) !== cents(y.driverPay)) {
-					problems.push({ scenario: k, ownerId: inv.ownerId, month: m, closed: A.isLocked(m), issue: `${m}'s payable or driver pay would change` });
+					problems.push({ scenario: k, ownerId: inv.ownerId, month: m, closed: A.isLocked(m), beforeMonth: !A.isLocked(m), issue: `${m}'s payable or driver pay would change` });
 				}
 			}
+		}
+	}
+	let percentageDriversUnchanged = true;
+	for (const d of percentageDrivers) {
+		for (const k of keys.slice(1)) {
+			if (cents(d.byScenario[k]) === cents(d.byScenario.today)) continue;
+			percentageDriversUnchanged = false;
+			problems.push({ scenario: k, issue: `${d.driver}'s October percentage pay would change (${usd(d.byScenario.today)} -> ${usd(d.byScenario[k])})` });
 		}
 	}
 	const fingerprint = Object.fromEntries(rateReport.FINGERPRINTED.map((t) => [t, rateReport.closedRowsHash(db, t, closedMonths)]));
@@ -582,7 +655,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 			compare: "owner 5, today -> B12 alone", thisRun: owner5 ? { today: owner5("today"), b12: owner5("b12") } : null,
 		},
 		{
-			earlier: "investor 5 October payable $1,969 -> $194", source: "B4 impact, replica, 2026-10-15: B12 off -> on, B4 applied",
+			earlier: "investor 5 October payable $1,969 -> $194", source: "B4 impact, computed 2026-10-16 ~05:00 ET on the replica copy of 2026-10-15: B12 off -> on, B4 applied",
 			compare: "owner 5, B4 applied -> B12 with B4 applied (no daily rate)", thisRun: owner5 ? { b4Applied: owner5("b4Applied"), b12WithB4Applied: owner5("b12B4") } : null,
 		},
 		{
@@ -602,7 +675,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 	const pdpFrom = A.PRE_DISPATCH_PAY_DAY_RULE_FROM || null;
 	return {
 		report: "october-flags", month: MONTH, latestClosedMonth: latestClosed, closedMonths,
-		readAt: { iso: new Date(readAt).toISOString(), eastern: easternText(readAt, zone) },
+		readAt: { database: { iso: new Date(snapshotAt).toISOString(), eastern: easternText(snapshotAt, zone) }, sheet: { iso: new Date(sheetAt).toISOString(), eastern: easternText(sheetAt, zone) } },
 		commit: "",
 		settings: {
 			LEDGER_DAY_ONCE_FROM: ledgerDayOnce.ruleFromEnv(env) || null,
@@ -616,11 +689,11 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 			RATECON_REISSUE_HOLD_ENABLED: !!A.RATECON_REISSUE_HOLD_ENABLED,
 		},
 		scenarios: SCENARIOS.map(([key, name]) => ({ key, name, ...PARTS[key] })),
-		drivers, driverTotals, investors: investorRows, investorTotals,
+		drivers, driverTotals, investors: investorRows, investorTotals, percentageDrivers, percentageDriversUnchanged,
 		invoices: invoicesBy, refusedDays: refusedBy,
 		b4Loads: b4.loads, b4InFlight: b4.loads.filter((l) => l.asDesigned.takesReady).map((l) => l.loadId),
 		closedMonthsUnchanged: !problems.some((p) => p.closed),
-		monthsBeforeUnchanged: !problems.some((p) => p.month && !p.closed),
+		monthsBeforeUnchanged: !problems.some((p) => p.beforeMonth),
 		closedMonthsFingerprint: fingerprint,
 		problems,
 		replaces,
@@ -634,7 +707,8 @@ function printText(r) {
 	const pad = (s, n) => String(s).padEnd(n);
 	const lpad = (s, n) => String(s).padStart(n);
 	lines.push(`October flags report (${r.month}): B12, the daily rate and B4, alone and together. Nothing was written.`);
-	lines.push(`Data read once at ${r.readAt.eastern} (database snapshot and Job Tracking); app commit ${r.commit}; latest closed month ${r.latestClosedMonth || "none"}.`);
+	const gap = Math.round((Date.parse(r.readAt.sheet.iso) - Date.parse(r.readAt.database.iso)) / 1000);
+	lines.push(`Data read once: database snapshot ${r.readAt.database.eastern}, Job Tracking ${r.readAt.sheet.eastern} (${gap} s later); app commit ${r.commit}; latest closed month ${r.latestClosedMonth || "none"}; the .env unchanged during the run: ${r.envUnchanged ? "yes" : "NO"}.`);
 	const s = r.settings;
 	lines.push(`Settings found (the app's .env, as the server reads them): LEDGER_DAY_ONCE ${s.LEDGER_DAY_ONCE_FROM ? `from ${s.LEDGER_DAY_ONCE_FROM}` : "off"}; TRIP_WORK_DAYS ${s.TRIP_WORK_DAYS_FROM || "off"}; DRIVER_RATE_ONLY ${s.DRIVER_RATE_ONLY_FROM || "off"}; PAYOUT_RULES_V2 ${s.PAYOUT_RULES_V2_ENABLED ? "on" : "off"}; PRE_DISPATCH_PAY_DAY_RULE ${s.PRE_DISPATCH_PAY_DAY_RULE_FROM ? `from ${s.PRE_DISPATCH_PAY_DAY_RULE_FROM}` : "off"}; INVESTOR_LEASE_PAYOUTS ${s.INVESTOR_LEASE_PAYOUTS_ENABLED ? "on" : "off"}; MARK_PAID_CLOSED_MONTH ${s.MARK_PAID_CLOSED_MONTH_ENABLED ? "on" : "off"}; PERSONAL_EXPENSE_DEDUCTIONS ${s.PERSONAL_EXPENSE_DEDUCTIONS_ENABLED ? "on" : "off"}; RATECON_REISSUE_HOLD ${s.RATECON_REISSUE_HOLD_ENABLED ? "on" : "off"}.`);
 	lines.push(`Scenarios: B12 = TRIP_WORK_DAYS from ${r.month}; daily rate = DRIVER_RATE_ONLY from ${r.month}; B4 as designed = today's figures (stored loads unchanged); B4 applied = each --b4-ready load's Pickup Appointment set to its Ready date; all three = B12 + daily rate + B4 applied.`);
@@ -647,6 +721,7 @@ function printText(r) {
 	lines.push("", "Investor October payable (after the loss carried forward; B4 as designed = today):", row("investor", cols.map(([, name]) => name)));
 	for (const i of r.investors) lines.push(row(i.investor, cols.map(([k]) => usd(i.byScenario[k].payable))));
 	lines.push(row("total", cols.map(([k]) => usd(r.investorTotals[k]))));
+	lines.push("", `Percentage drivers' October pay, the same in every scenario: ${r.percentageDriversUnchanged ? "yes" : "NO"}${r.percentageDrivers.length ? ` (${r.percentageDrivers.map((d) => `${d.driver} ${usd(d.byScenario.today)}`).join(", ")})` : " (none)"}.`);
 	for (const [k, name] of SCENARIOS.slice(1)) {
 		const list = r.invoices[k] || [];
 		lines.push("", `Invoices that would differ, ${name}: ${list.length || "none"}${k === "b4AsDesigned" ? " (stored loads unchanged)" : ""}`);
@@ -689,16 +764,19 @@ function printText(r) {
 }
 
 // The whole run, for the command line and the runner: { code, result, output }
-// or { code, error }. `now` (epoch ms) is the read instant the lifted code's
-// clock stops at (default: the clock); `loadSheet` reads Job Tracking once.
-async function run({ argv = process.argv.slice(2), now = null, loadSheet = sheetFor } = {}) {
+// or { code, error } (stalled: the Job Tracking read timed out and may still be
+// pending). `now` (epoch ms) is the instant the lifted code's clock stops at
+// (default: the snapshot's); `loadSheet` reads Job Tracking once; `log` takes
+// the progress notes (stderr).
+async function run({ argv = process.argv.slice(2), now = null, loadSheet = sheetFor, log = (msg) => console.error(msg) } = {}) {
 	const args = parseArgs(argv);
 	try {
-		const result = await compute(args, { now, loadSheet });
+		const result = await compute(args, { now, loadSheet, log });
 		const code = result.problems.length ? 1 : 0;
 		return { code, result, output: args.json === true ? JSON.stringify(result, null, 1) : printText(result) };
 	} catch (err) {
 		if (err instanceof Refusal) return { code: 2, error: `REFUSED: ${err.message}` };
+		if (err instanceof SheetTimeout) return { code: 1, error: `ERROR: ${err.message}`, stalled: true };
 		return { code: 1, error: `ERROR: ${err.stack || err.message}` };
 	}
 }
@@ -709,6 +787,8 @@ if (require.main === module) {
 	run().then((out) => {
 		if (out.error) console.error(out.error);
 		else console.log(out.output);
+		// A timed-out Sheets call would keep the process waiting on it.
+		if (out.stalled) process.exit(out.code);
 		process.exitCode = out.code;
 	});
 }
