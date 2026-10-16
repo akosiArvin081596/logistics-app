@@ -105,6 +105,7 @@ const { getStateFromCoords } = require("./lib/ifta-states");
 const routemate = require("./lib/routemate-client");
 const linxupPush = require("./lib/linxup-push");
 const eldFeedHealth = require("./lib/eld-feed-health");
+const eldPosition = require("./lib/eld-position");
 const driverAvailability = require("./lib/driver-availability");
 const scankit = require("./lib/scankit-client");
 const brokerInvoice = require("./lib/broker-invoice");
@@ -4768,6 +4769,22 @@ function reconcileEldDeviceAssignments() {
 		after = db.prepare("SELECT COUNT(*) AS n FROM eld_device_assignments").get().n;
 	})();
 	return { seeded: false, opened: after - before };
+}
+
+// When the device a truck carries was linked to it, in epoch ms: the truck's
+// open row for that exact device, read through lib/eld-position.js
+// linkedSinceMs() (null when unknown: no such row, or one the seed or the boot
+// reconcile opened). The position routes show no fix taken before it (B11).
+// One indexed read (idx_eld_dev_asg_open_truck).
+function eldDeviceLinkedSinceMs(truckId, vid) {
+	const id = Number(truckId);
+	const device = String(vid || "").trim();
+	if (!Number.isFinite(id) || id <= 0 || !device) return null;
+	const row = db.prepare(
+		`SELECT assigned_from, assigned_by FROM eld_device_assignments
+		 WHERE truck_id = ? AND routemate_vehicle_id = ? AND assigned_until = ''`
+	).get(id, device);
+	return eldPosition.linkedSinceMs(row);
 }
 
 function buildEldDeviceResolver() {
@@ -15528,7 +15545,6 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		let lastPingSpeed = 0;
 		let lastPingAgeMs = null;
 		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
-		const ETA_MAX_PING_AGE_MS = 2 * 60 * 60 * 1000; // B11: no ETA or distance from an older fix
 		if (driverNameKey) {
 			// Source priority: pick whichever of ELD telemetry vs phone GPS has the
 			// most recent valid ping within the 3-hour window. ELD is preferred only
@@ -15557,10 +15573,13 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				`).get(pingVehicleId) : null;
 				// Require a valid GPS fix — an ELD that lost satellites can return
 				// NULL/0 coords, which would otherwise pin the truck at the equator.
-				// Mirrors the rmHasFix check in /api/locations/latest.
+				// Mirrors the rmHasFix check in /api/locations/latest, the link rule
+				// included: no fix the device took before it was linked to this
+				// truck (B11; lib/eld-position.js).
 				if (rmRow && rmRow.location_date_ms
 					&& Number.isFinite(rmRow.latitude) && Number.isFinite(rmRow.longitude)
-					&& (rmRow.latitude !== 0 || rmRow.longitude !== 0)) {
+					&& (rmRow.latitude !== 0 || rmRow.longitude !== 0)
+					&& !eldPosition.fixPredatesLink(rmRow.location_date_ms, eldDeviceLinkedSinceMs(pingTruck.id, pingVehicleId))) {
 					const age = Date.now() - rmRow.location_date_ms;
 					if (age >= 0 && age <= MAX_PING_AGE_MS) {
 						rmCandidate = {
@@ -15607,7 +15626,9 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 				lastPingAgeMs = Date.now() - chosen.ts;
 			}
 		}
-		const pingFreshForEta = lastPing !== null && lastPingAgeMs !== null && lastPingAgeMs <= ETA_MAX_PING_AGE_MS;
+		// B11: no ETA or distance from a fix over 2 hours old, the rule
+		// /api/locations/latest and the browser use (lib/eld-position.js).
+		const pingFreshForEta = lastPing !== null && eldPosition.fixAllowsEta(lastPingAgeMs);
 
 		let eta = null;
 		const deliveredRe = /^(delivered|pod received|completed)$/i;
@@ -15694,7 +15715,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		// Taken verbatim from `eta` rather than recomputed, so the map's info
 		// strip can never contradict the ETA card sitting directly above it.
 		// With no fix within 2 hours (none at all, a truck silent past
-		// MAX_PING_AGE_MS, or one older than ETA_MAX_PING_AGE_MS) no distance or
+		// MAX_PING_AGE_MS, or one older than eldPosition.ETA_MAX_FIX_AGE_MS) no distance or
 		// drive time is sent either: the page shows the planned lane's as an ETA,
 		// and the customer link shows none from an old or missing fix (B11). A
 		// delivered load with a fresh fix keeps the lane's figures, as before.
@@ -42169,15 +42190,24 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 		if (!hasFix) {
 			return res.json({ ok: true, position: null, unit: (truck && truck.unit) || "", reason: "no_recent_fix" });
 		}
+		// No fix the device took before it was linked to this truck: it was taken
+		// on another vehicle, or wherever the unit sat (B11; the rule
+		// /api/locations/latest applies, lib/eld-position.js).
+		const linkedSince = eldDeviceLinkedSinceMs(truck.id, vehicleId);
+		if (eldPosition.fixPredatesLink(rm.location_date_ms, linkedSince)) {
+			return res.json({ ok: true, position: null, unit: (truck && truck.unit) || "", reason: "no_fix_since_link" });
+		}
 
 		// Heading: the device's own bearing (numeric degrees or a compass string),
-		// else the rhumb-line bearing from the previous clean fix. Same two-step,
-		// and the same helper, as /api/locations/latest — a driver's camera should
-		// point where the dispatcher's arrow points.
+		// else the rhumb-line bearing from the previous clean fix, when that one
+		// was taken since the link too. Same two-step, and the same helper, as
+		// /api/locations/latest — a driver's camera should point where the
+		// dispatcher's arrow points.
 		let heading = parseRoutemateBearing(rm.bearing);
 		if (heading == null && prev
 			&& Number.isFinite(prev.latitude) && Number.isFinite(prev.longitude)
-			&& (prev.latitude !== rm.latitude || prev.longitude !== rm.longitude)) {
+			&& (prev.latitude !== rm.latitude || prev.longitude !== rm.longitude)
+			&& !eldPosition.fixPredatesLink(prev.location_date_ms, linkedSince)) {
 			heading = geolib.getRhumbLineBearing(
 				{ latitude: prev.latitude, longitude: prev.longitude },
 				{ latitude: rm.latitude, longitude: rm.longitude },
@@ -52580,12 +52610,13 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			const routemateRows = db.prepare(`
 				SELECT
 					ta.driver_name AS driver_name,
+					t.id AS truck_id, t.routemate_vehicle_id AS vehicle_id,
 					rt.latitude, rt.longitude, rt.speed, rt.bearing,
 					rt.fuel_pct,
 					rt.location_date_ms,
 					rt.source, rt.engine_hours, rt.geocoded_location,
-					-- Prior telemetry row's coords, used as a fallback heading source
-					-- when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
+					-- Prior telemetry row's coords and time, used as a fallback heading
+					-- source when rt.bearing is missing or non-numeric. Index idx_rm_tel_vid_date
 					-- covers (routemate_vehicle_id, location_date_ms DESC) so this stays cheap.
 					(SELECT rt2.latitude  FROM routemate_telemetry rt2
 					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
@@ -52596,7 +52627,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
 					     AND rt2.id < rt.id
 					     AND rt2.dropped_reason = ''
-					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lng
+					   ORDER BY rt2.id DESC LIMIT 1) AS prev_lng,
+					(SELECT rt2.location_date_ms FROM routemate_telemetry rt2
+					   WHERE rt2.routemate_vehicle_id = t.routemate_vehicle_id
+					     AND rt2.id < rt.id
+					     AND rt2.dropped_reason = ''
+					   ORDER BY rt2.id DESC LIMIT 1) AS prev_ms
 				FROM truck_assignments ta
 				JOIN trucks t ON t.id = ta.truck_id
 				JOIN routemate_telemetry rt
@@ -52623,10 +52659,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// Only overlay Routemate when telemetry has a valid fix.
 				// A linked truck whose ELD lost GPS sends NULL/0 lat/lng — letting that
 				// through would clobber phone GPS and pin the truck at the equator.
+				// Nor a fix the device took before it was linked to this truck: it
+				// was taken on another vehicle, or wherever the unit sat (B11;
+				// lib/eld-position.js). A device linked today whose newest fix is
+				// 13 days old gives the driver no position, not that one.
+				const linkedSince = rm ? eldDeviceLinkedSinceMs(rm.truck_id, rm.vehicle_id) : null;
 				const rmHasFix = rm
 					&& Number.isFinite(rm.latitude)
 					&& Number.isFinite(rm.longitude)
-					&& (rm.latitude !== 0 || rm.longitude !== 0);
+					&& (rm.latitude !== 0 || rm.longitude !== 0)
+					&& !eldPosition.fixPredatesLink(rm.location_date_ms, linkedSince);
 				if (rmHasFix) {
 					loc.latitude = rm.latitude;
 					loc.longitude = rm.longitude;
@@ -52645,12 +52687,14 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 					if (loc.noGps) loc.noGps = false;
 					// Heading: parse Routemate's compass string (NW/SE/SSW/...) or numeric
 					// bearing to degrees; fall back to the rhumb-line bearing between the
-					// previous and current telemetry rows when Routemate sends no bearing.
+					// previous and current telemetry rows when Routemate sends no bearing,
+					// and the previous one was taken since the link too.
 					const headingDeg = parseRoutemateBearing(rm.bearing);
 					if (headingDeg != null) {
 						loc.heading = headingDeg;
 					} else if (Number.isFinite(rm.prev_lat) && Number.isFinite(rm.prev_lng) &&
-					           (rm.prev_lat !== rm.latitude || rm.prev_lng !== rm.longitude)) {
+					           (rm.prev_lat !== rm.latitude || rm.prev_lng !== rm.longitude) &&
+					           !eldPosition.fixPredatesLink(rm.prev_ms, linkedSince)) {
 						loc.heading = geolib.getRhumbLineBearing(
 							{ latitude: rm.prev_lat, longitude: rm.prev_lng },
 							{ latitude: rm.latitude, longitude: rm.longitude }
@@ -52856,6 +52900,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						} catch { /* coord fallback is best-effort */ }
 					}
 
+					// B11: no paid route from a fix over 2 hours old (lib/eld-position.js,
+					// the public tracker's rule). The browser shows no distance or ETA
+					// from it (client/src/lib/fixAge.js), so both stay empty and the
+					// verdict "unknown"; the position itself is still sent.
+					const etaFromFix = loc.latitude != null && loc.longitude != null && eldPosition.fixAllowsEta(loc.lastPingAge);
 					if (!isNaN(oLat) && !isNaN(oLng)) {
 						loc.originLat = oLat;
 						loc.originLng = oLng;
@@ -52870,14 +52919,14 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 						// panel headline answers "how long until this load reaches
 						// delivery", and this is an ADDITION to that, not a replacement.
 						const st = statusCol ? String(load[statusCol] || "").trim() : "";
-						if (!fuelModel.isPickedUp(st) && loc.latitude != null && loc.longitude != null) {
+						if (!fuelModel.isPickedUp(st) && etaFromFix) {
 							pickupEtaTasks.push({ loc, oLat, oLng });
 						}
 					}
 					if (!isNaN(dLat) && !isNaN(dLng)) {
 						loc.destLat = dLat;
 						loc.destLng = dLng;
-						if (loc.latitude == null || loc.longitude == null) continue;
+						if (!etaFromFix) continue;
 						etaTasks.push({ loc, dLat, dLng, load });
 					}
 				}
@@ -54050,6 +54099,9 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		let rawPoints = [];
 		if (assignment && assignment.routemate_vehicle_id) {
 			const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+			// No point the device took before it was linked to this truck (B11;
+			// the rule the position routes apply, lib/eld-position.js).
+			const linkedSince = eldDeviceLinkedSinceMs(assignment.truck_id, assignment.routemate_vehicle_id);
 			const rows = db.prepare(
 				`SELECT latitude, longitude, speed, location_date_ms
 				 FROM routemate_telemetry
@@ -54057,7 +54109,8 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 				   AND location_date_ms > ?
 				   AND dropped_reason = ''
 				 ORDER BY location_date_ms ASC`
-			).all(assignment.routemate_vehicle_id, cutoffMs);
+			).all(assignment.routemate_vehicle_id, cutoffMs)
+				.filter((r) => !eldPosition.fixPredatesLink(r.location_date_ms, linkedSince));
 			rawPoints = rows.map((r) => ({
 				latitude: r.latitude,
 				longitude: r.longitude,
@@ -54159,17 +54212,22 @@ app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async 
 		if (origin && !origin.address) origin.address = await geocodeReverse(origin.latitude, origin.longitude) || "";
 		if (destination && !destination.address) destination.address = await geocodeReverse(destination.latitude, destination.longitude) || "";
 
-		// Get planned route from driver's current position to destination
+		// Get planned route from driver's current position to destination. The
+		// newest point counts as the current position only while it is at most 2
+		// hours old: no paid route from where the truck was (B11,
+		// lib/eld-position.js). Otherwise, as with no point at all, the planned
+		// pickup-to-drop-off lane.
 		let route = null;
 		if (destination) {
-			const currentPos = trail.length > 0
-				? { latitude: trail[trail.length - 1].latitude, longitude: trail[trail.length - 1].longitude }
+			const last = trail.length > 0 ? trail[trail.length - 1] : null;
+			const currentPos = last && eldPosition.fixAllowsEta(Date.now() - Date.parse(last.timestamp))
+				? { latitude: last.latitude, longitude: last.longitude }
 				: origin;
 			if (currentPos) {
 				route = await getRoute(currentPos, destination);
 			}
 			// Fallback: route from origin to destination if driver position route fails
-			if (!route && origin) {
+			if (!route && origin && currentPos !== origin) {
 				route = await getRoute(origin, destination);
 			}
 		}
