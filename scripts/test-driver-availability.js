@@ -27,6 +27,23 @@
 //      "Assign anyway" that covers today makes his truck alert as normal (the
 //      owner's rule, 2026-10-15)
 //
+// The R11 follow-up (the user, 2026-10-16: staff full edit, ended rows too, under
+// the same server rules; the driver's own screen behind
+// DRIVER_TIME_OFF_SCREEN_ENABLED):
+//   §11 the staff GET says per row what the caller may change (`editable`,
+//       `limits`) and what a new row may use (`createLimits`), for both roles,
+//       on a recent, an old live and an old ended row; the writes' answers carry
+//       the same; each served limit is accepted and the day past it refused
+//   §12 an edit's audit line says "reason changed" when the reason changed, and
+//       no audit row the runner creates, of any action (refusals too), holds
+//       any reason text it used. logAudit() swallows its own errors, so an
+//       audit row is best effort and is not claimed to commit with the row
+//   §13 a Dispatcher's full edit is held to the same rules (guards: these pass
+//       before the follow-up too)
+//   §14 GET /api/driver/:driverName: `timeOff` only while both flags are on,
+//       his own current and upcoming rows, as /api/driver/me/availability
+//       answers them
+//
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // and sweep lifted out of server.js on an in-memory SQLite, over HTTP.
 // Run: node scripts/test-driver-availability.js
@@ -380,6 +397,161 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		await w.sweep();
 		const row = w.db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`);
 		ok("§7.13 a row whose directory row is gone (same name) pauses nothing: #91 alerts", !!row && !row.resolved_at && !!row.alerted_at);
+	});
+
+	// Today 2026-10-15: a Dispatcher's floor is Sep 15 (30 days back), yesterday Oct 14.
+	const NO_LIMITS = { fromMin: null, toMin: null, toMax: null };
+	const scopeOf = (r, id) => {
+		const x = r.body && Array.isArray(r.body.rows) ? r.body.rows.find((y) => y.id === id) : null;
+		return x ? [x.editable, x.limits === undefined ? "missing" : x.limits] : null;
+	};
+	section("§11 what the staff GET says the caller may change");
+	await R.guard("§11", async () => {
+		const w = await W.startWorld();
+		const recent = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-25")));
+		const recentEnded = rowId(await create(w, DIR.hollis, vacation("2026-09-20", "2026-10-02")));
+		const oldLive = rowId(await create(w, DIR.tamsin, vacation("2026-09-10", "2026-10-25")));
+		const oldEnded = rowId(await create(w, DIR.soren, vacation("2026-09-01", "2026-09-12")));
+		const gone = rowId(await create(w, DIR.soren, vacation("2026-11-01", "2026-11-02")));
+		await cancel(w, gone);
+		ok("§11.0 five rows: a recent current one, a recent ended one, an old live one, an old ended one, a cancelled one",
+			[recent, recentEnded, oldLive, oldEnded, gone].every(Boolean));
+		const sa = { h: await list(w, DIR.hollis), t: await list(w, DIR.tamsin), s: await list(w, DIR.soren) };
+		eq("§11.1 Super Admin: every live row \"full\", with no limits",
+			[scopeOf(sa.h, recent), scopeOf(sa.h, recentEnded), scopeOf(sa.t, oldLive), scopeOf(sa.s, oldEnded)], Array(4).fill(["full", NO_LIMITS]));
+		eq("§11.2 ...a cancelled row: \"none\", limits null", scopeOf(sa.s, gone), ["none", null]);
+		eq("§11.3 ...createLimits: none", sa.h.body && sa.h.body.createLimits, { fromMin: null, toMin: null });
+		const d = { h: await list(w, DIR.hollis, USERS.disp), t: await list(w, DIR.tamsin, USERS.disp), s: await list(w, DIR.soren, USERS.disp) };
+		eq("§11.4 Dispatcher, a recent current row (Oct 5-25): \"full\", from no earlier than Sep 15, an earlier end no earlier than yesterday",
+			scopeOf(d.h, recent), ["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null }]);
+		eq("§11.5 ...a recent ended row (Sep 20 - Oct 2): \"full\", its end may stay or move later",
+			scopeOf(d.h, recentEnded), ["full", { fromMin: "2026-09-15", toMin: "2026-10-02", toMax: null }]);
+		eq("§11.6 ...an old live row (Sep 10 - Oct 25): \"end_early\", the end from yesterday to the day before its end",
+			scopeOf(d.t, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-24" }]);
+		eq("§11.7 ...an old ended row (Sep 1-12): \"none\"", scopeOf(d.s, oldEnded), ["none", null]);
+		eq("§11.8 ...a cancelled row: \"none\"", scopeOf(d.s, gone), ["none", null]);
+		eq("§11.9 ...createLimits: from no earlier than Sep 15", d.h.body && d.h.body.createLimits, { fromMin: "2026-09-15", toMin: null });
+
+		const made = await create(w, DIR.soren, vacation("2026-10-28", "2026-10-29"), USERS.disp);
+		eq("§11.10 a Dispatcher's POST answer carries his editable and limits", made.body && made.body.row && [made.body.row.editable, made.body.row.limits],
+			["full", { fromMin: "2026-09-15", toMin: "2026-10-14", toMax: null }]);
+		const ended = await edit(w, oldLive, { to: "2026-10-20" }, USERS.disp);
+		eq("§11.11 ...his PUT answer too (the old row ended early at Oct 20 stays \"end_early\")", ended.body && ended.body.row && [ended.status, ended.body.row.editable, ended.body.row.limits],
+			[200, "end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-19" }]);
+		const c = await cancel(w, rowId(made), USERS.disp);
+		eq("§11.12 ...and his cancel answer: \"none\"", c.body && c.body.row && [c.body.row.editable, c.body.row.limits], ["none", null]);
+		const saEdit = await edit(w, oldEnded, { reason: "Personal" });
+		eq("§11.13 a Super Admin's PUT answer: \"full\", no limits", saEdit.body && saEdit.body.row && [saEdit.body.row.editable, saEdit.body.row.limits], ["full", NO_LIMITS]);
+	});
+	await R.guard("§11b", async () => {
+		// Each limit a Dispatcher is served is a day the server accepts; one day past it is refused.
+		const w = await W.startWorld();
+		const recent = rowId(await create(w, DIR.hollis, vacation("2026-10-05", "2026-10-25")));
+		const oldLive = rowId(await create(w, DIR.tamsin, vacation("2026-09-10", "2026-10-25")));
+		eq("§11.14 recent row, from one day before fromMin (Sep 14): 400; at fromMin (Sep 15): 200",
+			[code(await edit(w, recent, { from: "2026-09-14" }, USERS.disp)), (await edit(w, recent, { from: "2026-09-15" }, USERS.disp)).status], [[400, "BACKDATE_LIMIT"], 200]);
+		eq("§11.15 ...its end one day before toMin (Oct 13): 400; at toMin (Oct 14): 200",
+			[code(await edit(w, recent, { to: "2026-10-13" }, USERS.disp)), (await edit(w, recent, { to: "2026-10-14" }, USERS.disp)).status], [[400, "BACKDATE_LIMIT"], 200]);
+		eq("§11.16 old row, its end one day before toMin (Oct 13): 400; one day past toMax (its own end, Oct 25): 400; at toMax (Oct 24): 200",
+			[code(await edit(w, oldLive, { to: "2026-10-13" }, USERS.disp)), code(await edit(w, oldLive, { to: "2026-10-25" }, USERS.disp)), (await edit(w, oldLive, { to: "2026-10-24" }, USERS.disp)).status],
+			[[400, "BACKDATE_LIMIT"], [400, "BACKDATE_LIMIT"], 200]);
+		const after = await list(w, DIR.tamsin, USERS.disp);
+		eq("§11.17 ...served again: \"end_early\", toMax the day before its new end (Oct 23)", scopeOf(after, oldLive), ["end_early", { fromMin: null, toMin: "2026-10-14", toMax: "2026-10-23" }]);
+	});
+
+	section("§12 the edit audit names a reason change, never the reason");
+	await R.guard("§12", async () => {
+		const w = await W.startWorld();
+		const SECRET = ["Family wedding", "Jury duty", "Knee surgery", "Moving house", "Court date", "Dentist visit"];
+		const TOO_LONG = "Hospital stay ".repeat(15).slice(0, 201);
+		const a = rowId(await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20", { reason: SECRET[0] })));
+		const b = rowId(await create(w, DIR.soren, vacation("2026-10-16", "2026-10-18", { reason: SECRET[1] }), USERS.disp));
+		const old = rowId(await create(w, DIR.tamsin, vacation("2026-09-10", "2026-10-25", { reason: SECRET[2] })));
+		ok("§12.0 three rows, each with a reason", !!a && !!b && !!old);
+		const updates = () => w.audits("driver_availability_update");
+		const last = () => { const u = updates(); return u.length ? u[u.length - 1].details : ""; };
+		let n = updates().length;
+		eq("§12.1 a reason-only edit: 200", (await edit(w, a, { reason: SECRET[3] })).status, 200);
+		eq("§12.2 ...audited once", updates().length - n, 1);
+		ok("§12.3 ...the line says the reason changed (dates and kind as before)",
+			/off 2026-10-14\.\.2026-10-20 \(vacation\) -> off 2026-10-14\.\.2026-10-20 \(vacation\); reason changed$/.test(last()), last());
+		eq("§12.4 a Dispatcher's kind and reason edit: 200", (await edit(w, b, { kind: "other", reason: SECRET[4] }, USERS.disp)).status, 200);
+		ok("§12.5 ...the line shows the kind and says the reason changed", /\(vacation\) -> off 2026-10-16\.\.2026-10-18 \(other\); reason changed$/.test(last()), last());
+		eq("§12.6 a dates-only edit: 200", (await edit(w, a, { to: "2026-10-19" })).status, 200);
+		ok("§12.7 ...its line says nothing about the reason", /-> off 2026-10-14\.\.2026-10-19 \(vacation\)$/.test(last()), last());
+		n = updates().length;
+		const again = await edit(w, a, { reason: `  ${SECRET[3]}  ` });
+		eq("§12.8 the same reason again (edge spaces aside): 200 unchanged, nothing audited", [again.status, again.body && again.body.unchanged, updates().length - n], [200, true, 0]);
+		eq("§12.9 refusals: an old row's reason (Dispatcher), a 201-character reason on create and on edit, an overlap carrying a reason",
+			[code(await edit(w, old, { reason: SECRET[5] }, USERS.disp)), code(await create(w, DIR.hollis, vacation("2026-12-01", "2026-12-02", { reason: TOO_LONG }))),
+				code(await edit(w, a, { reason: TOO_LONG })), code(await create(w, DIR.hollis, vacation("2026-10-18", "2026-10-22", { reason: SECRET[5] })))],
+			[[400, "BACKDATE_LIMIT"], [400, "REASON_TOO_LONG"], [400, "REASON_TOO_LONG"], [409, "AVAILABILITY_OVERLAP"]]);
+		eq("§12.10 ...a Dispatcher's cancel of the old row is refused too", code(await cancel(w, old, USERS.disp)), [400, "BACKDATE_LIMIT"]);
+		eq("§12.11 ...and the Super Admin cancels it", (await cancel(w, old)).status, 200);
+		const all = w.db.prepare("SELECT * FROM audit_trail ORDER BY id").all();
+		const actions = new Set(all.map((x) => x.action));
+		ok("§12.12 the audit holds creates, updates, a cancel and refusals of each kind",
+			["driver_availability_create", "driver_availability_update", "driver_availability_cancel", "driver_availability_create_blocked",
+				"driver_availability_update_blocked", "driver_availability_cancel_blocked"].every((x) => actions.has(x)), [...actions].join());
+		const hits = all.filter((x) => { const t = JSON.stringify(x); return SECRET.some((s) => t.includes(s)) || t.includes("Hospital stay"); })
+			.map((x) => `${x.action}: ${x.details}`);
+		eq(`§12.13 none of the ${all.length} audit rows, of any action, holds a reason text the runner used`, hits, []);
+	});
+
+	section("§13 a Dispatcher's full edit, held to the same server rules");
+	await R.guard("§13", async () => {
+		const w = await W.startWorld();
+		const recent = rowId(await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20")));
+		const old = rowId(await create(w, DIR.tamsin, vacation("2026-09-10", "2026-10-25")));
+		const oldBefore = JSON.stringify(stored(w, old));
+		eq("§13.1 he changes only the kind of a recent row: 200", (await edit(w, recent, { kind: "off_duty" }, USERS.disp)).status, 200);
+		eq("§13.2 he changes the kind of an old row: 400 BACKDATE_LIMIT", code(await edit(w, old, { kind: "off_duty" }, USERS.disp)), [400, "BACKDATE_LIMIT"]);
+		eq("§13.3 on an old row, he changes the kind and ends it at yesterday: 400 BACKDATE_LIMIT",
+			code(await edit(w, old, { kind: "off_duty", to: "2026-10-14" }, USERS.disp)), [400, "BACKDATE_LIMIT"]);
+		eq("§13.4 he moves from later on a current row (Oct 14 -> Oct 16): 200", (await edit(w, recent, { from: "2026-10-16" }, USERS.disp)).status, 200);
+		eq("§13.5 he extends to on a recent row (Oct 20 -> Oct 30): 200", (await edit(w, recent, { to: "2026-10-30" }, USERS.disp)).status, 200);
+		eq("§13.6 an edit whose merged range is 61 days (Oct 16 - Dec 15): 400 RANGE_TOO_LONG",
+			code(await edit(w, recent, { to: "2026-12-15" }, USERS.disp)), [400, "RANGE_TOO_LONG"]);
+		eq("§13.7 he sends an unchanged body for an old row: 400 BACKDATE_LIMIT",
+			code(await edit(w, old, { kind: "vacation", from: "2026-09-10", to: "2026-10-25", reason: "Family" }, USERS.disp)), [400, "BACKDATE_LIMIT"]);
+		eq("§13.8 ...the old row is as the Super Admin left it", JSON.stringify(stored(w, old)), oldBefore);
+		eq("§13.9 ...and the recent row holds his edits (off_duty, Oct 16-30)", [stored(w, recent).kind, stored(w, recent).from_date, stored(w, recent).to_date], ["off_duty", "2026-10-16", "2026-10-30"]);
+	});
+
+	section("§14 the driver app's payload and DRIVER_TIME_OFF_SCREEN_ENABLED");
+	await R.guard("§14", async () => {
+		const page = (w, name, user) => w.call("GET", `/api/driver/${encodeURIComponent(name)}`, { user });
+		const seedRows = async (w) => {
+			await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20", { reason: "Family wedding" }));
+			await create(w, DIR.hollis, { kind: "off_duty", from: "2026-11-01", to: "2026-11-03", reason: "Court date" });
+			await create(w, DIR.hollis, vacation("2026-10-01", "2026-10-03"));
+			await cancel(w, rowId(await create(w, DIR.hollis, vacation("2026-10-25", "2026-10-27"))));
+			await create(w, DIR.soren, { kind: "other", from: "2026-10-16", to: "2026-10-18", reason: "Moving house" });
+		};
+		const shape = (r) => (r.body && r.body.timeOff && Array.isArray(r.body.timeOff.rows) ? r.body.timeOff.rows.map((t) => [t.from, t.to, t.kind, t.status]) : null);
+		const off = await W.startWorld();
+		eq("§14.0 the world serves the payload route", off.found.includes("driverPage"), true);
+		await seedRows(off);
+		const r0 = await page(off, "Hollis Renner", USERS.driver);
+		eq("§14.1 main flag on, sub-flag unset: 200 with his loads, no timeOff key",
+			[r0.status, Array.isArray(r0.body && r0.body.loads) && r0.body.loads.length > 0, !!r0.body && "timeOff" in r0.body], [200, true, false]);
+		const on = await W.startWorld({ env: { DRIVER_TIME_OFF_SCREEN_ENABLED: "true" } });
+		await seedRows(on);
+		const r1 = await page(on, "Hollis Renner", USERS.driver);
+		eq("§14.2 both on: 200 with his loads, and timeOff for today with his current and upcoming rows",
+			[r1.status, Array.isArray(r1.body && r1.body.loads) && r1.body.loads.length > 0, r1.body && r1.body.timeOff && r1.body.timeOff.today, shape(r1)],
+			[200, true, "2026-10-15", [["2026-10-14", "2026-10-20", "vacation", "current"], ["2026-11-01", "2026-11-03", "off_duty", "upcoming"]]]);
+		ok("§14.3 ...each row exactly { id, kind, from, to, status }, and no reason text anywhere in the answer",
+			!!(r1.body && r1.body.timeOff) && r1.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,id,kind,status,to")
+			&& !/Family wedding|Court date|Moving house/.test(r1.text), JSON.stringify(r1.body && r1.body.timeOff));
+		const mine = await on.call("GET", "/api/driver/me/availability", { user: USERS.driver });
+		eq("§14.4 ...the same as GET /api/driver/me/availability for him", r1.body && r1.body.timeOff, mine.body);
+		eq("§14.5 Soren gets only his own", shape(await page(on, "Soren King", USERS.otherDriver)), [["2026-10-16", "2026-10-18", "other", "upcoming"]]);
+		const foreign = await page(on, "Soren King", USERS.driver);
+		eq("§14.6 a Driver asking for another driver's page: 403, no timeOff", [foreign.status, !!foreign.body && "timeOff" in foreign.body], [403, false]);
+		eq("§14.7 Dispatcher and Investor: 403; signed out: 401",
+			[(await page(on, "Hollis Renner", USERS.disp)).status, (await page(on, "Hollis Renner", USERS.inv)).status, (await page(on, "Hollis Renner", null)).status], [403, 403, 401]);
+		eq("§14.8 a Super Admin on a driver's page: that driver's rows", shape(await page(on, "Soren King", USERS.sa)), [["2026-10-16", "2026-10-18", "other", "upcoming"]]);
 	});
 
 	await R.finish();
