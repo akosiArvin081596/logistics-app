@@ -120,16 +120,15 @@ function parseSnapshot(text) {
 	}
 }
 
-async function report({ off, on, from, names }) {
-	const { db } = on;
-	const A = on.api;
-	if (A.DRIVER_RATE_ONLY_FROM !== from) throw new Error(`the rule did not start from ${from} in the lifted server (DRIVER_RATE_ONLY_FROM is ${A.DRIVER_RATE_ONLY_FROM || "unset"})`);
-	if (off.api.DRIVER_RATE_ONLY_FROM) throw new Error("the baseline world has the rule on");
+// What the report reads about the drivers in world `A` (lifted from server.js):
+// the normalized name (norm), the pay structures, the display names, the
+// trucks, the month a day pays in (payMonthOfDay) and the rate an invoice pays
+// a day at in that world (raterOf). scripts/october-flags-report.js reads its
+// invoices through it and invoiceRateDiffs() too.
+async function driverIndex({ db, A }) {
 	const norm = (n) => A.normalizeDriverName(A.driverNameForTotals(n) || "");
 	const structs = A.getDriverPayStructures();
 	const isDaily = (k) => (structs[k] || { payType: "fixed" }).payType !== "percentage";
-	const latestClosed = ledgerDayOnce.latestClosedMonth(db);
-	const closedMonths = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period").all().map((r) => r.period);
 
 	// Display names: the directory's first row, then the trucks and the sheet.
 	const display = new Map();
@@ -166,6 +165,92 @@ async function report({ off, on, from, names }) {
 		}
 		return raters.get(k);
 	};
+	return { norm, structs, isDaily, display, trucks, truckOf, payMonthOfDay, raterOf };
+}
+
+// Whether an invoice's week touches a closed month (its correction is then a
+// correction draft, else an adjustment).
+const weekTouchesClosed = (A, inv) => [String(inv.week_start || "").slice(0, 7), String(inv.week_end || "").slice(0, 7)].some((m) => A.isLocked(m));
+
+// The live invoices of daily-rate drivers, priced the way world `A` would
+// price them (index: driverIndex() of A): each issued (not Draft) weekly
+// invoice with a paid grid day that pays in `from` or later whose printed
+// amount differs from A's rate for that day, the Draft weekly invoices likewise,
+// and the Draft manual corrections whose per-day line differs. Returns
+// { invoices, drafts, onSomeInvoice } (onSomeInvoice: "<driver>\t<day>" for
+// every live weekly invoice's paid grid day).
+function invoiceRateDiffs({ db, A, from, index }) {
+	const { norm, isDaily, payMonthOfDay, raterOf } = index;
+	const live = db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' ORDER BY week_start, id").all();
+	const gridDaysOf = (inv, snap) => {
+		const out = [];
+		if (!snap || snap.__templateName !== "service_invoice" || !snap.days || !DAY_RE.test(String(inv.week_start || ""))) return out;
+		for (let i = 0; i < 7; i++) {
+			const day = addDays(inv.week_start, i);
+			const cell = snap.days[A.invoiceGridDayName(day)] || {};
+			if (!cell.completed) continue;
+			out.push({ day, loads: String(cell.loadBol || "").split(",").map((x) => x.trim()).filter(Boolean), total: Number(cell.total) || 0 });
+		}
+		return out;
+	};
+	const onSomeInvoice = new Set();
+	const invoices = [];
+	const drafts = [];
+	for (const inv of live) {
+		const k = norm(inv.driver || "");
+		if (!k || !isDaily(k)) continue;
+		const snap = parseSnapshot(inv.render_data);
+		if (!Number(inv.is_manual)) {
+			const grid = gridDaysOf(inv, snap);
+			for (const g of grid) onSomeInvoice.add(`${k}\t${g.day}`);
+			const days = [];
+			for (const g of grid) {
+				const month = payMonthOfDay(g.day, g.loads);
+				if (month < from) continue;
+				const ruleRate = raterOf(k)(g.day, month);
+				if (cents(ruleRate) !== cents(g.total)) days.push({ day: g.day, month, printed: g.total, rule: ruleRate });
+			}
+			if (!days.length) continue;
+			const row = {
+				invoiceNumber: inv.invoice_number, driver: k, status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end, days,
+				printedRate: oneRate(days, "printed"), ruleRate: oneRate(days, "rule"),
+				difference: round2(days.reduce((c, d) => c + (cents(d.rule) - cents(d.printed)), 0) / 100),
+			};
+			if (inv.status === "Draft") drafts.push({ ...row, kind: "weekly", action: "regenerate the Draft once the rule is on" });
+			else invoices.push({ ...row, correction: weekTouchesClosed(A, inv) ? "correction draft" : "adjustment" });
+			continue;
+		}
+		if (inv.status !== "Draft" || !snap || !Array.isArray(snap.lineItems)) continue;
+		const days = [];
+		for (const l of snap.lineItems) {
+			const desc = String(l && l.description || "");
+			if (!DAY_LINE_RE.test(desc) || !DAY_RE.test(String(l.date || ""))) continue;
+			const loads = ((desc.match(/\(loads? ([^)]*)\)\s*$/) || [])[1] || "").split(",").map((x) => x.trim()).filter(Boolean);
+			const month = payMonthOfDay(l.date, loads);
+			if (month < from) continue;
+			const ruleRate = raterOf(k)(l.date, month);
+			if (cents(ruleRate) !== cents(l.amount)) days.push({ day: l.date, month, printed: Number(l.amount) || 0, rule: ruleRate });
+		}
+		if (!days.length) continue;
+		drafts.push({
+			invoiceNumber: inv.invoice_number, driver: k, status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end, days,
+			printedRate: oneRate(days, "printed"), ruleRate: oneRate(days, "rule"),
+			difference: round2(days.reduce((c, d) => c + (cents(d.rule) - cents(d.printed)), 0) / 100),
+			kind: "manual", action: "a person checks the line's rate before approving the Draft",
+		});
+	}
+	return { invoices, drafts, onSomeInvoice };
+}
+
+async function report({ off, on, from, names }) {
+	const { db } = on;
+	const A = on.api;
+	if (A.DRIVER_RATE_ONLY_FROM !== from) throw new Error(`the rule did not start from ${from} in the lifted server (DRIVER_RATE_ONLY_FROM is ${A.DRIVER_RATE_ONLY_FROM || "unset"})`);
+	if (off.api.DRIVER_RATE_ONLY_FROM) throw new Error("the baseline world has the rule on");
+	const latestClosed = ledgerDayOnce.latestClosedMonth(db);
+	const closedMonths = db.prepare("SELECT period FROM period_locks WHERE status = 'locked' ORDER BY period").all().map((r) => r.period);
+	const index = await driverIndex({ db, A });
+	const { structs, isDaily, display, truckOf } = index;
 
 	// drivers
 	const drivers = [];
@@ -243,65 +328,7 @@ async function report({ off, on, from, names }) {
 	}
 
 	// Invoices: each paid grid day that pays in FROM or later, printed vs the rule.
-	const live = db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' ORDER BY week_start, id").all();
-	const gridDaysOf = (inv, snap) => {
-		const out = [];
-		if (!snap || snap.__templateName !== "service_invoice" || !snap.days || !DAY_RE.test(String(inv.week_start || ""))) return out;
-		for (let i = 0; i < 7; i++) {
-			const day = addDays(inv.week_start, i);
-			const cell = snap.days[A.invoiceGridDayName(day)] || {};
-			if (!cell.completed) continue;
-			out.push({ day, loads: String(cell.loadBol || "").split(",").map((x) => x.trim()).filter(Boolean), total: Number(cell.total) || 0 });
-		}
-		return out;
-	};
-	const onSomeInvoice = new Set();
-	const invoices = [];
-	const drafts = [];
-	const weekTouchesClosed = (inv) => [String(inv.week_start || "").slice(0, 7), String(inv.week_end || "").slice(0, 7)].some((m) => A.isLocked(m));
-	for (const inv of live) {
-		const k = norm(inv.driver || "");
-		if (!k || !isDaily(k)) continue;
-		const snap = parseSnapshot(inv.render_data);
-		if (!Number(inv.is_manual)) {
-			const grid = gridDaysOf(inv, snap);
-			for (const g of grid) onSomeInvoice.add(`${k}\t${g.day}`);
-			const days = [];
-			for (const g of grid) {
-				const month = payMonthOfDay(g.day, g.loads);
-				if (month < from) continue;
-				const ruleRate = raterOf(k)(g.day, month);
-				if (cents(ruleRate) !== cents(g.total)) days.push({ day: g.day, month, printed: g.total, rule: ruleRate });
-			}
-			if (!days.length) continue;
-			const row = {
-				invoiceNumber: inv.invoice_number, driver: k, status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end, days,
-				printedRate: oneRate(days, "printed"), ruleRate: oneRate(days, "rule"),
-				difference: round2(days.reduce((c, d) => c + (cents(d.rule) - cents(d.printed)), 0) / 100),
-			};
-			if (inv.status === "Draft") drafts.push({ ...row, kind: "weekly", action: "regenerate the Draft once the rule is on" });
-			else invoices.push({ ...row, correction: weekTouchesClosed(inv) ? "correction draft" : "adjustment" });
-			continue;
-		}
-		if (inv.status !== "Draft" || !snap || !Array.isArray(snap.lineItems)) continue;
-		const days = [];
-		for (const l of snap.lineItems) {
-			const desc = String(l && l.description || "");
-			if (!DAY_LINE_RE.test(desc) || !DAY_RE.test(String(l.date || ""))) continue;
-			const loads = ((desc.match(/\(loads? ([^)]*)\)\s*$/) || [])[1] || "").split(",").map((x) => x.trim()).filter(Boolean);
-			const month = payMonthOfDay(l.date, loads);
-			if (month < from) continue;
-			const ruleRate = raterOf(k)(l.date, month);
-			if (cents(ruleRate) !== cents(l.amount)) days.push({ day: l.date, month, printed: Number(l.amount) || 0, rule: ruleRate });
-		}
-		if (!days.length) continue;
-		drafts.push({
-			invoiceNumber: inv.invoice_number, driver: k, status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end, days,
-			printedRate: oneRate(days, "printed"), ruleRate: oneRate(days, "rule"),
-			difference: round2(days.reduce((c, d) => c + (cents(d.rule) - cents(d.printed)), 0) / 100),
-			kind: "manual", action: "a person checks the line's rate before approving the Draft",
-		});
-	}
+	const { invoices, drafts, onSomeInvoice } = invoiceRateDiffs({ db, A, from, index });
 	const ledgerDaysOnNoInvoice = changedDays.filter((d) => !onSomeInvoice.has(`${d.driver}\t${d.day}`))
 		.sort((p, q) => p.driver.localeCompare(q.driver) || p.day.localeCompare(q.day));
 
@@ -429,4 +456,8 @@ async function main() {
 	}
 }
 
-main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
+// scripts/october-flags-report.js reuses the invoice pricing and the closed
+// months' fingerprint.
+module.exports = { EXTRA_ROOTS, FINGERPRINTED, driverIndex, invoiceRateDiffs, weekTouchesClosed, closedRowsHash };
+
+if (require.main === module) main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
