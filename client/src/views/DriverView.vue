@@ -166,6 +166,10 @@
                documents, expense form) lives BELOW the list.
                ============================================================ -->
 
+          <!-- His time off (R11 follow-up): one line while he is off and in
+               the 7 days before. Only when the payload carried `timeOff`. -->
+          <DriverTimeOffCard v-if="driverStore.timeOff" variant="banner" :time-off="driverStore.timeOff" />
+
           <!-- Sub-tab bar -->
           <div class="load-sub-tabs">
             <button
@@ -260,17 +264,25 @@
         <div v-if="driverStore.isLoading">
           <div class="skeleton skeleton-card"></div>
         </div>
-        <DriverKit
-          v-else
-          :driver-info="driverStore.driverInfo"
-          :headers="driverStore.headers.carrierDB"
-          :shared-documents="driverStore.sharedDocuments"
-          :truck-documents="driverStore.truckDocuments"
-          :application="driverStore.application"
-          :onboarding-documents="driverStore.onboarding?.documents || []"
-          :profile-picture-url="driverStore.profilePictureUrl"
-          :driver-id="driverStore.driverDirectoryId"
-        />
+        <template v-else>
+          <DriverKit
+            :driver-info="driverStore.driverInfo"
+            :headers="driverStore.headers.carrierDB"
+            :shared-documents="driverStore.sharedDocuments"
+            :truck-documents="driverStore.truckDocuments"
+            :application="driverStore.application"
+            :onboarding-documents="driverStore.onboarding?.documents || []"
+            :profile-picture-url="driverStore.profilePictureUrl"
+            :driver-id="driverStore.driverDirectoryId"
+          />
+          <!-- "My time off" (R11 follow-up), read-only. Only when the payload
+               carried `timeOff`; with no key the Kit is as it was. -->
+          <DriverTimeOffCard
+            v-if="driverStore.timeOff"
+            :time-off="driverStore.timeOff"
+            @message-dispatch="handleTabSwitch('messages')"
+          />
+        </template>
       </section>
 
       <!-- NOTIFICATIONS TAB -->
@@ -371,6 +383,7 @@ import LoadAssignedBanner from '../components/driver/LoadAssignedBanner.vue'
 import NotificationList from '../components/driver/NotificationList.vue'
 import DocumentSignModal from '../components/driver/DocumentSignModal.vue'
 import InvoiceTab from '../components/driver/InvoiceTab.vue'
+import DriverTimeOffCard from '../components/driver/DriverTimeOffCard.vue'
 import EmptyState from '../components/shared/EmptyState.vue'
 import StatusBadge from '../components/shared/StatusBadge.vue'
 
