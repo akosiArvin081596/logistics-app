@@ -411,7 +411,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 	const dryRuns = new Map();
 	const dryRunOf = async (k) => {
 		if (!dryRuns.has(k)) {
-			const dry = await W[k].api.workDaysDryRun({ from: MONTH, to: MONTH });
+			const dry = await W[k].api.workDaysDryRun({ from: MONTH, to: MONTH, names: true });
 			if (dry.refused) refuse(dry.reason);
 			dryRuns.set(k, dry);
 		}
@@ -421,24 +421,37 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 	const withoutTrip = { b12: "today", allThreeB4AsDesigned: "dailyRate", allThree: "rateB4" };
 	// The scenario without B4, for the B4 ledger days.
 	const withoutB4 = { b4Applied: "today", allThree: "allThreeB4AsDesigned" };
+	// What the switch-on does with B12's added days, by the dry run's own
+	// afterSwitchOn (settleLateWorkDays()): added to the invoice in place, or on a
+	// correction Draft for that week, both paid; anything else (a blocker that
+	// may already pay them, a week before the floor) is not added.
+	const b12Pays = (afterSwitchOn) => /^(added to this invoice in place|a correction invoice)/.test(String(afterSwitchOn || ""));
+	const REGENERATE = "regenerate the Draft once the flags are on";
 	const problems = [];
 	const invoicesBy = {};
+	const refusedBy = {};
 	for (const k of keys) {
 		const parts = PARTS[k];
 		const rows = new Map();
 		const rowOf = (number) => {
-			if (!rows.has(number)) rows.set(number, { added: new Map(), b12Added: null, notPaid: new Set(), repriced: [], notes: [], kind: "" });
+			if (!rows.has(number)) rows.set(number, { b12: null, b12NotPaid: new Set(), b12Pricing: [], rate: [], manual: false, b4Added: new Map(), b4NotPaid: new Set() });
 			return rows.get(number);
 		};
+		const repricedOf = (r) => r.days.map((d) => ({ day: d.day, printed: d.printed, scenario: d.rule }));
 		if (parts.rate) {
-			const idx = await rateReport.driverIndex({ db, A: W[k].api });
-			const diff = rateReport.invoiceRateDiffs({ db, A: W[k].api, from: MONTH, index: idx });
+			const diff = rateReport.invoiceRateDiffs({ db, A: W[k].api, from: MONTH, index: await rateReport.driverIndex({ db, A: W[k].api }) });
 			for (const r of [...diff.invoices, ...diff.drafts]) {
 				const row = rowOf(r.invoiceNumber);
-				row.repriced = r.days.map((d) => ({ day: d.day, printed: d.printed, scenario: d.rule }));
-				if (r.kind === "manual") row.kind = "manual";
+				row.rate = repricedOf(r);
+				if (r.kind === "manual") row.manual = true;
 			}
+		} else if (parts.trip) {
+			// A Draft regenerated with B12 on prices each day at its own dated rate
+			// (invoiceDayRater()); an issued invoice is never regenerated.
+			const diff = rateReport.invoiceRateDiffs({ db, A: W[k].api, from: MONTH, index: await rateReport.driverIndex({ db, A: W[k].api }) });
+			for (const r of diff.drafts) if (r.kind === "weekly") rowOf(r.invoiceNumber).b12Pricing = repricedOf(r);
 		}
+		refusedBy[k] = [];
 		if (parts.trip) {
 			const dry = await dryRunOf(withoutTrip[k]);
 			if (!dry.closedMonthsUnchanged || !dry.monthsBeforeFromUnchanged) {
@@ -446,10 +459,10 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 			}
 			for (const p of dry.perInvoice) {
 				const row = rowOf(p.invoiceNumber);
-				row.b12Added = { days: p.addedDays, amount: p.amountAdded };
-				for (const d of p.droppedDays) row.notPaid.add(d);
-				if (p.addedDays.length) row.notes.push(`B12: ${p.afterSwitchOn}`);
+				row.b12 = { days: p.addedDays, amount: p.amountAdded, action: p.afterSwitchOn, pays: b12Pays(p.afterSwitchOn) };
+				for (const d of p.droppedDays) row.b12NotPaid.add(d);
 			}
+			refusedBy[k] = dry.refusedDays.map((d) => ({ driver: label(index.norm(d.driver)), day: d.day, loadId: d.loadId, amount: d.amount, kind: d.kind, reason: d.reason }));
 		}
 		if (parts.b4) {
 			const before = ledger.get(withoutB4[k]).days;
@@ -463,8 +476,8 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 				const is = after.get(d) || new Map();
 				for (let i = 0; i < 7; i++) {
 					const day = addDays(inv.week_start, i);
-					if (printed.has(day) && was.has(day) && !is.has(day)) rowOf(inv.invoice_number).notPaid.add(day);
-					else if (!printed.has(day) && !was.has(day) && is.has(day)) rowOf(inv.invoice_number).added.set(day, is.get(day) / 100);
+					if (printed.has(day) && was.has(day) && !is.has(day)) rowOf(inv.invoice_number).b4NotPaid.add(day);
+					else if (!printed.has(day) && !was.has(day) && is.has(day)) rowOf(inv.invoice_number).b4Added.set(day, is.get(day) / 100);
 				}
 			}
 		}
@@ -472,29 +485,58 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 		for (const [number, row] of rows) {
 			const inv = byNumber.get(number);
 			if (!inv) continue;
-			const daysNow = A.invoicePaidDaysOf(inv);
-			const b12Days = row.b12Added ? row.b12Added.days : [];
-			const b4Days = [...row.added.keys()].filter((d) => !b12Days.includes(d));
-			const addedDays = sorted([...b12Days, ...b4Days]);
-			const notPaidDays = sorted([...row.notPaid]);
-			const repricedDays = row.repriced.filter((d) => !row.notPaid.has(d.day));
-			const added = cents(row.b12Added ? row.b12Added.amount : 0) + b4Days.reduce((c, d) => c + cents(row.added.get(d)), 0);
-			const repriced = repricedDays.reduce((c, d) => c + cents(d.scenario) - cents(d.printed), 0);
 			const draft = inv.status === "Draft";
-			const dropped = draft ? notPaidDays.reduce((c, d) => c + cents(gridTotal(inv, d)), 0) : 0;
-			const difference = (added + repriced - dropped) / 100;
-			if (!addedDays.length && !notPaidDays.length && !repricedDays.length) continue;
+			const issuedAction = (c) => (c ? (rateReport.weekTouchesClosed(A, inv) ? "correction draft" : "adjustment") : "none: stays as issued");
+			const notPaid = new Set([...row.b12NotPaid, ...row.b4NotPaid]);
+			const printedCents = (days) => days.reduce((c, d) => c + cents(gridTotal(inv, d)), 0);
+			const repricedCents = (list) => list.reduce((c, d) => c + cents(d.scenario) - cents(d.printed), 0);
+			// Each change's own part, with what the switch-on does with it.
+			const out = [];
+			const notAdded = [];
+			const b12Days = row.b12 ? row.b12.days : [];
+			if (row.b12 && b12Days.length && row.b12.pays) out.push({ part: "B12", addedDays: b12Days, notPaidDays: [], repricedDays: [], cents: cents(row.b12.amount), action: row.b12.action });
+			if (row.b12 && b12Days.length && !row.b12.pays) notAdded.push({ days: b12Days, amount: round2(row.b12.amount), reason: row.b12.action });
+			const b12Dropped = sorted([...row.b12NotPaid]);
+			const b12Priced = row.b12Pricing.filter((d) => !notPaid.has(d.day));
+			if (b12Dropped.length || b12Priced.length) {
+				out.push({
+					part: "B12", addedDays: [], notPaidDays: b12Dropped, repricedDays: b12Priced,
+					cents: repricedCents(b12Priced) - (draft ? printedCents(b12Dropped) : 0), action: draft ? REGENERATE : "none: stays as issued",
+				});
+			}
+			const ratePriced = row.rate.filter((d) => !notPaid.has(d.day));
+			if (ratePriced.length) {
+				const c = repricedCents(ratePriced);
+				out.push({
+					part: "daily rate", addedDays: [], notPaidDays: [], repricedDays: ratePriced, cents: c,
+					action: draft ? (row.manual ? "a person checks the line's rate before approving the Draft" : REGENERATE) : issuedAction(c),
+				});
+			}
+			const b4Days = [...row.b4Added.keys()].filter((d) => !b12Days.includes(d)).sort();
+			const b4Dropped = sorted([...row.b4NotPaid].filter((d) => !row.b12NotPaid.has(d)));
+			if (b4Days.length || b4Dropped.length) {
+				const c = b4Days.reduce((t, d) => t + cents(row.b4Added.get(d)), 0) - (draft ? printedCents(b4Dropped) : 0);
+				out.push({ part: "B4", addedDays: b4Days, notPaidDays: b4Dropped, repricedDays: [], cents: c, action: draft ? REGENERATE : issuedAction(c) });
+			}
+			if (!out.length && !notAdded.length) continue;
+			const difference = out.reduce((c, p) => c + p.cents, 0) / 100;
+			const daysNow = A.invoicePaidDaysOf(inv);
+			const addedDays = sorted(out.flatMap((p) => p.addedDays));
+			const notPaidDays = sorted(out.flatMap((p) => p.notPaidDays));
+			const actions = [...new Set(out.map((p) => p.action))];
+			const correction = actions.length === 1 ? actions[0]
+				: actions.length ? out.map((p) => `${p.part}: ${p.action}`).filter((x, i, a) => a.indexOf(x) === i).join("; ")
+					: notAdded.map((x) => x.reason).join("; ");
+			const notes = [];
+			if (!draft && notPaidDays.length) notes.push(`${notPaidDays.length} day(s) the scenario would not pay stay as issued (${usd(printedCents(notPaidDays) / 100)})`);
 			const amountNow = round2(Number(inv.total_earnings) || 0);
-			const correction = draft
-				? (row.kind === "manual" ? "a person checks the line's rate before approving the Draft" : "regenerate the Draft once the flags are on")
-				: difference ? (rateReport.weekTouchesClosed(A, inv) ? "correction draft" : "adjustment") : "none: stays as issued";
-			const notes = [...row.notes];
-			if (!draft && notPaidDays.length) notes.push(`${notPaidDays.length} day(s) the scenario would not pay stay as issued (${usd(notPaidDays.reduce((c, d) => c + gridTotal(inv, d), 0))})`);
 			list.push({
 				invoiceNumber: number, driver: label(index.norm(inv.driver || "")), status: inv.status, weekStart: inv.week_start, weekEnd: inv.week_end,
-				daysNow, daysScenario: sorted([...daysNow.filter((d) => !row.notPaid.has(d)), ...addedDays]),
-				addedDays, notPaidDays, repricedDays,
-				amountNow, amountScenario: round2(amountNow + difference), difference: round2(difference), correction, notes,
+				daysNow, daysScenario: sorted([...daysNow.filter((d) => !notPaid.has(d)), ...addedDays]),
+				addedDays, notPaidDays, repricedDays: out.flatMap((p) => p.repricedDays),
+				amountNow, amountScenario: round2(amountNow + difference), difference: round2(difference), correction,
+				parts: out.map((p) => ({ part: p.part, addedDays: p.addedDays, notPaidDays: p.notPaidDays, repricedDays: p.repricedDays, amount: p.cents / 100, action: p.action })),
+				notAdded, notes,
 			});
 		}
 		list.sort((p, q) => String(p.weekStart).localeCompare(String(q.weekStart)) || String(p.invoiceNumber).localeCompare(String(q.invoiceNumber)));
@@ -575,7 +617,7 @@ async function report({ db, args, envFile, sheetData, ready, readAt, zone, env, 
 		},
 		scenarios: SCENARIOS.map(([key, name]) => ({ key, name, ...PARTS[key] })),
 		drivers, driverTotals, investors: investorRows, investorTotals,
-		invoices: invoicesBy,
+		invoices: invoicesBy, refusedDays: refusedBy,
 		b4Loads: b4.loads, b4InFlight: b4.loads.filter((l) => l.asDesigned.takesReady).map((l) => l.loadId),
 		closedMonthsUnchanged: !problems.some((p) => p.closed),
 		monthsBeforeUnchanged: !problems.some((p) => p.month && !p.closed),
@@ -609,12 +651,21 @@ function printText(r) {
 		const list = r.invoices[k] || [];
 		lines.push("", `Invoices that would differ, ${name}: ${list.length || "none"}${k === "b4AsDesigned" ? " (stored loads unchanged)" : ""}`);
 		for (const i of list) {
-			const parts = [];
-			if (i.addedDays.length) parts.push(`added ${i.addedDays.join(", ")}`);
-			if (i.notPaidDays.length) parts.push(`not paid ${i.notPaidDays.join(", ")}`);
-			if (i.repricedDays.length) parts.push(`repriced ${i.repricedDays.map((d) => `${d.day} ${usd(d.printed)} -> ${usd(d.scenario)}`).join(", ")}`);
 			lines.push(`  ${i.invoiceNumber}  ${i.status}  week ${i.weekStart}  ${i.driver}  days ${i.daysNow.length} -> ${i.daysScenario.length}  ${usd(i.amountNow)} -> ${usd(i.amountScenario)} (${signed(i.difference)})  ${i.correction}`);
-			lines.push(`      ${parts.join("; ")}${i.notes.length ? `; ${i.notes.join("; ")}` : ""}`);
+			for (const p of i.parts) {
+				const what = [];
+				if (p.addedDays.length) what.push(`added ${p.addedDays.join(", ")}`);
+				if (p.notPaidDays.length) what.push(`not paid ${p.notPaidDays.join(", ")}`);
+				if (p.repricedDays.length) what.push(`repriced ${p.repricedDays.map((d) => `${d.day} ${usd(d.printed)} -> ${usd(d.scenario)}`).join(", ")}`);
+				lines.push(`      ${p.part}: ${what.join("; ")} (${signed(p.amount)}): ${p.action}`);
+			}
+			for (const x of i.notAdded) lines.push(`      B12, a person decides: ${x.days.join(", ")} (${usd(x.amount)}), left out of the amounts: ${x.reason}`);
+			for (const n of i.notes) lines.push(`      ${n}`);
+		}
+		if (PARTS[k].trip) {
+			const refused = r.refusedDays[k] || [];
+			lines.push(`  B12's refused days (worked by the trip timestamps, on no invoice; corrected by hand): ${refused.length || "none"}`);
+			for (const d of refused) lines.push(`    ${d.driver}  ${d.day}  load ${d.loadId}  ${usd(d.amount)}  ${d.kind}: ${d.reason}`);
 		}
 	}
 	lines.push("", "B4 drop-trailer loads (--b4-ready): load, status, stored Pickup Appointment -> Ready date; as designed; applied:");
