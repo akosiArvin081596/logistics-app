@@ -78,6 +78,7 @@ import {
 } from '../../utils/routeProgress'
 import { formatMinutes } from '../../lib/duration'
 import { fixAgeMs, lastSeenText, fixHidesFigures } from '../../lib/fixAge'
+import { pinIsLive as pinLiveFor, routeLegFor } from '../../lib/routeLeg'
 import { fmtArrivalClock } from '../../utils/datetime'
 import DriveModeOverlay from './DriveModeOverlay.vue'
 
@@ -128,7 +129,8 @@ const props = defineProps({
   // load's planned pickup → drop-off lane from GET /api/loads/:loadId/haul,
   // emitted by LoadHaulSection as
   //   { status: 'loading' | 'ready' | 'none', route, distanceMiles, etaMinutes, source }.
-  // While the truck has no live position, this one map draws that lane with
+  // While the truck has no live position (none, or a fix over 2 hours old,
+  // B11), this one map draws that lane with
   // both end markers, its chips read "mi" and "drive time", and no
   // /api/route call is made ('loading' waits for it, 'none' falls back to the
   // usual origin → drop-off fetch). A live position takes over as before.
@@ -282,9 +284,16 @@ const driverLatLng = computed(() => {
   return { lat: props.driverPosition.latitude, lng: props.driverPosition.longitude }
 })
 
+// B11 (2026-10-16): a pin whose fix is over 2 hours old shows where the truck
+// WAS. The map then draws the planned pickup -> drop-off route, never one from
+// that pin (lib/routeLeg.js): no line anchored to it, no paid route asked from
+// it, the pickup marker kept and the camera framing the route, not the pin. The
+// pin itself stays, with its "Last seen" age.
+const pinIsLive = computed(() => pinLiveFor(driverLatLng.value, fixTooOld.value))
+
 // The planned-lane fallback (see the plannedLane prop). Off unless a caller
 // passes the prop; never in publicMode.
-const usePlannedLane = computed(() => !props.publicMode && !!props.plannedLane && !driverLatLng.value)
+const usePlannedLane = computed(() => !props.publicMode && !!props.plannedLane && !pinIsLive.value)
 const plannedLaneShown = computed(() => usePlannedLane.value && props.plannedLane.status === 'ready')
 
 // Match "Status" AND "Job Status" (the Job Tracking sheet's column name used on
@@ -468,8 +477,11 @@ function buildRoutePath(driverOverride = null) {
   // `origin` as the terminal below would draw the entire lane followed by a
   // straight line back to its start. Draw the untrimmed lane instead; the
   // truck pin still shows where it is.
+  //
+  // Never anchored to a pin whose fix is over 2 hours old (B11): the planned
+  // route it stands beside is drawn whole.
   const onHaul = !props.publicMode || pickedUp.value
-  const dp = onHaul ? (driverOverride || driverLatLng.value) : null
+  const dp = onHaul && pinIsLive.value ? (driverOverride || driverLatLng.value) : null
   if (!dp) {
     const path = points.map(p => ({ lat: p.latitude, lng: p.longitude }))
     if (destLatLng.value && hasCoords.value) path.push(destLatLng.value)
@@ -523,8 +535,9 @@ function renderMarkers() {
   altPolylines = renderAlternatives(map, props.selectedAltIdx)
 
   // After pickup, hide origin marker — driver is now Point A. A planned lane
-  // (no live position) is the whole haul, so it keeps both ends.
-  if (originLatLng.value && hasCoords.value && (!pickedUp.value || usePlannedLane.value)) {
+  // (no live position) is the whole haul, so it keeps both ends, as does the
+  // planned route drawn beside a pin over 2 hours old (B11).
+  if (originLatLng.value && hasCoords.value && (!pickedUp.value || usePlannedLane.value || fixTooOld.value)) {
     originMarker = new google.maps.marker.AdvancedMarkerElement({ position: originLatLng.value, map, content: createDotPin('#16a34a', 14), title: 'Pickup' })
   }
   if (destLatLng.value && hasCoords.value) {
@@ -585,8 +598,9 @@ function fitBounds() {
   // Once the truck is rolling (post-pickup) and we have a live GPS fix,
   // focus the map on the driver pin at a close zoom so customers and
   // dispatchers immediately see what the truck is doing instead of an
-  // origin→destination wide view where the truck is a dot in the middle.
-  if (pickedUp.value && driverLatLng.value) {
+  // origin→destination wide view where the truck is a dot in the middle. A pin
+  // over 2 hours old is framed with the route instead (B11).
+  if (pickedUp.value && pinIsLive.value) {
     map.setCenter(driverLatLng.value)
     map.setZoom(15)
     return
@@ -705,22 +719,20 @@ async function fetchRoute(doFit = false) {
     if (props.plannedLane.status === 'ready') { applyPlannedLane(); return }
   }
 
-  // Pick the right leg to render:
+  // Pick the right leg to render (lib/routeLeg.js):
   //   - Has ELD + picked up:     truck→drop-off (current trajectory)
   //   - Has ELD + not picked up: truck→pickup (current trajectory)
-  //   - No ELD pin:              origin→drop-off (planned full haul)
+  //   - No ELD pin, or a pin whose fix is over 2 hours old (B11):
+  //                              origin→drop-off (planned full haul)
   // The original logic fell back to `origin → origin` when ELD was offline
   // and the load was pre-pickup, which produced no usable route — drivers
   // saw markers but no polyline and the smart guidance UI never populated.
-  const fromDriver = !!driverLatLng.value
-  let from, to
-  if (fromDriver) {
-    from = driverLatLng.value
-    to = pickedUp.value ? destLatLng.value : (originLatLng.value || destLatLng.value)
-  } else {
-    from = originLatLng.value
-    to = destLatLng.value
-  }
+  const leg = routeLegFor({
+    pin: driverLatLng.value, pinTooOld: fixTooOld.value,
+    origin: originLatLng.value, dest: destLatLng.value, pickedUp: pickedUp.value,
+  })
+  const fromDriver = leg.fromPin
+  const { from, to } = leg
   if (!from || !to) return
   // Answers "has this leg been routed from the truck's own position yet?", which
   // is the only question the removed 60 s / 0.06 mi gate's `lastRoutePos` was
@@ -1097,6 +1109,10 @@ watch(() => props.driverPosition, (pos) => {
   // reach fetchRoute() on this path.
   if (props.publicMode) return
 
+  // A pin over 2 hours old is neither routed from nor matched against the
+  // route (B11): the planned route stays until a fresh fix arrives.
+  if (!pinIsLive.value) return
+
   // Two reasons to go and get geometry, and only one of them is a retry:
   //
   //   (a) this leg has never been routed from the truck's own pin. Fires at most
@@ -1176,6 +1192,20 @@ watch(() => props.presetRoute, () => {
 // redraw from the lane. Never fires for a caller that passes no plannedLane.
 watch(() => [usePlannedLane.value, props.plannedLane], () => {
   if (usePlannedLane.value && map && destLatLng.value) fetchRoute(true)
+})
+
+// The pin's fix turned 2 hours old while the map is open (the 30 s fix clock),
+// or the parent handed an old one (B11): redraw from the plan. The customer
+// tracker fetches nothing, so it re-renders its lane untrimmed (or trimmed
+// again for a fresh fix); with the admin planned lane on hand the watcher
+// above redraws it. A fresh fix is routed from by the driverPosition watcher.
+watch(pinIsLive, (live) => {
+  if (!map || !destLatLng.value) return
+  if (props.publicMode) { renderMarkers(); return }
+  if (live || usePlannedLane.value) return
+  routedFromDriverPosition = false
+  resetLegRouteAttempts()
+  fetchRoute(true)
 })
 
 // Driver swapped to a different alternative (or recommended changed). Re-sync

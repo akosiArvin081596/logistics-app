@@ -669,8 +669,10 @@ function buildSingleLoadPath(driverOverride = null) {
     return p2
   }
 
+  // Never glued to a pin whose fix is over 2 hours old (B11): the planned route
+  // beside it is drawn whole. A live update (driverOverride) is a fresh fix.
   const driverPos = driverOverride
-    || (loc && loc.latitude != null && loc.longitude != null
+    || (loc && loc.latitude != null && loc.longitude != null && locShowsEta(loc)
           ? { lat: loc.latitude, lng: loc.longitude }
           : null)
   if (!driverPos) {
@@ -1264,10 +1266,15 @@ async function toggleLoad(al, loc) {
   destAddress.value = al.dropoffAddress || ''
 
   // Determine route-from point: driver GPS when past pickup, otherwise origin
-  // Fall back to origin if driver is too far (>2000 km) from load area
+  // Fall back to origin if driver is too far (>2000 km) from load area.
+  // A fix over 2 hours old shows where the truck WAS (B11, 2026-10-16): nothing
+  // is routed from it (no approach leg, no driver-to-drop-off figures, which
+  // this map hides for it anyway) and the map frames the planned route instead
+  // of zooming to it; the pin stays, with its "Last seen" age.
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
-  let useDriverPos = isPastPickup && hasDriverGps
+  const pinIsLive = hasDriverGps && locShowsEta(loc)
+  let useDriverPos = isPastPickup && pinIsLive
   if (useDriverPos && (hasOrigin || hasDest)) {
     const refLat = hasOrigin ? oLat : dLat
     const refLng = hasOrigin ? oLng : dLng
@@ -1283,8 +1290,7 @@ async function toggleLoad(al, loc) {
   await nextTick()
 
   if (map) {
-    const hasDriverGps = loc.latitude != null && loc.longitude != null
-    if (isPastPickup && hasDriverGps) {
+    if (isPastPickup && pinIsLive) {
       // Snap to the truck pin at max zoom — same level as clicking the pin
       // directly — so dispatchers immediately see street-level detail of
       // where the truck is. fitBounds(origin, dest) here would zoom out to
@@ -1341,7 +1347,7 @@ async function toggleLoad(al, loc) {
   // headline ETA/distance should measure from the truck's CURRENT position to
   // delivery (not pickup→delivery), matching the driver-list ETA. Override the
   // summary numbers here without disturbing the drawn haul/approach polylines.
-  if (!useDriverPos && hasDriverGps && hasDest) {
+  if (!useDriverPos && pinIsLive && hasDest) {
     await updateDriverToDestStats(loc.latitude, loc.longitude, dLat, dLng, focusGeneration)
   }
 
@@ -1350,7 +1356,7 @@ async function toggleLoad(al, loc) {
   // planned blue haul. The haul polyline stays anchored at pickup→drop-off
   // (see Step 1 in maybeRefetchRoute) while the approach leg refreshes as
   // the truck moves toward pickup.
-  if (!isPastPickup && hasDriverGps && hasOrigin) {
+  if (!isPastPickup && pinIsLive && hasOrigin) {
     const gen = focusGeneration
     lastApproachRefetchPos = { lat: loc.latitude, lng: loc.longitude }
     lastApproachRefetchTime = Date.now()
