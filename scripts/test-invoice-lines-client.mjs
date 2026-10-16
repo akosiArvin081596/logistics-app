@@ -236,12 +236,7 @@ guard('§4', () => {
   const totalTag = (MODAL.match(/<input\s[^>]*id="idp-total"[^>]*>/) || [''])[0]
   ok('the Total input is read-only while locked', /:readonly="linesLockTotal"/.test(totalTag))
   ok('…and its label says "Line haul" then', MODAL.includes("{{ linesLockTotal ? 'Line haul' : 'Total' }}"))
-  const SELECT_SRC = liftFn(MODAL, 'onLinesSelect')
-  const form = { lineIds: [], total: '1750.00' }
-  const calls = []
-  new Function('form', 'seeded', 'str', 'schedulePreview', `${SELECT_SRC}\nreturn onLinesSelect;`)(
-    form, { value: { total: '2400.00' } }, str, (o) => calls.push(o))([4])
-  eq('ticking a line puts the total back to the line haul the server derived, and renders at once', [form.lineIds, form.total, calls], [[4], '2400.00', [{ immediate: true }]])
+  // (What ticking a line does is run through the editor's own setup() in §7.)
 
   // The preview's figures are adopted as the server sent them.
   const ADOPT_SRC = liftFn(MODAL, 'adoptLines')
@@ -297,6 +292,191 @@ guard('§6', () => {
       ok(`MUTANT ${name}: caught`, !noMoneyArithmetic(`${script}\n${planted}\n`))
     }
   }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+section('§7 the editor itself: its <script setup>, run, and the requests it sends')
+// The modal's own setup(), compiled with @vue/compiler-sfc and run on Vue's
+// reactivity (no DOM): the real form, gates, timers and request builder. Its
+// imports are resolved by name: Vue, the two client libs (real), useApi (a
+// recorder), the components (stubs). What the replica browser check saw is a
+// preview that never re-rendered after a line was ticked; these cases pin the
+// requests and the footnote that must follow.
+const clientRequire = createRequire(rel('client/package.json'))
+let vue = null
+let compiler = null
+try {
+  vue = clientRequire('vue')
+  compiler = clientRequire('@vue/compiler-sfc')
+} catch (e) {
+  fail++
+  console.error(`FAIL  §7 cannot load vue / @vue/compiler-sfc from client/node_modules (${e.code || e.message})`)
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const SUMMARY_WIRE = (balance = '$1,750.00') => ({
+  lineHaul: '$2,400.00', advances: '-$650.00', balanceDue: balance, lineHaulCents: 240000, advancesCents: 65000,
+  balanceCents: 175000, lineHaulSource: 'preview', lines: [], footnote: '*$650 for fuel advance', footnoteDefault: '*$650 for fuel advance',
+})
+const LINE = Object.freeze({ id: 1, loadId: '41000018', kind: 'advance', label: 'Fuel advance', amountCents: 65000, amount: '$650.00', receivedOn: '', reference: '', note: '', invoiceId: '', voided: false })
+async function editor({ linesOn = true, to = 'ap@example.test', respond = null } = {}) {
+  const file = rel(MODAL_REL)
+  const { descriptor } = compiler.parse(fs.readFileSync(file, 'utf8'), { filename: file })
+  const out = compiler.compileScript(descriptor, { id: 'lines-editor', inlineTemplate: false })
+  const calls = []
+  const api = {
+    post: (url, body, opts) => {
+      const call = { url, body: JSON.parse(JSON.stringify(body)), signal: opts && opts.signal }
+      calls.push(call)
+      if (respond) return respond(call, calls.length)
+      const ids = Array.isArray(body.lineIds) ? body.lineIds : []
+      return Promise.resolve({ invoicePdfBase64: '', subject: 'Acme Freight Order #41000018', emailBodyDefault: 'Hello,', warnings: [],
+        ...(linesOn ? { invoiceLines: { summary: ids.length ? SUMMARY_WIRE() : null } } : {}) })
+    },
+  }
+  const libs = {
+    '../../lib/invoiceFields': await import(pathToFileURL(rel('client/src/lib/invoiceFields.js')).href),
+    '../../lib/invoiceLines': await import(pathToFileURL(rel(CLIENT_LIB)).href),
+    '../../composables/useApi': { useApi: () => api },
+    vue,
+  }
+  const scope = {}
+  for (const [local, imp] of Object.entries(out.imports || {})) {
+    if (imp.isType) continue
+    const mod = libs[imp.source]
+    scope[local] = mod ? (imp.imported === 'default' ? mod.default : mod[imp.imported]) : {}
+  }
+  const code = out.content.replace(/^import\s[\s\S]*?\sfrom\s+['"][^'"]+['"];?\n/gm, '').replace(/export default\s*/, 'return ')
+  const comp = new Function(...Object.keys(scope), code)(...Object.values(scope))
+  const preview = {
+    invoiceId: '10162026-1', peekedInvoiceId: '10162026-1', invoiceDateIso: '2026-10-16', deliveryDateIso: '2026-10-14',
+    orderNumber: '41000018', poNumber: '', totalAmount: 2400, total: '$2,400.00', totalSource: 'sheet', to, documentsEmailSource: 'default',
+    billToName: 'Acme Freight', brokerName: 'Acme Freight', isBison: false, moveNumber: '', notes: '', emailBodyDefault: 'Hello,', invoicePdfBase64: '',
+    ...(linesOn ? { invoiceLines: { enabled: true, available: [], selectedIds: [], summary: null, error: null, receiptWarnings: [] } } : {}),
+  }
+  const props = vue.reactive({ open: false, loadId: '41000018', preview, podUrl: null, alreadyDrafted: false })
+  const warnings = []
+  const origWarn = console.warn
+  console.warn = (...a) => warnings.push(a.join(' '))
+  let ed
+  try {
+    ed = vue.proxyRefs(vue.effectScope().run(() => comp.setup(props, { emit: () => {}, expose: () => {} })))
+    props.open = true
+    await sleep(5)
+  } finally {
+    console.warn = origWarn
+  }
+  const previews = () => calls.filter((c) => c.url === '/api/loads/41000018/invoice-preview')
+  return { ed, calls, previews }
+}
+if (vue && compiler) {
+  await (async () => {
+    // A line saved and ticked, as the section emits it.
+    {
+      const { ed, previews } = await editor()
+      ed.linesAvailable = [LINE]
+      ed.onLinesSelect([1])
+      eq('§7 ticking a line fills the default footnote at once (the documented rule over the server\'s amount)', ed.form.footnote, '*$650 for fuel advance')
+      eq('§7 …and puts the Total back to the line haul', ed.form.total, '2400.00')
+      await sleep(20)
+      eq('§7 …and sends one preview naming the ticked line, the footnote left to the server', previews().map((c) => [c.body.lineIds, Object.prototype.hasOwnProperty.call(c.body, 'footnote')]), [[[1], false]])
+      eq('§7 …whose figures the section then shows', ed.linesSummary && ed.linesSummary.balanceDue, '$1,750.00')
+      ed.onLinesSelect([])
+      await sleep(20)
+      eq('§7 unticking sends a preview with no line, and the untouched footnote empties', [previews().length, previews()[1] && previews()[1].body.lineIds, ed.form.footnote], [2, [], ''])
+    }
+    // The footnote is typed: one debounced preview carrying it.
+    {
+      const { ed, previews } = await editor()
+      ed.linesAvailable = [LINE]
+      ed.onLinesSelect([1])
+      await sleep(20)
+      ed.onFootnoteInput('*Paid by EFS check')
+      await sleep(100)
+      eq('§7 a typed footnote waits for the debounce', previews().length, 1)
+      await sleep(700)
+      eq('§7 …then one preview carries it', previews().slice(1).map((c) => c.body.footnote), ['*Paid by EFS check'])
+      eq('§7 …and the server\'s later answer does not overwrite it', ed.form.footnote, '*Paid by EFS check')
+    }
+    // A slow answer to an older request never overwrites a newer one.
+    {
+      let releaseFirst = null
+      const { ed, previews } = await editor({
+        respond: (call, n) => (n === 1
+          ? new Promise((r) => { releaseFirst = () => r({ invoicePdfBase64: '', invoiceLines: { summary: SUMMARY_WIRE('$9.99') } }) })
+          : Promise.resolve({ invoicePdfBase64: '', invoiceLines: { summary: SUMMARY_WIRE('$1,750.00') } })),
+      })
+      ed.linesAvailable = [LINE, { ...LINE, id: 2, label: 'Cash advance' }]
+      ed.onLinesSelect([1])
+      await sleep(5)
+      ed.onLinesSelect([1, 2])
+      await sleep(20)
+      if (releaseFirst) releaseFirst()
+      await sleep(20)
+      eq('§7 two previews in flight: the newer answer stands', [previews().length, ed.linesSummary && ed.linesSummary.balanceDue], [2, '$1,750.00'])
+    }
+    // A void of a ticked line: it leaves the selection and the invoice re-renders.
+    {
+      const { ed, previews } = await editor()
+      ed.linesAvailable = [LINE]
+      ed.onLinesSelect([1])
+      await sleep(20)
+      ed.linesAvailable = [{ ...LINE, voided: true }]
+      await sleep(20)
+      eq('§7 a voided ticked line is unticked and a preview without it is sent', [ed.form.lineIds, previews().length, previews()[1] && previews()[1].body.lineIds], [[], 2, []])
+    }
+    // No recipient (a replica or staging names no AP inbox): the replica check's case.
+    {
+      const { ed, previews } = await editor({ to: '' })
+      ed.linesAvailable = [LINE]
+      ed.onLinesSelect([1])
+      await sleep(20)
+      eq('§7 with no recipient yet, a ticked line still renders its preview', previews().length, 1)
+      ok('§7 …which leaves the blank recipient out (the server would refuse it)', previews()[0] && !Object.prototype.hasOwnProperty.call(previews()[0].body, 'recipientEmail'))
+      eq('§7 …the figures come back', ed.linesSummary && ed.linesSummary.balanceDue, '$1,750.00')
+      eq('§7 …and the approve still waits for a recipient', ed.canApprove, false)
+    }
+    // Another wrong field pauses the preview: the section says which.
+    {
+      const { ed, previews } = await editor()
+      ed.linesAvailable = [LINE]
+      ed.form.orderNumber = '#bad'
+      ed.onLinesSelect([1])
+      await sleep(20)
+      eq('§7 a wrong Order # pauses the preview', previews().length, 0)
+      ok('§7 …and the section is told why', typeof ed.linesPreviewPausedReason === 'string' && ed.linesPreviewPausedReason.length > 10)
+    }
+    // Flag off: the editor is the one it always was.
+    {
+      const { ed, previews } = await editor({ linesOn: false, to: '' })
+      ed.onFieldInput()
+      await sleep(700)
+      eq('§7 flag off, no recipient: no preview (as before)', previews().length, 0)
+      const valid = await editor({ linesOn: false })
+      valid.ed.onFieldInput()
+      await sleep(700)
+      eq('§7 flag off: an edit\'s preview carries no line keys', valid.previews().map((c) => ['lineIds', 'footnote'].filter((k) => Object.prototype.hasOwnProperty.call(c.body, k))), [[]])
+      eq('§7 flag off: no pause reason for a section that is not there', ed.linesPreviewPausedReason, '')
+    }
+  })()
+}
+guard('§7 the footnote rule', () => {
+  if (!C || !S) throw new Error('the client or server lines module is missing')
+  const db = new (createRequire(import.meta.url)('better-sqlite3'))(':memory:')
+  db.exec('CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY, total TEXT)')
+  S.ensureSchema(db)
+  const cases = [
+    [['Fuel advance', '650']],
+    [['EFS advance', '650.50']],
+    [['Comdata advance', '1,200'], ['Fuel advance', '0.29']],
+  ]
+  for (const lines of cases) {
+    const ids = lines.map(([label, amount]) => S.addLine(db, { loadId: 'L1', values: { ...S.parseNewLine({ label, amount }).values }, actor: 'x', closedMonths: [] }, {}).line.id)
+    const server = S.resolveInvoiceLines(db, { loadId: 'L1', selection: S.parseLineSelection({ lineIds: ids }), derivedLineHaul: 5000, lineHaulSource: 'sheet', typedTotal: null }).summary.footnoteDefault
+    const client = C.footnoteDefaultFor(S.listLines(db, 'L1').filter((l) => ids.includes(l.id)))
+    eq(`§7 the client's default footnote is the server's (${lines.map((l) => l[0]).join(' + ')})`, client, server)
+    for (const id of ids) S.voidLine(db, { loadId: 'L1', lineId: id, reason: 'next case', actor: 'x' }, {})
+  }
+  ok('§7 the section shows why the preview is paused', /previewPausedReason/.test(COMP) && /:preview-paused-reason="linesPreviewPausedReason"/.test(MODAL))
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)
