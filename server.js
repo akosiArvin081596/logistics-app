@@ -118,6 +118,8 @@ const personalExpense = require("./lib/personal-expense");
 // Their receipts on the invoice: the re-encode service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
 const invoiceReceipts = require("./lib/invoice-receipts");
+// An invoice's Address line from a drivers_directory row, each part once.
+const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
 const receiptFiles = require("./lib/receipt-files");
 const fuelModel = require("./lib/fuel-model");
@@ -20195,9 +20197,9 @@ async function generateInvoiceHandler(req, res) {
 		const driverRow = db.prepare(
 			"SELECT id, driver_name, address, city, state, zip, phone, cell FROM drivers_directory ORDER BY id ASC"
 		).all().find((r) => normalizeDriverName(r.driver_name) === nameNorm);
-		const providerAddress = driverRow
-			? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
-			: "";
+		// One line, each part once: most saved street fields already hold the
+		// whole address (lib/invoice-header.js).
+		const providerAddress = driverRow ? providerAddressLine(driverRow) : "";
 		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
 		// The P&L's structure (see the daily rate above), so the formula — fixed
 		// or percentage — and the percentage are the ones the P&L applies.
@@ -20206,7 +20208,8 @@ async function generateInvoiceHandler(req, res) {
 
 		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
 		// at 7 PM Eastern, which UTC calls Saturday in winter (7 PM EST is 00:00
-		// UTC), and the template prints this beside a literal "Friday,".
+		// UTC), and the invoice prints this date's own weekday beside it
+		// (lib/policy-field-maps.js, "Submission weekday").
 		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -24712,7 +24715,7 @@ function listInvoicePayees() {
 			out.push({
 				name,
 				type: "driver",
-				address: [d.address, d.city, d.state, d.zip].filter(Boolean).join(", "),
+				address: providerAddressLine(d),
 				phone: d.phone || d.cell || "",
 				role: "",
 			});
@@ -26448,7 +26451,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		correctionOf: weekly ? weekly.invoice_number : "",
 		payeeName: display,
 		payeeRole: "Driver",
-		payeeAddress: dirRow ? [dirRow.address, dirRow.city, dirRow.state, dirRow.zip].filter(Boolean).join(", ") : "",
+		payeeAddress: dirRow ? providerAddressLine(dirRow) : "",
 		payeePhone: dirRow ? (dirRow.phone || dirRow.cell || "") : "",
 		invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
 		issueDate: appTime.dateTextInZone(new Date(), APP_TIMEZONE),
