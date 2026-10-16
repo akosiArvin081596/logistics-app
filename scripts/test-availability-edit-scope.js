@@ -9,8 +9,9 @@
 //
 //   §1 the cases the client was built against (the contract's table), both roles
 //   §2 every edit over a grid of calendar days: today fixed, every live row and
-//      every candidate (from, to) with both ends in today-35..today+5, both
-//      roles, plus a kind change, a reason change and a cancel per row:
+//      every candidate (from, to) with both ends in today-35..today+5 (every
+//      to >= from, and one reversed range per first day), both roles, plus a
+//      kind change, a reason change and a cancel per row:
 //      "allowed by editable and limits" equals validateAvailability(...).ok,
 //      case by case. Run for 2026-10-15, across a year end (2027-01-03) and
 //      after a leap day (2028-03-01)
@@ -82,8 +83,12 @@ function gridAgreement(today) {
 				const limits = A.availabilityEditLimits(r, ctx);
 				const tag = `${role} row ${r.from_date}..${r.to_date} (${mode})`;
 				if ((mode === "none") !== (limits === null)) check(`${tag}: limits null exactly on "none"`, true, false);
-				for (const from of days) {
-					for (const to of days) {
+				// Every (from, to) with to >= from, plus one reversed range per first day
+				// (the day before it): both sides refuse every reversed range alike.
+				for (let f = 0; f < days.length; f++) {
+					for (let t = Math.max(0, f - 1); t < days.length; t++) {
+						const from = days[f];
+						const to = days[t];
 						const cand = { kind: r.kind, from, to, reason: r.reason };
 						check(`${tag} -> ${from}..${to}`, panelAllows(r, mode, limits, cand),
 							A.validateAvailability({ from, to }, { ...ctx, existing: r }).ok);
