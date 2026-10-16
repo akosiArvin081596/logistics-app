@@ -245,15 +245,29 @@ test("C1 providerAddressLine(): a street field already holding the whole address
 		[{ address: "Unit 4, 12 Oak Ct, Hartford", city: "Hartford", state: "CT", zip: "06103" }, "Unit 4, 12 Oak Ct, Hartford, CT 06103"],
 		[{ address: "Bldg 2, 4500 NE 5th Ave, Omaha", city: "Omaha", state: "NE", zip: "68102" }, "Bldg 2, 4500 NE 5th Ave, Omaha, NE 68102"],
 		[{ address: "Ranch 5, Co Rd 12, Greeley", city: "Greeley", state: "CO", zip: "80631" }, "Ranch 5, Co Rd 12, Greeley, CO 80631"],
+		// Text before the zip is the state only when it ends with the saved state
+		// or a US state's name or code, and isn't the city.
+		[{ address: "1200 Elm St, Houston 77002", city: "", state: "TX", zip: "77002" }, "1200 Elm St, Houston TX 77002"],
+		[{ address: "1200 Elm St, Apt 4 77002", ...tx }, "1200 Elm St, Houston, Apt 4 TX 77002"],
+		[{ address: "1200 Elm St, Houston, Suite B, 77002", ...tx }, "1200 Elm St, Houston, Suite B, TX 77002"],
+		[{ address: "1 Main St, Albany, New York 12207", city: "Albany", state: "NY", zip: "12207" }, "1 Main St, Albany, New York 12207"],
+		[{ address: "1 Main St, Albany, 12207", city: "Albany", state: "New York", zip: "12207" }, "1 Main St, Albany, New York 12207"],
+		[{ address: "1 Main St, Washington 15301", city: "Washington", state: "PA", zip: "15301" }, "1 Main St, Washington PA 15301"],
+		[{ address: "1 Main St, Washington, 15301", city: "Washington", state: "PA", zip: "15301" }, "1 Main St, Washington, PA 15301"],
+		[{ address: "1 Main St, New York 10001", city: "New York", state: "NY", zip: "10001" }, "1 Main St, New York NY 10001"],
+		[{ address: "100 Main St, Bldg CO", city: "Denver", state: "CO", zip: "80202" }, "100 Main St, Denver, Bldg CO 80202"],
+		[{ address: "1200 Elm St, Houston, 77002.", ...tx }, "1200 Elm St, Houston, 77002., TX"],
 		// Saved parts that disagree with the street are printed, never dropped.
 		[{ address: "1200 Elm St, Houston, TX 77002", city: "Houston", state: "TX", zip: "77008" }, "1200 Elm St, Houston, TX 77002, 77008"],
 		[{ address: "1200 Elm St, Katy, TX 77494", city: "Houston", state: "TX", zip: "77494" }, "1200 Elm St, Katy, Houston, TX 77494"],
+		[{ address: "1200 Elm St, Katy 77494", city: "Houston", state: "TX", zip: "77494" }, "1200 Elm St, Houston, Katy TX 77494"],
 		[{ address: "1200 Elm St, Houston Heights, TX 77008", city: "Houston", state: "TX", zip: "77008" }, "1200 Elm St, Houston Heights, Houston, TX 77008"],
 		[{ address: "1 Main St, New York, NY 10001", city: "York", state: "NY", zip: "10001" }, "1 Main St, New York, York, NY 10001"],
 		[{ address: "1 Main St, York, PA 17401", city: "New York", state: "PA", zip: "17401" }, "1 Main St, York, New York, PA 17401"],
 		// A state typed on a public form is text, never a replacement pattern.
 		[{ address: "1200 Elm St, Houston, 77002", city: "Houston", state: "$'X", zip: "77002" }, "1200 Elm St, Houston, $'X 77002"],
 		[{ address: "1200 Elm St, Houston, 77002", city: "Houston", state: "$&$1", zip: "77002" }, "1200 Elm St, Houston, $&$1 77002"],
+		[{ address: "1200 Elm St, Houston, 77002", city: "Houston", state: "$&$1$'", zip: "77002" }, "1200 Elm St, Houston, $&$1$' 77002"],
 		// It holds none of them: exactly the old join, as before this change.
 		[{ address: "1200 Elm St", ...tx }, "1200 Elm St, Houston, TX, 77002"],
 		[{ address: "1200 Elm St, Apt 4", ...tx }, "1200 Elm St, Apt 4, Houston, TX, 77002"],
@@ -261,6 +275,7 @@ test("C1 providerAddressLine(): a street field already holding the whole address
 		[{ address: "45 Houston Ave", ...tx }, "45 Houston Ave, Houston, TX, 77002"],
 		[{ address: "1200 Elm St 77002", ...tx }, "1200 Elm St 77002, Houston, TX, 77002"],
 		[{ address: "1200 Elm St Houston TX", ...tx }, "1200 Elm St Houston TX, Houston, TX, 77002"],
+		[{ address: "1200 Elm St Houston TX 77002", city: "Houston", state: "", zip: "77002" }, "1200 Elm St Houston TX 77002, Houston, 77002"],
 		[{ address: "USA", ...tx }, "USA, Houston, TX, 77002"],
 		[{ address: ", , ,", ...tx }, ", , ,, Houston, TX, 77002"],
 		[{ address: "", ...tx }, "Houston, TX, 77002"],
