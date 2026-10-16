@@ -41,6 +41,7 @@
             <input v-model="editForm.to" type="date" class="avail-input" :min="editBounds.toMin || undefined" :max="editBounds.toMax || undefined" required data-avail-first />
           </label>
         </template>
+        <p v-if="editHint" class="avail-note" role="status">{{ editHint }}</p>
         <div class="avail-actions">
           <button type="button" class="btn btn-secondary" :disabled="busy" @click="closeEdit(r.id)">Back</button>
           <button type="submit" class="btn btn-primary" :disabled="busy || !canSave">Save</button>
@@ -94,6 +95,7 @@
           <span class="avail-hint">Type of leave only (for example vacation or family). No medical details.</span>
         </label>
       </div>
+      <p v-if="addHint" class="avail-note" role="status">{{ addHint }}</p>
       <div class="avail-actions">
         <button type="submit" class="btn btn-primary" :disabled="busy || !dirId || !datesWithinBounds(form, createBounds)">Add time off</button>
       </div>
@@ -133,7 +135,7 @@ import { useApi } from '../../composables/useApi'
 import { normDriver } from '../../lib/driverName'
 import {
   AVAILABILITY_KINDS, availabilityRangeText, canSaveEdit, createDateBounds, datesWithinBounds,
-  editDateBounds, editFormFor, editPatch, endEarlyNote, kindLabel, rowActions,
+  editDateBounds, editFormFor, editPatch, endEarlyNote, kindLabel, rangeHint, rowActions,
 } from '../../lib/availabilityText'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
@@ -169,6 +171,8 @@ const createBounds = computed(() => createDateBounds(createLimits.value, form))
 const editingRow = computed(() => rows.value.find((r) => r.id === editingId.value) || null)
 const editBounds = computed(() => (editingRow.value ? editDateBounds(editingRow.value, editForm) : null))
 const canSave = computed(() => !!editingRow.value && canSaveEdit(editingRow.value, editForm))
+const editHint = computed(() => (editBounds.value ? rangeHint(editForm, editBounds.value) : ''))
+const addHint = computed(() => rangeHint(form, createBounds.value))
 
 // A reload that leaves the open form's row gone or no longer editable closes it.
 watch(editingRow, (r) => {

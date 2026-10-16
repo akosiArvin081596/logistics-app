@@ -174,6 +174,16 @@ export function datesWithinBounds(form, bounds) {
   return true
 }
 
+// Why Save or Add is off when the range is longer than the server's maxDays
+// (both days real and in order), in the server's own words; "" otherwise.
+export function rangeHint(form, bounds) {
+  const f = form || {}
+  if (!bounds || !bounds.maxDays || !isAvailabilityDay(f.from) || !isAvailabilityDay(f.to) || f.to < f.from) return ''
+  return dayIndex(f.to) - dayIndex(f.from) + 1 > bounds.maxDays
+    ? `At most ${bounds.maxDays} days. For longer, add another period after this one ends.`
+    : ''
+}
+
 // The note on an "end_early" form: why only the last day can change, naming
 // the server's back-dating window (createLimits.dispatcherBackDays).
 export function endEarlyNote(createLimits) {
