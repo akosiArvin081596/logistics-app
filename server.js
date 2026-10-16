@@ -2434,6 +2434,10 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_load_invoice_drafts_load ON load_invoice
 // number come from?" has to be a WHERE clause, not a JSON scan —
 //   SELECT * FROM load_invoice_drafts WHERE total_source='manual' OR total <> sheet_total
 // is the query somebody will run months later when a broker disputes a figure.
+// With advance lines (B20, BROKER_INVOICE_LINES_ENABLED) a draft that printed
+// one bills its balance due in `total` and keeps the line haul in gross_total,
+// so compare the gross instead, or an advance reads as a hand-edited total:
+//   ... OR COALESCE(NULLIF(gross_total, ''), total) <> sheet_total
 //
 // ⚠️ Do NOT overload recipient_source. It means "provenance of the EMAIL
 // ADDRESS" (ratecon | default | manual) and must keep meaning exactly that now
@@ -2457,6 +2461,12 @@ try { db.exec("ALTER TABLE load_invoice_drafts ADD COLUMN notes TEXT DEFAULT ''"
 // re-approve flow legitimately reissues a number; a unique index would turn a
 // warning into a 500. See the collision probe beside parseInvoiceOverrides().
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_load_invoice_drafts_invoice ON load_invoice_drafts(invoice_id)"); } catch {}
+// B20 advance lines on broker invoices (lib/broker-invoice-lines.js): the
+// broker_invoice_lines table, lines_json and gross_total on load_invoice_drafts,
+// and the table's append-only TEMP triggers. Built only while
+// BROKER_INVOICE_LINES_ENABLED is on, so with it off this server changes nothing
+// in the database; the flag is read at boot like every other one.
+if (brokerInvoice.invoiceLines.linesEnabled(process.env)) brokerInvoice.invoiceLines.ensureSchema(db);
 
 // nextInvoiceNumber(date) → "MMDDYYYY-N", incrementing per calendar day.
 // Concurrency-safe: a single UPSERT atomically bumps the counter and returns
@@ -48892,6 +48902,15 @@ app.post(
 			//    document reads and a Gemini vision call before it 400s.
 			const ov = parseInvoiceOverrides(req.body);
 			if (!ov.ok) return res.status(400).json({ error: ov.error, code: ov.code, field: ov.field });
+			// 0b) Advance lines (B20), only with BROKER_INVOICE_LINES_ENABLED on
+			//     (lib/broker-invoice-lines.js). Off, nothing below reads them and
+			//     this route answers exactly as before. The selection is line ids
+			//     and an optional footnote, never an amount, and is refused here,
+			//     before anything is spent, like the overrides above.
+			const invoiceLines = brokerInvoice.invoiceLines;
+			const linesOn = invoiceLines.linesEnabled(process.env);
+			const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
+			if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
 
 			// 1) Look up the load in the Job Tracking sheet by loadId.
 			const sheets = await getSheets();
@@ -49282,6 +49301,34 @@ app.post(
 				});
 			}
 
+			// 6a-1) ADVANCE LINES (B20). Below the refs guard and above
+			//     nextInvoiceNumber(), for the guards' own reason: a refusal after
+			//     the mint would burn an invoice number. The line haul is this route's
+			//     own base (the rate con's Total Rate, else the sheet's Payment); a
+			//     typed total that differs from it is refused beside a line, since it
+			//     would take the advance off twice. On ?dryRun=1 a refusal is reported
+			//     in the answer's invoiceLines.error and nothing is rendered, so the
+			//     editor still opens and the lines can be unticked. INVOICE-ONLY: the
+			//     balance due is billed; Job Tracking's Payment and every settlement
+			//     figure keep the line haul.
+			let lineResolved = null;
+			if (linesOn) {
+				lineResolved = invoiceLines.resolveInvoiceLines(db, {
+					loadId,
+					selection: lineSel,
+					derivedLineHaul: derivedTotal,
+					lineHaulSource: rcTotal > 0 ? "ratecon" : "sheet",
+					typedTotal: ov.has.total ? ov.values.total : null,
+				});
+				if (!lineResolved.ok && !dryRun) {
+					return res.status(lineResolved.status).json({
+						error: lineResolved.error, code: lineResolved.code, ...(lineResolved.lineId ? { lineId: lineResolved.lineId } : {}),
+					});
+				}
+			}
+			const lineSummary = lineResolved && lineResolved.ok ? lineResolved.summary : null;
+			const lineRefused = !!(lineResolved && !lineResolved.ok);
+
 			// 6a-2) A RECIPIENT. The default AP inboxes are settings with no default
 			//     in code (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL), so on a server
 			//     without the one this load needs, and with no rate-con address or
@@ -49336,14 +49383,18 @@ app.post(
 			// "" on the needsTotal dryRun — never "$0.00", which reads as a real
 			// figure the reviewer might approve.
 			const total = needsTotal ? "" : brokerInvoice.formatMoney(totalAmount);
+			// What the draft bills: the balance due when advance lines print (B20),
+			// else the total. `total` above stays the line haul.
+			const billedTotal = lineSummary ? invoiceLines.formatCents(lineSummary.balanceCents) : total;
 
 			// 7) Render the invoice PDF. Skipped entirely when no total could be
 			//    derived AND none was supplied (dryRun only — see the guard above):
 			//    there is nothing honest to print, and a rendered $0.00 invoice is
-			//    the one artifact this route has always refused to create.
+			//    the one artifact this route has always refused to create. Skipped
+			//    too on a dryRun whose advance lines were refused (6a-1).
 			let invoicePdf = null;
 			let invoicePdfBase64 = "";
-			if (!needsTotal) {
+			if (!needsTotal && !lineRefused) {
 				const invoiceHtml = brokerInvoice.buildInvoiceHtml({
 					invoiceId,
 					invoiceDate,
@@ -49352,6 +49403,7 @@ app.post(
 					orderNumber,
 					poNumber,
 					deliveryDate,
+					invoiceLines: lineSummary,
 					total,
 					notes,
 				});
@@ -49382,6 +49434,8 @@ app.post(
 				moveNumber,
 				poNumber,
 			};
+			// B20: the balance in its own paragraph when advance lines print.
+			if (lineSummary) emailFields.balanceLine = invoiceLines.emailBalanceLine(lineSummary);
 			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
 			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
 			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
@@ -49520,6 +49574,10 @@ app.post(
 					emailBodyDefault,
 					emailSignatureHtml: brokerInvoice.buildInvoiceEmailSignatureHtml(),
 					ratecons: (rateconCandidates || []).map((c) => ({ base64: Buffer.from(c.buffer).toString("base64"), label: c.label || "Rate-con", source: c.source || "" })), // EVERY rate-con file for this load so the reviewer can see all of them, not just the primary
+					// B20, only with the flag on: the load's advance lines, which print,
+					// the server's figures (or the refusal) and the same-amount receipt
+					// warnings. Absent with the flag off, so this answer is as before.
+					...(linesOn ? { invoiceLines: invoiceLines.dryRunEcho(db, { loadId, resolved: lineResolved }) } : {}),
 				});
 			}
 
@@ -49563,6 +49621,9 @@ app.post(
 				["moveNumber", derivedMoveNumber, moveNumber],
 				["total", derivedTotal, totalAmount],
 				["emailBody", emailBodyDefault, emailBody],
+				// B20: the printed advance lines, as one detail naming the rule (and an
+				// edited footnote). "" when none print, so it is no edit.
+				["lines", "", lineSummary ? invoiceLines.auditDraftDetail(lineSummary) : ""],
 				// LAST on purpose: the audit detail is capped at 1000 characters, and a
 				// long note must be what the cap trims, never the money line above.
 				["notes", derivedNotes, notes],
@@ -49575,12 +49636,22 @@ app.post(
 			// it was edited, its length, and — when the n8n fallback wrote the draft
 			// with the generated message instead — that the edit was not applied.
 			// An applied edit's words are in the Gmail draft itself.
+			// B20: notes on the lines' part of the audit line that are only known later
+			// (a line voided while the draft was made, recordDraft(); the balance
+			// sentence the n8n fallback's own email leaves out). editEmailApplied keeps
+			// the n8n path's answer for the message when the line is rebuilt for them.
+			const lineAuditNotes = [];
+			let editEmailApplied = true;
 			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
 				f === "total"
 					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
 					: f === "emailBody"
 						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
-						: `${f}: "${from}" → "${to}"`,
+						: f === "lines"
+							// Rebuilt here so the notes sit right after the figures, where
+							// the 1000-character cap below cannot reach them.
+							? invoiceLines.auditDraftDetail(lineSummary, lineAuditNotes)
+							: `${f}: "${from}" → "${to}"`,
 			).join("; ");
 			// Replaced on the n8n path only, before recordDraft() logs it.
 			let editDetail = describeEdits(true);
@@ -49589,23 +49660,42 @@ app.post(
 			// modal can show "approved draft → recipient / invoice #". Best-effort —
 			// never fails the draft. Only called on a real (non-dryRun) success.
 			const recordDraft = (via) => {
+				let draftRecorded = false;
 				try {
-					db.prepare(
-						"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-					).run(
-						loadId, invoiceId, invoiceTo.email, recipientSource, total, effBrokerName, orderNumber, via,
-						(req.session.user && req.session.user.username) || "",
-						editedFields.length ? 1 : 0,
-						editedFields.join(","),
-						// Without the email message, by the audit line's rule: edited_fields
-						// records that it changed, and the text is not kept here.
-						editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
-						totalSource,
-						sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
-						rcTotal > 0 ? fmtMoney(rcTotal) : "",
-						invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
-						notes,
-					);
+					// The draft row and, with B20 advance lines, its printed lines are ONE
+					// write: a line record that fails takes the row with it, so no draft
+					// row ever stands without the audit rows that follow.
+					const lineRecord = db.transaction(() => {
+						const draftRow = db.prepare(
+							"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+						).run(
+							loadId, invoiceId, invoiceTo.email, recipientSource, billedTotal, effBrokerName, orderNumber, via,
+							(req.session.user && req.session.user.username) || "",
+							editedFields.length ? 1 : 0,
+							editedFields.join(","),
+							// Without the email message, by the audit line's rule: edited_fields
+							// records that it changed, and the text is not kept here.
+							editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
+							totalSource,
+							sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
+							rcTotal > 0 ? fmtMoney(rcTotal) : "",
+							invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
+							notes,
+						);
+						// B20: the printed lines and the line haul on this row, and each
+						// line still active stamped with the first invoice # that printed it.
+						return lineSummary ? invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId }) : null;
+					})();
+					draftRecorded = true;
+					// A line voided after this draft resolved its lines is in the Gmail
+					// draft but carries no invoice #: the answer and the audit line say so.
+					if (lineRecord && lineRecord.voidedIds.length) {
+						for (const id of lineRecord.voidedIds) {
+							draftWarnings.push(`Advance line #${id} was voided while this draft was made; check the Gmail draft.`);
+							lineAuditNotes.push(`line #${id} was voided while this draft was made; check the Gmail draft`);
+						}
+						editDetail = describeEdits(editEmailApplied);
+					}
 					// ⚠️ BYTE-IDENTICAL for the unedited case, deliberately — historical
 					// queries over invoice_draft_created must not change shape. The edit
 					// is a SEPARATE action, per the naming discipline beside logAudit():
@@ -49617,6 +49707,18 @@ app.post(
 					}
 				} catch (e) {
 					console.error("Draft invoice: draft record persist failed:", e.message);
+					// The Gmail draft exists but this app has no record of it (no row, no
+					// stamp, no created/edited audit): the answer says so FIRST, so the
+					// warning stands whatever the audit write below does, then a *_failed
+					// row records the attempt.
+					if (!draftRecorded) {
+						draftWarnings.push(`The Gmail draft was created as invoice #${invoiceId} but LogisX could not record it; check before sending.`);
+						try {
+							logAudit(req, "invoice_draft_record_failed", "load", loadId, `${invoiceId} (${via}): ${sanitizeEvidenceText(e && e.message, 200)}`);
+						} catch (auditErr) {
+							console.error("Draft invoice: the record-failed audit row could not be written:", auditErr.message);
+						}
+					}
 				}
 			};
 
@@ -49653,7 +49755,16 @@ app.post(
 				// as not applied. Drop both once the workflow sends emailHtml.
 				if (editedFields.includes("emailBody")) {
 					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
+					editEmailApplied = false;
 					editDetail = describeEdits(false);
+				}
+				// B20: for the same reason the balance due sentence of an invoice with
+				// advance lines is not in this path's email. The PDF it attaches prints
+				// the figures; the answer and the audit line say the sentence is missing.
+				if (lineSummary) {
+					draftWarnings.push("The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.");
+					lineAuditNotes.push("email balance sentence NOT APPLIED (the fallback service used its own message)");
+					editDetail = describeEdits(editEmailApplied);
 				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
@@ -49688,6 +49799,9 @@ app.post(
 					rateconPdfBase64: rateconBuffer ? Buffer.from(rateconBuffer).toString("base64") : "",
 					rateconFileName: `${safeOrderNumber}.pdf`,
 				};
+				// B20: the reviewed advance lines and the balance due, as printed, so
+				// both send paths carry the same figures. Only when lines print.
+				if (lineSummary) Object.assign(payload, invoiceLines.n8nFields(lineSummary));
 				try {
 					const controller = new AbortController();
 					const timer = setTimeout(() => controller.abort(), 30000);
@@ -49798,6 +49912,12 @@ app.post(
 		// rules is how a preview comes to render something the approve refuses.
 		const ov = parseInvoiceOverrides(req.body);
 		if (!ov.ok) return res.status(400).json({ error: ov.error, code: ov.code, field: ov.field });
+		// Advance lines (B20), the approve's own selection rule; off, nothing here
+		// reads them. Refused before a render slot is taken.
+		const invoiceLines = brokerInvoice.invoiceLines;
+		const linesOn = invoiceLines.linesEnabled(process.env);
+		const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
+		if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
 
 		// ⚠️ 422 INVOICE_TOTAL_UNKNOWN keeps EXACTLY its existing meaning here —
 		// nothing derivable AND nothing supplied. On this route nothing is ever
@@ -49847,6 +49967,16 @@ app.post(
 			// would preview no note and then print one. One rule, one answer.
 			const notes = ov.has.notes ? ov.values.notes : latestDraftNotes(loadId);
 			const total = brokerInvoice.formatMoney(ov.values.total);
+			// B20: the lines the editor ticked, over the Total it sends. This route
+			// reads no sheet, so that Total is its line haul; the approve derives
+			// the line haul from the rate con or the sheet and refuses a different
+			// typed one beside a line. A refusal here is the approve's own 422.
+			let lineSummary = null;
+			if (linesOn) {
+				const lr = invoiceLines.resolveInvoiceLines(db, { loadId, selection: lineSel, derivedLineHaul: ov.values.total, lineHaulSource: "preview", typedTotal: null });
+				if (!lr.ok) return res.status(lr.status).json({ error: lr.error, code: lr.code, ...(lr.lineId ? { lineId: lr.lineId } : {}) });
+				lineSummary = lr.summary;
+			}
 
 			// ⚠️ PINNED FROM THE dryRun, exactly like moveNumber — never re-derived
 			// from the editable broker NAME.
@@ -49879,6 +50009,7 @@ app.post(
 
 			const invoiceHtml = brokerInvoice.buildInvoiceHtml({
 				invoiceId, invoiceDate, brokerName, invoiceTo, orderNumber, poNumber, deliveryDate, total, notes,
+				invoiceLines: lineSummary,
 			});
 			const invoicePdf = await renderHtmlToPdf(invoiceHtml);
 
@@ -49893,6 +50024,8 @@ app.post(
 			// it; it stays for the runners and the e2e harness.
 			const subject = brokerInvoice.buildInvoiceSubject({ brokerName, orderNumber });
 			const emailFields = { brokerName, isBison, loadNumber: loadRef, orderNumber, moveNumber, poNumber };
+			// B20: the balance in its own paragraph when advance lines print.
+			if (lineSummary) emailFields.balanceLine = invoiceLines.emailBalanceLine(lineSummary);
 			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
 			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
 			const emailHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
@@ -49920,6 +50053,8 @@ app.post(
 				invoiceFileName,
 				peekedInvoiceId,
 				warnings,
+				// B20, only with the flag on: the server's figures for the ticked lines.
+				...(linesOn ? { invoiceLines: invoiceLines.previewEcho(lineSummary) } : {}),
 			});
 		} catch (err) {
 			console.error("Invoice preview error:", err.message);
@@ -49952,6 +50087,93 @@ app.get("/api/loads/:loadId/invoice-draft", requireRole("Super Admin"), (req, re
 	} catch (err) {
 		console.error("GET /api/loads/:loadId/invoice-draft error:", err.message);
 		res.status(500).json({ error: "Failed to load invoice draft state" });
+	}
+});
+
+// ===========================================================================
+// ADVANCE LINES ON A BROKER INVOICE (B20 Phase 1) — lib/broker-invoice-lines.js
+//
+//   GET  /api/loads/:loadId/invoice-lines            the load's lines, voided ones too
+//   POST /api/loads/:loadId/invoice-lines            add an advance line
+//   POST /api/loads/:loadId/invoice-lines/:id/void   void one, with a reason
+//
+// SUPER ADMIN ONLY, like every invoice-draft route above: the lines live on the
+// broker invoice, and a non-Super-Admin gets no broker data from this app. The
+// role gate is the first middleware and brokerInvoiceLinesGate the second: with
+// BROKER_INVOICE_LINES_ENABLED off the gate hands the request on
+// (next("route")), so these paths answer exactly as they did before they existed.
+//
+// INVOICE-ONLY: these routes write broker_invoice_lines and the audit row, never
+// Google Sheets, Job Tracking, receipts, driver invoices or payouts, and nothing
+// that settles money reads the table. A load in a closed month takes a line: it
+// records money the broker paid early, no settled figure moves, and the audit
+// line says the month is closed. A database read or write, so neither the cost
+// tier's cross-site guard nor a limiter; requireRole already demands
+// X-Requested-With on the writes.
+// ===========================================================================
+function brokerInvoiceLinesGate(req, res, next) {
+	return brokerInvoice.invoiceLines.linesEnabled(process.env) ? next() : next("route");
+}
+
+app.get("/api/loads/:loadId/invoice-lines", requireRole("Super Admin"), brokerInvoiceLinesGate, (req, res) => {
+	try {
+		const loadId = decodeURIComponent(req.params.loadId || "").trim();
+		if (!loadId) return res.status(400).json({ error: "loadId is required" });
+		return res.json({ lines: brokerInvoice.invoiceLines.listLines(db, loadId) });
+	} catch (err) {
+		console.error("GET /api/loads/:loadId/invoice-lines error:", err.message);
+		return res.status(500).json({ error: "Failed to load the invoice lines." });
+	}
+});
+
+app.post("/api/loads/:loadId/invoice-lines", requireRole("Super Admin"), brokerInvoiceLinesGate, async (req, res) => {
+	try {
+		const invoiceLines = brokerInvoice.invoiceLines;
+		const loadId = decodeURIComponent(req.params.loadId || "").trim();
+		if (!loadId) return res.status(400).json({ error: "loadId is required" });
+		// Judged before the sheet is read.
+		const parsed = invoiceLines.parseNewLine(req.body);
+		if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, code: parsed.code, field: parsed.field });
+		// The load must be on Job Tracking: the shared cached read, never written.
+		const jt = await getJobTrackingCached();
+		const loadIdCol = findCol(jt.headers, /load.?id|job.?id/i);
+		const key = invoiceLines.loadKey(loadId);
+		const load = loadIdCol ? jt.data.find((r) => invoiceLines.loadKey(r[loadIdCol]) === key) : null;
+		if (!load) return res.status(404).json({ error: "Load not found", code: "LOAD_NOT_FOUND" });
+		// No await from here on: the count, the insert and the audit row are one step.
+		const r = invoiceLines.addLine(db, {
+			loadId: String(load[loadIdCol]).trim(),
+			values: parsed.values,
+			actor: (req.session.user && req.session.user.username) || "",
+			closedMonths: integrityClosedMonthsOf(jt.headers, load),
+		}, { audit: (action, detail, line) => logAudit(req, action, "load", line.loadId, detail) });
+		if (!r.ok) return res.status(r.status).json({ error: r.error, code: r.code });
+		return res.status(201).json({ line: r.line });
+	} catch (err) {
+		console.error("POST /api/loads/:loadId/invoice-lines error:", err.message);
+		return res.status(500).json({ error: "Failed to add the invoice line." });
+	}
+});
+
+app.post("/api/loads/:loadId/invoice-lines/:id/void", requireRole("Super Admin"), brokerInvoiceLinesGate, (req, res) => {
+	try {
+		const invoiceLines = brokerInvoice.invoiceLines;
+		const loadId = decodeURIComponent(req.params.loadId || "").trim();
+		const lineId = invoiceLines.parseLineId(req.params.id);
+		if (!loadId || !lineId) return res.status(404).json({ error: "No such advance line on this load.", code: "INVOICE_LINE_NOT_FOUND" });
+		const parsed = invoiceLines.parseVoid(req.body);
+		if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, code: parsed.code, field: parsed.field });
+		const r = invoiceLines.voidLine(db, {
+			loadId,
+			lineId,
+			reason: parsed.reason,
+			actor: (req.session.user && req.session.user.username) || "",
+		}, { audit: (action, detail, line) => logAudit(req, action, "load", line.loadId, detail) });
+		if (!r.ok) return res.status(r.status).json({ error: r.error, code: r.code });
+		return res.json({ line: r.line });
+	} catch (err) {
+		console.error("POST /api/loads/:loadId/invoice-lines/:id/void error:", err.message);
+		return res.status(500).json({ error: "Failed to void the invoice line." });
 	}
 });
 

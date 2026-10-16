@@ -333,6 +333,10 @@ function persistenceSection() {
 			invoiceTo: { name: "Bison Transport", email: "QPinvoicesUSA@bisontransport.com" },
 			recipientSource: "default",
 			total: "$3,000.00",
+			// B20 advance lines: none print here, so the draft bills `total`.
+			billedTotal: "$3,000.00",
+			lineSummary: null,
+			invoiceLines: brokerInvoice.invoiceLines,
 			effBrokerName: "Bison Transport",
 			orderNumber: "7101850-$700 ADV",
 			req: { session: { user: { username: "super_admin" } } },
