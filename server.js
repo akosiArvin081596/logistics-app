@@ -49648,7 +49648,9 @@ app.post(
 					: f === "emailBody"
 						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
 						: f === "lines"
-							? [to, ...lineAuditNotes].join("; ")
+							// Rebuilt here so the notes sit right after the figures, where
+							// the 1000-character cap below cannot reach them.
+							? invoiceLines.auditDraftDetail(lineSummary, lineAuditNotes)
 							: `${f}: "${from}" → "${to}"`,
 			).join("; ");
 			// Replaced on the n8n path only, before recordDraft() logs it.
@@ -49658,6 +49660,7 @@ app.post(
 			// modal can show "approved draft → recipient / invoice #". Best-effort —
 			// never fails the draft. Only called on a real (non-dryRun) success.
 			const recordDraft = (via) => {
+				let draftRecorded = false;
 				try {
 					// The draft row and, with B20 advance lines, its printed lines are ONE
 					// write: a line record that fails takes the row with it, so no draft
@@ -49683,6 +49686,7 @@ app.post(
 						// line still active stamped with the first invoice # that printed it.
 						return lineSummary ? invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId }) : null;
 					})();
+					draftRecorded = true;
 					// A line voided after this draft resolved its lines is in the Gmail
 					// draft but carries no invoice #: the answer and the audit line say so.
 					if (lineRecord && lineRecord.voidedIds.length) {
@@ -49703,6 +49707,18 @@ app.post(
 					}
 				} catch (e) {
 					console.error("Draft invoice: draft record persist failed:", e.message);
+					// The Gmail draft exists but this app has no record of it (no row, no
+					// stamp, no created/edited audit): the answer says so FIRST, so the
+					// warning stands whatever the audit write below does, then a *_failed
+					// row records the attempt.
+					if (!draftRecorded) {
+						draftWarnings.push(`The Gmail draft was created as invoice #${invoiceId} but LogisX could not record it; check before sending.`);
+						try {
+							logAudit(req, "invoice_draft_record_failed", "load", loadId, `${invoiceId} (${via}): ${sanitizeEvidenceText(e && e.message, 200)}`);
+						} catch (auditErr) {
+							console.error("Draft invoice: the record-failed audit row could not be written:", auditErr.message);
+						}
+					}
 				}
 			};
 
