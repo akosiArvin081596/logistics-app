@@ -174,7 +174,10 @@
                   <span class="font-bold text-emerald-700 text-[15px]">{{ dueText(selectedInvoice.total_due) }}</span>
                 </div>
               </template>
-              <div v-if="selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">{{ selectedInvoice.is_manual ? 'Deductions (in total)' : 'Expenses (ref)' }}</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
+              <!-- A weekly invoice's receipts without their Personal parts
+                   (expenses_ref_total, the server's); a manual one's deductions. -->
+              <div v-if="selectedInvoice.is_manual && selectedInvoice.expenses_total" class="meta-row"><span class="meta-label">Deductions (in total)</span><span>${{ fmtMoney(selectedInvoice.expenses_total) }}</span></div>
+              <div v-else-if="!selectedInvoice.is_manual && selectedInvoice.expenses_ref_total" class="meta-row"><span class="meta-label">Expenses (ref)</span><span>${{ fmtMoney(selectedInvoice.expenses_ref_total) }}</span></div>
             </div>
 
             <div class="meta-section">
@@ -701,7 +704,7 @@ function exportCsv() {
   for (const r of rows) {
     lines.push([
       r.invoice_number, r.is_manual ? 'Manual' : 'Weekly', r.driver, r.week_start, r.week_end,
-      r.loads_count, r.rate_per_load, r.total_earnings, r.adjustment || 0, r.expenses_total,
+      r.loads_count, r.rate_per_load, r.total_earnings, r.adjustment || 0, r.expenses_ref_total,
       r.status, r.submitted_at, r.approved_at, r.approved_by, r.rejection_note,
       r.deleted_at || '', r.deleted_by || '', r.delete_reason || '',
     ].map(escape).join(','))
