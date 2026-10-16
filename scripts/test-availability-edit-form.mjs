@@ -23,8 +23,9 @@
 //   §3 editDateBounds() / createDateBounds(): the server's limits, plus "not
 //      before the form's first day"
 //   §4 canSaveEdit() / datesWithinBounds(): Save only for a change inside them,
-//      never longer than maxDays; endEarlyNote(): the Dispatcher's back-dating
-//      window in words, from the server's dispatcherBackDays
+//      never longer than maxDays; rangeHint(): why Save or Add is off when the
+//      range is longer than maxDays; endEarlyNote(): the Dispatcher's
+//      back-dating window in words, from the server's dispatcherBackDays
 //   §5 editFormFor(): the form starts from the stored row; End early starts at
 //      today, kept inside the server's limits
 //   §6 driverTimeOffRows(): current and upcoming only, five fields only
@@ -63,7 +64,7 @@ try {
 }
 eq('§0 client/src/lib/availabilityText.js loads', !!text, true)
 const T = text || {}
-const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote']
+const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote', 'rangeHint']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
 const call = (name, ...args) => (typeof T[name] === 'function' ? T[name](...args) : undefined)
 
@@ -151,6 +152,15 @@ function scenario() {
   rec('§4 add 60 days (Oct 16 - Dec 14): allowed', add('2026-10-16', '2026-12-14'), true)
   rec('§4 add 61 days (Oct 16 - Dec 15): not allowed', add('2026-10-16', '2026-12-15'), false)
   rec('§4 add across a year end, 61 days (Dec 1 - Jan 30): not allowed', add('2026-12-01', '2027-01-30'), false)
+  const LONG = 'At most 60 days. For longer, add another period after this one ends.'
+  const hint = (from, to, limits = CREATE_DISP) => call('rangeHint', { from, to }, call('createDateBounds', limits, { from, to }))
+  rec('§4 the range hint at 61 days names the server\'s cap', hint('2026-10-16', '2026-12-15'), LONG)
+  rec('§4 ...says nothing at 60 days', hint('2026-10-16', '2026-12-14'), '')
+  rec('§4 ...uses the number the server sends', hint('2026-10-16', '2026-11-16', { ...CREATE_DISP, maxDays: 30 }), 'At most 30 days. For longer, add another period after this one ends.')
+  rec('§4 ...says nothing without a maxDays', hint('2026-10-16', '2026-12-15', { fromMin: null, toMin: null }), '')
+  rec('§4 ...nor for a reversed range or an unreadable day (the other limits cover those)', [hint('2026-12-15', '2026-10-16'), hint('2026-10-16', '')], ['', ''])
+  rec('§4 ...nor without bounds', call('rangeHint', { from: '2026-10-16', to: '2026-12-15' }, null), '')
+  rec('§4 ...and on an edit form, from its bounds', call('rangeHint', formOf(SA, { to: '2026-12-09' }), call('editDateBounds', SA, formOf(SA, { to: '2026-12-09' }))), LONG)
   rec('§4 the end-early note names the server\'s window', call('endEarlyNote', CREATE_DISP), 'Started more than 30 days ago: only a Super Admin can change the other details.')
   rec('§4 ...whatever number it sends', call('endEarlyNote', { ...CREATE_DISP, dispatcherBackDays: 45 }), 'Started more than 45 days ago: only a Super Admin can change the other details.')
   rec('§4 ...and names no number when none was sent', call('endEarlyNote', null), 'Started too long ago: only a Super Admin can change the other details.')
@@ -241,6 +251,7 @@ eq('§9 the panel\'s buttons come from rowActions()', /rowActions\(/.test(panel)
 eq('§9 the panel\'s edit sends editPatch()', /api\.put\([^\n]*editPatch\(/.test(panel), true)
 eq('§9 the panel\'s Save waits for canSaveEdit()', /canSaveEdit\(/.test(panel), true)
 eq('§9 the panel shows the server\'s create limits', /createDateBounds\(/.test(panel), true)
+eq('§9 the panel shows the range hint under the edit form and the add form', (panel.match(/rangeHint\(/g) || []).length, 2)
 eq('§9 the end-early note comes from endEarlyNote(), with no day count of its own', /endEarlyNote\(/.test(panel) && !/more than \d+ days/.test(panel), true)
 
 console.log(`\ntest-availability-edit-form: ${pass} passed, ${failures.length} failed`)
