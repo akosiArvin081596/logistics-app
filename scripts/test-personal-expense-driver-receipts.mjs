@@ -70,7 +70,20 @@ function balancedBlock(src, from) {
   }
   return null
 }
-const stripHtmlComments = (s) => s.replace(/<!--[\s\S]*?-->/g, '')
+// The template's text without its <!-- ... --> comments, scanned left to right
+// (an unterminated comment is kept as written).
+const stripHtmlComments = (s) => {
+  let out = ''
+  let i = 0
+  for (;;) {
+    const open = s.indexOf('<!--', i)
+    if (open === -1) return out + s.slice(i)
+    const close = s.indexOf('-->', open + 4)
+    if (close === -1) return out + s.slice(i)
+    out += s.slice(i, open)
+    i = close + 3
+  }
+}
 
 const loadIdLib = await import(pathToFileURL(path.join(ROOT, 'client/src/lib/loadId.js')).href)
 const { expensesOffLoads } = loadIdLib
