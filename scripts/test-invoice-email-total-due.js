@@ -109,6 +109,8 @@ function buildWorld(src) {
 		periodLockUnreadableResponse: () => { throw new Error("period locks are not under test here"); },
 		periodBlockedResponse: () => { throw new Error("period locks are not under test here"); },
 		INVOICE_LOCK_REMEDY: "",
+		// Every Mark Paid writes a pay_invoice audit row; the audit is not under test here.
+		logAudit: () => {},
 		sendEmail: async (to, subject, html, attachments = []) => { emails.push({ to, subject, html, attachments }); return true; },
 		console: {
 			log: (...a) => logs.push(a.join(" ")),
