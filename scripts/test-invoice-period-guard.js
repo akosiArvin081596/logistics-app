@@ -224,26 +224,32 @@ check("...with requireRole first, so a 403 never spends the guard",
 // ── 4. behaviour, against the REAL extracted guard ──────────────────────────
 section("4. behaviour (real extracted guard, in-memory db seeded from a COPY of app.db)");
 
-// ⚠️ NEVER THE LIVE app.db. It is copied to a temp path, opened READONLY, the few
-// rows needed are harvested, and the copy is unlinked. Nothing in this file can
-// reach the file the server writes. Absent app.db (CI, a fresh checkout) is not a
-// failure — the synthetic fixtures below are the ones that carry the assertions;
-// production rows are corroboration.
+// ⚠️ NEVER THE LIVE app.db. It is copied into a folder of its own, opened
+// READONLY, the few rows needed are harvested, and the folder is removed. Nothing
+// in this file can reach the file the server writes. Absent app.db (CI, a fresh
+// checkout) is not a failure — the synthetic fixtures below are the ones that
+// carry the assertions; production rows are corroboration.
+// The folder, not the file, is removed: app.db is in WAL mode, and a readonly
+// open of the copy creates -shm and -wal files beside it that closing leaves.
 function harvestProduction() {
 	const live = path.join(ROOT, "app.db");
 	if (!fs.existsSync(live)) return null;
-	const tmp = path.join(os.tmpdir(), `invoice-guard-fixture-${process.pid}-${Date.now()}.db`);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "invoice-guard-fixture-"));
+	let src = null;
 	try {
+		const tmp = path.join(dir, "app.db");
 		fs.copyFileSync(live, tmp);
-		const src = new Database(tmp, { readonly: true });
+		src = new Database(tmp, { readonly: true });
 		const invoices = src.prepare(
 			"SELECT id, invoice_number, driver, week_start, week_end, status, paid_at FROM invoices"
 		).all();
 		const locks = src.prepare("SELECT period, status FROM period_locks").all();
-		src.close();
 		return { invoices, locks };
 	} catch { return null; }
-	finally { try { fs.unlinkSync(tmp); } catch { /* best effort */ } }
+	finally {
+		if (src) src.close();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 }
 const PROD = harvestProduction();
 

@@ -59,8 +59,9 @@
  *      fallback for its target or account and no published password in code.
  *   §8 each script that had such a default, run without its setting:
  *      geocode-loads.js (LOGISX_BASE_URL), replay-via-webhook-injection.js
- *      (the message ID argument and N8N_GMAIL_CREDENTIAL_ID), rescue-load.js
- *      (N8N_GMAIL_CREDENTIAL_ID, which the replay it hands over to needs) and
+ *      (the message ID argument, N8N_GMAIL_CREDENTIAL_ID, N8N_REPLAY_CREDENTIAL_ID
+ *      and N8N_REPLAY_SECRET), rescue-load.js (N8N_GMAIL_CREDENTIAL_ID and the
+ *      replay credential settings, which the replay it hands over to needs) and
  *      secure-backups.sh (--app-dir / APP_DIR) exit 2 with one line naming
  *      what is missing, before any network call or command; with it, they run
  *      against what was named. refresh-local.sh (VPS_HOST, for a database
@@ -590,6 +591,8 @@ function runStatement(statement, values) {
 
 // ------------------------------------------------------------- §5 helpers
 const N8N_CREDENTIAL = { N8N_GMAIL_CREDENTIAL_ID: "gmail-credential-under-test" };
+const N8N_REPLAY = { N8N_REPLAY_CREDENTIAL_ID: "replay-credential-under-test", N8N_REPLAY_SECRET: "replay-secret-under-test" };
+const N8N_REPLAY_NEEDS = { ...N8N_CREDENTIAL, ...N8N_REPLAY };
 const MESSAGE_ID = "message-under-test";
 // [script, its arguments, the other settings it needs (§8 runs without them)]
 const N8N_SCRIPTS = [
@@ -599,8 +602,8 @@ const N8N_SCRIPTS = [
 	["patch-mark-read.js", [], {}],
 	["patch-protect-dispatch-fields.js", [], {}],
 	["stage-n8n-details-fix.js", [], {}],
-	["rescue-load.js", ["123456"], N8N_CREDENTIAL],
-	["replay-via-webhook-injection.js", [MESSAGE_ID], N8N_CREDENTIAL],
+	["rescue-load.js", ["123456"], N8N_REPLAY_NEEDS],
+	["replay-via-webhook-injection.js", [MESSAGE_ID], N8N_REPLAY_NEEDS],
 	["verify-n8n-behaviour.js", [], {}],
 ];
 function runScript(rel, args, env) {
@@ -1089,11 +1092,15 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			const replay = path.join("scripts", "replay-via-webhook-injection.js");
 			const rescue = path.join("scripts", "rescue-load.js");
 			for (const [rel, label, args, env, want] of [
-				[replay, "no message ID", [], N8N_CREDENTIAL, /name the Gmail message to replay/],
-				[replay, "a blank message ID", ["  "], N8N_CREDENTIAL, /name the Gmail message to replay/],
-				[replay, "no N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], {}, /N8N_GMAIL_CREDENTIAL_ID is not set/],
-				[replay, "a blank N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], { N8N_GMAIL_CREDENTIAL_ID: "  " }, /N8N_GMAIL_CREDENTIAL_ID is not set/],
-				[rescue, "no N8N_GMAIL_CREDENTIAL_ID", ["123456"], {}, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[replay, "no message ID", [], N8N_REPLAY_NEEDS, /name the Gmail message to replay/],
+				[replay, "a blank message ID", ["  "], N8N_REPLAY_NEEDS, /name the Gmail message to replay/],
+				[replay, "no N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], N8N_REPLAY, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[replay, "a blank N8N_GMAIL_CREDENTIAL_ID", [MESSAGE_ID], { ...N8N_REPLAY, N8N_GMAIL_CREDENTIAL_ID: "  " }, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[replay, "no replay credential settings", [MESSAGE_ID], N8N_CREDENTIAL, /N8N_REPLAY_CREDENTIAL_ID and N8N_REPLAY_SECRET are not set/],
+				[replay, "no N8N_REPLAY_CREDENTIAL_ID", [MESSAGE_ID], { ...N8N_CREDENTIAL, N8N_REPLAY_SECRET: N8N_REPLAY.N8N_REPLAY_SECRET }, /N8N_REPLAY_CREDENTIAL_ID is not set/],
+				[replay, "a blank N8N_REPLAY_SECRET", [MESSAGE_ID], { ...N8N_REPLAY_NEEDS, N8N_REPLAY_SECRET: "  " }, /N8N_REPLAY_SECRET is not set/],
+				[rescue, "no N8N_GMAIL_CREDENTIAL_ID", ["123456"], N8N_REPLAY, /N8N_GMAIL_CREDENTIAL_ID is not set/],
+				[rescue, "no N8N_REPLAY_SECRET", ["123456"], { ...N8N_CREDENTIAL, N8N_REPLAY_CREDENTIAL_ID: N8N_REPLAY.N8N_REPLAY_CREDENTIAL_ID }, /N8N_REPLAY_SECRET is not set/],
 			]) {
 				const name = path.basename(rel);
 				const r = runScript(rel, args, { ...N8N, ...env });

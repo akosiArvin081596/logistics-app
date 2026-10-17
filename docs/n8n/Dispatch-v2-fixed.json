@@ -467,19 +467,19 @@
           "mappingMode": "defineBelow",
           "value": {
             "Load ID": "={{ $('Normalize Load Fields').item.json.output['Load Number'] }}",
-            "Details": "={{ $('Normalize Load Fields').item.json.output['Details'] }}",
-            "Pickup Info": "={{ $('Normalize Load Fields').item.json.output['Pickup Company Information'] }} REF/PU#: {{ $('Normalize Load Fields').item.json.output['P/U Reference Number'] }}{{ $('Normalize Load Fields').item.json.output['Delivery Reference Number'] && $('Normalize Load Fields').item.json.output['Delivery Reference Number'] !== $('Normalize Load Fields').item.json.output['P/U Reference Number'] ? ', DEL#: ' + $('Normalize Load Fields').item.json.output['Delivery Reference Number'] : '' }}",
-            "Pickup Appointment": "={{ $('Normalize Load Fields').item.json.output['Pickup Appointment Time'] }}",
-            "Pickup Address": "={{ $('Normalize Load Fields').item.json.output['Pickup Address'] }}",
-            "Drop-off Info": "={{ $('Normalize Load Fields').item.json.output['Drop*off Company Information'] }}",
-            "Drop-off Appointment": "={{ $('Normalize Load Fields').item.json.output['Delivery Appointment Time'] }}",
-            "Drop-off Address": "={{ $('Normalize Load Fields').item.json.output['Drop-off Address'] }}",
-            "Broker Contact Name": "={{ $('Normalize Load Fields').item.json.output['Broker Name'] }}",
-            "Phone Number": "={{ $('Normalize Load Fields').item.json.output['Broker Phone'] }}",
-            "Email": "={{ $('Normalize Load Fields').item.json.output['Broker Email'] }}",
-            "Assigned Date": "={{ new Date($('Email Input').item.json.date).toLocaleString('en-US', { timeZone: 'America/Chicago' }) }}",
-            "Documents": "={{ $('Normalize Load Fields').item.json.output['BOL Number'] || $('Normalize Load Fields').item.json.output['Load Number'] }}",
-            "  Payment  ": "={{ $json.output.Rate }}"
+            "Details": "={{ $json.values[\"Details\"] }}",
+            "Pickup Info": "={{ $json.values[\"Pickup Info\"] }}",
+            "Pickup Appointment": "={{ $json.values[\"Pickup Appointment\"] }}",
+            "Pickup Address": "={{ $json.values[\"Pickup Address\"] }}",
+            "Drop-off Info": "={{ $json.values[\"Drop-off Info\"] }}",
+            "Drop-off Appointment": "={{ $json.values[\"Drop-off Appointment\"] }}",
+            "Drop-off Address": "={{ $json.values[\"Drop-off Address\"] }}",
+            "Broker Contact Name": "={{ $json.values[\"Broker Contact Name\"] }}",
+            "Phone Number": "={{ $json.values[\"Phone Number\"] }}",
+            "Email": "={{ $json.values[\"Email\"] }}",
+            "Assigned Date": "={{ $json.values[\"Assigned Date\"] }}",
+            "Documents": "={{ $json.values[\"Documents\"] }}",
+            "  Payment  ": "={{ $json.values[\"  Payment  \"] }}"
           },
           "matchingColumns": [
             "Load ID"
@@ -944,22 +944,14 @@
               "display": true,
               "type": "string",
               "canBeUsedToMatch": true
-            },
-            {
-              "id": "output",
-              "displayName": "output",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true,
-              "removed": false
             }
           ],
           "attemptToConvertTypes": false,
           "convertFieldsToString": false
         },
-        "options": {}
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
       },
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
@@ -999,7 +991,7 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "Details": "={{ $json.Details }}",
+            "Details": "={{ $('JOB DETAILS ENTRY').item.json['Details'] }}",
             "Load ID": "={{ $('JOB DETAILS ENTRY').item.json['Load ID'] }}"
           },
           "matchingColumns": [
@@ -1316,7 +1308,7 @@
     {
       "parameters": {
         "operation": "markAsRead",
-        "messageId": "={{ $json.message_id }}"
+        "messageId": "={{ $('Build Failure Context').item.json.message_id }}"
       },
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
@@ -1829,21 +1821,15 @@
       "parameters": {
         "method": "POST",
         "url": "https://app.logisx.com/api/n8n/extract-pdf-via-gemini",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-webhook-secret",
-              "value": "__REDACTED__SET_IN_N8N__X_WEBHOOK_SECRET__"
-            }
-          ]
-        },
+        "sendHeaders": false,
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ pdf_base64: $json.pdf_base64 }) }}",
         "options": {
           "timeout": 120000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "extract-via-logisx-0001",
       "name": "Extract via LogisX",
@@ -1856,7 +1842,13 @@
       "onError": "continueErrorOutput",
       "retryOnFail": true,
       "maxTries": 3,
-      "waitBetweenTries": 3000
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PRm2JOfL1qioLsCD",
+          "name": "LogisX extract secret"
+        }
+      }
     },
     {
       "parameters": {
@@ -1875,21 +1867,15 @@
       "parameters": {
         "method": "POST",
         "url": "https://app.logisx.com/api/n8n/load-distance",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-webhook-secret",
-              "value": "__REDACTED__SET_IN_N8N__X_WEBHOOK_SECRET__"
-            }
-          ]
-        },
+        "sendHeaders": false,
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ load_id: $json['Load ID'], pickup_address: $json['Pickup Address'], dropoff_address: $json['Drop-off Address'], rate: $('Normalize Load Fields').item.json.output.Rate }) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -1899,7 +1885,126 @@
       ],
       "id": "b7d1f0a4-3c65-4e2b-9a18-5f0c7d2e6a91",
       "name": "Distance via LogisX",
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PRm2JOfL1qioLsCD",
+          "name": "LogisX extract secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Collapse items that name the SAME load into one.\n//\n// WHY: C.H. Robinson sends each load as TWO emails (\"Booked Load #: X\" and\n// \"Navisphere Carrier Load Confirmation - Load X\"). Usually they arrive in\n// separate Gmail Trigger polls, so JOB DETAILS ENTRY's appendOrUpdate matches\n// the row the first one wrote and UPDATES it — one row, correct.\n//\n// But when both land in the SAME poll, this workflow runs once with 2 items and\n// appendOrUpdate cannot dedupe inside its own batch: neither item can see the\n// row the other just appended, so BOTH append. Execution 2501 on 2026-08-21 did\n// exactly that and wrote load 564446669 onto rows 433 and 434, which then made\n// the load impossible to assign (the server refuses an ambiguous load id).\n//\n// Keeping the LAST item preserves today's behaviour exactly: across separate\n// polls the second email already overwrites the first, so last-wins is what the\n// sheet would have ended up with anyway.\nconst seen = new Map();\nfor (const item of items) {\n  const raw = item.json?.output?.['Load Number'];\n  const key = String(raw == null ? '' : raw).trim().replace(/^#/, '').toLowerCase();\n  // No load number: keep it. Validate Load ID is the gate for that, not this\n  // node, and silently dropping it here would lose the failure alert.\n  if (!key) { seen.set('__nokey__' + seen.size, item); continue; }\n  seen.set(key, item);\n}\nreturn Array.from(seen.values());"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6480,
+        1356
+      ],
+      "id": "dedupe-loads-in-batch-0001",
+      "name": "Dedupe Loads In Batch"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "24621957-4825-43ba-a44a-9d7fbafb3a24",
+              "leftValue": "={{ Array.isArray($json.labelIds) ? $json.labelIds : [] }}",
+              "rightValue": "SENT",
+              "operator": {
+                "type": "array",
+                "operation": "contains",
+                "rightType": "any"
+              }
+            },
+            {
+              "id": "eb571783-35a5-4ee9-8828-6bd8acc3cf2c",
+              "leftValue": "={{ Array.isArray($json.labelIds) ? $json.labelIds : [] }}",
+              "rightValue": "INBOX",
+              "operator": {
+                "type": "array",
+                "operation": "notContains",
+                "rightType": "any"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3776,
+        1984
+      ],
+      "id": "e119e23b-70a4-4bdb-9c87-3e9c99000fb8",
+      "name": "Own Outbound Mail?"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Email Input').item.json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3996,
+        1984
+      ],
+      "id": "5e673fe3-4c41-4cc7-b07a-b964640845b6",
+      "name": "Mark Read (Own Outbound)",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "oymS9U543xCU6JOB",
+          "name": "Gmail account 7"
+        }
+      },
+      "webhookId": "aad0bdd9-b3ad-4ffd-bcb8-eef4458a8b20"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.logisx.com/api/n8n/keep-stored-values",
+        "sendHeaders": false,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ loadId: String($('Normalize Load Fields').item.json.output['Load Number'] ?? ''), values: { \"Details\": String(($('Normalize Load Fields').item.json.output['Details']) ?? ''), \"Pickup Info\": String(((String($('Normalize Load Fields').item.json.output['P/U Reference Number'] ?? '').trim() === '' ? '' : ($('Normalize Load Fields').item.json.output['Pickup Company Information'] ?? '') + ' REF/PU#: ' + ($('Normalize Load Fields').item.json.output['P/U Reference Number'] ?? '') + ($('Normalize Load Fields').item.json.output['Delivery Reference Number'] && $('Normalize Load Fields').item.json.output['Delivery Reference Number'] !== $('Normalize Load Fields').item.json.output['P/U Reference Number'] ? ', DEL#: ' + $('Normalize Load Fields').item.json.output['Delivery Reference Number'] : ''))) ?? ''), \"Pickup Appointment\": String(($('Normalize Load Fields').item.json.output['Pickup Appointment Time']) ?? ''), \"Pickup Address\": String(($('Normalize Load Fields').item.json.output['Pickup Address']) ?? ''), \"Drop-off Info\": String(($('Normalize Load Fields').item.json.output['Drop*off Company Information']) ?? ''), \"Drop-off Appointment\": String(($('Normalize Load Fields').item.json.output['Delivery Appointment Time']) ?? ''), \"Drop-off Address\": String(($('Normalize Load Fields').item.json.output['Drop-off Address']) ?? ''), \"Broker Contact Name\": String(($('Normalize Load Fields').item.json.output['Broker Name']) ?? ''), \"Phone Number\": String(($('Normalize Load Fields').item.json.output['Broker Phone']) ?? ''), \"Email\": String(($('Normalize Load Fields').item.json.output['Broker Email']) ?? ''), \"Assigned Date\": String((new Date($('Email Input').item.json.date).toLocaleString('en-US', { timeZone: 'America/New_York' })) ?? ''), \"Documents\": String(($('Normalize Load Fields').item.json.output['BOL Number']) ?? ''), \"  Payment  \": String(($json.output.Rate) ?? '') }, fallbacks: { \"Documents\": String(($('Normalize Load Fields').item.json.output['Load Number']) ?? ''), \"Pickup Info\": String((($('Normalize Load Fields').item.json.output['Pickup Company Information'] ?? '') + ' REF/PU#: ' + ($('Normalize Load Fields').item.json.output['P/U Reference Number'] ?? '') + ($('Normalize Load Fields').item.json.output['Delivery Reference Number'] && $('Normalize Load Fields').item.json.output['Delivery Reference Number'] !== $('Normalize Load Fields').item.json.output['P/U Reference Number'] ? ', DEL#: ' + $('Normalize Load Fields').item.json.output['Delivery Reference Number'] : '')) ?? '') } }) }}",
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6536,
+        1236
+      ],
+      "id": "289f3b07-115d-47f6-af95-2fa4a092952c",
+      "name": "Keep Stored Values via LogisX",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PRm2JOfL1qioLsCD",
+          "name": "LogisX extract secret"
+        }
+      },
+      "notes": "Asks LogisX which values to write: a later email never blanks a stored value, and Assigned Date is set once (2026-10-09).",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     }
   ],
   "connections": {
@@ -1951,7 +2056,7 @@
       "main": [
         [
           {
-            "node": "Is Tracking Update?",
+            "node": "Own Outbound Mail?",
             "type": "main",
             "index": 0
           }
@@ -2039,7 +2144,7 @@
       "main": [
         [
           {
-            "node": "JOB DETAILS ENTRY",
+            "node": "Dedupe Loads In Batch",
             "type": "main",
             "index": 0
           }
@@ -2361,6 +2466,53 @@
         [
           {
             "node": "Update Job Details (Distance)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe Loads In Batch": {
+      "main": [
+        [
+          {
+            "node": "Keep Stored Values via LogisX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Own Outbound Mail?": {
+      "main": [
+        [
+          {
+            "node": "Mark Read (Own Outbound)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Tracking Update?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep Stored Values via LogisX": {
+      "main": [
+        [
+          {
+            "node": "JOB DETAILS ENTRY",
             "type": "main",
             "index": 0
           }

@@ -7393,18 +7393,16 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 	// Accepts EITHER the shared n8n secret OR an extract-only secret.
 	//
 	// WHY THE SECOND ONE EXISTS: N8N_WEBHOOK_SECRET also gates POST /api/n8n/job
-	// and POST /api/webhook/new-load — and that last one CREATES LOADS. n8n Cloud
-	// cannot give this workflow a usable credential via its API (create works, but
-	// read/list/projects are all 403 and an API-created credential is not visible
-	// to the workflow owner), so the value has to sit in a node parameter — which
-	// is PLAINTEXT in the workflow JSON and readable by anyone with n8n access.
-	// Putting the shared secret there would hand out load injection. This one is
-	// accepted ONLY here, so a leak costs Gemini credits against a rate-limited
-	// read-only endpoint and nothing else.
+	// and POST /api/webhook/new-load — and that last one CREATES LOADS. The
+	// workflow's three calls to the app (this one, /api/n8n/load-distance and
+	// /api/n8n/keep-stored-values) present N8N_EXTRACT_SECRET instead, which only
+	// those three accept, and none of them writes.
 	//
-	// Swap the n8n node to a proper Header Auth credential when one is created in
-	// the UI, then drop N8N_EXTRACT_SECRET — this is the safe interim, not the
-	// permanent shape.
+	// n8n sends it from its Header Auth credential "LogisX extract secret", so a
+	// workflow export carries only a reference to it. (An API-created credential
+	// lands in the API key owner's personal project; it has to be transferred to
+	// the workflow's project before the workflow can use it.) Rotate it in the
+	// credential first and in the server's .env last.
 	const presented = req.headers["x-webhook-secret"];
 	const sharedSecret = process.env.N8N_WEBHOOK_SECRET;
 	const extractSecret = process.env.N8N_EXTRACT_SECRET;
@@ -7573,9 +7571,9 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 // SECURITY / COST:
 // - Same dual-secret gate as /api/n8n/extract-pdf-via-gemini. N8N_EXTRACT_SECRET
 //   is the one to use: N8N_WEBHOOK_SECRET also gates POST /api/webhook/new-load,
-//   which CREATES LOADS, and n8n node parameters are plaintext in the workflow
-//   JSON. A leak of the extract secret costs Distance Matrix elements against a
-//   rate-limited endpoint that writes nothing.
+//   which CREATES LOADS. n8n sends the extract secret from its Header Auth
+//   credential. On this endpoint it costs Distance Matrix elements against a
+//   rate limit, and the endpoint writes nothing.
 // - Writes NOTHING — no sheet, no SQLite, no Drive. Pure read + arithmetic, so
 //   it cannot restate a locked period or touch a finance row.
 // - Rate-limited: every call is a billed Distance Matrix element.
