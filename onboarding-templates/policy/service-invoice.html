@@ -136,10 +136,9 @@
       white-space: nowrap;
       min-width: 130px;
     }
-    .from-cell .blank {
+    .from-cell .fill {
       flex: 1 1 auto;
-      width: auto;
-      max-width: 340px;
+      min-width: 0;
     }
 
     /* Fillable blanks */
@@ -163,6 +162,25 @@
     .blank-sm  { width: 180px; }
     .blank-md  { width: 240px; }
     .blank-lg  { width: 320px; }
+
+    /* A filled-in value: a blank's underline under a box that grows with its
+       text and wraps inside the space it has, so a long value (an invoice
+       number, a two-load day, a full address, a date) prints whole instead of
+       being cut at the edge of a fixed-width box. The min-width keeps an empty
+       one looking like a blank. */
+    .fill {
+      display: inline-block;
+      max-width: 100%;
+      min-height: 1.4em;
+      padding: 0 4px;
+      border-bottom: 1px solid var(--ink);
+      vertical-align: baseline;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .fill-xs { min-width:  90px; }
+    .fill-sm { min-width: 110px; }
+    .fill-md { min-width: 240px; }
 
     /* Bill To address */
     .bill-to .addr-line {
@@ -215,9 +233,9 @@
       display: inline-block;
       margin-right: 2px;
     }
-    .service-table .load-cell .blank {
-      width: 100%;
-      min-width: 90px;
+    .service-table .load-cell .fill {
+      display: block;
+      min-width: 0;
     }
     .service-table .status-cell {
       white-space: nowrap;
@@ -231,6 +249,12 @@
     .service-table .total-row td {
       font-weight: 700;
     }
+    /* TOTAL DUE stays with the row above it. Personal lines can fill the page;
+       without this the total could move to a new page alone, under the
+       repeated table header. */
+    .service-table tr { break-inside: avoid; page-break-inside: avoid; }
+    .service-table .adjustment-row,
+    .service-table .total-row { break-before: avoid; page-break-before: avoid; }
     .service-table input[type="checkbox"] {
       width: 13px;
       height: 13px;
@@ -306,7 +330,7 @@
         padding: 0;
         max-width: none;
       }
-      .blank { border-bottom: 1px solid #000; }
+      .blank, .fill { border-bottom: 1px solid #000; }
     }
   </style>
 </head>
@@ -319,19 +343,19 @@
     <div class="from-grid">
       <label class="from-cell">
         <span class="label">Name:</span>
-        <input type="text" class="blank" aria-label="Provider name">
+        <span class="fill" aria-label="Provider name"></span>
       </label>
       <label class="from-cell">
         <span class="label">Business Name:</span>
-        <input type="text" class="blank" aria-label="Business name">
+        <span class="fill" aria-label="Business name"></span>
       </label>
       <label class="from-cell">
         <span class="label">Address:</span>
-        <input type="text" class="blank" aria-label="Provider address">
+        <span class="fill" aria-label="Provider address"></span>
       </label>
       <label class="from-cell">
         <span class="label">Phone:</span>
-        <input type="text" class="blank" aria-label="Provider phone">
+        <span class="fill" aria-label="Provider phone"></span>
       </label>
     </div>
 
@@ -357,10 +381,10 @@
       <tbody>
         <tr>
           <td>
-            <span class="prefix">INV-2026-</span><input type="text" class="blank" style="width: 70px;" aria-label="Invoice number suffix">
+            <span class="prefix">INV-</span><span class="fill fill-sm" aria-label="Invoice number suffix"></span>
           </td>
           <td>
-            <strong>Friday,</strong> <input type="text" class="blank" style="width: 110px;" aria-label="Submission date">
+            <strong aria-label="Submission weekday"></strong> <span class="fill fill-sm" aria-label="Submission date"></span>
           </td>
           <td>
             <strong>MUST BE BEFORE 6:00 PM</strong>
@@ -403,7 +427,7 @@
     <h2>PAYMENT INSTRUCTIONS</h2>
     <p class="italic-note">Payment will be remitted within <strong>7 calendar days</strong> of Monday verification via the method on file.</p>
     <ul class="payment-list">
-      <li><strong>Bank on File:</strong> <input type="text" class="blank blank-md" aria-label="Bank on file"></li>
+      <li><strong>Bank on File:</strong> <span class="fill fill-md" aria-label="Bank on file"></span></li>
       <li>
         <strong>Account Type:</strong>
         <label class="acct-choice"><input type="checkbox" aria-label="Checking"> Checking</label>
@@ -416,9 +440,9 @@
 
     <div class="field-row" style="margin-top: 18px;">
       <span class="label">Signature:</span>
-      <input type="text" class="blank blank-md" aria-label="Provider signature">
+      <span class="fill fill-md" aria-label="Provider signature"></span>
       <span class="label">Date:</span>
-      <input type="text" class="blank blank-xs" aria-label="Signature date">
+      <span class="fill fill-xs" aria-label="Signature date"></span>
     </div>
   </main>
 
@@ -444,7 +468,7 @@
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="day-cell">${day}</td>
-          <td class="load-cell"><input type="text" class="blank" aria-label="${day} Load/BOL number"></td>
+          <td class="load-cell"><span class="fill" aria-label="${day} Load/BOL number"></span></td>
           <td class="status-cell">
             <label><input type="checkbox" class="completed" data-row="${i}"> Completed</label>
             /

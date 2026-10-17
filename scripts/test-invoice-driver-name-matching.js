@@ -319,6 +319,8 @@ function buildWorld(opts = {}) {
 		usTzForLongitude: eldMiles.usTzForLongitude,
 		// The invoice routes print "today" in APP_TIMEZONE (lib/app-time.js).
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
+		// The invoice's Address line from the directory row (lib/invoice-header.js).
+		providerAddressLine: require("../lib/invoice-header").providerAddressLine,
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
 		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;
