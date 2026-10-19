@@ -28,6 +28,13 @@
  *      over 2 hours old is not routed from (the planned lane is)
  *   §7 approachStopsFor() (fuel stops on the run to the shipper, billed Routes
  *      and Places calls): never searched around a fix from before the link
+ *   §8 the live pushes: the Routemate poller (dispatch, the driver's room, the
+ *      customer page) and the Linxup webhook send no fix from before the link
+ *      (Routemate re-returns a vehicle's last fix for days, and the poller
+ *      re-sends it every minute); the customer page's push keeps its page's
+ *      3-hour window
+ *   §9 GET /api/fuel/trip-plan: neither the position nor the fuel level of a
+ *      fix from before the link (it plans from the pickup, as with no fix)
  *
  * The routes are lifted whole from server.js (scripts/lib/server-lift.js), with
  * the shipped eld_device_assignments DDL and telemetry indexes, and run against
@@ -86,17 +93,33 @@ const ROUTES = {
 	driver: 'app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver", "Super Admin"), driverPositionLimiter, (req, res) => {',
 	track: 'app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {',
 	trail: 'app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
+	tripPlan: 'app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"), fuelPlanLimiter, async (req, res) => {',
 };
 const PROVIDED = [
 	"app", "db", "getSheets", "SPREADSHEET_ID", "getRoute", "geolib", "requireRole",
 	"driverPositionLimiter", "trackPublicLimiter", "findTruckForDriverStamp", "computeStatusPhases", "geocodeReverse",
 	"getJobTrackingCached", "poiFuelStops", "GOOGLE_MAPS_API_KEY",
+	"fuelPlanLimiter", "loadBelongsToDriver", "burnRateForVehicle", "receiptMpgForVehicle",
 ];
 const lifted = closure(SRC, {
 	roots: ["approachStopsFor"],
 	routes: Object.values(ROUTES),
 	provided: PROVIDED,
 	denied: ["server", "io", "transporter", "sendEmail"],
+});
+// §8: the two ingest paths, with every socket and side channel stubbed.
+const PUSH_PROVIDED = [
+	"db", "io", "publicTrack", "routemate", "routemateCreds", "ROUTEMATE_ENABLED", "ROUTEMATE_API_KEY", "routemateHealth",
+	"clearRoutemateLogState", "getJobTrackingCached", "getDeletedLoadIds", "findDriverAccountSpelling", "maybeAlertLowFuel",
+	"tryGeofenceAdvance", "geofenceCandidatesAcrossSpacing", "linxupHealth", "linxupTrackSpeedUnit", "geolib",
+	// The vehicle-id mirror the poller keeps; not under test (and closure() does
+	// not reach it from inside the insert transaction).
+	"routemateUpsertVehicleMinimalStmt",
+];
+const liftedPush = closure(SRC, {
+	roots: ["routemateSyncTelemetry", "ingestLinxupPosition"],
+	provided: PUSH_PROVIDED,
+	denied: ["server", "transporter", "sendEmail"],
 });
 
 // The world: one driver, "Driver A", on truck #7 (LogisX-#901), which carries
@@ -114,7 +137,7 @@ const HEADERS = ["Load ID", "Job Status", "Driver", "Pickup Address", "Drop-off 
 
 // fixes: [{ ago, at: {lat,lng}, bearing }], oldest first, so the newest is the
 // highest id, as the routes read it. link: null (no row), or { ago, by }.
-function world({ fixes = [], link = null, status = "In Transit" } = {}) {
+function world({ fixes = [], link = null, status = "In Transit", coords = false } = {}) {
 	const now = Date.now();
 	const db = new Database(":memory:");
 	db.exec(`
@@ -129,15 +152,20 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		CREATE TABLE driver_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, driver TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
 			accuracy REAL DEFAULT 0, speed REAL DEFAULT 0, heading REAL DEFAULT 0, timestamp TEXT NOT NULL, load_id TEXT DEFAULT '');
 		CREATE TABLE load_status_history (id INTEGER PRIMARY KEY, load_id TEXT, new_status TEXT, changed_at TEXT);
+		CREATE TABLE routemate_vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL UNIQUE, vehicle_id TEXT DEFAULT '',
+			last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 	`);
 	for (const sql of [HISTORY_DDL, ...TELEMETRY_IDX]) db.exec(sql);
 	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES (?)").run(DRIVER);
 	db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id, assigned_driver) VALUES (?, ?, ?, ?)").run(TRUCK_ID, "LogisX-#901", DEVICE, DRIVER);
 	db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date, end_date) VALUES (?, ?, ?, '')").run(TRUCK_ID, DRIVER, new Date(now - 3 * DAY).toISOString());
-	const tel = db.prepare(`INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, bearing, engine_hours, geocoded_location, location_date_ms, source)
-		VALUES (?, ?, ?, ?, ?, 0, '', ?, 'linxup')`);
+	const tel = db.prepare(`INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, bearing, fuel_pct, engine_hours, geocoded_location, location_date_ms, source)
+		VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, 'linxup')`);
 	const fixMs = fixes.map((f) => now - f.ago);
-	fixes.forEach((f, i) => tel.run(DEVICE, f.at.lat, f.at.lng, f.speed || 0, f.bearing || "", fixMs[i]));
+	fixes.forEach((f, i) => tel.run(DEVICE, f.at.lat, f.at.lng, f.speed || 0, f.bearing || "", f.fuel === undefined ? null : f.fuel, fixMs[i]));
+	if (coords) {
+		db.prepare("INSERT INTO load_coordinates (load_id, origin_lat, origin_lng, dest_lat, dest_lng) VALUES ('t-200', ?, ?, ?, ?)").run(PICKUP.lat, PICKUP.lng, DROP.lat, DROP.lng);
+	}
 	if (link) {
 		db.prepare(`INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by)
 			VALUES (?, ?, ?, '', ?)`).run(TRUCK_ID, DEVICE, new Date(now - link.ago).toISOString(), link.by);
@@ -169,6 +197,7 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		getJobTrackingCached: async () => ({ headers: HEADERS, data: [Object.fromEntries(HEADERS.map((h, i) => [h, row[i]]))] }),
 		poiFuelStops: { findFuelStopsAlongRoute: async (o) => { poiCalls.push(o); return [{ name: "Stop 1", dieselPrice: 3.49, aboutMilesFromRoute: 1 }]; } },
 		GOOGLE_MAPS_API_KEY: "test-key",
+		fuelPlanLimiter: null, loadBelongsToDriver: async () => true, burnRateForVehicle: () => null, receiptMpgForVehicle: () => null,
 	};
 	const fns = new Function(...PROVIDED, "require", `${lifted.text}\nreturn { approachStopsFor };`)(...PROVIDED.map((k) => deps[k]), appRequire);
 	const call = async (route, req) => {
@@ -176,8 +205,28 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		await handlers[route]({ params: {}, query: {}, body: {}, headers: {}, ...req }, res);
 		return res;
 	};
+	// §8: one ingest round, the poller's (its Routemate answer is `live`) or the
+	// Linxup webhook's (one position), recording every socket send.
+	const pushes = (live) => {
+		const sent = [];
+		const room = (ns) => ({ to: (r) => ({ emit: (event, payload) => sent.push({ ns, room: r, event, payload }) }) });
+		const pdeps = {
+			db, io: room("io"), publicTrack: room("public"), geolib,
+			routemate: { listLiveLocations: async () => live.map((x) => ({ ...x })) }, routemateCreds: () => ({}),
+			ROUTEMATE_ENABLED: true, ROUTEMATE_API_KEY: "test-key", routemateHealth: { lastSync: {}, lastError: null },
+			clearRoutemateLogState: () => {}, getJobTrackingCached: deps.getJobTrackingCached, getDeletedLoadIds: () => new Set(),
+			findDriverAccountSpelling: (n) => n, maybeAlertLowFuel: () => {}, tryGeofenceAdvance: async () => false,
+			geofenceCandidatesAcrossSpacing: () => [], linxupHealth: { unlinked: 0, lastWritten: null }, linxupTrackSpeedUnit: () => {},
+			routemateUpsertVehicleMinimalStmt: { run() {} },
+		};
+		const p = new Function(...PUSH_PROVIDED, "require", `${liftedPush.text}\nreturn { routemateSyncTelemetry, ingestLinxupPosition };`)(
+			...PUSH_PROVIDED.map((k) => pdeps[k]), appRequire);
+		return { sent, p };
+	};
 	return {
-		fixMs, routeCalls, poiCalls,
+		fixMs, routeCalls, poiCalls, db,
+		poll: async (live) => { const { sent, p } = pushes(live); await p.routemateSyncTelemetry(); return sent; },
+		linxup: async (pos) => { const { sent, p } = pushes([]); await p.ingestLinxupPosition(pos); return sent; },
 		approach: () => fns.approachStopsFor("T-200", PICKUP.lat, PICKUP.lng),
 		latest: async () => {
 			const r = await call("/api/locations/latest", { session: { user: { role: "Super Admin", username: "admin_test" } } });
@@ -186,6 +235,7 @@ function world({ fixes = [], link = null, status = "In Transit" } = {}) {
 		driver: async () => (await call("/api/driver/position", { session: { user: { role: "Driver", driverName: DRIVER } } })),
 		track: async () => (await call("/api/public/track/:loadId", { params: { loadId: "T-200" } })),
 		trail: async () => (await call("/api/locations/trail", { query: { driver: DRIVER, loadId: "T-200" } })),
+		tripPlan: async () => (await call("/api/fuel/trip-plan", { query: { loadId: "T-200" }, session: { user: { role: "Super Admin", username: "admin_test" } } })),
 	};
 }
 const iso = (ms) => new Date(ms).toISOString();
@@ -215,6 +265,10 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		ok("§1 a fix of 2 hours or less allows an ETA; a millisecond more, or an unknown age, does not",
 			rule.fixAllowsEta(0) === true && rule.fixAllowsEta(2 * HOUR) === true && rule.fixAllowsEta(2 * HOUR + 1) === false
 			&& rule.fixAllowsEta(null) === false && rule.fixAllowsEta(NaN) === false);
+		ok("§1 the customer page's window: 0 to 3 hours; not a fix ahead of the clock, a millisecond past 3 hours, or an unknown age",
+			typeof rule.publicTrackShowsFix === "function" && rule.publicTrackShowsFix(0) === true && rule.publicTrackShowsFix(3 * HOUR) === true
+			&& rule.publicTrackShowsFix(3 * HOUR + 1) === false && rule.publicTrackShowsFix(-1) === false && rule.publicTrackShowsFix(null) === false
+			&& rule.publicTrackShowsFix(NaN) === false);
 		let client = null;
 		try { client = await import(pathToFileURL(path.join(path.dirname(SERVER_JS), "client", "src", "lib", "fixAge.js")).href); } catch { client = null; }
 		ok("§1 ...the same 2 hours the browser hides distance and ETA after (client/src/lib/fixAge.js)",
@@ -381,6 +435,77 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR }], status: "Dispatched" });
 		const stops = await w.approach();
 		ok("§7 no link row: stops searched from the fix, as before", stops.length === 1 && w.routeCalls.length === 1 && fromFix(w.routeCalls[0], NEAR), w.routeCalls);
+	}
+
+	// ══ §8 the live pushes ═══════════════════════════════════════════════════
+	console.log("§8 the live pushes");
+	const where = (sent) => sent.map((s) => `${s.ns}:${s.room}:${s.event}`);
+	const sentTo = (sent, ns, room) => sent.filter((s) => s.ns === ns && (room === undefined || s.room === room));
+	const live = (ago, at) => ({
+		routemate_vehicle_id: DEVICE, vehicle_id: "901", latitude: at.lat, longitude: at.lng, speed: 0, bearing: "",
+		odometer: 0, engine_hours: 0, fuel_pct: 50, geocoded_location: "", location_date_ms: Date.now() - ago,
+	});
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const sent = await w.poll([live(13 * DAY, AWAY)]);
+		ok("§8 the poller gets back a fix from before the link: nothing is pushed (dispatch, the driver's room, the customer page)",
+			sent.length === 0, where(sent));
+		const stored = w.db.prepare("SELECT COUNT(*) AS n FROM routemate_telemetry WHERE routemate_vehicle_id = ?").get(DEVICE).n;
+		ok("§8 ...the fix is still stored, as every fix is", stored === 1, stored);
+	}
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const sent = await w.poll([live(1 * MIN, NEAR)]);
+		ok("§8 a fix after the link: pushed to dispatch, the driver's room and the load's customer page",
+			sentTo(sent, "io", "dispatch").length === 1 && sentTo(sent, "io").length === 2 && sentTo(sent, "public", "load:T-200").length === 1, where(sent));
+	}
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "system:seed" } });
+		const sent = await w.poll([live(13 * DAY, AWAY)]);
+		ok("§8 a seed row (no real link time): dispatch and the driver's room as before", sentTo(sent, "io").length === 2, where(sent));
+	}
+	{
+		const w = world({});
+		const sent = await w.poll([live(5 * HOUR, NEAR)]);
+		ok("§8 no link row, a 5-hour fix: dispatch and the driver's room as before", sentTo(sent, "io").length === 2, where(sent));
+		ok("§8 ...but not the customer page, which shows no fix over 3 hours old", sentTo(sent, "public").length === 0, where(sent));
+		const w2 = world({});
+		const sent2 = await w2.poll([live(2 * HOUR, NEAR)]);
+		ok("§8 ...a 2-hour fix still reaches it", sentTo(sent2, "public", "load:T-200").length === 1, where(sent2));
+	}
+	const linxupPos = (ago, at) => ({
+		vehicle_id: DEVICE, candidates: [DEVICE], latitude: at.lat, longitude: at.lng, speed: 0, bearing: "",
+		odometer: 0, engine_hours: 0, fuel_pct: null, geocoded_location: "", location_date_ms: Date.now() - ago,
+	});
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const sent = await w.linxup(linxupPos(1 * HOUR, AWAY));
+		ok("§8 the Linxup webhook with a fix from before the link: nothing is pushed", sent.length === 0, where(sent));
+		const after = await w.linxup(linxupPos(1 * MIN, NEAR));
+		ok("§8 ...one after it: dispatch and the driver's room, as before", sentTo(after, "io", "dispatch").length === 1 && sentTo(after, "io").length === 2, where(after));
+	}
+
+	// ══ §9 GET /api/fuel/trip-plan ═══════════════════════════════════════════
+	console.log("§9 GET /api/fuel/trip-plan");
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR, fuel: 80 }], link: { ago: 30 * MIN, by: "admin_test" }, coords: true });
+		const r = await w.tripPlan();
+		const b = r.body || {};
+		ok("§9 200", r.statusCode === 200 && b.ok === true, b);
+		ok("§9 a fix taken before the link (inside the 6-hour window): planned from the pickup, not from it",
+			b.fromLivePosition === false && w.routeCalls.length >= 1 && w.routeCalls.every((c) => fromFix(c, PICKUP)), [b.fromLivePosition, w.routeCalls]);
+		ok("§9 ...and its fuel level is not read as this truck's", b.fuelPct !== 80 && b.updatedAt === null, [b.fuelPct, b.updatedAt]);
+	}
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: AWAY, fuel: 20 }, { ago: 10 * MIN, at: NEAR, fuel: 80 }], link: { ago: 30 * MIN, by: "admin_test" }, coords: true });
+		const b = (await w.tripPlan()).body || {};
+		ok("§9 a fix after the link: planned from it, with its fuel level, as before",
+			b.fromLivePosition === true && fromFix(w.routeCalls[0], NEAR) && b.fuelPct === 80, [b.fromLivePosition, w.routeCalls, b.fuelPct]);
+	}
+	{
+		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR, fuel: 80 }], coords: true });
+		const b = (await w.tripPlan()).body || {};
+		ok("§9 no link row: planned from the fix, as before", b.fromLivePosition === true && b.fuelPct === 80, [b.fromLivePosition, b.fuelPct]);
 	}
 })().then(() => {
 	if (failures.length) {

@@ -4245,14 +4245,18 @@ async function routemateSyncTelemetry() {
 		// telemetry row can fan out a Socket.IO location-update to dispatch
 		// viewers. Without this, the /tracking map only refreshes on page-load
 		// — ELD positions would appear frozen until the user F5s.
+		// The truck each vehicle is filed under, too, for the link rule on the
+		// sends below.
 		const driverByVehicle = {};
+		const truckIdByVehicle = {};
 		for (const r of db.prepare(`
-			SELECT t.routemate_vehicle_id, ta.driver_name
+			SELECT t.routemate_vehicle_id, t.id AS truck_id, ta.driver_name
 			FROM truck_assignments ta
 			JOIN trucks t ON t.id = ta.truck_id
 			WHERE ta.end_date = '' AND COALESCE(t.routemate_vehicle_id, '') <> ''
 		`).all()) {
 			driverByVehicle[r.routemate_vehicle_id] = r.driver_name;
+			truckIdByVehicle[r.routemate_vehicle_id] = r.truck_id;
 		}
 
 		const txn = db.transaction((items) => {
@@ -4370,6 +4374,13 @@ async function routemateSyncTelemetry() {
 			if (t._droppedReason) continue; // Tier 1: don't push outlier/invalid fixes to UI
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
+			// No push of a fix the device took before it was linked to this truck
+			// (B11, the position routes' rule; lib/eld-position.js). Routemate keeps
+			// answering with a vehicle's last fix for days, and this loop runs every
+			// minute, so without this a just-linked truck would flicker back to its
+			// device's old spot on every map, the customer page included.
+			const fixMs = t.location_date_ms || Date.now();
+			if (eldPosition.fixPredatesLink(fixMs, eldDeviceLinkedSinceMs(truckIdByVehicle[t.routemate_vehicle_id], t.routemate_vehicle_id))) continue;
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
 			// The driver's own room, and the name this payload gives the driver,
@@ -4377,7 +4388,7 @@ async function routemateSyncTelemetry() {
 			// the driver app keeps only a push naming its own driver, so an
 			// assignment stored with other spacing still reaches that driver.
 			const accountDriver = findDriverAccountSpelling(driverName) || driverName;
-			const timestamp = new Date(t.location_date_ms || Date.now()).toISOString();
+			const timestamp = new Date(fixMs).toISOString();
 			const headingDeg = parseRoutemateBearing(t.bearing);
 			const locationPayload = {
 				driver: accountDriver,
@@ -4398,7 +4409,9 @@ async function routemateSyncTelemetry() {
 			// for the next /api/locations/latest poll cycle. Driver sockets
 			// join their driverRoom() on `register` (see io.on("connection")).
 			if (driverLower) io.to(driverRoom(accountDriver)).emit("location-update", locationPayload);
-			if (activeLoadId) {
+			// The customer page shows no fix over 3 hours old; its push keeps the
+			// same window (lib/eld-position.js publicTrackShowsFix()).
+			if (activeLoadId && eldPosition.publicTrackShowsFix(Date.now() - fixMs)) {
 				publicTrack.to("load:" + activeLoadId).emit("tracker-update", {
 					lat: t.latitude,
 					lng: t.longitude,
@@ -15230,7 +15243,8 @@ app.put("/api/investors/:id/payout-basis", requireRole("Super Admin"), refuseCro
 //       field stripped, so driver/admin names never leak via the timeline.
 //     * X-Robots-Tag keeps tracker URLs out of search indexes
 //   - Driver GPS privacy: only the last ping is returned, and only if it's
-//     within the last 3 hours (MAX_PING_AGE_MS) — prevents leaking a driver's
+//     within the last 3 hours (lib/eld-position.js publicTrackShowsFix(), the
+//     window its live tracker-update push keeps too) — prevents leaking a driver's
 //     off-shift location after they stop reporting.
 //   - With no ping within the last 2 hours there is no ETA, distance or drive
 //     time in the payload (B11, owner decision 2026-10-15); the page shows the
@@ -15544,7 +15558,8 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		let lastPing = null;
 		let lastPingSpeed = 0;
 		let lastPingAgeMs = null;
-		const MAX_PING_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours — accommodates rural coverage gaps
+		// The 3-hour window (accommodates rural coverage gaps) is
+		// eldPosition.publicTrackShowsFix(), which this page's live push keeps too.
 		if (driverNameKey) {
 			// Source priority: pick whichever of ELD telemetry vs phone GPS has the
 			// most recent valid ping within the 3-hour window. ELD is preferred only
@@ -15580,8 +15595,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 					&& Number.isFinite(rmRow.latitude) && Number.isFinite(rmRow.longitude)
 					&& (rmRow.latitude !== 0 || rmRow.longitude !== 0)
 					&& !eldPosition.fixPredatesLink(rmRow.location_date_ms, eldDeviceLinkedSinceMs(pingTruck.id, pingVehicleId))) {
-					const age = Date.now() - rmRow.location_date_ms;
-					if (age >= 0 && age <= MAX_PING_AGE_MS) {
+					if (eldPosition.publicTrackShowsFix(Date.now() - rmRow.location_date_ms)) {
 						rmCandidate = {
 							ts: rmRow.location_date_ms,
 							lat: rmRow.latitude,
@@ -15600,8 +15614,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 			).get(driverNameKey);
 			if (row && row.timestamp) {
 				const ts = new Date(row.timestamp).getTime();
-				const ageMs = Date.now() - ts;
-				if (!isNaN(ageMs) && ageMs >= 0 && ageMs <= MAX_PING_AGE_MS) {
+				if (eldPosition.publicTrackShowsFix(Date.now() - ts)) {
 					phoneCandidate = {
 						ts,
 						lat: row.latitude,
@@ -15715,7 +15728,7 @@ app.get("/api/public/track/:loadId", trackPublicLimiter, async (req, res) => {
 		// Taken verbatim from `eta` rather than recomputed, so the map's info
 		// strip can never contradict the ETA card sitting directly above it.
 		// With no fix within 2 hours (none at all, a truck silent past
-		// MAX_PING_AGE_MS, or one older than eldPosition.ETA_MAX_FIX_AGE_MS) no distance or
+		// the 3-hour window, or one older than eldPosition.ETA_MAX_FIX_AGE_MS) no distance or
 		// drive time is sent either: the page shows the planned lane's as an ETA,
 		// and the customer link shows none from an old or missing fix (B11). A
 		// delivered load with a fresh fix keeps the lane's figures, as before.
@@ -44484,14 +44497,15 @@ async function ingestLinxupPosition(pos) {
 	// so no data is lost — they just won't map to a truck until it's linked.
 	let vehicleId = pos.vehicle_id;
 	let driverName = "";
+	let truckId = null;
 	if (pos.candidates && pos.candidates.length) {
 		const ph = pos.candidates.map(() => "?").join(",");
 		const row = db.prepare(
-			`SELECT ta.driver_name AS driver, t.routemate_vehicle_id AS vid
+			`SELECT ta.driver_name AS driver, t.routemate_vehicle_id AS vid, t.id AS truck_id
 			 FROM truck_assignments ta JOIN trucks t ON t.id = ta.truck_id
 			 WHERE ta.end_date = '' AND t.routemate_vehicle_id IN (${ph}) LIMIT 1`,
 		).get(...pos.candidates);
-		if (row) { vehicleId = row.vid; driverName = row.driver || ""; }
+		if (row) { vehicleId = row.vid; driverName = row.driver || ""; truckId = row.truck_id; }
 	}
 	if (!vehicleId) return { written: false, dropped_reason: "no_vehicle_id" };
 	if (!driverName) linxupHealth.unlinked++;
@@ -44596,8 +44610,12 @@ async function ingestLinxupPosition(pos) {
 			source: "linxup",
 			fuelPct: Number.isFinite(pos.fuel_pct) ? pos.fuel_pct : null,
 		};
-		io.to("dispatch").emit("location-update", locationPayload);
-		if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
+		// No push of a fix the device took before it was linked to this truck
+		// (B11; the poller's rule, lib/eld-position.js).
+		if (!eldPosition.fixPredatesLink(pos.location_date_ms || Date.now(), eldDeviceLinkedSinceMs(truckId, vehicleId))) {
+			io.to("dispatch").emit("location-update", locationPayload);
+			if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
+		}
 		// Same low-fuel check as the Routemate poller. BOTH ingest paths need it
 		// or the warning silently disappears the day Linxup fully replaces the
 		// poller — the exact class of gap that left speedMps unset here once.
@@ -55839,10 +55857,14 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
 		}
 
-		// Live fuel + position.
-		const latest = vehicleId ? db.prepare(`
+		// Live fuel + position. A newest row the device took before it was linked
+		// to this truck counts as no reading at all (B11, lib/eld-position.js): its
+		// position and its fuel level belong to another vehicle, so the plan starts
+		// from the pickup, as it does with no fix.
+		const newest = vehicleId ? db.prepare(`
 			SELECT latitude, longitude, fuel_pct, odometer, location_date_ms FROM routemate_telemetry
 			WHERE routemate_vehicle_id = ? AND dropped_reason = '' ORDER BY id DESC LIMIT 1`).get(vehicleId) : null;
+		const latest = newest && !eldPosition.fixPredatesLink(newest.location_date_ms, eldDeviceLinkedSinceMs(truck && truck.id, vehicleId)) ? newest : null;
 		const fixFresh = latest && latest.location_date_ms
 			&& Date.now() - latest.location_date_ms < 6 * 60 * 60 * 1000
 			&& Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude);
