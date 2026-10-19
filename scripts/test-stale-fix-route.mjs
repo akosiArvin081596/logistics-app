@@ -190,7 +190,9 @@ const LANE = [{ latitude: PICKUP.lat, longitude: PICKUP.lng }, { latitude: 31.5,
 function mapWorld() {
   // routeLines: every route line drawn (the white base line), with its first
   // point and whether it was taken off the map since.
-  const w = { asks: [], hauls: [], lines: [], markers: [], markerObjs: [], camera: [], routeLines: [], popups: [] }
+  // polys: every polyline of any kind (route, grey alternative, traffic piece),
+  // with its colour and whether it was taken off the map since.
+  const w = { asks: [], hauls: [], lines: [], markers: [], markerObjs: [], camera: [], routeLines: [], polys: [], popups: [] }
   class Marker {
     constructor(o) { Object.assign(this, o); this._on = {}; w.markers.push(o); w.markerObjs.push(this) }
     addEventListener(event, fn) { this._on[event] = fn } addListener() {}
@@ -198,6 +200,8 @@ function mapWorld() {
   class Polyline {
     constructor(o) {
       this.o = { ...o }
+      this.any = { color: o.strokeColor, removed: !o.map }
+      w.polys.push(this.any)
       if (o.strokeColor === '#ffffff') {
         const path = (o.path || []).map((p) => ({ lat: p.lat, lng: p.lng }))
         w.lines.push(path)
@@ -205,7 +209,10 @@ function mapWorld() {
         w.routeLines.push(this.entry)
       }
     }
-    setMap(m) { if (m === null && this.entry) this.entry.removed = true }
+    setMap(m) {
+      if (m === null && this.entry) this.entry.removed = true
+      this.any.removed = m === null
+    }
     get(k) { return this.o[k] } set(k, v) { this.o[k] = v } getPath() { return { getArray: () => [] } }
     // A live redraw of the route line counts as a line drawn.
     setPath(path) { if (this.o.strokeColor === '#ffffff') w.lines.push((path || []).map((p) => ({ lat: p.lat, lng: p.lng }))) }
@@ -236,7 +243,12 @@ const routeMapDeps = {
       get: async (url) => {
         if (!String(url).startsWith('/api/route')) return {}
         const r = world.route(url)
-        return { routes: [{ route: r.route, distanceMiles: 85.2, etaMinutes: 95, steps: [] }], recommendedIdx: 0 }
+        const main = { route: r.route, distanceMiles: 85.2, etaMinutes: 95, steps: [] }
+        if (!world.twoRoutes) return { routes: [main], recommendedIdx: 0 }
+        // Two alternatives, each with a jammed stretch: the grey dashed
+        // alternative and the red traffic piece are drawn beside the route.
+        const jam = [{ congestion: 'TRAFFIC_JAM', startIdx: 0, endIdx: 2 }]
+        return { routes: [{ ...main, trafficSegments: jam }, { ...main, distanceMiles: 90.1, trafficSegments: jam }], recommendedIdx: 0 }
       },
     }),
   },
@@ -325,6 +337,28 @@ if (RouteMap) {
       w.routeLines.length >= 1 && w.routeLines.filter((r) => same(r.first, pinLatLng(LIVE_PIN))).every((r) => r.removed), w.routeLines)
     m.unmount()
   }
+  // Routed from a live pin with two alternatives and a jammed stretch; the fix
+  // then turns old while the load's lane is 'none' (no coordinates) or still
+  // 'loading'. The grey alternative and the traffic pieces of the route from
+  // the pin go too, not just its line.
+  for (const status of ['none', 'loading']) {
+    world = mapWorld()
+    world.twoRoutes = true
+    globalThis.google = world.google
+    const lane = { status, route: null, distanceMiles: null, etaMinutes: null, source: 'none' }
+    const state = Vue.reactive({ fixAt: ago(10 * MIN) })
+    const Wrapper = Vue.defineComponent({ setup: () => () => Vue.h(RouteMap, { ...base, driverPosition: LIVE_PIN, fixAt: state.fixAt, plannedLane: lane }) })
+    const m = mountInMemory(Wrapper, {})
+    await drain()
+    const w = world
+    const shown = (color) => w.polys.some((p) => p.color === color && !p.removed)
+    const before = [shown('#94a3b8'), shown('#dc2626')]
+    state.fixAt = ago(2 * HOUR + 5 * MIN)
+    await drain()
+    ok(`§2 lane '${status}', a fix that turns old: the grey alternative and the traffic piece of the route from the pin are taken off too`,
+      before[0] && before[1] && !shown('#94a3b8') && !shown('#dc2626') && !shown('#ffffff'), [before, w.polys.filter((p) => !p.removed).map((p) => p.color)])
+    m.unmount()
+  }
 
   console.log('§3 DriverRouteMap, the customer tracker')
   const pub = { load: mapLoad('In Transit'), headers: MAP_HEADERS, publicMode: true, presetRoute: { route: LANE, distanceMiles: 812.4, etaMinutes: 750 } }
@@ -370,7 +404,10 @@ console.log('§4 TrackingMap, the dispatch tracking map')
           }
           if (/^\/api\/loads\/[^/]+\/haul$/.test(String(url))) {
             tw.hauls.push(url)
-            return { loadId: 'L-77', lane: { ...lane }, driven: null }
+            // `lane` may be a function of (url, request number) giving the lane,
+            // a promise of it, or a rejection (a failed request).
+            const answer = await (typeof lane === 'function' ? lane(url, tw.hauls.length) : lane)
+            return { loadId: decodeURIComponent(String(url).split('/')[3]), lane: { ...answer }, driven: null }
           }
           return { available: false }
         },
@@ -466,6 +503,72 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       ok('§4 ...and its 49 mph shows on the card, the summary and the popup, as before',
         !!f.glance && Math.round(f.glance.speed * 2.237) === 49 && /\b49 mph\b/.test(f.text) && f.w.popups.some((p) => /Speed: 49 mph/.test(p)),
         [f.glance && f.glance.speed, f.w.popups.length])
+    }
+  }
+  {
+    // The haul lane over several clicks on one open map: the driver's row
+    // (open, collapse, open again) and each load's header (collapse / open).
+    const nodeText = (n) => (n.type === 'text' ? n.text : (n.children || []).map(nodeText).join(' '))
+    const keepOpen = async (loc, lane) => {
+      tw = mapWorld()
+      globalThis.google = tw.google
+      const Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], true, lane))
+      const m = mountInMemory(Tracking, { visible: true })
+      await drain()
+      const row = () => m.find((n) => /(^|\s)driver-item(\s|$)/.test(String(n.props.class || '')) && !/\ball-item\b/.test(String(n.props.class || '')))
+      const header = (loadId) => m.find((n) => /(^|\s)load-entry-header(\s|$)/.test(String(n.props.class || '')) && nodeText(n).includes(loadId))
+      const click = (el) => { if (el && typeof el.props.onClick === 'function') el.props.onClick({ stopPropagation() {} }) }
+      return { w: tw, m, clickRow: () => click(row()), clickLoad: (id) => click(header(id)) }
+    }
+    const deferred = () => { let resolve; const p = new Promise((r) => { resolve = r }); return { p, resolve } }
+    {
+      // (a) the first haul request fails; the next open asks again.
+      const k = await keepOpen(locFor(OLD_PIN, 3 * HOUR, 'In Transit'), (url, n) => (n === 1 ? Promise.reject(new Error('503')) : LANE_WITH_LINE))
+      k.clickRow(); await drain()
+      k.clickLoad('L-77'); await drain()
+      k.clickLoad('L-77'); await drain()
+      ok('§4 a failed haul request is not kept: the next open asks again, and draws the lane',
+        k.w.hauls.length === 2 && !!lastLine(k.w) && same(lastLine(k.w)[0], PICKUP), [k.w.hauls.length, lastLine(k.w) && lastLine(k.w)[0]])
+      k.m.unmount()
+    }
+    {
+      // (b) answered once; collapsing and opening again within 10 minutes asks nothing.
+      const k = await keepOpen(locFor(OLD_PIN, 3 * HOUR, 'In Transit'), LANE_WITH_LINE)
+      k.clickRow(); await drain()
+      k.clickLoad('L-77'); await drain()
+      k.clickLoad('L-77'); await drain()
+      ok('§4 reopening the load within 10 minutes sends no second haul request, and draws the lane',
+        k.w.hauls.length === 1 && !!lastLine(k.w) && same(lastLine(k.w)[0], PICKUP), [k.w.hauls.length, lastLine(k.w) && lastLine(k.w)[0]])
+      k.m.unmount()
+    }
+    {
+      // (c) L-77's haul is still out when the dispatcher opens L-78; L-77's late
+      // answer must not be drawn over L-78.
+      const PICKUP_B = { lat: 35.1, lng: -90.0 }
+      const LANE_B = [{ latitude: PICKUP_B.lat, longitude: PICKUP_B.lng }, { latitude: 36.2, longitude: -86.8 }]
+      const slow = deferred()
+      const loc = locFor(OLD_PIN, 3 * HOUR, 'In Transit')
+      loc.activeLoads.push({ loadId: 'L-78', status: 'In Transit', pickupAddress: 'Town C, TN', dropoffAddress: 'Town D, TN', originLat: PICKUP_B.lat, originLng: PICKUP_B.lng, destLat: 36.2, destLng: -86.8 })
+      const k = await keepOpen(loc, (url) => (url.includes('L-77') ? slow.p : { route: LANE_B, distanceMiles: 200, etaMinutes: 190, source: 'routes_api' }))
+      k.clickRow(); await drain()
+      k.clickLoad('L-78'); await drain()
+      slow.resolve(LANE_WITH_LINE); await drain()
+      const line = lastLine(k.w)
+      ok('§4 switching loads while a haul request is out: the late answer is not drawn, the open load\'s lane is',
+        k.w.hauls.length === 2 && !!line && same(line[0], PICKUP_B) && !k.w.lines.some((l) => l.length && same(l[0], PICKUP)), [k.w.hauls, line && line[0]])
+      k.m.unmount()
+    }
+    {
+      // Two quick focusDriver() calls (the row clicked open, closed and open
+      // again while the haul is out): one request between them.
+      const slow = deferred()
+      const k = await keepOpen(locFor(OLD_PIN, 3 * HOUR, 'In Transit'), () => slow.p)
+      k.clickRow(); k.clickRow(); k.clickRow()
+      await drain()
+      slow.resolve(LANE_WITH_LINE); await drain()
+      ok('§4 two quick opens of the driver while the haul is out: one haul request, and the lane drawn',
+        k.w.hauls.length === 1 && !!lastLine(k.w) && same(lastLine(k.w)[0], PICKUP), [k.w.hauls.length, lastLine(k.w) && lastLine(k.w)[0]])
+      k.m.unmount()
     }
   }
   // ══ §5 TrackingMap's live feed ═════════════════════════════════════════════

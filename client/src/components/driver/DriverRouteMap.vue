@@ -701,6 +701,16 @@ function onRouteGeometryChanged() {
   routeVersion.value++
 }
 
+// fetchRoute() draws no route of its own (a planned lane still loading, or an
+// old pin with none on hand): the alternatives, the traffic pieces and
+// Navigation Mode's route of the last one go with its line, as in
+// applyPlannedLane().
+function dropRoutedGeometry() {
+  allRoutes.value = []
+  recommendedIdx.value = 0
+  onRouteGeometryChanged()
+}
+
 async function fetchRoute(doFit = false) {
   const mySeq = ++fetchSeq
   routePoints.value = []
@@ -716,7 +726,7 @@ async function fetchRoute(doFit = false) {
   // Admin load detail with no live position: draw the planned lane, or wait
   // for it, instead of routing; 'none' falls through to the fetch below.
   if (usePlannedLane.value) {
-    if (props.plannedLane.status === 'loading') { if (map) renderMarkers(); return }
+    if (props.plannedLane.status === 'loading') { dropRoutedGeometry(); if (map) renderMarkers(); return }
     if (props.plannedLane.status === 'ready') { applyPlannedLane(); return }
   }
 
@@ -724,7 +734,7 @@ async function fetchRoute(doFit = false) {
   // all (B11, the replica check 2026-10-19). Every /api/route can be a paid
   // Google Routes call and no lane geometry is stored, so the map keeps the
   // load's two markers and the pin, with no line.
-  if (fixTooOld.value) { if (map) renderMarkers(); return }
+  if (fixTooOld.value) { dropRoutedGeometry(); if (map) renderMarkers(); return }
 
   // Pick the right leg to render (lib/routeLeg.js):
   //   - Has ELD + picked up:     truck→drop-off (current trajectory)

@@ -361,21 +361,25 @@ function clientCacheKey(fromLat, fromLng, toLat, toLng) {
 // endpoint (and 15-minute server route cache) the load detail's haul section
 // uses, so opening such a load here costs what that detail already spends, and
 // never from /api/route. [] when the lane has no line (Routes failed or off:
-// a stored or straight-line distance only). An answer is kept as long as a
-// static route is (CLIENT_CACHE_TTL); a failed request is not kept, and nothing
-// asks again on a timer.
-const plannedLaneCache = new Map()
+// a stored or straight-line distance only). The request itself is kept, so a
+// second open while it is out shares it, and its answer is kept as long as a
+// static route is (CLIENT_CACHE_TTL); a failed request is dropped, so the next
+// open asks again. Nothing asks on a timer.
+const plannedLaneCache = new Map() // loadId -> { time, points: Promise<[[lat, lng], ...]> }
 async function fetchPlannedLane(loadId) {
   const key = String(loadId || '')
   const hit = plannedLaneCache.get(key)
-  if (hit && Date.now() - hit.time < CLIENT_CACHE_TTL) return hit.points
-  try {
-    const d = await api.get(`/api/loads/${encodeURIComponent(key)}/haul`)
+  if (hit && Date.now() - hit.time < CLIENT_CACHE_TTL) return hit.points.catch(() => [])
+  const entry = { time: Date.now(), points: null }
+  entry.points = api.get(`/api/loads/${encodeURIComponent(key)}/haul`).then((d) => {
     const route = d && d.lane && Array.isArray(d.lane.route) ? d.lane.route : []
-    const points = route.length >= 2 ? route.map(p => [p.latitude, p.longitude]) : []
-    plannedLaneCache.set(key, { time: Date.now(), points })
-    return points
+    return route.length >= 2 ? route.map(p => [p.latitude, p.longitude]) : []
+  })
+  plannedLaneCache.set(key, entry)
+  try {
+    return await entry.points
   } catch {
+    if (plannedLaneCache.get(key) === entry) plannedLaneCache.delete(key)
     return []
   }
 }
