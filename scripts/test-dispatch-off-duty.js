@@ -29,6 +29,17 @@
 //      n8n and re-issue writes are system writes and never checked). A new
 //      time on the same day is no move. The Driver column is the one checked:
 //      Job Tracking has no co-driver column.
+//   §8 the other side (R11b, pure, lib/driver-availability.js): recording or
+//      changing time off over loads he already has. loadsNewlyInTimeOff()
+//      lists his live loads whose window (offDutyLoadWindow()) overlaps the new
+//      dates, ends today or later and, on an edit, misses the old dates; a load
+//      with no readable day is skipped. parseConfirmLoads() reads the "Save
+//      anyway" echo and nothing else; timeOffLoadsDecision() asks again when
+//      the echo misses a listed load or its window; driverHasLoadsBody() is
+//      the 409's words. Every listed load can be confirmed (an id over 64
+//      characters is not listed; an echo of the whole list is never too long);
+//      an unchecked echo is kept to the time off's days; each load is listed and
+//      matched by the id the viewer is shown, and confirmed by the stored one
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js) over a fake Job Tracking sheet; "today"
@@ -231,6 +242,137 @@ const ROUTES = [
 				(await move(w, 4, "7003", into, false)).status, 200);
 		});
 	}
+
+	section("§8 R11b: time off over loads he already has (pure)");
+	await R.guard("§8", async () => {
+		const fn = (name) => (lib && typeof lib[name] === "function" ? lib[name] : null);
+		eq("§8.0 lib/driver-availability.js exports the four R11b functions",
+			["loadsNewlyInTimeOff", "parseConfirmLoads", "timeOffLoadsDecision", "driverHasLoadsBody"].filter((n) => !fn(n)), []);
+		// server.js's normalizeDriverName() and normLoadKey(), as far as these cases need.
+		const norm = (s) => String(s == null ? "" : s).trim().toLowerCase().replace(/\s+/g, " ");
+		const key = (id) => String(id || "").trim().toLowerCase().replace(/^#/, "");
+		const L = (loadId, pickupKey, dropoffKey, driver = "Hollis Renner", truck = "LogisX-#91") => ({ loadId, driver, truck, pickupKey, dropoffKey });
+		// Today 2026-10-15.
+		const LOADS = [
+			L("A1", "2026-10-20", "2026-10-22"),
+			L("A2", "2026-10-25", "2026-10-27"),
+			L("A3", "2026-10-16", "2026-10-18"),
+			L("B1", "2026-10-26", "2026-10-28"),
+			L("B2", "2026-10-10", "2026-10-14"),
+			L("B3", "", ""),
+			L("B4", "2026-10-21", "", "Soren King"),
+			L("C1", "2026-10-21", ""),
+			L("C2", "", "2026-10-24"),
+			L("C3", "2026-10-22", "2026-10-19"),
+			L("C4", "2026-10-14", "2026-10-15"),
+			L("D1", "2026-10-19", "2026-10-19", " hollis  RENNER "),
+			L("", "2026-10-20", "2026-10-20"),
+		];
+		const newly = (o, loads = LOADS) => (fn("loadsNewlyInTimeOff")
+			? fn("loadsNewlyInTimeOff")({ loads, driverName: "Hollis Renner", normalize: norm, todayKey: "2026-10-15", ...o }).map((l) => [l.loadId, l.from, l.to])
+			: null);
+		eq("§8.1 a new row Oct 18-25: every live load of his overlapping it, by first day; a pickup-only or drop-off-only load is that day, a drop-off before the pickup the pickup day; his name in other spacing counts",
+			newly({ from: "2026-10-18", to: "2026-10-25" }),
+			[["A3", "2026-10-16", "2026-10-18"], ["D1", "2026-10-19", "2026-10-19"], ["A1", "2026-10-20", "2026-10-22"], ["C1", "2026-10-21", "2026-10-21"],
+				["C3", "2026-10-22", "2026-10-22"], ["C2", "2026-10-24", "2026-10-24"], ["A2", "2026-10-25", "2026-10-27"]]);
+		eq("§8.2 ...never one that misses the dates (B1), ended before today (B2), has no readable day (B3), another driver's (B4) or has no load id",
+			(newly({ from: "2026-10-01", to: "2026-10-31" }) || []).map((x) => x[0]).filter((id) => ["B2", "B3", "B4", ""].includes(id)), []);
+		eq("§8.3 a window ending today counts (C4 on Oct 15); one that ended yesterday never does (B2)", newly({ from: "2026-10-10", to: "2026-10-15" }), [["C4", "2026-10-14", "2026-10-15"]]);
+		eq("§8.4 an edit from Oct 18-22 to Oct 18-25: only the loads it newly covers", newly({ from: "2026-10-18", to: "2026-10-25", oldFrom: "2026-10-18", oldTo: "2026-10-22" }),
+			[["C2", "2026-10-24", "2026-10-24"], ["A2", "2026-10-25", "2026-10-27"]]);
+		eq("§8.5 ...a load touching the old dates by one day (A3 on Oct 18) is not newly covered", newly({ from: "2026-10-16", to: "2026-10-18", oldFrom: "2026-10-18", oldTo: "2026-10-18" }), []);
+		eq("§8.6 a shrink inside the old dates: none", newly({ from: "2026-10-20", to: "2026-10-22", oldFrom: "2026-10-18", oldTo: "2026-10-25" }), []);
+		eq("§8.7 old dates that miss every load: as a new row", newly({ from: "2026-10-26", to: "2026-10-28", oldFrom: "2026-10-01", oldTo: "2026-10-05" }),
+			[["A2", "2026-10-25", "2026-10-27"], ["B1", "2026-10-26", "2026-10-28"]]);
+		eq("§8.8 unreadable old dates: as a new row", newly({ from: "2026-10-26", to: "2026-10-28", oldFrom: "", oldTo: "soon" }), [["A2", "2026-10-25", "2026-10-27"], ["B1", "2026-10-26", "2026-10-28"]]);
+		eq("§8.9 nothing for an unreadable today, reversed dates, no loads or no driver",
+			[newly({ from: "2026-10-18", to: "2026-10-25", todayKey: "" }), newly({ from: "2026-10-25", to: "2026-10-18" }), newly({ from: "2026-10-18", to: "2026-10-25" }, null),
+				newly({ from: "2026-10-18", to: "2026-10-25", driverName: "  " })], [[], [], [], []]);
+		const one = fn("loadsNewlyInTimeOff") ? fn("loadsNewlyInTimeOff")({ loads: [L(" 7001 ", "2026-10-20", "2026-10-22", "Hollis Renner", " LogisX-#91 ")], driverName: "Hollis Renner", normalize: norm, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-20" }) : null;
+		eq("§8.10 each listed load is { loadId, shownId, from, to }, trimmed, with no Truck cell (shownId the id itself when none is given)", one,
+			[{ loadId: "7001", shownId: "7001", from: "2026-10-20", to: "2026-10-22" }]);
+
+		const parse = (v) => (fn("parseConfirmLoads") ? fn("parseConfirmLoads")(v) : "missing");
+		const E = (loadId, from = "2026-10-20", to = "2026-10-22") => ({ loadId, from, to });
+		eq("§8.11 the echo: a list of { loadId, from, to }, ids trimmed, other keys dropped, repeats once",
+			parse([{ ...E(" 7001 "), truck: "T-1", note: "x" }, E("7002", "2026-10-21", "2026-10-21"), E("7001")]), [E("7001"), E("7002", "2026-10-21", "2026-10-21")]);
+		eq("§8.12 an empty list is an echo of nothing", parse([]), []);
+		eq("§8.13 500 entries are read; 501 are not a confirmation unless the server listed that many",
+			[(parse(Array.from({ length: 500 }, (_, i) => E(`L${i}`))) || []).length, parse(Array.from({ length: 501 }, (_, i) => E(`L${i}`))),
+				(fn("parseConfirmLoads") ? fn("parseConfirmLoads")(Array.from({ length: 501 }, (_, i) => E(`L${i}`)), { max: 501 }) || [] : []).length], [500, null, 501]);
+		eq("§8.14 a 64-character id is read; 65 is not a confirmation", [(parse([E("7".repeat(64))]) || []).length, parse([E("7".repeat(65))])], [1, null]);
+		for (const [label, v] of [
+			["true", true], ["an object", E("7001")], ["text", "7001"], ["null", null], ["nothing", undefined],
+			["an entry that is null", [E("7001"), null]], ["an entry that is a list", [["7001", "2026-10-20", "2026-10-22"]]],
+			["a number id", [{ loadId: 7001, from: "2026-10-20", to: "2026-10-22" }]], ["a blank id", [E("   ")]],
+			["no last day", [{ loadId: "7001", from: "2026-10-20" }]], ["a US-style day", [E("7001", "10/20/2026")]],
+			["a day that does not exist", [E("7001", "2026-02-30", "2026-03-01")]], ["a reversed window", [E("7001", "2026-10-22", "2026-10-20")]],
+		]) eq(`§8.15 ${label}: not a confirmation`, parse(v), null);
+
+		const decide = (o) => (fn("timeOffLoadsDecision")
+			? fn("timeOffLoadsDecision")({ loads: LOADS, driverName: "Hollis Renner", normalize: norm, loadKey: key, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-21", ...o })
+			: null);
+		const asked = [{ loadId: "A1", from: "2026-10-20", to: "2026-10-22" }, { loadId: "C1", from: "2026-10-21", to: "2026-10-21" }];
+		eq("§8.16 listed loads and no echo: ask with the list", decide({}), { ask: asked });
+		eq("§8.17 confirmLoads true: ask", decide({ confirmLoads: true }), { ask: asked });
+		eq("§8.18 the list echoed: confirm each listed load's window, checked",
+			decide({ confirmLoads: [E("A1"), E("C1", "2026-10-21", "2026-10-21")] }), { ask: null, confirm: [E("A1"), E("C1", "2026-10-21", "2026-10-21")], unchecked: false });
+		eq("§8.19 ...ids matched as load ids are (\"#a1\" is A1)", (decide({ confirmLoads: [E("#a1"), E("c1", "2026-10-21", "2026-10-21")] }) || {}).confirm, [E("A1"), E("C1", "2026-10-21", "2026-10-21")]);
+		eq("§8.20 an echo missing a listed load: ask again with the whole list", decide({ confirmLoads: [E("A1")] }), { ask: asked });
+		eq("§8.21 an echo with a load's old window: ask again", decide({ confirmLoads: [E("A1", "2026-10-20", "2026-10-21"), E("C1", "2026-10-21", "2026-10-21")] }), { ask: asked });
+		eq("§8.22 an echo naming more than is listed: confirm the listed loads only",
+			(decide({ confirmLoads: [E("A1"), E("C1", "2026-10-21", "2026-10-21"), E("Z9")] }) || {}).confirm, [E("A1"), E("C1", "2026-10-21", "2026-10-21")]);
+		eq("§8.23 nothing listed: no ask, nothing confirmed, whatever the echo", decide({ from: "2026-11-20", to: "2026-11-21", confirmLoads: [E("A1")] }), { ask: null, confirm: [], unchecked: false });
+		eq("§8.24 the sheet unreadable (loads null), no echo: save unchecked", decide({ loads: null }), { ask: null, confirm: [], unchecked: true });
+		eq("§8.25 ...with an echo: each echoed load overlapping the new dates, as given, its window kept to them",
+			decide({ loads: null, confirmLoads: [E("A1"), E("Q7", "2026-10-22", "2026-10-23"), E("C1", "2026-10-21", "2026-10-21")] }),
+			{ ask: null, confirm: [E("A1", "2026-10-20", "2026-10-21"), E("C1", "2026-10-21", "2026-10-21")], unchecked: true });
+		eq("§8.26 ...with a malformed echo: unchecked, nothing confirmed", decide({ loads: null, confirmLoads: true }), { ask: null, confirm: [], unchecked: true });
+
+		const body = (o) => (fn("driverHasLoadsBody") ? fn("driverHasLoadsBody")({ driverName: "Hollis Renner", from: "2026-10-20", to: "2026-10-21", ...o }) : null);
+		eq("§8.27 the 409 body for one load", body({ loads: [asked[0]] }), {
+			error: "Hollis Renner has load A1 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him.",
+			code: "DRIVER_HAS_LOADS", driver: "Hollis Renner", from: "2026-10-20", to: "2026-10-21", loads: [asked[0]],
+		});
+		eq("§8.28 ...a one-day load", (body({ loads: [asked[1]] }) || {}).error, "Hollis Renner has load C1 (Oct 21) overlapping these dates. Save anyway? The load stays assigned to him.");
+		eq("§8.29 ...two loads", (body({ loads: asked }) || {}).error, "Hollis Renner has 2 loads overlapping these dates: A1 (Oct 20 – Oct 22), C1 (Oct 21). Save anyway? The loads stay assigned to him.");
+		const seven = Array.from({ length: 7 }, (_, i) => ({ loadId: `M${i + 1}`, from: `2026-10-2${i}`, to: `2026-10-2${i}`, truck: "" }));
+		eq("§8.30 ...seven loads: the first five named, the rest counted", (body({ loads: seven }) || {}).error,
+			"Hollis Renner has 7 loads overlapping these dates: M1 (Oct 20), M2 (Oct 21), M3 (Oct 22), M4 (Oct 23), M5 (Oct 24) and 2 more. Save anyway? The loads stay assigned to him.");
+		eq("§8.31 ...a blank name", (body({ driverName: " ", loads: [asked[0]] }) || {}).error, "This driver has load A1 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him.");
+		eq("§8.32 ...each load copied as { loadId, from, to } only (no Truck cell)",
+			(body({ loads: [{ ...asked[0], truck: "LogisX-#91", shownId: "A1", driver: "Hollis Renner", pickupKey: "2026-10-20" }] }) || {}).loads, [asked[0]]);
+
+		// The security review's fixes (2026-10-19).
+		const newlyIds = (loads, o = {}) => (fn("loadsNewlyInTimeOff")
+			? fn("loadsNewlyInTimeOff")({ loads, driverName: "Hollis Renner", normalize: norm, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-21", ...o }).map((l) => l.loadId)
+			: null);
+		eq("§8.33 L1: a load whose id is over 64 characters is skipped, like one with none; 64 is listed",
+			newlyIds([L("7".repeat(65), "2026-10-20", ""), L("8".repeat(64), "2026-10-20", ""), L("A1", "2026-10-20", "")]), ["8".repeat(64), "A1"]);
+		eq("§8.34 L1: ...so is one whose id as the viewer is shown it is over 64 characters",
+			newlyIds([{ ...L("A1", "2026-10-20", ""), shownId: `A1 ${"x".repeat(62)}` }, { ...L("A2", "2026-10-20", ""), shownId: "A2 [contact withheld]" }]), ["A2"]);
+		const many = Array.from({ length: 60 }, (_, i) => L(`N${String(i).padStart(2, "0")}`, "2026-10-20", "2026-10-21"));
+		const manyAsk = decide({ loads: many });
+		const manyDone = decide({ loads: many, confirmLoads: manyAsk && Array.isArray(manyAsk.ask) ? manyAsk.ask : [] });
+		eq("§8.35 L1: 60 listed loads, all echoed: confirmed, all 60", [manyAsk && Array.isArray(manyAsk.ask) ? manyAsk.ask.length : null, manyDone && manyDone.ask, manyDone && Array.isArray(manyDone.confirm) ? manyDone.confirm.length : null],
+			[60, null, 60]);
+		eq("§8.36 L2: unchecked, an echoed window reaching past the time off (to 2099) is recorded clamped to its days",
+			(decide({ loads: null, confirmLoads: [E("A1", "2026-10-15", "2099-12-31"), E("C1", "2026-10-21", "2026-10-21")] }) || {}).confirm,
+			[E("A1", "2026-10-20", "2026-10-21"), E("C1", "2026-10-21", "2026-10-21")]);
+		const shown = [
+			{ ...L("7710 ops@broker.example", "2026-10-20", "2026-10-22"), shownId: "7710 [contact withheld]" },
+			{ ...L("ops@broker.example", "2026-10-21", ""), shownId: "[contact withheld]" },
+		];
+		const shownAsk = decide({ loads: shown });
+		eq("§8.37 R1: the ask lists each load by the id the viewer is shown, never the stored one",
+			shownAsk, { ask: [E("7710 [contact withheld]", "2026-10-20", "2026-10-22"), E("[contact withheld]", "2026-10-21", "2026-10-21")] });
+		eq("§8.38 R1: ...that echo confirms, recording the stored ids",
+			decide({ loads: shown, confirmLoads: shownAsk && shownAsk.ask }),
+			{ ask: null, confirm: [E("7710 ops@broker.example", "2026-10-20", "2026-10-22"), E("ops@broker.example", "2026-10-21", "2026-10-21")], unchecked: false });
+		eq("§8.39 R1: ...an echo of the stored ids, not what he was shown, asks again",
+			(decide({ loads: shown, confirmLoads: [E("7710 ops@broker.example", "2026-10-20", "2026-10-22"), E("ops@broker.example", "2026-10-21", "2026-10-21")] }) || {}).ask,
+			shownAsk && shownAsk.ask);
+	});
 
 	section("§4 the call sites");
 	await R.guard("§4", async () => {
