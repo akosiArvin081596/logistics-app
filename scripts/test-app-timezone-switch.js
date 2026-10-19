@@ -152,8 +152,9 @@ eq(S.getWeekRange("2026-10-31"), week("2026-10-31", "2026-11-06"), "Sat Oct 31 s
 
 // 4. The ELD ping window of the invoice generator holds every truck-local day of
 // the week, wherever the truck was: each US zone's Saturday 00:00 and Friday
-// 23:59:59 fall inside [weekStartMs, weekEndMs).
-const windowLines = /const weekStartMs = Date\.parse\(weekStart \+ "T00:00:00Z"\);\n\t\tconst weekEndMs = [^\n]+/.exec(SRC);
+// 23:59:59 fall inside [weekStartMs, weekEndMs). (In invoiceWeekPaidDays() since
+// money plan D moved the week's days out of the handler; any indentation.)
+const windowLines = /const weekStartMs = Date\.parse\(weekStart \+ "T00:00:00Z"\);\n\t+const weekEndMs = [^\n]+/.exec(SRC);
 eq(!!windowLines, true, "the generator's ping window is two lines of calendar arithmetic");
 const pingWindow = (weekStart, computedWeekEnd) => new Function("weekStart", "computedWeekEnd",
 	`${windowLines[0]}\nreturn [weekStartMs, weekEndMs];`)(weekStart, computedWeekEnd);
