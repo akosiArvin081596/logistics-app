@@ -3279,6 +3279,48 @@ async function refreshAvailabilityLoadIndex() {
 	}
 }
 
+// The live Job Tracking loads a time-off save is checked against (R11b, behind
+// DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED; POST and PUT time off only), as
+// [{ loadId, shownId, driver, pickupKey, dropoffKey }]: cancelled and
+// soft-deleted loads left out (excludeDroppedLoads()), days read with
+// sheetDayKey() ("" when unreadable), a row with no Load ID left out (no
+// confirmation could name it). `shownId` is the Load ID as the session user may
+// see it: for every role but Super Admin (#525) the rows go through
+// sanitizeBrokerColumns(), the Job Board's own rule, and an id it leaves blank
+// (one holding only contact) reads "[contact withheld]"; the 409 lists that, the
+// echo is matched against it, and the confirmation records `loadId`. Every
+// driver's loads: the route picks his after its last await, by the directory
+// row it reads again then. From the cached sheet, read only: never written, the
+// cached rows never changed. null when the sheet could not be read (logged);
+// the save then goes through unchecked (lib/driver-availability.js
+// timeOffLoadsDecision()).
+async function driverLoadsForTimeOff(req) {
+	try {
+		const jt = await getJobTrackingCached();
+		const cols = jobTrackingMonthCols(jt.headers);
+		const live = excludeDroppedLoads(jt.data, jt.headers);
+		const withheld = req.session.user.role !== "Super Admin";
+		const shown = withheld ? sanitizeBrokerColumns(jt.headers, live) : live;
+		const out = [];
+		live.forEach((r, i) => {
+			const loadId = String((cols.loadIdCol ? r[cols.loadIdCol] : "") || "").trim();
+			if (!normLoadKey(loadId)) return;
+			const seen = withheld ? String((cols.loadIdCol ? shown[i][cols.loadIdCol] : "") || "").trim() || brokerContact.WITHHELD_TEXT : loadId;
+			out.push({
+				loadId,
+				shownId: seen,
+				driver: cols.driverCol ? String(r[cols.driverCol] || "") : "",
+				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
+				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
+			});
+		});
+		return out;
+	} catch (e) {
+		console.error("[availability] Job Tracking unreadable; time off saved without the loads check:", e.message);
+		return null;
+	}
+}
+
 // Every truck's current driver's time off, Map(truck id -> { driverName,
 // driverOffUntil, driverLastOffTo, driverReturningFromMs, driverConfirmedLoadToday }).
 // The truck's driver is its newest open assignment, else trucks.assigned_driver,
@@ -6477,6 +6519,16 @@ const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env
 // Loads banner. Off, the payload has no `timeOff` key and the app shows nothing;
 // the rest of R11 runs as before. GET /api/driver/me/availability is not behind it.
 const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_SCREEN_ENABLED ?? "").trim());
+// The time-off loads warning (R11b), default OFF (true/1/yes/on turns it on),
+// and only while DRIVER_AVAILABILITY_ENABLED is on (folded in here). On,
+// recording time off, or an edit reaching days the row did not cover, reads Job
+// Tracking (driverLoadsForTimeOff()) and answers 409 DRIVER_HAS_LOADS when the
+// new days cover loads he already has; "Save anyway" (the loads echoed as
+// `confirmLoads`) saves and records a confirmation per load, so his truck's
+// dark-ELD alert still fires while one covers today. Off, create and edit never
+// read Job Tracking, ignore `confirmLoads` and answer as before. It changes no
+// load and pays nothing.
+const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
@@ -10049,6 +10101,9 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // (`createLimits`): availabilityEditScope() / availabilityEditLimits() /
 // availabilityCreateLimits() restate the validator for the panel, and the
 // validator still decides every write. Rows are cancelled, never deleted.
+// Behind DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), a create, or an edit
+// reaching days the row did not cover, over loads he already has asks first
+// (409 DRIVER_HAS_LOADS) and "Save anyway" records a confirmation per load.
 // Nothing here reaches pay or money.
 
 // The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
@@ -10129,6 +10184,36 @@ function availabilityAttempt(body) {
 	return ["kind", "from", "to"].map((k) => `${k} ${auditText(b[k], 20) || "-"}`).join(", ");
 }
 
+// What a time-off save's audit line adds when Job Tracking could not be read
+// for the loads warning (R11b)
+const TIME_OFF_LOADS_UNCHECKED_NOTE = "; loads not checked (Job Tracking unreadable)";
+
+// R11b's "Save anyway": one driver_availability_confirmations row per load the
+// time off was saved over (`loads`, timeOffLoadsDecision()'s `confirm`), tied to
+// the time-off row and holding the load's window, and one audit line per load
+// naming the driver, his days, the load and its window (never the reason). It
+// runs inside the write's transaction, so the confirmations commit with the
+// time-off row or not at all; logAudit() swallows its own errors, so the audit
+// rows are best effort. The ELD sweep reads these rows as it reads an "Assign
+// anyway" (standingConfirmations()): while the load still has him, is live and
+// covers today, his truck alerts as normal. `via` is availability_create or
+// availability_update, with "_unchecked" when Job Tracking could not be read
+// and the echo was recorded as given.
+function recordTimeOffLoadConfirmations(req, { availabilityId, directoryId, driverName, kind, from, to, loads, via }) {
+	const user = (req.session && req.session.user) || {};
+	const insert = db.prepare(`
+		INSERT INTO driver_availability_confirmations
+			(availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by, confirmed_by_user_id, confirmed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`);
+	const at = new Date().toISOString();
+	for (const l of Array.isArray(loads) ? loads : []) {
+		insert.run(Number(availabilityId) || 0, Number(directoryId) || 0, l.loadId, l.from, l.to, via, String(user.username || ""), Number(user.id) || 0, at);
+		logAudit(req, "driver_availability_loads_confirmed", "load", auditText(l.loadId, 64),
+			`${driverName}: off ${from}..${to} (${kind}) saved over load ${auditText(l.loadId, 64)} (${l.from}..${l.to}); confirmed (${via})`);
+	}
+}
+
 // GET /api/drivers-directory/:id/availability — one driver's rows, newest first,
 // each with what the caller may change, and `createLimits` for a new row.
 app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
@@ -10153,8 +10238,15 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 // POST /api/drivers-directory/:id/availability — record a period off.
 // Body { kind, from, to, reason }. 400 INVALID_KIND / INVALID_REASON /
 // REASON_TOO_LONG / INVALID_DATE / RANGE_REVERSED / RANGE_TOO_LONG /
-// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP.
-app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP. With
+// DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), then 409 DRIVER_HAS_LOADS
+// when the days cover loads he already has (nothing written, not audited); the
+// same body with `confirmLoads`, the 409's loads echoed, saves and records a
+// confirmation per load (recordTimeOffLoadConfirmations()). Job Tracking
+// unreadable: saved unchecked, the answer saying `loadsUnchecked: true`. The
+// sheet read is the one await; the directory row is read again after it, in
+// the write's transaction (404 when it was deleted meanwhile).
+app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = Number(req.params.id);
 		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
@@ -10168,23 +10260,42 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
 		const { kind, from, to, reason } = v.value;
+		let jtLoads;
+		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+			jtLoads = await driverLoadsForTimeOff(req);
+		}
 		const outcome = db.transaction(() => {
+			// After the sheet read's await, the directory row as it is now (the
+			// validator reads only the body, today and the role, none of which moved)
+			const current = jtLoads === undefined ? dir : db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id);
+			if (!current) return { gone: true };
 			const clash = availabilityOverlap(id, 0, from, to);
-			if (clash) return { clash };
+			if (clash) return { clash, name: current.driver_name };
+			let loadsCheck = null;
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: current.driver_name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, todayKey: today });
+			}
+			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: current.driver_name, from, to, loads: loadsCheck.ask }) };
 			const info = db.prepare(`
 				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`).run(id, dir.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
-			logAudit(req, "driver_availability_create", "driver", String(id), `${dir.driver_name}: off ${from}..${to} (${kind})`);
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid) };
+			`).run(id, current.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+			logAudit(req, "driver_availability_create", "driver", String(id),
+				`${current.driver_name}: off ${from}..${to} (${kind})${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
+				recordTimeOffLoadConfirmations(req, { availabilityId: info.lastInsertRowid, directoryId: id, driverName: current.driver_name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_create_unchecked" : "availability_create" });
+			}
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid), unchecked: !!(loadsCheck && loadsCheck.unchecked) };
 		})();
+		if (outcome.gone) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
 		if (outcome.clash) {
 			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
-				`${dir.driver_name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
-			return res.status(409).json(availabilityOverlapBody(dir.driver_name, outcome.clash));
+				`${outcome.name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(outcome.name, outcome.clash));
 		}
+		if (outcome.asked) return res.status(409).json(outcome.asked);
 		notifyChange("drivers");
-		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user) });
+		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
 	} catch (err) {
 		console.error("[availability] create failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -10194,41 +10305,76 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 // PUT /api/driver-availability/:id — change a period (a partial body over the
 // stored row; "end early" is a new `to`). The create's codes, plus 409
 // AVAILABILITY_CANCELLED; 404 for an unknown id or a row whose driver is gone.
-app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// With DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), an edit reaching days
+// the row did not cover (an earlier first day or a later last day) reads Job
+// Tracking and answers 409 DRIVER_HAS_LOADS for the loads it newly covers, as
+// the create does; any other edit (the kind or reason only, an end-early, a
+// shrink) never reads it. After that read the stored row is read again and the
+// body merged over it and checked again, so the old days are the row as it is
+// now (404 / 409 AVAILABILITY_CANCELLED / 400 when it changed meanwhile).
+app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
 		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
 		const user = req.session.user;
 		const today = appTodayKey();
-		const name = row.directory_name;
-		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		const isSuperAdmin = user.role === "Super Admin";
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: row });
 		if (!v.ok) {
 			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
-				`${name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+				`${row.directory_name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
-		const { kind, from, to, reason } = v.value;
-		const reasonChanged = reason !== String(row.reason || "");
-		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && !reasonChanged;
+		let jtLoads;
+		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && (v.value.from < row.from_date || v.value.to > row.to_date)) {
+			jtLoads = await driverLoadsForTimeOff(req);
+		}
 		const outcome = db.transaction(() => {
-			const clash = availabilityOverlap(row.directory_id, row.id, from, to);
-			if (clash) return { clash };
+			// After the sheet read's await, the stored row as it is now, with the
+			// body merged over it and checked again
+			const cur = jtLoads === undefined ? row : availabilityRowWithDriver(row.id);
+			if (!cur) return { gone: true };
+			const checked = jtLoads === undefined ? v : driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: cur });
+			if (!checked.ok) return { refused: checked, cur };
+			const { kind, from, to, reason } = checked.value;
+			const name = cur.directory_name;
+			const reasonChanged = reason !== String(cur.reason || "");
+			const unchanged = kind === cur.kind && from === cur.from_date && to === cur.to_date && !reasonChanged;
+			const clash = availabilityOverlap(cur.directory_id, cur.id, from, to);
+			if (clash) return { clash, cur, from, to };
+			let loadsCheck = null;
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && jtLoads !== undefined) {
+				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, oldFrom: cur.from_date, oldTo: cur.to_date, todayKey: today });
+			}
+			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: name, from, to, loads: loadsCheck.ask }) };
 			if (!unchanged) {
 				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
-					.run(kind, from, to, reason, new Date().toISOString(), row.id);
-				// That the reason changed, never the reason itself (as the create line).
-				logAudit(req, "driver_availability_update", "driver", String(row.directory_id),
-					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}`);
+					.run(kind, from, to, reason, new Date().toISOString(), cur.id);
+				// That the reason changed, never the reason itself (as the create line)
+				logAudit(req, "driver_availability_update", "driver", String(cur.directory_id),
+					`${name}: off ${cur.from_date}..${cur.to_date} (${cur.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+				if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
+					recordTimeOffLoadConfirmations(req, { availabilityId: cur.id, directoryId: cur.directory_id, driverName: name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_update_unchecked" : "availability_update" });
+				}
 			}
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id) };
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), unchanged, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
 		})();
-		if (outcome.clash) {
-			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
-				`${name}: row ${row.id} to ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
-			return res.status(409).json(availabilityOverlapBody(name, outcome.clash));
+		if (outcome.gone) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		if (outcome.refused) {
+			const { cur, refused } = outcome;
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(cur.directory_id),
+				`${cur.directory_name}: row ${cur.id} (${cur.from_date}..${cur.to_date}): ${availabilityAttempt(req.body)} [${refused.code}]`, refused.code);
+			return res.status(refused.status).json({ error: refused.error, code: refused.code });
 		}
-		if (!unchanged) notifyChange("drivers");
-		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(unchanged ? { unchanged: true } : {}) });
+		if (outcome.clash) {
+			const { cur } = outcome;
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(cur.directory_id),
+				`${cur.directory_name}: row ${cur.id} to ${outcome.from}..${outcome.to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(cur.directory_name, outcome.clash));
+		}
+		if (outcome.asked) return res.status(409).json(outcome.asked);
+		if (!outcome.unchanged) notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchanged ? { unchanged: true } : {}), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
 	} catch (err) {
 		console.error("[availability] update failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });

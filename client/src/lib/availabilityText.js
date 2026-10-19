@@ -217,6 +217,39 @@ export function editFormFor(row, today) {
   return form
 }
 
+// ── Time off over loads he already has (R11b) ───────────────────────────────
+// With the server's DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED on, a create or an
+// edit that covers loads the driver already has answers 409 DRIVER_HAS_LOADS:
+// { error (the words), driver, from, to, loads: [{ loadId, from, to }] }, each
+// Load ID as the server shows this user (broker contact withheld for every role
+// but Super Admin). The server decides which loads warn. "Save anyway" re-sends
+// the same body with those loads echoed back as `confirmLoads`; if the list changed meanwhile
+// the server asks again with the new one. A save it could not check (Job
+// Tracking unreadable) answers `loadsUnchecked: true`.
+
+export const LOADS_UNCHECKED_NOTE = 'Loads couldn\'t be checked. Look at the Job Board for his loads.'
+
+// The 409 a time-off save gives over his loads, from a useApi() error.
+export function isDriverHasLoadsWarning(err) {
+  return !!err && err.status === 409 && err.code === 'DRIVER_HAS_LOADS'
+}
+
+// The "Save anyway" body: `body` as it was sent, plus `confirmLoads`, the
+// warning's loads as { loadId, from, to } (a later warning's list replaces an
+// earlier echo). Copied as the server sent them; nothing is worked out here.
+export function withLoadsConfirmed(body, warning) {
+  const loads = warning && Array.isArray(warning.loads) ? warning.loads : []
+  return {
+    ...(body || {}),
+    confirmLoads: loads.filter((l) => l && typeof l === 'object').map((l) => ({ loadId: l.loadId, from: l.from, to: l.to })),
+  }
+}
+
+// The note after a save the server could not check against his loads ("" otherwise).
+export function loadsUncheckedNote(reply) {
+  return reply && reply.loadsUnchecked === true ? LOADS_UNCHECKED_NOTE : ''
+}
+
 // ── The driver's own screen (R11 follow-up) ─────────────────────────────────
 // GET /api/driver/:driverName carries `timeOff: { today, rows }` only while the
 // server's DRIVER_TIME_OFF_SCREEN_ENABLED is on. He sees his current and
