@@ -10,9 +10,10 @@
 //   - the rate-con mailbox is read only with --mailbox (EXAMINE and BODY.PEEK,
 //     the app's GMAIL_USER / GMAIL_APP_PASSWORD from the app's .env), for check 3;
 //   - no email: the recipient (ADMIN_NOTIFY_EMAIL from the app's .env) is printed.
-// parseSheet(), deduplicateLoads() and EXPENSE_PERIOD_EXPR are lifted from this
-// checkout's server.js (scripts/lib/server-lift.js), so the checks read the sheet
-// and book receipts exactly as the server does.
+// parseSheet(), deduplicateLoads(), EXPENSE_PERIOD_EXPR and excludeDroppedLoads()
+// are lifted from this checkout's server.js (scripts/lib/server-lift.js), so the
+// checks read the sheet, book receipts and leave out cancelled loads exactly as
+// the server does.
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with):
 //   node scripts/integrity-check.js --print --db=app.db --sheet-id=<id> [--key=service-account-key.json] [--mailbox]
@@ -44,15 +45,23 @@ function refuse(message) {
 	process.exit(2);
 }
 
-// The server's own sheet reader, expense month rule and accounting-month rule,
-// from this checkout.
-function liftFromServer() {
+// The server's own sheet reader, expense month rule, accounting-month rule and
+// live-load rule (excludeDroppedLoads(), check 9), from this checkout. The
+// lifted code resolves `require` as server.js does. excludeDroppedLoads() asks
+// the server's own getDeletedLoadIds(), lifted on its own and handed this
+// script's read-only database handle: the one lifted function given the
+// database, which it only reads; nothing else lifted here can reach it.
+function liftFromServer(appRequire, db) {
 	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
+	const getDeletedLoadIds = new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db);
 	const lifted = closure(SRC, {
-		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths"],
+		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths", "excludeDroppedLoads"],
+		provided: ["getDeletedLoadIds"],
 		denied: ["db", "getSheets", "sheets", "sendEmail", "transporter", "app", "io", "server", "SPREADSHEET_ID"],
 	});
-	return new Function(`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths };`)();
+	return new Function("require", "getDeletedLoadIds",
+		`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths, excludeDroppedLoads };`)(appRequire, getDeletedLoadIds);
 }
 
 // Check 5's closed-month rule, read as the server reads it: the row's accounting
@@ -101,7 +110,7 @@ async function main() {
 	if (!db.readonly) throw new Error("refusing: the SQLite handle is not read-only");
 	db.pragma("busy_timeout = 10000");
 
-	const server = liftFromServer();
+	const server = liftFromServer(appRequire, db);
 	const sheetData = await sheetFor(args, ROOT);
 	const parsed = server.parseSheet(sheetData);
 	parsed.data = server.deduplicateLoads(parsed.data, parsed.headers);
@@ -158,6 +167,9 @@ async function main() {
 		log,
 		appZone: appTime.resolveAppTimeZone(env.APP_TIMEZONE, (m) => console.error(m)),
 		closedMonthsOf: closedMonthsRule(db, server.loadRowAccountingMonths),
+		// Check 9: cancelled and soft-deleted loads left out, as the server leaves
+		// them out.
+		liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers),
 		dayOnceFrom,
 		readFleetLedger,
 		dailyRateRuleFor,
