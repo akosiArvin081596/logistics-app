@@ -9,11 +9,12 @@
  * WHAT IS ASSERTED:
  *   §1 the check over one sheet: a live open-month load whose Truck cell
  *      matches no trucks row is raised; not raised: a Truck cell matching a
- *      truck across case and spacing, a blank Truck cell, a cancelled load and
- *      a soft-deleted one (server.js's excludeDroppedLoads(), lifted); a load in
- *      a closed month is never raised (counted for the log line only); one
- *      whose month can't be told is counted, not raised; the sheet object is
- *      never mutated
+ *      truck across case and edge spaces, a blank Truck cell, a cancelled load
+ *      and a soft-deleted one (server.js's excludeDroppedLoads(), lifted); a
+ *      load in a closed month is never raised (counted for the log line only);
+ *      one whose month can't be told is counted, not raised; a cell with a
+ *      space inside that the truck's number doesn't have is raised, as pay
+ *      can't resolve it either; the sheet object is never mutated
  *   §2 the email and the log line: the section, one line per load naming its
  *      Truck cell; the note for loads that can't be placed; the closed-month
  *      count in the log line and nowhere in the email
@@ -28,10 +29,11 @@
  *      the other checks still run
  *   §5 it only reads: the trucks, deleted loads and locks are byte-identical
  *      after every run
- *   §6 one rule, not a copy: truckUnitKey() answers as server.js's
- *      eldLinkUnitKey(); the Truck column is found with the pay paths' regex;
- *      server.js and scripts/integrity-check.js hand the run the closed-month
- *      rule and excludeDroppedLoads()
+ *   §6 one rule, not a copy: truckUnitKey() answers as the pay paths read a
+ *      Truck cell (server.js invoiceTruckVidReader()); the Truck column is
+ *      found with the pay paths' regex; server.js and scripts/integrity-check.js
+ *      hand the run the closed-month rule and excludeDroppedLoads(), the
+ *      script over the server's own getDeletedLoadIds()
  *
  * Hermetic: in-memory SQLite, made-up loads and trucks; no network.
  *   node scripts/test-integrity-truck-cell.js    # exits 1 on failure
@@ -67,17 +69,19 @@ const periodDef = SRC.match(/\nconst EXPENSE_PERIOD_EXPR =\s*("(?:[^"\\]|\\.)*")
 if (!periodDef) { console.error("FAILED: EXPENSE_PERIOD_EXPR not found in server.js"); process.exit(1); }
 const EXPENSE_PERIOD_EXPR = JSON.parse(periodDef[1]);
 
-// The server's own accounting-month rule and live-load rule. getDeletedLoadIds()
-// reads the app's database, so it is handed in over the test's own; `require`
-// resolves as it does in server.js (normalizeLoadId() is lib/ratecon-load.js's).
+// The server's own accounting-month rule and live-load rule. The server's own
+// getDeletedLoadIds() is lifted on its own over the test's database, as
+// scripts/integrity-check.js lifts it; `require` resolves as it does in
+// server.js (normalizeLoadId() is lib/ratecon-load.js's).
 const lifted = closure(SRC, {
 	roots: ["loadRowAccountingMonths", "excludeDroppedLoads"],
 	provided: ["getDeletedLoadIds"],
 	denied: ["db", "getSheets", "sheets", "sendEmail", "transporter", "app", "io", "server", "SPREADSHEET_ID"],
 });
+const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
 const serverRequire = createRequire(path.join(ROOT, "server.js"));
 const serverFor = (db) => new Function("getDeletedLoadIds", "require", `"use strict";\n${lifted.text}\nreturn { loadRowAccountingMonths, excludeDroppedLoads };`)(
-	() => new Set(db.prepare("SELECT load_id FROM deleted_loads").all().map((r) => String(r.load_id || "").trim().toLowerCase())), serverRequire);
+	new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db), serverRequire);
 
 // The closed-month rule as server.js's integrityClosedMonthsOf() reads it.
 function closedMonthsOf(db, server) {
@@ -116,7 +120,7 @@ function sheet(rows, headers = HEADERS) {
 }
 const ROWS = [
 	{ id: "LX-1001", truck: "LogisX-#X" },                                  // raised: names no truck
-	{ id: "LX-1002", truck: " logisx   #456 " },                             // a truck, across case and spacing
+	{ id: "LX-1002", truck: " logisx #456 " },                               // a truck, across case and edge spaces
 	{ id: "LX-1003", truck: "Old-Unit-7", assigned: "09/10/2026 8:00:00" },  // closed September: never raised
 	{ id: "LX-1004", truck: "Ghost-1", status: "Cancelled" },                // cancelled
 	{ id: "#LX-1005", truck: "Ghost-2" },                                    // soft-deleted (stored as "lx-1005")
@@ -186,8 +190,16 @@ const snapshot = (db) => JSON.stringify(["trucks", "deleted_loads", "period_lock
 	const ids = r.loads.map((l) => l.id);
 	ok("§1 raised: the two open-month loads whose Truck cell names no truck", ids.join() === "LX-1001,LX-1009", r);
 	ok("§1 each carries its Truck cell as written and its key", r.loads[0] && r.loads[0].truck === "LogisX-#X" && r.loads[1] && r.loads[1].truck === "Mystery-9" && r.loads[1].truckKey === "mystery-9", r.loads);
-	ok("§1 not raised: a truck matched across case and spacing, a blank cell, a cancelled load, a soft-deleted load, a known truck",
+	ok("§1 not raised: a truck matched across case and edge spaces, a blank cell, a cancelled load, a soft-deleted load, a known truck",
 		!["LX-1002", "LX-1004", "#LX-1005", "LX-1006", "LX-1007"].some((id) => ids.includes(id)));
+	{
+		// A space inside the cell that the truck's number doesn't have: the pay
+		// paths (trimmed, case aside) can't resolve it to LogisX #456, so it is named.
+		const spaced = sheet([{ id: "LX-3001", truck: "LogisX  #456" }, { id: "LX-3002", truck: "  LOGISX #456  " }]);
+		const s = ic.unknownTruckLoads(db, spaced, { closedMonthsOf: closedMonthsOf(db, server), liveLoadRows: (x) => server.excludeDroppedLoads(x.data, x.headers) });
+		ok("§1 a cell with a space inside the truck's number doesn't have is raised; the same number in another case with edge spaces is not",
+			s.loads.map((l) => `${l.id}:${l.truckKey}`).join() === "LX-3001:logisx  #456", s.loads);
+	}
 	ok("§1 the closed-month load is never raised, only counted", !ids.includes("LX-1003") && r.closed === 1, r);
 	ok("§1 the load whose month can't be told is counted, not raised", !ids.includes("LX-1008") && r.unknownMonth === 1, r);
 	ok("§1 nothing reported earlier, nothing skipped", r.reportedOpen === 0 && r.skipped === "", r);
@@ -279,14 +291,20 @@ const snapshot = (db) => JSON.stringify(["trucks", "deleted_loads", "period_lock
 		!/\b(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+(trucks|deleted_loads|period_locks)\b/i.test(lib));
 
 	console.log("§6 one rule, not a copy");
-	const keySrc = SRC.match(/\nfunction eldLinkUnitKey\(v\) \{\n([\s\S]*?)\n\}/);
-	ok("§6 server.js's eldLinkUnitKey() found", !!keySrc);
-	if (keySrc) {
-		const serverKey = new Function("v", keySrc[1]);
-		const samples = ["LogisX-#41", "  logisx   #456 ", "LogisX\t#456", "", null, 456, "x"];
-		ok("§6 truckUnitKey() answers as server.js's eldLinkUnitKey() on every sample",
-			samples.every((s) => ic.truckUnitKey(s) === serverKey(s)), samples.map((s) => [ic.truckUnitKey(s), serverKey(s)]));
+	// The pay paths' own read of a Truck cell, taken from server.js's
+	// invoiceTruckVidReader() (the weekly invoice reads the cell the same way).
+	const readerAt = SRC.indexOf("\nfunction invoiceTruckVidReader(headers) {");
+	const readerSrc = readerAt < 0 ? "" : SRC.slice(readerAt, SRC.indexOf("\n}\n", readerAt + 1));
+	const payRead = readerSrc.match(/const unit = truckCol \? (String\(row\[truckCol\] \|\| ""\)\.trim\(\)\.toLowerCase\(\)) : "";/);
+	ok("§6 the pay paths' read of a Truck cell found in invoiceTruckVidReader()", !!payRead, readerSrc.slice(0, 200));
+	if (payRead) {
+		const payKey = new Function("row", "truckCol", `return ${payRead[1]};`);
+		const samples = ["LogisX-#41", "  logisx #456 ", "LogisX  #456", "LogisX\t#456", "", "x"];
+		ok("§6 truckUnitKey() answers as the pay paths read a Truck cell on every sample",
+			samples.every((s) => ic.truckUnitKey(s) === payKey({ Truck: s }, "Truck")), samples.map((s) => [ic.truckUnitKey(s), payKey({ Truck: s }, "Truck")]));
 	}
+	ok("§6 the weekly invoice reads the Truck cell the same way",
+		/const truckUnit = truckCol \? \(load\[truckCol\] \|\| ""\)\.trim\(\)\.toLowerCase\(\) : "";/.test(SRC));
 	const colRe = SRC.match(/\nconst ELD_LINK_TRUCK_COL_RE = (\/[^\n]*\/i);\n/);
 	ok("§6 the check finds the Truck column with the pay paths' regex", !!colRe && ic.TRUCK_COL_RE.source === new Function(`return ${colRe[1]};`)().source && ic.TRUCK_COL_RE.flags === "i",
 		colRe && colRe[1]);
@@ -294,7 +312,9 @@ const snapshot = (db) => JSON.stringify(["trucks", "deleted_loads", "period_lock
 		SRC.includes("liveLoadRows: (sheet) => excludeDroppedLoads(sheet.data, sheet.headers),"));
 	const cli = fs.readFileSync(path.join(ROOT, "scripts", "integrity-check.js"), "utf8");
 	ok("§6 scripts/integrity-check.js hands it the server's excludeDroppedLoads() too",
-		cli.includes("liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers, deletedLoadIds),"));
+		cli.includes("liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers),"));
+	ok("§6 ...over the server's own getDeletedLoadIds(), with no read of the deleted loads of its own",
+		cli.includes('closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] })') && !/deleted_loads/.test(cli));
 })().then(() => {
 	if (failures.length) {
 		console.error(`\n${passed} passed, ${failures.length} failed`);

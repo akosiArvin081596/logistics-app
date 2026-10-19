@@ -33931,7 +33931,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
-		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg), plus one
+		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg, _unit_number,
+		// _vin), plus one
 		// update_truck_costs line per save that names every cost it changed; a
 		// refusal has no such split because the whole edit is refused as one, so the
 		// single row has to name every field that moved and what it would have
@@ -63224,11 +63225,14 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 // approved receipt on no invoice for more than 7 days, among its other checks
 // (an open-month load whose Truck cell names no truck, for one), by one email to
 // ADMIN_NOTIFY_EMAIL (none when it is unset) and one log line. It writes only its
-// own two tables, integrity_check_loads and integrity_check_receipts (the receipts
-// it named, so each is named once); never the sheet, an invoice, a payout or any
-// other row. A KILL SWITCH that defaults ON (the !/^(false|0|no|off)$/i shape): it
-// moves no money. A replica starts no job (startsJob()). scripts/integrity-check.js
-// --print runs the same checks by hand, read-only.
+// own integrity_check_* tables: integrity_check_loads (the values it last saw) and,
+// for each check that names a finding once, the list of what it named (the
+// receipts, invoiced Payments, given-up re-issue alerts, day-once driver-days,
+// invoice daily rates and unknown Truck cells); never the sheet, an invoice, a
+// payout or any other row. A KILL SWITCH that defaults ON (the
+// !/^(false|0|no|off)$/i shape): it moves no money. A replica starts no job
+// (startsJob()). scripts/integrity-check.js --print runs the same checks by
+// hand, read-only.
 const INTEGRITY_CHECK_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.INTEGRITY_CHECK_ENABLED ?? "").trim());
 const integrityCheck = require("./lib/integrity-check");
 // Check 5's closed-month rule: the months loadRowAccountingMonths() books a Job

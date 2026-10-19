@@ -47,11 +47,14 @@ function refuse(message) {
 
 // The server's own sheet reader, expense month rule, accounting-month rule and
 // live-load rule (excludeDroppedLoads(), check 9), from this checkout. The
-// lifted code resolves `require` as server.js does; the server's
-// getDeletedLoadIds() reads its own database handle, so the caller hands in a
-// reader over this script's read-only one.
-function liftFromServer(appRequire, getDeletedLoadIds) {
+// lifted code resolves `require` as server.js does. excludeDroppedLoads() asks
+// the server's own getDeletedLoadIds(), lifted on its own and handed this
+// script's read-only database handle: the one lifted function given the
+// database, which it only reads; nothing else lifted here can reach it.
+function liftFromServer(appRequire, db) {
 	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
+	const getDeletedLoadIds = new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db);
 	const lifted = closure(SRC, {
 		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths", "excludeDroppedLoads"],
 		provided: ["getDeletedLoadIds"],
@@ -59,16 +62,6 @@ function liftFromServer(appRequire, getDeletedLoadIds) {
 	});
 	return new Function("require", "getDeletedLoadIds",
 		`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths, excludeDroppedLoads };`)(appRequire, getDeletedLoadIds);
-}
-
-// The soft-deleted load ids, read as the server's getDeletedLoadIds() reads
-// them; a database without the table has none.
-function deletedLoadIdsOf(db) {
-	try {
-		return new Set(db.prepare("SELECT load_id FROM deleted_loads").all().map((r) => (r.load_id || "").toString().trim().toLowerCase()));
-	} catch {
-		return new Set();
-	}
 }
 
 // Check 5's closed-month rule, read as the server reads it: the row's accounting
@@ -117,8 +110,7 @@ async function main() {
 	if (!db.readonly) throw new Error("refusing: the SQLite handle is not read-only");
 	db.pragma("busy_timeout = 10000");
 
-	const deletedLoadIds = deletedLoadIdsOf(db);
-	const server = liftFromServer(appRequire, () => deletedLoadIds);
+	const server = liftFromServer(appRequire, db);
 	const sheetData = await sheetFor(args, ROOT);
 	const parsed = server.parseSheet(sheetData);
 	parsed.data = server.deduplicateLoads(parsed.data, parsed.headers);
@@ -177,7 +169,7 @@ async function main() {
 		closedMonthsOf: closedMonthsRule(db, server.loadRowAccountingMonths),
 		// Check 9: cancelled and soft-deleted loads left out, as the server leaves
 		// them out.
-		liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers, deletedLoadIds),
+		liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers),
 		dayOnceFrom,
 		readFleetLedger,
 		dailyRateRuleFor,
