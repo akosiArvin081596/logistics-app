@@ -90,6 +90,10 @@ const MUST_AUDIT = {
 	purchase_price: "the investor report's asset value and depreciation for the truck",
 	maintenance_fund_monthly: "the maintenance reserve the investor report shows",
 	admin_fee_pct: "a term of the investor's deal on the truck",
+	// A truck's identity: the number a load's Truck cell is matched against, and
+	// the VIN that says which physical truck it is. A rename left no trail.
+	unit_number: "the number every load's Truck cell is matched against",
+	vin: "which physical truck the row is",
 };
 
 // The eight audited together on one `update_truck_costs` line.
@@ -100,7 +104,7 @@ const COST_AUDITED = [
 
 // Descriptive only: wrong values here are visible and harmless.
 const COSMETIC = new Set([
-	"unit_number", "make", "model", "year", "vin", "license_plate", "notes", "photo",
+	"make", "model", "year", "license_plate", "notes", "photo",
 	"title_status", "assigned_driver", "routemate_vehicle_id",
 ]);
 

@@ -259,6 +259,7 @@ import {
   milesText,
 } from '../../lib/fuelReview'
 import { priceText, cheapestIndex } from '../../lib/fuelStops'
+import { formatAgeMs } from '../../lib/duration'
 
 const api = useApi()
 
@@ -406,13 +407,13 @@ const noFuelReason = computed(() => {
   }
   return 'No fuel level reported by this truck’s ELD.'
 })
+// The reading's age by the helper the position's "Last seen" uses
+// (lib/duration.js formatAgeMs(), through lib/fixAge.js): when the fuel level
+// rides on the truck's last fix, both cards name one age, never "3 d" beside
+// "4 d" for the same fix.
 function agoText(mins) {
-  const m = Number(mins)
-  if (!Number.isFinite(m)) return ''
-  if (m < 90) return `${Math.round(m)} min ago`
-  const h = m / 60
-  if (h < 48) return `${Math.round(h)} h ago`
-  return `${Math.round(h / 24)} d ago`
+  const age = formatAgeMs(Number(mins) * 60000)
+  return age ? `${age} ago` : ''
 }
 const noPlanReason = computed(() => {
   if (!props.loadId) return 'Select a load to check its route against the tank.'

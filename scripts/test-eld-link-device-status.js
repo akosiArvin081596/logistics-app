@@ -33,6 +33,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 const eldFeedHealth = require("../lib/eld-feed-health");
+const eldPosition = require("../lib/eld-position");
 const alertChannels = require("../lib/alert-channels");
 
 const src = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
@@ -483,14 +484,16 @@ function routeWorld(db, verb, route, deps = {}) {
 			VALUES (?,?,?,?,?,?,?)`);
 		tel.run(LINXUP_LIVE, 29.9, -95.5, 0, "", NOW - 5 * 60 * 1000, "linxup");
 		tel.run(ODD_SOURCE, 29.6, -95.2, 0, "", NOW - 5 * 60 * 1000, "samsara");
-		const lifted = build(null, [
+		// The link-time read (B11) runs as shipped, over this world's link history.
+		const lifted = build(db, [
 			extractConst("MOVEMENT_MOVING_MPS"), extractConst("MOVEMENT_ACTIVE_MS"),
 			extractFunction("classifyMovement"), extractFunction("parseRoutemateBearing"),
-		], { expose: ["classifyMovement", "parseRoutemateBearing"] });
+			extractFunction("eldDeviceLinkedSinceMs"),
+		], { expose: ["classifyMovement", "parseRoutemateBearing", "eldDeviceLinkedSinceMs"], deps: { eldPosition } });
 		const route = ["/api/driver/position", "/api/driver/me/position"];
 		const sourceFor = async (vid) => {
 			const get = routeWorld(db, "get", route, {
-				...lifted, geolib: require("geolib"), driverPositionLimiter: null,
+				...lifted, eldPosition, geolib: require("geolib"), driverPositionLimiter: null,
 				resolveTruckForDriverName: () => ({ unit: "LogisX-#21", routemate_vehicle_id: vid }),
 			});
 			const res = await get({ session: { user: { role: "Driver", driverName: "Test Driver" } } });
