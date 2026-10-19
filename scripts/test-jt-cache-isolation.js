@@ -204,6 +204,8 @@ const MUTATORS = "sort|reverse|splice|push|pop|shift|unshift|fill|copyWithin";
 // Underscore writes that are NOT on Job Tracking rows, each with the reason.
 const ANNOTATION_ALLOW = [
 	{ fn: "routemateSyncTelemetry", write: "t._droppedReason =", why: "t is a telemetry fix being filtered, not a sheet row" },
+	{ fn: "routemateSyncTelemetry", write: "t._fixMs =", why: "t is a telemetry fix (its stored time), not a sheet row" },
+	{ fn: "routemateSyncTelemetry", write: "t._beforeLink =", why: "t is a telemetry fix being filtered (B11 link rule), not a sheet row" },
 ];
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

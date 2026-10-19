@@ -233,9 +233,12 @@ if (RouteMap) {
   ok('§2 without the prop (job board, completed before, driver app): no planned route, no drive time', !/Planned route|drive time/.test(none))
   const pub = await ssr(RouteMap, { load: mapLoad('In Transit'), headers: MAP_HEADERS, driverPosition: null, publicMode: true, dispatchMode: true, plannedLane: LANE, presetRoute: { route: LANE.route, distanceMiles: 812.44, etaMinutes: 750 } })
   ok('§2 publicMode ignores a planned lane even if one were passed', !/Planned route|drive time/.test(pub))
+  // "No live position" is no pin, or a pin whose fix is over 2 hours old (B11,
+  // scripts/test-stale-fix-route.mjs).
   ok('§2 the prop defaults to null and every new branch reads usePlannedLane',
     /plannedLane: \{ type: Object, default: null \}/.test(ROUTE_MAP) &&
-    /const usePlannedLane = computed\(\(\) => !props\.publicMode && !!props\.plannedLane && !driverLatLng\.value\)/.test(ROUTE_MAP))
+    /const usePlannedLane = computed\(\(\) => !props\.publicMode && !!props\.plannedLane && !pinIsLive\.value\)/.test(ROUTE_MAP) &&
+    /const pinIsLive = computed\(\(\) => pinLiveFor\(driverLatLng\.value, fixTooOld\.value\)\)/.test(ROUTE_MAP))
   // Live mode, mounted: the map script and /api/route answer, as in
   // production. The ETA chip is there, as it was on main.
   {
