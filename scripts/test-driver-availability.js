@@ -44,6 +44,24 @@
 //       his own current and upcoming rows, as /api/driver/me/availability
 //       answers them
 //
+// R11b (the user, 2026-10-16), with DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED on:
+// recording time off, or moving or extending it, over loads he already has
+// warns; "Save anyway" echoes the listed loads and records a confirmation per
+// load, so his truck's dark-ELD alert still fires while one covers today; loads
+// with no readable day are skipped. Record-only: it pays nothing.
+//   §8  create: 409 DRIVER_HAS_LOADS listing his live loads inside the dates,
+//       nothing written; the echo (confirmLoads) and nothing else confirms; an
+//       echo missing a load added or moved since is asked again; no warning for
+//       a past, cancelled, soft-deleted, undated or other driver's load; the
+//       sheet unreadable saves unchecked (an echo recorded as given); the
+//       overlap check first; the directory row re-read after the sheet read
+//   §9  edit: only an edit that adds days reads the sheet; only loads newly
+//       covered warn; the stored row re-read after the sheet read (cancelled,
+//       moved or its driver deleted meanwhile)
+//   §10 the sweep: after "Save anyway" his dark truck alerts while the load
+//       covers today; an unchecked confirmation whose load was since
+//       reassigned no longer counts
+//
 // Everything runs through scripts/lib/availability-world.js: the shipped routes
 // and sweep lifted out of server.js on an in-memory SQLite, over HTTP.
 // Run: node scripts/test-driver-availability.js
@@ -397,6 +415,224 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		await w.sweep();
 		const row = w.db.prepare("SELECT * FROM eld_feed_alerts WHERE alert_key = ?").get(`vid:${W.VID.t91}`);
 		ok("§7.13 a row whose directory row is gone (same name) pauses nothing: #91 alerts", !!row && !row.resolved_at && !!row.alerted_at);
+	});
+
+	// ── R11b ────────────────────────────────────────────────────────────────────
+	// W.hisLoadsRows(), with load 7503 soft-deleted as the fixture says.
+	const startR11b = async (opts = {}) => {
+		const w = await W.startWorld({ loadsWarning: true, rows: W.hisLoadsRows(), ...opts });
+		w.db.prepare("INSERT INTO deleted_loads (load_id, deleted_by) VALUES ('7503', 'super_admin')").run();
+		return w;
+	};
+	const confirmsOf = (w) => w.db.prepare("SELECT availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by FROM driver_availability_confirmations ORDER BY id").all();
+	const listed = (r) => (r.body && Array.isArray(r.body.loads) ? r.body.loads.map((l) => [l.loadId, l.from, l.to]) : null);
+	const echoOf = (r) => (r.body && Array.isArray(r.body.loads) ? r.body.loads.map((l) => ({ loadId: l.loadId, from: l.from, to: l.to })) : []);
+	const auditCount = (w) => w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n;
+	const lastAudit = (w, action) => { const a = w.audits(action); return a.length ? a[a.length - 1].details : ""; };
+	const jtRowOf = (w, loadId) => w.sheet.tabs["Job Tracking"].find((r) => r[W.COL["Load ID"]] === loadId);
+	const ASKED = [409, "DRIVER_HAS_LOADS"];
+
+	section("§8 R11b: recording time off over loads he already has");
+	await R.guard("§8", async () => {
+		const w = await startR11b();
+		// Broker and customer cells on his load, to show none reaches the answer.
+		const r7001 = jtRowOf(w, "7001");
+		r7001[W.COL["Broker Contact Name"]] = "Pat Brokerly";
+		r7001[W.COL["Phone Number"]] = "555-0142";
+		r7001[W.COL.Email] = "pat@broker.example";
+		r7001[W.COL["Pickup Address"]] = "100 Shipper Way, Dallas, TX";
+		r7001[W.COL["Drop-off Address"]] = "200 Receiver Rd, Tulsa, OK";
+		for (const [label, from, to] of [
+			["a past load (7004, Oct 1-3)", "2026-10-01", "2026-10-03"],
+			["a load that ended yesterday (7506, Oct 12-14)", "2026-10-12", "2026-10-14"],
+			["an undated load (7504, \"TBD\" both), today", "2026-10-15", "2026-10-15"],
+			["another driver's load (7002, Soren, Oct 16-17)", "2026-10-16", "2026-10-17"],
+			["dates that miss his loads (Oct 23-25)", "2026-10-23", "2026-10-25"],
+			["a cancelled load (7502, Oct 28)", "2026-10-28", "2026-10-28"],
+			["a soft-deleted load (7503, Oct 29)", "2026-10-29", "2026-10-29"],
+		]) {
+			const reads = w.jt.reads;
+			const r = await create(w, DIR.hollis, vacation(from, to));
+			eq(`§8.1 ${label}: 201 with no warning, Job Tracking read`, [r.status, w.jt.reads > reads, !!r.body && "loadsUnchecked" in r.body], [201, true, false]);
+		}
+		eq("§8.2 ...no confirmation recorded", confirmsOf(w).length, 0);
+
+		const before = count(w);
+		const auditsBefore = auditCount(w);
+		const asked = await create(w, DIR.hollis, vacation("2026-10-20", "2026-10-21"));
+		eq("§8.3 Oct 20-21 over his load 7001 (Oct 20-22): 409 DRIVER_HAS_LOADS listing it", [code(asked), listed(asked)], [ASKED, [["7001", "2026-10-20", "2026-10-22"]]]);
+		eq("§8.4 ...naming the driver, the dates asked for and the load's truck",
+			asked.body && [asked.body.driver, asked.body.from, asked.body.to, asked.body.loads && asked.body.loads[0].truck], ["Hollis Renner", "2026-10-20", "2026-10-21", "LogisX-#91"]);
+		eq("§8.5 ...in words", asked.body && asked.body.error, "Hollis Renner has load 7001 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.");
+		eq("§8.6 ...the body holds only error, code, driver, from, to and loads; each load only loadId, from, to and truck",
+			asked.body && Array.isArray(asked.body.loads) ? [Object.keys(asked.body).sort(), asked.body.loads.map((l) => Object.keys(l).sort())] : null,
+			[["code", "driver", "error", "from", "loads", "to"], [["from", "loadId", "to", "truck"]]]);
+		ok("§8.7 ...and no broker or customer data", !/Brokerly|555-0142|broker\.example|Shipper Way|Receiver Rd/.test(asked.text), asked.text);
+		eq("§8.8 ...nothing written, nothing audited", [count(w) - before, auditCount(w) - auditsBefore], [0, 0]);
+
+		for (const [label, confirmLoads] of [
+			["true", true],
+			["an object, not a list", { loadId: "7001", from: "2026-10-20", to: "2026-10-22" }],
+			["an entry without its last day", [{ loadId: "7001", from: "2026-10-20" }]],
+			["a day not written YYYY-MM-DD", [{ loadId: "7001", from: "10/20/2026", to: "2026-10-22" }]],
+			["a load id of 65 characters", [{ loadId: "7".repeat(65), from: "2026-10-20", to: "2026-10-22" }]],
+			["a load id that is a number", [{ loadId: 7001, from: "2026-10-20", to: "2026-10-22" }]],
+			["51 entries, the right one among them", [...Array.from({ length: 50 }, (_, i) => ({ loadId: `X${i}`, from: "2026-10-20", to: "2026-10-20" })), { loadId: "7001", from: "2026-10-20", to: "2026-10-22" }]],
+		]) eq(`§8.9 confirmLoads ${label}: no confirmation, 409 again`, code(await create(w, DIR.hollis, { ...vacation("2026-10-20", "2026-10-21"), confirmLoads })), ASKED);
+		eq("§8.10 ...still nothing written", count(w) - before, 0);
+
+		const saved = await create(w, DIR.hollis, { ...vacation("2026-10-20", "2026-10-21"), confirmLoads: echoOf(asked) });
+		eq("§8.11 \"Save anyway\", the listed loads echoed: 201, no loadsUnchecked", [saved.status, !!saved.body && "loadsUnchecked" in saved.body], [201, false]);
+		eq("§8.12 ...one confirmation, for the load's window, tied to the new row", confirmsOf(w),
+			[{ availability_id: rowId(saved), directory_id: DIR.hollis, load_id: "7001", load_from: "2026-10-20", load_to: "2026-10-22", via: "availability_create", confirmed_by: "super_admin" }]);
+		const confirmedAudit = w.audits("driver_availability_loads_confirmed");
+		eq("§8.13 ...one driver_availability_loads_confirmed audit row, entity load, id the load", confirmedAudit.map((a) => [a.entity, a.entity_id]), [["load", "7001"]]);
+		ok("§8.14 ...naming the driver, his dates, the load's window and the route, never the reason",
+			!!confirmedAudit[0] && /Hollis Renner/.test(confirmedAudit[0].details) && /2026-10-20\.\.2026-10-21/.test(confirmedAudit[0].details)
+				&& /2026-10-20\.\.2026-10-22/.test(confirmedAudit[0].details) && /availability_create/.test(confirmedAudit[0].details) && !/Family/.test(confirmedAudit[0].details),
+			confirmedAudit[0] && confirmedAudit[0].details);
+		eq("§8.15 ...the create audit line as before", lastAudit(w, "driver_availability_create"), "Hollis Renner: off 2026-10-20..2026-10-21 (vacation)");
+
+		const variant = await create(w, DIR.hollis, vacation("2026-11-03", "2026-11-04"));
+		eq("§8.16 his name in other spacing and case on load 7505 (Nov 3-4): still warns", [code(variant), listed(variant)], [ASKED, [["7505", "2026-11-03", "2026-11-04"]]]);
+
+		const first = await create(w, DIR.hollis, vacation("2026-10-26", "2026-10-27"));
+		eq("§8.17 Oct 26-27 over 7501: 409 listing it", listed(first), [["7501", "2026-10-26", "2026-10-27"]]);
+		w.sheet.tabs["Job Tracking"].push(W.jtRow({ id: "7507", driver: "Hollis Renner", pickup: "10/27/2026 06:00", dropoff: "10/27/2026 20:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }));
+		const again = await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-27"), confirmLoads: echoOf(first) });
+		eq("§8.18 a load added since (7507, Oct 27), the echo naming only 7501: 409 again listing both", [code(again), listed(again)],
+			[ASKED, [["7501", "2026-10-26", "2026-10-27"], ["7507", "2026-10-27", "2026-10-27"]]]);
+		jtRowOf(w, "7501")[W.COL["Drop-off Appointment"]] = "10/28/2026 12:00";
+		const moved = await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-27"), confirmLoads: echoOf(again) });
+		eq("§8.19 7501's drop-off moved to Oct 28 since: 409 again with its new window", [code(moved), listed(moved)],
+			[ASKED, [["7501", "2026-10-26", "2026-10-28"], ["7507", "2026-10-27", "2026-10-27"]]]);
+		eq("§8.20 ...the words name both", moved.body && moved.body.error,
+			"Hollis Renner has 2 loads inside these dates: 7501 (Oct 26 – Oct 28), 7507 (Oct 27). Save anyway? The loads stay assigned to him.");
+		eq("§8.21 ...none of the refused saves wrote a row (the one row since is the Oct 20-21 save)", count(w) - before, 1);
+		const done = await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-27"), confirmLoads: [...echoOf(moved), { loadId: "9999", from: "2026-10-26", to: "2026-10-26" }] });
+		eq("§8.22 echoed in full, plus a load no longer listed (9999): 201, confirmations for the two listed only",
+			[done.status, confirmsOf(w).filter((c) => c.availability_id === rowId(done)).map((c) => [c.load_id, c.load_from, c.load_to])],
+			[201, [["7501", "2026-10-26", "2026-10-28"], ["7507", "2026-10-27", "2026-10-27"]]]);
+
+		eq("§8.23 over his Oct 20-21 row and load 7001 at once: 409 AVAILABILITY_OVERLAP first", code(await create(w, DIR.hollis, vacation("2026-10-21", "2026-10-22"))), [409, "AVAILABILITY_OVERLAP"]);
+
+		const sAsk = await create(w, DIR.soren, vacation("2026-10-16", "2026-10-16"), USERS.disp);
+		eq("§8.24 a Dispatcher records Soren off Oct 16, over his load 7002 (Oct 16-17): 409", [code(sAsk), listed(sAsk)], [ASKED, [["7002", "2026-10-16", "2026-10-17"]]]);
+		const sDone = await create(w, DIR.soren, { ...vacation("2026-10-16", "2026-10-16"), confirmLoads: echoOf(sAsk) }, USERS.disp);
+		eq("§8.25 ...his \"Save anyway\": 201, confirmed by him", [sDone.status, confirmsOf(w).filter((c) => c.availability_id === rowId(sDone)).map((c) => [c.load_id, c.confirmed_by])],
+			[201, [["7002", "dispatch_t"]]]);
+	});
+	await R.guard("§8b", async () => {
+		const w = await startR11b();
+		w.jt.fail = true;
+		const logsBefore = w.logs.length;
+		const r = await create(w, DIR.hollis, vacation("2026-10-20", "2026-10-21"));
+		eq("§8.26 Job Tracking unreadable, Oct 20-21 over load 7001: 201 with loadsUnchecked, nothing confirmed",
+			[r.status, r.body && r.body.loadsUnchecked, confirmsOf(w).length], [201, true, 0]);
+		eq("§8.27 ...the create audit says the loads were not checked", lastAudit(w, "driver_availability_create"),
+			"Hollis Renner: off 2026-10-20..2026-10-21 (vacation); loads not checked (Job Tracking unreadable)");
+		ok("§8.28 ...and the failed read is logged", w.logs.slice(logsBefore).some((l) => /Job Tracking unreadable/.test(l)), w.logs.slice(logsBefore).join(" | "));
+		const e = await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-27"), confirmLoads: [
+			{ loadId: "7501", from: "2026-10-26", to: "2026-10-27" },
+			{ loadId: "7001", from: "2026-10-20", to: "2026-10-22" },
+		] });
+		eq("§8.29 unreadable, with an echo: 201 loadsUnchecked; the echoed load inside the dates recorded as given, \"_unchecked\"; the one outside them not",
+			[e.status, e.body && e.body.loadsUnchecked, confirmsOf(w).map((c) => [c.load_id, c.load_from, c.load_to, c.via])],
+			[201, true, [["7501", "2026-10-26", "2026-10-27", "availability_create_unchecked"]]]);
+		eq("§8.30 ...with its audit row", w.audits("driver_availability_loads_confirmed").map((a) => a.entity_id), ["7501"]);
+		w.jt.fail = false;
+		w.jt.during = () => w.db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(DIR.soren);
+		const gone = await create(w, DIR.soren, vacation("2026-11-01", "2026-11-02"));
+		eq("§8.31 the directory row deleted while the sheet was read: 404 DRIVER_NOT_FOUND, nothing written",
+			[code(gone), w.db.prepare("SELECT COUNT(*) AS n FROM driver_availability WHERE directory_id = ?").get(DIR.soren).n], [[404, "DRIVER_NOT_FOUND"], 0]);
+	});
+
+	section("§9 R11b: moving or extending time off onto loads he already has");
+	await R.guard("§9", async () => {
+		const w = await startR11b();
+		const a = rowId(await create(w, DIR.hollis, vacation("2026-10-16", "2026-10-18")));
+		ok("§9.0 a row over none of his loads (Oct 16-18)", !!a);
+		const snap = () => JSON.stringify(stored(w, a));
+		const aBefore = snap();
+		const onto = await edit(w, a, { from: "2026-10-20", to: "2026-10-21" });
+		eq("§9.1 moved onto load 7001 (to Oct 20-21): 409 DRIVER_HAS_LOADS listing it", [code(onto), listed(onto)], [ASKED, [["7001", "2026-10-20", "2026-10-22"]]]);
+		const ext = await edit(w, a, { to: "2026-10-20" });
+		eq("§9.2 extended over it (to Oct 20): 409 listing it", [code(ext), listed(ext)], [ASKED, [["7001", "2026-10-20", "2026-10-22"]]]);
+		eq("§9.3 ...the row unchanged, no update audited", [snap() === aBefore, w.audits("driver_availability_update").length], [true, 0]);
+
+		const askB = await create(w, DIR.hollis, vacation("2026-10-26", "2026-10-31"));
+		const b = rowId(await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-31"), confirmLoads: echoOf(askB) }));
+		ok("§9.4 a row over load 7501, saved anyway (Oct 26-31)", !!b);
+		for (const [label, body] of [
+			["the kind only", { kind: "off_duty" }],
+			["the reason only", { reason: "Personal" }],
+			["an end-early (to Oct 30)", { to: "2026-10-30" }],
+			["a shrink inside the old dates (Oct 27-29)", { from: "2026-10-27", to: "2026-10-29" }],
+		]) {
+			const reads = w.jt.reads;
+			const r = await edit(w, b, body);
+			eq(`§9.5 ${label}: 200, Job Tracking not read`, [r.status, w.jt.reads - reads], [200, 0]);
+		}
+		const reads = w.jt.reads;
+		const longer = await edit(w, b, { to: "2026-11-02" });
+		eq("§9.6 Oct 27-29 extended to Nov 2: Job Tracking read; 7501 already inside the old dates and no other load: 200",
+			[longer.status, w.jt.reads > reads], [200, true]);
+		const over = await edit(w, b, { to: "2026-11-04" });
+		eq("§9.7 extended to Nov 4: 409 listing only the newly covered load 7505", [code(over), listed(over)], [ASKED, [["7505", "2026-11-03", "2026-11-04"]]]);
+		const confirmed = await edit(w, b, { to: "2026-11-04", confirmLoads: echoOf(over) });
+		eq("§9.8 echoed: 200, one more confirmation, for 7505 only",
+			[confirmed.status, (stored(w, b) || {}).to_date, confirmsOf(w).filter((c) => c.availability_id === b).map((c) => [c.load_id, c.via])],
+			[200, "2026-11-04", [["7501", "availability_create"], ["7505", "availability_update"]]]);
+		eq("§9.9 ...with its audit row", w.audits("driver_availability_loads_confirmed").map((x) => x.entity_id), ["7501", "7505"]);
+
+		const c = rowId(await create(w, DIR.tamsin, vacation("2026-10-16", "2026-10-17")));
+		w.jt.during = () => w.db.prepare("UPDATE driver_availability SET cancelled_at = '2026-10-15T16:00:00.000Z', cancelled_by = 'super_admin' WHERE id = ?").run(c);
+		const cancelledMeanwhile = await edit(w, c, { to: "2026-10-20" });
+		eq("§9.10 cancelled while the sheet was read: 409 AVAILABILITY_CANCELLED, the row as cancelled",
+			[code(cancelledMeanwhile), stored(w, c).to_date, !!stored(w, c).cancelled_at], [[409, "AVAILABILITY_CANCELLED"], "2026-10-17", true]);
+
+		w.jt.during = () => w.db.prepare("UPDATE driver_availability SET from_date = '2026-10-19', to_date = '2026-10-22' WHERE id = ?").run(a);
+		const movedMeanwhile = await edit(w, a, { to: "2026-10-21" });
+		eq("§9.11 a Super Admin moved it to Oct 19-22 (over 7001) while the sheet was read, then this edit to Oct 21: the re-read days are the old range, so 7001 is not newly covered: 200, Oct 19-21",
+			[movedMeanwhile.status, stored(w, a).from_date, stored(w, a).to_date], [200, "2026-10-19", "2026-10-21"]);
+		ok("§9.12 ...its audit line starts from the re-read days", /: off 2026-10-19\.\.2026-10-22 \(vacation\) -> off 2026-10-19\.\.2026-10-21 \(vacation\)$/.test(lastAudit(w, "driver_availability_update")), lastAudit(w, "driver_availability_update"));
+
+		const d = rowId(await create(w, DIR.tamsin, vacation("2026-11-10", "2026-11-11")));
+		w.jt.during = () => w.db.prepare("DELETE FROM drivers_directory WHERE id = ?").run(DIR.tamsin);
+		const goneMeanwhile = await edit(w, d, { to: "2026-11-14" });
+		eq("§9.13 its driver's directory row deleted while the sheet was read: 404 AVAILABILITY_NOT_FOUND, the row unchanged",
+			[code(goneMeanwhile), stored(w, d).to_date], [[404, "AVAILABILITY_NOT_FOUND"], "2026-11-11"]);
+	});
+
+	section("§10 R11b: after \"Save anyway\" his dark truck alerts while that load covers today");
+	const todayLoadRows = () => [...W.defaultRows(), W.jtRow({ id: "7600", driver: "Hollis Renner", pickup: "10/15/2026 08:00", dropoff: "10/16/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" })];
+	await R.guard("§10", async () => {
+		const w = await startR11b({ rows: todayLoadRows() });
+		const ask = await create(w, DIR.hollis, vacation("2026-10-14", "2026-10-20"));
+		eq("§10.1 Oct 14-20 over his loads 7600 (Oct 15-16) and 7001 (Oct 20-22): 409 listing both",
+			[code(ask), listed(ask)], [ASKED, [["7600", "2026-10-15", "2026-10-16"], ["7001", "2026-10-20", "2026-10-22"]]]);
+		eq("§10.2 saved anyway: 201", (await create(w, DIR.hollis, { ...vacation("2026-10-14", "2026-10-20"), confirmLoads: echoOf(ask) })).status, 201);
+		await w.sweep();
+		const s = t91(w);
+		eq("§10.3 the sweep alerts on his dark truck (#91) as normal while 7600 covers today", [s.state, !!(s.row && !s.row.resolved_at && s.row.alerted_at)], ["stale", true]);
+		w.clock.ms = Date.parse("2026-10-18T16:00:00Z");
+		await w.sweep();
+		const s2 = t91(w);
+		eq("§10.4 Oct 18, between his loads and still off: driver_off again, the alert resolved", [s2.state, !!(s2.row && s2.row.resolved_at)], ["driver_off", true]);
+	});
+	await R.guard("§10b", async () => {
+		const w = await startR11b({ rows: todayLoadRows() });
+		w.jt.fail = true;
+		const r = await create(w, DIR.hollis, { ...vacation("2026-10-14", "2026-10-20"), confirmLoads: [{ loadId: "7600", from: "2026-10-15", to: "2026-10-16" }] });
+		eq("§10.5 Job Tracking unreadable, 7600 echoed: 201 unchecked, its confirmation \"_unchecked\"",
+			[r.status, r.body && r.body.loadsUnchecked, confirmsOf(w).map((c) => [c.load_id, c.via])], [201, true, [["7600", "availability_create_unchecked"]]]);
+		w.jt.fail = false;
+		await w.sweep();
+		eq("§10.6 the load still his: #91 alerts", t91(w).state, "stale");
+		eq("§10.7 7600 reassigned to Soren: 200", (await w.call("PUT", "/api/load/7600", { user: USERS.disp, body: { Driver: "Soren King" } })).status, 200);
+		await w.sweep();
+		const s = t91(w);
+		eq("§10.8 ...the unchecked confirmation no longer counts: #91 back to driver_off, the alert resolved", [s.state, !!(s.row && s.row.resolved_at)], ["driver_off", true]);
 	});
 
 	// Today 2026-10-15: a Dispatcher's floor is Sep 15 (30 days back), yesterday Oct 14.

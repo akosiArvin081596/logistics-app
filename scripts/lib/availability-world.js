@@ -19,7 +19,12 @@
 // (world.clock.ms; "today" is the business day of that instant), and recording
 // stubs for mail, sockets and notifyChange. The flag DRIVER_AVAILABILITY_ENABLED
 // is read from the world's own process.env, as the server reads it at boot, and
-// so is DRIVER_TIME_OFF_SCREEN_ENABLED (pass it in `env`).
+// so are DRIVER_TIME_OFF_SCREEN_ENABLED (pass it in `env`) and
+// DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b; `loadsWarning: true`).
+// The cached Job Tracking read (getJobTrackingCached()) is the world's own:
+// world.jt.reads counts the reads, world.jt.fail makes each read throw (the
+// sheet unreadable), and world.jt.during, a function, runs once inside the next
+// read (a change another session makes while a route awaits the sheet).
 // A route server.js does not have yet is simply not registered, so a request to
 // it answers like any unknown path.
 //
@@ -246,23 +251,45 @@ function defaultRows() {
 	];
 }
 
+// R11b's fixture: defaultRows() plus more of Hollis's loads, each a case the
+// time-off warning decides ("today" 2026-10-15):
+//   7501  Oct 26-27, Dispatched, #91        warns when a save covers it
+//   7502  Oct 28, Cancelled                 never warns
+//   7503  Oct 29, Dispatched                the runner soft-deletes it (deleted_loads): never warns
+//   7504  "TBD" / "TBD"                     no readable day: skipped
+//   7505  Nov 3-4, "  hollis   RENNER "     his name in other spacing and case: warns
+//   7506  Oct 12-14, Delivered              ended yesterday: never warns
+function hisLoadsRows() {
+	return [
+		...defaultRows(),
+		jtRow({ id: "7501", driver: "Hollis Renner", pickup: "10/26/2026 08:00", dropoff: "10/27/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }),
+		jtRow({ id: "7502", driver: "Hollis Renner", pickup: "10/28/2026 08:00", dropoff: "10/28/2026 17:00", status: "Cancelled", truck: "LogisX-#91", owner: "5" }),
+		jtRow({ id: "7503", driver: "Hollis Renner", pickup: "10/29/2026 08:00", dropoff: "10/29/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }),
+		jtRow({ id: "7504", driver: "Hollis Renner", pickup: "TBD", dropoff: "TBD", status: "Dispatched" }),
+		jtRow({ id: "7505", driver: "  hollis   RENNER ", pickup: "11/3/2026 08:00", dropoff: "11/4/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }),
+		jtRow({ id: "7506", driver: "Hollis Renner", pickup: "10/12/2026 08:00", dropoff: "10/14/2026 17:00", status: "Delivered", truck: "LogisX-#91", owner: "5" }),
+	];
+}
+
 const servers = new Set();
 const agent = new http.Agent({ keepAlive: false });
 
 // Options:
-//   flag    true: DRIVER_AVAILABILITY_ENABLED=true in the world's env; false: unset
-//   routes  ROUTES keys to lift (default all)
-//   rows    the Job Tracking tab, header row first (default defaultRows())
-//   now     epoch ms of the world's clock
-//   env     anything else the server reads at boot
-async function startWorld({ flag = true, routes = Object.keys(ROUTES), rows = defaultRows(), now = DEFAULT_NOW, env = {} } = {}) {
+//   flag          true: DRIVER_AVAILABILITY_ENABLED=true in the world's env; false: unset
+//   loadsWarning  true: DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED=true (R11b); false: unset
+//   routes        ROUTES keys to lift (default all)
+//   rows          the Job Tracking tab, header row first (default defaultRows())
+//   now           epoch ms of the world's clock
+//   env           anything else the server reads at boot
+async function startWorld({ flag = true, loadsWarning = false, routes = Object.keys(ROUTES), rows = defaultRows(), now = DEFAULT_NOW, env = {} } = {}) {
 	const L = lifted(routes);
 	const db = new Database(":memory:");
 	buildSchema(db);
 	const clock = { ms: now };
 	seed(db, now);
 	const sheet = fakeSheet(rows);
-	const world = { db, clock, sheet, emails: [], changes: [], logs: [], mailFails: false, found: L.found };
+	const jt = { reads: 0, fail: false, during: null };
+	const world = { db, clock, sheet, jt, emails: [], changes: [], logs: [], mailFails: false, found: L.found };
 
 	class FixedDate extends Date {
 		constructor(...args) { super(...(args.length ? args : [clock.ms])); }
@@ -278,6 +305,7 @@ async function startWorld({ flag = true, routes = Object.keys(ROUTES), rows = de
 	const quiet = { log() {}, info() {}, warn: (...a) => world.logs.push(a.join(" ")), error: (...a) => world.logs.push(a.join(" ")) };
 	const procEnv = {
 		...(flag ? { DRIVER_AVAILABILITY_ENABLED: "true" } : {}),
+		...(loadsWarning ? { DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED: "true" } : {}),
 		GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test", ADMIN_NOTIFY_EMAIL: "ops@example.invalid",
 		...env,
 	};
@@ -291,6 +319,13 @@ async function startWorld({ flag = true, routes = Object.keys(ROUTES), rows = de
 		app,
 		notifyChange: (d) => world.changes.push(d),
 		getJobTrackingCached: async () => {
+			jt.reads++;
+			if (typeof jt.during === "function") {
+				const change = jt.during;
+				jt.during = null;
+				change();
+			}
+			if (jt.fail) throw new Error("fake sheet: Job Tracking unreadable");
 			const all = sheet.tabs["Job Tracking"];
 			const headers = all[0].slice();
 			return { headers, data: all.slice(1).map((r, i) => ({ _rowIndex: i + 2, ...Object.fromEntries(headers.map((h, j) => [h, r[j] == null ? "" : r[j]])) })) };
@@ -380,5 +415,5 @@ function createRunner(title) {
 
 module.exports = {
 	ROOT, SRC, ROUTES, AVAILABILITY_ROUTES, ASSIGN_ROUTES, HEADERS, COL, USERS, DIR, TRUCK, VID, DEFAULT_NOW, HOUR, DAY,
-	routeHead, jtRow, defaultRows, startWorld, closeAll, createRunner, fakeSheet,
+	routeHead, jtRow, defaultRows, hisLoadsRows, startWorld, closeAll, createRunner, fakeSheet,
 };

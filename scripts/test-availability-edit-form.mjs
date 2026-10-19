@@ -34,7 +34,13 @@
 //   §8 the same answers under every viewer zone
 //   §9 the source: no zone-dependent Date in the text lib, the panel or the
 //      card; the card never names the fields it must not show; DriverView
-//      renders the card and the banner only when the payload carried `timeOff`
+//      renders the card and the banner only when the payload carried `timeOff`;
+//      the panel's "Save anyway" (R11b) is built from the helpers below
+//   §10 R11b, the other side of the dispatch warning: a save over loads he
+//      already has answers 409 DRIVER_HAS_LOADS (isDriverHasLoadsWarning());
+//      "Save anyway" re-sends the same body with the listed loads echoed as
+//      `confirmLoads` (withLoadsConfirmed()), never anything the panel worked
+//      out; a save the server could not check says so (loadsUncheckedNote())
 //
 // No DOM, no server. Files under test come from LOGISX_ROOT (default: this
 // checkout).
@@ -64,7 +70,8 @@ try {
 }
 eq('§0 client/src/lib/availabilityText.js loads', !!text, true)
 const T = text || {}
-const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote', 'rangeHint']
+const NEW_EXPORTS = ['rowActions', 'editPatch', 'editDateBounds', 'createDateBounds', 'datesWithinBounds', 'canSaveEdit', 'editFormFor', 'driverTimeOffRows', 'driverTimeOffBanner', 'endEarlyNote', 'rangeHint',
+  'isDriverHasLoadsWarning', 'withLoadsConfirmed', 'loadsUncheckedNote']
 for (const name of NEW_EXPORTS) eq(`§0 availabilityText.js exports ${name}()`, typeof T[name], 'function')
 const call = (name, ...args) => (typeof T[name] === 'function' ? T[name](...args) : undefined)
 
@@ -210,6 +217,37 @@ function scenario() {
   rec('§7 no readable today: no banner', call('driverTimeOffBanner', sent, ''), '')
   const withExtras = call('driverTimeOffBanner', [{ ...row('2026-10-15', '2026-10-18', 'other', 'current'), reason: 'Clinic visit', createdBy: 'dispatch_demo' }], TODAY)
   rec('§7 the banner never carries the reason or the author', [/Clinic|dispatch_demo/.test(String(withExtras)), withExtras], [false, 'You\'re marked off Oct 15 – Oct 18 (Other).'])
+
+  // §10 R11b: "Save anyway" when the time off covers loads he already has.
+  const apiError = (status, code, data) => Object.assign(new Error((data && data.error) || 'x'), { status, code, data })
+  const hasLoads = {
+    error: 'Demo Driver has 2 loads inside these dates: L-100 (Oct 20 – Oct 22), L-101 (Oct 24). Save anyway? The loads stay assigned to him.',
+    code: 'DRIVER_HAS_LOADS', driver: 'Demo Driver', from: '2026-10-20', to: '2026-10-24',
+    loads: [{ loadId: 'L-100', from: '2026-10-20', to: '2026-10-22', truck: 'T-7' }, { loadId: 'L-101', from: '2026-10-24', to: '2026-10-24', truck: '' }],
+  }
+  rec('§10 a 409 DRIVER_HAS_LOADS is the loads warning', call('isDriverHasLoadsWarning', apiError(409, 'DRIVER_HAS_LOADS', hasLoads)), true)
+  rec('§10 ...the dispatch side\'s 409 DRIVER_OFF_DUTY is not', call('isDriverHasLoadsWarning', apiError(409, 'DRIVER_OFF_DUTY', {})), false)
+  rec('§10 ...nor an overlap, another status, or nothing', [
+    call('isDriverHasLoadsWarning', apiError(409, 'AVAILABILITY_OVERLAP', {})), call('isDriverHasLoadsWarning', apiError(400, 'DRIVER_HAS_LOADS', {})),
+    call('isDriverHasLoadsWarning', null), call('isDriverHasLoadsWarning', undefined),
+  ], [false, false, false, false])
+  const sentBody = { kind: 'vacation', from: '2026-10-20', to: '2026-10-24', reason: 'Family' }
+  rec('§10 "Save anyway" re-sends the same body with each listed load echoed as { loadId, from, to }', call('withLoadsConfirmed', sentBody, hasLoads), {
+    ...sentBody, confirmLoads: [{ loadId: 'L-100', from: '2026-10-20', to: '2026-10-22' }, { loadId: 'L-101', from: '2026-10-24', to: '2026-10-24' }],
+  })
+  rec('§10 ...an edit\'s body of changed fields alone', call('withLoadsConfirmed', { to: '2026-10-24' }, hasLoads), {
+    to: '2026-10-24', confirmLoads: [{ loadId: 'L-100', from: '2026-10-20', to: '2026-10-22' }, { loadId: 'L-101', from: '2026-10-24', to: '2026-10-24' }],
+  })
+  const second = { ...hasLoads, loads: [{ loadId: 'L-102', from: '2026-10-21', to: '2026-10-21', truck: '' }] }
+  rec('§10 a second 409\'s list replaces the first echo', call('withLoadsConfirmed', call('withLoadsConfirmed', sentBody, hasLoads), second)?.confirmLoads, [{ loadId: 'L-102', from: '2026-10-21', to: '2026-10-21' }])
+  const kept = { ...sentBody }
+  call('withLoadsConfirmed', kept, hasLoads)
+  rec('§10 ...the body sent first is left as it was', kept, sentBody)
+  rec('§10 no list in the answer: an empty echo (the server asks again)', call('withLoadsConfirmed', sentBody, { code: 'DRIVER_HAS_LOADS' })?.confirmLoads, [])
+  rec('§10 entries that are not loads are left out', call('withLoadsConfirmed', sentBody, { loads: [null, 'L-9', { loadId: 'L-103', from: '2026-10-22', to: '2026-10-23', extra: 1 }] })?.confirmLoads,
+    [{ loadId: 'L-103', from: '2026-10-22', to: '2026-10-23' }])
+  rec('§10 a save the server could not check says so', call('loadsUncheckedNote', { success: true, row: {}, loadsUnchecked: true }), 'Loads couldn\'t be checked. Look at the Job Board for his loads.')
+  rec('§10 ...a checked save says nothing', [call('loadsUncheckedNote', { success: true, row: {} }), call('loadsUncheckedNote', { loadsUnchecked: 'yes' }), call('loadsUncheckedNote', null)], ['', '', ''])
   return out.join('|')
 }
 
@@ -253,6 +291,16 @@ eq('§9 the panel\'s Save waits for canSaveEdit()', /canSaveEdit\(/.test(panel),
 eq('§9 the panel shows the server\'s create limits', /createDateBounds\(/.test(panel), true)
 eq('§9 the panel shows the range hint under the edit form and the add form', (panel.match(/rangeHint\(/g) || []).length, 2)
 eq('§9 the end-early note comes from endEarlyNote(), with no day count of its own', /endEarlyNote\(/.test(panel) && !/more than \d+ days/.test(panel), true)
+eq('§9 R11b: the panel knows the loads warning by isDriverHasLoadsWarning()', /isDriverHasLoadsWarning\(/.test(panel), true)
+eq('§9 ...re-sends with withLoadsConfirmed()', /withLoadsConfirmed\(/.test(panel), true)
+eq('§9 ...says when loads were not checked through loadsUncheckedNote()', /loadsUncheckedNote\(/.test(panel), true)
+eq('§9 ...asks in its own dialog: "He has loads on these days", "Keep as is" (the safe button, first) and "Save anyway"',
+  [/title="He has loads on these days"/.test(panel), /cancel-text="Keep as is"/.test(panel), /confirm-text="Save anyway"/.test(panel)], [true, true, true])
+eq('§9 ...and builds no echo of its own (no confirmLoads written in the panel)', /confirmLoads/.test(panel), false)
+for (const rel of ['client/src/composables/useOffDutyConfirm.js', 'client/src/components/shared/OffDutyConfirmHost.vue']) {
+  const src = read(rel)
+  eq(`§9 ${rel} is left to the dispatch side (it never names DRIVER_HAS_LOADS)`, src !== null && !/DRIVER_HAS_LOADS|confirmLoads/.test(src), true)
+}
 
 console.log(`\ntest-availability-edit-form: ${pass} passed, ${failures.length} failed`)
 if (failures.length) process.exit(1)
