@@ -35,6 +35,9 @@
  *      3-hour window
  *   §9 GET /api/fuel/trip-plan: neither the position nor the fuel level of a
  *      fix from before the link (it plans from the pickup, as with no fix)
+ *   §10 both ingest paths: a fix from before the link runs no low-fuel check
+ *      and asks no geofence advance (it is still stored); a fix after the link,
+ *      or with no known link time, does both as before
  *
  * The routes are lifted whole from server.js (scripts/lib/server-lift.js), with
  * the shipped eld_device_assignments DDL and telemetry indexes, and run against
@@ -209,24 +212,30 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 	// Linxup webhook's (one position), recording every socket send.
 	const pushes = (live) => {
 		const sent = [];
+		const fuelChecks = [];
+		const geofenceAsks = [];
 		const room = (ns) => ({ to: (r) => ({ emit: (event, payload) => sent.push({ ns, room: r, event, payload }) }) });
 		const pdeps = {
 			db, io: room("io"), publicTrack: room("public"), geolib,
 			routemate: { listLiveLocations: async () => live.map((x) => ({ ...x })) }, routemateCreds: () => ({}),
 			ROUTEMATE_ENABLED: true, ROUTEMATE_API_KEY: "test-key", routemateHealth: { lastSync: {}, lastError: null },
 			clearRoutemateLogState: () => {}, getJobTrackingCached: deps.getJobTrackingCached, getDeletedLoadIds: () => new Set(),
-			findDriverAccountSpelling: (n) => n, maybeAlertLowFuel: () => {}, tryGeofenceAdvance: async () => false,
+			findDriverAccountSpelling: (n) => n,
+			maybeAlertLowFuel: (vid, driver) => { fuelChecks.push([vid, driver]); },
+			tryGeofenceAdvance: async (ping) => { geofenceAsks.push(ping); return false; },
 			geofenceCandidatesAcrossSpacing: () => [], linxupHealth: { unlinked: 0, lastWritten: null }, linxupTrackSpeedUnit: () => {},
 			routemateUpsertVehicleMinimalStmt: { run() {} },
 		};
 		const p = new Function(...PUSH_PROVIDED, "require", `${liftedPush.text}\nreturn { routemateSyncTelemetry, ingestLinxupPosition };`)(
 			...PUSH_PROVIDED.map((k) => pdeps[k]), appRequire);
-		return { sent, p };
+		return { sent, fuelChecks, geofenceAsks, p };
 	};
 	return {
 		fixMs, routeCalls, poiCalls, db,
-		poll: async (live) => { const { sent, p } = pushes(live); await p.routemateSyncTelemetry(); return sent; },
-		linxup: async (pos) => { const { sent, p } = pushes([]); await p.ingestLinxupPosition(pos); return sent; },
+		// Each returns the socket sends; `.ingest` adds the low-fuel checks and
+		// geofence asks the same round made.
+		poll: async (live) => { const r = pushes(live); await r.p.routemateSyncTelemetry(); return Object.assign(r.sent, { ingest: r }); },
+		linxup: async (pos) => { const r = pushes([]); await r.p.ingestLinxupPosition(pos); return Object.assign(r.sent, { ingest: r }); },
 		approach: () => fns.approachStopsFor("T-200", PICKUP.lat, PICKUP.lng),
 		latest: async () => {
 			const r = await call("/api/locations/latest", { session: { user: { role: "Super Admin", username: "admin_test" } } });
@@ -506,6 +515,44 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		const w = world({ fixes: [{ ago: 60 * MIN, at: NEAR, fuel: 80 }], coords: true });
 		const b = (await w.tripPlan()).body || {};
 		ok("§9 no link row: planned from the fix, as before", b.fromLivePosition === true && b.fuelPct === 80, [b.fromLivePosition, b.fuelPct]);
+	}
+
+	// ══ §10 low fuel and the geofence on both ingest paths ═══════════════════
+	// The fixes sit at the load's pickup (inside its geofence) with 5% fuel.
+	console.log("§10 low fuel and the geofence");
+	const lowAt = (ago) => ({ ...live(ago, PICKUP), fuel_pct: 5 });
+	const lowLinxup = (ago) => ({ ...linxupPos(ago, PICKUP), fuel_pct: 5 });
+	const checks = (sent) => [sent.ingest.fuelChecks.length, sent.ingest.geofenceAsks.length];
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const sent = await w.poll([lowAt(13 * DAY)]);
+		ok("§10 poller, a just-linked truck, a low-fuel fix inside the pickup's geofence taken before the link: no low-fuel check, no geofence ask",
+			JSON.stringify(checks(sent)) === "[0,0]", checks(sent));
+		const stored = w.db.prepare("SELECT COUNT(*) AS n FROM routemate_telemetry WHERE routemate_vehicle_id = ?").get(DEVICE).n;
+		ok("§10 ...and the fix is stored, as every fix is", stored === 1, stored);
+	}
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const sent = await w.poll([lowAt(1 * MIN)]);
+		const [fuel, geo] = checks(sent);
+		ok("§10 poller, the same fix taken after the link: the low-fuel check and the geofence ask, as before",
+			fuel === 1 && geo >= 1 && sent.ingest.geofenceAsks[0].loadId === "T-200", checks(sent));
+	}
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "system:seed" } });
+		const sent = await w.poll([lowAt(13 * DAY)]);
+		const [fuel, geo] = checks(sent);
+		ok("§10 poller, a seed row (no real link time): both, as before", fuel === 1 && geo >= 1, checks(sent));
+	}
+	{
+		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
+		const before = await w.linxup(lowLinxup(1 * HOUR));
+		ok("§10 Linxup webhook, a fix taken before the link: no low-fuel check, no geofence ask", JSON.stringify(checks(before)) === "[0,0]", checks(before));
+		const after = await w.linxup(lowLinxup(1 * MIN));
+		const [fuel, geo] = checks(after);
+		ok("§10 ...one after it: both, as before", fuel === 1 && geo >= 1 && after.ingest.geofenceAsks[0].loadId === "T-200", checks(after));
+		const stored = w.db.prepare("SELECT COUNT(*) AS n FROM routemate_telemetry WHERE routemate_vehicle_id = ?").get(DEVICE).n;
+		ok("§10 ...and both fixes are stored", stored === 2, stored);
 	}
 })().then(() => {
 	if (failures.length) {

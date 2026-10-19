@@ -4245,10 +4245,10 @@ async function routemateSyncTelemetry() {
 		// telemetry row can fan out a Socket.IO location-update to dispatch
 		// viewers. Without this, the /tracking map only refreshes on page-load
 		// — ELD positions would appear frozen until the user F5s.
-		// The truck each vehicle is filed under, too, for the link rule on the
-		// sends below.
+		// And when each vehicle was linked to the truck it is filed under, for the
+		// link rule on everything the fixes fan out to below.
 		const driverByVehicle = {};
-		const truckIdByVehicle = {};
+		const linkedSinceByVehicle = {};
 		for (const r of db.prepare(`
 			SELECT t.routemate_vehicle_id, t.id AS truck_id, ta.driver_name
 			FROM truck_assignments ta
@@ -4256,7 +4256,7 @@ async function routemateSyncTelemetry() {
 			WHERE ta.end_date = '' AND COALESCE(t.routemate_vehicle_id, '') <> ''
 		`).all()) {
 			driverByVehicle[r.routemate_vehicle_id] = r.driver_name;
-			truckIdByVehicle[r.routemate_vehicle_id] = r.truck_id;
+			linkedSinceByVehicle[r.routemate_vehicle_id] = eldDeviceLinkedSinceMs(r.truck_id, r.routemate_vehicle_id);
 		}
 
 		const txn = db.transaction((items) => {
@@ -4287,8 +4287,17 @@ async function routemateSyncTelemetry() {
 					}
 				}
 				// Tag the in-memory item so the socket-emit + geofence loops
-				// downstream can skip dropped rows without re-querying.
+				// downstream can skip dropped rows without re-querying, and rows
+				// the device took before it was linked to this truck (B11; the
+				// position routes' rule, lib/eld-position.js). Routemate keeps
+				// answering with a vehicle's last fix for days and this runs every
+				// minute, so without that a just-linked truck would flicker back to
+				// its device's old spot on every map, the customer page included,
+				// and be judged for low fuel and geofences on another vehicle's fix.
+				// Both kinds are still stored.
 				t._droppedReason = droppedReason;
+				t._fixMs = t.location_date_ms || Date.now();
+				t._beforeLink = eldPosition.fixPredatesLink(t._fixMs, linkedSinceByVehicle[t.routemate_vehicle_id]);
 				routemateInsertTelemetryStmt.run({
 					routemate_vehicle_id: t.routemate_vehicle_id,
 					latitude: t.latitude,
@@ -4299,7 +4308,7 @@ async function routemateSyncTelemetry() {
 					engine_hours: t.engine_hours || 0,
 					fuel_pct: t.fuel_pct,
 					geocoded_location: t.geocoded_location || "",
-					location_date_ms: t.location_date_ms || Date.now(),
+					location_date_ms: t._fixMs,
 					dropped_reason: droppedReason,
 					source: "routemate",
 				});
@@ -4372,15 +4381,10 @@ async function routemateSyncTelemetry() {
 		// `source: 'routemate'` lets the client flip the badge to ELD live.
 		for (const t of rows) {
 			if (t._droppedReason) continue; // Tier 1: don't push outlier/invalid fixes to UI
+			if (t._beforeLink) continue; // B11: nor a fix from before the device's link (see the txn)
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
-			// No push of a fix the device took before it was linked to this truck
-			// (B11, the position routes' rule; lib/eld-position.js). Routemate keeps
-			// answering with a vehicle's last fix for days, and this loop runs every
-			// minute, so without this a just-linked truck would flicker back to its
-			// device's old spot on every map, the customer page included.
-			const fixMs = t.location_date_ms || Date.now();
-			if (eldPosition.fixPredatesLink(fixMs, eldDeviceLinkedSinceMs(truckIdByVehicle[t.routemate_vehicle_id], t.routemate_vehicle_id))) continue;
+			const fixMs = t._fixMs;
 			const driverLower = driverName.trim().toLowerCase();
 			const activeLoadId = loadIdByDriver[driverLower] || "";
 			// The driver's own room, and the name this payload gives the driver,
@@ -4427,6 +4431,7 @@ async function routemateSyncTelemetry() {
 		// the radius a silent no-op until the load advances.
 		for (const t of rows) {
 			if (t._droppedReason) continue; // Tier 1: outlier/invalid fixes never fire geofence
+			if (t._beforeLink) continue; // B11: nor low fuel or a geofence on a fix from before the link
 			const driverName = driverByVehicle[t.routemate_vehicle_id];
 			if (!driverName) continue;
 			if (!Number.isFinite(t.latitude) || !Number.isFinite(t.longitude)) continue;
@@ -44551,8 +44556,12 @@ async function ingestLinxupPosition(pos) {
 	// to be untrustworthy, and feeding outliers to the detector would blunt it.
 	if (!droppedReason) linxupTrackSpeedUnit(vehicleId, pos);
 
-	// Fan out live UI + geofence only for clean, linked fixes (same as the poller).
-	if (!droppedReason && driverName) {
+	// Fan out live UI + geofence only for clean, linked fixes (same as the poller),
+	// and none of it (no push, no low-fuel check, no geofence) for a fix the
+	// device took before it was linked to this truck (B11; the poller's rule,
+	// lib/eld-position.js). Such a fix is still stored above.
+	const beforeLink = eldPosition.fixPredatesLink(pos.location_date_ms || Date.now(), eldDeviceLinkedSinceMs(truckId, vehicleId));
+	if (!droppedReason && driverName && !beforeLink) {
 		// The driver's own room, and the name the live payload gives the driver,
 		// are the spelling their account holds (findDriverAccountSpelling()), as on
 		// the Routemate path. The sheet rows are still matched under the ping's own
@@ -44610,12 +44619,8 @@ async function ingestLinxupPosition(pos) {
 			source: "linxup",
 			fuelPct: Number.isFinite(pos.fuel_pct) ? pos.fuel_pct : null,
 		};
-		// No push of a fix the device took before it was linked to this truck
-		// (B11; the poller's rule, lib/eld-position.js).
-		if (!eldPosition.fixPredatesLink(pos.location_date_ms || Date.now(), eldDeviceLinkedSinceMs(truckId, vehicleId))) {
-			io.to("dispatch").emit("location-update", locationPayload);
-			if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
-		}
+		io.to("dispatch").emit("location-update", locationPayload);
+		if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
 		// Same low-fuel check as the Routemate poller. BOTH ingest paths need it
 		// or the warning silently disappears the day Linxup fully replaces the
 		// poller — the exact class of gap that left speedMps unset here once.

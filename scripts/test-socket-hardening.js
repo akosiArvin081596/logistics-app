@@ -1178,7 +1178,7 @@ const MUTANTS = [
 	...[
 		["a load-assigned emit to the bare driver name", "io.to(driverRoom(driver)).emit(\"load-assigned\"", "io.to(driver.trim().toLowerCase()).emit(\"load-assigned\""],
 		["a fuel-low emit to the bare key", "io.to(driverRoom(key)).emit(\"fuel-low\"", "io.to(key).emit(\"fuel-low\""],
-		["a location-update emit to the bare driver name", "if (driverLower) io.to(driverRoom(driverLower)).emit(\"location-update\", locationPayload);\n\t\t}\n\t\t// Same low-fuel", "if (driverLower) io.to(driverLower).emit(\"location-update\", locationPayload);\n\t\t}\n\t\t// Same low-fuel"],
+		["a location-update emit to the bare driver name", "if (driverLower) io.to(driverRoom(driverLower)).emit(\"location-update\", locationPayload);\n\t\t// Same low-fuel", "if (driverLower) io.to(driverLower).emit(\"location-update\", locationPayload);\n\t\t// Same low-fuel"],
 		["chat to the bare recipient name", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);", "io.to((to || \"\").trim().toLowerCase()).emit(\"new-message\", payload);"],
 		["a reassign emit to the bare new driver", "io.to(driverRoom(newDriver)).emit(\"load-assigned\"", "io.to(newDriver.trim().toLowerCase()).emit(\"load-assigned\""],
 		["chat to the dispatch room when the recipient says so", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);", "io.to(to === \"dispatch\" ? \"dispatch\" : chatRooms(from, to)).emit(\"new-message\", payload);"],
