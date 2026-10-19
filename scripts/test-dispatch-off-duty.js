@@ -331,15 +331,15 @@ const ROUTES = [
 
 		const body = (o) => (fn("driverHasLoadsBody") ? fn("driverHasLoadsBody")({ driverName: "Hollis Renner", from: "2026-10-20", to: "2026-10-21", ...o }) : null);
 		eq("§8.27 the 409 body for one load", body({ loads: [asked[0]] }), {
-			error: "Hollis Renner has load A1 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.",
+			error: "Hollis Renner has load A1 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him.",
 			code: "DRIVER_HAS_LOADS", driver: "Hollis Renner", from: "2026-10-20", to: "2026-10-21", loads: [asked[0]],
 		});
-		eq("§8.28 ...a one-day load", (body({ loads: [asked[1]] }) || {}).error, "Hollis Renner has load C1 on Oct 21 inside these dates. Save anyway? The load stays assigned to him.");
-		eq("§8.29 ...two loads", (body({ loads: asked }) || {}).error, "Hollis Renner has 2 loads inside these dates: A1 (Oct 20 – Oct 22), C1 (Oct 21). Save anyway? The loads stay assigned to him.");
+		eq("§8.28 ...a one-day load", (body({ loads: [asked[1]] }) || {}).error, "Hollis Renner has load C1 (Oct 21) overlapping these dates. Save anyway? The load stays assigned to him.");
+		eq("§8.29 ...two loads", (body({ loads: asked }) || {}).error, "Hollis Renner has 2 loads overlapping these dates: A1 (Oct 20 – Oct 22), C1 (Oct 21). Save anyway? The loads stay assigned to him.");
 		const seven = Array.from({ length: 7 }, (_, i) => ({ loadId: `M${i + 1}`, from: `2026-10-2${i}`, to: `2026-10-2${i}`, truck: "" }));
 		eq("§8.30 ...seven loads: the first five named, the rest counted", (body({ loads: seven }) || {}).error,
-			"Hollis Renner has 7 loads inside these dates: M1 (Oct 20), M2 (Oct 21), M3 (Oct 22), M4 (Oct 23), M5 (Oct 24) and 2 more. Save anyway? The loads stay assigned to him.");
-		eq("§8.31 ...a blank name", (body({ driverName: " ", loads: [asked[0]] }) || {}).error, "This driver has load A1 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.");
+			"Hollis Renner has 7 loads overlapping these dates: M1 (Oct 20), M2 (Oct 21), M3 (Oct 22), M4 (Oct 23), M5 (Oct 24) and 2 more. Save anyway? The loads stay assigned to him.");
+		eq("§8.31 ...a blank name", (body({ driverName: " ", loads: [asked[0]] }) || {}).error, "This driver has load A1 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him.");
 		eq("§8.32 ...each load copied as { loadId, from, to } only (no Truck cell)",
 			(body({ loads: [{ ...asked[0], truck: "LogisX-#91", shownId: "A1", driver: "Hollis Renner", pickupKey: "2026-10-20" }] }) || {}).loads, [asked[0]]);
 

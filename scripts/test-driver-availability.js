@@ -468,7 +468,11 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§8.3 Oct 20-21 over his load 7001 (Oct 20-22): 409 DRIVER_HAS_LOADS listing it", [code(asked), listed(asked)], [ASKED, [["7001", "2026-10-20", "2026-10-22"]]]);
 		eq("§8.4 ...naming the driver and the dates asked for, and no Truck cell",
 			asked.body && [asked.body.driver, asked.body.from, asked.body.to, !!asked.body.loads && "truck" in asked.body.loads[0]], ["Hollis Renner", "2026-10-20", "2026-10-21", false]);
-		eq("§8.5 ...in words", asked.body && asked.body.error, "Hollis Renner has load 7001 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.");
+		eq("§8.5 ...in words", asked.body && asked.body.error, "Hollis Renner has load 7001 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him.");
+		const partial = await create(w, DIR.hollis, vacation("2026-10-21", "2026-10-21"));
+		eq("§8.5b time off on Oct 21 only, covering part of load 7001 (Oct 20-22): the words say the load overlaps, not that it is inside",
+			[code(partial), partial.body && partial.body.error],
+			[ASKED, "Hollis Renner has load 7001 (Oct 20 – Oct 22) overlapping these dates. Save anyway? The load stays assigned to him."]);
 		eq("§8.6 ...the body holds only error, code, driver, from, to and loads; each load only loadId, from and to",
 			asked.body && Array.isArray(asked.body.loads) ? [Object.keys(asked.body).sort(), asked.body.loads.map((l) => Object.keys(l).sort())] : null,
 			[["code", "driver", "error", "from", "loads", "to"], [["from", "loadId", "to"]]]);
@@ -512,7 +516,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§8.19 7501's drop-off moved to Oct 28 since: 409 again with its new window", [code(moved), listed(moved)],
 			[ASKED, [["7501", "2026-10-26", "2026-10-28"], ["7507", "2026-10-27", "2026-10-27"]]]);
 		eq("§8.20 ...the words name both", moved.body && moved.body.error,
-			"Hollis Renner has 2 loads inside these dates: 7501 (Oct 26 – Oct 28), 7507 (Oct 27). Save anyway? The loads stay assigned to him.");
+			"Hollis Renner has 2 loads overlapping these dates: 7501 (Oct 26 – Oct 28), 7507 (Oct 27). Save anyway? The loads stay assigned to him.");
 		eq("§8.21 ...none of the refused saves wrote a row (the one row since is the Oct 20-21 save)", count(w) - before, 1);
 		const done = await create(w, DIR.hollis, { ...vacation("2026-10-26", "2026-10-27"), confirmLoads: [...echoOf(moved), { loadId: "9999", from: "2026-10-26", to: "2026-10-26" }] });
 		eq("§8.22 echoed in full, plus a load no longer listed (9999): 201, confirmations for the two listed only",

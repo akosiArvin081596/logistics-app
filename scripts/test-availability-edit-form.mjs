@@ -221,7 +221,7 @@ function scenario() {
   // §10 R11b: "Save anyway" when the time off covers loads he already has.
   const apiError = (status, code, data) => Object.assign(new Error((data && data.error) || 'x'), { status, code, data })
   const hasLoads = {
-    error: 'Demo Driver has 2 loads inside these dates: L-100 (Oct 20 – Oct 22), L-101 (Oct 24). Save anyway? The loads stay assigned to him.',
+    error: 'Demo Driver has 2 loads overlapping these dates: L-100 (Oct 20 – Oct 22), L-101 (Oct 24). Save anyway? The loads stay assigned to him.',
     code: 'DRIVER_HAS_LOADS', driver: 'Demo Driver', from: '2026-10-20', to: '2026-10-24',
     loads: [{ loadId: 'L-100', from: '2026-10-20', to: '2026-10-22', truck: 'T-7' }, { loadId: 'L-101', from: '2026-10-24', to: '2026-10-24', truck: '' }],
   }
