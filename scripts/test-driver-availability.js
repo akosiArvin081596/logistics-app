@@ -53,11 +53,16 @@
 //       nothing written; the echo (confirmLoads) and nothing else confirms; an
 //       echo missing a load added or moved since is asked again; no warning for
 //       a past, cancelled, soft-deleted, undated or other driver's load; the
-//       sheet unreadable saves unchecked (an echo recorded as given); the
-//       overlap check first; the directory row re-read after the sheet read
+//       sheet unreadable saves unchecked (an echo recorded as given, its window
+//       kept to the time off's days); the overlap check first; the directory
+//       row re-read after the sheet read; every listed load can be confirmed
+//       (an id over 64 characters is not listed; 60 loads are); a Dispatcher's
+//       limits hold on "Save anyway"; a non-Super-Admin sees each Load ID as the
+//       Job Board shows him (broker contact withheld), and his echo of that
+//       records the stored ids
 //   §9  edit: only an edit that adds days reads the sheet; only loads newly
 //       covered warn; the stored row re-read after the sheet read (cancelled,
-//       moved or its driver deleted meanwhile)
+//       moved or its driver deleted meanwhile), a Dispatcher's limits checked on it
 //   §10 the sweep: after "Save anyway" his dark truck alerts while the load
 //       covers today; an unchecked confirmation whose load was since
 //       reassigned no longer counts
@@ -461,12 +466,12 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const auditsBefore = auditCount(w);
 		const asked = await create(w, DIR.hollis, vacation("2026-10-20", "2026-10-21"));
 		eq("§8.3 Oct 20-21 over his load 7001 (Oct 20-22): 409 DRIVER_HAS_LOADS listing it", [code(asked), listed(asked)], [ASKED, [["7001", "2026-10-20", "2026-10-22"]]]);
-		eq("§8.4 ...naming the driver, the dates asked for and the load's truck",
-			asked.body && [asked.body.driver, asked.body.from, asked.body.to, asked.body.loads && asked.body.loads[0].truck], ["Hollis Renner", "2026-10-20", "2026-10-21", "LogisX-#91"]);
+		eq("§8.4 ...naming the driver and the dates asked for, and no Truck cell",
+			asked.body && [asked.body.driver, asked.body.from, asked.body.to, !!asked.body.loads && "truck" in asked.body.loads[0]], ["Hollis Renner", "2026-10-20", "2026-10-21", false]);
 		eq("§8.5 ...in words", asked.body && asked.body.error, "Hollis Renner has load 7001 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.");
-		eq("§8.6 ...the body holds only error, code, driver, from, to and loads; each load only loadId, from, to and truck",
+		eq("§8.6 ...the body holds only error, code, driver, from, to and loads; each load only loadId, from and to",
 			asked.body && Array.isArray(asked.body.loads) ? [Object.keys(asked.body).sort(), asked.body.loads.map((l) => Object.keys(l).sort())] : null,
-			[["code", "driver", "error", "from", "loads", "to"], [["from", "loadId", "to", "truck"]]]);
+			[["code", "driver", "error", "from", "loads", "to"], [["from", "loadId", "to"]]]);
 		ok("§8.7 ...and no broker or customer data", !/Brokerly|555-0142|broker\.example|Shipper Way|Receiver Rd/.test(asked.text), asked.text);
 		eq("§8.8 ...nothing written, nothing audited", [count(w) - before, auditCount(w) - auditsBefore], [0, 0]);
 
@@ -477,7 +482,7 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 			["a day not written YYYY-MM-DD", [{ loadId: "7001", from: "10/20/2026", to: "2026-10-22" }]],
 			["a load id of 65 characters", [{ loadId: "7".repeat(65), from: "2026-10-20", to: "2026-10-22" }]],
 			["a load id that is a number", [{ loadId: 7001, from: "2026-10-20", to: "2026-10-22" }]],
-			["51 entries, the right one among them", [...Array.from({ length: 50 }, (_, i) => ({ loadId: `X${i}`, from: "2026-10-20", to: "2026-10-20" })), { loadId: "7001", from: "2026-10-20", to: "2026-10-22" }]],
+			["501 entries (more than 500 and than the one listed), the right one among them", [...Array.from({ length: 500 }, (_, i) => ({ loadId: `X${i}`, from: "2026-10-20", to: "2026-10-20" })), { loadId: "7001", from: "2026-10-20", to: "2026-10-22" }]],
 		]) eq(`§8.9 confirmLoads ${label}: no confirmation, 409 again`, code(await create(w, DIR.hollis, { ...vacation("2026-10-20", "2026-10-21"), confirmLoads })), ASKED);
 		eq("§8.10 ...still nothing written", count(w) - before, 0);
 
@@ -546,6 +551,61 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		eq("§8.31 the directory row deleted while the sheet was read: 404 DRIVER_NOT_FOUND, nothing written",
 			[code(gone), w.db.prepare("SELECT COUNT(*) AS n FROM driver_availability WHERE directory_id = ?").get(DIR.soren).n], [[404, "DRIVER_NOT_FOUND"], 0]);
 	});
+	// The security review's fixes (2026-10-19): every listed load can be
+	// confirmed (L1), an unchecked echo is kept to the time off's days (L2), a
+	// Dispatcher's limits hold on "Save anyway" (L3), and a non-Super-Admin sees
+	// each Load ID as the Job Board shows it to him, broker contact withheld (R1).
+	await R.guard("§8c", async () => {
+		const longId = "X".repeat(65);
+		const dayLoad = (id, driver, day, hour = 8) => W.jtRow({ id, driver, pickup: `11/${day}/2026 ${String(hour).padStart(2, "0")}:00`, dropoff: `11/${day}/2026 20:00`, status: "Dispatched", truck: "LogisX-#91", owner: "5" });
+		const w = await startR11b({ rows: [...W.defaultRows(),
+			dayLoad(longId, "Hollis Renner", 10),
+			dayLoad("7801", "Hollis Renner", 11),
+			...Array.from({ length: 60 }, (_, i) => dayLoad(`T${String(i + 1).padStart(2, "0")}`, "Tamsin Vale", 1 + Math.floor(i / 3), 6 + (i % 3))),
+		] });
+		const ask = await create(w, DIR.hollis, vacation("2026-11-10", "2026-11-11"));
+		eq("§8.32 L1: Nov 10-11 over a load whose id is 65 characters and over 7801: 409 listing 7801 only", [code(ask), listed(ask)], [ASKED, [["7801", "2026-11-11", "2026-11-11"]]]);
+		const saved = await create(w, DIR.hollis, { ...vacation("2026-11-10", "2026-11-11"), confirmLoads: echoOf(ask) });
+		eq("§8.33 L1: ...\"Save anyway\": 201, confirmed for 7801", [saved.status, confirmsOf(w).filter((c) => c.availability_id === rowId(saved)).map((c) => c.load_id)], [201, ["7801"]]);
+		const sixty = await create(w, DIR.tamsin, vacation("2026-11-01", "2026-11-20"));
+		eq("§8.34 L1: Nov 1-20 over 60 of Tamsin's loads: 409 listing all 60", [code(sixty), (listed(sixty) || []).length], [ASKED, 60]);
+		const sixtySaved = await create(w, DIR.tamsin, { ...vacation("2026-11-01", "2026-11-20"), confirmLoads: echoOf(sixty) });
+		eq("§8.35 L1: ...all 60 echoed: 201, 60 confirmations", [sixtySaved.status, confirmsOf(w).filter((c) => c.availability_id === rowId(sixtySaved)).length], [201, 60]);
+
+		w.jt.fail = true;
+		const clamped = await create(w, DIR.soren, { ...vacation("2026-11-01", "2026-11-02"), confirmLoads: [{ loadId: "7002", from: "2026-10-30", to: "2099-12-31" }] });
+		w.jt.fail = false;
+		eq("§8.36 L2: Job Tracking unreadable, an echoed window reaching 2099: 201 unchecked, recorded clamped to Nov 1-2",
+			[clamped.status, clamped.body && clamped.body.loadsUnchecked, confirmsOf(w).filter((c) => c.availability_id === rowId(clamped)).map((c) => [c.load_id, c.load_from, c.load_to])],
+			[201, true, [["7002", "2026-11-01", "2026-11-02"]]]);
+
+		const before = count(w);
+		const reads = w.jt.reads;
+		const back = vacation("2026-09-14", "2026-09-16");
+		eq("§8.37 L3: a Dispatcher's \"Save anyway\" starting 31 days back: 400 BACKDATE_LIMIT, as without the echo; nothing written, Job Tracking not read",
+			[code(await create(w, DIR.hollis, { ...back, confirmLoads: [{ loadId: "7001", from: "2026-10-20", to: "2026-10-22" }] }, USERS.disp)),
+				code(await create(w, DIR.hollis, back, USERS.disp)), count(w) - before, w.jt.reads - reads],
+			[[400, "BACKDATE_LIMIT"], [400, "BACKDATE_LIMIT"], 0, 0]);
+	});
+	await R.guard("§8d", async () => {
+		const real = ["7710 ops@broker.example", "ops@broker.example"];
+		const w = await startR11b({ rows: [...W.defaultRows(),
+			W.jtRow({ id: real[0], driver: "Hollis Renner", pickup: "11/5/2026 08:00", dropoff: "11/6/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }),
+			W.jtRow({ id: real[1], driver: "Hollis Renner", pickup: "11/8/2026 08:00", dropoff: "11/8/2026 17:00", status: "Dispatched", truck: "LogisX-#91", owner: "5" }),
+		] });
+		const dates = vacation("2026-11-05", "2026-11-08");
+		const sa = await create(w, DIR.hollis, dates);
+		eq("§8.38 R1: a Super Admin sees the stored Load IDs", listed(sa), [[real[0], "2026-11-05", "2026-11-06"], [real[1], "2026-11-08", "2026-11-08"]]);
+		const disp = await create(w, DIR.hollis, dates, USERS.disp);
+		eq("§8.39 R1: a Dispatcher sees them as the Job Board shows him, broker contact withheld (an id that is only contact reads \"[contact withheld]\")",
+			listed(disp), [["7710 [contact withheld]", "2026-11-05", "2026-11-06"], ["[contact withheld]", "2026-11-08", "2026-11-08"]]);
+		ok("§8.40 R1: ...nowhere in his answer is the contact", !/broker\.example/.test(disp.text), disp.text);
+		eq("§8.41 R1: his echo of the stored ids, not what he was shown: 409 again", code(await create(w, DIR.hollis, { ...dates, confirmLoads: echoOf(sa) }, USERS.disp)), ASKED);
+		const done = await create(w, DIR.hollis, { ...dates, confirmLoads: echoOf(disp) }, USERS.disp);
+		eq("§8.42 R1: his \"Save anyway\" with what he was shown: 201, the confirmations recorded under the stored ids",
+			[done.status, confirmsOf(w).filter((c) => c.availability_id === rowId(done)).map((c) => c.load_id)], [201, real]);
+		ok("§8.43 R1: ...and his 201 holds no contact either", !/broker\.example/.test(done.text), done.text);
+	});
 
 	section("§9 R11b: moving or extending time off onto loads he already has");
 	await R.guard("§9", async () => {
@@ -602,6 +662,18 @@ const vacation = (from, to, extra = {}) => ({ kind: "vacation", from, to, reason
 		const goneMeanwhile = await edit(w, d, { to: "2026-11-14" });
 		eq("§9.13 its driver's directory row deleted while the sheet was read: 404 AVAILABILITY_NOT_FOUND, the row unchanged",
 			[code(goneMeanwhile), stored(w, d).to_date], [[404, "AVAILABILITY_NOT_FOUND"], "2026-11-11"]);
+
+		// L3 (the security review, 2026-10-19): a Dispatcher's "Save anyway" is held
+		// to his limits on the row as re-read after the sheet read.
+		const e = rowId(await create(w, DIR.soren, vacation("2026-10-10", "2026-10-12"), USERS.disp));
+		w.jt.during = () => w.db.prepare("UPDATE driver_availability SET from_date = '2026-09-10' WHERE id = ?").run(e);
+		const confirmsBefore = confirmsOf(w).length;
+		const echoed = await edit(w, e, { to: "2026-10-17", confirmLoads: [{ loadId: "7002", from: "2026-10-16", to: "2026-10-17" }] }, USERS.disp);
+		const plain = await edit(w, e, { to: "2026-10-17" }, USERS.disp);
+		eq("§9.14 L3: a Dispatcher extends Soren's row over 7002 with \"Save anyway\" while a Super Admin moves its start 35 days back: 400 BACKDATE_LIMIT on the re-read row, as without the echo",
+			[code(echoed), code(plain)], [[400, "BACKDATE_LIMIT"], [400, "BACKDATE_LIMIT"]]);
+		eq("§9.15 ...the row as the Super Admin left it, no confirmation recorded",
+			[(stored(w, e) || {}).from_date, (stored(w, e) || {}).to_date, confirmsOf(w).length - confirmsBefore], ["2026-09-10", "2026-10-12", 0]);
 	});
 
 	section("§10 R11b: after \"Save anyway\" his dark truck alerts while that load covers today");

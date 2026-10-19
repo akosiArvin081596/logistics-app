@@ -36,7 +36,10 @@
 //      with no readable day is skipped. parseConfirmLoads() reads the "Save
 //      anyway" echo and nothing else; timeOffLoadsDecision() asks again when
 //      the echo misses a listed load or its window; driverHasLoadsBody() is
-//      the 409's words
+//      the 409's words. Every listed load can be confirmed (an id over 64
+//      characters is not listed; an echo of the whole list is never too long);
+//      an unchecked echo is kept to the time off's days; each load is listed and
+//      matched by the id the viewer is shown, and confirmed by the stored one
 //
 // The routes are the shipped ones, lifted out of server.js
 // (scripts/lib/availability-world.js) over a fake Job Tracking sheet; "today"
@@ -286,15 +289,17 @@ const ROUTES = [
 			[newly({ from: "2026-10-18", to: "2026-10-25", todayKey: "" }), newly({ from: "2026-10-25", to: "2026-10-18" }), newly({ from: "2026-10-18", to: "2026-10-25" }, null),
 				newly({ from: "2026-10-18", to: "2026-10-25", driverName: "  " })], [[], [], [], []]);
 		const one = fn("loadsNewlyInTimeOff") ? fn("loadsNewlyInTimeOff")({ loads: [L(" 7001 ", "2026-10-20", "2026-10-22", "Hollis Renner", " LogisX-#91 ")], driverName: "Hollis Renner", normalize: norm, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-20" }) : null;
-		eq("§8.10 each listed load is { loadId, from, to, truck }, trimmed", one, [{ loadId: "7001", from: "2026-10-20", to: "2026-10-22", truck: "LogisX-#91" }]);
+		eq("§8.10 each listed load is { loadId, shownId, from, to }, trimmed, with no Truck cell (shownId the id itself when none is given)", one,
+			[{ loadId: "7001", shownId: "7001", from: "2026-10-20", to: "2026-10-22" }]);
 
 		const parse = (v) => (fn("parseConfirmLoads") ? fn("parseConfirmLoads")(v) : "missing");
 		const E = (loadId, from = "2026-10-20", to = "2026-10-22") => ({ loadId, from, to });
 		eq("§8.11 the echo: a list of { loadId, from, to }, ids trimmed, other keys dropped, repeats once",
 			parse([{ ...E(" 7001 "), truck: "T-1", note: "x" }, E("7002", "2026-10-21", "2026-10-21"), E("7001")]), [E("7001"), E("7002", "2026-10-21", "2026-10-21")]);
 		eq("§8.12 an empty list is an echo of nothing", parse([]), []);
-		eq("§8.13 50 entries are read; 51 are not a confirmation",
-			[(parse(Array.from({ length: 50 }, (_, i) => E(`L${i}`))) || []).length, parse(Array.from({ length: 51 }, (_, i) => E(`L${i}`)))], [50, null]);
+		eq("§8.13 500 entries are read; 501 are not a confirmation unless the server listed that many",
+			[(parse(Array.from({ length: 500 }, (_, i) => E(`L${i}`))) || []).length, parse(Array.from({ length: 501 }, (_, i) => E(`L${i}`))),
+				(fn("parseConfirmLoads") ? fn("parseConfirmLoads")(Array.from({ length: 501 }, (_, i) => E(`L${i}`)), { max: 501 }) || [] : []).length], [500, null, 501]);
 		eq("§8.14 a 64-character id is read; 65 is not a confirmation", [(parse([E("7".repeat(64))]) || []).length, parse([E("7".repeat(65))])], [1, null]);
 		for (const [label, v] of [
 			["true", true], ["an object", E("7001")], ["text", "7001"], ["null", null], ["nothing", undefined],
@@ -307,7 +312,7 @@ const ROUTES = [
 		const decide = (o) => (fn("timeOffLoadsDecision")
 			? fn("timeOffLoadsDecision")({ loads: LOADS, driverName: "Hollis Renner", normalize: norm, loadKey: key, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-21", ...o })
 			: null);
-		const asked = [{ loadId: "A1", from: "2026-10-20", to: "2026-10-22", truck: "LogisX-#91" }, { loadId: "C1", from: "2026-10-21", to: "2026-10-21", truck: "LogisX-#91" }];
+		const asked = [{ loadId: "A1", from: "2026-10-20", to: "2026-10-22" }, { loadId: "C1", from: "2026-10-21", to: "2026-10-21" }];
 		eq("§8.16 listed loads and no echo: ask with the list", decide({}), { ask: asked });
 		eq("§8.17 confirmLoads true: ask", decide({ confirmLoads: true }), { ask: asked });
 		eq("§8.18 the list echoed: confirm each listed load's window, checked",
@@ -319,9 +324,9 @@ const ROUTES = [
 			(decide({ confirmLoads: [E("A1"), E("C1", "2026-10-21", "2026-10-21"), E("Z9")] }) || {}).confirm, [E("A1"), E("C1", "2026-10-21", "2026-10-21")]);
 		eq("§8.23 nothing listed: no ask, nothing confirmed, whatever the echo", decide({ from: "2026-11-20", to: "2026-11-21", confirmLoads: [E("A1")] }), { ask: null, confirm: [], unchecked: false });
 		eq("§8.24 the sheet unreadable (loads null), no echo: save unchecked", decide({ loads: null }), { ask: null, confirm: [], unchecked: true });
-		eq("§8.25 ...with an echo: each echoed load overlapping the new dates, as given",
+		eq("§8.25 ...with an echo: each echoed load overlapping the new dates, as given, its window kept to them",
 			decide({ loads: null, confirmLoads: [E("A1"), E("Q7", "2026-10-22", "2026-10-23"), E("C1", "2026-10-21", "2026-10-21")] }),
-			{ ask: null, confirm: [E("A1"), E("C1", "2026-10-21", "2026-10-21")], unchecked: true });
+			{ ask: null, confirm: [E("A1", "2026-10-20", "2026-10-21"), E("C1", "2026-10-21", "2026-10-21")], unchecked: true });
 		eq("§8.26 ...with a malformed echo: unchecked, nothing confirmed", decide({ loads: null, confirmLoads: true }), { ask: null, confirm: [], unchecked: true });
 
 		const body = (o) => (fn("driverHasLoadsBody") ? fn("driverHasLoadsBody")({ driverName: "Hollis Renner", from: "2026-10-20", to: "2026-10-21", ...o }) : null);
@@ -335,7 +340,38 @@ const ROUTES = [
 		eq("§8.30 ...seven loads: the first five named, the rest counted", (body({ loads: seven }) || {}).error,
 			"Hollis Renner has 7 loads inside these dates: M1 (Oct 20), M2 (Oct 21), M3 (Oct 22), M4 (Oct 23), M5 (Oct 24) and 2 more. Save anyway? The loads stay assigned to him.");
 		eq("§8.31 ...a blank name", (body({ driverName: " ", loads: [asked[0]] }) || {}).error, "This driver has load A1 on Oct 20 – Oct 22 inside these dates. Save anyway? The load stays assigned to him.");
-		eq("§8.32 ...each load copied as { loadId, from, to, truck } only", (body({ loads: [{ ...asked[0], driver: "Hollis Renner", pickupKey: "2026-10-20" }] }) || {}).loads, [asked[0]]);
+		eq("§8.32 ...each load copied as { loadId, from, to } only (no Truck cell)",
+			(body({ loads: [{ ...asked[0], truck: "LogisX-#91", shownId: "A1", driver: "Hollis Renner", pickupKey: "2026-10-20" }] }) || {}).loads, [asked[0]]);
+
+		// The security review's fixes (2026-10-19).
+		const newlyIds = (loads, o = {}) => (fn("loadsNewlyInTimeOff")
+			? fn("loadsNewlyInTimeOff")({ loads, driverName: "Hollis Renner", normalize: norm, todayKey: "2026-10-15", from: "2026-10-20", to: "2026-10-21", ...o }).map((l) => l.loadId)
+			: null);
+		eq("§8.33 L1: a load whose id is over 64 characters is skipped, like one with none; 64 is listed",
+			newlyIds([L("7".repeat(65), "2026-10-20", ""), L("8".repeat(64), "2026-10-20", ""), L("A1", "2026-10-20", "")]), ["8".repeat(64), "A1"]);
+		eq("§8.34 L1: ...so is one whose id as the viewer is shown it is over 64 characters",
+			newlyIds([{ ...L("A1", "2026-10-20", ""), shownId: `A1 ${"x".repeat(62)}` }, { ...L("A2", "2026-10-20", ""), shownId: "A2 [contact withheld]" }]), ["A2"]);
+		const many = Array.from({ length: 60 }, (_, i) => L(`N${String(i).padStart(2, "0")}`, "2026-10-20", "2026-10-21"));
+		const manyAsk = decide({ loads: many });
+		const manyDone = decide({ loads: many, confirmLoads: manyAsk && Array.isArray(manyAsk.ask) ? manyAsk.ask : [] });
+		eq("§8.35 L1: 60 listed loads, all echoed: confirmed, all 60", [manyAsk && Array.isArray(manyAsk.ask) ? manyAsk.ask.length : null, manyDone && manyDone.ask, manyDone && Array.isArray(manyDone.confirm) ? manyDone.confirm.length : null],
+			[60, null, 60]);
+		eq("§8.36 L2: unchecked, an echoed window reaching past the time off (to 2099) is recorded clamped to its days",
+			(decide({ loads: null, confirmLoads: [E("A1", "2026-10-15", "2099-12-31"), E("C1", "2026-10-21", "2026-10-21")] }) || {}).confirm,
+			[E("A1", "2026-10-20", "2026-10-21"), E("C1", "2026-10-21", "2026-10-21")]);
+		const shown = [
+			{ ...L("7710 ops@broker.example", "2026-10-20", "2026-10-22"), shownId: "7710 [contact withheld]" },
+			{ ...L("ops@broker.example", "2026-10-21", ""), shownId: "[contact withheld]" },
+		];
+		const shownAsk = decide({ loads: shown });
+		eq("§8.37 R1: the ask lists each load by the id the viewer is shown, never the stored one",
+			shownAsk, { ask: [E("7710 [contact withheld]", "2026-10-20", "2026-10-22"), E("[contact withheld]", "2026-10-21", "2026-10-21")] });
+		eq("§8.38 R1: ...that echo confirms, recording the stored ids",
+			decide({ loads: shown, confirmLoads: shownAsk && shownAsk.ask }),
+			{ ask: null, confirm: [E("7710 ops@broker.example", "2026-10-20", "2026-10-22"), E("ops@broker.example", "2026-10-21", "2026-10-21")], unchecked: false });
+		eq("§8.39 R1: ...an echo of the stored ids, not what he was shown, asks again",
+			(decide({ loads: shown, confirmLoads: [E("7710 ops@broker.example", "2026-10-20", "2026-10-22"), E("ops@broker.example", "2026-10-21", "2026-10-21")] }) || {}).ask,
+			shownAsk && shownAsk.ask);
 	});
 
 	section("§4 the call sites");

@@ -935,8 +935,8 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 	const unguarded = calls.filter((at) => !/req\.session\.user\.role !== "Super Admin"/.test(SRC.slice(Math.max(0, at - 160), at)));
 	check("every route call of the reader or the two writer rules is for a non-Super-Admin only",
 		unguarded.map((at) => SRC.slice(at, SRC.indexOf("\n", at)).trim()), []);
-	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x3 (the third blanks a held broker field), dispatch, reassign)",
-		calls.length, 15);
+	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT, the time-off loads warning's Load IDs (R11b, driverLoadsForTimeOff()); restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x3 (the third blanks a held broker field), dispatch, reassign)",
+		calls.length, 16);
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	for (const [label, src, rowVar] of [["PUT /api/data/:rowIndex", DATA_PUT_SRC, "values"], ["PUT /api/load/:loadId", LOAD_PUT_SRC, "updatedRow"]]) {
 		const c = code(src);

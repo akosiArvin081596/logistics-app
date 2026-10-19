@@ -3281,31 +3281,39 @@ async function refreshAvailabilityLoadIndex() {
 
 // The live Job Tracking loads a time-off save is checked against (R11b, behind
 // DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED; POST and PUT time off only), as
-// [{ loadId, driver, truck, pickupKey, dropoffKey }]: cancelled and
+// [{ loadId, shownId, driver, pickupKey, dropoffKey }]: cancelled and
 // soft-deleted loads left out (excludeDroppedLoads()), days read with
 // sheetDayKey() ("" when unreadable), a row with no Load ID left out (no
-// confirmation could name it). Every driver's loads: the route picks his after
-// its last await, by the directory row it reads again then. From the cached
-// sheet, read only: never written, the cached rows never changed. null when the
-// sheet could not be read (logged); the save then goes through unchecked
-// (lib/driver-availability.js timeOffLoadsDecision()).
-async function driverLoadsForTimeOff() {
+// confirmation could name it). `shownId` is the Load ID as the session user may
+// see it: for every role but Super Admin (#525) the rows go through
+// sanitizeBrokerColumns(), the Job Board's own rule, and an id it leaves blank
+// (one holding only contact) reads "[contact withheld]"; the 409 lists that, the
+// echo is matched against it, and the confirmation records `loadId`. Every
+// driver's loads: the route picks his after its last await, by the directory
+// row it reads again then. From the cached sheet, read only: never written, the
+// cached rows never changed. null when the sheet could not be read (logged);
+// the save then goes through unchecked (lib/driver-availability.js
+// timeOffLoadsDecision()).
+async function driverLoadsForTimeOff(req) {
 	try {
 		const jt = await getJobTrackingCached();
 		const cols = jobTrackingMonthCols(jt.headers);
-		const truckCol = findCol(jt.headers, /^truck$/i);
+		const live = excludeDroppedLoads(jt.data, jt.headers);
+		const withheld = req.session.user.role !== "Super Admin";
+		const shown = withheld ? sanitizeBrokerColumns(jt.headers, live) : live;
 		const out = [];
-		for (const r of excludeDroppedLoads(jt.data, jt.headers)) {
+		live.forEach((r, i) => {
 			const loadId = String((cols.loadIdCol ? r[cols.loadIdCol] : "") || "").trim();
-			if (!normLoadKey(loadId)) continue;
+			if (!normLoadKey(loadId)) return;
+			const seen = withheld ? String((cols.loadIdCol ? shown[i][cols.loadIdCol] : "") || "").trim() || brokerContact.WITHHELD_TEXT : loadId;
 			out.push({
 				loadId,
+				shownId: seen,
 				driver: cols.driverCol ? String(r[cols.driverCol] || "") : "",
-				truck: truckCol ? String(r[truckCol] || "") : "",
 				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
 				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
 			});
-		}
+		});
 		return out;
 	} catch (e) {
 		console.error("[availability] Job Tracking unreadable; time off saved without the loads check:", e.message);
@@ -10239,7 +10247,7 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 		const { kind, from, to, reason } = v.value;
 		let jtLoads;
 		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
-			jtLoads = await driverLoadsForTimeOff();
+			jtLoads = await driverLoadsForTimeOff(req);
 		}
 		const outcome = db.transaction(() => {
 			// After the sheet read's await, the directory row as it is now (the
@@ -10304,7 +10312,7 @@ app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super
 		}
 		let jtLoads;
 		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && (v.value.from < row.from_date || v.value.to > row.to_date)) {
-			jtLoads = await driverLoadsForTimeOff();
+			jtLoads = await driverLoadsForTimeOff(req);
 		}
 		const outcome = db.transaction(() => {
 			// After the sheet read's await, the stored row as it is now, with the

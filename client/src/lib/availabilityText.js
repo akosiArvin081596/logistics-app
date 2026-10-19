@@ -220,9 +220,10 @@ export function editFormFor(row, today) {
 // ── Time off over loads he already has (R11b) ───────────────────────────────
 // With the server's DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED on, a create or an
 // edit that covers loads the driver already has answers 409 DRIVER_HAS_LOADS:
-// { error (the words), driver, from, to, loads: [{ loadId, from, to, truck }] }.
-// The server decides which loads warn. "Save anyway" re-sends the same body
-// with those loads echoed back as `confirmLoads`; if the list changed meanwhile
+// { error (the words), driver, from, to, loads: [{ loadId, from, to }] }, each
+// Load ID as the server shows this user (broker contact withheld for every role
+// but Super Admin). The server decides which loads warn. "Save anyway" re-sends
+// the same body with those loads echoed back as `confirmLoads`; if the list changed meanwhile
 // the server asks again with the new one. A save it could not check (Job
 // Tracking unreadable) answers `loadsUnchecked: true`.
 
