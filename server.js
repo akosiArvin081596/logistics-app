@@ -5597,7 +5597,7 @@ const DRIVER_RATE_ONLY_FROM = financialsCalc.driverRateOnly.ruleFromEnv(process.
 // approved separately, each with the first settle month it covers, read once
 // here (true/1/yes/on; off by default; on without a month leaves it off, with
 // one warning). null = off. Months before FROM, closed months, frozen items and
-// payouts never change. Before switching either on, review
+// settled payouts never change. Before switching either on, review
 // scripts/blank-pickup-dry-run.js.
 //   INVOICE_BLANK_PICKUP_FALLBACK_*   driver pay: the weekly invoice starts a
 //     blank pickup's window at the Assigned Date, as the ledger and the investor
@@ -20040,7 +20040,8 @@ function invoiceCompletionCol(headers) {
 // the dry run computes exactly the days generate pays. `blankPickupFrom` is
 // INVOICE_BLANK_PICKUP_FALLBACK_FROM (null while off); only the dry run passes
 // another. Returns { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads }:
-// blankPickupLoads names each load whose window started at its Assigned Date.
+// blankPickupLoads names each load whose window started at its Assigned Date
+// and that pays a day of the invoice no other load, trip rule or added day pays.
 function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
 	// Same two cells selectInvoiceWeekLoads() reads for `scheduledInWeek`.
 	const { statusCol, loadIdCol, pickupCol, dropoffCol } = cols;
@@ -20082,7 +20083,11 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	const notePayMonth = DRIVER_RATE_ONLY_FROM
 		? (ds, assignedMonth) => { dayPayMonth[ds] = financialsCalc.driverRateOnly.payMonthOf(ds, [dayPayMonth[ds], assignedMonth || ds.slice(0, 7)]); }
 		: () => {};
-	const blankPickupLoads = [];
+	// For blankPickupLoads: the day -> the blank-pickup loads paying it, and the
+	// days something else pays too.
+	const fallbackPayers = {};
+	const paidOtherwise = new Set();
+	const fallbackLoads = [];
 
 	for (const load of loads) {
 		const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
@@ -20103,6 +20108,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			if (trip) {
 				for (const ds of trip) {
 					activeDaySet.add(ds);
+					paidOtherwise.add(ds);
 					notePayMonth(ds, assignedMonth);
 					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 					if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
@@ -20121,7 +20127,8 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			rules: { pickupFromAssigned: blankPickupFrom, dropoffFromCompletion: true },
 		});
 		if (!win) continue;
-		if (win.pickupFallback) blankPickupLoads.push(String(lid).trim() || `(sheet row ${load._rowIndex})`);
+		const fallbackKey = win.pickupFallback ? (String(lid).trim() || `(sheet row ${load._rowIndex})`) : null;
+		if (fallbackKey) fallbackLoads.push(fallbackKey);
 		// The window's last day as the ledger and GET /api/investor read it, for
 		// the pre-dispatch rule only: the drop-off appointment, else the pickup
 		// day (the completion date only where the ledger's blank drop-off
@@ -20163,6 +20170,8 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		);
 		for (const ds of countedDays) {
 			activeDaySet.add(ds);
+			if (fallbackKey) (fallbackPayers[ds] || (fallbackPayers[ds] = [])).push(fallbackKey);
+			else paidOtherwise.add(ds);
 			notePayMonth(ds, assignedMonth);
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
@@ -20172,6 +20181,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	for (const x of extraRuleLoads) {
 		for (const ds of x.days) {
 			activeDaySet.add(ds);
+			paidOtherwise.add(ds);
 			notePayMonth(ds, x.month);
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
@@ -20197,6 +20207,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 				for (const ds of ovrAll.add) {
 					if (ds >= weekStart && ds <= computedWeekEnd) {
 						activeDaySet.add(ds);
+						paidOtherwise.add(ds);
 						// An added day pays in its own month, as the ledger buckets it.
 						notePayMonth(ds, "");
 						// Admin-added days aren't tied to a load row, so the
@@ -20207,6 +20218,13 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			}
 		}
 	}
+	// The blank-pickup loads that gained the invoice a day, in sheet order: a day
+	// still paid after the overrides that only such loads pay.
+	const gained = new Set();
+	for (const ds of [...activeDaySet].sort()) {
+		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
+	}
+	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
 	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads };
 }
 
@@ -40093,7 +40111,11 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // counts completed ones only. Status is mutable and the override row is not, so
 // a load one status change away from counting would otherwise be one status
 // change away from silently restating a closed month.
-function excludedDayPeriods({ driver, date, action, jobTracking }) {
+//
+// `blankDropoffFrom` is the blank drop-off fallback's FROM (excludedDayGate()
+// reads it as the payout ledger does; null while off): with it, a covering load's
+// window is the one the ledger pays (loadWindowDays()).
+function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null }) {
 	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY, because
 	// filtering it would DROP it from the array, which is a PERMIT. The producers
 	// below need the test because they build their keys from arbitrary sheet cells;
@@ -40113,6 +40135,8 @@ function excludedDayPeriods({ driver, date, action, jobTracking }) {
 	if (action === "add" || !jobTracking) return [own];
 	const cols = jobTrackingMonthCols(jobTracking.headers);
 	if (!cols.driverCol) return [own];
+	// The completion cell the ledger reads (ledgerLoadRows()), for that window.
+	if (blankDropoffFrom) Object.assign(cols, { blankDropoffFrom, completionDateCol: findCol(jobTracking.headers, /completion.*date|status.*update.*date/i) });
 	const months = new Set();
 	for (const row of jobTracking.data) {
 		if (normalizeDriverName(row[cols.driverCol]) !== driver) continue;
@@ -40161,7 +40185,10 @@ async function excludedDayGate({ driver, date, action }) {
 			return { refuse: "unresolved", periods: [] };
 		}
 	}
-	const periods = excludedDayPeriods({ driver, date, action, jobTracking });
+	// The blank drop-off fallback's FROM, read as the payout ledger reads it
+	// (gatherLedgerScopeFacts()), so the lock covers the days the ledger pays.
+	const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
+	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom });
 	const locked = lockedAmong(periods);
 	return locked.length ? { refuse: "finalized", periods: locked } : { refuse: null, periods };
 }
@@ -42121,6 +42148,25 @@ function loadWindowDays(row, cols) {
 	// refusal default is byte-identical to before the pickup end was widened.
 	if (!pickup || isNaN(pickup)) return [];
 	const days = jtExpandDateRange(pickup, dropoff || pickup);
+	// THE MONTH-END LOCK COVERS THE SAME DAYS THE LEDGER PAYS. With the blank
+	// drop-off fallback on (LEDGER_BLANK_DROPOFF_FALLBACK_*, lib/load-pay-days.js
+	// payWindow()), the payout ledger and GET /api/investor pay a blank drop-off's
+	// window to the completion date for a load settling in FROM or later, so the
+	// window here runs there too, from either pickup reading, judged by the same
+	// payWindow() rule. Status is not read, as everywhere in this guard. Only a
+	// caller whose `cols` carries the setting (excludedDayPeriods(), from
+	// excludedDayGate()) gets it: without one this is the window as before.
+	if (!dropoff && cols.blankDropoffFrom) {
+		const completion = cols.completionDateCol ? moneySheetDate(row[cols.completionDateCol]) : null;
+		const settleMonth = loadAssignedMonthKey(row, cols);
+		for (const start of [pickup, pickupShared]) {
+			const win = start && !isNaN(start)
+				? loadPayDays.payWindow({ pickup: start, completion, completed: true, settleMonth, rules: { dropoffFromCompletion: cols.blankDropoffFrom } })
+				: null;
+			if (win && win.dropoffFallback) for (const d of jtExpandDateRange(win.start, win.end)) if (!days.includes(d)) days.push(d);
+		}
+		days.sort();
+	}
 	if (!pickupShared || isNaN(pickupShared) || +pickupShared === +pickup) return days;
 	// Both readings agreed on nothing but the drop-off — take their union, so the
 	// guard sees every month either basis could book this load into.

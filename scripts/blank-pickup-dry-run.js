@@ -90,9 +90,9 @@ function invoiceSection(api, sheetValues, from, problems) {
 	const monthCols = api.jobTrackingMonthCols(headers);
 	const deletedKeys = api.loadKeySet(api.getDeletedLoadIds());
 	// The driver-weeks that bill a completed, live load with no pickup date whose
-	// Assigned month is FROM or later. Which of their loads the fallback starts at
-	// the Assigned Date is invoiceWeekPaidDays()'s answer below (the week's billed
-	// row of each load), not this scan's.
+	// Assigned month is FROM or later. Which of their loads gain the invoice a day
+	// from the Assigned Date is invoiceWeekPaidDays()'s answer below (the week's
+	// billed row of each load, the loads its warning names), not this scan's.
 	const weeks = new Map();
 	for (const row of data) {
 		// Completed, live and dated: billed in exactly one week.
@@ -287,7 +287,7 @@ function printText(r) {
 	if (r.invoice) {
 		const s = r.invoice.summary;
 		lines.push("", `1. DRIVER PAY: INVOICE_BLANK_PICKUP_FALLBACK_FROM=${r.invoice.from}`);
-		lines.push(`Loads the invoice would start at the Assigned Date (blank or non-date pickup, Assigned ${r.invoice.from} or later): ${s.loads}. Weeks that change: ${s.weeksChanged} (+${s.daysAdded} / -${s.daysRemoved} days, ${usd(s.amountChange)}).`);
+		lines.push(`Loads that would gain the invoice a day from the Assigned Date (blank or non-date pickup, Assigned ${r.invoice.from} or later): ${s.loads}. Weeks that change: ${s.weeksChanged} (+${s.daysAdded} / -${s.daysRemoved} days, ${usd(s.amountChange)}).`);
 		lines.push(`Of those, issued invoices (not regenerated; a person adds the days): ${s.issuedWeeks} (${usd(s.issuedAmountNotPaid)}).`);
 		lines.push("Weeks (driver, week, loads, days now -> with the flag, $ now -> with, invoice, once on):");
 		for (const w of r.invoice.weeks) {
