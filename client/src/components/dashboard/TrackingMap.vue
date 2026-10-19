@@ -448,13 +448,18 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 // setPath causes the polyline to visually disappear (Google batches overlay
 // rendering during camera animations). Initial focus (load-click) and
 // pin-click still re-center explicitly.
-function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
+// `fixAt` is the time of the fix animated to (the driver row's own when not
+// given). A fix over 2 hours old is where the truck WAS (B11): it is neither
+// snapped onto the route nor glued to the line.
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000, fixAt = null) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
   const start = performance.now()
   const isSelected = selectedDriver.value
     && normDriver(selectedDriver.value) === normDriver(driver)
-  const followLine = isSelected && !!expandedLoadId.value
+  const row = locations.value.find((l) => l.driver === driver)
+  const liveFix = fixAllowsEta(fixAgeMs(fixAt != null ? fixAt : row && row.timestamp))
+  const followLine = isSelected && !!expandedLoadId.value && liveFix
   // When a load is in focus, snap the tween target onto the route polyline
   // so the pin always sits ON the dashed line. Raw GPS often lands on a
   // parallel road (tollway vs frontage); snapping eliminates that gap.
@@ -670,7 +675,8 @@ function buildSingleLoadPath(driverOverride = null) {
   }
 
   // Never glued to a pin whose fix is over 2 hours old (B11): the planned route
-  // beside it is drawn whole. A live update (driverOverride) is a fresh fix.
+  // beside it is drawn whole. driverOverride comes only from animateMarker()
+  // for a fix of 2 hours or less.
   const driverPos = driverOverride
     || (loc && loc.latitude != null && loc.longitude != null && locShowsEta(loc)
           ? { lat: loc.latitude, lng: loc.longitude }
@@ -1743,6 +1749,23 @@ const selectedDriverLoc = computed(() => locations.value.find(l => l.driver === 
 const selectedLastSeen = computed(() => (selectedDriverLoc.value ? locLastSeen(selectedDriverLoc.value) : ''))
 const selectedShowsEta = computed(() => !!selectedDriverLoc.value && !fixHidesFigures(selectedDriverLoc.value.noGps ? null : selectedDriverLoc.value.timestamp, now.value))
 
+// B11: the open load's fix turns 2 hours old on the 10 s clock (or an old fix is
+// pushed for it): redraw the load, which toggleLoad() then draws from the plan
+// and routes nothing from the old pin, as DriverRouteMap's watch(pinIsLive)
+// does. Only for the same driver; selecting another one draws its load afresh.
+const selectedPinIsLive = computed(() => {
+  const loc = selectedDriverLoc.value
+  return !!loc && !loc.noGps && loc.latitude != null && loc.longitude != null && locShowsEta(loc)
+})
+watch(() => [selectedDriver.value, selectedPinIsLive.value], ([driver, live], [wasDriver, wasLive]) => {
+  if (driver !== wasDriver || live || !wasLive || !expandedLoadId.value) return
+  const loc = selectedDriverLoc.value
+  const al = loc && (loc.activeLoads || []).find((l) => l.loadId === expandedLoadId.value)
+  if (!al) return
+  expandedLoadId.value = ''
+  toggleLoad(al, loc)
+})
+
 // The active load driving the FuelFinderPanel's POI query: the expanded load
 // when one is open, else the focused driver's first active load (its
 // origin/dest coords are the fallback when no loadId resolves server-side).
@@ -1866,6 +1889,10 @@ function onLocationUpdate(payload) {
   const isSelectedDriver = selectedDriver.value
     && payload.driver
     && normDriver(selectedDriver.value) === payloadKey
+  // A pushed fix over 2 hours old is where the truck WAS (B11): the poller
+  // re-sends a parked device's last fix every minute. Nothing below routes from
+  // it or glues the line to it.
+  const pushIsLive = fixAllowsEta(fixAgeMs(payload.timestamp))
 
   const idx = locations.value.findIndex(
     (l) => normDriver(l.driver) === payloadKey
@@ -1885,7 +1912,7 @@ function onLocationUpdate(payload) {
       ? Math.min(Math.max(now - prevAt, PING_TWEEN_MIN_MS), PING_TWEEN_MAX_MS)
       : PING_TWEEN_MIN_MS
     lastPingAt.set(rowDriver, now)
-    animateMarker(rowDriver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
+    animateMarker(rowDriver, old.latitude, old.longitude, targetLat, targetLng, tweenMs, payload.timestamp)
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
@@ -1947,11 +1974,12 @@ function onLocationUpdate(payload) {
   // Refresh the route as the truck progresses (100m moved + 60s elapsed),
   // mirroring the public /track tracker so both views render the same
   // road segments at the same intervals. Pre-pickup loads refresh the
-  // amber driver→pickup approach leg instead of the static blue haul.
-  if (isSelectedDriver && originLatLng.value && expandedLoadId.value) {
+  // amber driver→pickup approach leg instead of the static blue haul. Only
+  // from a fix of 2 hours or less (pushIsLive).
+  if (pushIsLive && isSelectedDriver && originLatLng.value && expandedLoadId.value) {
     maybeRefetchApproachLeg(payload.latitude, payload.longitude)
   }
-  if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
+  if (pushIsLive && isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
     maybeRefetchRoute(payload.latitude, payload.longitude)
   }
 }

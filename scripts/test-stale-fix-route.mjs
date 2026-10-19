@@ -19,6 +19,11 @@
 //      and opened on the driver: a 3-hour fix asks no route, approach leg or
 //      driver-to-drop-off figures from the pin and draws the planned lane; a
 //      fresh fix routes from the pin as before
+//   §5 TrackingMap's live feed for the open driver: a pushed fix over 2 hours
+//      old (the poller re-sends a parked device's last fix every minute) asks
+//      no route or approach leg from that pin and is not glued to the line; a
+//      fresh push still refreshes the route; and when the open load's fix turns
+//      2 hours old on the map's own clock, the load is redrawn from the plan
 //
 // No DOM, no server, no network. Vue comes from this checkout's
 // client/node_modules; the files under test come from LOGISX_ROOT (default:
@@ -174,7 +179,9 @@ function mapWorld() {
   class Marker { constructor(o) { Object.assign(this, o); w.markers.push(o) } addEventListener() {} addListener() {} }
   class Polyline {
     constructor(o) { this.o = { ...o }; if (o.strokeColor === '#ffffff') w.lines.push((o.path || []).map((p) => ({ lat: p.lat, lng: p.lng }))) }
-    setMap() {} get(k) { return this.o[k] } set(k, v) { this.o[k] = v } setPath() {} getPath() { return { getArray: () => [] } }
+    setMap() {} get(k) { return this.o[k] } set(k, v) { this.o[k] = v } getPath() { return { getArray: () => [] } }
+    // A live redraw of the route line counts as a line drawn.
+    setPath(path) { if (this.o.strokeColor === '#ffffff') w.lines.push((path || []).map((p) => ({ lat: p.lat, lng: p.lng }))) }
   }
   class LatLngBounds { extend() {} getCenter() { return { lat: 0, lng: 0 } } }
   class InfoWindow { open() {} close() {} setContent() {} }
@@ -313,6 +320,7 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     activeLoads: [{ loadId: 'L-77', status, pickupAddress: 'Town A, TX', dropoffAddress: 'Town B, GA', originLat: PICKUP.lat, originLng: PICKUP.lng, destLat: DROP.lat, destLng: DROP.lng }],
   })
   let tw = null
+  let socketHandlers = {}
   const deps = (locations, loadsMap) => ({
     '../../composables/useApi': {
       useApi: () => ({
@@ -326,7 +334,7 @@ console.log('§4 TrackingMap, the dispatch tracking map')
         },
       }),
     },
-    '../../composables/useSocket': { useSocket: () => ({ connect() {}, register() {}, on() {}, off() {} }) },
+    '../../composables/useSocket': { useSocket: () => ({ connect() {}, register() {}, on(event, fn) { socketHandlers[event] = fn }, off() {} }) },
     '../../composables/useGoogleMaps': {
       useGoogleMaps: () => ({ load: loadsMap ? async () => globalThis.google.maps : () => new Promise(() => {}), createMap: async () => tw.map }),
       createDotPin: () => ({ addEventListener() {} }), createTruckArrow: () => ({ addEventListener() {}, style: {} }), createFuelPricePin: () => ({ addEventListener() {} }),
@@ -392,6 +400,100 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       ok('§4 a 10-minute fix, map loaded: the line starts at the pin, as before', !!line && same(line[0], pinLatLng(LIVE_PIN)), line && line[0])
     }
   }
+  // ══ §5 TrackingMap's live feed ═════════════════════════════════════════════
+  console.log('§5 TrackingMap, the live feed for the open driver')
+  {
+    // The map's own clock and the Date it reads, under the test's control; an
+    // animation frame runs its last step at once.
+    const realNow = Date.now
+    const realSetInterval = globalThis.setInterval
+    const realClearInterval = globalThis.clearInterval
+    let skew = 0
+    const intervals = []
+    Date.now = () => realNow() + skew
+    globalThis.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length }
+    globalThis.clearInterval = () => {}
+    globalThis.requestAnimationFrame = (cb) => { setImmediate(() => cb(performance.now() + 1e7)); return 1 }
+    const tickClock = async (ms) => {
+      skew += ms
+      for (const i of intervals) if (i.ms === 10000) i.fn()
+      await drain()
+    }
+    const openLive = async (loc) => {
+      tw = mapWorld()
+      globalThis.google = tw.google
+      socketHandlers = {}
+      intervals.length = 0
+      const Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], true))
+      const m = mountInMemory(Tracking, { visible: true })
+      await drain()
+      const row = m.find((n) => /(^|\s)driver-item(\s|$)/.test(String(n.props.class || '')) && !/\ball-item\b/.test(String(n.props.class || '')))
+      if (row) row.props.onClick({ stopPropagation() {} })
+      await drain()
+      const push = async (pin, at) => {
+        socketHandlers['location-update']({ driver: 'Driver A', latitude: pin.latitude, longitude: pin.longitude, speed: 0, heading: 0, loadId: 'L-77', timestamp: at, source: 'routemate', fuelPct: null })
+        await drain()
+      }
+      return { w: tw, m, push, opened: !!row && typeof socketHandlers['location-update'] === 'function' }
+    }
+    {
+      // In Transit, opened on a 3-hour fix; a minute later the poller re-sends
+      // that same fix.
+      const loc = locFor(OLD_PIN, 3 * HOUR, 'In Transit')
+      const r = await openLive(loc)
+      ok('§5 the map opens with its live feed', r.opened)
+      const asked = r.w.asks.length
+      const lines = r.w.lines.length
+      skew += 61 * 1000
+      await r.push(OLD_PIN, loc.timestamp)
+      const later = r.w.asks.slice(asked)
+      ok('§5 In Transit, the 3-hour fix pushed again a minute later: no route asked from that pin', !later.some((a) => same(a.from, pinLatLng(OLD_PIN))), later)
+      const drawn = r.w.lines.slice(lines)
+      ok('§5 ...and the line is not glued to it', !drawn.some((line) => line.length && same(line[0], pinLatLng(OLD_PIN))), drawn.map((l) => l[0]))
+      r.m.unmount()
+    }
+    {
+      const loc = locFor(OLD_PIN, 3 * HOUR, 'Dispatched')
+      const r = await openLive(loc)
+      const asked = r.w.asks.length
+      await r.push(OLD_PIN, loc.timestamp)
+      const later = r.w.asks.slice(asked)
+      ok('§5 Dispatched, the 3-hour fix pushed again: no approach leg and no driver-to-drop-off figures asked from that pin',
+        !later.some((a) => same(a.from, pinLatLng(OLD_PIN))), later)
+      r.m.unmount()
+    }
+    {
+      const LIVE_NEXT = { latitude: 31.4, longitude: -89.6 }
+      const r = await openLive(locFor(LIVE_PIN, 10 * MIN, 'In Transit'))
+      const asked = r.w.asks.length
+      skew += 61 * 1000
+      await r.push(LIVE_NEXT, new Date(Date.now() - 20 * 1000).toISOString())
+      const later = r.w.asks.slice(asked)
+      ok('§5 a fresh push a minute later still refreshes the route from the truck, as before',
+        later.some((a) => same(a.from, pinLatLng(LIVE_NEXT)) && same(a.to, DROP)), later)
+      r.m.unmount()
+    }
+    {
+      // Opened on a 1 h 55 min fix (live, routed from the pin); the map's clock
+      // then runs past 2 hours with no new fix.
+      const r = await openLive(locFor(LIVE_PIN, 2 * HOUR - 5 * MIN, 'In Transit'))
+      ok('§5 a 1 h 55 min fix is routed from the pin when opened', r.w.asks.some((a) => same(a.from, pinLatLng(LIVE_PIN))), r.w.asks)
+      const asked = r.w.asks.length
+      await tickClock(10 * 1000)
+      ok('§5 ...ten seconds on, still under 2 hours: nothing redrawn', r.w.asks.length === asked, r.w.asks.slice(asked))
+      await tickClock(10 * MIN)
+      const later = r.w.asks.slice(asked)
+      ok('§5 ...once the fix is over 2 hours old: the load is redrawn from the planned pickup -> drop-off',
+        later.length >= 1 && later.every((a) => same(a.from, PICKUP) && same(a.to, DROP)), later)
+      const line = lastLine(r.w)
+      ok('§5 ...and the line now starts at the pickup', !!line && same(line[0], PICKUP), line && line[0])
+      r.m.unmount()
+    }
+    Date.now = realNow
+    globalThis.setInterval = realSetInterval
+    globalThis.clearInterval = realClearInterval
+  }
+
   delete globalThis.cancelAnimationFrame
   delete globalThis.requestAnimationFrame
   delete globalThis.document
