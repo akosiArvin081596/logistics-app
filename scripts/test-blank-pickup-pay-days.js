@@ -23,12 +23,13 @@
  *     the ledger and the investor view end a blank drop-off's window at the
  *     completion date, as the invoice does.
  *
- * Written before the fix. Fail on main: D1-D4 (invoice flag on, FROM=2026-10)
- * and D8 (ledger flag on): D8 checks the direction, so a fix that cut the
- * invoice back to the pickup day would fail it. Pass on main and pin what must
- * not move: D5 a pickup on file; D6 both flags off, exactly today; D7 a week
- * before FROM; D9 and D10 each flag moves only its own side; D11 the ledger
- * flag before FROM.
+ * Written before the fix. Failed before it: D1-D4 (invoice flag on,
+ * FROM=2026-10) and D8 (ledger flag on): D8 checks the direction, so a fix that
+ * cut the invoice back to the pickup day would fail it. Passed before it and pin
+ * what must not move: D5 a pickup on file; D6 both flags off, exactly today; D7
+ * a week before FROM; D9 and D10 each flag moves only its own side; D11 the
+ * ledger flag before FROM. Added with the fix (both failed before it): D12 the
+ * generate response's warning line (D-D3), D13 the start-up warnings.
  *
  * The three paths run lifted from server.js (scripts/lib/money-plans-world.js
  * on scripts/lib/work-days-world.js). Made-up data only: one driver at $300 a
@@ -150,6 +151,28 @@ const R = M.createRunner("Money plan D: a blank Pickup (or Drop-off) Appointment
 		const row = loadRow({ id: "D1101", driver: AMY, pickup: "2026-09-21 8:00", dropoff: "", assigned: "2026-09-21", done: "2026-09-23", truck: "T1" });
 		const p = await paths(world(LEDGER_ON, row), SEP_WEEK);
 		eq("[ledger, investor]", [p.ledger, p.investor], [["2026-09-21"], ["2026-09-21"]]);
+	});
+
+	await R.test("D12 (D-D3) Invoice flag on: the generate response's warnings name the load paid from its Assigned Date; the PDF's data carries no such line; flag off, no such warning", async ({ eq, ok }) => {
+		const LINE = "Pickup Appointment blank; days counted from the Assigned Date: D101.";
+		const on = await M.generate(world(INVOICE_ON, blankPickup()), AMY, OCT_WEEK);
+		const off = await M.generate(world(OFF, blankPickup()), AMY, OCT_WEEK);
+		eq("[on: status, has the line]", [on.status, on.warnings.includes(LINE)], [200, true]);
+		ok("on: the PDF's render data does not say it", !JSON.stringify(on.data || {}).includes("Assigned Date"), JSON.stringify(on.data || {}).slice(0, 200));
+		eq("off: no blank-pickup line", off.warnings.filter((w) => /Pickup Appointment blank/.test(w)), []);
+	});
+
+	await R.test("D13 Start-up: a FROM at or before the latest closed month logs one notice per flag; a flag on without a month stays off with one warning naming the setting, never its value", async ({ eq, ok }) => {
+		const closed = world({ ...INVOICE_ON, LEDGER_BLANK_DROPOFF_FALLBACK_ENABLED: "true", LEDGER_BLANK_DROPOFF_FALLBACK_FROM: "2026-09" }, blankPickup(), { locks: ["2026-09"] });
+		const notices = closed.warnings.filter((w) => /latest closed month/.test(w));
+		eq("one notice, for the drop-off FROM only (the invoice FROM 2026-10 is open)", notices.length, 1);
+		ok("…naming LEDGER_BLANK_DROPOFF_FALLBACK_FROM", /LEDGER_BLANK_DROPOFF_FALLBACK_FROM/.test(notices[0] || ""), notices.join(" | "));
+		const bad = world({ INVOICE_BLANK_PICKUP_FALLBACK_ENABLED: "true", INVOICE_BLANK_PICKUP_FALLBACK_FROM: "Oct-2026" }, blankPickup());
+		const said = bad.warnings.filter((w) => /INVOICE_BLANK_PICKUP_FALLBACK_FROM/.test(w));
+		eq("one warning naming the setting", said.length, 1);
+		ok("…never its value", !said.some((w) => w.includes("Oct-2026")), said.join(" | "));
+		const p = await paths(bad);
+		eq("…and the flag stays off: the invoice pays no day", p.invoice, []);
 	});
 
 	R.finish();

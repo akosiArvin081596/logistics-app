@@ -128,6 +128,8 @@ const SHARED_FNS = [
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
+	// The week's days and their pricing, out of the handler since money plan D.
+	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceWeekPaidDays", "invoiceDayPricing",
 	// The handler's driver identity, pay lookups and guarded write (see
 	// scripts/test-invoice-driver-name-matching.js for what they decide).
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "invoiceWriteRefusal",
@@ -198,6 +200,10 @@ function buildWorld(db, opts = {}) {
 		// scripts/test-driver-rate-only.js runs the handler with it on).
 		DRIVER_RATE_ONLY_FROM: null,
 		driverRateOnlyStart: null,
+		// The blank-appointment fallbacks are off here (scripts/test-blank-pickup-pay-days.js
+		// runs the pay paths with them on).
+		INVOICE_BLANK_PICKUP_FALLBACK_FROM: null,
+		LEDGER_BLANK_DROPOFF_FALLBACK_FROM: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },
