@@ -33678,11 +33678,14 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// same trail, and this handler previously recorded nothing at all. The fuel
 		// tank and MPG are named when set, as the PUT audits every change to them:
 		// together they set the estimated range a driver plans against.
+		// The VIN is named when one is set, so the first value a later VIN change
+		// (update_truck_vin) starts from is on record too.
 		const createFuel = (createAmounts.fuel_tank_gallons > 0 ? `, fuel tank ${createAmounts.fuel_tank_gallons} gal` : "") +
 			(createAmounts.avg_mpg > 0 ? `, avg MPG ${createAmounts.avg_mpg}` : "");
+		const createVin = auditText(vin, 100);
 		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
 			`Created truck ${auditText(unit, 100)} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
-			`fixed costs: ${createMonthlyFixed}${createFuel}`);
+			`fixed costs: ${createMonthlyFixed}${createFuel}${createVin ? `, VIN ${createVin}` : ""}`);
 		recordPayRateChanges();
 		notifyChange("trucks");
 		res.json({ success: true, id: result.lastInsertRowid });
@@ -34053,6 +34056,20 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		// Audit lines name the truck by its unit number as stored before this save,
 		// through auditText(), like every other truck audit line.
 		const unitLabel = auditText(truck.unit_number, 100);
+		// A truck's identity is audited like the fields beside it: the unit number
+		// is what every load's Truck cell is matched against, and the VIN says which
+		// physical truck the row is. Both were written with no trail. Keyed on a
+		// real difference from the row as re-read, compared as the trimmed text
+		// (the rename test the directory refresh below uses, so a case-only rename
+		// counts), never on presence: a resend writes nothing.
+		if (nextUnit !== undefined && nextUnit !== String(truck.unit_number || "").trim()) {
+			logAudit(req, "update_truck_unit_number", "truck", String(id),
+				`Unit number for truck #${id}: ${unitLabel || "not set"} → ${auditText(nextUnit, 100)}`);
+		}
+		if (vin !== undefined && String(vin ?? "").trim() !== String(truck.vin ?? "").trim()) {
+			const fmtVin = (v) => auditText(v, 100) || "not set";
+			logAudit(req, "update_truck_vin", "truck", String(id), `VIN for ${unitLabel}: ${fmtVin(truck.vin)} → ${fmtVin(vin)}`);
+		}
 		// Audit pay-rate changes — the rate drives invoices and P&L. Reuses the
 		// established truck-entity logAudit pattern (see routemate_link/unlink).
 		// Only a Super Admin's save writes a rate (see the UPDATE above).
@@ -34291,8 +34308,11 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	})();
 	// Like the user delete, this previously left no trace at all — "a truck was
 	// removed" does not tell a later reader that its service history went too.
+	// The VIN, when the truck had one, says which physical truck it was: the row
+	// that held it is gone.
+	const deletedVin = auditText(truck.vin, 100);
 	logAudit(req, "delete_truck", "truck", String(id),
-		`Truck ${auditText(truck.unit_number, 100) || `#${id}`} (${truck.status}, owner ${truck.owner_id || "fleet"}) deleted; cascade: ` +
+		`Truck ${auditText(truck.unit_number, 100) || `#${id}`} (${truck.status}, owner ${truck.owner_id || "fleet"}${deletedVin ? `, VIN ${deletedVin}` : ""}) deleted; cascade: ` +
 		(Object.entries(removed).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`).join(", ") || "no rows"));
 	notifyChange("trucks");
 	res.json({ success: true, removed });
@@ -63201,7 +63221,8 @@ if (PERIOD_FINALIZE_ENABLED && startsJob("month-end close")) {
 // (getJobTrackingCached()) and app.db and reports a Pickup Appointment that went
 // blank, an Assigned Date that changed, a new n8n Assigned Date not in Eastern
 // time (against the rate-con email's own Date header, mailbox read-only) and an
-// approved receipt on no invoice for more than 7 days, by one email to
+// approved receipt on no invoice for more than 7 days, among its other checks
+// (an open-month load whose Truck cell names no truck, for one), by one email to
 // ADMIN_NOTIFY_EMAIL (none when it is unset) and one log line. It writes only its
 // own two tables, integrity_check_loads and integrity_check_receipts (the receipts
 // it named, so each is named once); never the sheet, an invoice, a payout or any
@@ -63246,6 +63267,9 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			readFleetLedger: computeFleetLedger,
 			// Check 8 day by day while the daily-rate rule is on (DRIVER_RATE_ONLY_FROM).
 			dailyRateRuleFor: DRIVER_RATE_ONLY_FROM ? driverRateOnlyDayRule : null,
+			// Check 9 (an open-month load whose Truck cell names no truck) reads live
+			// loads only: cancelled and soft-deleted ones left out, the one rule.
+			liveLoadRows: (sheet) => excludeDroppedLoads(sheet.data, sheet.headers),
 		}),
 	});
 	// The ticker never rejects; a rejection here is a defect in its own guard.

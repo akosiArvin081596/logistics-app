@@ -580,7 +580,7 @@ async function section6() {
 	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
 		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
 		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger", "tripWorkDays", "TRIP_WORK_DAYS_FROM",
-		"DRIVER_RATE_ONLY_FROM", "driverRateOnlyDayRule"];
+		"DRIVER_RATE_ONLY_FROM", "driverRateOnlyDayRule", "excludeDroppedLoads"];
 	const exec = (over) => {
 		const timers = [];
 		const seen = {};
@@ -615,6 +615,8 @@ async function section6() {
 			// compares rate_per_load as before.
 			DRIVER_RATE_ONLY_FROM: null,
 			driverRateOnlyDayRule: () => ({ rule: true }),
+			// Check 9's live-load rule: records what it was handed.
+			excludeDroppedLoads: (rows, headers) => { seen.dropped = { rows, headers }; return ["live"]; },
 			...over,
 		};
 		new Function(...names, `${startsJobSrc}\n${block}`)(...names.map((n) => env[n]));
@@ -643,6 +645,10 @@ async function section6() {
 		ok("check 5 gets the server's closed-month rule", o.closedMonthsOf === on.env.integrityClosedMonthsOf);
 		ok("check 7 gets the server's payout ledger, and with the ledger day-once rule off no FROM month", o.readFleetLedger === on.env.computeFleetLedger && o.dayOnceFrom === null);
 		ok("check 8: with the daily-rate rule off, no day-by-day rule", o.dailyRateRuleFor === null);
+		const sheetIn = { headers: ["Load ID", "Truck"], data: [{ "Load ID": "1", Truck: "x" }] };
+		const live = typeof o.liveLoadRows === "function" ? o.liveLoadRows(sheetIn) : null;
+		ok("check 9 gets the server's excludeDroppedLoads() over the run's own Job Tracking rows",
+			JSON.stringify(live) === JSON.stringify(["live"]) && !!on.seen.dropped && on.seen.dropped.rows === sheetIn.data && on.seen.dropped.headers === sheetIn.headers, live);
 		const rateOn = exec({ DRIVER_RATE_ONLY_FROM: "2026-10" });
 		rateOn.seen.ticker.run(now);
 		ok("check 8: with the daily-rate rule on, the server's driverRateOnlyDayRule()", (rateOn.seen.run || {}).dailyRateRuleFor === rateOn.env.driverRateOnlyDayRule);
@@ -661,11 +667,11 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own tables",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE|UNKNOWN_TRUCKS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
 	ok("the reported lists are written in the same transaction as the load state",
-		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody) && /markRate\.run\(/.test(txBody), txBody);
+		/upsert\.run\(/.test(txBody) && /markReported\.run\(/.test(txBody) && /markPayment\.run\(/.test(txBody) && /markGaveUp\.run\(/.test(txBody) && /markDayOnce\.run\(/.test(txBody) && /markRate\.run\(/.test(txBody) && /markUnknownTruck\.run\(/.test(txBody), txBody);
 }
 
 function sha(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
