@@ -108,10 +108,10 @@
                 <span v-if="driverOutOfRange(loc)" class="driver-warning">{{ driverOutOfRange(loc) }}</span>
                 <!-- Quick-glance metrics (no click): absolute ETA + countdown,
                      MPH, distance remaining, fuel % — each degrading to "—".
-                     A fix older than 2 hours gives no distance or ETA (B11). -->
+                     A fix older than 2 hours gives no distance, ETA or speed (B11). -->
                 <DriverGlanceMetrics
                   v-if="!loc.noGps"
-                  :speed="numOrNull(loc.speed)"
+                  :speed="locShowsEta(loc) ? numOrNull(loc.speed) : null"
                   :distance-miles="locShowsEta(loc) ? numOrNull(loc.distanceMiles) : null"
                   :fuel-pct="numOrNull(loc.fuelPct)"
                   :eta-epoch-ms="locShowsEta(loc) ? numOrNull(loc._etaEpochMs) : null"
@@ -1096,7 +1096,8 @@ function buildDriverPopupContent(loc) {
   const loadId = inTransitLoad(loc)
   if (loadId) html += `<div style="color:#555;font-size:0.8rem">Load: ${loadId}</div>`
   html += `<div style="color:#888;font-size:0.72rem;font-family:JetBrains Mono,monospace">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</div>`
-  if (loc.speed) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
+  // No speed from a fix over 2 hours old (B11): it is how fast the truck was going then.
+  if (loc.speed && locShowsEta(loc)) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
   // Latest ELD fuel level. fuelPct is numeric (0-100) from the server; null
   // when the device doesn't report fuel — line hidden rather than "Fuel: —".
   if (loc.fuelPct != null && Number.isFinite(Number(loc.fuelPct))) {
@@ -1275,11 +1276,15 @@ async function toggleLoad(al, loc) {
   // Fall back to origin if driver is too far (>2000 km) from load area.
   // A fix over 2 hours old shows where the truck WAS (B11, 2026-10-16): nothing
   // is routed from it (no approach leg, no driver-to-drop-off figures, which
-  // this map hides for it anyway) and the map frames the planned route instead
-  // of zooming to it; the pin stays, with its "Last seen" age.
+  // this map hides for it anyway) and the map frames the load instead of
+  // zooming to it; the pin stays, with its "Last seen" age. Nor is the planned
+  // pickup -> drop-off routed for it (the replica check, 2026-10-19): every
+  // /api/route can be a paid Google Routes call and no lane geometry is
+  // stored, so such a load shows its two markers and no line (staleFix).
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
   const pinIsLive = hasDriverGps && locShowsEta(loc)
+  const staleFix = hasDriverGps && !pinIsLive
   let useDriverPos = isPastPickup && pinIsLive
   if (useDriverPos && (hasOrigin || hasDest)) {
     const refLat = hasOrigin ? oLat : dLat
@@ -1319,8 +1324,8 @@ async function toggleLoad(al, loc) {
   // Render origin/dest markers immediately
   renderSingleLoadRoute()
 
-  // Fetch route polyline in background
-  if (hasFrom && hasDest) {
+  // Fetch route polyline in background (none for a fix over 2 hours old)
+  if (hasFrom && hasDest && !staleFix) {
     const gen = focusGeneration
     fetchingRoute.value = true
     try {
@@ -1738,9 +1743,10 @@ const movementCounts = computed(() => {
   for (const loc of activeLocations.value) c[movementState(loc)]++
   return c
 })
+// No speed from a fix over 2 hours old (B11), as on the driver card and popup.
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
-  return loc?.speed ? Math.round(loc.speed * 2.237) : null
+  return loc?.speed && locShowsEta(loc) ? Math.round(loc.speed * 2.237) : null
 })
 // The selected truck's fix age, for the route summary and the route's distance
 // label (B11). Only a fix over 2 hours old hides the figures; a driver with no

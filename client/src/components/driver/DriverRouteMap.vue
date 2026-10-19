@@ -285,10 +285,11 @@ const driverLatLng = computed(() => {
 })
 
 // B11 (2026-10-16): a pin whose fix is over 2 hours old shows where the truck
-// WAS. The map then draws the planned pickup -> drop-off route, never one from
-// that pin (lib/routeLeg.js): no line anchored to it, no paid route asked from
-// it, the pickup marker kept and the camera framing the route, not the pin. The
-// pin itself stays, with its "Last seen" age.
+// WAS. The map then draws the planned pickup -> drop-off route when the load's
+// planned lane is on hand (the load detail's), never one from that pin
+// (lib/routeLeg.js): no line anchored to it, no route asked at all for it (see
+// fetchRoute()), the pickup marker kept and the camera framing the load, not
+// the pin. The pin itself stays, with its "Last seen" age.
 const pinIsLive = computed(() => pinLiveFor(driverLatLng.value, fixTooOld.value))
 
 // The planned-lane fallback (see the plannedLane prop). Off unless a caller
@@ -719,11 +720,17 @@ async function fetchRoute(doFit = false) {
     if (props.plannedLane.status === 'ready') { applyPlannedLane(); return }
   }
 
+  // A pin over 2 hours old with no planned lane on hand: nothing is routed at
+  // all (B11, the replica check 2026-10-19). Every /api/route can be a paid
+  // Google Routes call and no lane geometry is stored, so the map keeps the
+  // load's two markers and the pin, with no line.
+  if (fixTooOld.value) { if (map) renderMarkers(); return }
+
   // Pick the right leg to render (lib/routeLeg.js):
   //   - Has ELD + picked up:     truck→drop-off (current trajectory)
   //   - Has ELD + not picked up: truck→pickup (current trajectory)
-  //   - No ELD pin, or a pin whose fix is over 2 hours old (B11):
-  //                              origin→drop-off (planned full haul)
+  //   - No ELD pin:              origin→drop-off (planned full haul)
+  //   (a pin over 2 hours old asks nothing; see above)
   // The original logic fell back to `origin → origin` when ELD was offline
   // and the load was pre-pickup, which produced no usable route — drivers
   // saw markers but no polyline and the smart guidance UI never populated.

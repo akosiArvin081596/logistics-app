@@ -23,7 +23,14 @@
 //      old (the poller re-sends a parked device's last fix every minute) asks
 //      no route or approach leg from that pin and is not glued to the line; a
 //      fresh push still refreshes the route; and when the open load's fix turns
-//      2 hours old on the map's own clock, the load is redrawn from the plan
+//      2 hours old on the map's own clock, the load is redrawn without it
+//   §6 the fuel card dates a stale reading with the same helper as "Last seen"
+//
+// An old fix asks no route at all (no /api/route, so no paid Google Routes call;
+// review of the B11 replica check, 2026-10-19): the load map draws the load's
+// planned lane only when it already has one (the load detail's haul lane), and
+// otherwise only the two markers and the pin, as does the tracking map. Over 2
+// hours a fix's speed is not shown either.
 //
 // No DOM, no server, no network. Vue comes from this checkout's
 // client/node_modules; the files under test come from LOGISX_ROOT (default:
@@ -57,8 +64,13 @@ const drain = async () => { for (let i = 0; i < 30; i++) await new Promise((r) =
 // Compile a committed SFC's <script setup> + <template> into a component.
 // Imports are resolved from `overrides` first; a .vue import becomes a stub; a
 // relative .js import is loaded from ROOT.
+// Each render of a stub records the props it was given.
+const stubbed = []
 function stub(name) {
-  return Vue.defineComponent({ name, inheritAttrs: false, setup() { return () => Vue.h('div', { 'data-stub': name }) } })
+  return Vue.defineComponent({
+    name, inheritAttrs: false,
+    setup(_, { attrs }) { return () => { stubbed.push({ name, attrs: { ...attrs } }); return Vue.h('div', { 'data-stub': name }) } },
+  })
 }
 async function compileComponent(rel, overrides = {}) {
   const file = path.join(ROOT, rel)
@@ -175,16 +187,30 @@ const LANE = [{ latitude: PICKUP.lat, longitude: PICKUP.lng }, { latitude: 31.5,
 // One recording world per mount: every /api/route ask, every line drawn, every
 // marker and camera move.
 function mapWorld() {
-  const w = { asks: [], lines: [], markers: [], camera: [] }
-  class Marker { constructor(o) { Object.assign(this, o); w.markers.push(o) } addEventListener() {} addListener() {} }
+  // routeLines: every route line drawn (the white base line), with its first
+  // point and whether it was taken off the map since.
+  const w = { asks: [], lines: [], markers: [], markerObjs: [], camera: [], routeLines: [], popups: [] }
+  class Marker {
+    constructor(o) { Object.assign(this, o); this._on = {}; w.markers.push(o); w.markerObjs.push(this) }
+    addEventListener(event, fn) { this._on[event] = fn } addListener() {}
+  }
   class Polyline {
-    constructor(o) { this.o = { ...o }; if (o.strokeColor === '#ffffff') w.lines.push((o.path || []).map((p) => ({ lat: p.lat, lng: p.lng }))) }
-    setMap() {} get(k) { return this.o[k] } set(k, v) { this.o[k] = v } getPath() { return { getArray: () => [] } }
+    constructor(o) {
+      this.o = { ...o }
+      if (o.strokeColor === '#ffffff') {
+        const path = (o.path || []).map((p) => ({ lat: p.lat, lng: p.lng }))
+        w.lines.push(path)
+        this.entry = { first: path[0] || null, removed: false }
+        w.routeLines.push(this.entry)
+      }
+    }
+    setMap(m) { if (m === null && this.entry) this.entry.removed = true }
+    get(k) { return this.o[k] } set(k, v) { this.o[k] = v } getPath() { return { getArray: () => [] } }
     // A live redraw of the route line counts as a line drawn.
     setPath(path) { if (this.o.strokeColor === '#ffffff') w.lines.push((path || []).map((p) => ({ lat: p.lat, lng: p.lng }))) }
   }
   class LatLngBounds { extend() {} getCenter() { return { lat: 0, lng: 0 } } }
-  class InfoWindow { open() {} close() {} setContent() {} }
+  class InfoWindow { open() {} close() {} setContent(c) { w.popups.push(String(c)) } }
   w.google = { maps: { marker: { AdvancedMarkerElement: Marker }, Polyline, LatLngBounds, InfoWindow, event: { trigger() {} }, MapTypeControlStyle: { HORIZONTAL_BAR: 1 }, ControlPosition: { TOP_LEFT: 1 } } }
   w.map = {
     fitBounds() { w.camera.push(['fitBounds']) }, setCenter(c) { w.camera.push(['setCenter', c]) }, setZoom(z) { w.camera.push(['setZoom', z]) },
@@ -231,22 +257,30 @@ async function mountMap(props) {
 if (RouteMap) {
   console.log('§2 DriverRouteMap, the dispatch load detail')
   const base = { load: mapLoad('In Transit'), headers: MAP_HEADERS, dispatchMode: true, showArrival: true }
+  // An old fix asks no route at all (no /api/route, so no paid Routes call):
+  // the planned lane is drawn only when the load's lane is on hand, else none.
   {
     const { w, m } = await mountMap({ ...base, driverPosition: OLD_PIN, fixAt: ago(3 * HOUR) })
-    ok('§2 a 3-hour fix: the route asked is the planned pickup -> drop-off', w.asks.length >= 1 && w.asks.every((a) => same(a.from, PICKUP) && same(a.to, DROP)), w.asks)
-    ok('§2 ...never one from the old pin', !w.asks.some((a) => same(a.from, pinLatLng(OLD_PIN))), w.asks)
-    const line = lastLine(w)
-    ok('§2 ...the line drawn starts at the pickup, not at the pin', !!line && same(line[0], PICKUP) && !line.some((p) => same(p, pinLatLng(OLD_PIN))), line && line.slice(0, 2))
-    ok('§2 ...the pickup marker is drawn (the route starts there), and the pin stays', w.markers.some((mk) => mk.title === 'Pickup') && w.markers.some((mk) => same(mk.position, pinLatLng(OLD_PIN))),
+    ok('§2 a 3-hour fix with no planned lane on hand: no route asked at all', w.asks.length === 0, w.asks)
+    ok('§2 ...so no line is drawn, from the old pin or anywhere', w.lines.length === 0, w.lines.map((l) => l[0]))
+    ok('§2 ...the pickup and drop-off markers are drawn, and the pin stays',
+      w.markers.some((mk) => mk.title === 'Pickup') && w.markers.some((mk) => mk.title === 'Drop-off') && w.markers.some((mk) => same(mk.position, pinLatLng(OLD_PIN))),
       w.markers.map((mk) => mk.title))
-    ok('§2 ...and the map frames the route instead of zooming in on the old pin',
+    ok('§2 ...and the map frames the load instead of zooming in on the old pin',
       w.camera.some((c) => c[0] === 'fitBounds') && !w.camera.some((c) => c[0] === 'setZoom' && c[1] === 15), w.camera)
     m.unmount()
   }
   {
     const { w, m } = await mountMap({ ...base, load: mapLoad('Dispatched'), driverPosition: OLD_PIN, fixAt: ago(3 * HOUR) })
-    ok('§2 not yet collected, a 3-hour fix: the planned pickup -> drop-off, not pin -> pickup',
-      w.asks.length >= 1 && w.asks.every((a) => same(a.from, PICKUP) && same(a.to, DROP)), w.asks)
+    ok('§2 not yet collected, a 3-hour fix: no route asked (neither pin -> pickup nor the lane)', w.asks.length === 0, w.asks)
+    m.unmount()
+  }
+  {
+    // The lane GET /api/loads/:id/haul answers when Routes is unavailable: a
+    // stored distance and no geometry.
+    const stored = { status: 'ready', route: null, distanceMiles: 812.4, etaMinutes: null, source: 'stored' }
+    const { w, m } = await mountMap({ ...base, driverPosition: OLD_PIN, fixAt: ago(3 * HOUR), plannedLane: stored })
+    ok('§2 a 3-hour fix and a stored lane with no geometry: no route asked, no line drawn', w.asks.length === 0 && w.lines.length === 0, [w.asks, w.lines.length])
     m.unmount()
   }
   {
@@ -285,10 +319,9 @@ if (RouteMap) {
     state.fixAt = ago(2 * HOUR + 5 * MIN)
     await drain()
     const later = w.asks.slice(asked)
-    ok('§2 a fix that turns 2 hours old while the map is open: the planned route is asked',
-      asked === 1 && later.length >= 1 && later.every((a) => same(a.from, PICKUP) && same(a.to, DROP)), [asked, later])
-    const line = lastLine(w)
-    ok('§2 ...and the line no longer starts at the pin', !!line && same(line[0], PICKUP), line && line[0])
+    ok('§2 a fix that turns 2 hours old while the map is open: no route is asked', asked === 1 && later.length === 0, [asked, later])
+    ok('§2 ...and the line drawn from the pin is taken off the map',
+      w.routeLines.length >= 1 && w.routeLines.filter((r) => same(r.first, pinLatLng(LIVE_PIN))).every((r) => r.removed), w.routeLines)
     m.unmount()
   }
 
@@ -314,8 +347,8 @@ if (RouteMap) {
 // ══ §4 TrackingMap ═══════════════════════════════════════════════════════════
 console.log('§4 TrackingMap, the dispatch tracking map')
 {
-  const locFor = (pin, ageMs, status) => ({
-    driver: 'Driver A', latitude: pin.latitude, longitude: pin.longitude, speed: 0, timestamp: ago(ageMs), source: 'linxup', noGps: false,
+  const locFor = (pin, ageMs, status, speed = 0) => ({
+    driver: 'Driver A', latitude: pin.latitude, longitude: pin.longitude, speed, timestamp: ago(ageMs), source: 'linxup', noGps: false,
     loadId: 'L-77', etaStatus: 'unknown', etaMinutes: null, distanceMiles: null,
     activeLoads: [{ loadId: 'L-77', status, pickupAddress: 'Town A, TX', dropoffAddress: 'Town B, GA', originLat: PICKUP.lat, originLng: PICKUP.lng, destLat: DROP.lat, destLng: DROP.lng }],
   })
@@ -350,6 +383,7 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     globalThis.google = tw.google
     let Tracking = null
     try { Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], loadsMap)) } catch (err) { ok(`§4 TrackingMap compiles in this harness (${err.message})`, false); return null }
+    stubbed.length = 0
     const m = mountInMemory(Tracking, { visible: true })
     await drain()
     // The driver's own row, not the "All drivers" row above it.
@@ -357,22 +391,29 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     if (!row || typeof row.props.onClick !== 'function') { m.unmount(); return { w: tw, opened: false } }
     row.props.onClick({ stopPropagation() {} })
     await drain()
+    // The camera as opening the load left it; then, with the map loaded, the
+    // truck's popup too (a click on its marker, which zooms to it by design).
+    const camera = tw.camera.slice()
+    const pin = tw.markerObjs.find((mk) => mk.title === 'Driver A')
+    if (pin && typeof pin._on['gmp-click'] === 'function') pin._on['gmp-click']()
+    const text = m.text()
+    const glance = stubbed.filter((s) => s.name === 'DriverGlanceMetrics').map((s) => s.attrs).pop() || null
     m.unmount()
-    return { w: tw, opened: true }
+    return { w: tw, opened: true, text, glance, camera }
   }
   {
     const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'In Transit'))
     ok('§4 the driver row opens', !!r && r.opened)
     if (r && r.opened) {
       ok('§4 In Transit, a 3-hour fix: no route asked from the old pin', !r.w.asks.some((a) => same(a.from, pinLatLng(OLD_PIN))), r.w.asks)
-      ok('§4 ...the planned pickup -> drop-off is asked instead', r.w.asks.some((a) => same(a.from, PICKUP) && same(a.to, DROP)), r.w.asks)
+      ok('§4 ...nor the planned pickup -> drop-off: no route asked at all (no paid Routes call for an old fix)', r.w.asks.length === 0, r.w.asks)
     }
   }
   {
     const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'Dispatched'))
     if (r && r.opened) {
-      ok('§4 Dispatched, a 3-hour fix: no approach leg and no driver-to-drop-off figures asked from the old pin',
-        !r.w.asks.some((a) => same(a.from, pinLatLng(OLD_PIN))), r.w.asks)
+      ok('§4 Dispatched, a 3-hour fix: no approach leg, no driver-to-drop-off figures and no lane asked: no route at all',
+        r.w.asks.length === 0, r.w.asks)
     }
   }
   {
@@ -383,21 +424,28 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     }
   }
   {
-    // With the map script loaded, the line itself: the planned lane, not one
-    // glued to the old pin.
-    const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'In Transit'), { loadsMap: true })
+    // With the map script loaded: no route line at all for an old fix (no lane
+    // geometry is stored, and none is asked for), the load's two markers, the
+    // pin kept; and no speed anywhere from that fix (49 mph three days ago).
+    const MPS_49 = 49 / 2.237
+    const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'In Transit', MPS_49), { loadsMap: true })
     if (r && r.opened) {
-      const line = lastLine(r.w)
-      ok('§4 In Transit, a 3-hour fix, map loaded: the line starts at the pickup, not at the old pin',
-        !!line && same(line[0], PICKUP) && !line.some((p) => same(p, pinLatLng(OLD_PIN))), line && line.slice(0, 2))
-      const centredOnPin = r.w.camera.some((c) => c[0] === 'setCenter' && same(c[1], pinLatLng(OLD_PIN)))
-      const streetZoom = r.w.camera.some((c) => c[0] === 'setZoom' && c[1] === 20)
-      ok('§4 ...and the map is not zoomed in on the old pin', !(centredOnPin && streetZoom), r.w.camera)
+      ok('§4 In Transit, a 3-hour fix, map loaded: no route line is drawn', r.w.lines.length === 0, r.w.lines.map((l) => l[0]))
+      ok('§4 ...the pickup and drop-off markers are', r.w.markers.some((mk) => mk.title === 'Pickup') && r.w.markers.some((mk) => mk.title === 'Drop-off'), r.w.markers.map((mk) => mk.title))
+      const centredOnPin = r.camera.some((c) => c[0] === 'setCenter' && same(c[1], pinLatLng(OLD_PIN)))
+      const streetZoom = r.camera.some((c) => c[0] === 'setZoom' && c[1] === 20)
+      ok('§4 ...and opening the load does not zoom in on the old pin', !(centredOnPin && streetZoom), r.camera)
+      ok('§4 a 3-hour fix at 49 mph: no speed on the driver card', !!r.glance && r.glance.speed == null, r.glance && r.glance.speed)
+      ok(`§4 ...nor in the open load's summary (${r.text.slice(0, 120)})`, !/\b49 mph\b/.test(r.text))
+      ok('§4 ...nor in the truck\'s popup', r.w.popups.length >= 1 && !r.w.popups.some((p) => /Speed:/.test(p)), r.w.popups.map((p) => p.slice(0, 80)))
     }
-    const f = await openOn(locFor(LIVE_PIN, 10 * MIN, 'In Transit'), { loadsMap: true })
+    const f = await openOn(locFor(LIVE_PIN, 10 * MIN, 'In Transit', MPS_49), { loadsMap: true })
     if (f && f.opened) {
       const line = lastLine(f.w)
       ok('§4 a 10-minute fix, map loaded: the line starts at the pin, as before', !!line && same(line[0], pinLatLng(LIVE_PIN)), line && line[0])
+      ok('§4 ...and its 49 mph shows on the card, the summary and the popup, as before',
+        !!f.glance && Math.round(f.glance.speed * 2.237) === 49 && /\b49 mph\b/.test(f.text) && f.w.popups.some((p) => /Speed: 49 mph/.test(p)),
+        [f.glance && f.glance.speed, f.w.popups.length])
     }
   }
   // ══ §5 TrackingMap's live feed ═════════════════════════════════════════════
@@ -483,10 +531,9 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       ok('§5 ...ten seconds on, still under 2 hours: nothing redrawn', r.w.asks.length === asked, r.w.asks.slice(asked))
       await tickClock(10 * MIN)
       const later = r.w.asks.slice(asked)
-      ok('§5 ...once the fix is over 2 hours old: the load is redrawn from the planned pickup -> drop-off',
-        later.length >= 1 && later.every((a) => same(a.from, PICKUP) && same(a.to, DROP)), later)
-      const line = lastLine(r.w)
-      ok('§5 ...and the line now starts at the pickup', !!line && same(line[0], PICKUP), line && line[0])
+      ok('§5 ...once the fix is over 2 hours old: the load is redrawn with no route asked at all', later.length === 0, later)
+      const fromPin = r.w.routeLines.filter((l) => same(l.first, pinLatLng(LIVE_PIN)))
+      ok('§5 ...and the line drawn from the pin is taken off the map', fromPin.length >= 1 && fromPin.every((l) => l.removed), r.w.routeLines)
       r.m.unmount()
     }
     Date.now = realNow
@@ -498,6 +545,38 @@ console.log('§4 TrackingMap, the dispatch tracking map')
   delete globalThis.requestAnimationFrame
   delete globalThis.document
   delete globalThis.google
+}
+
+// ══ §6 the fuel card's age ═══════════════════════════════════════════════════
+// A stale reading on the newest row (the replica's case: the fuel level rides on
+// the same row as the position fix) is dated by the same helper the position's
+// "Last seen" uses, so one fix never reads "3 d" on one card and "4 d" on the
+// other (3.73 days: floored 3, rounded 4).
+console.log('§6 the fuel card, a stale reading')
+{
+  let duration = null
+  try { duration = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'duration.js')).href) } catch { duration = null }
+  const ageMin = Math.round(3.73 * 24 * 60)
+  const fuelDeps = {
+    '../../composables/useApi': {
+      useApi: () => ({
+        get: async (url) => (String(url).startsWith('/api/fuel/range')
+          ? { ok: true, fuelPct: null, fuelSource: 'stale', fuelAnchorPct: 40, fuelReadingAgeMinutes: ageMin }
+          : { ok: false }),
+      }),
+    },
+  }
+  let Fuel = null
+  try { Fuel = await compileComponent('client/src/components/dashboard/FuelFinderPanel.vue', fuelDeps) } catch (err) { ok(`§6 FuelFinderPanel compiles in this harness (${err.message})`, false) }
+  if (Fuel && duration) {
+    const m = mountInMemory(Fuel, { driver: 'Driver A' })
+    await drain()
+    const t = m.text()
+    m.unmount()
+    const sameAge = `${duration.formatAgeMs(ageMin * 60 * 1000)} ago`
+    ok(`§6 a reading 3.73 days old reads "${sameAge}", as the position's "Last seen" does (${t.slice(0, 160)})`,
+      t.includes(`Last known 40%, ${sameAge}`) && !t.includes('4 d ago'))
+  }
 }
 
 if (failures.length) {
