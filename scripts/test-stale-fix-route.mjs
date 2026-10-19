@@ -16,8 +16,8 @@
 //   §3 DriverRouteMap on the customer tracker (publicMode, preset lane): a fix
 //      over 2 hours old leaves the lane whole instead of trimming it at the pin
 //   §4 TrackingMap (the dispatch tracking map), mounted on /api/locations/latest
-//      and opened on the driver: a 3-hour fix asks no route, approach leg or
-//      driver-to-drop-off figures from the pin and draws the planned lane; a
+//      and opened on the driver: a 3-hour fix asks no /api/route at all, draws
+//      the haul's planned lane (none when it has no line) and shows no speed; a
 //      fresh fix routes from the pin as before
 //   §5 TrackingMap's live feed for the open driver: a pushed fix over 2 hours
 //      old (the poller re-sends a parked device's last fix every minute) asks
@@ -26,11 +26,12 @@
 //      2 hours old on the map's own clock, the load is redrawn without it
 //   §6 the fuel card dates a stale reading with the same helper as "Last seen"
 //
-// An old fix asks no route at all (no /api/route, so no paid Google Routes call;
-// review of the B11 replica check, 2026-10-19): the load map draws the load's
-// planned lane only when it already has one (the load detail's haul lane), and
-// otherwise only the two markers and the pin, as does the tracking map. Over 2
-// hours a fix's speed is not shown either.
+// An old fix asks no /api/route at all (the B11 replica check, 2026-10-19). Its
+// planned lane comes from GET /api/loads/:id/haul, the load detail's endpoint
+// and server cache: the load map draws the lane its haul section hands it, the
+// tracking map asks the haul once per opened load (and once at the turn-old
+// redraw); a lane with no line (Routes failed or off) draws none. Over 2 hours a
+// fix's speed is not shown either.
 //
 // No DOM, no server, no network. Vue comes from this checkout's
 // client/node_modules; the files under test come from LOGISX_ROOT (default:
@@ -189,7 +190,7 @@ const LANE = [{ latitude: PICKUP.lat, longitude: PICKUP.lng }, { latitude: 31.5,
 function mapWorld() {
   // routeLines: every route line drawn (the white base line), with its first
   // point and whether it was taken off the map since.
-  const w = { asks: [], lines: [], markers: [], markerObjs: [], camera: [], routeLines: [], popups: [] }
+  const w = { asks: [], hauls: [], lines: [], markers: [], markerObjs: [], camera: [], routeLines: [], popups: [] }
   class Marker {
     constructor(o) { Object.assign(this, o); this._on = {}; w.markers.push(o); w.markerObjs.push(this) }
     addEventListener(event, fn) { this._on[event] = fn } addListener() {}
@@ -354,7 +355,11 @@ console.log('§4 TrackingMap, the dispatch tracking map')
   })
   let tw = null
   let socketHandlers = {}
-  const deps = (locations, loadsMap) => ({
+  // The load's planned lane, as GET /api/loads/:id/haul answers it: with a line
+  // (Routes answered) or a stored distance and no line (Routes failed or off).
+  const LANE_WITH_LINE = { route: LANE, distanceMiles: 812.4, etaMinutes: 750, source: 'routes_api' }
+  const LANE_NO_LINE = { route: null, distanceMiles: 812.4, etaMinutes: null, source: 'stored' }
+  const deps = (locations, loadsMap, lane = LANE_WITH_LINE) => ({
     '../../composables/useApi': {
       useApi: () => ({
         get: async (url) => {
@@ -362,6 +367,10 @@ console.log('§4 TrackingMap, the dispatch tracking map')
           if (String(url).startsWith('/api/route')) {
             const r = tw.route(url)
             return { route: r.route, distanceMiles: 85.2, etaMinutes: 95 }
+          }
+          if (/^\/api\/loads\/[^/]+\/haul$/.test(String(url))) {
+            tw.hauls.push(url)
+            return { loadId: 'L-77', lane: { ...lane }, driven: null }
           }
           return { available: false }
         },
@@ -378,11 +387,11 @@ console.log('§4 TrackingMap, the dispatch tracking map')
   globalThis.document = { createElement: () => ({ style: {}, textContent: '', addEventListener() {}, appendChild() {} }) }
   // Opens the map on the driver (a click on the driver's row), which expands
   // the driver's working load and draws its route.
-  const openOn = async (loc, { loadsMap = false } = {}) => {
+  const openOn = async (loc, { loadsMap = false, lane } = {}) => {
     tw = mapWorld()
     globalThis.google = tw.google
     let Tracking = null
-    try { Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], loadsMap)) } catch (err) { ok(`§4 TrackingMap compiles in this harness (${err.message})`, false); return null }
+    try { Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], loadsMap, lane)) } catch (err) { ok(`§4 TrackingMap compiles in this harness (${err.message})`, false); return null }
     stubbed.length = 0
     const m = mountInMemory(Tracking, { visible: true })
     await drain()
@@ -406,14 +415,17 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     ok('§4 the driver row opens', !!r && r.opened)
     if (r && r.opened) {
       ok('§4 In Transit, a 3-hour fix: no route asked from the old pin', !r.w.asks.some((a) => same(a.from, pinLatLng(OLD_PIN))), r.w.asks)
-      ok('§4 ...nor the planned pickup -> drop-off: no route asked at all (no paid Routes call for an old fix)', r.w.asks.length === 0, r.w.asks)
+      ok('§4 ...nor the planned pickup -> drop-off from /api/route: no /api/route at all', r.w.asks.length === 0, r.w.asks)
+      ok('§4 ...the planned lane is asked once, from the load\'s haul (the load detail\'s endpoint)',
+        r.w.hauls.length === 1 && r.w.hauls[0] === '/api/loads/L-77/haul', r.w.hauls)
     }
   }
   {
     const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'Dispatched'))
     if (r && r.opened) {
-      ok('§4 Dispatched, a 3-hour fix: no approach leg, no driver-to-drop-off figures and no lane asked: no route at all',
+      ok('§4 Dispatched, a 3-hour fix: no approach leg, no driver-to-drop-off figures, no /api/route at all',
         r.w.asks.length === 0, r.w.asks)
+      ok('§4 ...the planned lane once, from the haul', r.w.hauls.length === 1, r.w.hauls)
     }
   }
   {
@@ -421,16 +433,19 @@ console.log('§4 TrackingMap, the dispatch tracking map')
     if (r && r.opened) {
       ok('§4 In Transit, a 10-minute fix: routed from the pin to the drop-off, as before',
         r.w.asks.some((a) => same(a.from, pinLatLng(LIVE_PIN)) && same(a.to, DROP)), r.w.asks)
+      ok('§4 ...and no haul is asked for it', r.w.hauls.length === 0, r.w.hauls)
     }
   }
   {
-    // With the map script loaded: no route line at all for an old fix (no lane
-    // geometry is stored, and none is asked for), the load's two markers, the
-    // pin kept; and no speed anywhere from that fix (49 mph three days ago).
+    // With the map script loaded: an old fix gets the haul's planned lane drawn
+    // (never a line from the pin), the load's two markers, the pin kept; and no
+    // speed anywhere from that fix (49 mph three days ago).
     const MPS_49 = 49 / 2.237
     const r = await openOn(locFor(OLD_PIN, 3 * HOUR, 'In Transit', MPS_49), { loadsMap: true })
     if (r && r.opened) {
-      ok('§4 In Transit, a 3-hour fix, map loaded: no route line is drawn', r.w.lines.length === 0, r.w.lines.map((l) => l[0]))
+      const line = lastLine(r.w)
+      ok('§4 In Transit, a 3-hour fix, map loaded: the haul\'s planned lane is drawn, from the pickup',
+        !!line && same(line[0], PICKUP) && line.length >= LANE.length && !line.some((p) => same(p, pinLatLng(OLD_PIN))), line && line.slice(0, 2))
       ok('§4 ...the pickup and drop-off markers are', r.w.markers.some((mk) => mk.title === 'Pickup') && r.w.markers.some((mk) => mk.title === 'Drop-off'), r.w.markers.map((mk) => mk.title))
       const centredOnPin = r.camera.some((c) => c[0] === 'setCenter' && same(c[1], pinLatLng(OLD_PIN)))
       const streetZoom = r.camera.some((c) => c[0] === 'setZoom' && c[1] === 20)
@@ -438,6 +453,11 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       ok('§4 a 3-hour fix at 49 mph: no speed on the driver card', !!r.glance && r.glance.speed == null, r.glance && r.glance.speed)
       ok(`§4 ...nor in the open load's summary (${r.text.slice(0, 120)})`, !/\b49 mph\b/.test(r.text))
       ok('§4 ...nor in the truck\'s popup', r.w.popups.length >= 1 && !r.w.popups.some((p) => /Speed:/.test(p)), r.w.popups.map((p) => p.slice(0, 80)))
+    }
+    const n = await openOn(locFor(OLD_PIN, 3 * HOUR, 'In Transit'), { loadsMap: true, lane: LANE_NO_LINE })
+    if (n && n.opened) {
+      ok('§4 a 3-hour fix whose haul lane has no line (Routes failed or off): no line drawn, no /api/route',
+        n.w.lines.length === 0 && n.w.asks.length === 0 && n.w.hauls.length === 1, [n.w.lines.length, n.w.asks, n.w.hauls])
     }
     const f = await openOn(locFor(LIVE_PIN, 10 * MIN, 'In Transit', MPS_49), { loadsMap: true })
     if (f && f.opened) {
@@ -467,12 +487,12 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       for (const i of intervals) if (i.ms === 10000) i.fn()
       await drain()
     }
-    const openLive = async (loc) => {
+    const openLive = async (loc, lane) => {
       tw = mapWorld()
       globalThis.google = tw.google
       socketHandlers = {}
       intervals.length = 0
-      const Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], true))
+      const Tracking = await compileComponent('client/src/components/dashboard/TrackingMap.vue', deps([loc], true, lane))
       const m = mountInMemory(Tracking, { visible: true })
       await drain()
       const row = m.find((n) => /(^|\s)driver-item(\s|$)/.test(String(n.props.class || '')) && !/\ball-item\b/.test(String(n.props.class || '')))
@@ -528,12 +548,30 @@ console.log('§4 TrackingMap, the dispatch tracking map')
       ok('§5 a 1 h 55 min fix is routed from the pin when opened', r.w.asks.some((a) => same(a.from, pinLatLng(LIVE_PIN))), r.w.asks)
       const asked = r.w.asks.length
       await tickClock(10 * 1000)
-      ok('§5 ...ten seconds on, still under 2 hours: nothing redrawn', r.w.asks.length === asked, r.w.asks.slice(asked))
+      ok('§5 ...ten seconds on, still under 2 hours: nothing redrawn', r.w.asks.length === asked && r.w.hauls.length === 0, [r.w.asks.slice(asked), r.w.hauls])
       await tickClock(10 * MIN)
       const later = r.w.asks.slice(asked)
-      ok('§5 ...once the fix is over 2 hours old: the load is redrawn with no route asked at all', later.length === 0, later)
+      ok('§5 ...once the fix is over 2 hours old: redrawn with no /api/route', later.length === 0, later)
+      ok('§5 ...the planned lane asked once, from the haul', r.w.hauls.length === 1, r.w.hauls)
       const fromPin = r.w.routeLines.filter((l) => same(l.first, pinLatLng(LIVE_PIN)))
-      ok('§5 ...and the line drawn from the pin is taken off the map', fromPin.length >= 1 && fromPin.every((l) => l.removed), r.w.routeLines)
+      ok('§5 ...the line drawn from the pin is taken off the map', fromPin.length >= 1 && fromPin.every((l) => l.removed), r.w.routeLines)
+      const line = lastLine(r.w)
+      ok('§5 ...and the haul\'s lane is drawn, from the pickup', !!line && same(line[0], PICKUP), line && line[0])
+      r.m.unmount()
+    }
+    {
+      // The browser check's 70-second wait: the map open on a 3-hour fix, its
+      // 10 s clock ticking and the poller re-sending the same old fix each
+      // minute. The haul is asked once (the open) and never again.
+      const loc = locFor(OLD_PIN, 3 * HOUR, 'In Transit')
+      const r = await openLive(loc)
+      const hauls = r.w.hauls.length
+      for (let s = 10; s <= 70; s += 10) {
+        await tickClock(10 * 1000)
+        if (s === 60) await r.push(OLD_PIN, loc.timestamp)
+      }
+      ok('§5 70 s with the map open on a 3-hour fix: one haul request in all, no /api/route',
+        hauls === 1 && r.w.hauls.length === 1 && r.w.asks.length === 0, [hauls, r.w.hauls.length, r.w.asks])
       r.m.unmount()
     }
     Date.now = realNow

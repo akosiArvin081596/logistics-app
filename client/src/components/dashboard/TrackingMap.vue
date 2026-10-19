@@ -356,6 +356,30 @@ function clientCacheKey(fromLat, fromLng, toLat, toLng) {
   return `${Number(fromLat).toFixed(3)},${Number(fromLng).toFixed(3)}>${Number(toLat).toFixed(3)},${Number(toLng).toFixed(3)}`
 }
 
+// B11: the planned pickup -> drop-off lane of a load whose truck's fix is over 2
+// hours old, as [[lat, lng], ...]. Read from GET /api/loads/:id/haul, the
+// endpoint (and 15-minute server route cache) the load detail's haul section
+// uses, so opening such a load here costs what that detail already spends, and
+// never from /api/route. [] when the lane has no line (Routes failed or off:
+// a stored or straight-line distance only). An answer is kept as long as a
+// static route is (CLIENT_CACHE_TTL); a failed request is not kept, and nothing
+// asks again on a timer.
+const plannedLaneCache = new Map()
+async function fetchPlannedLane(loadId) {
+  const key = String(loadId || '')
+  const hit = plannedLaneCache.get(key)
+  if (hit && Date.now() - hit.time < CLIENT_CACHE_TTL) return hit.points
+  try {
+    const d = await api.get(`/api/loads/${encodeURIComponent(key)}/haul`)
+    const route = d && d.lane && Array.isArray(d.lane.route) ? d.lane.route : []
+    const points = route.length >= 2 ? route.map(p => [p.latitude, p.longitude]) : []
+    plannedLaneCache.set(key, { time: Date.now(), points })
+    return points
+  } catch {
+    return []
+  }
+}
+
 async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
   const key = clientCacheKey(fromLat, fromLng, toLat, toLng)
   const cached = staticRouteCache.get(key)
@@ -1278,9 +1302,10 @@ async function toggleLoad(al, loc) {
   // is routed from it (no approach leg, no driver-to-drop-off figures, which
   // this map hides for it anyway) and the map frames the load instead of
   // zooming to it; the pin stays, with its "Last seen" age. Nor is the planned
-  // pickup -> drop-off routed for it (the replica check, 2026-10-19): every
-  // /api/route can be a paid Google Routes call and no lane geometry is
-  // stored, so such a load shows its two markers and no line (staleFix).
+  // pickup -> drop-off routed through /api/route for it (the replica check,
+  // 2026-10-19): such a load draws its planned lane from the load detail's own
+  // endpoint instead (staleFix, fetchPlannedLane()), or no line when that lane
+  // has none.
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
   const pinIsLive = hasDriverGps && locShowsEta(loc)
@@ -1351,6 +1376,22 @@ async function toggleLoad(al, loc) {
       fetchingRoute.value = false
     }
     // Re-render with the fetched route
+    renderSingleLoadRoute()
+  }
+
+  // A fix over 2 hours old: the load's planned lane, from GET /api/loads/:id/haul
+  // (fetchPlannedLane()), never /api/route. A lane with no line draws none.
+  if (staleFix && hasOrigin && hasDest) {
+    const gen = focusGeneration
+    fetchingRoute.value = true
+    let lane = []
+    try {
+      lane = await fetchPlannedLane(al.loadId)
+    } finally {
+      fetchingRoute.value = false
+    }
+    if (gen !== focusGeneration) return
+    routePoints.value = lane
     renderSingleLoadRoute()
   }
 
