@@ -6,7 +6,10 @@
        (`limits`, with the range cap `maxDays`), and for the add form
        (`createLimits`, which also names the Dispatcher's back-dating window);
        this shows exactly those buttons and days, sends only the fields that
-       changed, and shows the server's words when it refuses. Rendered only by
+       changed, and shows the server's words when it refuses. Over loads he
+       already has (R11b, when the server's loads warning is on) the server
+       asks first, in its own words: "Keep as is" writes nothing, "Save anyway"
+       re-sends with the server's list of loads echoed back. Rendered only by
        screens whose data says availability is on. -->
   <section ref="panelEl" class="avail" aria-label="Time off">
     <!-- One row's buttons and its inline edit form, shared by the live and the
@@ -59,6 +62,7 @@
       <span v-if="loading" class="avail-muted">Loading…</span>
     </div>
     <p v-if="error" class="avail-error" role="alert">{{ error }}</p>
+    <p v-if="notice" class="avail-note" role="status">{{ notice }}</p>
 
     <ul v-if="live.length" class="avail-list">
       <li v-for="r in live" :key="r.id" class="avail-row">
@@ -125,6 +129,15 @@
       @confirm="confirmCancel"
       @cancel="pendingCancel = null"
     />
+    <ConfirmModal
+      :open="!!pendingLoads"
+      title="He has loads on these days"
+      :message="pendingLoads ? pendingLoads.message : ''"
+      confirm-text="Save anyway"
+      cancel-text="Keep as is"
+      @confirm="saveAnyway"
+      @cancel="pendingLoads = null"
+    />
   </section>
 </template>
 
@@ -135,7 +148,8 @@ import { useApi } from '../../composables/useApi'
 import { normDriver } from '../../lib/driverName'
 import {
   AVAILABILITY_KINDS, availabilityRangeText, canSaveEdit, createDateBounds, datesWithinBounds,
-  editDateBounds, editFormFor, editPatch, endEarlyNote, kindLabel, rangeHint, rowActions,
+  editDateBounds, editFormFor, editPatch, endEarlyNote, isDriverHasLoadsWarning, kindLabel,
+  loadsUncheckedNote, rangeHint, rowActions, withLoadsConfirmed,
 } from '../../lib/availabilityText'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 
@@ -163,6 +177,9 @@ const form = reactive({ kind: 'vacation', from: '', to: '', reason: '' })
 const editingId = ref(null)
 const editForm = reactive({ kind: '', from: '', to: '', reason: '' })
 const pendingCancel = ref(null)
+// The server's loads warning on a save: { message, resend } ("Save anyway").
+const pendingLoads = ref(null)
+const notice = ref('')
 
 const live = computed(() => rows.value.filter((r) => r.status === 'current' || r.status === 'upcoming')
   .slice().sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0)))
@@ -208,27 +225,49 @@ async function load() {
   }
 }
 
-async function run(fn) {
+// `onLoadsWarning`, when given, takes the server's 409 DRIVER_HAS_LOADS instead
+// of the alert box.
+async function run(fn, onLoadsWarning) {
   busy.value = true
   error.value = ''
+  notice.value = ''
   try {
-    await fn()
+    const reply = await fn()
+    notice.value = loadsUncheckedNote(reply)
     await load()
     emit('changed')
     return true
   } catch (err) {
-    error.value = (err && err.message) || 'The change could not be saved.'
+    if (onLoadsWarning && isDriverHasLoadsWarning(err)) onLoadsWarning(err)
+    else error.value = (err && err.message) || 'The change could not be saved.'
     return false
   } finally {
     busy.value = false
   }
 }
 
+// A create or an edit. Over loads he already has the server asks first, in its
+// own words; "Save anyway" re-sends the same body with the server's list echoed
+// back, and a second warning asks again with the new list. `done` runs once the
+// save went through.
+async function save(send, body, done) {
+  const ok = await run(() => send(body), (err) => {
+    pendingLoads.value = { message: err.message, resend: () => save(send, withLoadsConfirmed(body, err.data), done) }
+  })
+  if (ok && done) done()
+}
+
+function saveAnyway() {
+  const pending = pendingLoads.value
+  pendingLoads.value = null
+  if (pending) pending.resend()
+}
+
 async function add() {
   if (!datesWithinBounds(form, createBounds.value)) return
   const body = { kind: form.kind, from: form.from, to: form.to, reason: form.reason.trim() }
-  const ok = await run(() => api.post(`/api/drivers-directory/${dirId.value}/availability`, body))
-  if (ok) form.reason = ''
+  const url = `/api/drivers-directory/${dirId.value}/availability`
+  await save((b) => api.post(url, b), body, () => { form.reason = '' })
 }
 
 // Focus moves into the form when it opens and back to the row's button when it
@@ -254,8 +293,7 @@ async function closeEdit(id) {
 
 async function saveEdit(r) {
   if (!canSaveEdit(r, editForm)) return
-  const ok = await run(() => api.put(`/api/driver-availability/${r.id}`, editPatch(r, editForm)))
-  if (ok) closeEdit(r.id)
+  await save((b) => api.put(`/api/driver-availability/${r.id}`, b), editPatch(r, editForm), () => closeEdit(r.id))
 }
 
 async function confirmCancel() {
@@ -270,6 +308,8 @@ watch(() => [props.directoryId, props.driverName], () => {
   form.to = ''
   editingId.value = null
   createLimits.value = null
+  pendingLoads.value = null
+  notice.value = ''
   load()
 }, { immediate: true })
 </script>
