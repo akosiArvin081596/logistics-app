@@ -23,7 +23,7 @@
  *                             listed from its own stamps, checked as of its last change, flagged
  *   C    Hollis  10/20-10/26  10-17 14:00 (10:00 EDT)
  *   E    Hollis  11/2-11/3    10-19 15:00                 cancelled 10-19 16:00: listed, cancelled
- *   D    Tamsin  10/14-10/25  10-20 02:30 (10/19 22:30 EDT)  10-20 14:00 ended early to 10/19
+ *   D    Tamsin  10/12-10/22  10-17 02:30 (10/16 22:30 EDT)  10-17 14:00 ended early to 10/16
  *
  *   load  driver           days         Assigned       expected
  *   8101  Hollis           10/18-10/20  10/15          C: ends on its first day, already had, confirmed
@@ -43,10 +43,10 @@
  *   8203  Soren            10/27        10/19          B: not yet assigned at the re-dating
  *   8204  Soren            11/12-11/13  10/18          H: as of its last change (10/18)
  *   8301  Soren            10/21-10/22  10/10          not listed (no row of his covers it)
- *   8401  Tamsin           10/18-10/19  10/12          D: as of 10/19, the Eastern day it was
- *                                                      recorded (UTC says 10/20; it ended early on 10/20)
+ *   8401  Tamsin           10/15-10/16  10/12          D: as of 10/16, the Eastern day it was
+ *                                                      recorded (UTC says 10/17; it ended early on 10/17)
  *   8402  Tamsin           10/13-10/15  10/10          not listed (ended before D was recorded)
- *   8403  Tamsin           10/22-10/23  10/10          not listed (the early end left it out)
+ *   8403  Tamsin           10/20-10/21  10/10          not listed (the early end left it out)
  *
  * Read-only: the database file keeps its bytes and mtime and its folder gains no
  * file; a missing database is refused, never created; a WAL database another
@@ -99,9 +99,9 @@ function sheetRows() {
 		load({ id: "8203", driver: soren, pickup: "10/27/2026 08:00", dropoff: "10/27/2026 17:00", assigned: "10/19/2026 11:00:00", truck: "LogisX-#33" }),
 		load({ id: "8204", driver: soren, pickup: "11/12/2026 08:00", dropoff: "11/13/2026 17:00", assigned: "2026-10-18", truck: "LogisX-#33" }),
 		load({ id: "8301", driver: soren, pickup: "10/21/2026 08:00", dropoff: "10/22/2026 17:00", assigned: "10/10/2026 08:00:00", truck: "LogisX-#33" }),
-		load({ id: "8401", driver: tamsin, pickup: "10/18/2026 08:00", dropoff: "10/19/2026 17:00", assigned: "10/12/2026 08:00:00", truck: "" }),
+		load({ id: "8401", driver: tamsin, pickup: "10/15/2026 08:00", dropoff: "10/16/2026 17:00", assigned: "10/12/2026 08:00:00", truck: "" }),
 		load({ id: "8402", driver: tamsin, pickup: "10/13/2026 08:00", dropoff: "10/15/2026 17:00", assigned: "10/10/2026 08:00:00", truck: "" }),
-		load({ id: "8403", driver: tamsin, pickup: "10/22/2026 08:00", dropoff: "10/23/2026 17:00", assigned: "10/10/2026 08:00:00", truck: "" }),
+		load({ id: "8403", driver: tamsin, pickup: "10/20/2026 08:00", dropoff: "10/21/2026 17:00", assigned: "10/10/2026 08:00:00", truck: "" }),
 	];
 }
 
@@ -129,13 +129,13 @@ async function buildWorld() {
 	id.B = await create("2026-10-15T18:00:00.000Z", A.DIR.soren, { kind: "off_duty", from: "2026-10-24", to: "2026-10-25" });
 	id.G = await create("2026-10-16T06:59:59.999Z", A.DIR.soren, { kind: "vacation", from: "2026-11-08", to: "2026-11-09" });
 	id.F = await create("2026-10-16T07:00:00.000Z", A.DIR.soren, { kind: "vacation", from: "2026-11-05", to: "2026-11-06" });
+	id.D = await create("2026-10-17T02:30:00.000Z", A.DIR.tamsin, { kind: "other", from: "2026-10-12", to: "2026-10-22" });
+	await edit("2026-10-17T14:00:00.000Z", id.D, { to: "2026-10-16" });
 	id.C = await create("2026-10-17T14:00:00.000Z", A.DIR.hollis, { kind: "vacation", from: "2026-10-20", to: "2026-10-26" });
 	await edit("2026-10-17T15:00:00.000Z", id.A, { kind: "other" });
 	await edit("2026-10-18T15:00:00.000Z", id.B, { to: "2026-10-27" });
 	id.E = await create("2026-10-19T15:00:00.000Z", A.DIR.hollis, { kind: "off_duty", from: "2026-11-02", to: "2026-11-03" });
 	await cancel("2026-10-19T16:00:00.000Z", id.E);
-	id.D = await create("2026-10-20T02:30:00.000Z", A.DIR.tamsin, { kind: "other", from: "2026-10-14", to: "2026-10-25" });
-	await edit("2026-10-20T14:00:00.000Z", id.D, { to: "2026-10-19" });
 	// A row the audit log does not account for (logAudit() is best effort).
 	id.H = Number(w.db.prepare(`
 		INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at, updated_at)
@@ -187,7 +187,7 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 	R.ok("exits 0 with JSON", out.code === 0 && !!out.json, (out.stderr || out.stdout).slice(0, 300));
 
 	R.section("Which rows: recorded at or after --since, or re-dated at or after it");
-	R.eq("rows listed, in the order recorded (B re-dated since; F at exactly since; H, C, E, D after it)", rows.map((r) => r.id), [id.B, id.F, id.H, id.C, id.E, id.D]);
+	R.eq("rows listed, in the order recorded (B re-dated since; F at exactly since; D, H, C, E after it)", rows.map((r) => r.id), [id.B, id.F, id.D, id.H, id.C, id.E]);
 	R.ok("A (recorded before since, only its kind changed since) is not listed", !rows.some((r) => r.id === id.A));
 	R.ok("G (recorded 1 ms before since) is not listed", !rows.some((r) => r.id === id.G));
 	R.eq("the default since is 2026-10-16 03:00 ET", j.since, "2026-10-16T07:00:00.000Z");
@@ -199,7 +199,7 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 		["8201 yes 2026-10-15", "8202 yes 2026-10-18", "8203 no 2026-10-18"]);
 	R.eq("H: no audit line, so checked as of its last change", loadLines("H"), ["8204 yes 2026-10-18"]);
 	R.eq("E: a cancelled row keeps its loads", loadLines("E"), ["8112 yes 2026-10-19"]);
-	R.eq("D: as of 10/19, the Eastern day it was recorded at 22:30 EDT; 8402 ended before that day; 8403 left out by the early end", loadLines("D"), ["8401 yes 2026-10-19"]);
+	R.eq("D: as of 10/16, the Eastern day it was recorded at 22:30 EDT; 8402 ended before that day; 8403 left out by the early end", loadLines("D"), ["8401 yes 2026-10-16"]);
 	R.eq("F: no loads", loadLines("F"), []);
 	const l8101 = row("C").loads.find((l) => l.loadId === "8101") || {};
 	R.eq("8101's days, status and cells", [l8101.from, l8101.to, l8101.status, l8101.pickup, l8101.dropoff, l8101.assignedDate],
@@ -229,7 +229,7 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 	R.eq("E is cancelled", [e.state, e.cancelledAt, e.cancelledAtText], ["cancelled", "2026-10-19T16:00:00.000Z", "2026-10-19 12:00 EDT"]);
 	const d = row("D");
 	R.eq("D ended early: recorded in the evening Eastern, ended", [d.from, d.to, d.state, d.recordedAtText, d.saves.map((s) => `${s.change} ${s.day} ${s.from}..${s.to}`)],
-		["2026-10-14", "2026-10-19", "ended", "2026-10-19 22:30 EDT", ["recorded 2026-10-19 2026-10-14..2026-10-25", "changed 2026-10-20 2026-10-14..2026-10-19"]]);
+		["2026-10-12", "2026-10-16", "ended", "2026-10-16 22:30 EDT", ["recorded 2026-10-16 2026-10-12..2026-10-22", "changed 2026-10-17 2026-10-12..2026-10-16"]]);
 	R.eq("H is flagged: the audit log does not account for it", [row("H").historyComplete, row("H").saves.map((s) => `${s.change} ${s.day}`)], [false, ["changed 2026-10-18"]]);
 
 	R.section("Counts");
@@ -246,7 +246,7 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 
 	R.section("--since");
 	const later = run(copy, ["--since=2026-10-18T00:00:00Z", "--json"]);
-	R.eq("since 10/18 00:00 UTC: B (re-dated 10/18), H (changed 10/18), E and D", ((later.json || {}).rows || []).map((r) => r.id), [id.B, id.H, id.E, id.D]);
+	R.eq("since 10/18 00:00 UTC: B (re-dated 10/18), H (changed 10/18) and E; not D (recorded and ended early 10/17)", ((later.json || {}).rows || []).map((r) => r.id), [id.B, id.H, id.E]);
 	R.eq("refused (exit 2): a since that is not an instant, no sheet, no database", [
 		run(copy, ["--since=2026-10-16", "--json"]).code,
 		W.runScript(SCRIPT, [`--db=${copy.db}`, "--json"]).code,
