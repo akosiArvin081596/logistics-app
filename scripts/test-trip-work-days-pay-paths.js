@@ -228,7 +228,7 @@ function caseA(env) {
 const R = W.createRunner("B12 B: trip work days on the weekly invoice, the investor view and the payout ledger");
 
 (async () => {
-	await R.test("B1 [Q4, Q9] Case a, week 9/26-10/2 at $260: a load with no appointments (Mon), two loads on Tue, Heading to Shipper Wed is no start: the invoice pays Mon-Fri ($1,300); ledger and investor view Sep {9/28, 9/29}, Oct {9/30, 10/1, 10/2}, the Oct load's 9/29 dropped (the earliest Assigned month wins). Base: Tue-Thu, $780, 9/29 in both months", async ({ eq }) => {
+	await R.test("B1 [Q4, Q9; rule d] Case a, week 9/26-10/2 at $260: a load with no appointments (Mon), two loads on Tue, Heading to Shipper Wed (under rule d the last load's first day, a day another load pays anyway):the invoice pays Mon-Fri ($1,300); ledger and investor view Sep {9/28, 9/29}, Oct {9/30, 10/1, 10/2}, the Oct load's 9/29 dropped (the earliest Assigned month wins). Base: Tue-Thu, $780, 9/29 in both months", async ({ eq }) => {
 		const w = caseA(TRIP());
 		const g = await W.generate(w, ADA, W39);
 		eq("invoice status", g.status, 200);

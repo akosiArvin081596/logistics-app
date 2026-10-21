@@ -460,6 +460,8 @@ function mountDispatch(db, routeSrc, helperOver) {
 		resolveLoadBinding: () => null,
 		sendLoadBindRefusal: (req, res) => res.status(409).json({ code: "LOAD_ROW_MISMATCH" }),
 		dispatchWriteBlocker: () => null,
+		// The trip work-day rule's month-lock cover, as it reads with the rule off.
+		tripDayLockCover: () => null,
 		sheetRowToObject: H.sheetRowToObject,
 		colLetter: H.colLetter,
 		formulaCellRefusal: H.formulaCellRefusal,

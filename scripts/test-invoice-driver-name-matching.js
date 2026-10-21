@@ -119,7 +119,9 @@ const SHARED_FNS = [
 	"driversWithCompletedLoadsInWeek",
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
 	// The week's days and their pricing, out of the handler since money plan D.
-	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceWeekPaidDays", "invoiceDayPricing",
+	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceLoadWindow", "invoiceWeekPaidDays", "invoiceDayPricing",
+	// The days a live manual invoice already pays, left off the weekly invoice.
+	"manualInvoicePaidDayCover",
 	// Under test.
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
