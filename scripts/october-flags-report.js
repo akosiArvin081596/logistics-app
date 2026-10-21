@@ -1216,8 +1216,9 @@ function printOwnerNote(r) {
 	tail.push(`Paid-days rule: not paid ${sum("waiting")} waiting, ${sum("restDay")} rest and ${sum("dark")} no-ELD days; ${sum("loadingFallback")} loading days without a Loading tap; ${sum("lateTapLoads")} late Delivered loads; `
 		+ `${sum("keptOnIssued")} days stay on issued invoices; ${sum("cancelledDriveDays")} possible drive days on cancelled loads (not paid; tell us any to add).`);
 	if (r.ruleD.windowRule.length) tail.push(`Paid by appointment dates, not taps (dates don't fit): ${r.ruleD.windowRule.map((w) => `${w.driver} load ${w.loadId}`).join("; ")}.`);
-	for (const d of r.checkC.deletedDraftDays) {
-		tail.push(`${d.driver} ${dayText(d.day)}: the correction for it was deleted as not valid; with the change on, the payout ledger would pay it (${money(d.ledgerBoth)}). Please confirm it isn't owed; we then mark it unpaid first.`);
+	const deleted = r.checkC.deletedDraftDays;
+	if (deleted.length) {
+		tail.push(`${deleted.map((d) => `${d.driver} ${dayText(d.day)} (October ledger ${money(d.ledgerToday)} -> ${money(d.ledgerBoth)})`).join("; ")}: its correction was deleted as not valid, so no invoice pays it. Please confirm it isn't owed; we then mark it unpaid before the change goes on.`);
 	}
 	if (r.ruleD.errorLoads.length) tail.push(`Loads whose trip data could not be read (paid by dates): ${r.ruleD.errorLoads.length}.`);
 	tail.push(`Please reply by ${SEND_BY.by} (at the latest ${SEND_BY.latest}): OK to switch both changes on for October? October closes Nov 15.`);
