@@ -19179,8 +19179,12 @@ function invoiceWeekWarnings(undated) {
 // THE TRIP WORK-DAY RULE ON THE WEEKLY INVOICE (B12; off unless TRIP_WORK_DAYS)
 // ============================================================
 // With the rule on, a daily-rate driver's week pays:
-//   - for each load it covers (lib/trip-work-days.js), its trip days inside the
-//     week, in place of its window, with no ELD or pre-dispatch filter;
+//   - for each load it covers (lib/trip-work-days.js, decision d), the days
+//     inside the week it pays (driving, loading and unloading days, judged by the
+//     trip taps and the truck's ELD in Eastern time, from the load's invoice
+//     window, invoiceLoadWindow()), in place of the window cut by the ELD, with
+//     no pre-dispatch filter; a load whose history or ELD it cannot read pays its
+//     window and is named in `warnings`;
 //   - the trip days inside the week of every other completed live load of the
 //     driver: one completed in another week, or with no completion date;
 //   - each day at the rate in effect that day (pay_rate_history), for days of
@@ -19263,7 +19267,10 @@ function invoiceTruckVidReader(headers) {
 
 // The other completed loads whose trip days fall in the week (see the header):
 // [{ key, loadId, days }], days inside weekStart..weekEnd, only loads with some.
-function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, weekEnd, resolver, deletedKeys }) {
+// Each load's trip is read with its own invoice window (invoiceLoadWindow()). A
+// load whose history or ELD could not be read pays nothing here; it is added to
+// `errors` ({ loadId, error }) when the caller gives one.
+function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, weekEnd, resolver, deletedKeys, errors = null }) {
 	const cols = invoiceWeekColumns(headers);
 	const keyOf = (row) => (cols.loadIdCol && normalizeLoadId(row[cols.loadIdCol])) || `_row_${row._rowIndex}`;
 	const billedKeys = new Set((billed || []).map(keyOf));
@@ -19275,8 +19282,10 @@ function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, w
 		if (billedKeys.has(key)) continue;
 		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 		if (!loadId) continue;
-		const month = loadAssignedMonthKey(row, monthCols);
-		const days = resolver.forLoad({ loadId, settleMonth: month, range: { start: weekStart, end: weekEnd }, vid: vidOf(row) });
+		const { assignedMonth: month, tripWindow } = invoiceLoadWindow(row, { cols, headers, monthCols });
+		const answer = resolver.forLoad({ loadId, settleMonth: month, range: { start: weekStart, end: weekEnd }, vid: vidOf(row), window: tripWindow });
+		if (answer && answer.error) { if (errors) errors.push({ loadId, error: answer.error }); continue; }
+		const days = tripWorkDays.tripDaysOrNull(answer);
 		if (days && days.length) out.push({ key, loadId, days, month });
 	}
 	return out;
@@ -19337,6 +19346,121 @@ function manualInvoiceDayCover(driverNorm, manuals = driverManualInvoicesForDays
 	return cover;
 }
 
+// A line of a correction or missed-week Draft, as createWorkDayCorrection(),
+// scripts/create-correction-invoice-draft.js ("Correction for <invoice>: ...")
+// and scripts/create-missed-week-invoice-draft.js ("Missed week <Saturday> to
+// <Friday>: ...") write it: one day's pay for the day it is dated.
+const DAY_PAY_DRAFT_LINE_RE = /^(Correction for \S+:|Missed week \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2}:)/;
+
+// A driver's live manual invoices as the weekly invoice reads them (pay plan
+// 2026-10-21, "Added" item 1): [{ invoiceNumber, status, weekStart, weekEnd,
+// paidDays, draftDays, datedCents: Map day -> cents of its lines dated that day,
+// undated }]. draftDays are the days its correction or missed-week lines
+// (DAY_PAY_DRAFT_LINE_RE) are dated. Live means not soft-deleted and not
+// Rejected; a Personal correction (is_correction) holds only Personal lines and
+// pays no day. `undated` is a line that names no day (or no line at all) while
+// the invoice names no paidDays.
+function driverLiveManualInvoices(driverNorm) {
+	const out = [];
+	if (!driverNorm) return out;
+	const DAY = /^\d{4}-\d{2}-\d{2}$/;
+	for (const r of db.prepare(
+		"SELECT invoice_number, driver, status, week_start, week_end, render_data FROM invoices WHERE deleted_at = '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 AND status != 'Rejected' ORDER BY id"
+	).all()) {
+		if (normalizeDriverName(r.driver || "") !== driverNorm) continue;
+		let snap = null;
+		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+		const lines = snap && Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const paidDays = snap && Array.isArray(snap.paidDays) ? snap.paidDays.map(String).filter((d) => DAY.test(d)) : [];
+		const datedCents = new Map();
+		const draftDays = new Set();
+		let undated = !lines.length;
+		for (const l of lines) {
+			const d = String((l && l.date) || "").trim();
+			if (!DAY.test(d)) { undated = true; continue; }
+			datedCents.set(d, (datedCents.get(d) || 0) + Math.round((Number(l && l.amount) || 0) * 100));
+			if (DAY_PAY_DRAFT_LINE_RE.test(String((l && l.description) || "").trim())) draftDays.add(d);
+		}
+		out.push({ invoiceNumber: r.invoice_number, status: r.status, weekStart: String(r.week_start || ""), weekEnd: String(r.week_end || ""), paidDays, draftDays, datedCents, undated: undated && !paidDays.length });
+	}
+	return out;
+}
+
+// THE DAYS A LIVE MANUAL INVOICE ALREADY PAYS, which the weekly invoice leaves
+// off (pay plan 2026-10-21, "Added" item 1; narrowed by the money review, M1).
+// The one place the rule lives, so a flag could wrap its one call in
+// generateInvoiceHandler(). A day of `days` (the week's) is held by a live
+// manual invoice of the driver that names it in its paidDays (a work-day
+// correction, or a manual invoice made with `days`), that dates a correction or
+// missed-week line on it (DAY_PAY_DRAFT_LINE_RE, whatever rate it was drafted
+// at), or whose lines dated that day come to at least one day's pay (the
+// smallest rate the week's days price at, `rateOf`: lateWorkWeekBlocker()'s
+// minRate). A dated line under one day's pay (a bonus, a reimbursement) holds
+// nothing; such an invoice is named to check, as is one with an undated line
+// over the week. Returns { held: Map day -> { invoiceNumber, status }, check:
+// [invoiceNumber] }.
+function weeklyManualInvoiceHolds({ driverNorm, days, weekStart, weekEnd, rateOf }) {
+	const held = new Map();
+	const check = new Set();
+	const list = [...days].sort();
+	if (!list.length) return { held, check: [] };
+	const manuals = driverLiveManualInvoices(driverNorm);
+	const minCents = Math.min(...list.map((ds) => Math.round((Number(rateOf(ds)) || 0) * 100)));
+	// The amount test needs a line dated the day and a rate above $0: at $0 any
+	// amount, or none, would be "one day's pay" (re-check L).
+	const coversDay = (m, ds) => minCents > 0 && m.datedCents.has(ds) && m.datedCents.get(ds) >= minCents;
+	for (const ds of list) {
+		const holder = manuals.find((m) => m.paidDays.includes(ds) || m.draftDays.has(ds) || coversDay(m, ds));
+		if (holder) held.set(ds, { invoiceNumber: holder.invoiceNumber, status: holder.status });
+	}
+	const holders = new Set([...held.values()].map((h) => h.invoiceNumber));
+	for (const m of manuals) {
+		if (holders.has(m.invoiceNumber)) continue;
+		const datedInWeek = [...m.datedCents.keys()].some((d) => d >= weekStart && d <= weekEnd);
+		const undatedOverWeek = m.undated && m.weekStart <= weekEnd && m.weekEnd >= weekStart;
+		if (datedInWeek || undatedOverWeek) check.add(m.invoiceNumber);
+	}
+	return { held, check: [...check] };
+}
+
+// The days a Super Admin took out of automatic pay by deleting the manual
+// invoice that named them (pay plan 2026-10-21, "Added" item 2; the owner's
+// decision on MR's Oct 2 correction Draft, deleted 2026-10-16 as "not valid"):
+// Map day -> invoice number for each day a SOFT-DELETED correction or
+// missed-week Draft of the driver named (money review L2: only those, never an
+// ordinary manual invoice nor a Personal correction): a work-day correction
+// (createWorkDayCorrection(): workDayCorrection, correction_of) or a manual
+// invoice with lines in the scripts' formats (DAY_PAY_DRAFT_LINE_RE), by those
+// lines' dates and its paidDays. The trip work-day rule's
+// late-day settle never carries such a day again (lateWorkDaysFor(), refused
+// "deletedDraft" and named in the generate warnings and the dry run): a person
+// decides it, with a manual invoice, or by restoring the deleted one (PUT
+// /api/invoices/:id/restore makes it live again, and it then pays the day). A
+// live invoice paying the day comes first. Weekly invoices are not read: a
+// deleted weekly Draft is the generator's own regenerate.
+function deletedManualInvoiceDays(driverNorm) {
+	const days = new Map();
+	if (!driverNorm) return days;
+	const DAY = /^\d{4}-\d{2}-\d{2}$/;
+	for (const r of db.prepare(
+		"SELECT invoice_number, driver, render_data, correction_of FROM invoices WHERE deleted_at != '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 ORDER BY id"
+	).all()) {
+		if (normalizeDriverName(r.driver || "") !== driverNorm) continue;
+		let snap = null;
+		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+		const lines = snap && Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const draftLines = lines.filter((l) => DAY_PAY_DRAFT_LINE_RE.test(String((l && l.description) || "").trim()));
+		const isDraft = !!(snap && snap.workDayCorrection) || (r.correction_of !== null && r.correction_of !== undefined) || draftLines.length > 0;
+		if (!isDraft) continue;
+		const named = [
+			...(snap && Array.isArray(snap.paidDays) ? snap.paidDays.map(String) : []),
+			...draftLines.map((l) => String((l && l.date) || "").trim()),
+		];
+		for (const d of named) if (DAY.test(d) && !days.has(d)) days.set(d, r.invoice_number);
+	}
+	return days;
+}
+
 // Why a week's late days cannot go on its weekly invoice `inv` or a correction
 // for it, or "" (as scripts/create-correction-invoice-draft.js refuses):
 //   - a positive adjustment on it of at least one day's pay (`minRate`, the
@@ -19367,11 +19491,15 @@ function lateDaysPaidElsewhere(driverNorm, days, weeklyRow, minRate) {
 }
 
 // The days of one driver the rule pays that no live invoice holds, before
-// `lastDay`: { byWeek: Map weekStart -> [{ day, loads, month }], refused: [{ day, loadId, reason, kind, month }] }.
+// `lastDay`: { byWeek: Map weekStart -> [{ day, loads, month }], refused: [{ day, loadId, reason, kind, month }],
+// tripErrors: [{ loadId, error }] }.
 // `month` is the month the day pays in: the earliest Assigned month of the loads
 // behind it, else the day's own month (the daily-rate rule prices it by that).
 // A day removed by an override is left out; a day another live invoice holds is
-// paid (named only when a manual invoice holds it). `holdersOf` is
+// paid (named only when a manual invoice holds it); a day a deleted manual
+// invoice named is not carried (deletedManualInvoiceDays()). Each load's trip is
+// read with its invoice window (invoiceLoadWindow()); a load whose history or
+// ELD could not be read gives no day and is listed in tripErrors. `holdersOf` is
 // invoicePaidDayHolders() (the dry run passes one that also sees the rows the
 // backfill would write).
 function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, holdersOf = invoicePaidDayHolders }) {
@@ -19383,17 +19511,19 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 	const removed = ovr && ovr.remove ? ovr.remove : new Set();
 	const payable = new Map();
 	const candidates = [];
+	const tripErrors = [];
 	for (const row of driverCompletedLiveLoads(data, headers, driverName, loadKeySet(getDeletedLoadIds()))) {
 		const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 		if (!loadId) continue;
 		const vid = vidOf(row);
-		const t = resolver.trip(loadId, { vid });
-		if (t.basis !== "trip") continue;
-		const assignedMonth = loadAssignedMonthKey(row, monthCols);
-		const follows = resolver.forLoad({ loadId, settleMonth: assignedMonth, vid });
+		const { assignedMonth, tripWindow } = invoiceLoadWindow(row, { cols, headers, monthCols });
+		const t = resolver.trip(loadId, { vid, window: tripWindow });
+		if (t.basis === "error") { tripErrors.push({ loadId, error: t.error }); continue; }
+		if (t.basis !== "trip" && t.basis !== "appointments") continue;
+		const follows = Array.isArray(resolver.forLoad({ loadId, settleMonth: assignedMonth, vid, window: tripWindow }));
 		for (const day of t.days) {
 			if (day > lastDay || removed.has(day)) continue;
-			candidates.push({ day, loadId, follows: !!follows, month: assignedMonth || day.slice(0, 7) });
+			candidates.push({ day, loadId, follows, month: assignedMonth || day.slice(0, 7) });
 		}
 	}
 	const holders = holdersOf(nameNorm, [...new Set(candidates.map((c) => c.day))]);
@@ -19407,6 +19537,7 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 		}
 	}
 	const manualCover = manualInvoiceDayCover(nameNorm);
+	const deletedNamed = deletedManualInvoiceDays(nameNorm);
 	const refused = [];
 	const seen = new Set();
 	const payMonths = new Map();
@@ -19421,6 +19552,10 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 			continue;
 		}
 		if (manualCover.has(c.day)) { refuse("mayBePaid", `it may already be paid by ${manualCover.get(c.day)}`); continue; }
+		if (deletedNamed.has(c.day)) {
+			refuse("deletedDraft", `${deletedNamed.get(c.day)}, which named it, was deleted by a Super Admin, so it is not carried again automatically; a person decides`);
+			continue;
+		}
 		if (!c.follows) { refuse("beforeFrom", "its load settles before TRIP_WORK_DAYS_FROM"); continue; }
 		if (c.day < floor) { refuse("beforeFloor", `it is before ${floor}, the first week of TRIP_WORK_DAYS_FROM`); continue; }
 		if (periodWriteLocked(c.day.slice(0, 7))) {
@@ -19439,7 +19574,7 @@ function lateWorkDaysFor({ data, headers, driverName, resolver, floor, lastDay, 
 		if (!byWeek.has(ws)) byWeek.set(ws, []);
 		byWeek.get(ws).push({ day, loads: payable.get(day), month: payMonths.get(day) });
 	}
-	return { byWeek, refused: refusedLeft.sort((a, b) => a.day.localeCompare(b.day) || a.loadId.localeCompare(b.loadId)) };
+	return { byWeek, refused: refusedLeft.sort((a, b) => a.day.localeCompare(b.day) || a.loadId.localeCompare(b.loadId)), tripErrors };
 }
 
 // Puts days onto a live weekly invoice that is not approved, in place: its day
@@ -19607,7 +19742,7 @@ async function createWorkDayCorrection({ driverName, weekly, weekStart, weekEnd,
 // Returns { report, warnings }; a week that cannot be settled is named in
 // `warnings` and waits for the next run (the days stay unpaid, never doubled).
 async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTrackingRows, resolver, req }) {
-	const report = { updated: [], corrections: [], refused: [], noInvoice: [] };
+	const report = { updated: [], corrections: [], refused: [], noInvoice: [], unreadable: [] };
 	const warnings = [];
 	const out = { report, warnings };
 	const nameNorm = normalizeDriverName(driverName);
@@ -19622,6 +19757,10 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 		if (r.day < reportFrom) continue;
 		report.refused.push(r);
 		warnings.push(`NOT ADDED: ${r.day} (load ${r.loadId}) was worked by its trip timestamps but goes on no invoice: ${r.reason}.`);
+	}
+	for (const e of found.tripErrors) {
+		report.unreadable.push(e);
+		warnings.push(`NOT CHECKED: load ${e.loadId}'s earlier days: ${e.error}. They wait for the next run.`);
 	}
 	const truckRate = truckDailyRateCandidates(driverName).slice(-1)[0];
 	const rateOf = invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate });
@@ -19744,14 +19883,26 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 	const inRange = (mk) => mk >= fromMonth && mk <= toMonth;
 	const resolver = tripDayResolver(fromMonth);
 	const offRules = { ...payoutRules(), tripFrom: null };
-	const onRules = { ...payoutRules(), tripFrom: fromMonth };
+	// The ledger with the rule on reads this run's resolver, so each day's reason
+	// is the answer the ledger paid by (resolver.lastTrip(), with its window).
+	const onRules = { ...payoutRules(), tripFrom: fromMonth, tripFacts: { tripDays: resolver, dayOnceFrom: tripWorkDays.dayOnceFromFor(process.env, fromMonth) } };
 	const round2 = (x) => Math.round(x * 100) / 100;
 	const problems = [];
 
 	// The payout ledger, every scope, off and on: perDay and driverMonths.
 	const off = await computeFleetLedger({ rules: offRules });
 	const on = await computeFleetLedger({ rules: onRules });
-	const tripOf = (loadId) => (loadId ? resolver.trip(loadId) : null);
+	const tripOf = (loadId) => (loadId ? resolver.lastTrip(loadId) : null);
+	// Why rule d pays a day (heading, driving, loading, loading-fallback,
+	// unloading, appointment, noEld) or not (waiting, restDay, dark, lateTapGap;
+	// outsideSpan: a window day outside the trip's span; windowRule: the rule
+	// does not cover the load; error: not read).
+	const reasonOf = (t, day) => {
+		if (!t) return "";
+		if (t.basis === "error") return "error";
+		if (t.basis !== "trip" && t.basis !== "appointments") return "windowRule";
+		return (t.reasons && t.reasons[day]) || (t.dropped && t.dropped[day]) || "outsideSpan";
+	};
 	const perDay = [];
 	const driverMonths = new Map();
 	const FIGURES = ["revenue", "driverPay", "fixedCosts", "tripExpenses", "maintFundCost", "complianceCost"];
@@ -19771,6 +19922,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 					amount: (change === "added" ? 1 : -1) * it.cents / 100,
 					tripBasis: t ? t.basis : "", tripStartStatus: t && t.startEvent ? t.startEvent.status : "", tripStart: t && t.startEvent ? t.startEvent.at : "",
 					flags: t ? Object.keys(t.flags) : [],
+					reason: it.added ? "" : reasonOf(t, it.day),
 				});
 				const k = `${base.ownerId}\t${it.driver}\t${it.month}`;
 				const row = driverMonths.get(k) || { ownerId: base.ownerId, driver: it.driver, month: it.month, daysChange: 0, driverPayChange: 0 };
@@ -19896,9 +20048,11 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		if (!snap || snap.__templateName !== "service_invoice" || !snap.days) continue;
 		const display = drivers.get(nm) || inv.driver;
 		const loads = new Map(driverCompletedLiveLoads(data, headers, display, deletedKeys).map((row) => [normalizeLoadId(cols.loadIdCol ? row[cols.loadIdCol] : ""), row]));
+		// Each load's trip read with its own invoice window (invoiceLoadWindow()).
+		const tripWindowOf = (row) => invoiceLoadWindow(row, { cols, headers, monthCols }).tripWindow;
 		const follows = (loadId) => {
 			const row = loads.get(normalizeLoadId(loadId));
-			return !!row && resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), vid: vidOf(row) }) !== null;
+			return !!row && Array.isArray(resolver.forLoad({ loadId, settleMonth: loadAssignedMonthKey(row, monthCols), vid: vidOf(row), window: tripWindowOf(row) }));
 		};
 		const current = invoicePaidDaysOf(inv);
 		const gridOf = (day) => snap.days[invoiceGridDayName(day)] || {};
@@ -19910,7 +20064,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		for (const [, row] of loads) {
 			const loadId = cols.loadIdCol ? String(row[cols.loadIdCol] || "").trim() : "";
 			const assignedMonth = loadAssignedMonthKey(row, monthCols);
-			const days = loadId ? resolver.forLoad({ loadId, settleMonth: assignedMonth, range: { start: inv.week_start, end: inv.week_end }, vid: vidOf(row) }) : null;
+			const days = loadId ? tripWorkDays.tripDaysOrNull(resolver.forLoad({ loadId, settleMonth: assignedMonth, range: { start: inv.week_start, end: inv.week_end }, vid: vidOf(row), window: tripWindowOf(row) })) : null;
 			for (const d of days || []) {
 				ruleDays.add(d);
 				// A load with no Assigned Date pays in the day's own month.
@@ -19960,6 +20114,12 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		baseline: "TRIP_WORK_DAYS off; every other setting as the server has it",
 		perDay: named(perDay), driverMonths: named(months), investorMonths, perInvoice: named(perInvoice),
 		lateDays: named(lateDays), refusedDays: named(refusedDays), backfillRows: named(backfillRows), backfillConflicts: named(backfillConflicts),
+		// Loads whose trip history or ELD could not be read: every path pays them
+		// by their window, and a month-lock guard refuses on them.
+		tripErrors: resolver.errors(),
+		// Loads whose schedule ends before their trip can start (no arrival tap,
+		// the window before the dispatch or Assigned Date): paid by their window.
+		tripWindowRule: resolver.fallbacks(),
 		closedMonthsUnchanged: !problems.some((p) => p.closed),
 		monthsBeforeFromUnchanged: !problems.some((p) => p.beforeFrom),
 		problems,
@@ -19986,6 +20146,15 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 			}, {}),
 			backfillRows: backfillRows.length,
 			backfillConflicts: backfillConflicts.length,
+			// perDay by rule d's reason: why each added day is paid, why each
+			// removed one is not.
+			reasons: perDay.reduce((acc, d) => {
+				const k = `${d.change} ${d.reason || (d.added ? "added override" : "other")}`;
+				acc[k] = (acc[k] || 0) + 1;
+				return acc;
+			}, {}),
+			tripErrors: resolver.errors().length,
+			tripWindowRule: resolver.fallbacks().length,
 			note: "lateDays and perInvoice.addedDays overlap (the same unpaid days seen per week and per invoice); dropped days stay on issued invoices",
 		},
 		generatedAt: new Date().toISOString(),
@@ -20072,6 +20241,37 @@ function invoiceCompletionCol(headers) {
 	return (headers || []).find(h => /completion.*date|status.*update.*date/i.test(h));
 }
 
+// One Job Tracking row's pay window as the weekly invoice reads it
+// (lib/load-pay-days.js payWindow(): pickup to drop-off, a blank drop-off on a
+// delivered load to its completion date, a blank pickup from the Assigned Date
+// only where the blank-pickup fallback `blankPickupFrom` covers the load), and
+// the window the trip work-day rule reads for it (tripWindowOf(): the same
+// window as day keys, with the Pickup Appointment and Assigned Date). `cols` is
+// invoiceWeekColumns(headers); `monthCols` jobTrackingMonthCols(headers), or null
+// while no rule reads the Assigned month (it then reads none). invoiceWeekPaidDays()
+// and every other reading of an invoice's window (the trip rule's late days, the
+// dry run, the month-lock cover) call this one. `assumeCompleted` reads the row as
+// completed whatever its status (the month-lock cover is status-blind).
+function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM, assumeCompleted = false }) {
+	const { statusCol, pickupCol, dropoffCol } = cols;
+	const completionCol = invoiceCompletionCol(headers);
+	const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
+	const scheduledDropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+	const completed = assumeCompleted || /delivered|completed|pod received/i.test(load[statusCol] || "");
+	// Fallback: delivered loads with no dropoff appointment lose the
+	// hauling days between pickup and actual delivery. Use the actual
+	// completion timestamp instead so the driver gets credited.
+	const completion = !scheduledDropoff && completionCol && completed ? parseInvoiceDate(load[completionCol]) : null;
+	const assignedMonth = monthCols ? loadAssignedMonthKey(load, monthCols) : "";
+	const assignedDate = monthCols && monthCols.dateCol && load[monthCols.dateCol] ? moneySheetDate(load[monthCols.dateCol]) : null;
+	const assigned = !pickup && blankPickupFrom && assignedDate ? assignedDate : null;
+	const win = loadPayDays.payWindow({
+		pickup, dropoff: scheduledDropoff, assigned, completion, completed, settleMonth: assignedMonth,
+		rules: { pickupFromAssigned: blankPickupFrom, dropoffFromCompletion: true },
+	});
+	return { pickup, scheduledDropoff, completion, completed, assignedMonth, win, tripWindow: loadPayDays.tripWindowOf(win, { pickup, assigned: assignedDate }) };
+}
+
 // The days one driver's weekly invoice pays for weekStart..weekEnd, before
 // pricing: the week's billed loads (selectInvoiceWeekLoads(): `cols` and
 // `loads`), the trip days of the driver's other loads (`extraRuleLoads`, under
@@ -20081,11 +20281,12 @@ function invoiceCompletionCol(headers) {
 // INVOICE_BLANK_PICKUP_FALLBACK_FROM (null while off); only the dry run passes
 // another. Returns { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads }:
 // blankPickupLoads names each load whose window started at its Assigned Date
-// and that pays a day of the invoice no other load, trip rule or added day pays.
+// and that pays a day of the invoice no other load, trip rule or added day pays;
+// tripErrors each load the trip work-day rule could not read ({ loadId, error }:
+// its window paid it).
 function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
-	// Same two cells selectInvoiceWeekLoads() reads for `scheduledInWeek`.
-	const { statusCol, loadIdCol, pickupCol, dropoffCol } = cols;
-	const completionCol = invoiceCompletionCol(headers);
+	const { loadIdCol } = cols;
+	const tripErrors = [];
 
 	// Truck column → Routemate vehicle → ELD travel/coverage days for the
 	// invoice week. Active days below are intersected with real travel days the
@@ -20130,21 +20331,23 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	const fallbackLoads = [];
 
 	for (const load of loads) {
-		const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
-		const scheduledDropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
-		const completed = /delivered|completed|pod received/i.test(load[statusCol] || "");
-		// Fallback: delivered loads with no dropoff appointment lose the
-		// hauling days between pickup and actual delivery. Use the actual
-		// completion timestamp instead so the driver gets credited.
-		const completion = !scheduledDropoff && completionCol && completed ? parseInvoiceDate(load[completionCol]) : null;
-		const assignedMonth = monthCols ? loadAssignedMonthKey(load, monthCols) : "";
+		// The window (lib/load-pay-days.js payWindow(), invoiceLoadWindow()):
+		// pickup to drop-off, a blank drop-off on a delivered load to its
+		// completion date. A blank or non-date pickup has no window, so no day,
+		// unless the blank-pickup fallback covers the load's Assigned month: then it
+		// starts at the Assigned Date, read as the ledger reads it.
+		const { scheduledDropoff, completion, completed, assignedMonth, win, tripWindow } = invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom });
 		const lid = loadIdCol ? (load[loadIdCol] || "") : "";
 		// The trip work-day rule first, before the pickup gate (weekRule is null
-		// while it is off): a load it covers pays its trip days in this week.
+		// while it is off): a load it covers pays its trip days in this week. A
+		// load whose history or ELD it could not read pays its window, named.
 		if (weekRule) {
 			const ruleLid = String(loadIdCol ? (load[loadIdCol] || "") : "").trim();
 			const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
-			const trip = weekRule.forLoad({ loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null });
+			const answer = weekRule.forLoad({ loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null, window: tripWindow });
+			if (answer && answer.error) tripErrors.push({ loadId: ruleLid, error: answer.error });
+			else if (answer && answer.fallback) tripErrors.push({ loadId: ruleLid, error: answer.fallback, fallback: true });
+			const trip = tripWorkDays.tripDaysOrNull(answer);
 			if (trip) {
 				for (const ds of trip) {
 					activeDaySet.add(ds);
@@ -20156,16 +20359,6 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 				continue;
 			}
 		}
-		// The window (lib/load-pay-days.js payWindow()): pickup to drop-off, a
-		// blank drop-off on a delivered load to its completion date. A blank or
-		// non-date pickup has no window, so no day, unless the blank-pickup
-		// fallback covers the load's Assigned month: then it starts at the
-		// Assigned Date, read as the ledger reads it.
-		const assigned = !pickup && blankPickupFrom && monthCols.dateCol && load[monthCols.dateCol] ? moneySheetDate(load[monthCols.dateCol]) : null;
-		const win = loadPayDays.payWindow({
-			pickup, dropoff: scheduledDropoff, assigned, completion, completed, settleMonth: assignedMonth,
-			rules: { pickupFromAssigned: blankPickupFrom, dropoffFromCompletion: true },
-		});
 		if (!win) continue;
 		const fallbackKey = win.pickupFallback ? (String(lid).trim() || `(sheet row ${load._rowIndex})`) : null;
 		if (fallbackKey) fallbackLoads.push(fallbackKey);
@@ -20265,7 +20458,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
 	}
 	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
-	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads };
+	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors };
 }
 
 // How a weekly invoice prices the days invoiceWeekPaidDays() returns, for a
@@ -20421,8 +20614,9 @@ async function generateInvoiceHandler(req, res) {
 		// percentage driver, whose pay reads revenue, not days): the trip days in
 		// this week of the driver's other completed loads (see the section header).
 		const weekRule = tripRule && (getDriverPayStructures()[nameNorm] || { payType: "fixed" }).payType !== "percentage" ? tripRule : null;
+		const extraRuleErrors = [];
 		const extraRuleLoads = weekRule
-			? invoiceExtraRuleLoads({ data, headers, driverName, billed: uniqueLoads, weekStart, weekEnd: computedWeekEnd, resolver: weekRule, deletedKeys: loadKeySet(getDeletedLoadIds()) })
+			? invoiceExtraRuleLoads({ data, headers, driverName, billed: uniqueLoads, weekStart, weekEnd: computedWeekEnd, resolver: weekRule, deletedKeys: loadKeySet(getDeletedLoadIds()), errors: extraRuleErrors })
 			: [];
 		// An undated load the rule pays is billed, not missing.
 		const ruleKeys = new Set(extraRuleLoads.map((x) => x.key));
@@ -20480,12 +20674,43 @@ async function generateInvoiceHandler(req, res) {
 		// --- Active-day algorithm for driver pay ---
 		// invoiceWeekPaidDays() (above the route) is the one copy of the week's
 		// days; scripts/blank-pickup-dry-run.js runs it too.
-		const { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads } = invoiceWeekPaidDays({
+		const { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
 			headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads, weekRule, weekStart, weekEnd: computedWeekEnd, nameNorm,
 		});
 		// A load paid from its Assigned Date (the blank-pickup fallback) is named
 		// to the admin here; the PDF does not say it.
 		if (blankPickupLoads.length) warnings.push(`Pickup Appointment blank; days counted from the Assigned Date: ${blankPickupLoads.join(", ")}.`);
+		// A load the trip work-day rule could not read is paid by its window here.
+		for (const e of [...tripErrors, ...extraRuleErrors]) {
+			warnings.push(`${e.fallback ? "TRIP RULE NOT APPLIED" : "TRIP DAYS NOT READ"}: load ${e.loadId}: ${e.error}. ${extraRuleErrors.includes(e) ? "Its days in this week are not on this invoice." : "This invoice pays its scheduled window instead."}`);
+		}
+		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
+		// the route; the dry run prices with it too).
+		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
+		// A DAY A LIVE MANUAL INVOICE ALREADY PAYS IS NOT BILLED AGAIN (pay plan
+		// 2026-10-21, "Added" item 1), with the trip work-day rule on or off: a
+		// correction or missed-week Draft, a manual invoice naming the day in its
+		// paidDays, or lines dated the day of at least one day's pay
+		// (weeklyManualInvoiceHolds(), the one call a flag would wrap). A load's
+		// completion date moved into a week a missed-week Draft already pays, and
+		// that week generated, billed the day twice; with the rule on, the
+		// invoice_paid_days claims miss a manual invoice that only dates its lines.
+		// The day is left off and named; a smaller dated line (a bonus) or a line
+		// with no date is named to check only. Percentage pay reads revenue, not
+		// days, and is left as it is.
+		if (payStruct.payType !== "percentage") {
+			const holds = weeklyManualInvoiceHolds({ driverNorm: nameNorm, days: activeDaySet, weekStart, weekEnd: computedWeekEnd, rateOf: (ds) => (rateOf ? rateOf(ds) : dailyRate) });
+			const held = [...holds.held.keys()];
+			for (const ds of held) { activeDaySet.delete(ds); delete dayLoadMap[ds]; }
+			if (held.length) {
+				const open = [...new Set([...holds.held.values()].filter((h) => h.status === "Draft" || h.status === "Submitted").map((h) => h.invoiceNumber))];
+				warnings.push(`NOT BILLED: ${held.map((ds) => `${ds} (already paid by ${holds.held.get(ds).invoiceNumber}, ${holds.held.get(ds).status})`).join(", ")}: a manual invoice of this driver pays ${held.length === 1 ? "that day" : "those days"}. If it does not, correct the manual invoice, then generate again.`
+					+ (open.length ? ` ${open.join(", ")} ${open.length === 1 ? "is" : "are"} not approved yet (a Draft or Submitted): if rejected or deleted later, the day is not billed again by itself once this invoice is approved; regenerate this invoice while it is a Draft, or pay the day by hand.` : ""));
+			}
+			if (holds.check.length) {
+				warnings.push(`CHECK: ${holds.check.join(", ")} ${holds.check.length === 1 ? "has" : "have"} a line dated in this week under one day's pay, or a line with no date over it, and may already pay some of its days.`);
+			}
+		}
 		// The cells the percentage driver's load lines read below.
 		const { pickupCol, dropoffCol } = week.cols;
 		const completionCol = invoiceCompletionCol(headers);
@@ -20494,9 +20719,6 @@ async function generateInvoiceHandler(req, res) {
 		const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
 
 		const activeDays = activeDaySet.size;
-		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
-		// the route; the dry run prices with it too).
-		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
 		// `let` because owner-op (percentage) drivers override this further down.
 		let totalEarnings = totalOf(activeDaySet);
 
@@ -39009,8 +39231,10 @@ const DISPATCH_COMPLETED_RE = /^(delivered|completed|pod received)$/i;
 // means period_locks is empty, nothing is locked, one indexed SELECT.
 //
 // `before` is the header-keyed row as it stands; `edits` is the header-keyed
-// delta the route would apply, i.e. after = {...before, ...edits}.
-function dispatchWriteBlocker(headers, before, edits) {
+// delta the route would apply, i.e. after = {...before, ...edits}. `tripCover`
+// is tripDayLockCover(headers) (null while TRIP_WORK_DAYS is off): a row with no
+// Assigned Date then also answers for the months its trip days settle in.
+function dispatchWriteBlocker(headers, before, edits, tripCover = null) {
 	// RUNG 1 — refuse FIRST on an unreadable lock table. isLocked() swallows
 	// every error and answers "not locked", so without this the guard would be
 	// present, silent and open.
@@ -39025,6 +39249,7 @@ function dispatchWriteBlocker(headers, before, edits) {
 	// it reads dates only, which is what makes the cancelled-row resurrection
 	// case above come out right for free.
 	const cols = jobTrackingMonthCols(headers);
+	if (tripCover) cols.tripCover = tripCover;
 	const pBefore = loadRowPeriods(before, cols);
 	const pAfter = loadRowPeriods(after, cols);
 
@@ -39585,7 +39810,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			// nor a date, so they cannot change this guard's answer; when their
 			// headers do not exist yet the route creates them below, which also
 			// changes nothing the guard reads.
-			const blocked = dispatchWriteBlocker(headers, before, edits);
+			const blocked = dispatchWriteBlocker(headers, before, edits, tripDayLockCover(headers));
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "dispatch_blocked", loadId,
@@ -39763,7 +39988,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			const before = sheetRowToObject(headers, snapshot.row);
 			const edits = {};
 			if (headers[driverCol]) edits[headers[driverCol]] = newDriver;
-			const blocked = dispatchWriteBlocker(headers, before, edits);
+			const blocked = dispatchWriteBlocker(headers, before, edits, tripDayLockCover(headers));
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "reassign_blocked", loadId,
@@ -40144,6 +40369,10 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 		}
 
 		const cols = jobTrackingMonthCols(jobTracking.headers);
+		// With the trip work-day rule on, a row with no Assigned Date answers for
+		// its trip days' months too (tripDayLockCover(), loadRowPeriods()).
+		const tripCover = tripDayLockCover(jobTracking.headers);
+		if (tripCover) cols.tripCover = tripCover;
 		// EVERY row carrying this load id, not just the first: the delete is keyed
 		// on load_id, so it drops all of them and the guard has to answer for all
 		// of them. Matched with the same `#`-stripped lowercasing the delete uses.
@@ -40275,7 +40504,14 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // `blankDropoffFrom` is the blank drop-off fallback's FROM (excludedDayGate()
 // reads it as the payout ledger does; null while off): with it, a covering load's
 // window is the one the ledger pays (loadWindowDays()).
-function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null }) {
+//
+// `tripCover` is tripDayLockCover()'s answer (null while TRIP_WORK_DAYS is off):
+// with it a load also covers the date when the trip work-day rule pays it that
+// day (pay plan 2026-10-21, section 2), whatever its window says, and its months
+// (loadRowPeriods(), the cover included) join the answer. A driver's load whose
+// trip history or ELD could not be read makes the answer null: the gate refuses
+// as unresolved.
+function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null, tripCover = null }) {
 	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY, because
 	// filtering it would DROP it from the array, which is a PERMIT. The producers
 	// below need the test because they build their keys from arbitrary sheet cells;
@@ -40297,10 +40533,17 @@ function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFro
 	if (!cols.driverCol) return [own];
 	// The completion cell the ledger reads (ledgerLoadRows()), for that window.
 	if (blankDropoffFrom) Object.assign(cols, { blankDropoffFrom, completionDateCol: findCol(jobTracking.headers, /completion.*date|status.*update.*date/i) });
+	if (tripCover) cols.tripCover = tripCover;
 	const months = new Set();
 	for (const row of jobTracking.data) {
 		if (normalizeDriverName(row[cols.driverCol]) !== driver) continue;
-		if (!loadWindowDays(row, cols).includes(date)) continue;
+		let covers = loadWindowDays(row, cols).includes(date);
+		if (tripCover) {
+			const trip = tripCover.daysFor(row);
+			if (trip.error) return null;
+			covers = covers || trip.days.includes(date);
+		}
+		if (!covers) continue;
 		loadRowPeriods(row, cols).periods.forEach((m) => months.add(m));
 	}
 	// UNION, not displacement — see the ⚠️ above. With no covering load this is
@@ -40348,7 +40591,10 @@ async function excludedDayGate({ driver, date, action }) {
 	// The blank drop-off fallback's FROM, read as the payout ledger reads it
 	// (gatherLedgerScopeFacts()), so the lock covers the days the ledger pays.
 	const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
-	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom });
+	// The trip work-day rule's days (null while it is off): see excludedDayPeriods().
+	const tripCover = action !== "add" && jobTracking ? tripDayLockCover(jobTracking.headers) : null;
+	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom, tripCover });
+	if (periods === null) return { refuse: "unresolved", periods: [] };
 	const locked = lockedAmong(periods);
 	return locked.length ? { refuse: "finalized", periods: locked } : { refuse: null, periods };
 }
@@ -40637,7 +40883,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 			const edits = {};
 			if (sIdx !== -1 && headers[sIdx]) edits[headers[sIdx]] = response === "accepted" ? "Assigned" : "Unassigned";
 			if (response !== "accepted" && dIdx !== -1 && headers[dIdx]) edits[headers[dIdx]] = "";
-			const blocked = dispatchWriteBlocker(headers, before, edits);
+			const blocked = dispatchWriteBlocker(headers, before, edits, tripDayLockCover(headers));
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "driver_respond_blocked", loadId,
@@ -42070,6 +42316,57 @@ function tripDayResolver(fromMonth = TRIP_WORK_DAYS_FROM) {
 	return tripWorkDays.createTripDayResolver({ db, enabled: true, fromMonth, zone: APP_TIMEZONE, radiusM: GEOFENCE_RADIUS });
 }
 
+// THE MONTH-END LOCK OVER THE TRIP RULE'S DAYS (pay plan 2026-10-21, section 2;
+// Arvin's e). The trip work-day rule pays days outside a load's window (the
+// drive to the pickup, an unloading day after the Drop-off Appointment, a load
+// with a blank window), each settling in the load's Assigned month, or in its
+// own month when the load has none. The lock guards ask which months a load
+// touches from its window (loadRowPeriods(), excludedDayPeriods()), so with the
+// rule on they also ask this cover: an override on such a day, or a write to a
+// load with no Assigned Date, is held to the months those days settle in.
+// null while TRIP_WORK_DAYS is off, so every guard is then exactly as before.
+//   daysFor(row)  the days the rule pays for one Job Tracking row (header-keyed),
+//                 any status, asked with the weekly invoice's window and the
+//                 ledger's (their blank-appointment flags differ by path), as
+//                 { days } (sorted, [] when the rule does not cover the load), or
+//                 { days: [], error } when its history or ELD could not be read:
+//                 the guard then refuses as unresolved, never as "no days".
+function tripDayLockCover(headers) {
+	const resolver = tripDayResolver();
+	if (!resolver) return null;
+	const invoiceCols = invoiceWeekColumns(headers);
+	const monthCols = jobTrackingMonthCols(headers);
+	const vidOf = invoiceTruckVidReader(headers);
+	const completionCol = findCol(headers || [], /completion.*date|status.*update.*date/i);
+	return {
+		daysFor(row) {
+			const loadId = monthCols.loadIdCol ? String(row[monthCols.loadIdCol] || "").trim() : "";
+			if (!loadId) return { days: [] };
+			const settleMonth = loadAssignedMonthKey(row, monthCols);
+			const vid = vidOf(row);
+			// The ledger's window, read as ledgerLoadRows() and computeLedgerScope() read it.
+			const assigned = monthCols.dateCol && row[monthCols.dateCol] ? moneySheetDate(row[monthCols.dateCol]) : null;
+			const pickup = moneySheetDate(monthCols.pickupDateCol ? row[monthCols.pickupDateCol] : null);
+			const ledgerWin = loadPayDays.payWindow({
+				pickup: pickup || assigned, dropoff: moneySheetDate(monthCols.dropoffDateCol ? row[monthCols.dropoffDateCol] : null), assigned,
+				completion: completionCol ? moneySheetDate(row[completionCol]) : null, completed: true, settleMonth,
+				rules: { pickupFromAssigned: true, dropoffFromCompletion: LEDGER_BLANK_DROPOFF_FALLBACK_FROM },
+			});
+			const windows = [
+				invoiceLoadWindow(row, { cols: invoiceCols, headers, monthCols, assumeCompleted: true }).tripWindow,
+				loadPayDays.tripWindowOf(ledgerWin, { pickup, assigned }),
+			];
+			const days = new Set();
+			for (const window of windows) {
+				const answer = resolver.forLoad({ loadId, settleMonth, vid, window });
+				if (answer && answer.error) return { days: [], error: answer.error };
+				for (const d of tripWorkDays.tripDaysOrNull(answer) || []) days.add(d);
+			}
+			return { days: [...days].sort() };
+		},
+	};
+}
+
 // One notice at boot when TRIP_WORK_DAYS_FROM is at or before the latest closed
 // month, built like the two above. The rule keeps running either way.
 function warnTripWorkDaysFromClosedMonth() {
@@ -42448,8 +42745,16 @@ function loadRowPeriods(row, cols) {
 	// start dropping lockable months and this line would become the fail-open.)
 	// When it filters everything out, `months` is empty and the row answers
 	// resolved:false, i.e. the guard refuses.
-	const months = [...new Set(loadWindowDays(row, cols).map((d) => d.slice(0, 7)).filter((m) => LOCKABLE_MONTH_KEY.test(m)))].sort();
-	return { periods: months, resolved: months.length > 0 };
+	//
+	// With the trip work-day rule on (`cols.tripCover`, tripDayLockCover(); the
+	// caller sets it), the days the rule pays settle in their own months too:
+	// the drive to the pickup, an unloading day after the window. They join the
+	// window's days; a history or ELD the rule could not read answers
+	// resolved:false (the guard refuses).
+	const trip = cols.tripCover ? cols.tripCover.daysFor(row) : null;
+	const days = trip && !trip.error ? [...loadWindowDays(row, cols), ...trip.days] : loadWindowDays(row, cols);
+	const months = [...new Set(days.map((d) => d.slice(0, 7)).filter((m) => LOCKABLE_MONTH_KEY.test(m)))].sort();
+	return { periods: months, resolved: months.length > 0 && !(trip && trip.error) };
 }
 
 // Of a set of candidate months, the ones period_locks records as closed.
@@ -43993,7 +44298,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 				const cIdx = headers.findIndex((h) => /completion.*date/i.test(h));
 				if (cIdx !== -1 && headers[cIdx]) edits[headers[cIdx]] = dateTime;
 			}
-			const blocked = dispatchWriteBlocker(headers, before, edits);
+			const blocked = dispatchWriteBlocker(headers, before, edits, tripDayLockCover(headers));
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "status_update_blocked", loadId,
@@ -44085,8 +44390,9 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 //
 // `rows` are header-keyed Job Tracking rows (parseSheet's shape) — EVERY row
 // carrying the load id, not the last one. `edits` is the header-keyed delta the
-// write would apply, i.e. after = {...before, ...edits}.
-function statusOverrideBlocker(headers, rows, edits) {
+// write would apply, i.e. after = {...before, ...edits}. `tripCover` is
+// tripDayLockCover(headers), as dispatchWriteBlocker() takes it.
+function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 	if (!periodLocksReadable()) {
 		return {
 			code: "PERIOD_LOCK_UNREADABLE",
@@ -44094,6 +44400,7 @@ function statusOverrideBlocker(headers, rows, edits) {
 		};
 	}
 	const cols = jobTrackingMonthCols(headers);
+	if (tripCover) cols.tripCover = tripCover;
 	const periods = new Set();
 	let allResolved = true;
 	for (const before of rows) {
@@ -44280,7 +44587,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			headers.forEach((h, i) => { o[h] = arr[i] == null ? "" : arr[i]; });
 			return o;
 		};
-		const blocker = statusOverrideBlocker(headers, matches.map((m) => asObject(m.row)), edits);
+		const blocker = statusOverrideBlocker(headers, matches.map((m) => asObject(m.row)), edits, tripDayLockCover(headers));
 		if (blocker) {
 			auditBlocked(blocker.code, blocker.periods, canonicalStatus);
 			// AUDITED_UPSTREAM on all three: auditBlocked() one line above wrote the
@@ -58323,8 +58630,9 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // too; it is reported, not split.
 async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
 	// One trip work-day reading (the status history) for every scope
-	// (gatherLedgerScopeFacts() takes it from rules.tripFacts).
-	const rules = { ...given, tripFacts: financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
+	// (gatherLedgerScopeFacts() takes it from rules.tripFacts), or the caller's
+	// (the work-days dry run reads each load's answer from it afterwards).
+	const rules = { ...given, tripFacts: given.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
 	// One Job Tracking snapshot for every scope, so they all read the same sheet.
 	const jobTracking = await getJobTrackingCached();
 	const carrierDB = getCarrierDBFromSQLite();
@@ -59836,12 +60144,29 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 				// read the cell through the shared resolver, a present-but-unreadable
 				// pickup landed here too, contradicting this comment.
 				if (!pickup && jtDateCol && r[jtDateCol]) pickup = moneySheetDate(r[jtDateCol]);
-				// The trip work-day rule first, before the pickup gate (null when off).
+				// The window (lib/load-pay-days.js payWindow(), as the ledger reads it):
+				// the pickup (or the Assigned date, above) to the drop-off, a blank
+				// drop-off ending at the completion date where the blank drop-off
+				// fallback covers the load. Read first: the trip rule reads it too.
+				const window = loadPayDays.payWindow({
+					pickup, dropoff,
+					completion: !dropoff && blankDropoffFrom && completionDateCol ? moneySheetDate(r[completionDateCol]) : null,
+					completed: true, settleMonth: assignedMonthKey || "",
+					rules: { pickupFromAssigned: true, dropoffFromCompletion: blankDropoffFrom },
+				});
+				// The trip work-day rule first, before the pickup gate (null when off,
+				// and for a load whose history or ELD it could not read).
 				const vid = truckUnit ? unitToVid[truckUnit] : null;
 				const lid = loadIdCol ? (r[loadIdCol] || "").trim() : "";
 				// Daily-rate drivers only: a percentage driver's pay reads revenue, not days.
 				const trip = tripDays && (tripPayStructures[driver] || {}).payType !== "percentage"
-					? tripDays.forLoad({ loadId: lid, settleMonth: assignedMonthKey || "", vid })
+					? tripWorkDays.tripDaysOrNull(tripDays.forLoad({
+						loadId: lid, settleMonth: assignedMonthKey || "", vid,
+						window: loadPayDays.tripWindowOf(window, {
+							pickup: moneySheetDate(pickupDateCol ? r[pickupDateCol] : null),
+							assigned: jtDateCol && r[jtDateCol] ? moneySheetDate(r[jtDateCol]) : null,
+						}),
+					}))
 					: null;
 				// A load the rule pays with no Assigned Date settles in its days' own
 				// months, so the month list starts no later than its first day.
@@ -59849,16 +60174,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const first = new Date(`${trip[0]}T12:00:00`);
 					if (!earliestDate || first < earliestDate) earliestDate = first;
 				}
-				// The window (lib/load-pay-days.js payWindow(), as the ledger reads it):
-				// the pickup (or the Assigned date, above) to the drop-off, a blank
-				// drop-off ending at the completion date where the blank drop-off
-				// fallback covers the load.
-				const win = trip ? null : loadPayDays.payWindow({
-					pickup, dropoff,
-					completion: !dropoff && blankDropoffFrom && completionDateCol ? moneySheetDate(r[completionDateCol]) : null,
-					completed: true, settleMonth: assignedMonthKey || "",
-					rules: { pickupFromAssigned: true, dropoffFromCompletion: blankDropoffFrom },
-				});
+				const win = trip ? null : window;
 				if (trip || win) {
 					const windowDays = trip ? [] : expandDateRange(win.start, win.end || win.start);
 					const eld = vid ? eldByVid[vid] : null;

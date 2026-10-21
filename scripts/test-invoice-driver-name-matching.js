@@ -110,6 +110,7 @@ const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
+	"DAY_PAY_DRAFT_LINE_RE",
 ];
 const SHARED_FNS = [
 	"appDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
@@ -119,7 +120,9 @@ const SHARED_FNS = [
 	"driversWithCompletedLoadsInWeek",
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
 	// The week's days and their pricing, out of the handler since money plan D.
-	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceWeekPaidDays", "invoiceDayPricing",
+	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceLoadWindow", "invoiceWeekPaidDays", "invoiceDayPricing",
+	// The days a live manual invoice already pays, left off the weekly invoice.
+	"driverLiveManualInvoices", "weeklyManualInvoiceHolds",
 	// Under test.
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",

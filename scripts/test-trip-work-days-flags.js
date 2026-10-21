@@ -107,12 +107,15 @@ const R = W.createRunner("B12 G: the trip work-day flags and edges");
 		ok("FROM, commented with no value", /\n# TRIP_WORK_DAYS_FROM=\n/.test(example));
 	});
 
-	await R.test("G4 The pickup geofence radius the rule reads is server.js's GEOFENCE_RADIUS (GEOFENCE_RADIUS_M, else its default)", async ({ eq }) => {
+	await R.test("G4 The pickup geofence radius the rule reads is server.js's GEOFENCE_RADIUS (GEOFENCE_RADIUS_M, else its default); its driving speed (rule d) is the travel-day test's and GEOFENCE_DEPART_SPEED_MPS", async ({ eq }) => {
 		const lib = W.requireLib("trip-work-days");
 		const m = W.SRC.match(/\nconst GEOFENCE_RADIUS = Number\(process\.env\.GEOFENCE_RADIUS_M\) > 0\s*\?\s*Number\(process\.env\.GEOFENCE_RADIUS_M\)\s*:\s*([\d.]+);/);
 		eq("the default", m && Number(m[1]), lib.DEFAULT_GEOFENCE_RADIUS_M);
 		eq("a set radius, an unset one, a bad one", [lib.geofenceRadiusFromEnv({ GEOFENCE_RADIUS_M: "500" }), lib.geofenceRadiusFromEnv({}), lib.geofenceRadiusFromEnv({ GEOFENCE_RADIUS_M: "-3" })],
 			[500, lib.DEFAULT_GEOFENCE_RADIUS_M, lib.DEFAULT_GEOFENCE_RADIUS_M]);
+		const depart = W.SRC.match(/\nconst GEOFENCE_DEPART_SPEED_MPS = ([\d.]+);/);
+		const travel = W.SRC.match(/if \(\(r\.speed \|\| 0\) > ([\d.]+)\) e\.travel\.add\(day\);/);
+		eq("driving speed = GEOFENCE_DEPART_SPEED_MPS = the travel-day test", [lib.DRIVING_MPS, depart && Number(depart[1]), travel && Number(travel[1])], [2.235, 2.235, 2.235]);
 	});
 
 	await R.test("G5 With the rule off, a manual invoice ignores `days`: 200, no paid-day row, and the stored render data exactly as without `days`", async ({ eq }) => {
