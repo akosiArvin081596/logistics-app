@@ -10,11 +10,12 @@
 //       panel, and a real tap on the header collapses the card.
 //   Both at 390x844 (a phone, touch) as a Super Admin and as a Dispatcher, each with
 //   no horizontal page scroll (scrollWidth <= innerWidth). The same steps at
-//   1280x800 (W1d, W2d) check the desktop layout: the same controls reachable, the
-//   header on one row with its actions on the right, the Fuel & Route card 270 px
-//   wide and the Active Loads panel uncapped. The desktop geometry is written to the
+//   768x1024 (W1m, W2m; the first width the header is one row again) and 1280x800
+//   (W1d, W2d) check the wider layout: the same controls reachable, the header on
+//   one row with its actions on the right, the Fuel & Route card 270 px wide and the
+//   Active Loads panel uncapped. The geometry of both wider views is written to the
 //   work dir; DESKTOP_BASELINE=<that file from a run on main> fails the run on any
-//   difference, so "desktop unchanged" is measured, not assumed.
+//   difference, so "768 px and up unchanged" is measured, not assumed.
 //
 // Unlike e2e.mjs this boots no server.js, opens no database, reads no .env or key
 // and signs nobody in. It serves the checkout's built client/dist from its own
@@ -51,7 +52,10 @@ const HEADED = process.env.HEADED === '1'
 const OUT_TAG = String(process.env.OUT_TAG || 'phone-layout').replace(/[^\w.-]/g, '')
 const DIST = path.join(paths.REPO, 'client', 'dist')
 const PHONE = { width: 390, height: 844 }
+const TABLET = { width: 768, height: 1024 } // the first width the load detail's header is one row again
 const DESKTOP = { width: 1280, height: 800 }
+// Step names: W1/W2 on the phone, W1m/W2m at 768 px, W1d/W2d at 1280 px.
+const stepName = (n, size, role) => `W${n}${size.width < 640 ? '' : size.width < 1024 ? 'm' : 'd'}-${role === 'Dispatcher' ? 'DSP' : 'SA'}`
 
 function die(msg) {
   console.error(`phone-layout: ${msg}`)
@@ -84,6 +88,7 @@ const ACTIVE_JOB = {
   _dropLocation: 'Dallas, TX 75201',
 }
 const OTHER_DRIVERS = ['Sam Sample', 'Alex Placeholder', 'Jo Testcase', 'Lee Madeup']
+const STOP_COUNT = 8 // enough truck stops to grow the Fuel & Route card to its full height
 
 function user(role) {
   return role === 'Dispatcher'
@@ -146,7 +151,7 @@ function locations() {
 }
 
 function fuelStops() {
-  const stops = Array.from({ length: 8 }, (_, i) => ({
+  const stops = Array.from({ length: STOP_COUNT }, (_, i) => ({
     placeId: `qa-stop-${i}`,
     name: `Example Truck Stop ${i + 1}`,
     brand: 'Example Fuel',
@@ -308,6 +313,16 @@ async function tapAt(page, x, y, touch) {
   else await page.mouse.click(x, y)
 }
 
+// Waits until every finite animation or transition on `selector` and inside it has
+// finished (the dialog's zoom-in, a chevron's turn); an endless one is not waited on.
+async function settled(page, selector, timeout = 5000) {
+  await page.waitForFunction((sel) => {
+    const el = document.querySelector(sel)
+    return !!el && el.getAnimations({ subtree: true })
+      .every((a) => a.playState !== 'running' || (a.effect && a.effect.getTiming().iterations === Infinity))
+  }, selector, { timeout })
+}
+
 async function noHorizontalScroll(page) {
   return page.evaluate(() => ({
     scrollWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
@@ -328,13 +343,13 @@ async function rectsOf(page, selectors) {
 // ---------------------------------------------------------------- W1: load detail header
 async function loadDetail(browser, role, size, geometry) {
   const phone = size.width < 640
-  const step = `${phone ? 'W1' : 'W1d'}-${role === 'Dispatcher' ? 'DSP' : 'SA'}`
+  const step = stepName(1, size, role)
   const { ctx, page } = await openPage(browser, role, size)
   try {
     await page.goto(`${BASE}/dashboard?load=${encodeURIComponent(LOAD_ID)}`)
     const dialog = page.getByRole('dialog').filter({ hasText: LOAD_ID })
     await dialog.waitFor({ state: 'visible', timeout: 20000 })
-    await page.waitForTimeout(400) // the dialog's zoom-in animation
+    await settled(page, '[role="dialog"]') // the dialog's zoom-in
     const names = ['Copy tracking link', 'Override', 'Edit', ...(role === 'Super Admin' ? ['Delete'] : [])]
     const handles = []
     for (const n of names) handles.push(await dialog.getByRole('button', { name: n, exact: true }).elementHandle({ timeout: 5000 }))
@@ -366,11 +381,11 @@ async function loadDetail(browser, role, size, geometry) {
       }, { id: LOAD_ID, labels: names })
       const oneRow = row.mids.every((m) => Math.abs(m - row.titleMid) <= 2)
       const rightAligned = Math.abs(row.headerRight - row.lastRight) <= 1
-      record(`${step}r`, `Desktop load detail header layout (${role})`,
+      record(`${step}r`, `Load detail header layout at ${size.width} px (${role})`,
         'the title and every action on one row, the last action at the row\'s right edge',
         `title centre y ${Math.round(row.titleMid)}, action centres y ${row.mids.map(Math.round).join('/')}; last action right ${Math.round(row.lastRight)} vs row right ${Math.round(row.headerRight)}`,
         oneRow && rightAligned, file)
-      geometry[`loadDetail-${role}`] = await page.evaluate(({ id, labels }) => {
+      geometry[`loadDetail-${role}-${size.width}`] = await page.evaluate(({ id, labels }) => {
         const dlg = [...document.querySelectorAll('[role="dialog"]')].find((d) => d.textContent.includes(id))
         const out = {}
         const put = (k, el) => { if (!el) return; const r = el.getBoundingClientRect(); out[k] = { left: r.left, top: r.top, width: r.width, height: r.height } }
@@ -404,7 +419,7 @@ async function loadDetail(browser, role, size, geometry) {
 // ---------------------------------------------------------------- W2: Tracking, Fuel & Route header
 async function tracking(browser, role, size, geometry) {
   const phone = size.width < 640
-  const step = `${phone ? 'W2' : 'W2d'}-${role === 'Dispatcher' ? 'DSP' : 'SA'}`
+  const step = stepName(2, size, role)
   const { ctx, page } = await openPage(browser, role, size)
   try {
     await page.goto(`${BASE}/tracking`)
@@ -413,8 +428,12 @@ async function tracking(browser, role, size, geometry) {
     await panel.locator('.driver-item', { hasText: DRIVER }).click()
     const toggle = page.locator('.fuel-finder .ff-toggle')
     await toggle.waitFor({ state: 'visible', timeout: 10000 })
-    await page.locator('.fuel-finder .ff-stop').first().waitFor({ state: 'visible', timeout: 10000 })
-    await page.waitForTimeout(300)
+    // The state the bug showed in: the driver's load expanded in the panel, every
+    // made-up truck stop listed in the card, no route fetch pending, nothing moving.
+    await panel.locator('.route-accordion').waitFor({ state: 'visible', timeout: 10000 })
+    await page.waitForFunction((n) => document.querySelectorAll('.fuel-finder .ff-stop').length === n, STOP_COUNT, { timeout: 10000 })
+    await page.locator('.route-overlay').waitFor({ state: 'detached', timeout: 10000 })
+    await settled(page, '.map-wrap')
     const parts = [
       await toggle.elementHandle(),
       await page.locator('.fuel-finder .ff-title-text').elementHandle(),
@@ -452,16 +471,17 @@ async function tracking(browser, role, size, geometry) {
         return { fuelWidth: ff.width, panelMaxHeight: getComputedStyle(panelEl).maxHeight }
       })
       const okDesk = Math.abs(desk.fuelWidth - 270) < 0.5 && /^calc\(100% - 20px\)$/.test(desk.panelMaxHeight.replace(/\s+/g, ' '))
-      record(`${step}r`, `Desktop Tracking layout (${role})`, 'the Fuel & Route card 270 px wide; the Active Loads panel capped only by the map (calc(100% - 20px))',
+      record(`${step}r`, `Tracking layout at ${size.width} px (${role})`, 'the Fuel & Route card 270 px wide; the Active Loads panel capped only by the map (calc(100% - 20px))',
         `card ${desk.fuelWidth} px; panel max-height ${desk.panelMaxHeight}`, okDesk, file)
-      geometry[`tracking-${role}`] = await rectsOf(page, { map: '.map-wrap', panel: '.driver-panel', fuel: '.fuel-finder', fuelHeader: '.fuel-finder .ff-toggle' })
+      geometry[`tracking-${role}-${size.width}`] = await rectsOf(page, { map: '.map-wrap', panel: '.driver-panel', fuel: '.fuel-finder', fuelHeader: '.fuel-finder .ff-toggle' })
     }
 
     // A real tap (or click) on the header's screen point collapses the card.
     const head = hits[0].box
     await tapAt(page, (head.left + head.right) / 2, (head.top + head.bottom) / 2, phone)
-    await page.waitForTimeout(200)
-    const collapsed = (await toggle.getAttribute('aria-expanded')) === 'false'
+    const collapsed = await page.waitForFunction(
+      () => document.querySelector('.fuel-finder .ff-toggle')?.getAttribute('aria-expanded') === 'false', null, { timeout: 5000 },
+    ).then(() => true, () => false)
     const tapFile = await shot(page, `${step}-fuel-collapsed`)
     record(`${step}t`, `${phone ? 'Tapping' : 'Clicking'} the Fuel & Route header (${role})`, 'the card collapses (aria-expanded false)',
       collapsed ? 'collapsed' : 'did not collapse', collapsed, tapFile)
@@ -494,10 +514,10 @@ async function main() {
   const geometry = {}
   try {
     for (const role of ['Super Admin', 'Dispatcher']) {
-      await loadDetail(browser, role, PHONE, geometry)
-      await tracking(browser, role, PHONE, geometry)
-      await loadDetail(browser, role, DESKTOP, geometry)
-      await tracking(browser, role, DESKTOP, geometry)
+      for (const size of [PHONE, TABLET, DESKTOP]) {
+        await loadDetail(browser, role, size, geometry)
+        await tracking(browser, role, size, geometry)
+      }
     }
   } finally {
     await browser.close()

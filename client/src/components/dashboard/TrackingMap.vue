@@ -17,7 +17,7 @@
            (default), the user can pan freely. Manual drag temporarily
            suspends follow. -->
       <button
-        v-if="selectedDriver && selectedDriver !== '__all__'"
+        v-if="driverFocused"
         class="follow-toggle"
         :class="{ active: followTruck && !followSuppressed }"
         :title="followTruck ? 'Following truck — click to release camera' : 'Click to follow truck'"
@@ -32,7 +32,7 @@
            /api/fuel/range + /api/poi/fuel-stops; emits the stops + toggle up so
            this parent (which owns the map) can plot the POI markers. -->
       <FuelFinderPanel
-        v-if="selectedDriver && selectedDriver !== '__all__'"
+        v-if="driverFocused"
         :driver="selectedDriver"
         :load-id="expandedLoadId"
         :active-load="selectedActiveLoad"
@@ -42,7 +42,7 @@
       />
 
       <!-- Driver list panel -->
-      <div class="driver-panel" :class="{ collapsed: panelCollapsed, 'with-fuel': selectedDriver && selectedDriver !== '__all__' }">
+      <div class="driver-panel" :class="{ collapsed: panelCollapsed, 'with-fuel': driverFocused }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
           Active Loads <span class="panel-count">{{ activeLocations.length }}</span>
           <span class="panel-chevron" :class="{ open: !panelCollapsed }">&#9662;</span>
@@ -239,6 +239,9 @@ let map = null
 const locations = ref([])
 const loading = ref(true)
 const selectedDriver = ref('')
+// One driver focused (not "All Drivers"): the Follow pill and the Fuel & Route
+// card show, and on a phone the Active Loads panel makes room for the card.
+const driverFocused = computed(() => !!selectedDriver.value && selectedDriver.value !== '__all__')
 const expandedLoadId = ref('')
 let focusGeneration = 0  // incremented on each focus action to cancel stale async fits
 const fetchingRoute = ref(false)

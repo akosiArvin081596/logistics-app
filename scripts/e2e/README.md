@@ -116,7 +116,7 @@ What it covers today, by section (`ONLY` picks them):
 
 Beside the browser run, `payout-parity.mjs` compares every investor's payout figures between two builds, to the cent and
 to the word (see "The payout parity check"), and `phone-layout.mjs` checks the load detail's header actions and the
-Tracking page's Fuel & Route card at 390x844 and 1280x800 on made-up data, with no server.js, database or sign-in
+Tracking page's Fuel & Route card at 390x844, 768x1024 and 1280x800 on made-up data, with no server.js, database or sign-in
 (see "The phone layout check").
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
@@ -1456,7 +1456,7 @@ answered 200 and listed (Wx expects none). The server stops when the run ends: t
 ```bash
 npm run build:client                                                         # the build under test
 fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs                    # add HEADED=1 to watch it
-# desktop unchanged, measured: a run on main's build first (it writes desktop-geometry-main.json), then the branch's
+# 768 px and up unchanged, measured: a run on main's build first (it writes desktop-geometry-main.json), then the branch's
 W="$(node scripts/e2e/paths.cjs work-dir)"
 OUT_TAG=main fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs                        # on main's build
 DESKTOP_BASELINE="$W/desktop-geometry-main.json" fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs   # on the branch's
@@ -1468,17 +1468,17 @@ ProcessSingleton"): run it outside that sandbox.
 | Step | What it does | Expected |
 |---|---|---|
 | W1-SA, W1-DSP | 390x844, touch. `/dashboard?load=QA-PHONE-1001` opens the load detail. Each header control's box, and `document.elementFromPoint` at its centre: Copy tracking link, Override, Edit, Delete (Super Admin only) and the dialog's Close. | Every box lies inside the viewport and the element at its centre is that control |
-| W1-*s, W2-*s | `scrollWidth` of the page against `innerWidth`, with the load detail open and on Tracking. | `scrollWidth <= innerWidth`, and `innerWidth` is 390 on the phone |
-| W1-*t | A tap on the screen point where Edit shows (not `locator.tap()`, which would scroll the clipped dialog first). | The "Edit Load — QA-PHONE-1001" form opens |
+| W1-\*s, W2-\*s | `scrollWidth` of the page against `innerWidth`, with the load detail open and on Tracking. | `scrollWidth <= innerWidth`, and `innerWidth` is 390 on the phone |
+| W1-\*t | A tap on the screen point where Edit shows (not `locator.tap()`, which would scroll the clipped dialog first). | The "Edit Load — QA-PHONE-1001" form opens |
 | W2-SA, W2-DSP | 390x844. `/tracking`, "Pat Example" tapped in Active Loads, so the Fuel & Route card shows with its truck-stop list. The hit test of the card's header, its title and its collapse arrow, and the Active Loads panel's box against the header's. | All three inside the viewport, the topmost element at each centre inside the header, and the panel clear of the header |
-| W2-*t | A tap on the header's screen point. | The card collapses (`aria-expanded="false"`) |
-| W1d-*, W2d-* | The same steps at 1280x800 with a mouse. W1d-*r: the title and every action on one row, the last action at the row's right edge. W2d-*r: the card 270 px wide and the Active Loads panel's `max-height` `calc(100% - 20px)`. | As on the phone, plus the desktop layout as before |
-| Wg | With `DESKTOP_BASELINE`: every desktop box measured (the dialog, its title and actions; the map, the panel, the card and its header) against the baseline file. | Identical |
+| W2-\*t | A tap on the header's screen point. | The card collapses (`aria-expanded="false"`) |
+| W1m-\*, W2m-\*, W1d-\*, W2d-\* | The same steps with a mouse at 768x1024 (`m`, the first width the load detail's header is one row again) and at 1280x800 (`d`). W1m/W1d-\*r: the title and every action on one row, the last action at the row's right edge. W2m/W2d-\*r: the card 270 px wide and the Active Loads panel's `max-height` `calc(100% - 20px)`. | As on the phone, plus the wider layout as before |
+| Wg | With `DESKTOP_BASELINE`: every box measured at 768 and 1280 px (the dialog, its title and actions; the map, the panel, the card and its header), both roles, against the baseline file. | Identical |
 | Wx | Writes the page sent. | None |
 
 Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
 (`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
-build without the fix, W1-*, W1-*t, W2-* and W2-*t FAIL.
+build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL.
 
 ## Teardown (once the whole QA cycle is done)
 
