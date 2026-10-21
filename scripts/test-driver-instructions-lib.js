@@ -697,5 +697,37 @@ section(() => {
 	ok("§9 L6 the reason has a counts-only message", di.reasonMessages(["reference_unknown_type"], { reference_unknown_type: 2 })[0].text.includes("2"));
 }, "§9");
 
+// --- §10 final re-check (PR #554): things a driver should still see ------------------------
+section(() => {
+	const ctx = context();
+	const hours = (text, c = ctx) => {
+		const r = di.filterInstructions({ stops: [{ kind: "delivery", instructions: [{ kind: "hours", text }] }] }, c);
+		return r.payload.stops[0].instructions.map((x) => x.text);
+	};
+	// N1: one date followed by one time or one time range is not a withheld number.
+	for (const text of ["Appointment 10-24-2026 08:00 at the dock.", "Appointment 2026-10-25 0800 at the dock.", "Appointment 10-24 08:00 at the dock.", "Appt 10-25-2026 0800-1500 at door 4."]) {
+		eq(hours(text), [text], `§10 N1 a date and a time stay readable ("${text}")`);
+	}
+	for (const text of ["Hours 1203-1145-2210 daily at the dock.", "Dates 12-31-1999 01-02-2003 at the dock.", "At 0800 10-24-2026 1500 at the dock."]) {
+		ok(`§10 N1 a chain, or a time before a date, is still withheld ("${text}")`, hours(text)[0].includes("[number withheld]"), hours(text));
+	}
+	for (const text of ["Receiving hours 0700-1500, first come first served.", "Deliver by 10-24-2026 at the latest.", "Arrive by 08:00 at the dock."]) {
+		eq(hours(text), [text], `§10 dock hours, one date and one time stay readable ("${text}")`);
+	}
+	// N2: "ICC bar" is equipment; ICC followed by a number is a carrier identifier.
+	eq(di.filterInstructions({ loadRequirements: [{ category: "equipment", text: "Trailer must have an ICC bar." }] }, ctx).payload.loadRequirements.map((x) => x.text),
+		["Trailer must have an ICC bar."], "§10 N2 \"ICC bar\" stays");
+	eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text: "Give ICC 445566 at the gate." }] }, ctx).payload.loadRequirements, [], "§10 N2 ICC with a number is still dropped");
+	// N3: the own amount is matched in thousands grouping only.
+	const c1025 = context({ amounts: ["$1,025.00"] });
+	eq(hours("Deliver on 10-25-2026 by noon.", c1025), ["Deliver on 10-25-2026 by noon."], "§10 N3 a date whose digits read like the own amount stays");
+	const ref = di.filterInstructions({ stops: [{ kind: "pickup", references: [{ type: "po_number", label: "PO", value: "10-25-77" }] }] }, c1025);
+	eq(ref.payload.stops[0].references.map((x) => x.value), ["10-25-77"], "§10 N3 a reference whose digits read like the own amount stays");
+	for (const text of [`Declared value 1${EN_DASH}200 at the gate.`, "Declared value 1 200 at the gate.", "Load 4 1200 lbs at the gate."]) {
+		eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text }] }, ctx).payload.loadRequirements, [], `§10 N3 the own amount in thousands grouping is still dropped ("${text.replace(EN_DASH, "<en dash>")}")`);
+	}
+	eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text: "Declared value 1,025 at the gate." }] }, c1025).payload.loadRequirements, [], "§10 N3 \"1,025\" with an own amount of $1,025 is dropped");
+}, "§10");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
