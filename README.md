@@ -62,17 +62,21 @@ No Jest/Vitest/ESLint. Instead, standalone runners plus a manual HTTP harness:
 
 ```bash
 npm run lint       # node --check over server.js and every .js/.mjs/.cjs in lib/ and scripts/ (about a second)
-npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), 4 at a time — no server needed
-npm run check      # lint + test:unit: the fast local check, 70–110 s on an M-series Mac
+npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), one per core — no server needed
+npm run check      # lint + test:unit: the local check the pre-push hook runs
 npm run ci         # check + build:client — the same gate CI runs
 ```
 
 `npm run test:unit` (that is, `node scripts/run-unit-tests.js`) prints how many
-runners it found and names each one, so no count is kept here. It runs them 4 at
-a time (`UNIT_TEST_CONCURRENCY=1` for one by one), so a new runner must be
-isolated: temp files from `mkdtemp`, databases `:memory:` or inside that temp
-directory, servers on port 0, nothing written into the repo. Timing-sensitive
-runners (`scripts/test-pdf-cold-start.js`) run alone after the rest.
+runners it found and names each one, so no count is kept here. It runs one per
+core less one, never fewer than 4 at a time (`UNIT_TEST_CONCURRENCY=1` for one
+by one); more than the machine has cores only slows it down. So a new runner
+must be isolated: temp files from `mkdtemp`, databases `:memory:` or inside that
+temp directory, servers on port 0, nothing written into the repo.
+Timing-sensitive runners (`scripts/test-pdf-cold-start.js`) run alone after the
+rest. CI runs the runners in parts, as parallel jobs: `UNIT_TEST_SHARD=2/3 npm
+run test:unit` runs the second of three locally, and `node
+scripts/run-unit-tests.js --list` prints what a run would start.
 
 **Pre-push hook.** `.githooks/pre-push` runs `npm run check` before every push
 and blocks the push if it fails. Turn it on once per clone:

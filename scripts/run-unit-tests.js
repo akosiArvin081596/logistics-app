@@ -36,9 +36,9 @@
  * Every runner in scope is hermetic — `new Database(":memory:")` or a fresh
  * `mkdtemp`, no network, no fixtures, and it does not read the real `app.db`.
  *
- * FOUR AT A TIME, SO EVERY RUNNER MUST BE ISOLATED
- * ------------------------------------------------
- * Runners run CONCURRENCY at a time (default 4), so no runner may share
+ * SEVERAL AT A TIME, SO EVERY RUNNER MUST BE ISOLATED
+ * ---------------------------------------------------
+ * Runners run CONCURRENCY at a time (below), so no runner may share
  * anything with another: temp files and directories come from `mkdtemp` (or
  * carry the pid), databases are `:memory:` or inside that temp directory,
  * servers listen on port 0, and nothing is written into the repo tree.
@@ -48,10 +48,20 @@
  * runners were grepped for fixed temp paths and ports. No shared file, port or
  * database was found; the suite then passed 3/3 at 4 at a time. Serial it took
  * ~240 s on an M-series Mac, 4 at a time ~70 s.
+ *
+ * IN PARTS, FOR CI
+ * ----------------
+ * UNIT_TEST_SHARD=i/n runs part i of n, and CI runs the parts as parallel jobs.
+ * The runners, in sorted order, are dealt round-robin (the 1st, the n+1st, …
+ * to part 1), so every runner is in exactly one part and the slow ones spread
+ * out. `--list` prints the runners a run would start and starts none;
+ * scripts/test-release-gate.js §4 reads it to prove the parts cover every
+ * runner once.
  */
 
 const { spawn } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const SCRIPTS_DIR = path.join(__dirname);
@@ -62,12 +72,33 @@ const REPO_ROOT = path.join(__dirname, "..");
 // hung runner fails the build in a minute instead of burning the job's timeout.
 const TIMEOUT_MS = Number(process.env.UNIT_TEST_TIMEOUT_MS) || 60_000;
 
-// Four at a time by default, in CI (a public repo's runner has 4 vCPUs) and in
-// `npm run check`. UNIT_TEST_CONCURRENCY=1 runs them one by one. Each runner's
-// output is buffered and printed whole, so parallel runs never interleave.
+// One runner per core, less one for the harness and the processes runners
+// start, and never fewer than 4: CI's 4-vCPU runner keeps the 4 at a time the
+// audit above ran at, and a machine with more cores uses them. Not more than
+// the cores: measured 2026-10-21 on 4 cores, 6 and 8 at a time took longer than 4
+// (198 s against 193 s) and the deploy runners hit TIMEOUT_MS.
+// UNIT_TEST_CONCURRENCY=1 runs them one by one. Each runner's output is
+// buffered and printed whole, so parallel runs never interleave.
 // Timing-sensitive runners (below) never share the machine: they run alone,
 // one by one, after every other runner has finished.
-const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || 4);
+const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || Math.max(4, os.availableParallelism() - 1));
+
+// UNIT_TEST_SHARD=i/n (see IN PARTS, above). Unset or empty: every runner.
+// Anything else that is not i/n with 1 <= i <= n stops the run: a typo must not
+// quietly run the wrong part, or none.
+function shardOf(value) {
+	const raw = String(value ?? "").trim();
+	if (!raw) return null;
+	const m = /^(\d+)\/(\d+)$/.exec(raw);
+	const i = m ? Number(m[1]) : 0;
+	const n = m ? Number(m[2]) : 0;
+	if (!(n >= 1 && i >= 1 && i <= n)) {
+		console.error(`FAIL: UNIT_TEST_SHARD must be i/n with 1 <= i <= n (got ${JSON.stringify(raw)})`);
+		process.exit(1);
+	}
+	return { i, n };
+}
+const SHARD = shardOf(process.env.UNIT_TEST_SHARD);
 
 /**
  * Runners whose assertions are TIMING-SENSITIVE and therefore cannot give a
@@ -188,20 +219,33 @@ function runOne(file) {
 }
 
 async function main() {
-	const files = discover();
+	const started = Date.now();
+	const all = discover();
+	// Dealt before the timing skip, so a part holds the same runners whatever
+	// the environment.
+	const files = SHARD ? all.filter((_, k) => k % SHARD.n === SHARD.i - 1) : all;
 	if (files.length === 0) {
 		// A glob that matches nothing must fail loudly. A silent zero-test pass is
 		// the single worst outcome here: the pipeline goes green having verified
 		// nothing, which is a stronger false signal than having no pipeline.
-		console.error("FAIL: no runners matched scripts/{test,check}-*.{js,mjs}");
+		console.error(SHARD
+			? `FAIL: part ${SHARD.i} of ${SHARD.n} holds no runners (${all.length} found in all)`
+			: "FAIL: no runners matched scripts/{test,check}-*.{js,mjs}");
 		process.exit(1);
 	}
 
 	const skipped = SKIP_TIMING ? files.filter((f) => TIMING_SENSITIVE.has(f)) : [];
 	const toRun = files.filter((f) => !skipped.includes(f));
 
+	if (process.argv.includes("--list")) {
+		for (const f of toRun) console.log(f);
+		process.exit(0);
+	}
+
 	console.log(
-		`Running ${toRun.length} standalone runners, ${CONCURRENCY} at a time (timeout ${TIMEOUT_MS / 1000}s each)` +
+		`Running ${toRun.length} standalone runners` +
+			(SHARD ? ` (part ${SHARD.i} of ${SHARD.n}; ${all.length} in all)` : "") +
+			`, ${CONCURRENCY} at a time (timeout ${TIMEOUT_MS / 1000}s each)` +
 			(skipped.length ? `, skipping ${skipped.length} timing-sensitive` : "") +
 			"\n"
 	);
@@ -268,9 +312,10 @@ async function main() {
 		}
 	}
 
+	// Both clocks: the runners' own times added up, and how long this run took.
 	const total = results.reduce((a, r) => a + r.ms, 0);
 	console.log(
-		`\n${results.length - failed.length}/${results.length} passed in ${(total / 1000).toFixed(1)}s` +
+		`\n${results.length - failed.length}/${results.length} passed in ${(total / 1000).toFixed(1)}s of runner time, ${((Date.now() - started) / 1000).toFixed(1)}s wall` +
 			(flaked.length ? ` — ${flaked.length} flaky (passed on retry)` : "") +
 			(failed.length ? ` — ${failed.length} FAILED` : "")
 	);

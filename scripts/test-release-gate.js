@@ -26,13 +26,16 @@
  *   §4 source pins: the serves check, the smoke and the CI wait are push-only
  *      steps of the staging job, after its deploy, with nothing allowed to
  *      fail; the serves check's own script refuses a no-op that leaves a newer
- *      build serving; the CI wait outlasts CI's own timeout and takes no
+ *      build serving; the CI wait outlasts CI's longest job chain and takes no
  *      CHECK_NAME or poll override; production needs staging, keeps its
  *      environment, and a manual dispatch passes the dispatch gate and deploys
  *      exactly the commit it checked; every job in every workflow has a
  *      timeout; ci.yml runs on every push to main with no path filter, and a
  *      manual run can never cancel the push run (its group expression is
- *      evaluated per event); the unit runners run once in CI; package.json
+ *      evaluated per event); the unit runners run once in CI, in parts 1..n
+ *      that run-unit-tests.js proves cover every runner exactly once; the
+ *      verdict job needs every other job, runs whatever they concluded and
+ *      fails unless each succeeded (its gate run under bash); package.json
  *   §5 mutants of each script, workflow and the dispatch gate, caught above
  *   §6 scripts/deploy/dispatch-gate.js against a fake GitHub API: only a
  *      commit whose push-triggered staging job passed deploys (main pinned to
@@ -433,6 +436,22 @@ function runText(stepRaw) {
 	}
 	return `${body.join("\n").replace(/\s+$/, "")}\n`;
 }
+const jobMinutes = (jobText) => Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(jobText || "")) || [])[1]);
+const jobNeeds = (jobText) => ((/^ {4}needs:\s*\[([^\]]*)\]\s*$/m.exec(noComments(jobText || "")) || [])[1] || "").split(",").map((s) => s.trim()).filter(Boolean);
+// How long ci.yml's verdict can take: the `verify` job's timeout after the
+// longest of the jobs it needs (NaN when either is missing).
+function ciChainMinutes(ciText) {
+	const jobs = jobBlocks(ciText);
+	const needs = jobNeeds(jobs.verify);
+	return jobMinutes(jobs.verify) + (needs.length ? Math.max(...needs.map((id) => jobMinutes(jobs[id]))) : 0);
+}
+// The job that runs the unit runners, and its matrix's parts.
+function unitJob(ciText) {
+	const jobs = jobBlocks(ciText);
+	const id = Object.keys(jobs).find((k) => /run:\s*npm run test:unit\s*$/m.test(noComments(jobs[k])));
+	const parts = ((/^ {8}part:\s*\[([^\]]*)\]\s*$/m.exec(noComments(jobs[id] || "")) || [])[1] || "").split(",").map((s) => s.trim()).filter(Boolean).map(Number);
+	return { id, text: jobs[id] || "", parts };
+}
 const envKeys = (step) => {
 	const m = /\n {8}env:\n((?: {10}.*\n)+)/.exec(`\n${step}`);
 	return m ? m[1].split("\n").map((l) => (/^ {10}([A-Z_]+):/.exec(l) || [])[1]).filter(Boolean).sort() : [];
@@ -471,11 +490,11 @@ function checkDeployGate(deployText, ciText, tag = "") {
 	r.push([stepEnv(wait, "SHA") === "${{ github.sha }}" && stepEnv(wait, "REPO") === "${{ github.repository }}" && stepEnv(wait, "GH_TOKEN") === "${{ github.token }}",
 		`${tag}§4 the CI wait reads this run's own commit, through env:`]);
 	r.push([envKeys(wait).join() === "CI_WAIT_S,GH_TOKEN,REPO,SHA", `${tag}§4 the CI wait's env sets nothing else: no CHECK_NAME or CI_POLL_S override (got ${envKeys(wait).join()})`]);
-	const ciTimeout = Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(jobBlocks(ciText).verify || "")) || [])[1]);
+	const ciTimeout = ciChainMinutes(ciText);
 	const waitS = Number(String(stepEnv(wait, "CI_WAIT_S") || "").replace(/"/g, ""));
 	const waitT = Number(stepKey(wait, "timeout-minutes"));
 	r.push([ciTimeout > 0 && waitS >= ciTimeout * 60 + 120 && waitS <= 1800 && waitT * 60 > waitS,
-		`${tag}§4 the CI wait outlasts CI's own ${ciTimeout}-minute timeout plus queue room, at most 30 min, inside its step timeout (CI_WAIT_S ${waitS}, step ${waitT} min)`]);
+		`${tag}§4 the CI wait outlasts CI's own ${ciTimeout}-minute longest job chain plus queue room, at most 30 min, inside its step timeout (CI_WAIT_S ${waitS}, step ${waitT} min)`]);
 	const jobT = Number((/^ {4}timeout-minutes:\s*(\d+)\s*$/m.exec(noComments(staging)) || [])[1]);
 	r.push([jobT >= waitT + smokeT + 10, `${tag}§4 the staging job's timeout (${jobT}) leaves room for the deploy after the CI wait (${waitT}) and the smoke (${smokeT})`]);
 	const perms = /\n {4}permissions:\n((?: {6}.*\n)+)/.exec(`\n${noComments(staging)}`);
@@ -599,6 +618,43 @@ function checkCi(ciText, tag = "") {
 		`${tag}§4 a PR's new push still cancels its previous run`]);
 	r.push([(c.match(/run:\s*npm run test:unit\s*$/gm) || []).length === 1 && !/run:\s*npm run (check|ci)\b/.test(c), `${tag}§4 CI runs the unit runners exactly once (test:unit, never check or ci, which include them)`]);
 	r.push([/run:\s*npm run lint\s*$/m.test(c), `${tag}§4 CI runs the syntax check (npm run lint)`]);
+
+	// The unit runners run in parts 1..n, each told its part; the harness proves
+	// the parts cover every runner once (checkLocal).
+	const unit = unitJob(ciText);
+	const runStep = stepBlocks(unit.text).find((s) => /run:\s*npm run test:unit\s*$/m.test(s)) || "";
+	r.push([unit.parts.length >= 1 && unit.parts.every((p, k) => p === k + 1),
+		`${tag}§4 the unit job's matrix runs parts 1..n, none missing (got [${unit.parts}])`]);
+	r.push([stepEnv(runStep, "UNIT_TEST_SHARD") === "${{ matrix.part }}/${{ strategy.job-total }}",
+		`${tag}§4 each unit job runs its own part of n (UNIT_TEST_SHARD: ${stepEnv(runStep, "UNIT_TEST_SHARD")})`]);
+
+	// `verify` is the verdict: it needs every other job, runs whatever they
+	// concluded (a job skipped because its needs failed reads as passed to branch
+	// protection), and its gate passes only when every needed job succeeded.
+	const jobs = jobBlocks(ciText);
+	const verify = jobs.verify || "";
+	const needs = jobNeeds(verify);
+	const others = Object.keys(jobs).filter((k) => k !== "verify");
+	r.push([others.length > 0 && others.every((k) => needs.includes(k)) && needs.every((k) => others.includes(k)),
+		`${tag}§4 the verdict job needs every other job in ci.yml (needs [${needs}], jobs [${others}])`]);
+	r.push([(/^ {4}if:\s*(.+?)\s*$/m.exec(noComments(verify)) || [])[1] === "always()",
+		`${tag}§4 the verdict job runs whatever its needs concluded (if: always()), so a failed part fails it instead of skipping it`]);
+	const gate = rawStepBlocks(verify).find((s) => /\$\{\{ needs\./.test(s)) || "";
+	const gateEnv = {};
+	for (const m of gate.matchAll(/^ {10}([A-Z_]+):\s*\$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}\s*$/gm)) gateEnv[m[2]] = m[1];
+	r.push([needs.length > 0 && needs.every((k) => gateEnv[k]) && Object.keys(gateEnv).length === needs.length,
+		`${tag}§4 the verdict's gate reads each needed job's result through env: (${JSON.stringify(gateEnv)})`]);
+	const script = runText(gate);
+	const file = path.join(tmpDir("verdict"), "gate.sh");
+	fs.writeFileSync(file, script);
+	const verdict = (results) => spawnSync("bash", ["-e", file], { encoding: "utf8", env: { PATH: process.env.PATH, ...results } }).status;
+	const allPass = Object.fromEntries(needs.map((k) => [gateEnv[k], "success"]));
+	r.push([script.length > 0 && verdict(allPass) === 0, `${tag}§4 the verdict passes when every needed job succeeded`]);
+	for (const k of needs) {
+		for (const result of ["failure", "cancelled", "skipped", ""]) {
+			r.push([verdict({ ...allPass, [gateEnv[k]]: result }) === 1, `${tag}§4 the verdict fails when '${k}' concluded '${result || "nothing"}'`]);
+		}
+	}
 	return r;
 }
 
@@ -616,7 +672,25 @@ function checkLocal() {
 		&& !listed.some((f) => f.split("/").includes("node_modules")),
 		`§4 the lint list holds server.js, the scripts/*.mjs runners and the scripts/ subfolders, and nothing under node_modules (${listed.length} files)`);
 	const harness = fs.readFileSync(path.join(ROOT, "scripts/run-unit-tests.js"), "utf8");
-	ok(/Number\(process\.env\.UNIT_TEST_CONCURRENCY\) \|\| 4\)/.test(harness), "§4 run-unit-tests.js runs 4 at a time by default");
+	ok(/Number\(process\.env\.UNIT_TEST_CONCURRENCY\) \|\| Math\.max\(4, os\.availableParallelism\(\) - 1\)\)/.test(harness),
+		"§4 run-unit-tests.js runs one per core less one, never fewer than 4, by default");
+	// The parts CI runs cover every runner exactly once, whatever the timing skip.
+	const list = (shard) => {
+		const x = spawnSync(process.execPath, [path.join(ROOT, "scripts/run-unit-tests.js"), "--list"],
+			{ encoding: "utf8", env: { ...process.env, UNIT_TEST_SHARD: shard, UNIT_TEST_SKIP_TIMING: "" } });
+		return { code: x.status, files: x.stdout.split("\n").filter(Boolean), err: x.stderr };
+	};
+	const whole = list("");
+	const { parts } = unitJob(fs.readFileSync(CI_YML, "utf8"));
+	const dealt = parts.map((p) => list(`${p}/${parts.length}`));
+	const seen = dealt.flatMap((d) => d.files);
+	ok(whole.code === 0 && whole.files.length > 0 && dealt.every((d) => d.code === 0 && d.files.length > 0)
+		&& seen.length === whole.files.length && new Set(seen).size === seen.length && whole.files.every((f) => seen.includes(f)),
+	`§4 ci.yml's ${parts.length} parts each run some runners and together run every one of the ${whole.files.length} exactly once (parts: ${dealt.map((d) => d.files.length).join(", ")})`);
+	for (const bad of ["0/3", "4/3", "3", "1/0", "two/3"]) {
+		const x = list(bad);
+		ok(x.code === 1 && /UNIT_TEST_SHARD must be i\/n/.test(x.err), `§4 run-unit-tests.js refuses UNIT_TEST_SHARD=${bad} rather than run the wrong part (exit ${x.code})`);
+	}
 	ok(/const alone = toRun\.filter\(\(f\) => TIMING_SENSITIVE\.has\(f\)\)/.test(harness) && /queue = alone;\n\tawait worker\(\);/.test(harness),
 		"§4 …and runs the timing-sensitive runners alone, after the pool");
 	const mode = fs.statSync(HOOK).mode;
@@ -835,10 +909,20 @@ function mutants() {
 		["ci.yml skips docs-only pushes", ciText.replace("  push:\n    branches: [main]\n", "  push:\n    branches: [main]\n    paths-ignore: [\"**.md\"]\n")],
 		["a manual run shares the push run's group", ciText.replace("ci-${{ github.event_name }}-${{", "ci-${{")],
 		["push runs cancel each other again", ciText.replace("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "cancel-in-progress: true")],
+		["the verdict no longer needs the unit parts", ciText.replace("    needs: [unit, build]\n", "    needs: [build]\n")],
+		["the verdict is skipped when a part fails", ciText.replace("    needs: [unit, build]\n    if: always()\n", "    needs: [unit, build]\n")],
+		["the verdict passes a failed part", ciText.replace('if [ "$UNIT" = success ] && [ "$BUILD" = success ]; then', 'if [ "$BUILD" = success ]; then')],
+		["the verdict reads no result for the build", ciText.replace("          BUILD: ${{ needs.build.result }}\n", "")],
+		["a part never runs", ciText.replace("        part: [1, 2, 3]\n", "        part: [1, 2, 4]\n")],
+		["every part runs every runner", ciText.replace("          UNIT_TEST_SHARD: ${{ matrix.part }}/${{ strategy.job-total }}\n", "")],
 	]) {
 		ok(text !== ciText, `§5 mutant '${name}' must actually differ from ci.yml`);
 		ok(checkCi(text, "[mutant] ").some(([c]) => !c), `§5 mutant '${name}' must be caught by §4`);
 	}
+	// The CI wait is held against the verdict's whole chain, a part included.
+	const longPart = ciText.replace("    timeout-minutes: 10\n    strategy:\n", "    timeout-minutes: 30\n    strategy:\n");
+	ok(longPart !== ciText && checkDeployGate(deployText, longPart, "[mutant] ").some(([c]) => !c),
+		"§5 mutant 'a unit part may outlast the CI wait' must be caught by §4");
 }
 
 (async () => {

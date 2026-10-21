@@ -198,7 +198,8 @@ jobs:
           BASE: https://staging-app.logisx.com
         run: bash scripts/deploy/staging-smoke.sh
 
-      # 20 min: ci.yml's job timeout (15) plus room for its runner queue, so the
+      # 20 min: ci.yml's longest job chain (15: a unit part's 10, then the
+      # verdict's 5) plus room for its runner queues, so the
       # wait never gives up on a CI run that is still allowed to finish.
       - name: CI on main passed on this commit
         if: github.event_name == 'push'
