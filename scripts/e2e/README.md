@@ -115,7 +115,9 @@ What it covers today, by section (`ONLY` picks them):
   L-numbers are its own: the ELD-link section's L1–L3 are different steps.
 
 Beside the browser run, `payout-parity.mjs` compares every investor's payout figures between two builds, to the cent and
-to the word (see "The payout parity check").
+to the word (see "The payout parity check"), and `phone-layout.mjs` checks the load detail's header actions and the
+Tracking page's Fuel & Route card at 390x844 and 1280x800 on made-up data, with no server.js, database or sign-in
+(see "The phone layout check").
 
 Every "Expected" column states the behaviour **after** the fix. A run on a build without it (a BEFORE baseline) is
 expected to FAIL exactly the fix rows.
@@ -208,6 +210,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 | `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
+| `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -1437,13 +1440,53 @@ pairs (the ledger's `recomputedAmount`, `monthEarnings`, `monthShare` and the cu
 flagged 5 months where the unchanged portal copy of the rule now disagreed with the ledger's. On every run, one settled
 row (owner 5, 2026-06, paid and finalized) differs from today's recompute: a frozen figure, listed for information.
 
+## The phone layout check (`phone-layout.mjs`)
+
+Two phone-width layout bugs (2026-10-19): on a 390 px screen the load detail's header actions ran off the dialog, so
+Edit and Delete could not be reached, and on Tracking the Active Loads panel covered the Fuel & Route card's header.
+This check is the one in this folder that touches **no real data**: it boots no `server.js`, opens no database, reads no
+`.env` or key and signs nobody in. It serves the checkout's built `client/dist` from its own static server on
+`127.0.0.1:$E2E_PORT` (default 3181; 3000, 5173 and a port in use are refused) and answers every `/api` request in the
+browser with made-up fixtures (load `QA-PHONE-1001`, drivers such as "Pat Example", made-up coordinates and truck
+stops). The session it answers is a made-up Super Admin or Dispatcher, so the client shows what that role sees; the
+server's role gates are not under test. The Google Maps script is answered with a stub that draws nothing, and every
+other request to another host is aborted (Google Fonts too, so the page uses its fallback font). An `/api` write is
+answered 200 and listed (Wx expects none). The server stops when the run ends: there is no PID to stop.
+
+```bash
+npm run build:client                                                         # the build under test
+fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs                    # add HEADED=1 to watch it
+# desktop unchanged, measured: a run on main's build first (it writes desktop-geometry-main.json), then the branch's
+W="$(node scripts/e2e/paths.cjs work-dir)"
+OUT_TAG=main fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs                        # on main's build
+DESKTOP_BASELINE="$W/desktop-geometry-main.json" fnm exec --using=22.23.2 node scripts/e2e/phone-layout.mjs   # on the branch's
+```
+
+Chrome needs to bind its own sockets, which the Claude Code Bash sandbox refuses ("Failed to create a
+ProcessSingleton"): run it outside that sandbox.
+
+| Step | What it does | Expected |
+|---|---|---|
+| W1-SA, W1-DSP | 390x844, touch. `/dashboard?load=QA-PHONE-1001` opens the load detail. Each header control's box, and `document.elementFromPoint` at its centre: Copy tracking link, Override, Edit, Delete (Super Admin only) and the dialog's Close. | Every box lies inside the viewport and the element at its centre is that control |
+| W1-*s, W2-*s | `scrollWidth` of the page against `innerWidth`, with the load detail open and on Tracking. | `scrollWidth <= innerWidth`, and `innerWidth` is 390 on the phone |
+| W1-*t | A tap on the screen point where Edit shows (not `locator.tap()`, which would scroll the clipped dialog first). | The "Edit Load — QA-PHONE-1001" form opens |
+| W2-SA, W2-DSP | 390x844. `/tracking`, "Pat Example" tapped in Active Loads, so the Fuel & Route card shows with its truck-stop list. The hit test of the card's header, its title and its collapse arrow, and the Active Loads panel's box against the header's. | All three inside the viewport, the topmost element at each centre inside the header, and the panel clear of the header |
+| W2-*t | A tap on the header's screen point. | The card collapses (`aria-expanded="false"`) |
+| W1d-*, W2d-* | The same steps at 1280x800 with a mouse. W1d-*r: the title and every action on one row, the last action at the row's right edge. W2d-*r: the card 270 px wide and the Active Loads panel's `max-height` `calc(100% - 20px)`. | As on the phone, plus the desktop layout as before |
+| Wg | With `DESKTOP_BASELINE`: every desktop box measured (the dialog, its title and actions; the map, the panel, the card and its header) against the baseline file. | Identical |
+| Wx | Writes the page sent. | None |
+
+Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
+(`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
+build without the fix, W1-*, W1-*t, W2-* and W2-*t FAIL.
+
 ## Teardown (once the whole QA cycle is done)
 
 ```bash
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh <port>
 W="$(node scripts/e2e/paths.cjs work-dir)" && echo "$W"
 find "$W" -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-*' -o -name 'creds*.json' -o -name 'logins*.json' -o -name 'results-*.md' \
-  -o -name 'parity-*.md' -o -name 'server-*.log' -o -name 'plant-journal.json' \) -print -delete
+  -o -name 'parity-*.md' -o -name 'server-*.log' -o -name 'plant-journal.json' -o -name 'desktop-geometry-*.json' \) -print -delete
 rm -rf -- "$W/shots"   # real data: the dashboard, truck lists, the driver's truck photo, the Kit page (identity documents masked)
 rm -rf -- "$W/fake-gmail"   # the drafts the fake Gmail captured: a real recipient, and the load's invoice and POD PDFs
 ```
