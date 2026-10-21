@@ -546,7 +546,10 @@ if (require.main === module) {
 	});
 }
 
+// The day, text and money helpers and the two INSERTs are shared with
+// scripts/create-missed-week-invoice-draft.js.
 module.exports = {
-	ACTOR, AUDIT_ACTION, PREPARED_BY, ROOTS, PROVIDED, DENIED, TEMPLATE, INSERT_INVOICE, Refusal,
+	ACTOR, AUDIT_ACTION, PREPARED_BY, ROOTS, PROVIDED, DENIED, TEMPLATE, INSERT_INVOICE, INSERT_AUDIT, Refusal,
 	readOptions, resolveTarget, buildWorld, plan, run, describe, monthsBetween, namesDay,
+	gridBills, isCalendarDay, weekdayOf, longDay, monthLabel, cents, usd, usdShort, parseJson,
 };
