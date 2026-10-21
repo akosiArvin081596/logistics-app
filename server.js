@@ -99,6 +99,7 @@ const financialsCalc = require("./lib/financials-calc");
 const loadPayDays = require("./lib/load-pay-days");
 const tripWorkDays = require("./lib/trip-work-days");
 const financialsReport = require("./lib/financials-report");
+const invoiceMonthSplit = require("./lib/invoice-month-split");
 const leasePayoutText = require("./lib/lease-payout-text");
 const { renderHtmlToPdf } = require("./lib/pdf-browser");
 const { getStateFromCoords } = require("./lib/ifta-states");
@@ -119,6 +120,8 @@ const personalExpense = require("./lib/personal-expense");
 // Their receipts on the invoice: the re-encode service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
 const invoiceReceipts = require("./lib/invoice-receipts");
+// An invoice's Address line from a drivers_directory row, each part once.
+const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
 const receiptFiles = require("./lib/receipt-files");
 const fuelModel = require("./lib/fuel-model");
@@ -20521,9 +20524,9 @@ async function generateInvoiceHandler(req, res) {
 		const driverRow = db.prepare(
 			"SELECT id, driver_name, address, city, state, zip, phone, cell FROM drivers_directory ORDER BY id ASC"
 		).all().find((r) => normalizeDriverName(r.driver_name) === nameNorm);
-		const providerAddress = driverRow
-			? [driverRow.address, driverRow.city, driverRow.state, driverRow.zip].filter(Boolean).join(", ")
-			: "";
+		// One line, each part once: most saved street fields already hold the
+		// whole address (lib/invoice-header.js).
+		const providerAddress = driverRow ? providerAddressLine(driverRow) : "";
 		const providerPhone = driverRow ? (driverRow.phone || driverRow.cell || "") : "";
 		// The P&L's structure (see the daily rate above), so the formula — fixed
 		// or percentage — and the percentage are the ones the P&L applies.
@@ -20532,7 +20535,8 @@ async function generateInvoiceHandler(req, res) {
 
 		// Today in APP_TIMEZONE, not on the server's UTC clock: the Friday batch runs
 		// at 7 PM Eastern, which UTC calls Saturday in winter (7 PM EST is 00:00
-		// UTC), and the template prints this beside a literal "Friday,".
+		// UTC), and the invoice prints this date's own weekday beside it
+		// (lib/policy-field-maps.js, "Submission weekday").
 		const nowStr = appTime.dateTextInZone(new Date(), APP_TIMEZONE);
 		const fmtWeekDate = (s) =>
 			new Date(s + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
@@ -25038,7 +25042,7 @@ function listInvoicePayees() {
 			out.push({
 				name,
 				type: "driver",
-				address: [d.address, d.city, d.state, d.zip].filter(Boolean).join(", "),
+				address: providerAddressLine(d),
 				phone: d.phone || d.cell || "",
 				role: "",
 			});
@@ -26774,7 +26778,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		correctionOf: weekly ? weekly.invoice_number : "",
 		payeeName: display,
 		payeeRole: "Driver",
-		payeeAddress: dirRow ? [dirRow.address, dirRow.city, dirRow.state, dirRow.zip].filter(Boolean).join(", ") : "",
+		payeeAddress: dirRow ? providerAddressLine(dirRow) : "",
 		payeePhone: dirRow ? (dirRow.phone || dirRow.cell || "") : "",
 		invoiceNumberSuffix: invoiceNumber.replace(/^INV-/, ""),
 		issueDate: appTime.dateTextInZone(new Date(), APP_TIMEZONE),
@@ -63767,6 +63771,65 @@ app.put("/api/financials/settings", requireRole("Super Admin"), refuseCrossOrigi
 	}
 });
 
+// Every live, non-rejected driver invoice with its share of each month, for the
+// Financials driver table's invoice columns (lib/invoice-month-split.js). An
+// invoice whose week spans two months counts in each only for its own part:
+//   - its days are invoicePaidDaysOf()'s, each at its amount on the invoice (a
+//     weekly invoice's day-grid total; a manual one's lines dated that day);
+//   - a day counts in the month `books` (buildFinancialsLedger(): a closed
+//     month's frozen items, an open month's live ledger) pays that driver-day
+//     in, the earliest when two months do, else in its own calendar month;
+//   - an owner-operator invoice's loads, in the month the books count each
+//     load's revenue in;
+//   - anything else by calendar days; the adjustment, a returned Personal share
+//     and any gap from the days' amounts in week_end's month.
+// Every invoice is read, not just those whose week touches a month: the books can
+// pay a day in a month the week does not touch (a load assigned the month before
+// its pickup). Display only: nothing here is written or feeds pay or payouts.
+function financialsInvoiceShares(books) {
+	const dayMonth = new Map();
+	const loadMonth = new Map();
+	const keepEarliest = (map, key, mk) => {
+		const had = map.get(key);
+		if (!had || mk < had) map.set(key, mk);
+	};
+	for (const it of books.items) {
+		if (it.kind === "driver_pay" && it.driver && it.day) keepEarliest(dayMonth, `${it.driver}\t${it.day}`, it.month);
+		else if (it.kind === "revenue" && it.loadId) keepEarliest(loadMonth, String(it.loadId).trim(), it.month);
+	}
+	const out = [];
+	const rows = db.prepare(
+		`SELECT id, invoice_number, driver, week_start, week_end, status, is_manual, render_data,
+		        COALESCE(total_earnings,0) AS total_earnings, COALESCE(adjustment,0) AS adjustment, COALESCE(personal_share_total,0) AS personal_share_total
+		 FROM invoices WHERE status != 'Rejected' AND deleted_at = '' ORDER BY id`
+	).all();
+	for (const r of rows) {
+		const driver = normalizeDriverName(driverNameForTotals(r.driver));
+		if (!driver) continue;
+		let snap = null;
+		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+		const named = !!(snap && Array.isArray(snap.paidDays));
+		const lines = named && Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const grid = snap && snap.days && typeof snap.days === "object" ? snap.days : null;
+		// A grid day by its position from week_start, as invoicePaidDaysOf() derives it.
+		const gridStart = Date.parse(`${r.week_start}T12:00:00Z`);
+		const dayAmount = (day) => {
+			if (named) return lines.reduce((s, l) => s + (l && String(l.date || "").trim() === day ? Number(l.amount) || 0 : 0), 0);
+			const i = Math.round((Date.parse(`${day}T12:00:00Z`) - gridStart) / 86400000);
+			const e = grid && i >= 0 && i < INVOICE_GRID_DAYS.length ? grid[INVOICE_GRID_DAYS[i]] : null;
+			return e ? Number(e.total) || 0 : 0;
+		};
+		const split = invoiceMonthSplit.invoiceMonthShares({ ...r, driver, render_data: snap || {} }, {
+			paidDays: invoicePaidDaysOf(r),
+			dayAmount,
+			booksMonthOf: (d, day) => dayMonth.get(`${d}\t${day}`) || "",
+			loadMonthOf: (id) => loadMonth.get(String(id || "").trim()) || "",
+		});
+		out.push({ id: r.id, invoiceNumber: r.invoice_number, driver, weekStart: r.week_start, weekEnd: r.week_end, status: r.status, ...split });
+	}
+	return out;
+}
+
 // GET /api/financials — the Financials summary, per-truck table, driver
 // leaderboard, monthly table and month drill-down. Every figure comes from the
 // books (buildFinancialsLedger(), one calculation with the payout ledger): open
@@ -64079,26 +64142,18 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 				lowest: loadsSorted.length ? brief(loadsSorted[loadsSorted.length - 1]) : null,
 			};
 
-			const monthStartStr = `${monthParam}-01`;
-			const monthEndStr = `${monthParam}-${pad2(daysInMonth)}`;
-			// Null-prototype, and an invoice whose driver reads as a built-in
-			// property name is skipped like a blank one (driverNameForTotals()).
-			const invByDriver = Object.create(null);
 			// "Invoiced" is pay: earnings, adjustment and an owner-operator's share
 			// returned on Personal lines. What a driver repays on them is not pay, so
 			// it never lowers this figure (a correction invoice moves it only by a
-			// returned share).
-			db.prepare(
-				`SELECT driver, COALESCE(total_earnings,0) AS earned, COALESCE(adjustment,0) AS adj, COALESCE(personal_share_total,0) AS share
-				 FROM invoices WHERE status != 'Rejected' AND deleted_at = '' AND week_start <= ? AND week_end >= ?`
-			).all(monthEndStr, monthStartStr).forEach((r) => {
-				const k = normalizeDriverName(driverNameForTotals(r.driver));
-				if (!k) return;
-				if (!invByDriver[k]) invByDriver[k] = { count: 0, invoiced: 0, adjustments: 0 };
-				invByDriver[k].count += 1;
-				invByDriver[k].invoiced += r.earned + r.adj + r.share;
-				invByDriver[k].adjustments += r.adj;
-			});
+			// returned share). Each invoice counts here only for its share of this
+			// month (financialsInvoiceShares()), so a week spanning two months is
+			// counted once across them; its adjustment counts in week_end's month.
+			// A closed month too: its shares follow its frozen items, and only these
+			// invoice columns read them (display only). Null-prototype, and an
+			// invoice whose driver reads as a built-in property name is skipped like
+			// a blank one (driverNameForTotals()).
+			const invByDriver = Object.create(null);
+			invoiceMonthSplit.monthInvoiceTotals(financialsInvoiceShares(books), monthParam, invByDriver);
 
 			// Drivers: the month's driver-pay and revenue items, per driver.
 			const byDriver = new Map();
@@ -64143,9 +64198,11 @@ app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {
 					revenue: e.revenueCents / 100,
 					margin: (e.revenueCents - e.payCents) / 100,
 					invoiceCount: inv ? inv.count : 0,
-					invoicedTotal: inv ? toCent(inv.invoiced) : 0,
-					adjustments: inv ? toCent(inv.adjustments) : 0,
-					variance: inv ? Math.round(inv.invoiced - pay) : null,
+					invoicedTotal: inv ? inv.invoicedCents / 100 : 0,
+					adjustments: inv ? inv.adjustmentCents / 100 : 0,
+					variance: inv ? Math.round((inv.invoicedCents - e.payCents) / 100) : null,
+					// How many of those invoices share their week with another month.
+					splitInvoices: inv ? inv.splitCount : 0,
 				});
 			}
 			monthDriverRows.sort((x, y) => y.pay - x.pay);
