@@ -610,11 +610,16 @@ section(() => {
 		["a long word run before a street word", `${"word ".repeat(10000)}Street`],
 	];
 	for (const [what, text] of nasty) {
-		const t = Date.now();
-		di.filterInstructions({ loadRequirements: [{ category: "check_in", text }], stops: [{ kind: "pickup", facility: text, place: text, references: [{ type: "other_reference", label: text, value: text }], instructions: [{ kind: "shipper", text }] }] }, ctx);
-		di.validateStaffEdit({ loadRequirements: [{ category: "check_in", text: text.slice(0, 600) }] }, ctx);
-		di.reviewReasons({ extraction: { loadRequirements: [{ category: "check_in", text }] }, filtered: di.filterInstructions({}, ctx), visibleText: `${VISIBLE} ${text}`.repeat(1), byteLength: 1000, ctx });
-		const ms = Date.now() - t;
+		// The fastest of up to 3 runs: a busy machine only adds time, while a pattern
+		// that backtracks is slow on every run.
+		let ms = Infinity;
+		for (let run = 0; run < 3 && ms >= 100; run++) {
+			const t = Date.now();
+			di.filterInstructions({ loadRequirements: [{ category: "check_in", text }], stops: [{ kind: "pickup", facility: text, place: text, references: [{ type: "other_reference", label: text, value: text }], instructions: [{ kind: "shipper", text }] }] }, ctx);
+			di.validateStaffEdit({ loadRequirements: [{ category: "check_in", text: text.slice(0, 600) }] }, ctx);
+			di.reviewReasons({ extraction: { loadRequirements: [{ category: "check_in", text }] }, filtered: di.filterInstructions({}, ctx), visibleText: `${VISIBLE} ${text}`.repeat(1), byteLength: 1000, ctx });
+			ms = Math.min(ms, Date.now() - t);
+		}
 		ok(`§8 ${what}: filter, staff check and heuristic under 100 ms (${ms} ms)`, ms < 100, ms);
 	}
 	const t = Date.now();

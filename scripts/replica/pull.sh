@@ -107,6 +107,12 @@ fi
 "$NODE_BIN" -e 'if (typeof require("zlib").createZstdDecompress !== "function") process.exit(3); new (require(process.argv[1]))(":memory:").close();' "$REPO/node_modules/better-sqlite3" 2>/dev/null \
   || die "this Node ($("$NODE_BIN" -v)) can't run the local steps: they need zstd (Node 22.15+) and the better-sqlite3 built for the .nvmrc version (fnm use)"
 
+# The rules uploaded below decide what is never copied. A checkout whose rules
+# would copy the carrier's account numbers (older than the driver-instructions
+# work) is refused before production does any work.
+"$NODE_BIN" -e 'const r = require(process.argv[1]); const v = r.classifySetting("CARRIER_ACCOUNT_NUMBERS_DENY", "T0000000", { readByApp: new Set(["CARRIER_ACCOUNT_NUMBERS_DENY"]) }); process.exit(v && v.copy === false ? 0 : 3);' "$REPO/lib/replica-rules.js" 2>/dev/null \
+  || die "this checkout's lib/replica-rules.js would copy CARRIER_ACCOUNT_NUMBERS_DENY: update the checkout from main, then pull"
+
 # One pull at a time.
 LOCK="$ROOT/.pull.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then

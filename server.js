@@ -7312,6 +7312,10 @@ const RATECON_GEMINI_FIELDS = [
 	"Order Number","PO Number","Move Number","Trailer Number","Total Rate",
 	"Documents Email",
 ];
+// When this extraction last met a 429 or an `unavailable` answer (epoch ms). The
+// rate-con driver-instructions sweep stays paused for 30 minutes after one, so load
+// ingestion keeps the shared key (lib/driver-instructions-runtime.js).
+let rateConGeminiUnavailableAt = 0;
 async function runRateConGemini(base64) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_OCR_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 	const body = {
@@ -7390,6 +7394,7 @@ async function runRateConGemini(base64) {
 			// turned a clean error-branch fallback into a node timeout.
 			// Errors with no .kind (empty body, unparseable JSON, an aborted fetch)
 			// still retry exactly as they did.
+			if (err && err.kind === "unavailable") rateConGeminiUnavailableAt = Date.now();
 			if (err && err.kind && err.kind !== "transient") break;
 			if (attempt < 2) {
 				await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -41440,6 +41445,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			rows: [...respUnassigned, ...respActive, ...respCompleted],
 			includeDraftRefs: req.session.user.role === "Super Admin",
 		});
+		// Driver-instructions review codes on the open loads (codes only; inert while
+		// the flag is off).
+		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -48801,11 +48809,60 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			ratePerMile: rpm.rate_per_mile,
 			warnings,
 		});
+		// Driver instructions from the PDF just archived, read after the answer
+		// (lib/driver-instructions-runtime.js; inert while its flag is off).
+		if (rateconArchived) driverInstructions.afterDropzone({ loadId, base64: rawPdf, amounts: [fields["Rate"], fields["Total Rate"]], user: req.session.user });
 	} catch (error) {
 		console.error("Error creating load from rate-con:", error.message);
 		res.status(500).json({ error: "Failed to create the load. Check the Job Tracking sheet before retrying." });
 	}
 });
+
+// <driver-instructions-wiring>
+// RATE-CON DRIVER INSTRUCTIONS (the owner's request, 2026-10-21; plan PR 2). What a
+// driver may be shown from a rate con: lib/driver-instructions.js filters it,
+// lib/driver-instructions-runtime.js stores it, reads rate cons for it (a Drive sweep
+// of the rate-con folder, the drag-and-drop hook above) and serves it to staff:
+// GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
+// .../accept-pending, .../re-extract (Super Admin, Dispatcher). Inert, every route
+// 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY
+// holds a usable value. Pinned by scripts/test-driver-instructions-routes.js, which
+// lifts this block.
+let driverInstructionsSideCache = null;
+// The two other sheets holding the load's own amounts (Payments Table, Job Details),
+// one read a minute at most. A failed read throws: the routes then answer 503.
+async function driverInstructionsSideSheets() {
+	if (driverInstructionsSideCache && Date.now() - driverInstructionsSideCache.at < 60 * 1000) return driverInstructionsSideCache.data;
+	const sheets = await getSheets();
+	const resp = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Payments Table", "Job Details"] });
+	const ranges = (resp && resp.data && resp.data.valueRanges) || [];
+	const data = { payments: (ranges[0] && ranges[0].values) || [], jobDetails: (ranges[1] && ranges[1].values) || [] };
+	driverInstructionsSideCache = { data, at: Date.now() };
+	return data;
+}
+const driverInstructions = require("./lib/driver-instructions-runtime").create({
+	db,
+	env: process.env,
+	fetch,
+	geminiApiKey: GEMINI_API_KEY,
+	geminiModel: GEMINI_OCR_MODEL,
+	getDrive,
+	getJobTracking: getJobTrackingCached,
+	getSideSheets: driverInstructionsSideSheets,
+	brokerWithheldRe: BROKER_WITHHELD_RE,
+	ingestionGeminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	logAudit,
+	logAuditRefusal,
+	notifySuperAdmins: (event, payload) => io.to("super-admin").emit(event, payload),
+	sendAdminEmail: (subject, html) => (alertChannels.mailbox(process.env) ? sendEmail(alertChannels.mailbox(process.env), subject, html) : null),
+	uploadsDir: path.join(DATA_DIR, "uploads"),
+	log: console,
+});
+driverInstructions.mount(app, { requireRole });
+if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-instructions sweep")) {
+	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
+}
+// </driver-instructions-wiring>
 
 // GET /api/documents/:loadId — Fetch all documents for a load
 //
