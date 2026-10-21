@@ -7,7 +7,8 @@
  * (lib/driver-availability.js loadsNewlyInTimeOff()) would have checked it at the
  * save that brought it into the time off: "today" is that save's business day
  * (America/New_York), and the driver "already had" the load when its Assigned Date
- * is on or before that day.
+ * is before that day, or that day at or before the save's time (read on the clock
+ * that wrote the stamp); a bare date on that day is "same_day".
  *
  * The rows are recorded, re-dated, ended early and cancelled through the shipped
  * routes (scripts/lib/availability-world.js) on a clock the test moves, so their
@@ -27,7 +28,10 @@
  *
  *   load  driver           days         Assigned       expected
  *   8101  Hollis           10/18-10/20  10/15          C: ends on its first day, already had, confirmed
- *   8102  Hollis           10/26-10/28  10/17          C: starts on its last day; Assigned on the save day: already had
+ *   8102  Hollis           10/26-10/28  10/17 11:00    C: starts on its last day; assigned an hour after the
+ *                                                      10:00 EDT save (before it, read as UTC): not yet
+ *   8113  Hollis           10/25        10/17 09:59    C: assigned a minute before the save: already had
+ *   8114  Hollis           10/25-10/26  10/17 (no time)  C: same_day
  *   8103  Hollis           10/17-10/19  10/10          not listed (ends the day before C)
  *   8104  Hollis           10/27-10/28  10/10          not listed (starts the day after C)
  *   8105  Hollis           10/22-10/23  10/18          C: not yet assigned at the save
@@ -41,7 +45,7 @@
  *   8201  Soren            10/24-10/25  10/10          B: covered when recorded, as of 10/15
  *   8202  Soren            10/26-10/27  10/17          B: brought in by the re-dating, as of 10/18
  *   8203  Soren            10/27        10/19          B: not yet assigned at the re-dating
- *   8204  Soren            11/12-11/13  10/18          H: as of its last change (10/18)
+ *   8204  Soren            11/12-11/13  10/18          H: as of its last change (10/18); a bare date that day: same_day
  *   8301  Soren            10/21-10/22  10/10          not listed (no row of his covers it)
  *   8401  Tamsin           10/15-10/16  10/12          D: as of 10/16, the Eastern day it was
  *                                                      recorded (UTC says 10/17; it ended early on 10/17)
@@ -51,7 +55,8 @@
  * Read-only: the database file keeps its bytes and mtime and its folder gains no
  * file; a missing database is refused, never created; a WAL database another
  * connection holds open is read (rows still in its -wal included) and its main
- * file left as it was.
+ * file left as it was; a database without deleted_loads is refused (soft-deleted
+ * loads would be listed); fetch() in the lifted code's scope refuses.
  * Run: node scripts/test-time-off-loads-report.js    # exits 1 on failure
  */
 "use strict";
@@ -83,7 +88,9 @@ function sheetRows() {
 	return [
 		A.HEADERS.slice(),
 		load({ id: "8101", driver: hollis, pickup: "10/18/2026 08:00", dropoff: "10/20/2026 17:00", assigned: "10/15/2026 09:12:00" }),
-		load({ id: "8102", driver: hollis, pickup: "10/26/2026 08:00", dropoff: "10/28/2026 17:00", assigned: "10/17/2026 16:40:00" }),
+		load({ id: "8102", driver: hollis, pickup: "10/26/2026 08:00", dropoff: "10/28/2026 17:00", assigned: "10/17/2026 11:00:00" }),
+		load({ id: "8113", driver: hollis, pickup: "10/25/2026 08:00", dropoff: "10/25/2026 17:00", assigned: "10/17/2026 09:59:00" }),
+		load({ id: "8114", driver: hollis, pickup: "10/25/2026 09:00", dropoff: "10/26/2026 12:00", assigned: "10/17/2026" }),
 		load({ id: "8103", driver: hollis, pickup: "10/17/2026 08:00", dropoff: "10/19/2026 17:00", assigned: "10/10/2026 08:00:00" }),
 		load({ id: "8104", driver: hollis, pickup: "10/27/2026 08:00", dropoff: "10/28/2026 17:00", assigned: "10/10/2026 08:00:00" }),
 		load({ id: "8105", driver: hollis, pickup: "10/22/2026 08:00", dropoff: "10/23/2026 17:00", assigned: "10/18/2026 07:30:00" }),
@@ -192,12 +199,14 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 	R.ok("G (recorded 1 ms before since) is not listed", !rows.some((r) => r.id === id.G));
 	R.eq("the default since is 2026-10-16 03:00 ET", j.since, "2026-10-16T07:00:00.000Z");
 
-	R.section("Each row's loads: Load ID, already had (Assigned Date on or before the save day), the save day");
+	R.section("Each row's loads: Load ID, already had (assigned before the save), the save day");
 	R.eq("C: the edge days overlap, the day before and after don't; spacing and case match; cancelled and soft-deleted loads left out", loadLines("C"),
-		["8101 yes 2026-10-17", "8109 yes 2026-10-17", "8105 no 2026-10-17", "8107 unknown 2026-10-17", "8106 unknown 2026-10-17", "8102 yes 2026-10-17"]);
+		["8101 yes 2026-10-17", "8109 yes 2026-10-17", "8105 no 2026-10-17", "8107 unknown 2026-10-17", "8106 unknown 2026-10-17", "8113 yes 2026-10-17", "8114 same_day 2026-10-17", "8102 no 2026-10-17"]);
+	R.eq("C, on the save's day: assigned 09:59 (before the 10:00 EDT save) yes, 11:00 EDT (after; before it if read as UTC) no, a bare date same_day",
+		["8113", "8102", "8114"].map((x) => (row("C").loads.find((l) => l.loadId === x) || {}).alreadyHad), ["yes", "no", "same_day"]);
 	R.eq("B: a load covered when it was recorded stays as of that day; the re-dating's loads as of the re-dating", loadLines("B"),
 		["8201 yes 2026-10-15", "8202 yes 2026-10-18", "8203 no 2026-10-18"]);
-	R.eq("H: no audit line, so checked as of its last change", loadLines("H"), ["8204 yes 2026-10-18"]);
+	R.eq("H: no audit line, so checked as of its last change; a bare date that day is same_day", loadLines("H"), ["8204 same_day 2026-10-18"]);
 	R.eq("E: a cancelled row keeps its loads", loadLines("E"), ["8112 yes 2026-10-19"]);
 	R.eq("D: as of 10/16, the Eastern day it was recorded at 22:30 EDT; 8402 ended before that day; 8403 left out by the early end", loadLines("D"), ["8401 yes 2026-10-16"]);
 	R.eq("F: no loads", loadLines("F"), []);
@@ -234,14 +243,15 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 
 	R.section("Counts");
 	const s = j.summary || {};
-	R.eq("[rows checked, with already-had loads, loads listed, already had, not yet, unknown, skipped for no dates, confirmed]",
-		[s.rowsChecked, s.rowsWithAlreadyHadLoads, s.loadsListed, s.loadsAlreadyHad, s.loadsNotYetAssigned, s.loadsAssignedDateUnknown, s.loadsSkippedNoDates, s.loadsConfirmed],
-		[6, 5, 12, 8, 2, 2, 1, 1]);
+	R.eq("[rows checked, with already-had loads, loads listed, already had, same day, not yet, unknown, skipped for no dates, confirmed]",
+		[s.rowsChecked, s.rowsWithAlreadyHadLoads, s.loadsListed, s.loadsAlreadyHad, s.loadsSameDay, s.loadsNotYetAssigned, s.loadsAssignedDateUnknown, s.loadsSkippedNoDates, s.loadsConfirmed],
+		[6, 4, 14, 7, 2, 3, 2, 1, 1]);
 
 	R.section("The --json shape");
 	R.eq("top-level keys", Object.keys(j).sort(), ["generatedAt", "rows", "since", "summary", "timeZone", "today"]);
 	R.eq("a row's keys", Object.keys(c).sort(), ["cancelledAt", "cancelledAtText", "directoryId", "driver", "from", "historyComplete", "id", "kind", "lastChangedAt", "lastChangedAtText", "loads", "recordedAs", "recordedAt", "recordedAtText", "saves", "skipped", "state", "to"]);
-	R.eq("a load's keys", Object.keys(l8101).sort(), ["alreadyHad", "assignedDate", "checkedAsOf", "confirmed", "confirmedVia", "dropoff", "from", "loadId", "pickup", "status", "to"]);
+	R.eq("a load's keys", Object.keys(l8101).sort(), ["alreadyHad", "assignedDate", "checkedAsOf", "checkedAt", "confirmed", "confirmedVia", "dropoff", "from", "loadId", "pickup", "status", "to"]);
+	R.eq("a load's save instant", l8101.checkedAt, "2026-10-17T14:00:00.000Z");
 	R.eq("the zone", j.timeZone, "America/New_York");
 
 	R.section("--since");
@@ -256,14 +266,21 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 	R.section("The text report");
 	const text = run(copy, []);
 	R.ok("exits 0 and says nothing was written", text.code === 0 && /Nothing was written/.test(text.stdout), (text.stderr || text.stdout).slice(0, 300));
-	R.ok("names the driver, the groups and the Eastern stamps", ["Hollis Renner", "Already had", "Not yet assigned", "Assigned date unknown", "10:00 EDT", "cancelled"].every((x) => text.stdout.includes(x)), text.stdout.slice(0, 400));
-	R.ok("ends with the counts", /rows checked 6.*rows with already-had loads 5.*loads listed 12.*loads skipped for no dates 1/s.test(text.stdout.split("\n").slice(-3).join("\n")), text.stdout.split("\n").slice(-3).join(" | "));
+	R.ok("names the driver, the groups and the Eastern stamps", ["Hollis Renner", "Already had", "Same day", "Not yet assigned", "Assigned date unknown", "10:00 EDT", "cancelled"].every((x) => text.stdout.includes(x)), text.stdout.slice(0, 400));
+	R.ok("ends with the counts", /rows checked 6.*rows with already-had loads 4.*loads listed 14 \(already had 7, same day 2, .*loads skipped for no dates 1/s.test(text.stdout.split("\n").slice(-3).join("\n")), text.stdout.split("\n").slice(-3).join(" | "));
 
 	R.section("Read-only");
 	R.eq("the database file's bytes, mtime and folder after five runs", snapshot(copy), before);
 	const missing = path.join(copy.dir, "no-such.db");
 	const gone = W.runScript(SCRIPT, [`--db=${missing}`, `--values-json=${copy.values}`, "--json"]);
 	R.eq("a missing database is refused (exit 2) and never created", [gone.code, fs.existsSync(missing)], [2, false]);
+	// Without deleted_loads, getDeletedLoadIds() answers "none deleted" and 8111 would be listed.
+	const noDeleted = saveCopy(w);
+	const fixture = new W.Database(noDeleted.db);
+	fixture.exec("DROP TABLE deleted_loads");
+	fixture.close();
+	const noDeletedRun = run(noDeleted, ["--json"]);
+	R.eq("a database without deleted_loads is refused (exit 2), naming it", [noDeletedRun.code, /deleted_loads/.test(noDeletedRun.stderr)], [2, true]);
 
 	// A WAL database the app holds open: a row still in the -wal is read, and the
 	// main file is left as it was.
@@ -282,6 +299,36 @@ const R = A.createRunner("R11b follow-up: time off recorded over loads the drive
 		R.eq("the main file unchanged", W.fileHash(live.db), mainBefore);
 	} finally {
 		writer.close();
+	}
+
+	// The lifted server code runs inside liftedScope(): a fetch() compiled there,
+	// as the lifted code is, refuses instead of reaching Node's own fetch.
+	R.section("The lifted code's scope");
+	let report = null;
+	try {
+		report = require("./time-off-loads-report");
+	} catch (err) {
+		R.ok("the script loads as a module", false, err.message);
+	}
+	if (report && typeof report.liftedScope === "function") {
+		const scope = report.liftedScope(A.SRC, w.db, { values: [] });
+		let refused = null;
+		try {
+			new Function(...Object.keys(scope), '"use strict"; return fetch("https://example.invalid/");')(...Object.values(scope));
+		} catch (err) {
+			refused = err;
+		}
+		R.ok("fetch() there throws, so no network call is made", !!refused && /makes no network calls/.test(refused.message), String(refused));
+		R.eq("the lifted code sees no environment", scope.process.env, {});
+		let required = null;
+		try {
+			scope.require("fs");
+		} catch (err) {
+			required = err;
+		}
+		R.ok("and may require the app's lib/ only", !!required && typeof scope.require("./lib/app-time").appTimeZone === "function", String(required));
+	} else {
+		R.ok("the script exports liftedScope()", false);
 	}
 
 	await w.close();

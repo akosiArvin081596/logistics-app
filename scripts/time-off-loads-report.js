@@ -31,9 +31,12 @@
 // what the warning would have named at that save, not what it would name now: a
 // load that had ended before the save day is not listed, nor one the row was
 // moved off.
-//   already had  yes when its Assigned Date (read with sheetDayKey()) is on or
-//                before that save's day, no when after; unknown when blank or
-//                unreadable
+//   already had  yes when its Assigned Date (read with sheetDayKey()) is before
+//                that save's day, no when after, unknown when blank or
+//                unreadable. On the save's own day the cell's time decides when
+//                it holds one, read on the clock that wrote it (lib/load-haul.js
+//                parseSheetInstant()): at or before the save yes, after it no. A
+//                date with no time on that day is same_day, its own group
 //   confirmed    a driver_availability_confirmations row for this time off and
 //                this load (none are expected while
 //                DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED is off)
@@ -44,16 +47,28 @@
 //   node scripts/time-off-loads-report.js --db=<app.db> --values-json=<file> [--since=<instant>] [--json]
 //   node scripts/time-off-loads-report.js --db=app.db --sheet-id=<id> [--key=service-account-key.json] [--since=<instant>] [--json]
 //   --db=<file>           the database, opened read-only; it must exist. Any copy,
-//                         a replica working copy's app.db included: this report
-//                         reads no setting from any .env, so it is not held to
-//                         the app directory's own database as the money dry runs
-//                         are (scripts/lib/ledger-world.js dbScope())
-//   --values-json=<file>  a saved values.get of the Job Tracking tab
-//   --sheet-id=<id>       Job Tracking read with the read-only scope
-//                         (scripts/lib/ledger-world.js sheetFor(); =env takes the
-//                         app's .env SPREADSHEET_ID, for the app's own app.db only)
+//                         a replica working copy's app.db included: the report
+//                         takes no setting from the database's app directory, so
+//                         it is not held to the app directory's own database as
+//                         the money dry runs are (scripts/lib/ledger-world.js
+//                         dbScope()), except with --sheet-id=env
+//   --values-json=<file>  a saved values.get of the Job Tracking tab; reads that
+//                         file and nothing else for the sheet
+//   --sheet-id=<id>       reads the Job Tracking tab from Google Sheets with the
+//                         spreadsheets.readonly scope, signed in with the
+//                         service-account key file (--key=<file>; default the app
+//                         directory's service-account-key.json), through
+//                         scripts/lib/ledger-world.js sheetFor()
+//   --sheet-id=env        the same, with the sheet ID read from SPREADSHEET_ID in
+//                         the app directory's .env (or --env-file=<file>, for a
+//                         copy under the temp directory); --db must then be the
+//                         app's own app.db or such a copy
 //   --since=<instant>     an ISO instant with its zone; default 2026-10-16T07:00:00Z
 //   --json                the whole result as JSON (default: a text report)
+// Only --sheet-id=env reads a .env, and only --sheet-id reads a key file and the
+// network. The business clock is APP_TIMEZONE from this process's environment
+// (America/New_York when unset). The lifted server code sees no environment, and
+// its fetch() refuses.
 // On a WAL database whose -wal and -shm files are absent, SQLite's read-only open
 // creates them, empty, beside it (as for every read-only script here); the
 // database file itself is never written.
@@ -70,11 +85,14 @@ const { closure } = require("./lib/server-lift");
 const driverAvailability = require("../lib/driver-availability");
 const appTime = require("../lib/app-time");
 const { stampMs } = require("../lib/eld-feed-health");
+const { parseSheetInstant } = require("../lib/load-haul");
 
 const ROOT = path.join(__dirname, "..");
 const DEFAULT_SINCE = "2026-10-16T07:00:00Z";
 const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-const TABLES = ["driver_availability", "drivers_directory", "driver_availability_confirmations", "audit_trail"];
+// deleted_loads too: without it getDeletedLoadIds() answers "none deleted", and
+// soft-deleted loads would be listed.
+const TABLES = ["driver_availability", "drivers_directory", "driver_availability_confirmations", "audit_trail", "deleted_loads"];
 // The audit lines server.js writes when time off is recorded and changed:
 // "<name>: off <from>..<to> (<kind>)" and
 // "<name>: off <old from>..<old to> (<kind>) -> off <from>..<to> (<kind>)".
@@ -97,25 +115,40 @@ function refuse(msg) {
 // and the column, day, name and live-load rules beside them. getDeletedLoadIds()
 // is lifted on its own and handed the read-only handle, the one lifted function
 // given the database (as scripts/integrity-check.js does); getSheets() answers
-// getJobTrackingCached()'s one values.get with the tab already read. The lifted
-// code sees no environment and may require the app's lib/ only.
+// getJobTrackingCached()'s one values.get with the tab already read.
 function liftFromServer(db, sheetData) {
 	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
-	const appRequire = createRequire(path.join(ROOT, "server.js"));
-	const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
-	const getDeletedLoadIds = new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db);
 	const lifted = closure(SRC, {
 		roots: LIFT_ROOTS,
 		provided: ["getDeletedLoadIds", "getSheets", "SPREADSHEET_ID"],
 		denied: ["db", "app", "io", "server", "sheets", "sendEmail", "transporter", "getDrive", "KEY_FILE", "jtCacheInvalidate"],
 	});
-	const liftedRequire = (m) => {
-		if (!/^\.\/lib\/[\w.-]+$/.test(m)) throw new Error(`lifted code required ${m}, which this report does not load`);
-		return appRequire(m);
+	const scope = liftedScope(SRC, db, sheetData);
+	return new Function(...Object.keys(scope), `"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(...Object.values(scope));
+}
+
+const refuseFetch = () => { throw new Error("lifted code called fetch(); this report makes no network calls"); };
+
+// What the lifted code runs with in place of the server's process: no
+// environment, the app's lib/ only for require, a fetch() that refuses (as
+// scripts/lib/ledger-world.js buildLedgerWorld() gives its lifted code), and the
+// sheet already read. Every name here shadows the global of that name.
+function liftedScope(src, db, sheetData) {
+	const appRequire = createRequire(path.join(ROOT, "server.js"));
+	const deletedReader = closure(src, { roots: ["getDeletedLoadIds"], provided: ["db"] });
+	const getDeletedLoadIds = new Function("db", "fetch", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db, refuseFetch);
+	return {
+		getDeletedLoadIds,
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: sheetData }) } } }),
+		SPREADSHEET_ID: "",
+		console,
+		process: { env: {} },
+		require: (m) => {
+			if (!/^\.\/lib\/[\w.-]+$/.test(m)) throw new Error(`lifted code required ${m}, which this report does not load`);
+			return appRequire(m);
+		},
+		fetch: refuseFetch,
 	};
-	const getSheets = async () => ({ spreadsheets: { values: { get: async () => ({ data: sheetData }) } } });
-	return new Function("getDeletedLoadIds", "getSheets", "SPREADSHEET_ID", "console", "process", "require",
-		`"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(getDeletedLoadIds, getSheets, "", console, { env: {} }, liftedRequire);
 }
 
 // An instant as the business clock shows it ("2026-10-17 10:00 EDT"), or null.
@@ -175,6 +208,18 @@ function rowSaves(row, lines) {
 }
 
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+// Did he already have the load when `save` was made? By the Assigned Date's day
+// (sheetDayKey(), `assignedDay`), and on the save's own day by the cell's time,
+// read on the clock that wrote it (parseSheetInstant()): "yes", "no",
+// "same_day" (that day, with no time to tell which came first) or "unknown".
+function alreadyHadAt(assignedCell, assignedDay, save) {
+	if (!driverAvailability.isAvailabilityDay(assignedDay)) return "unknown";
+	if (assignedDay !== save.day) return assignedDay < save.day ? "yes" : "no";
+	const at = parseSheetInstant(assignedCell);
+	if (!at || at.dateOnly) return "same_day";
+	return at.ms <= stampMs(save.at) ? "yes" : "no";
+}
 
 async function buildReport(db, sheetData, sinceMs) {
 	const server = liftFromServer(db, sheetData);
@@ -238,17 +283,16 @@ async function buildReport(db, sheetData, sinceMs) {
 		const broughtIn = new Map();
 		const savesOut = saves.map((s) => {
 			const day = dayOf(s.at);
-			for (const l of asked(loads, s, day)) broughtIn.set(server.normLoadKey(l.loadId), { l, day });
+			for (const l of asked(loads, s, day)) broughtIn.set(server.normLoadKey(l.loadId), { l, save: { at: s.at, day } });
 			return { change: s.change, at: s.at, atText: zoneText(s.at), day, from: s.from, to: s.to, oldFrom: s.oldFrom, oldTo: s.oldTo };
 		});
 		const now = { from: row.from_date, to: row.to_date, oldFrom: null, oldTo: null };
 		const rowLoads = [];
-		for (const [k, { l, day }] of broughtIn) {
-			if (!asked([recordOf.get(k)], now, day).length) continue;
+		for (const [k, { l, save }] of broughtIn) {
+			if (!asked([recordOf.get(k)], now, save.day).length) continue;
 			const r = sheetRowOf.get(k);
 			const assignedCell = cell(r, assignedCol);
 			const assignedDay = server.sheetDayKey(assignedCell);
-			const alreadyHad = !driverAvailability.isAvailabilityDay(assignedDay) ? "unknown" : assignedDay <= day ? "yes" : "no";
 			const via = viaOf.get(`${row.id}\t${k}`);
 			rowLoads.push({
 				loadId: l.loadId, from: l.from, to: l.to,
@@ -256,7 +300,7 @@ async function buildReport(db, sheetData, sinceMs) {
 				dropoff: { cell: cell(r, monthCols.dropoffDateCol), day: recordOf.get(k).dropoffKey },
 				status: cell(r, statusCol),
 				assignedDate: { cell: assignedCell, day: assignedDay },
-				alreadyHad, checkedAsOf: day,
+				alreadyHad: alreadyHadAt(assignedCell, assignedDay, save), checkedAsOf: save.day, checkedAt: save.at,
 				confirmed: !!via, confirmedVia: via ? [...via].sort() : [],
 			});
 		}
@@ -295,6 +339,7 @@ async function buildReport(db, sheetData, sinceMs) {
 			rowsWithAssignedDateUnknown: out.filter((r) => r.loads.some((l) => l.alreadyHad === "unknown")).length,
 			loadsListed: all.length,
 			loadsAlreadyHad: count("yes"),
+			loadsSameDay: count("same_day"),
 			loadsNotYetAssigned: count("no"),
 			loadsAssignedDateUnknown: count("unknown"),
 			loadsSkippedNoDates: skippedNoDates.size,
@@ -308,14 +353,19 @@ function printText(r) {
 	const lines = [];
 	const s = r.summary;
 	lines.push(`Time off recorded or re-dated since ${zoneText(r.since)}, with the driver's loads it covers. Read-only. Nothing was written.`);
-	lines.push(`Each load is checked as R11b's warning would have checked it at the save that brought it into the time off ("as of" that save's day, ${r.timeZone}); "already had" means its Assigned Date is on or before that day. Loads are as Job Tracking has them now.`);
-	const loadLine = (l) => `    ${l.loadId}  ${l.from}..${l.to}  pickup ${l.pickup.cell || "(blank)"}, drop-off ${l.dropoff.cell || "(blank)"}  ${l.status || "(no status)"}  Assigned ${l.assignedDate.cell || "(blank)"}  as of ${l.checkedAsOf}  ${l.confirmed ? `confirmed (${l.confirmedVia.join(", ")})` : "not confirmed"}`;
+	lines.push(`Each load is checked as R11b's warning would have checked it at the save that brought it into the time off ("as of" that save's day, ${r.timeZone}); "already had" means its Assigned Date is before that day, or that day at or before the save's time. Loads are as Job Tracking has them now.`);
+	const loadLine = (l) => `    ${l.loadId}  ${l.from}..${l.to}  pickup ${l.pickup.cell || "(blank)"}, drop-off ${l.dropoff.cell || "(blank)"}  ${l.status || "(no status)"}  Assigned ${l.assignedDate.cell || "(blank)"}  as of ${zoneText(l.checkedAt) || l.checkedAsOf}  ${l.confirmed ? `confirmed (${l.confirmedVia.join(", ")})` : "not confirmed"}`;
 	for (const row of r.rows) {
 		lines.push("");
 		lines.push(`Row ${row.id}  ${row.driver}${row.recordedAs ? ` (recorded as ${row.recordedAs})` : ""}  ${driverAvailability.availabilityRangeText(row.from, row.to)} (${row.from}..${row.to}, ${row.kind})  ${row.state}`);
 		lines.push(`  recorded ${row.recordedAtText || row.recordedAt}; last changed ${row.lastChangedAtText || "never"}${row.cancelledAt ? `; cancelled ${row.cancelledAtText || row.cancelledAt}` : ""}`);
 		if (!row.historyComplete) lines.push("  note: the audit log does not account for every change of this row, so its loads are checked as of its last change");
-		const groups = [["yes", "Already had (Assigned Date on or before the save day)"], ["no", "Not yet assigned at the save"], ["unknown", "Assigned date unknown (blank or unreadable)"]];
+		const groups = [
+			["yes", "Already had (assigned before the save)"],
+			["same_day", "Same day (assigned the day of the save, with no time to tell which came first)"],
+			["no", "Not yet assigned at the save"],
+			["unknown", "Assigned date unknown (blank or unreadable)"],
+		];
 		for (const [v, title] of groups) {
 			const these = row.loads.filter((l) => l.alreadyHad === v);
 			if (!these.length) continue;
@@ -328,7 +378,7 @@ function printText(r) {
 	}
 	lines.push("");
 	if (s.rowsSkippedUnreadableStamp) lines.push(`Not checked: ${s.rowsSkippedUnreadableStamp} time-off row(s) whose recorded-at stamp cannot be read.`);
-	lines.push(`Counts: rows checked ${s.rowsChecked}; rows with already-had loads ${s.rowsWithAlreadyHadLoads}; loads listed ${s.loadsListed} (already had ${s.loadsAlreadyHad}, not yet assigned ${s.loadsNotYetAssigned}, assigned date unknown ${s.loadsAssignedDateUnknown}); loads skipped for no dates ${s.loadsSkippedNoDates}${s.loadsSkippedLoadIdTooLong ? `; loads skipped for a Load ID over 64 characters ${s.loadsSkippedLoadIdTooLong}` : ""}; confirmed ${s.loadsConfirmed}.`);
+	lines.push(`Counts: rows checked ${s.rowsChecked}; rows with already-had loads ${s.rowsWithAlreadyHadLoads}; loads listed ${s.loadsListed} (already had ${s.loadsAlreadyHad}, same day ${s.loadsSameDay}, not yet assigned ${s.loadsNotYetAssigned}, assigned date unknown ${s.loadsAssignedDateUnknown}); loads skipped for no dates ${s.loadsSkippedNoDates}${s.loadsSkippedLoadIdTooLong ? `; loads skipped for a Load ID over 64 characters ${s.loadsSkippedLoadIdTooLong}` : ""}; confirmed ${s.loadsConfirmed}.`);
 	console.log(lines.join("\n"));
 }
 
@@ -362,4 +412,9 @@ async function main() {
 	}
 }
 
-main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
+// The runner (scripts/test-time-off-loads-report.js) checks the lifted code's scope.
+module.exports = { liftedScope };
+
+if (require.main === module) {
+	main().catch((err) => { console.error(`ERROR: ${err.stack || err.message}`); process.exit(1); });
+}
