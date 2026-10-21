@@ -57,7 +57,7 @@
       </div>
       <div ref="messagesEl" class="msg-chat-messages">
         <template v-if="store.selectedDriver && store.currentMessages.length > 0">
-          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" />
+          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" @open-photo="openPhoto" />
         </template>
         <EmptyState v-else-if="store.selectedDriver">No messages yet.</EmptyState>
         <EmptyState v-else>Select a conversation from the left to view messages.</EmptyState>
@@ -118,6 +118,20 @@
         <button class="msg-send-btn" :disabled="!!preparing || sending" @click="sendMessage">&#10148;</button>
       </div>
     </div>
+
+    <!-- A thread photo, full size: zoom, next/previous through this thread's
+         photos, Esc / X / a click outside to close. Same /uploads URL the
+         bubble shows, so nothing new is fetched or made public. -->
+    <ZoomableImage
+      :src="photoView ? photoView.photo.url : null"
+      :alt="photoView ? photoView.photo.alt : 'Photo'"
+      :has-prev="!!photoView && photoView.hasPrev"
+      :has-next="!!photoView && photoView.hasNext"
+      :position="photoView ? photoView.position : ''"
+      @prev="stepPhoto(-1)"
+      @next="stepPhoto(1)"
+      @close="closePhoto"
+    />
   </div>
 </template>
 
@@ -135,8 +149,10 @@ import {
   uploadChatAttachment,
 } from '../../lib/chatAttachment'
 import { fmtAppInstant } from '../../utils/datetime'
+import { chatPhotoStep, chatPhotoView, chatPhotos } from '../../lib/chatPhotos'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   driverNames: { type: Array, default: () => [] },
@@ -305,6 +321,17 @@ function scrollToBottom() {
 }
 
 watch(() => store.currentMessages.length, scrollToBottom)
+
+// The open thread's photos and the one shown full size, tracked by URL: when
+// another conversation is picked, the open URL is no longer in the thread, the
+// viewer closes and the URL is forgotten (coming back does not reopen it).
+const photos = computed(() => chatPhotos(store.currentMessages))
+const openPhotoUrl = ref('')
+const photoView = computed(() => chatPhotoView(photos.value, openPhotoUrl.value))
+function openPhoto(msg) { openPhotoUrl.value = msg && msg.attachment_url ? msg.attachment_url : '' }
+function stepPhoto(delta) { openPhotoUrl.value = chatPhotoStep(photos.value, openPhotoUrl.value, delta) }
+function closePhoto() { openPhotoUrl.value = '' }
+watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
 </script>
 
 <style scoped>
