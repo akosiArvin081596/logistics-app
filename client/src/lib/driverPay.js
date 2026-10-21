@@ -94,8 +94,11 @@ export function truckPayRuleNote(rule) {
 // the figure beside it is the server's totalPay. A driver with no pay entry
 // was paid nothing: "No pay this period", not "0 days x $250". A driver paid at
 // more than one rate (the daily-rate rule priced some months at the driver's
-// own rate, else $250) comes with the server's segments, `rates: [{ days, rate
-// }]` in month order, and reads "2 days x $150 + 3 days x $250".
+// own rate, else $250, or his rate changed on a date) comes with the server's
+// segments, `rates: [{ days, rate }]` in month and day order, and reads
+// "2 days x $150 + 3 days x $250" ("1 day x $280" for a single day). The
+// payout statement's copy of that wording is lib/driver-pay-text.js
+// rateSegmentsText(); scripts/test-driver-pay-two-rates.mjs pins them equal.
 export function driverPayBasis(details) {
   if (!details) return 'No pay this period'
   const d = details
@@ -103,9 +106,29 @@ export function driverPayBasis(details) {
     return `${Number(d.payPercentage) || 0}% of revenue after deductible trip expenses`
   }
   if (Array.isArray(d.rates) && d.rates.length > 1) {
-    return d.rates.map((s) => `${Number(s.days) || 0} days x $${Number(s.rate) || 0}`).join(' + ')
+    return d.rates.map((s) => {
+      const days = Number(s.days) || 0
+      return `${days} day${days === 1 ? '' : 's'} x $${Number(s.rate) || 0}`
+    }).join(' + ')
   }
   return `${d.activeDays || 0} days x $${d.dailyRate || 250}`
+}
+
+// The distinct daily rates a month's day-rate drivers were paid at, for the
+// Earnings card's Driver Pay formula line: each driver's segments when he was
+// paid at more than one rate, else his one rate. A missing or zero rate is
+// dropped, never defaulted. `drivers` are the server's driverDetails entries.
+export function monthDayRates(drivers) {
+  const out = new Set()
+  for (const d of drivers || []) {
+    if (!d || d.payType === 'percentage') continue
+    const list = Array.isArray(d.rates) && d.rates.length > 1 ? d.rates.map((s) => s.rate) : [d.dailyRate]
+    for (const r of list) {
+      const n = Number(r)
+      if (Number.isFinite(n) && n > 0) out.add(n)
+    }
+  }
+  return [...out]
 }
 
 // How the pay on ONE truck in the Fleet Breakdown was earned, from the server's

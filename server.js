@@ -18144,13 +18144,14 @@ function driverRateOnlyInfo() {
 
 // Check 8 of the daily integrity check under the daily-rate rule
 // (lib/integrity-check.js invoiceRateMismatches()): { from, appliesTo(month),
-// payMonthOf(day, loadIds), rateOf(driverKey, directoryRate, day, month) }, a
-// grid day's pay month read from the Job Tracking snapshot `jt` as the invoice
-// reads it (each load's Assigned month, a load with none counting as the day's
-// own month, the earliest of them; else the day's own month), and the rate the
-// invoice should have paid that day: the one driver-day price
-// (driverDayRater()), the driver's rate in effect that day. Null while the rule
-// is off.
+// payMonthOf(day, loadIds), rateOf(driverKey, directoryRate, day, month),
+// ownRateOf(driverKey, directoryRate, day) }, a grid day's pay month read from
+// the Job Tracking snapshot `jt` as the invoice reads it (each load's Assigned
+// month, a load with none counting as the day's own month, the earliest of
+// them; else the day's own month), the rate the invoice should have paid that
+// day (the one driver-day price, driverDayRater(): the driver's rate in effect
+// that day), and that own rate before the $250 default, so the check can say
+// which priced the day. Null while the rule is off.
 function driverRateOnlyDayRule(jt) {
 	if (!DRIVER_RATE_ONLY_FROM) return null;
 	const cols = jobTrackingMonthCols((jt && jt.headers) || []);
@@ -18167,6 +18168,8 @@ function driverRateOnlyDayRule(jt) {
 		payMonthOf: (day, loadIds) => financialsCalc.driverRateOnly.payMonthOf(day, (loadIds || []).map((id) => monthOf.get(normalizeLoadId(id)) || String(day).slice(0, 7))),
 		// Asked only for a day of a month the rule prices, where a truck's rate is never read.
 		rateOf: (driverKey, directoryRate, day, month) => rate(driverKey, directoryRate, 0, day, month),
+		// The driver's own rate that day before the default (0 or less: the $250 default priced it).
+		ownRateOf: (driverKey, directoryRate, day) => rate.ownRateOn(driverKey, directoryRate, day),
 	};
 }
 
@@ -18217,15 +18220,22 @@ function resolveDailyRate(driverPayDaily, truckDaily, month) {
 //     default when that rate is 0 or less. A truck's rate never prices it.
 //   - Any other month: resolveDailyRate(own, truck, month), as always. While the
 //     rule has never run, every month is one, and the history is never read.
-// The history is read once per rater, on its first day in a rule month.
+// The history is read once per rater, on its first day in a rule month. The
+// rater's ownRateOn(driverKey, payDaily, day) is the own rate it reads for a
+// day (the dated one, else the current one), before the $250 default.
 function driverDayRater() {
 	let rates = null;
-	return (driverKey, payDaily, truckRate, day, month) => {
-		if (!driverRateOnlyApplies(month)) return resolveDailyRate(payDaily, truckRate, month);
+	const ownRateOn = (driverKey, payDaily, day) => {
 		if (!rates) rates = loadPayRateIndex();
 		const dated = rates.at("driver", driverKey, day);
-		return resolveDailyRate(dated == null ? payDaily : dated, 0, month);
+		return dated == null ? payDaily : dated;
 	};
+	const rate = (driverKey, payDaily, truckRate, day, month) => {
+		if (!driverRateOnlyApplies(month)) return resolveDailyRate(payDaily, truckRate, month);
+		return resolveDailyRate(ownRateOn(driverKey, payDaily, day), 0, month);
+	};
+	rate.ownRateOn = ownRateOn;
+	return rate;
 }
 
 // An expense an admin set to 'Rejected' was explicitly denied — it must never
@@ -61113,9 +61123,11 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 //     of those changes the rendered bytes, so rendering counts as template.
 //   • lib/lease-payout-text.js — the lease sentences a lease month's statement
 //     prints, which payout-statement.js takes from there.
+//   • lib/driver-pay-text.js — the Driver Pay basis of a driver paid at more
+//     than one daily rate, which payout-statement.js takes from there.
 //
 // ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
-// still for: anything outside these four files. A Puppeteer/Chromium upgrade
+// still for: anything outside these five files. A Puppeteer/Chromium upgrade
 // re-rasterizes glyphs with no diff in lib/; a Google Fonts change upstream
 // arrives with no diff anywhere; a bad batch needs a forced re-render for
 // operational reasons. Hashing package-lock.json was considered and REJECTED —
@@ -61127,6 +61139,7 @@ const STATEMENT_TEMPLATE_FILES = [
 	"./lib/broker-invoice.js",
 	"./lib/pdf-browser.js",
 	"./lib/lease-payout-text.js",
+	"./lib/driver-pay-text.js",
 ];
 
 // Computed ONCE, here, at module load — never per request. require.resolve so a
