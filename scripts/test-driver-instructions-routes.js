@@ -31,7 +31,11 @@
  *   §8 logs, the ledger and audit rows hold no Gemini text; the leak test over every
  *      surface this PR has (responses, socket, email, every table, every log line)
  *   §9 the n8n extract route writes nothing new; wiring no value can prove
+ *   §11 production's sheet layout (PR 2b): Job Details has no Load ID column, so its rates
+ *      are read by the load's lane; Job Tracking's "Job Status"; a missing Job Tracking
+ *      column the filter reads, or more own amounts than the filter reads, answers 503
  *
+ * The fixtures use production's header layout for the Payments Table and Job Details.
  * Every value is made up: the account number, amounts, phones, emails, names, places,
  * references and load numbers. Pure: no network, no real Gemini, Drive or Sheets.
  * Run: node scripts/test-driver-instructions-routes.js
@@ -122,9 +126,29 @@ const ROWS = [
 	[DELIVERED_ID, "Delivered", "Test Driver B", "Test Mill South REF/PU#: 5550001111", "1 Alpha St, Springfield, IL 62701", "2 Beta St, Riverton, WY 82501", "$900.00", "", "", ""],
 	[OTHER_ID, "Assigned", "Test Driver C", "Test Yard REF/PU#: 6660002222", "9 Gamma St, Dover, DE 19901", "8 Delta St, Akron, OH 44301", "$1,500.00", "", "", ""],
 ];
+// Production's layout (2026-10-21, headers only): Job Tracking's status column is
+// "Job Status"; the Job Details tab's column A header is blank and it has NO Load ID
+// column, so a row there is the load's only by the lane ingestion wrote into Details.
+const PROD_JT_HEADERS = ["Contract ID", "Load ID", "Details", "Trailer Number", "Driver", "Pickup Info", "Pickup Appointment", "Pickup Address", "Drop-off Info", "Drop-off Appointment",
+	"Drop-off Address", "Job Status", "Phase of Progress", "Carrier Stage", "  Payment  ", "Broker Contact Name", "Phone Number", "Email", "Location Link", "Documents", "Assigned Date",
+	"Status Update Date", "Completion Date", "Truck", "Owner ID"];
+const PROD_JD_HEADERS = ["", "Distance", "Rate Per Mile", "Details", "Driver", "Pickup Address", "Drop-off Address", "Payment", "Job Status", "Carrier Stage", "Driver Name",
+	"Phone Number", "Email", "Location Link", "Documents", "Assigned Date", "Completion Date", " Notes", "Notes to Driver", "output (retired)"];
+const PROD_PT_HEADERS = ["Contract ID", " Job ID", "Invoice Number", "Payment Amount"];
+// ROWS laid out on production's Job Tracking columns, by header name.
+function prodRows(rows = ROWS) {
+	return rows.map((r) => PROD_JT_HEADERS.map((h) => {
+		const j = HEADERS.findIndex((x) => x === h || (x === "Status" && h === "Job Status"));
+		return j < 0 ? "" : r[j];
+	}));
+}
+// The lane as ingestion writes it into Job Details' Details (calculateRatePerMile()).
+const LANE = "Springfield, IL 62701 - Riverton, WY 82501";
+const OTHER_LANE = "Dover, DE 19901 - Akron, OH 44301";
+const jdRow = (lane, payment) => ["", "1,180 Miles", "$1.02", lane, "", "", "", payment];
 const SIDE = {
-	payments: [[" Job ID", "Contract ID", "Payment Amount"], [LOAD_ID, "Pat Broker", OWN_AMOUNT]],
-	jobDetails: [["Load ID", "Rate Per Mile", "Payment"], [LOAD_ID, "$2.00", OWN_AMOUNT]],
+	payments: [PROD_PT_HEADERS, ["Pat Broker", LOAD_ID, "", OWN_AMOUNT]],
+	jobDetails: [PROD_JD_HEADERS, jdRow(LANE, "1200")],
 };
 
 // What must never appear on any surface (plan §3.4): the account number digits-only
@@ -1018,12 +1042,99 @@ test("§10 L2 a missing amount header answers 503 INSTRUCTIONS_UNVERIFIED; a bla
 	eq("Job Tracking without Payment", [(await w.call("GET", API, DISP)).status, (await w.call("GET", API, DISP)).body.code], [503, "INSTRUCTIONS_UNVERIFIED"]);
 	const w2 = await world({ side: { ...SIDE, payments: [[" Job ID", "Contract ID"], [LOAD_ID, "Pat Broker"]] } });
 	eq("Payments Table without Payment Amount", (await w2.call("GET", API, DISP)).status, 503);
-	const w3 = await world({ side: { ...SIDE, jobDetails: [["Load ID", "Rate Per Mile"], [LOAD_ID, "$2.00"]] } });
+	const without = (h) => [PROD_JD_HEADERS.map((x) => (x === h ? "Retired" : x)), jdRow(LANE, "1200")];
+	const w3 = await world({ side: { ...SIDE, jobDetails: without("Payment") } });
 	eq("Job Details without Payment", (await w3.call("GET", API, DISP)).status, 503);
+	const w3b = await world({ side: { ...SIDE, jobDetails: without("Details") } });
+	eq("Job Details without Details (the lane that identifies its rows)", (await w3b.call("GET", API, DISP)).status, 503);
+	const w3c = await world({ side: { ...SIDE, jobDetails: [] } });
+	eq("an empty Job Details tab (no header row)", (await w3c.call("GET", API, DISP)).status, 503);
 	const w4 = await world({ side: { ...SIDE, payments: [[" Job ID"]] } });
 	eq("Payments Table without its id header", (await w4.call("GET", API, DISP)).status, 503);
 	const w5 = await world({ rows: ROWS.map((r) => r.map((c, j) => (HEADERS[j].trim() === "Payment" ? "" : c))) });
 	eq("a blank Payment cell: 200", (await w5.call("GET", API, DISP)).status, 200);
+});
+
+// ── §11 production's sheet layout (PR 2b) ─────────────────────────────────────
+const declared = (n) => ({ category: "equipment", text: `Declared value ${n} must match the paperwork.` });
+async function readsWith(side) {
+	const x = cleanExtraction();
+	delete x.contacts;
+	x.loadRequirements.push(declared("1200"), declared("1275"), declared("1350"), declared("1640"));
+	const w = await world({ headers: PROD_JT_HEADERS, rows: prodRows(), side });
+	insertRow(w, { v: 1, footnote: "x", ...x });
+	return w;
+}
+test("§11 production's layout (no Load ID in Job Details, \"Job Status\") answers 200; every own amount is withheld, Job Details' by the load's lane", async ({ eq, ok }) => {
+	useClock();
+	const side = {
+		payments: [PROD_PT_HEADERS, ["Pat Broker", LOAD_ID, "", "$1,350.00"], ["Other Broker", OTHER_ID, "", "$1,500.00"]],
+		// The load's own row (the rate Job Tracking also holds), another load's lane, and an
+		// earlier rate on the load's lane that only Job Details still holds (a re-issue or a
+		// hand edit changed Job Tracking's Payment after ingestion).
+		jobDetails: [PROD_JD_HEADERS, jdRow(LANE, "1200"), jdRow(OTHER_LANE, "1640"), jdRow(LANE.toUpperCase(), "1275")],
+	};
+	const w = await readsWith(side);
+	for (const u of [DISP, SA]) {
+		const r = await w.call("GET", API, u);
+		eq(`${u.role}: 200`, r.status, 200);
+		const text = `${JSON.stringify(r.body && r.body.payload)}${JSON.stringify(r.body && r.body.driverPreview)}`;
+		ok(`${u.role}: Job Tracking's amount, also on the Job Details row, withheld`, !text.includes("value 1200"), text.slice(0, 600));
+		ok(`${u.role}: the earlier rate only Job Details holds, withheld by lane`, !text.includes("value 1275"), text.slice(0, 600));
+		ok(`${u.role}: the Payments Table's amount, by Job ID, withheld`, !text.includes("value 1350"), text.slice(0, 600));
+		ok(`${u.role}: another lane's amount is not this load's`, text.includes("value 1640"), text.slice(0, 600));
+		ok(`${u.role}: the references and HV items stay`, text.includes(PU) && text.includes("HIGH VALUE"), text.slice(0, 300));
+	}
+	// The control: the same item is served when no Job Details row on the load's lane holds it.
+	const w2 = await readsWith({ ...side, jobDetails: [PROD_JD_HEADERS, jdRow(LANE, "1200"), jdRow(OTHER_LANE, "1275")] });
+	const r2 = await w2.call("GET", API, DISP);
+	ok("control: served once only another lane holds it", r2.status === 200 && r2.text.includes("value 1275"), r2.text.slice(0, 300));
+});
+
+test("§11 production's layout: the sweep matches and stores an open load's rate con, and skips a \"Job Status\" Delivered load's (no download, no Gemini call)", async ({ eq }) => {
+	useClock();
+	const booked = driveFile(`Booked Load # ${DELIVERED_ID}.pdf`, READABLE_B);
+	const f = driveFile(`Subject: Load ${LOAD_ID} Rate Confirmation.pdf`, READABLE);
+	const w = await world({ headers: PROD_JT_HEADERS, rows: prodRows(), files: [booked, f] });
+	await w.service.sweep();
+	eq("states", [w.ledger(booked.meta.id).state, w.ledger(f.meta.id).state], ["no_open_load", "done"]);
+	eq("one download and one Gemini call, for the open load only", [w.calls.download, w.calls.gemini], [[f.meta.id], 1]);
+});
+
+test("§11 more distinct own amounts than the filter reads answer 503 INSTRUCTIONS_UNVERIFIED, never a payload filtered with some left out", async ({ eq }) => {
+	useClock();
+	const rates = Array.from({ length: 60 }, (_, i) => jdRow(LANE, `$${2000 + i * 10}.00`));
+	const w = await world({ side: { ...SIDE, jobDetails: [PROD_JD_HEADERS, ...rates] } });
+	insertRow(w, cleanExtraction());
+	const r = await w.call("GET", API, DISP);
+	eq("60 rates on the lane: 503", [r.status, r.body && r.body.code], [503, "INSTRUCTIONS_UNVERIFIED"]);
+	const w2 = await world({ side: { ...SIDE, jobDetails: [PROD_JD_HEADERS, ...rates.slice(0, 40), ...rates.slice(0, 40)] } });
+	insertRow(w2, cleanExtraction());
+	eq("40 rates, each on two rows, count once: 200", (await w2.call("GET", API, DISP)).status, 200);
+});
+
+test("§11 a \"Cancel\", \"Canceled\" or \"Cancelled\" load is closed: the sweep skips its rate con before download (no Gemini call)", async ({ eq }) => {
+	useClock();
+	for (const status of ["Cancel", "Canceled", "Cancelled"]) {
+		const rows = prodRows(ROWS.map((r) => (r[0] === DELIVERED_ID ? r.map((c, j) => (HEADERS[j] === "Status" ? status : c)) : r)));
+		const booked = driveFile(`Booked Load # ${DELIVERED_ID}.pdf`, READABLE_B);
+		const w = await world({ headers: PROD_JT_HEADERS, rows, files: [booked] });
+		await w.service.sweep();
+		eq(`"${status}": skipped`, [w.ledger(booked.meta.id).state, w.calls.download, w.calls.gemini], ["no_open_load", [], 0]);
+	}
+});
+
+test("§11 a Job Tracking column the filter reads that is missing answers 503 INSTRUCTIONS_UNVERIFIED: either stop address, the broker contact name, the phone or the email", async ({ eq }) => {
+	useClock();
+	for (const h of ["Pickup Address", "Drop-off Address", "Broker Contact Name", "Phone Number", "Email"]) {
+		const headers = PROD_JT_HEADERS.map((x) => (x === h ? "Retired" : x));
+		const w = await world({ headers, rows: prodRows() });
+		insertRow(w, cleanExtraction());
+		const r = await w.call("GET", API, DISP);
+		eq(`without ${h}`, [r.status, r.body && r.body.code], [503, "INSTRUCTIONS_UNVERIFIED"]);
+	}
+	const w = await world({ headers: PROD_JT_HEADERS, rows: prodRows(ROWS.map((r) => r.map((c, j) => (["Phone Number", "Email"].includes(HEADERS[j]) ? "" : c)))) });
+	eq("blank contact cells: 200", (await w.call("GET", API, DISP)).status, 200);
 });
 
 test("§10 L3 the sweep's cursor never moves past files it didn't record: a failed sweep leaves listed empty; a pause records the rest as deferred", async ({ eq, ok }) => {
