@@ -943,6 +943,22 @@ test("§9 wiring: the drag-and-drop hook runs after the answer for an archived P
 	eq("mounted with requireRole", /driverInstructions\.mount\(app, \{ requireRole \}\);/.test(wiring), true);
 });
 
+test("§9 replica:pull never copies the deny list or the uploader account, and carries both flags' state", async ({ eq, ok }) => {
+	const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
+	const libDir = path.join(ROOT, "lib");
+	const sources = [SRC, ...fs.readdirSync(libDir).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => fs.readFileSync(path.join(libDir, f), "utf8"))];
+	const read = rules.namesReadBy(sources);
+	for (const [name, value] of [["CARRIER_ACCOUNT_NUMBERS_DENY", DENY], ["RATECON_DRIVE_UPLOADER_EMAIL", UPLOADER]]) {
+		const v = rules.classifySetting(name, value, { readByApp: read });
+		eq(`${name}: never copied, by name`, [v.copy, /^production only/.test(v.rule)], [false, true]);
+		eq(`${name}: never copied, even when listed as read`, rules.classifySetting(name, value, { readByApp: new Set([name]) }).copy, false);
+	}
+	for (const flag of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED"]) {
+		ok(`${flag} is read by the app as the replica export sees it`, read.has(flag));
+		eq(`${flag} is copied`, rules.classifySetting(flag, "false", { readByApp: read }).copy, true);
+	}
+});
+
 if (!fs.existsSync(RUNTIME)) {
 	console.log("FAIL lib/driver-instructions-runtime.js does not exist (the PR 2 build adds it)");
 }
