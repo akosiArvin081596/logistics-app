@@ -954,6 +954,21 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("a deleted ordinary manual invoice dating Thu: Thu and Fri go on a correction", corrections(d.w).map(paidDaysOf), [["2026-10-01", "2026-10-02"]]);
 	});
 
+	await R.test("P6 (re-check L) An Assigned Date stamped after the Delivered tap, no dispatch row, FROM=2026-10, no truck feed: pickup 9/29, drop-off 10/1, Delivered 10/2, Assigned 10/3: the late Assigned Date is dropped as a start, so the invoice, the ledger and the investor view pay 9/29-10/2 (in October, its Assigned month), not 10/2 alone. Base (a6b937f): 10/2 only", async ({ eq }) => {
+		const D = "Cy Late";
+		const w = W.startWorld({
+			env: TRIP("2026-10"),
+			drivers: [{ name: D }],
+			rows: [loadRow({ id: "Q4601", driver: D, pickup: "2026-09-29 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-10-03", done: "2026-10-02", truck: "T1" })],
+			status: [s("Q4601", "Delivered", et("2026-10-02 15:00"))],
+		});
+		const want = ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"];
+		const g = await W.generate(w, D, W39);
+		eq("invoice", invDays(g, W39), want);
+		const v = await monthViews(w, D);
+		eq("ledger and investor view", [v.ledger, v.investor], [want.map((d) => `2026-10 ${d}`), want.map((d) => `2026-10 ${d}`)]);
+	});
+
 	await R.test("M5 (re-check L) weeklyManualInvoiceHolds() at a $0 smallest rate (the daily-rate rule reading a $0 history row): only a correction or missed-week line or paidDays holds a day; a day with no line dated on it, or a dated bonus, holds nothing, since no amount is one day's pay at $0. Base (f03fe7d): every day of the week held", async ({ eq }) => {
 		const { closure } = require(path.join(W.ROOT, "scripts", "lib", "server-lift"));
 		const lift = closure(W.SRC, { roots: ["weeklyManualInvoiceHolds"], provided: ["db", "require", "console", "process"] });

@@ -302,15 +302,26 @@ const R = W.createRunner("Rule d: paid trip days (lib/trip-work-days.js tripDays
 		eq("appointment Wed, dispatched and Assigned Thu: Thu and Fri", days(thu), ["2026-10-01", "2026-10-02"]);
 	});
 
-	await R.test("D31 (re-check M1) assigned-date-after-delivery: an Assigned Date is sometimes stamped after delivery. Dispatched 9/30, Delivered 10/2, Assigned 10/3, window 9/30-10/2, no arrival tap: the dispatch is the floor (the Assigned Date only bounds a load with no dispatch row), so 9/30-10/2 are paid, ELD or not; with no dispatch row the start is never after the Delivered day (10/2 only); with no taps at all, the named fallback to the window rule", ({ eq, ok }) => {
+	await R.test("D31 (re-check M1) assigned-date-after-delivery: an Assigned Date is sometimes stamped after delivery. Dispatched 9/30, Delivered 10/2, Assigned 10/3, window 9/30-10/2, no arrival tap: the dispatch is the floor (the Assigned Date only bounds a load with no dispatch row), so 9/30-10/2 are paid, ELD or not; with no dispatch row the late Assigned Date is dropped (D32); with no taps at all, the named fallback to the window rule", ({ eq, ok }) => {
 		const window = { start: "2026-09-30", end: "2026-10-02", pickup: "2026-09-30", assigned: "2026-10-03" };
 		const shape = [DISPATCH("2026-09-30 08:00"), T("Delivered", "2026-10-02 15:00")];
 		eq("no ELD: 9/30-10/2", days(run(shape, { window })), ["2026-09-30", "2026-10-01", "2026-10-02"]);
 		eq("ELD driving 10/1: 9/30 (appointment), 10/1, 10/2", days(run(shape, { window, eld: eld({ covered: ["2026-09-30", "2026-10-02"], driving: ["2026-10-01"] }) })), ["2026-09-30", "2026-10-01", "2026-10-02"]);
 		eq("resolver", resolverWith({ status: shape.map((e) => ["d31", e]) }).forLoad({ loadId: "D31", settleMonth: "2026-10", window }), ["2026-09-30", "2026-10-01", "2026-10-02"]);
-		eq("no dispatch row: the Delivered day only", days(run([T("Delivered", "2026-10-02 15:00")], { window })), ["2026-10-02"]);
+		eq("no dispatch row: the Assigned Date after the Delivered tap is dropped (D32), the window starts the trip", days(run([T("Delivered", "2026-10-02 15:00")], { window })), ["2026-09-30", "2026-10-01", "2026-10-02"]);
 		const noTaps = resolverWith().forLoad({ loadId: "D31", settleMonth: "2026-10", window });
 		ok("no taps: the named fallback", !!noTaps && !Array.isArray(noTaps) && typeof noTaps.fallback === "string", JSON.stringify(noTaps));
+	});
+
+	await R.test("D32 (re-check L) assigned-after-delivered-tap-dropped: pickup 9/29, drop-off 10/1, a Delivered tap 10/2, no dispatch row, Assigned Date 10/3 (stamped after the tap, so late): the Assigned Date is no start date; the window's first day starts the trip: 9/29 (appointment), the driving days and 10/2 (unloading), flagged assignedAfterDelivery; the same with no ELD; not the Delivered day alone", ({ eq, ok }) => {
+		const window = { start: "2026-09-29", end: "2026-10-01", pickup: "2026-09-29", assigned: "2026-10-03" };
+		const events = [T("Delivered", "2026-10-02 15:00")];
+		const withEld = run(events, { window, eld: eld({ driving: ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"] }) });
+		eq("ELD driving 9/29-10/2", days(withEld), ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"]);
+		eq("reasons", [why(withEld, "2026-09-29"), why(withEld, "2026-09-30"), why(withEld, "2026-10-02")], ["appointment", "driving", "unloading"]);
+		ok("flagged assignedAfterDelivery", flag(withEld, "assignedAfterDelivery"), JSON.stringify(withEld && withEld.flags));
+		eq("no ELD", days(run(events, { window })), ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"]);
+		eq("resolver", resolverWith({ status: events.map((e) => ["d32", e]) }).forLoad({ loadId: "D32", settleMonth: "2026-10", window }), ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02"]);
 	});
 
 	// ── the ELD, time, errors ──────────────────────────────────────────────────
