@@ -369,6 +369,7 @@ import { useToast } from '../composables/useToast'
 import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
 import { expensesForLoad } from '../lib/loadId'
+import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -981,6 +982,15 @@ function viewAssignedLoad() {
   }
 }
 
+// A load's rate-con instructions changed on the server ({ loadId } only, sent to this
+// driver's room). The open load's card reads them again; the list refreshes its chips
+// through the debounced refetch.
+function onInstructionsChanged(payload) {
+  if (!isMounted || !isInstructionsEvent(payload)) return
+  if (instructionsKey(payload.loadId) === instructionsKey(detailLoadId.value)) driverStore.fetchLoadInstructions(detailLoadId.value)
+  scheduleDriverRefetch()
+}
+
 function onLoadCancelled(payload) {
   if (!isMounted) return
   const reassigned = payload.reason === 'reassigned'
@@ -1146,6 +1156,7 @@ async function attemptInitialLoad() {
     socket.on('load-cancelled', onLoadCancelled)
     socket.on('geofence-trigger', onGeofenceTrigger)
     socket.on('location-update', onLocationUpdate)
+    socket.on('driver-instructions-changed', onInstructionsChanged)
     socketSetupDone = true
   }
 }
@@ -1198,6 +1209,7 @@ onUnmounted(() => {
   socket.off('load-cancelled', onLoadCancelled)
   socket.off('geofence-trigger', onGeofenceTrigger)
   socket.off('location-update', onLocationUpdate)
+  socket.off('driver-instructions-changed', onInstructionsChanged)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   socket.disconnect()
 })
