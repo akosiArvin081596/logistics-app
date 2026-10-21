@@ -39,7 +39,7 @@ const http = require("http");
 const { createRequire } = require("module");
 const express = require("express");
 const { closure } = require("./server-lift");
-const { buildSchema, Database } = require("./work-days-world");
+const { schemaDb, Database } = require("./work-days-world");
 
 const ROOT = path.join(__dirname, "..", "..");
 const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
@@ -283,8 +283,7 @@ const agent = new http.Agent({ keepAlive: false });
 //   env           anything else the server reads at boot
 async function startWorld({ flag = true, loadsWarning = false, routes = Object.keys(ROUTES), rows = defaultRows(), now = DEFAULT_NOW, env = {} } = {}) {
 	const L = lifted(routes);
-	const db = new Database(":memory:");
-	buildSchema(db);
+	const db = schemaDb();
 	const clock = { ms: now };
 	seed(db, now);
 	const sheet = fakeSheet(rows);

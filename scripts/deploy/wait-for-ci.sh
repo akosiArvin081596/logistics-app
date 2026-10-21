@@ -14,7 +14,8 @@
 #   CHECK_NAME   default "check · unit · build" (ci.yml's job name, and the
 #                check branch protection requires)
 #   CI_WAIT_S    how long to wait in all, default 1200 (20 min: ci.yml's
-#                15-minute job timeout plus room for its runner queue)
+#                15-minute longest job chain, a unit part then the
+#                verdict, plus room for its runner queues)
 #   CI_POLL_S    seconds between reads, default 15
 #
 # Passes only on the newest GitHub Actions check run of that name on that

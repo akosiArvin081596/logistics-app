@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Pre-push: runs `npm run check` (syntax check + every unit runner, 4 at a
-# time) and blocks the push when it fails.
+# Pre-push: runs `npm run check` (syntax check + every unit runner, one per
+# core) and blocks the push when it fails.
 #
 # Turn it on once per clone:   git config core.hooksPath .githooks
 # Skip it for one push:        git push --no-verify

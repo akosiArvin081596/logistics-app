@@ -206,13 +206,17 @@ const R = M.createRunner("Dated daily rates: under the daily-rate rule each day 
 	await R.test("DR2 Control, flag off (unset, and FROM set with the flag off): nothing reads the history. Dale is paid his current $320 every day on the invoice, the ledger, the investor view and Financials, exactly as today; every answer is byte-identical with and without his history rows, and with the history table gone", async ({ eq, ok }) => {
 		for (const env of [{}, { DRIVER_RATE_ONLY_FROM: "2026-10" }]) {
 			const tag = JSON.stringify(env);
+			// The invoice row without created_at: the wall clock when it was
+			// generated, to the second, so two worlds a second apart differ there
+			// and nowhere else (it failed about 1 run in 10).
+			const unstamped = (invoice) => invoice && { ...invoice, created_at: undefined };
 			const answers = async (w) => {
 				const a = await weekly(w, DALE, W39);
 				const b = await weekly(w, DALE, W40);
 				const led = await M.ledger(w);
 				const inv = await investor(w, DALE, "2026-10", "T2");
 				const fin = await financialsRow(w, DALE, "2026-10");
-				return { a: [a.status, a.g.data, a.g.invoice], b: [b.status, b.g.data, b.g.invoice], items: led.items, months: led.months, inv: inv.body, fin: fin.body };
+				return { a: [a.status, a.g.data, unstamped(a.g.invoice)], b: [b.status, b.g.data, unstamped(b.g.invoice)], items: led.items, months: led.months, inv: inv.body, fin: fin.body };
 			};
 			const dated = world({ env });
 			const plain = world({ env, payRates: [] });

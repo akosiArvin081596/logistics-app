@@ -9,7 +9,8 @@ name: CI
 # no PR run tested. deploy.yml's staging job waits for THIS workflow's
 # `check · unit · build` on the pushed commit (scripts/deploy/wait-for-ci.sh)
 # and production deploys only once it passed. Keep the push trigger and the
-# job name.
+# job name. That job (`verify`) is the verdict: it needs every other job here
+# and passes only when all of them passed.
 on:
   pull_request:
     branches: [main]
@@ -33,10 +34,20 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: check · unit · build
+  # The unit runners in parts, side by side, each on its own runner: one after
+  # another they took ~130 s of a ~3-minute job. scripts/run-unit-tests.js
+  # deals the parts round-robin over the sorted runners, so each runner is in
+  # exactly one part (scripts/test-release-gate.js §4 proves it). The number of
+  # parts is the length of `part` (strategy.job-total): parts are 1..n.
+  unit:
+    name: unit · part ${{ matrix.part }} of ${{ strategy.job-total }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
+    strategy:
+      # Every part runs to the end, so one part's failure never hides another's.
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -55,6 +66,55 @@ jobs:
       # This moved from 20 → 22 because puppeteer 25 requires >=22.12, and
       # puppeteer 25 is the ONLY fix for the extract-zip advisory (no patched
       # extract-zip exists; 2.0.1 is the latest and is itself vulnerable).
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+
+      # `npm ci`: it fails on a lockfile drifted from its package.json, and its
+      # postinstall installs client/ with `npm ci` too (the lint · build job
+      # below verifies the client lockfile on its own as well).
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The standalone runners. Hermetic — :memory:/mkdtemp only, no network,
+      # no fixtures, no app.db. This job's part of them (UNIT_TEST_SHARD), 4 at
+      # a time on this 4-vCPU runner (run-unit-tests.js's default; the isolation
+      # audit is in its header), timing-sensitive ones alone after.
+      #
+      # ⚠️ UNIT_TEST_SKIP_TIMING drops the timing-sensitive runners (currently
+      # exactly one: test-pdf-cold-start.js, which launches Chromium, induces an
+      # event-loop stall and asserts on wall-clock budgets around the recovery).
+      # Its old flake was a race inside its own §1, not machine load, and is
+      # fixed (#492; measured 12/12 idle and 12/12 under load on a 15-core Mac,
+      # see scripts/run-unit-tests.js). It stays out of CI because a 3 s
+      # navigation budget on a GitHub-hosted runner's two shared cores is
+      # untested, and a pipeline nobody trusts is worse than no pipeline.
+      #
+      # The skip is printed at the start AND end of the run and named in the
+      # `verify` job's summary below — never silent. It means the PDF cold-start path is NOT
+      # covered here: run `npm run test:unit` locally (no env var) before
+      # touching lib/pdf-browser.js.
+      - name: Unit / guard runners
+        env:
+          UNIT_TEST_SKIP_TIMING: "1"
+          UNIT_TEST_SHARD: ${{ matrix.part }}/${{ strategy.job-total }}
+        run: npm run test:unit
+
+  # Both lockfiles, the syntax check, the tripwire, and the client build with
+  # the deploy's whole-build check on it.
+  build:
+    name: lint · build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The same Node as the unit job (see the note there).
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .nvmrc
@@ -87,31 +147,9 @@ jobs:
       # first. `npm run lint` is `node --check` over server.js and every
       # .js/.mjs/.cjs file in lib/ and scripts/, about a second. (`npm run
       # check` is lint plus the unit runners, the local pre-push check; CI runs
-      # the two as separate steps so the unit runners run once.)
+      # the two in separate jobs so the unit runners run once.)
       - name: Syntax check (server.js, lib, scripts)
         run: npm run lint
-
-      # The standalone runners. Hermetic — :memory:/mkdtemp only, no network,
-      # no fixtures, no app.db. 4 at a time (run-unit-tests.js's default; the
-      # isolation audit is in its header), timing-sensitive ones alone after.
-      #
-      # ⚠️ UNIT_TEST_SKIP_TIMING drops the timing-sensitive runners (currently
-      # exactly one: test-pdf-cold-start.js, which launches Chromium, induces an
-      # event-loop stall and asserts on wall-clock budgets around the recovery).
-      # Its old flake was a race inside its own §1, not machine load, and is
-      # fixed (#492; measured 12/12 idle and 12/12 under load on a 15-core Mac,
-      # see scripts/run-unit-tests.js). It stays out of CI because a 3 s
-      # navigation budget on a GitHub-hosted runner's two shared cores is
-      # untested, and a pipeline nobody trusts is worse than no pipeline.
-      #
-      # The skip is printed at the start AND end of the run and named in the job
-      # summary below — never silent. It means the PDF cold-start path is NOT
-      # covered here: run `npm run test:unit` locally (no env var) before
-      # touching lib/pdf-browser.js.
-      - name: Unit / guard runners
-        env:
-          UNIT_TEST_SKIP_TIMING: "1"
-        run: npm run test:unit
 
       # ⚠️ Tripwire. test-suite.js must never run in CI: it needs a live server,
       # it WRITES (test 46 logs an expense), it defaults to port 3000 — which is
@@ -167,6 +205,39 @@ jobs:
           count=$(find client/dist/assets -type f 2>/dev/null | wc -l)
           echo "client/dist/assets: $count files"
           [ "$count" -gt 0 ] || { echo "::error::client/dist/assets is empty"; exit 1; }
+
+  # THE verdict: branch protection requires this check by name, and
+  # wait-for-ci.sh waits for it before production deploys. It needs every
+  # other job and passes only when each of them passed.
+  #
+  # ⚠️ `if: always()` is load-bearing. Without it, a failed part makes GitHub
+  # SKIP this job, and a skipped required check counts as passed: the PR would
+  # merge with failing runners. With it, this job runs after any outcome and
+  # fails unless every result it reads is `success` (failure, cancelled and
+  # skipped all fail it).
+  #
+  # Its 5 minutes after a part's 10 keep the longest chain at 15, which
+  # deploy.yml's 20-minute CI wait outlasts.
+  verify:
+    name: check · unit · build
+    needs: [unit, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Every unit part and the lint · build job passed
+        env:
+          UNIT: ${{ needs.unit.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "unit parts: ${UNIT:-none} · lint · build: ${BUILD:-none}"
+          if [ "$UNIT" = success ] && [ "$BUILD" = success ]; then
+            echo "ok: every unit part and the lint · build job passed"
+            exit 0
+          fi
+          echo "::error::CI did not pass: unit parts ${UNIT:-none}, lint · build ${BUILD:-none}. Any result but success fails this required check."
+          exit 1
 
       - name: Note what this run did not cover
         if: always()
