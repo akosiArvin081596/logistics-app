@@ -79,9 +79,11 @@ function record(results) {
 }
 
 // ---------------------------------------------------------------- extraction
-// A top-level function, from its declaration to the first `}` in column 0.
+// A top-level function (or async function), from its declaration to the first
+// `}` in column 0.
 function extract(name) {
-	const needle = `\nfunction ${name}(`;
+	const plain = `\nfunction ${name}(`;
+	const needle = SRC.includes(plain) ? plain : `\nasync function ${name}(`;
 	const hits = SRC.split(needle).length - 1;
 	if (hits !== 1) throw new Error(`expected exactly 1 definition of ${name}() in server.js, found ${hits}`);
 	const start = SRC.indexOf(needle) + 1;
@@ -128,12 +130,18 @@ const CONSTS = [
 	extractConst("const SHEET_ROW_AUDIT_DETAILS_MAX = "),
 	extractConst("const SHEET_ROW_AUDIT_MAX_CHANGES = "),
 	extractConst("const JT_MONEY_COLUMN_PATTERNS = [", "\n];"),
+	// The Load ID rule a non-Super-Admin's ROW_MOVED check reads
+	// (staffRowMovedRefusal()), and the sheet it reads again.
+	extractConst("const SHOWN_LOAD_ID_INDEXES = "),
+	extractConst("const SHOWN_LOAD_ID_STATE = "),
+	'const SPREADSHEET_ID = "sheet-under-test";',
 ].join("\n");
 const HELPERS = [
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
 	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal",
 	"sheetRowAfterUpdate", "a1SheetPrefix", "a1ColumnLetter", "sheetRowCellWrites", "restoreUntouchedCells",
 	"baselineApplies", "rowMovedRefusal",
+	"shownLoadIdIndex", "currentShownLoadIdIndex", "loadIdWithheldFor", "shownLoadId", "staffRowMovedRefusal",
 	"guardedColumnReason", "changedGuardedCells", "scrubPurgeMarker", "capAuditField", "buildSheetUpdateAudit",
 ];
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));

@@ -34,6 +34,7 @@ const { createRequire } = require("module");
 const { parseArgs, sheetFor, envFor, buildLedgerWorld } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
 const integrityCheck = require("../lib/integrity-check");
+const brokerContact = require("../lib/broker-contact");
 const ledgerDayOnce = require("../lib/ledger-day-once");
 const driverRateOnly = require("../lib/driver-rate-only");
 const appTime = require("../lib/app-time");
@@ -56,12 +57,12 @@ function liftFromServer(appRequire, db) {
 	const deletedReader = closure(SRC, { roots: ["getDeletedLoadIds"], provided: ["db"] });
 	const getDeletedLoadIds = new Function("db", `"use strict";\n${deletedReader.text}\nreturn getDeletedLoadIds;`)(db);
 	const lifted = closure(SRC, {
-		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths", "excludeDroppedLoads"],
+		roots: ["parseSheet", "deduplicateLoads", "EXPENSE_PERIOD_EXPR", "loadRowAccountingMonths", "excludeDroppedLoads", "BROKER_WITHHELD_RE"],
 		provided: ["getDeletedLoadIds"],
 		denied: ["db", "getSheets", "sheets", "sendEmail", "transporter", "app", "io", "server", "SPREADSHEET_ID"],
 	});
 	return new Function("require", "getDeletedLoadIds",
-		`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths, excludeDroppedLoads };`)(appRequire, getDeletedLoadIds);
+		`"use strict";\n${lifted.text}\nreturn { parseSheet, deduplicateLoads, EXPENSE_PERIOD_EXPR, loadRowAccountingMonths, excludeDroppedLoads, BROKER_WITHHELD_RE };`)(appRequire, getDeletedLoadIds);
 }
 
 // Check 5's closed-month rule, read as the server reads it: the row's accounting
@@ -170,6 +171,8 @@ async function main() {
 		// Check 9: cancelled and soft-deleted loads left out, as the server leaves
 		// them out.
 		liveLoadRows: (sheet) => server.excludeDroppedLoads(sheet.data, sheet.headers),
+		// Check 10: the server's Load ID rule over its own BROKER_WITHHELD_RE.
+		loadIdShownOf: (row, raw) => brokerContact.shownLoadIdOf(raw, { row, withheldRe: server.BROKER_WITHHELD_RE }),
 		dayOnceFrom,
 		readFleetLedger,
 		dailyRateRuleFor,

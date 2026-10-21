@@ -118,7 +118,7 @@ function makeChannels() {
 		if (!ch.inAppOk) throw new Error("notifications down (test)");
 		ch.notes.push({ type, title, body, meta });
 	} };
-	ch.io = { to: () => ({ emit() {} }) };
+	ch.io = { to: () => ({ emit() {}, except: () => ({ emit() {} }) }) };
 	const capture = (...a) => { ch.logs.push(util.format(...a)); };
 	ch.console = { log: capture, warn: capture, error: capture, info: capture };
 	return ch;
