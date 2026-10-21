@@ -151,7 +151,9 @@ function scriptModule() {
 }
 
 // One in-process run on a copy, with a sheet loader that counts its calls.
-async function inProcess(copy, { ready = READY, extra = [], during = null } = {}) {
+// Every run states its rate basis (pay plan R3): --rates-as-recorded unless the
+// case gives its own. `ready` null leaves --b4-ready out (B4 is opt-in, R1).
+async function inProcess(copy, { ready = READY, extra = [], during = null, rates = ["--rates-as-recorded"] } = {}) {
 	const mod = scriptModule();
 	if (!mod || typeof mod.run !== "function") throw new Error(`${SCRIPT} does not exist yet (or has no run())`);
 	let reads = 0;
@@ -161,7 +163,7 @@ async function inProcess(copy, { ready = READY, extra = [], during = null } = {}
 		return JSON.parse(fs.readFileSync(copy.values, "utf8"));
 	};
 	const out = await mod.run({
-		argv: [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, `--b4-ready=${JSON.stringify(ready)}`, "--names", "--json", ...extra],
+		argv: [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, ...(ready === null ? [] : [`--b4-ready=${JSON.stringify(ready)}`]), "--names", "--json", ...rates, ...extra],
 		now: NOW, loadSheet, log: () => {},
 	});
 	return { ...out, reads };
@@ -274,10 +276,13 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		eq("settings found", r.settings && [r.settings.LEDGER_DAY_ONCE_FROM, r.settings.TRIP_WORK_DAYS_FROM, r.settings.DRIVER_RATE_ONLY_FROM], ["2026-10", null, null]);
 	});
 
-	await R.test("O8 The figures this report replaces are listed as labels, each beside this run's figure: investor 5 $2,347 -> $722 (B12 dry run) beside today -> B12 ($975 -> $900); B12 October driver pay +$3,250 beside +$150. Base: the script does not exist", async ({ eq, ok }) => {
+	await R.test("O8 (revised 2026-10-22, pay plan R7: the 2026-10-16 production run is a fifth figure) The figures this report replaces are listed as labels, each beside this run's figure: investor 5 $2,347 -> $722 (B12 dry run) beside today -> B12 ($975 -> $900); B12 October driver pay +$3,250 beside +$150; the 2026-10-16 production run's today and both totals beside this run's. Before: four figures", async ({ eq, ok }) => {
 		const { out } = await main();
 		const list = (out.result && out.result.replaces) || [];
-		ok("four earlier figures", list.length === 4 && ["$2,347", "$1,969", "+$900", "+$3,250"].every((x) => list.some((e) => String(e.earlier).includes(x))), JSON.stringify(list).slice(0, 300));
+		ok("five earlier figures", list.length === 5 && ["$2,347", "$1,969", "+$900", "+$3,250", "$10,750"].every((x) => list.some((e) => String(e.earlier).includes(x))), JSON.stringify(list).slice(0, 300));
+		const prod = list.find((e) => String(e.earlier).includes("$10,750")) || {};
+		ok("the production run's source names its data time and commit", /09:42 ET/.test(String(prod.source)) && /73be100/.test(String(prod.source)), String(prod.source));
+		eq("this run's today and both: driver pay (days, $) and the investor payable", prod.thisRun, { today: { days: 7, pay: 1850, payable: 975 }, both: { days: 8, pay: 2400, payable: 700 } });
 		const b12 = list.find((e) => String(e.earlier).includes("$2,347")) || {};
 		eq("investor 5, today -> B12", b12.thisRun && [b12.thisRun.today, b12.thisRun.b12], [975, 900]);
 		const pay12 = list.find((e) => String(e.earlier).includes("+$3,250")) || {};
@@ -289,7 +294,7 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 	await R.test("O9 Read-only: run as the server runs it (text report), it exits 0 and leaves the database file's bytes and modified time as they were. Base: the script does not exist", async ({ eq, ok }) => {
 		const { copy } = await main();
 		const before = [M.fileHash(copy.db), fs.statSync(copy.db).mtimeMs];
-		const r = M.runScript(SCRIPT, [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--dry-run"]);
+		const r = M.runScript(SCRIPT, [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--rates-as-recorded", "--dry-run"]);
 		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
 		eq("exit code", r.code, 0);
 		ok("the text report says nothing was written", /Nothing was written/.test(r.stdout), r.stdout.slice(0, 200));
@@ -299,9 +304,9 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		eq("the file's bytes and modified time", [M.fileHash(copy.db), fs.statSync(copy.db).mtimeMs], before);
 	});
 
-	await R.test("O10 Refused with exit 2 and no report: a malformed --b4-ready (not JSON, a list, a date that does not exist, a blank load id, one load twice, a load not on Job Tracking), no --b4-ready, and no --db. Base: the script does not exist", async ({ eq, ok }) => {
+	await R.test("O10 (revised 2026-10-22, pay plan R1: B4 is opt-in, so a run with no --b4-ready is no longer refused; O19 runs one) Refused with exit 2 and no report: a malformed --b4-ready (not JSON, a list, a date that does not exist, a blank load id, one load twice, a load not on Job Tracking) and no --db", async ({ eq, ok }) => {
 		const { copy } = await main();
-		const base = [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--json"];
+		const base = [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--rates-as-recorded", "--json"];
 		const cases = [
 			["not JSON", [...base, "--b4-ready={A902:2026-10-07}"]],
 			["a list", [...base, '--b4-ready=["A902"]']],
@@ -314,7 +319,6 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 			["501 loads (review L7)", [...base, `--b4-ready=${JSON.stringify(Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`L${i}`, "2026-10-07"])))}`]],
 			["a 65-character load id (review L7)", [...base, `--b4-ready=${JSON.stringify({ ["9".repeat(65)]: "2026-10-07" })}`]],
 			["a load not on Job Tracking", [...base, '--b4-ready={"Z999":"2026-10-07"}']],
-			["no --b4-ready", base],
 			["no --db", base.slice(1).concat(['--b4-ready={"A902":"2026-10-07"}'])],
 		];
 		const why = { "501 loads (review L7)": /at most 500/, "a 65-character load id (review L7)": /overlong/, "one key twice (review L9)": /twice/, "one key twice, the first value not a string (re-review)": /twice/ };
@@ -329,20 +333,32 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 	await R.test("O11 Refused with exit 2: October already closed (the rules may start only in an open month), and an app .env that already turns B12 or the daily rate on (today would already include it). Base: the script does not exist", async ({ eq, ok }) => {
 		const closed = await fixture({ lockOctober: true });
 		const c = M.saveCopy(closed.w, ENV);
-		const r = M.runScript(SCRIPT, [`--db=${c.db}`, `--env-file=${c.envFile}`, `--values-json=${c.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--json"]);
+		const r = M.runScript(SCRIPT, [`--db=${c.db}`, `--env-file=${c.envFile}`, `--values-json=${c.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--rates-as-recorded", "--json"]);
 		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
 		eq("October closed", [r.code, r.json], [2, null]);
 		const { f } = await main();
 		for (const flags of [{ TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-10" }, { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-10" }]) {
 			const on = M.saveCopy(f.w, { ...ENV, ...flags });
-			const x = M.runScript(SCRIPT, [`--db=${on.db}`, `--env-file=${on.envFile}`, `--values-json=${on.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--json"]);
+			const x = M.runScript(SCRIPT, [`--db=${on.db}`, `--env-file=${on.envFile}`, `--values-json=${on.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--rates-as-recorded", "--json"]);
 			eq(`${Object.keys(flags)[0]} already on`, [x.code, x.json], [2, null]);
 		}
 		// The shell's APP_TIMEZONE (none: America/New_York) is what lib/ reads; the
 		// .env naming another zone would make the lifted code and lib/ disagree.
 		const zone = M.saveCopy(f.w, { ...ENV, APP_TIMEZONE: "America/Chicago" });
-		const z = M.runScript(SCRIPT, [`--db=${zone.db}`, `--env-file=${zone.envFile}`, `--values-json=${zone.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--json"]);
+		const z = M.runScript(SCRIPT, [`--db=${zone.db}`, `--env-file=${zone.envFile}`, `--values-json=${zone.values}`, `--b4-ready=${JSON.stringify(READY)}`, "--rates-as-recorded", "--json"]);
 		eq("the .env's APP_TIMEZONE differs from the shell's (review L1)", [z.code, z.json, /APP_TIMEZONE/.test(z.stderr)], [2, null, true]);
+	});
+
+	await R.test("O23 (pay plan R8) Refused with exit 2: a start record of either rule already in the database (TRIP_WORK_DAYS' first invoiced week, or DRIVER_RATE_ONLY's start), so a rule has already run. Before: not checked", async ({ eq, ok }) => {
+		for (const key of ["trip_work_days_started_at", "driver_rate_only.started"]) {
+			const f = await fixture();
+			const value = key === "trip_work_days_started_at" ? JSON.stringify({ weekStart: "2026-10-03" }) : JSON.stringify({ from: "2026-10", startedAt: "2026-10-16T12:00:00.000Z" });
+			f.w.db.prepare("INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, '2026-10-16T12:00:00.000Z', 'system')").run(key, value);
+			const c = M.saveCopy(f.w, ENV);
+			const r = M.runScript(SCRIPT, [`--db=${c.db}`, `--env-file=${c.envFile}`, `--values-json=${c.values}`, "--rates-as-recorded", "--json"]);
+			eq(`${key}: exit code and no report`, [r.code, r.json], [2, null]);
+			ok(`${key}: the reason names the record`, r.stderr.includes(key), r.stderr.slice(0, 200));
+		}
 	});
 
 	await R.test("O12 (review M1) B12 on an Approved invoice in an open month: Eve's W40 gains 10/4 ($260) on a correction Draft for that week, as the server does; the week's pay $520 -> $780. Before: labelled an adjustment", async ({ eq }) => {
@@ -409,6 +425,204 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		eq("exit code", out.code, 1);
 		ok("a problem names the .env", ((out.result && out.result.problems) || []).some((p) => /\.env/.test(p.issue)), JSON.stringify(out.result && out.result.problems));
 		ok("no value printed", !/SOME_SETTING/.test(out.output || ""), "");
+	});
+
+	await R.test("O19 (pay plan R1) B4 is opt-in and the headline is both changes: with no --b4-ready the run is not refused, B4 is not included (B4 applied reads as today), and the headline gives today -> both (B12 + daily rate): Ana $1,400 both, Cal 3 days $450 -> 4 days $1,000; investor 5 $975 -> $700; Cal's W40 the one invoice that changes (+$550); the text report opens with it. Before: refused for no --b4-ready", async ({ eq, ok }) => {
+		const { f, copy } = await main();
+		const out = await inProcess(copy, { ready: null });
+		eq("exit code", out.code, 0);
+		const r = out.result || {};
+		eq("B4 not included", r.b4Included, false);
+		eq("B4 applied reads as today: Ana", (pay(r, ANA) || [])[4], [4, 1400]);
+		const h = r.headline || {};
+		eq("the headline's scenario", h.scenario, "allThreeB4AsDesigned");
+		eq("drivers, today -> both", (h.drivers || []).map((d) => [d.driver, d.today.days, d.today.pay, d.both.days, d.both.pay]), [[ANA, 4, 1400, 4, 1400], [CAL, 3, 450, 4, 1000]]);
+		eq("driver totals", h.driverTotals, { today: { days: 7, pay: 1850 }, both: { days: 8, pay: 2400 } });
+		eq("investor 5", (h.investors || []).map((i) => [i.ownerId, i.today, i.both]), [[5, 975, 700]]);
+		eq("investor total", h.investorTotals, { today: 975, both: 700 });
+		eq("the invoices that change", (h.invoices || []).map((i) => [i.invoiceNumber, i.status, i.difference]), [[f.cal, "Submitted", 550]]);
+		const t = M.runScript(SCRIPT, [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--rates-as-recorded"]);
+		eq("text: exit code", t.code, 0);
+		const at = t.stdout.indexOf("Both changes (B12 + daily rate)");
+		ok("text: the headline comes before every other table", at !== -1 && at < t.stdout.indexOf("Driver October pay"), t.stdout.slice(0, 400));
+		ok("text: B4 is said to be left out", /B4: not included/.test(t.stdout), t.stdout.slice(0, 400));
+	});
+
+	// The data fix's plan for made-up Ana: $300 from 10/1, $350 (her rate now) from 10/6.
+	const PLAN = { approval: "arvin-2026-10-21-a-b", drivers: [{ name: ANA, expect: { payDaily: 350 }, rates: [{ from: "2026-10-01", rate: 300 }, { from: "2026-10-06", rate: 350 }] }] };
+	const planFile = (dir, plan = PLAN) => { const p = path.join(dir, "octrep-plan.json"); fs.writeFileSync(p, JSON.stringify(plan)); return p; };
+	// The data fix's end state, as scripts/data-fix-driver-rates.js writes it:
+	// Ana's dated rows (Eastern midnight) and its audit rows' references.
+	const applyFix = (w, { rows = true, refs = 5 } = {}) => {
+		if (rows) {
+			const ins = w.db.prepare("INSERT INTO pay_rate_history (subject, subject_key, rate, effective_from, source) VALUES ('driver', 'ana moss', ?, ?, 'data-fix')");
+			ins.run(300, "2026-10-01T04:00:00.000Z");
+			ins.run(350, "2026-10-06T04:00:00.000Z");
+		}
+		const a = w.db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES ('2026-10-16T12:00:00.000Z', 0, 'system: data-fix-driver-rates', 'system', 'pay_rate_entry', 'driver', 'ana moss', ?)");
+		for (let n = 1; n <= refs; n++) a.run(`made-up data fix row. [DRF-20261021-${n}]`);
+	};
+
+	await R.test("O20 (pay plan R3, R5) The rates the report prices by: refused (exit 2) without the data fix's end state (no --rate-plan, its audit references missing, or a day not at the plan's rate); with it, the run prices Ana's 10/5 at $300 (both $1,350) and prints each daily-rate driver's October rate per day, today vs both; --simulate-rate-plan gives the same figures from the plan in memory, labelled SIMULATED, the file untouched; each plan rate's first day says which invoice pays it. Before: none of it", async ({ eq, ok }) => {
+		const run = (copy, args) => M.runScript(SCRIPT, [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--json", ...args]);
+		const bare = await fixture();
+		const c0 = M.saveCopy(bare.w, ENV);
+		const none = run(c0, []);
+		eq("no rate basis: exit code, no report", [none.code, none.json], [2, null]);
+		ok("no rate basis: the reason names the data fix", /data fix/.test(none.stderr), none.stderr.slice(0, 200));
+		const both = run(c0, [`--rate-plan=${planFile(c0.dir)}`, "--rates-as-recorded"]);
+		eq("--rate-plan with --rates-as-recorded: refused", [both.code, both.json], [2, null]);
+
+		const short = await fixture();
+		applyFix(short.w, { refs: 4 });
+		const c1 = M.saveCopy(short.w, ENV);
+		const r1 = run(c1, [`--rate-plan=${planFile(c1.dir)}`]);
+		eq("a reference missing: refused", [r1.code, r1.json], [2, null]);
+		ok("the reason names the missing reference", /DRF-20261021-5/.test(r1.stderr), r1.stderr.slice(0, 200));
+
+		const noRows = await fixture();
+		applyFix(noRows.w, { rows: false });
+		const c2 = M.saveCopy(noRows.w, ENV);
+		const r2 = run(c2, [`--rate-plan=${planFile(c2.dir)}`]);
+		eq("the rows missing: refused", [r2.code, r2.json], [2, null]);
+		ok("the reason names the driver's first wrong day", /2026-10-01/.test(r2.stderr), r2.stderr.slice(0, 200));
+
+		const fixed = await fixture();
+		applyFix(fixed.w);
+		const c3 = M.saveCopy(fixed.w, ENV);
+		const out = await inProcess(c3, { rates: [`--rate-plan=${planFile(c3.dir)}`] });
+		eq("fixed: exit code", out.code, 0);
+		const r = out.result || {};
+		eq("fixed: the rate basis", r.rates && r.rates.mode, "fixed");
+		eq("Ana today, both: 10/5 at $300", [(pay(r, ANA) || [])[0], (pay(r, ANA) || [])[6]], [[4, 1400], [4, 1350]]);
+		const rates = Object.fromEntries(((r.rates && r.rates.october) || []).map((d) => [d.driver, [d.today, d.both]]));
+		eq("October rates per day, today vs both", [rates[ANA], rates[CAL]], [
+			[[{ from: "2026-10-01", to: "2026-10-31", rate: 350 }], [{ from: "2026-10-01", to: "2026-10-05", rate: 300 }, { from: "2026-10-06", to: "2026-10-31", rate: 350 }]],
+			[[{ from: "2026-10-01", to: "2026-10-31", rate: 150 }], [{ from: "2026-10-01", to: "2026-10-31", rate: 250 }]],
+		]);
+		eq("each plan rate's first day: who pays it, today's ledger and both", ((r.checkC && r.checkC.rateDays) || []).map((d) => [d.driver, d.day, d.paidBy.map((p) => [p.invoiceNumber, p.status, p.amount]), d.ledgerToday, d.ledgerBoth]), [
+			[ANA, "2026-10-01", [], 0, 0],
+			[ANA, "2026-10-06", [[fixed.ana, "Draft", 350]], 350, 350],
+		]);
+
+		const c4 = M.saveCopy(bare.w, ENV);
+		const before = [M.fileHash(c4.db), fs.statSync(c4.db).mtimeMs];
+		const sim = await inProcess(c4, { rates: [`--rate-plan=${planFile(c4.dir)}`, "--simulate-rate-plan"] });
+		eq("simulated: exit code and basis", [sim.code, sim.result && sim.result.rates && sim.result.rates.mode], [0, "simulated"]);
+		eq("simulated: Ana today, both", [(pay(sim.result, ANA) || [])[0], (pay(sim.result, ANA) || [])[6]], [[4, 1400], [4, 1350]]);
+		eq("simulated: the database file untouched", [M.fileHash(c4.db), fs.statSync(c4.db).mtimeMs], before);
+		const st = M.runScript(SCRIPT, [`--db=${c4.db}`, `--env-file=${c4.envFile}`, `--values-json=${c4.values}`, `--rate-plan=${planFile(c4.dir)}`, "--simulate-rate-plan"]);
+		ok("simulated: the text report says so first", st.code === 0 && /^.*SIMULATED/m.test(st.stdout.split("\n").slice(0, 3).join("\n")), st.stdout.slice(0, 300) + st.stderr.slice(0, 300));
+	});
+
+	// Rule d's shapes (scripts/test-trip-work-days-pay-paths.js), in week W41
+	// (Sat 10/10-Fri 10/16), one driver and truck each at $260, with ELD:
+	//   Abe   heading Mon, loads Tue: Mon added (heading)
+	//   Cy    At Shipper Mon, Loading Wed: Tue a waiting day
+	//   Eli   in transit Mon-Wed, parked Tue: a rest day
+	//   Hal   At Receiver Tue, Delivered Fri, no receiver coordinates: a lateTap
+	//         load, Wed-Thu not paid, Fri added (unloading)
+	//   Kim   At Shipper Mon, no Loading tap, In Transit Wed, Pickup Appointment
+	//         Tue (parked): Tue a loading-fallback day
+	//   Lou   heading Mon, cancelled Tue (drove both days): two drive days on a
+	//         cancelled load (Q17)
+	//   Mo    Delivered Wed, Drop-off Appointment Thu, drove Thu: Thu not paid
+	//         by rule d, kept on his Submitted W41 invoice
+	async function ruleDWorld() {
+		const [, , MON, TUE, WED, THU, FRI] = M.daysFrom("2026-10-10", "2026-10-16");
+		const shapes = [
+			{ driver: "Abe Heading", pickup: TUE, dropoff: WED, assigned: MON, done: WED,
+				status: [["Dispatched", MON, "08:00"], ["Heading to Shipper", MON, "09:30"], ["At Shipper", TUE, "08:00"], ["Loading", TUE, "09:00"], ["In Transit", TUE, "13:00"], ["At Receiver", WED, "10:00"], ["Delivered", WED, "11:30"]],
+				feed: (x) => x.drive(MON, { miles: 200 }).drive(TUE, { miles: 250 }).drive(WED, { miles: 150 }) },
+			{ driver: "Cy Wait", pickup: MON, dropoff: THU, assigned: MON, done: THU,
+				status: [["At Shipper", MON, "10:00"], ["Loading", WED, "08:00"], ["In Transit", WED, "12:00"], ["At Receiver", THU, "14:00"], ["Delivered", THU, "15:00"]],
+				feed: (x) => x.drive(MON, { miles: 200 }).park(TUE).drive(WED, { miles: 200 }).drive(THU, { miles: 200 }) },
+			{ driver: "Eli Rest", pickup: MON, dropoff: WED, assigned: MON, done: WED,
+				status: [["At Shipper", MON, "08:00"], ["Loading", MON, "09:00"], ["In Transit", MON, "12:00"], ["At Receiver", WED, "15:00"], ["Delivered", WED, "16:00"]],
+				feed: (x) => x.drive(MON, { miles: 300 }).park(TUE).drive(WED, { miles: 300 }) },
+			{ driver: "Hal Late", pickup: MON, dropoff: TUE, assigned: MON, done: FRI,
+				status: [["At Shipper", MON, "09:00"], ["Loading", MON, "10:00"], ["In Transit", MON, "12:00"], ["At Receiver", TUE, "15:00"], ["Delivered", FRI, "10:00"]],
+				feed: (x) => x.drive(MON, { miles: 300 }).drive(TUE, { miles: 200, to: 13 }).park(WED).drive(THU, { miles: 10, from: 9, to: 11 }).park(FRI) },
+			{ driver: "Kim Fall", pickup: TUE, dropoff: THU, assigned: MON, done: THU,
+				status: [["At Shipper", MON, "10:00"], ["In Transit", WED, "12:00"], ["At Receiver", THU, "10:00"], ["Delivered", THU, "11:00"]],
+				feed: (x) => x.drive(MON, { miles: 200 }).park(TUE).drive(WED, { miles: 200 }).drive(THU, { miles: 100 }) },
+			{ driver: "Lou Tonu", pickup: WED, dropoff: THU, assigned: MON, done: "", rowStatus: "Cancelled",
+				status: [["Dispatched", MON, "08:00"], ["Heading to Shipper", MON, "09:00"], ["Cancelled", TUE, "10:00"]],
+				feed: (x) => x.drive(MON, { miles: 200 }).drive(TUE, { miles: 100, to: 10 }) },
+			{ driver: "Mo Early", pickup: MON, dropoff: THU, assigned: MON, done: WED,
+				status: [["At Shipper", MON, "08:00"], ["Loading", MON, "09:00"], ["In Transit", MON, "12:00"], ["At Receiver", WED, "09:00"], ["Delivered", WED, "10:00"]],
+				feed: (x) => x.drive(MON, { miles: 200 }).drive(TUE, { miles: 200 }).drive(WED, { miles: 200 }).drive(THU, { miles: 200 }) },
+		];
+		const rows = [];
+		const status = [];
+		const pings = {};
+		const trucks = [];
+		shapes.forEach((x, i) => {
+			const id = `R0${i}`;
+			const unit = `T${i + 1}`;
+			const vid = `V${i + 1}`;
+			trucks.push({ unit, driver: x.driver, vid });
+			pings[vid] = x.feed(M.feed(100000 * (i + 1))).pings;
+			rows.push(loadRow({ id, driver: x.driver, pickup: `${x.pickup} 8:00`, dropoff: `${x.dropoff} 18:00`, assigned: x.assigned, done: x.done, truck: unit, status: x.rowStatus || "Delivered" }));
+			for (const [st, day, hm] of x.status) status.push([id, st, st === "Dispatched" ? "dispatch" : "manual", et(`${day} ${hm}`), st === "Dispatched" ? "super_admin" : ""]);
+		});
+		const w = M.startWorld({ env: ENV, drivers: shapes.map((x) => ({ name: x.driver })), trucks, rows, status, pings, now: M.etMs("2026-10-16 20:00") });
+		const mo = await M.generate(w, "Mo Early", "2026-10-16");
+		if (!mo.invoice) throw new Error(`Mo's W41 invoice was not made (${mo.status})`);
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(mo.invoice.id);
+		return { w, mo: mo.invoice.invoice_number, days: { MON, TUE, WED, THU, FRI } };
+	}
+	let sharedRuleD = null;
+	async function ruleDMain() {
+		if (!sharedRuleD) {
+			const f = await ruleDWorld();
+			const copy = M.saveCopy(f.w, ENV);
+			sharedRuleD = { f, copy, out: await inProcess(copy, { ready: null }) };
+		}
+		return sharedRuleD;
+	}
+
+	await R.test("O21 (pay plan R4) Rule d in the both-changes figures: each changed driver-day with its reason (Abe's Mon heading, Hal's Fri unloading, Kim's Mon driving and Tue loading-fallback added; Mo's Thu not paid, outsideSpan), and per driver the waiting (Cy 1), rest (Eli 1) and dark days, loading-fallback days (Kim 1), lateTap loads (Hal 1), error-state loads, days an issued invoice keeps (Mo 1) and drive days on cancelled loads (Lou 2: Mon, Tue). Before: none of it", async ({ eq }) => {
+		const { f, out } = await ruleDMain();
+		eq("exit code", out.code, 0);
+		const r = out.result || {};
+		const { MON, TUE, THU, FRI } = f.days;
+		const changed = ((r.ruleD && r.ruleD.changedDays) || []).map((d) => [d.driver, d.day, d.change, d.reason]);
+		eq("changed driver-days and why", changed, [
+			["Abe Heading", MON, "added", "heading"],
+			["Hal Late", FRI, "added", "unloading"],
+			["Kim Fall", MON, "added", "driving"],
+			["Kim Fall", TUE, "added", "loading-fallback"],
+			["Mo Early", THU, "removed", "outsideSpan"],
+		]);
+		const counts = Object.fromEntries(((r.ruleD && r.ruleD.drivers) || []).map((d) => [d.driver, d]));
+		const pick = (name) => { const d = counts[name] || {}; return [d.waiting, d.restDay, d.dark, d.loadingFallback, d.lateTapLoads, d.errorLoads, d.keptOnIssued, d.cancelledDriveDays]; };
+		eq("Cy", pick("Cy Wait"), [1, 0, 0, 0, 0, 0, 0, 0]);
+		eq("Eli", pick("Eli Rest"), [0, 1, 0, 0, 0, 0, 0, 0]);
+		eq("Hal", pick("Hal Late"), [0, 0, 0, 0, 1, 0, 0, 0]);
+		eq("Kim", pick("Kim Fall"), [0, 0, 0, 1, 0, 0, 0, 0]);
+		eq("Mo", pick("Mo Early"), [0, 0, 0, 0, 0, 0, 1, 0]);
+		eq("Lou", pick("Lou Tonu"), [0, 0, 0, 0, 0, 0, 0, 2]);
+		eq("Lou's cancelled load and its drive days", ((r.ruleD && r.ruleD.cancelled) || []).map((c) => [c.driver, c.loadId, c.days]), [["Lou Tonu", "R05", [MON, TUE]]]);
+		eq("Mo's kept day", ((r.ruleD && r.ruleD.keptOnIssued) || []).map((k) => [k.driver, k.invoiceNumber, k.days]), [["Mo Early", f.mo, [THU]]]);
+	});
+
+	await R.test("O22 (pay plan R6) --owner-note prints a plain note of 25 lines or fewer: October pay per driver today -> both (days and $), the investor payable today -> both, each invoice that changes (number, status, +/-, how), rule d's counts, the rate basis and the send-by dates; names only with --names. Before: no such option", async ({ eq, ok }) => {
+		const { f, copy } = await main();
+		const args = [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--rates-as-recorded", "--owner-note"];
+		const named = M.runScript(SCRIPT, [...args, "--names"]);
+		eq("exit code", named.code, 0);
+		const lines = named.stdout.trim().split("\n");
+		ok("25 lines or fewer", lines.length <= 25 && lines.length >= 8, `${lines.length} lines`);
+		ok("Cal: 3 days $450 -> 4 days $1,000", lines.some((l) => /Cal Burke/.test(l) && /3 days, \$450/.test(l) && /4 days, \$1,000/.test(l)), named.stdout);
+		ok("the investor payable $975 -> $700", lines.some((l) => /\$975/.test(l) && /\$700/.test(l)), named.stdout);
+		ok("Cal's W40: number, status, +$550, how", lines.some((l) => l.includes(f.cal) && /Submitted/.test(l) && /\+\$550/.test(l)), named.stdout);
+		ok("rule d's counts", lines.some((l) => /waiting/i.test(l) && /cancelled/i.test(l)), named.stdout);
+		ok("the rate basis: rates as recorded, not final", lines.slice(0, 3).some((l) => /not final/i.test(l)), named.stdout);
+		ok("the send-by dates", lines.some((l) => /Fri Oct 30/.test(l) && /Mon Nov 9/.test(l)), named.stdout);
+		const plain = M.runScript(SCRIPT, args);
+		eq("without --names: exit code", plain.code, 0);
+		ok("without --names: numbered drivers, no name", !/Cal Burke|Ana Moss/.test(plain.stdout) && /driver \d/.test(plain.stdout), plain.stdout.slice(0, 300));
 	});
 
 	R.finish();
