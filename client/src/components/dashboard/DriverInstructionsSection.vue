@@ -25,13 +25,13 @@
     <div class="rounded-lg border border-gray-200 bg-white p-3 text-sm">
       <p v-if="loading && !body" role="status" class="text-xs text-gray-500">Loading the driver instructions…</p>
 
-      <p v-if="errorText" role="alert" class="di-msg di-msg-error" data-testid="di-error">{{ errorText }}</p>
+      <p v-if="errorText && !editing" role="alert" class="di-msg di-msg-error" data-testid="di-error">{{ errorText }}</p>
       <p v-if="noticeText" role="status" class="di-msg di-msg-ok" data-testid="di-notice">{{ noticeText }}</p>
 
       <template v-if="body">
         <p class="text-xs text-gray-600">
           {{ status.note }}
-          <template v-if="reviewedLine"> {{ reviewedLine }}</template>
+          <span v-if="reviewedLine" data-testid="di-reviewed">{{ reviewedLine }}</span>
         </p>
         <p v-if="body.unmatchedFiles > 0" class="mt-1 text-xs text-gray-600">
           {{ body.unmatchedFiles === 1 ? 'A rate-con file names this load' : `${body.unmatchedFiles} rate-con files name this load` }} but couldn't be matched to it.
@@ -51,7 +51,7 @@
         </div>
 
         <div v-if="compare && !editing" class="mt-3" data-testid="di-pending">
-          <p class="text-xs font-semibold text-gray-800">A newer reading of the rate con is waiting. Drivers keep seeing the current version until you accept the new one.</p>
+          <p class="text-xs font-semibold text-gray-800">Drivers keep seeing the current version until you accept the new reading.</p>
           <div class="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2">
             <div class="min-w-0">
               <h4 class="di-h">Drivers see now</h4>
@@ -123,8 +123,8 @@
               <select v-model="ref.type" class="di-select" :aria-label="`Stop ${si + 1} reference ${ri + 1} kind`">
                 <option v-for="(label, key) in REFERENCE_LABELS" :key="key" :value="key">{{ label }}</option>
               </select>
-              <Input v-model="ref.label" class="h-9 sm:w-32" placeholder="Label (optional)" :aria-label="`Stop ${si + 1} reference ${ri + 1} label`" />
-              <Input v-model="ref.value" class="h-9 font-mono" placeholder="Number" :aria-label="`Stop ${si + 1} reference ${ri + 1} number`" />
+              <Input v-model="ref.label" class="h-9 sm:w-36" placeholder="Label (optional)" :aria-label="`Stop ${si + 1} reference ${ri + 1} label`" />
+              <Input v-model="ref.value" class="h-9 font-mono sm:w-auto sm:min-w-[8rem] sm:flex-1" placeholder="Number" :aria-label="`Stop ${si + 1} reference ${ri + 1} number`" />
               <Button type="button" size="sm" variant="ghost" :aria-label="`Remove stop ${si + 1} reference ${ri + 1}`" @click="s.references.splice(ri, 1)">Remove</Button>
             </div>
             <Button type="button" size="sm" variant="outline" @click="s.references.push(blankReference())">Add reference</Button>
@@ -159,6 +159,8 @@
             <Button type="button" size="sm" variant="outline" @click="draft.stops.push(blankStop('pickup'))">Add pickup stop</Button>
             <Button type="button" size="sm" variant="outline" @click="draft.stops.push(blankStop('delivery'))">Add delivery stop</Button>
           </div>
+          <!-- While editing, a refusal shows here, beside Save, where the person is. -->
+          <p v-if="errorText" role="alert" class="di-msg di-msg-error" data-testid="di-error">{{ errorText }}</p>
           <div class="flex flex-wrap gap-2 border-t border-gray-100 pt-3">
             <Button type="submit" size="sm" :disabled="busy">Save</Button>
             <Button type="button" size="sm" variant="outline" :disabled="busy" @click="cancelEdit">Cancel</Button>

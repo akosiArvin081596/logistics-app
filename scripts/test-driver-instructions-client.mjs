@@ -280,6 +280,11 @@ console.log('§9 the source')
   eq('the buttons are there', ['>Edit<', '>Mark reviewed<', '>Accept the new rate con<', '>Keep current<', '>Re-read the rate con<'].map((b) => src.includes(b)), [true, true, true, true, true])
   eq('the preview is the server\'s driverPreview', src.includes('body.driverPreview'), true)
   eq('messages are announced', /role="alert"/.test(src) && /role="status"/.test(src), true)
+  {
+    const form = (src.match(/<form v-if="editing && draft"[\s\S]*?<\/form>/) || [''])[0]
+    eq('while editing, a refusal shows beside Save (and not at the top as well)',
+      [/<p v-if="errorText" role="alert"[^>]*data-testid="di-error"/.test(form), /<p v-if="errorText && !editing" role="alert"/.test(src)], [true, true])
+  }
   eq('one pane below md (the side-by-side is two columns only from md)', src.includes('md:grid-cols-2'), true)
   const dash = path.join(ROOT, 'client', 'src', 'components', 'dashboard')
   const active = fs.readFileSync(path.join(dash, 'ActiveLoadsTab.vue'), 'utf8')
