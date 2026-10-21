@@ -205,6 +205,21 @@ eq('hiddenFromDrivers: the items the server flagged, with words; nothing else',
     { where: 'Stop 1 · Pickup', label: 'Receiver instructions', text: 'QA redirect item.', why: 'Drivers don\'t see this: it holds another address or redirect wording.' },
   ])
 eq('hiddenFromDrivers: none flagged, or no payload', [v.hiddenFromDrivers(PAYLOAD()), v.hiddenFromDrivers(null)], [[], []])
+{
+  // The "Hidden from drivers" chip in a payload view gives the same reason as the list.
+  const payloadView = fs.readFileSync(path.join(ROOT, 'client', 'src', 'components', 'dashboard', 'DriverInstructionsPayload.vue'), 'utf8')
+  eq('whyHidden(): Other says kind Other; flagged text says why; the payload view\'s chips use it',
+    [
+      typeof v.whyHidden === 'function' ? [v.whyHidden({ category: 'other', flag: 'unusual_content' }), v.whyHidden({ kind: 'receiver', flag: 'unusual_content' }), v.whyHidden(null)] : null,
+      (payloadView.match(/:title="whyHidden\((r|x)\)"/g) || []).length,
+      /flagWords/.test(payloadView),
+    ],
+    [
+      ['Drivers don\'t see this: items of kind Other are never shown to drivers.', 'Drivers don\'t see this: it holds another address or redirect wording.', ''],
+      3,
+      false,
+    ])
+}
 // An item of kind Other saves (it is never refused) and stays hidden from drivers; an
 // item the server flagged for its text is refused until it is removed or reworded.
 eq('draftItemNote: Other is never shown; flagged text must go or change; nothing otherwise',

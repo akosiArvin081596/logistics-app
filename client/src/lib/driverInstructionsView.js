@@ -196,7 +196,11 @@ export function flagWords(flag) {
 // An item of kind Other is saved (never refused) and never shown to drivers.
 const OTHER_WHY = "Drivers don't see this: items of kind Other are never shown to drivers."
 const OTHER_NOTE = 'Items of kind Other are never shown to drivers: pick another kind or remove it.'
-const whyHidden = (item) => (item.category === 'other' ? OTHER_WHY : flagWords(item.flag))
+// Why a flagged item is hidden from drivers (the list and the payload view's chips).
+export function whyHidden(item) {
+  if (!item || typeof item !== 'object') return ''
+  return item.category === 'other' ? OTHER_WHY : flagWords(item.flag)
+}
 
 // The note under an item in the edit form: kind Other never reaches drivers; an item
 // the server flagged for its text is refused until it is removed or reworded.

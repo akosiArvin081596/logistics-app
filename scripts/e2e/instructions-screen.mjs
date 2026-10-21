@@ -556,8 +556,8 @@ async function flagOff(browser) {
     await page.waitForTimeout(500)
     let body = null
     try { body = await resp.json() } catch { /* not json */ }
-    // The browser logs the 404 itself, once per opened load (as for RateConPdfSection's
-    // 403 to a Dispatcher); nothing else may reach the console.
+    // The browser logs the 404 itself, once per opened load: expected while the flag is
+    // off. Nothing else may reach the console.
     const errors = appErrors(consoleLines.slice(consoleFrom))
     const checks = {
       status404: resp.status() === 404,

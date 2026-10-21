@@ -16,7 +16,7 @@
         <li v-for="(r, i) in loadRequirements" :key="`lr-${i}`" class="break-words">
           <span class="font-semibold" :class="r.critical ? 'text-red-700' : 'text-gray-800'">{{ categoryLabel(r.category) }}:</span>
           {{ r.text }}
-          <span v-if="showFlags && r.flag" class="di-flag" :title="flagWords(r.flag)">Hidden from drivers</span>
+          <span v-if="showFlags && r.flag" class="di-flag" :title="whyHidden(r)">Hidden from drivers</span>
         </li>
       </ul>
     </div>
@@ -35,14 +35,14 @@
         <li v-for="(r, ri) in list(s.requirements)" :key="`req-${si}-${ri}`" class="break-words">
           <span class="font-semibold" :class="r.critical ? 'text-red-700' : 'text-gray-800'">{{ categoryLabel(r.category) }}:</span>
           {{ r.text }}
-          <span v-if="showFlags && r.flag" class="di-flag" :title="flagWords(r.flag)">Hidden from drivers</span>
+          <span v-if="showFlags && r.flag" class="di-flag" :title="whyHidden(r)">Hidden from drivers</span>
         </li>
       </ul>
       <ul v-if="list(s.instructions).length" class="mt-1 space-y-1">
         <li v-for="(x, xi) in list(s.instructions)" :key="`ins-${si}-${xi}`" class="whitespace-pre-line break-words">
           <span class="font-semibold text-gray-800">{{ instructionKindLabel(x.kind) }}:</span>
           {{ x.text }}
-          <span v-if="showFlags && x.flag" class="di-flag" :title="flagWords(x.flag)">Hidden from drivers</span>
+          <span v-if="showFlags && x.flag" class="di-flag" :title="whyHidden(x)">Hidden from drivers</span>
         </li>
       </ul>
       <p v-if="!list(s.references).length && !list(s.requirements).length && !list(s.instructions).length" class="mt-1 text-xs text-gray-500">Nothing for this stop.</p>
@@ -53,7 +53,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { categoryLabel, instructionKindLabel, referenceLabel, stopKindLabel, flagWords } from '../../lib/driverInstructionsView'
+import { categoryLabel, instructionKindLabel, referenceLabel, stopKindLabel, whyHidden } from '../../lib/driverInstructionsView'
 
 const props = defineProps({
   payload: { type: Object, default: null },
