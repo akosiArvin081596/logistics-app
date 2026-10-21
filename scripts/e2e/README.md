@@ -1485,8 +1485,12 @@ serve those routes. It serves the built `client/dist` from its own static server
 and 5173 refused), answers the session, the dashboard and every other `/api` request in the browser with made-up
 fixtures, and hands the instructions routes to PR 2's own runtime (`lib/driver-instructions-runtime.js`, `create()` +
 `mount()`) on an express app in the same process, with an in-memory database, made-up sheet rows and the invented deny
-value. IS7 runs a second runtime with the flag off: 404 with no code, and no section. Nothing leaves the machine; full
-page screenshots are fine (all made-up). `SHOTS_DIR` puts them outside the work dir.
+value. IS6 also measures the phone list cards (Active Loads and Job Board) whose rows carry instruction codes: the
+badge stays inside the card. IS7 runs a second runtime with the flag off: 404 with no code, no section, and the
+console holds only the browser's own "Failed to load resource … 404" line for the opened load, which is expected
+while the flag is off (as RateConPdfSection's 403 is for a Dispatcher). The console lines about requests the check
+aborts on purpose (the socket, other hosts) are set aside. Nothing leaves the machine; full page screenshots are fine
+(all made-up). `SHOTS_DIR` puts them outside the work dir.
 
 ## The phone layout check (`phone-layout.mjs`)
 

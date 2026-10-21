@@ -398,7 +398,7 @@ const meta = { startedAt: new Date().toISOString(), baseUrl: BASE_URL, phase: PH
 // \uXXXX, so no observed text can reorder or hide a line of the results.
 const visible = (s) => String(s ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g,
   (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
-const cell = (s) => visible(s).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
+const cell = (s) => visible(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 function writeResults(final = false) {
   const counts = rows.reduce((a, r) => { const k = r.verdict.split(' ')[0]; a[k] = (a[k] || 0) + 1; return a }, {})
   const title = 'LogisX E2E — ' + [
@@ -12104,7 +12104,7 @@ async function instructionsSection() {
       const checks = {
         status200: resp.status() === 200,
         chip: /Reviewed/i.test(await sec.locator('[data-testid="di-status"]').innerText()),
-        notice: (await notice.innerText()).includes('Marked reviewed. Drivers see this version.'),
+        notice: (await notice.innerText()).includes('Marked reviewed. Drivers see this version'),
         heading: (await sec.locator('[data-testid="di-preview"]').innerText()).toLowerCase().includes('what the driver sees'),
         reasonsCleared: (await sec.locator('[data-testid="di-reasons"]').count()) === 0,
         storedReviewed: stored.status === 'reviewed' && !!stored.published_at,

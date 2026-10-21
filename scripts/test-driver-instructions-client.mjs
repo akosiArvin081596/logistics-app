@@ -200,11 +200,34 @@ eq('hiddenFromDrivers: the items the server flagged, with words; nothing else',
     stops: [STOP({ instructions: [{ kind: 'receiver', text: 'QA redirect item.', flag: 'unusual_content' }, { kind: 'shipper', text: 'Fine.' }], requirements: [{ category: 'seal', text: 'QA odd text.', flag: 'suspicious_text' }] })],
   })),
   [
-    { where: 'Whole load', label: 'Other', text: 'QA other item.', why: 'Drivers don\'t see this: it holds another address, redirect wording or no category.' },
+    { where: 'Whole load', label: 'Other', text: 'QA other item.', why: 'Drivers don\'t see this: items of kind Other are never shown to drivers.' },
     { where: 'Stop 1 · Pickup', label: 'Seal', text: 'QA odd text.', why: 'Drivers don\'t see this: it reads like instructions to a computer.' },
-    { where: 'Stop 1 · Pickup', label: 'Receiver instructions', text: 'QA redirect item.', why: 'Drivers don\'t see this: it holds another address, redirect wording or no category.' },
+    { where: 'Stop 1 · Pickup', label: 'Receiver instructions', text: 'QA redirect item.', why: 'Drivers don\'t see this: it holds another address or redirect wording.' },
   ])
 eq('hiddenFromDrivers: none flagged, or no payload', [v.hiddenFromDrivers(PAYLOAD()), v.hiddenFromDrivers(null)], [[], []])
+// An item of kind Other saves (it is never refused) and stays hidden from drivers; an
+// item the server flagged for its text is refused until it is removed or reworded.
+eq('draftItemNote: Other is never shown; flagged text must go or change; nothing otherwise',
+  typeof v.draftItemNote === 'function'
+    ? [{ category: 'other', text: 'x' }, { category: 'other', text: 'x', flag: 'unusual_content' }, { kind: 'receiver', text: 'x', flag: 'unusual_content' }, { category: 'seal', text: 'x', flag: 'suspicious_text' }, { category: 'seal', text: 'x' }, null].map(v.draftItemNote)
+    : null,
+  [
+    'Items of kind Other are never shown to drivers: pick another kind or remove it.',
+    'Items of kind Other are never shown to drivers: pick another kind or remove it.',
+    'Drivers don\'t see this: it holds another address or redirect wording. Remove it or reword it before saving.',
+    'Drivers don\'t see this: it reads like instructions to a computer. Remove it or reword it before saving.',
+    '',
+    '',
+  ])
+eq('the Save and Mark reviewed notices say when some items stay hidden',
+  typeof v.doneText === 'function'
+    ? [v.doneText('Saved.', BODY()), v.doneText('Marked reviewed.', BODY({ payload: PAYLOAD({ loadRequirements: [{ category: 'other', text: 'x', flag: 'unusual_content' }] }) })), v.doneText('Saved.', null)]
+    : null,
+  [
+    'Saved. Drivers see this version.',
+    'Marked reviewed. Drivers see this version, except the items under "Not shown to drivers".',
+    'Saved. Drivers see this version.',
+  ])
 
 // ---------------------------------------------------------------------------
 console.log('§7 the edit draft and the body sent')
@@ -227,7 +250,7 @@ console.log('§7 the edit draft and the body sent')
         stops: [
           {
             kind: 'pickup', facility: 'QA Test Shipper', place: 'Testville, TX',
-            references: [{ type: 'pickup_number', label: 'Pickup #', value: 'QA-PU-1001' }, { type: 'other_reference', label: '', value: `  ${MADE_UP_DENY} ` }],
+            references: [{ type: 'pickup_number', label: '', value: 'QA-PU-1001' }, { type: 'other_reference', label: '', value: `  ${MADE_UP_DENY} ` }],
             requirements: [{ category: 'seal', text: 'Seal the trailer before leaving.' }, { category: 'check_in', text: '' }],
             instructions: [{ kind: 'shipper', text: 'Check in at gate 4 , then wait.' }],
           },
@@ -243,6 +266,23 @@ console.log('§7 the edit draft and the body sent')
       { kind: 'pickup', facility: '', place: '', references: [], requirements: [], instructions: [] }])
 }
 
+{
+  // M1: the server stores each reference with its kind's own label ("Pickup #"). A
+  // kind changed in the draft must not carry the old kind's label to the server.
+  const d = v.editDraftFrom(PAYLOAD())
+  eq('M1 the draft leaves a kind\'s own default label blank', d.stops[0].references[0].label, '')
+  d.stops[0].references[0].type = 'po_number'
+  eq('M1 a kind changed in the draft sends label "" (the server applies the new kind\'s label)',
+    v.editBody(d).payload.stops[0].references[0], { type: 'po_number', label: '', value: 'QA-PU-1001' })
+  const own = v.editDraftFrom(PAYLOAD({ stops: [STOP({ references: [{ type: 'pickup_number', label: 'PU Ref', value: 'QA-PU-1001' }] })] }))
+  eq('M1 a label of its own stays in the draft', own.stops[0].references[0].label, 'PU Ref')
+  const typed = { type: 'pickup_number', label: 'Pickup #', value: 'QA-1' }
+  const mine = { type: 'pickup_number', label: 'PU Ref', value: 'QA-1' }
+  if (typeof v.setReferenceType === 'function') { v.setReferenceType(typed, 'po_number'); v.setReferenceType(mine, 'po_number') }
+  eq('M1 setReferenceType(): the old kind\'s default label is cleared with the kind; a label of its own stays',
+    [typed, mine], [{ type: 'po_number', label: '', value: 'QA-1' }, { type: 'po_number', label: 'PU Ref', value: 'QA-1' }])
+}
+
 // ---------------------------------------------------------------------------
 console.log('§8 the labels match the server\'s')
 // ---------------------------------------------------------------------------
@@ -253,6 +293,21 @@ eq('stop kinds', Object.keys(v.STOP_KIND_LABELS), server.STOP_KINDS)
 eq('the routes', ['', 'review', 'accept-pending', 're-extract'].map((a) => v.instructionsUrl('QA 1001/x', a)),
   ['/api/loads/QA%201001%2Fx/driver-instructions', '/api/loads/QA%201001%2Fx/driver-instructions/review',
     '/api/loads/QA%201001%2Fx/driver-instructions/accept-pending', '/api/loads/QA%201001%2Fx/driver-instructions/re-extract'])
+
+{
+  // The dashboard badge words every code the server can send, and no other.
+  const review = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'loadReview.js')).href)
+  eq('the badge words cover exactly the server\'s review codes',
+    Object.keys(review.INSTRUCTION_REVIEW_WORDS || {}).sort(), Object.keys(server.REVIEW_REASONS).sort())
+}
+{
+  // After a write the tabs refresh the dashboard and hand the open load its fresh codes.
+  const rows = [{ _rowIndex: 2, _instructionsReview: ['no_rate_con'] }, { _rowIndex: 3 }]
+  const fresh = typeof v.freshInstructionCodes === 'function' ? v.freshInstructionCodes : () => 'missing'
+  eq('freshInstructionCodes: the refreshed row\'s codes, [] when it has none, null when the row is gone',
+    [fresh({ _rowIndex: 2 }, rows), fresh({ _rowIndex: 3, _instructionsReview: ['rate_con_changed'] }, rows), fresh({ _rowIndex: 9 }, rows), fresh(null, rows), fresh({ _rowIndex: 2 }, null)],
+    [['no_rate_con'], [], null, null, null])
+}
 
 // ---------------------------------------------------------------------------
 console.log('§9 the source')
@@ -291,9 +346,20 @@ console.log('§9 the source')
   const board = fs.readFileSync(path.join(dash, 'JobBoardTab.vue'), 'utf8')
   for (const [name, tab] of [['ActiveLoadsTab.vue', active], ['JobBoardTab.vue', board]]) {
     eq(`${name}: imports the section`, tab.includes("import DriverInstructionsSection from './DriverInstructionsSection.vue'"), true)
-    eq(`${name}: renders it once in the load detail, for the open load`, (tab.match(/<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" \/>/g) || []).length, 1)
+    eq(`${name}: renders it once in the load detail, for the open load`, (tab.match(/<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" \/>/g) || []).length, 1)
   }
   eq('ActiveLoadsTab.vue: beside LoadHaulSection', /<LoadHaulSection[^\n]*\/>\s*\n\s*<\/div>\s*\n\s*<DriverInstructionsSection /.test(active), true)
+  eq('M1 a reference\'s kind changes through setReferenceType()', /<select :value="ref\.type"[^>]*@change="setReferenceType\(ref, \$event\.target\.value\)"/.test(src) && !/v-model="ref\.type"/.test(src), true)
+  eq('every draft item\'s note is draftItemNote()\'s', (src.match(/draftItemNote\((r|x)\)/g) || []).length >= 6 && !/Remove it or reword it before saving/.test(src), true)
+  eq('Save and Mark reviewed say when items stay hidden', src.includes("doneText('Saved.', answer)") && src.includes("doneText('Marked reviewed.', answer)"), true)
+  eq('a successful write emits changed', /const emit = defineEmits\(\['changed'\]\)/.test(src) && /noticeText\.value = done\(answer\)\s*\n\s*emit\('changed'\)/.test(src), true)
+  eq('a failed first read offers Try again', /<Button v-if="!body && errorText && !loading"[^>]*@click="load"[^>]*>Try again<\/Button>/.test(src), true)
+  eq('the section keeps a gap above it', /\.di-section \{ margin: 1rem 0; \}/.test(src), true)
+  for (const [name, tab] of [['ActiveLoadsTab.vue', active], ['JobBoardTab.vue', board]]) {
+    eq(`${name}: a change refreshes the dashboard and the open load's codes`,
+      tab.includes('<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />') &&
+      /async function onInstructionsChanged\(\) \{\s*\n\s*try \{ await dashStore\.refresh\(\) \} catch \{[^}]*\}\s*\n\s*await nextTick\(\)\s*\n\s*const codes = freshInstructionCodes\(selectedJob\.value, props\.jobs\)/.test(tab), true)
+  }
 }
 
 done()

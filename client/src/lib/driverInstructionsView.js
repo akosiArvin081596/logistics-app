@@ -187,11 +187,30 @@ export function pendingCompare(body) {
 
 // ---------------------------------------------------------------- flagged items
 const FLAG_WORDS = Object.freeze({
-  unusual_content: "Drivers don't see this: it holds another address, redirect wording or no category.",
+  unusual_content: "Drivers don't see this: it holds another address or redirect wording.",
   suspicious_text: "Drivers don't see this: it reads like instructions to a computer.",
 })
 export function flagWords(flag) {
   return typeof flag === 'string' && Object.hasOwn(FLAG_WORDS, flag) ? FLAG_WORDS[flag] : "Drivers don't see this."
+}
+// An item of kind Other is saved (never refused) and never shown to drivers.
+const OTHER_WHY = "Drivers don't see this: items of kind Other are never shown to drivers."
+const OTHER_NOTE = 'Items of kind Other are never shown to drivers: pick another kind or remove it.'
+const whyHidden = (item) => (item.category === 'other' ? OTHER_WHY : flagWords(item.flag))
+
+// The note under an item in the edit form: kind Other never reaches drivers; an item
+// the server flagged for its text is refused until it is removed or reworded.
+export function draftItemNote(item) {
+  if (!item || typeof item !== 'object') return ''
+  if (item.category === 'other') return OTHER_NOTE
+  return item.flag ? `${flagWords(item.flag)} Remove it or reword it before saving.` : ''
+}
+
+// What a successful Save or Mark reviewed says, from the server's answer.
+export function doneText(prefix, body) {
+  return hiddenFromDrivers(body && body.payload).length
+    ? `${prefix} Drivers see this version, except the items under "Not shown to drivers".`
+    : `${prefix} Drivers see this version.`
 }
 
 // The items the server marked with a `flag` in the staff payload (the driver view
@@ -200,7 +219,7 @@ export function hiddenFromDrivers(payload) {
   if (!payload || typeof payload !== 'object') return []
   const out = []
   const add = (where, label, item) => {
-    if (item && item.flag) out.push({ where, label, text: String(item.text ?? ''), why: flagWords(item.flag) })
+    if (item && item.flag) out.push({ where, label, text: String(item.text ?? ''), why: whyHidden(item) })
   }
   for (const r of Array.isArray(payload.loadRequirements) ? payload.loadRequirements : []) add('Whole load', categoryLabel(r?.category), r)
   ;(Array.isArray(payload.stops) ? payload.stops : []).forEach((s, i) => {
@@ -226,6 +245,19 @@ function draftItem(item, key) {
   return out
 }
 
+// The server stores each reference with a label: its own, or its kind's default
+// ("Pickup #"). The draft holds only a label of its own, so a kind changed in the
+// form never carries the old kind's label to the server (which applies the new
+// kind's default to a blank one).
+const ownLabel = (type, label) => (label && Object.hasOwn(REFERENCE_LABELS, type) && label === REFERENCE_LABELS[type] ? '' : label)
+
+// The form's kind picker: the old kind's default label goes with the old kind.
+export function setReferenceType(ref, type) {
+  if (!ref || typeof ref !== 'object') return
+  ref.label = ownLabel(ref.type, str(ref.label))
+  ref.type = str(type)
+}
+
 // An editable copy of the staff payload. `flag` stays on a copy of a flagged
 // item, for display only; editBody() never sends it.
 export function editDraftFrom(payload) {
@@ -236,7 +268,7 @@ export function editDraftFrom(payload) {
       kind: str(s?.kind),
       facility: str(s?.facility),
       place: str(s?.place),
-      references: list(s?.references).map((r) => ({ type: str(r?.type), label: str(r?.label), value: str(r?.value) })),
+      references: list(s?.references).map((r) => ({ type: str(r?.type), label: ownLabel(str(r?.type), str(r?.label)), value: str(r?.value) })),
       requirements: list(s?.requirements).map((r) => draftItem(r, 'category')),
       instructions: list(s?.instructions).map((x) => draftItem(x, 'kind')),
     })),
@@ -259,4 +291,13 @@ export function editBody(draft) {
       })),
     },
   }
+}
+
+// After a write the tabs refresh the dashboard: the open load's codes from its
+// refreshed row ([] when it carries none), or null when the row is gone.
+export function freshInstructionCodes(selected, rows) {
+  if (!selected || !Array.isArray(rows)) return null
+  const row = rows.find((r) => r && r._rowIndex === selected._rowIndex)
+  if (!row) return null
+  return Array.isArray(row._instructionsReview) ? row._instructionsReview : []
 }

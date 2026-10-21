@@ -90,6 +90,8 @@ const ACTIVE_JOB = {
   _dropStreet: '200 Sample Ave',
   _dropLocation: 'Dallas, TX 75201',
 }
+// An unassigned load with no instructions on file: the runtime gives it no_rate_con.
+const UNASSIGNED_JOB = { ...ACTIVE_JOB, _rowIndex: 3, 'Load ID': 'QA-DI-2002', Status: 'Unassigned', Driver: '', Truck: '' }
 const SIDE = {
   payments: [['Job ID', 'Payment Amount'], [LOAD_ID, '$1,234.00']],
   jobDetails: [['Load ID', 'Payment'], [LOAD_ID, '$1,234.00']],
@@ -159,11 +161,13 @@ async function startApi(env) {
 
 function dashboard(svc) {
   const rows = [{ ...ACTIVE_JOB }]
+  const unassigned = [{ ...UNASSIGNED_JOB }]
+  svc.annotateDashboardRows({ headers: HEADERS, rows: unassigned })
   svc.annotateDashboardRows({ headers: HEADERS, rows })
   return {
     timestamp: new Date().toISOString(),
     kpis: { activeLoads: 1, unassignedLoads: 0, completedThisWeek: 0, completedThisMonth: 0, fleetUtilization: { assigned: 1, total: 1 }, revenue: { total: 0, paid: 0, pending: 0 } },
-    unassignedJobs: [],
+    unassignedJobs: unassigned,
     jobTrackingHeaders: HEADERS,
     completedHeaders: HEADERS,
     activeJobs: rows,
@@ -230,6 +234,11 @@ function portInUse(port) {
 // ---------------------------------------------------------------- results
 const rows = []
 const pageErrors = []
+const consoleLines = []
+// The browser's lines about requests this harness aborts on purpose (the socket, other
+// hosts): not the app's.
+const harnessLine = (l) => /socket\.io/.test(l.text) || /socket\.io/.test(l.url) || (!!l.url && !l.url.startsWith(BASE))
+const appErrors = (lines) => lines.filter((l) => l.type === 'error' && !harnessLine(l))
 const otherWrites = []
 let exitCode = 0
 function record(step, title, expected, observed, ok, shot = '') {
@@ -267,6 +276,7 @@ async function openPage(browser, api, size) {
   })
   const page = await ctx.newPage()
   page.on('pageerror', (e) => pageErrors.push(`${size.width}px: ${String(e.message || e).slice(0, 200)}`))
+  page.on('console', (m) => consoleLines.push({ type: m.type(), text: m.text(), url: String((m.location() && m.location().url) || '') }))
   return { ctx, page }
 }
 
@@ -401,11 +411,13 @@ async function flagOn(browser) {
       const checks = {
         status200: resp.status() === 200,
         chip: /Reviewed/i.test(await sec.locator('[data-testid="di-status"]').innerText()),
-        notice: (await sec.locator('[data-testid="di-notice"]').innerText()).includes('Marked reviewed. Drivers see this version.'),
+        notice: (await sec.locator('[data-testid="di-notice"]').innerText()).includes('Marked reviewed. Drivers see this version'),
         heading: (await sec.locator('[data-testid="di-preview"]').innerText()).toLowerCase().includes('what the driver sees'),
         reasonsCleared: (await sec.locator('[data-testid="di-reasons"]').count()) === 0,
         reviewedLine: (await sec.locator('[data-testid="di-reviewed"]').innerText()).includes('Last reviewed by qa-di-dispatcher'),
         storedReviewed: stored.status === 'reviewed' && !!stored.published_at,
+        // The tab refreshed the dashboard and re-synced the open load: its badge is gone.
+        detailBadgeCleared: await page.getByRole('dialog').getByText('⚠ Driver instructions need a look').waitFor({ state: 'detached', timeout: 15000 }).then(() => true, () => false),
       }
       const s = await sectionShot(page, 'is3-reviewed')
       record('IS3', 'Mark reviewed', 'POST .../review 200; status Reviewed; the notice; "What the driver sees"; no reasons left; "Last reviewed by"; stored reviewed and published', flags(checks), allTrue(checks), s)
@@ -498,9 +510,34 @@ async function flagOn(browser) {
         await sec.locator('[data-testid="di-edit"]').waitFor({ state: 'visible', timeout: 15000 })
         const edit = await measure()
         const s2 = await sectionShot(p.page, 'is6-phone-390x844-edit')
-        const ok = view.right <= view.vw && view.sectionOverflow <= 0 && view.pageScroll <= 0 && view.stacked && edit.right <= edit.vw && edit.sectionOverflow <= 0 && edit.pageScroll <= 0
-        record('IS6', 'The section at 390 x 844', 'fits the width (no sideways scroll, page or section); the pending columns stack; the edit form fits too',
-          `view ${flags(view)}; edit right=${edit.right} sectionOverflow=${edit.sectionOverflow} pageScroll=${edit.pageScroll}; edit shot ${path.basename(s2)}`, ok, s)
+        // The phone list cards whose row carries instruction codes: the badge stays
+        // inside its card, with no sideways scroll (Active Loads, then the Job Board).
+        const cardFit = (cardSel) => p.page.evaluate((sel) => {
+          const card = [...document.querySelectorAll(sel)].find((c) => /Driver instructions need a look/i.test(c.textContent))
+          if (!card) return null
+          card.scrollIntoView({ block: 'center' })
+          const badge = [...card.querySelectorAll('span')].find((b) => /Driver instructions need a look/i.test(b.textContent) && b.children.length === 0)
+          const c = card.getBoundingClientRect()
+          const b = badge ? badge.getBoundingClientRect() : null
+          return {
+            badgeInside: !!b && b.left >= c.left - 0.5 && b.right <= c.right + 0.5,
+            cardOverflow: card.scrollWidth - card.clientWidth,
+            pageScroll: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth,
+          }
+        }, cardSel)
+        await sec.getByRole('button', { name: 'Cancel' }).click()
+        await p.page.keyboard.press('Escape')
+        await p.page.locator('.mobile-load-card').first().waitFor({ state: 'visible', timeout: 15000 })
+        const activeCard = await cardFit('.mobile-load-card')
+        await pageShot(p.page, 'is6-phone-390x844-active-card')
+        await p.page.getByRole('tab', { name: /Job Board/ }).click()
+        await p.page.locator('.mobile-job-card').first().waitFor({ state: 'visible', timeout: 15000 })
+        const boardCard = await cardFit('.mobile-job-card')
+        await pageShot(p.page, 'is6-phone-390x844-board-card')
+        const cardOk = (m) => !!m && m.badgeInside && m.cardOverflow <= 0 && m.pageScroll <= 0
+        const ok = view.right <= view.vw && view.sectionOverflow <= 0 && view.pageScroll <= 0 && view.stacked && edit.right <= edit.vw && edit.sectionOverflow <= 0 && edit.pageScroll <= 0 && cardOk(activeCard) && cardOk(boardCard)
+        record('IS6', 'The section at 390 x 844, and the phone list cards with the instructions badge', 'fits the width (no sideways scroll, page or section); the pending columns stack; the edit form fits too; on the Active Loads and Job Board cards the badge stays inside the card',
+          `view ${flags(view)}; edit right=${edit.right} sectionOverflow=${edit.sectionOverflow} pageScroll=${edit.pageScroll}; Active Loads card ${activeCard ? flags(activeCard) : 'NOT FOUND'}; Job Board card ${boardCard ? flags(boardCard) : 'NOT FOUND'}; edit shot ${path.basename(s2)}`, ok, s)
       } finally { await p.ctx.close() }
     }
   } finally {
@@ -513,14 +550,25 @@ async function flagOff(browser) {
   const api = await startApi({})
   const { ctx, page } = await openPage(browser, api, DESKTOP)
   try {
+    const consoleFrom = consoleLines.length
     const resp = await openLoad(page)
     await page.getByRole('dialog').filter({ hasText: LOAD_ID }).waitFor({ state: 'visible', timeout: 15000 })
     await page.waitForTimeout(500)
     let body = null
     try { body = await resp.json() } catch { /* not json */ }
-    const checks = { status404: resp.status() === 404, noCode: !body?.code, noSection: (await page.locator(SECTION).count()) === 0, noBadge: (await page.getByText('Driver instructions need a look').count()) === 0 }
+    // The browser logs the 404 itself, once per opened load (as for RateConPdfSection's
+    // 403 to a Dispatcher); nothing else may reach the console.
+    const errors = appErrors(consoleLines.slice(consoleFrom))
+    const checks = {
+      status404: resp.status() === 404,
+      noCode: !body?.code,
+      noSection: (await page.locator(SECTION).count()) === 0,
+      noBadge: (await page.getByText('Driver instructions need a look').count()) === 0,
+      consoleOnlyThe404: errors.length === 1 && /Failed to load resource.*404/.test(errors[0].text),
+    }
     const s = await pageShot(page, 'is7-flag-off')
-    record('IS7', 'The flag off', 'GET .../driver-instructions 404 with no code; no section in the load detail; no instructions badge', flags(checks), allTrue(checks), s)
+    record('IS7', 'The flag off', 'GET .../driver-instructions 404 with no code; no section in the load detail; no instructions badge; the console holds only the browser\'s one "Failed to load resource … 404" line for the opened load',
+      `${flags(checks)}; console errors: ${errors.map((l) => `"${l.text.slice(0, 120)}"`).join(', ') || 'none'}`, allTrue(checks), s)
   } finally {
     await ctx.close()
     await api.close()
@@ -537,7 +585,13 @@ async function main() {
     for (const [name, fn] of [['flag on', flagOn], ['flag off', flagOff]]) {
       try { await fn(browser) } catch (e) { record('IS!', `${name}: aborted`, '', String(e.stack || e).split('\n').slice(0, 3).join(' '), false) }
     }
-    record('ISx', 'Page errors; writes the page sent outside the instructions routes', 'none', `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; ${otherWrites.length ? otherWrites.join(', ') : 'no other writes'}`, pageErrors.length === 0 && otherWrites.length === 0)
+    // Console errors over the whole run: only the browser's own lines for the answers the
+    // steps asked for (400 refusal, 404s), never a script error.
+    const consoleErrors = appErrors(consoleLines)
+    const notNetwork = consoleErrors.filter((l) => !/^Failed to load resource: the server responded with a status of (400|404)/.test(l.text))
+    record('ISx', 'Page errors; console errors; writes the page sent outside the instructions routes', 'no page errors; console errors only the browser\'s "Failed to load resource" lines for the 400 and 404 answers; no other writes',
+      `${pageErrors.length ? pageErrors.join('; ') : 'no page errors'}; ${consoleErrors.length} console error line(s), ${notNetwork.length} other than those${notNetwork.length ? `: ${notNetwork.map((l) => l.text.slice(0, 120)).join('; ')}` : ''}; ${otherWrites.length ? otherWrites.join(', ') : 'no other writes'}`,
+      pageErrors.length === 0 && notNetwork.length === 0 && otherWrites.length === 0)
   } finally {
     if (browser) await browser.close().catch(() => {})
     await new Promise((r) => server.close(() => r()))

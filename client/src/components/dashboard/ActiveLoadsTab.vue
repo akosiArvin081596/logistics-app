@@ -298,7 +298,7 @@
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :fix-at="mapDriverPosition ? mapDriverPosition.fixAt : null" :planned-lane="plannedLane" dispatch-mode show-arrival />
             <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" />
+          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -495,7 +495,7 @@
 </template>
 
 <script setup>
-import { computed, ref, reactive, watch } from 'vue'
+import { computed, ref, reactive, watch, nextTick } from 'vue'
 import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { ACTIVE_LOADS_PAGE_SIZE } from '../../lib/loadboardPaging'
 import { useApi } from '../../composables/useApi'
@@ -511,6 +511,7 @@ import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
 import DriverInstructionsSection from './DriverInstructionsSection.vue'
+import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
@@ -796,6 +797,14 @@ function runCancel() {
 }
 function confirmStatusUpdate(j) { const s = statusSelections[j._rowIndex]; if (!s) return; if (confirm(`Update to "${s}"?`)) { emit('status-update', { rowIndex: j._rowIndex, newStatus: s, job: j }); statusSelections[j._rowIndex] = '' } }
 function closeDetail() { selectedJob.value = null; selectedDriverPosition.value = null; linkCopied.value = false; if (linkCopiedTimer) { clearTimeout(linkCopiedTimer); linkCopiedTimer = null }; closeDeleteConfirm() }
+// The Driver instructions section changed this load's review codes: refresh the lists,
+// then give the open load its fresh codes so its badge follows.
+async function onInstructionsChanged() {
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+  await nextTick()
+  const codes = freshInstructionCodes(selectedJob.value, props.jobs)
+  if (codes && selectedJob.value) selectedJob.value = { ...selectedJob.value, _instructionsReview: codes }
+}
 
 function openOverride() {
   if (!loadIdValue.value) return

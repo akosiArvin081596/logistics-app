@@ -26,6 +26,7 @@
       <p v-if="loading && !body" role="status" class="text-xs text-gray-500">Loading the driver instructions…</p>
 
       <p v-if="errorText && !editing" role="alert" class="di-msg di-msg-error" data-testid="di-error">{{ errorText }}</p>
+      <Button v-if="!body && errorText && !loading" type="button" size="sm" variant="outline" @click="load">Try again</Button>
       <p v-if="noticeText" role="status" class="di-msg di-msg-ok" data-testid="di-notice">{{ noticeText }}</p>
 
       <template v-if="body">
@@ -97,7 +98,7 @@
               </select>
               <textarea v-model="r.text" rows="2" class="di-text" :aria-label="`Whole-load requirement ${i + 1} text`" />
               <Button type="button" size="sm" variant="ghost" :aria-label="`Remove whole-load requirement ${i + 1}`" @click="draft.loadRequirements.splice(i, 1)">Remove</Button>
-              <p v-if="r.flag" class="di-note">{{ flagWords(r.flag) }} Remove it or reword it before saving.</p>
+              <p v-if="draftItemNote(r)" class="di-note">{{ draftItemNote(r) }}</p>
             </div>
             <Button type="button" size="sm" variant="outline" @click="draft.loadRequirements.push(blankRequirement())">Add requirement</Button>
           </fieldset>
@@ -120,7 +121,7 @@
 
             <p class="di-sub">References</p>
             <div v-for="(ref, ri) in s.references" :key="`er-${si}-${ri}`" class="di-row">
-              <select v-model="ref.type" class="di-select" :aria-label="`Stop ${si + 1} reference ${ri + 1} kind`">
+              <select :value="ref.type" class="di-select" @change="setReferenceType(ref, $event.target.value)" :aria-label="`Stop ${si + 1} reference ${ri + 1} kind`">
                 <option v-for="(label, key) in REFERENCE_LABELS" :key="key" :value="key">{{ label }}</option>
               </select>
               <Input v-model="ref.label" class="h-9 sm:w-36" placeholder="Label (optional)" :aria-label="`Stop ${si + 1} reference ${ri + 1} label`" />
@@ -136,7 +137,7 @@
               </select>
               <textarea v-model="r.text" rows="2" class="di-text" :aria-label="`Stop ${si + 1} requirement ${ri + 1} text`" />
               <Button type="button" size="sm" variant="ghost" :aria-label="`Remove stop ${si + 1} requirement ${ri + 1}`" @click="s.requirements.splice(ri, 1)">Remove</Button>
-              <p v-if="r.flag" class="di-note">{{ flagWords(r.flag) }} Remove it or reword it before saving.</p>
+              <p v-if="draftItemNote(r)" class="di-note">{{ draftItemNote(r) }}</p>
             </div>
             <Button type="button" size="sm" variant="outline" @click="s.requirements.push(blankRequirement())">Add requirement</Button>
 
@@ -147,7 +148,7 @@
               </select>
               <textarea v-model="x.text" rows="2" class="di-text" :aria-label="`Stop ${si + 1} instruction ${xi + 1} text`" />
               <Button type="button" size="sm" variant="ghost" :aria-label="`Remove stop ${si + 1} instruction ${xi + 1}`" @click="s.instructions.splice(xi, 1)">Remove</Button>
-              <p v-if="x.flag" class="di-note">{{ flagWords(x.flag) }} Remove it or reword it before saving.</p>
+              <p v-if="draftItemNote(x)" class="di-note">{{ draftItemNote(x) }}</p>
             </div>
             <div class="flex flex-wrap gap-2">
               <Button type="button" size="sm" variant="outline" @click="s.instructions.push(blankInstruction())">Add instruction</Button>
@@ -181,7 +182,7 @@ import { Input } from '@/components/ui/input'
 import DriverInstructionsPayload from './DriverInstructionsPayload.vue'
 import {
   canSeeDriverInstructions, instructionsUrl, instructionsError, statusView, canMarkReviewed,
-  rereadResultText, pendingCompare, hiddenFromDrivers, flagWords,
+  rereadResultText, pendingCompare, hiddenFromDrivers, draftItemNote, doneText, setReferenceType,
   editDraftFrom, editBody, blankReference, blankRequirement, blankInstruction, blankStop,
   REFERENCE_LABELS, CATEGORY_LABELS, INSTRUCTION_KIND_LABELS, STOP_KIND_LABELS,
 } from '../../lib/driverInstructionsView'
@@ -191,6 +192,9 @@ const props = defineProps({
   // The modal owns visibility: nothing is fetched for a closed modal.
   open: { type: Boolean, default: false },
 })
+// After a successful write: the load's review codes may have changed, so the tab
+// refreshes the dashboard and its badges.
+const emit = defineEmits(['changed'])
 
 // A re-read waits for the server's own rate-con reading (up to a minute).
 const REREAD_TIMEOUT_MS = 90000
@@ -244,6 +248,7 @@ async function load() {
   if (!canSee.value || !props.open || !id) return
   const mine = ++seq
   loading.value = true
+  errorText.value = ''
   try {
     const answer = await api.get(instructionsUrl(id))
     if (mine !== seq) return
@@ -270,6 +275,7 @@ async function write(run, done) {
     if (mine !== seq) return
     body.value = answer
     noticeText.value = done(answer)
+    emit('changed')
     return true
   } catch (e) {
     if (mine !== seq) return
@@ -291,14 +297,14 @@ function cancelEdit() {
   resetMessages()
 }
 async function save() {
-  const ok = await write((id) => api.put(instructionsUrl(id), editBody(draft.value)), () => 'Saved. Drivers see this version.')
+  const ok = await write((id) => api.put(instructionsUrl(id), editBody(draft.value)), (answer) => doneText('Saved.', answer))
   if (ok) {
     editing.value = false
     draft.value = null
   }
 }
 function markReviewed() {
-  return write((id) => api.post(instructionsUrl(id, 'review'), {}), () => 'Marked reviewed. Drivers see this version.')
+  return write((id) => api.post(instructionsUrl(id, 'review'), {}), (answer) => doneText('Marked reviewed.', answer))
 }
 async function decide(action) {
   const ok = await write(
@@ -329,7 +335,7 @@ watch(() => [props.loadId, props.open, canSee.value], ([id, open]) => {
 </script>
 
 <style scoped>
-.di-section { margin-bottom: 1rem; }
+.di-section { margin: 1rem 0; }
 .di-chip {
   font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
   padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e7eb; white-space: nowrap;

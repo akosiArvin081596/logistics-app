@@ -173,7 +173,7 @@
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" />
+          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
         </div>
       </DialogContent>
     </Dialog>
@@ -243,7 +243,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch, nextTick } from 'vue'
 import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -261,6 +261,7 @@ import ConfirmModal from '../shared/ConfirmModal.vue'
 import RateConDropzone from '../shared/RateConDropzone.vue'
 import RateConReviewModal from '../shared/RateConReviewModal.vue'
 import DriverInstructionsSection from './DriverInstructionsSection.vue'
+import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
@@ -279,6 +280,14 @@ const { show: toast } = useToast()
 const { isMobile } = useViewport()
 const auth = useAuthStore()
 const dashStore = useDashboardStore()
+// The Driver instructions section changed this load's review codes: refresh the lists,
+// then give the open load its fresh codes so its badge follows.
+async function onInstructionsChanged() {
+  try { await dashStore.refresh() } catch { /* the socket refresh will catch up */ }
+  await nextTick()
+  const codes = freshInstructionCodes(selectedJob.value, props.jobs)
+  if (codes && selectedJob.value) selectedJob.value = { ...selectedJob.value, _instructionsReview: codes }
+}
 function statusValueOf(job) { return statusCol.value ? (job[statusCol.value] || '').trim() : '' }
 const assignSelections = reactive({})
 watch(() => props.jobs, (jobs) => { jobs.forEach(j => { if (!(j._rowIndex in assignSelections)) assignSelections[j._rowIndex] = '' }) }, { immediate: true })
