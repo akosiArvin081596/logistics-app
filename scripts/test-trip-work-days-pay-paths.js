@@ -422,24 +422,27 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		parity(eq, paid, await monthViews(w, D), [...WEEK39, ...WEEK40], ["2026-09-30"]);
 	});
 
-	await R.test("B13 [Q13] Rate $280, then $320 from Wed 9/30 (pay_rate_history), a full week worked: the invoice prices Sat-Tue at $280 and Wed-Fri at $320, Total Due 4 x $280 + 3 x $320 = $2,080; with PAYOUT_RULES_V2_ENABLED off the ledger keeps one month rate (7 x $320 = $2,240), a $160 difference that is expected until datedRates is on. Base: 7 x $320 on the invoice", async ({ eq }) => {
+	await R.test("B13 [Q13; revised 2026-10-21, one pricing rule] Rate $280, then $320 from Wed 9/30 (pay_rate_history), a full week worked. The trip rule alone reads no dated rate: the invoice and the ledger both pay 7 x $320 = $2,240. With the daily-rate rule on too (DRIVER_RATE_ONLY from 2026-09) both price each day at its dated rate, Sat-Tue $280 and Wed-Fri $320: $2,080 on both. Before: the invoice read the dated rates with the trip rule alone ($2,080) while the ledger paid $2,240", async ({ eq }) => {
 		const D = "Ola Stone";
-		const w = W.startWorld({
-			env: TRIP(),
+		const weekAt = (env) => W.startWorld({
+			env,
 			drivers: [{ name: D, payDaily: 320 }],
 			payRates: [{ subject: "driver", key: norm(D), rate: 280, from: "2026-09-01T12:00:00.000Z" }, { subject: "driver", key: norm(D), rate: 320, from: "2026-09-30T13:00:00.000Z" }],
 			rows: [loadRow({ id: "Q1301", driver: D, pickup: "2026-09-26 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-09-26", done: "2026-10-02", truck: "T1" })],
 			status: [s("Q1301", "At Shipper", "2026-09-26 12:00:00"), s("Q1301", "Delivered", "2026-10-02 22:00:00")],
 		});
-		const g = await W.generate(w, D, W39);
-		eq("each grid day at its own rate", W.gridDays(g.data, W39).map((e) => [e.day, e.total]), WEEK39.map((d) => [d, d < "2026-09-30" ? 280 : 320]));
-		eq("Total Due", g.data && g.data.totalDue, 2080);
-		eq("the invoice row's total", g.invoice && g.invoice.total_earnings, 2080);
-		const led = await W.ledger(w);
-		const cents = led.pay.filter((i) => i.driver === norm(D)).reduce((a, i) => a + i.cents, 0);
-		eq("ledger with PAYOUT_RULES_V2_ENABLED off: one month rate, 7 x $320", cents, 224000);
-		eq("the documented difference, invoice minus ledger", 208000 - cents, -16000);
-		parity(eq, invDays(g, W39), await monthViews(w, D), WEEK39);
+		const ledgerCents = async (w) => (await W.ledger(w)).pay.filter((i) => i.driver === norm(D)).reduce((a, i) => a + i.cents, 0);
+		const alone = weekAt(TRIP());
+		const g = await W.generate(alone, D, W39);
+		eq("trip rule alone: each grid day at $320", W.gridDays(g.data, W39).map((e) => [e.day, e.total]), WEEK39.map((d) => [d, 320]));
+		eq("trip rule alone: Total Due and the row's total", [g.data && g.data.totalDue, g.invoice && g.invoice.total_earnings], [2240, 2240]);
+		eq("trip rule alone: the ledger pays the same", await ledgerCents(alone), 224000);
+		parity(eq, invDays(g, W39), await monthViews(alone, D), WEEK39);
+		const both = weekAt({ ...TRIP(), DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-09" });
+		const g2 = await W.generate(both, D, W39);
+		eq("with the daily-rate rule: each grid day at its dated rate", W.gridDays(g2.data, W39).map((e) => [e.day, e.total]), WEEK39.map((d) => [d, d < "2026-09-30" ? 280 : 320]));
+		eq("with the daily-rate rule: Total Due", g2.data && g2.data.totalDue, 2080);
+		eq("with the daily-rate rule: the ledger pays the same", await ledgerCents(both), 208000);
 	});
 
 	await R.test("B14 Late-known day (FROM=2026-10): a load Assigned Oct, At Shipper and delivered Fri 10/30, is marked Delivered on the sheet only after October closed. Its 10/30 is not carried onto the November invoice (closed month) and is listed in `warnings`; October's frozen ledger items are untouched", async ({ eq, ok }) => {

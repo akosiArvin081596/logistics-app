@@ -1069,8 +1069,10 @@ watch(() => [props.driver, props.loadId], reloadAll, { immediate: true })
 .tag-live { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
 .ff-price-na { font-size: 0.62rem; color: #b0b8c4; font-weight: 600; font-style: italic; }
 
+/* The bottom half of the map at most, so it never reaches the Active Loads
+   panel (TrackingMap caps that one to the top half); the body scrolls inside. */
 @media (max-width: 640px) {
-  .fuel-finder { width: 220px; }
+  .fuel-finder { width: 220px; max-height: calc(50% - 15px); }
   .ff-body { max-height: 42vh; }
 }
 </style>

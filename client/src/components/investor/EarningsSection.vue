@@ -391,8 +391,9 @@
                   <!-- `|| 250` here printed a rate the server never sent, in the one
                        place an investor goes to check the arithmetic. Show the rate
                        only when there is one; otherwise the day count and the total
-                       still reconcile without asserting a number. -->
-                  {{ d.activeDays }} unique calendar day{{ d.activeDays !== 1 ? 's' : '' }} worked<template v-if="d.dailyRate > 0"> × ${{ d.dailyRate }}/day</template>
+                       still reconcile without asserting a number. A month paid at
+                       more than one rate names each, as the server sent them. -->
+                  {{ d.activeDays }} unique calendar day{{ d.activeDays !== 1 ? 's' : '' }} worked<template v-if="Array.isArray(d.rates) && d.rates.length > 1">: {{ driverPayBasis(d) }}</template><template v-else-if="d.dailyRate > 0"> × ${{ d.dailyRate }}/day</template>
                   <span v-if="d.source === 'eld'" class="modal-src eld">ELD-verified</span>
                   <span v-else-if="d.source === 'mixed'" class="modal-src mixed">partly ELD-verified</span>
                   <span v-else class="modal-src est">estimated</span>
@@ -812,6 +813,7 @@ import { appToday } from '../../utils/datetime'
 import { monthLabel } from '../../lib/monthLabel'
 import { earningsCarryTerms, CARRY_EXPLAIN, leaseBasisOf, hasLeaseMonth, leaseNotes, extraCostsOf } from '../../lib/payoutPeriod'
 import { LEASE_LABEL, leaseSubLine, leaseExplain } from '../../lib/leasePayoutText'
+import { driverPayBasis, monthDayRates } from '../../lib/driverPay'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
@@ -992,8 +994,9 @@ const driverPayFormula = computed(() => {
   if (allFixed) {
     // Only rates the server actually resolved. A missing or zero rate is DROPPED,
     // not defaulted — falling through to prose is honest, printing someone else's
-    // rate is not.
-    const rates = [...new Set(drivers.map(d => Number(d.dailyRate)).filter(r => Number.isFinite(r) && r > 0))]
+    // rate is not. A driver paid at more than one rate this month brings each
+    // of them (his segments), so the line never quotes one rate for two.
+    const rates = monthDayRates(drivers)
     if (rates.length === 1) return `= $${rates[0]} × calendar days worked this month`
     return '= each driver’s daily rate × calendar days worked this month'
   }

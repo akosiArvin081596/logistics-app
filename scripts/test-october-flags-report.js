@@ -371,12 +371,12 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 			[[["2026-10-01", "2026-10-02"], [520, 1040, 520], "a correction invoice (Draft) for this week"]]);
 	});
 
-	await R.test("O15 (review M2) B12 alone regenerates a Draft at each day's own dated rate (invoiceDayRater()): Hal's W40 Draft, printed at his $350, prices 10/5-10/6 at the $300 pay_rate_history holds for those days, $700 -> $600. Before: not listed", async ({ eq }) => {
+	await R.test("O15 (review M2; revised 2026-10-21, one pricing rule) Dated rates price a regenerated Draft only with the daily-rate rule on: Hal's W40 Draft, printed at his $350, is not repriced by B12 alone (it pays the ledger's $350), and with all three it prices 10/5-10/6 at the $300 pay_rate_history holds for those days, $700 -> $600. Before: B12 alone repriced it", async ({ eq }) => {
 		const { f, out } = await b12Main();
-		eq("Hal's W40 Draft", invoiceRows(out.result, "b12").filter((i) => i.number === f.hal), [{
-			number: f.hal, status: "Draft", added: [], notPaid: [], repriced: [["2026-10-05", 350, 300], ["2026-10-06", 350, 300]],
-			amount: [700, 600, -100], correction: "regenerate the Draft once the flags are on",
-		}]);
+		eq("B12 alone: Hal's W40 Draft not listed", invoiceRows(out.result, "b12").filter((i) => i.number === f.hal), []);
+		eq("all three: Hal's W40 Draft", invoiceRows(out.result, "allThree").filter((i) => i.number === f.hal).map((i) => [i.status, i.repriced, i.amount]), [
+			["Draft", [["2026-10-05", 350, 300], ["2026-10-06", 350, 300]], [700, 600, -100]],
+		]);
 	});
 
 	await R.test("O16 (review L6) A percentage driver's October pay is the same in every scenario, and the report says so. Before: not checked", async ({ eq, ok }) => {

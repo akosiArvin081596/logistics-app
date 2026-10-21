@@ -856,7 +856,12 @@ let sectionMutants = 0;
 	ok(!/'= \$250 ×/.test(SFC), "§10 no hardcoded $250 empty-state label");
 	ok(!/'\$rate'/.test(SFC), "§10 no literal '$rate' placeholder leaking to the page");
 	ok(!/'driver %'/.test(SFC), "§10 no literal 'driver %' placeholder leaking to the page");
-	ok(SFC.includes("filter(r => Number.isFinite(r) && r > 0)"),
+	// The formula line's rates come from client/src/lib/driverPay.js monthDayRates()
+	// since 2026-10-21 (a driver paid at two rates brings both); the drop moved
+	// there with it (scripts/test-driver-pay-two-rates.mjs §4 runs it).
+	const DRIVER_PAY = fs.readFileSync(path.join(__dirname, "..", "client", "src", "lib", "driverPay.js"), "utf8");
+	const monthDayRatesSrc = (DRIVER_PAY.match(/\nexport function monthDayRates\(drivers\) \{\n([\s\S]*?)\n\}/) || [])[1] || "";
+	ok(SFC.includes("const rates = monthDayRates(drivers)") && monthDayRatesSrc.includes("if (Number.isFinite(n) && n > 0) out.add(n)"),
 		"§10 unknown daily rates are DROPPED, not defaulted");
 	ok(SFC.includes("= daily rate × calendar days worked this month"),
 		"§10 the empty state says 'daily rate', which is true at any rate");

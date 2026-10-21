@@ -147,7 +147,7 @@ const FNS = [
 	"listSettlableInvestors",
 	// What the totals call, shipped as is.
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "driverRateOnlyInfo", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverDayRater", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "driverRateOnlyInfo", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",

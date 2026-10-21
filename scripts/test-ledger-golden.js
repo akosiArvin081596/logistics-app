@@ -94,7 +94,7 @@ const FNS = [
 	"driverNameForTotals", "findCol", "pickAddressColumn", "excludeDroppedLoads",
 	"getDeletedLoadIds", "loadKeySet", "moneySheetDate", "appDay", "appMonthStart", "getAllExcludedDriverDays", "preDispatchPayDayFilter",
 	"getDriverPayStructures", "getDeductibleExpensesByDriverMonth", "expenseFrom", "personalLedgerPresent", "expenseDriverKey",
-	"resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
+	"resolveDailyRate", "driverDayRater", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "assignmentMonthKey",
 	"intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth",
 	"truckMonthlyFixed", "resolveInvestorSplitPct", "payoutBasisContext", "getCarrierDBFromSQLite",
 	// The ledger's own helpers once it moved onto lib/financials-calc.js.

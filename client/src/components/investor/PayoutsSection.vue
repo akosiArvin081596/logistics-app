@@ -454,6 +454,7 @@
                   <td>{{ r.driver || '—' }}</td>
                   <td class="ld-basis">
                     <template v-if="r.payType === 'percentage'">{{ r.payPercentage }}% of revenue</template>
+                    <template v-else-if="Array.isArray(r.rates) && r.rates.length > 1">{{ driverPayBasis(r) }}</template>
                     <template v-else>{{ r.activeDays }} day{{ Number(r.activeDays) === 1 ? '' : 's' }} × {{ fmtCents(r.dailyRate) }}/day</template>
                   </td>
                   <td class="mono-xs num">{{ fmtCents(r.pay) }}</td>
@@ -570,6 +571,7 @@ import { useToast } from '../../composables/useToast'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../ui/dialog'
 import PdfZoomViewer from '../shared/PdfZoomViewer.vue'
+import { driverPayBasis } from '../../lib/driverPay'
 import { fmtYmd, fmtTimestamp } from '../../utils/datetime'
 import { CARRY_LABELS, leaseBasisOf, leaseNotes, settledCarryTerms } from '../../lib/payoutPeriod'
 import { LEASE_LABEL, leaseSubLine, leaseReasonLine } from '../../lib/leasePayoutText'

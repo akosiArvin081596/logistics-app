@@ -18144,10 +18144,14 @@ function driverRateOnlyInfo() {
 
 // Check 8 of the daily integrity check under the daily-rate rule
 // (lib/integrity-check.js invoiceRateMismatches()): { from, appliesTo(month),
-// payMonthOf(day, loadIds) }, a grid day's pay month read from the Job Tracking
-// snapshot `jt` as the invoice reads it (each load's Assigned month, a load with
-// none counting as the day's own month, the earliest of them; else the day's own
-// month); null while the rule is off.
+// payMonthOf(day, loadIds), rateOf(driverKey, directoryRate, day, month),
+// ownRateOf(driverKey, directoryRate, day) }, a grid day's pay month read from
+// the Job Tracking snapshot `jt` as the invoice reads it (each load's Assigned
+// month, a load with none counting as the day's own month, the earliest of
+// them; else the day's own month), the rate the invoice should have paid that
+// day (the one driver-day price, driverDayRater(): the driver's rate in effect
+// that day), and that own rate before the $250 default, so the check can say
+// which priced the day. Null while the rule is off.
 function driverRateOnlyDayRule(jt) {
 	if (!DRIVER_RATE_ONLY_FROM) return null;
 	const cols = jobTrackingMonthCols((jt && jt.headers) || []);
@@ -18157,10 +18161,15 @@ function driverRateOnlyDayRule(jt) {
 		const id = cols.loadIdCol ? normalizeLoadId(r[cols.loadIdCol]) : "";
 		if (id) monthOf.set(id, financialsCalc.driverRateOnly.payMonthOf("", [monthOf.get(id), loadAssignedMonthKey(r, cols)]));
 	}
+	const rate = driverDayRater();
 	return {
 		from: DRIVER_RATE_ONLY_FROM,
 		appliesTo: driverRateOnlyApplies,
 		payMonthOf: (day, loadIds) => financialsCalc.driverRateOnly.payMonthOf(day, (loadIds || []).map((id) => monthOf.get(normalizeLoadId(id)) || String(day).slice(0, 7))),
+		// Asked only for a day of a month the rule prices, where a truck's rate is never read.
+		rateOf: (driverKey, directoryRate, day, month) => rate(driverKey, directoryRate, 0, day, month),
+		// The driver's own rate that day before the default (0 or less: the $250 default priced it).
+		ownRateOf: (driverKey, directoryRate, day) => rate.ownRateOn(driverKey, directoryRate, day),
 	};
 }
 
@@ -18193,6 +18202,40 @@ function resolveDailyRate(driverPayDaily, truckDaily, month) {
 	if (driverRateOnlyApplies(month)) return 250;
 	const t = Number(truckDaily) || 0;
 	return t > 0 ? t : 250;
+}
+
+// THE PRICE OF ONE DRIVER-DAY, for every pay path: the weekly invoice, its late
+// days and correction drafts, the work-days dry run, the payout ledger (and so
+// Financials and the payouts), the investor view, check 8 of the daily integrity
+// check and the reports. driverDayRater() returns
+// (driverKey, payDaily, truckRate, day, month) -> the day's rate, where
+// `driverKey` is the normalized name, `payDaily` the driver's current own rate
+// (drivers_directory.pay_daily), `truckRate` his truck's, and `month` the month
+// the day pays in (its load's Assigned month, else the day's own month).
+//   - A month the daily-rate rule prices (driverRateOnlyApplies(), a month closed
+//     under the rule included): the driver's own rate in effect that day
+//     (pay_rate_history, loadPayRateIndex(): a Drivers Directory save counts from
+//     the business day it is saved; a day before his first row reads that row),
+//     his current own rate when the history has no row for him, and the $250
+//     default when that rate is 0 or less. A truck's rate never prices it.
+//   - Any other month: resolveDailyRate(own, truck, month), as always. While the
+//     rule has never run, every month is one, and the history is never read.
+// The history is read once per rater, on its first day in a rule month. The
+// rater's ownRateOn(driverKey, payDaily, day) is the own rate it reads for a
+// day (the dated one, else the current one), before the $250 default.
+function driverDayRater() {
+	let rates = null;
+	const ownRateOn = (driverKey, payDaily, day) => {
+		if (!rates) rates = loadPayRateIndex();
+		const dated = rates.at("driver", driverKey, day);
+		return dated == null ? payDaily : dated;
+	};
+	const rate = (driverKey, payDaily, truckRate, day, month) => {
+		if (!driverRateOnlyApplies(month)) return resolveDailyRate(payDaily, truckRate, month);
+		return resolveDailyRate(ownRateOn(driverKey, payDaily, day), 0, month);
+	};
+	rate.ownRateOn = ownRateOn;
+	return rate;
 }
 
 // An expense an admin set to 'Rejected' was explicitly denied — it must never
@@ -19235,24 +19278,14 @@ function invoiceExtraRuleLoads({ data, headers, driverName, billed, weekStart, w
 	return out;
 }
 
-// (day, month) -> the daily rate an invoice prices that day at. `month` is the
+// (day, month) -> the daily rate an invoice prices that day at: the one
+// driver-day price every pay path reads (driverDayRater()). `month` is the
 // month the day pays in (its load's Assigned month, the earliest when several
-// loads pay it; else the day's own month), which resolveDailyRate() prices by
-// the daily-rate rule (DRIVER_RATE_ONLY_FROM). Under the trip work-day rule
-// (`fromMonth`, TRIP_WORK_DAYS_FROM, compared with the day's calendar month as
-// always), a day of FROM's month on is priced at the driver's own rate in
-// effect that day (pay_rate_history, loadPayRateIndex()), else the truck rate,
-// else $250; an earlier day, and every day with no `fromMonth`, keeps the one
-// rate the invoice has always used (the driver's, else the truck's, else $250).
-function invoiceDayRater({ nameNorm, payDaily, truckRate, fromMonth }) {
-	let rates = null;
-	return (day, month) => {
-		const payMonth = month || String(day).slice(0, 7);
-		if (!fromMonth || String(day).slice(0, 7) < fromMonth) return resolveDailyRate(payDaily, truckRate, payMonth);
-		if (!rates) rates = loadPayRateIndex();
-		const own = rates.at("driver", nameNorm, day);
-		return resolveDailyRate(own == null ? payDaily : own, truckRate, payMonth);
-	};
+// loads pay it; else the day's own month). The trip work-day rule reads no
+// rate of its own: its days are priced as the ledger prices them.
+function invoiceDayRater({ nameNorm, payDaily, truckRate }) {
+	const rate = driverDayRater();
+	return (day, month) => rate(nameNorm, payDaily, truckRate, day, month || String(day).slice(0, 7));
 }
 
 // The live manual invoices of a driver that may pay a driver-day without naming
@@ -19587,7 +19620,7 @@ async function settleLateWorkDays({ driverName, beforeWeekStart, readJobTracking
 		warnings.push(`NOT ADDED: ${r.day} (load ${r.loadId}) was worked by its trip timestamps but goes on no invoice: ${r.reason}.`);
 	}
 	const truckRate = truckDailyRateCandidates(driverName).slice(-1)[0];
-	const rateOf = invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate, fromMonth: resolver.fromMonth });
+	const rateOf = invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate });
 	let changed = false;
 	for (const [weekStart, list] of found.byWeek) {
 		const weekEnd = getWeekRange(weekStart).weekEnd;
@@ -19818,7 +19851,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 	const raterFor = (nm, display) => {
 		const ps = payStructs[nm] || { payType: "fixed", payDaily: 0 };
 		const truckRate = truckDailyRateCandidates(display).slice(-1)[0];
-		return invoiceDayRater({ nameNorm: nm, payDaily: ps.payDaily, truckRate, fromMonth });
+		return invoiceDayRater({ nameNorm: nm, payDaily: ps.payDaily, truckRate });
 	};
 	for (const [nm, display] of drivers) {
 		if ((payStructs[nm] || {}).payType === "percentage") continue;
@@ -20236,13 +20269,12 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 // `dailyRate` is the week's one rate, resolveDailyRate(payDaily, truckRate, the
 // week's end month), as the handler resolves it. Under the trip work-day rule or
 // the daily-rate rule each day is priced at its own rate (invoiceDayRater(), by
-// the month the day pays in, dayPayMonth) and rateOf is that rate, the total
-// their sum; otherwise rateOf is null and the total is dailyRate per day.
+// the month the day pays in, dayPayMonth: under the daily-rate rule the
+// driver's rate in effect that day) and rateOf is that rate, the total their
+// sum; otherwise rateOf is null and the total is dailyRate per day.
 // Returns { rateOf, totalOf(days) }.
 function invoiceDayPricing({ dailyRate, nameNorm, payDaily, truckRate, weekRule = null, dayPayMonth = {} }) {
-	const dayRater = weekRule || DRIVER_RATE_ONLY_FROM
-		? invoiceDayRater({ nameNorm, payDaily, truckRate, fromMonth: weekRule ? weekRule.fromMonth : null })
-		: null;
+	const dayRater = weekRule || DRIVER_RATE_ONLY_FROM ? invoiceDayRater({ nameNorm, payDaily, truckRate }) : null;
 	const rateOf = dayRater ? (ds) => dayRater(ds, dayPayMonth[ds]) : null;
 	const totalOf = (days) => (rateOf ? [...days].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : days.size * dailyRate);
 	return { rateOf, totalOf };
@@ -57821,24 +57853,36 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// A month's days at that month's rate (resolveDailyRate(), the daily-rate
 		// rule by month).
 		rateFor: (driver, struct, month) => resolveDailyRate(struct.payDaily, trucksByDriver[driver], month),
-		// Under datedRates, each day's rate: the driver's own rate in effect that
-		// day, else the rate of the truck the driver held that day as it stood then
-		// (else the truck rate the ledger reads today, else $250). In a month the
-		// daily-rate rule covers, the driver's own rate in effect that day, else
-		// $250: no truck's history is read for it.
+		// Each day's own rate, for the months dayRatedMonth names (lib/financials-calc.js):
+		//   - under datedRates, every month: the driver's own rate in effect that
+		//     day, else the rate of the truck the driver held that day as it stood
+		//     then (else the truck rate the ledger reads today, else $250); in a
+		//     month the daily-rate rule prices, the rule's day price
+		//     (driverDayRater()): no truck's history is read for it;
+		//   - otherwise, once the daily-rate rule has run (its start record), the
+		//     months it prices at the rule's day price, the driver's own rate in
+		//     effect that day, every other month at rateFor. While the rule has
+		//     never run, null: every month at rateFor, the history unread.
 		rateForDay: rules.datedRates
 			? (() => {
 				const rates = loadPayRateIndex();
+				const ruleDay = driverDayRater();
 				return (driver, struct, day, month) => {
+					if (driverRateOnlyApplies(month)) return ruleDay(driver, struct.payDaily, 0, day, month);
 					const own = rates.at("driver", driver, day);
 					const ownRate = own == null ? struct.payDaily : own;
-					if (driverRateOnlyApplies(month)) return resolveDailyRate(ownRate, 0, month);
 					const truck = heldTrucks.truckAt(driver, day);
 					const truckRate = truck ? rates.at("truck", String(truck.id), day) ?? (Number(truck.driver_pay_daily) || 0) : trucksByDriver[driver];
 					return resolveDailyRate(ownRate, truckRate, month);
 				};
 			})()
-			: null,
+			: driverRateOnlyStartRecord()
+				? (() => {
+					const ruleDay = driverDayRater();
+					return (driver, struct, day, month) => ruleDay(driver, struct.payDaily, trucksByDriver[driver], day, month);
+				})()
+				: null,
+		dayRatedMonth: rules.datedRates ? null : (month) => driverRateOnlyApplies(month),
 		tripByMonth, maintByMonth, complianceByMonth, receipts, maintRows, complianceRows, tripExpenseItems,
 		fixedTrucks, truckChargedInMonth, truckMonthlyFixed,
 		isZeroActivityMonth: investorPayoutBasis.isZeroActivityMonth,
@@ -59680,10 +59724,13 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const driverDayRates = Object.create(null);
 		let totalDriverPay = 0;
 		const trucksByDriver = truckRatesByDriver(investorDriverSet ? user.id : null);
-		// Each all-time day's rate: the rate of the month it pays in (its earliest
-		// monthly bucket, the month the day-once rule keeps it in; an added day's own
-		// month). While the daily-rate rule is off every month gives the driver's one
-		// rate, so the all-time figure stays days x that rate.
+		// Each all-time day's rate: the driver-day price (driverDayRater()) by the
+		// month it pays in (its earliest monthly bucket, the month the day-once rule
+		// keeps it in; an added day's own month): in a month the daily-rate rule
+		// prices, his rate in effect that day. While the daily-rate rule is off
+		// every month gives the driver's one rate, so the all-time figure stays
+		// days x that rate.
+		const dayRate = driverDayRater();
 		const dayRateOf = (driver, struct) => {
 			const monthOfDay = new Map();
 			for (const mk of Object.keys(driverMonthlyDays[driver] || {}).sort()) {
@@ -59691,7 +59738,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 			}
 			return (d) => {
 				const month = monthOfDay.get(d) || d.slice(0, 7);
-				return { day: d, month, rate: resolveDailyRate(struct.payDaily, trucksByDriver[driver], month) };
+				return { day: d, month, rate: dayRate(driver, struct.payDaily, trucksByDriver[driver], d, month) };
 			};
 		};
 		{
@@ -59817,9 +59864,30 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const monthExp = (expensesByDriverMonth[driver] || {})[mk] || 0;
 					const net = Math.max(0, monthRev - monthExp);
 					let pay, dailyRate;
+					let rates = null;
 					if (struct.payType === "percentage") {
 						pay = Math.round((net * struct.payPercentage / 100) * 100) / 100;
 						dailyRate = 0;
+					} else if (driverRateOnlyApplies(mk)) {
+						// A month the daily-rate rule prices: each day at the driver's rate in
+						// effect that day (driverDayRater()), as the payout ledger pays it. Paid
+						// at more than one rate, the month names its segments, and its rate is
+						// their average to the cent (the ledger's month row says the same).
+						let payCents = 0;
+						const list = [...daySet].sort().map((d) => {
+							const rate = dayRate(driver, struct.payDaily, trucksByDriver[driver], d, mk);
+							payCents += Math.round(rate * 100);
+							return { day: d, month: mk, rate };
+						});
+						const segments = financialsCalc.driverRateOnly.rateSegments(list);
+						if (segments.length > 1) {
+							rates = segments;
+							dailyRate = Math.round(payCents / activeDays) / 100;
+							pay = payCents / 100;
+						} else {
+							dailyRate = segments.length ? segments[0].rate : fixedRate;
+							pay = activeDays * dailyRate;
+						}
 					} else {
 						dailyRate = fixedRate;
 						pay = activeDays * dailyRate;
@@ -59862,6 +59930,7 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					if (!monthlyDriverDetails[mk]) monthlyDriverDetails[mk] = Object.create(null); // driver-keyed
 					monthlyDriverDetails[mk][driver] = {
 						activeDays, dailyRate, totalPay: pay,
+						...(rates ? { rates } : {}),
 						payType: struct.payType,
 						payPercentage: struct.payType === "percentage" ? struct.payPercentage : 0,
 						monthRevenue: Math.round(monthRev),
@@ -61054,9 +61123,11 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 //     of those changes the rendered bytes, so rendering counts as template.
 //   • lib/lease-payout-text.js — the lease sentences a lease month's statement
 //     prints, which payout-statement.js takes from there.
+//   • lib/driver-pay-text.js — the Driver Pay basis of a driver paid at more
+//     than one daily rate, which payout-statement.js takes from there.
 //
 // ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
-// still for: anything outside these four files. A Puppeteer/Chromium upgrade
+// still for: anything outside these five files. A Puppeteer/Chromium upgrade
 // re-rasterizes glyphs with no diff in lib/; a Google Fonts change upstream
 // arrives with no diff anywhere; a bad batch needs a forced re-render for
 // operational reasons. Hashing package-lock.json was considered and REJECTED —
@@ -61068,6 +61139,7 @@ const STATEMENT_TEMPLATE_FILES = [
 	"./lib/broker-invoice.js",
 	"./lib/pdf-browser.js",
 	"./lib/lease-payout-text.js",
+	"./lib/driver-pay-text.js",
 ];
 
 // Computed ONCE, here, at module load — never per request. require.resolve so a

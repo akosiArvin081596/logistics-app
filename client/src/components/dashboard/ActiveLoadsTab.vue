@@ -127,12 +127,12 @@
     <Dialog :open="!!selectedJob" @update:open="v => { if (!v) closeDetail() }">
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
-            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <div class="detail-head" style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
+            <div class="detail-title" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
               <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
               <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Click Edit to fill in the gaps.">⚠ Needs Review</span>
             </div>
-            <div style="display:flex;gap:0.5rem;align-items:center;">
+            <div class="detail-actions" style="display:flex;gap:0.5rem;align-items:center;">
               <button
                 v-if="loadIdValue"
                 type="button"
@@ -1194,6 +1194,16 @@ const detailSections = computed(() => {
   align-items: center;
 }
 .mobile-load-select { flex: 1; min-width: 0; }
+/* Load detail header on a phone (below the 768 px isMobile breakpoint): the
+   actions take their own rows under the title, wrapping as needed, instead of
+   running past the dialog's right edge, where Edit and Delete could not be
+   reached at 390 px. The title keeps clear of the dialog's Close button. From
+   768 px up the header is one row, as before. */
+@media (max-width: 767px) {
+  .detail-head { flex-wrap: wrap; }
+  .detail-title { padding-right: 1.5rem; }
+  .detail-actions { flex-wrap: wrap; }
+}
 /* The reference a search matched (Order #, PO #, ...), under the Load ID. */
 .ref-chip {
   display: block;
