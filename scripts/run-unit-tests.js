@@ -237,9 +237,14 @@ async function main() {
 	const skipped = SKIP_TIMING ? files.filter((f) => TIMING_SENSITIVE.has(f)) : [];
 	const toRun = files.filter((f) => !skipped.includes(f));
 
+	// Never process.exit() after printing more than one short line: once the
+	// pipe to a slow reader is full, Node holds the rest of stdout, and exit
+	// drops it. (The error exits here print one short line, which fits.) On a
+	// loaded CI machine that cut this list short (release-gate §4 read 189 of
+	// 328, 2026-10-21). Returning lets Node flush stdout before the process ends.
 	if (process.argv.includes("--list")) {
-		for (const f of toRun) console.log(f);
-		process.exit(0);
+		process.stdout.write(toRun.map((f) => `${f}\n`).join(""));
+		return;
 	}
 
 	console.log(
@@ -331,7 +336,9 @@ async function main() {
 		);
 	}
 
-	process.exit(failed.length ? 1 : 0);
+	// exitCode, not process.exit(): the failure output above must reach the log
+	// whole (see --list).
+	process.exitCode = failed.length ? 1 : 0;
 }
 
 main().catch((err) => {
