@@ -23,6 +23,10 @@
 //      keeps its attachment (stores/messages.js)
 //   §4 the driver thread (driver/ChatView.vue), MOUNTED: the same, and a photo
 //      arriving live keeps its attachment (stores/driver.js)
+//   §5 the investor thread (investor/InvestorChat.vue), MOUNTED: the same
+//      viewer, and the investor's own photo shows in his bubble only once the
+//      message naming it is saved (a chat file opens only for the conversation
+//      of the message that sent it)
 //
 // No DOM, no server: components are compiled from their .vue files and mounted
 // on an in-memory renderer. Vue comes from client/node_modules; the sources
@@ -496,6 +500,92 @@ const CHAT_REL = 'client/src/components/driver/ChatView.vue'
   const live = /addIncomingMessage\s*\(msg\)\s*\{[\s\S]*?\n {4}\},/.exec(src)
   ok('§4 stores/driver.js addIncomingMessage keeps attachment_url and attachment_type',
     !!live && /attachment_url:\s*msg\.attachment_url/.test(live[0]) && /attachment_type:\s*msg\.attachment_type/.test(live[0]))
+}
+
+// ══ §5 the investor thread ═══════════════════════════════════════════════════
+// The investor portal's Messages section: the same viewer, and an investor's
+// own photo shows in his bubble only once the message naming it is saved
+// (a chat file opens only for the conversation the message that sent it is in).
+const INV_REL = 'client/src/components/investor/InvestorChat.vue'
+{
+  const invThread = () => ([
+    { id: 1, timestamp: '2026-10-20T13:00:00.000Z', from: 'Dispatch', to: 'inv_t', message: 'hi', read: 1, attachment_url: P1, attachment_type: 'image' },
+    { id: 2, timestamp: '2026-10-20T13:01:00.000Z', from: 'inv_t', to: 'admin', message: '', read: 1, attachment_url: P2, attachment_type: 'image' },
+    { id: 3, timestamp: '2026-10-20T13:02:00.000Z', from: 'Dispatch', to: 'inv_t', message: '', read: 1, attachment_url: PDF, attachment_type: 'pdf' },
+  ])
+  const NEW = '/uploads/chat/chat_1700000000009_zzzzz.jpg'
+  const calls = []
+  let releaseMessage = null
+  const api = {
+    get: async () => ({ messages: invThread() }),
+    put: async () => ({}),
+    post: (url, body) => {
+      calls.push(url)
+      if (url === '/api/chat/attachment') return Promise.resolve({ success: true, fileUrl: NEW, attachmentType: 'image' })
+      if (url === '/api/messages') return new Promise((resolve) => { releaseMessage = () => resolve({ success: true, id: 99 }) })
+      return Promise.resolve({})
+    },
+  }
+  let onFiles = null
+  let chatAttachment = null
+  try { chatAttachment = await import(pathToFileURL(path.join(ROOT, 'client', 'src', 'lib', 'chatAttachment.js')).href) } catch { chatAttachment = null }
+  const overrides = {
+    '../../composables/useApi': { useApi: () => api },
+    '../../composables/useSocket': { useSocket: () => ({ on() {}, off() {} }) },
+    '../../composables/useFileDrop': {
+      useFileDrop: (opts) => { onFiles = opts.onFiles; return { dropzoneProps: {}, inputProps: {}, setInputEl() {}, dragActive: Vue.ref(false), error: Vue.ref(''), notice: Vue.ref(''), clearMessages() {} } },
+    },
+    // The picked file, already read (FileReader is a browser API).
+    '../../lib/chatAttachment': chatAttachment && {
+      ...chatAttachment,
+      prepareChatAttachment: async (file) => ({ ok: true, error: '', attachment: { displayName: file.name, fileName: file.name, mediaType: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,AAAA', uploaded: null } }),
+    },
+    '../../stores/auth': { useAuthStore: () => ({ user: { username: 'inv_t', role: 'Investor' } }) },
+    '../../stores/investor': { useInvestorStore: () => ({ data: null }) },
+  }
+  let Inv = null
+  try { Inv = await compileComponent(INV_REL, { overrides, real: ['ZoomableImage.vue'] }) } catch (err) { ok(`§5 InvestorChat.vue compiles (${err.message})`, false) }
+  if (Inv && chatAttachment) {
+    const m = mountInMemory(Inv, { trucks: [] })
+    await drain()
+    const photoButtons = m.findAll((n) => n.tag === 'button' && hasClass(n, 'attach-photo'))
+    ok('§5 the investor thread shows each photo as a button (2), a PDF as a link', photoButtons.length === 2 && !!m.find((n) => n.tag === 'a' && n.props.href === PDF))
+    ok('§5 ...with the button\'s purpose and the photo\'s alt text', photoButtons.length === 2 && photoButtons[0].props['aria-label'] === 'Open full size: Photo from Dispatch' && imgIn(photoButtons[0])?.props?.alt === 'Photo from Dispatch')
+    ok('§5 no photo opens in a new tab any more', !m.find((n) => n.tag === 'a' && (n.props.href === P1 || n.props.href === P2)))
+    if (photoButtons.length === 2) {
+      await click(photoButtons[0])
+      ok('§5 a photo opens full size as "Photo 1 of 2"', !!dialogOf(m) && imgIn(dialogOf(m))?.props?.src === P1 && m.textOf(m.find((n) => hasClass(n, 'zoom-position'))) === 'Photo 1 of 2')
+      await click(buttonNamed(m, 'Next photo'))
+      ok('§5 Next shows the investor\'s own photo', imgIn(dialogOf(m))?.props?.src === P2)
+      key('Escape'); await drain()
+      ok('§5 Esc closes, focus back on the photo', !dialogOf(m) && globalThis.document.activeElement === photoButtons[0])
+    }
+    // Send a photo: it shows only after the message naming it is saved.
+    await onFiles([{ name: 'IMG_0001.jpg', type: 'image/jpeg', size: 1000 }])
+    await drain()
+    const sendBtn = m.find((n) => n.tag === 'button' && hasClass(n, 'send-btn'))
+    await click(sendBtn)
+    for (let i = 0; i < 5 && !calls.includes('/api/messages'); i++) await drain()
+    // The investor types the next message while this one is still sending,
+    // which re-renders the thread.
+    const box = m.find((n) => (n.tag === 'textarea' || n.tag === 'input') && typeof n.props.onKeydown === 'function')
+    if (box) {
+      box.value = 'next'
+      for (const fn of box.listeners.input || []) fn({ target: box })
+      await drain()
+    }
+    ok('§5 (the composer is found and re-renders the thread while sending)', !!box)
+    const shownEarly = m.find((n) => n.tag === 'img' && n.props.src === NEW)
+    ok('§5 sending: the photo is uploaded, then the message is posted', calls.includes('/api/chat/attachment') && calls.includes('/api/messages'))
+    ok('§5 ...and the bubble does not show the photo before the message is saved', !shownEarly)
+    if (releaseMessage) releaseMessage()
+    await drain()
+    const shown = m.find((n) => n.tag === 'img' && n.props.src === NEW)
+    ok('§5 once the message is saved, the photo shows (as a button that opens the viewer)', !!shown && shown.parent && hasClass(shown.parent, 'attach-photo'))
+    m.unmount()
+  } else if (!chatAttachment) {
+    ok('§5 lib/chatAttachment.js loads', false)
+  }
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)
