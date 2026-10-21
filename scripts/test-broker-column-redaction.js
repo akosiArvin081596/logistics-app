@@ -882,6 +882,7 @@ function mountPostData(routeSrc, M, rows) {
 		db: { prepare: () => { throw new Error("the database is not reached by this fixture"); } },
 		driverCellRefusal: M.driverCellRefusal,
 		brokerContact: BROKER_CONTACT,
+		loadIdRule: require("../lib/load-id-rule"),
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const names = Object.keys(env);

@@ -38097,6 +38097,9 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 	}
 });
 
+// The Load ID rule a new Job Tracking row is held to (see the append below).
+const loadIdRule = require("./lib/load-id-rule");
+
 // CREATE — Append a new row
 //
 // ⚠️ SUPER ADMIN ONLY (2026-09-26), like GET. It appends a caller-built row to
@@ -38213,6 +38216,19 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				});
 			}
 			appendHeaders = hdrs;
+			// A new load's Load ID is held to the rule its own pages open it by
+			// (lib/load-id-rule.js): its edge whitespace is trimmed before anything
+			// below reads it, and an ID those pages refuse (a space inside, a # after
+			// the first character, over 40 characters) is refused 400
+			// INVALID_LOAD_ID naming the column, with nothing written, so a load is
+			// never created that its details dialog cannot open. A blank Load ID is
+			// not judged here; New Job asks for one before it posts.
+			const loadIdIdx = Array.isArray(values) ? hdrs.findIndex((h) => /load.?id|job.?id/i.test(h)) : -1;
+			if (loadIdIdx >= 0 && loadIdRule.trimLoadId(values[loadIdIdx])) {
+				const loadIdRefusal = loadIdRule.newLoadIdRefusal(values[loadIdIdx], String(hdrs[loadIdIdx]).trim());
+				if (loadIdRefusal) return res.status(400).json(loadIdRefusal);
+				if (typeof values[loadIdIdx] === "string") values[loadIdIdx] = values[loadIdIdx].trim();
+			}
 			// A Driver cell that reads as a built-in property name is refused, 400
 			// DRIVER_NAME_RESERVED naming the column (driverCellRefusal(), as the row
 			// saves refuse it). A new row has no stored cells, so every cell counts.
