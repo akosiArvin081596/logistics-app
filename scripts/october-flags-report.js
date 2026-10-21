@@ -819,7 +819,7 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 		const parts = PARTS[k];
 		const rows = new Map();
 		const rowOf = (number) => {
-			if (!rows.has(number)) rows.set(number, { b12: null, b12NotPaid: new Set(), b12Pricing: [], rate: [], manual: false, b4Added: new Map(), b4NotPaid: new Set() });
+			if (!rows.has(number)) rows.set(number, { b12: null, b12Held: null, b12NotPaid: new Set(), b12Pricing: [], rate: [], manual: false, b4Added: new Map(), b4NotPaid: new Set() });
 			return rows.get(number);
 		};
 		const repricedOf = (r) => r.days.map((d) => ({ day: d.day, printed: d.printed, scenario: d.rule }));
@@ -842,9 +842,18 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 			if (!dry.closedMonthsUnchanged || !dry.monthsBeforeFromUnchanged) {
 				for (const p of dry.problems) problems.push({ scenario: k, ownerId: p.ownerId, issue: `B12 dry run: ${p.issue}`, closed: !!p.closed, beforeMonth: !!p.beforeFrom });
 			}
+			// A day a deleted correction Draft named is refused by the switch-on
+			// (refusedDays kind deletedDraft; 2026-10-21 item 2), though the dry
+			// run's per-invoice projection still adds it: it is left to a person.
+			const held = new Map();
+			for (const d of dry.refusedDays) if (d.kind === "deletedDraft") held.set(`${index.norm(d.driver)}\t${d.day}`, d);
 			for (const p of dry.perInvoice) {
 				const row = rowOf(p.invoiceNumber);
-				row.b12 = { days: p.addedDays, amount: p.amountAdded, action: p.afterSwitchOn, pays: b12Pays(p.afterSwitchOn) };
+				const nm = index.norm(p.driver);
+				const out = p.addedDays.filter((d) => held.has(`${nm}\t${d}`));
+				const outAmount = round2(out.reduce((c, d) => c + held.get(`${nm}\t${d}`).amount, 0));
+				row.b12 = { days: p.addedDays.filter((d) => !out.includes(d)), amount: round2(p.amountAdded - outAmount), action: p.afterSwitchOn, pays: b12Pays(p.afterSwitchOn) };
+				if (out.length) row.b12Held = { days: out, amount: outAmount, reason: `not added: ${held.get(`${nm}\t${out[0]}`).reason}` };
 				for (const d of p.droppedDays) row.b12NotPaid.add(d);
 			}
 			refusedBy[k] = dry.refusedDays.map((d) => ({ driver: label(index.norm(d.driver)), day: d.day, loadId: d.loadId, amount: d.amount, kind: d.kind, reason: d.reason }));
@@ -881,6 +890,7 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 			const b12Days = row.b12 ? row.b12.days : [];
 			if (row.b12 && b12Days.length && row.b12.pays) out.push({ part: "B12", addedDays: b12Days, notPaidDays: [], repricedDays: [], cents: cents(row.b12.amount), action: row.b12.action });
 			if (row.b12 && b12Days.length && !row.b12.pays) notAdded.push({ days: b12Days, amount: round2(row.b12.amount), reason: row.b12.action });
+			if (row.b12Held) notAdded.push(row.b12Held);
 			const b12Dropped = sorted([...row.b12NotPaid]);
 			const b12Priced = row.b12Pricing.filter((d) => !notPaid.has(d.day));
 			if (b12Dropped.length || b12Priced.length) {
@@ -1111,7 +1121,9 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 		driverTotals: { today: driverTotals.today, both: driverTotals[BOTH] },
 		investors: investorRows.map((i) => ({ ownerId: i.ownerId, investor: i.investor, today: i.byScenario.today.payable, both: i.byScenario[BOTH].payable })),
 		investorTotals: { today: investorTotals.today, both: investorTotals[BOTH] },
-		invoices: invoicesBy[BOTH] || [],
+		// The invoices that change (a row with only days left to a person is in
+		// the full list, not here).
+		invoices: (invoicesBy[BOTH] || []).filter((i) => i.difference || i.addedDays.length || i.notPaidDays.length),
 	};
 
 	// The earlier figures this report replaces (labels, not computations).
