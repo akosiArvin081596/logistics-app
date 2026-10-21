@@ -55,6 +55,7 @@ const PROBE_DB = path.join(TMP, "probe", "app.db");
 fs.mkdirSync(path.dirname(PROBE_ENV), { recursive: true });
 fs.writeFileSync(PROBE_ENV, "MADE_UP=1\n");
 fs.writeFileSync(PROBE_DB, "made up\n");
+const BASE = Object.freeze({ receiptsDir: RECEIPTS, cacheDir: CACHE, probes: { env: PROBE_ENV, db: PROBE_DB } });
 
 let nextId = 1000;
 function put(bytes, ext = "pdf") {
@@ -155,6 +156,7 @@ const jpegClean = (buf) => {
 		log: (line) => logs.push(line),
 	});
 	const prep = (bytes) => svc.prepare(put(bytes));
+	let plainOut = null;           // a clean output, for the fake self-test children below
 
 	// ---- self-test (T39) ----------------------------------------------------
 	console.log("T39 the self-test line");
@@ -174,6 +176,7 @@ const jpegClean = (buf) => {
 	console.log("a plain one-page receipt");
 	{
 		const r = await prep(onePage());
+		if (r.status === "pages") plainOut = r.pdf;
 		const o = r.status === "pages" ? await inspect(r.pdf) : null;
 		check("a plain receipt comes back as one Letter page", [r.status, r.pages, o && o.pages, o && o.size], ["pages", 1, 1, [612, 792]]);
 		check("its page is drawn from a Form XObject (no catalog, Info or ID copied)",
@@ -306,7 +309,7 @@ const jpegClean = (buf) => {
 	{
 		const HANG = scratchChild("hang-child.js", "process.once('message', () => { setInterval(() => {}, 1000); });\n");
 		const pids = [];
-		const hang = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, childPath: HANG, timeoutMs: 600, trace: (e, i) => { if (e === "fork") pids.push(i.pid); } });
+		const hang = rp.createReceiptPdfService({ ...BASE, childPath: HANG, timeoutMs: 600, trace: (e, i) => { if (e === "fork") pids.push(i.pid); } });
 		const r = await hang.prepare(put(onePage()));
 		const jobPid = pids[pids.length - 1];
 		await new Promise((res) => setTimeout(res, 200));
@@ -321,7 +324,7 @@ const jpegClean = (buf) => {
 		const doc = await PDFDocument.create({ updateMetadata: false });
 		doc.addPage([100, 100]);
 		doc.context.register(doc.context.obj({ Type: "Font", Subtype: "Type1", BaseFont: "Helvetica", JS: "void 0" }));
-		const planted = await PDFDocument.load(await doc.save({ useObjectStreams: false }), { updateMetadata: false });
+		const withJs = await PDFDocument.load(await doc.save({ useObjectStreams: false }), { updateMetadata: false });
 		const orphanPdf = (body) => rawPdf(["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>", body]);
 		const escaped = await PDFDocument.load(orphanPdf("<< /Open#41ction 1 0 R >>"), { updateMetadata: false });
 		const action = await PDFDocument.load(orphanPdf("<< /Next << /S /JavaScript >> >>"), { updateMetadata: false });
@@ -329,8 +332,8 @@ const jpegClean = (buf) => {
 		cleanDoc.addPage([100, 100]).node.delete(PDFName.of("Annots"));
 		const clean = await PDFDocument.load(await cleanDoc.save({ useObjectStreams: false }), { updateMetadata: false });
 		const scan = (d) => childLib.postScan(pdfLib, stripImageMetadata, d, childLib.DEFAULT_LIMITS);
-		check("T16 refused: a planted /JS in an orphan object, a key spelt with a #xx escape, an action type as a value; a clean file passes",
-			[scan(planted), scan(escaped), scan(action), scan(clean)], ["key:JS", "key:OpenAction", "value:JavaScript", null]);
+		check("T16 refused: a /JS key in an unreferenced object, a key spelt with a #xx escape, an action type as a value; a clean file passes",
+			[scan(withJs), scan(escaped), scan(action), scan(clean)], ["key:JS", "key:OpenAction", "value:JavaScript", null]);
 		const lower = PDFName.of("OpenActio#6e");
 		check("T16 a lower-case escape stays literal in pdf-lib and is written with '#' as #23 (a viewer reads the same literal name)",
 			[childLib.plainName(lower), lower.asString()], ["OpenActio#6e", "/OpenActio#236e"]);
@@ -462,6 +465,120 @@ const jpegClean = (buf) => {
 			[t32.status, t32.reason, childLib.postScan(pdfLib, stripImageMetadata, orphan, childLib.DEFAULT_LIMITS)], ["on_file", "resource_graph", "key:OpenAction"]);
 	}
 
+	// ---- review round 1 ---------------------------------------------------------
+	console.log("R1 review round 1: page content, references, content totals, probes, input");
+	{
+		const exifJpeg = fixtureJpeg({ exif: gpsTiff() });
+		const inlineTail = Buffer.concat([Buffer.from("/W 8 /H 8 /CS /G /BPC 8 /F /DCT ID "), exifJpeg, Buffer.from(" EI Q")]);
+		const pageWith = (contents, objects) => rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+			`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents [${contents}] >>`,
+			...objects,
+		]);
+
+		const split = await prep(pageWith("4 0 R 5 0 R", [streamObject("", "q 10 0 0 10 0 0 cm BI"), streamObject("", inlineTail)]));
+		const twoStreams = await prep(pageWith("4 0 R 5 0 R", [streamObject("", "q 0 0 1 rg"), streamObject("", "10 10 50 50 re f Q")]));
+		check("M1 an inline image split across two of the page's content streams: refused; two ordinary streams still copy",
+			[split.status, split.reason, twoStreams.status], ["on_file", "inline_image", "pages"]);
+
+		const doubleForm = await prep(onePage({
+			content: "/Fm0 Do",
+			resources: "/XObject << /Fm0 5 0 R >>",
+			extra: ["6 0 R", streamObject("/Type /XObject /Subtype /Form /BBox [0 0 100 100]", Buffer.concat([Buffer.from("q BI "), inlineTail]))],
+		}));
+		const doubleCatalog = await prep(onePage({ content: "BT /F1 12 Tf 10 10 Td (x) Tj ET", resources: "/Font << /F1 5 0 R >>", extra: ["1 0 R"] }));
+		check("M2 an object that is only a reference to a form, or to the catalog: refused (resource_graph)",
+			[doubleForm.status, doubleForm.reason, doubleCatalog.status, doubleCatalog.reason], ["on_file", "resource_graph", "on_file", "resource_graph"]);
+		const refOnly = await PDFDocument.load(rawPdf(["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>", "1 0 R"]), { updateMetadata: false });
+		check("M2 the post-scan refuses an object that is only a reference", childLib.postScan(pdfLib, stripImageMetadata, refOnly, childLib.DEFAULT_LIMITS), "indirect_reference");
+
+		const forty = await prep(pageWith(Array(40).fill("4 0 R").join(" "), [streamObject("", Buffer.alloc(1024 * 1024, 0x20))]));
+		const many = await prep(pageWith(Array(257).fill("4 0 R").join(" "), [streamObject("", "0 0 1 rg")]));
+		check("M3 one 1 MB uncompressed stream listed 40 times: refused by the job total; more than 256 content streams on a page: refused",
+			[forty.status, forty.reason, many.status, many.reason], ["on_file", "decode_total_cap", "on_file", "page_contents"]);
+
+		const noProbes = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE });
+		const np = await noProbes.selfTest();
+		const wrongLogs = [];
+		const wrongProbes = rp.createReceiptPdfService({ ...BASE, probes: { env: path.join(TMP, "probe", "absent.env"), db: PROBE_DB }, log: (l) => wrongLogs.push(l) });
+		const wp = await wrongProbes.selfTest();
+		check("L1 the self-test fails with no probe paths, or with a probe path that does not exist (probe_missing)",
+			[np.passed, np.problems, wp.passed, wp.problems, /env_readable=missing db_readable=no/.test(wrongLogs[0] || "")], [false, ["probe_missing"], false, ["probe_missing"], true]);
+
+		let threw = null;
+		let results = null;
+		try {
+			results = await Promise.all([svc.prepare(null), svc.prepare(undefined), svc.prepare(null, null), svc.prepare({ expenseId: 1, photoData: "" }, null)]);
+		} catch (err) {
+			threw = err && err.name;
+		}
+		check("L2 prepare(null), prepare(undefined) and a null options object give a result, never a throw",
+			[threw, results && results.map((x) => `${x.status}:${x.reason}`)], [null, ["unavailable:no receipt", "unavailable:no receipt", "unavailable:no receipt", "unavailable:no receipt"]]);
+	}
+
+	// ---- L6: more limits and strips ------------------------------------------------
+	console.log("L6 the queue, more limits and strips, the self-test's identity checks");
+	{
+		const SLOW = scratchChild("slow-child.js", "process.once('message', () => setTimeout(() => process.send({ ok: false, reason: 'probe' }, () => process.exit(0)), 300));\n");
+		const slow = rp.createReceiptPdfService({ ...BASE, childPath: SLOW, queueCap: 1 });
+		await slow.selfTest();
+		const three = await Promise.all([1, 2, 3].map((n) => slow.prepare(put(onePage({ content: `0 0 1 rg ${n} ${n} 5 5 re f` })))));
+		check("L6 one child at a time and a capped queue: past the cap a receipt is refused (busy)",
+			[three.map((x) => x.reason).sort(), slow.stats().maxRunning], [["busy", "probe", "probe"], 1]);
+
+		const objStmBig = streamObject("/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode", zlib.deflateSync(Buffer.concat([Buffer.from("6 0 "), Buffer.alloc(9 * 1024 * 1024, 0x20)])));
+		const loadCap = await prep(onePage({ extra: [objStmBig] }));
+		check("L6 an object stream inflating past 8 MB while the file loads: refused (decode_cap)", [loadCap.status, loadCap.reason], ["on_file", "decode_cap"]);
+
+		const plainJpeg = fixtureJpeg();
+		const strips = await prep(onePage({
+			content: `${DRAW_IM0} /Fm0 Do`,
+			resources: "/XObject << /Im0 5 0 R /Fm0 6 0 R >>",
+			extra: [
+				streamObject(`${IMAGE_DICT} /Filter /DCTDecode /OC << /Type /OCG /Name (layer) >> /Alternates [<< /Image 7 0 R /DefaultForPrinting true >>]`, plainJpeg),
+				streamObject("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /PieceInfo << /Example << /LastModified (D:20260101000000Z) /Private (x) >> >>", "0 0 5 5 re f"),
+				streamObject(`${IMAGE_DICT} /Filter /DCTDecode`, plainJpeg),
+			],
+		}));
+		const os6 = strips.status === "pages" ? await inspect(strips.pdf) : null;
+		check("L6 /OC, /Alternates and /PieceInfo are stripped", [strips.status, os6 && hasAny(os6.names, ["OC", "OCG", "Alternates", "DefaultForPrinting", "PieceInfo", "LastModified"])], ["pages", []]);
+
+		const capped = rp.createReceiptPdfService({ ...BASE, limits: { outputMax: 4000 } });
+		const noisy = require("crypto").randomBytes(8192);
+		const tooBigOut = await capped.prepare(put(onePage({ content: DRAW_IM0, resources: "/XObject << /Im0 5 0 R >>", extra: [streamObject("/Type /XObject /Subtype /Image /Width 64 /Height 128 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode", noisy)] })));
+		check("L6 an output over the output cap: refused (output_too_large)", [capped.state(), tooBigOut.status, tooBigOut.reason], ["passed", "on_file", "output_too_large"]);
+
+		const direct = await prep(onePage({ content: "/Fm0 Do", resources: "/XObject << /Fm0 << /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 12 >>\nstream\n0 0 5 5 re f\nendstream >>" }));
+		check("L6 a stream written inside a dictionary: refused (direct_stream)", [direct.status, direct.reason], ["on_file", "direct_stream"]);
+
+		const walker = rp.createReceiptPdfService({ ...BASE, limits: { maxWalk: 5000 } });
+		const wide = await walker.prepare(put(onePage({ resources: `/Extra [${Array.from({ length: 10_000 }, (_, i) => i).join(" ")}]` })));
+		check("L6 resources wider than the walk limit: refused (resource_graph)", [walker.state(), wide.status, wide.reason], ["passed", "on_file", "resource_graph"]);
+		const smallDoc = await PDFDocument.load(rawPdf(["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>"]), { updateMetadata: false });
+		check("L6 the post-scan stops at the walk limit (post_scan_size)", childLib.postScan(pdfLib, stripImageMetadata, smallDoc, { ...childLib.DEFAULT_LIMITS, maxWalk: 3 }), "post_scan_size");
+
+		const pred = await prep(onePage({ content: streamObject("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 4 >>", zlib.deflateSync(Buffer.from("0 0 1 rg"))) }));
+		const badJpeg = await prep(onePage({ content: DRAW_IM0, resources: "/XObject << /Im0 5 0 R >>", extra: [streamObject(`${IMAGE_DICT} /Filter /DCTDecode`, "not a jpeg at all")] }));
+		check("L6 page content with a predictor: refused (predictor); a JPEG that cannot be walked: refused (image_metadata)",
+			[pred.reason, badJpeg.reason], ["predictor", "image_metadata"]);
+
+		if (!plainOut) {
+			check("L6 a clean output is available for the fake self-test children", false, true);
+		} else {
+			const fake = (name, identity) => scratchChild(name, [
+				`const pdf = Buffer.from(${JSON.stringify(Buffer.from(plainOut).toString("base64"))}, "base64");`,
+				`process.once('message', () => process.send({ ok: true, identity: ${JSON.stringify(identity)}, hook: true, result: { ok: true, pdf, pages: 1 } }, () => process.exit(0)));`,
+			].join("\n"));
+			const ok = { gid: 20, groups: [20], env: "no", db: "no", permission: "on" };
+			const root = await rp.createReceiptPdfService({ ...BASE, selfTestChildPath: fake("fake-uid0.js", { ...ok, uid: 0 }) }).selfTest();
+			const wheel = await rp.createReceiptPdfService({ ...BASE, selfTestChildPath: fake("fake-group0.js", { ...ok, uid: 501, groups: [20, 0] }) }).selfTest();
+			const gid0 = await rp.createReceiptPdfService({ ...BASE, selfTestChildPath: fake("fake-gid0.js", { ...ok, uid: 501, gid: 0 }) }).selfTest();
+			check("L6 the self-test fails on uid 0, on group 0 and on gid 0 (identity), and on nothing else",
+				[root.problems, wheel.problems, gid0.problems], [["identity"], ["identity"], ["identity"]]);
+		}
+	}
+
 	// ---- the cache ------------------------------------------------------------
 	console.log("the cache");
 	{
@@ -491,9 +608,9 @@ const jpegClean = (buf) => {
 		const HEAP = scratchChild("heap-child.js", "process.once('message', () => process.send({ ok: false, reason: 'probe', heap: require('v8').getHeapStatistics().heap_size_limit, nodeOptions: process.env.NODE_OPTIONS || null, envKeys: Object.keys(process.env).filter((k) => !k.startsWith('__CF_')) }, () => process.exit(0)));\n");
 		const BLOW = scratchChild("blow-child.js", "process.once('message', () => { const keep = []; for (;;) keep.push(new Array(1e6).fill(1.5)); });\n");
 		let probe = null;
-		const heapSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, childPath: HEAP, trace: (e, i) => { if (e === "message" && i.message && i.message.reason === "probe") probe = i.message; } });
+		const heapSvc = rp.createReceiptPdfService({ ...BASE, childPath: HEAP, trace: (e, i) => { if (e === "message" && i.message && i.message.reason === "probe") probe = i.message; } });
 		await heapSvc.prepare(put(onePage()));
-		const blowSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, childPath: BLOW, timeoutMs: 20_000 });
+		const blowSvc = rp.createReceiptPdfService({ ...BASE, childPath: BLOW, timeoutMs: 20_000 });
 		const t31s = Date.now();
 		const blown = await blowSvc.prepare(put(onePage()));
 		if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = savedNodeOptions;
@@ -509,7 +626,7 @@ const jpegClean = (buf) => {
 		if (typeof process.getuid === "function" && process.getuid() === 0) {
 			console.log("  skip  T33 (this runner is root; it never runs anything as root on purpose)");
 		} else {
-			const dropSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, runAs: { uid: otherUid, gid: otherUid } });
+			const dropSvc = rp.createReceiptPdfService({ ...BASE, runAs: { uid: otherUid, gid: otherUid } });
 			const st = await dropSvc.selfTest();
 			const r = await dropSvc.prepare(put(onePage()));
 			check("T33 the uid option fails (EPERM): self-test fails, the receipt keeps the note, one fork in all",
@@ -538,7 +655,7 @@ const jpegClean = (buf) => {
 			"});",
 		].join("\n"));
 		const noHookLogs = [];
-		const noHook = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, selfTestChildPath: NOHOOK, log: (l) => noHookLogs.push(l) });
+		const noHook = rp.createReceiptPdfService({ ...BASE, selfTestChildPath: NOHOOK, log: (l) => noHookLogs.push(l) });
 		const st = await noHook.selfTest();
 		const r = await noHook.prepare(put(onePage()));
 		check("T34 the self-test fails on the missing hook alone, pages stay off: the note (disabled), no job child started",
@@ -562,7 +679,7 @@ const jpegClean = (buf) => {
 			"});",
 		].join("\n"));
 		let probe = null;
-		const permSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, childPath: PROBE, trace: (e, i) => { if (e === "message" && i.message && i.message.probe) probe = i.message.probe; } });
+		const permSvc = rp.createReceiptPdfService({ ...BASE, childPath: PROBE, trace: (e, i) => { if (e === "message" && i.message && i.message.probe) probe = i.message.probe; } });
 		const r = await permSvc.prepare(put(onePage()));
 		check("T35 the child cannot read outside its list, spawn, start a worker or write; it loads pdf-lib; IPC works",
 			[probe, r.status, fs.existsSync(path.join(TMP, "written.txt"))],
@@ -580,7 +697,7 @@ const jpegClean = (buf) => {
 	{
 		const events = [];
 		const linuxSvc = rp.createReceiptPdfService({
-			receiptsDir: RECEIPTS, cacheDir: CACHE, platform: "linux",
+			...BASE, platform: "linux",
 			writeOomScoreAdj: (pid) => {
 				events.push(["oom-write", pid]);
 				if (process.platform === "linux") fs.writeFileSync(`/proc/${pid}/oom_score_adj`, String(rp.RECEIPT_PDF_OOM_SCORE_ADJ));
@@ -603,10 +720,10 @@ const jpegClean = (buf) => {
 			console.log("  skip  T40 read-back of /proc/<pid>/oom_score_adj (Linux only)");
 		}
 		let writes = 0;
-		const macSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, platform: "darwin", writeOomScoreAdj: () => { writes++; } });
+		const macSvc = rp.createReceiptPdfService({ ...BASE, platform: "darwin", writeOomScoreAdj: () => { writes++; } });
 		const rm = await macSvc.prepare(put(onePage()));
 		check("T40 elsewhere nothing is written", [rm.status, writes], ["pages", 0]);
-		const failSvc = rp.createReceiptPdfService({ receiptsDir: RECEIPTS, cacheDir: CACHE, platform: "linux", writeOomScoreAdj: () => { throw new Error("EACCES"); } });
+		const failSvc = rp.createReceiptPdfService({ ...BASE, platform: "linux", writeOomScoreAdj: () => { throw new Error("EACCES"); } });
 		const rf = await failSvc.prepare(put(onePage()));
 		check("T40 a failed write sends nothing: the self-test fails and the receipt keeps the note", [failSvc.state(), rf.status, rf.reason], ["failed", "on_file", "disabled"]);
 	}
