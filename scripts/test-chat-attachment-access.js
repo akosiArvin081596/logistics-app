@@ -304,7 +304,11 @@ async function buildUpload(dataDir) {
 		const logs = [];
 		const guard = chatFiles.createChatAttachmentGuard({ db, chatDir: CHAT_DIR, logError: (m) => logs.push(m) });
 		const app = sessionApp();
-		app.use("/uploads/chat", requireAuth, (req, res, next) => guard(req, res, next, `/uploads/chat${req.path}`, req.path.slice(1)));
+		// The test route sits behind a rate limiter like every route in server.js;
+		// its ceiling is far above any burst below, so it never answers here.
+		const rateLimit = require("express-rate-limit");
+		const testRouteLimiter = rateLimit({ windowMs: 60_000, limit: 100_000, standardHeaders: false, legacyHeaders: false });
+		app.use("/uploads/chat", testRouteLimiter, requireAuth, (req, res, next) => guard(req, res, next, `/uploads/chat${req.path}`, req.path.slice(1)));
 		app.use("/uploads", requireAuth, express.static(UP));
 		app.use("/uploads", requireAuth, (req, res) => res.status(404).end());
 		const get = await listen(app);
