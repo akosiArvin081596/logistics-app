@@ -19346,47 +19346,89 @@ function manualInvoiceDayCover(driverNorm, manuals = driverManualInvoicesForDays
 	return cover;
 }
 
-// The days a driver's live manual invoices pay BY NAME, for the weekly invoice
-// (pay plan 2026-10-21, "Added" item 1): a correction or missed-week Draft, or
-// any manual invoice with a line dated a day, pays that day; so does a day in its
-// paidDays (a work-day correction, or one made with `days`), whether or not the
-// trip work-day rule is on to read its invoice_paid_days claims. Live means not
-// soft-deleted and not Rejected; a Personal correction (is_correction) holds only
-// Personal lines and pays no day. Returns { days: Map day -> invoice number,
-// undated: [{ invoiceNumber, weekStart, weekEnd }] }: undated are the invoices
-// with a line that names no day (or no line), which may pay any day of their
-// period; the weekly invoice names them and pays its days.
-function manualInvoicePaidDayCover(driverNorm) {
-	const days = new Map();
-	const undated = [];
-	if (!driverNorm) return { days, undated };
+// A line of a correction or missed-week Draft, as createWorkDayCorrection(),
+// scripts/create-correction-invoice-draft.js ("Correction for <invoice>: ...")
+// and scripts/create-missed-week-invoice-draft.js ("Missed week <Saturday> to
+// <Friday>: ...") write it: one day's pay for the day it is dated.
+const DAY_PAY_DRAFT_LINE_RE = /^(Correction for \S+:|Missed week \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2}:)/;
+
+// A driver's live manual invoices as the weekly invoice reads them (pay plan
+// 2026-10-21, "Added" item 1): [{ invoiceNumber, status, weekStart, weekEnd,
+// paidDays, draftDays, datedCents: Map day -> cents of its lines dated that day,
+// undated }]. draftDays are the days its correction or missed-week lines
+// (DAY_PAY_DRAFT_LINE_RE) are dated. Live means not soft-deleted and not
+// Rejected; a Personal correction (is_correction) holds only Personal lines and
+// pays no day. `undated` is a line that names no day (or no line at all) while
+// the invoice names no paidDays.
+function driverLiveManualInvoices(driverNorm) {
+	const out = [];
+	if (!driverNorm) return out;
 	const DAY = /^\d{4}-\d{2}-\d{2}$/;
 	for (const r of db.prepare(
-		"SELECT invoice_number, driver, week_start, week_end, render_data FROM invoices WHERE deleted_at = '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 AND status != 'Rejected' ORDER BY id"
+		"SELECT invoice_number, driver, status, week_start, week_end, render_data FROM invoices WHERE deleted_at = '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 AND status != 'Rejected' ORDER BY id"
 	).all()) {
 		if (normalizeDriverName(r.driver || "") !== driverNorm) continue;
 		let snap = null;
 		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
-		const mark = (d) => { if (DAY.test(d) && !days.has(d)) days.set(d, r.invoice_number); };
 		const lines = snap && Array.isArray(snap.lineItems) ? snap.lineItems : [];
-		for (const d of snap && Array.isArray(snap.paidDays) ? snap.paidDays : []) mark(String(d));
-		let dated = lines.length > 0;
+		const paidDays = snap && Array.isArray(snap.paidDays) ? snap.paidDays.map(String).filter((d) => DAY.test(d)) : [];
+		const datedCents = new Map();
+		const draftDays = new Set();
+		let undated = !lines.length;
 		for (const l of lines) {
 			const d = String((l && l.date) || "").trim();
-			if (DAY.test(d)) mark(d);
-			else dated = false;
+			if (!DAY.test(d)) { undated = true; continue; }
+			datedCents.set(d, (datedCents.get(d) || 0) + Math.round((Number(l && l.amount) || 0) * 100));
+			if (DAY_PAY_DRAFT_LINE_RE.test(String((l && l.description) || "").trim())) draftDays.add(d);
 		}
-		if (!dated && !(snap && Array.isArray(snap.paidDays))) undated.push({ invoiceNumber: r.invoice_number, weekStart: String(r.week_start || ""), weekEnd: String(r.week_end || "") });
+		out.push({ invoiceNumber: r.invoice_number, status: r.status, weekStart: String(r.week_start || ""), weekEnd: String(r.week_end || ""), paidDays, draftDays, datedCents, undated: undated && !paidDays.length });
 	}
-	return { days, undated };
+	return out;
+}
+
+// THE DAYS A LIVE MANUAL INVOICE ALREADY PAYS, which the weekly invoice leaves
+// off (pay plan 2026-10-21, "Added" item 1; narrowed by the money review, M1).
+// The one place the rule lives, so a flag could wrap its one call in
+// generateInvoiceHandler(). A day of `days` (the week's) is held by a live
+// manual invoice of the driver that names it in its paidDays (a work-day
+// correction, or a manual invoice made with `days`), that dates a correction or
+// missed-week line on it (DAY_PAY_DRAFT_LINE_RE, whatever rate it was drafted
+// at), or whose lines dated that day come to at least one day's pay (the
+// smallest rate the week's days price at, `rateOf`: lateWorkWeekBlocker()'s
+// minRate). A dated line under one day's pay (a bonus, a reimbursement) holds
+// nothing; such an invoice is named to check, as is one with an undated line
+// over the week. Returns { held: Map day -> { invoiceNumber, status }, check:
+// [invoiceNumber] }.
+function weeklyManualInvoiceHolds({ driverNorm, days, weekStart, weekEnd, rateOf }) {
+	const held = new Map();
+	const check = new Set();
+	const list = [...days].sort();
+	if (!list.length) return { held, check: [] };
+	const manuals = driverLiveManualInvoices(driverNorm);
+	const minCents = Math.min(...list.map((ds) => Math.round((Number(rateOf(ds)) || 0) * 100)));
+	for (const ds of list) {
+		const holder = manuals.find((m) => m.paidDays.includes(ds) || m.draftDays.has(ds) || (m.datedCents.get(ds) || 0) >= minCents);
+		if (holder) held.set(ds, { invoiceNumber: holder.invoiceNumber, status: holder.status });
+	}
+	const holders = new Set([...held.values()].map((h) => h.invoiceNumber));
+	for (const m of manuals) {
+		if (holders.has(m.invoiceNumber)) continue;
+		const datedInWeek = [...m.datedCents.keys()].some((d) => d >= weekStart && d <= weekEnd);
+		const undatedOverWeek = m.undated && m.weekStart <= weekEnd && m.weekEnd >= weekStart;
+		if (datedInWeek || undatedOverWeek) check.add(m.invoiceNumber);
+	}
+	return { held, check: [...check] };
 }
 
 // The days a Super Admin took out of automatic pay by deleting the manual
 // invoice that named them (pay plan 2026-10-21, "Added" item 2; the owner's
 // decision on MR's Oct 2 correction Draft, deleted 2026-10-16 as "not valid"):
-// Map day -> invoice number for each day a SOFT-DELETED manual invoice of the
-// driver (a correction or missed-week Draft, any manual invoice; not a Personal
-// correction) named by a dated line or its paidDays. The trip work-day rule's
+// Map day -> invoice number for each day a SOFT-DELETED correction or
+// missed-week Draft of the driver named (money review L2: only those, never an
+// ordinary manual invoice nor a Personal correction): a work-day correction
+// (createWorkDayCorrection(): workDayCorrection, correction_of) or a manual
+// invoice with lines in the scripts' formats (DAY_PAY_DRAFT_LINE_RE), by those
+// lines' dates and its paidDays. The trip work-day rule's
 // late-day settle never carries such a day again (lateWorkDaysFor(), refused
 // "deletedDraft" and named in the generate warnings and the dry run): a person
 // decides it, with a manual invoice, or by restoring the deleted one (PUT
@@ -19398,14 +19440,18 @@ function deletedManualInvoiceDays(driverNorm) {
 	if (!driverNorm) return days;
 	const DAY = /^\d{4}-\d{2}-\d{2}$/;
 	for (const r of db.prepare(
-		"SELECT invoice_number, driver, render_data FROM invoices WHERE deleted_at != '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 ORDER BY id"
+		"SELECT invoice_number, driver, render_data, correction_of FROM invoices WHERE deleted_at != '' AND is_manual = 1 AND COALESCE(is_correction, 0) = 0 ORDER BY id"
 	).all()) {
 		if (normalizeDriverName(r.driver || "") !== driverNorm) continue;
 		let snap = null;
 		try { snap = JSON.parse(r.render_data || "{}"); } catch { snap = null; }
+		const lines = snap && Array.isArray(snap.lineItems) ? snap.lineItems : [];
+		const draftLines = lines.filter((l) => DAY_PAY_DRAFT_LINE_RE.test(String((l && l.description) || "").trim()));
+		const isDraft = !!(snap && snap.workDayCorrection) || (r.correction_of !== null && r.correction_of !== undefined) || draftLines.length > 0;
+		if (!isDraft) continue;
 		const named = [
 			...(snap && Array.isArray(snap.paidDays) ? snap.paidDays.map(String) : []),
-			...(snap && Array.isArray(snap.lineItems) ? snap.lineItems.map((l) => String((l && l.date) || "").trim()) : []),
+			...draftLines.map((l) => String((l && l.date) || "").trim()),
 		];
 		for (const d of named) if (DAY.test(d) && !days.has(d)) days.set(d, r.invoice_number);
 	}
@@ -20630,25 +20676,31 @@ async function generateInvoiceHandler(req, res) {
 		for (const e of [...tripErrors, ...extraRuleErrors]) {
 			warnings.push(`TRIP DAYS NOT READ: load ${e.loadId}: ${e.error}. ${extraRuleErrors.includes(e) ? "Its days in this week are not on this invoice." : "This invoice pays its scheduled window instead."}`);
 		}
+		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
+		// the route; the dry run prices with it too).
+		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
 		// A DAY A LIVE MANUAL INVOICE ALREADY PAYS IS NOT BILLED AGAIN (pay plan
 		// 2026-10-21, "Added" item 1), with the trip work-day rule on or off: a
-		// correction or missed-week Draft, or any manual invoice of the driver with a
-		// line dated the day or the day in its paidDays (manualInvoicePaidDayCover()).
-		// A load's completion date moved into a week a missed-week Draft already
-		// pays, and that week generated, billed the day twice; with the rule on, the
+		// correction or missed-week Draft, a manual invoice naming the day in its
+		// paidDays, or lines dated the day of at least one day's pay
+		// (weeklyManualInvoiceHolds(), the one call a flag would wrap). A load's
+		// completion date moved into a week a missed-week Draft already pays, and
+		// that week generated, billed the day twice; with the rule on, the
 		// invoice_paid_days claims miss a manual invoice that only dates its lines.
-		// The day is left off and named; a manual line with no date is named only.
-		// Percentage pay reads revenue, not days, and is left as it is.
+		// The day is left off and named; a smaller dated line (a bonus) or a line
+		// with no date is named to check only. Percentage pay reads revenue, not
+		// days, and is left as it is.
 		if (payStruct.payType !== "percentage") {
-			const cover = manualInvoicePaidDayCover(nameNorm);
-			const held = [...activeDaySet].filter((ds) => cover.days.has(ds)).sort();
+			const holds = weeklyManualInvoiceHolds({ driverNorm: nameNorm, days: activeDaySet, weekStart, weekEnd: computedWeekEnd, rateOf: (ds) => (rateOf ? rateOf(ds) : dailyRate) });
+			const held = [...holds.held.keys()];
 			for (const ds of held) { activeDaySet.delete(ds); delete dayLoadMap[ds]; }
 			if (held.length) {
-				warnings.push(`NOT BILLED: ${held.map((ds) => `${ds} (already paid by ${cover.days.get(ds)})`).join(", ")}: a manual invoice of this driver pays ${held.length === 1 ? "that day" : "those days"} by date. If it does not, correct the manual invoice, then generate again.`);
+				const open = [...new Set([...holds.held.values()].filter((h) => h.status === "Draft" || h.status === "Submitted").map((h) => h.invoiceNumber))];
+				warnings.push(`NOT BILLED: ${held.map((ds) => `${ds} (already paid by ${holds.held.get(ds).invoiceNumber}, ${holds.held.get(ds).status})`).join(", ")}: a manual invoice of this driver pays ${held.length === 1 ? "that day" : "those days"}. If it does not, correct the manual invoice, then generate again.`
+					+ (open.length ? ` ${open.join(", ")} ${open.length === 1 ? "is" : "are"} not approved yet (a Draft or Submitted): if rejected or deleted later, the day is not billed again by itself once this invoice is approved; regenerate this invoice while it is a Draft, or pay the day by hand.` : ""));
 			}
-			const undatedInvoices = cover.undated.filter((m) => m.weekStart <= computedWeekEnd && m.weekEnd >= weekStart);
-			if (undatedInvoices.length) {
-				warnings.push(`CHECK: ${undatedInvoices.map((m) => m.invoiceNumber).join(", ")} ${undatedInvoices.length === 1 ? "has" : "have"} a line with no date over this week and may already pay some of its days.`);
+			if (holds.check.length) {
+				warnings.push(`CHECK: ${holds.check.join(", ")} ${holds.check.length === 1 ? "has" : "have"} a line dated in this week under one day's pay, or a line with no date over it, and may already pay some of its days.`);
 			}
 		}
 		// The cells the percentage driver's load lines read below.
@@ -20659,9 +20711,6 @@ async function generateInvoiceHandler(req, res) {
 		const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
 
 		const activeDays = activeDaySet.size;
-		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
-		// the route; the dry run prices with it too).
-		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
 		// `let` because owner-op (percentage) drivers override this further down.
 		let totalEarnings = totalOf(activeDaySet);
 
