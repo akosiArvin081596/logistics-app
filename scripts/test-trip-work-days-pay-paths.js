@@ -432,7 +432,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		}
 	});
 
-	await R.test("B10 [rule d, Q3] Pre-dispatch flag and trip flag both on (FROM=2026-10): a load with a full trip ignores the pre-dispatch filter (its idle 12 km day before dispatch pays, At Shipper that day); a load with only Dispatched and Delivered now follows rule d too, each anchor on its own, so its Pickup Appointment day (Wed) is paid as decision d's appointment day and the pre-dispatch filter, a window-rule filter, no longer reads it. Base: both lose the idle day", async ({ eq }) => {
+	await R.test("B10 [rule d, Q3] Pre-dispatch flag and trip flag both on (FROM=2026-10): a load with a full trip ignores the pre-dispatch filter (its idle 12 km day before dispatch pays, At Shipper that day); a load with only Dispatched and Delivered follows rule d too, each anchor on its own; with no arrival tap its trip starts at the latest of its Pickup Appointment (Wed), its dispatch (Thu) and its Assigned Date (Thu) (money review M2), so the idle Wed before the dispatch is unpaid, as the pre-dispatch filter had it. Base: both lose the idle day", async ({ eq }) => {
 		const K = "Kit Lane";
 		const L = "Lou Penn";
 		const track = (odo) => W.feed(odo).park("2026-09-25").drive("2026-09-30", { miles: 7.5 })
@@ -455,11 +455,11 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		const gk = await W.generate(w, K, W39);
 		const gl = await W.generate(w, L, W39);
 		eq("full trip: invoice", invDays(gk, W39), ["2026-09-30", "2026-10-01", "2026-10-02"]);
-		eq("Dispatched and Delivered only: invoice (rule d: the appointment day Wed, Thu driving, Fri unloading)", invDays(gl, W39), ["2026-09-30", "2026-10-01", "2026-10-02"]);
+		eq("Dispatched and Delivered only: invoice (rule d: Wed before the Thu dispatch unpaid, Thu driving, Fri unloading)", invDays(gl, W39), ["2026-10-01", "2026-10-02"]);
 		const vk = await monthViews(w, K);
 		const vl = await monthViews(w, L);
 		eq("full trip: ledger and investor view", [vk.ledger, vk.investor], [["2026-10 2026-09-30", "2026-10 2026-10-01", "2026-10 2026-10-02"], ["2026-10 2026-09-30", "2026-10 2026-10-01", "2026-10 2026-10-02"]]);
-		eq("Dispatched and Delivered only: ledger and investor view", [vl.ledger, vl.investor], [["2026-10 2026-09-30", "2026-10 2026-10-01", "2026-10 2026-10-02"], ["2026-10 2026-09-30", "2026-10 2026-10-01", "2026-10 2026-10-02"]]);
+		eq("Dispatched and Delivered only: ledger and investor view", [vl.ledger, vl.investor], [["2026-10 2026-10-01", "2026-10 2026-10-02"], ["2026-10 2026-10-01", "2026-10 2026-10-02"]]);
 		parity(eq, invDays(gk, W39), vk, WEEK39);
 		parity(eq, invDays(gl, W39), vl, WEEK39);
 	});
@@ -678,7 +678,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		}
 	});
 
-	await R.test("B20 (re-review M1, L2; added 2026-10-21 item 2) A manual invoice that names the week's invoice in a line or its notes blocks that week's late days, whatever date it carries; an adjustment under one day's pay (a $25 bonus) does not block; nor do a Rejected manual invoice, a Personal correction (is_correction) or a manual invoice that names its days. A soft-deleted manual invoice blocks nothing but the day it dates: a Super Admin deleted it, so that day is never carried again automatically (M1), the other day is", async ({ eq, ok }) => {
+	await R.test("B20 (re-review M1, L2) A manual invoice that names the week's invoice in a line or its notes blocks that week's late days, whatever date it carries; an adjustment under one day's pay (a $25 bonus) does not block; nor do a Rejected or soft-deleted manual invoice, a Personal correction (is_correction) or a manual invoice that names its days (a deleted correction or missed-week draft is M1's)", async ({ eq, ok }) => {
 		const run = async (D, prepare) => {
 			const w = boundaryWorld(D);
 			const g39 = await W.generate(w, D, W39);
@@ -717,8 +717,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 				w.db.prepare("UPDATE invoices SET deleted_at = '2026-10-05T00:00:00.000Z', deleted_by = 'super_admin' WHERE id = ?").run(m.body.invoice.id);
 				return m;
 			});
-			eq("a soft-deleted manual invoice dated Thu: Thu is not carried, Fri is", r.grid, ["2026-09-28", "2026-09-29", "2026-10-02"]);
-			ok("…and Thu is named in warnings with the deleted invoice", (r.g40.warnings || []).some((x) => x.includes("2026-10-01") && /deleted/.test(x)), JSON.stringify(r.g40.warnings));
+			eq("a soft-deleted manual invoice dated Thu, not a correction or missed-week draft: it holds nothing (money review L2)", r.grid, BOTH);
 		}
 		{
 			const r = await run("Oli Pratt", async (w, g39) => {
@@ -878,12 +877,38 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		ok("both named in warnings", ["2026-10-01", "2026-10-02"].every((d) => (g40.warnings || []).some((x) => x.includes(d) && x.includes(m.body.invoice.invoice_number))), JSON.stringify(g40.warnings));
 	});
 
-	await R.test("M1 (added 2026-10-21 item 2; the MR 10/2 shape as it stands) The correction Draft for Thu 10/1 and Fri 10/2 was deleted by a Super Admin: neither day is carried again automatically (no correction), each named in warnings with the deleted invoice; a deleted manual invoice dating another day (10/20) holds nothing. Base: a correction for both", async ({ eq, ok }) => {
+	await R.test("P4 (money review M2) A stale Pickup Appointment, FROM=2026-10: two loads Assigned Fri 10/16 with appointments 9/29-9/30 and no arrival tap, their trucks driving 9/29, 9/30 and 10/16. With no status rows: nothing paid on the ledger and the investor view (the trip starts at the Assigned Date, after the window). With a Delivered tap Sat 10/17: 10/16 (driving) and 10/17 (unloading) only, the week's invoice 10/17. Base: 9/29 and 9/30 paid", async ({ eq }) => {
+		const U = "Una Stale";
+		const V = "Val Stale";
+		const track = (odo) => W.feed(odo).drive("2026-09-29", { miles: 100 }).drive("2026-09-30", { miles: 100 }).drive("2026-10-16", { miles: 200 }).park("2026-10-17").pings;
+		const w = W.startWorld({
+			env: TRIP("2026-10"),
+			drivers: [{ name: U }, { name: V }],
+			trucks: [{ unit: "T1", driver: U, vid: "V1" }, { unit: "T2", driver: V, vid: "V2" }],
+			pings: { V1: track(100000), V2: track(200000) },
+			rows: [
+				loadRow({ id: "Q4401", driver: U, pickup: "2026-09-29 8:00", dropoff: "2026-09-30 18:00", assigned: "2026-10-16", done: "2026-10-17", truck: "T1" }),
+				loadRow({ id: "Q4402", driver: V, pickup: "2026-09-29 8:00", dropoff: "2026-09-30 18:00", assigned: "2026-10-16", done: "2026-10-17", truck: "T2" }),
+			],
+			status: [s("Q4402", "Delivered", et("2026-10-17 14:00"))],
+			now: etMs("2026-10-23 20:00"),
+		});
+		const vu = await monthViews(w, U);
+		eq("no taps: ledger and investor view pay nothing", [vu.ledger, vu.investor], [[], []]);
+		const vv = await monthViews(w, V);
+		const want = ["2026-10 2026-10-16", "2026-10 2026-10-17"];
+		eq("Delivered 10/17: ledger and investor view", [vv.ledger, vv.investor], [want, want]);
+		const gv = await W.generate(w, V, "2026-10-23");
+		eq("Delivered 10/17: the week's invoice pays 10/17", invDays(gv, "2026-10-23"), ["2026-10-17"]);
+	});
+
+	await R.test("M1 (added 2026-10-21 item 2; the MR 10/2 shape as it stands; money review L2) The correction Draft for Thu 10/1 and Fri 10/2 (scripts/create-correction-invoice-draft.js's lines) was deleted by a Super Admin: neither day is carried again automatically (no correction), each named in warnings with the deleted invoice; a deleted missed-week Draft dating Thu holds Thu the same way; a deleted manual invoice dating another day (10/20), or a deleted ordinary manual invoice dating Thu, holds nothing. Base: a correction for both", async ({ eq, ok }) => {
 		const D = "Mo Reyes";
-		const setup = async (lines) => {
+		const setup = async (linesFor) => {
 			const w = boundaryWorld(D, { env: TRIP("2026-10") });
 			const g39 = await W.generate(w, D, W39);
 			w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(g39.invoice.id);
+			const lines = linesFor(g39.invoice.invoice_number);
 			const m = await W.route(w, "POST /api/invoices/manual", { body: { payee: D, periodStart: lines[0].date, periodEnd: lines[lines.length - 1].date, lineItems: lines } });
 			const del = await W.route(w, "DELETE /api/invoices/:id", { params: { id: String(m.body.invoice.id) }, query: { reason: "not valid" } });
 			eq("the draft is deleted", [m.status, del.status], [200, 200]);
@@ -891,12 +916,19 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			const g40 = await W.generate(w, D, W40);
 			return { w, g39, g40, number: m.body.invoice.invoice_number };
 		};
-		const a = await setup([{ date: "2026-10-01", description: "Correction: Thursday, October 1, 2026, $260", amount: 260 }, { date: "2026-10-02", description: "Correction: Friday, October 2, 2026, $260", amount: 260 }]);
+		const a = await setup((n) => [
+			{ date: "2026-10-01", description: `Correction for ${n}: Thursday, October 1, 2026, $260`, amount: 260 },
+			{ date: "2026-10-02", description: `Correction for ${n}: Friday, October 2, 2026, $260`, amount: 260 },
+		]);
 		eq("no correction; W39 as approved", [corrections(a.w).length, W.dayList(storedGrid(a.w, a.g39.invoice.id, W39))], [0, ["2026-09-28", "2026-09-29"]]);
 		ok("both named in warnings with the deleted invoice", ["2026-10-01", "2026-10-02"].every((d) => (a.g40.warnings || []).some((x) => x.includes(d) && x.includes(a.number) && /deleted/.test(x))), JSON.stringify(a.g40.warnings));
 		eq("…reported as refused, kind deletedDraft", (a.g40.body && a.g40.body.lateWorkDays && a.g40.body.lateWorkDays.refused || []).map((r) => [r.day, r.kind]), [["2026-10-01", "deletedDraft"], ["2026-10-02", "deletedDraft"]]);
-		const b = await setup([{ date: "2026-10-20", description: "Bonus", amount: 100 }]);
+		const b = await setup(() => [{ date: "2026-10-20", description: "Bonus", amount: 100 }]);
 		eq("a deleted invoice dating 10/20: Thu and Fri go on a correction", corrections(b.w).map(paidDaysOf), [["2026-10-01", "2026-10-02"]]);
+		const c = await setup(() => [{ date: "2026-10-01", description: "Missed week 2026-09-26 to 2026-10-02: Thursday, October 1, 2026, $260", amount: 260 }]);
+		eq("a deleted missed-week Draft dating Thu: only Fri goes on a correction", corrections(c.w).map(paidDaysOf), [["2026-10-02"]]);
+		const d = await setup(() => [{ date: "2026-10-01", description: "Reimbursement, Thursday", amount: 260 }]);
+		eq("a deleted ordinary manual invoice dating Thu: Thu and Fri go on a correction", corrections(d.w).map(paidDaysOf), [["2026-10-01", "2026-10-02"]]);
 	});
 
 	await R.test("M2 (added 2026-10-21 item 1; flag off) A missed-week Draft pays Thu 10/15 of a week with no weekly invoice (W41); the load's completion date is then edited into W41 and W41 generated: the weekly invoice leaves Thu off (named in warnings with the manual invoice) and bills Mon. Base: Thu billed twice", async ({ eq, ok }) => {
@@ -905,6 +937,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("W41 bills Mon only", [g.status, invDays(g, W41)], [200, ["2026-10-12"]]);
 		eq("Total Due", g.data && g.data.totalDue, 260);
 		ok("Thu named in warnings with the manual invoice", (g.warnings || []).some((x) => x.includes("2026-10-15") && x.includes(number)), JSON.stringify(g.warnings));
+		ok("…which says (money review L3) that the Draft rejected or deleted later does not bill Thu again by itself", (g.warnings || []).some((x) => x.includes(number) && /Draft/.test(x) && /rejected or deleted/.test(x) && /not billed again/.test(x)), JSON.stringify(g.warnings));
 	});
 
 	await R.test("M3 (added 2026-10-21 item 1; TRIP_WORK_DAYS on, FROM=2026-10) The same: the weekly invoice is made (no 409), leaves Thu off and claims only Mon. Base: Thu billed twice and claimed by the weekly invoice", async ({ eq }) => {
@@ -914,7 +947,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("the weekly invoice claims Mon only", claimRows(w).filter(([, id]) => id === (g.invoice && g.invoice.id)).map(([d]) => d), ["2026-10-12"]);
 	});
 
-	await R.test("M4 (added 2026-10-21 item 1; flag off) What holds a day for the weekly invoice: a live manual invoice's paidDays (no dated line) holds Thu; a Rejected one, a soft-deleted one and a Personal correction dating Thu hold nothing (Thu billed); an undated line over the week holds nothing but is named in warnings as possibly paying the week", async ({ eq, ok }) => {
+	await R.test("M4 (added 2026-10-21 item 1; flag off) What holds a day for the weekly invoice: a live manual invoice's paidDays (no dated line) holds Thu; a Rejected one, a soft-deleted one and a Personal correction dating Thu hold nothing (Thu billed); an undated line over the week, or (money review M1) a line dated Thu of less than one day's pay (a $50 bonus), holds nothing but is named in a CHECK warning", async ({ eq, ok }) => {
 		const line = { date: "2026-10-15", description: "Thursday", amount: 260 };
 		const cases = [
 			["paidDays only", { lineItems: [{ description: "Missed Thursday", amount: 260 }], paidDays: ["2026-10-15"] }, ["2026-10-12"]],
@@ -922,12 +955,14 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			["soft-deleted", { lineItems: [line], deleted: true }, ["2026-10-12", "2026-10-15"]],
 			["Personal correction", { lineItems: [line], isCorrection: true }, ["2026-10-12", "2026-10-15"]],
 			["undated line", { lineItems: [{ description: "Catch-up", amount: 260 }] }, ["2026-10-12", "2026-10-15"]],
+			// Money review M1: a dated line under one day's pay ($260) holds no day.
+			["dated $50 bonus", { lineItems: [{ date: "2026-10-15", description: "Bonus", amount: 50 }] }, ["2026-10-12", "2026-10-15"]],
 		];
 		for (const [label, manual, want] of cases) {
 			const { w, number } = await skWorld({}, [], manual);
 			const g = await W.generate(w, "Sol Kane", W41);
 			eq(`${label}: W41 days`, invDays(g, W41), want);
-			if (label === "undated line") ok("undated line: named in warnings", (g.warnings || []).some((x) => x.includes(number)), JSON.stringify(g.warnings));
+			if (label === "undated line" || label === "dated $50 bonus") ok(`${label}: named in warnings to check`, (g.warnings || []).some((x) => x.startsWith("CHECK") && x.includes(number)), JSON.stringify(g.warnings));
 		}
 	});
 

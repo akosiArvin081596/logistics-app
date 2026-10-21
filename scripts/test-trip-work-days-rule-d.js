@@ -4,7 +4,8 @@
  * and the pay plan's section 1 builds it (~/LogisX-replica/reports/
  * 2026-10-21-pay-plan.md, Revision 2; P1-P18 approved, P8 as (b)). Written before
  * the fix: every case fails on main except the controls D18, D19 and D20 (D27,
- * a control under P8 (a), changes with P8 (b) and fails on main too).
+ * a control under P8 (a), changes with P8 (b) and fails on main too). D30 came
+ * from the money review (M2), written before its fix, which it failed.
  *
  * Decision d: a day is paid when the driver is driving or loading/unloading on a
  * dispatched trip, from the day he heads to the pickup through the day he
@@ -285,6 +286,19 @@ const R = W.createRunner("Rule d: paid trip days (lib/trip-work-days.js tripDays
 		eq("Assigned Sun", days(run([], { window: { start: WED, end: THU, pickup: WED, assigned: SUN }, eld: e })), [MON, TUE, WED, THU]);
 		eq("Assigned Tue", days(run([], { window: { start: WED, end: THU, pickup: WED, assigned: TUE }, eld: e })), [TUE, WED, THU]);
 		eq("no Assigned Date", days(run([], { window: { start: WED, end: THU, pickup: WED, assigned: "" }, eld: e })), [WED, THU]);
+	});
+
+	await R.test("D30 (money review M2) stale-appointment-floor: with no arrival tap the trip starts at the latest of the window's first day, the dispatch day and the Assigned Date. A Pickup Appointment 9/29-9/30 on a load Assigned 10/16, no taps: nothing is paid (not even the ELD's 9/29-9/30 driving) and the resolver answers [] (the rule covers the load), not null; with a Delivered tap 10/17: the driving 10/16 and the unloading 10/17 only; an appointment Wed on a load dispatched and Assigned Thu: Wed unpaid though the truck moved", ({ eq, ok }) => {
+		const window = { start: "2026-09-29", end: "2026-09-30", pickup: "2026-09-29", assigned: "2026-10-16" };
+		const e = eld({ driving: ["2026-09-29", "2026-09-30", "2026-10-16"] });
+		const none = run([], { window, eld: e });
+		eq("no taps: nothing", days(none), []);
+		ok("flagged staleAppointment", flag(none, "staleAppointment"), JSON.stringify(none && none.flags));
+		eq("resolver: [] (the rule covers it, pays nothing), not null", resolverWith().forLoad({ loadId: "D30", settleMonth: "2026-10", window }), []);
+		eq("a Delivered tap 10/17: 10/16 and 10/17 only", days(run([T("Delivered", "2026-10-17 14:00")], { window, eld: e })), ["2026-10-16", "2026-10-17"]);
+		const thu = run([DISPATCH("2026-10-01 10:00"), T("Delivered", "2026-10-02 16:00")],
+			{ window: { start: "2026-09-30", end: "2026-10-02", pickup: "2026-09-30", assigned: "2026-10-01" }, eld: eld({ driving: ["2026-09-30", "2026-10-01", "2026-10-02"] }) });
+		eq("appointment Wed, dispatched and Assigned Thu: Thu and Fri", days(thu), ["2026-10-01", "2026-10-02"]);
 	});
 
 	// ── the ELD, time, errors ──────────────────────────────────────────────────
