@@ -119,7 +119,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	eq("...and names read off the env a lib/ helper is handed (env.NAME, env?.NAME, env[\"NAME\"])", [...rules.namesReadBy(['if (env.A_ENABLED === "true") return env?.A_FROM ?? env["B_MODE"];'])].sort(), ["A_ENABLED", "A_FROM", "B_MODE"]);
 	eq("...and a flag or first month a helper names in quotes, and a settings table's env: name", [...rules.namesReadBy(['const F = { on: "C_ENABLED", from: \'C_FROM\' }; const T = { x: { env: "D_MODE" } }; env[F.on]; env[F.from]; env[T.x.env];'])].sort(), ["C_ENABLED", "C_FROM", "D_MODE"]);
 	eq("...but not another quoted code, a lower-case property, another object's field or a name in a comment", [...rules.namesReadBy(['res.json({ code: "INVOICE_LINE_LIMIT" }); env.length; obj.E_ENABLED; // see F_ENABLED'])], []);
-	for (const n of ["SPREADSHEET_ID", "BISON_INVOICE_EMAIL", "DEFAULT_INVOICE_EMAIL", "N8N_BASE_URL", "N8N_WORKFLOW_ID"]) {
+	for (const n of ["SPREADSHEET_ID", "ADMIN_NOTIFY_EMAIL", "RATECON_DRIVE_FOLDER_ID", "BISON_INVOICE_EMAIL", "DEFAULT_INVOICE_EMAIL", "N8N_BASE_URL", "N8N_WORKFLOW_ID"]) {
 		eq(`${n} is never copied, even when the app reads it`, rules.classifySetting(n, "made-up", { readByApp: new Set([n]) }).rule, "production only: names a production target");
 	}
 	eq("proxy settings are found in any case, and NODE_USE_ENV_PROXY", rules.proxySettingsSet({ https_proxy: "x", HTTP_PROXY: "y", All_Proxy: "z", NODE_USE_ENV_PROXY: "1", NO_PROXY: "localhost", PATH: "/bin" }), ["All_Proxy", "HTTP_PROXY", "NODE_USE_ENV_PROXY", "https_proxy"]);
@@ -446,6 +446,8 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	refusedAfterSettings("a settings value that looks like a key: refused once the file is read", "SOME_SETTING='AIzaSyD3x9EXAMPLEEXAMPLE12345'\n", /settings file holds SOME_SETTING, which a replica does not take \(secret: value looks like a key\)/);
 	refusedAfterSettings("a runtime setting in the settings file (NODE_OPTIONS): refused once the file is read", "NODE_OPTIONS='--max-old-space-size=64'\n", /settings file holds NODE_OPTIONS, which a replica does not take \(runtime: set by replica:start\)/);
 	refusedAfterSettings("a production target in the settings file (BISON_INVOICE_EMAIL): refused once the file is read", "BISON_INVOICE_EMAIL='ap@example.test'\n", /settings file holds BISON_INVOICE_EMAIL, which a replica does not take \(production only: names a production target\)/);
+	refusedAfterSettings("a settings file holding ADMIN_NOTIFY_EMAIL stops the start once the file is read", "ADMIN_NOTIFY_EMAIL='admin@example.test'\n", /settings file holds ADMIN_NOTIFY_EMAIL, which a replica does not take \(production only: names a production target\)/);
+	refusedAfterSettings("a settings file holding RATECON_DRIVE_FOLDER_ID stops the start once the file is read", "RATECON_DRIVE_FOLDER_ID='made-up-folder-id'\n", /settings file holds RATECON_DRIVE_FOLDER_ID, which a replica does not take \(production only: names a production target\)/);
 	refused("off macOS: refused before listening", () => {}, /this is linux: a replica runs on a developer Mac \(macOS\) only/, platformShim("linux"));
 	{
 		// Replica mode is decided before dotenv: a LOCAL_REPLICA that only a .env

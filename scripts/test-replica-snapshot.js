@@ -277,6 +277,7 @@ console.log("§3 the settings export copies business settings only");
 		GEMINI_API_KEY: "made-up-key", SESSION_SECRET: "made-up-secret", GMAIL_APP_PASSWORD: "made-up-pass", LINXUP_WEBHOOK_TOKEN: "made-up-token",
 		SPREADSHEET_ID: "made-up-sheet-id", BISON_INVOICE_EMAIL: "ap-bison@example.test", DEFAULT_INVOICE_EMAIL: "ap-default@example.test",
 		N8N_BASE_URL: "https://n8n.example.test", N8N_WORKFLOW_ID: "made-up-workflow",
+		ADMIN_NOTIFY_EMAIL: "admin-notify@example.test", RATECON_DRIVE_FOLDER_ID: "made-up-drive-folder",
 	};
 	fs.writeFileSync(path.join(app, ".env"), Object.entries({ ...wanted, ...withheld }).map(([k, v]) => `${k}="${v}"`).join("\n"));
 	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
@@ -286,6 +287,11 @@ console.log("§3 the settings export copies business settings only");
 	const written = r.status === 0 ? dotenv.parse(fs.readFileSync(path.join(out, "settings.env"))) : {};
 	eq("...with its value exactly", Object.keys(wanted).map((n) => written[n]), Object.values(wanted));
 	for (const n of Object.keys(withheld)) ok(`${n} is never copied`, !cli.copied.includes(n) && !(n in written) && cli.skipped.some((x) => x.name === n));
+	const serverSrc = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	for (const n of ["ADMIN_NOTIFY_EMAIL", "RATECON_DRIVE_FOLDER_ID"]) {
+		ok(`${n} is never copied, though server.js reads it as plain process.env.${n}`, new RegExp(`process\\.env\\.${n}\\b`).test(serverSrc)
+			&& (cli.skipped.find((x) => x.name === n) || {}).rule === "production only: names a production target", (cli.skipped.find((x) => x.name === n) || {}).rule);
+	}
 	ok("...and no withheld value is in the written file or the output", r.status === 0 && Object.values(withheld).every((v) => !fs.readFileSync(path.join(out, "settings.env"), "utf8").includes(v) && !r.stdout.includes(v)));
 	// Every flag the replica rules know (and each one's first month) is one the
 	// export finds read, without counting replica-rules.js's own lists.
