@@ -217,6 +217,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
+| `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -313,6 +314,8 @@ BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-instructions ONLY=instr
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 # The same screen on made-up data (no server.js, database or sign-in; PR 2's routes in-process)
 E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 node scripts/e2e/instructions-screen.mjs
+# The driver's own load instructions at 390 x 844 on made-up data (PR 4's driver route in-process)
+E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 node scripts/e2e/driver-instructions-screen.mjs
 # The payout parity check (no browser, no server of yours: it boots its own two)
 REF_A=main REF_B=HEAD FLAG=off fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
 REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
@@ -1491,6 +1494,15 @@ console holds only the browser's own "Failed to load resource … 404" line for 
 while the flag is off: the section asks, and the 404 is its answer. The console lines about requests the check
 aborts on purpose (the socket, other hosts) are set aside. Nothing leaves the machine; full page screenshots are fine
 (all made-up). `SHOTS_DIR` puts them outside the work dir.
+
+`driver-instructions-screen.mjs` (DS1–DS6, DSx) is the driver's side, at 390 x 844, the same way (`E2E_PORT`, default
+3184): a made-up Driver opens `/driver`; `GET /api/driver/:driverName` is built from two made-up rows and annotated by
+the runtime's `annotateDriverLoads()`, and `GET /api/driver/loads/:loadId/instructions` is answered by PR 4's runtime
+in-process (both flags on, the invented deny value). It checks the list chips (codes only), the card first under the
+route banner, critical requirements first, Copy buttons at least 44 px tall, a 40-character reference wrapping inside
+the card, flagged items absent, directions and warehouse notes collapsed, Copy, the "being checked by dispatch" line,
+no sideways scroll, and with the driver screen flag off: no key, no chips, no card and no request to the route. The
+socket event isn't sent here (the socket is aborted); `scripts/test-driver-instructions-routes.js` §12 covers it.
 
 ## The phone layout check (`phone-layout.mjs`)
 

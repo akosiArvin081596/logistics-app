@@ -318,7 +318,7 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		app,
 		notifyChange: (d) => world.changes.push(d),
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
-		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		driverInstructions: { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } },
 		getJobTrackingCached: async () => {
 			jt.reads++;
 			if (typeof jt.during === "function") {

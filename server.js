@@ -43436,6 +43436,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// expense form from, and the one POST /api/expenses enforces. Fresh row
 		// copies; see withExpenseWindows().
 		filteredLoads = withExpenseWindows(filteredLoads, jobTracking.headers);
+		// Rate-con driver instructions (DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED):
+		// `_instructions` { state, highlights } per load, codes only, keyed by each
+		// row's own stored Load ID (lib/driver-instructions-runtime.js).
+		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -48826,8 +48830,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 // GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
 // .../accept-pending, .../re-extract (Super Admin, Dispatcher). Inert, every route
 // 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY
-// holds a usable value. Pinned by scripts/test-driver-instructions-routes.js, which
-// lifts this block.
+// holds a usable value. The driver's screen (plan PR 4) also needs
+// DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: GET /api/driver/loads/:loadId/instructions
+// (the load's own driver through loadBelongsToDriver(), or Super Admin), the codes on
+// GET /api/driver/:driverName, and `driver-instructions-changed` { loadId } to the
+// load's driver's room. Pinned by scripts/test-driver-instructions-routes.js, which
+// lifts this block, and scripts/test-driver-page-role-gate.js §8.
 let driverInstructionsSideCache = null;
 // The two other sheets holding the load's own amounts (Payments Table, Job Details),
 // one read a minute at most. A failed read throws: the routes then answer 503.
@@ -48857,6 +48865,10 @@ const driverInstructions = require("./lib/driver-instructions-runtime").create({
 	sendAdminEmail: (subject, html) => (alertChannels.mailbox(process.env) ? sendEmail(alertChannels.mailbox(process.env), subject, html) : null),
 	uploadsDir: path.join(DATA_DIR, "uploads"),
 	log: console,
+	loadBelongsToDriver,
+	sentIfLoadOwnershipUnverified,
+	// The driver's room by the spelling his account holds, as the geofence notice does.
+	emitToDriver: (name, event, payload) => io.to(driverRoom(findDriverAccountSpelling(name) || name)).emit(event, payload),
 });
 driverInstructions.mount(app, { requireRole });
 if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-instructions sweep")) {
