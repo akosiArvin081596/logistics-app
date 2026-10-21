@@ -42,7 +42,7 @@
       />
 
       <!-- Driver list panel -->
-      <div class="driver-panel" :class="{ collapsed: panelCollapsed }">
+      <div class="driver-panel" :class="{ collapsed: panelCollapsed, 'with-fuel': selectedDriver && selectedDriver !== '__all__' }">
         <button class="panel-toggle" @click="panelCollapsed = !panelCollapsed">
           Active Loads <span class="panel-count">{{ activeLocations.length }}</span>
           <span class="panel-chevron" :class="{ open: !panelCollapsed }">&#9662;</span>
@@ -2243,6 +2243,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* Phones: with a driver focused, the Fuel & Route card (FuelFinderPanel,
+   bottom left) shows too, and the two cards can't sit side by side. This panel
+   takes at most the top half of the map and the card at most the bottom half
+   (its own @media rule), each scrolling inside; the panel used to run down over
+   the card's header, hiding its title and collapse arrow. */
+@media (max-width: 640px) {
+  .driver-panel.with-fuel { max-height: calc(50% - 15px); }
 }
 
 .panel-toggle {
