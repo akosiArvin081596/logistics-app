@@ -85,6 +85,15 @@ console.log("§1 lib/load-miles.js");
 	check("§1.6 the lane exactly as calculateRatePerMile() writes Details",
 		lane("4528 W Royal Ln\nIrving, TX 75063", "818 Hallmark Dr, LAREDO, TX 78045"), "irving, tx 75063 - laredo, tx 78045");
 	check("§1.7 no lane without both ends", [lane("", "Laredo, TX 78045"), lane("Irving, TX 75063", "  ")], ["", ""]);
+	// Lane matching reads at most 500 characters of each address (made-up addresses).
+	const huge = `1 Test Rd ${" ".repeat(49980)}, TX`;
+	const t0 = Date.now();
+	const hugeLanes = [lane(huge, "818 Hallmark Dr, LAREDO, TX 78045"), lane("4528 W Royal Ln\nIrving, TX 75063", huge)];
+	const took = Date.now() - t0;
+	check("§1.8 a 50,000-character address is read to 500 characters (under 400 ms for both ends)", took < 400 ? "fast" : `${took} ms`, "fast");
+	check("§1.8 ... and gives a lane, never a throw", hugeLanes.every((l) => typeof l === "string"), true);
+	check("§1.9 a normal address, padded with spaces, keeps its lane",
+		lane(`   4528 W Royal Ln\nIrving, TX 75063${" ".repeat(600)}`, `${" ".repeat(600)}818 Hallmark Dr, LAREDO, TX 78045`), "irving, tx 75063 - laredo, tx 78045");
 
 	// Job Details as the Sheets API returns it: column A's header is blank, the
 	// retired `output` column sits at the end.

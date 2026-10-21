@@ -1113,9 +1113,20 @@ test("§11 more distinct own amounts than the filter reads answer 503 INSTRUCTIO
 	eq("40 rates, each on two rows, count once: 200", (await w2.call("GET", API, DISP)).status, 200);
 });
 
-test("§11 a Job Tracking column the filter reads that is missing answers 503 INSTRUCTIONS_UNVERIFIED: either stop address, the phone or the email", async ({ eq }) => {
+test("§11 a \"Cancel\", \"Canceled\" or \"Cancelled\" load is closed: the sweep skips its rate con before download (no Gemini call)", async ({ eq }) => {
 	useClock();
-	for (const h of ["Pickup Address", "Drop-off Address", "Phone Number", "Email"]) {
+	for (const status of ["Cancel", "Canceled", "Cancelled"]) {
+		const rows = prodRows(ROWS.map((r) => (r[0] === DELIVERED_ID ? r.map((c, j) => (HEADERS[j] === "Status" ? status : c)) : r)));
+		const booked = driveFile(`Booked Load # ${DELIVERED_ID}.pdf`, READABLE_B);
+		const w = await world({ headers: PROD_JT_HEADERS, rows, files: [booked] });
+		await w.service.sweep();
+		eq(`"${status}": skipped`, [w.ledger(booked.meta.id).state, w.calls.download, w.calls.gemini], ["no_open_load", [], 0]);
+	}
+});
+
+test("§11 a Job Tracking column the filter reads that is missing answers 503 INSTRUCTIONS_UNVERIFIED: either stop address, the broker contact name, the phone or the email", async ({ eq }) => {
+	useClock();
+	for (const h of ["Pickup Address", "Drop-off Address", "Broker Contact Name", "Phone Number", "Email"]) {
 		const headers = PROD_JT_HEADERS.map((x) => (x === h ? "Retired" : x));
 		const w = await world({ headers, rows: prodRows() });
 		insertRow(w, cleanExtraction());
