@@ -99,7 +99,8 @@
 //                          numbered per run, and investors by owner id); for the
 //                          owner note, whose file stays under ~/LogisX-replica/reports
 //   --json                 print the whole result as JSON (default: a text report)
-//   --owner-note           print the owner note (plain text) instead
+//   --owner-note           print the owner note (plain text) instead; a run that
+//                          found a problem prints none (exit 1, the reason on stderr)
 //   --dry-run              accepted; the run is always read-only
 // Exit codes: 0 done, 1 error or a closed month would change, 2 refused (a
 // malformed --b4-ready or --rate-plan, a missing input, no rate basis or the
@@ -851,7 +852,11 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 				const row = rowOf(p.invoiceNumber);
 				const nm = index.norm(p.driver);
 				const out = p.addedDays.filter((d) => held.has(`${nm}\t${d}`));
-				const outAmount = round2(out.reduce((c, d) => c + held.get(`${nm}\t${d}`).amount, 0));
+				// Every added day held: the projection's own amount (a day two loads
+				// of different Assigned months name has one refused entry per load,
+				// each at its own month's price; the projection prices the day once).
+				const outAmount = out.length && out.length === p.addedDays.length ? round2(p.amountAdded)
+					: round2(out.reduce((c, d) => c + held.get(`${nm}\t${d}`).amount, 0));
 				row.b12 = { days: p.addedDays.filter((d) => !out.includes(d)), amount: round2(p.amountAdded - outAmount), action: p.afterSwitchOn, pays: b12Pays(p.afterSwitchOn) };
 				if (out.length) row.b12Held = { days: out, amount: outAmount, reason: `not added: ${held.get(`${nm}\t${out[0]}`).reason}` };
 				for (const d of p.droppedDays) row.b12NotPaid.add(d);
@@ -1077,7 +1082,8 @@ async function report({ db, memoryCopy, args, envFile, sheetData, ready, snapsho
 	const payersOf = (k, day) => {
 		const out = [];
 		for (const inv of live) {
-			if (index.norm(inv.driver || "") !== k) continue;
+			// A Rejected invoice pays nothing (the pay plan's check c query).
+			if (index.norm(inv.driver || "") !== k || inv.status === "Rejected") continue;
 			if (!Number(inv.is_manual)) {
 				if (inv.week_start <= day && inv.week_end >= day && A.invoicePaidDaysOf(inv).includes(day)) out.push({ invoiceNumber: inv.invoice_number, status: inv.status, amount: gridTotal(inv, day) });
 				continue;
@@ -1351,6 +1357,12 @@ async function run({ argv = process.argv.slice(2), now = null, loadSheet = sheet
 	try {
 		const result = await compute(args, { now, loadSheet, log });
 		const code = result.problems.length ? 1 : 0;
+		// The owner note has no room for a PROBLEM line: a run that found one
+		// prints no note (the text or --json report shows the problems).
+		if (args["owner-note"] === true && result.problems.length) {
+			const listed = result.problems.map((p) => `${p.scenario ? `${p.scenario}: ` : ""}${p.ownerId != null ? `owner ${p.ownerId}: ` : ""}${p.issue}`).join("; ");
+			return { code: 1, result, error: `owner note withheld: ${result.problems.length} problem(s): ${listed}` };
+		}
 		const output = args["owner-note"] === true ? printOwnerNote(result) : args.json === true ? JSON.stringify(result, null, 1) : printText(result);
 		return { code, result, output };
 	} catch (err) {
