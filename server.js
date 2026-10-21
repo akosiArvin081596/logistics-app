@@ -19406,8 +19406,11 @@ function weeklyManualInvoiceHolds({ driverNorm, days, weekStart, weekEnd, rateOf
 	if (!list.length) return { held, check: [] };
 	const manuals = driverLiveManualInvoices(driverNorm);
 	const minCents = Math.min(...list.map((ds) => Math.round((Number(rateOf(ds)) || 0) * 100)));
+	// The amount test needs a line dated the day and a rate above $0: at $0 any
+	// amount, or none, would be "one day's pay" (re-check L).
+	const coversDay = (m, ds) => minCents > 0 && m.datedCents.has(ds) && m.datedCents.get(ds) >= minCents;
 	for (const ds of list) {
-		const holder = manuals.find((m) => m.paidDays.includes(ds) || m.draftDays.has(ds) || (m.datedCents.get(ds) || 0) >= minCents);
+		const holder = manuals.find((m) => m.paidDays.includes(ds) || m.draftDays.has(ds) || coversDay(m, ds));
 		if (holder) held.set(ds, { invoiceNumber: holder.invoiceNumber, status: holder.status });
 	}
 	const holders = new Set([...held.values()].map((h) => h.invoiceNumber));
@@ -20114,6 +20117,9 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 		// Loads whose trip history or ELD could not be read: every path pays them
 		// by their window, and a month-lock guard refuses on them.
 		tripErrors: resolver.errors(),
+		// Loads whose schedule ends before their trip can start (no arrival tap,
+		// the window before the dispatch or Assigned Date): paid by their window.
+		tripWindowRule: resolver.fallbacks(),
 		closedMonthsUnchanged: !problems.some((p) => p.closed),
 		monthsBeforeFromUnchanged: !problems.some((p) => p.beforeFrom),
 		problems,
@@ -20148,6 +20154,7 @@ async function workDaysDryRun({ from, to = "", names = false }) {
 				return acc;
 			}, {}),
 			tripErrors: resolver.errors().length,
+			tripWindowRule: resolver.fallbacks().length,
 			note: "lateDays and perInvoice.addedDays overlap (the same unpaid days seen per week and per invoice); dropped days stay on issued invoices",
 		},
 		generatedAt: new Date().toISOString(),
@@ -20339,6 +20346,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
 			const answer = weekRule.forLoad({ loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null, window: tripWindow });
 			if (answer && answer.error) tripErrors.push({ loadId: ruleLid, error: answer.error });
+			else if (answer && answer.fallback) tripErrors.push({ loadId: ruleLid, error: answer.fallback, fallback: true });
 			const trip = tripWorkDays.tripDaysOrNull(answer);
 			if (trip) {
 				for (const ds of trip) {
@@ -20674,7 +20682,7 @@ async function generateInvoiceHandler(req, res) {
 		if (blankPickupLoads.length) warnings.push(`Pickup Appointment blank; days counted from the Assigned Date: ${blankPickupLoads.join(", ")}.`);
 		// A load the trip work-day rule could not read is paid by its window here.
 		for (const e of [...tripErrors, ...extraRuleErrors]) {
-			warnings.push(`TRIP DAYS NOT READ: load ${e.loadId}: ${e.error}. ${extraRuleErrors.includes(e) ? "Its days in this week are not on this invoice." : "This invoice pays its scheduled window instead."}`);
+			warnings.push(`${e.fallback ? "TRIP RULE NOT APPLIED" : "TRIP DAYS NOT READ"}: load ${e.loadId}: ${e.error}. ${extraRuleErrors.includes(e) ? "Its days in this week are not on this invoice." : "This invoice pays its scheduled window instead."}`);
 		}
 		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
 		// the route; the dry run prices with it too).

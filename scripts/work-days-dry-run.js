@@ -94,6 +94,8 @@ function printText(r) {
 	lines.push(`Driver-days by rule d's reason: ${Object.entries(s.reasons || {}).map(([k, n]) => `${k} ${n}`).join("; ") || "none"}.`);
 	lines.push(`Loads whose trip history or ELD could not be read (paid by their window): ${s.tripErrors || 0}.`);
 	for (const e of r.tripErrors || []) lines.push(`  UNREAD load ${e.loadId}: ${e.error}`);
+	lines.push(`Loads whose schedule ends before their trip can start (paid by their window): ${s.tripWindowRule || 0}.`);
+	for (const e of r.tripWindowRule || []) lines.push(`  WINDOW RULE load ${e.loadId}: ${e.reason}`);
 	lines.push("", "Driver-days (scope, driver, month, day, change, why, load, trip start, flags):");
 	for (const d of r.perDay) lines.push(`  owner ${d.ownerId}  ${d.driver}  ${d.month}  ${d.day}  ${d.change} ${usd(d.amount)}  ${d.reason || "-"}  ${d.added ? "added day" : `load ${d.loadId}`}  ${d.tripStartStatus ? `${d.tripStartStatus} ${d.tripStart}` : "(no trip)"}  ${d.flags.join(",")}`);
 	lines.push("", "Driver pay by scope, driver and month:");
