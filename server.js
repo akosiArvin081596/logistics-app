@@ -3280,6 +3280,48 @@ async function refreshAvailabilityLoadIndex() {
 	}
 }
 
+// The live Job Tracking loads a time-off save is checked against (R11b, behind
+// DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED; POST and PUT time off only), as
+// [{ loadId, shownId, driver, pickupKey, dropoffKey }]: cancelled and
+// soft-deleted loads left out (excludeDroppedLoads()), days read with
+// sheetDayKey() ("" when unreadable), a row with no Load ID left out (no
+// confirmation could name it). `shownId` is the Load ID as the session user may
+// see it: for every role but Super Admin (#525) the rows go through
+// sanitizeBrokerColumns(), the Job Board's own rule, and an id it leaves blank
+// (one holding only contact) reads "[contact withheld]"; the 409 lists that, the
+// echo is matched against it, and the confirmation records `loadId`. Every
+// driver's loads: the route picks his after its last await, by the directory
+// row it reads again then. From the cached sheet, read only: never written, the
+// cached rows never changed. null when the sheet could not be read (logged);
+// the save then goes through unchecked (lib/driver-availability.js
+// timeOffLoadsDecision()).
+async function driverLoadsForTimeOff(req) {
+	try {
+		const jt = await getJobTrackingCached();
+		const cols = jobTrackingMonthCols(jt.headers);
+		const live = excludeDroppedLoads(jt.data, jt.headers);
+		const withheld = req.session.user.role !== "Super Admin";
+		const shown = withheld ? sanitizeBrokerColumns(jt.headers, live) : live;
+		const out = [];
+		live.forEach((r, i) => {
+			const loadId = String((cols.loadIdCol ? r[cols.loadIdCol] : "") || "").trim();
+			if (!normLoadKey(loadId)) return;
+			const seen = withheld ? String((cols.loadIdCol ? shown[i][cols.loadIdCol] : "") || "").trim() || brokerContact.WITHHELD_TEXT : loadId;
+			out.push({
+				loadId,
+				shownId: seen,
+				driver: cols.driverCol ? String(r[cols.driverCol] || "") : "",
+				pickupKey: sheetDayKey(cols.pickupDateCol ? r[cols.pickupDateCol] : ""),
+				dropoffKey: sheetDayKey(cols.dropoffDateCol ? r[cols.dropoffDateCol] : ""),
+			});
+		});
+		return out;
+	} catch (e) {
+		console.error("[availability] Job Tracking unreadable; time off saved without the loads check:", e.message);
+		return null;
+	}
+}
+
 // Every truck's current driver's time off, Map(truck id -> { driverName,
 // driverOffUntil, driverLastOffTo, driverReturningFromMs, driverConfirmedLoadToday }).
 // The truck's driver is its newest open assignment, else trucks.assigned_driver,
@@ -5551,6 +5593,21 @@ const TRIP_WORK_DAYS_FROM = tripWorkDays.ruleFromEnv(process.env, (msg) => conso
 // resolveDailyRate(own, truck, month); months before FROM, a month closed
 // outside the rule, and frozen items never change.
 const DRIVER_RATE_ONLY_FROM = financialsCalc.driverRateOnly.ruleFromEnv(process.env, (msg) => console.warn(`[driver-rate-only] ${msg}`));
+// A blank (or non-date, "TBD") appointment cell (money plan D, 2026-10-15;
+// lib/load-pay-days.js payWindow()). Two flags, so driver pay and payouts are
+// approved separately, each with the first settle month it covers, read once
+// here (true/1/yes/on; off by default; on without a month leaves it off, with
+// one warning). null = off. Months before FROM, closed months, frozen items and
+// settled payouts never change. Before switching either on, review
+// scripts/blank-pickup-dry-run.js.
+//   INVOICE_BLANK_PICKUP_FALLBACK_*   driver pay: the weekly invoice starts a
+//     blank pickup's window at the Assigned Date, as the ledger and the investor
+//     view already do (today it pays such a load no day);
+//   LEDGER_BLANK_DROPOFF_FALLBACK_*   payouts: the ledger and the investor view
+//     end a blank drop-off's window at the completion date, as the weekly
+//     invoice already does (today they pay the pickup day only).
+const INVOICE_BLANK_PICKUP_FALLBACK_FROM = loadPayDays.blankFallbackFromEnv(process.env, "pickup", (msg) => console.warn(`[blank-pay-window] ${msg}`));
+const LEDGER_BLANK_DROPOFF_FALLBACK_FROM = loadPayDays.blankFallbackFromEnv(process.env, "dropoff", (msg) => console.warn(`[blank-pay-window] ${msg}`));
 function payoutRules(overrides = null) {
 	const out = {};
 	for (const k of PAYOUT_RULE_KEYS) out[k] = overrides && typeof overrides[k] === "boolean" ? overrides[k] : PAYOUT_RULES_V2_ENABLED;
@@ -6463,6 +6520,16 @@ const DRIVER_AVAILABILITY_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env
 // Loads banner. Off, the payload has no `timeOff` key and the app shows nothing;
 // the rest of R11 runs as before. GET /api/driver/me/availability is not behind it.
 const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_TIME_OFF_SCREEN_ENABLED ?? "").trim());
+// The time-off loads warning (R11b), default OFF (true/1/yes/on turns it on),
+// and only while DRIVER_AVAILABILITY_ENABLED is on (folded in here). On,
+// recording time off, or an edit reaching days the row did not cover, reads Job
+// Tracking (driverLoadsForTimeOff()) and answers 409 DRIVER_HAS_LOADS when the
+// new days cover loads he already has; "Save anyway" (the loads echoed as
+// `confirmLoads`) saves and records a confirmation per load, so his truck's
+// dark-ELD alert still fires while one covers today. Off, create and edit never
+// read Job Tracking, ignore `confirmLoads` and answer as before. It changes no
+// load and pays nothing.
+const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ?? "").trim());
 // One row per period off. `directory_id` is drivers_directory.id: a row follows
 // a rename, and a deleted driver's rows are cancelled with the directory row
 // (a re-added driver gets a new id and starts with none). Dates are calendar days
@@ -10035,6 +10102,9 @@ app.delete("/api/drivers-directory/:id", requireRole("Super Admin"), async (req,
 // (`createLimits`): availabilityEditScope() / availabilityEditLimits() /
 // availabilityCreateLimits() restate the validator for the panel, and the
 // validator still decides every write. Rows are cancelled, never deleted.
+// Behind DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), a create, or an edit
+// reaching days the row did not cover, over loads he already has asks first
+// (409 DRIVER_HAS_LOADS) and "Save anyway" records a confirmation per load.
 // Nothing here reaches pay or money.
 
 // The six routes exist only while DRIVER_AVAILABILITY_ENABLED is on. Off, the
@@ -10115,6 +10185,36 @@ function availabilityAttempt(body) {
 	return ["kind", "from", "to"].map((k) => `${k} ${auditText(b[k], 20) || "-"}`).join(", ");
 }
 
+// What a time-off save's audit line adds when Job Tracking could not be read
+// for the loads warning (R11b)
+const TIME_OFF_LOADS_UNCHECKED_NOTE = "; loads not checked (Job Tracking unreadable)";
+
+// R11b's "Save anyway": one driver_availability_confirmations row per load the
+// time off was saved over (`loads`, timeOffLoadsDecision()'s `confirm`), tied to
+// the time-off row and holding the load's window, and one audit line per load
+// naming the driver, his days, the load and its window (never the reason). It
+// runs inside the write's transaction, so the confirmations commit with the
+// time-off row or not at all; logAudit() swallows its own errors, so the audit
+// rows are best effort. The ELD sweep reads these rows as it reads an "Assign
+// anyway" (standingConfirmations()): while the load still has him, is live and
+// covers today, his truck alerts as normal. `via` is availability_create or
+// availability_update, with "_unchecked" when Job Tracking could not be read
+// and the echo was recorded as given.
+function recordTimeOffLoadConfirmations(req, { availabilityId, directoryId, driverName, kind, from, to, loads, via }) {
+	const user = (req.session && req.session.user) || {};
+	const insert = db.prepare(`
+		INSERT INTO driver_availability_confirmations
+			(availability_id, directory_id, load_id, load_from, load_to, via, confirmed_by, confirmed_by_user_id, confirmed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`);
+	const at = new Date().toISOString();
+	for (const l of Array.isArray(loads) ? loads : []) {
+		insert.run(Number(availabilityId) || 0, Number(directoryId) || 0, l.loadId, l.from, l.to, via, String(user.username || ""), Number(user.id) || 0, at);
+		logAudit(req, "driver_availability_loads_confirmed", "load", auditText(l.loadId, 64),
+			`${driverName}: off ${from}..${to} (${kind}) saved over load ${auditText(l.loadId, 64)} (${l.from}..${l.to}); confirmed (${via})`);
+	}
+}
+
 // GET /api/drivers-directory/:id/availability — one driver's rows, newest first,
 // each with what the caller may change, and `createLimits` for a new row.
 app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
@@ -10139,8 +10239,15 @@ app.get("/api/drivers-directory/:id/availability", availabilityFlagGate, require
 // POST /api/drivers-directory/:id/availability — record a period off.
 // Body { kind, from, to, reason }. 400 INVALID_KIND / INVALID_REASON /
 // REASON_TOO_LONG / INVALID_DATE / RANGE_REVERSED / RANGE_TOO_LONG /
-// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP.
-app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// BACKDATE_LIMIT; 409 AVAILABILITY_OVERLAP. With
+// DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), then 409 DRIVER_HAS_LOADS
+// when the days cover loads he already has (nothing written, not audited); the
+// same body with `confirmLoads`, the 409's loads echoed, saves and records a
+// confirmation per load (recordTimeOffLoadConfirmations()). Job Tracking
+// unreadable: saved unchecked, the answer saying `loadsUnchecked: true`. The
+// sheet read is the one await; the directory row is read again after it, in
+// the write's transaction (404 when it was deleted meanwhile).
+app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const id = Number(req.params.id);
 		const dir = Number.isInteger(id) && id > 0 ? db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id) : undefined;
@@ -10154,23 +10261,42 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
 		const { kind, from, to, reason } = v.value;
+		let jtLoads;
+		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+			jtLoads = await driverLoadsForTimeOff(req);
+		}
 		const outcome = db.transaction(() => {
+			// After the sheet read's await, the directory row as it is now (the
+			// validator reads only the body, today and the role, none of which moved)
+			const current = jtLoads === undefined ? dir : db.prepare("SELECT id, driver_name FROM drivers_directory WHERE id = ?").get(id);
+			if (!current) return { gone: true };
 			const clash = availabilityOverlap(id, 0, from, to);
-			if (clash) return { clash };
+			if (clash) return { clash, name: current.driver_name };
+			let loadsCheck = null;
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED) {
+				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: current.driver_name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, todayKey: today });
+			}
+			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: current.driver_name, from, to, loads: loadsCheck.ask }) };
 			const info = db.prepare(`
 				INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_by_user_id, created_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`).run(id, dir.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
-			logAudit(req, "driver_availability_create", "driver", String(id), `${dir.driver_name}: off ${from}..${to} (${kind})`);
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid) };
+			`).run(id, current.driver_name, kind, from, to, reason, String(user.username || ""), Number(user.id) || 0, new Date().toISOString());
+			logAudit(req, "driver_availability_create", "driver", String(id),
+				`${current.driver_name}: off ${from}..${to} (${kind})${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
+				recordTimeOffLoadConfirmations(req, { availabilityId: info.lastInsertRowid, directoryId: id, driverName: current.driver_name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_create_unchecked" : "availability_create" });
+			}
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(info.lastInsertRowid), unchecked: !!(loadsCheck && loadsCheck.unchecked) };
 		})();
+		if (outcome.gone) return res.status(404).json({ error: "Driver not found", code: "DRIVER_NOT_FOUND" });
 		if (outcome.clash) {
 			logAuditRefusal(req, "driver_availability_create_blocked", "driver", String(id),
-				`${dir.driver_name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
-			return res.status(409).json(availabilityOverlapBody(dir.driver_name, outcome.clash));
+				`${outcome.name}: off ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(outcome.name, outcome.clash));
 		}
+		if (outcome.asked) return res.status(409).json(outcome.asked);
 		notifyChange("drivers");
-		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user) });
+		res.status(201).json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
 	} catch (err) {
 		console.error("[availability] create failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -10180,41 +10306,76 @@ app.post("/api/drivers-directory/:id/availability", availabilityFlagGate, requir
 // PUT /api/driver-availability/:id — change a period (a partial body over the
 // stored row; "end early" is a new `to`). The create's codes, plus 409
 // AVAILABILITY_CANCELLED; 404 for an unknown id or a row whose driver is gone.
-app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), (req, res) => {
+// With DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), an edit reaching days
+// the row did not cover (an earlier first day or a later last day) reads Job
+// Tracking and answers 409 DRIVER_HAS_LOADS for the loads it newly covers, as
+// the create does; any other edit (the kind or reason only, an end-early, a
+// shrink) never reads it. After that read the stored row is read again and the
+// body merged over it and checked again, so the old days are the row as it is
+// now (404 / 409 AVAILABILITY_CANCELLED / 400 when it changed meanwhile).
+app.put("/api/driver-availability/:id", availabilityFlagGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
 		const row = availabilityRowWithDriver(Number(req.params.id));
 		if (!row) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
 		const user = req.session.user;
 		const today = appTodayKey();
-		const name = row.directory_name;
-		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin: user.role === "Super Admin", existing: row });
+		const isSuperAdmin = user.role === "Super Admin";
+		const v = driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: row });
 		if (!v.ok) {
 			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
-				`${name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
+				`${row.directory_name}: row ${row.id} (${row.from_date}..${row.to_date}): ${availabilityAttempt(req.body)} [${v.code}]`, v.code);
 			return res.status(v.status).json({ error: v.error, code: v.code });
 		}
-		const { kind, from, to, reason } = v.value;
-		const reasonChanged = reason !== String(row.reason || "");
-		const unchanged = kind === row.kind && from === row.from_date && to === row.to_date && !reasonChanged;
+		let jtLoads;
+		if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && (v.value.from < row.from_date || v.value.to > row.to_date)) {
+			jtLoads = await driverLoadsForTimeOff(req);
+		}
 		const outcome = db.transaction(() => {
-			const clash = availabilityOverlap(row.directory_id, row.id, from, to);
-			if (clash) return { clash };
+			// After the sheet read's await, the stored row as it is now, with the
+			// body merged over it and checked again
+			const cur = jtLoads === undefined ? row : availabilityRowWithDriver(row.id);
+			if (!cur) return { gone: true };
+			const checked = jtLoads === undefined ? v : driverAvailability.validateAvailability(req.body, { todayKey: today, isSuperAdmin, existing: cur });
+			if (!checked.ok) return { refused: checked, cur };
+			const { kind, from, to, reason } = checked.value;
+			const name = cur.directory_name;
+			const reasonChanged = reason !== String(cur.reason || "");
+			const unchanged = kind === cur.kind && from === cur.from_date && to === cur.to_date && !reasonChanged;
+			const clash = availabilityOverlap(cur.directory_id, cur.id, from, to);
+			if (clash) return { clash, cur, from, to };
+			let loadsCheck = null;
+			if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && jtLoads !== undefined) {
+				loadsCheck = driverAvailability.timeOffLoadsDecision({ loads: jtLoads, confirmLoads: req.body && req.body.confirmLoads, driverName: name, normalize: normalizeDriverName, loadKey: normLoadKey, from, to, oldFrom: cur.from_date, oldTo: cur.to_date, todayKey: today });
+			}
+			if (loadsCheck && loadsCheck.ask) return { asked: driverAvailability.driverHasLoadsBody({ driverName: name, from, to, loads: loadsCheck.ask }) };
 			if (!unchanged) {
 				db.prepare("UPDATE driver_availability SET kind = ?, from_date = ?, to_date = ?, reason = ?, updated_at = ? WHERE id = ? AND cancelled_at IS NULL")
-					.run(kind, from, to, reason, new Date().toISOString(), row.id);
-				// That the reason changed, never the reason itself (as the create line).
-				logAudit(req, "driver_availability_update", "driver", String(row.directory_id),
-					`${name}: off ${row.from_date}..${row.to_date} (${row.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}`);
+					.run(kind, from, to, reason, new Date().toISOString(), cur.id);
+				// That the reason changed, never the reason itself (as the create line)
+				logAudit(req, "driver_availability_update", "driver", String(cur.directory_id),
+					`${name}: off ${cur.from_date}..${cur.to_date} (${cur.kind}) -> off ${from}..${to} (${kind})${reasonChanged ? "; reason changed" : ""}${loadsCheck && loadsCheck.unchecked ? TIME_OFF_LOADS_UNCHECKED_NOTE : ""}`);
+				if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED && loadsCheck) {
+					recordTimeOffLoadConfirmations(req, { availabilityId: cur.id, directoryId: cur.directory_id, driverName: name, kind, from, to, loads: loadsCheck.confirm, via: loadsCheck.unchecked ? "availability_update_unchecked" : "availability_update" });
+				}
 			}
-			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(row.id) };
+			return { row: db.prepare("SELECT * FROM driver_availability WHERE id = ?").get(cur.id), unchanged, unchecked: !!(loadsCheck && loadsCheck.unchecked) };
 		})();
-		if (outcome.clash) {
-			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(row.directory_id),
-				`${name}: row ${row.id} to ${from}..${to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
-			return res.status(409).json(availabilityOverlapBody(name, outcome.clash));
+		if (outcome.gone) return res.status(404).json({ error: "Time off not found", code: "AVAILABILITY_NOT_FOUND" });
+		if (outcome.refused) {
+			const { cur, refused } = outcome;
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(cur.directory_id),
+				`${cur.directory_name}: row ${cur.id} (${cur.from_date}..${cur.to_date}): ${availabilityAttempt(req.body)} [${refused.code}]`, refused.code);
+			return res.status(refused.status).json({ error: refused.error, code: refused.code });
 		}
-		if (!unchanged) notifyChange("drivers");
-		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(unchanged ? { unchanged: true } : {}) });
+		if (outcome.clash) {
+			const { cur } = outcome;
+			logAuditRefusal(req, "driver_availability_update_blocked", "driver", String(cur.directory_id),
+				`${cur.directory_name}: row ${cur.id} to ${outcome.from}..${outcome.to} overlaps ${outcome.clash.from_date}..${outcome.clash.to_date} [AVAILABILITY_OVERLAP]`, "AVAILABILITY_OVERLAP");
+			return res.status(409).json(availabilityOverlapBody(cur.directory_name, outcome.clash));
+		}
+		if (outcome.asked) return res.status(409).json(outcome.asked);
+		if (!outcome.unchanged) notifyChange("drivers");
+		res.json({ success: true, row: availabilityRowView(outcome.row, today, user), ...(outcome.unchanged ? { unchanged: true } : {}), ...(outcome.unchecked ? { loadsUnchecked: true } : {}) });
 	} catch (err) {
 		console.error("[availability] update failed:", err.message);
 		res.status(500).json({ error: "The time off could not be saved." });
@@ -19806,6 +19967,285 @@ app.get("/api/admin/work-days/dry-run", requireRole("Super Admin"), async (req, 
 	}
 });
 
+// --- The weekly invoice's active-day algorithm for driver pay ---
+// Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
+//
+// ROUTES THROUGH sheetDayKey() — THE WEEK BASIS — AND MUST KEEP DOING SO.
+// This used to hold its own parser: a literal M/D/Y branch, then a bare
+// `new Date(cleaned)` for everything else. That fallback made the resolved
+// calendar day depend on the server's timezone, because `new Date()` on an
+// ISO or RFC 2822 string yields an INSTANT which fmtLocalDate() below then
+// reads back through server-local getters. "2026-04-27" is UTC midnight, so
+// it resolved to Apr 27 on the UTC VPS and Apr 26 on a Houston laptop —
+// same sheet, same code, a different paid day.
+//
+// WHY sheetDayKey AND NOT moneySheetDate. They are both shared resolvers and
+// they agree on every shape except one: an ISO stamp with a trailing offset
+// ("…T19:16:37Z"), which sheetDayKey converts to the business day and
+// moneySheetDate reads literally. sheetDayKey is the right one HERE because
+// this handler's week filter already uses it — invoiceCompletionDay(), which
+// driversWithCompletedLoadsInWeek() shares through invoiceWeekVerdict() —
+// and `completionCol` resolves to "Status Update Date", THE SAME CELL the
+// week filter reads. Resolving
+// that one cell two ways would admit a load to week N and then place its
+// active day in week N±1: the exact divergence this is closing, recreated
+// one function over. moneySheetDate is the MONTH/settlement basis, and it
+// reads RFC 2822 literally for a settlement-history reason ("already closed
+// and locked, follow that date") that has no force over a billing week.
+//
+// MEASURED READ-ONLY ON PRODUCTION BEFORE SHIPPING: over all 389 completed
+// Job Tracking rows this changes the resolved day of ZERO rows under TZ=UTC,
+// which is what the VPS runs — no invoice would have contained a different
+// set of loads, and nothing is restated. Under TZ=America/Chicago two rows
+// move by one day and neither crosses a Sat–Fri boundary. It is fixed anyway
+// because the failure is silent, in money, and goes live the moment a `Z` or
+// RFC 2822 value reaches an appointment column — the same reasoning
+// sheetDayKey's own header records for its `Z` branch.
+//
+// It and fmtLocalDate() lived inside generateInvoiceHandler() until money plan
+// D moved the week's day computation into invoiceWeekPaidDays() below, which
+// scripts/blank-pickup-dry-run.js runs too; they are unchanged.
+function parseInvoiceDate(val) {
+	const key = sheetDayKey(val);
+	if (key) {
+		const [y, mo, d] = key.split("-").map(Number);
+		// LOCAL midnight, so fmtLocalDate() reads back exactly this day in
+		// any server zone — the same round-trip contract moneySheetDate has.
+		const dt = new Date(y, mo - 1, d);
+		if (!isNaN(dt)) return dt;
+	}
+	// Anything the three shared branches do not recognize degrades to the OLD
+	// behaviour rather than to null: dropping the day would silently zero a
+	// load's active days, which is worse than dating it awkwardly. Production
+	// has 3 such cells today ("07:00 Appt."), and they are unparseable both ways.
+	const fb = new Date(String(val ?? "").replace(/^date:\s*/i, "").trim());
+	return isNaN(fb) ? null : fb;
+}
+function fmtLocalDate(d) {
+	return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// Used as a fallback "actual end" when the dropoff appointment is blank
+// — common when dispatch never set a delivery appointment but the
+// driver still completed the run. Prefer Completion Date, then Status
+// Update Date, since both reflect when the load actually ended.
+function invoiceCompletionCol(headers) {
+	return (headers || []).find(h => /completion.*date|status.*update.*date/i.test(h));
+}
+
+// The days one driver's weekly invoice pays for weekStart..weekEnd, before
+// pricing: the week's billed loads (selectInvoiceWeekLoads(): `cols` and
+// `loads`), the trip days of the driver's other loads (`extraRuleLoads`, under
+// `weekRule`, the trip work-day rule or null), then Super Admin overrides.
+// generateInvoiceHandler() and scripts/blank-pickup-dry-run.js both call it, so
+// the dry run computes exactly the days generate pays. `blankPickupFrom` is
+// INVOICE_BLANK_PICKUP_FALLBACK_FROM (null while off); only the dry run passes
+// another. Returns { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads }:
+// blankPickupLoads names each load whose window started at its Assigned Date
+// and that pays a day of the invoice no other load, trip rule or added day pays.
+function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
+	// Same two cells selectInvoiceWeekLoads() reads for `scheduledInWeek`.
+	const { statusCol, loadIdCol, pickupCol, dropoffCol } = cols;
+	const completionCol = invoiceCompletionCol(headers);
+
+	// Truck column → Routemate vehicle → ELD travel/coverage days for the
+	// invoice week. Active days below are intersected with real travel days the
+	// same way /api/investor and /api/financials do; a week/truck with no ELD
+	// data falls back to the scheduled window (coverage-aware) so pay isn't zeroed.
+	const truckCol = headers.find(h => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
+	const unitToVid = {};
+	db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
+		.all().forEach(t => { unitToVid[t.u] = t.vid; });
+	// The window only bounds which pings are READ: getEldTravelDaysByVehicle
+	// buckets each ping into the TRUCK'S local day, and loadWindowDays below
+	// keeps only days inside the week. So the window must hold every truck-local
+	// day of the week, wherever the truck was: from UTC midnight on the
+	// Saturday (8 PM Eastern the evening before) to noon UTC the day after the
+	// Friday (4 AM Pacific Saturday at the latest). A window cut at one zone's
+	// midnight dropped pings of trucks in the zones west of it: built at UTC
+	// midnight it lost Friday 19:00-23:59 Central (one daily rate, $250 by
+	// default), and Central midnight still lost a Mountain or Pacific Friday
+	// evening. Pings outside the week land on days nothing counts.
+	const weekStartMs = Date.parse(weekStart + "T00:00:00Z");
+	const weekEndMs = Date.parse(computedWeekEnd + "T00:00:00Z") + 36 * 3600 * 1000;
+	const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
+	// The pre-dispatch rule (off unless enabled) and the month each load's days
+	// settle in, read as the ledger reads it (the load's Assigned month).
+	const preDispatch = preDispatchPayDayFilter();
+	const monthCols = preDispatch || weekRule || DRIVER_RATE_ONLY_FROM || blankPickupFrom ? jobTrackingMonthCols(headers) : null;
+
+	const activeDaySet = new Set();
+	const dayLoadMap = {}; // date string → [load IDs]
+	// date string → the month it pays in under the daily-rate rule: the earliest
+	// Assigned month of the loads paying it (the ledger's bucket), else the day's
+	// own month (an admin-added day, a load with no Assigned Date). Kept only
+	// while the rule is on; off, every day is priced as before.
+	const dayPayMonth = {};
+	const notePayMonth = DRIVER_RATE_ONLY_FROM
+		? (ds, assignedMonth) => { dayPayMonth[ds] = financialsCalc.driverRateOnly.payMonthOf(ds, [dayPayMonth[ds], assignedMonth || ds.slice(0, 7)]); }
+		: () => {};
+	// For blankPickupLoads: the day -> the blank-pickup loads paying it, and the
+	// days something else pays too.
+	const fallbackPayers = {};
+	const paidOtherwise = new Set();
+	const fallbackLoads = [];
+
+	for (const load of loads) {
+		const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
+		const scheduledDropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
+		const completed = /delivered|completed|pod received/i.test(load[statusCol] || "");
+		// Fallback: delivered loads with no dropoff appointment lose the
+		// hauling days between pickup and actual delivery. Use the actual
+		// completion timestamp instead so the driver gets credited.
+		const completion = !scheduledDropoff && completionCol && completed ? parseInvoiceDate(load[completionCol]) : null;
+		const assignedMonth = monthCols ? loadAssignedMonthKey(load, monthCols) : "";
+		const lid = loadIdCol ? (load[loadIdCol] || "") : "";
+		// The trip work-day rule first, before the pickup gate (weekRule is null
+		// while it is off): a load it covers pays its trip days in this week.
+		if (weekRule) {
+			const ruleLid = String(loadIdCol ? (load[loadIdCol] || "") : "").trim();
+			const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
+			const trip = weekRule.forLoad({ loadId: ruleLid, settleMonth: assignedMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null });
+			if (trip) {
+				for (const ds of trip) {
+					activeDaySet.add(ds);
+					paidOtherwise.add(ds);
+					notePayMonth(ds, assignedMonth);
+					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+					if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
+				}
+				continue;
+			}
+		}
+		// The window (lib/load-pay-days.js payWindow()): pickup to drop-off, a
+		// blank drop-off on a delivered load to its completion date. A blank or
+		// non-date pickup has no window, so no day, unless the blank-pickup
+		// fallback covers the load's Assigned month: then it starts at the
+		// Assigned Date, read as the ledger reads it.
+		const assigned = !pickup && blankPickupFrom && monthCols.dateCol && load[monthCols.dateCol] ? moneySheetDate(load[monthCols.dateCol]) : null;
+		const win = loadPayDays.payWindow({
+			pickup, dropoff: scheduledDropoff, assigned, completion, completed, settleMonth: assignedMonth,
+			rules: { pickupFromAssigned: blankPickupFrom, dropoffFromCompletion: true },
+		});
+		if (!win) continue;
+		const fallbackKey = win.pickupFallback ? (String(lid).trim() || `(sheet row ${load._rowIndex})`) : null;
+		if (fallbackKey) fallbackLoads.push(fallbackKey);
+		// The window's last day as the ledger and GET /api/investor read it, for
+		// the pre-dispatch rule only: the drop-off appointment, else the pickup
+		// day (the completion date only where the ledger's blank drop-off
+		// fallback covers the load), capped at 31 days, by the ledger's own
+		// expansion.
+		const ledgerWin = preDispatch
+			? loadPayDays.payWindow({
+				pickup: win.start, dropoff: scheduledDropoff, completion, completed, settleMonth: assignedMonth,
+				rules: { pickupFromAssigned: true, dropoffFromCompletion: LEDGER_BLANK_DROPOFF_FALLBACK_FROM },
+			})
+			: null;
+		const ruleWindowEnd = ledgerWin ? financialsCalc.expandDateRange(ledgerWin.start, ledgerWin.end || ledgerWin.start).slice(-1)[0] : "";
+		const start = new Date(win.start); start.setHours(12, 0, 0, 0);
+		const end = win.end ? new Date(win.end) : new Date(win.start);
+		end.setHours(12, 0, 0, 0);
+		if (end < start) { end.setTime(start.getTime()); }
+		// Collect this load's scheduled days that fall within the invoice week.
+		const loadWindowDays = [];
+		const cur = new Date(start);
+		while (cur <= end) {
+			const ds = fmtLocalDate(cur);
+			if (ds >= weekStart && ds <= computedWeekEnd) loadWindowDays.push(ds);
+			cur.setDate(cur.getDate() + 1);
+		}
+		// Intersect with the truck's real ELD travel days — but only when the
+		// ELD actually covered this window (≥1 ping). Uncovered windows (truck
+		// not linked, or load predates/outside the feed) fall back to the full
+		// scheduled window so pay isn't zeroed; a covered-but-parked day is dropped.
+		// lib/load-pay-days.js payDaysForLoad() is the copy the investor view and
+		// the ledger share, the pre-dispatch rule included.
+		const truckUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
+		const vid = truckUnit ? unitToVid[truckUnit] : null;
+		const eld = vid ? eldByVid[vid] : null;
+		const { days: countedDays } = loadPayDays.payDaysForLoad(
+			loadWindowDays, eld,
+			// loadWindowDays is clipped to the week; the rule reads the whole window.
+			{ loadId: String(lid).trim(), vid, settleMonth: assignedMonth, windowStart: fmtLocalDate(start), windowEnd: ruleWindowEnd },
+			preDispatch,
+		);
+		for (const ds of countedDays) {
+			activeDaySet.add(ds);
+			if (fallbackKey) (fallbackPayers[ds] || (fallbackPayers[ds] = [])).push(fallbackKey);
+			else paidOtherwise.add(ds);
+			notePayMonth(ds, assignedMonth);
+			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+			if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
+		}
+	}
+	// The trip days in this week of the driver's other completed loads.
+	for (const x of extraRuleLoads) {
+		for (const ds of x.days) {
+			activeDaySet.add(ds);
+			paidOtherwise.add(ds);
+			notePayMonth(ds, x.month);
+			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+			if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
+		}
+	}
+
+	// Apply admin overrides — Super Admin's manual (driver, date) adjustments
+	// from /api/admin/excluded-days. CLAUDE.md requires the three pay paths
+	// (/api/investor, /api/financials, this) stay in lockstep, so we honor the
+	// same overrides here, clipped to the invoice's Sat–Fri week.
+	{
+		const ovrAll = getAllExcludedDriverDays()[nameNorm];
+		if (ovrAll) {
+			if (ovrAll.remove && ovrAll.remove.size) {
+				for (const ds of ovrAll.remove) {
+					if (ds >= weekStart && ds <= computedWeekEnd) {
+						activeDaySet.delete(ds);
+						delete dayLoadMap[ds];
+					}
+				}
+			}
+			if (ovrAll.add && ovrAll.add.size) {
+				for (const ds of ovrAll.add) {
+					if (ds >= weekStart && ds <= computedWeekEnd) {
+						activeDaySet.add(ds);
+						paidOtherwise.add(ds);
+						// An added day pays in its own month, as the ledger buckets it.
+						notePayMonth(ds, "");
+						// Admin-added days aren't tied to a load row, so the
+						// BoL column on the invoice grid stays empty for them.
+						if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
+					}
+				}
+			}
+		}
+	}
+	// The blank-pickup loads that gained the invoice a day, in sheet order: a day
+	// still paid after the overrides that only such loads pay.
+	const gained = new Set();
+	for (const ds of [...activeDaySet].sort()) {
+		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
+	}
+	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
+	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads };
+}
+
+// How a weekly invoice prices the days invoiceWeekPaidDays() returns, for a
+// daily-rate driver (a percentage driver's total is set from revenue later).
+// `dailyRate` is the week's one rate, resolveDailyRate(payDaily, truckRate, the
+// week's end month), as the handler resolves it. Under the trip work-day rule or
+// the daily-rate rule each day is priced at its own rate (invoiceDayRater(), by
+// the month the day pays in, dayPayMonth) and rateOf is that rate, the total
+// their sum; otherwise rateOf is null and the total is dailyRate per day.
+// Returns { rateOf, totalOf(days) }.
+function invoiceDayPricing({ dailyRate, nameNorm, payDaily, truckRate, weekRule = null, dayPayMonth = {} }) {
+	const dayRater = weekRule || DRIVER_RATE_ONLY_FROM
+		? invoiceDayRater({ nameNorm, payDaily, truckRate, fromMonth: weekRule ? weekRule.fromMonth : null })
+		: null;
+	const rateOf = dayRater ? (ds) => dayRater(ds, dayPayMonth[ds]) : null;
+	const totalOf = (days) => (rateOf ? [...days].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : days.size * dailyRate);
+	return { rateOf, totalOf };
+}
+
 // POST /api/invoices/generate — driver generates weekly invoice
 app.post("/api/invoices/generate", requireAuth, generateInvoiceHandler);
 // Named (not an inline arrow) so the Friday auto-invoice batch can invoke this
@@ -20000,225 +20440,27 @@ async function generateInvoiceHandler(req, res) {
 		const personal = personalGenerationPlan({ driverName, weekStart, existing, expenses, percentage: payStruct.payType === "percentage" });
 
 		// --- Active-day algorithm for driver pay ---
-		// Parse date from messy sheet values like "5/16/25 9:00" or "5/16/25 06:00-18:00 Appt."
-		//
-		// ROUTES THROUGH sheetDayKey() — THE WEEK BASIS — AND MUST KEEP DOING SO.
-		// This used to hold its own parser: a literal M/D/Y branch, then a bare
-		// `new Date(cleaned)` for everything else. That fallback made the resolved
-		// calendar day depend on the server's timezone, because `new Date()` on an
-		// ISO or RFC 2822 string yields an INSTANT which fmtLocalDate() below then
-		// reads back through server-local getters. "2026-04-27" is UTC midnight, so
-		// it resolved to Apr 27 on the UTC VPS and Apr 26 on a Houston laptop —
-		// same sheet, same code, a different paid day.
-		//
-		// WHY sheetDayKey AND NOT moneySheetDate. They are both shared resolvers and
-		// they agree on every shape except one: an ISO stamp with a trailing offset
-		// ("…T19:16:37Z"), which sheetDayKey converts to the business day and
-		// moneySheetDate reads literally. sheetDayKey is the right one HERE because
-		// this handler's week filter already uses it — invoiceCompletionDay(), which
-		// driversWithCompletedLoadsInWeek() shares through invoiceWeekVerdict() —
-		// and `completionCol` resolves to "Status Update Date", THE SAME CELL the
-		// week filter reads. Resolving
-		// that one cell two ways would admit a load to week N and then place its
-		// active day in week N±1: the exact divergence this is closing, recreated
-		// one function over. moneySheetDate is the MONTH/settlement basis, and it
-		// reads RFC 2822 literally for a settlement-history reason ("already closed
-		// and locked, follow that date") that has no force over a billing week.
-		//
-		// MEASURED READ-ONLY ON PRODUCTION BEFORE SHIPPING: over all 389 completed
-		// Job Tracking rows this changes the resolved day of ZERO rows under TZ=UTC,
-		// which is what the VPS runs — no invoice would have contained a different
-		// set of loads, and nothing is restated. Under TZ=America/Chicago two rows
-		// move by one day and neither crosses a Sat–Fri boundary. It is fixed anyway
-		// because the failure is silent, in money, and goes live the moment a `Z` or
-		// RFC 2822 value reaches an appointment column — the same reasoning
-		// sheetDayKey's own header records for its `Z` branch.
-		function parseInvoiceDate(val) {
-			const key = sheetDayKey(val);
-			if (key) {
-				const [y, mo, d] = key.split("-").map(Number);
-				// LOCAL midnight, so fmtLocalDate() reads back exactly this day in
-				// any server zone — the same round-trip contract moneySheetDate has.
-				const dt = new Date(y, mo - 1, d);
-				if (!isNaN(dt)) return dt;
-			}
-			// Anything the three shared branches do not recognize degrades to the OLD
-			// behaviour rather than to null: dropping the day would silently zero a
-			// load's active days, which is worse than dating it awkwardly. Production
-			// has 3 such cells today ("07:00 Appt."), and they are unparseable both ways.
-			const fb = new Date(String(val ?? "").replace(/^date:\s*/i, "").trim());
-			return isNaN(fb) ? null : fb;
-		}
-		function fmtLocalDate(d) {
-			return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-		}
-
-		// Same two cells selectInvoiceWeekLoads() reads for `scheduledInWeek`.
+		// invoiceWeekPaidDays() (above the route) is the one copy of the week's
+		// days; scripts/blank-pickup-dry-run.js runs it too.
+		const { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads } = invoiceWeekPaidDays({
+			headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads, weekRule, weekStart, weekEnd: computedWeekEnd, nameNorm,
+		});
+		// A load paid from its Assigned Date (the blank-pickup fallback) is named
+		// to the admin here; the PDF does not say it.
+		if (blankPickupLoads.length) warnings.push(`Pickup Appointment blank; days counted from the Assigned Date: ${blankPickupLoads.join(", ")}.`);
+		// The cells the percentage driver's load lines read below.
 		const { pickupCol, dropoffCol } = week.cols;
-		// Used as a fallback "actual end" when the dropoff appointment is blank
-		// — common when dispatch never set a delivery appointment but the
-		// driver still completed the run. Prefer Completion Date, then Status
-		// Update Date, since both reflect when the load actually ended.
-		const completionCol = headers.find(h => /completion.*date|status.*update.*date/i.test(h));
+		const completionCol = invoiceCompletionCol(headers);
 		// Broker-rate column for owner-op % pay. Same regex /api/dashboard uses.
 		const rateCol = headers.find(h => /payment|rate|amount|pay/i.test(h));
 		const parseAmount = (s) => parseFloat(String(s || "0").replace(/[$,]/g, "")) || 0;
 
-		// Truck column → Routemate vehicle → ELD travel/coverage days for the
-		// invoice week. Active days below are intersected with real travel days the
-		// same way /api/investor and /api/financials do; a week/truck with no ELD
-		// data falls back to the scheduled window (coverage-aware) so pay isn't zeroed.
-		const truckCol = headers.find(h => /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i.test(h));
-		const unitToVid = {};
-		db.prepare("SELECT LOWER(unit_number) AS u, routemate_vehicle_id AS vid FROM trucks WHERE COALESCE(routemate_vehicle_id, '') != ''")
-			.all().forEach(t => { unitToVid[t.u] = t.vid; });
-		// The window only bounds which pings are READ: getEldTravelDaysByVehicle
-		// buckets each ping into the TRUCK'S local day, and loadWindowDays below
-		// keeps only days inside the week. So the window must hold every truck-local
-		// day of the week, wherever the truck was: from UTC midnight on the
-		// Saturday (8 PM Eastern the evening before) to noon UTC the day after the
-		// Friday (4 AM Pacific Saturday at the latest). A window cut at one zone's
-		// midnight dropped pings of trucks in the zones west of it: built at UTC
-		// midnight it lost Friday 19:00-23:59 Central (one daily rate, $250 by
-		// default), and Central midnight still lost a Mountain or Pacific Friday
-		// evening. Pings outside the week land on days nothing counts.
-		const weekStartMs = Date.parse(weekStart + "T00:00:00Z");
-		const weekEndMs = Date.parse(computedWeekEnd + "T00:00:00Z") + 36 * 3600 * 1000;
-		const eldByVid = getEldTravelDaysByVehicle(Object.values(unitToVid), weekStartMs, weekEndMs);
-		// The pre-dispatch rule (off unless enabled) and the month each load's days
-		// settle in, read as the ledger reads it (the load's Assigned month).
-		const preDispatch = preDispatchPayDayFilter();
-		const monthCols = preDispatch || weekRule || DRIVER_RATE_ONLY_FROM ? jobTrackingMonthCols(headers) : null;
-
-		const activeDaySet = new Set();
-		const dayLoadMap = {}; // date string → [load IDs]
-		// date string → the month it pays in under the daily-rate rule: the earliest
-		// Assigned month of the loads paying it (the ledger's bucket), else the day's
-		// own month (an admin-added day, a load with no Assigned Date). Kept only
-		// while the rule is on; off, every day is priced as before.
-		const dayPayMonth = {};
-		const notePayMonth = DRIVER_RATE_ONLY_FROM
-			? (ds, assignedMonth) => { dayPayMonth[ds] = financialsCalc.driverRateOnly.payMonthOf(ds, [dayPayMonth[ds], assignedMonth || ds.slice(0, 7)]); }
-			: () => {};
-
-		for (const load of uniqueLoads) {
-			const pickup = parseInvoiceDate(pickupCol ? load[pickupCol] : null);
-			let dropoff = parseInvoiceDate(dropoffCol ? load[dropoffCol] : null);
-			// The window's last day as the ledger and GET /api/investor read it, for
-			// the pre-dispatch rule only: the drop-off appointment, else the pickup
-			// day (never the completion fallback below), capped at 31 days, by the
-			// ledger's own expansion.
-			const ruleWindowEnd = preDispatch && pickup ? financialsCalc.expandDateRange(pickup, dropoff || pickup).slice(-1)[0] : "";
-			// Fallback: delivered loads with no dropoff appointment lose the
-			// hauling days between pickup and actual delivery. Use the actual
-			// completion timestamp instead so the driver gets credited.
-			if (!dropoff && completionCol && /delivered|completed|pod received/i.test(load[statusCol] || "")) {
-				dropoff = parseInvoiceDate(load[completionCol]);
-			}
-			// The trip work-day rule first, before the pickup gate (weekRule is null
-			// while it is off): a load it covers pays its trip days in this week.
-			if (weekRule) {
-				const ruleLid = String(loadIdCol ? (load[loadIdCol] || "") : "").trim();
-				const ruleUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
-				const ruleMonth = loadAssignedMonthKey(load, monthCols);
-				const trip = weekRule.forLoad({ loadId: ruleLid, settleMonth: ruleMonth, range: { start: weekStart, end: computedWeekEnd }, vid: ruleUnit ? unitToVid[ruleUnit] : null });
-				if (trip) {
-					for (const ds of trip) {
-						activeDaySet.add(ds);
-						notePayMonth(ds, ruleMonth);
-						if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
-						if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
-					}
-					continue;
-				}
-			}
-			if (!pickup) continue;
-			const start = new Date(pickup); start.setHours(12, 0, 0, 0);
-			const end = dropoff ? new Date(dropoff) : new Date(pickup);
-			end.setHours(12, 0, 0, 0);
-			if (end < start) { end.setTime(start.getTime()); }
-			// Collect this load's scheduled days that fall within the invoice week.
-			const loadWindowDays = [];
-			const cur = new Date(start);
-			while (cur <= end) {
-				const ds = fmtLocalDate(cur);
-				if (ds >= weekStart && ds <= computedWeekEnd) loadWindowDays.push(ds);
-				cur.setDate(cur.getDate() + 1);
-			}
-			// Intersect with the truck's real ELD travel days — but only when the
-			// ELD actually covered this window (≥1 ping). Uncovered windows (truck
-			// not linked, or load predates/outside the feed) fall back to the full
-			// scheduled window so pay isn't zeroed; a covered-but-parked day is dropped.
-			// lib/load-pay-days.js payDaysForLoad() is the copy the investor view and
-			// the ledger share, the pre-dispatch rule included.
-			const truckUnit = truckCol ? (load[truckCol] || "").trim().toLowerCase() : "";
-			const vid = truckUnit ? unitToVid[truckUnit] : null;
-			const eld = vid ? eldByVid[vid] : null;
-			const lid = loadIdCol ? (load[loadIdCol] || "") : "";
-			const assignedMonth = monthCols ? loadAssignedMonthKey(load, monthCols) : "";
-			const { days: countedDays } = loadPayDays.payDaysForLoad(
-				loadWindowDays, eld,
-				// loadWindowDays is clipped to the week; the rule reads the whole window.
-				{ loadId: String(lid).trim(), vid, settleMonth: assignedMonth, windowStart: fmtLocalDate(start), windowEnd: ruleWindowEnd },
-				preDispatch,
-			);
-			for (const ds of countedDays) {
-				activeDaySet.add(ds);
-				notePayMonth(ds, assignedMonth);
-				if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
-				if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
-			}
-		}
-		// The trip days in this week of the driver's other completed loads.
-		for (const x of extraRuleLoads) {
-			for (const ds of x.days) {
-				activeDaySet.add(ds);
-				notePayMonth(ds, x.month);
-				if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
-				if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
-			}
-		}
-
-		// Apply admin overrides — Super Admin's manual (driver, date) adjustments
-		// from /api/admin/excluded-days. CLAUDE.md requires the three pay paths
-		// (/api/investor, /api/financials, this) stay in lockstep, so we honor the
-		// same overrides here, clipped to the invoice's Sat–Fri week.
-		{
-			const ovrAll = getAllExcludedDriverDays()[nameNorm];
-			if (ovrAll) {
-				if (ovrAll.remove && ovrAll.remove.size) {
-					for (const ds of ovrAll.remove) {
-						if (ds >= weekStart && ds <= computedWeekEnd) {
-							activeDaySet.delete(ds);
-							delete dayLoadMap[ds];
-						}
-					}
-				}
-				if (ovrAll.add && ovrAll.add.size) {
-					for (const ds of ovrAll.add) {
-						if (ds >= weekStart && ds <= computedWeekEnd) {
-							activeDaySet.add(ds);
-							// An added day pays in its own month, as the ledger buckets it.
-							notePayMonth(ds, "");
-							// Admin-added days aren't tied to a load row, so the
-							// BoL column on the invoice grid stays empty for them.
-							if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
-						}
-					}
-				}
-			}
-		}
-
 		const activeDays = activeDaySet.size;
-		// Under the trip work-day rule or the daily-rate rule each day is priced at
-		// its own rate (invoiceDayRater(), by the month the day pays in) and the
-		// total is their sum; otherwise one rate.
-		const dayRater = weekRule || DRIVER_RATE_ONLY_FROM
-			? invoiceDayRater({ nameNorm, payDaily: payStruct.payDaily, truckRate, fromMonth: weekRule ? weekRule.fromMonth : null })
-			: null;
-		const rateOf = dayRater ? (ds) => dayRater(ds, dayPayMonth[ds]) : null;
+		// Each day's rate where a rule prices days apart (invoiceDayPricing(), above
+		// the route; the dry run prices with it too).
+		const { rateOf, totalOf } = invoiceDayPricing({ dailyRate, nameNorm, payDaily: payStruct.payDaily, truckRate, weekRule, dayPayMonth });
 		// `let` because owner-op (percentage) drivers override this further down.
-		let totalEarnings = rateOf ? [...activeDaySet].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : activeDays * dailyRate;
+		let totalEarnings = totalOf(activeDaySet);
 
 		// Generate invoice number
 		// An existing Draft is regenerated, not deleted here: commitInvoiceWithPdf()
@@ -39870,7 +40112,11 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 // counts completed ones only. Status is mutable and the override row is not, so
 // a load one status change away from counting would otherwise be one status
 // change away from silently restating a closed month.
-function excludedDayPeriods({ driver, date, action, jobTracking }) {
+//
+// `blankDropoffFrom` is the blank drop-off fallback's FROM (excludedDayGate()
+// reads it as the payout ledger does; null while off): with it, a covering load's
+// window is the one the ledger pays (loadWindowDays()).
+function excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom = null }) {
 	// ⚠️ `own` is deliberately NOT run through LOCKABLE_MONTH_KEY, because
 	// filtering it would DROP it from the array, which is a PERMIT. The producers
 	// below need the test because they build their keys from arbitrary sheet cells;
@@ -39890,6 +40136,8 @@ function excludedDayPeriods({ driver, date, action, jobTracking }) {
 	if (action === "add" || !jobTracking) return [own];
 	const cols = jobTrackingMonthCols(jobTracking.headers);
 	if (!cols.driverCol) return [own];
+	// The completion cell the ledger reads (ledgerLoadRows()), for that window.
+	if (blankDropoffFrom) Object.assign(cols, { blankDropoffFrom, completionDateCol: findCol(jobTracking.headers, /completion.*date|status.*update.*date/i) });
 	const months = new Set();
 	for (const row of jobTracking.data) {
 		if (normalizeDriverName(row[cols.driverCol]) !== driver) continue;
@@ -39938,7 +40186,10 @@ async function excludedDayGate({ driver, date, action }) {
 			return { refuse: "unresolved", periods: [] };
 		}
 	}
-	const periods = excludedDayPeriods({ driver, date, action, jobTracking });
+	// The blank drop-off fallback's FROM, read as the payout ledger reads it
+	// (gatherLedgerScopeFacts()), so the lock covers the days the ledger pays.
+	const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
+	const periods = excludedDayPeriods({ driver, date, action, jobTracking, blankDropoffFrom });
 	const locked = lockedAmong(periods);
 	return locked.length ? { refuse: "finalized", periods: locked } : { refuse: null, periods };
 }
@@ -41589,6 +41840,17 @@ function warnDriverRateOnlyFromClosedMonth() {
 	if (msg) console.warn(`[driver-rate-only] ${msg}`);
 }
 warnDriverRateOnlyFromClosedMonth();
+// One notice at boot per blank-appointment fallback whose FROM is at or before
+// the latest closed month, built like the ones above. The fallback keeps running.
+function warnBlankWindowFallbackFromClosedMonth() {
+	if (!INVOICE_BLANK_PICKUP_FALLBACK_FROM && !LEDGER_BLANK_DROPOFF_FALLBACK_FROM) return;
+	const latest = financialsCalc.ledgerDayOnce.latestClosedMonth(db);
+	for (const [which, from] of [["pickup", INVOICE_BLANK_PICKUP_FALLBACK_FROM], ["dropoff", LEDGER_BLANK_DROPOFF_FALLBACK_FROM]]) {
+		const msg = from ? loadPayDays.blankFallbackFromClosedWarning(which, from, latest) : null;
+		if (msg) console.warn(`[blank-pay-window] ${msg}`);
+	}
+}
+warnBlankWindowFallbackFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -41887,6 +42149,25 @@ function loadWindowDays(row, cols) {
 	// refusal default is byte-identical to before the pickup end was widened.
 	if (!pickup || isNaN(pickup)) return [];
 	const days = jtExpandDateRange(pickup, dropoff || pickup);
+	// THE MONTH-END LOCK COVERS THE SAME DAYS THE LEDGER PAYS. With the blank
+	// drop-off fallback on (LEDGER_BLANK_DROPOFF_FALLBACK_*, lib/load-pay-days.js
+	// payWindow()), the payout ledger and GET /api/investor pay a blank drop-off's
+	// window to the completion date for a load settling in FROM or later, so the
+	// window here runs there too, from either pickup reading, judged by the same
+	// payWindow() rule. Status is not read, as everywhere in this guard. Only a
+	// caller whose `cols` carries the setting (excludedDayPeriods(), from
+	// excludedDayGate()) gets it: without one this is the window as before.
+	if (!dropoff && cols.blankDropoffFrom) {
+		const completion = cols.completionDateCol ? moneySheetDate(row[cols.completionDateCol]) : null;
+		const settleMonth = loadAssignedMonthKey(row, cols);
+		for (const start of [pickup, pickupShared]) {
+			const win = start && !isNaN(start)
+				? loadPayDays.payWindow({ pickup: start, completion, completed: true, settleMonth, rules: { dropoffFromCompletion: cols.blankDropoffFrom } })
+				: null;
+			if (win && win.dropoffFallback) for (const d of jtExpandDateRange(win.start, win.end)) if (!days.includes(d)) days.push(d);
+		}
+		days.sort();
+	}
 	if (!pickupShared || isNaN(pickupShared) || +pickupShared === +pickup) return days;
 	// Both readings agreed on nothing but the drop-off — take their union, so the
 	// guard sees every month either basis could book this load into.
@@ -57235,9 +57516,12 @@ function truckBilledMonthCount(t, now) {
 // narrower than the sheet, and silently drops or mis-dates the rows it cannot
 // read (PR #215 assigned dates, PR #237 IFTA rows and the drop-off end, then the
 // pickup end). The pickup and drop-off results are passed through as they come
-// back, an unreadable Date included: an unreadable pickup is NOT a blank one
-// (the window must not fall back to the Assigned date for it), and an
-// unreadable drop-off yields no days, exactly as before.
+// back. moneySheetDate() answers null for a cell it cannot read ("TBD"), so the
+// ledger treats such a pickup as a blank one and starts the window at the
+// Assigned date, as GET /api/investor does; an unreadable drop-off is a blank
+// one too. The completion date (the cell the weekly invoice ends a blank
+// drop-off's window at, "Status Update Date" on production) is passed for the
+// blank drop-off fallback (lib/load-pay-days.js payWindow()).
 //
 // `ownerOfBlankRow(r)`, given (the datedAttribution payout rule), decides a row
 // with a blank Owner ID instead of the driver set: the owner of the truck the
@@ -57259,6 +57543,9 @@ function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, owner
 	// Match the rest of the codebase (NOT contract.?id): Job Tracking's column A is
 	// "Contract ID" and is blank for email-ingested loads.
 	const jtLoadIdCol = findCol(headers, /load.?id|job.?id/i);
+	// The weekly invoice's completion cell (invoiceCompletionCol()'s regex, first
+	// match in sheet order).
+	const completionCol = findCol(headers, /completion.*date|status.*update.*date/i);
 
 	// A Driver cell that reads as a built-in property name falls back like a
 	// blank one (driverNameForTotals()) — the same rule as GET /api/investor.
@@ -57293,6 +57580,7 @@ function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, owner
 			assignedText: jtDateCol ? String(r[jtDateCol] || "").trim() : "",
 			pickupDate: moneySheetDate(pickupDateCol ? r[pickupDateCol] : null),
 			dropoffDate: moneySheetDate(dropoffDateCol ? r[dropoffDateCol] : null),
+			completionDate: moneySheetDate(completionCol ? r[completionCol] : null),
 			completed: completedStatuses.test(st),
 			amount: parseFloat(String((jtRateCol ? r[jtRateCol] : "0")).replace(/[$,]/g, "")) || 0,
 			ownerCell: rawOwner === undefined || rawOwner === null ? "" : String(rawOwner).trim(),
@@ -57473,6 +57761,14 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 		// scope of computeFleetLedger(). Reached through financialsCalc, as the
 		// day-once rule is, so every lifted copy of this function keeps its names.
 		...(rules.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules })),
+		// The blank drop-off fallback (LEDGER_BLANK_DROPOFF_FALLBACK_FROM, off by
+		// default): a completed load with a blank Drop-off Appointment is paid to its
+		// completion date, as the weekly invoice pays it. `rules.blankDropoffFrom`,
+		// when present, is the dry run's candidate FROM (scripts/blank-pickup-dry-run.js).
+		// Read through financialsCalc, as the rules above are.
+		blankDropoffFrom: Object.prototype.hasOwnProperty.call(rules, "blankDropoffFrom")
+			? (rules.blankDropoffFrom || null)
+			: financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff"),
 		driverDayOverrides: getAllExcludedDriverDays(),
 		// An admin-added day counts for the driver's investor: by the driver set,
 		// or under datedAttribution by the truck the driver held that day.
@@ -58933,6 +59229,9 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		const statusCol = findCol(jobTracking.headers, /status/i);
 		const pickupDateCol = findCol(jobTracking.headers, /pickup.*appo|pickup.*date/i);
 		const dropoffDateCol = findCol(jobTracking.headers, /drop.?off.*appo|drop.?off.*date|delivery.*date/i);
+		// The weekly invoice's completion cell, for the blank drop-off fallback
+		// (as ledgerLoadRows() reads it).
+		const completionDateCol = findCol(jobTracking.headers, /completion.*date|status.*update.*date/i);
 
 		// ⚠️ The local `parseSheetDate` is DELETED, not merely unused — every date
 		// read in this handler now goes through the shared moneySheetDate(). See the
@@ -59063,6 +59362,8 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 		// pay structures read once, only while it is on).
 		const { tripDays, dayOnceFrom } = financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env });
 		const tripPayStructures = tripDays ? getDriverPayStructures() : null;
+		// The blank drop-off fallback, as the payout ledger reads it (off by default).
+		const blankDropoffFrom = financialsCalc.loadPayDays.blankFallbackFromEnv(process.env, "dropoff");
 		// Per-driver-per-month day-source flags for the UI badge: { driver: { "YYYY-MM": {eld,est,trip} } }.
 		// `trip` (days from the trip timestamps) only exists while that rule is on.
 		const driverDaySource = Object.create(null);
@@ -59169,8 +59470,18 @@ app.get("/api/investor", requireRole("Super Admin", "Investor"), async (req, res
 					const first = new Date(`${trip[0]}T12:00:00`);
 					if (!earliestDate || first < earliestDate) earliestDate = first;
 				}
-				if (trip || (pickup && !isNaN(pickup))) {
-					const windowDays = trip ? [] : expandDateRange(pickup, dropoff || pickup);
+				// The window (lib/load-pay-days.js payWindow(), as the ledger reads it):
+				// the pickup (or the Assigned date, above) to the drop-off, a blank
+				// drop-off ending at the completion date where the blank drop-off
+				// fallback covers the load.
+				const win = trip ? null : loadPayDays.payWindow({
+					pickup, dropoff,
+					completion: !dropoff && blankDropoffFrom && completionDateCol ? moneySheetDate(r[completionDateCol]) : null,
+					completed: true, settleMonth: assignedMonthKey || "",
+					rules: { pickupFromAssigned: true, dropoffFromCompletion: blankDropoffFrom },
+				});
+				if (trip || win) {
+					const windowDays = trip ? [] : expandDateRange(win.start, win.end || win.start);
 					const eld = vid ? eldByVid[vid] : null;
 					// Intersect with real travel days ONLY when the ELD covered this
 					// load's window (≥1 ping). Uncovered windows (load predates the

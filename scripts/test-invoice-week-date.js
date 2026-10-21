@@ -49,15 +49,14 @@ function extractAt(needle, label) {
 	throw new Error(`unbalanced braces extracting ${label}`);
 }
 const extract = (name) => extractAt(`\nfunction ${name}(`, `${name}()`);
-// parseInvoiceDate is nested inside generateInvoiceHandler, so it is indented.
-const extractNested = (name) => extractAt(`\n\t\tfunction ${name}(`, `${name}()`);
 
 const RFC2822_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const S = new Function("RFC2822_MONTHS", "APP_TIMEZONE", [
 	extract("appDay"),
 	extract("sheetDayKey"),
 	extract("getWeekRange"),
-	extractNested("parseInvoiceDate"),
+	// Module level since money plan D (it was nested in generateInvoiceHandler()).
+	extract("parseInvoiceDate"),
 	"return { appDay, sheetDayKey, getWeekRange, parseInvoiceDate };",
 ].join("\n"))(RFC2822_MONTHS, require("../lib/app-time").appTimeZone());
 const { sheetDayKey, getWeekRange, parseInvoiceDate } = S;
