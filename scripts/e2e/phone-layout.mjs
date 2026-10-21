@@ -260,6 +260,11 @@ async function openPage(browser, role, size) {
     if (url.host !== `${HOST}:${PORT}`) return route.abort()
     if (url.pathname.startsWith('/socket.io/')) return route.abort()
     if (!url.pathname.startsWith('/api/')) return route.continue()
+    // The rate-con driver instructions answer as with their flag off (production
+    // today): 404 with no code, so the load detail shows no instructions section.
+    if (/^\/api\/loads\/[^/]+\/driver-instructions(\/|$)/.test(url.pathname)) {
+      return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' })
+    }
     if (req.method() !== 'GET') {
       writes.push(`${role} ${req.method()} ${url.pathname}`)
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
