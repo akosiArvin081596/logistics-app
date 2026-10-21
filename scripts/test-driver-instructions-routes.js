@@ -240,7 +240,7 @@ function driveFile(name, bytes, over = {}) {
 }
 
 const openWorlds = [];
-async function world({ env = ON, rows = ROWS, side = SIDE, files = [], gemini = [], ingestionAt = 0, sheetFails = false, sideFails = false } = {}) {
+async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, files = [], gemini = [], ingestionAt = 0, sheetFails = false, sideFails = false } = {}) {
 	// Lifted first: a server.js without the block fails here, before a temp folder exists.
 	const g = guards();
 	const block = wiringBlock().replace(/\brateConGeminiUnavailableAt\b/g, "__ingestionAt()");
@@ -291,7 +291,7 @@ async function world({ env = ON, rows = ROWS, side = SIDE, files = [], gemini = 
 			},
 		},
 	};
-	const sheetObjs = () => rows.map((r, i) => Object.assign(Object.fromEntries(HEADERS.map((h, j) => [h, r[j] == null ? "" : r[j]])), { _rowIndex: i + 2 }));
+	const sheetObjs = () => rows.map((r, i) => Object.assign(Object.fromEntries(headers.map((h, j) => [h, r[j] == null ? "" : r[j]])), { _rowIndex: i + 2 }));
 	const scope = {
 		db,
 		process: proc,
@@ -304,7 +304,7 @@ async function world({ env = ON, rows = ROWS, side = SIDE, files = [], gemini = 
 		getJobTrackingCached: async () => {
 			w.calls.sheet++;
 			if (w.sheetFails) throw new Error("sheets down");
-			return { headers: [...HEADERS], data: sheetObjs() };
+			return { headers: [...headers], data: sheetObjs() };
 		},
 		getSheets: async () => ({
 			spreadsheets: {
@@ -796,6 +796,7 @@ test("§6 re-extract reads the stored drag-and-drop PDF; a busy budget answers 5
 	const r = await w.call("POST", `${API}/re-extract`, DISP, {});
 	eq("200, inserted", [r.status, r.body.result, r.body.status], [200, "insert", "auto"]);
 	eq("one call", w.calls.gemini, 1);
+	clock.t += 16 * 60 * 1000;
 	w.gemini.push({ status: 429, body: {} });
 	eq("a 429 -> 503 busy", (await w.call("POST", `${API}/re-extract`, DISP, {})).body.code, "INSTRUCTIONS_EXTRACT_BUSY");
 	eq("inside the pause: 503 busy, no call", [(await w.call("POST", `${API}/re-extract`, DISP, {})).status, w.calls.gemini], [503, 2]);
@@ -835,7 +836,7 @@ test("§7 dashboard `_instructionsReview`: codes only, for loads that need a per
 	w.service.annotateDashboardRows({ headers: HEADERS, rows });
 	eq("needs review: its codes (unknown codes dropped)", rows[0]._instructionsReview, ["reference_unknown_type", "not_cross_checked"]);
 	eq("nothing on file: no_rate_con", rows[1]._instructionsReview, ["no_rate_con"]);
-	ok("a rate con on file, no row yet: no key", !("_instructionsReview" in rows[2]));
+	eq("a dropped rate con not read yet: rate_con_not_read", rows[2]._instructionsReview, ["rate_con_not_read"]);
 	w.db.prepare("UPDATE load_driver_instructions SET status = 'auto', review_reasons = '[]', published_at = 'x' WHERE load_key = ?").run(LOAD_ID);
 	const again = [{ "Load ID": LOAD_ID }];
 	w.service.annotateDashboardRows({ headers: HEADERS, rows: again });
@@ -958,6 +959,157 @@ test("§9 replica:pull never copies the deny list or the uploader account, and c
 		ok(`${flag} is read by the app as the replica export sees it`, read.has(flag));
 		eq(`${flag} is copied`, rules.classifySetting(flag, "false", { readByApp: read }).copy, true);
 	}
+});
+
+// ── §10 permission review, round 1 ────────────────────────────────────────────
+const sha256 = (b) => require("crypto").createHash("sha256").update(b).digest("hex");
+function ledgerRow(w, f, state, { loadKey = LOAD_ID, sha = f.bytes ? sha256(f.bytes) : null } = {}) {
+	w.db.prepare("INSERT INTO ratecon_instruction_files (drive_file_id, md5, sha256, created_time, load_key, state, tries, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, '', ?)")
+		.run(f.meta.id, f.meta.md5Checksum, sha, f.meta.createdTime, loadKey, state, f.meta.createdTime);
+}
+
+test("§10 M1 a refused number names no item: many references, one on the deny list, and the answer says only \"references\"; the audit row keeps the path", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	const refs = [];
+	for (let i = 0; i < 12; i++) refs.push({ type: "other_reference", label: "Ref", value: i === 7 ? `9${DENY_DIGITS}5` : `RX${String(400 + i)}` });
+	const body = { payload: { loadRequirements: [], stops: [{ kind: "pickup", facility: "Test Mill North", place: "Springfield, IL", references: refs, requirements: [], instructions: [] }] } };
+	const r = await w.call("PUT", API, DISP, body);
+	eq("400, rule number", [r.status, r.body.code, r.body.rule], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number"]);
+	eq("the field names no item", r.body.field, "references");
+	ok("no position anywhere in the answer", !/\[\d+\]|\b7\b/.test(JSON.stringify(r.body)), r.body);
+	const t = await w.call("PUT", API, DISP, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the north gate." }, { category: "check_in", text: `Give the gate code ${DENY_DIGITS} on arrival.` }], stops: [] } });
+	eq("a number in an item's text: field \"text\"", [t.body.rule, t.body.field], ["number", "text"]);
+	const a = w.audits().filter((x) => x.action === "edit_refused");
+	ok("the audit row keeps the full path", a.some((x) => JSON.parse(x.details).field === "stops[0].references[7].value"), a.map((x) => x.details));
+	const m = await w.call("PUT", API, DISP, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the gate." }, { category: "check_in", text: "Driver is paid $50 extra for the wait." }], stops: [] } });
+	eq("other rules keep the position", [m.body.rule, m.body.field], ["money", "loadRequirements[1].text"]);
+	const rt = require(RUNTIME);
+	eq("one alert threshold constant, still 3", rt.ALERT_HITS, 3);
+});
+
+test("§10 L1 a re-read uses only a folder file the sweep matched to this load, whose owner, last modifier and bytes are unchanged", async ({ eq }) => {
+	useClock();
+	const dup = driveFile(`Load ${LOAD_ID} copy.pdf`, READABLE);
+	const w = await world({ files: [dup] });
+	ledgerRow(w, dup, "duplicate");
+	const r1 = await w.call("POST", `${API}/re-extract`, SA, {});
+	eq("a duplicate row alone: no rate con, nothing downloaded, no call", [r1.body.code, w.calls.download.length, w.calls.gemini], ["INSTRUCTIONS_NO_RATE_CON", 0, 0]);
+	const moved = driveFile(`Load ${LOAD_ID}.pdf`, READABLE, { owners: [{ emailAddress: "someone@example.test" }] });
+	const w2 = await world({ files: [moved] });
+	ledgerRow(w2, moved, "done");
+	eq("owner changed since the match: no rate con, no call", [(await w2.call("POST", `${API}/re-extract`, SA, {})).body.code, w2.calls.gemini], ["INSTRUCTIONS_NO_RATE_CON", 0]);
+	const edited = driveFile(`Load ${LOAD_ID}.pdf`, READABLE_B);
+	const w3 = await world({ files: [edited] });
+	ledgerRow(w3, edited, "done", { sha: sha256(READABLE) });
+	eq("bytes changed since the match: no rate con, no call", [(await w3.call("POST", `${API}/re-extract`, SA, {})).body.code, w3.calls.gemini], ["INSTRUCTIONS_NO_RATE_CON", 0]);
+	const good = driveFile(`Load ${LOAD_ID}.pdf`, READABLE);
+	const w4 = await world({ files: [good] });
+	ledgerRow(w4, good, "done");
+	eq("the matched file, unchanged: read", [(await w4.call("POST", `${API}/re-extract`, SA, {})).status, w4.calls.gemini], [200, 1]);
+});
+
+test("§10 L2 a missing amount header answers 503 INSTRUCTIONS_UNVERIFIED; a blank amount cell is fine", async ({ eq }) => {
+	useClock();
+	const noPay = HEADERS.filter((h) => h.trim() !== "Payment");
+	const w = await world({ headers: noPay, rows: ROWS.map((r) => r.filter((_, j) => HEADERS[j].trim() !== "Payment")) });
+	eq("Job Tracking without Payment", [(await w.call("GET", API, DISP)).status, (await w.call("GET", API, DISP)).body.code], [503, "INSTRUCTIONS_UNVERIFIED"]);
+	const w2 = await world({ side: { ...SIDE, payments: [[" Job ID", "Contract ID"], [LOAD_ID, "Pat Broker"]] } });
+	eq("Payments Table without Payment Amount", (await w2.call("GET", API, DISP)).status, 503);
+	const w3 = await world({ side: { ...SIDE, jobDetails: [["Load ID", "Rate Per Mile"], [LOAD_ID, "$2.00"]] } });
+	eq("Job Details without Payment", (await w3.call("GET", API, DISP)).status, 503);
+	const w4 = await world({ side: { ...SIDE, payments: [[" Job ID"]] } });
+	eq("Payments Table without its id header", (await w4.call("GET", API, DISP)).status, 503);
+	const w5 = await world({ rows: ROWS.map((r) => r.map((c, j) => (HEADERS[j].trim() === "Payment" ? "" : c))) });
+	eq("a blank Payment cell: 200", (await w5.call("GET", API, DISP)).status, 200);
+});
+
+test("§10 L3 the sweep's cursor never moves past files it didn't record: a failed sweep leaves listed empty; a pause records the rest as deferred", async ({ eq, ok }) => {
+	const clock = useClock();
+	const w = await world();
+	await w.service.sweep();
+	clock.t += 20 * 60 * 1000;
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	w.files.push(f);
+	clock.t += 20 * 60 * 1000;
+	w.sheetFails = true;
+	const s2 = await w.service.sweep();
+	eq("the failed sweep", s2.note, "sheet_unreadable");
+	eq("its row leaves listed empty", w.db.prepare("SELECT listed FROM ratecon_instruction_sweeps ORDER BY id DESC LIMIT 1").get().listed, null);
+	w.sheetFails = false;
+	clock.t += 5 * 60 * 1000;
+	await w.service.sweep();
+	eq("the next sweep still finds the file and reads it", [w.ledger(f.meta.id) && w.ledger(f.meta.id).state, w.calls.gemini], ["done", 1]);
+	useClock();
+	const a = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const b = driveFile(`Load ${OTHER_ID} Rate Con.pdf`, READABLE);
+	const p = await world({ files: [a, b], gemini: [{ status: 429, body: {} }] });
+	await p.service.sweep();
+	ok("the file after the pause is recorded deferred", p.ledger(b.meta.id) && p.ledger(b.meta.id).state === "deferred", p.ledger(b.meta.id));
+});
+
+test("§10 L4 the dashboard badge: only a matched file counts as on file; an unmatched file or an unread dropped rate con has its own code", async ({ eq }) => {
+	useClock();
+	const w = await world();
+	const u = driveFile("u.pdf", READABLE);
+	ledgerRow(w, u, "match_unconfirmed", { loadKey: LOAD_ID });
+	const fl = driveFile("f.pdf", READABLE);
+	ledgerRow(w, fl, "failed", { loadKey: OTHER_ID });
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', 'x.pdf')").run("771200555");
+	const rows = [{ "Load ID": LOAD_ID }, { "Load ID": OTHER_ID }, { "Load ID": "771200555" }];
+	w.service.annotateDashboardRows({ headers: HEADERS, rows });
+	eq("unmatched file", rows[0]._instructionsReview, ["rate_con_unmatched"]);
+	eq("a failed file is not on file", rows[1]._instructionsReview, ["no_rate_con"]);
+	eq("a dropped rate con never read", rows[2]._instructionsReview, ["rate_con_not_read"]);
+});
+
+test("§10 L5 the alert's day and the daily budget are Eastern days (APP_TIMEZONE), not UTC", async ({ eq }) => {
+	const clock = useClock(Date.parse("2026-10-22T20:00:00Z"));
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	for (let i = 0; i < 3; i++) await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	await w.settle();
+	eq("first alert", w.emails.length, 1);
+	clock.t = Date.parse("2026-10-23T03:00:00Z");
+	for (let i = 0; i < 3; i++) await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	await w.settle();
+	eq("11 PM Eastern on the same day: no second alert", w.emails.length, 1);
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	w.files.push(f);
+	await w.service.sweep();
+	eq("the budget's day is the Eastern day", w.service.budgetState().day, "2026-10-22");
+});
+
+test("§10 L6 replica:pull refuses a checkout whose replica rules would copy CARRIER_ACCOUNT_NUMBERS_DENY", async ({ eq, ok }) => {
+	const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
+	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
+	ok("pull.sh checks the rules before production does any work", !!m && pull.indexOf(m[0]) < pull.indexOf("REMOTE_FILES=(") + 1e9 && pull.indexOf(m[0]) < pull.indexOf("conn_open()"), m && m[0]);
+	if (!m) return;
+	const { spawnSync } = require("child_process");
+	const run = (rulesFile) => spawnSync(process.execPath, ["-e", m[1], rulesFile], { encoding: "utf8" }).status;
+	eq("this checkout's rules pass", run(path.join(ROOT, "lib", "replica-rules.js")), 0);
+	const older = path.join(os.tmpdir(), `rcpr2-old-rules-${process.pid}.js`);
+	fs.writeFileSync(older, fs.readFileSync(path.join(ROOT, "lib", "replica-rules.js"), "utf8").replace(/if \(CARRIER_ACCOUNT_SETTINGS\.includes\(name\)\)[^\n]*\n/, ""));
+	try {
+		ok("rules that would copy it are refused", run(older) !== 0);
+	} finally {
+		fs.rmSync(older, { force: true });
+	}
+});
+
+test("§10 L7 one re-read per load per 15 minutes unless the last one failed", async ({ eq }) => {
+	const clock = useClock();
+	const w = await world();
+	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', ?)").run(LOAD_ID, `${LOAD_ID}.pdf`);
+	eq("first re-read", (await w.call("POST", `${API}/re-extract`, DISP, {})).status, 200);
+	const again = await w.call("POST", `${API}/re-extract`, SA, {});
+	eq("a second within 15 min: 429, no call", [again.status, again.body.code, w.calls.gemini], [429, "INSTRUCTIONS_REREAD_TOO_SOON", 1]);
+	clock.t += 16 * 60 * 1000;
+	w.gemini.push(geminiAnswer("not json"));
+	eq("after 15 min: allowed (this one fails)", (await w.call("POST", `${API}/re-extract`, DISP, {})).status, 502);
+	eq("after a failed read: allowed at once", (await w.call("POST", `${API}/re-extract`, DISP, {})).status, 200);
 });
 
 if (!fs.existsSync(RUNTIME)) {
