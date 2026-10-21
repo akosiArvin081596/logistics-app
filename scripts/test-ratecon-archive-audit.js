@@ -51,7 +51,7 @@ function eq(actual, expected, label) {
 const HEAD = 'app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {';
 const PROVIDED = ["app", "db", "fs", "path", "require", "console", "process", "requireRole", "rateConLimiter", "io", "notifyChange",
 	"insertDispatchNotification", "logAudit", "upsertLoadCoordsStmt", "getSheets", "getDrive", "geocodeAddress", "jtCacheInvalidate",
-	"SPREADSHEET_ID", "GOOGLE_MAPS_API_KEY", "RATECON_DRIVE_FOLDER_ID", "DATA_DIR", "fetch", "getDeletedLoadIds"];
+	"SPREADSHEET_ID", "GOOGLE_MAPS_API_KEY", "RATECON_DRIVE_FOLDER_ID", "DATA_DIR", "fetch", "getDeletedLoadIds", "driverInstructions"];
 const LIFTED = closure(SRC, { routes: [HEAD], provided: PROVIDED, denied: ["server", "auth", "google", "sheetsClient", "sendEmail", "transporter"] });
 
 const JT_HEADERS = ["Load ID", "Details", "Driver", "Pickup Address", "Drop-off Address", "Job Status", "  Payment  ", "Assigned Date"];
@@ -94,6 +94,7 @@ async function run({ loadId, drive = "none", localFails = false, pdf = PDF }) {
 		app, db, fs: fsUnder, path, require: rootRequire, console: QUIET, process: { env: {} },
 		requireRole: () => (req, res, next) => next(), rateConLimiter: (req, res, next) => next(),
 		io: { to: () => ({ emit() {}, except: () => ({ emit() {} }) }) }, notifyChange() {},
+		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		insertDispatchNotification: { run() {} },
 		logAudit: (req, action, entity, entityId, details) => audits.push({ action, entity, entityId, details }),
 		upsertLoadCoordsStmt: { run() {} },

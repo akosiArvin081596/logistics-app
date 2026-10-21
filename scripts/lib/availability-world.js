@@ -74,7 +74,7 @@ function routeHead(method, p) {
 }
 
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange", "getJobTrackingCached", "getSheets",
-	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA"];
+	"SPREADSHEET_ID", "io", "sendEmail", "fs", "DATA_DIR", "fetch", "REPLICA", "driverInstructions"];
 const DENIED = ["server", "transporter", "getDrive", "KEY_FILE", "auth", "sheetsClient"];
 const ROOTS = ["sweepEldFeedSilence", "eldFeedHealthReport", "appTodayKey", "normalizeDriverName"];
 // Lifted by name: server-lift's closure walk misses a statement that starts the
@@ -317,6 +317,8 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		Date: FixedDate,
 		app,
 		notifyChange: (d) => world.changes.push(d),
+		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
+		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		getJobTrackingCached: async () => {
 			jt.reads++;
 			if (typeof jt.during === "function") {
