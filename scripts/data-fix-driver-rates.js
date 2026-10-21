@@ -255,7 +255,7 @@ function withCurrent(rows, current, today) {
 
 function auditRefs(db, ref) {
 	const out = new Set();
-	const re = new RegExp(`\\[(${ref}-\\d+)\\]`, "g");
+	const re = new RegExp(`\\[(${ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+)\\]`, "g");
 	for (const r of db.prepare("SELECT details FROM audit_trail WHERE username = ? AND user_id = 0 AND role = 'system'").all(ACTOR)) {
 		for (const m of String(r.details || "").matchAll(re)) out.add(m[1]);
 	}

@@ -85,6 +85,8 @@ CREATE TABLE drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_nam
 const SEED_AT = "2026-10-03T03:00:20.343Z";
 const OCT1_ET = "2026-10-01T04:00:00.000Z";
 const OCT2_ET = "2026-10-02T04:00:00.000Z";
+// A literal for a RegExp: every character the pattern syntax reads, escaped.
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function buildFixture(name, o = {}) {
 	const opt = { patTruckRate: 160, leeRate: 360, extraPat: false, history: [], settings: [], ...o };
@@ -171,10 +173,10 @@ console.log("F1-F4: dry run, apply, the server's reader, replay");
 	check(/read-only handle/.test(d.out), "F1 the dry run's handle is read-only");
 	const want = [
 		/DRF-20261021-1 {2}drivers_directory row 1: pay_daily \$0\.00 -> \$160\.00 {2}\[would write\]/,
-		new RegExp(`DRF-20261021-2 {2}pay_rate_history \\+ driver \\$160\\.00 from ${OCT1_ET.replace(/\./g, "\\.")} \\(2026-10-01\\), source data-fix {2}\\[would write\\]`),
-		new RegExp(`DRF-20261021-3 {2}pay_rate_history \\+ driver \\$160\\.00 from ${SEED_AT.replace(/\./g, "\\.")} \\(2026-10-02\\), source data-fix, after seed row 4 \\(\\$0\\.00\\) at the same instant {2}\\[would write\\]`),
-		new RegExp(`DRF-20261021-4 {2}pay_rate_history \\+ driver \\$310\\.00 from ${OCT1_ET.replace(/\./g, "\\.")} \\(2026-10-01\\), source data-fix {2}\\[would write\\]`),
-		new RegExp(`DRF-20261021-5 {2}pay_rate_history \\+ driver \\$360\\.00 from ${OCT2_ET.replace(/\./g, "\\.")} \\(2026-10-02\\), source data-fix {2}\\[would write\\]`),
+		new RegExp(`DRF-20261021-2 {2}pay_rate_history \\+ driver \\$160\\.00 from ${reEscape(OCT1_ET)} \\(2026-10-01\\), source data-fix {2}\\[would write\\]`),
+		new RegExp(`DRF-20261021-3 {2}pay_rate_history \\+ driver \\$160\\.00 from ${reEscape(SEED_AT)} \\(2026-10-02\\), source data-fix, after seed row 4 \\(\\$0\\.00\\) at the same instant {2}\\[would write\\]`),
+		new RegExp(`DRF-20261021-4 {2}pay_rate_history \\+ driver \\$310\\.00 from ${reEscape(OCT1_ET)} \\(2026-10-01\\), source data-fix {2}\\[would write\\]`),
+		new RegExp(`DRF-20261021-5 {2}pay_rate_history \\+ driver \\$360\\.00 from ${reEscape(OCT2_ET)} \\(2026-10-02\\), source data-fix {2}\\[would write\\]`),
 	];
 	want.forEach((re, i) => check(re.test(d.out), `F1 the dry run prints write ${i + 1} with its reference`, re.source));
 	check(!/DRF-20261021-6/.test(d.out), "F1 no sixth write (Lee's seed already reads $360 on Oct 2; Kim is not in the plan)");
