@@ -241,7 +241,9 @@ function driveFile(name, bytes, over = {}) {
 
 const openWorlds = [];
 async function world({ env = ON, rows = ROWS, side = SIDE, files = [], gemini = [], ingestionAt = 0, sheetFails = false, sideFails = false } = {}) {
+	// Lifted first: a server.js without the block fails here, before a temp folder exists.
 	const g = guards();
+	const block = wiringBlock().replace(/\brateConGeminiUnavailableAt\b/g, "__ingestionAt()");
 	const db = new Database(":memory:");
 	db.exec(`CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER, username TEXT, role TEXT, action TEXT NOT NULL,
 		entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
@@ -338,7 +340,6 @@ async function world({ env = ON, rows = ROWS, side = SIDE, files = [], gemini = 
 		next();
 	});
 	scope.app = app;
-	const block = wiringBlock().replace(/\brateConGeminiUnavailableAt\b/g, "__ingestionAt()");
 	const names = Object.keys(scope);
 	w.service = new Function(...names, "__ingestionAt", `${block}\nreturn driverInstructions;`)(...names.map((n) => scope[n]), () => w.ingestionAt);
 	w.server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
