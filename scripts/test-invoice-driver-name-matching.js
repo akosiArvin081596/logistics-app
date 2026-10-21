@@ -118,6 +118,8 @@ const SHARED_FNS = [
 	"invoiceWeekColumns", "invoiceCompletionDay", "invoiceWeekVerdict", "selectInvoiceWeekLoads", "invoiceWeekWarnings",
 	"driversWithCompletedLoadsInWeek",
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
+	// The week's days and their pricing, out of the handler since money plan D.
+	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceWeekPaidDays", "invoiceDayPricing",
 	// Under test.
 	"liveWeeklyInvoicesForDriverWeek", "invoicePdfFileName", "invoiceNumberHolders", "generateInvoiceNumber",
 	"invoiceWriteRefusal", "commitInvoiceWithPdf", "driverAccountsNamed", "getDriverPayStructures",
@@ -327,6 +329,10 @@ function buildWorld(opts = {}) {
 		// scripts/test-driver-rate-only.js runs the handler with it on).
 		DRIVER_RATE_ONLY_FROM: null,
 		driverRateOnlyStart: null,
+		// The blank-appointment fallbacks are off here (scripts/test-blank-pickup-pay-days.js
+		// runs the pay paths with them on).
+		INVOICE_BLANK_PICKUP_FALLBACK_FROM: null,
+		LEDGER_BLANK_DROPOFF_FALLBACK_FROM: null,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		// The document records whose invoice it is, so a test can tell which

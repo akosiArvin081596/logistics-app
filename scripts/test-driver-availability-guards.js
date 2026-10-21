@@ -15,8 +15,17 @@
 //      five assign routes, the dashboard and the trucks list. So the payout
 //      builders, Financials, the fixed-cost and projection queries and the
 //      invoice generator can neither read the table nor call a helper that does.
+//      The driver app's payload (GET /api/driver/:driverName) is NOT allowlisted:
+//      it carries invoiceTotalDue. There a tracked name may stand only on the one
+//      line of its res.json({...}) that spreads `timeOff` behind
+//      DRIVER_TIME_OFF_SCREEN_ENABLED (R11 follow-up), and nowhere else in it.
 //   §4 every call of the off-duty check sits inside
-//      `if (DRIVER_AVAILABILITY_ENABLED) {`
+//      `if (DRIVER_AVAILABILITY_ENABLED) {`; DRIVER_TIME_OFF_SCREEN_ENABLED folds
+//      in the main flag and gates only that spread; so does
+//      DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED (R11b), and each of its three
+//      steps (the Job Tracking read, the decision, the confirmations) is the
+//      first statement of an `if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED...) {`,
+//      which gates nothing else
 //
 // Tracked names: the table, the module path, the module's binding in server.js,
 // every name lib/driver-availability.js exports (read from the module, so a new
@@ -44,7 +53,8 @@ const eq = (name, a, e) => ok(name, JSON.stringify(a) === JSON.stringify(e), `ex
 
 // ── tracked names ──────────────────────────────────────────────────────────────
 const SERVER_HELPERS = ["driverAvailabilityByName", "truckDriverAvailability", "driverOffDutyRefusal", "cancelDirectoryAvailability",
-	"availabilityRowWithDriver", "availabilityOverlap", "availabilityOverlapBody", "recordOffDutyConfirmation", "sheetRowOffDutyDriver"];
+	"availabilityRowWithDriver", "availabilityOverlap", "availabilityOverlapBody", "recordOffDutyConfirmation", "sheetRowOffDutyDriver",
+	"availabilityRowView", "driverOwnTimeOff", "driverLoadsForTimeOff", "recordTimeOffLoadConfirmations"];
 let libExports = [];
 try { libExports = Object.keys(require("../lib/driver-availability")); } catch { libExports = []; }
 const TRACKED = ["driver_availability", "driver_availability_confirmations", "driver-availability", "driverAvailability", ...SERVER_HELPERS, ...libExports];
@@ -138,11 +148,13 @@ async function moneyViews(withRow) {
 	console.log("\n── §3 server.js: every mention sits in an allowlisted place");
 	{
 		const code = blankComments(SRC).split("\n");
+		const missing = SERVER_HELPERS.filter((n) => !code.some((l) => l.startsWith(`function ${n}(`) || l.startsWith(`async function ${n}(`)));
+		eq("§3.0 every tracked helper is defined in server.js", missing, []);
 		const ALLOW_HEADS = [
 			'const driverAvailability = require("./lib/driver-availability");',
 			"const DRIVER_AVAILABILITY_ENABLED =",
 			"function availabilityFlagGate(",
-			...SERVER_HELPERS.map((n) => `function ${n}(`),
+			...SERVER_HELPERS.flatMap((n) => [`function ${n}(`, `async function ${n}(`]),
 			"function eldFeedSnapshot(",
 			'app.get("/api/drivers-directory/:id/availability",',
 			'app.post("/api/drivers-directory/:id/availability",',
@@ -163,7 +175,20 @@ async function moneyViews(withRow) {
 		const isHead = (l) => /^[^\s}\])`/]/.test(l);
 		const headOf = (i) => { for (let j = i; j >= 0; j--) if (isHead(code[j])) return j; return -1; };
 		const statementText = (j) => { let k = j + 1; while (k < code.length && !isHead(code[k])) k++; return code.slice(j, k).join("\n"); };
+		// The driver app's payload: one exempt line, the `timeOff` spread, as a
+		// property of the route's res.json({ ... }).
+		const PAYLOAD_HEAD = 'app.get("/api/driver/:driverName",';
+		const TIME_OFF_SPREAD_RE = /^\.\.\.\(DRIVER_TIME_OFF_SCREEN_ENABLED \? \{ timeOff: driverOwnTimeOff\([^()]*\) \} : \{\}\),$/;
+		const inReply = (j, i) => {
+			for (let k = i - 1; k > j; k--) {
+				const t = code[k].trim();
+				if (t === "res.json({") return true;
+				if (t === "});" || /^(if|for|while|const|let|return|try|await)\b|^\} catch\b/.test(t)) return false;
+			}
+			return false;
+		};
 		const stray = [];
+		const spreads = [];
 		let mentions = 0;
 		code.forEach((l, i) => {
 			if (!TRACKED_RE.test(l)) return;
@@ -172,10 +197,14 @@ async function moneyViews(withRow) {
 			const head = j < 0 ? "" : code[j];
 			const allowed = ALLOW_HEADS.some((h) => head.startsWith(h))
 				|| (head.startsWith("db.exec(") && statementText(j).includes("CREATE TABLE IF NOT EXISTS driver_availability"));
-			if (!allowed) stray.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 90)}`);
+			if (allowed) return;
+			if (head.startsWith(PAYLOAD_HEAD) && TIME_OFF_SPREAD_RE.test(l.trim()) && inReply(j, i)) { spreads.push(i + 1); return; }
+			stray.push(`line ${i + 1} (in ${head.slice(0, 70) || "?"}): ${l.trim().slice(0, 90)}`);
 		});
 		eq("§3.1 no tracked name outside the allowlist", stray, []);
 		console.log(`  (${mentions} mention(s) checked)`);
+		ok("§3.1b the driver app's payload route is not on the allowlist", !ALLOW_HEADS.some((h) => PAYLOAD_HEAD.startsWith(h) || h.startsWith(PAYLOAD_HEAD)));
+		ok("§3.1c ...and holds at most one exempt line, the timeOff spread in its res.json", spreads.length <= 1, `lines ${spreads.join(", ")}`);
 		// The money paths, by name: none is on the allowlist, so §3.1 covers them;
 		// asserted directly as well so a rename cannot slip one onto it.
 		const money = ["computeInvestorMonthlyEarnings", "buildFinancialsLedger", "buildFinancialsReport", "generateInvoiceHandler", "truckMonthlyFixed",
@@ -202,6 +231,37 @@ async function moneyViews(withRow) {
 			return true;
 		}).map((i) => `line ${i + 1}`);
 		eq(`§4.1 every call (${calls.length}) is inside if (DRIVER_AVAILABILITY_ENABLED)`, unguarded, []);
+		// The screen sub-flag works only while the main flag is on, and gates the
+		// driver app's timeOff spread and nothing else.
+		const code = blankComments(SRC).split("\n");
+		const defs = code.filter((l) => l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED ="));
+		ok("§4.2 DRIVER_TIME_OFF_SCREEN_ENABLED, where defined, is defined once and folds in DRIVER_AVAILABILITY_ENABLED first",
+			defs.length <= 1 && defs.every((l) => l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test(")), defs.join(" | "));
+		const uses = code.map((l, i) => [l, i + 1]).filter(([l]) => /\bDRIVER_TIME_OFF_SCREEN_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_TIME_OFF_SCREEN_ENABLED ="));
+		ok("§4.3 ...and every other mention is the timeOff spread", uses.every(([l]) => l.trim().startsWith("...(DRIVER_TIME_OFF_SCREEN_ENABLED ? { timeOff: driverOwnTimeOff(")),
+			uses.map(([l, n]) => `line ${n}: ${l.trim().slice(0, 80)}`).join(" | "));
+
+		// R11b: the time-off loads warning works only while the main flag is on, and
+		// gates its three steps and nothing else.
+		const loadsDefs = code.filter((l) => l.startsWith("const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ="));
+		ok("§4.4 DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED is defined once and folds in DRIVER_AVAILABILITY_ENABLED first",
+			loadsDefs.length === 1 && loadsDefs[0].startsWith("const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED = DRIVER_AVAILABILITY_ENABLED && /^(true|1|yes|on)$/i.test("),
+			`${loadsDefs.length} definition(s): ${loadsDefs.join(" | ")}`);
+		const GATE_RE = /^if \(DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED(?: && [^{}]+)?\) \{$/;
+		const STEPS = ["driverLoadsForTimeOff", "driverAvailability.timeOffLoadsDecision", "recordTimeOffLoadConfirmations"];
+		const stepRe = (name) => new RegExp(`(?<![\\w$.])${escapeRe(name)}\\(`);
+		const prevCode = (i) => { for (let j = i - 1; j >= 0; j--) if (code[j].trim()) return code[j].trim(); return ""; };
+		const nextCode = (i) => { for (let j = i + 1; j < code.length; j++) if (code[j].trim()) return code[j].trim(); return ""; };
+		for (const name of STEPS) {
+			const calls = [];
+			code.forEach((l, i) => { if (stepRe(name).test(l) && !l.startsWith(`function ${name}(`) && !l.startsWith(`async function ${name}(`)) calls.push(i); });
+			const unguarded = calls.filter((i) => !GATE_RE.test(prevCode(i))).map((i) => `line ${i + 1}`);
+			ok(`§4.5 ${name}() is called (${calls.length}), each call the first statement of an if (DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED...)`,
+				calls.length > 0 && unguarded.length === 0, unguarded.join(", "));
+		}
+		const gates = code.map((l, i) => [l, i]).filter(([l]) => /\bDRIVER_AVAILABILITY_LOADS_WARNING_ENABLED\b/.test(l) && !l.startsWith("const DRIVER_AVAILABILITY_LOADS_WARNING_ENABLED ="));
+		const strayGates = gates.filter(([l, i]) => !GATE_RE.test(l.trim()) || !STEPS.some((n) => stepRe(n).test(nextCode(i)))).map(([l, i]) => `line ${i + 1}: ${l.trim().slice(0, 80)}`);
+		ok(`§4.6 ...and every other mention of it (${gates.length}) is such a gate around one of those steps`, gates.length > 0 && strayGates.length === 0, strayGates.join(" | "));
 	}
 
 	WD.cleanup();

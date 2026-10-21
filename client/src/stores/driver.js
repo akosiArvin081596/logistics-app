@@ -39,6 +39,11 @@ export const useDriverStore = defineStore('driver', {
     application: null,
     profilePictureUrl: '',
     driverDirectoryId: 0,
+    // His own current and upcoming time off (R11), { today, rows }. null when
+    // the payload carries no `timeOff` key (the server's
+    // DRIVER_TIME_OFF_SCREEN_ENABLED is off): the Kit card and the Loads
+    // banner then render nothing.
+    timeOff: null,
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -343,6 +348,7 @@ export const useDriverStore = defineStore('driver', {
         if (data.application !== undefined) this.application = data.application
         this.profilePictureUrl = data.profilePictureUrl || ''
         this.driverDirectoryId = data.driverDirectoryId || 0
+        this.timeOff = data.timeOff && typeof data.timeOff === 'object' && !Array.isArray(data.timeOff) ? data.timeOff : null
 
         // Keep selected status load in sync
         if (this.selectedStatusLoad) {

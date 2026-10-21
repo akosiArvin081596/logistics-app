@@ -108,10 +108,10 @@
                 <span v-if="driverOutOfRange(loc)" class="driver-warning">{{ driverOutOfRange(loc) }}</span>
                 <!-- Quick-glance metrics (no click): absolute ETA + countdown,
                      MPH, distance remaining, fuel % — each degrading to "—".
-                     A fix older than 2 hours gives no distance or ETA (B11). -->
+                     A fix older than 2 hours gives no distance, ETA or speed (B11). -->
                 <DriverGlanceMetrics
                   v-if="!loc.noGps"
-                  :speed="numOrNull(loc.speed)"
+                  :speed="locShowsEta(loc) ? numOrNull(loc.speed) : null"
                   :distance-miles="locShowsEta(loc) ? numOrNull(loc.distanceMiles) : null"
                   :fuel-pct="numOrNull(loc.fuelPct)"
                   :eta-epoch-ms="locShowsEta(loc) ? numOrNull(loc._etaEpochMs) : null"
@@ -356,6 +356,34 @@ function clientCacheKey(fromLat, fromLng, toLat, toLng) {
   return `${Number(fromLat).toFixed(3)},${Number(fromLng).toFixed(3)}>${Number(toLat).toFixed(3)},${Number(toLng).toFixed(3)}`
 }
 
+// B11: the planned pickup -> drop-off lane of a load whose truck's fix is over 2
+// hours old, as [[lat, lng], ...]. Read from GET /api/loads/:id/haul, the
+// endpoint (and 15-minute server route cache) the load detail's haul section
+// uses, so opening such a load here costs what that detail already spends, and
+// never from /api/route. [] when the lane has no line (Routes failed or off:
+// a stored or straight-line distance only). The request itself is kept, so a
+// second open while it is out shares it, and its answer is kept as long as a
+// static route is (CLIENT_CACHE_TTL); a failed request is dropped, so the next
+// open asks again. Nothing asks on a timer.
+const plannedLaneCache = new Map() // loadId -> { time, points: Promise<[[lat, lng], ...]> }
+async function fetchPlannedLane(loadId) {
+  const key = String(loadId || '')
+  const hit = plannedLaneCache.get(key)
+  if (hit && Date.now() - hit.time < CLIENT_CACHE_TTL) return hit.points.catch(() => [])
+  const entry = { time: Date.now(), points: null }
+  entry.points = api.get(`/api/loads/${encodeURIComponent(key)}/haul`).then((d) => {
+    const route = d && d.lane && Array.isArray(d.lane.route) ? d.lane.route : []
+    return route.length >= 2 ? route.map(p => [p.latitude, p.longitude]) : []
+  })
+  plannedLaneCache.set(key, entry)
+  try {
+    return await entry.points
+  } catch {
+    if (plannedLaneCache.get(key) === entry) plannedLaneCache.delete(key)
+    return []
+  }
+}
+
 async function fetchRouteCached(fromLat, fromLng, toLat, toLng) {
   const key = clientCacheKey(fromLat, fromLng, toLat, toLng)
   const cached = staticRouteCache.get(key)
@@ -448,13 +476,18 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 // setPath causes the polyline to visually disappear (Google batches overlay
 // rendering during camera animations). Initial focus (load-click) and
 // pin-click still re-center explicitly.
-function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000) {
+// `fixAt` is the time of the fix animated to (the driver row's own when not
+// given). A fix over 2 hours old is where the truck WAS (B11): it is neither
+// snapped onto the route nor glued to the line.
+function animateMarker(driver, fromLat, fromLng, toLat, toLng, duration = 1000, fixAt = null) {
   if (activeAnimations[driver]) cancelAnimationFrame(activeAnimations[driver])
   const markerObj = driverMarkers.get(driver)
   const start = performance.now()
   const isSelected = selectedDriver.value
     && normDriver(selectedDriver.value) === normDriver(driver)
-  const followLine = isSelected && !!expandedLoadId.value
+  const row = locations.value.find((l) => l.driver === driver)
+  const liveFix = fixAllowsEta(fixAgeMs(fixAt != null ? fixAt : row && row.timestamp))
+  const followLine = isSelected && !!expandedLoadId.value && liveFix
   // When a load is in focus, snap the tween target onto the route polyline
   // so the pin always sits ON the dashed line. Raw GPS often lands on a
   // parallel road (tollway vs frontage); snapping eliminates that gap.
@@ -669,8 +702,11 @@ function buildSingleLoadPath(driverOverride = null) {
     return p2
   }
 
+  // Never glued to a pin whose fix is over 2 hours old (B11): the planned route
+  // beside it is drawn whole. driverOverride comes only from animateMarker()
+  // for a fix of 2 hours or less.
   const driverPos = driverOverride
-    || (loc && loc.latitude != null && loc.longitude != null
+    || (loc && loc.latitude != null && loc.longitude != null && locShowsEta(loc)
           ? { lat: loc.latitude, lng: loc.longitude }
           : null)
   if (!driverPos) {
@@ -1088,7 +1124,8 @@ function buildDriverPopupContent(loc) {
   const loadId = inTransitLoad(loc)
   if (loadId) html += `<div style="color:#555;font-size:0.8rem">Load: ${loadId}</div>`
   html += `<div style="color:#888;font-size:0.72rem;font-family:JetBrains Mono,monospace">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</div>`
-  if (loc.speed) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
+  // No speed from a fix over 2 hours old (B11): it is how fast the truck was going then.
+  if (loc.speed && locShowsEta(loc)) html += `<div style="color:#555;font-size:0.8rem">Speed: ${Math.round(loc.speed * 2.237)} mph</div>`
   // Latest ELD fuel level. fuelPct is numeric (0-100) from the server; null
   // when the device doesn't report fuel — line hidden rather than "Fuel: —".
   if (loc.fuelPct != null && Number.isFinite(Number(loc.fuelPct))) {
@@ -1264,10 +1301,20 @@ async function toggleLoad(al, loc) {
   destAddress.value = al.dropoffAddress || ''
 
   // Determine route-from point: driver GPS when past pickup, otherwise origin
-  // Fall back to origin if driver is too far (>2000 km) from load area
+  // Fall back to origin if driver is too far (>2000 km) from load area.
+  // A fix over 2 hours old shows where the truck WAS (B11, 2026-10-16): nothing
+  // is routed from it (no approach leg, no driver-to-drop-off figures, which
+  // this map hides for it anyway) and the map frames the load instead of
+  // zooming to it; the pin stays, with its "Last seen" age. Nor is the planned
+  // pickup -> drop-off routed through /api/route for it (the replica check,
+  // 2026-10-19): such a load draws its planned lane from the load detail's own
+  // endpoint instead (staleFix, fetchPlannedLane()), or no line when that lane
+  // has none.
   const isPastPickup = PAST_PICKUP_RE.test(al.status)
   const hasDriverGps = loc.latitude != null && loc.longitude != null
-  let useDriverPos = isPastPickup && hasDriverGps
+  const pinIsLive = hasDriverGps && locShowsEta(loc)
+  const staleFix = hasDriverGps && !pinIsLive
+  let useDriverPos = isPastPickup && pinIsLive
   if (useDriverPos && (hasOrigin || hasDest)) {
     const refLat = hasOrigin ? oLat : dLat
     const refLng = hasOrigin ? oLng : dLng
@@ -1283,8 +1330,7 @@ async function toggleLoad(al, loc) {
   await nextTick()
 
   if (map) {
-    const hasDriverGps = loc.latitude != null && loc.longitude != null
-    if (isPastPickup && hasDriverGps) {
+    if (isPastPickup && pinIsLive) {
       // Snap to the truck pin at max zoom — same level as clicking the pin
       // directly — so dispatchers immediately see street-level detail of
       // where the truck is. fitBounds(origin, dest) here would zoom out to
@@ -1307,8 +1353,8 @@ async function toggleLoad(al, loc) {
   // Render origin/dest markers immediately
   renderSingleLoadRoute()
 
-  // Fetch route polyline in background
-  if (hasFrom && hasDest) {
+  // Fetch route polyline in background (none for a fix over 2 hours old)
+  if (hasFrom && hasDest && !staleFix) {
     const gen = focusGeneration
     fetchingRoute.value = true
     try {
@@ -1337,11 +1383,27 @@ async function toggleLoad(al, loc) {
     renderSingleLoadRoute()
   }
 
+  // A fix over 2 hours old: the load's planned lane, from GET /api/loads/:id/haul
+  // (fetchPlannedLane()), never /api/route. A lane with no line draws none.
+  if (staleFix && hasOrigin && hasDest) {
+    const gen = focusGeneration
+    fetchingRoute.value = true
+    let lane = []
+    try {
+      lane = await fetchPlannedLane(al.loadId)
+    } finally {
+      fetchingRoute.value = false
+    }
+    if (gen !== focusGeneration) return
+    routePoints.value = lane
+    renderSingleLoadRoute()
+  }
+
   // Pre-pickup loads still draw the haul polyline from pickup above, but the
   // headline ETA/distance should measure from the truck's CURRENT position to
   // delivery (not pickup→delivery), matching the driver-list ETA. Override the
   // summary numbers here without disturbing the drawn haul/approach polylines.
-  if (!useDriverPos && hasDriverGps && hasDest) {
+  if (!useDriverPos && pinIsLive && hasDest) {
     await updateDriverToDestStats(loc.latitude, loc.longitude, dLat, dLng, focusGeneration)
   }
 
@@ -1350,7 +1412,7 @@ async function toggleLoad(al, loc) {
   // planned blue haul. The haul polyline stays anchored at pickup→drop-off
   // (see Step 1 in maybeRefetchRoute) while the approach leg refreshes as
   // the truck moves toward pickup.
-  if (!isPastPickup && hasDriverGps && hasOrigin) {
+  if (!isPastPickup && pinIsLive && hasOrigin) {
     const gen = focusGeneration
     lastApproachRefetchPos = { lat: loc.latitude, lng: loc.longitude }
     lastApproachRefetchTime = Date.now()
@@ -1726,9 +1788,10 @@ const movementCounts = computed(() => {
   for (const loc of activeLocations.value) c[movementState(loc)]++
   return c
 })
+// No speed from a fix over 2 hours old (B11), as on the driver card and popup.
 const selectedDriverSpeed = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
-  return loc?.speed ? Math.round(loc.speed * 2.237) : null
+  return loc?.speed && locShowsEta(loc) ? Math.round(loc.speed * 2.237) : null
 })
 // The selected truck's fix age, for the route summary and the route's distance
 // label (B11). Only a fix over 2 hours old hides the figures; a driver with no
@@ -1736,6 +1799,23 @@ const selectedDriverSpeed = computed(() => {
 const selectedDriverLoc = computed(() => locations.value.find(l => l.driver === selectedDriver.value) || null)
 const selectedLastSeen = computed(() => (selectedDriverLoc.value ? locLastSeen(selectedDriverLoc.value) : ''))
 const selectedShowsEta = computed(() => !!selectedDriverLoc.value && !fixHidesFigures(selectedDriverLoc.value.noGps ? null : selectedDriverLoc.value.timestamp, now.value))
+
+// B11: the open load's fix turns 2 hours old on the 10 s clock (or an old fix is
+// pushed for it): redraw the load, which toggleLoad() then draws from the plan
+// and routes nothing from the old pin, as DriverRouteMap's watch(pinIsLive)
+// does. Only for the same driver; selecting another one draws its load afresh.
+const selectedPinIsLive = computed(() => {
+  const loc = selectedDriverLoc.value
+  return !!loc && !loc.noGps && loc.latitude != null && loc.longitude != null && locShowsEta(loc)
+})
+watch(() => [selectedDriver.value, selectedPinIsLive.value], ([driver, live], [wasDriver, wasLive]) => {
+  if (driver !== wasDriver || live || !wasLive || !expandedLoadId.value) return
+  const loc = selectedDriverLoc.value
+  const al = loc && (loc.activeLoads || []).find((l) => l.loadId === expandedLoadId.value)
+  if (!al) return
+  expandedLoadId.value = ''
+  toggleLoad(al, loc)
+})
 
 // The active load driving the FuelFinderPanel's POI query: the expanded load
 // when one is open, else the focused driver's first active load (its
@@ -1860,6 +1940,10 @@ function onLocationUpdate(payload) {
   const isSelectedDriver = selectedDriver.value
     && payload.driver
     && normDriver(selectedDriver.value) === payloadKey
+  // A pushed fix over 2 hours old is where the truck WAS (B11): the poller
+  // re-sends a parked device's last fix every minute. Nothing below routes from
+  // it or glues the line to it.
+  const pushIsLive = fixAllowsEta(fixAgeMs(payload.timestamp))
 
   const idx = locations.value.findIndex(
     (l) => normDriver(l.driver) === payloadKey
@@ -1879,7 +1963,7 @@ function onLocationUpdate(payload) {
       ? Math.min(Math.max(now - prevAt, PING_TWEEN_MIN_MS), PING_TWEEN_MAX_MS)
       : PING_TWEEN_MIN_MS
     lastPingAt.set(rowDriver, now)
-    animateMarker(rowDriver, old.latitude, old.longitude, targetLat, targetLng, tweenMs)
+    animateMarker(rowDriver, old.latitude, old.longitude, targetLat, targetLng, tweenMs, payload.timestamp)
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
@@ -1941,11 +2025,12 @@ function onLocationUpdate(payload) {
   // Refresh the route as the truck progresses (100m moved + 60s elapsed),
   // mirroring the public /track tracker so both views render the same
   // road segments at the same intervals. Pre-pickup loads refresh the
-  // amber driver→pickup approach leg instead of the static blue haul.
-  if (isSelectedDriver && originLatLng.value && expandedLoadId.value) {
+  // amber driver→pickup approach leg instead of the static blue haul. Only
+  // from a fix of 2 hours or less (pushIsLive).
+  if (pushIsLive && isSelectedDriver && originLatLng.value && expandedLoadId.value) {
     maybeRefetchApproachLeg(payload.latitude, payload.longitude)
   }
-  if (isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
+  if (pushIsLive && isSelectedDriver && routePoints.value.length >= 2 && destLatLng.value) {
     maybeRefetchRoute(payload.latitude, payload.longitude)
   }
 }

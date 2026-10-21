@@ -223,6 +223,11 @@
                         <span v-if="d.adjustments" class="adj-note" :class="d.adjustments < 0 ? 'neg' : 'pos'">
                           ({{ signedCents(d.adjustments) }} adj)
                         </span>
+                        <span
+                          v-if="d.splitInvoices"
+                          class="adj-note"
+                          :title="`${d.splitInvoices} of these invoices ${d.splitInvoices === 1 ? 'is' : 'are'} split with another month; this month shows only its part`"
+                        >(split)</span>
                       </template>
                       <template v-else>—</template>
                     </td>
@@ -237,10 +242,13 @@
                 </tbody>
               </table>
               <div class="footnote">
-                Invoiced = weekly (Sat&ndash;Fri) invoices overlapping this month, incl. admin adjustments
-                (deductions/bonuses); boundary weeks also appear in the adjacent month. Variance compares
-                invoiced vs the active-day pay estimate &mdash; <span class="neg">over</span> = invoiced above
-                the estimate, <span class="warn">under</span> = below.
+                Invoiced = this month's part of each driver invoice: a paid day counts in the month the pay
+                beside it counts that day (a closed month as it was frozen), so a week spanning two months is
+                split between them <span class="dim">(split)</span>, never counted twice. An owner-operator
+                invoice follows its loads; one with neither days nor loads is split by calendar days. Admin
+                adjustments (deductions/bonuses) count once, in the month
+                the week ends. Variance compares invoiced vs the active-day pay estimate &mdash;
+                <span class="neg">over</span> = invoiced above the estimate, <span class="warn">under</span> = below.
               </div>
             </div>
 

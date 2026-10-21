@@ -34,6 +34,16 @@
  *      POST /api/drivers-directory/:id/profile-picture (another driver and a
  *      blank session name still refused). Two mutants: the truck lookup and the
  *      truck-document check back to their old comparisons.
+ *   §7 the driver's own time off on the payload (R11 follow-up): only while
+ *      DRIVER_TIME_OFF_SCREEN_ENABLED is on, `timeOff: { today, rows }` holds
+ *      the caller's current and upcoming rows, { id, kind, from, to, status }
+ *      and nothing else, row for row what GET /api/driver/me/availability
+ *      answers. A Driver's rows are looked up by his SESSION's driver name,
+ *      never the URL's; a Super Admin's by the URL's. driverOwnTimeOff(),
+ *      driverAvailabilityByName() and the me route are the shipped code, on an
+ *      in-memory SQLite built from server.js's own CREATE TABLE text. Mutants:
+ *      the self-check removed (the session's rows still come back), the rows
+ *      read by the URL's name (flips), the spread without the sub-flag (flips).
  *
  * Pure: no server, no port, no app.db, no network, no fixtures.
  *
@@ -205,13 +215,18 @@ function makeDeps() {
 		// scripts/test-stored-file-serving.js).
 		storedFileKind: new Function("imageLimits", `${liftFn("storedFileKind")}\nreturn storedFileKind;`)(require(path.join(ROOT, "lib", "image-size"))),
 		ONBOARDING_DOCS: [],
+		// The driver's own time off (§7): off here, so its reader must never run.
+		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
+		driverOwnTimeOff: () => { throw new Error("driverOwnTimeOff() ran with DRIVER_TIME_OFF_SCREEN_ENABLED off"); },
 	};
 	return { deps, reads };
 }
 
 // Execute the registration against a capturing `app`, returning its chain.
-function buildRoute(routeSrc = ROUTE_SRC) {
+// `overrides` replaces deps by name (§7's time-off reader and flag).
+function buildRoute(routeSrc = ROUTE_SRC, overrides = {}) {
 	const { deps, reads } = makeDeps();
+	Object.assign(deps, overrides);
 	const names = Object.keys(deps);
 	let captured = null;
 	const app = { get: (p, ...chain) => { captured = { path: p, chain }; } };
@@ -617,6 +632,162 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			'(truck.assigned_driver || "").trim().toLowerCase() !== sessionDriver');
 		const x = await sibling("get", "/api/driver/truck-documents/:id/view", makeFilesDb(), {}, oldCompare)(SK, { id: "50" });
 		ok("MUTANT 5 (the truck-document check back to trim + lowercase): the §6 admission flips to 403", x.status === 403, said(x));
+	}
+
+	// =========================================================================
+	console.log("\n§7  the driver's own time off on the payload (DRIVER_TIME_OFF_SCREEN_ENABLED)");
+	// =========================================================================
+	// The time-off reads are the shipped helpers on a real SQLite; every other
+	// read keeps the canned fixture. "Today" is 2026-10-15. A helper or line
+	// server.js doesn't have yet is a FAIL here, never a crash, so §1-§6 still run.
+	{
+		const TODAY = "2026-10-15";
+		const softFn = (name) => {
+			const a = SRC.indexOf(`\nfunction ${name}(`);
+			const b = a < 0 ? -1 : SRC.indexOf("\n}\n", a);
+			return b < 0 ? null : SRC.slice(a + 1, b + 2);
+		};
+		const softMutate = (src, from, to) => (src && src.split(from).length - 1 === 1 ? src.replace(from, to) : null);
+		const ddl = (table) => (SRC.match(new RegExp(`db\\.exec\\(\`\\s*CREATE TABLE IF NOT EXISTS ${table} \\([\\s\\S]*?\`\\);`)) || [null])[0];
+		const OWN_SRC = softFn("driverOwnTimeOff");
+		const BY_NAME_SRC = softFn("driverAvailabilityByName");
+		const SPREAD_ARG = 'req.session.user.role !== "Super Admin" ? req.session.user.driverName : driverName';
+		ok("§7.0 server.js has driverOwnTimeOff() and driverAvailabilityByName(), and both tables' CREATE TABLE",
+			!!OWN_SRC && !!BY_NAME_SRC && !!ddl("drivers_directory") && !!ddl("driver_availability"));
+		// Reason texts used below: none may reach a driver.
+		const REASONS = ["Family wedding", "Court date", "Dentist", "Moving house", "Knee surgery"];
+		const TV = { id: 7, role: "Driver", username: "LogisX-1004", driverName: "Tamsin Vale" };
+		const errors = [];
+		const quiet = { log() {}, warn() {}, info() {}, error: (...a) => errors.push(a.join(" ")) };
+		function availabilityDb({ broken = false } = {}) {
+			const adb = new Database(":memory:");
+			new Function("db", ddl("drivers_directory"))(adb);
+			new Function("db", ddl("driver_availability"))(adb);
+			const dir = adb.prepare("INSERT INTO drivers_directory (id, driver_name) VALUES (?, ?)");
+			// Tamsin Vale has two legacy directory rows, one with a doubled space.
+			for (const [id, name] of [[11, "Desoren King"], [12, "Soren King"], [14, "Tamsin Vale"], [15, "Tamsin  Vale"]]) dir.run(id, name);
+			const row = adb.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at, cancelled_at)
+				VALUES (?, ?, ?, ?, ?, ?, 'super_admin', '2026-10-01T12:00:00Z', ?)`);
+			row.run(11, "Desoren King", "vacation", "2026-10-14", "2026-10-20", REASONS[0], null);                // current
+			row.run(11, "Desoren King", "off_duty", "2026-11-01", "2026-11-03", REASONS[1], null);                // upcoming
+			row.run(11, "Desoren King", "vacation", "2026-10-01", "2026-10-03", REASONS[2], null);                // past
+			row.run(11, "Desoren King", "other", "2026-10-25", "2026-10-27", REASONS[3], "2026-10-10T12:00:00Z"); // cancelled
+			row.run(12, "Soren King", "other", "2026-10-16", "2026-10-18", REASONS[4], null);
+			row.run(14, "Tamsin Vale", "vacation", "2026-10-22", "2026-10-23", "", null);
+			row.run(15, "Tamsin  Vale", "off_duty", "2026-12-01", "2026-12-02", "", null);
+			if (broken) adb.exec("DROP TABLE driver_availability");
+			return adb;
+		}
+		const timeOffHelpers = (adb) => new Function("db", "driverAvailability", "appTodayKey", "console", [
+			liftFn("normalizeDriverName"), BY_NAME_SRC, OWN_SRC, "return { driverAvailabilityByName, driverOwnTimeOff };",
+		].join("\n"))(adb, require(path.join(ROOT, "lib", "driver-availability")), () => TODAY, quiet);
+		const counted = (fn) => { const f = (...a) => { f.calls++; return fn(...a); }; f.calls = 0; return f; };
+		// The payload with the time-off reader wired to `adb`, the sub-flag as given.
+		const pageRoute = (screen, adb, src = ROUTE_SRC) => {
+			const h = timeOffHelpers(adb);
+			const reader = counted(h.driverOwnTimeOff);
+			const route = buildRoute(src, { DRIVER_TIME_OFF_SCREEN_ENABLED: screen, driverOwnTimeOff: reader });
+			return { ...route, reader };
+		};
+		// GET /api/driver/me/availability, the shipped registration, main flag on.
+		const meRoute = (adb) => {
+			const h = timeOffHelpers(adb);
+			const deps = {
+				availabilityFlagGate: new Function("DRIVER_AVAILABILITY_ENABLED", `${liftFn("availabilityFlagGate")}\nreturn availabilityFlagGate;`)(true),
+				requireRole, requireAuth, normalizeDriverName: helpers.normalizeDriverName, appTodayKey: () => TODAY, console: quiet,
+				driverAvailabilityByName: h.driverAvailabilityByName, driverOwnTimeOff: h.driverOwnTimeOff,
+			};
+			const names = Object.keys(deps);
+			let chain = null;
+			const app = { get: (p, ...c) => { if (p === "/api/driver/me/availability") chain = c; } };
+			new Function("app", ...names, `${routeSource("get", "/api/driver/me/availability")};`)(app, ...names.map((n) => deps[n]));
+			return async (user) => {
+				const req = { method: "GET", url: "/api/driver/me/availability", originalUrl: "/api/driver/me/availability", params: {}, headers: {},
+					route: { path: "/api/driver/me/availability" }, session: user ? { user: { ...user } } : {} };
+				const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, setHeader() {} };
+				for (const mw of chain) {
+					let next = false;
+					await mw(req, res, () => { next = true; });
+					if (!next) break;
+				}
+				return { status: res.statusCode, body: res.body };
+			};
+		};
+		const shape = (x) => (x && x.body && x.body.timeOff && Array.isArray(x.body.timeOff.rows)
+			? x.body.timeOff.rows.map((t) => [t.from, t.to, t.kind, t.status]) : null);
+		const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+		const DK_ROWS = [["2026-10-14", "2026-10-20", "vacation", "current"], ["2026-11-01", "2026-11-03", "off_duty", "upcoming"]];
+		const SK_ROWS = [["2026-10-16", "2026-10-18", "other", "upcoming"]];
+		const told = (x) => `${brief(x)}, timeOff ${JSON.stringify(x.body && x.body.timeOff)}`.slice(0, 300);
+
+		if (OWN_SRC && BY_NAME_SRC) {
+			const adb = availabilityDb();
+			const page = pageRoute(true, adb);
+			r = await call(page, DK, "Desoren King");
+			ok("§7.1 Driver, sub-flag on: 200 with his loads, and timeOff for today",
+				r.status === 200 && r.body.loads.length === 1 && !!r.body.timeOff && r.body.timeOff.today === TODAY, told(r));
+			ok("§7.2 ...his current and upcoming rows only (his past and cancelled rows absent)", same(shape(r), DK_ROWS), told(r));
+			ok("§7.3 ...each row exactly { id, kind, from, to, status }: no reason, directory id or author, and no reason text anywhere",
+				!!r.body.timeOff && r.body.timeOff.rows.every((t) => Object.keys(t).sort().join() === "from,id,kind,status,to")
+				&& !REASONS.some((s) => JSON.stringify(r.body).includes(s)), told(r));
+			const me = await meRoute(adb)(DK);
+			ok("§7.4 ...row for row what GET /api/driver/me/availability answers the same session",
+				me.status === 200 && same(r.body.timeOff, me.body), `me ${me.status} ${JSON.stringify(me.body)}`);
+			r = await call(page, SK, "Soren King");
+			ok("§7.5 another Driver gets only his own", same(shape(r), SK_ROWS), told(r));
+			r = await call(page, { ...DK, driverName: "Desoren  King" }, "Desoren King");
+			ok("§7.6 a session name with a doubled space still gets his rows", r.status === 200 && same(shape(r), DK_ROWS), told(r));
+			r = await call(page, DK, "Soren King");
+			ok("§7.7 a Driver asking for another driver's name: 403 (the self-check), no timeOff", forbidden(r) && !("timeOff" in r.body), told(r));
+			r = await call(page, SUPER, "Soren King");
+			ok("§7.8 Super Admin with a driver's name in the URL: that driver's rows", r.status === 200 && same(shape(r), SK_ROWS), told(r));
+			r = await call(page, SUPER, "super_admin");
+			ok("§7.9 Super Admin on his own /driver page (his own name): no rows", r.status === 200 && same(shape(r), []), told(r));
+			const refused = [await call(page, DISPATCH_NAMED, "Desoren King"), await call(page, INVESTOR_NAMED, "Desoren King"), await call(page, null, "Desoren King")];
+			ok("§7.10 Dispatcher and Investor (even carrying his name): 403; signed out: 401; none gets timeOff",
+				same(refused.map((x) => x.status), [403, 403, 401]) && refused.every((x) => !x.body || !("timeOff" in x.body)),
+				refused.map((x) => x.status).join());
+			r = await call(page, TV, "Tamsin Vale");
+			ok("§7.11 two legacy directory rows that normalize to one name: their rows combined (driverAvailabilityByName()'s grouping)",
+				same(shape(r), [["2026-10-22", "2026-10-23", "vacation", "upcoming"], ["2026-12-01", "2026-12-02", "off_duty", "upcoming"]]), told(r));
+
+			const broken = availabilityDb({ broken: true });
+			errors.length = 0;
+			r = await call(pageRoute(true, broken), DK, "Desoren King");
+			ok("§7.12 a failing time-off read: the payload still answers 200 with his loads, timeOff { today, rows: [], error: true }",
+				r.status === 200 && r.body.loads.length === 1 && same(r.body.timeOff, { today: TODAY, rows: [], error: true }) && errors.length === 1,
+				`${told(r)}, errors ${errors.length}`);
+			const meBroken = await meRoute(broken)(DK);
+			ok("§7.13 ...while GET /api/driver/me/availability keeps its 500 on the same failure",
+				meBroken.status === 500 && meBroken.body && meBroken.body.error === "Your time off could not be read.", JSON.stringify(meBroken));
+
+			const off = pageRoute(false, adb);
+			r = await call(off, DK, "Desoren King");
+			ok("§7.14 sub-flag off (main flag on): 200 with his loads, no timeOff key, and the reader never runs",
+				r.status === 200 && r.body.loads.length === 1 && !("timeOff" in r.body) && off.reader.calls === 0, `${told(r)}, reader calls ${off.reader.calls}`);
+
+			// The self-check is the first wall; the session lookup is the second.
+			const NO_SELF_CHECK = softMutate(ROUTE_SRC, "if (!sessionName || normalizeDriverName(driverName) !== sessionName) {", "if (false) {");
+			ok("§7.15a the self-check mutant applies", !!NO_SELF_CHECK);
+			if (NO_SELF_CHECK) {
+				r = await call(pageRoute(true, adb, NO_SELF_CHECK), DK, "Soren King");
+				ok("§7.15 with the self-check removed, a Driver asking for another driver's name still gets only HIS rows (the session's name)",
+					r.status === 200 && same(shape(r), DK_ROWS), told(r));
+			}
+			const BY_URL = softMutate(NO_SELF_CHECK, SPREAD_ARG, "driverName");
+			ok("§7.16a the URL-name mutant applies (the spread reads the session's name for a non-Super-Admin)", !!BY_URL);
+			if (BY_URL) {
+				r = await call(pageRoute(true, adb, BY_URL), DK, "Soren King");
+				ok("MUTANT 7 (the rows read by the URL's name, self-check removed): §7.15 flips to the other driver's rows",
+					r.status === 200 && same(shape(r), SK_ROWS), told(r));
+			}
+			const NO_FLAG = softMutate(ROUTE_SRC, "...(DRIVER_TIME_OFF_SCREEN_ENABLED ? {", "...(true ? {");
+			ok("§7.17a the sub-flag mutant applies", !!NO_FLAG);
+			if (NO_FLAG) {
+				r = await call(pageRoute(false, adb, NO_FLAG), DK, "Desoren King");
+				ok("MUTANT 8 (the spread without the sub-flag): §7.14 flips, timeOff sent with the sub-flag off", r.status === 200 && "timeOff" in r.body, told(r));
+			}
+		}
 	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);

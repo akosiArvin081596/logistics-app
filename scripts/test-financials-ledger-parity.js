@@ -96,7 +96,7 @@ function trucksDdl() {
 const alters = (table) => SRC.match(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`]*`, "g")) || [];
 
 const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), async (req, res) => {';
-const CONSTS = ["PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
+const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "haulAssignmentsStmt", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS", "PERIOD_FINALIZE_ENABLED",
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
 const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
@@ -117,7 +117,7 @@ const FNS = [
 	"appMonthKey", "settlementGraceDays", "graceEndsAt", "periodPhase", "isPlausibleLockPeriod",
 	"getCarrierDBFromSQLite", "recordPayoutChange", "listSettlableInvestors",
 	"closingFingerprint", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "noteLateItemInClosedMonth", "logAudit", "installPeriodLockTriggers",
-	"financialsReportQuery", "buildFinancialsReport", "getLoadMilesIndex",
+	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex",
 ];
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
@@ -181,7 +181,7 @@ function buildWorld() {
 	const errors = [];
 	const deps = {
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
-		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
+		db, geolib, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, invoiceMonthSplit: require("../lib/invoice-month-split.js"), loadPayDays: require("../lib/load-pay-days.js"), loadHaul: require(path.join(__dirname, "..", "lib", "load-haul.js")), Date: Clock,
 		app: { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; } },
 		requireRole: () => (req, res, next) => next && next(),
 		getJobTrackingCached: async () => ({ headers: [...HEADERS], data: SHEET.map((r, i) => ({ _rowIndex: i + 2, ...r })) }),
