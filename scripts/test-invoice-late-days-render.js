@@ -13,8 +13,10 @@
  *   - a late day fills its own weekday in its week's grid ({ completed, total,
  *     loadBol }); the later week's render data has no earlierDays and leaves
  *     that weekday empty;
- *   - Total Due = the sum of each day's own rate (pay_rate_history); each grid
- *     day carries its rate;
+ *   - Total Due = the sum of each day's own rate; each grid day carries its
+ *     rate. Dated rates (pay_rate_history) price days only under the daily-rate
+ *     rule (DRIVER_RATE_ONLY; revised 2026-10-21: the trip rule alone reads none,
+ *     so D2's two-rate weeks run with both rules on);
  *   - PUT /api/invoices/:id/adjust re-renders from the stored render_data and
  *     keeps the added days;
  *   - an invoice without late days renders exactly as today.
@@ -33,6 +35,8 @@ const W = require("./lib/work-days-world");
 const { loadRow, etMs, daysFrom } = W;
 
 const TRIP = { TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-09" };
+// The daily-rate rule from the same month: the rule that reads dated rates.
+const DATED = { ...TRIP, DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-09" };
 const W39 = "2026-10-02";
 const W40 = "2026-10-09";
 const s = (lid, status, at, source = "manual", actor = "") => [lid, status, source, at, actor];
@@ -42,9 +46,9 @@ const stored = (w, id) => JSON.parse(w.db.prepare("SELECT render_data FROM invoi
 
 // W39 pays a Mon-Tue load; a load At Shipper Thu 10/1 is delivered Mon 10/5,
 // after W39 was made, so W40's run puts Thu and Fri onto W39 (a Draft).
-async function boundaryWeek({ driver = "Rex Ames", payDaily = 260, payRates = [] } = {}) {
+async function boundaryWeek({ driver = "Rex Ames", payDaily = 260, payRates = [], env = TRIP } = {}) {
 	const w = W.startWorld({
-		env: TRIP,
+		env,
 		drivers: [{ name: driver, payDaily }],
 		payRates,
 		rows: [
@@ -78,13 +82,13 @@ const R = W.createRunner("B12 D: late days print in their own week's invoice");
 		eq("no invoice stores an earlierDays section", w.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE render_data LIKE '%earlierDays%'").get().n, 0);
 	});
 
-	await R.test("D2 Total Due is the sum of each day's own rate: one rate all week is days x rate (W39 4 x $260 = $1,040, W40 3 x $260 = $780); $280 until Fri 10/2 then $320 prices W39's late Thursday and Friday at $280 (W39 $1,120) and W40's grid at $320 ($960), each row at its rate; the runner-B B13 week gives $2,080", async ({ eq }) => {
+	await R.test("D2 [revised 2026-10-21] Total Due is the sum of each day's own rate: one rate all week is days x rate (W39 4 x $260 = $1,040, W40 3 x $260 = $780); with the daily-rate rule on too, $280 until Fri 10/2 then $320 prices W39's late Thursday and Friday at $280 (W39 $1,120) and W40's grid at $320 ($960), each row at its rate; the runner-B B13 week gives $2,080", async ({ eq }) => {
 		const one = await boundaryWeek();
 		const row39 = one.w.db.prepare("SELECT total_earnings FROM invoices WHERE id = ?").get(one.g39.invoice.id);
 		eq("one rate: W39 and W40 totals", [row39.total_earnings, stored(one.w, one.g39.invoice.id).totalDue, one.g.data && one.g.data.totalDue, one.g.invoice && one.g.invoice.total_earnings], [1040, 1040, 780, 780]);
 		const key = norm("Sue Kemp");
 		const two = await boundaryWeek({
-			driver: "Sue Kemp", payDaily: 320,
+			driver: "Sue Kemp", payDaily: 320, env: DATED,
 			payRates: [{ subject: "driver", key, rate: 280, from: "2026-09-01T12:00:00.000Z" }, { subject: "driver", key, rate: 320, from: "2026-10-03T13:00:00.000Z" }],
 		});
 		const d39 = stored(two.w, two.g39.invoice.id);
@@ -96,7 +100,7 @@ const R = W.createRunner("B12 D: late days print in their own week's invoice");
 		eq("two rates: the PDF's Thursday row (W39)", fieldMap(d39).text["Thursday total"], "280.00");
 		const D = "Ola Stone";
 		const w = W.startWorld({
-			env: TRIP,
+			env: DATED,
 			drivers: [{ name: D, payDaily: 320 }],
 			payRates: [{ subject: "driver", key: norm(D), rate: 280, from: "2026-09-01T12:00:00.000Z" }, { subject: "driver", key: norm(D), rate: 320, from: "2026-09-30T13:00:00.000Z" }],
 			rows: [loadRow({ id: "D201", driver: D, pickup: "2026-09-26 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-09-26", done: "2026-10-02", truck: "T1" })],

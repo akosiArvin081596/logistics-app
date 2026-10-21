@@ -29,8 +29,9 @@
  * (client/src/lib/driverPay.js), and its Drivers Database and Trucks page text
  * (D18, D19). D10, D10b, D14 and D17 run the read-only "what would change"
  * report (scripts/driver-rate-only-report.js) on a copy of this world's
- * database. D20 and C7 pin the trip rater's TRIP_WORK_DAYS_FROM check on the
- * calendar month. The month-end guards, the close record and the payout-rules
+ * database. D20 and C7 (revised 2026-10-21, one pricing rule: the trip rule
+ * alone no longer reads the dated history; scripts/test-driver-rate-dated.js)
+ * pin how the trip rule's days are priced. The month-end guards, the close record and the payout-rules
  * dry run are in test-driver-rate-only-guards.js.
  *
  * Made-up data only: investor 5 owns T1 ($150 a day on the truck), T2 ($300)
@@ -371,8 +372,10 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		rows: [loadRow({ id: "Q401", driver: CAL, pickup: "2026-09-30 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-10-01", done: "2026-10-01", truck: "T1" })],
 		status: [s("Q401", "At Shipper", "2026-09-30 09:00"), s("Q401", "Delivered", "2026-10-01 17:00")],
 	});
-	await R.test("D20 Flag on with the trip work-day rule: the trip rater keeps its TRIP_WORK_DAYS_FROM check on the calendar month. Sept 30 (a September day, though its load pays in October) keeps Cal's one rate, $300; Oct 1 takes the dated path, $0 dated so the rule's $250. Base: Oct 1 at the truck's $150", async ({ eq }) => {
-		eq("W39 grid", (await weekly(tripCalendarWorld(ON), CAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 250]]);
+	await R.test("D20 [revised 2026-10-21, one pricing rule] Flag on with the trip work-day rule: each day is priced by the month it pays in, on the invoice as on the ledger. Sept 30 and Oct 1 pay in October (their load is Assigned Oct 1), so both read Cal's dated $0 and pay the rule's $250. Before: Sept 30 kept his one $300 on the invoice (the calendar-month check) while the ledger paid $300 for both days", async ({ eq }) => {
+		const w = tripCalendarWorld(ON);
+		eq("W39 grid", (await weekly(w, CAL, W39)).days, [["2026-09-30", 250], ["2026-10-01", 250]]);
+		eq("ledger", await ledgerDays(w, CAL), [["2026-10", "2026-09-30", 25000], ["2026-10", "2026-10-01", 25000]]);
 	});
 
 	// The rule from November: an October day keeps the truck's $150, a November
@@ -422,8 +425,10 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		eq("the days listed", listed && listed.days.map((d) => [d.day, d.month, d.printed, d.rule]), [["2026-11-02", "2026-11", 150, 250]]);
 	});
 
-	await R.test("C7 Control, flag off with the trip work-day rule: the same week as today: Sept 30 at Cal's one rate ($300), Oct 1 on the dated path ($0 dated, so the truck's $150)", async ({ eq }) => {
-		eq("W39 grid", (await weekly(tripCalendarWorld({}), CAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 150]]);
+	await R.test("C7 [revised 2026-10-21, one pricing rule] Flag off with the trip work-day rule: the trip rule alone reads no dated rate, so both days pay Cal's one $300, as the ledger pays them. Before: Oct 1 on the dated path ($0 dated, so the truck's $150) while the ledger paid $300", async ({ eq }) => {
+		const w = tripCalendarWorld({});
+		eq("W39 grid", (await weekly(w, CAL, W39)).days, [["2026-09-30", 300], ["2026-10-01", 300]]);
+		eq("ledger", await ledgerDays(w, CAL), [["2026-10", "2026-09-30", 30000], ["2026-10", "2026-10-01", 30000]]);
 	});
 
 	await R.test("C1 Control, flag off (also with FROM set and the flag off): Cal at the truck's $150 on the invoice, the ledger and the investor view; Kim at $300", async ({ eq }) => {

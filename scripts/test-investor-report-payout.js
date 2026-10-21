@@ -570,6 +570,8 @@ const CTX = { sessionUser: { id: 1, role: "Super Admin", username: "sa" }, carri
 				getDriverPayStructures: () => ({}),
 				getDeductibleExpensesByDriverMonth: () => ({}),
 				resolveDailyRate: (perDriver, perTruck) => perDriver || perTruck || 250,
+				// The daily-rate rule has never run (no start record), as it ships.
+				driverRateOnlyStartRecord: () => null,
 				// No trucks in this world (the db above reads nothing).
 				truckRatesByDriver: () => Object.create(null),
 				getInvestorDriverMonthWindows: () => new Map(),

@@ -7,7 +7,7 @@
 //
 // It lifts the server's own payout ledger (computeFleetLedger()), investor
 // payables (computeInvestorMonthlyEarnings(), the loss carried forward
-// included) and invoice day pricing (invoiceDayRater(), resolveDailyRate())
+// included) and its driver-day price (driverDayRater(), resolveDailyRate())
 // from this checkout's server.js twice (scripts/lib/ledger-world.js): once with
 // the rule off and once with it on from --from, every other setting as the
 // app's .env has it, each on a read-only handle of app.db. Nothing is written:
@@ -35,7 +35,7 @@
 //     pay changes and that no live weekly invoice carries;
 //   - historyGaps: { driver, from, to }, days from FROM on whose dated rate
 //     (pay_rate_history) reads $0 while the driver has a rate of his own now
-//     (what the dated-rate and trip rules would pay at $250);
+//     (days the rule, which reads dated rates, would pay at $250);
 //   - closedMonthsUnchanged: every closed month and every month before FROM
 //     identical with the rule off and on, and a fingerprint of the closed
 //     months' frozen rows. If not, the run exits 1 after printing.
@@ -67,7 +67,7 @@ const FINGERPRINTED = ["investor_payouts", "investor_payout_history", "financial
 // What the report lifts beside the ledger (ledger-world's own ROOTS).
 const EXTRA_ROOTS = [
 	"getDriverPayStructures", "truckDailyRateCandidates", "resolveDailyRate", "normalizeDriverName", "driverNameForTotals",
-	"loadAssignedMonthKey", "jobTrackingMonthCols", "normalizeLoadId", "loadPayRateIndex", "invoiceGridDayName", "invoiceDayRater",
+	"loadAssignedMonthKey", "jobTrackingMonthCols", "normalizeLoadId", "loadPayRateIndex", "invoiceGridDayName", "driverDayRater",
 	"appDay", "TRIP_WORK_DAYS_FROM", "DRIVER_RATE_ONLY_FROM",
 ];
 // A correction's per-day line ("Correction for <invoice>: <Weekday, Month D, YYYY>, $<rate>").
@@ -151,17 +151,20 @@ async function driverIndex({ db, A }) {
 	// A load with no Assigned Date (or not on the sheet) pays in the day's own month.
 	const payMonthOfDay = (day, loadIds) => driverRateOnly.payMonthOf(day, loadIds.map((id) => assignedMonthOf.get(A.normalizeLoadId(id)) || String(day).slice(0, 7)));
 
-	// The rate each pay path hands a driver's day: his own, the last truck naming him.
+	// The rate each pay path hands a driver's day (the one driver-day price,
+	// driverDayRater(): under the rule his rate in effect that day), from his
+	// own rate and the last truck naming him.
 	const truckOf = (k) => {
 		const list = trucks.filter((t) => norm(t.assigned_driver) === k);
 		return list.length ? list[list.length - 1] : null;
 	};
+	const dayRate = A.driverDayRater();
 	const raters = new Map();
 	const raterOf = (k) => {
 		if (!raters.has(k)) {
 			const own = (structs[k] && structs[k].payDaily) || 0;
 			const truckRate = A.truckDailyRateCandidates(display.get(k) || k).slice(-1)[0];
-			raters.set(k, A.invoiceDayRater({ nameNorm: k, payDaily: own, truckRate, fromMonth: A.TRIP_WORK_DAYS_FROM }));
+			raters.set(k, (day, month) => dayRate(k, own, truckRate, day, month || String(day).slice(0, 7)));
 		}
 		return raters.get(k);
 	};

@@ -534,8 +534,8 @@ async function report({ db, args, envFile, sheetData, ready, snapshotAt, sheetAt
 				if (r.kind === "manual") row.manual = true;
 			}
 		} else if (parts.trip) {
-			// A Draft regenerated with B12 on prices each day at its own dated rate
-			// (invoiceDayRater()); an issued invoice is never regenerated.
+			// A Draft regenerated with B12 on prices each day as the ledger does (the
+			// driver-day price, driverDayRater()); an issued invoice is never regenerated.
 			const diff = rateReport.invoiceRateDiffs({ db, A: W[k].api, from: MONTH, index: await rateReport.driverIndex({ db, A: W[k].api }) });
 			for (const r of diff.drafts) if (r.kind === "weekly") rowOf(r.invoiceNumber).b12Pricing = repricedOf(r);
 		}
