@@ -193,6 +193,8 @@ function writeTree() {
 	fs.writeFileSync(path.join(RECEIPTS_DIR, "thumbs", "2.jpg"), IMG.thumb);
 	fs.mkdirSync(path.join(UP, "chat"), { recursive: true });
 	fs.writeFileSync(path.join(UP, "chat", "chat_1_abcde.jpg"), IMG.bJpg);
+	fs.mkdirSync(path.join(UP, "onboarding-templates"), { recursive: true });
+	fs.writeFileSync(path.join(UP, "onboarding-templates", "blank-form.pdf"), IMG.pdf);
 }
 
 // `noTrucks`: a database whose trucks table cannot be read (the Investor
@@ -266,12 +268,12 @@ async function build({ option = SHIPPED_OPTION, db = makeDb() } = {}) {
 	const mod = new Function(
 		"app", "express", "path", "fs", "crypto", "DATA_DIR", "RECEIPTS_DIR", "db", "requireAuth", "requireRole",
 		"imageLimits", "receiptFiles", "imageMetadata", "guardDriverSignedDoc", "guardInvestorSignedDoc",
-		"guardInvoicePdf", "guardDrugTestFile", "guardRootLoadDocument", "console", "require", "windowCalls",
+		"guardInvoicePdf", "guardDrugTestFile", "guardRootLoadDocument", "guardChatAttachment", "console", "require", "windowCalls",
 		body,
 	)(app, express, path, fs, crypto, TMP, RECEIPTS_DIR, db, requireAuth, requireRole,
 		require("../lib/image-size"), require("../lib/receipt-files"), require("../lib/image-metadata"),
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"),
-		stub("guardRootLoadDocument"), fakeConsole, serverRequire, windowCalls);
+		stub("guardRootLoadDocument"), stub("guardChatAttachment"), fakeConsole, serverRequire, windowCalls);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -359,7 +361,8 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 		ok("§1 a served receipt may not be stored by any cache (private, no-store, no ETag)",
 			own.headers["cache-control"] === "private, no-store" && !own.headers.etag);
 		ok("§1 a POST is not served", (await T.get(R(F.A_JPG), U.sa, { method: "POST" })).status === 404);
-		ok("§1 another unguarded folder is unchanged (chat/ still opens for a Driver)", (await T.get("/uploads/chat/chat_1_abcde.jpg", U.drvA)).status === 200);
+		ok("§1 another unguarded folder is unchanged (onboarding-templates/ still opens for a Driver)", (await T.get("/uploads/onboarding-templates/blank-form.pdf", U.drvA)).status === 200);
+		ok("§1 chat/ goes to its own guard, not the receipt guard", (await T.get("/uploads/chat/chat_1_abcde.jpg", U.drvA)).headers["x-test-guard"] === "guardChatAttachment");
 	}
 
 	// §2 Cached thumbnails in the folder

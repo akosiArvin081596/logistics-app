@@ -551,6 +551,9 @@ export const useDriverStore = defineStore('driver', {
         message: msg.message,
         loadId: msg.loadId || '',
         read: this.currentTab === 'messages' ? 1 : 0,
+        // A photo from Dispatch shows (and opens full size) without a reload.
+        attachment_url: msg.attachment_url || '',
+        attachment_type: msg.attachment_type || '',
       })
     },
   },

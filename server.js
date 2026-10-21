@@ -124,6 +124,9 @@ const invoiceReceipts = require("./lib/invoice-receipts");
 const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
 const receiptFiles = require("./lib/receipt-files");
+// Chat attachment files: who may open one (the conversation's participants),
+// and the copy (photos without metadata).
+const chatFiles = require("./lib/chat-files");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
@@ -11516,11 +11519,13 @@ function guardInvoicePdf(req, res, next, url, file) {
 //
 //   Swept at the same time and deliberately left (all timestamped, so the URL is
 //   a weak secret rather than a free enumeration):
-//     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
 //     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
 //   uploads/expense-receipts/ was on that list too, and is guarded since
 //   2026-10-15 (owner's rule: the receipt's driver, Super Admin and the roles
 //   that review receipts). See guardExpenseReceipt.
+//   uploads/chat/ is guarded since 2026-10-22 (owner's rule: only the people
+//   who can read the conversation; photos served without location data). See
+//   guardChatAttachment.
 //   The uploads ROOT was on that list too — `${loadId}_${docType}_${Date.now()}`
 //   PODs, BOLs and receipts — and is now guarded by guardRootLoadDocument (see
 //   there). It is not a GUARDED_UPLOAD_DIRS entry because it is not a directory
@@ -11810,11 +11815,29 @@ function guardExpenseReceipt(req, res, next, url, file) {
 	return expenseReceiptGuard(req, res, next, url, file);
 }
 
+// uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
+// read the conversation it was sent in (Super Admin and Dispatcher every
+// thread; a Driver or Investor his own), decided by the first message that
+// names it; everyone else gets 404. Photos go out without their metadata (no
+// location). The rule and the copy live in lib/chat-files.js. chat_uploads
+// records who stored each file, so a message carries only its sender's own
+// upload (POST /api/messages).
+db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
+const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
+	db,
+	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	logError: (msg) => console.error(msg),
+});
+function guardChatAttachment(req, res, next, url, file) {
+	return chatAttachmentGuard(req, res, next, url, file);
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
 	{ dir: "/invoices/", guard: guardInvoicePdf },
 	{ dir: "/expense-receipts/", guard: guardExpenseReceipt },
+	{ dir: "/chat/", guard: guardChatAttachment },
 	// ⚠️ THE TRAILING SLASH IS LOAD-BEARING. The match is a startsWith, so
 	// "/onboarding" without it would also swallow /onboarding-signed/ and
 	// /onboarding-templates/, routing signed W-9s to the drug-test guard. With
@@ -43224,11 +43247,13 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 				driverName.toLowerCase(),
 		);
 
-		// Messages from SQLite (fast indexed query)
+		// Messages from SQLite (fast indexed query). Attachments ride along, so the
+		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
+		// to the conversation's participants only).
 		const nameLower = driverName.toLowerCase();
 		const driverMessages = db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
@@ -46161,6 +46186,12 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		const from = isPrivilegedSender ? (requestedFrom || sessionName) : sessionName;
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
+		}
+		// An attachment is a chat file this same account uploaded through
+		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
+		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
+		if (attachmentRefusal) {
+			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
 		const timestamp = new Date().toISOString();
@@ -51492,7 +51523,14 @@ app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req,
 		// client-sent mimeType and is a display hint, never evidence.
 		const chatErr = verifyInlineServedBytes(chatBuf, path.extname(safeName));
 		if (chatErr) return res.status(400).json({ error: chatErr });
-		fs.writeFileSync(path.join(chatDir, safeName), chatBuf);
+		// A photo is stored without its metadata (no location, camera or text;
+		// orientation kept); one the strip cannot walk is refused, never stored
+		// as it is. Other files are stored as sent.
+		const stored = chatFiles.chatUploadBytes(chatBuf);
+		if (!stored) return res.status(415).json({ error: "That photo couldn't be read. Try a JPG or PNG.", code: "UNSUPPORTED_IMAGE_TYPE" });
+		fs.writeFileSync(path.join(chatDir, safeName), stored);
+		// Who stored it: POST /api/messages takes it only from this account.
+		chatFiles.recordChatUpload(db, `/uploads/chat/${safeName}`, req.session.user.id);
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);

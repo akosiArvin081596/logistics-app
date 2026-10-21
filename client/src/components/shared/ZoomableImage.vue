@@ -26,6 +26,26 @@
         @dblclick="onDoubleClick"
       />
 
+      <p v-if="gallery && position" class="zoom-position" aria-live="polite">{{ position }}</p>
+      <!-- aria-disabled rather than disabled at either end: a disabled button
+           drops the focus it holds, and focus must stay inside the viewer. -->
+      <button
+        v-if="gallery"
+        type="button"
+        class="zoom-nav zoom-prev"
+        aria-label="Previous photo"
+        :aria-disabled="hasPrev ? 'false' : 'true'"
+        @click="goPrev"
+      >&lsaquo;</button>
+      <button
+        v-if="gallery"
+        type="button"
+        class="zoom-nav zoom-next"
+        aria-label="Next photo"
+        :aria-disabled="hasNext ? 'false' : 'true'"
+        @click="goNext"
+      >&rsaquo;</button>
+
       <div class="zoom-controls">
         <button type="button" class="zoom-btn" aria-label="Zoom out" @click="zoomBy(-ZOOM_STEP)">&minus;</button>
         <button type="button" class="zoom-btn zoom-reset" aria-label="Reset zoom" @click="reset">Reset</button>
@@ -39,12 +59,20 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { swipeStep, trapTabIndex } from '../../lib/photoViewer'
 
 // Reusable fullscreen image viewer with wheel/button/double-click zoom,
 // drag-to-pan and touch pinch. Plain CSS transforms only (no deps, no Vant)
 // so it is safe in both the Vant driver shell and the shadcn/Tailwind admin
 // shell. Caller binds :src and listens for @close — render is guarded inside
 // the Teleport so the parent does not need its own v-if.
+//
+// The fullscreen overlay is a modal dialog: focus moves into it when it opens,
+// Tab and Shift+Tab stay inside it, Esc / the X / a click outside the photo
+// close it, and focus goes back to whatever had it before (the photo that was
+// clicked). A caller showing a set of photos (the chat threads) also binds
+// has-prev / has-next / position and listens for @prev / @next: that adds the
+// previous and next buttons, the arrow keys and a one-finger swipe at fit size.
 const props = defineProps({
   src: { type: String, default: null },
   alt: { type: String, default: 'Image' },
@@ -52,8 +80,19 @@ const props = defineProps({
   // image is zoomable/pannable directly inside its container. Default false
   // preserves the existing fullscreen-overlay behavior for every other caller.
   inline: { type: Boolean, default: false },
+  hasPrev: { type: Boolean, default: false },
+  hasNext: { type: Boolean, default: false },
+  // "Photo 2 of 5": shown and announced when it changes.
+  position: { type: String, default: '' },
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'prev', 'next'])
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+// Next/previous exist only in the fullscreen overlay, and only for a caller
+// that has more than one photo to step through.
+const gallery = computed(() => !props.inline && (props.hasPrev || props.hasNext))
 
 const MIN_SCALE = 1
 const MAX_SCALE = 5
@@ -76,6 +115,12 @@ const isInteracting = ref(false)
 const pointers = new Map()
 let dragStart = null   // { x, y, tx, ty }
 let pinchStart = null  // { dist, scale }
+// A one-finger gesture that began at fit size: { id, x, y }. Becomes a
+// next/previous swipe on release unless a second finger joined (a pinch).
+let swipeStart = null
+// The element that had focus when the overlay opened; focus goes back to it
+// when the overlay closes.
+let opener = null
 
 const imgStyle = computed(() => ({
   transform: `translate(${tx.value}px, ${ty.value}px) scale(${scale.value})`,
@@ -160,6 +205,9 @@ function pointerMidpoint() {
 function onPointerDown(e) {
   imgRef.value?.setPointerCapture?.(e.pointerId)
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  swipeStart = pointers.size === 1 && scale.value <= MIN_SCALE && gallery.value
+    ? { id: e.pointerId, x: e.clientX, y: e.clientY }
+    : null
   if (pointers.size === 2) {
     pinchStart = { dist: pointerDistance(), scale: scale.value }
     dragStart = null
@@ -186,6 +234,13 @@ function onPointerMove(e) {
 function onPointerUp(e) {
   pointers.delete(e.pointerId)
   imgRef.value?.releasePointerCapture?.(e.pointerId)
+  const swipe = swipeStart
+  swipeStart = null
+  if (swipe && swipe.id === e.pointerId && pointers.size === 0 && e.type !== 'pointercancel' && scale.value <= MIN_SCALE) {
+    const step = swipeStep(e.clientX - swipe.x, e.clientY - swipe.y)
+    if (step > 0) goNext()
+    else if (step < 0) goPrev()
+  }
   if (pointers.size < 2) pinchStart = null
   if (pointers.size === 1 && scale.value > MIN_SCALE) {
     // One finger remains after a pinch — re-anchor the drag so it doesn't jump.
@@ -201,37 +256,74 @@ function emitClose() {
   emit('close')
 }
 
+// At either end the button stays (aria-disabled) and does nothing.
+function goPrev() {
+  if (gallery.value && props.hasPrev) emit('prev')
+}
+function goNext() {
+  if (gallery.value && props.hasNext) emit('next')
+}
+
 // Backdrop click closes the fullscreen overlay; inline mode has no backdrop to
 // dismiss, so it's a no-op there.
 function onBackdropClick() {
   if (!props.inline) emitClose()
 }
 
+function trapTab(e) {
+  const overlay = overlayRef.value
+  if (!overlay || typeof overlay.querySelectorAll !== 'function') return
+  const focusable = Array.from(overlay.querySelectorAll(FOCUSABLE_SELECTOR))
+  const active = typeof document !== 'undefined' ? document.activeElement : null
+  const to = trapTabIndex(focusable.length, focusable.indexOf(active), e.shiftKey)
+  if (to < 0) return
+  e.preventDefault()
+  focusable[to].focus()
+}
+
 function onKeydown(e) {
   if (e.key === 'Escape') { e.preventDefault(); emitClose() }
+  else if (e.key === 'Tab') trapTab(e)
+  else if (e.key === 'ArrowLeft' && gallery.value) { e.preventDefault(); goPrev() }
+  else if (e.key === 'ArrowRight' && gallery.value) { e.preventDefault(); goNext() }
+}
+
+// Back to the element that opened the overlay, if it is still on the page (a
+// conversation switch can have removed the photo that was clicked).
+function returnFocus() {
+  const el = opener
+  opener = null
+  if (el && el.isConnected !== false && typeof el.focus === 'function') el.focus()
 }
 
 // Reset the view and (un)wire the Esc listener + focus whenever the bound
 // image opens, closes, or swaps to a different receipt.
-watch(() => props.src, (val) => {
+watch(() => props.src, (val, old) => {
   scale.value = MIN_SCALE
   tx.value = 0
   ty.value = 0
   pointers.clear()
   dragStart = null
   pinchStart = null
+  swipeStart = null
   isInteracting.value = false
   // Inline mode must NOT hijack Escape (the host modal owns it) or steal focus —
   // only the fullscreen overlay wires those.
   if (val && !props.inline) {
+    // Opening (not stepping to the next photo): remember who had focus.
+    if (!old) opener = typeof document !== 'undefined' ? document.activeElement : null
     window.addEventListener('keydown', onKeydown)
     nextTick(() => overlayRef.value?.focus())
   } else {
     window.removeEventListener('keydown', onKeydown)
+    if (old && !props.inline) returnFocus()
   }
 }, { immediate: true })
 
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  if (props.src && !props.inline) returnFocus()
+})
 </script>
 
 <style scoped>
@@ -337,4 +429,51 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   transition: background 0.15s;
 }
 .zoom-close:hover { background: rgba(255, 255, 255, 0.28); }
+.zoom-close:focus-visible,
+.zoom-btn:focus-visible,
+.zoom-nav:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+/* Next / previous: 44px targets at the screen's sides, clear of the zoom
+   pill and the X. */
+.zoom-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2.75rem;
+  height: 2.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 2rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.zoom-nav:hover { background: rgba(255, 255, 255, 0.28); }
+.zoom-nav[aria-disabled='true'] { opacity: 0.3; cursor: default; }
+.zoom-nav[aria-disabled='true']:hover { background: rgba(0, 0, 0, 0.55); }
+.zoom-prev { left: 0.75rem; }
+.zoom-next { right: 0.75rem; }
+
+.zoom-position {
+  position: fixed;
+  top: 1.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  pointer-events: none;
+}
 </style>
