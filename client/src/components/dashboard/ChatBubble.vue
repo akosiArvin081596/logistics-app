@@ -13,7 +13,8 @@
       >
         <img :src="msg.attachment_url" :alt="photoAlt" class="msg-attach-img" />
       </button>
-      <a v-else :href="msg.attachment_url" target="_blank" class="msg-attach-file">{{ msg.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+      <a v-else-if="ownFile" :href="msg.attachment_url" target="_blank" class="msg-attach-file">{{ msg.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+      <span v-else class="msg-attach-file">File unavailable</span>
     </div>
     <div v-if="msg.message">{{ msg.message }}</div>
     <div class="msg-meta">
@@ -26,7 +27,7 @@
 <script setup>
 import { computed } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
-import { chatPhotoAlt, isChatPhoto } from '../../lib/chatPhotos'
+import { chatPhotoAlt, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -34,6 +35,7 @@ const props = defineProps({
 const emit = defineEmits(['open-photo'])
 
 const photo = computed(() => isChatPhoto(props.msg))
+const ownFile = computed(() => isOwnUploadUrl(props.msg.attachment_url))
 const photoAlt = computed(() => chatPhotoAlt(props.msg))
 
 const isSent = computed(() => {

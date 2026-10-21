@@ -34,7 +34,8 @@
             >
               <img :src="m.attachment_url" :alt="chatPhotoAlt(m)" class="msg-photo-img" />
             </button>
-            <a v-else :href="m.attachment_url" target="_blank" class="msg-file">{{ m.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+            <a v-else-if="isOwnUploadUrl(m.attachment_url)" :href="m.attachment_url" target="_blank" class="msg-file">{{ m.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+            <span v-else class="msg-file">File unavailable</span>
           </div>
           {{ m.message }}
           <div class="msg-footer">
@@ -87,7 +88,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
-import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto } from '../../lib/chatPhotos'
+import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import EmptyState from '../shared/EmptyState.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
 

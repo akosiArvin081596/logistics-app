@@ -15,10 +15,17 @@ import { positionLabel, stepIndex } from './photoViewer.js'
 // backslash, no scheme, no query or fragment.
 const OWN_UPLOAD_URL = /^\/uploads\/[^\s\\:?#]+$/
 
+// Is this attachment URL one of our own uploads? Every thread links an
+// attachment only when it is (a script URL or another site's link never
+// becomes a link); anything else reads "File unavailable".
+export function isOwnUploadUrl(url) {
+  const u = typeof url === 'string' ? url : ''
+  return OWN_UPLOAD_URL.test(u) && !u.includes('/..') && !u.includes('//')
+}
+
 export function isChatPhoto(msg) {
   if (!msg || msg.attachment_type !== 'image') return false
-  const url = typeof msg.attachment_url === 'string' ? msg.attachment_url : ''
-  return OWN_UPLOAD_URL.test(url) && !url.includes('/..') && !url.includes('//')
+  return isOwnUploadUrl(msg.attachment_url)
 }
 
 // The photo's text alternative: who sent it.

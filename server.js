@@ -11819,7 +11819,10 @@ function guardExpenseReceipt(req, res, next, url, file) {
 // read the conversation it was sent in (Super Admin and Dispatcher every
 // thread; a Driver or Investor his own), decided by the first message that
 // names it; everyone else gets 404. Photos go out without their metadata (no
-// location). The rule and the copy live in lib/chat-files.js.
+// location). The rule and the copy live in lib/chat-files.js. chat_uploads
+// records who stored each file, so a message carries only its sender's own
+// upload (POST /api/messages).
+db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
 const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
 	db,
 	chatDir: path.join(DATA_DIR, "uploads", "chat"),
@@ -46184,6 +46187,12 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		// An attachment is a chat file this same account uploaded through
+		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
+		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
+		if (attachmentRefusal) {
+			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
+		}
 
 		const timestamp = new Date().toISOString();
 		const result = db
@@ -51520,6 +51529,8 @@ app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req,
 		const stored = chatFiles.chatUploadBytes(chatBuf);
 		if (!stored) return res.status(415).json({ error: "That photo couldn't be read. Try a JPG or PNG.", code: "UNSUPPORTED_IMAGE_TYPE" });
 		fs.writeFileSync(path.join(chatDir, safeName), stored);
+		// Who stored it: POST /api/messages takes it only from this account.
+		chatFiles.recordChatUpload(db, `/uploads/chat/${safeName}`, req.session.user.id);
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);

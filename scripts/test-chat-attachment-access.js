@@ -65,6 +65,7 @@ const F = {
 	INV_JPG: "chat_1788000000005_eeeee.jpg",   // investor -> admin
 	ORPHAN: "chat_1788000000006_fffff.jpg",    // uploaded, never sent
 	A_BROKEN: "chat_1788000000007_ggggg.jpg",  // Dispatch -> Driver A, cut inside its metadata
+	CASED: "chat_1788000000008_hhhhh.jpg",     // first named (other spelling) to Driver B, then by Driver A
 };
 const U = {
 	sa: { id: 1, role: "Super Admin", username: "admin_t" },
@@ -92,6 +93,10 @@ function makeDb() {
 	add(INVESTOR, "admin", F.INV_JPG);           // 5
 	add(DRIVER_B, "Dispatch", F.A_JPG);          // 6: a later message naming Driver A's file
 	add("Dispatch", DRIVER_A, F.A_BROKEN);       // 7
+	db.prepare(`INSERT INTO messages (timestamp, "from", "to", attachment_url, attachment_type) VALUES ('2026-10-20T13:00:00.000Z', 'Dispatch', ?, ?, 'image')`)
+		.run(DRIVER_B, `/uploads/CHAT/${F.CASED}`);  // 8: the same file, another spelling, Driver B's thread
+	add(DRIVER_A, "Dispatch", F.CASED);          // 9: later, Driver A names it as stored
+	if (chatFiles && chatFiles.CHAT_UPLOADS_SCHEMA_SQL) db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
 	return db;
 }
 const rowsFor = (db, file) => db.prepare('SELECT id, "from", "to" FROM messages WHERE attachment_url = ?').all(C(file));
@@ -110,6 +115,7 @@ function writeTree() {
 	fs.writeFileSync(path.join(CHAT_DIR, F.INV_JPG), IMG.gpsJpg);
 	fs.writeFileSync(path.join(CHAT_DIR, F.ORPHAN), IMG.gpsJpg);
 	fs.writeFileSync(path.join(CHAT_DIR, F.A_BROKEN), IMG.broken);
+	fs.writeFileSync(path.join(CHAT_DIR, F.CASED), IMG.gpsJpg);
 }
 
 const agent = new http.Agent({ keepAlive: false });
@@ -244,18 +250,25 @@ async function buildServer(db) {
 
 // POST /api/chat/attachment with every declaration it reaches.
 const UPLOAD_HEAD = 'app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req, res) => {';
-async function buildUpload(dataDir) {
+// ...and POST /api/messages, on the same database. The socket and notification
+// side effects are stubs; the route's own checks run as shipped.
+const MESSAGES_HEAD = 'app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {';
+async function buildUpload(dataDir, db) {
 	const lifted = closure(SRC, {
 		roots: [],
-		routes: [UPLOAD_HEAD],
-		provided: ["app", "express", "path", "fs", "DATA_DIR", "db", "requireAuth", "chatAttachmentLimiter", "chatFiles", "console", "require"],
-		denied: ["server", "io", "httpServer"],
+		routes: [UPLOAD_HEAD, MESSAGES_HEAD],
+		provided: ["app", "express", "path", "fs", "DATA_DIR", "db", "requireAuth", "chatAttachmentLimiter", "driverWriteLimiter", "chatFiles", "console", "require",
+			"insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole"],
+		denied: ["server", "httpServer"],
 	}).text;
 	const app = sessionApp();
 	app.use(express.json({ limit: "20mb" }));
 	const passThrough = (req, res, next) => next();
-	new Function("app", "express", "path", "fs", "DATA_DIR", "requireAuth", "chatAttachmentLimiter", "chatFiles", "console", "require", `"use strict";\n${lifted}`)(
-		app, express, path, fs, dataDir, requireAuth, passThrough, chatFiles, { log() {}, warn() {}, error() {} }, require);
+	const io = { to: () => ({ emit() {}, except: () => ({ emit() {} }) }) };
+	new Function("app", "express", "path", "fs", "DATA_DIR", "db", "requireAuth", "chatAttachmentLimiter", "driverWriteLimiter", "chatFiles", "console", "require",
+		"insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", `"use strict";\n${lifted}`)(
+		app, express, path, fs, dataDir, db, requireAuth, passThrough, passThrough, chatFiles, { log() {}, warn() {}, error() {} }, require,
+		{ run: () => ({ lastInsertRowid: 1 }) }, io, () => [], (who, raw) => raw, () => {});
 	return listen(app);
 }
 
@@ -335,6 +348,31 @@ async function buildUpload(dataDir) {
 		ok("§3 a photo the strip cannot walk is not served (never as it is)", refused(await get(C(F.A_BROKEN), U.sa)) && logs.some((l) => /not served/.test(l)));
 		ok("§3 HEAD answers like GET, with no body", (await get(C(F.A_JPG), U.drvA, { method: "HEAD" })).status === 200);
 		ok("§3 a write is 404", refused(await get(C(F.A_JPG), U.sa, { method: "POST" })));
+		ok("§3 the earliest message naming a file decides, whatever its spelling: Driver A is refused", refused(await get(C(F.CASED), U.drvA)));
+		ok("§3 ...and the driver of that earliest message opens it", isImage(await get(C(F.CASED), U.drvB)));
+		ok("§3 a PDF goes out never cached by a shared cache (private, no-store)", (await get(C(F.A_PDF), U.drvA)).headers["cache-control"] === "private, no-store");
+	}
+
+	// §2b which file a message may carry
+	if (chatFiles && typeof chatFiles.chatAttachmentRefusal === "function") {
+		const R = chatFiles.chatAttachmentRefusal;
+		const mine = "/uploads/chat/chat_1788000000100_mmmmm.jpg";
+		const theirs = "/uploads/chat/chat_1788000000101_ttttt.jpg";
+		const rdb = new Database(":memory:");
+		rdb.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
+		chatFiles.recordChatUpload(rdb, mine, U.drvA.id);
+		chatFiles.recordChatUpload(rdb, theirs, U.drvB.id);
+		ok("§2b a message with no attachment is fine", R(rdb, U.drvA, "") === "" && R(rdb, U.drvA, undefined) === "");
+		ok("§2b a chat file the same account uploaded is fine", R(rdb, U.drvA, mine) === "");
+		ok("§2b another account's upload is refused, staff included", R(rdb, U.drvA, theirs) !== "" && R(rdb, U.sa, theirs) !== "");
+		ok("§2b a script URL, another site, data:, a path elsewhere, or a dot-dot path is refused",
+			["javascript:alert(1)", "JavaScript:alert(1)", "https://elsewhere.example/a.pdf", "//elsewhere.example/a.pdf", "data:text/html,x",
+				"/uploads/invoices/INV-1.pdf", "/uploads/chat/../invoices/INV-1.pdf", `${mine}?x=1`, ` ${mine}`]
+				.every((u) => R(rdb, U.drvA, u) !== ""));
+		ok("§2b a file no upload recorded is refused", R(rdb, U.sa, "/uploads/chat/chat_1788000000102_nnnnn.jpg") !== "");
+		ok("§2b a non-string is refused", R(rdb, U.drvA, { url: mine }) !== "" && R(rdb, U.drvA, 42) !== "");
+	} else {
+		ok("§2b lib/chat-files.js exports chatAttachmentRefusal, recordChatUpload and CHAT_UPLOADS_SCHEMA_SQL", false);
 	}
 
 	// §4 server.js
@@ -353,7 +391,8 @@ async function buildUpload(dataDir) {
 		ok("§4 a file no message names is refused", refused(await S.get(C(F.ORPHAN), U.sa)));
 
 		const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-upload-"));
-		const post = await buildUpload(dataDir);
+		const mdb = makeDb();
+		const post = await buildUpload(dataDir, mdb);
 		const res = await post("/api/chat/attachment", U.drvA, {
 			method: "POST",
 			body: { fileName: "IMG_0001.jpg", mimeType: "image/jpeg", fileData: `data:image/jpeg;base64,${IMG.gpsJpg.toString("base64")}` },
@@ -369,6 +408,25 @@ async function buildUpload(dataDir) {
 			body: { fileName: "note.pdf", mimeType: "application/pdf", fileData: `data:application/pdf;base64,${IMG.pdf.toString("base64")}` },
 		});
 		ok("§4 ...and a PDF as it is", pdfRes.status === 200);
+		let recorded = null;
+		try { recorded = url ? mdb.prepare("SELECT user_id FROM chat_uploads WHERE file_url = ?").get(url) : null; } catch { recorded = null; }
+		ok("§4 POST /api/chat/attachment records who uploaded the file", !!recorded && recorded.user_id === U.drvA.id);
+
+		// POST /api/messages takes only an attachment the same account uploaded.
+		const send = (user, attachmentUrl, attachmentType = "pdf") => post("/api/messages", user, {
+			method: "POST", body: { to: "Dispatch", message: "see attached", loadId: "", attachmentUrl, attachmentType },
+		});
+		const attached = () => mdb.prepare("SELECT COUNT(*) AS n FROM messages").get().n;
+		const before = attached();
+		for (const bad of ["javascript:alert(document.cookie)", "https://elsewhere.example/invoice.pdf", "//elsewhere.example/x.pdf", "/uploads/invoices/INV-1.pdf"]) {
+			const r = await send(U.drvA, bad);
+			ok(`§4 POST /api/messages refuses ${bad.slice(0, 30)} as an attachment (400)`, r.status === 400);
+		}
+		ok("§4 another account's upload is refused (400)", (await send(U.drvB, url, "image")).status === 400);
+		ok("§4 ...and none of the refused messages was stored", attached() === before);
+		const okSend = await send(U.drvA, url, "image");
+		ok("§4 the uploader's own file is sent (200)", okSend.status === 200);
+		ok("§4 a message with no attachment is still sent", (await send(U.drvA, "", "")).status === 200);
 		fs.rmSync(dataDir, { recursive: true, force: true });
 
 		// The driver's thread: the only route a Driver reads his messages from.

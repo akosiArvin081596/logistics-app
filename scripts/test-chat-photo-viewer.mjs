@@ -67,13 +67,20 @@ const P1 = '/uploads/chat/chat_1700000000001_aaaaa.jpg'
 const P2 = '/uploads/chat/chat_1700000000002_bbbbb.png'
 const P3 = '/uploads/chat/chat_1700000000003_ccccc.jpg'
 const PDF = '/uploads/chat/chat_1700000000004_ddddd.pdf'
+const BAD_SCRIPT = 'javascript:alert(document.cookie)'
+const BAD_SITE = 'https://elsewhere.example/invoice.pdf'
 const thread = () => ([
   { id: 1, timestamp: '2026-10-20T13:00:00.000Z', from: 'Dispatch', to: 'Test Driver', message: 'first', loadId: 'L-1', read: 1, attachment_url: P1, attachment_type: 'image' },
   { id: 2, timestamp: '2026-10-20T13:01:00.000Z', from: 'Test Driver', to: 'Dispatch', message: 'ok', loadId: 'L-1', read: 1, attachment_url: '', attachment_type: '' },
   { id: 3, timestamp: '2026-10-20T13:02:00.000Z', from: 'Dispatch', to: 'Test Driver', message: '', loadId: 'L-1', read: 1, attachment_url: PDF, attachment_type: 'pdf' },
   { id: 4, timestamp: '2026-10-20T13:03:00.000Z', from: 'Test Driver', to: 'Dispatch', message: 'photo', loadId: 'L-1', read: 1, attachment_url: P2, attachment_type: 'image' },
   { id: 5, timestamp: '2026-10-20T13:04:00.000Z', from: 'Dispatch', to: 'Test Driver', message: 'last', loadId: 'L-1', read: 1, attachment_url: P3, attachment_type: 'image' },
+  // Attachments that are not our own uploads: never a link, in any thread.
+  { id: 6, timestamp: '2026-10-20T13:05:00.000Z', from: 'Test Driver', to: 'Dispatch', message: '', loadId: 'L-1', read: 1, attachment_url: BAD_SCRIPT, attachment_type: 'pdf' },
+  { id: 7, timestamp: '2026-10-20T13:06:00.000Z', from: 'Test Driver', to: 'Dispatch', message: '', loadId: 'L-1', read: 1, attachment_url: BAD_SITE, attachment_type: 'other' },
 ])
+const BAD_LINK = (n) => n.tag === 'a' && /^\s*(javascript:|https?:|\/\/|data:)/i.test(String(n.props.href || ''))
+const unavailable = (m) => m.findAll((n) => n.tag === 'span' && m.textOf(n) === 'File unavailable').length
 
 // ══ §1 the rules ═════════════════════════════════════════════════════════════
 const PV = await importLib('photoViewer.js')
@@ -102,6 +109,10 @@ if (CP) {
   ok('§1 an image URL on another host, protocol-relative, data:, blob: or with ".." is not opened as a photo',
     ['https://elsewhere.example/a.jpg', '//elsewhere.example/a.jpg', 'data:image/png;base64,AAAA', 'blob:http://localhost/x', '/uploads/chat/../../x.jpg', '/api/x.jpg', '/uploads/chat/a.jpg?x=1']
       .every((u) => !isChatPhoto({ attachment_type: 'image', attachment_url: u })))
+  ok('§1 isOwnUploadUrl: our own /uploads path yes; a script URL, another site, protocol-relative, data: or ".." no',
+    typeof CP.isOwnUploadUrl === 'function' && CP.isOwnUploadUrl(PDF) && CP.isOwnUploadUrl(P1)
+      && [BAD_SCRIPT, 'JavaScript:alert(1)', BAD_SITE, '//elsewhere.example/a.pdf', 'data:text/html,x', '/uploads/chat/../../x.pdf', '', null]
+        .every((u) => !CP.isOwnUploadUrl(u)))
   ok('§1 the alt text names the sender', chatPhotoAlt({ from: ' Dispatch ' }) === 'Photo from Dispatch' && chatPhotoAlt({ from: '' }) === 'Photo' && chatPhotoAlt(null) === 'Photo')
   const photos = chatPhotos(thread())
   ok('§1 a thread\'s photos: oldest first, PDFs and text left out', same(photos.map((p) => p.url), [P1, P2, P3]))
@@ -433,6 +444,7 @@ const PANEL_REL = 'client/src/components/dashboard/MessagingPanel.vue'
     ok('§3 the button says what it does and the photo keeps its alt text',
       photoButtons.length === 3 && photoButtons[0].props['aria-label'] === 'Open full size: Photo from Dispatch' && imgIn(photoButtons[0])?.props?.alt === 'Photo from Dispatch' && imgIn(photoButtons[1])?.props?.alt === 'Photo from Test Driver')
     ok('§3 a PDF stays a link', !!m.find((n) => n.tag === 'a' && n.props.href === PDF))
+    ok('§3 a script URL or another site\'s link is never a link; each reads "File unavailable"', m.findAll(BAD_LINK).length === 0 && unavailable(m) === 2)
     ok('§3 nothing is open until a photo is clicked', !dialogOf(m))
     if (photoButtons.length === 3) {
       await click(photoButtons[1])
@@ -483,6 +495,7 @@ const CHAT_REL = 'client/src/components/driver/ChatView.vue'
     ok('§4 the driver thread shows each photo as a button (3)', photoButtons.length === 3)
     ok('§4 ...with the button\'s purpose and the photo\'s alt text', photoButtons.length === 3 && photoButtons[2].props['aria-label'] === 'Open full size: Photo from Dispatch' && imgIn(photoButtons[2])?.props?.alt === 'Photo from Dispatch' && imgIn(photoButtons[2])?.props?.src === P3)
     ok('§4 a PDF from Dispatch shows as a link', !!m.find((n) => n.tag === 'a' && n.props.href === PDF))
+    ok('§4 a script URL or another site\'s link is never a link; each reads "File unavailable"', m.findAll(BAD_LINK).length === 0 && unavailable(m) === 2)
     if (photoButtons.length === 3) {
       await click(photoButtons[0])
       ok('§4 tapping a photo opens it full size as "Photo 1 of 3"', !!dialogOf(m) && imgIn(dialogOf(m))?.props?.src === P1 && m.textOf(m.find((n) => hasClass(n, 'zoom-position'))) === 'Photo 1 of 3')
@@ -512,6 +525,8 @@ const INV_REL = 'client/src/components/investor/InvestorChat.vue'
     { id: 1, timestamp: '2026-10-20T13:00:00.000Z', from: 'Dispatch', to: 'inv_t', message: 'hi', read: 1, attachment_url: P1, attachment_type: 'image' },
     { id: 2, timestamp: '2026-10-20T13:01:00.000Z', from: 'inv_t', to: 'admin', message: '', read: 1, attachment_url: P2, attachment_type: 'image' },
     { id: 3, timestamp: '2026-10-20T13:02:00.000Z', from: 'Dispatch', to: 'inv_t', message: '', read: 1, attachment_url: PDF, attachment_type: 'pdf' },
+    { id: 4, timestamp: '2026-10-20T13:03:00.000Z', from: 'Dispatch', to: 'inv_t', message: '', read: 1, attachment_url: BAD_SCRIPT, attachment_type: 'pdf' },
+    { id: 5, timestamp: '2026-10-20T13:04:00.000Z', from: 'Dispatch', to: 'inv_t', message: '', read: 1, attachment_url: BAD_SITE, attachment_type: 'image' },
   ])
   const NEW = '/uploads/chat/chat_1700000000009_zzzzz.jpg'
   const calls = []
@@ -552,6 +567,8 @@ const INV_REL = 'client/src/components/investor/InvestorChat.vue'
     ok('§5 the investor thread shows each photo as a button (2), a PDF as a link', photoButtons.length === 2 && !!m.find((n) => n.tag === 'a' && n.props.href === PDF))
     ok('§5 ...with the button\'s purpose and the photo\'s alt text', photoButtons.length === 2 && photoButtons[0].props['aria-label'] === 'Open full size: Photo from Dispatch' && imgIn(photoButtons[0])?.props?.alt === 'Photo from Dispatch')
     ok('§5 no photo opens in a new tab any more', !m.find((n) => n.tag === 'a' && (n.props.href === P1 || n.props.href === P2)))
+    ok('§5 a script URL or another site\'s link (even typed as a photo) is never a link or an image; each reads "File unavailable"',
+      m.findAll(BAD_LINK).length === 0 && !m.find((n) => n.tag === 'img' && n.props.src === BAD_SITE) && unavailable(m) === 2)
     if (photoButtons.length === 2) {
       await click(photoButtons[0])
       ok('§5 a photo opens full size as "Photo 1 of 2"', !!dialogOf(m) && imgIn(dialogOf(m))?.props?.src === P1 && m.textOf(m.find((n) => hasClass(n, 'zoom-position'))) === 'Photo 1 of 2')

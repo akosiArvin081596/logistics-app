@@ -35,9 +35,10 @@
             >
               <img :src="msg.attachment_url" :alt="chatPhotoAlt(msg)" class="attach-img" />
             </button>
-            <a v-else :href="msg.attachment_url" target="_blank" rel="noopener" class="attach-link">
+            <a v-else-if="isOwnUploadUrl(msg.attachment_url)" :href="msg.attachment_url" target="_blank" rel="noopener" class="attach-link">
               &#128206; {{ msg.attachment_url.split('/').pop() }}
             </a>
+            <span v-else class="attach-link">File unavailable</span>
           </div>
         </div>
       </div>
@@ -135,7 +136,7 @@ import {
   uploadChatAttachment,
 } from '../../lib/chatAttachment'
 import { fmtAppInstant } from '../../utils/datetime'
-import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto } from '../../lib/chatPhotos'
+import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
 import ZoomableImage from '../shared/ZoomableImage.vue'
