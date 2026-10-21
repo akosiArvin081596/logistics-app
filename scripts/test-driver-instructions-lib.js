@@ -732,6 +732,12 @@ section(() => {
 		eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text }] }, ctx).payload.loadRequirements, [], `§10 N3 the own amount in thousands grouping is still dropped ("${text.replace(EN_DASH, "<en dash>")}")`);
 	}
 	eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text: "Declared value 1,025 at the gate." }] }, c1025).payload.loadRequirements, [], "§10 N3 \"1,025\" with an own amount of $1,025 is dropped");
+	// PR 2b: every rate on the load's Job Details lane is an own amount, so a context can
+	// hold more than 20; the last one is read like the first.
+	const last = { loadRequirements: [{ category: "check_in", text: "Declared value 2390 at the gate." }] };
+	eq(di.filterInstructions(last, ctx).payload.loadRequirements.length, 1, "§10 PR 2b control: the item stays when 2390 is no own amount");
+	const many = context({ amounts: Array.from({ length: 40 }, (_, i) => `$${2000 + i * 10}.00`) });
+	eq(di.filterInstructions(last, many).payload.loadRequirements, [], "§10 PR 2b the 40th own amount is still withheld");
 }, "§10");
 
 console.log(`\n${pass} passed, ${fail} failed`);
