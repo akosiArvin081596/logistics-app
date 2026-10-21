@@ -101,11 +101,17 @@ const IKE = "Ike Moe";
 // `deletedDraft`: a correction Draft for Dot's W39 naming 10/1 and 10/2 was made
 // and then deleted by a Super Admin (as "not valid") before F702 was delivered:
 // the switch-on carries neither day again (2026-10-21 item 2, the MR 10/2 shape).
-async function b12World({ deletedDraft = false } = {}) {
+// `twoMonths` (with deletedDraft; review L1): Dot has no rate of his own and
+// drives T1 at the truck's $150, and a second load, F703, Assigned 9/30 (a
+// September load the trip rule does not cover), also spans 10/1-10/2: with
+// both changes on, F702's October days price at $250 and F703's September
+// ones at $150, so the switch-on's deleted-draft entries carry both prices.
+async function b12World({ deletedDraft = false, twoMonths = false } = {}) {
 	const oct = (id, driver, truck) => loadRow({ id, driver, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck });
 	const w = M.startWorld({
 		env: ENV, now: M.etMs("2026-10-02 20:00"),
-		drivers: [{ name: DOT }, { name: EVE }, { name: GUS }, { name: HAL, payDaily: 350 }, { name: IKE, payType: "percentage", payPct: 30 }],
+		drivers: [{ name: DOT, ...(twoMonths ? { payDaily: 0 } : {}) }, { name: EVE }, { name: GUS }, { name: HAL, payDaily: 350 }, { name: IKE, payType: "percentage", payPct: 30 }],
+		...(twoMonths ? { trucks: [{ unit: "T1", driver: DOT, payDaily: 150 }, { unit: "T2", driver: EVE }, { unit: "T3", driver: GUS }, { unit: "T4", driver: HAL }, { unit: "T5", driver: IKE }] } : {}),
 		payRates: [
 			{ subject: "driver", key: "hal ives", rate: 300, from: "2026-09-01T12:00:00.000Z" },
 			{ subject: "driver", key: "hal ives", rate: 350, from: "2026-10-10T12:00:00.000Z" },
@@ -113,6 +119,7 @@ async function b12World({ deletedDraft = false } = {}) {
 		rows: [
 			loadRow({ id: "F701", driver: DOT, pickup: "2026-09-28 8:00", dropoff: "2026-09-29 18:00", assigned: "2026-09-28", done: "2026-09-29", truck: "T1" }),
 			loadRow({ id: "F702", driver: DOT, pickup: "2026-09-30 8:00", dropoff: "2026-10-03 12:00", assigned: "2026-10-01", done: "", status: "In Transit", truck: "T1" }),
+			...(twoMonths ? [loadRow({ id: "F703", driver: DOT, pickup: "2026-10-01 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-09-30", done: "", status: "In Transit", truck: "T1" })] : []),
 			oct("E401", EVE, "T2"), oct("G401", GUS, "T3"), oct("J401", HAL, "T4"), oct("I401", IKE, "T5"),
 		],
 		status: [
@@ -136,6 +143,7 @@ async function b12World({ deletedDraft = false } = {}) {
 	}
 	w.addStatus([s("F702", "Delivered", "2026-10-03 16:00")]);
 	w.setRow("F702", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
+	if (twoMonths) w.setRow("F703", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
 	M.lockMonth(w.db, "2026-09", "2026-10-15T05:00:00.000Z");
 	w.clock.ms = NOW;
 	const eve = await M.generate(w, EVE, W40);
@@ -652,6 +660,34 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		const plain = M.runScript(SCRIPT, args);
 		eq("without --names: exit code", plain.code, 0);
 		ok("without --names: numbered drivers, no name", !/Cal Burke|Ana Moss/.test(plain.stdout) && /driver \d/.test(plain.stdout), plain.stdout.slice(0, 300));
+	});
+
+	await R.test("O25 (#555 review M1) --owner-note on a run that found a problem prints no note: with the .env changing during the run (as O18) it exits 1 with \"owner note withheld: 1 problem(s): …\" naming the problem, and prints nothing. Before: a clean-looking note on stdout", async ({ eq, ok }) => {
+		const f = await fixture();
+		const copy = M.saveCopy(f.w, ENV);
+		const out = await inProcess(copy, { extra: ["--owner-note"], during: () => fs.appendFileSync(copy.envFile, "SOME_SETTING=1\n") });
+		eq("exit code", out.code, 1);
+		eq("no note", out.output, undefined);
+		ok("the reason: withheld, the count and the problem", /^owner note withheld: 1 problem\(s\): .*\.env/.test(String(out.error)), String(out.error).slice(0, 200));
+		ok("no value printed", !/SOME_SETTING/.test(String(out.error)), "");
+	});
+
+	await R.test("O26 (#555 review L1) Deleted-draft days that two loads of different Assigned months name: when every day the invoice would add is held, the held amount is the invoice projection's own (10/1-10/2 at both changes' $250, $500), not one load's entry price, and the invoice adds nothing. Before: a load's entry price ($300)", async ({ eq }) => {
+		const f = await b12World({ deletedDraft: true, twoMonths: true });
+		const out = await inProcess(M.saveCopy(f.w, ENV), { ready: null });
+		const row = (((out.result || {}).invoices || {}).allThreeB4AsDesigned || []).find((i) => i.invoiceNumber === f.dot) || {};
+		eq("Dot's W39: nothing added, no difference", [row.addedDays, row.difference], [[], 0]);
+		eq("left to a person at the projection's $500", (row.notAdded || []).map((x) => [x.days, x.amount]), [[["2026-10-01", "2026-10-02"], 500]]);
+	});
+
+	await R.test("O27 (#555 review L4) Check c does not count a Rejected invoice as paying a day (as the pay plan's check c query): with Ana's W40 Rejected, her 10/6 lists no payer. Before: the Rejected W40 at $350", async ({ eq }) => {
+		const f = await fixture();
+		applyFix(f.w);
+		f.w.db.prepare("UPDATE invoices SET status = 'Rejected' WHERE invoice_number = ?").run(f.ana);
+		const copy = M.saveCopy(f.w, ENV);
+		const out = await inProcess(copy, { rates: [`--rate-plan=${planFile(copy.dir)}`] });
+		eq("exit code", out.code, 0);
+		eq("10/6's payers", (((out.result || {}).checkC || {}).rateDays || []).filter((d) => d.day === "2026-10-06").map((d) => d.paidBy), [[]]);
 	});
 
 	R.finish();
