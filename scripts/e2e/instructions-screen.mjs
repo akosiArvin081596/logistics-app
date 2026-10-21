@@ -542,12 +542,14 @@ async function main() {
     if (browser) await browser.close().catch(() => {})
     await new Promise((r) => server.close(() => r()))
   }
+  // A table cell: backslashes first, then the pipes and line breaks that would end it.
+  const cell = (s) => String(s ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
   const lines = [
     `# LogisX — driver instructions staff screen (made-up data) — ${new Date().toISOString()}`,
     '',
     '| Step | What | Expected | Observed | Verdict | Screenshot |',
     '|---|---|---|---|---|---|',
-    ...rows.map((r) => `| ${r.step} | ${r.title} | ${r.expected.replace(/\|/g, '\\|')} | ${r.observed.replace(/\|/g, '\\|')} | ${r.verdict} | ${r.shot ? path.basename(r.shot) : ''} |`),
+    ...rows.map((r) => `| ${cell(r.step)} | ${cell(r.title)} | ${cell(r.expected)} | ${cell(r.observed)} | ${r.verdict} | ${r.shot ? cell(path.basename(r.shot)) : ''} |`),
     '',
   ]
   fs.writeFileSync(RESULTS, lines.join('\n'))
