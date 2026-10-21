@@ -193,20 +193,28 @@ const BOOT_CHECKS = [...SRC.matchAll(/^(warn\w*FromClosedMonth)\(\);$/gm)].map((
 // Lifted by name: server-lift's closure walk misses a call that starts the line
 // after a `//` comment ending in "." (it reads the call as a property access), as
 // rerenderInvoicePdfFromStoredData()'s call to assertInvoiceFileStillOwn() is.
-const NAMED_ROOTS = ["assertInvoiceFileStillOwn"].filter((n) => SRC.includes(`\nfunction ${n}(`));
+// jtCacheInvalidate()'s `_jtInflight = null;` (after such a comment) is the same.
+const NAMED_ROOTS = [
+	...["assertInvoiceFileStillOwn"].filter((n) => SRC.includes(`\nfunction ${n}(`)),
+	...["_jtInflight"].filter((n) => SRC.includes(`\nlet ${n} =`)),
+];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "requireAuth", "refuseCrossOrigin",
 	"notifyChange", "logAudit", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs",
 	"DATA_DIR", "fetch", "io", "sendEmail"];
-let LIFTED = null;
-function lifted() {
-	if (LIFTED) return LIFTED;
+// One lift per set of extra routes (startWorld's `routes`, [[method, path]]): the
+// month-lock runner adds the routes its guards sit on.
+const LIFTS = new Map();
+function lifted(extraRoutes = []) {
+	const key = extraRoutes.map(([m, p]) => `${m} ${p}`).join("|");
+	if (LIFTS.has(key)) return LIFTS.get(key);
 	const dry = routeHead(...DRY_RUN_ROUTE, true);
-	const heads = [...ROUTES.map(([m, p]) => routeHead(m, p)), ...(dry ? [dry] : [])];
+	const heads = [...[...ROUTES, ...extraRoutes].map(([m, p]) => routeHead(m, p)), ...(dry ? [dry] : [])];
 	const roots = ["generateInvoiceHandler", "computeInvestorMonthlyEarnings", "getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet",
 		"deduplicateLoads", "findCol", "normalizeDriverName", ...NAMED_ROOTS, ...BOOT_CHECKS];
-	LIFTED = closure(SRC, { roots, routes: heads, provided: PROVIDED, denied: ["server", "transporter", "getDrive", "KEY_FILE"] });
-	LIFTED.hasDryRunRoute = !!dry;
-	return LIFTED;
+	const lift = closure(SRC, { roots, routes: heads, provided: PROVIDED, denied: ["server", "transporter", "getDrive", "KEY_FILE"] });
+	lift.hasDryRunRoute = !!dry;
+	LIFTS.set(key, lift);
+	return lift;
 }
 
 // ── the fixture ───────────────────────────────────────────────────────────────
@@ -281,9 +289,10 @@ process.on("exit", cleanup);
 //   locks      ["YYYY-MM"] closed months
 //   payRates   [{ subject, key, rate, from }] pay_rate_history rows
 //   now        epoch ms (world.clock.ms moves it)
+//   routes     extra routes to lift and register, [[method, path]]
 function startWorld(opts = {}) {
-	const { env = {}, rows = [], drivers = [], trucks = null, status = [], pings = {}, coords = {}, overrides = [], locks = [], payRates = [], now = DEFAULT_NOW } = opts;
-	const L = lifted();
+	const { env = {}, rows = [], drivers = [], trucks = null, status = [], pings = {}, coords = {}, overrides = [], locks = [], payRates = [], now = DEFAULT_NOW, routes = [] } = opts;
+	const L = lifted(routes);
 	const db = schemaDb();
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "");
@@ -305,7 +314,7 @@ function startWorld(opts = {}) {
 	const tl = db.prepare("INSERT INTO routemate_telemetry (routemate_vehicle_id, latitude, longitude, speed, odometer, location_date_ms, dropped_reason) VALUES (?, ?, ?, ?, ?, ?, '')");
 	for (const [vid, list] of Object.entries(pings)) for (const p of list) tl.run(vid, p.lat, p.lng, p.speed, p.odo, p.ms);
 	const world = {
-		db, L, rows: rows.map((r) => ({ ...r })), clock: { ms: now }, routes: {}, warnings: [], rendered: [],
+		db, L, rows: rows.map((r) => ({ ...r })), clock: { ms: now }, routes: {}, warnings: [], rendered: [], sheetWrites: [],
 		renderHook: null, fsFail: { rename: false },
 	};
 	world.addStatus = (list) => {
@@ -359,7 +368,12 @@ function startWorld(opts = {}) {
 		notifyChange: () => {},
 		logAudit: () => {},
 		getJobTrackingCached: null,
-		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheetValues(world.rows) } }) } } }),
+		// A write is recorded in world.sheetWrites, never applied to the rows.
+		getSheets: async () => ({ spreadsheets: { values: {
+			get: async () => ({ data: { values: sheetValues(world.rows) } }),
+			batchUpdate: async (req) => { world.sheetWrites.push(req); return { data: {} }; },
+			update: async (req) => { world.sheetWrites.push(req); return { data: {} }; },
+		} } }),
 		SPREADSHEET_ID: "test-sheet",
 		REPLICA: null,
 		SHEET_TARGET: null,
