@@ -9,10 +9,12 @@
 // PASS, CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is a secret and is never
 // copied, nor is a value that is a URL carrying credentials or looks like a key,
 // nor a runtime setting replica:start sets itself (NODE_ENV, PORT, ...), nor a
-// production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS). It is an
-// allowlist too: only names the running app reads (process.env.NAME in
-// <app dir>/server.js and lib/) are copied, so a name nothing reads, whatever it
-// holds, stays on the server. The rest is written, file mode 600, and only
+// production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS; the
+// sheet, inboxes and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
+// allowlist too: only names the running app reads in <app dir>/server.js and
+// lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
+// handed, and the names a helper reads through a table) are copied, so a name
+// nothing reads, whatever it holds, stays on the server. The rest is written, file mode 600, and only
 // names are printed: the copied keys, and each skipped key with the rule that
 // skipped it. No value is ever printed.
 "use strict";
