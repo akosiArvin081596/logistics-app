@@ -667,7 +667,7 @@ async function section6() {
 	const writes = [...lib.matchAll(/\b(INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|REPLACE\s+INTO|UPDATE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE|ALTER\s+TABLE)\s+(\S+)/g)]
 		.map((m) => `${m[1].split(/\s+/)[0]} ${m[2]}`);
 	ok("the lib writes, creates and changes only its own tables",
-		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE|UNKNOWN_TRUCKS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
+		writes.length > 0 && writes.every((w) => /\$\{(STATE_TABLE|RECEIPTS_TABLE|PAYMENTS_TABLE|REISSUE_GAVE_UP_TABLE|DAY_ONCE_TABLE|INVOICE_RATES_TABLE|UNKNOWN_TRUCKS_TABLE|WITHHELD_LOAD_IDS_TABLE)\}$/.test(w) || w === "UPDATE SET"), writes);
 	const commitAt = lib.indexOf("function commitState(");
 	const txBody = commitAt < 0 ? "" : lib.slice(lib.indexOf("db.transaction(() => {", commitAt), lib.indexOf("})();", commitAt));
 	ok("the reported lists are written in the same transaction as the load state",

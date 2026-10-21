@@ -214,7 +214,12 @@ function world({ fixes = [], link = null, status = "In Transit", coords = false 
 		const sent = [];
 		const fuelChecks = [];
 		const geofenceAsks = [];
-		const room = (ns) => ({ to: (r) => ({ emit: (event, payload) => sent.push({ ns, room: r, event, payload }) }) });
+		// `except` as socket.io has it: the dispatch room's copy for every role but
+		// Super Admin is recorded under the dispatch room.
+		const room = (ns) => ({ to: (r) => ({
+			emit: (event, payload) => sent.push({ ns, room: r, event, payload }),
+			except: () => ({ emit: (event, payload) => sent.push({ ns, room: r, event, payload }) }),
+		}) });
 		const pdeps = {
 			db, io: room("io"), publicTrack: room("public"), geolib,
 			routemate: { listLiveLocations: async () => live.map((x) => ({ ...x })) }, routemateCreds: () => ({}),
@@ -465,18 +470,21 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 	{
 		const w = world({ link: { ago: 10 * MIN, by: "admin_test" } });
 		const sent = await w.poll([live(1 * MIN, NEAR)]);
+		// The dispatch room per role (Super Admins' own room, and the rest of the
+		// room), then the driver's room.
 		ok("§8 a fix after the link: pushed to dispatch, the driver's room and the load's customer page",
-			sentTo(sent, "io", "dispatch").length === 1 && sentTo(sent, "io").length === 2 && sentTo(sent, "public", "load:T-200").length === 1, where(sent));
+			sentTo(sent, "io", "dispatch").length === 1 && sentTo(sent, "io", "super-admin").length === 1 && sentTo(sent, "io").length === 3 &&
+			sentTo(sent, "public", "load:T-200").length === 1, where(sent));
 	}
 	{
 		const w = world({ link: { ago: 10 * MIN, by: "system:seed" } });
 		const sent = await w.poll([live(13 * DAY, AWAY)]);
-		ok("§8 a seed row (no real link time): dispatch and the driver's room as before", sentTo(sent, "io").length === 2, where(sent));
+		ok("§8 a seed row (no real link time): dispatch (per role) and the driver's room as before", sentTo(sent, "io").length === 3, where(sent));
 	}
 	{
 		const w = world({});
 		const sent = await w.poll([live(5 * HOUR, NEAR)]);
-		ok("§8 no link row, a 5-hour fix: dispatch and the driver's room as before", sentTo(sent, "io").length === 2, where(sent));
+		ok("§8 no link row, a 5-hour fix: dispatch (per role) and the driver's room as before", sentTo(sent, "io").length === 3, where(sent));
 		ok("§8 ...but not the customer page, which shows no fix over 3 hours old", sentTo(sent, "public").length === 0, where(sent));
 		const w2 = world({});
 		const sent2 = await w2.poll([live(2 * HOUR, NEAR)]);
@@ -491,7 +499,8 @@ const fromFix = (call, at) => call[0].latitude === at.lat && call[0].longitude =
 		const sent = await w.linxup(linxupPos(1 * HOUR, AWAY));
 		ok("§8 the Linxup webhook with a fix from before the link: nothing is pushed", sent.length === 0, where(sent));
 		const after = await w.linxup(linxupPos(1 * MIN, NEAR));
-		ok("§8 ...one after it: dispatch and the driver's room, as before", sentTo(after, "io", "dispatch").length === 1 && sentTo(after, "io").length === 2, where(after));
+		ok("§8 ...one after it: dispatch (per role) and the driver's room, as before",
+			sentTo(after, "io", "dispatch").length === 1 && sentTo(after, "io", "super-admin").length === 1 && sentTo(after, "io").length === 3, where(after));
 	}
 
 	// ══ §9 GET /api/fuel/trip-plan ═══════════════════════════════════════════

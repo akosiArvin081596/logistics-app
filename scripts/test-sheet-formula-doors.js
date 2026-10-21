@@ -146,6 +146,15 @@ const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_
 const BROKER_WITHHELD_RE = new Function(`return ${extractConst("BROKER_WITHHELD_RE")};`)();
 const BROKER_CONTACT_VALUE_REDACTION_ENABLED = new Function(`return ${extractConst("BROKER_CONTACT_VALUE_REDACTION_ENABLED")};`)();
 const brokerContact = require("../lib/broker-contact");
+// The Load ID rule the create names its load by for a non-Super-Admin, shipped
+// as is (scripts/test-broker-contact-redaction.js runs it).
+const LOAD_IDS = new Function("brokerContact", "BROKER_WITHHELD_RE", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", `
+const SHOWN_LOAD_ID_STATE = { latest: null };
+${extract("loadIdWithheldFor")}
+${extract("currentShownLoadIdIndex")}
+${extract("shownLoadId")}
+return { loadIdWithheldFor, shownLoadId };
+`)(brokerContact, BROKER_WITHHELD_RE, BROKER_CONTACT_VALUE_REDACTION_ENABLED);
 const RATECON_GEMINI_FIELDS = new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
 const QUIET = { error() {}, log() {}, warn() {} };
 const readJobTrackingSnapshot = new Function("SPREADSHEET_ID", "console",
@@ -387,9 +396,11 @@ function mountRatecon(routeSrc, tabs = RATECON_TABS()) {
 		RATECON_DRIVE_FOLDER_ID: "",
 		logAudit: (req, action) => { audits.push(action); },
 		insertDispatchNotification: { run: () => ({}) },
-		io: { to: () => ({ emit: () => {} }) },
+		io: { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) },
 		// The New Load notice, per role (scripts/test-broker-contact-redaction.js runs it).
-		emitDispatchByRole: () => {},
+		emitDispatchNotice: () => {},
+		loadIdWithheldFor: LOAD_IDS.loadIdWithheldFor,
+		shownLoadId: LOAD_IDS.shownLoadId,
 		notifyChange: () => {},
 		console: QUIET,
 		Buffer,
@@ -662,7 +673,8 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 		SPREADSHEET_ID: "sheet-under-test",
 		insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
 		insertDispatchNotification: { run: () => ({}) },
-		io: { to: () => ({ emit: () => {} }) },
+		io: { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) },
+		emitDispatchNotice: () => {},
 		driverRoom: (n) => `driver:${String(n).toLowerCase()}`,
 		logAudit: (req, action) => { audits.push(action); },
 		recordStatusChange: () => {},

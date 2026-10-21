@@ -109,6 +109,13 @@ function record(results) {
 }
 
 // ---------------------------------------------------------------- extraction
+// An `async function` declaration, by the same rule as extract() below.
+function extractAsync(name) {
+	const needle = `\nasync function ${name}(`;
+	if (SRC.split(needle).length - 1 !== 1) throw new Error(`expected exactly 1 definition of async ${name}() in server.js`);
+	const start = SRC.indexOf(needle) + 1;
+	return SRC.slice(start, SRC.indexOf("\n}\n", start) + 3);
+}
 // Terminates on the first `}` in COLUMN 0 rather than by counting braces: a
 // brace counter reads a "{" inside a string literal as a real block. Every
 // target is a top-level declaration, so its closing brace is unindented.
@@ -147,8 +154,11 @@ if (!reMatch) throw new Error("BROKER_WITHHELD_RE not found in server.js");
 
 // The three row routes' driver-name rule (driverCellRefusal()) and what it
 // calls are built into the same module.
+// The Load ID rule the routes name each load by (LOAD IDS THAT HOLD BROKER
+// CONTACT) is built in with them.
 const REAL = ["resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "restoreWithheldBrokerCells", "formulaCellRefusal",
-	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal"];
+	"normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal", "driverCellRefusal",
+	"shownLoadIdIndex", "currentShownLoadIdIndex", "routeShownLoadIdIndex", "loadIdWithheldFor", "shownLoadId"];
 const REAL_SRC = Object.fromEntries(REAL.map((n) => [n, extract(n)]));
 // The reader also redacts every other value by its content (lib/broker-contact.js,
 // behind the kill switch; scripts/test-broker-contact-redaction.js covers that):
@@ -162,6 +172,7 @@ function buildModule(overrides = {}, reSrc = reMatch[1]) {
 	const s = { ...REAL_SRC, ...overrides };
 	return new Function("brokerContact",
 		`const BROKER_WITHHELD_RE = ${reSrc};\nconst BROKER_CONTACT_VALUE_REDACTION_ENABLED = ${flagMatch[1]};\n` +
+		"const SHOWN_LOAD_ID_INDEX = Symbol(\"shownLoadIdIndex\");\nconst SHOWN_LOAD_ID_INDEXES = new WeakMap();\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n" +
 		`${REAL.map((n) => s[n]).join("\n")}\nreturn { ${REAL.join(", ")} };`
 	)(BROKER_CONTACT);
 }
@@ -173,10 +184,11 @@ const DATA_PUT_SRC = extractRoute('app.put("/api/data/:rowIndex", requireRole("S
 // The baseline helpers need the shipped normalizeLoadId(); guardedColumnReason()
 // is stubbed as the route's env stubs it.
 const { normalizeLoadId } = require("../lib/ratecon-load");
-const ROUTE_HELPERS = new Function("normalizeLoadId", "guardedColumnReason",
+const ROUTE_HELPERS = new Function("normalizeLoadId", "guardedColumnReason", "brokerContact", "BROKER_WITHHELD_RE", "shownLoadId", "SPREADSHEET_ID",
 	`${extract("sheetRowAfterUpdate")}\n${extract("a1SheetPrefix")}\n${extract("a1ColumnLetter")}\n${extract("sheetRowCellWrites")}\n` +
-	`${extract("restoreUntouchedCells")}\n${extract("baselineApplies")}\n${extract("rowMovedRefusal")}\n` +
-	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells, rowMovedRefusal };")(normalizeLoadId, () => "");
+	`${extract("restoreUntouchedCells")}\n${extract("baselineApplies")}\n${extract("rowMovedRefusal")}\n${extractAsync("staffRowMovedRefusal")}\n` +
+	"return { sheetRowAfterUpdate, a1SheetPrefix, a1ColumnLetter, sheetRowCellWrites, restoreUntouchedCells, rowMovedRefusal, staffRowMovedRefusal };")(
+	normalizeLoadId, () => "", BROKER_CONTACT, SHIPPED_WITHHELD_RE, G.shownLoadId, "sheet-under-test");
 // GET and POST /api/data and the shipped role gate.
 const GET_DATA_HEAD = 'app.get("/api/data", requireRole("Super Admin"), async (req, res) => {';
 const GET_DATA_SRC = extractRoute(GET_DATA_HEAD);
@@ -688,6 +700,8 @@ function mountPut(routeSrc, M, rows) {
 		// are (scripts/test-row-save-cell-writes.js).
 		restoreUntouchedCells: ROUTE_HELPERS.restoreUntouchedCells,
 		rowMovedRefusal: ROUTE_HELPERS.rowMovedRefusal,
+		staffRowMovedRefusal: ROUTE_HELPERS.staffRowMovedRefusal,
+		loadIdWithheldFor: M.loadIdWithheldFor,
 		normalizeLoadId,
 		changedGuardedCells: () => [],
 		guardedColumnReason: () => "",
@@ -936,8 +950,11 @@ async function postDataSection(M = G, routeSrc = POST_DATA_SRC) {
 	const unguarded = calls.filter((at) => !/req\.session\.user\.role !== "Super Admin"/.test(SRC.slice(Math.max(0, at - 160), at)));
 	check("every route call of the reader or the two writer rules is for a non-Super-Admin only",
 		unguarded.map((at) => SRC.slice(at, SRC.indexOf("\n", at)).trim()), []);
-	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT, the time-off loads warning's Load IDs (R11b, driverLoadsForTimeOff()); restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x3 (the third blanks a held broker field), dispatch, reassign)",
-		calls.length, 16);
+	// The time-off loads warning's Load IDs (R11b, driverLoadsForTimeOff()) are
+	// named by shownLoadId() since the Dispatcher Load ID rule (2026-10-21), the
+	// cell's rule with the row's own contact, so it no longer calls the reader.
+	check("the call sites are the ones this file was sized against (reader: dashboard x3, driver page, load GET/PUT; restore: data PUT, load PUT; formula rule: data PUT, load PUT, from-ratecon x3 (the third blanks a held broker field), dispatch, reassign)",
+		calls.length, 15);
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	for (const [label, src, rowVar] of [["PUT /api/data/:rowIndex", DATA_PUT_SRC, "values"], ["PUT /api/load/:loadId", LOAD_PUT_SRC, "updatedRow"]]) {
 		const c = code(src);
@@ -1132,6 +1149,9 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		pickAddressColumn: () => null,
 		resolveAddressParts: () => ({ cityStateZip: "", street: "" }),
 		sanitizeBrokerColumns: G.sanitizeBrokerColumns,
+		loadIdWithheldFor: G.loadIdWithheldFor,
+		routeShownLoadIdIndex: G.routeShownLoadIdIndex,
+		shownLoadId: G.shownLoadId,
 		require: (p) => {
 			if (p === "./lib/load-search-refs") return loadSearchRefs;
 			throw new Error(`unexpected require(${JSON.stringify(p)}) in the dashboard handler`);

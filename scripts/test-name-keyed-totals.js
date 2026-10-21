@@ -123,8 +123,9 @@ function liftDecl(src, kind, name) {
 
 const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEYS", "DRIVER_RATE_ONLY_FROM", "driverRateOnlyMonths", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "LEDGER_ITEM_COLS", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "CANCELED_STATUS_RE", "RFC2822_MONTHS",
 	"BROKER_WITHHELD_RE", "MOVEMENT_MOVING_MPS", "MOVEMENT_ACTIVE_MS",
-	// The broker contact value rule the dashboard and locations answers apply.
-	"brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+	// The broker contact value rule the dashboard and locations answers apply,
+	// and the Load ID rule they and fuel analytics name each load by.
+	"brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "SHOWN_LOAD_ID_INDEX", "SHOWN_LOAD_ID_INDEXES", "SHOWN_LOAD_ID_STATE",
 	// The fuel-gallons recovery's thresholds (§3b).
 	"FUEL_EVENTS_MATCH_DAYS", "FUEL_MATCH_MIN_GAL_PER_100PCT", "FUEL_MATCH_MAX_GAL_PER_100PCT", "FUEL_MATCH_MIN_GALLONS",
 	"FUEL_MATCH_MAX_KM", "FUEL_MATCH_AMBIGUITY_MARGIN", "FUEL_CALIB_MIN_RISE_PCT", "FUEL_ODOMETER_CONFLICT_MI",
@@ -152,6 +153,7 @@ const FNS = [
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
 	"resolveBrokerWithheldColumns", "sanitizeBrokerColumns", "sanitizeDetails", "parseRoutemateBearing",
+	"shownLoadIdIndex", "currentShownLoadIdIndex", "routeShownLoadIdIndex", "loadIdWithheldFor", "shownLoadId",
 	"classifyMovement", "reservedDriverNameRefusal",
 	// The fuel-gallons recovery (§3b), run with persist: false, so nothing it
 	// would write is reached.

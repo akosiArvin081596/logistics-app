@@ -221,10 +221,14 @@ function loadShipped(db, opts = {}, mutate = (s) => s) {
 
 	const body = FNS.map(extract).join("\n\n");
 	const src = mutate(`${preamble}${body}\nreturn { ${FNS.join(", ")}, eldFeedSweepHealth };`);
+	// The live notice goes per role through emitDispatchNotice() (scripts/
+	// test-broker-contact-redaction.js runs that helper); here it is recorded as
+	// one emit to the dispatch room.
+	const emitDispatchNotice = (notice) => io.to("dispatch").emit("dispatch-notification", notice);
 	const built = new Function(
-		"db", "eldFeedHealth", "alertChannels", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "console", "process",
+		"db", "eldFeedHealth", "alertChannels", "appTodayKey", "sendEmail", "insertDispatchNotification", "io", "emitDispatchNotice", "console", "process",
 		src,
-	)(db, opts.lib || feedLib, alertChannels, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, quiet,
+	)(db, opts.lib || feedLib, alertChannels, () => opts.todayKey || "2026-09-19", sendEmail, insertDispatchNotification, io, emitDispatchNotice, quiet,
 		{ env: { GMAIL_USER: "ops@example.invalid", GMAIL_APP_PASSWORD: "app-password-under-test" } });
 	return { ...built, rec, db };
 }
@@ -419,7 +423,7 @@ section("§1 textual — the shipped source says what this test assumes");
 	ok("§1.22 alerted_at is stamped only on confirmed delivery", deliveredAt > -1 && stampAt > deliveredAt);
 	ok("§1.23 the stamp is idempotent (`alerted_at IS NULL` guard)", /WHERE alert_key = \? AND alerted_at IS NULL/.test(alertFn));
 	ok("§1.24 emit triple: dispatch notification row", /insertDispatchNotification\.run\(/.test(alertFn));
-	ok("§1.25 emit triple: socket to the dispatch room", /io\.to\("dispatch"\)\.emit\(/.test(alertFn));
+	ok("§1.25 emit triple: socket to the dispatch room (per role, emitDispatchNotice())", /emitDispatchNotice\(/.test(alertFn));
 	ok("§1.26 emit triple: email", /sendEmail\(/.test(alertFn));
 	// A feed alert is not about a load; inventing a loadId sends a dispatcher to
 	// an arbitrary load's modal (NotificationsView routes on metadata.loadId).

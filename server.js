@@ -3288,9 +3288,10 @@ async function refreshAvailabilityLoadIndex() {
 // soft-deleted loads left out (excludeDroppedLoads()), days read with
 // sheetDayKey() ("" when unreadable), a row with no Load ID left out (no
 // confirmation could name it). `shownId` is the Load ID as the session user may
-// see it: for every role but Super Admin (#525) the rows go through
-// sanitizeBrokerColumns(), the Job Board's own rule, and an id it leaves blank
-// (one holding only contact) reads "[contact withheld]"; the 409 lists that, the
+// see it: for every role but Super Admin (#525) as shownLoadId() names it (the
+// Job Board's rule for the cell, with the row's own contact, and withheld when
+// any row of the same load withholds it), an id holding only contact reading
+// "[contact withheld]"; the 409 lists that, the
 // echo is matched against it, and the confirmation records `loadId`. Every
 // driver's loads: the route picks his after its last await, by the directory
 // row it reads again then. From the cached sheet, read only: never written, the
@@ -3302,13 +3303,12 @@ async function driverLoadsForTimeOff(req) {
 		const jt = await getJobTrackingCached();
 		const cols = jobTrackingMonthCols(jt.headers);
 		const live = excludeDroppedLoads(jt.data, jt.headers);
-		const withheld = req.session.user.role !== "Super Admin";
-		const shown = withheld ? sanitizeBrokerColumns(jt.headers, live) : live;
+		const index = loadIdWithheldFor(req) ? shownLoadIdIndex(jt) : null;
 		const out = [];
-		live.forEach((r, i) => {
+		live.forEach((r) => {
 			const loadId = String((cols.loadIdCol ? r[cols.loadIdCol] : "") || "").trim();
 			if (!normLoadKey(loadId)) return;
-			const seen = withheld ? String((cols.loadIdCol ? shown[i][cols.loadIdCol] : "") || "").trim() || brokerContact.WITHHELD_TEXT : loadId;
+			const seen = index ? String(shownLoadId(req, loadId, { row: r, index }) || "").trim() || brokerContact.WITHHELD_TEXT : loadId;
 			out.push({
 				loadId,
 				shownId: seen,
@@ -3811,7 +3811,7 @@ async function alertEldFeedSilence(verdict) {
 					lastFixMs: Number(v.lastFixMs) || 0, fixes24h: Number(v.fixes24h) || 0,
 				});
 				insertDispatchNotification.run("eld-feed-silent", title, body, meta);
-				io.to("dispatch").emit("dispatch-notification", {
+				emitDispatchNotice({
 					type: "eld-feed-silent", title, body, metadata: JSON.parse(meta),
 				});
 			},
@@ -4452,7 +4452,9 @@ async function routemateSyncTelemetry() {
 				// so the tracking popup/panel stays current between page loads.
 				fuelPct: Number.isFinite(t.fuel_pct) ? t.fuel_pct : null,
 			};
-			io.to("dispatch").emit("location-update", locationPayload);
+			// The dispatch room per role: the load named as shown to every role but
+			// Super Admin (emitLoadEventToDispatch()), and the driver's own room as is:
+			emitLoadEventToDispatch("location-update", locationPayload);
 			// Also push to the driver's own socket room so the driver app's
 			// Load Route Map can update the truck pin live instead of waiting
 			// for the next /api/locations/latest poll cycle. Driver sockets
@@ -5255,7 +5257,7 @@ async function routemateSyncFaultCodes() {
 							body,
 							JSON.stringify({ truckUnit: v.unit_number, code: f.code, status: f.status || "", routemateVehicleId: v.routemate_vehicle_id, faultId: r.lastInsertRowid })
 						);
-						io.to("dispatch").emit("dispatch-notification", {
+						emitDispatchNotice({
 							type: 'eld-fault',
 							title,
 							body,
@@ -8283,9 +8285,11 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			const storedMetadata = redactedBody == null ? metadata : { ...metadata, redactedBody };
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(storedMetadata));
-				emitDispatchByRole("dispatch-notification",
-					{ type: "ratecon-reissue-held", title, body, metadata },
-					{ type: "ratecon-reissue-held", title, body: redactedBody, metadata });
+				// The rest of the room gets the copy GET /api/dispatch-notifications
+				// serves them from the stored row: title and metadata.loadId name the
+				// load as shown (emitDispatchNotice()):
+				emitDispatchNotice({ type: "ratecon-reissue-held", title, body, metadata },
+					{ staffNotice: { type: "ratecon-reissue-held", title, body, metadata: storedMetadata } });
 				notified = true;
 			} catch (e) { console.error("[ratecon-reissue] notification failed:", e.message); }
 			if (notified) {
@@ -13697,7 +13701,7 @@ function alertOnboardingDocFailure({ scope, ownerId, docKey, docName, reason }) 
 		const title = `ACTION NEEDED — unsigned document: ${docName || docKey}`;
 		const body = `${scope} ${ownerId} completed signing "${docName || docKey}" but the PDF could not be produced, so it is NOT marked signed. The signature was saved and the document can be regenerated. Reason: ${reason}`;
 		insertDispatchNotification.run("onboarding-doc-failed", title, body, JSON.stringify({ scope, ownerId, docKey }));
-		io.to("dispatch").emit("dispatch-notification", { type: "onboarding-doc-failed", title, body });
+		emitDispatchNotice({ type: "onboarding-doc-failed", title, body });
 	} catch (err) {
 		// An alerting failure must never mask the signing failure itself.
 		console.error("[onboarding] alert bookkeeping failed:", err.message);
@@ -20904,7 +20908,7 @@ function abortAutogenRun(range, reason) {
 		const body = `Auto-invoice can't read Job Tracking (${reason}). No invoices generated yet — check the sheet + service-account access, then generate manually if needed.`;
 		try {
 			insertDispatchNotification.run("invoices-autogen", title, body, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, aborted: true }));
-			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body });
+			if (io) emitDispatchNotice({ type: "invoices-autogen", title, body });
 		} catch (e) { console.error("[invoice-autogen] abort alert notify failed:", e.message); }
 		const adminEmail = process.env.GMAIL_USER;
 		sendEmail(adminEmail, title, invoiceEmailHtml({ heading: "Weekly Invoices — Sheet Unreadable", bodyHtml: `<p style="margin:0;color:#b91c1c;line-height:1.6">${escHtml(body)}</p>`, ctaText: "Open Invoices", ctaHref: "https://app.logisx.com/invoices" }))
@@ -21072,7 +21076,7 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 			const title = `Weekly invoices ${needsAttention ? "— ACTION NEEDED" : "generated"} · ${range.weekStart} to ${range.weekEnd}`;
 			insertDispatchNotification.run("invoices-autogen", title, summary + detail, JSON.stringify({ weekStart: range.weekStart, weekEnd: range.weekEnd, submitted, skipped, zeroPay: zeroPay.length, unbilled: unbilled.length, undatedInWeek: undatedInWeek.length, errored: errors.length }));
 			undatedEntriesShown = Math.max(undatedEntriesShown, undatedEntriesInApp);
-			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-autogen", title, body: summary + detail });
+			if (io) emitDispatchNotice({ type: "invoices-autogen", title, body: summary + detail });
 		} catch (e) { console.error("[invoice-autogen] notification failed:", e.message); }
 		try {
 			const adminEmail = process.env.GMAIL_USER;
@@ -21439,7 +21443,7 @@ async function sendUndatedLoadDigest(loads, { range = null, held = 0, emailLoads
 		try {
 			insertDispatchNotification.run("invoices-undated", title, body, JSON.stringify(metadata));
 			notified = true;
-			if (io) io.to("dispatch").emit("dispatch-notification", { type: "invoices-undated", title, body, metadata });
+			if (io) emitDispatchNotice({ type: "invoices-undated", title, body, metadata });
 		} catch (e) { console.error("[invoice-undated] notification failed:", e && e.message); }
 	}
 
@@ -21914,7 +21918,7 @@ async function sendRateConExtractAlert(key, { id, unusable, fields }, { firstSee
 				unusable.join(", "),
 				JSON.stringify({ loadId: id, unusable }),
 			);
-			io.to("dispatch").emit("dispatch-notification", {
+			emitDispatchNotice({
 				type: "ratecon-unusable-address",
 				title: `Load ${label} ingested with an unusable address`,
 				body: unusable.join(", "),
@@ -22313,7 +22317,7 @@ async function reconcileRateCons({ alert = true, forceFloorWindow = false } = {}
 				newly.map((m) => m.loadNumber).join(", "),
 				JSON.stringify({ missing: newly.map((m) => m.loadNumber), baseline: isBaseline }),
 			);
-			io.to("dispatch").emit("dispatch-notification", {
+			emitDispatchNotice({
 				type: "ratecon-gap",
 				title: isBaseline
 					? `Deep sweep: ${plan.total} historical rate-con gap(s) recorded`
@@ -23666,7 +23670,7 @@ async function alertDuplicateReceipts(group) {
 					body,
 					JSON.stringify({ groupKey: key, expenseIds: ids, excessAmount: group.excessAmount, confidence: group.confidence, period: group.period || "" }),
 				);
-				io.to("dispatch").emit("dispatch-notification", {
+				emitDispatchNotice({
 					type: "duplicate-receipts",
 					title,
 					body,
@@ -24100,7 +24104,7 @@ async function sweepFuelEvents({ notify = true, markAlerted = true, persist = tr
 				body,
 				JSON.stringify({ fills: newly.map((e) => ({ unit: e.unit, day: e.local_day, rise: e.rise, odometer: e.odometer })) }),
 			);
-			io.to("dispatch").emit("dispatch-notification", {
+			emitDispatchNotice({
 				type: "fuel-event-gap",
 				title: `${newly.length} refuel(s) with no receipt`,
 				body,
@@ -27270,7 +27274,7 @@ async function runPersonalSweep() {
 			const body = `${flaggedAll.length} Personal line(s) could not go on a weekly invoice. Open Expenses and create each week's correction invoice.`;
 			try {
 				insertDispatchNotification.run("personal-expenses", title, body, JSON.stringify({ lines: flaggedAll.map((r) => r.id) }));
-				if (io) io.to("dispatch").emit("dispatch-notification", { type: "personal-expenses", title, body });
+				if (io) emitDispatchNotice({ type: "personal-expenses", title, body });
 			} catch (err) { console.error("[personal-sweep] notification failed:", err.message); }
 			notifyChange("expenses");
 		}
@@ -37305,7 +37309,13 @@ function baselineApplies(values, baseline) {
 // Nothing to compare (null; the save is judged as it was before this check): no
 // usable baseline (baselineApplies()), or no load-id column in `headers`. The
 // route runs it on the tabs the guards cover (Job Tracking) only.
-function rowMovedRefusal(headers, rowIndex, before, values, baseline) {
+//
+// For every role but Super Admin the route calls staffRowMovedRefusal(), which
+// passes `confirmed` (the baseline's Load ID is the row's own as served, and no
+// other row reads the same) and the text each ID is named by (`expectedAs`,
+// `foundAs`: as shownLoadId() names it). `expectedRaw` and `foundRaw` are the
+// ids as sent and as stored, for the audit line.
+function rowMovedRefusal(headers, rowIndex, before, values, baseline, { confirmed = false, expectedAs = null, foundAs = null } = {}) {
 	if (!baselineApplies(values, baseline)) return null;
 	const hs = Array.isArray(headers) ? headers : [];
 	const col = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
@@ -37314,9 +37324,12 @@ function rowMovedRefusal(headers, rowIndex, before, values, baseline) {
 	const opened = normalizeLoadId(baseline[col]);
 	const found = normalizeLoadId(b[col]);
 	if (opened && opened === found) return null;
+	if (confirmed) return null;
 	const shown = (v) => String(v == null ? "" : v).trim().slice(0, 120);
-	const expectedLoadId = opened ? shown(baseline[col]) : "";
-	const foundLoadId = found ? shown(b[col]) : "";
+	const expectedRaw = opened ? shown(baseline[col]) : "";
+	const foundRaw = found ? shown(b[col]) : "";
+	const expectedLoadId = opened ? shown(expectedAs == null ? baseline[col] : expectedAs) : "";
+	const foundLoadId = found ? shown(foundAs == null ? b[col] : foundAs) : "";
 	// What the form asked for: each cell sent unlike its baseline, as the form
 	// opened it and as sent. Not the row as read, which holds another load.
 	const edited = [];
@@ -37338,7 +37351,60 @@ function rowMovedRefusal(headers, rowIndex, before, values, baseline) {
 			foundLoadId,
 		},
 		edited,
+		expectedRaw,
+		foundRaw,
 	};
+}
+
+// PUT /api/data/:rowIndex's ROW_MOVED check for every role but Super Admin
+// (LOAD IDS THAT HOLD BROKER CONTACT). Their form opened the row as it was
+// served, so a withheld Load ID reaches the baseline as its served text. That
+// confirms the row when it is, letter case aside, the served text of the row as
+// read and no other row of the sheet, read fresh now, reads the same (two
+// withheld IDs can read alike); an ID that is only contact is served blank and
+// stays refused, and a failed read confirms nothing. Both IDs the refusal names
+// are named as shownLoadId() names them, so no row number tells a withheld ID.
+async function staffRowMovedRefusal(req, sheets, a1, headers, rowIndex, before, values, baseline) {
+	if (!baselineApplies(values, baseline)) return null;
+	const hs = Array.isArray(headers) ? headers : [];
+	const col = hs.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (col < 0) return null;
+	const b = Array.isArray(before) ? before : [];
+	const rowOf = (hdrs, cells) => Object.fromEntries(hdrs.map((h, i) => [h, cells[i] == null ? "" : cells[i]]));
+	// The text the Load ID cell is served as (sanitizeBrokerColumns(): the row's
+	// own contact; "" when only contact).
+	const servedText = (hdrs, cells, i) => {
+		const raw = String(cells[i] == null ? "" : cells[i]);
+		const own = brokerContact.ownContact(hdrs.map((h, j) => [h, cells[j]]).filter(([h]) => BROKER_WITHHELD_RE.test(String(h == null ? "" : h))));
+		const shown = brokerContact.loadIdAsShown(raw, own);
+		return (shown === raw ? raw : shown === brokerContact.WITHHELD_TEXT ? "" : shown).trim();
+	};
+	const storedRaw = String(b[col] == null ? "" : b[col]).trim();
+	const stored = servedText(hs, b, col);
+	const opened = String(baseline[col] == null ? "" : baseline[col]).trim();
+	let confirmed = false;
+	if (stored && stored !== storedRaw && opened.toLowerCase() === stored.toLowerCase()) {
+		try {
+			const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: a1 });
+			const all = (read && read.data && read.data.values) || [];
+			const freshHeaders = all[0] || [];
+			const freshCol = freshHeaders.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+			let alike = 0;
+			if (freshCol >= 0) {
+				for (const cells of all.slice(1)) {
+					if (servedText(freshHeaders, cells || [], freshCol).toLowerCase() === stored.toLowerCase()) alike++;
+				}
+			}
+			confirmed = alike === 1;
+		} catch (e) {
+			console.warn("[row-moved] the sheet could not be read to confirm a withheld Load ID; the save is refused:", e.message);
+		}
+	}
+	return rowMovedRefusal(headers, rowIndex, before, values, baseline, {
+		confirmed,
+		expectedAs: shownLoadId(req, baseline[col]),
+		foundAs: shownLoadId(req, storedRaw, { row: rowOf(hs, b) }),
+	});
 }
 
 // Resolve the requested ?sheet= to a REAL tab, the way the Sheets range parser
@@ -38473,22 +38539,28 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 		// a save with no usable baseline keep today's behaviour.
 		if (guarded) {
 			const moved = rowMovedRefusal(headers, rowIndex, before, values, baseline);
-			if (moved) {
+			// Every role but Super Admin opened the row as served, so a withheld Load
+			// ID is judged again by its served text, and the refusal names both IDs as
+			// shown (staffRowMovedRefusal()).
+			const refusal = moved && loadIdWithheldFor(req)
+				? await staffRowMovedRefusal(req, sheets, a1, headers, rowIndex, before, values, baseline)
+				: moved;
+			if (refusal) {
 				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(buildSheetUpdateAudit({
 					outcome: "blocked",
 					sheet: sheetName,
 					rowIndex,
-					changed: moved.edited,
-					guardedChanged: moved.edited.filter((c) => c.why),
+					changed: refusal.edited,
+					guardedChanged: refusal.edited.filter((c) => c.why),
 					code: "ROW_MOVED",
-					expectedLoadId: moved.body.expectedLoadId,
-					foundLoadId: moved.body.foundLoadId,
+					expectedLoadId: refusal.expectedRaw,
+					foundLoadId: refusal.foundRaw,
 				}), "ROW_MOVED"));
 				// The view that sent this row number is out of date, and the cached
 				// Job Tracking rows may be too: drop them, so the next dashboard read
 				// shows each load on the row it is on now.
 				jtCacheInvalidate();
-				return res.status(409).json(moved.body);
+				return res.status(409).json(refusal.body);
 			}
 		}
 
@@ -38786,8 +38858,22 @@ app.post("/api/webhook/new-load", (req, res) => {
 		JSON.stringify({ loadId, driver, source: "n8n" })
 	);
 	io.to("dispatch").emit("new-load", { timestamp: Date.now() });
-	io.to("dispatch").emit("dispatch-notification", { type: "new-load", title: `New Load${loadId ? " " + loadId : ""}`, body: driver ? `Assigned to ${driver}` : "New load added" });
 	res.json({ ok: true });
+	// The live notice, after n8n is answered (LOAD IDS THAT HOLD BROKER CONTACT):
+	// the load is not in the Job Tracking cache yet, so the cache is read fresh
+	// (one sheet read) and the rest of the dispatch room's copy names the load as
+	// shown; when that read fails, their copy leaves the ID out.
+	const notice = { type: "new-load", title: `New Load${loadId ? " " + loadId : ""}`, body: driver ? `Assigned to ${driver}` : "New load added" };
+	(async () => {
+		let index = null;
+		try {
+			const jt = await getJobTrackingCached();
+			index = shownLoadIdIndex(jt);
+		} catch (e) {
+			console.error("[webhook] Job Tracking unreadable; the New Load notice leaves the load out of the dispatch copy:", e.message);
+		}
+		emitDispatchNotice(notice, index ? { index } : { staffNotice: { ...notice, title: "New Load" } });
+	})().catch((e) => console.error("[webhook] New Load notice failed:", e.message));
 });
 
 // Validate a caller-supplied Job Tracking row number, or refuse the request.
@@ -39570,7 +39656,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			route,
 			JSON.stringify({ loadId, driver, rowIndex })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'load-assigned',
 			title: `Assigned ${driver} to Load ${loadId || 'N/A'}`,
 			body: route,
@@ -39760,7 +39846,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			`Previously ${oldDriver || 'unknown'}`,
 			JSON.stringify({ loadId, newDriver, oldDriver, rowIndex })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'load-reassigned',
 			title: `Reassigned Load ${loadId || 'N/A'} to ${newDriver}`,
 			body: `Previously ${oldDriver || 'unknown'}`,
@@ -39942,7 +40028,7 @@ app.post("/api/dispatch/cancel", requireRole("Super Admin"), async (req, res) =>
 			`Was assigned to ${boundDriver || 'unknown'} — ${cancelReason}`,
 			JSON.stringify({ loadId, driver: boundDriver, rowIndex, reason: cancelReason })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'load-cancelled',
 			title: `Cancelled Load ${loadId || 'N/A'}`,
 			body: `Was assigned to ${boundDriver || 'unknown'} — ${cancelReason}`,
@@ -40120,7 +40206,7 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 			`Removed by ${deletedBy || "admin"}`,
 			JSON.stringify({ loadId: rawId, deletedBy, rowIndex }),
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: "load-deleted",
 			title: `Deleted Load ${rawId}`,
 			body: `Removed by ${deletedBy || "admin"}`,
@@ -40604,8 +40690,8 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 				`Driver confirmed assignment`,
 				JSON.stringify({ loadId, driverName, rowIndex })
 			);
-			io.to("dispatch").emit("load-accepted", { loadId, driverName, rowIndex });
-			io.to("dispatch").emit("dispatch-notification", {
+			emitLoadEventToDispatch("load-accepted", { loadId, driverName, rowIndex });
+			emitDispatchNotice({
 				type: 'load-accepted',
 				title: `${driverName} accepted Load ${loadId}`,
 				body: `Driver confirmed assignment`,
@@ -40642,8 +40728,8 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 				`Load returned to Job Board`,
 				JSON.stringify({ loadId, driverName, rowIndex })
 			);
-			io.to("dispatch").emit("load-declined", { loadId, driverName, rowIndex });
-			io.to("dispatch").emit("dispatch-notification", {
+			emitLoadEventToDispatch("load-declined", { loadId, driverName, rowIndex });
+			emitDispatchNotice({
 				type: 'load-declined',
 				title: `${driverName} declined Load ${loadId}`,
 				body: `Load returned to Job Board`,
@@ -40956,6 +41042,12 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// helper feeds the driver app so the queue position labels agree across
 		// both surfaces.
 		const driverQueues = computeDriverQueues(jobTracking.data, jobTracking.headers);
+		// Every role but Super Admin: the Fleet chips (CurrentLoad, QueuedLoadIds)
+		// and driverQueues name each load as shownLoadId() does, as the rows below
+		// serve its Load ID cell (LOAD IDS THAT HOLD BROKER CONTACT).
+		const withholdIds = loadIdWithheldFor(req);
+		const loadIdIndex = withholdIds ? routeShownLoadIdIndex(jobTracking) : null;
+		const idShown = (raw, row) => (withholdIds ? shownLoadId(req, raw, { row, index: loadIdIndex }) : raw);
 
 		// Fleet details. "On Load" should only fire when the driver is actually
 		// mid-trip (heading-to-shipper..unloading); a driver whose only loads are
@@ -41002,11 +41094,11 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 				Status: status,
 				CurrentLoad: inProgressLoad
 					? loadIdCol
-						? inProgressLoad[loadIdCol]
+						? idShown(inProgressLoad[loadIdCol], inProgressLoad)
 						: ""
 					: "",
 				QueueCount: queue.length,
-				QueuedLoadIds: queue.map((q) => q.load_id),
+				QueuedLoadIds: queue.map((q) => idShown(q.load_id)),
 				CompletedLoads: completedJobs.filter((j) => {
 					return driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm;
 				}).length,
@@ -41101,7 +41193,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			completedJobs: respCompleted,
 			fleet,
 			drivers: driverList,
-			driverQueues,
+			driverQueues: withholdIds
+				? Object.assign(Object.create(null), Object.fromEntries(Object.entries(driverQueues).map(([k, list]) => [k, list.map((q) => ({ ...q, load_id: idShown(q.load_id) }))])))
+				: driverQueues,
 			...(offUntilByName
 				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
 				: {}),
@@ -41265,6 +41359,93 @@ function sanitizeBrokerColumns(headers, rows) {
 		}
 		return cleaned;
 	});
+}
+
+// LOAD IDS THAT HOLD BROKER CONTACT (the Dispatcher raw Load ID plan, PR 1,
+// 2026-10-21). A Load ID can hold broker contact itself (a phone inside it, an
+// email, the row's own broker phone as bare digits). sanitizeBrokerColumns()
+// serves the row's Load ID cell redacted; every OTHER place that names a load to
+// a non-Super-Admin (the Fleet chips and queues, the tracking map, live notices
+// and events, expenses, messages, IFTA, mileage and fuel analytics, the ROW_MOVED
+// refusal, the rate-con create's answer) names it as shownLoadId() does, so the
+// text never reaches them. Super Admin's answers are unchanged, and with
+// BROKER_CONTACT_VALUE_REDACTION_ENABLED off every ID is served as stored (the
+// column-only rule never touched the Load ID). No flag of its own: it acts only
+// on an ID that holds contact.
+//
+// One index per Job Tracking read (lib/broker-contact.js buildShownLoadIdIndex(),
+// every row, soft-deleted and cancelled included, each with its own contact),
+// built by getJobTrackingCached() as it parses the read, before the object is
+// shared, and kept on it under SHOWN_LOAD_ID_INDEX: a symbol, so JSON and
+// Object.keys() never see it, while liveJobTrackingView()'s spread carries it to
+// a route's own copy of the rows. The latest is the newest read's (a read
+// that started before an invalidation never becomes it), for a caller with no
+// read of its own. Any other object is indexed once, in SHOWN_LOAD_ID_INDEXES.
+const SHOWN_LOAD_ID_INDEX = Symbol("shownLoadIdIndex");
+const SHOWN_LOAD_ID_INDEXES = new WeakMap();
+const SHOWN_LOAD_ID_STATE = { latest: null };
+// `remember`: getJobTrackingCached()'s own call for a read still current.
+function shownLoadIdIndex(jt, { remember = false } = {}) {
+	if (!jt || typeof jt !== "object") return currentShownLoadIdIndex();
+	let index = jt[SHOWN_LOAD_ID_INDEX] || SHOWN_LOAD_ID_INDEXES.get(jt);
+	if (!index) {
+		index = brokerContact.buildShownLoadIdIndex(jt.headers || [], jt.data || [], { withheldRe: BROKER_WITHHELD_RE });
+		SHOWN_LOAD_ID_INDEXES.set(jt, index);
+	}
+	if (remember) SHOWN_LOAD_ID_STATE.latest = index;
+	return index;
+}
+// The index of the latest Job Tracking read, or null before the first one (an
+// ID is then judged by the patterns alone).
+function currentShownLoadIdIndex() {
+	return SHOWN_LOAD_ID_STATE.latest;
+}
+// The index for a route that holds a Job Tracking read of its own, the cached
+// object or liveJobTrackingView()'s copy of it: that read's own index (built
+// over its rows when it has none).
+function routeShownLoadIdIndex(jt) {
+	return shownLoadIdIndex(jt);
+}
+// Whether `who` (a request, or a role name) is served Load IDs withheld.
+function loadIdWithheldFor(who) {
+	if (!BROKER_CONTACT_VALUE_REDACTION_ENABLED) return false;
+	const role = typeof who === "string" ? who : (who && who.session && who.session.user && who.session.user.role) || "";
+	return role !== "Super Admin";
+}
+// `raw` as `who` may see it: as stored for a Super Admin (or with the kill
+// switch off); otherwise withheld when the index withholds it, or when the
+// patterns or a given `row` (header-keyed, its own contact) or `own` do.
+function shownLoadId(who, raw, { row = null, own = null, index = currentShownLoadIdIndex() } = {}) {
+	if (!loadIdWithheldFor(who)) return raw;
+	return brokerContact.shownLoadIdOf(raw, { index, row, own, withheldRe: BROKER_WITHHELD_RE });
+}
+// A dispatch notice as a non-Super-Admin is served it, stored or live: every
+// withheld Load ID (the index's, plus `extraHidden`, a load not read yet) swapped
+// for its shown text in title, body and metadata, then the notice redacted
+// (lib/broker-contact.js redactDispatchNotice()).
+// The index's own list is handed over as is, so its compiled pattern is reused;
+// a new list only when there is an extra one.
+function staffDispatchNotice(notice, { index = currentShownLoadIdIndex(), extraHidden = null } = {}) {
+	const indexed = (index && index.hidden) || [];
+	const hidden = extraHidden && extraHidden.length ? [...extraHidden, ...indexed] : indexed;
+	return brokerContact.redactDispatchNotice(notice, { hidden });
+}
+// One dispatch notice, live, per role (emitDispatchByRole()): Super Admins get
+// `notice` as given; the rest of the dispatch room the copy above, made from
+// `staffNotice` when the caller has one (a body redacted before it was cut).
+function emitDispatchNotice(notice, { staffNotice = null, index = currentShownLoadIdIndex(), extraHidden = null } = {}) {
+	if (!io) return;
+	emitDispatchByRole("dispatch-notification", notice, staffDispatchNotice(staffNotice || notice, { index, extraHidden }));
+}
+// One dispatch-room event that names a load, per role: Super Admins get
+// `payload` as given; the rest of the dispatch room a copy whose loadId is shown
+// (shownLoadId(), with `row` when the caller has it), without `dropForStaff`.
+function emitLoadEventToDispatch(event, payload, { row = null, index = currentShownLoadIdIndex(), dropForStaff = [] } = {}) {
+	if (!io) return;
+	const staff = { ...payload };
+	if (Object.prototype.hasOwnProperty.call(staff, "loadId")) staff.loadId = shownLoadId("Dispatcher", staff.loadId, { row, index });
+	for (const k of dropForStaff) delete staff[k];
+	emitDispatchByRole(event, payload, staff);
 }
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
@@ -42857,6 +43038,26 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		if (req.session.user.role !== "Super Admin") {
 			filteredLoads = sanitizeBrokerColumns(filteredHeaders, filteredLoads);
 		}
+		// A Driver sees his OWN load's Load ID exactly as stored (Arvin's D1,
+		// 2026-10-21: he gives it at check-in), whatever it holds; never another
+		// driver's. Own is decided here, server-side: the session's driver name
+		// (the 403 above) against each row's own Driver cell. Only the Load ID cell
+		// is put back, from the same row (both copies above map the rows 1:1), and it
+		// leaves `_withheldCells`; every other cell stays as served (the Documents
+		// cell where n8n copies the Load ID included). Before the accepted badge,
+		// the queue position and the receipt window below, which key on it.
+		if (req.session.user.role === "Driver" && loadIdCol && driverCol) {
+			const self = normalizeDriverName(req.session.user.driverName);
+			filteredLoads = filteredLoads.map((load, i) => {
+				const row = loads[i];
+				if (!row || !self || normalizeDriverName(row[driverCol]) !== self || load[loadIdCol] === row[loadIdCol]) return load;
+				const own = { ...load, [loadIdCol]: row[loadIdCol] };
+				const still = (load._withheldCells || []).filter((h) => h !== loadIdCol);
+				if (still.length) own._withheldCells = still;
+				else delete own._withheldCells;
+				return own;
+			});
+		}
 
 		// Attach _accepted flag from load_responses
 		const acceptedRows = db.prepare(
@@ -43825,14 +44026,14 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 
 		// Notify dispatch in real-time
 		jtCacheInvalidate();
-		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus });
+		emitLoadEventToDispatch("status-updated", { loadId, driverName, newStatus });
 		insertDispatchNotification.run(
 			'status-updated',
 			`${driverName}: ${newStatus}`,
 			`Load ${loadId}`,
 			JSON.stringify({ loadId, driverName, newStatus })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'status-updated',
 			title: `${driverName}: ${newStatus}`,
 			body: `Load ${loadId}`,
@@ -44127,14 +44328,14 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		// landed in the cell, or a lowercase request leaves four records disagreeing
 		// with the sheet.
 		const detailMsg = `Override: "${oldStatus}" → "${canonicalStatus}" — ${reason.trim()}`;
-		io.to("dispatch").emit("status-updated", { loadId, driverName, newStatus: canonicalStatus });
+		emitLoadEventToDispatch("status-updated", { loadId, driverName, newStatus: canonicalStatus });
 		insertDispatchNotification.run(
 			'status-override',
 			`${driverName || "Load"}: ${canonicalStatus} (override)`,
 			detailMsg,
 			JSON.stringify({ loadId, driverName, newStatus: canonicalStatus, oldStatus, reason: reason.trim(), by: overrideUser })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'status-override',
 			title: `${driverName || "Load"}: ${canonicalStatus} (override)`,
 			body: detailMsg,
@@ -44995,7 +45196,7 @@ async function ingestLinxupPosition(pos) {
 			source: "linxup",
 			fuelPct: Number.isFinite(pos.fuel_pct) ? pos.fuel_pct : null,
 		};
-		io.to("dispatch").emit("location-update", locationPayload);
+		emitLoadEventToDispatch("location-update", locationPayload);
 		if (driverLower) io.to(driverRoom(driverLower)).emit("location-update", locationPayload);
 		// Same low-fuel check as the Routemate poller. BOTH ingest paths need it
 		// or the warning silently disappears the day Linxup fully replaces the
@@ -45689,7 +45890,19 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			attachment_url: attachmentUrl || "",
 			attachment_type: attachmentType || "",
 		};
-		io.to(chatRooms(from, to)).emit("new-message", payload);
+		// A message about a load whose ID every role but Super Admin is served
+		// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
+		// as stored) goes per role in the dispatch room: Super Admins as sent, the
+		// rest of the room with the load as shown (emitDispatchByRole()), and the
+		// parties' own rooms as sent, without the dispatch room's sockets, so each
+		// socket gets it once. Any other message, as before:
+		const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
+		if (staffLoadId === payload.loadId) {
+			io.to(chatRooms(from, to)).emit("new-message", payload);
+		} else {
+			io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
+			emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+		}
 
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (error) {
@@ -45795,11 +46008,13 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		// Every role but Super Admin (with BROKER_CONTACT_VALUE_REDACTION_ENABLED):
 		// each notice's title, body and metadata with broker contact withheld, the
 		// copy stored with it (metadata.redactedBody) served as its body, and a
-		// re-issue notice stored before that copy existed naming its columns only
-		// (brokerContact.redactDispatchNotice()). Otherwise each as stored, without
-		// the copy (brokerContact.fullDispatchNotice()).
+		// re-issue notice stored before that copy existed naming its columns only,
+		// and every withheld Load ID named as shown wherever it appears, a body
+		// included (staffDispatchNotice(), the copy the live notice is sent as).
+		// Otherwise each as stored, without the copy (brokerContact.fullDispatchNotice()).
+		const index = currentShownLoadIdIndex();
 		const served = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin"
-			? notifications.map((n) => brokerContact.redactDispatchNotice(n))
+			? notifications.map((n) => staffDispatchNotice(n, { index }))
 			: notifications.map((n) => brokerContact.fullDispatchNotice(n));
 		res.json({ notifications: served, unreadCount });
 	} catch (error) {
@@ -45866,6 +46081,12 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 			)
 			.all();
 
+		// Every role but Super Admin: each conversation's load named as shownLoadId()
+		// does; GET /api/messages/:driverName?loadId= takes that text back.
+		if (loadIdWithheldFor(req)) {
+			const index = currentShownLoadIdIndex();
+			return res.json({ conversations: conversations.map((c) => ({ ...c, loadId: shownLoadId(req, c.loadId, { index }) })) });
+		}
 		res.json({ conversations });
 	} catch (error) {
 		console.error("Error fetching messages:", error.message);
@@ -45879,9 +46100,15 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
 		const loadId = req.query.loadId || "";
+		// Every role but Super Admin is served each load as shownLoadId() names it
+		// (the conversation list above too), so a thread is asked for by that text:
+		// the driver's messages are read whole and kept when their load reads as
+		// asked, stored or shown.
+		const withholdIds = loadIdWithheldFor(req);
+		const index = withholdIds ? currentShownLoadIdIndex() : null;
 
 		let messages;
-		if (loadId) {
+		if (loadId && !withholdIds) {
 			messages = db
 				.prepare(
 					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
@@ -45899,6 +46126,13 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower);
+		}
+		if (withholdIds) {
+			const asked = String(loadId);
+			messages = messages
+				.map((m) => ({ ...m, shown: shownLoadId(req, m.loadId, { index }) }))
+				.filter((m) => !asked || m.loadId === asked || m.shown === asked)
+				.map(({ shown, ...m }) => ({ ...m, loadId: shown }));
 		}
 
 		res.json({ messages });
@@ -47580,9 +47814,14 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// switch says, and with BROKER_CONTACT_VALUE_REDACTION_ENABLED every other
 			// value redacted. The original is kept in memory for this PDF, so the
 			// create that follows writes the rate con's own broker contact (POST
-			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()).
+			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()). The rate
+			// con's own Load Number is kept for every role, longer and apart from
+			// that copy (the answer unchanged): the create tells it from one the
+			// person typed (brokerContact.rateConNumberStash).
+			const stashKey = brokerContact.rateConStashKey(base64);
+			brokerContact.rateConNumberStash.put(stashKey, { "Load Number": fields["Load Number"] });
 			if (req.session.user.role !== "Super Admin") {
-				brokerContact.rateConStash.put(brokerContact.rateConStashKey(base64), fields);
+				brokerContact.rateConStash.put(stashKey, fields);
 				return res.json({
 					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
 					warnings: rateconLoad.extractionWarnings(fields),
@@ -47652,8 +47891,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// Before every check below, so they judge the fields as they will be written.
 		let brokerContactMissed = false;
 		let fromExtract = [];
+		const stashKey = brokerContact.rateConStashKey(pdfBase64);
 		if (req.session.user.role !== "Super Admin") {
-			const held = brokerContact.rateConStash.get(brokerContact.rateConStashKey(pdfBase64));
+			const held = brokerContact.rateConStash.get(stashKey);
 			const merged = brokerContact.rateConCreateFields(fields, held, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED });
 			fields = merged.fields;
 			brokerContactMissed = merged.missed;
@@ -47679,6 +47919,32 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// interpolate into a Drive file name and an A1 range.
 		if (!/^[A-Za-z0-9\-_.#]{1,40}$/.test(loadId)) {
 			return res.status(400).json({ error: "Load Number contains unsupported characters." });
+		}
+		// A Load Number the person typed (not the rate con's own, as the extract
+		// read it for this PDF) holding a phone or an email is refused for every
+		// role, as the row saves refuse it in Load ID (400 CONTACT_NOT_ALLOWED). The
+		// rate con's own number, and n8n's, go through.
+		const ownNumber = brokerContact.rateConNumberStash.get(stashKey);
+		const extractedNumber = ownNumber ? String(ownNumber["Load Number"] == null ? "" : ownNumber["Load Number"]).trim() : null;
+		if (loadId !== extractedNumber && brokerContact.hasContact(loadId)) {
+			return res.status(400).json({
+				error: "\"Load Number\" can't hold an email address or a phone number. Enter the load number instead.",
+				code: "CONTACT_NOT_ALLOWED",
+				field: "Load Number",
+			});
+		}
+		// This load as every role but Super Admin is shown it (LOAD IDS THAT HOLD
+		// BROKER CONTACT), the rate con's own broker contact counting as its row's:
+		// for the New Load notice's copy below, whoever creates the load, and for a
+		// non-Super-Admin caller every answer from here on (its 409s, its warnings,
+		// the created load's answer), each body's values swapped, never its keys.
+		const newLoadShown = shownLoadId("Dispatcher", loadId, { own: brokerContact.rateConOwnContact(fields, BROKER_WITHHELD_RE) });
+		const newLoadHidden = newLoadShown !== loadId ? [{ raw: loadId, shown: newLoadShown }] : [];
+		let hiddenNew = [];
+		if (loadIdWithheldFor(req)) {
+			hiddenNew = newLoadHidden;
+			const json = res.json.bind(res);
+			res.json = (body) => json(hiddenNew.length ? brokerContact.swapHiddenLoadIds(body, hiddenNew) : body);
 		}
 		// Re-validate every field's shape. These arrive hand-edited from the
 		// review modal, so runRateConGemini's own 500-char-per-field cap no
@@ -47778,6 +48044,11 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			(r) => rateconLoad.normalizeLoadId(r[loadIdCol]) === loadKey,
 		);
 		if (existing) {
+			// Named as the row on the sheet is shown, its own contact counting too.
+			if (loadIdWithheldFor(req)) {
+				const shownThere = shownLoadId(req, loadId, { row: existing, own: brokerContact.rateConOwnContact(fields, BROKER_WITHHELD_RE) });
+				if (shownThere !== loadId) hiddenNew = [{ raw: loadId, shown: shownThere }];
+			}
 			// Soft-deleted loads keep their sheet row, so "already exists" would
 			// otherwise be baffling — the dispatcher can't see the load anywhere.
 			const softDeleted = getDeletedLoadIds().has(loadKey);
@@ -48176,9 +48447,12 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			JSON.stringify({ loadId, rowIndex, source: "ratecon-drop", ...(routeRedacted !== route ? { redactedBody: routeRedacted } : {}) }),
 		);
 		io.to("dispatch").emit("new-load", { timestamp: Date.now() });
-		emitDispatchByRole("dispatch-notification",
-			{ type: "new-load", title: `New Load ${loadId}`, body: route },
-			{ type: "new-load", title: `New Load ${loadId}`, body: routeRedacted });
+		// The load is not in the Job Tracking cache yet, so its own withheld ID
+		// (newLoadHidden) is swapped by name in the rest of the room's copy:
+		emitDispatchNotice({ type: "new-load", title: `New Load ${loadId}`, body: route }, {
+			staffNotice: { type: "new-load", title: `New Load ${loadId}`, body: routeRedacted },
+			extraHidden: newLoadHidden,
+		});
 		notifyChange("dashboard");
 
 		res.json({
@@ -52289,20 +52563,21 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 
 		// Notify dispatch. The dispatch room holds Dispatchers, so a rate con's link
 		// stays out of the broadcast: rate cons are Super Admin only (owner,
-		// 2026-09-26). No client reads driveUrl from this event.
-		io.to("dispatch").emit("pod-uploaded", {
+		// 2026-09-26). No client reads driveUrl from this event, and every role but
+		// Super Admin gets it without the link and with the load named as shown:
+		emitLoadEventToDispatch("pod-uploaded", {
 			loadId,
 			driverName,
 			...(isRateConDocType(docType) ? {} : { driveUrl }),
 			docType,
-		});
+		}, { dropForStaff: ["driveUrl"] });
 		insertDispatchNotification.run(
 			'pod-uploaded',
 			`${docType} uploaded by ${driverName || 'driver'}`,
 			`Load ${loadId}`,
 			JSON.stringify({ loadId, driverName, docType })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: 'pod-uploaded',
 			title: `${docType} uploaded by ${driverName || 'driver'}`,
 			body: `Load ${loadId}`,
@@ -52856,7 +53131,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				loadId, status: trigger, distanceM,
 				notificationId: geoNotif.lastInsertRowid,
 			});
-			io.to("dispatch").emit("geofence-trigger", {
+			emitLoadEventToDispatch("geofence-trigger", {
 				loadId, driver: driverName, status: trigger, distanceM,
 			});
 			const dispatchMsg = (trigger === "At Shipper"
@@ -52870,7 +53145,7 @@ async function tryGeofenceAdvance({ latitude, longitude, driverName, loadId, rou
 				dispatchMsg,
 				JSON.stringify({ loadId, driverName, status: trigger, distanceM })
 			);
-			io.to("dispatch").emit("dispatch-notification", {
+			emitDispatchNotice({
 				type: "geofence",
 				title: `${driverName}: ${trigger}`,
 				body: dispatchMsg,
@@ -53140,7 +53415,9 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 			console.error("Truck-assignment overlay error:", asErr.message);
 		}
 
-		// Enrich with ETA data from sheet
+		// Enrich with ETA data from sheet. sheetRowForLoad() answers the sheet row of
+		// a load id once that read is in.
+		let sheetRowForLoad = () => null;
 		try {
 			const sheets = await getSheets();
 			const headerResp = await sheets.spreadsheets.values.get({
@@ -53173,6 +53450,7 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 				// cell carried a "#" or a stray space got no ETA or distance.
 				const loadMap = Object.create(null);
 				const loadById = (id) => loadMap[normalizeLoadId(id)];
+				sheetRowForLoad = loadById;
 				for (let i = 1; i < rows.length; i++) {
 					const obj = {};
 					headers.forEach((h, idx) => { obj[h] = rows[i][idx] || ""; });
@@ -53399,6 +53677,16 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		// a stopped one is stopped). Fresh ELD ping above the ~5 mph travel gate =
 		// moving; fresh but slower = idling; no recent ping = parked.
 		locations.forEach((loc) => { loc.movement = classifyMovement(loc); });
+
+		// Every role but Super Admin: each driver's load named as shownLoadId() does,
+		// with its sheet row when the read above found one (LOAD IDS THAT HOLD BROKER
+		// CONTACT). After every use of the stored id above.
+		if (loadIdWithheldFor(req)) {
+			const index = currentShownLoadIdIndex();
+			for (const loc of locations) {
+				if (loc.loadId) loc.loadId = shownLoadId(req, loc.loadId, { row: sheetRowForLoad(loc.loadId) || null, index });
+			}
+		}
 
 		res.json({ locations });
 	} catch (error) {
@@ -55746,7 +56034,7 @@ function maybeAlertLowFuel(vehicleId, driverName) {
 			JSON.stringify({ driverName, unit: truck.unit, planningMiles: planning,
 				fuelPct: reading.fuelPct, fuelSource: reading.fuelSource })
 		);
-		io.to("dispatch").emit("dispatch-notification", {
+		emitDispatchNotice({
 			type: "fuel-low",
 			title: `${driverName}: low fuel`,
 			body: `${truck.unit || "unknown truck"} — about ${planning} mi of fuel left${est}.`,
@@ -57342,6 +57630,12 @@ async function getJobTrackingCached() {
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const parsed = parseSheet(response.data);
 		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
+		// The Load IDs as every role but Super Admin is served them, kept on this
+		// read before it is shared (shownLoadIdIndex()), and the latest only while
+		// no invalidation has come since the read started. Never fails the read.
+		try {
+			parsed[SHOWN_LOAD_ID_INDEX] = shownLoadIdIndex(parsed, { remember: _jtEpoch === epoch });
+		} catch (e) { console.error("[load-ids] index not built:", e.message); }
 		if (_jtEpoch === epoch) _jtCache = { data: parsed, at: Date.now() };
 		return parsed;
 	})();
@@ -63699,6 +63993,9 @@ if (INTEGRITY_CHECK_ENABLED && startsJob("daily integrity check")) {
 			// Check 9 (an open-month load whose Truck cell names no truck) reads live
 			// loads only: cancelled and soft-deleted ones left out, the one rule.
 			liveLoadRows: (sheet) => excludeDroppedLoads(sheet.data, sheet.headers),
+			// Check 10 (an open-month load whose Load ID every role but Super Admin is
+			// served withheld) reads the one Load ID rule, with the row's own contact.
+			loadIdShownOf: (row, raw) => brokerContact.shownLoadIdOf(raw, { row, withheldRe: BROKER_WITHHELD_RE }),
 		}),
 	});
 	// The ticker never rejects; a rejection here is a defect in its own guard.
@@ -64661,9 +64958,16 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		const rows = db.prepare(sql).all(...params);
 		const personal = personalSummaryByExpense(rows.map((e) => e.id));
 		const role = req.session.user.role;
+		// Every role but Super Admin: each receipt's load named as shownLoadId() does.
+		const withholdIds = loadIdWithheldFor(req);
+		const loadIdIndex = withholdIds ? currentShownLoadIdIndex() : null;
 		const expenses = rows.map((e) => {
 			const period = expensePostedPeriod(e);
-			return { ...e, receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role) };
+			return {
+				...e,
+				...(withholdIds ? { load_id: shownLoadId(req, e.load_id, { index: loadIdIndex }) } : {}),
+				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
+			};
 		});
 		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED });
 	} catch (err) {
@@ -65552,7 +65856,8 @@ app.get("/api/expenses/fuel-analytics", requireRole("Super Admin", "Dispatcher")
 				odometerSource: odometerSourceFor(e),
 				gallonsSource: gallonsSourceFor(e),
 				truckUnit: e.truck_unit || "",
-				date: e.date, loadId: e.load_id,
+				// Every role but Super Admin: the load named as shownLoadId() does.
+				date: e.date, loadId: shownLoadId(req, e.load_id),
 			})),
 			// Reconciliation lists are OMITTED entirely (not []) when the fuel-event
 			// sweep has never populated its table: the client reads an absent key as
@@ -66462,6 +66767,11 @@ app.get("/api/analytics/mileage/detail",
 		const units = [...new Set(dayRows.map(r => r.unit).filter(Boolean))];
 		const drivers = [...new Set(dayRows.map(r => r.driver_name).filter(Boolean))];
 
+		// Every role but Super Admin: each fuel receipt's and status change's load
+		// named as shownLoadId() does.
+		const loadIdIndex = loadIdWithheldFor(req) ? currentShownLoadIdIndex() : null;
+		const idShown = (raw) => shownLoadId(req, raw, { index: loadIdIndex });
+
 		// Fuel bought on these days, by the same truck(s). Bounded by the range.
 		const fuelByDay = new Map();
 		if (units.length) {
@@ -66477,7 +66787,7 @@ app.get("/api/analytics/mileage/detail",
 					amount: Number(f.amount) || 0,
 					// null, not 0 — a receipt filed without a volume is unknown, not free.
 					gallons: Number(f.gallons) > 0 ? Number(f.gallons) : null,
-					vendor: f.vendor || "", loadId: f.load_id || "", truckUnit: f.truck_unit || "",
+					vendor: f.vendor || "", loadId: idShown(f.load_id || ""), truckUnit: f.truck_unit || "",
 					odometer: Number(f.odometer) > 0 ? Number(f.odometer) : null,
 				});
 				fuelByDay.set(f.date, list);
@@ -66520,10 +66830,10 @@ app.get("/api/analytics/mileage/detail",
 			const rawLoads = loadsByDay.get(r.local_day) || [];
 			// One entry per load, carrying the statuses it passed through that day —
 			// a load that went At Shipper -> In Transit -> Delivered is one load, not
-			// three rows.
+			// three rows. Grouped by the stored id, each named as shown.
 			const byLoad = new Map();
 			for (const l of rawLoads) {
-				const e = byLoad.get(l.loadId) || { loadId: l.loadId, statuses: [], pickup: l.pickup, dropoff: l.dropoff };
+				const e = byLoad.get(l.loadId) || { loadId: idShown(l.loadId), statuses: [], pickup: l.pickup, dropoff: l.dropoff };
 				e.statuses.push(l.status);
 				byLoad.set(l.loadId, e);
 			}
@@ -66818,6 +67128,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 				if (driversOnTruck.size > 0) {
 					const jt = await getJobTrackingCached();
 					const jtData = excludeDroppedLoads(jt.data, jt.headers);
+					const loadIdIndex = loadIdWithheldFor(req) ? routeShownLoadIdIndex(jt) : null;
 					const jtDriverCol = findCol(jt.headers, /^driver$/i) || findCol(jt.headers, /driver/i);
 					const jtLoadIdCol = findCol(jt.headers, /load.?id|job.?id/i);
 					const jtAssignedCol = findCol(jt.headers, /assigned.*date|date.*assigned/i);
@@ -66862,7 +67173,8 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 							const sIso = sheetToIso(row[jtAssignedCol]);
 							if (!sIso) continue;
 							const eIso = jtDeliveredCol ? (sheetToIso(row[jtDeliveredCol]) || todayIso) : todayIso;
-							candidates.push({ loadId: lid, startIso: sIso, endIso: eIso });
+							// Every role but Super Admin: the load named as shownLoadId() does.
+							candidates.push({ loadId: shownLoadId(req, lid, { row, index: loadIdIndex }), startIso: sIso, endIso: eIso });
 						}
 						for (const day of daysList) {
 							const ids = new Set();

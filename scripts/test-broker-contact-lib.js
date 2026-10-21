@@ -344,6 +344,84 @@ const asServed = Object.fromEntries(Object.entries(red).map(([k, v]) => [k, v ==
 		[bc.rateConStashKey("JVBERi0xLjU=") !== k, bc.rateConStashKey(""), bc.rateConStashKey(null)], [true, "", ""]);
 }
 
+// ------------------------------------------------- Load IDs (2026-10-21)
+// A Load ID as a non-Super-Admin may see it: what sanitizeBrokerColumns() does
+// to the Load ID cell (the row's own contact, no name matching), except that an
+// ID that was only contact reads "[contact withheld]" (R11b's rule), not blank.
+{
+	const own = bc.ownContact([["Phone Number", "555-010-0163"], ["Broker Contact Name", "Pat Agent"]]);
+	const fn = typeof bc.loadIdAsShown === "function" ? bc.loadIdAsShown : () => "(no loadIdAsShown)";
+	check("Load ID shown: an email-shaped ID reads as withheld", fn("agent.h4@example.invalid", own), W);
+	check("Load ID shown: a dash-phone inside the ID is withheld, the rest kept", fn("QA-555-010-0161", own), `QA-${W}`);
+	check("Load ID shown: a phone inside text is withheld", fn("Load 555.010.0162 A", null), `Load ${W} A`);
+	check("Load ID shown: the row's own broker phone as bare digits is withheld", fn("5550100163", own), W);
+	check("Load ID shown: a bare 10-digit run that is not the row's phone is kept", fn("5550100199", own), "5550100199");
+	check("Load ID shown: a normal ID is kept exactly, a name is never matched in it", [fn("80000011", own), fn("PAT AGENT 1", own)], ["80000011", "PAT AGENT 1"]);
+	check("Load ID shown: not a string, or blank, comes back as it is", [fn("", own), fn(null, own), fn(undefined, own)], ["", null, undefined]);
+}
+{
+	const H = ["Load ID", "Driver", "Phone Number", "Email", "Details"];
+	const row = (id, phone = "", email = "", details = "") => ({ "Load ID": id, Driver: "D", "Phone Number": phone, Email: email, Details: details });
+	const rows = [
+		row("QA-555-010-0161", "555-010-0170"),
+		row("5550100163", "555-010-0163"),
+		row("QA-555-010-0162"),
+		row("agent.h4@example.invalid"),
+		row("80000031", "555-010-0171"),
+		// The same ID twice: withheld when any row withholds it.
+		row("#5550100164"),
+		row("5550100164", "(555) 010-0164"),
+	];
+	const build = typeof bc.buildShownLoadIdIndex === "function" ? bc.buildShownLoadIdIndex : null;
+	const idx = build ? build(H, rows, { withheldRe: WITHHELD_RE }) : null;
+	const shownOf = (raw, opts = {}) => (typeof bc.shownLoadIdOf === "function" ? bc.shownLoadIdOf(raw, { index: idx, ...opts }) : "(no shownLoadIdOf)");
+	check("Load ID index: built over every row", !!idx, true);
+	check("Load ID index: each hidden ID reads as shown, any letter case or a leading #",
+		[shownOf("QA-555-010-0161"), shownOf("qa-555-010-0161"), shownOf("5550100163"), shownOf("agent.h4@example.invalid"), shownOf("80000031")],
+		[`QA-${W}`, `QA-${W}`, W, W, "80000031"]);
+	check("Load ID index: an ID on two rows is withheld when any row withholds it", [shownOf("5550100164"), shownOf("#5550100164")], [W, W]);
+	check("Load ID index: an ID on no row falls back to the patterns only", [shownOf("Z 555-010-0188"), shownOf("5550100188")], [`Z ${W}`, "5550100188"]);
+	check("Load ID index: a given row counts too (a load not on the sheet yet)",
+		shownOf("5550100177", { row: row("5550100177", "555-010-0177"), withheldRe: WITHHELD_RE }), W);
+	check("Load ID index: the hidden IDs, longest first",
+		idx ? idx.hidden.map((h) => h.raw) : null,
+		["agent.h4@example.invalid", "QA-555-010-0161", "QA-555-010-0162", "#5550100164", "5550100163", "5550100164"]);
+	// Swapped inside values, any letter case, longest first; keys unchanged; never
+	// in serialized JSON (an ID with a quote or a backslash is still found).
+	const swap = (v, list = idx) => (typeof bc.swapHiddenLoadIds === "function" ? bc.swapHiddenLoadIds(v, list) : "(no swapHiddenLoadIds)");
+	check("swap: an ID named in text, any letter case", swap("Load qa-555-010-0161 and load 5550100163 arrived"), `Load QA-${W} and load ${W} arrived`);
+	check("swap: values at any depth, keys unchanged, other values kept",
+		swap({ loadId: "5550100163", "5550100163": ["QA-555-010-0162", 7, null], n: "80000031" }),
+		{ loadId: W, "5550100163": [`QA-${W}`, 7, null], n: "80000031" });
+	check("swap: no hidden IDs, the value comes back as it is", swap("Load 5550100163", []), "Load 5550100163");
+	const odd = bc.buildShownLoadIdIndex ? bc.buildShownLoadIdIndex(H, [row('Q"555-010-0165\\'), row("555-010-0166")], { withheldRe: WITHHELD_RE }) : null;
+	check("swap: an ID holding a quote and a backslash, inside a JSON string's value",
+		odd ? swap({ loadId: 'Q"555-010-0165\\', note: "QQ555-010-0166" }, odd) : null, { loadId: `Q"${W}\\`, note: `QQ${W}` });
+	// A notice as served to a non-Super-Admin: the hidden IDs swapped in title,
+	// body and metadata (an ID named only in the body too), then redacted.
+	const notice = { id: 9, type: "status-updated", title: "Driver: In Transit", body: "Load 5550100163",
+		metadata: JSON.stringify({ loadId: "5550100163", driverName: "D" }) };
+	const n = bc.redactDispatchNotice(notice, { hidden: idx ? idx.hidden : [] });
+	check("notice with hidden IDs: body and metadata.loadId swapped, metadata still a JSON string",
+		[n.body, typeof n.metadata, JSON.parse(n.metadata).loadId], [`Load ${W}`, "string", W]);
+	const live = bc.redactDispatchNotice({ type: "new-load", title: "New Load 5550100163", body: "Dallas → Tulsa", metadata: { loadId: "5550100163", rowIndex: 4 } }, { hidden: idx ? idx.hidden : [] });
+	check("notice with hidden IDs, live (metadata an object): the title swapped, metadata stays an object",
+		[live.title, live.metadata], [`New Load ${W}`, { loadId: W, rowIndex: 4 }]);
+	check("notice for a Super Admin: an object metadata stays an object, the copy dropped",
+		bc.fullDispatchNotice({ type: "x", title: "t", body: "b", metadata: { loadId: "5550100163", redactedBody: "c" } }).metadata, { loadId: "5550100163" });
+}
+{
+	const LI = ["Load ID", "Contract ID", "Details"];
+	const refuse = (before, values) => bc.contactNotAllowedRefusal(LI, before, values);
+	const r1 = refuse(["80000011", "", ""], ["agent.h4@example.invalid", "", ""]);
+	check("Load ID: an email typed in is refused, 400 CONTACT_NOT_ALLOWED naming Load ID",
+		[(r1 || {}).code, (r1 || {}).field, /"Load ID"/.test((r1 || {}).error || "")], ["CONTACT_NOT_ALLOWED", "Load ID", true]);
+	check("Load ID: a formatted phone typed in is refused", (refuse(["80000011", "", ""], ["QA-555-010-0161", "", ""]) || {}).code, "CONTACT_NOT_ALLOWED");
+	check("Load ID: a stored ID resent unchanged is not refused", refuse(["QA-555-010-0161", "", ""], ["QA-555-010-0161", "", "x"]), null);
+	check("Load ID: a load number, or bare digits, is fine", [refuse(["", "", ""], ["80000011", "", ""]), refuse([], ["5550100163", "", ""])], [null, null]);
+	check("Load ID: the Payments Table's Job ID too", (bc.contactNotAllowedRefusal([" Job ID"], [""], ["555-010-0161"]) || {}).field, " Job ID");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) {
 	console.log("\nFailures:");

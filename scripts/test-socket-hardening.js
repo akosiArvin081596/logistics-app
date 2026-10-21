@@ -175,6 +175,17 @@ const SRCS = {
 	ioHandler: liftHandler('io.on("connection", (socket) => {', 'io.on("connection", '),
 	tracker: liftHandler('publicTrack.on("connection", (socket) => {', 'publicTrack.on("connection", '),
 	messages: liftStatement('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {'),
+	// What the chat route sends a message about a withheld load ID through: the
+	// one Load ID rule and the per-role dispatch-room send (2026-10-21).
+	loadIds: [
+		liftLine(/\nconst BROKER_WITHHELD_RE = [^\n]+;/, "BROKER_WITHHELD_RE").trim(),
+		...[
+			"function emitDispatchByRole(event, full, redacted) {",
+			"function loadIdWithheldFor(who) {",
+			"function currentShownLoadIdIndex() {",
+			"function shownLoadId(who, raw, { row = null, own = null, index = currentShownLoadIdIndex() } = {}) {",
+		].map(liftFunction),
+	].join("\n"),
 	guard: ["function socketHandler(event, fn) {", "function logSocketHandlerFault(event, err) {"].map(liftFunction).join("\n"),
 };
 const TRUST_PROXY_SRC = liftLine(/\napp\.set\("trust proxy", 1\);/, 'app.set("trust proxy", 1)');
@@ -293,8 +304,13 @@ async function startWorld({ sources = SRCS, secureCookie = false, mustChange = (
 	const db = { prepare: () => ({ run: () => ({ lastInsertRowid: ++seq }) }) };
 	const insertNotification = { run: () => ({ lastInsertRowid: ++seq }) };
 	const requireAuth = new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
-	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", sources.messages)(
-		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms);
+	// The shipped Load ID rule (by its patterns: no sheet here) and per-role send,
+	// with value redaction on, as production runs.
+	const loadIds = new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+		`const SHOWN_LOAD_ID_STATE = { latest: null };\n${sources.loadIds}\nreturn { shownLoadId, emitDispatchByRole };`)(
+		io, require(path.join(__dirname, "..", "lib", "broker-contact")), true);
+	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", sources.messages)(
+		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole);
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
@@ -625,6 +641,10 @@ const SCENARIOS = {
 				await chat(w, "bob", { to: "investor", message: "m8" }),
 				await chat(w, "bob", { to: "driver:mike", message: "m9" }),
 				await chat(w, "bob", { to: "user:mike", message: "m10" }),
+				// About a load whose ID holds a phone (withheld from every role but
+				// Super Admin): a driver naming his own load, and the desk to a name.
+				await chat(w, "bob", { to: "Dispatch", message: "m11", loadId: "QA-555-010-0161" }),
+				await chat(w, "root", { from: "Dispatch", to: "Mike", message: "m12", loadId: "QA-555-010-0161" }),
 			];
 			const delivered = posts.every((r) => r.status === 200) && (await barrier(w, all, 1));
 			const receivers = (event, pred) => who.filter((k) => copies(c[k], event, pred) > 0).sort();
@@ -654,8 +674,17 @@ const SCENARIOS = {
 			p.chatForgedRoomNamesReachNoOne = delivered && sameSet(receivers("new-message", msg("m9")), ["bob", "ops", "root"]) &&
 				sameSet(receivers("new-message", msg("m10")), ["bob", "ops", "root"]);
 			p.forgedDriverTargetReachesNoOne = delivered && receivers("load-assigned", (x) => x.k === "forged").length === 0;
-			p.chatOncePerSocket = delivered && ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10"].every((m) => who.every((k) => copies(c[k], "new-message", msg(m)) <= 1)) &&
+			p.chatOncePerSocket = delivered && ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12"].every((m) => who.every((k) => copies(c[k], "new-message", msg(m)) <= 1)) &&
 				copies(c.root, "new-message", msg("m6")) === 1;
+			// A message about a withheld load reaches exactly whom any message does
+			// (m7's and m2's receivers); the Dispatcher's copy names the load as
+			// shown, the Super Admin's and every party's as sent.
+			const loadIdSeen = (k, m) => { const hit = c[k].got.find(([e, a]) => e === "new-message" && msg(m)(a[0])); return hit ? hit[1][0].loadId : null; };
+			p.chatWithheldLoadSameReceivers = delivered && sameSet(receivers("new-message", msg("m11")), ["bob", "ops", "root"]) &&
+				sameSet(receivers("new-message", msg("m12")), ["dMike", "mike", "ops", "root"]);
+			p.chatWithheldLoadPerRole = delivered && loadIdSeen("ops", "m11") === "QA-[contact withheld]" && loadIdSeen("ops", "m12") === "QA-[contact withheld]" &&
+				["root", "bob"].every((k) => loadIdSeen(k, "m11") === "QA-555-010-0161") &&
+				["root", "dMike", "mike"].every((k) => loadIdSeen(k, "m12") === "QA-555-010-0161");
 			p.roomsRan = true;
 		} finally { await w.close(); }
 	},
@@ -852,8 +881,13 @@ function roomPinProblems(fullSrc) {
 		const close = closeParen(code, open);
 		const arg = code.slice(open + 1, close).trim();
 		if (method === "to" && recv === "io") toCalls.push({ arg, at });
-		// The one exclusion: the dispatch room without the Super Admin room.
+		// The two exclusions: the dispatch room without the Super Admin room, and a
+		// chat message's rooms without the dispatch room (a message about a withheld
+		// load ID, whose dispatch-room copies go per role; 2026-10-21).
 		if (method === "except" && arg === '"super-admin"' && /io\s*\.\s*to\(\s*"dispatch"\s*\)\s*$/.test(code.slice(Math.max(0, at - 40), at + 1))) {
+			continue;
+		}
+		if (method === "except" && arg === '"dispatch"' && /io\s*\.\s*to\(\s*chatRooms\(from, to\)\s*\)\s*$/.test(code.slice(Math.max(0, at - 60), at + recv.length))) {
 			continue;
 		}
 		if (["in", "except", "socketsJoin", "socketsLeave"].includes(method)) {
@@ -880,7 +914,7 @@ function roomPinProblems(fullSrc) {
 		if (method === "join") joins.push(arg);
 		if (method === "to") {
 			const rest = code.slice(close + 1);
-			const e = rest.match(/^\s*\.\s*emit\(\s*["'`]([^"'`$]+)["'`]/);
+			const e = rest.match(/^\s*(?:\.\s*except\(\s*"[^"]*"\s*\)\s*)?\.\s*emit\(\s*["'`]([^"'`$]+)["'`]/);
 			emits.push({ arg, event: e ? e[1] : null, at });
 		}
 	}
@@ -892,8 +926,11 @@ function roomPinProblems(fullSrc) {
 		if (viaDriverRoom.length !== want) problems.push(`"${event}" goes to driverRoom() at ${viaDriverRoom.length} site(s), expected ${want}`);
 		for (const x of other) bad(x.at, `"${event}" to ${x.arg} — a driver event goes to driverRoom() or the dispatch room`);
 	}
+	// Chat: one emit to chatRooms(), and beside it the one to chatRooms() without
+	// the dispatch room for a message about a withheld load ID (its dispatch-room
+	// copies go through emitDispatchByRole()).
 	const chatSites = emits.filter((x) => x.event === "new-message");
-	if (chatSites.length !== 1 || !isCallOf(chatSites[0].arg, ["chatRooms"])) problems.push(`"new-message" must be one emit to chatRooms(), found ${chatSites.map((x) => x.arg).join(", ") || "none"}`);
+	if (chatSites.length !== 2 || !chatSites.every((x) => isCallOf(x.arg, ["chatRooms"]))) problems.push(`"new-message" must be the two emits to chatRooms() (all rooms, and all but the dispatch room), found ${chatSites.map((x) => x.arg).join(", ") || "none"}`);
 	for (const x of emits) {
 		if (isCallOf(x.arg, ["chatRooms"]) && x.event !== "new-message") bad(x.at, `chatRooms() is for chat only, not "${x.event}"`);
 		if (isCallOf(x.arg, ["userRoom"])) bad(x.at, `userRoom() emits nothing today; "${x.event}" to ${x.arg} needs a reason and a pin`);
@@ -906,7 +943,7 @@ function roomPinProblems(fullSrc) {
 	const REQUEST_FED = [
 		['app.post("/api/dispatch", ', ["driverRoom(driver)"]],
 		['app.post("/api/dispatch/reassign", ', ["driverRoom(newDriver)", "driverRoom(oldDriverKey)"]],
-		['app.post("/api/messages", ', ["chatRooms(from, to)"]],
+		['app.post("/api/messages", ', ["chatRooms(from, to)", "chatRooms(from, to)"]],
 	];
 	for (const [head, want] of REQUEST_FED) {
 		const range = body(head);
@@ -1021,6 +1058,8 @@ Object.assign(PROPS, {
 	chatForgedRoomNamesReachNoOne: ["rooms", "§3 a chat recipient spelled like a room of another kind (driver:…, user:…) must reach no one else"],
 	forgedDriverTargetReachesNoOne: ["rooms", "§3 a driver target spelled like a user room must reach no one"],
 	chatOncePerSocket: ["rooms", "§3 each socket must receive a chat message once"],
+	chatWithheldLoadSameReceivers: ["rooms", "§3 a chat message about a withheld load ID must reach exactly whom any chat message reaches (m11, m12)"],
+	chatWithheldLoadPerRole: ["rooms", "§3 ...the Dispatcher's copy naming the load as shown, the Super Admin's and every party's as sent"],
 	roomsRan: ["rooms", "§3 the rooms scenario must run to the end"],
 	unlinkedJoinsOwnRoomOnly: ["unlinked", "§3 a driver with no driver name must join only its own user room (fixture unlinked)"],
 	unlinkedGetsNoDispatchEvents: ["unlinked", "§3 ...and receive no dispatch-room event"],
@@ -1155,6 +1194,22 @@ const MUTANTS = [
 		mutate: cut("io.to(chatRooms(from, to)).emit(\"new-message\", payload);",
 			"const fromRoom = (from || \"\").trim().toLowerCase();\n\t\tconst toRoom = (to || \"\").trim().toLowerCase();\n\t\tif (fromRoom) io.to(fromRoom).emit(\"new-message\", payload);\n\t\tif (toRoom && toRoom !== fromRoom) io.to(toRoom).emit(\"new-message\", payload);\n\t\tif (fromRoom !== \"dispatch\" && toRoom !== \"dispatch\") io.to(\"dispatch\").emit(\"new-message\", payload);"),
 		caughtBy: ["chatByRoleNameSparesRoleRoom", "chatFromDeskReachesParties", "chatReachesUnlinkedDriver"],
+	},
+	{
+		// A message about a withheld load ID sent to every room in one payload, as
+		// before 2026-10-21: the Dispatcher gets the ID as sent.
+		name: "chat about a withheld load ID sent in one payload",
+		target: "messages",
+		mutate: cut("const staffLoadId = shownLoadId(\"Dispatcher\", payload.loadId);", "const staffLoadId = payload.loadId;"),
+		caughtBy: ["chatWithheldLoadPerRole"],
+	},
+	{
+		// ...and its parties' copy sent without leaving out the dispatch room, so a
+		// socket in the dispatch room gets it twice, one of them as sent.
+		name: "chat about a withheld load ID to the parties without leaving out the dispatch room",
+		target: "messages",
+		mutate: cut("io.to(chatRooms(from, to)).except(\"dispatch\").emit(\"new-message\", payload);", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);"),
+		caughtBy: ["chatOncePerSocket"],
 	},
 	{
 		name: "register normalises a name without checking its type",
