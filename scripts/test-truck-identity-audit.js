@@ -24,13 +24,19 @@
  *      month-end lock writes none and changes nothing.
  *   §2 PUT VINs: one update_truck_vin line when the VIN is set, changed or
  *      cleared, naming the truck by its number as stored before the save; a
- *      resend (exact or padded) writes none; a save that renames and changes
- *      the VIN writes one of each; a refused save carrying a VIN change writes
- *      none and leaves the VIN as it was.
+ *      resend (exact or padded) writes none and leaves the stored VIN byte for
+ *      byte as it was (a VIN stored padded before the trim stays as stored); a
+ *      change sent padded is stored trimmed and its line names the trimmed
+ *      values; a save that renames and changes the VIN writes one of each; a
+ *      refused save carrying a VIN change writes none and leaves the VIN as it
+ *      was.
  *   §3 POST: the create_truck line names the VIN when one is set, and is the
- *      line it always was when none is.
+ *      line it always was when none is; a VIN sent padded is stored trimmed.
  *   §4 DELETE: the delete_truck line names the deleted truck's VIN when it had
  *      one, and is the line it always was when it had none.
+ *   §5 Trailers, the same VIN rule: POST /api/trailers stores a padded VIN
+ *      trimmed; PUT /api/trailers/:id keeps the stored VIN as it is on a padded
+ *      resend or a save that sends none, and stores a real change trimmed.
  *
  * Pure: no server, no app.db, no network. Made-up trucks and names.
  *
@@ -91,6 +97,8 @@ const ROUTES = {
 	post: liftRoute('app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), async (req, res) => {'),
 	put: liftRoute('app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req, res) => {'),
 	del: liftRoute('app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {'),
+	trailerPost: liftRoute('app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+	trailerPut: liftRoute('app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
 };
 
 // Everything the three routes call from module scope, verbatim.
@@ -167,6 +175,11 @@ function auditDdl() {
 	if (!m) die("could not locate CREATE TABLE audit_trail");
 	return `CREATE TABLE audit_trail (${m[1]}\n)`;
 }
+function trailersDdl() {
+	const m = SRC.match(/CREATE TABLE IF NOT EXISTS trailers \(([\s\S]*?)\n\t\)/);
+	if (!m) die("could not locate CREATE TABLE trailers");
+	return `CREATE TABLE trailers (${m[1]}\n)`;
+}
 const DDL = [
 	...usersDdl(),
 	auditDdl(),
@@ -187,8 +200,9 @@ const DDL = [
 		routemate_vehicle_id TEXT DEFAULT '')`,
 	"CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')",
 	"CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT)",
-	// What DELETE /api/trucks/:id reads or cascades through.
-	"CREATE TABLE trailers (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER)",
+	// What DELETE /api/trucks/:id reads or cascades through, and what the two
+	// trailer routes write (server.js's own trailers table).
+	trailersDdl(),
 	"CREATE TABLE legal_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER)",
 	"CREATE TABLE maintenance_fund (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT)",
 	"CREATE TABLE compliance_fees (id INTEGER PRIMARY KEY AUTOINCREMENT, truck TEXT)",
@@ -311,11 +325,15 @@ function mountAll(db, { blockEdit = false } = {}) {
 	const put = mountRoute(ROUTES.put, env);
 	const post = mountRoute(ROUTES.post, env);
 	const del = mountRoute(ROUTES.del, env);
+	const trailerPost = mountRoute(ROUTES.trailerPost, env);
+	const trailerPut = mountRoute(ROUTES.trailerPut, env);
 	const as = (user) => ({ session: { user } });
 	return {
 		put: (user, id, body) => quiet(() => put({ ...as(user), params: { id: String(id) }, body })),
 		post: (user, body) => quiet(() => post({ ...as(user), body })),
 		del: (user, id) => quiet(() => del({ ...as(user), params: { id: String(id) } })),
+		trailerPost: (user, body) => quiet(() => trailerPost({ ...as(user), body })),
+		trailerPut: (user, id, body) => quiet(() => trailerPut({ ...as(user), params: { id: String(id) }, body })),
 	};
 }
 
@@ -399,12 +417,38 @@ async function vinSection() {
 	for (const [label, body] of [
 		["the VIN resent as stored", () => ({ vin: VIN_A })],
 		["the VIN resent padded", () => ({ vin: ` ${VIN_A} ` })],
+		["the VIN resent padded with a tab and a line break", () => ({ vin: `\t${VIN_A}\r\n` })],
 		["a whole-row resend", (db) => truckFormBody(truckRow(db, 1))],
+		["a whole-row resend with the VIN padded", (db) => truckFormBody(truckRow(db, 1), { vin: `  ${VIN_A}  ` })],
 	]) {
 		const db = makeDb();
 		const app = mountAll(db);
 		const r = await app.put(SUPER, 1, body(db));
 		ok(r.status === 200 && audits(db, "update_truck_vin").length === 0, `§2 ${label}: 200 and no VIN line (got ${r.status}, ${audits(db, "update_truck_vin").length})`);
+		ok(truckRow(db, 1).vin === VIN_A, `§2 ${label}: the stored VIN unchanged, byte for byte (got ${JSON.stringify(truckRow(db, 1).vin)})`);
+	}
+	// A VIN stored padded before the trim: a resend of the same VIN, trimmed or
+	// padded, is no change, so the stored value is kept exactly as it is.
+	for (const sent of [VIN_A, ` ${VIN_A}`]) {
+		const db = makeDb();
+		db.prepare("UPDATE trucks SET vin = ? WHERE id = 1").run(`${VIN_A}  `);
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, { vin: sent });
+		ok(r.status === 200 && audits(db, "update_truck_vin").length === 0 && truckRow(db, 1).vin === `${VIN_A}  `,
+			`§2 a VIN stored padded, resent as ${JSON.stringify(sent)}: 200, no VIN line, the stored value kept as it is (got ${r.status}, ${audits(db, "update_truck_vin").length}, ${JSON.stringify(truckRow(db, 1).vin)})`);
+	}
+	for (const [label, id, vin, stored, details] of [
+		["a VIN changed, sent padded", 1, `  ${VIN_B}\t`, VIN_B, `VIN for LogisX-#41: ${VIN_A} → ${VIN_B}`],
+		["a VIN set, sent padded, on a truck that had none", 2, ` ${VIN_B} `, VIN_B, `VIN for LogisX-#91: not set → ${VIN_B}`],
+		["a VIN cleared with spaces only", 1, "   ", "", `VIN for LogisX-#41: ${VIN_A} → not set`],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(DISPATCHER, id, { vin });
+		const rows = audits(db, "update_truck_vin");
+		ok(r.status === 200 && truckRow(db, id).vin === stored, `§2 ${label}: 200 and stored trimmed, ${JSON.stringify(stored)} (got ${r.status}, ${JSON.stringify(truckRow(db, id).vin)})`);
+		ok(rows.length === 1 && (rows[0] || {}).details === details,
+			`§2 ${label}: one update_truck_vin line with the trimmed values, ${JSON.stringify(details)} (got ${rows.length}, ${JSON.stringify((rows[0] || {}).details)})`);
 	}
 	{
 		const db = makeDb();
@@ -457,6 +501,23 @@ async function createSection() {
 		ok(r.status === 200 && line === "Created truck LogisX-#23 (Active), in-service date: unset (falls back to created_at), fixed costs: $0.00/mo",
 			`§3 a truck added with no VIN: the line it always was (got ${r.status}, ${JSON.stringify(line)})`);
 	}
+	// The Investor's My Trucks form sends the VIN as typed.
+	for (const user of [SUPER, { id: 5, username: "acme", role: "Investor" }]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.post(user, addForm({ vin: `  ${VIN_B} ` }));
+		const t = db.prepare("SELECT * FROM trucks WHERE unit_number = 'LogisX-#23'").get() || {};
+		const line = (audits(db, "create_truck")[0] || {}).details || "";
+		ok(r.status === 200 && t.vin === VIN_B && line.endsWith(`, VIN ${VIN_B}`),
+			`§3 a truck added by a ${user.role} with a padded VIN: stored trimmed and named trimmed (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(t.vin)}, ${JSON.stringify(line)})`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.post(SUPER, addForm({ vin: "   " }));
+		const t = db.prepare("SELECT * FROM trucks WHERE unit_number = 'LogisX-#23'").get() || {};
+		ok(r.status === 200 && t.vin === "", `§3 a truck added with a VIN of spaces only: stored blank (got ${r.status}, ${JSON.stringify(t.vin)})`);
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════ §4
@@ -481,11 +542,47 @@ async function deleteSection() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════ §5
+async function trailerSection() {
+	section("§5 Trailers — the same VIN rule: edge whitespace trimmed, a padded resend is no change");
+	const trailerRow = (db, id) => db.prepare("SELECT * FROM trailers WHERE id = ?").get(id) || {};
+	const seed = (db, vin) => db.prepare("INSERT INTO trailers (id, trailer_number, type, vin, status) VALUES (7, 'TR-5301', 'Dry Van', ?, 'Available')").run(vin);
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.trailerPost(DISPATCHER, { trailer_number: "TR-5302", type: "Reefer", vin: ` ${VIN_B}\t` });
+		const t = db.prepare("SELECT * FROM trailers WHERE trailer_number = 'TR-5302'").get() || {};
+		ok(r.status === 200 && t.vin === VIN_B, `§5 a trailer added with a padded VIN: stored trimmed (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(t.vin)})`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.trailerPost(DISPATCHER, { trailer_number: "TR-5303" });
+		const t = db.prepare("SELECT * FROM trailers WHERE trailer_number = 'TR-5303'").get() || {};
+		ok(r.status === 200 && t.vin === "", `§5 a trailer added with no VIN: stored blank, as before (got ${r.status}, ${JSON.stringify(t.vin)})`);
+	}
+	for (const [label, stored, body, expected] of [
+		["the VIN resent padded", VIN_A, { vin: `  ${VIN_A} ` }, VIN_A],
+		["a VIN stored padded, resent trimmed", `${VIN_A} `, { vin: VIN_A }, `${VIN_A} `],
+		["a save that sends no VIN", `${VIN_A} `, { notes: "new mud flaps" }, `${VIN_A} `],
+		["a VIN changed, sent padded", VIN_A, { vin: `\t${VIN_B}  ` }, VIN_B],
+		["a VIN cleared", VIN_A, { vin: "" }, ""],
+	]) {
+		const db = makeDb();
+		seed(db, stored);
+		const app = mountAll(db);
+		const r = await app.trailerPut(SUPER, 7, body);
+		ok(r.status === 200 && trailerRow(db, 7).vin === expected,
+			`§5 PUT, ${label}: 200 and the VIN stored as ${JSON.stringify(expected)} (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(trailerRow(db, 7).vin)})`);
+	}
+}
+
 (async () => {
 	await renameSection();
 	await vinSection();
 	await createSection();
 	await deleteSection();
+	await trailerSection();
 })().then(() => {
 	if (failures.length) {
 		for (const f of failures) console.error(`  FAIL  ${f}`);

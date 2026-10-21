@@ -33900,13 +33900,17 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// "Unit number already exists". The INSERT is the first write, so a unit
 		// number another writer took after the check above (isUnitNumberTaken()) is
 		// refused as the check refuses it, with nothing written.
+		// The VIN is stored without its edge whitespace (PUT /api/trucks/:id's
+		// rule), so a VIN typed or pasted with a space around it is the same VIN a
+		// later save compares against. Text is trimmed; anything else as before.
+		const createVinStored = (typeof vin === "string" ? vin.trim() : vin) || "";
 		let result;
 		try {
 			result = db.transaction(() => {
 				const inserted = db.prepare(
 					"INSERT INTO trucks (unit_number, make, model, year, vin, license_plate, status, assigned_driver, notes, owner_id, driver_pay_daily, purchase_price, title_status, maintenance_fund_monthly, fuel_tank_gallons, avg_mpg, in_service_date, " +
 					"photo, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, admin_fee_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-				).run(unit, make || "", model || "", parseInt(year) || 0, vin || "", licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
+				).run(unit, make || "", model || "", parseInt(year) || 0, createVinStored, licensePlate || "", validStatus, finalAssignedDriver, notes || "", finalOwnerId, driverPayParsed.value,
 					createAmounts.purchase_price ?? 0, titleStatus || "Clean", createAmounts.maintenance_fund_monthly ?? 0, createAmounts.fuel_tank_gallons ?? 0, createAmounts.avg_mpg ?? 0, inServiceCreate,
 					createPhoto, createCosts.insurance_monthly, createCosts.eld_monthly, createCosts.truck_payment_monthly, createCosts.hvut_annual, createCosts.irp_annual, createAdminFee);
 				if (finalAssignedDriver && finalAssignedDriver.trim()) {
@@ -33928,7 +33932,7 @@ app.post("/api/trucks", requireRole("Super Admin", "Dispatcher", "Investor"), as
 		// (update_truck_vin) starts from is on record too.
 		const createFuel = (createAmounts.fuel_tank_gallons > 0 ? `, fuel tank ${createAmounts.fuel_tank_gallons} gal` : "") +
 			(createAmounts.avg_mpg > 0 ? `, avg MPG ${createAmounts.avg_mpg}` : "");
-		const createVin = auditText(vin, 100);
+		const createVin = auditText(createVinStored, 100);
 		logAudit(req, "create_truck", "truck", String(result.lastInsertRowid),
 			`Created truck ${auditText(unit, 100)} (${validStatus}), in-service date: ${inServiceCreate || "unset (falls back to created_at)"}, ` +
 			`fixed costs: ${createMonthlyFixed}${createFuel}${createVin ? `, VIN ${createVin}` : ""}`);
@@ -34218,7 +34222,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		if (make !== undefined) { updates.push("make = ?"); params.push(make); }
 		if (model !== undefined) { updates.push("model = ?"); params.push(model); }
 		if (year !== undefined) { updates.push("year = ?"); params.push(parseInt(year) || 0); }
-		if (vin !== undefined) { updates.push("vin = ?"); params.push(vin); }
+		// A VIN is compared and stored without its edge whitespace, against the row
+		// as re-read. A resend, padded or not, is the VIN on file: the column keeps
+		// its stored bytes (`vin = vin`, as the pay rate keeps its own above) and
+		// no update_truck_vin line is written below. A real change is written
+		// trimmed. Text is trimmed; anything else is written as before.
+		const vinChanged = vin !== undefined && String(vin ?? "").trim() !== String(truck.vin ?? "").trim();
+		if (vin !== undefined) {
+			if (vinChanged) { updates.push("vin = ?"); params.push(typeof vin === "string" ? vin.trim() : vin); }
+			else updates.push("vin = vin");
+		}
 		if (licensePlate !== undefined) { updates.push("license_plate = ?"); params.push(licensePlate); }
 		// Track the status that actually lands, not just `status !== undefined` —
 		// an unrecognized value is silently ignored here, and both the audit row
@@ -34313,7 +34326,7 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_truck_unit_number", "truck", String(id),
 				`Unit number for truck #${id}: ${unitLabel || "not set"} → ${auditText(nextUnit, 100)}`);
 		}
-		if (vin !== undefined && String(vin ?? "").trim() !== String(truck.vin ?? "").trim()) {
+		if (vinChanged) {
 			const fmtVin = (v) => auditText(v, 100) || "not set";
 			logAudit(req, "update_truck_vin", "truck", String(id), `VIN for ${unitLabel}: ${fmtVin(truck.vin)} → ${fmtVin(vin)}`);
 		}
@@ -34594,10 +34607,11 @@ app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) =
 			const onTruck = db.prepare("SELECT id, trailer_number FROM trailers WHERE truck_id = ?").get(truck_id);
 			if (onTruck) return res.status(409).json({ error: `Truck already has trailer ${onTruck.trailer_number} assigned` });
 		}
+		// The VIN without its edge whitespace, as a truck's is stored.
 		const result = db.prepare(`
 			INSERT INTO trailers (trailer_number, type, length, year, vin, license_plate, status, truck_id, notes)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(trailer_number, type || 'Dry Van', length || '53', year || 0, vin || '', license_plate || '', status || 'Available', truck_id || null, notes || '');
+		`).run(trailer_number, type || 'Dry Van', length || '53', year || 0, (typeof vin === "string" ? vin.trim() : vin) || '', license_plate || '', status || 'Available', truck_id || null, notes || '');
 		notifyChange("trailers");
 		res.json({ success: true, id: result.lastInsertRowid });
 	} catch (err) {
@@ -34616,6 +34630,10 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 			const onTruck = db.prepare("SELECT id, trailer_number FROM trailers WHERE truck_id = ? AND id != ?").get(truck_id, id);
 			if (onTruck) return res.status(409).json({ error: `Truck already has trailer ${onTruck.trailer_number} assigned` });
 		}
+		// The VIN as PUT /api/trucks/:id treats it: compared without its edge
+		// whitespace, so a resend (padded or not) keeps the stored value as it is,
+		// and a real change is stored trimmed.
+		const vinChanged = vin != null && String(vin).trim() !== String(trailer.vin ?? "").trim();
 		db.prepare(`
 			UPDATE trailers SET trailer_number = ?, type = ?, length = ?, year = ?, vin = ?, license_plate = ?, status = ?, truck_id = ?, notes = ?
 			WHERE id = ?
@@ -34624,7 +34642,7 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 			type ?? trailer.type,
 			length ?? trailer.length,
 			year ?? trailer.year,
-			vin ?? trailer.vin,
+			vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
 			license_plate ?? trailer.license_plate,
 			status ?? trailer.status,
 			truck_id === undefined ? trailer.truck_id : (truck_id || null),
@@ -38083,6 +38101,9 @@ app.get("/api/data", requireRole("Super Admin"), async (req, res) => {
 	}
 });
 
+// The Load ID rule a new Job Tracking row is held to (see the append below).
+const loadIdRule = require("./lib/load-id-rule");
+
 // CREATE — Append a new row
 //
 // ⚠️ SUPER ADMIN ONLY (2026-09-26), like GET. It appends a caller-built row to
@@ -38150,8 +38171,12 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
-				if (lidIdx >= 0 && values[lidIdx]) {
-					const newLid = values[lidIdx].trim().toLowerCase().replace(/^#/, "");
+				// The ID as the row will store it, edge whitespace trimmed (the Load ID
+				// rule below trims it before the append), so the warning quotes the ID
+				// the new row carries rather than the padding it was sent with.
+				const sentLid = lidIdx >= 0 ? loadIdRule.trimLoadId(values[lidIdx]) : "";
+				if (sentLid) {
+					const newLid = sentLid.toLowerCase().replace(/^#/, "");
 					if (newLid) {
 						const allResp = await sheets.spreadsheets.values.get({
 							spreadsheetId: SPREADSHEET_ID,
@@ -38161,7 +38186,7 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 						for (let i = 1; i < allRows.length; i++) {
 							const existing = (allRows[i][lidIdx] || "").trim().toLowerCase().replace(/^#/, "");
 							if (existing === newLid) {
-								warning = `Load ID '${values[lidIdx]}' already exists (row ${i + 1}). A duplicate entry will be created.`;
+								warning = `Load ID '${sentLid}' already exists (row ${i + 1}). A duplicate entry will be created.`;
 								break;
 							}
 						}
@@ -38199,6 +38224,19 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 				});
 			}
 			appendHeaders = hdrs;
+			// A new load's Load ID is held to the rule its own pages open it by
+			// (lib/load-id-rule.js): its edge whitespace is trimmed before anything
+			// below reads it, and an ID those pages refuse (a space inside, a # after
+			// the first character, over 40 characters) is refused 400
+			// INVALID_LOAD_ID naming the column, with nothing written, so a load is
+			// never created that its details dialog cannot open. A blank Load ID is
+			// not judged here; New Job asks for one before it posts.
+			const loadIdIdx = Array.isArray(values) ? hdrs.findIndex((h) => /load.?id|job.?id/i.test(h)) : -1;
+			if (loadIdIdx >= 0 && loadIdRule.trimLoadId(values[loadIdIdx])) {
+				const loadIdRefusal = loadIdRule.newLoadIdRefusal(values[loadIdIdx], String(hdrs[loadIdIdx]).trim());
+				if (loadIdRefusal) return res.status(400).json(loadIdRefusal);
+				if (typeof values[loadIdIdx] === "string") values[loadIdIdx] = values[loadIdIdx].trim();
+			}
 			// A Driver cell that reads as a built-in property name is refused, 400
 			// DRIVER_NAME_RESERVED naming the column (driverCellRefusal(), as the row
 			// saves refuse it). A new row has no stored cells, so every cell counts.

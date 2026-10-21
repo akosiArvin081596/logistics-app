@@ -39,9 +39,20 @@
           <div class="form-group">
             <label class="form-label">Load ID *</label>
             <div class="input-with-btn">
-              <input v-model="form.loadId" class="form-input" type="text" placeholder="e.g. LD-20260402" />
+              <input
+                v-model="form.loadId"
+                class="form-input"
+                :class="{ 'is-invalid': loadIdProblem }"
+                type="text"
+                placeholder="e.g. LD-20260402"
+                :aria-invalid="loadIdProblem ? 'true' : 'false'"
+                :aria-describedby="loadIdProblem ? 'new-job-load-id-rule' : undefined"
+              />
               <button class="btn-gen" @click="generateId" title="Auto-generate">&#8635;</button>
             </div>
+            <!-- The rule the load's own pages open it by (client/src/lib/loadIdRule.js); the
+                 server refuses the same IDs with 400 INVALID_LOAD_ID. -->
+            <div v-if="loadIdProblem" id="new-job-load-id-rule" class="field-error" aria-live="polite">{{ loadIdProblem }}</div>
             <div v-if="duplicateWarning" class="field-warning">{{ duplicateWarning }}</div>
           </div>
           <div class="form-group">
@@ -184,7 +195,7 @@
       <!-- Actions -->
       <div class="form-actions">
         <router-link to="/dashboard" class="btn btn-secondary">Cancel</router-link>
-        <button class="btn btn-primary" :disabled="submitting || !form.loadId.trim()" @click="submit">
+        <button class="btn btn-primary" :disabled="submitting || !form.loadId.trim() || !!loadIdProblem" @click="submit">
           {{ submitting ? 'Creating...' : 'Create Job' }}
         </button>
       </div>
@@ -196,7 +207,7 @@
 
 <script setup>
 import { appToday } from '../utils/datetime'
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
@@ -204,6 +215,7 @@ import { useOffDutyConfirm } from '../composables/useOffDutyConfirm'
 import { useGeocode } from '../composables/useGeocode'
 import LocationPickerModal from '../components/data-manager/LocationPickerModal.vue'
 import RateConDropzone from '../components/shared/RateConDropzone.vue'
+import { loadIdFieldMessage } from '../lib/loadIdRule'
 
 const api = useApi()
 const router = useRouter()
@@ -242,6 +254,10 @@ const form = reactive({
   dropoffLng: '',
   details: '',
 })
+
+// The message under the Load ID field: a Load ID the load's own pages would
+// refuse can't be created (Create Job stays disabled and submit() refuses it).
+const loadIdProblem = computed(() => loadIdFieldMessage(form.loadId))
 
 // Inline address search
 const pickupSuggestions = ref([])
@@ -471,6 +487,10 @@ async function submit() {
 
   if (!form.loadId.trim()) {
     errorMsg.value = 'Load ID is required.'
+    return
+  }
+  if (loadIdProblem.value) {
+    errorMsg.value = loadIdProblem.value
     return
   }
 
@@ -742,6 +762,8 @@ onMounted(() => {
 
 .error-msg { color: var(--danger); font-size: 0.78rem; margin-top: 0.75rem; }
 .field-warning { color: var(--amber); font-size: 0.72rem; margin-top: 0.25rem; }
+.field-error { color: var(--danger); font-size: 0.72rem; margin-top: 0.25rem; }
+.form-input.is-invalid { border-color: var(--danger); }
 
 @media (max-width: 640px) {
   .form-row { flex-direction: column; gap: 0; }
