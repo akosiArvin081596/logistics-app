@@ -310,6 +310,59 @@ const R = M.createRunner("Dated daily rates: under the daily-rate rule each day 
 			r.mail && r.mail.text);
 	});
 
+	await R.test("DR7b (review L4) Flag on: check 8 names a day whose dated rate is $0 as the $250 default: Gus (a $0 row from Oct 2, his $175 saved Oct 20) billed $175 on Mon 10/5 is flagged against $250, \"no daily rate was in effect for the driver that day, so the daily rate is the $250.00 default\". Before: \"the driver's rate in effect that day is $250.00\"", async ({ eq, ok }) => {
+		const w = world({
+			payRates: [row(GUS, 0, SEED_AT), row(GUS, 175, "2026-10-20T14:00:00.000Z")],
+			extraRows: [loadRow({ id: "G101", driver: GUS, pickup: "2026-10-05 8:00", dropoff: "2026-10-05 18:00", assigned: "2026-10-05", done: "2026-10-05", truck: "T1" })],
+		});
+		M.insertInvoice(w.db, {
+			invoice_number: "INV-GT-2026W40-01", driver: GUS, week_start: "2026-10-03", week_end: "2026-10-09", loads_count: 1, rate_per_load: 175,
+			total_earnings: 175, status: "Submitted", render_data: JSON.stringify({ __templateName: "service_invoice", days: { Monday: { loadBol: "G101", total: 175, completed: true } } }),
+		});
+		const lift = liftOnto(w, ON);
+		const jt = await lift.getJobTrackingCached();
+		const rule = lift.driverRateOnlyDayRule(jt);
+		const out = ic.invoiceRateMismatches(w.db, { dailyRateRule: rule });
+		eq("flagged against the $250 default", out.mismatches.map((m) => [m.invoiceNumber, m.days, m.invoiceCents, m.directoryCents, m.defaultRate]), [["INV-GT-2026W40-01", ["2026-10-05"], 17500, 25000, true]]);
+		const r = await ic.runIntegrityCheck({
+			db: w.db, now: new Date("2026-10-21T12:00:30Z"), write: false, sendEmail: async () => undefined, to: "admin@example.test",
+			log: { log() {}, info() {}, warn() {}, error() {} }, readJobTracking: async () => jt, expensePeriodExpr: "strftime('%Y-%m', date)",
+			appZone: "America/New_York", dailyRateRuleFor: () => rule,
+		});
+		ok("the email says the $250 default",
+			!!r.mail && r.mail.text.includes("Invoice INV-GT-2026W40-01 (driver Gus Thorn, week 2026-10-03 to 2026-10-09, Submitted): billed at $175.00 a day on 2026-10-05; no daily rate was in effect for the driver that day, so the daily rate is the $250.00 default."),
+			r.mail && r.mail.text);
+	});
+
+	await R.test("DR14 (review M1) Flag on: the payout ledger's October row for Dale (paid at $280 and $320) carries its segments, and the payout statement prints its basis as \"1 day x $280 + 3 days x $320\" beside $1,240.00; Rae's one-rate row carries none and prints \"2 days × $260.00/day\" as before, the same page with or without a one-segment list. Before: no segments, \"4 days × $310.00/day\"", async ({ eq, ok }) => {
+		const w = world({ extraRows: [loadRow({ id: "R101", driver: RAE, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck: "T3" })] });
+		const carrierDB = w.api.getCarrierDBFromSQLite();
+		const config = {};
+		w.db.prepare("SELECT key, value FROM investor_config WHERE owner_id IN (0, 5) ORDER BY owner_id").all().forEach((r) => { config[r.key] = r.value; });
+		const out = await w.api.computeInvestorMonthlyEarnings({
+			user: { id: 5, role: "Investor", username: "inv5" }, isSuperAdmin: false, config, detailForMonth: "2026-10", investorOwnerId: 5,
+			investorDriverSet: w.api.getInvestorDriverSet(5, carrierDB.data, w.api.findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0], w.api.findCol(carrierDB.headers, /carrier/i)),
+		});
+		const rows = (out.detail && out.detail.driverPayRows) || [];
+		const dale = rows.find((x) => x.driver === norm(DALE)) || null;
+		const rae = rows.find((x) => x.driver === norm(RAE)) || null;
+		eq("Dale's row", dale && [dale.activeDays, dale.pay, dale.rates], [4, 1240, [{ days: 1, rate: 280 }, { days: 3, rate: 320 }]]);
+		eq("Rae's row: one rate, no segments", rae && [rae.activeDays, rae.dailyRate, rae.pay, "rates" in rae], [2, 260, 520, false]);
+		const S = require(path.join(ROOT, "lib", "payout-statement.js"));
+		const page = (payRows) => S.buildPayoutStatementHtml({
+			investorName: "Test Investor", investorCompany: "Test Holdings LLC", period: "2026-10", periodLabel: "October 2026", statementNo: "202610-5",
+			generatedAt: new Date("2026-11-20T17:00:00Z"), status: "paid", paidAt: "2026-11-20T15:00:00.000Z", paidBy: "super_admin", dueDate: "2026-11-30",
+			breakdown: { revenue: 8000, driverPay: 1760, fixedCosts: 0, tripExpenses: 0, maintFundCost: 0, complianceCost: 0, netProfit: 6240, splitPct: 50, monthShare: 3120 },
+			lossCarriedIn: 0, lossDeferred: 0, adjustment: 0, amount: 3120, effectiveAmount: 3120,
+			detail: { revenueLoads: [], driverPayRows: payRows, fixedCostItems: [], tripExpenseItems: [] },
+		});
+		const html = page([dale, rae].filter(Boolean));
+		ok("Dale's basis: each rate", html.includes("<td>1 day x $280 + 3 days x $320</td>"), (html.match(/<td>[^<]*day[^<]*<\/td>/g) || []).join(" | "));
+		ok("Rae's basis: as before", html.includes("<td>2 days &times; $260.00/day</td>"), (html.match(/<td>[^<]*day[^<]*<\/td>/g) || []).join(" | "));
+		const raeOnly = rae ? { ...rae } : {};
+		ok("a one-segment list prints the same page as none", page([raeOnly]) === page([{ ...raeOnly, rates: [{ days: 2, rate: 260 }] }]));
+	});
+
 	await R.test("DR8 The trip work-day rule alone (TRIP_WORK_DAYS on, DRIVER_RATE_ONLY off) prices like the ledger: Dale's W39 trip days are $320 each, as the ledger pays them, and the history is not read. Base: Thu 10/1 at the dated $280 while the ledger pays $320", async ({ eq }) => {
 		const env = TRIP_OCT;
 		const status = [s("D101", "At Shipper", "2026-10-01 09:00"), s("D101", "Delivered", "2026-10-02 17:00")];
