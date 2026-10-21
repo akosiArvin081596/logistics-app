@@ -1657,6 +1657,90 @@ section("§9 T6: the driver's own writes on his withheld-ID load reach the rest 
 	check("T6: a Super Admin's receipt list names the load as stored", hiddenIn(adminExp.body, ["5550100163"]).length > 0, true);
 });
 
+// ====================================================== §10 review Lows (PR 549)
+// L1: the latest index is the newest read's, whatever order the reads finish in
+// (a read that started before an invalidation never becomes the latest), and a
+// route uses its own read's index (through liveJobTrackingView()), not the latest.
+section("§10 L1: the latest index and a route's own read", async () => {
+	const { closure } = require(path.join(ROOT, "scripts", "lib", "server-lift"));
+	const provided = ["getSheets", "SPREADSHEET_ID", "getDeletedLoadIds", "require", "console"];
+	const roots = ["getJobTrackingCached", "jtCacheInvalidate", "currentShownLoadIdIndex", "routeShownLoadIdIndex", "liveJobTrackingView"];
+	const lifted = closure(SRC, { roots, provided });
+	const reads = [];
+	const getSheets = async () => ({ spreadsheets: { values: { get: () => new Promise((resolve) => reads.push(resolve)) } } });
+	const api = new Function(...provided, `"use strict";\n${lifted.text}\nreturn { ${roots.join(", ")} };`)(
+		getSheets, "sheet-under-test", () => new Set(), realRequire, quietConsole([]));
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+	const sheetOf = (rows) => ({ data: { values: [HEADERS.slice(), ...rows.map(cells)] } });
+	const older = api.getJobTrackingCached();
+	await tick();
+	api.jtCacheInvalidate();
+	const newer = api.getJobTrackingCached();
+	await tick();
+	// The newer read (H2: the row's own phone as its ID) finishes first, the older
+	// one (a normal load only) after it.
+	reads[1](sheetOf([H2]));
+	const b = await newer;
+	reads[0](sheetOf([N1]));
+	const a = await older;
+	const latest = api.currentShownLoadIdIndex();
+	check("L1: an older read finishing after a newer one leaves the newer read's index as the latest",
+		[reads.length, !!latest && !!latest.byKey.get("5550100163") && latest.byKey.get("5550100163").hidden, !!latest && latest.byKey.has("80000031")],
+		[2, true, false]);
+	const ownA = api.routeShownLoadIdIndex(api.liveJobTrackingView(a));
+	check("L1: a route uses its own read's index (through liveJobTrackingView()), not the latest",
+		[ownA !== latest, !!ownA && ownA.byKey.has("80000031"), api.routeShownLoadIdIndex(api.liveJobTrackingView(b)) === latest], [true, true, true]);
+});
+
+// L5: a notice's copy hands the index's own list over (its compiled pattern is
+// reused), and a list with a load not read yet only when there is one.
+section("§10 L5: the index's list is passed as is", async () => {
+	const got = [];
+	const staff = liftFunction("staffDispatchNotice", { brokerContact: { redactDispatchNotice: (n, opts) => { got.push(opts.hidden); return n; } } });
+	const extra = [{ raw: "5550100166", shown: WITHHELD_TEXT }];
+	staff({ title: "t" }, { index: HIDX });
+	staff({ title: "t" }, { index: HIDX, extraHidden: extra });
+	check("L5: no extra list: the index's own list; with one: both",
+		[got[0] === (HIDX && HIDX.hidden), got[1] !== (HIDX && HIDX.hidden), (got[1] || []).length === ((HIDX && HIDX.hidden.length) || 0) + 1], [true, true, true]);
+});
+
+// L4: the rate con's own Load Number is told from a typed one by a copy that
+// outlives the extract's (30 minutes, 200 entries): a Super Admin creating the
+// load from a rate con whose number holds a phone, after the extract's copy is
+// gone, is not refused.
+section("§10 L4: the rate con's own number after the extract's copy is gone", async () => {
+	const errors = [];
+	const common = { requireRole: () => null, rateConLimiter: null, console: quietConsole(errors) };
+	const answer = {
+		"Load Number": "QA-555-010-0172", "Broker Name": "Pat Agent", "Broker Phone": "(555) 010-0142", "Broker Email": "agent.one@example.invalid",
+		Rate: "$1,800.00", "Pickup Address": "100 Main St, Dallas, TX 75201", "Drop-off Address": "200 Oak Ave, Tulsa, OK 74103",
+		"Pickup Appointment Time": "01/20/2030 08:00", "Delivery Appointment Time": "01/21/2030 14:00", Details: "Dry van",
+	};
+	const extract = lift('app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+		...common, GEMINI_API_KEY: "test-key", runRateConGemini: async () => ({ ...answer }), rateConNormalizeOptions: () => ({}),
+		rateconNormalize: require(path.join(ROOT, "lib", "ratecon-normalize")), rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
+	});
+	const tabs = { "Job Tracking": [HEADERS.slice()], "Payments Table": [[" Job ID", "Contract ID", "Payment Amount"]], "Job Details": [["Load ID", "Rate Per Mile", "Distance", "Details", "Payment"]] };
+	const create = lift('app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), rateConLimiter, async (req, res) => {', {
+		...common, getSheets: fakeTabs(tabs).getSheets, SPREADSHEET_ID: "sheet-under-test", rateconLoad: require(path.join(ROOT, "lib", "ratecon-load")),
+		getDeletedLoadIds: () => new Set(), GOOGLE_MAPS_API_KEY: "", geocodeAddress: async () => null, appDay: () => "2030-01-19",
+		validateOwnerIdCell: () => null, jtCacheInvalidate: () => {}, notifyChange: () => {}, logAudit: () => {},
+		DATA_DIR: path.join(ROOT, "no-such-dir"), fs: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
+		db: emptyDb(), RATECON_DRIVE_FOLDER_ID: "", currentShownLoadIdIndex: () => null,
+		insertDispatchNotification: { run: () => ({ lastInsertRowid: 1 }) }, io: fakeIo([]),
+	});
+	const pdfBase64 = Buffer.from("%PDF-1.4 the extract's copy expires").toString("base64");
+	const served = await extract({ body: { pdfBase64 }, session: session("Super Admin") });
+	// 200 other extracts since: the extract's own copy of this one is gone.
+	for (let i = 0; i < 205; i++) bcLib.rateConStash.put(`evicting-${i}`, {});
+	const gone = bcLib.rateConStash.get(bcLib.rateConStashKey(pdfBase64));
+	const made = await create({ body: { fields: (served.body || {}).fields || {}, pdfBase64 }, session: session("Super Admin") });
+	check("L4: the extract's copy is gone (the check below is not vacuous)", [served.code, gone], [200, null]);
+	check("L4: a Super Admin's create with the rate con's own phone-shaped number: 200, created under it",
+		[made.code, (made.body || {}).loadId, (tabs["Job Tracking"][1] || [])[HEADERS.indexOf("Load ID")]], [200, "QA-555-010-0172", "QA-555-010-0172"]);
+	check("L4: no error logged", errors, []);
+});
+
 // ====================================================================== the run
 (async () => {
 	for (const [name, fn] of sections) {

@@ -41375,20 +41375,24 @@ function sanitizeBrokerColumns(headers, rows) {
 //
 // One index per Job Tracking read (lib/broker-contact.js buildShownLoadIdIndex(),
 // every row, soft-deleted and cancelled included, each with its own contact),
-// kept on the cached object (never changed) and built when getJobTrackingCached()
-// reads; the latest is what a caller with no read of its own uses.
+// built by getJobTrackingCached() as it parses the read, before the object is
+// shared, and kept on it under SHOWN_LOAD_ID_INDEX: a symbol, so JSON and
+// Object.keys() never see it, while liveJobTrackingView()'s spread carries it to
+// a route's own copy of the rows. The latest is the newest read's (a read
+// that started before an invalidation never becomes it), for a caller with no
+// read of its own. Any other object is indexed once, in SHOWN_LOAD_ID_INDEXES.
+const SHOWN_LOAD_ID_INDEX = Symbol("shownLoadIdIndex");
 const SHOWN_LOAD_ID_INDEXES = new WeakMap();
 const SHOWN_LOAD_ID_STATE = { latest: null };
-// `remember` false: a request's own copy of the rows (liveJobTrackingView()),
-// never kept as the latest.
-function shownLoadIdIndex(jt, { remember = true } = {}) {
+// `remember`: getJobTrackingCached()'s own call for a read still current.
+function shownLoadIdIndex(jt, { remember = false } = {}) {
 	if (!jt || typeof jt !== "object") return currentShownLoadIdIndex();
-	let index = SHOWN_LOAD_ID_INDEXES.get(jt);
+	let index = jt[SHOWN_LOAD_ID_INDEX] || SHOWN_LOAD_ID_INDEXES.get(jt);
 	if (!index) {
 		index = brokerContact.buildShownLoadIdIndex(jt.headers || [], jt.data || [], { withheldRe: BROKER_WITHHELD_RE });
 		SHOWN_LOAD_ID_INDEXES.set(jt, index);
-		if (remember) SHOWN_LOAD_ID_STATE.latest = index;
 	}
+	if (remember) SHOWN_LOAD_ID_STATE.latest = index;
 	return index;
 }
 // The index of the latest Job Tracking read, or null before the first one (an
@@ -41396,10 +41400,11 @@ function shownLoadIdIndex(jt, { remember = true } = {}) {
 function currentShownLoadIdIndex() {
 	return SHOWN_LOAD_ID_STATE.latest;
 }
-// The index for a route that holds a Job Tracking read of its own: the latest
-// one, else one built over the route's own rows.
+// The index for a route that holds a Job Tracking read of its own, the cached
+// object or liveJobTrackingView()'s copy of it: that read's own index (built
+// over its rows when it has none).
 function routeShownLoadIdIndex(jt) {
-	return currentShownLoadIdIndex() || shownLoadIdIndex(jt, { remember: false });
+	return shownLoadIdIndex(jt);
 }
 // Whether `who` (a request, or a role name) is served Load IDs withheld.
 function loadIdWithheldFor(who) {
@@ -41418,8 +41423,11 @@ function shownLoadId(who, raw, { row = null, own = null, index = currentShownLoa
 // withheld Load ID (the index's, plus `extraHidden`, a load not read yet) swapped
 // for its shown text in title, body and metadata, then the notice redacted
 // (lib/broker-contact.js redactDispatchNotice()).
+// The index's own list is handed over as is, so its compiled pattern is reused;
+// a new list only when there is an extra one.
 function staffDispatchNotice(notice, { index = currentShownLoadIdIndex(), extraHidden = null } = {}) {
-	const hidden = [...(extraHidden || []), ...((index && index.hidden) || [])];
+	const indexed = (index && index.hidden) || [];
+	const hidden = extraHidden && extraHidden.length ? [...extraHidden, ...indexed] : indexed;
 	return brokerContact.redactDispatchNotice(notice, { hidden });
 }
 // One dispatch notice, live, per role (emitDispatchByRole()): Super Admins get
@@ -47806,11 +47814,14 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// switch says, and with BROKER_CONTACT_VALUE_REDACTION_ENABLED every other
 			// value redacted. The original is kept in memory for this PDF, so the
 			// create that follows writes the rate con's own broker contact (POST
-			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()). Kept for
-			// a Super Admin too (the answer unchanged): the create tells the rate
-			// con's own Load Number from one the person typed by it.
-			brokerContact.rateConStash.put(brokerContact.rateConStashKey(base64), fields);
+			// /api/loads/from-ratecon, brokerContact.rateConCreateFields()). The rate
+			// con's own Load Number is kept for every role, longer and apart from
+			// that copy (the answer unchanged): the create tells it from one the
+			// person typed (brokerContact.rateConNumberStash).
+			const stashKey = brokerContact.rateConStashKey(base64);
+			brokerContact.rateConNumberStash.put(stashKey, { "Load Number": fields["Load Number"] });
 			if (req.session.user.role !== "Super Admin") {
+				brokerContact.rateConStash.put(stashKey, fields);
 				return res.json({
 					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
 					warnings: rateconLoad.extractionWarnings(fields),
@@ -47880,8 +47891,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// Before every check below, so they judge the fields as they will be written.
 		let brokerContactMissed = false;
 		let fromExtract = [];
-		const held = brokerContact.rateConStash.get(brokerContact.rateConStashKey(pdfBase64));
+		const stashKey = brokerContact.rateConStashKey(pdfBase64);
 		if (req.session.user.role !== "Super Admin") {
+			const held = brokerContact.rateConStash.get(stashKey);
 			const merged = brokerContact.rateConCreateFields(fields, held, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED });
 			fields = merged.fields;
 			brokerContactMissed = merged.missed;
@@ -47912,7 +47924,8 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		// read it for this PDF) holding a phone or an email is refused for every
 		// role, as the row saves refuse it in Load ID (400 CONTACT_NOT_ALLOWED). The
 		// rate con's own number, and n8n's, go through.
-		const extractedNumber = held ? String(held["Load Number"] == null ? "" : held["Load Number"]).trim() : null;
+		const ownNumber = brokerContact.rateConNumberStash.get(stashKey);
+		const extractedNumber = ownNumber ? String(ownNumber["Load Number"] == null ? "" : ownNumber["Load Number"]).trim() : null;
 		if (loadId !== extractedNumber && brokerContact.hasContact(loadId)) {
 			return res.status(400).json({
 				error: "\"Load Number\" can't hold an email address or a phone number. Enter the load number instead.",
@@ -57617,9 +57630,12 @@ async function getJobTrackingCached() {
 		const response = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
 		const parsed = parseSheet(response.data);
 		parsed.data = deduplicateLoads(parsed.data, parsed.headers);
-		// The Load IDs as every role but Super Admin is served them, for the
-		// callers with no read of their own (shownLoadIdIndex()). Never fails the read.
-		try { shownLoadIdIndex(parsed); } catch (e) { console.error("[load-ids] index not built:", e.message); }
+		// The Load IDs as every role but Super Admin is served them, kept on this
+		// read before it is shared (shownLoadIdIndex()), and the latest only while
+		// no invalidation has come since the read started. Never fails the read.
+		try {
+			parsed[SHOWN_LOAD_ID_INDEX] = shownLoadIdIndex(parsed, { remember: _jtEpoch === epoch });
+		} catch (e) { console.error("[load-ids] index not built:", e.message); }
 		if (_jtEpoch === epoch) _jtCache = { data: parsed, at: Date.now() };
 		return parsed;
 	})();

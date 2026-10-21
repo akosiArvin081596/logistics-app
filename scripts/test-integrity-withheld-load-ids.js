@@ -185,7 +185,11 @@ const reportedRows = (db) => (tableExists(db) ? db.prepare(`SELECT load_id FROM 
 	ok("§2 one line per load naming what other roles see",
 		text.includes(`Load QA-555-010-0161: its Load ID holds broker contact, so every role but Super Admin sees it as "QA-${W}".`), text);
 	ok("§2 the email says nothing of the closed-month load", !/QA-555-010-0170/.test(text));
-	ok("§2 the log line names the loads", /Load ID withheld from other roles: load QA-555-010-0161, agent\.h4@example\.invalid, 5550100163/.test(first.log.lines.join("\n")), first.log.lines);
+	// The server log is read more widely than the admin inbox: it counts the loads
+	// and names no withheld ID (the email names them).
+	const logText = first.log.lines.join("\n");
+	ok("§2 the log line counts the loads and names no withheld ID",
+		/3 loads with a Load ID withheld from other roles/.test(logText) && !/QA-555-010-0161|agent\.h4@example\.invalid|5550100163/.test(logText), first.log.lines);
 
 	console.log("§3 once per load");
 	ok("§3 the recorded run named the three loads", JSON.stringify(reportedRows(db)) === JSON.stringify(["5550100163", "agent.h4@example.invalid", "qa-555-010-0161"]), reportedRows(db));

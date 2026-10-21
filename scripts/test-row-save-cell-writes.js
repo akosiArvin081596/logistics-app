@@ -132,6 +132,7 @@ const CONSTS = [
 	extractConst("const JT_MONEY_COLUMN_PATTERNS = [", "\n];"),
 	// The Load ID rule a non-Super-Admin's ROW_MOVED check reads
 	// (staffRowMovedRefusal()), and the sheet it reads again.
+	extractConst("const SHOWN_LOAD_ID_INDEX = "),
 	extractConst("const SHOWN_LOAD_ID_INDEXES = "),
 	extractConst("const SHOWN_LOAD_ID_STATE = "),
 	'const SPREADSHEET_ID = "sheet-under-test";',

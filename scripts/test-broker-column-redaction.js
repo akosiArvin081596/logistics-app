@@ -172,7 +172,7 @@ function buildModule(overrides = {}, reSrc = reMatch[1]) {
 	const s = { ...REAL_SRC, ...overrides };
 	return new Function("brokerContact",
 		`const BROKER_WITHHELD_RE = ${reSrc};\nconst BROKER_CONTACT_VALUE_REDACTION_ENABLED = ${flagMatch[1]};\n` +
-		"const SHOWN_LOAD_ID_INDEXES = new WeakMap();\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n" +
+		"const SHOWN_LOAD_ID_INDEX = Symbol(\"shownLoadIdIndex\");\nconst SHOWN_LOAD_ID_INDEXES = new WeakMap();\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n" +
 		`${REAL.map((n) => s[n]).join("\n")}\nreturn { ${REAL.join(", ")} };`
 	)(BROKER_CONTACT);
 }
