@@ -2,8 +2,19 @@
   <div :class="['msg-bubble', isSent ? 'sent' : 'received']">
     <div v-if="msg.loadId" class="msg-load-tag">{{ msg.loadId }}</div>
     <div v-if="msg.attachment_url" class="msg-attachment">
-      <img v-if="msg.attachment_type === 'image'" :src="msg.attachment_url" class="msg-attach-img" />
-      <a v-else :href="msg.attachment_url" target="_blank" class="msg-attach-file">{{ msg.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+      <!-- A photo opens full size (MessagingPanel's viewer); focus comes back
+           to this button when the viewer closes. -->
+      <button
+        v-if="photo"
+        type="button"
+        class="msg-attach-photo"
+        :aria-label="`Open full size: ${photoAlt}`"
+        @click="emit('open-photo', msg)"
+      >
+        <img :src="msg.attachment_url" :alt="photoAlt" class="msg-attach-img" />
+      </button>
+      <a v-else-if="ownFile" :href="msg.attachment_url" target="_blank" class="msg-attach-file">{{ msg.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+      <span v-else class="msg-attach-file">File unavailable</span>
     </div>
     <div v-if="msg.message">{{ msg.message }}</div>
     <div class="msg-meta">
@@ -16,10 +27,16 @@
 <script setup>
 import { computed } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
+import { chatPhotoAlt, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 
 const props = defineProps({
   msg: { type: Object, required: true },
 })
+const emit = defineEmits(['open-photo'])
+
+const photo = computed(() => isChatPhoto(props.msg))
+const ownFile = computed(() => isOwnUploadUrl(props.msg.attachment_url))
+const photoAlt = computed(() => chatPhotoAlt(props.msg))
 
 const isSent = computed(() => {
   const from = (props.msg.from || '').toLowerCase()
@@ -44,6 +61,11 @@ const time = computed(() => fmtAppInstant(props.msg.timestamp, { hour: 'numeric'
   color: #93c5fd;
 }
 .msg-attachment { margin-bottom: 0.3rem; }
+.msg-attach-photo {
+  display: block; padding: 0; border: none; background: none; border-radius: 6px;
+  cursor: zoom-in; font: inherit; color: inherit;
+}
+.msg-attach-photo:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .msg-attach-img { max-width: 200px; max-height: 150px; border-radius: 6px; display: block; }
 .msg-attach-file {
   display: inline-block; padding: 0.3rem 0.6rem; background: rgba(255,255,255,0.2);
