@@ -28,6 +28,15 @@
  * [Qn] in a title: the expected days follow the plan's recommended answer to open
  * question n. A different answer changes that case.
  *
+ * Rule d (pay plan 2026-10-21, section 1; Arvin's P1-P18): A1, A5, A6, A7 and A8
+ * follow rule d. The rule changed, not the case: with no ELD fix in a trip's span
+ * every span day is paid, so A1 now pays the heading day; a late Delivered tap
+ * with the receiver exit unreadable pays the At Receiver day and the Delivered day,
+ * not the days between (P8 (b)), so A5 pays Fri and the tap day; a pickup-geofence
+ * fix is an ELD fix, so A6's Sunday arrival with no driving is a waiting day; a
+ * Delivered-only load (A7) and a load with no rows (A8) follow the rule once the
+ * path gives its window. scripts/test-trip-work-days-rule-d.js holds D01-D29.
+ *
  * A11 runs the same inputs in child processes under TZ=UTC, America/New_York,
  * America/Chicago, America/Los_Angeles and Asia/Manila; the answers must match.
  *
@@ -89,7 +98,7 @@ process.env.TZ = "UTC";
 const R = W.createRunner("B12 A: tripDaysForLoad() and createTripDayResolver() (lib/trip-work-days.js)");
 
 (async () => {
-	await R.test("A1 Heading to Shipper (Wed 20:52 ET) and Dispatched are no work start; At Shipper Thu starts the trip: Thu and Fri, Wed nothing (the resolver reads the same days, keyed like statusKey(), clipped to range; a load settling before FROM is null)", ({ eq }) => {
+	await R.test("A1 [rule d] Heading to Shipper (Wed 20:52 ET) after the Wed dispatch starts the trip; with no ELD fix in the span every span day is paid: Wed to Fri (the resolver reads the same days, keyed like statusKey(), clipped to range; a load settling before FROM is null)", ({ eq }) => {
 		const events = [
 			ev("Dispatched", "2026-09-30 14:00:00", "dispatch", "super_admin"),
 			ev("Heading to Shipper", "2026-10-01 00:52:00"), // Wed 20:52 ET
@@ -100,9 +109,10 @@ const R = W.createRunner("B12 A: tripDaysForLoad() and createTripDayResolver() (
 		];
 		const t = trip(events);
 		eq("basis", t.basis, "trip");
-		eq("days", sorted(t.days), ["2026-10-01", "2026-10-02"]);
+		eq("days", sorted(t.days), ["2026-09-30", "2026-10-01", "2026-10-02"]);
+		eq("the heading day opens the span, paid for want of an ELD fix", t.reasons && t.reasons["2026-09-30"], "noEld");
 		const r = resolverOn(rowsOf("a101", events));
-		eq("resolver, load id as the sheet spells it (#A101)", daysOf(r.forLoad({ loadId: "#A101", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" } })), ["2026-10-01", "2026-10-02"]);
+		eq("resolver, load id as the sheet spells it (#A101)", daysOf(r.forLoad({ loadId: "#A101", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" } })), ["2026-09-30", "2026-10-01", "2026-10-02"]);
 		eq("resolver clips to the range", daysOf(r.forLoad({ loadId: "A101", settleMonth: "2026-10", range: { start: "2026-10-02", end: "2026-10-08" } })), ["2026-10-02"]);
 		eq("resolver: a load settling before FROM (2026-08 < 2026-09) is null", r.forLoad({ loadId: "A101", settleMonth: "2026-08", range: { start: "2026-09-26", end: "2026-10-02" } }), null);
 	});
@@ -129,16 +139,17 @@ const R = W.createRunner("B12 A: tripDaysForLoad() and createTripDayResolver() (
 		ok("no late-tap flag for a Delivered one day after At Receiver", !W.hasFlag(t.flags, "lateTap"), JSON.stringify(t.flags));
 	});
 
-	await R.test("A5 [Q1] At Receiver Fri 9/25 20:33 ET, Delivered tapped Sun 9/27, and in a second load Mon 9/28: the trip ends Fri in both, flagged lateTap", ({ eq, ok }) => {
+	await R.test("A5 [P8 (b)] At Receiver Fri 9/25 20:33 ET, Delivered tapped Sun 9/27, and in a second load Mon 9/28, the receiver exit unreadable: the At Receiver day and the Delivered day are paid, not the days between, flagged lateTap", ({ eq, ok }) => {
 		const base = [ev("At Shipper", "2026-09-25 05:14:00"), ev("At Receiver", "2026-09-26 00:33:00")];
 		const sun = trip([...base, ev("Delivered", "2026-09-27 15:00:00")]);
 		const mon = trip([...base, ev("Delivered", "2026-09-28 17:27:00")]);
-		eq("Delivered Sun: Fri only", sorted(sun.days), ["2026-09-25"]);
-		eq("Delivered Mon: Fri only", sorted(mon.days), ["2026-09-25"]);
+		eq("Delivered Sun: Fri and Sun", sorted(sun.days), ["2026-09-25", "2026-09-27"]);
+		eq("Delivered Mon: Fri and Mon", sorted(mon.days), ["2026-09-25", "2026-09-28"]);
+		eq("the days between are dropped as the late tap's gap", [sun.dropped && sun.dropped["2026-09-26"], mon.dropped && mon.dropped["2026-09-27"]], ["lateTapGap", "lateTapGap"]);
 		ok("both flagged lateTap", W.hasFlag(sun.flags, "lateTap") && W.hasFlag(mon.flags, "lateTap"), JSON.stringify([sun.flags, mon.flags]));
 	});
 
-	await R.test("A6 [Q2] No At Shipper: the first In Transit (Mon 18:44 ET) starts the trip, Delivered Tue: Mon and Tue, flagged noAtShipper; an ELD fix inside the pickup geofence on Sun after a Sat dispatch starts it Sun; a fix before dispatch is ignored", ({ eq, ok }) => {
+	await R.test("A6 [Q2; rule d] No At Shipper: the first In Transit (Mon 18:44 ET) is the arrival, Delivered Tue: Mon and Tue, flagged noAtShipper; an ELD fix inside the pickup geofence on Sun after a Sat dispatch makes Sun the arrival and, being an ELD fix, a day the truck did not drive: Sun is a waiting day (Mon, the In Transit day, is the loading day), paid when the ELD shows driving that day; a fix before dispatch is ignored", ({ eq, ok }) => {
 		const events = [
 			ev("Dispatched", "2026-09-28 19:53:00", "dispatch", "super_admin"), // Mon 15:53
 			ev("In Transit", "2026-09-28 22:44:00"), // Mon 18:44
@@ -150,23 +161,35 @@ const R = W.createRunner("B12 A: tripDaysForLoad() and createTripDayResolver() (
 		ok("flagged noAtShipper", W.hasFlag(t.flags, "noAtShipper"), JSON.stringify(t.flags));
 		const early = [ev("Dispatched", "2026-09-26 18:00:00", "dispatch", "super_admin"), ...events.slice(1)];
 		const fixes = [W.etMs("2026-09-25 10:00"), W.etMs("2026-09-27 14:00")];
-		eq("Sat dispatch, geofence fix Sun 14:00 ET: Sun to Tue", sorted(trip(early, { pickupFixesMs: fixes }).days), ["2026-09-27", "2026-09-28", "2026-09-29"]);
+		const atSun = trip(early, { pickupFixesMs: fixes });
+		eq("Sat dispatch, geofence fix Sun 14:00 ET, no driving Sun: Mon and Tue", sorted(atSun.days), ["2026-09-28", "2026-09-29"]);
+		eq("…Sun is the arrival, a waiting day", [markDay(atSun.start), atSun.dropped && atSun.dropped["2026-09-27"]], ["2026-09-27", "waiting"]);
+		eq("…the ELD shows driving Sun: Sun to Tue", sorted(trip(early, { pickupFixesMs: fixes, eld: { covered: new Set(["2026-09-27"]), driving: new Set(["2026-09-27"]) } }).days), ["2026-09-27", "2026-09-28", "2026-09-29"]);
 		eq("Mon dispatch, geofence fix Sun (before dispatch): still Mon and Tue", sorted(trip(events, { pickupFixesMs: [W.etMs("2026-09-27 14:00")] }).days), ["2026-09-28", "2026-09-29"]);
 	});
 
-	await R.test("A7 [Q2] A Delivered tap only: basis partial, flagged deliveredOnly, and the resolver returns null (today's rule applies)", ({ eq, ok }) => {
+	await R.test("A7 [Q2; rule d, Q3] A Delivered tap only: with no window, basis partial, flagged deliveredOnly, and the resolver returns null (today's rule applies); with the path's window (Mon 9/28 to Wed 9/30) it follows the rule, each anchor on its own: the pickup appointment is the arrival and loading day, the tap the unloading day, no ELD: Mon to Wed", ({ eq, ok }) => {
 		const events = [ev("Delivered", "2026-09-30 18:00:00")];
 		const t = trip(events);
 		eq("basis", t.basis, "partial");
 		ok("flagged deliveredOnly", W.hasFlag(t.flags, "deliveredOnly"), JSON.stringify(t.flags));
 		eq("resolver", resolverOn(rowsOf("a107", events)).forLoad({ loadId: "A107", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" } }), null);
+		const window = { start: "2026-09-28", end: "2026-09-30", pickup: "2026-09-28", assigned: "2026-09-28" };
+		const withWindow = trip(events, { window });
+		eq("with the window: basis trip, Mon to Wed", [withWindow.basis, sorted(withWindow.days)], ["trip", ["2026-09-28", "2026-09-29", "2026-09-30"]]);
+		eq("resolver with the window", daysOf(resolverOn(rowsOf("a107", events)).forLoad({ loadId: "A107", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" }, window })), ["2026-09-28", "2026-09-29", "2026-09-30"]);
 	});
 
-	await R.test("A8 No history rows: basis none, no days, and the resolver returns null", ({ eq }) => {
+	await R.test("A8 [rule d, Q6] No history rows: with no window, basis none, no days, and the resolver returns null; with the path's window (Mon 9/28 to Wed 9/30) the appointment days are paid and, the ELD covering the span, the days between only when it shows driving", ({ eq }) => {
 		const t = trip([]);
 		eq("basis", t.basis, "none");
 		eq("days", sorted(t.days), []);
 		eq("resolver", resolverOn([]).forLoad({ loadId: "A108", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" } }), null);
+		const window = { start: "2026-09-28", end: "2026-09-30", pickup: "2026-09-28", assigned: "2026-09-28" };
+		const noEld = trip([], { window });
+		eq("no ELD: the window", [noEld.basis, sorted(noEld.days)], ["appointments", ["2026-09-28", "2026-09-29", "2026-09-30"]]);
+		eq("ELD parked Tue: Mon and Wed", sorted(trip([], { window, eld: { covered: new Set(["2026-09-28", "2026-09-29", "2026-09-30"]), driving: new Set() } }).days), ["2026-09-28", "2026-09-30"]);
+		eq("resolver with the window, no truck", daysOf(resolverOn([]).forLoad({ loadId: "A108", settleMonth: "2026-10", range: { start: "2026-09-26", end: "2026-10-02" }, window })), ["2026-09-28", "2026-09-29", "2026-09-30"]);
 	});
 
 	await R.test("A9 At Shipper Mon, Cancelled Mon, re-dispatched Tue, At Shipper Wed, Delivered Thu: only the events after the last Cancelled count, Wed and Thu", ({ eq }) => {
