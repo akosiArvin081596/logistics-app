@@ -88,7 +88,7 @@ const FNS = [
 	"getDriverPayStructures", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "expenseDriverKey", "foldExpenseTotalsByDriver",
 	"getDeductibleExpensesByDriverMonth", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules",
 	"findCol", "pickAddressColumn", "loadKeySet", "excludeDroppedLoads", "liveJobTrackingView", "moneySheetDate",
-	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "resolveInvestorSplitPct", "resolvePreviewUser",
+	"appDay", "appMonthStart", "getWeekRange", "resolveDailyRate", "driverDayRater", "driverRateOnlyApplies", "driverRateOnlyStartRecord", "truckRatesByDriver", "recordDriverRateOnlyAtClose", "forgetDriverRateOnlyMonths", "resolveInvestorSplitPct", "resolvePreviewUser",
 	"getCarrierDBFromSQLite", "getInvestorDriverSet", "getInvestorDriverMonthWindows", "investorExpenseScopeSql", "expenseFrom", "personalLedgerPresent",
 	"assignmentMonthKey", "intersectMonthWindow", "truckChargeFromMonth", "truckChargeUntilMonth",
 	"truckChargedInMonth", "truckMonthlyFixed", "truckBilledMonthCount", "computeLossCarryForward",
