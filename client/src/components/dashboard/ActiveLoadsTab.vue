@@ -130,7 +130,7 @@
           <div class="detail-head" style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
             <div class="detail-title" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
               <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
-              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Click Edit to fill in the gaps.">⚠ Needs Review</span>
+              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             </div>
             <div class="detail-actions" style="display:flex;gap:0.5rem;align-items:center;">
               <button
@@ -298,6 +298,7 @@
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :fix-at="mapDriverPosition ? mapDriverPosition.fixAt : null" :planned-lane="plannedLane" dispatch-mode show-arrival />
             <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
+          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -509,6 +510,7 @@ import EmptyState from '../shared/EmptyState.vue'
 import PaginationBar from '../shared/PaginationBar.vue'
 import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import LoadHaulSection from './LoadHaulSection.vue'
+import DriverInstructionsSection from './DriverInstructionsSection.vue'
 import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'

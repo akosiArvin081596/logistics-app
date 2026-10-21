@@ -110,7 +110,7 @@
             <div class="flex items-center gap-3" style="flex-wrap:wrap;">
               <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
               <StatusBadge v-if="statusValue" :status="statusValue" />
-              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" title="Rate or address is missing from the rate-con extract. Open in Active Loads → Edit to fill the gaps.">⚠ Needs Review</span>
+              <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             </div>
             <div style="display:flex;gap:0.5rem;align-items:center;">
               <button
@@ -173,6 +173,7 @@
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
+          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
     </Dialog>
@@ -259,6 +260,7 @@ import DriverRouteMap from '../driver/DriverRouteMap.vue'
 import ConfirmModal from '../shared/ConfirmModal.vue'
 import RateConDropzone from '../shared/RateConDropzone.vue'
 import RateConReviewModal from '../shared/RateConReviewModal.vue'
+import DriverInstructionsSection from './DriverInstructionsSection.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useDashboardStore } from '../../stores/dashboard'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
