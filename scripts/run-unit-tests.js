@@ -238,8 +238,10 @@ async function main() {
 	const toRun = files.filter((f) => !skipped.includes(f));
 
 	if (process.argv.includes("--list")) {
-		for (const f of toRun) console.log(f);
-		process.exit(0);
+		// One write, and the exit only once it has drained: process.exit() straight
+		// after console.log can cut a piped list short on a busy machine.
+		process.stdout.write(toRun.map((f) => `${f}\n`).join(""), () => process.exit(0));
+		return;
 	}
 
 	console.log(
