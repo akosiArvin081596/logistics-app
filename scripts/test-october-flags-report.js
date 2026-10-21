@@ -98,7 +98,10 @@ const EVE = "Eve Park";
 const GUS = "Gus Hale";
 const HAL = "Hal Ives";
 const IKE = "Ike Moe";
-async function b12World() {
+// `deletedDraft`: a correction Draft for Dot's W39 naming 10/1 and 10/2 was made
+// and then deleted by a Super Admin (as "not valid") before F702 was delivered:
+// the switch-on carries neither day again (2026-10-21 item 2, the MR 10/2 shape).
+async function b12World({ deletedDraft = false } = {}) {
 	const oct = (id, driver, truck) => loadRow({ id, driver, pickup: "2026-10-05 8:00", dropoff: "2026-10-06 18:00", assigned: "2026-10-05", done: "2026-10-06", truck });
 	const w = M.startWorld({
 		env: ENV, now: M.etMs("2026-10-02 20:00"),
@@ -119,6 +122,18 @@ async function b12World() {
 		],
 	});
 	const dot = await M.generate(w, DOT, "2026-10-02");
+	if (deletedDraft) {
+		const n = dot.invoice.invoice_number;
+		const lines = [
+			{ date: "2026-10-01", description: `Correction for ${n}: Thursday, October 1, 2026, $260`, amount: 260 },
+			{ date: "2026-10-02", description: `Correction for ${n}: Friday, October 2, 2026, $260`, amount: 260 },
+		];
+		// The invoice routes work-days-world lifts (money-plans-world's route() is its own).
+		const WD = require("./lib/work-days-world");
+		const m = await WD.route(w, "POST /api/invoices/manual", { body: { payee: DOT, periodStart: "2026-10-01", periodEnd: "2026-10-02", lineItems: lines } });
+		const del = await WD.route(w, "DELETE /api/invoices/:id", { params: { id: String(m.body && m.body.invoice && m.body.invoice.id) }, query: { reason: "not valid" } });
+		if (m.status !== 200 || del.status !== 200) throw new Error(`the deleted correction draft was not made (${m.status}, ${del.status})`);
+	}
 	w.addStatus([s("F702", "Delivered", "2026-10-03 16:00")]);
 	w.setRow("F702", { "Job Status": "Delivered", "Status Update Date": "10/3/2026", "Completion Date": "10/3/2026" });
 	M.lockMonth(w.db, "2026-09", "2026-10-15T05:00:00.000Z");
@@ -393,6 +408,20 @@ const R = M.createRunner("The combined October what-would-change report (scripts
 		eq("all three: Hal's W40 Draft", invoiceRows(out.result, "allThree").filter((i) => i.number === f.hal).map((i) => [i.status, i.repriced, i.amount]), [
 			["Draft", [["2026-10-05", 350, 300], ["2026-10-06", 350, 300]], [700, 600, -100]],
 		]);
+	});
+
+	await R.test("O24 (2026-10-21 item 2) A day a deleted correction Draft named is never carried again, so the report does not count it as an invoice change: Dot's W39 adds nothing ($520 -> $520); 10/1-10/2 ($520) are listed for a person to decide, as deleted-draft days the switch-on refuses. Before: added on a correction Draft (+$520)", async ({ eq }) => {
+		const f = await b12World({ deletedDraft: true });
+		const out = await inProcess(M.saveCopy(f.w, ENV), { ready: null });
+		eq("exit code", out.code, 0);
+		const r = out.result || {};
+		for (const k of ["b12", "allThreeB4AsDesigned"]) {
+			const row = ((r.invoices || {})[k] || []).find((i) => i.invoiceNumber === f.dot) || {};
+			eq(`${k}: Dot's W39 adds nothing`, [row.addedDays, row.amountNow, row.amountScenario], [[], 520, 520]);
+			eq(`${k}: 10/1-10/2 left to a person, as deleted-draft days`, (row.notAdded || []).map((x) => [x.days, x.amount, /deleted/.test(x.reason)]), [[["2026-10-01", "2026-10-02"], 520, true]]);
+			eq(`${k}: the refused days`, (((r.refusedDays || {})[k]) || []).filter((d) => d.driver === DOT).map((d) => [d.day, d.kind]), [["2026-09-30", "closedMonth"], ["2026-10-01", "deletedDraft"], ["2026-10-02", "deletedDraft"]]);
+		}
+		eq("check c: the deleted-draft days, once each", ((r.checkC && r.checkC.deletedDraftDays) || []).filter((d) => d.driver === DOT).map((d) => d.day), ["2026-10-01", "2026-10-02"]);
 	});
 
 	await R.test("O16 (review L6) A percentage driver's October pay is the same in every scenario, and the report says so. Before: not checked", async ({ eq, ok }) => {
