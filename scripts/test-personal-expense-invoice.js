@@ -526,8 +526,11 @@ const SAT_0630 = edt("2026-10-17", 6, 30);
 		check("the payment report serves both columns and the total due", report.invoices.map((r) => [r.personal_total, r.personal_share_total, r.total_due]), [[200, 0, 700]]);
 		const driverList = SRC.slice(SRC.indexOf("const driverInvoices = db.prepare("), SRC.indexOf("const driverInvoices = db.prepare(") + 900);
 		check("the driver app list selects both columns", [/personal_total/.test(driverList), /personal_share_total/.test(driverList)], [true, true]);
-		const fin = SRC.slice(SRC.indexOf("const invByDriver = Object.create(null);"), SRC.indexOf("const invByDriver = Object.create(null);") + 1200);
-		check("Financials \"invoiced\" adds the share returned and never subtracts repayments", [/personal_share_total/.test(fin), /personal_total\b(?!_)/.test(fin.replace(/personal_share_total/g, ""))], [true, false]);
+		// The invoiced figure's columns are read by financialsInvoiceShares() and
+		// added up by lib/invoice-month-split.js.
+		const finStart = SRC.indexOf("function financialsInvoiceShares(");
+		const fin = SRC.slice(finStart, SRC.indexOf("\n}\n", finStart)) + require("fs").readFileSync(path.join(__dirname, "..", "lib", "invoice-month-split.js"), "utf8");
+		check("Financials \"invoiced\" adds the share returned and never subtracts repayments", [finStart !== -1 && /personal_share_total/.test(fin), /personal_total\b(?!_)/.test(fin.replace(/personal_share_total/g, ""))], [true, false]);
 		const delAudit = SRC.slice(SRC.indexOf('app.delete("/api/invoices/:id"'), SRC.indexOf('app.put("/api/invoices/:id/restore"'));
 		check("the delete audit's total is invoiceTotalDue()", /invoiceTotalDue\(invoice\)/.test(delAudit), true);
 		w.cleanup();
