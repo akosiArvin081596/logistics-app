@@ -10,7 +10,13 @@
 // setting as the app's .env has it, and reports:
 //   - perDay: each driver-day the payout ledger pays differently, with its
 //     scope (owner id; 0 is the company), the load, the trip timestamp behind
-//     the day and its flags (lateTap, noAtShipper, multiActor, ...);
+//     the day, its flags (lateTap, noAtShipper, multiActor, noEld, ...) and
+//     rule d's reason: why an added day is paid (heading, driving, loading,
+//     loading-fallback, unloading, appointment, noEld) or a removed one is not
+//     (waiting, restDay, dark, lateTapGap, outsideSpan, windowRule); counted in
+//     the summary;
+//   - tripErrors: loads whose trip history or ELD could not be read (every path
+//     pays them by their window; the month-lock guards refuse on them);
 //   - driverMonths: per scope, driver and month, days and driver pay changed;
 //   - investorMonths: per investor and month, the payable now and with the rule
 //     (the loss carried forward included), and driver pay;
@@ -25,7 +31,8 @@
 //   - refusedDays: days of --from..--to worked by the trip timestamps that no
 //     invoice will carry, with the reason and amount (before the floor: paid by
 //     the ledger, on no invoice; a load settling before FROM; a closed month; a
-//     manual invoice or an adjustment that may already pay it);
+//     manual invoice or an adjustment that may already pay it; a manual invoice
+//     naming it that a Super Admin deleted, "deletedDraft");
 //   - backfillRows / backfillConflicts: what scripts/backfill-invoice-paid-days.js
 //     would write first;
 //   - closedMonthsUnchanged and monthsBeforeFromUnchanged: every closed month,
@@ -84,8 +91,11 @@ function printText(r) {
 	lines.push(`Late days: ${s.lateDays} (${usd(s.lateDaysAmount)}; overlapping the invoices' added days). Refused days: ${s.refusedDays} (${usd(s.refusedAmount)}).`);
 	lines.push(`Refused by reason: ${Object.entries(s.refusedByKind || {}).map(([k, v]) => `${k} ${v.days} (${usd(v.amount)})`).join("; ") || "none"}. "beforeFloor" is paid by the ledger and carried onto no invoice.`);
 	lines.push(`Backfill: ${s.backfillRows} row(s), ${s.backfillConflicts} conflict(s).`);
-	lines.push("", "Driver-days (scope, driver, month, day, change, load, trip start, flags):");
-	for (const d of r.perDay) lines.push(`  owner ${d.ownerId}  ${d.driver}  ${d.month}  ${d.day}  ${d.change} ${usd(d.amount)}  ${d.added ? "added day" : `load ${d.loadId}`}  ${d.tripStartStatus ? `${d.tripStartStatus} ${d.tripStart}` : "(no trip)"}  ${d.flags.join(",")}`);
+	lines.push(`Driver-days by rule d's reason: ${Object.entries(s.reasons || {}).map(([k, n]) => `${k} ${n}`).join("; ") || "none"}.`);
+	lines.push(`Loads whose trip history or ELD could not be read (paid by their window): ${s.tripErrors || 0}.`);
+	for (const e of r.tripErrors || []) lines.push(`  UNREAD load ${e.loadId}: ${e.error}`);
+	lines.push("", "Driver-days (scope, driver, month, day, change, why, load, trip start, flags):");
+	for (const d of r.perDay) lines.push(`  owner ${d.ownerId}  ${d.driver}  ${d.month}  ${d.day}  ${d.change} ${usd(d.amount)}  ${d.reason || "-"}  ${d.added ? "added day" : `load ${d.loadId}`}  ${d.tripStartStatus ? `${d.tripStartStatus} ${d.tripStart}` : "(no trip)"}  ${d.flags.join(",")}`);
 	lines.push("", "Driver pay by scope, driver and month:");
 	for (const m of r.driverMonths) lines.push(`  owner ${m.ownerId}  ${m.driver}  ${m.month}  ${m.daysChange > 0 ? "+" : ""}${m.daysChange} day(s)  ${usd(m.driverPayChange)}`);
 	lines.push("", "Investor payable by month:");
