@@ -155,15 +155,28 @@ const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndate
 	// The batch caches the week's Personal receipt images first (none here).
 	"warmPersonalReceiptsForWeek"];
 
+// The declarations a world lifts from one source text — cached, because each
+// lift scans all of server.js and every world needs the same ~70: the shipped
+// source serves most worlds, and a mutant's source each of its own.
+const LIFT_CACHE = new Map();
+function liftedDeclarations(src) {
+	if (!LIFT_CACHE.has(src)) {
+		LIFT_CACHE.set(src, [
+			...SHARED_CONSTS.map((c) => liftConst(src, c)),
+			...SHARED_FNS.map((f) => liftFn(src, f)),
+			...ASYNC_FNS.map((f) => liftAsyncFn(src, f)),
+		]);
+	}
+	return LIFT_CACHE.get(src);
+}
+
 // Build the lifted world against one database. `src` defaults to the shipping
 // server.js; §6 passes mutated copies. `overrides` replaces a lifted binding
 // (§4/§6 splice the PRE-FIX selection into the otherwise-identical handler).
 function buildWorld(db, opts = {}) {
 	const src = opts.src || SRC;
 	const body = [
-		...SHARED_CONSTS.map((c) => liftConst(src, c)),
-		...SHARED_FNS.map((f) => liftFn(src, f)),
-		...ASYNC_FNS.map((f) => liftAsyncFn(src, f)),
+		...liftedDeclarations(src),
 		// Module state and statements the batch closes over, restated verbatim.
 		"let invoiceAutogenAbortStreak = 0;",
 		"let invoiceAutogenAbortAlerted = false;",

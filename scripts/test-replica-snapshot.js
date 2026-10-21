@@ -357,7 +357,11 @@ console.log("§4 stamps, tasks and the pull scripts");
 		const db = new Database(path.join(d, "app.db"));
 		db.exec("CREATE TABLE loads (id INTEGER PRIMARY KEY, name TEXT, notes TEXT)");
 		const ins = db.prepare("INSERT INTO loads (name, notes) VALUES (?, ?)");
-		for (let i = 0; i < 3000; i++) ins.run(`load-${i}`, crypto.randomBytes(24).toString("hex"));
+		// One transaction: a file database commits (and syncs) each bare insert
+		// on its own, which made these 3000 rows take seconds.
+		db.transaction(() => {
+			for (let i = 0; i < 3000; i++) ins.run(`load-${i}`, crypto.randomBytes(24).toString("hex"));
+		})();
 		db.close();
 		fs.writeFileSync(path.join(d, "sheets.json"), JSON.stringify({ format: 1, spreadsheets: { s1: { role: "main", tabs: { "Job Tracking": [["Load ID"], ["1"]] } } } }));
 		fs.writeFileSync(path.join(d, "manifest.json"), "{}");

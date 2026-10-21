@@ -54,8 +54,7 @@ const markDay = (x) => {
 
 // A history table holding `rows` [loadId, status, source, changed_at, actor], and a resolver on it.
 function resolverOn(rows, { enabled = true, fromMonth = "2026-09" } = {}) {
-	const db = new W.Database(":memory:");
-	W.buildSchema(db);
+	const db = W.schemaDb();
 	const st = db.prepare("INSERT INTO load_status_history (load_id, old_status, new_status, source, actor, changed_at) VALUES (?, '', ?, ?, ?, ?)");
 	for (const [lid, s, source, at, actor] of rows) st.run(lid, s, source || "manual", actor || "", at);
 	return W.requireLib("trip-work-days").createTripDayResolver({ db, enabled, fromMonth, zone: ZONE });

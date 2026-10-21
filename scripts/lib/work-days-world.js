@@ -158,6 +158,19 @@ function buildSchema(db) {
 		if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t)) die(`table ${t} did not build from server.js's DDL`);
 	}
 }
+// A fresh in-memory database holding that schema. Running the ~200 statements
+// costs ~100 ms and runners start dozens of worlds, so they run once, into a
+// template, and every world opens its own copy of the template's bytes (~0.1 ms).
+let SCHEMA_IMAGE = null;
+function schemaDb() {
+	if (!SCHEMA_IMAGE) {
+		const template = new Database(":memory:");
+		buildSchema(template);
+		SCHEMA_IMAGE = template.serialize();
+		template.close();
+	}
+	return new Database(SCHEMA_IMAGE);
+}
 const hasTable = (db, name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 // ── the lifted server ─────────────────────────────────────────────────────────
@@ -271,8 +284,7 @@ process.on("exit", cleanup);
 function startWorld(opts = {}) {
 	const { env = {}, rows = [], drivers = [], trucks = null, status = [], pings = {}, coords = {}, overrides = [], locks = [], payRates = [], now = DEFAULT_NOW } = opts;
 	const L = lifted();
-	const db = new Database(":memory:");
-	buildSchema(db);
+	const db = schemaDb();
 	const user = db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
 	user.run(1, "super_admin", "Super Admin", "");
 	user.run(5, "inv5", "Investor", "Acme Carrier");
@@ -525,7 +537,7 @@ function anyFlag(flags) {
 }
 
 module.exports = {
-	ROOT, SRC, Database, createRunner, requireLib, addDays, daysFrom, md, et, etMs, stampMs, buildSchema, hasTable,
+	ROOT, SRC, Database, createRunner, requireLib, addDays, daysFrom, md, et, etMs, stampMs, buildSchema, schemaDb, hasTable,
 	startWorld, loadRow, sheetValues, HEADERS, feed, PICKUP, DALLAS, DEFAULT_NOW, call, route, generate,
 	gridDays, earlierDays, dayList, investorDays, ledger, monthDays, onlyDays, saveCopy, runScript, tableHashes, fileHash,
 	objects, scalars, sameInstant, hasFlag, anyFlag, tempDir, cleanup, lifted,
