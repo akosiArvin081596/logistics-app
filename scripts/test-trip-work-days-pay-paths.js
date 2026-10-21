@@ -877,7 +877,7 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		ok("both named in warnings", ["2026-10-01", "2026-10-02"].every((d) => (g40.warnings || []).some((x) => x.includes(d) && x.includes(m.body.invoice.invoice_number))), JSON.stringify(g40.warnings));
 	});
 
-	await R.test("P4 (money review M2) A stale Pickup Appointment, FROM=2026-10: two loads Assigned Fri 10/16 with appointments 9/29-9/30 and no arrival tap, their trucks driving 9/29, 9/30 and 10/16. With no status rows: nothing paid on the ledger and the investor view (the trip starts at the Assigned Date, after the window). With a Delivered tap Sat 10/17: 10/16 (driving) and 10/17 (unloading) only, the week's invoice 10/17. Base: 9/29 and 9/30 paid", async ({ eq }) => {
+	await R.test("P4 (money review M2; re-check M1) A stale Pickup Appointment, FROM=2026-10: two loads Assigned Fri 10/16 with appointments 9/29-9/30 and no arrival tap, their trucks driving 9/29, 9/30 and 10/16. With no status rows the window ends before the trip's start (the Assigned Date, no dispatch row): the rule does not place the load, every path pays its window rule (9/29 and 9/30), and the week's invoice names the load. With a Delivered tap Sat 10/17: 10/16 (driving) and 10/17 (unloading) only, the week's invoice 10/17. Base: 9/29 and 9/30 paid", async ({ eq, ok }) => {
 		const U = "Una Stale";
 		const V = "Val Stale";
 		const track = (odo) => W.feed(odo).drive("2026-09-29", { miles: 100 }).drive("2026-09-30", { miles: 100 }).drive("2026-10-16", { miles: 200 }).park("2026-10-17").pings;
@@ -894,12 +894,35 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 			now: etMs("2026-10-23 20:00"),
 		});
 		const vu = await monthViews(w, U);
-		eq("no taps: ledger and investor view pay nothing", [vu.ledger, vu.investor], [[], []]);
+		const windowRule = ["2026-10 2026-09-29", "2026-10 2026-09-30"];
+		eq("no taps: ledger and investor view pay the window rule", [vu.ledger, vu.investor], [windowRule, windowRule]);
+		const gu = await W.generate(w, U, "2026-10-23");
+		ok("no taps: the week's invoice names the load as paid by its window", (gu.warnings || []).some((x) => x.includes("Q4401") && /window/.test(x)), JSON.stringify(gu.warnings));
 		const vv = await monthViews(w, V);
 		const want = ["2026-10 2026-10-16", "2026-10 2026-10-17"];
 		eq("Delivered 10/17: ledger and investor view", [vv.ledger, vv.investor], [want, want]);
 		const gv = await W.generate(w, V, "2026-10-23");
 		eq("Delivered 10/17: the week's invoice pays 10/17", invDays(gv, "2026-10-23"), ["2026-10-17"]);
+	});
+
+	await R.test("P5 (re-check M1) An Assigned Date stamped after delivery, FROM=2026-10, no truck feed: a load Dispatched Wed 9/30, Delivered Fri 10/2, Assigned Sat 10/3, appointments 9/30-10/2, no arrival tap: the dispatch is the floor, so the invoice, the ledger and the investor view pay 9/30-10/2 (in October, its Assigned month). The same load with no status rows at all: the window rule pays 9/30-10/2 and the invoice names the load. Base (f03fe7d): 0 days on every path", async ({ eq, ok }) => {
+		const A = "Ada Late";
+		const B = "Bo Late";
+		const row = (id, driver, truck) => loadRow({ id, driver, pickup: "2026-09-30 8:00", dropoff: "2026-10-02 18:00", assigned: "2026-10-03", done: "2026-10-02", truck });
+		const w = W.startWorld({
+			env: TRIP("2026-10"),
+			drivers: [{ name: A }, { name: B }],
+			rows: [row("Q4501", A, "T1"), row("Q4502", B, "T2")],
+			status: [s("Q4501", "Dispatched", et("2026-09-30 08:00"), "dispatch", "super_admin"), s("Q4501", "Delivered", et("2026-10-02 15:00"))],
+		});
+		const want = ["2026-09-30", "2026-10-01", "2026-10-02"];
+		for (const [label, driver, id] of [["dispatched", A, "Q4501"], ["no status rows", B, "Q4502"]]) {
+			const g = await W.generate(w, driver, W39);
+			eq(`${label}: invoice`, invDays(g, W39), want);
+			const v = await monthViews(w, driver);
+			eq(`${label}: ledger and investor view`, [v.ledger, v.investor], [want.map((d) => `2026-10 ${d}`), want.map((d) => `2026-10 ${d}`)]);
+			if (label === "no status rows") ok("no status rows: the invoice names the load", (g.warnings || []).some((x) => x.includes(id) && /window/.test(x)), JSON.stringify(g.warnings));
+		}
 	});
 
 	await R.test("M1 (added 2026-10-21 item 2; the MR 10/2 shape as it stands; money review L2) The correction Draft for Thu 10/1 and Fri 10/2 (scripts/create-correction-invoice-draft.js's lines) was deleted by a Super Admin: neither day is carried again automatically (no correction), each named in warnings with the deleted invoice; a deleted missed-week Draft dating Thu holds Thu the same way; a deleted manual invoice dating another day (10/20), or a deleted ordinary manual invoice dating Thu, holds nothing. Base: a correction for both", async ({ eq, ok }) => {
@@ -929,6 +952,19 @@ const R = W.createRunner("B12 B: trip work days on the weekly invoice, the inves
 		eq("a deleted missed-week Draft dating Thu: only Fri goes on a correction", corrections(c.w).map(paidDaysOf), [["2026-10-02"]]);
 		const d = await setup(() => [{ date: "2026-10-01", description: "Reimbursement, Thursday", amount: 260 }]);
 		eq("a deleted ordinary manual invoice dating Thu: Thu and Fri go on a correction", corrections(d.w).map(paidDaysOf), [["2026-10-01", "2026-10-02"]]);
+	});
+
+	await R.test("M5 (re-check L) weeklyManualInvoiceHolds() at a $0 smallest rate (the daily-rate rule reading a $0 history row): only a correction or missed-week line or paidDays holds a day; a day with no line dated on it, or a dated bonus, holds nothing, since no amount is one day's pay at $0. Base (f03fe7d): every day of the week held", async ({ eq }) => {
+		const { closure } = require(path.join(W.ROOT, "scripts", "lib", "server-lift"));
+		const lift = closure(W.SRC, { roots: ["weeklyManualInvoiceHolds"], provided: ["db", "require", "console", "process"] });
+		const { w } = await skWorld({}, [], { lineItems: [
+			{ date: "2026-10-15", description: "Missed week 2026-10-10 to 2026-10-16: Thursday, October 15, 2026, $260", amount: 260 },
+			{ date: "2026-10-14", description: "Bonus", amount: 50 },
+		] });
+		const holds = new Function("db", "require", "console", "process", `${lift.text}\nreturn weeklyManualInvoiceHolds;`)(w.db, require, console, process);
+		const args = { driverNorm: "sol kane", days: ["2026-10-12", "2026-10-14", "2026-10-15"], weekStart: "2026-10-10", weekEnd: W41 };
+		eq("rate $0: Thu (the missed-week line) only", [...holds({ ...args, rateOf: () => 0 }).held.keys()], ["2026-10-15"]);
+		eq("rate $260: Thu only too (the $50 bonus is under one day's pay)", [...holds({ ...args, rateOf: () => 260 }).held.keys()], ["2026-10-15"]);
 	});
 
 	await R.test("M2 (added 2026-10-21 item 1; flag off) A missed-week Draft pays Thu 10/15 of a week with no weekly invoice (W41); the load's completion date is then edited into W41 and W41 generated: the weekly invoice leaves Thu off (named in warnings with the manual invoice) and bills Mon. Base: Thu billed twice", async ({ eq, ok }) => {
