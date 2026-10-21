@@ -337,7 +337,7 @@ section(() => {
 		{ type: "pickup_number", label: "Call 555-010-0199", value: "55120" },
 		{ type: "delivery_number", label: 42, value: "55121" },
 	] }] }, ctx);
-	eq(labels.payload.stops[0].references.map((x) => x.label), ["Pickup #", "Delivery #"], "§1 a label holding a phone, or not text, becomes the type's own label");
+	eq(labels.payload.stops[0].references.map((x) => [x.type, x.label]), [["delivery_number", "Delivery #"]], "§1 a label holding a phone drops its reference; a label that isn't text becomes the type's own label");
 	const innocent = di.filterInstructions({ loadRequirements: [
 		{ category: "bol_check", text: "The bill of lading must be signed in advance by the shipper." },
 		{ category: "check_in", text: "Report to the person in charge at the guard shack." },
@@ -621,6 +621,81 @@ section(() => {
 	di.reviewReasons({ extraction: dirtyExtraction(), filtered: di.filterInstructions(dirtyExtraction(), ctx), visibleText: `${VISIBLE} `.repeat(250).slice(0, 200000), byteLength: 1000, ctx });
 	ok(`§8 the heuristic on 200,000 characters of rate-con text runs under 300 ms (${Date.now() - t} ms)`, Date.now() - t < 300);
 }, "§8");
+
+// --- §9 review round 1 (PR #554) ---------------------------------------------------------
+// Each case kept a value on the first version of this PR.
+section(() => {
+	const ctx = context();
+	const refs = (ref) => di.filterInstructions({ stops: [{ kind: "pickup", references: [ref] }] }, ctx);
+	const kept = (ref) => refs(ref).payload.stops[0].references.length === 1;
+	// M1a: references are matched against the deny list by their digits alone.
+	for (const value of [`${DENY_DIGITS.slice(0, 4)}----${DENY_DIGITS.slice(4)}`, `${DENY_DIGITS.slice(0, 4)}/-/-${DENY_DIGITS.slice(4)}`, `T${DENY_DIGITS.slice(0, 4)}A${DENY_DIGITS.slice(4)}`]) {
+		const r = refs({ type: "other_reference", label: "Ref", value });
+		ok(`§9 M1a the account number split inside a reference ("${value.replace(/\d/g, "9")}") is dropped`, r.payload.stops[0].references.length === 0 && r.denyHit === true, r.payload.stops[0].references);
+	}
+	ok("§9 M1a the account number split between a label and its value is dropped", !kept({ type: "other_reference", label: `Ref ${DENY_DIGITS.slice(0, 2)}`, value: DENY_DIGITS.slice(2) }));
+	// M1b: carrier identifiers and money in a reference's value or label drop the reference.
+	for (const [what, ref] of [
+		["a vendor number label", { type: "other_reference", label: "Vendor #", value: "V40021" }],
+		["an account label", { type: "other_reference", label: "Acct", value: "445566" }],
+		["an account label with \"=\"", { type: "other_reference", label: "Acct=", value: "445566" }],
+		["an MC label", { type: "other_reference", label: "MC #", value: "445566" }],
+		["a USD value", { type: "other_reference", label: "Ref", value: "USD 540" }],
+		["a rate value", { type: "other_reference", label: "Ref", value: "Rate 540" }],
+		["a rate label", { type: "other_reference", label: "Rate", value: "540123" }],
+	]) ok(`§9 M1b ${what}: the whole reference is dropped`, !kept(ref), refs(ref).payload.stops[0].references);
+	// M1c: the load's own phone and 7-digit phones in a reference.
+	for (const value of ["5550100199", "555#010#0199", "010-0199"]) {
+		ok(`§9 M1c a phone as a reference ("${value.replace(/\d/g, "9")}") is dropped`, !kept({ type: "other_reference", label: "Ref", value }));
+	}
+	const shield = di.filterInstructions({ stops: [{ kind: "pickup", references: [{ type: "other_reference", label: "Ref", value: "010-0199" }], instructions: [{ kind: "directions", text: "Gate line 010-0199 after hours." }] }] }, ctx);
+	eq(shield.payload.stops[0].instructions.map((x) => x.text), ["Gate line [contact withheld] after hours."], "§9 M1c a phone-shaped reference no longer shields the same phone in its stop's text");
+	const staffVendor = di.validateStaffEdit({ stops: [{ kind: "pickup", references: [{ type: "other_reference", label: "Vendor #", value: "V40021" }] }] }, ctx);
+	eq([staffVendor.ok, staffVendor.rule, staffVendor.field], [false, "number", "stops[0].references[0].label"], "§9 M1b a staff edit with a vendor-number label is refused (rule \"number\")");
+	const staffUsd = di.validateStaffEdit({ stops: [{ kind: "pickup", references: [{ type: "other_reference", label: "Ref", value: "USD 540" }] }] }, ctx);
+	eq([staffUsd.ok, staffUsd.rule, staffUsd.field], [false, "money", "stops[0].references[0].value"], "§9 M1b a staff edit with a money reference is refused (rule \"money\")");
+	// M2: no context from buildContext(), or no deny values: the lib refuses to run.
+	const stored = di.filterInstructions({ stops: [{ kind: "pickup", references: [{ type: "pickup_number", label: "PU", value: "55120" }] }] }, ctx).payload;
+	const throwsOn = (fn) => { try { fn(); return false; } catch (e) { return e && e.code === "DRIVER_INSTRUCTIONS_CONTEXT"; } };
+	const noDeny = di.buildContext({ denyList: "", loadId: LOAD_ID });
+	for (const [what, fn] of [
+		["driverView with {}", () => di.driverView(stored, {})],
+		["driverView with no context", () => di.driverView(stored)],
+		["staffView with a copied context", () => di.staffView(stored, { ...ctx })],
+		["filterInstructions with no context", () => di.filterInstructions(stored)],
+		["validateStaffEdit with a forged context", () => di.validateStaffEdit(stored, { deny: ["1"] })],
+		["reviewReasons with no context", () => di.reviewReasons({ extraction: {}, visibleText: "" })],
+		["driverView with an empty deny list", () => di.driverView(stored, noDeny)],
+		["filterInstructions with an empty deny list", () => di.filterInstructions(stored, noDeny)],
+	]) ok(`§9 M2 ${what}: throws DRIVER_INSTRUCTIONS_CONTEXT`, throwsOn(fn));
+	// L1: four or more separators.
+	for (const text of [`Gate code ${DENY_DIGITS.slice(0, 4)} -- ${DENY_DIGITS.slice(4)} at entry.`, `Gate code ${DENY_DIGITS.slice(0, 4)}....${DENY_DIGITS.slice(4)} at entry.`]) {
+		eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text }] }, ctx).payload.loadRequirements, [], `§9 L1 the account number split by four separators: the item is dropped ("${text.replace(/\d/g, "9")}")`);
+	}
+	const wide = di.filterInstructions({ loadRequirements: [{ category: "check_in", text: "Call 555 -- 010 -- 0199 at the gate today." }] }, ctx);
+	eq(leaks(wide.payload), [], "§9 L1 a phone split by four separators is withheld");
+	// L2: one time range or one date per run.
+	for (const text of ["Hours 1203-1145-2210 daily at the dock.", "Hours 12:03 11:45 22:10 daily at the dock.", "Dates 12-31-1999 01-02-2003 at the dock."]) {
+		const r = di.filterInstructions({ stops: [{ kind: "delivery", instructions: [{ kind: "hours", text }] }] }, ctx);
+		ok(`§9 L2 a chain of times or dates is a withheld number ("${text}")`, r.payload.stops[0].instructions[0].text.includes("[number withheld]"), r.payload.stops[0].instructions);
+	}
+	// L3: money with no "$" or money word, and the own amount written with other separators.
+	for (const text of ["Driver gets 500 bucks at the dock.", "Gate token 75¢ at the kiosk.", "€150 at the gate for entry.", "£150 at the gate for entry.", "Amount 950 at the gate for entry.", "Lumper 150 per pallet at delivery.", "Flat 500 at the gate for entry.",
+		"Declared value 1 200 at the gate.", "Declared value 1-200 at the gate.", "Declared value 1'200 at the gate.", "Load 4 1200 lbs at the gate."]) {
+		eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text }] }, ctx).payload.loadRequirements, [], `§9 L3 money or the own amount: the item is dropped ("${text}")`);
+	}
+	// L4: a spelled email with any ending.
+	const spelled = di.filterInstructions({ stops: [{ kind: "pickup", instructions: [{ kind: "warehouse", text: "Send POD to opsdesk at broker-example dot test today please." }] }] }, ctx);
+	eq(spelled.payload.stops[0].instructions.map((x) => x.text), ["Send POD to [contact withheld] today please."], "§9 L4 \"<word> at <word> dot <word>\" is withheld whatever the ending");
+	// L5: carrier identifiers in any letter case, and USDOT.
+	for (const text of ["Give mc 445566 at check in.", "USDOT 123456 is on the door.", "Show the dot # 1234567 at the gate."]) {
+		eq(di.filterInstructions({ loadRequirements: [{ category: "check_in", text }] }, ctx).payload.loadRequirements, [], `§9 L5 a carrier identifier: the item is dropped ("${text}")`);
+	}
+	// L6: an unknown reference type is a review reason.
+	const unknown = refs({ type: "carrier_number", label: "Carrier", value: "C99001" });
+	ok("§9 L6 a reference of an unknown type is dropped with reference_unknown_type", unknown.payload.stops[0].references.length === 0 && unknown.reasons.includes("reference_unknown_type") && unknown.reasonCounts.reference_unknown_type === 1, unknown.reasons);
+	ok("§9 L6 the reason has a counts-only message", di.reasonMessages(["reference_unknown_type"], { reference_unknown_type: 2 })[0].text.includes("2"));
+}, "§9");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
