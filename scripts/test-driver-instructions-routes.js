@@ -984,6 +984,8 @@ test("§10 M1 a refused number names no item: many references, one on the deny l
 	ok("the audit row keeps the full path", a.some((x) => JSON.parse(x.details).field === "stops[0].references[7].value"), a.map((x) => x.details));
 	const m = await w.call("PUT", API, DISP, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the gate." }, { category: "check_in", text: "Driver is paid $50 extra for the wait." }], stops: [] } });
 	eq("other rules keep the position", [m.body.rule, m.body.field], ["money", "loadRequirements[1].text"]);
+	const c = await w.call("PUT", API, DISP, { payload: { loadRequirements: [], stops: [{ kind: "pickup", facility: "Test Mill North", place: "Springfield, IL", references: [{ type: "other_reference", label: "Ref", value: "RX400" }, { type: "other_reference", label: "Ref", value: "RX401" }, { type: "other_reference", label: "Ref", value: "Pat Broker" }], requirements: [], instructions: [] }] } });
+	eq("a refused contact names no item either", [c.status, c.body.rule, c.body.field], [400, "contact", "references"]);
 	const rt = require(RUNTIME);
 	eq("one alert threshold constant, still 3", rt.ALERT_HITS, 3);
 });
