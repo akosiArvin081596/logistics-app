@@ -515,7 +515,8 @@ async function main() {
   record('Wx', 'Writes sent by the page', 'none', writes.length ? writes.join('; ') : 'none', writes.length === 0)
 
   const resultsFile = path.join(paths.workDir(), `results-${OUT_TAG}.md`)
-  const esc = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ')
+  // A table cell: backslashes first, so an observed "\|" can't end the cell early.
+  const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
   const md = [
     `# Phone layout check (${OUT_TAG})`, '',
     `Build: ${DIST}. Made-up data only. ${new Date().toISOString()}`, '',
