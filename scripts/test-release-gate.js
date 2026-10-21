@@ -684,13 +684,16 @@ async function checkHarnessFlush() {
 
 	const listDir = tmpDir("harness-list");
 	fs.writeFileSync(path.join(listDir, "run-unit-tests.js"), harness);
-	const names = Array.from({ length: 1500 }, (_, k) => `test-${"x".repeat(150)}-${String(k).padStart(4, "0")}.js`);
+	// About 640 KB: well past a socket buffer plus the paused reader's own, so
+	// even one write followed by process.exit() would lose some.
+	const names = Array.from({ length: 3000 }, (_, k) => `test-${"x".repeat(200)}-${String(k).padStart(4, "0")}.js`);
 	for (const f of names) fs.writeFileSync(path.join(listDir, f), "");
 
 	const LINE = "loud-runner-line";
+	const LOUD = 40000; // about 680 KB, which the harness prints in one write
 	const failDir = tmpDir("harness-fail");
 	fs.writeFileSync(path.join(failDir, "run-unit-tests.js"), harness);
-	fs.writeFileSync(path.join(failDir, "test-loud.js"), `process.stdout.write(${JSON.stringify(`${LINE}\n`)}.repeat(20000));\nprocess.exitCode = 1;\n`);
+	fs.writeFileSync(path.join(failDir, "test-loud.js"), `process.stdout.write(${JSON.stringify(`${LINE}\n`)}.repeat(${LOUD}));\nprocess.exitCode = 1;\n`);
 
 	const [list, fail] = await Promise.all([drainLate(listDir, ["--list"]), drainLate(failDir, [])]);
 	const listed = list.out.split("\n").filter(Boolean);
@@ -699,8 +702,8 @@ async function checkHarnessFlush() {
 	return [
 		[list.code === 0 && listed.length === names.length && listed.every((f, k) => f === names[k]),
 			`§4 run-unit-tests.js --list prints every runner to a reader that drains late (${listed.length} of ${names.length}, exit ${list.code})`],
-		[fail.code === 1 && lines === 20000 && summary,
-			`§4 run-unit-tests.js prints a failed runner's whole output and the summary to a reader that drains late (${lines} of 20000 lines, summary ${summary}, exit ${fail.code})`],
+		[fail.code === 1 && lines === LOUD && summary,
+			`§4 run-unit-tests.js prints a failed runner's whole output and the summary to a reader that drains late (${lines} of ${LOUD} lines, summary ${summary}, exit ${fail.code})`],
 	];
 }
 
