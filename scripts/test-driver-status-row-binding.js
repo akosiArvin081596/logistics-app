@@ -289,7 +289,7 @@ check("#246: the cancel walk-around is still refused", ROUTE_CODE.includes("CANC
 check("#230: the period guard is still here", ROUTE_CODE.includes("dispatchWriteBlocker("), true);
 check("#222: the row-number guard is still here", ROUTE_CODE.includes("resolveSheetDataRow(res, rawRowIndex)"), true);
 check("the POD gate is still here", ROUTE_CODE.includes("POD_REQUIRED"), true);
-check("the socket event still fires", ROUTE_CODE.includes('io.to("dispatch").emit("status-updated"'), true);
+check("the socket event still fires (to the dispatch room, per role)", ROUTE_CODE.includes('emitLoadEventToDispatch("status-updated"'), true);
 check("the dispatch feed row is still written", ROUTE_CODE.includes("insertDispatchNotification.run"), true);
 check("the success audit line is still written", ROUTE_CODE.includes("'update_status'"), true);
 check("load_status_history is still stamped", ROUTE_CODE.includes("recordStatusChange("), true);

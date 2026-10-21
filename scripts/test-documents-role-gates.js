@@ -21,8 +21,9 @@
  *   §2 POST /api/documents/upload — the same, plus the real resolveDriverActor
  *      and uploadDocTypeFor: every role, the type list per role, and a refusal
  *      writes no file, inserts no row, reads no sheet and spends no limiter budget.
- *      The pod-uploaded broadcast to the dispatch room carries a document's link,
- *      but never a rate con's (rate cons are Super Admin only; isRateConDocType()).
+ *      The pod-uploaded broadcast carries a document's link to Super Admins only
+ *      (the rest of the dispatch room gets it without, 2026-10-21), and never a
+ *      rate con's (rate cons are Super Admin only; isRateConDocType()).
  *   §3 the two read-flag routes over an in-memory SQLite: each role marks exactly
  *      the rows it may, and a caller with no name marks nothing.
  *   §4 GET /api/driver/:driverName: a Driver with no loads gets no diagnostic;
@@ -132,6 +133,26 @@ function resetCounters() {
 }
 const readsOf = () => counters.sheetReads + counters.prepared.length;
 
+// The dispatch room, as socket.io has it (`except` included), recording each
+// emit with its room and the room it leaves out; and the shipped per-role
+// helpers the upload route sends through (Super Admins' own room in full, the
+// rest of the dispatch room with the load named as shown and no Drive link).
+const DOC_IO = {
+	to: (room) => ({
+		emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, event, payload }); },
+		except: (other) => ({ emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, except: other, event, payload }); } }),
+	}),
+};
+const DISPATCH_EMIT_NAMES = ["emitDispatchByRole", "loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadId", "staffDispatchNotice", "emitDispatchNotice", "emitLoadEventToDispatch"];
+const DISPATCH_EMITS = (() => {
+	const re = SRC.match(/\nconst BROKER_WITHHELD_RE = (\/[^\n]*\/i);\n/);
+	if (!re) fatal("BROKER_WITHHELD_RE not found in server.js");
+	return new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+		`const BROKER_WITHHELD_RE = ${re[1]};\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n` +
+		`${DISPATCH_EMIT_NAMES.map((n) => liftFn(n)).join("\n")}\nreturn { ${DISPATCH_EMIT_NAMES.join(", ")} };`,
+	)(DOC_IO, require("../lib/broker-contact"), true);
+})();
+
 // The real ownership check, over the canned sheet and an empty deleted_loads.
 const loadBelongsToDriver = new Function(
 	"getDeletedLoadIds", "getJobTrackingCached", "findCol", "normalizeDriverName", "ownershipUnverified",
@@ -190,7 +211,8 @@ function documentDeps(overrides = {}) {
 			mkdirSync: () => {},
 			writeFileSync: (p, bytes) => { counters.files.push(p); },
 		},
-		io: { to: (room) => ({ emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, event, payload }); } }) },
+		io: DOC_IO,
+		...DISPATCH_EMITS,
 		insertDispatchNotification: { run: () => ({}) },
 		setImmediate: () => {},
 		getSheets: async () => { throw new Error("not in this runner"); },
@@ -320,8 +342,11 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		r.status === 200 && r.body.success === true && r.inserted === 1 && counters.files.length === 1 &&
 		lastDoc().type === "POD" && lastDoc().driver === "Desoren King", brief(r));
 	const podUploaded = () => counters.emitted.filter((e) => e.event === "pod-uploaded");
-	ok("...and the pod-uploaded broadcast to the dispatch room carries the POD's link",
-		podUploaded().length === 1 && podUploaded()[0].room === "dispatch" && podUploaded()[0].payload.driveUrl === r.body.driveUrl,
+	const toAdmins = () => podUploaded().filter((e) => e.room === "super-admin");
+	const toRest = () => podUploaded().filter((e) => e.room === "dispatch" && e.except === "super-admin");
+	ok("...and the pod-uploaded broadcast carries the POD's link to Super Admins only, never to the rest of the dispatch room",
+		podUploaded().length === 2 && toAdmins().length === 1 && toAdmins()[0].payload.driveUrl === r.body.driveUrl &&
+		toRest().length === 1 && !("driveUrl" in toRest()[0].payload) && toRest()[0].payload.loadId === "L-100",
 		JSON.stringify(podUploaded()));
 	r = await uploadAs(DK, upload("L-200", "POD"));
 	ok("Driver, another driver's load: 403, no file, no row",
@@ -360,7 +385,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		r = await uploadAs(SUPER, upload("L-200", t));
 		const ev = counters.emitted.filter((e) => e.event === "pod-uploaded");
 		ok(`Super Admin, type ${JSON.stringify(t)}: the pod-uploaded broadcast carries no link to the rate con`,
-			r.status === 200 && ev.length === 1 && ev[0].payload.docType === t && !("driveUrl" in ev[0].payload) &&
+			r.status === 200 && ev.length === 2 && ev.every((e) => e.payload.docType === t && !("driveUrl" in e.payload)) &&
 			!JSON.stringify(counters.emitted).includes(r.body.driveUrl), JSON.stringify(counters.emitted));
 	}
 

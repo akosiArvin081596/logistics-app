@@ -467,7 +467,9 @@ function mountDispatch(db, routeSrc, helperOver) {
 		SPREADSHEET_ID: "sheet-under-test",
 		insertNotification: { run: () => ({ lastInsertRowid: 1 }) },
 		insertDispatchNotification: { run: () => ({}) },
-		io: { to: () => ({ emit: () => {} }) },
+		io: { to: () => ({ emit: () => {}, except: () => ({ emit: () => {} }) }) },
+		// The dispatch-room notice, per role (no socket in this runner).
+		emitDispatchNotice: () => {},
 		driverRoom: (n) => `driver:${String(n).toLowerCase()}`,
 		logAudit: () => {},
 		recordStatusChange: () => {},

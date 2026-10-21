@@ -331,7 +331,7 @@ async function startWorld({ flag = true, loadsWarning = false, routes = Object.k
 		},
 		getSheets: async () => sheet.api,
 		SPREADSHEET_ID: "availability-test-sheet",
-		io: { to: () => ({ emit() {} }), emit() {} },
+		io: { to: () => ({ emit() {}, except: () => ({ emit() {} }) }), emit() {} },
 		sendEmail: async (to, subject, html) => { world.emails.push({ to, subject, html }); return !world.mailFails; },
 		fs,
 		DATA_DIR: path.join(os.tmpdir(), "r11-availability-no-uploads"),
