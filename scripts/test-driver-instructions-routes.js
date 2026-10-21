@@ -588,6 +588,7 @@ test("§3 the budget: at most 6 calls in 15 minutes; the rest wait as deferred",
 	await w.service.sweep();
 	eq("6 calls", w.calls.gemini, 6);
 	eq("2 deferred for budget", files.filter((f) => w.ledger(f.meta.id).state === "deferred" && w.ledger(f.meta.id).note === "budget").length, 2);
+	eq("a deferred file is not downloaded", w.calls.download.length, 6);
 });
 
 // ── §4 the publish rule end to end ────────────────────────────────────────────
