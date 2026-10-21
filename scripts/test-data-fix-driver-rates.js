@@ -195,7 +195,7 @@ console.log("F1-F4: dry run, apply, the server's reader, replay");
 	check(audit.length === 5 && audit.every((r) => r.user_id === 0 && r.username === ACTOR && r.role === "system"), "F2 five audit rows, each a system change (user 0, role system)", JSON.stringify(audit.map((r) => [r.user_id, r.username, r.role])));
 	check(audit.map((r) => r.action).join() === "update_driver_pay,pay_rate_entry,pay_rate_entry,pay_rate_entry,pay_rate_entry", "F2 the audit actions", audit.map((r) => r.action).join());
 	check(audit.every((r, i) => r.details.includes(`[DRF-20261021-${i + 1}]`) && r.details.includes(APPROVAL)), "F2 each audit row carries its reference and the approval");
-	check(/pay_daily 0\.00 -> 160\.00/.test(audit[0].details) && audit[0].entity === "drivers_directory" && audit[0].entity_id === "1", "F2 the directory audit row names the change");
+	check(/pay_daily 0\.00 -> 160\.00/.test(audit[0].details) && audit[0].entity === "driver" && audit[0].entity_id === "1", "F2 the directory audit row names the change, under the entity the server's own edit logs (driver)");
 	check(counts(db).pat === 160, "F2 Pat's Drivers Database rate is $160");
 	const added = rows(db, "SELECT id, subject_key, rate, effective_from, source FROM pay_rate_history WHERE source = 'data-fix' ORDER BY id");
 	check(JSON.stringify(added.map((r) => [r.subject_key, r.rate, r.effective_from])) === JSON.stringify([

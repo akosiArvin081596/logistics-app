@@ -55,6 +55,14 @@
 // day's price with the flags as set in a month the daily-rate rule does not
 // price (the fix must not move pay while the flags are off); a write whose
 // reference is already in the audit trail but whose row is not in place.
+// That price check's scope: it prices the driver at every truck that names him
+// now (truckDailyRateCandidates()), the fleet-wide view. An investor's own view
+// and payout ledger read only that investor's trucks (truckRatesByDriver(owner
+// id)); for an investor whose trucks no longer name the driver (he moved to
+// another investor's truck) no truck rate is read, so a new own rate on a driver
+// who had none moves that investor's open-month days from the $250 default to
+// the new rate. The check does not prove that case: for such a driver, compare
+// that investor's open months before applying.
 //
 // Idempotent: a write already in place is reported "already applied" and not
 // written again; a replay writes 0 rows and exits 0.
@@ -440,7 +448,7 @@ function writePlan(db, plan, nowIso) {
 		if (w.kind === "directory") {
 			const changes = db.prepare("UPDATE drivers_directory SET pay_daily = ? WHERE id = ? AND pay_daily IS ?").run(w.to, d.row.id, d.row.pay_daily).changes;
 			if (changes !== 1) throw new Error(`Drivers Database row ${d.row.id} changed while this run was writing; nothing was written`);
-			const a = audit.run(nowIso, ACTOR, "update_driver_pay", "drivers_directory", String(d.row.id),
+			const a = audit.run(nowIso, ACTOR, "update_driver_pay", "driver", String(d.row.id),
 				`${d.row.driver_name}: pay_daily ${Number(w.from).toFixed(2)} -> ${Number(w.to).toFixed(2)}. ${tag}. [${w.ref}]`);
 			written.push({ ref: w.ref, table: "drivers_directory", id: d.row.id, auditId: Number(a.lastInsertRowid) });
 		} else {
