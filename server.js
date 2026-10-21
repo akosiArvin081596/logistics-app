@@ -38167,8 +38167,12 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			if (ownerErr) return res.status(400).json({ error: ownerErr.error });
 			try {
 				const lidIdx = hdrs.findIndex((h) => /load.?id|job.?id/i.test(h));
-				if (lidIdx >= 0 && values[lidIdx]) {
-					const newLid = values[lidIdx].trim().toLowerCase().replace(/^#/, "");
+				// The ID as the row will store it, edge whitespace trimmed (the Load ID
+				// rule below trims it before the append), so the warning quotes the ID
+				// the new row carries rather than the padding it was sent with.
+				const sentLid = lidIdx >= 0 ? loadIdRule.trimLoadId(values[lidIdx]) : "";
+				if (sentLid) {
+					const newLid = sentLid.toLowerCase().replace(/^#/, "");
 					if (newLid) {
 						const allResp = await sheets.spreadsheets.values.get({
 							spreadsheetId: SPREADSHEET_ID,
@@ -38178,7 +38182,7 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 						for (let i = 1; i < allRows.length; i++) {
 							const existing = (allRows[i][lidIdx] || "").trim().toLowerCase().replace(/^#/, "");
 							if (existing === newLid) {
-								warning = `Load ID '${values[lidIdx]}' already exists (row ${i + 1}). A duplicate entry will be created.`;
+								warning = `Load ID '${sentLid}' already exists (row ${i + 1}). A duplicate entry will be created.`;
 								break;
 							}
 						}

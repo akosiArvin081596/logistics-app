@@ -50,7 +50,7 @@
               />
               <button class="btn-gen" @click="generateId" title="Auto-generate">&#8635;</button>
             </div>
-            <!-- The rule the load's own pages open it by (lib/loadIdRule.js); the
+            <!-- The rule the load's own pages open it by (client/src/lib/loadIdRule.js); the
                  server refuses the same IDs with 400 INVALID_LOAD_ID. -->
             <div v-if="loadIdProblem" id="new-job-load-id-rule" class="field-error" aria-live="polite">{{ loadIdProblem }}</div>
             <div v-if="duplicateWarning" class="field-warning">{{ duplicateWarning }}</div>

@@ -12,14 +12,17 @@
 //      status-history, haul (server.js) and ratecon.pdf
 //      (lib/ratecon-pdf-route.js) test, read out of their source; on a battery
 //      of IDs it opens exactly what all three routes open, after trimming.
-//   §2 client/src/lib/loadIdRule.js is the same rule: same patterns, message
-//      and answers; the field message is blank for a blank field or an ID that
-//      opens, and the rule's message otherwise.
-//   §3 POST /api/data, lifted from server.js and run against a fake sheet: on
-//      Job Tracking a Load ID the pages refuse is answered 400 INVALID_LOAD_ID
-//      naming the column, with nothing appended or audited; edge spaces are
-//      trimmed before the append; an ID that opens is appended as sent; a blank
-//      Load ID and another tab are not judged by this rule.
+//   §2 client/src/lib/loadIdRule.js is the same rule: same patterns (no flags),
+//      message and answers, a number Load ID included; the field message is
+//      blank for a blank field or an ID that opens, and the rule's message
+//      otherwise.
+//   §3 POST /api/data, lifted from server.js and run against a fake sheet (New
+//      Job and the Data Manager's add-row both post here): on Job Tracking a
+//      Load ID the pages refuse is answered 400 INVALID_LOAD_ID naming the
+//      column, with nothing appended or audited; edge spaces are trimmed before
+//      the append, and the duplicate-ID warning quotes the trimmed ID; an ID
+//      that opens is appended as sent; a blank Load ID and another tab are not
+//      judged by this rule.
 //   §4 NewJobView.vue uses the client rule: the message under the Load ID
 //      field, Create Job disabled while it shows, and submit() refusing before
 //      the POST.
@@ -145,7 +148,19 @@ ok(/no spaces/.test(rule.LOAD_ID_RULE_MESSAGE) && /40 characters/.test(rule.LOAD
 section('§2 client/src/lib/loadIdRule.js is the same rule')
 ok(clientRule.LOAD_ROUTE_ID_RE.source === rule.LOAD_ROUTE_ID_RE.source && clientRule.RATECON_PDF_ID_RE.source === rule.RATECON_PDF_ID_RE.source,
   '§2 the client copy has the same two patterns')
+ok(clientRule.LOAD_ROUTE_ID_RE.flags === '' && clientRule.RATECON_PDF_ID_RE.flags === '',
+  `§2 neither client pattern carries a flag the routes do not (got "${clientRule.LOAD_ROUTE_ID_RE.flags}", "${clientRule.RATECON_PDF_ID_RE.flags}")`)
 ok(clientRule.LOAD_ID_RULE_MESSAGE === rule.LOAD_ID_RULE_MESSAGE, '§2 the client copy has the same message')
+// A number Load ID (a sheet cell can hold one) reads as its digits on both
+// sides, and anything that is neither text nor a number as blank.
+for (const raw of [30080873, 7001.5, Number.NaN, Infinity, null, undefined, {}, ['LD-7001'], { toString: () => 'LD-7001' }]) {
+  ok(clientRule.trimLoadId(raw) === rule.trimLoadId(raw), `§2 client trimLoadId(${String(raw)}) matches the server's (got ${JSON.stringify(clientRule.trimLoadId(raw))} vs ${JSON.stringify(rule.trimLoadId(raw))})`)
+  ok(clientRule.loadIdOpenable(raw) === rule.loadIdOpenable(raw), `§2 client loadIdOpenable(${String(raw)}) matches the server's (got ${clientRule.loadIdOpenable(raw)} vs ${rule.loadIdOpenable(raw)})`)
+}
+ok(clientRule.trimLoadId(30080873) === '30080873' && clientRule.loadIdOpenable(30080873) === true && clientRule.loadIdFieldMessage(30080873) === '',
+  '§2 the client reads a number Load ID as its digits: it opens, and the field shows no message')
+ok(clientRule.loadIdOpenable(7001.5) === true && clientRule.loadIdOpenable(Number.NaN) === false && clientRule.loadIdFieldMessage(Number.NaN) === '',
+  '§2 the client reads 7001.5 as "7001.5" (opens) and NaN as blank (no message; the form asks for a Load ID)')
 for (const [id, opens] of SAMPLES) {
   ok(clientRule.loadIdOpenable(id) === opens, `§2 client loadIdOpenable(${JSON.stringify(id)}) is ${opens}`)
   ok(clientRule.trimLoadId(id) === rule.trimLoadId(id), `§2 client trimLoadId(${JSON.stringify(id)}) matches the server's`)
@@ -233,6 +248,25 @@ for (const [label, sent, stored] of [
   ok(r.code === 200 && app.writes.length === 1 && w.row[IDX['Load ID']] === stored && w.row[IDX.Payment] === '1500' && w.row[IDX.Status] === 'Unassigned',
     `§3 ${label}: 200, appended with Load ID ${JSON.stringify(stored)} and the other cells as sent (got ${r.code} ${JSON.stringify(r.body)}, ${JSON.stringify(w.row)})`)
   ok(JSON.stringify(app.audits) === '["create_sheet_row"]', `§3 ${label}: the create audited as before (got ${JSON.stringify(app.audits)})`)
+}
+// The duplicate-ID warning reads the trimmed ID: a padded append (the Data
+// Manager's add-row sends cells as typed) quotes the ID the new row carries.
+for (const [label, sent, quoted] of [
+  ['the stored ID resent', 'LD-1001', 'LD-1001'],
+  ['the stored ID resent padded', '  LD-1001\t', 'LD-1001'],
+  ['the stored ID resent with a # and in lower case, padded', ' #ld-1001 ', '#ld-1001'],
+]) {
+  const app = mountPostData()
+  const r = await app.run({ values: row({ 'Load ID': sent, Status: 'Unassigned' }) })
+  const w = app.writes[0] || { row: [] }
+  const expected = `Load ID '${quoted}' already exists (row 2). A duplicate entry will be created.`
+  ok(r.code === 200 && (r.body || {}).warning === expected && w.row[IDX['Load ID']] === quoted,
+    `§3 ${label}: 200, appended as ${JSON.stringify(quoted)}, warning ${JSON.stringify(expected)} (got ${r.code}, ${JSON.stringify((r.body || {}).warning)}, ${JSON.stringify(w.row[IDX['Load ID']])})`)
+}
+{
+  const app = mountPostData()
+  const r = await app.run({ values: row({ 'Load ID': '  LD-7009 ', Status: 'Unassigned' }) })
+  ok(r.code === 200 && !('warning' in (r.body || {})), `§3 a padded new ID that no row holds: no duplicate warning (got ${JSON.stringify(r.body)})`)
 }
 {
   // A blank Load ID is not a Load ID the pages could be asked to open; the New
