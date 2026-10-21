@@ -364,7 +364,9 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 			w.db.prepare("UPDATE invoices SET adjustment = 280, adjustment_note = ? WHERE id = ?").run(note, id);
 			const hashes = W.tableHashes(w.db);
 			const { out, err } = await attempt(w, { days: ["2026-10-08"] });
-			ok(`refused (note "${note}")`, err instanceof M.Refusal && new RegExp(`${NEW_NUMBER} \\(Draft\\), this script's draft for the week, carries an adjustment of \\$280\\.00 \\("${note.replace(/[$+]/g, "\\$&")}"\\)`).test(err.message), err ? err.message : `state ${out && out.state}`);
+			// Matched as text: the note never becomes part of a pattern.
+			const want = `${NEW_NUMBER} (Draft), this script's draft for the week, carries an adjustment of $280.00 (${JSON.stringify(note)})`;
+			ok(`refused (note "${note}")`, err instanceof M.Refusal && err.message.includes(want), err ? err.message : `state ${out && out.state}`);
 			eq(`nothing written (note "${note}")`, W.tableHashes(w.db), hashes);
 		}
 		const again = await attempt(w);
