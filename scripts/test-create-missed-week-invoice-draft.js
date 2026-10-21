@@ -345,6 +345,48 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 		ok("its notes say why", / Period from October 1, 2026 because September 2026 is closed\.$/.test(rd.notes || ""), rd.notes);
 		eq("its line names the week", rd.lineItems && rd.lineItems[0].description, "Missed week 2026-09-26 to 2026-10-02: Thursday, October 1, 2026, $280");
 	});
+	await test("§6 refuses a day named in a manual invoice's adjustment note, whatever its period, writing nothing", async ({ eq, ok }) => {
+		const w = base();
+		// Approved, its period before the week: an adjustment can pay any day.
+		addInvoice(w, { invoice_number: "INV-M-JT-2026W40-08", week_start: "2026-10-01", week_end: "2026-10-01", status: "Approved", adjustment: 280, adjustment_note: "Missed day 10/7",
+			render_data: manualRender([{ date: "2026-10-01", description: "Fuel advance", amount: 40 }]) });
+		const hashes = W.tableHashes(w.db);
+		const { out, err } = await attempt(w);
+		ok("refused", err instanceof M.Refusal && /INV-M-JT-2026W40-08 \(Approved\) carries an adjustment of \$280\.00 whose note names 2026-10-07; it may already pay that day/.test(err.message), err ? err.message : `state ${out && out.state}`);
+		eq("nothing written", W.tableHashes(w.db), hashes);
+	});
+	await test("§6 refuses any day of the week once this script's own draft for it carries an adjustment, writing nothing", async ({ eq, ok }) => {
+		const w = base({ overrides: [{ driver: D, day: "2026-10-08", action: "add" }] });
+		const first = await attempt(w);
+		eq("the 10/7 draft is written", first.out && first.out.state, "written");
+		const id = first.out && first.out.invoice.id;
+		for (const note of ["+$280 Thu 10/8 too", "bonus"]) {
+			w.db.prepare("UPDATE invoices SET adjustment = 280, adjustment_note = ? WHERE id = ?").run(note, id);
+			const hashes = W.tableHashes(w.db);
+			const { out, err } = await attempt(w, { days: ["2026-10-08"] });
+			ok(`refused (note "${note}")`, err instanceof M.Refusal && new RegExp(`${NEW_NUMBER} \\(Draft\\), this script's draft for the week, carries an adjustment of \\$280\\.00 \\("${note.replace(/[$+]/g, "\\$&")}"\\)`).test(err.message), err ? err.message : `state ${out && out.state}`);
+			eq(`nothing written (note "${note}")`, W.tableHashes(w.db), hashes);
+		}
+		const again = await attempt(w);
+		eq("the same days again are still already drafted", again.out && again.out.state, "already");
+	});
+	await refused("--loads naming a token two loads end with", null, { loads: ["5101"] }, /--loads 5101 matches 2 of this driver's completed loads billed in another week; name one/,
+		{ extraRows: [loadRow({ id: "Q-5101", driver: D, pickup: "2026-10-12 8:00", dropoff: "2026-10-13 9:00", assigned: "2026-10-11", done: "2026-10-13", truck: "T1" })] });
+	await test("§6 a Rejected invoice naming the day does not block, and is listed (PUT /revert can bring it back)", async ({ eq, ok }) => {
+		const w = base();
+		addInvoice(w, { invoice_number: "INV-M-JT-2026W42-06", week_start: "2026-10-18", week_end: "2026-10-18", status: "Rejected", render_data: manualRender([{ date: "2026-10-07", description: "Make-up", amount: 280 }]) });
+		addInvoice(w, { invoice_number: "INV-JT-2026W41-01", week_start: "2026-10-10", week_end: "2026-10-16", status: "Rejected", is_manual: 0, render_data: weeklyRender([]), adjustment: 280, adjustment_note: "Wed 10/7 missed" });
+		const { out, err } = await attempt(w);
+		eq("written", out && out.state, "written");
+		if (err) ok("no error", false, err.message);
+		const lines = out ? M.describe(out.plan, { ...OPTS }) : [];
+		const at = lines.indexOf("Rejected invoices naming these days (they do not block; PUT /api/invoices/:id/revert can bring one back):");
+		ok("the heading", at >= 0, lines.join("\n"));
+		eq("each listed with what names the day", lines.slice(at + 1, at + 3), [
+			"  INV-M-JT-2026W42-06 (Rejected): INV-M-JT-2026W42-06 (Rejected) has a line dated 2026-10-07; it may already pay that day",
+			"  INV-JT-2026W41-01 (Rejected): INV-JT-2026W41-01 (Rejected) carries an adjustment of $280.00 whose note names 2026-10-07; it may already pay that day",
+		]);
+	});
 	await allowed("a Rejected manual invoice paying the day does not block", (w) => addInvoice(w, { invoice_number: "INV-M-JT-2026W42-06", week_start: "2026-10-18", week_end: "2026-10-18", status: "Rejected", render_data: manualRender([{ date: "2026-10-07", description: "Make-up", amount: 280 }]) }));
 	await allowed("a deleted manual invoice paying the day does not block", (w) => addInvoice(w, { invoice_number: "INV-M-JT-2026W42-07", week_start: "2026-10-18", week_end: "2026-10-18", deleted_at: "2026-10-19T00:00:00Z", render_data: manualRender([{ date: "2026-10-07", description: "Make-up", amount: 280 }]) }));
 	await allowed("another driver's invoice paying the day does not block", (w) => addInvoice(w, { invoice_number: "INV-M-AB-2026W42-01", driver: "avery bramble", week_start: "2026-10-18", week_end: "2026-10-18", render_data: manualRender([{ date: "2026-10-07", description: "Make-up", amount: 260 }]) }));

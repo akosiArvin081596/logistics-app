@@ -45,8 +45,9 @@
 // the rules would not pay is refused, with why (no window covers it, the ELD
 // shows the truck parked, an override removed it); there is no option to force
 // one: a Super Admin adds the day in the app (excluded days, "add") and the run
-// then reads it. --loads limits the loads that may justify a day (a load whose
-// appointments look mistyped stays out unless named). The rate is the one the
+// then reads it. Without --loads every such load counts; a load with a window
+// over a week long, or a pickup well before its Assigned Date, is named in a
+// NOTE, and --loads (the loads that may justify a day) leaves it out. The rate is the one the
 // generator would price the day at today: getDriverPayStructures(),
 // truckDailyRateCandidates(), resolveDailyRate() and invoiceDayPricing() (the
 // daily-rate rule's rate in effect that day when DRIVER_RATE_ONLY is on); every
@@ -57,7 +58,10 @@
 // "Missed week <Saturday> to <Friday>:") names exactly these days at the rate
 // they price at now, it prints "already drafted" with its number, status and
 // total and writes nothing (exit 0), whatever the date and the month locks say.
-// The same days at another rate, or some of the days, refuse.
+// The same days at another rate, or some of the days, refuse; so does any day
+// once one of this script's drafts for the week carries an adjustment (it may
+// pay other days of the week; PUT /api/invoices/:id/adjust works on manual
+// invoices).
 //
 // Refused (exit 2, nothing written) when:
 //   - the driver name does not match exactly one Driver account and one
@@ -73,8 +77,10 @@
 //     it, or which covers it with no grid; a manual invoice with a line dated it,
 //     paidDays naming it, an undated line (or no line) over a period covering it,
 //     or a line or notes naming it (2026-10-15, 10/15, October 15 or Oct 15) when
-//     its period ends on or after the week's start; a weekly invoice from the
-//     week on whose adjustment note names it;
+//     its period ends on or after the week's start; any invoice, weekly or
+//     manual, whatever its period, carrying an adjustment whose note names it.
+//     A Rejected invoice pays nothing and does not block, but one that would
+//     have is listed (PUT /api/invoices/:id/revert can bring it back);
 //   - --date is after today, before the last day, or in a closed month; a day's
 //     month is closed (period_locks; an unreadable table counts as closed);
 //   - the state read before rendering the PDF changed by the time the database
@@ -333,9 +339,17 @@ function plan(db, api, values, opts, { today = null } = {}) {
 		}
 		return { state: "already", existing: exact.row, existingTotal: api.invoiceTotalDue(exact.row), payee, listing };
 	}
+	// An adjustment on one of this script's drafts for the week may pay any day
+	// of it (PUT /api/invoices/:id/adjust works on manual invoices), as an
+	// adjusted original refuses in the correction script.
+	const adjusted = drafts.find((c) => cents(c.row.adjustment) !== 0);
+	if (adjusted) {
+		throw new Refusal(`${adjusted.row.invoice_number} (${adjusted.row.status}), this script's draft for the week, carries an adjustment of ${usd(adjusted.row.adjustment)} ` +
+			`(${JSON.stringify(String(adjusted.row.adjustment_note || ""))}); it may already pay other days of the week, so nothing was drafted; a person decides`);
+	}
 	const partial = drafts.find((c) => c.days.some((d) => days.includes(d)));
 	if (partial) throw new Refusal(`${partial.row.invoice_number} (${partial.row.status}) already drafts the week for ${partial.days.join(", ")}, which overlaps these days; nothing was drafted`);
-	checks.push("no draft of this script for the week names any of these days");
+	checks.push("no draft of this script for the week names any of these days or carries an adjustment");
 
 	// ── the week has no invoice, and the generator would bill none ──────────────
 	const weekly = api.liveWeeklyInvoicesForDriverWeek(payee, weekStart);
@@ -431,38 +445,51 @@ function plan(db, api, values, opts, { today = null } = {}) {
 		const holders = api.invoicePaidDayHolders(nameNorm, days);
 		for (const d of days) if (holders.has(d)) throw new Refusal(`${d} is already recorded as paid by ${holders.get(d).invoiceNumber || `invoice #${holders.get(d).invoiceId}`} (invoice_paid_days)`);
 	}
-	for (const r of live) {
-		if (draftIds.has(r.id)) continue;
+	// Why invoice `r` may pay day `d`, or null. An adjustment can pay any day,
+	// on any invoice, weekly or manual, whatever its period.
+	const dayHit = (r, d) => {
+		if (cents(r.adjustment) !== 0 && namesDay(r.adjustment_note, d)) {
+			return `${r.invoice_number} (${r.status}) carries an adjustment of ${usd(r.adjustment)} whose note names ${d}; it may already pay that day`;
+		}
 		const snap = snapOf(r);
 		if (!Number(r.is_manual)) {
-			for (const d of days) {
-				if (r.week_start <= d && d <= r.week_end) {
-					const bills = gridBills(r, d);
-					if (bills === null) throw new Refusal(`${r.invoice_number} (${r.status}) covers ${d} but has no day grid line for it, so the script can't tell whether it pays that day`);
-					if (bills) throw new Refusal(`${weekdayOf(d)} ${d} is already billed on ${r.invoice_number} (${r.status})`);
-				}
-				if (String(r.week_end || "") >= weekStart && cents(r.adjustment) !== 0 && namesDay(r.adjustment_note, d)) {
-					throw new Refusal(`${r.invoice_number} (${r.status}) carries an adjustment of ${usd(r.adjustment)} whose note names ${d}; it may already pay that day`);
-				}
-			}
-			continue;
+			if (!(r.week_start <= d && d <= r.week_end)) return null;
+			const bills = gridBills(r, d);
+			if (bills === null) return `${r.invoice_number} (${r.status}) covers ${d} but has no day grid line for it, so the script can't tell whether it pays that day`;
+			return bills ? `${weekdayOf(d)} ${d} is already billed on ${r.invoice_number} (${r.status})` : null;
 		}
 		const lines = linesOf(r);
-		const claimed = Array.isArray(snap.paidDays) ? snap.paidDays.map(String) : [];
+		if (Array.isArray(snap.paidDays) && snap.paidDays.map(String).includes(d)) return `${r.invoice_number} (${r.status}) names ${d} among the days it pays`;
+		if (lines.some((l) => String((l && l.date) || "").trim() === d)) return `${r.invoice_number} (${r.status}) has a line dated ${d}; it may already pay that day`;
+		if (r.week_start <= d && d <= r.week_end && (!lines.length || lines.some((l) => !isCalendarDay(String((l && l.date) || "").trim())))) {
+			return `${r.invoice_number} (${r.status}) covers ${d} with ${lines.length ? "an undated line" : "no line"}, so the script can't tell whether it pays that day`;
+		}
+		if (String(r.week_end || "") >= weekStart) {
+			const texts = [...lines.map((l) => String((l && l.description) || "")), String(snap.notes || "")];
+			if (texts.some((t) => namesDay(t, d))) return `${r.invoice_number} (${r.status}) names ${d} in a line or its notes; it may already pay that day`;
+		}
+		return null;
+	};
+	for (const r of live) {
+		// This script's drafts for the week: an exact one answered above, an
+		// overlapping or adjusted one refused above, the rest name other days.
+		if (draftIds.has(r.id)) continue;
 		for (const d of days) {
-			if (claimed.includes(d)) throw new Refusal(`${r.invoice_number} (${r.status}) names ${d} among the days it pays`);
-			if (lines.some((l) => String((l && l.date) || "").trim() === d)) throw new Refusal(`${r.invoice_number} (${r.status}) has a line dated ${d}; it may already pay that day`);
-			const covers = r.week_start <= d && d <= r.week_end;
-			if (covers && (!lines.length || lines.some((l) => !isCalendarDay(String((l && l.date) || "").trim())))) {
-				throw new Refusal(`${r.invoice_number} (${r.status}) covers ${d} with ${lines.length ? "an undated line" : "no line"}, so the script can't tell whether it pays that day`);
-			}
-			if (String(r.week_end || "") >= weekStart) {
-				const texts = [...lines.map((l) => String((l && l.description) || "")), String(snap.notes || "")];
-				if (texts.some((t) => namesDay(t, d))) throw new Refusal(`${r.invoice_number} (${r.status}) names ${d} in a line or its notes; it may already pay that day`);
-			}
+			const hit = dayHit(r, d);
+			if (hit) throw new Refusal(hit);
 		}
 	}
-	checks.push("no live invoice of the driver pays these days (paid-days records, weekly day grids and adjustment notes, manual lines, days and notes)");
+	checks.push("no live invoice of the driver pays these days (paid-days records, weekly day grids, adjustment notes on any invoice, manual lines, days and notes)");
+	// A Rejected invoice pays nothing and does not block, but PUT /revert can
+	// bring one back: each one naming a day is listed for a person.
+	const rejectedNaming = [];
+	for (const r of db.prepare("SELECT * FROM invoices WHERE COALESCE(deleted_at, '') = '' AND status = 'Rejected' ORDER BY id").all()) {
+		if (api.normalizeDriverName(r.driver) !== nameNorm) continue;
+		for (const d of days) {
+			const hit = dayHit(r, d);
+			if (hit) rejectedNaming.push({ invoiceNumber: r.invoice_number, day: d, why: hit });
+		}
+	}
 
 	// ── the draft ───────────────────────────────────────────────────────────────
 	const lineItems = perDay.map((p) => ({ date: p.day, description: `${prefix} ${weekdayOf(p.day)}, ${longDay(p.day)}, ${usdShort(p.rate)}`, amount: p.rate }));
@@ -534,7 +561,7 @@ function plan(db, api, values, opts, { today = null } = {}) {
 	// shown, never drafted unless named in --days.
 	const otherDays = [...paid.activeDaySet].filter((d) => !days.includes(d)).sort().map((d) => ({ day: d, loads: paid.dayLoadMap[d] || [] }));
 	return {
-		state: "draft", payee, nameNorm, perDay, otherDays, renderData, row, audit, paidDays, periodStart, closedInWeek, checks, listing,
+		state: "draft", payee, nameNorm, perDay, otherDays, renderData, row, audit, paidDays, periodStart, closedInWeek, checks, listing, rejectedNaming,
 		related: relatedLoads({ api, data, headers, cols, nameNorm, weekStart, weekEnd, weekRule, deletedKeys, payerIds, used, keyOf, idOf, rawWindow }),
 		suspects: payerIds.map((id) => byId.get(id)).filter(Boolean).map((r) => ({ loadId: idOf(r), note: suspectNote(loadCells(r, cols, headers), rawWindow(r), dayKey) })).filter((s) => s.note),
 		flags: {
@@ -651,6 +678,10 @@ function describe(p, opts) {
 			(m.lines.length ? `: ${m.lines.map((l) => JSON.stringify(l)).join(" | ")}` : ""));
 	}
 	if (p.state === "already") return out;
+	if (p.rejectedNaming.length) {
+		out.push("Rejected invoices naming these days (they do not block; PUT /api/invoices/:id/revert can bring one back):");
+		for (const x of p.rejectedNaming) out.push(`  ${x.invoiceNumber} (Rejected): ${x.why}`);
+	}
 	out.push(`Related loads (window touches the week; none of their days is drafted): ${p.related.length ? "" : "none"}`);
 	for (const r of p.related) {
 		out.push(`  load ${r.loadId}: ${r.status || "no status"}; Pickup ${r.pickup || "-"}, Drop-off ${r.dropoff || "-"}, Assigned ${r.assigned || "-"}, completed ${r.completedOn || "-"}; ` +
