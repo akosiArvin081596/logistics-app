@@ -502,6 +502,7 @@ async function main() {
 
 	const browser = await puppeteer.launch({
 		headless: "new",
+		pipe: true, // controlled over a pipe, like lib/pdf-browser.js
 		args: [
 			"--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
 			// ⚠️ MANDATORY. page.screencast() measures the viewport with
