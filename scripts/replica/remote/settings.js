@@ -61,7 +61,9 @@ if (require.main === module) {
 		const dotenv = require(path.join(appDir, "node_modules", "dotenv"));
 		const envFile = path.join(appDir, ".env");
 		const parsed = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
-		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join(appDir, "lib", f))]
+		// replica-rules.js only names settings to judge them (its lists and
+		// comments), so it never makes a name count as read.
+		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join(appDir, "lib", f))]
 			.map((f) => fs.readFileSync(f, "utf8"));
 		const { copied, skipped, text } = exportSettings(parsed, { readByApp: rules.namesReadBy(appSources) });
 		fs.writeFileSync(out, text, { mode: 0o600, flag: "wx" });

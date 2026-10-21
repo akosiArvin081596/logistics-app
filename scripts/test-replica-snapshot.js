@@ -301,6 +301,22 @@ console.log("§3 the settings export copies business settings only");
 	const known = [...rules.ENABLE_ALLOWED, ...Object.keys(rules.ENABLE_REFUSED), ...Object.values(rules.ENABLE_FROM)];
 	eq("every flag the replica rules know is found read by server.js or lib/", known.filter((n) => !read.has(n)), []);
 }
+{
+	// lib/replica-rules.js names settings only to judge them: a name that only
+	// its lists or comments mention is not read by the app.
+	const app = tmp("replica-settings-rules-");
+	const out = tmp("replica-settings-rules-out-");
+	fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(app, "node_modules"));
+	fs.writeFileSync(path.join(app, "server.js"), "const r = process.env.ROUTEMATE_ENABLED;\n");
+	fs.mkdirSync(path.join(app, "lib"));
+	fs.writeFileSync(path.join(app, "lib", "replica-rules.js"), 'const ENABLE_ALLOWED = ["ONLY_IN_RULES_ENABLED"];\n// see "RULES_COMMENT_FROM"\n');
+	fs.writeFileSync(path.join(app, ".env"), 'ROUTEMATE_ENABLED="true"\nONLY_IN_RULES_ENABLED="true"\nRULES_COMMENT_FROM="2030-01"\n');
+	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
+	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
+	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
+	ok("a name only lib/replica-rules.js lists or mentions in a comment is not read by the app", r.status === 0 && cli.copied.includes("ROUTEMATE_ENABLED")
+		&& rule("ONLY_IN_RULES_ENABLED") === "not read by the app" && rule("RULES_COMMENT_FROM") === "not read by the app", { status: r.status, copied: cli.copied });
+}
 
 // ---- §4 rules and the pull scripts ------------------------------------------------------------
 console.log("§4 stamps, tasks and the pull scripts");
