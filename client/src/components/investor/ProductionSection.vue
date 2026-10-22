@@ -20,6 +20,7 @@
           @click="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
           @keyup.enter="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
           @keyup.space.prevent="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
+          @focus="revealBar"
         >
           <div class="chart-amount">{{ m.amount > 0 ? fmt(m.amount) : '' }}</div>
           <div class="chart-bar" :class="{ empty: m.amount === 0, 'bar-current': m.isCurrent }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
@@ -118,6 +119,7 @@ import { appToday, shiftYm } from '../../utils/datetime'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { leaseBasisOf, leaseNotes } from '../../lib/payoutPeriod'
 import { LEASE_LABEL } from '../../lib/leasePayoutText'
+import { revealOnKeyboardFocus } from '../../lib/revealInScroller'
 
 const props = defineProps({
   production: { type: Object, required: true },
@@ -168,6 +170,11 @@ function monthFullLabel(key) {
 const selectedMonth = ref(null)
 function openMonthDetail(m) {
   selectedMonth.value = m
+}
+// Tab to a bar the phone-width chart box only partly shows: scroll the box so
+// the bar and its focus outline (2px + 2px offset) are in view.
+function revealBar(e) {
+  revealOnKeyboardFocus(e.currentTarget, e.currentTarget.closest('.chart-scroll'), 4)
 }
 
 const selectedMonthEarnings = computed(() => {

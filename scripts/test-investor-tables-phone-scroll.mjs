@@ -28,9 +28,15 @@
 //      keeps the same layout while a focused bar's outline and the bars' -2 px
 //      margins stay inside the box; .chart-bars is at least as wide as its bars,
 //      so the axis line runs under every bar when scrolled (2026-10-22)
+//   §5 Tab to a bar the box only partly shows (the current month, at the right
+//      edge on a phone) scrolls the box so the bar and its focus outline are in
+//      view. Keyboard focus only (:focus-visible), and only the box moves, never
+//      the page: a click or tap, or a box with nothing to scroll (desktop), stays
+//      as it is (#578 browser check, 2026-10-22)
 //
 // The components' own markup and styles, parsed with the client's compiler and
-// postcss. No DOM, no browser.
+// postcss; §5 runs client/src/lib/revealInScroller.js on fake elements. No DOM,
+// no browser.
 //   node scripts/test-investor-tables-phone-scroll.mjs
 //   EXPENSES_SECTION_VUE=/tmp/base/ExpensesSection.vue node scripts/test-investor-tables-phone-scroll.mjs   # a base copy: fails
 //   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, TRUCK_TABLE_VUE,
@@ -207,6 +213,55 @@ console.log('§4 the Production Performance chart scrolls sideways inside its ow
   }
   // The axis line (.chart-bars' bottom border) spans every bar when scrolled.
   eq('.chart-bars min-width', last(decls(root, '.chart-bars', 'min-width')), 'min-content')
+}
+
+console.log('§5 a keyboard-focused bar the chart box only partly shows scrolls into view')
+{
+  const { descriptor } = load(PRODUCTION_SECTION_VUE)
+  // The @focus handler on each bar, and that it hands the bar to the helper.
+  let wrap
+  ;(function walk(node) {
+    if (!wrap && node.type === 1 && staticClasses(node).includes('chart-bar-wrap')) wrap = node
+    for (const child of node.children || []) walk(child)
+  })(descriptor.template.ast)
+  const onFocus = wrap && (wrap.props || []).find((p) => p.type === 7 && p.name === 'on' && p.arg && p.arg.content === 'focus')
+  ok('.chart-bar-wrap has an @focus handler', !!onFocus)
+  const handler = onFocus && onFocus.exp ? onFocus.exp.content.trim() : ''
+  const script = descriptor.scriptSetup ? descriptor.scriptSetup.content : ''
+  ok('ProductionSection imports revealOnKeyboardFocus from lib/revealInScroller',
+    /import\s*\{[^}]*\brevealOnKeyboardFocus\b[^}]*\}\s*from\s*'\.\.\/\.\.\/lib\/revealInScroller'/.test(script))
+  const body = /^\w+$/.test(handler) ? new RegExp(`function ${handler}\\s*\\([^)]*\\)\\s*\\{([^}]*)\\}`).exec(script) : null
+  ok(`the @focus handler (${JSON.stringify(handler)}) calls revealOnKeyboardFocus with the bar and its .chart-scroll box`,
+    !!body && /revealOnKeyboardFocus\(\s*e\.currentTarget\s*,\s*e\.currentTarget\.closest\('\.chart-scroll'\)\s*,\s*4\s*\)/.test(body[1]))
+
+  let reveal
+  try {
+    ;({ revealOnKeyboardFocus: reveal } = await import(path.join(SRC, 'lib', 'revealInScroller.js')))
+  } catch (err) {
+    ok(`client/src/lib/revealInScroller.js loads (${err.code || err.message})`, false)
+  }
+  if (reveal) {
+    // A 340 px box at x 20..360; `left` is the bar's on-screen left edge.
+    const box = (scrollLeft = 0) => ({ scrollLeft, getBoundingClientRect: () => ({ left: 20, right: 360 }) })
+    const bar = (left, keyboard = true) => ({
+      matches: (sel) => sel === ':focus-visible' && keyboard,
+      getBoundingClientRect: () => ({ left, right: left + 46 }),
+    })
+    let b = box(0); reveal(bar(330), b, 4)
+    eq('a bar cut off on the right (16 of 46 px hidden): scrolls 16 + the 4 px outline', b.scrollLeft, 20)
+    b = box(100); reveal(bar(10), b, 4)
+    eq('a bar cut off on the left: scrolls back 10 + 4 px', b.scrollLeft, 86)
+    b = box(50); reveal(bar(200), b, 4)
+    eq('a bar fully in view (and every bar at desktop width): no scroll', b.scrollLeft, 50)
+    b = box(0); reveal(bar(310), b, 4)
+    eq('a bar whose outline just fits (right edge 360): no scroll', b.scrollLeft, 0)
+    b = box(0); reveal(bar(330, false), b, 4)
+    eq('mouse or touch focus (not :focus-visible): no scroll', b.scrollLeft, 0)
+    b = box(0)
+    reveal(bar(330), null, 4)
+    reveal(null, b, 4)
+    eq('no box or no bar: nothing thrown, nothing moved', b.scrollLeft, 0)
+  }
 }
 
 if (failures.length) {
