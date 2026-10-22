@@ -500,6 +500,9 @@ const sorted = (...xs) => [...xs].sort().join();
 	const H = documentFiledUnder;
 	ok("matches across letter case and spacing", H({ driver: "driver  b" }, "Driver B") === true && H({ driver: " DRIVER B " }, "driver b") === true);
 	ok("another driver's row is not his", H({ driver: "Driver A" }, "Driver B") === false);
+	ok("a name that only starts or ends like his is not his",
+		H({ driver: "Driver Bo" }, "Driver B") === false && H({ driver: "Driver B" }, "Driver Bo") === false &&
+		H({ driver: "Old Driver B" }, "Driver B") === false);
 	ok("a blank name on either side matches nothing (blank-filed rows are office-only; a nameless session sees none)",
 		H({ driver: "" }, "") === false && H({ driver: "" }, "Driver B") === false && H({ driver: "Driver B" }, "") === false &&
 		H({ driver: "   " }, "  ") === false);
