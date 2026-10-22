@@ -9103,15 +9103,19 @@ const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
 // preview's rate-con files; and a listed account's password, role, email and
 // driver name change, or its removal, only by itself or another listed account
 // (PUT and DELETE /api/users/:id, 403 PROTECTED_ACCOUNT). Invoice drafting
-// still attaches the rate con for every Super Admin.
-// Unset: the behaviour before the list existed, and one warning per start.
+// still attaches the rate con for every Super Admin. The same list is the only
+// way into the database admin routes (POST /api/db/download, GET /api/db/tables,
+// GET /api/db/query/:table; dbAccessListedOnly), 403 DB_DOWNLOAD_RESTRICTED for
+// everyone else.
+// Unset: the behaviour before the list existed for rate cons and accounts, but
+// nobody uses the database admin routes; one warning per start.
 // Set but invalid: nobody opens a rate con in the app, no Super Admin's
-// password, role, email or driver name changes and none is removed, and one
-// error per start.
+// password, role, email or driver name changes and none is removed, nobody uses
+// the database admin routes, and one error per start.
 const RATECON_PDF_VIEWERS = require("./lib/listed-accounts.js").fromSetting(
 	"RATECON_PDF_VIEWER_IDS", process.env.RATECON_PDF_VIEWER_IDS, console, {
-		unsetMeans: "every Super Admin opens rate-con files and no account is protected; set it to the owner's account id(s)",
-		invalidMeans: "nobody opens a rate-con file in the app, and no Super Admin's password, role, email or driver name changes, until it lists account ids only (for example 1,7)",
+		unsetMeans: "every Super Admin opens rate-con files and no account is protected, but nobody downloads or browses the database in the app; set it to the owner's account id(s)",
+		invalidMeans: "nobody opens a rate-con file or downloads or browses the database in the app, and no Super Admin's password, role, email or driver name changes, until it lists account ids only (for example 1,7)",
 	},
 );
 const rateconViewGate = require("./lib/ratecon-pdf-route.js").viewerGate(RATECON_PDF_VIEWERS);
@@ -30014,6 +30018,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 // This is also the shape the removed `demo_viewer` account exploited (see the
 // tombstone above): its only gate was the HTTP method, so every Super-Admin GET
 // — GET /api/db/download included — was reachable by anyone who read the repo.
+//
+// Since 2026-10-22 all three are limited to the accounts on
+// RATECON_PDF_VIEWER_IDS, and every refusal is audited (dbAccessListedOnly,
+// below).
 // ---------------------------------------------------------------------------
 const dbAdminLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -30078,8 +30086,121 @@ function purgeOrphanedDbExports() {
 purgeOrphanedDbExports();
 
 // ---------------------------------------------------------------------------
-// Export the SQLite database file (Super Admin only). POST, and THE METHOD IS
-// THE CONTROL.
+// THE DATABASE ADMIN ROUTES ARE FOR THE LISTED ACCOUNTS ONLY (2026-10-22).
+// POST /api/db/download hands over the whole database, GET /api/db/query/:table
+// any table page by page, GET /api/db/tables every table's row count. Only the
+// accounts on RATECON_PDF_VIEWER_IDS (RATECON_PDF_VIEWERS above) may use them.
+// dbAccessRefusalReason() decides, for a caller requireRole already admitted
+// as a Super Admin:
+//   listed         — allowed once the account, re-read by id, is still a Super
+//                    Admin. The session's role is a copy taken at sign-in, so a
+//                    demoted or removed account whose session still says Super
+//                    Admin is told to sign in again;
+//   unlisted       — refused;
+//   no account id  — refused, "sign in again";
+//   list unset     — refused (decision D3). Unlike the rate-con gates, which
+//                    keep the behaviour from before the list, nobody takes the
+//                    database through the app until the list is set;
+//   list invalid   — refused (fail closed).
+// A refusal is 403 DB_DOWNLOAD_RESTRICTED, no-store, code and error only (never
+// the setting's text), audited through logAuditRefusal (one row a minute per
+// account and route, a burst's count carried on the next row) as
+// db_download_blocked, db_tables_blocked or db_query_blocked. None of them is on
+// PURGEABLE_REFUSAL_ACTIONS: kept forever, like db_export_blocked. The GETs have
+// no cross-site guard, so their rows also record Sec-Fetch-Site.
+// A refused download also raises a Super Admin-only dispatch notice
+// (SUPER_ADMIN_ONLY_NOTICE_TYPES), at most once a day per account; the window is
+// in memory, so a restart may repeat one. The GETs raise none, so a link can't
+// flood Super Admins with notices. A notice that fails is logged and the 403
+// still goes out.
+// Mounted after requireRole("Super Admin"), so every other role keeps its
+// 401/403 with no audit row, and before dbAdminLimiter, so a refusal spends none
+// of the listed accounts' budget. scripts/test-db-download-listed-only.js lifts
+// everything from here to the end of GET /api/db/query/:table.
+// ---------------------------------------------------------------------------
+const { sessionAccountId: dbAccessAccountId } = require("./lib/listed-accounts.js");
+const DB_ACCESS_CODE = "DB_DOWNLOAD_RESTRICTED";
+const DB_ACCESS_MESSAGES = Object.freeze({
+	restricted: "Downloading the database is limited to the owner.",
+	signInAgain: "Your session is out of date. Sign in again to download the database.",
+});
+// The reasons that mean "this session no longer speaks for an allowed account".
+const DB_ACCESS_STALE_REASONS = new Set(["no account id", "role changed", "account not found"]);
+const DB_ACCESS_NOTICE_TYPE = "db-download-refused";
+const DB_ACCESS_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
+const dbAccessNoticeSentAt = new Map();
+
+// null when `user` may use the database routes, otherwise the reason it may not.
+function dbAccessRefusalReason(user) {
+	const verdict = RATECON_PDF_VIEWERS.verdict(user);
+	if (verdict === "unset") return "list unset";
+	if (verdict === "invalid") return "list invalid";
+	if (verdict === "no-id") return "no account id";
+	if (verdict !== "listed") return "unlisted";
+	let row;
+	try {
+		row = db.prepare("SELECT role FROM users WHERE id = ?").get(dbAccessAccountId(user));
+	} catch (err) {
+		console.error("db access: the listed account could not be re-read:", err.message);
+		return "account unreadable";
+	}
+	if (!row) return "account not found";
+	if (row.role !== "Super Admin") return "role changed";
+	return null;
+}
+
+// The Super Admin notice for a refused download, once a day per account.
+function noticeDbDownloadRefused(req, user) {
+	try {
+		const id = dbAccessAccountId(user);
+		const key = id === null ? "no-id" : String(id);
+		const now = Date.now();
+		const last = dbAccessNoticeSentAt.get(key);
+		if (last !== undefined && now - last < DB_ACCESS_NOTICE_EVERY_MS) return;
+		dbAccessNoticeSentAt.set(key, now);
+		const who = id === null
+			? "A session without an account id"
+			: `Account #${id} (${auditHeaderValue(user && user.username, 60)})`;
+		const at = new Date(now).toLocaleTimeString("en-US", { timeZone: APP_TIMEZONE, hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+		const notice = {
+			type: DB_ACCESS_NOTICE_TYPE,
+			title: "Database download refused",
+			body: `${who} tried to download the database at ${at} from ${auditHeaderValue(req.ip, 60)}. Refused.`,
+			metadata: { accountId: id, at: new Date(now).toISOString() },
+		};
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata));
+		io.to("super-admin").emit("dispatch-notification", notice);
+	} catch (err) {
+		console.error("db download refusal notice failed:", err.message);
+	}
+}
+
+function dbAccessListedOnly(action, { entityId = () => "app.db", recordFetchSite = false, notice = false } = {}) {
+	return (req, res, next) => {
+		const user = req.session && req.session.user;
+		const reason = dbAccessRefusalReason(user);
+		if (!reason) return next();
+		const site = recordFetchSite ? ` Sec-Fetch-Site=${auditHeaderValue(req.get("Sec-Fetch-Site"), 40)}` : "";
+		logAuditRefusal(req, action, "database", entityId(req),
+			`Refused: ${reason} ip=${auditHeaderValue(req.ip, 60)}${site} [${DB_ACCESS_CODE}]`, DB_ACCESS_CODE);
+		if (notice) noticeDbDownloadRefused(req, user);
+		return res.status(403).set("Cache-Control", "no-store").json({
+			code: DB_ACCESS_CODE,
+			error: DB_ACCESS_STALE_REASONS.has(reason) ? DB_ACCESS_MESSAGES.signInAgain : DB_ACCESS_MESSAGES.restricted,
+		});
+	};
+}
+const dbDownloadListedOnly = dbAccessListedOnly("db_download_blocked", { notice: true });
+const dbTablesListedOnly = dbAccessListedOnly("db_tables_blocked", { recordFetchSite: true });
+// The table the caller named is its own text: clipped and reduced to printable ASCII.
+const dbQueryListedOnly = dbAccessListedOnly("db_query_blocked", {
+	recordFetchSite: true,
+	entityId: (req) => auditHeaderValue(req.params && req.params.table, 60),
+});
+
+// ---------------------------------------------------------------------------
+// Export the SQLite database file (listed accounts only, see above). POST, and
+// THE METHOD IS THE CONTROL.
 //
 // ⚠️ THIS WAS A GET UNTIL 2026-08-09, AND THE COMMENT IT REPLACES OVERCLAIMED.
 // It said `refuseCrossOrigin` stopped "one link or redirect a logged-in Super
@@ -30139,8 +30260,10 @@ purgeOrphanedDbExports();
 //
 // requireRole FIRST, matching every other guarded route — an unauthenticated
 // caller must never reach anything further down the chain, limiter included, and
-// a 403 must never spend the limiter. Mounts pinned by
-// scripts/test-csrf-guard.js and scripts/test-db-export-guard.js.
+// a 403 must never spend the limiter. Then the cross-site guard, then the
+// listed-accounts gate (dbDownloadListedOnly, above), then the limiter. Mounts
+// pinned by scripts/test-csrf-guard.js, scripts/test-db-export-guard.js and
+// scripts/test-db-download-listed-only.js.
 // ---------------------------------------------------------------------------
 
 // Method guard — mirrors POST /api/admin/routemate/sync-now. Without it a GET
@@ -30156,7 +30279,7 @@ app.all("/api/db/download", (req, res, next) => {
 	res.set("Allow", "POST");
 	res.status(405).json({ error: "Method not allowed", expected: "POST", code: "DB_EXPORT_METHOD" });
 });
-app.post("/api/db/download", requireRole("Super Admin"), refuseCrossOriginStrict, dbAdminLimiter, (req, res) => {
+app.post("/api/db/download", requireRole("Super Admin"), refuseCrossOriginStrict, dbDownloadListedOnly, dbAdminLimiter, (req, res) => {
 	// The entire database in one response. Logged BEFORE the work starts, so an
 	// export that fails or is aborted mid-stream still leaves the attempt on
 	// record — the intent is what is being audited, not the byte count.
@@ -30211,8 +30334,9 @@ app.post("/api/db/download", requireRole("Super Admin"), refuseCrossOriginStrict
 	});
 });
 
-// Database diagnosis — list tables and query any table (Super Admin only)
-app.get("/api/db/tables", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
+// Database diagnosis — list tables and query any table (listed accounts only;
+// the gate is dbAccessListedOnly above).
+app.get("/api/db/tables", requireRole("Super Admin"), dbTablesListedOnly, dbAdminLimiter, (req, res) => {
 	const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
 	const result = {};
 	for (const { name } of tables) {
@@ -30222,7 +30346,7 @@ app.get("/api/db/tables", requireRole("Super Admin"), dbAdminLimiter, (req, res)
 	res.json({ tables: result });
 });
 
-app.get("/api/db/query/:table", requireRole("Super Admin"), dbAdminLimiter, (req, res) => {
+app.get("/api/db/query/:table", requireRole("Super Admin"), dbQueryListedOnly, dbAdminLimiter, (req, res) => {
 	const table = req.params.table;
 	// Validate table name exists to prevent injection
 	const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
@@ -46513,9 +46637,10 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 
 // Dispatch notices only Super Admins see: the driver-instructions edit lock
 // (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
-// sent to the super-admin room only). For every other role GET
+// sent to the super-admin room only) and a refused database download
+// (DB_ACCESS_NOTICE_TYPE, noticeDbDownloadRefused()). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "db-download-refused"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;

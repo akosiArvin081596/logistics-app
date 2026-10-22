@@ -161,7 +161,7 @@ Spreadsheet ID `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` (NOT the archive a
 Direct SSH to the VPS lets you run scripts. Be careful. The scripts directory includes utilities for password resets, geocode backfill, etc. Document any production script runs.
 
 **Q. How do I back up the database?**
-`POST /api/db/download` returns the SQLite file. Or `scp` it from the VPS directly. Schedule periodic backups.
+The accounts listed in `RATECON_PDF_VIEWER_IDS` can use *Download database backup* in Admin Tools (`POST /api/db/download`); everyone else is refused. Or `scp` it from the VPS directly. The server also takes a verified snapshot every night.
 
 It is a **POST**, so you cannot paste the URL into the address bar — a GET returns 405. That is deliberate: the export contains every SSN and bank account number in the system, and as a GET one link followed from an email or a chat message could make your own browser download a full copy. The `curl` recipe is in the technical manual under Operations → Database admin tools.
 
