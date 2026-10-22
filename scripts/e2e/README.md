@@ -218,6 +218,8 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
 | `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
+| `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
+| `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -242,7 +244,7 @@ fnm exec --using=22.23.2 npm --prefix scripts/e2e ci                        # on
 W="$(node scripts/e2e/paths.cjs work-dir)"                                   # the work dir (created 0700)
 fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # add --force to replace a copy
 fnm exec --using=22.23.2 node scripts/e2e/verify-creds.cjs "$W/qa.db"        # expect "password matches=true must_change_password=0" x5
-fnm exec --using=22.23.2 scripts/e2e/prep-worktree.sh                        # once per worktree
+# Once per worktree: link the main checkout's installs as fix-bug.md step 3 says (prep-worktree.sh is blocked by the secrets guard)
 # Part 1: trucks + Dispatcher data (5 sign-ins)
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"   # waits until it answers
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-trucks ONLY=trucks,dispatcher DB_PATH="$W/qa.db" \
@@ -266,8 +268,8 @@ BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-moneypath ONLY=moneypat
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
 # Part 5: the invoice editor (1 sign-in). The draft route reads a load's POD from the checkout's uploads/ on disk,
-# so link the main checkout's POD files first (once per worktree; the main checkout has its own).
-E2E_LINK_PODS=1 fnm exec --using=22.23.2 scripts/e2e/prep-worktree.sh
+# so link the main checkout's POD files first (once per worktree; the main checkout has its own), by hand as
+# fix-bug.md step 3 says: prep-worktree.sh (E2E_LINK_PODS=1) is blocked by the secrets guard.
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-invoice ONLY=invoice DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs

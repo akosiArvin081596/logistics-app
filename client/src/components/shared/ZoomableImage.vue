@@ -133,7 +133,7 @@ function clampScale(v) {
 // Keep the image from being dragged entirely off-screen: pan room equals how
 // far the scaled image overflows the viewport, plus a little slack so edges
 // stay comfortably reachable. clientWidth/Height are the un-transformed
-// (layout) dimensions, which the CSS already caps at 90vw/90vh.
+// (layout) dimensions, which the CSS already caps at 90vw/90dvh.
 function clampPan() {
   const img = imgRef.value
   if (!img) return
