@@ -193,6 +193,13 @@ const routes = [
     meta: { roles: ['Super Admin'] },
   },
   {
+    // GET /api/admin/deleted-loads, a list only (no restore). Linked from Active Loads.
+    path: '/admin/deleted-loads',
+    name: 'admin-deleted-loads',
+    component: () => import('../views/DeletedLoadsView.vue'),
+    meta: { roles: ['Super Admin'] },
+  },
+  {
     path: '/archive',
     name: 'archive',
     component: () => import('../views/ArchiveView.vue'),
