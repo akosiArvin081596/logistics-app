@@ -44,6 +44,7 @@
  *   §6 DD10: open-month receipts refuse the delete.
  *   §7 What must not change.
  *   §8 Source pins (comments stripped before matching).
+ *   §9 Discrimination: each new clause of the guard, taken out, flips a check.
  *
  * The route registration is lifted whole from server.js, with the real guard
  * (userDeleteLockBlockers() and the rename cascade's leg helpers), the real
@@ -235,12 +236,12 @@ function world(opts = {}) {
 }
 
 // The registration, executed against a capturing `app`, with its dependencies.
-function deleteRoute(w, rec) {
+function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 	const isLocked = (p) => w.locked.has(p);
 	const month = (r) => String(r.posted_period || r.date || "").slice(0, 7);
 	const guard = new Function(
 		"db", "isLocked", "periodLocksReadable", "expenseRowPeriodLocked", "blockedExpensePeriods", "truckFixedCostLockedMonths",
-		`${GUARD_SRC}\nreturn userDeleteLockBlockers;`,
+		`${guardSrc}\nreturn userDeleteLockBlockers;`,
 	)(w.db, isLocked, () => true, (r) => isLocked(month(r)), (rows) => [...new Set(rows.map(month))].sort(), () => []);
 	const truck = new Function("db", `${TRUCK_SRC}\n${liftFn("normalizeDriverName")}\nreturn { findTruckForDriverAccount, normalizeDriverName };`)(w.db);
 	const deps = {
@@ -266,9 +267,9 @@ function deleteRoute(w, rec) {
 	if (!captured || captured.path !== "/api/users/:id") fatal("the lifted registration did not register DELETE /api/users/:id");
 	return captured.chain;
 }
-function del(w, id) {
+function del(w, id, guardSrc) {
 	const rec = { refusals: [], audits: [], purged: [], synced: [] };
-	const chain = deleteRoute(w, rec);
+	const chain = deleteRoute(w, rec, guardSrc);
 	const req = { method: "DELETE", params: { id: String(id) }, body: {}, query: {}, headers: {}, session: { user: { ...ADMIN } } };
 	const res = {
 		statusCode: 200, body: undefined,
@@ -585,6 +586,44 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	const GUARD = codeOnly(liftFn("userDeleteLockBlockers"));
 	ok("§8 the guard asks driverRenameWidens() once, for both name-matched legs",
 		(GUARD.match(/driverRenameWidens\(/g) || []).length === 1, String((GUARD.match(/driverRenameWidens\(/g) || []).length));
+}
+
+// ---------------------------------------------------------------------------
+// §9 DISCRIMINATION: each new clause of the guard, taken out, must flip an
+// assertion above. A mutant whose anchor is missing is a failure, never a pass.
+// ---------------------------------------------------------------------------
+{
+	const REAL = liftFn("userDeleteLockBlockers");
+	const guardWith = (from, to) => {
+		const n = REAL.split(from).length - 1;
+		if (n !== 1) { ok(`§9 mutant anchor found exactly once: ${from.slice(0, 60)}`, false, `found ${n}`); return null; }
+		return GUARD_SRC.replace(REAL, REAL.replace(from, to));
+	};
+	const run = (src, opts) => { const w = world(opts); const r = del(w, TVALE.id, src); done(w); return r; };
+	const POD = { docs: [{ load: "L-9020", driver: "Tamsin Vale", type: "POD", file: "L-9020_POD_tv.jpg" }] };
+
+	const noDocs = guardWith("if (docs.n) blockers.push({", "if (false) blockers.push({");
+	if (noDocs) eq("§9 mutant: without the documents blocker the POD no longer holds the delete", run(noDocs, POD).status, 200);
+
+	const noOpen = guardWith("if (openExpenseRows) blockers.push({", "if (false) blockers.push({");
+	if (noOpen) eq("§9 mutant: without the open-month blocker the receipt no longer holds the delete", run(noOpen, { expenses: [OPEN_RCPT] }).status, 200);
+
+	const narrow = guardWith("? { userId: user.id } :", "? { userId: user.id, widens: false } :");
+	if (narrow) eq("§9 mutant: without the widening a POD under another spacing no longer holds the delete",
+		run(narrow, { docs: [{ load: "L-9021", driver: "tamsin  vale", type: "POD", file: "L-9021_POD_tv.jpg" }] }).status, 200);
+
+	const liveAndGone = guardWith("AND deleted_at IS NULL`", "`");
+	if (liveAndGone) eq("§9 mutant: counting soft-deleted rows refuses a delete §3 lets through",
+		run(liveAndGone, { docs: [{ load: "L-9022", driver: "Tamsin Vale", type: "POD", file: "L-9022_POD_old.jpg", deleted: "2026-10-03 14:00:00" }] }).status, 409);
+
+	const caseBound = guardWith("UPPER(TRIM(COALESCE(type, ''))) = 'POD'", "type = 'POD'");
+	if (caseBound) {
+		const r = run(caseBound, { docs: [
+			{ load: "L-9023", driver: "Tamsin Vale", type: "pod", file: "L-9023_pod.jpg" },
+			{ load: "L-9024", driver: "Tamsin Vale", type: " POD ", file: "L-9024_POD.jpg" },
+		] });
+		eq("§9 mutant: an exact-case POD test misses \"pod\" and \" POD \"", (blockerOf(r, "DRIVER_HAS_DOCUMENTS") || {}).pods, 0);
+	}
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
