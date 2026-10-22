@@ -40,7 +40,8 @@
 //   node scripts/test-investor-tables-phone-scroll.mjs
 //   EXPENSES_SECTION_VUE=/tmp/base/ExpensesSection.vue node scripts/test-investor-tables-phone-scroll.mjs   # a base copy: fails
 //   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, TRUCK_TABLE_VUE,
-//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, PRODUCTION_SECTION_VUE, SHARED_CSS)
+//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, PRODUCTION_SECTION_VUE, SHARED_CSS,
+//    REVEAL_IN_SCROLLER_JS)
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -64,6 +65,7 @@ const TABLE_FILES = [
 ]
 const INVESTOR_VIEW_VUE = process.env.INVESTOR_VIEW_VUE || path.join(SRC, 'views', 'InvestorView.vue')
 const PRODUCTION_SECTION_VUE = process.env.PRODUCTION_SECTION_VUE || path.join(INVESTOR, 'ProductionSection.vue')
+const REVEAL_IN_SCROLLER_JS = process.env.REVEAL_IN_SCROLLER_JS || path.join(SRC, 'lib', 'revealInScroller.js')
 const SHARED_CSS = process.env.SHARED_CSS || path.join(SRC, 'assets', 'shared.css')
 
 let pass = 0
@@ -236,7 +238,7 @@ console.log('§5 a keyboard-focused bar the chart box only partly shows scrolls 
 
   let reveal
   try {
-    ;({ revealOnKeyboardFocus: reveal } = await import(path.join(SRC, 'lib', 'revealInScroller.js')))
+    ;({ revealOnKeyboardFocus: reveal } = await import(REVEAL_IN_SCROLLER_JS))
   } catch (err) {
     ok(`client/src/lib/revealInScroller.js loads (${err.code || err.message})`, false)
   }
@@ -261,6 +263,16 @@ console.log('§5 a keyboard-focused bar the chart box only partly shows scrolls 
     reveal(bar(330), null, 4)
     reveal(null, b, 4)
     eq('no box or no bar: nothing thrown, nothing moved', b.scrollLeft, 0)
+    // A browser without :focus-visible throws a SyntaxError from matches().
+    const oldBrowserBar = {
+      matches: () => { throw new SyntaxError("':focus-visible' is not a valid selector") },
+      getBoundingClientRect: () => ({ left: 330, right: 376 }),
+    }
+    b = box(0)
+    let threw = null
+    try { reveal(oldBrowserBar, b, 4) } catch (err) { threw = err }
+    ok(`:focus-visible unsupported (matches() throws): no exception (got ${threw && threw.message})`, threw === null)
+    eq(':focus-visible unsupported: no scroll', b.scrollLeft, 0)
   }
 }
 
