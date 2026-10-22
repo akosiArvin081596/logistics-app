@@ -323,7 +323,7 @@ const PENDING_PHONE = { ...PENDING, stops: [PENDING.stops[0], { ...PENDING.stops
 
 // ---------------------------------------------------------------- the steps
 async function flagOn(browser) {
-  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY: DENY })
+  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY })
   plant(api)
   const { ctx, page } = await openPage(browser, api, DESKTOP)
   try {

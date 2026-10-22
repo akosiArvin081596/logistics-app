@@ -815,7 +815,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		const RUNTIME_PATH = path.join(ROOT, "lib", "driver-instructions-runtime.js");
 		const DRIVER_ROUTE = "/api/driver/loads/:loadId/instructions";
 		const DENY = "T8273641";
-		const ON = { RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY: DENY };
+		const ON = { RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY };
 		const quiet = { log() {}, warn() {}, info() {}, error() {} };
 		const liftAsync = (name) => {
 			const a = SRC.indexOf(`\nasync function ${name}(`);
@@ -918,7 +918,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 		ok("§8.0b the page route annotates its loads through driverInstructions.annotateDriverLoads()", /driverInstructions\.annotateDriverLoads\(/.test(routeCode));
 
 		// Off three ways: flag 2 off, flag 1 off, the deny list unset.
-		for (const [label, env] of [["flag 2 off", { ...ON, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "" }], ["flag 1 off", { ...ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "false" }], ["deny list unset", { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY: "" }]]) {
+		for (const [label, env] of [["flag 2 off", { ...ON, DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: "" }], ["flag 1 off", { ...ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "false" }], ["deny list unset", { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: "" }]]) {
 			const off = world(env);
 			const answers = [await off.read(DK, "QA-DI-100"), await off.read(SUPER, "QA-DI-100"), await off.read(null, "QA-DI-100")];
 			ok(`§8.1 ${label}: the route answers 404 with no code (Driver, Super Admin, signed out)`, off.mounted && answers.every(notFound), answers.map(said).join(" | "));

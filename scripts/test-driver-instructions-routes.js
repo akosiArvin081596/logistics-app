@@ -122,7 +122,7 @@ const GEMINI_MARKER = "QZXMARKERQZX";
 const EN_DASH = String.fromCharCode(0x2013);
 const T0 = Date.parse("2026-10-22T15:00:00Z");
 
-const ON = Object.freeze({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY: DENY, RATECON_DRIVE_FOLDER_ID: FOLDER, RATECON_DRIVE_UPLOADER_EMAIL: UPLOADER });
+const ON = Object.freeze({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY, RATECON_DRIVE_FOLDER_ID: FOLDER, RATECON_DRIVE_UPLOADER_EMAIL: UPLOADER });
 const SA = { id: 1, username: "admin_test", role: "Super Admin" };
 const DISP = { id: 2, username: "disp_test", role: "Dispatcher" };
 const DISP2 = { id: 3, username: "disp_two", role: "Dispatcher" };
@@ -457,13 +457,13 @@ test("§1 deny list unset or unusable with the flag on: inert like the flag off,
 	useClock();
 	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
 	for (const deny of [undefined, "", "  ", "12, 3456"]) {
-		const env = { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY: deny };
-		if (deny === undefined) delete env.CARRIER_ACCOUNT_NUMBERS_DENY;
+		const env = { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: deny };
+		if (deny === undefined) delete env.CARRIER_ACCOUNT_NUMBERS_DENY_SECRET;
 		const w = await world({ env, files: [f] });
 		eq(`deny ${JSON.stringify(deny)}: sweep inert`, (await w.service.sweep()).ran, false);
 		for (const [m, u] of ROUTES) eq(`deny ${JSON.stringify(deny)}: ${m} ${u} -> 404`, (await w.call(m, u, SA, m === "GET" ? undefined : {})).status, 404);
 		eq("no Gemini call, no Drive list", [w.calls.gemini, w.calls.list], [0, 0]);
-		ok("one warning names CARRIER_ACCOUNT_NUMBERS_DENY", w.logs.filter((l) => l.includes("CARRIER_ACCOUNT_NUMBERS_DENY is not set")).length === 1, w.logs);
+		ok("one warning names CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", w.logs.filter((l) => l.includes("CARRIER_ACCOUNT_NUMBERS_DENY_SECRET is not set")).length === 1, w.logs);
 		ok("no log line holds a deny value", !w.logs.some((l) => /3456|8273641/.test(l)), w.logs);
 	}
 });
@@ -709,7 +709,7 @@ test("§5 a deny value added later withholds an already-clean stored reference o
 	x.stops[1].references.push({ type: "other_reference", label: "Ref", value: "6127734" });
 	insertRow(w, { v: 1, footnote: "x", ...x });
 	ok("served while not denied", (await w.call("GET", API, DISP)).text.includes("6127734"));
-	w.env.CARRIER_ACCOUNT_NUMBERS_DENY = `${DENY}, X6127734`;
+	w.env.CARRIER_ACCOUNT_NUMBERS_DENY_SECRET = `${DENY}, X6127734`;
 	const r = await w.call("GET", API, DISP);
 	ok("withheld once denied", !r.text.includes("6127734"), r.text.slice(0, 400));
 	eq("refiltered", r.body.refiltered, true);
@@ -736,7 +736,7 @@ test("§5 a context error mid-request (the deny list gone after the gate) answer
 	const w = await world();
 	insertRow(w, cleanExtraction());
 	let reads = 0;
-	Object.defineProperty(w.env, "CARRIER_ACCOUNT_NUMBERS_DENY", { get: () => (reads++ === 0 ? DENY : ""), configurable: true, enumerable: true });
+	Object.defineProperty(w.env, "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", { get: () => (reads++ === 0 ? DENY : ""), configurable: true, enumerable: true });
 	const r = await w.call("GET", API, DISP);
 	eq("404", [r.status, reads >= 2], [404, true]);
 });
@@ -1017,7 +1017,7 @@ test("§9 wiring: the drag-and-drop hook runs after the answer for an archived P
 	const gem = lift.closure(SRC, { roots: ["runRateConGemini"], provided: ["fetch", "GEMINI_OCR_MODEL", "GEMINI_API_KEY", "RATECON_PDF_SYSTEM_PROMPT", "RATECON_PDF_RESPONSE_SCHEMA", "RATECON_GEMINI_FIELDS", "geminiFailure"] });
 	ok("runRateConGemini records an unavailable answer for the sweep's pause", /rateConGeminiUnavailableAt = Date\.now\(\)/.test(gem.text) && gem.names.includes("rateConGeminiUnavailableAt"));
 	const ex = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
-	for (const v of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED", "CARRIER_ACCOUNT_NUMBERS_DENY", "RATECON_DRIVE_UPLOADER_EMAIL"]) {
+	for (const v of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED", "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", "RATECON_DRIVE_UPLOADER_EMAIL"]) {
 		const line = ex.split("\n").find((l) => new RegExp(`^#?\\s*${v}=`).test(l));
 		ok(`.env.example names ${v}`, !!line, v);
 		ok(`.env.example gives ${v} no value`, line && /=\s*$/.test(line), line);
@@ -1032,9 +1032,9 @@ test("§9 replica:pull never copies the deny list or the uploader account, and c
 	const libDir = path.join(ROOT, "lib");
 	const sources = [SRC, ...fs.readdirSync(libDir).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => fs.readFileSync(path.join(libDir, f), "utf8"))];
 	const read = rules.namesReadBy(sources);
-	for (const [name, value] of [["CARRIER_ACCOUNT_NUMBERS_DENY", DENY], ["RATECON_DRIVE_UPLOADER_EMAIL", UPLOADER]]) {
+	for (const [name, value, rule] of [["CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", DENY, /^secret: name contains SECRET$/], ["CARRIER_ACCOUNT_NUMBERS_DENY", DENY, /^production only/], ["RATECON_DRIVE_UPLOADER_EMAIL", UPLOADER, /^production only/]]) {
 		const v = rules.classifySetting(name, value, { readByApp: read });
-		eq(`${name}: never copied, by name`, [v.copy, /^production only/.test(v.rule)], [false, true]);
+		eq(`${name}: never copied, by name`, [v.copy, rule.test(v.rule)], [false, true]);
 		eq(`${name}: never copied, even when listed as read`, rules.classifySetting(name, value, { readByApp: new Set([name]) }).copy, false);
 	}
 	for (const flag of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED"]) {
@@ -1261,9 +1261,9 @@ test("§10 L5 the alert's day and the daily budget are Eastern days (APP_TIMEZON
 	eq("the budget's day is the Eastern day", w.service.budgetState().day, "2026-10-22");
 });
 
-test("§10 L6 replica:pull refuses a checkout whose replica rules would copy CARRIER_ACCOUNT_NUMBERS_DENY", async ({ eq, ok }) => {
+test("§10 L6 replica:pull refuses a checkout whose replica rules would copy the deny list under its name or its retired one", async ({ eq, ok }) => {
 	const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
-	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
+	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY_SECRET[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
 	ok("pull.sh checks the rules before production does any work", !!m && pull.indexOf(m[0]) < pull.indexOf("REMOTE_FILES=(") + 1e9 && pull.indexOf(m[0]) < pull.indexOf("conn_open()"), m && m[0]);
 	if (!m) return;
 	const { spawnSync } = require("child_process");
@@ -1315,7 +1315,7 @@ function driverScreenExtraction() {
 
 test("§12 flag 2 off, the deny list unset, or flag 1 off: the driver route answers 404 with no code to every role, and no driver event is sent", async ({ eq }) => {
 	useClock();
-	const cases = [["flag 2 off", ON], ["deny list unset", { ...ON2, CARRIER_ACCOUNT_NUMBERS_DENY: "" }], ["flag 1 off", { ...ON2, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" }]];
+	const cases = [["flag 2 off", ON], ["deny list unset", { ...ON2, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: "" }], ["flag 1 off", { ...ON2, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" }]];
 	for (const [label, env] of cases) {
 		const w = await world({ env, files: [driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE)] });
 		await w.service.sweep();
@@ -1560,6 +1560,58 @@ test("§12 wiring: the runtime gets the ownership check, its 503 and a driver-ro
 	const wiring = wiringBlock();
 	ok("loadBelongsToDriver and sentIfLoadOwnershipUnverified are handed in", /\bloadBelongsToDriver,/.test(wiring) && /\bsentIfLoadOwnershipUnverified,/.test(wiring));
 	ok("the driver event goes to driverRoom(findDriverAccountSpelling(name) || name)", /emitToDriver: \(name, event, payload\) => io\.to\(driverRoom\(findDriverAccountSpelling\(name\) \|\| name\)\)\.emit\(event, payload\)/.test(wiring));
+});
+
+// ── §13 decisions 37, 38 and 40 ───────────────────────────────────────────────
+const NEW_NAME = "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET";
+const OLD_NAME = "CARRIER_ACCOUNT_NUMBERS_DENY";
+
+test("§13 38 the deny list is read only from CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: the old name alone leaves everything inert, with one warning per start naming both and no value", async ({ eq, ok }) => {
+	useClock();
+	const rt = require(RUNTIME);
+	eq("the runtime's names", [rt.DENY_LIST_SETTING, rt.RETIRED_DENY_LIST_SETTING], [NEW_NAME, OLD_NAME]);
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const oldOnly = { ...ON, [OLD_NAME]: DENY };
+	delete oldOnly[NEW_NAME];
+	const w = await world({ env: oldOnly, files: [f] });
+	eq("the sweep is inert", (await w.service.sweep()).ran, false);
+	for (const [m, u] of ROUTES) eq(`${m} ${u} -> 404`, (await w.call(m, u, SA, m === "GET" ? undefined : {})).status, 404);
+	eq("no Gemini call, no Drive list", [w.calls.gemini, w.calls.list], [0, 0]);
+	const ignored = w.logs.filter((l) => l.includes(`${OLD_NAME} is ignored`));
+	eq("one warning that the old name is ignored", ignored.length, 1);
+	ok("...naming the name it is read from", ignored.length === 1 && ignored[0].includes(NEW_NAME), ignored);
+	ok("no log line holds the value", !w.logs.some((l) => l.includes(DENY_DIGITS)), w.logs);
+	const both = await world({ env: { ...ON, [OLD_NAME]: "X5550001" } });
+	eq("with the new name set the feature runs, and the old name is still named as ignored", [(await both.call("GET", API, SA)).status, both.logs.filter((l) => l.includes(`${OLD_NAME} is ignored`)).length], [200, 1]);
+	const quiet = await world();
+	eq("no warning when the old name is unset", quiet.logs.filter((l) => l.includes(OLD_NAME)).length, 0);
+	ok("the old name's value is never read as a deny value", !rt.readConfig({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", [OLD_NAME]: DENY }).enabled);
+});
+
+test("§13 38 every replica rule refuses the new name: the secret-name rule (as in every version since #432), the boot refusal, and pull.sh's check for both names", async ({ eq, ok }) => {
+	const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
+	ok("SECRET_NAME_RE matches it", rules.SECRET_NAME_RE.test(NEW_NAME) && rules.isSecretName(NEW_NAME));
+	const v = rules.classifySetting(NEW_NAME, DENY, { readByApp: new Set([NEW_NAME]) });
+	eq("never copied, even when listed as read: refused as a secret by name", [v.copy, v.rule], [false, "secret: name contains SECRET"]);
+	eq("a replica refuses to start while it is set", rules.outboundCredentialsSet({ [NEW_NAME]: DENY }), [NEW_NAME]);
+	ok("both names are on the never-copied list", rules.CARRIER_ACCOUNT_SETTINGS.includes(NEW_NAME) && rules.CARRIER_ACCOUNT_SETTINGS.includes(OLD_NAME));
+	const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
+	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
+	ok("pull.sh's check names both", !!m && m[1].includes(`"${NEW_NAME}"`) && m[1].includes(`"${OLD_NAME}"`), m && m[1]);
+	if (!m) return;
+	const { spawnSync } = require("child_process");
+	const older = path.join(os.tmpdir(), `rc37-rules-${process.pid}.js`);
+	// Rules that judge the new name by neither its SECRET nor the never-copied list.
+	const src = fs.readFileSync(path.join(ROOT, "lib", "replica-rules.js"), "utf8");
+	const weakened = src.replace(/const SECRET_NAME_PARTS = Object\.freeze\(\[[^\]]*\]\);/, 'const SECRET_NAME_PARTS = Object.freeze(["KEY"]);').replace(`"${NEW_NAME}", `, "");
+	ok("the weakened copy differs in both places", weakened !== src && !weakened.includes(`"${NEW_NAME}"`));
+	fs.writeFileSync(older, weakened);
+	try {
+		eq("this checkout's rules pass", spawnSync(process.execPath, ["-e", m[1], path.join(ROOT, "lib", "replica-rules.js")], { encoding: "utf8" }).status, 0);
+		ok("rules that would copy the new name are refused", spawnSync(process.execPath, ["-e", m[1], older], { encoding: "utf8" }).status !== 0);
+	} finally {
+		fs.rmSync(older, { force: true });
+	}
 });
 
 if (!fs.existsSync(RUNTIME)) {

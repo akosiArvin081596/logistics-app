@@ -683,7 +683,7 @@ async function main(argv, deps = {}) {
 		return refuse(e.message);
 	}
 	const cfg = runtime.readConfig(env);
-	if (!cfg.denyConfigured) return refuse(`${runtime.DENY_LIST_SETTING} is not set to a usable value in the app's settings; nothing is filtered without it`);
+	if (!cfg.denyConfigured) return refuse(`${runtime.DENY_LIST_SETTING} is not set to a usable value in the app's settings; nothing is filtered without it${cfg.retiredDenySet ? ` (${runtime.RETIRED_DENY_LIST_SETTING} is set, but it is no longer read)` : ""}`);
 	if (!cfg.uploaderEmail) return refuse(`${UPLOADER_SETTING} is not set to an address in the app's settings; a folder file's uploader can't be checked without it`);
 	if (!cfg.folderId) return refuse(`${FOLDER_SETTING} is not set in the app's settings; the backfill reads the rate-con folder`);
 	if (!args["sheet-id"]) return refuse("--sheet-id is required; there is no default sheet");

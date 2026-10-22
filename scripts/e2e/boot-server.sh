@@ -29,7 +29,7 @@
 #                 (payout-parity.mjs), which never requests a page.
 #   E2E_DRIVER_INSTRUCTIONS_DENY=<made-up value>  boot with the rate-con driver
 #                 instructions ON (RATECON_DRIVER_INSTRUCTIONS_ENABLED=true) and this
-#                 value as the only CARRIER_ACCOUNT_NUMBERS_DENY entry, for the
+#                 value as the only CARRIER_ACCOUNT_NUMBERS_DENY_SECRET entry, for the
 #                 E2E's instructions section. Use an invented value (e.g. T8273641),
 #                 never a real one; it is set in this server's environment only and
 #                 never printed. Unset or empty: both off and blank, whatever .env
@@ -171,7 +171,7 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   INVOICE_UNDATED_ALERT_ENABLED=false RATECON_EXTRACT_ALERT_ENABLED=false \
   MAINTENANCE_NOTICE_ENABLED="$NOTICE" MAINTENANCE_NOTICE_AUDIENCE=investor \
   INVESTOR_LEASE_PAYOUTS_ENABLED="$LEASE" \
-  RATECON_DRIVER_INSTRUCTIONS_ENABLED="$DI_ENABLED" CARRIER_ACCOUNT_NUMBERS_DENY="$DI_DENY" \
+  RATECON_DRIVER_INSTRUCTIONS_ENABLED="$DI_ENABLED" CARRIER_ACCOUNT_NUMBERS_DENY_SECRET="$DI_DENY" CARRIER_ACCOUNT_NUMBERS_DENY= \
   DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED=false RATECON_DRIVE_UPLOADER_EMAIL= \
   nohup "$NODE_BIN" server.js >"$LOG" 2>&1 &
 PID=$!

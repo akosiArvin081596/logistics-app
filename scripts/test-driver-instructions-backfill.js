@@ -441,6 +441,8 @@ test("§2 exit 2 without the deny list or the uploader account: nothing read, ca
 		["deny list unset", (e) => { delete e[runtime.DENY_LIST_SETTING]; }, runtime.DENY_LIST_SETTING],
 		["deny list empty", (e) => { e[runtime.DENY_LIST_SETTING] = ""; }, runtime.DENY_LIST_SETTING],
 		["deny list with no usable value", (e) => { e[runtime.DENY_LIST_SETTING] = "T12"; }, runtime.DENY_LIST_SETTING],
+		// Decision 38: the retired name is never read; the refusal says so.
+		["deny list only under its retired name", (e) => { delete e[runtime.DENY_LIST_SETTING]; e.CARRIER_ACCOUNT_NUMBERS_DENY = DENY; }, `${runtime.RETIRED_DENY_LIST_SETTING} is set, but it is no longer read`],
 		["uploader account unset", (e) => { delete e.RATECON_DRIVE_UPLOADER_EMAIL; }, "RATECON_DRIVE_UPLOADER_EMAIL"],
 		["uploader account not an address", (e) => { e.RATECON_DRIVE_UPLOADER_EMAIL = "n8n-uploader"; }, "RATECON_DRIVE_UPLOADER_EMAIL"],
 	];
@@ -461,8 +463,9 @@ test("§2 exit 2 without the deny list or the uploader account: nothing read, ca
 	const src = fs.readFileSync(SCRIPT, "utf8");
 	ok("the script names the deny list only through the runtime's constant, never a second literal", !src.includes("CARRIER_ACCOUNT_NUMBERS_DENY") && /runtime\.DENY_LIST_SETTING/.test(src));
 	const rt = fs.readFileSync(RUNTIME_FILE, "utf8");
-	eq("the runtime spells the setting once, in DENY_LIST_SETTING", (rt.match(/"CARRIER_ACCOUNT_NUMBERS_DENY"/g) || []).length, 1);
-	ok("...and reads it only through that constant", !/env\.CARRIER_ACCOUNT_NUMBERS_DENY|\.CARRIER_ACCOUNT_NUMBERS_DENY\b/.test(rt.replace(/\/\/[^\n]*/g, "")));
+	eq("the runtime spells the setting once, in DENY_LIST_SETTING", [(rt.match(/"CARRIER_ACCOUNT_NUMBERS_DENY_SECRET"/g) || []).length, runtime.DENY_LIST_SETTING], [1, "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET"]);
+	eq("...and its retired name once, in RETIRED_DENY_LIST_SETTING", [(rt.match(/"CARRIER_ACCOUNT_NUMBERS_DENY"/g) || []).length, runtime.RETIRED_DENY_LIST_SETTING], [1, "CARRIER_ACCOUNT_NUMBERS_DENY"]);
+	ok("...and reads them only through those constants", !/env\.CARRIER_ACCOUNT_NUMBERS_DENY|\.CARRIER_ACCOUNT_NUMBERS_DENY(?:_SECRET)?\b/.test(rt.replace(/\/\/[^\n]*/g, "")));
 	const replicaRulesFile = path.join(ROOT, "lib", "replica-rules.js");
 	ok("the replica rules never copy the deny list under the runtime's name for it", require(replicaRulesFile).CARRIER_ACCOUNT_SETTINGS.includes(runtime.DENY_LIST_SETTING));
 	ok("...and stay standalone (they ship to the server alone): no require of the runtime", !/require\(/.test(fs.readFileSync(replicaRulesFile, "utf8").replace(/\/\/[^\n]*/g, "")));

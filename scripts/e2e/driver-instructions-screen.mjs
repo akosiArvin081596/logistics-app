@@ -314,7 +314,7 @@ const sideways = (page) => page.evaluate(() => Math.max(document.documentElement
 
 // ---------------------------------------------------------------- the steps
 async function flagOn(browser) {
-  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY: DENY })
+  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY })
   const { ctx, page, seen } = await openPage(browser, api)
   try {
     await page.goto(`${BASE}/driver`)
@@ -436,7 +436,7 @@ async function flagOn(browser) {
 }
 
 async function flagOff(browser) {
-  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY: DENY })
+  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY })
   const { ctx, page, seen } = await openPage(browser, api)
   try {
     await page.goto(`${BASE}/driver`)
