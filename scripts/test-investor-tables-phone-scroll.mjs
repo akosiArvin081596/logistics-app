@@ -93,7 +93,7 @@ function overflowX(root, cls) {
   const v = last(decls(root, `.${cls}`, /^overflow(-x)?$/))
   if (v) return v.split(' ')[0]
   const y = last(decls(root, `.${cls}`, 'overflow-y'))
-  return y && y !== 'visible' ? 'auto' : undefined
+  return y && !['visible', 'clip', 'initial', 'unset'].includes(y) ? 'auto' : undefined
 }
 
 const sharedRoot = postcss.parse(fs.readFileSync(SHARED_CSS, 'utf8'))

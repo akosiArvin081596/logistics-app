@@ -1227,7 +1227,7 @@ async function handleUnlink(truck) {
 
 .truck-table {
   width: 100%; border-collapse: separate; border-spacing: 0;
-  font-size: 0.82rem; margin-top: 0.5rem;
+  font-size: 0.82rem;
 }
 .truck-table th {
   text-align: left; padding: 0.6rem 0.5rem; font-weight: 600;
