@@ -16,6 +16,9 @@
 //
 //   §1 the rule, unchanged, on a case table; the reasons, the badge, the text.
 //   §2 the tabs' source.
+//   §3 rate-con driver instructions (plan PR 3): the server's
+//      `_instructionsReview` codes add the reason 'instructions' to the same
+//      badge and filter, with words for each code.
 //
 // No network, no DOM, no build.
 //   node scripts/test-load-review.mjs      # exits 1 on any failure
@@ -120,6 +123,72 @@ for (const file of ['JobBoardTab.vue', 'ActiveLoadsTab.vue', 'CompletedLoadsTab.
   check('Completed: the invoice-draft message points to Data Manager',
     src.includes('Add the Payment on this load in Data Manager (Job Tracking), then try again.'), true)
   check('Completed: the note has its style', /\.review-note \{/.test(src) && /\.review-note-link \{/.test(src), true)
+}
+
+// ---------------------------------------------------------------------------
+console.log('§3 driver instructions (`_instructionsReview` codes on the dashboard rows)')
+// ---------------------------------------------------------------------------
+// The server puts the review codes of each open load whose driver instructions
+// need a person on the dashboard row (codes only, never a token: PR 2,
+// annotateDashboardRows()). The row joins the existing badge and the Needs Review
+// filter as the reason 'instructions'; the badge says "Driver instructions need a
+// look" and the title words each code. The client never works a code out itself.
+const INSTRUCTION_WORDS = {
+  no_rate_con: 'no rate con is on file',
+  rate_con_unmatched: 'a rate-con file names this load but couldn\'t be matched to it',
+  rate_con_not_read: 'the rate con on file hasn\'t been read yet',
+  extract_failed: 'the rate con couldn\'t be read',
+  load_number_unconfirmed: 'the load number on the rate con doesn\'t match',
+  reference_missed: 'reference-like numbers on the rate con are missing',
+  reference_not_on_rate_con: 'some references are not on the rate con',
+  unusual_content: 'some items hold another address, redirect wording or no category',
+  stop_place_mismatch: 'a stop\'s city or state differs from the load',
+  refiltered: 'something stored was withheld under the current rules',
+  money_or_number_withheld: 'some references were left out as amounts, phones or account numbers',
+  reference_too_long: 'some references were too long and left out',
+  reference_unknown_type: 'some references had a kind the app doesn\'t show',
+  requirement_missed: 'the rate con mentions requirements the instructions don\'t include',
+  stop_count_mismatch: 'the rate con lists a different number of stops',
+  not_cross_checked: 'the rate con\'s text can\'t be checked for completeness',
+  suspicious_text: 'some items read like instructions to a computer',
+  rate_con_changed: 'a newer reading of the rate con is waiting',
+}
+{
+  const ok = row('$1,800.00')
+  const withCodes = (codes) => ({ ...ok, _instructionsReview: codes })
+  check('a row with codes is flagged with the reason "instructions"', reviewReasons(withCodes(['no_rate_con'])), ['instructions'])
+  check('needsReview: true for a row with codes', needsReview(withCodes(['rate_con_changed'])), true)
+  check('no codes, an empty list or a non-list: not flagged',
+    [ok, withCodes([]), withCodes('no_rate_con'), withCodes(null), withCodes({ no_rate_con: true })].map(needsReview), [false, false, false, false, false])
+  check('the instructions reason comes after payment and address',
+    reviewReasons({ ...row('', AWAIT), _instructionsReview: ['no_rate_con'] }), ['payment', 'pickup', 'instructions'])
+  check('countNeedsReview counts rows flagged for instructions',
+    countNeedsReview([ok, withCodes(['no_rate_con']), withCodes([]), withCodes(['extract_failed', 'refiltered'])]), 2)
+  check('the badge: "Driver instructions need a look"', reviewBadgeText(withCodes(['extract_failed'])), 'Driver instructions need a look')
+  check('the badge with another reason names both',
+    [{ ...row(''), _instructionsReview: ['no_rate_con'] }, { ...row('$1,800.00', AWAIT), _instructionsReview: ['no_rate_con'] }].map(reviewBadgeText),
+    ['No payment + instructions', 'Address: Awaiting Rate Con + instructions'])
+  check('every code the server sends has words', Object.keys(INSTRUCTION_WORDS).map((c) => reviewReasonText(withCodes([c]))),
+    Object.values(INSTRUCTION_WORDS).map((w) => `Driver instructions need a look: ${w}.`))
+  check('several codes, in the order sent, each once',
+    reviewReasonText(withCodes(['stop_place_mismatch', 'rate_con_changed', 'stop_place_mismatch'])),
+    `Driver instructions need a look: ${INSTRUCTION_WORDS.stop_place_mismatch}; ${INSTRUCTION_WORDS.rate_con_changed}.`)
+  check('a code the client doesn\'t know still flags the row, with the words it has',
+    [needsReview(withCodes(['some_future_code'])), reviewReasonText(withCodes(['some_future_code'])), reviewReasonText(withCodes(['some_future_code', 'no_rate_con']))],
+    [true, 'Driver instructions need a look.', `Driver instructions need a look: ${INSTRUCTION_WORDS.no_rate_con}.`])
+  check('the words follow the existing reasons',
+    reviewReasonText({ ...row(''), _instructionsReview: ['no_rate_con'] }),
+    `Payment is blank or $0. Driver instructions need a look: ${INSTRUCTION_WORDS.no_rate_con}.`)
+  check('only codes reach the words: a non-string entry is ignored',
+    reviewReasonText(withCodes([{ text: 'T8273641' }, 42, 'no_rate_con'])), `Driver instructions need a look: ${INSTRUCTION_WORDS.no_rate_con}.`)
+}
+{
+  // The load-detail badge of the two tabs that get the instructions codes says why.
+  for (const file of ['JobBoardTab.vue', 'ActiveLoadsTab.vue']) {
+    const src = read(file)
+    check(`${file}: the detail badge's title gives the reason in words`,
+      src.includes('<span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>'), true)
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

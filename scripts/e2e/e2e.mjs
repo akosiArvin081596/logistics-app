@@ -278,7 +278,7 @@ const SLOWMO = Number(process.env.SLOWMO ?? (HEADED ? 350 : 0))
 const [DVW, DVH] = String(process.env.DRIVER_VIEWPORT || '430x900').split('x').map(Number)
 // ONLY picks sections, e.g. ONLY=signout or ONLY=trucks,dispatcher. Unset = all.
 const ONLY = String(process.env.ONLY || '').toLowerCase()
-const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes', 'report', 'lease']
+const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypath', 'names', 'eldlink', 'invoice', 'terms', 'investorfixes', 'report', 'lease', 'instructions']
 // Sign-ins (POST /api/auth/login) each section makes; the limiter allows 20 per 15
 // minutes per server process. The sign-out section's figure is its worst case: S4a's
 // second half runs, and the build sends S7's second sign-in (one fewer for each
@@ -293,7 +293,7 @@ const ALL_SECTIONS = ['trucks', 'signout', 'dispatcher', 'maintenance', 'moneypa
 // sign the Super Admin in once and T7's throwaway test Investor once. The report
 // section signs the Super Admin in once; every step shares that page. So does the
 // lease section: its server restarts keep the session (the store is the database).
-const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1, lease: 1 }
+const SIGN_INS = { trucks: 3, signout: 20, dispatcher: 2, maintenance: 3, moneypath: 3, names: 2, eldlink: 1, invoice: 1, terms: 2, investorfixes: 3, report: 1, lease: 1, instructions: 2 }
 // Sections that need no login at all, so they run without a logins file (e.g. on
 // staging, where no staging logins need to exist for them). The terms section is
 // one only while STEPS picks T0 alone (see TERMS_NEEDS_LOGIN).
@@ -398,7 +398,7 @@ const meta = { startedAt: new Date().toISOString(), baseUrl: BASE_URL, phase: PH
 // \uXXXX, so no observed text can reorder or hide a line of the results.
 const visible = (s) => String(s ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g,
   (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
-const cell = (s) => visible(s).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
+const cell = (s) => visible(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 function writeResults(final = false) {
   const counts = rows.reduce((a, r) => { const k = r.verdict.split(' ')[0]; a[k] = (a[k] || 0) + 1; return a }, {})
   const title = 'LogisX E2E — ' + [
@@ -414,6 +414,7 @@ function writeResults(final = false) {
     runs('investorfixes') && 'investor fixes (F1-F14)',
     runs('report') && `investor report (${[...REPORT_PLAN].sort().join(', ') || 'no step picked'}${REPORT_PLAN.size ? ', Rx' : ''})`,
     runs('lease') && 'lease payouts (LA-LH, LP, LS, LV, LW, LX, LY)',
+    runs('instructions') && 'driver instructions (DI1-DI6)',
   ].filter(Boolean).join(' + ')
   const lines = [
     `# ${title} — ${PHASE.toUpperCase()}`,
@@ -905,6 +906,12 @@ async function main() {
     try { await leaseSection() } catch (e) {
       exitCode = 1
       record({ step: 'L!', title: 'Lease payouts section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
+    }
+  }
+  if (runs('instructions')) {
+    try { await instructionsSection() } catch (e) {
+      exitCode = 1
+      record({ step: 'DI!', title: 'Driver instructions section aborted', expected: '', observed: e.stack?.split('\n').slice(0, 3).join(' ') || String(e), verdict: 'FAIL', shot: '' })
     }
   }
 }
@@ -11882,6 +11889,366 @@ async function leaseSection() {
       expected: 'Each removed; no plant journal left by this section', observed: `${notes.join('; ') || 'nothing to remove'}; plant journal ${fs.existsSync(JOURNAL) ? 'PRESENT' : 'none'}`, verdict: verdict(ok && !fs.existsSync(JOURNAL)), shot: '' })
     try { await ctx.close() } catch { /* ignore */ }
     if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  }
+}
+
+// ---------------------------------------------------------------- driver instructions (DI1-DI6)
+// The staff screen of the rate-con driver instructions (plan PR 3): a Dispatcher opens
+// an active load's detail and sees the Driver instructions section (DI1); an edit
+// holding the server's deny value is refused with the field kind only (DI2) and locks
+// the Dispatcher's instruction edits until a Super Admin clears the lock (DI2b); Mark
+// reviewed works (DI3); a pending re-issue shows side by side and Keep current clears
+// it (DI4); the section at 390 x 844 is one pane with no sideways scroll (DI5);
+// clean-up (DI6).
+//
+// Boot the server with E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value> (boot-server.sh)
+// and give this run the same value in the same variable, plus DB_PATH: the made-up
+// instructions are planted in the copy for the chosen load and removed at the end, and
+// the section never touches a load that already had a row. Screenshots are of the
+// section alone, which holds only the made-up instructions (the "last reviewed by" line,
+// an account name, is masked); the page around it shows the copy's real loads, so no
+// full-page shot is taken.
+const DI_DENY = String(process.env.E2E_DRIVER_INSTRUCTIONS_DENY || '')
+const DI_SECTION = '[data-testid="driver-instructions"]'
+const DI_FOOTNOTE = 'From the rate con. Questions: contact dispatch.'
+const DI_SEED = {
+  v: 1,
+  loadRequirements: [
+    { category: 'ppe', text: 'QA: hard hat and safety vest on site.', critical: true },
+    { category: 'other', text: 'QA: an item with no category, for staff only.', critical: false },
+  ],
+  stops: [
+    { seq: 1, kind: 'pickup', facility: 'QA Test Shipper', place: '', references: [{ type: 'pickup_number', label: 'Pickup #', value: 'QA-PU-1001' }], requirements: [{ category: 'seal', text: 'QA: seal the trailer before leaving.', critical: true }], instructions: [{ kind: 'shipper', text: 'QA: check in at the guard shack.' }] },
+    { seq: 2, kind: 'delivery', facility: 'QA Test Receiver', place: '', references: [{ type: 'delivery_number', label: 'Delivery #', value: 'QA-DL-2002' }], requirements: [], instructions: [{ kind: 'receiver', text: 'QA: unload at door four.' }] },
+  ],
+  footnote: DI_FOOTNOTE,
+}
+const DI_PENDING = {
+  ...DI_SEED,
+  stops: [DI_SEED.stops[0], { ...DI_SEED.stops[1], facility: 'QA Test Receiver North', instructions: [{ kind: 'receiver', text: 'QA: unload at door seven.' }, { kind: 'hours', text: 'QA: receiving closes at 3 PM.' }] }],
+}
+// The section alone (taller than the dialog's scroll area: for the picture only the
+// viewport grows taller, same width, then it is put back).
+async function diShot(page, name) {
+  const file = path.join(SHOTS, `${name}.png`)
+  const size = page.viewportSize()
+  try {
+    await page.setViewportSize({ width: size.width, height: 3000 })
+    await page.waitForTimeout(300)
+    const sec = page.locator(DI_SECTION)
+    await sec.scrollIntoViewIfNeeded()
+    await sec.screenshot({ path: file, mask: [page.locator('[data-testid="di-reviewed"]')], maskColor: '#6b21a8' })
+  } catch (e) { console.log(`  (screenshot ${name} failed: ${e.message})`) } finally {
+    await page.setViewportSize(size).catch(() => {})
+  }
+  return path.relative(WORK, file)
+}
+async function diOpen(page, lid) {
+  const answered = page.waitForResponse((r) => r.request().method() === 'GET' && /\/driver-instructions$/.test(pathOf(r.url())), { timeout: 90000 })
+  await page.goto(`${BASE_URL}/dashboard?load=${encodeURIComponent(lid)}`)
+  const sec = page.locator(DI_SECTION)
+  await sec.waitFor({ state: 'visible', timeout: 45000 })
+  const resp = await answered
+  let code = ''
+  try { code = (await resp.json())?.code || '' } catch { /* not json */ }
+  await sec.locator('[data-testid="di-status"], [data-testid="di-error"]').first().waitFor({ state: 'visible', timeout: 30000 })
+  if (resp.status() !== 200) throw new Error(`GET driver-instructions answered ${resp.status()} ${code}; the section says: ${(await sec.locator('[data-testid="di-error"]').innerText().catch(() => '')).trim()}`)
+  return sec
+}
+async function instructionsSection() {
+  const skip = (step, title, why) => record({ step, title, expected: '—', observed: `SKIPPED — ${why}`, verdict: 'SKIP', shot: '' })
+  const TITLES = [
+    ['DI1', 'Dispatcher opens an active load: the Driver instructions section'],
+    ['DI2', 'Edit: a reference holding the deny value is refused, field kind only'],
+    ['DI3', 'Mark reviewed'],
+    ['DI4', 'A pending re-issue side by side; Keep current'],
+    ['DI5', 'The section at 390 x 844'],
+    ['DI2b', 'The refusal locked the Dispatcher; a Super Admin clears the lock'],
+  ]
+  if (!CREDS.dispatcher) { for (const [s, t] of TITLES) skip(s, t, 'the logins file has no dispatcher login (run setup-db.cjs)'); return }
+  if (!DB_PATH || !LOCAL) { for (const [s, t] of TITLES) skip(s, t, 'needs DB_PATH and a server on this machine (the made-up instructions are planted in the copy)'); return }
+  if (!DI_DENY) { for (const [s, t] of TITLES) skip(s, t, 'E2E_DRIVER_INSTRUCTIONS_DENY is not set (boot the server and run this with the same invented value)'); return }
+  meta.ids.dispatcherUser = CREDS.dispatcher.userId
+  const ddb = openDb()
+  const { ctx, page } = await freshPage(ADMIN_VP)
+  let phone = null
+  let key = ''
+  let planted = false
+  let hitsBefore = 0
+  let lockedBefore = false
+  try {
+    await login(page, 'Step DI1 — Dispatcher', CREDS.dispatcher.username, CREDS.dispatcher.password, '/dashboard')
+    const probe = await api(page, 'GET', '/api/loads/QA-DI-NO-SUCH-LOAD/driver-instructions')
+    if (probe.status === 404 && !probe.json?.code) { for (const [s, t] of TITLES) skip(s, t, 'the instructions routes answer 404 with no code: the server was booted with the flag off'); return }
+    const dash = (await api(page, 'GET', '/api/dashboard')).json || {}
+    const headers = dash.jobTrackingHeaders || []
+    const idCol = headers.find((h) => /load.?id|job.?id/i.test(h))
+    const taken = new Set(ddb.prepare('SELECT load_key FROM load_driver_instructions').all().map((r) => r.load_key))
+    const load = (dash.activeJobs || []).map((r) => String(idCol ? r[idCol] ?? '' : '').trim())
+      .find((lid) => lid && !taken.has(lid.toLowerCase().replace(/^#/, '')))
+    if (!load) { for (const [s, t] of TITLES) skip(s, t, 'no active load without a stored instructions row in the local sheet'); return }
+    meta.ids.di = 'an active load (id not recorded: real data)'
+    key = load.toLowerCase().replace(/^#/, '')
+    // ---- DI0: the server can check this load's details (its Job Tracking row and the
+    // two sheets holding the load's own amounts). A 503 here is the server refusing to
+    // filter with less; nothing is planted then. Which sheet: the header rows, read
+    // through the app as the Super Admin (booleans only).
+    {
+      const pre = await api(page, 'GET', `/api/loads/${encodeURIComponent(load)}/driver-instructions`)
+      if (pre.status !== 200) {
+        const notes = [`GET answered ${pre.status} ${pre.json?.code || ''}`]
+        if (pre.status === 503 && CREDS.superAdmin) {
+          const sa = await freshPage(ADMIN_VP)
+          try {
+            await login(sa.page, 'Step DI0 — Super Admin (sheet header probe)', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+            for (const [sheet, idRe, amountRe] of [['Payments Table', /job.?id/i, /payment.?amount/i], ['Job Details', /load.?id/i, /^\s*payment\s*$/i]]) {
+              const r = await api(sa.page, 'GET', `/api/data?sheet=${encodeURIComponent(sheet)}&limit=1`)
+              const h = Array.isArray(r.json?.headers) ? r.json.headers.map(String) : []
+              notes.push(`${sheet}: ${r.status}, ${h.length} header(s), id column ${h.some((x) => idRe.test(x))}, amount column ${h.some((x) => amountRe.test(x))}`)
+            }
+          } finally { await sa.ctx.close().catch(() => {}) }
+        }
+        // What the Dispatcher sees meanwhile: the section with the plain 503 message.
+        let s = ''
+        if (pre.status === 503) {
+          await page.goto(`${BASE_URL}/dashboard?load=${encodeURIComponent(load)}`)
+          const err = page.locator(`${DI_SECTION} [data-testid="di-error"]`)
+          const shown = await err.waitFor({ state: 'visible', timeout: 45000 }).then(() => err.innerText(), () => '')
+          notes.push(`the section says "${shown.trim()}" (${shown.trim() === 'Couldn\'t check this load\'s details right now; try again.' ? 'as expected' : 'NOT the expected message'})`)
+          s = await diShot(page, 'di0-unverified')
+        }
+        record({ step: 'DI0', title: 'The server can check the chosen load\'s details (Job Tracking row, Payments Table, Job Details)', expected: 'GET .../driver-instructions 200', observed: notes.join('; '), verdict: 'FAIL', shot: s })
+        for (const [s, t] of TITLES) skip(s, t, 'DI0: the server could not check the load\'s details on this sheet; nothing was planted')
+        return
+      }
+    }
+    const codesBefore = (dash.activeJobs || []).filter((r) => Array.isArray(r._instructionsReview)).length
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+    hitsBefore = ddb.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM driver_instructions_number_hits').get().n
+    lockedBefore = !!ddb.prepare('SELECT 1 FROM driver_instructions_edit_locks WHERE user_id = ?').get(Number(CREDS.dispatcher.userId))
+    ddb.prepare(`INSERT INTO load_driver_instructions (load_key, load_id, payload, status, review_reasons, review_counts, source, created_at, updated_at)
+      VALUES (?, ?, ?, 'needs_review', ?, ?, 'e2e_seed', ?, ?)`).run(key, load, JSON.stringify(DI_SEED), JSON.stringify(['unusual_content', 'not_cross_checked']), JSON.stringify({ unusual_content: 1 }), now, now)
+    planted = true
+
+    // ---- DI1: the section renders what the server serves
+    {
+      const sec = await diOpen(page, load)
+      const text = await sec.innerText()
+      const row = ((await api(page, 'GET', '/api/dashboard')).json?.activeJobs || []).find((r) => String(r[idCol] ?? '').trim() === load)
+      const checks = {
+        status: /Needs review/i.test(await sec.locator('[data-testid="di-status"]').innerText()),
+        hiddenNote: text.includes('Drivers don\'t see these until someone marks them reviewed.'),
+        preview: (await sec.locator('[data-testid="di-preview"]').innerText()).includes('QA Test Shipper') && text.includes('QA-PU-1001') && text.includes('QA: check in at the guard shack.'),
+        previewOmitsFlagged: !(await sec.locator('[data-testid="di-preview"]').innerText()).includes('for staff only'),
+        reasons: (await sec.locator('[data-testid="di-reasons"]').innerText()).includes('can\'t be read, so the instructions can\'t be checked'),
+        hiddenList: (await sec.locator('[data-testid="di-hidden"]').innerText()).includes('QA: an item with no category'),
+        buttons: (await sec.getByRole('button', { name: 'Edit' }).isVisible()) && (await sec.getByRole('button', { name: 'Mark reviewed' }).isVisible()) && (await sec.getByRole('button', { name: 'Re-read the rate con' }).isVisible()),
+        rowCodes: Array.isArray(row?._instructionsReview) && row._instructionsReview.includes('not_cross_checked'),
+      }
+      const ok = Object.values(checks).every(Boolean)
+      await caption(page, `Step DI1 — Driver instructions section: ${ok ? 'renders the made-up instructions' : 'MISSING parts'}`)
+      const s = await diShot(page, 'di1-section')
+      record({
+        step: 'DI1', title: TITLES[0][1],
+        expected: 'Status "Needs review", hidden-from-drivers note, the driver preview (made-up stops; the flagged item left out), the review reasons in words, the flagged item under "Not shown to drivers", Edit / Mark reviewed / Re-read; the dashboard row carries the codes',
+        observed: `${Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' ')}; ${codesBefore} active row(s) carried codes before the plant`, verdict: verdict(ok), shot: s,
+      })
+    }
+
+    // ---- DI2: an edit holding the deny value is refused, field kind only
+    {
+      const sec = page.locator(DI_SECTION)
+      await sec.getByRole('button', { name: 'Edit' }).click()
+      const form = sec.locator('[data-testid="di-edit"]')
+      await form.waitFor({ state: 'visible', timeout: 15000 })
+      await form.locator('fieldset').nth(1).getByRole('button', { name: 'Add reference' }).click()
+      await form.getByLabel('Stop 1 reference 2 number').fill(DI_DENY)
+      const [resp] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'PUT' && /\/driver-instructions$/.test(pathOf(r.url())), { timeout: 30000 }),
+        form.getByRole('button', { name: 'Save' }).click(),
+      ])
+      let body = null; try { body = await resp.json() } catch { /* not json */ }
+      const err = sec.locator('[data-testid="di-error"]')
+      await err.waitFor({ state: 'visible', timeout: 15000 })
+      const shown = (await err.innerText()).trim()
+      const want = 'This can\'t be saved: it looks like a number or contact drivers must not see. Field: references.'
+      const digits = DI_DENY.replace(/\D/g, '')
+      const checks = {
+        status400: resp.status() === 400,
+        code: body?.code === 'INSTRUCTIONS_CONTENT_NOT_ALLOWED',
+        rule: body?.rule === 'number',
+        fieldKindOnly: body?.field === 'references',
+        bodyNoValue: !JSON.stringify(body || {}).includes(digits),
+        message: shown === want,
+        messageNoItem: !/\[|\]|\d/.test(shown),
+        stillEditing: await form.isVisible(),
+        nothingWritten: ddb.prepare('SELECT status FROM load_driver_instructions WHERE load_key = ?').get(key)?.status === 'needs_review',
+      }
+      const ok = Object.values(checks).every(Boolean)
+      await caption(page, `Step DI2 — refused: "${shown}"`)
+      const s = await diShot(page, 'di2-refused')
+      record({
+        step: 'DI2', title: TITLES[1][1],
+        expected: `400 INSTRUCTIONS_CONTENT_NOT_ALLOWED, rule "number", field "references", no value echoed; the screen says "${want}" and nothing else about the item; nothing written`,
+        observed: `${Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' ')}; shown: "${shown}"`, verdict: verdict(ok), shot: s,
+      })
+      await form.getByRole('button', { name: 'Cancel' }).click()
+    }
+
+    // ---- DI2b: that refusal locked the Dispatcher (decision 37); a Super Admin clears it
+    {
+      const uid = Number(CREDS.dispatcher.userId)
+      const lockRow = () => ddb.prepare('SELECT user_id FROM driver_instructions_edit_locks WHERE user_id = ?').get(uid)
+      const sec = await diOpen(page, load)
+      const lockedMsg = sec.locator('[data-testid="di-locked"]')
+      const checks = {
+        lockStored: !!lockRow(),
+        message: await lockedMsg.waitFor({ state: 'visible', timeout: 15000 }).then(async () => (await lockedMsg.innerText()).trim() === 'Your instruction edits are locked. Ask a Super Admin to clear the lock.', () => false),
+        noEditControls: (await sec.getByRole('button', { name: 'Edit', exact: true }).count()) === 0 && (await sec.getByRole('button', { name: 'Mark reviewed' }).count()) === 0,
+      }
+      await caption(page, 'Step DI2b — the Dispatcher\'s instruction edits are locked')
+      const s = await diShot(page, 'di2b-locked')
+      const notes = []
+      if (CREDS.superAdmin) {
+        const sa = await freshPage(ADMIN_VP)
+        try {
+          await login(sa.page, 'Step DI2b — Super Admin clears the lock', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+          const ssec = await diOpen(sa.page, load)
+          const row = ssec.locator('[data-testid="di-lock-row"]').filter({ hasText: CREDS.dispatcher.username })
+          checks.listed = await row.waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+          notes.push(`lock list shot ${await diShot(sa.page, 'di2b-lock-list')}`)
+          const [resp] = await Promise.all([
+            sa.page.waitForResponse((r) => r.request().method() === 'POST' && /\/edit-locks\/\d+\/clear$/.test(pathOf(r.url())), { timeout: 30000 }),
+            row.getByRole('button', { name: 'Clear lock' }).click(),
+          ])
+          checks.cleared = resp.status() === 200 && !lockRow()
+        } finally { await sa.ctx.close().catch(() => {}) }
+      } else {
+        notes.push('no Super Admin login: the lock was removed from the copy directly')
+        ddb.prepare('DELETE FROM driver_instructions_edit_locks WHERE user_id = ?').run(uid)
+      }
+      const ok = Object.values(checks).every(Boolean)
+      record({
+        step: 'DI2b', title: TITLES[5][1],
+        expected: 'a lock row for the Dispatcher; the section shows "Your instruction edits are locked. Ask a Super Admin to clear the lock." instead of Edit / Mark reviewed; a Super Admin sees the Dispatcher in the lock list and Clear lock answers 200 and removes the lock',
+        observed: `${Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' ')}${notes.length ? `; ${notes.join('; ')}` : ''}`, verdict: verdict(ok), shot: s,
+      })
+      await diOpen(page, load)
+    }
+
+    // ---- DI3: Mark reviewed
+    {
+      const sec = page.locator(DI_SECTION)
+      const [resp] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'POST' && /\/driver-instructions\/review$/.test(pathOf(r.url())), { timeout: 30000 }),
+        sec.getByRole('button', { name: 'Mark reviewed' }).click(),
+      ])
+      const notice = sec.locator('[data-testid="di-notice"]')
+      await notice.waitFor({ state: 'visible', timeout: 15000 })
+      const stored = ddb.prepare('SELECT status, published_at FROM load_driver_instructions WHERE load_key = ?').get(key) || {}
+      const checks = {
+        status200: resp.status() === 200,
+        chip: /Reviewed/i.test(await sec.locator('[data-testid="di-status"]').innerText()),
+        notice: (await notice.innerText()).includes('Marked reviewed. Drivers see this version'),
+        heading: (await sec.locator('[data-testid="di-preview"]').innerText()).toLowerCase().includes('what the driver sees'),
+        reasonsCleared: (await sec.locator('[data-testid="di-reasons"]').count()) === 0,
+        storedReviewed: stored.status === 'reviewed' && !!stored.published_at,
+      }
+      const ok = Object.values(checks).every(Boolean)
+      await caption(page, `Step DI3 — Mark reviewed: ${ok ? 'reviewed and published' : 'NOT as expected'}`)
+      const s = await diShot(page, 'di3-reviewed')
+      record({
+        step: 'DI3', title: TITLES[2][1],
+        expected: 'POST .../review 200; status "Reviewed", the notice, "What the driver sees", no review reasons left; the row reviewed and published',
+        observed: Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' '), verdict: verdict(ok), shot: s,
+      })
+    }
+
+    // ---- DI4: a pending re-issue side by side; Keep current
+    {
+      ddb.prepare("UPDATE load_driver_instructions SET pending_payload = ?, pending_sha256 = 'e2e', pending_reasons = ?, review_reasons = ? WHERE load_key = ?")
+        .run(JSON.stringify(DI_PENDING), JSON.stringify(['rate_con_changed']), JSON.stringify(['rate_con_changed']), key)
+      const sec = await diOpen(page, load)
+      const pend = sec.locator('[data-testid="di-pending"]')
+      await pend.waitFor({ state: 'visible', timeout: 15000 })
+      const ptext = await pend.innerText()
+      const cols = await pend.locator('.grid > div').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().top)))
+      const before = {
+        sideBySide: cols.length === 2 && cols[0] === cols[1],
+        current: ptext.toLowerCase().includes('drivers see now') && ptext.includes('QA: unload at door four.'),
+        next: ptext.toLowerCase().includes('new reading') && ptext.includes('QA Test Receiver North') && ptext.includes('QA: unload at door seven.'),
+        buttons: (await pend.getByRole('button', { name: 'Accept the new rate con' }).isVisible()) && (await pend.getByRole('button', { name: 'Keep current' }).isVisible()),
+      }
+      await caption(page, 'Step DI4 — a newer reading beside what drivers see now')
+      const s = await diShot(page, 'di4-pending')
+      const [resp] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'POST' && /\/driver-instructions\/accept-pending$/.test(pathOf(r.url())), { timeout: 30000 }),
+        pend.getByRole('button', { name: 'Keep current' }).click(),
+      ])
+      await sec.locator('[data-testid="di-notice"]').waitFor({ state: 'visible', timeout: 15000 })
+      const stored = ddb.prepare('SELECT pending_payload, payload FROM load_driver_instructions WHERE load_key = ?').get(key) || {}
+      const after = {
+        status200: resp.status() === 200,
+        pendingGone: (await sec.locator('[data-testid="di-pending"]').count()) === 0,
+        notice: (await sec.locator('[data-testid="di-notice"]').innerText()).includes('Kept the current version.'),
+        storedKept: stored.pending_payload === '' && String(stored.payload || '').includes('door four'),
+      }
+      const ok = Object.values(before).every(Boolean) && Object.values(after).every(Boolean)
+      record({
+        step: 'DI4', title: TITLES[3][1],
+        expected: 'Two columns side by side ("Drivers see now" | "New reading") with Accept / Keep; Keep current answers 200, the pending reading is gone and the current version stays',
+        observed: `${Object.entries(before).map(([k, b]) => `${k}=${b}`).join(' ')}; after Keep: ${Object.entries(after).map(([k, b]) => `${k}=${b}`).join(' ')}`, verdict: verdict(ok), shot: s,
+      })
+    }
+
+    // ---- DI5: 390 x 844, one pane, no sideways scroll; the edit form too
+    {
+      const p = await freshPage({ width: 390, height: 844 })
+      phone = p.ctx
+      const pp = p.page
+      await login(pp, 'Step DI5 — Dispatcher on a phone', CREDS.dispatcher.username, CREDS.dispatcher.password, '/dashboard')
+      ddb.prepare("UPDATE load_driver_instructions SET pending_payload = ?, pending_sha256 = 'e2e', pending_reasons = ?, review_reasons = ? WHERE load_key = ?")
+        .run(JSON.stringify(DI_PENDING), JSON.stringify(['rate_con_changed']), JSON.stringify(['rate_con_changed']), key)
+      const sec = await diOpen(pp, load)
+      const fit = async () => sec.evaluate((el) => {
+        const r = el.getBoundingClientRect()
+        const cols = [...el.querySelectorAll('[data-testid="di-pending"] .grid > div')].map((c) => Math.round(c.getBoundingClientRect().left))
+        return { right: Math.round(r.right), vw: window.innerWidth, overflow: el.scrollWidth - el.clientWidth, stacked: cols.length === 2 && cols[0] === cols[1] }
+      })
+      const view = await fit()
+      const s = await diShot(pp, 'di5-phone-390x844')
+      await sec.getByRole('button', { name: 'Edit' }).click()
+      await sec.locator('[data-testid="di-edit"]').waitFor({ state: 'visible', timeout: 15000 })
+      const edit = await fit()
+      const s2 = await diShot(pp, 'di5-phone-390x844-edit')
+      await sec.getByRole('button', { name: 'Cancel' }).click()
+      await pp.locator(DI_SECTION).getByRole('button', { name: 'Keep current' }).click()
+      await pp.locator(`${DI_SECTION} [data-testid="di-notice"]`).waitFor({ state: 'visible', timeout: 15000 })
+      const ok = view.right <= view.vw && view.overflow <= 0 && view.stacked && edit.right <= edit.vw && edit.overflow <= 0
+      record({
+        step: 'DI5', title: TITLES[4][1],
+        expected: 'The section fits 390 px (no sideways scroll), the pending columns stack (one pane below md), and the edit form fits too',
+        observed: `view: right=${view.right} of ${view.vw}, overflow=${view.overflow}, stacked=${view.stacked}; edit: right=${edit.right}, overflow=${edit.overflow}; second shot ${s2}`, verdict: verdict(ok), shot: s,
+      })
+    }
+  } finally {
+    // ---- DI6: remove what this section planted or caused in the copy
+    const notes = []
+    let ok = true
+    try {
+      if (planted && key) {
+        notes.push(`instructions rows removed: ${ddb.prepare('DELETE FROM load_driver_instructions WHERE load_key = ?').run(key).changes}`)
+        notes.push(`version rows removed: ${ddb.prepare('DELETE FROM load_driver_instructions_versions WHERE load_key = ?').run(key).changes}`)
+        notes.push(`refused-number rows removed: ${ddb.prepare('DELETE FROM driver_instructions_number_hits WHERE id > ?').run(hitsBefore).changes}`)
+        // DI2's refusal locked the Dispatcher (decision 37); DI2b clears it, this is the fallback.
+        if (!lockedBefore) notes.push(`edit locks removed: ${ddb.prepare('DELETE FROM driver_instructions_edit_locks WHERE user_id = ?').run(Number(CREDS.dispatcher.userId)).changes}`)
+        ok = !ddb.prepare('SELECT 1 FROM load_driver_instructions WHERE load_key = ?').get(key)
+      }
+    } catch (e) { ok = false; notes.push(`clean-up error: ${e.message}`) }
+    if (planted) record({ step: 'DI6', title: 'Clean-up: the made-up instructions row, its versions and the refused-number row this run caused (the audit rows stay in the copy)', expected: 'Each removed', observed: notes.join('; '), verdict: verdict(ok), shot: '' })
+    try { await phone?.close() } catch { /* ignore */ }
+    try { await ctx.close() } catch { /* ignore */ }
+    try { ddb?.close() } catch { /* ignore */ }
   }
 }
 

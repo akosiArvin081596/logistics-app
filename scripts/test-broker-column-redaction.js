@@ -1156,6 +1156,8 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 			if (p === "./lib/load-search-refs") return loadSearchRefs;
 			throw new Error(`unexpected require(${JSON.stringify(p)}) in the dashboard handler`);
 		},
+		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
+		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		console: { error: (...a) => errors.push(a.join(" ")), log() {}, warn() {} },
 	};
 	const names = Object.keys(env);

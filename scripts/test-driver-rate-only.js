@@ -262,6 +262,26 @@ const R = M.createRunner("The owner's rule (2026-10-16): a daily rate belongs to
 		eq("the copy is unchanged", M.fileHash(copy.db), before);
 	});
 
+	await R.test("D10c (#547 review L5) The report compares each day's rate, not the month's: Ana ($350 of her own; pay_rate_history $300 from 10/1, $350 from 10/2) is listed with her rate per day under the rule (10/1 $300, 10/2-10/31 $350), though her month-level rate stays $350; Cal and Kim keep one rate for the month. Before: Ana not listed", async ({ eq, ok }) => {
+		const w = world({
+			locks: ["2026-09"],
+			payRates: [
+				{ subject: "driver", key: norm(ANA), rate: 300, from: "2026-10-01T04:00:00.000Z" },
+				{ subject: "driver", key: norm(ANA), rate: 350, from: "2026-10-02T04:00:00.000Z" },
+			],
+		});
+		const copy = M.saveCopy(w, {});
+		const r = M.runScript("scripts/driver-rate-only-report.js", [`--db=${copy.db}`, `--env-file=${copy.envFile}`, `--values-json=${copy.values}`, "--from=2026-10", "--names", "--json"]);
+		ok("the script exists", !r.missing, r.stderr.split("\n")[0]);
+		eq("exit code", r.code, 0);
+		const j = r.json || {};
+		eq("drivers whose rate changes on some day", tuples(j.drivers, ["driver", "rateToday", "rateUnderRule"]), [[norm(ANA), 350, 350], [norm(CAL), 150, 250], [norm(KIM), 300, 250]]);
+		const ana = (j.drivers || []).find((d) => norm(String(d.driver)) === norm(ANA)) || {};
+		eq("Ana's rate per day under the rule", ana.ruleRates, [{ from: "2026-10-01", to: "2026-10-01", rate: 300 }, { from: "2026-10-02", to: "2026-10-31", rate: 350 }]);
+		const cal = (j.drivers || []).find((d) => norm(String(d.driver)) === norm(CAL)) || {};
+		eq("Cal's: one rate", cal.ruleRates, [{ from: "2026-10-01", to: "2026-10-31", rate: 250 }]);
+	});
+
 	await R.test("D10b The report refuses --from=2026-09 while September is closed: exit 2, nothing printed as a result. Base: the script does not exist", async ({ eq, ok }) => {
 		const w = world({ locks: ["2026-09"] });
 		const copy = M.saveCopy(w, {});

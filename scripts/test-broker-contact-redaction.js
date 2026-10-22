@@ -217,7 +217,9 @@ function lift(head, stubs) {
 	let handler = null;
 	const register = (...args) => { handler = args[args.length - 1]; };
 	const kept = Object.fromEntries(Object.entries(stubs).filter(([, v]) => v !== SHIPPED));
-	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, ...kept });
+	// The rate-con driver-instructions runtime (its own runner covers it): inert here.
+	const driverInstructions = { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } };
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, ...kept });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {

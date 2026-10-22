@@ -16,7 +16,10 @@
 //   §3 settings.js copies business settings only: secrets by name, a URL
 //      carrying credentials, a value that looks like a key, runtime settings and
 //      any name the app's code does not read are skipped, by rule and name;
-//      what it writes reads back exactly through dotenv
+//      what it writes reads back exactly through dotenv; on this checkout's own
+//      server.js and lib/, every flag, first month and lease setting the app
+//      reads (process.env.NAME, env.NAME in a lib/ helper, or a name table) is
+//      copied, and the bank settings, secrets and production targets are not
 //   §4 the stamp (unique per run) and task rules; the pull scripts keep the
 //      production host out of the repository, fail when the server's folder
 //      cannot be confirmed gone, sweep stale folders (over an hour old), and
@@ -222,8 +225,10 @@ console.log("§3 the settings export copies business settings only");
 		DRIVE_FOLDER_ID: "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ",
 	};
 	const { copied, skipped, text } = exportSettings(prod);
-	eq("business settings are copied", copied, ["CSRF_HEADER_REQUIRED", "DRIVE_FOLDER_ID", "GEMINI_OCR_MODEL", "GMAIL_USER", "MAINTENANCE_NOTICE_MESSAGE", "PLAIN_URL", "RATECON_RECONCILE_MAILBOX", "ROUTEMATE_ENABLED"]);
+	eq("business settings are copied", copied, ["CSRF_HEADER_REQUIRED", "DRIVE_FOLDER_ID", "GEMINI_OCR_MODEL", "MAINTENANCE_NOTICE_MESSAGE", "PLAIN_URL", "ROUTEMATE_ENABLED"]);
 	const rule = (n) => (skipped.find((s) => s.name === n) || {}).rule;
+	// Decision 36: the app's Gmail account and its reconcile label are production targets.
+	for (const n of ["GMAIL_USER", "RATECON_RECONCILE_MAILBOX"]) eq(`${n} is skipped as a production target`, rule(n), "production only: names a production target");
 	for (const [n, part] of [["GEMINI_API_KEY", "KEY"], ["GMAIL_APP_PASSWORD", "PASS"], ["SESSION_SECRET", "SECRET"], ["LINXUP_WEBHOOK_TOKEN", "TOKEN"], ["N8N_WEBHOOK_SECRET", "SECRET"], ["SETUP_RECOVERY_TOKEN", "TOKEN"], ["PRIVATE_THING", "PRIVATE"], ["SMTP_HOST", "SMTP"], ["SENTRY_DSN", "DSN"], ["OAUTH_CLIENT", "AUTH"]]) {
 		eq(`${n} is skipped as a secret (name contains ${part})`, rule(n), `secret: name contains ${part}`);
 	}
@@ -247,10 +252,72 @@ console.log("§3 the settings export copies business settings only");
 	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
 	eq("settings.js exits 0", r.status, 0);
 	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
-	ok("...and prints names, never a value", !/dispatch@example|gemini-2\.5|Sunday|smtp\.example|"k"|"p"|AIzaSy/.test(r.stdout) && cli.copied.length === 8);
+	ok("...and prints names, never a value", !/dispatch@example|gemini-2\.5|Sunday|smtp\.example|"k"|"p"|AIzaSy/.test(r.stdout) && cli.copied.length === 6);
 	eq("...a setting no app code reads is skipped by the allowlist", (cli.skipped.find((x) => x.name === "NOT_READ_SETTING") || {}).rule, "not read by the app");
 	eq("...and one the app reads that looks like a key is still skipped", (cli.skipped.find((x) => x.name === "REPORT_SETTING") || {}).rule, "secret: value looks like a key");
 	eq("...writing the file 0600", (fs.statSync(path.join(out, "settings.env")).mode & 0o777).toString(8), "600");
+}
+{
+	// This checkout's own server.js and lib/, read the way settings.js reads the
+	// app on the server. Made-up values only.
+	const app = tmp("replica-settings-real-");
+	const out = tmp("replica-settings-real-out-");
+	for (const f of ["node_modules", "server.js", "lib"]) fs.symlinkSync(path.join(ROOT, f), path.join(app, f));
+	const wanted = {
+		// read as env.NAME on the env a lib/ helper is handed
+		LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2030-01", BROKER_INVOICE_LINES_ENABLED: "true",
+		TRIP_WORK_DAYS_ENABLED: "false", TRIP_WORK_DAYS_FROM: "2030-01", DRIVER_RATE_ONLY_ENABLED: "false", DRIVER_RATE_ONLY_FROM: "2030-01",
+		// read through a name table: env[flag.enabled], env[flag.from], env[s.env]
+		INVOICE_BLANK_PICKUP_FALLBACK_ENABLED: "false", INVOICE_BLANK_PICKUP_FALLBACK_FROM: "2030-01",
+		LEDGER_BLANK_DROPOFF_FALLBACK_ENABLED: "false", LEDGER_BLANK_DROPOFF_FALLBACK_FROM: "2030-01",
+		INVESTOR_LEASE_DOWNTIME: "unpaid", INVESTOR_LEASE_PRORATE: "daily", INVESTOR_LEASE_RETIREMENT: "stop",
+		// read as process.env.NAME
+		PAYOUT_RULES_V2_ENABLED: "false", MARK_PAID_CLOSED_MONTH_ENABLED: "true",
+	};
+	const withheld = {
+		INVOICE_BANK_ROUTING: "000000000", INVOICE_BANK_ACCOUNT: "000000000000",
+		GEMINI_API_KEY: "made-up-key", SESSION_SECRET: "made-up-secret", GMAIL_APP_PASSWORD: "made-up-pass", LINXUP_WEBHOOK_TOKEN: "made-up-token",
+		SPREADSHEET_ID: "made-up-sheet-id", BISON_INVOICE_EMAIL: "ap-bison@example.test", DEFAULT_INVOICE_EMAIL: "ap-default@example.test",
+		N8N_BASE_URL: "https://n8n.example.test", N8N_WORKFLOW_ID: "made-up-workflow",
+		ADMIN_NOTIFY_EMAIL: "admin-notify@example.test", RATECON_DRIVE_FOLDER_ID: "made-up-drive-folder",
+	};
+	fs.writeFileSync(path.join(app, ".env"), Object.entries({ ...wanted, ...withheld }).map(([k, v]) => `${k}="${v}"`).join("\n"));
+	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
+	eq("settings.js on this checkout's server.js and lib/ exits 0", r.status, 0);
+	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
+	for (const n of Object.keys(wanted)) ok(`${n}, which the app reads, is copied`, cli.copied.includes(n), (cli.skipped.find((x) => x.name === n) || {}).rule);
+	const written = r.status === 0 ? dotenv.parse(fs.readFileSync(path.join(out, "settings.env"))) : {};
+	eq("...with its value exactly", Object.keys(wanted).map((n) => written[n]), Object.values(wanted));
+	for (const n of Object.keys(withheld)) ok(`${n} is never copied`, !cli.copied.includes(n) && !(n in written) && cli.skipped.some((x) => x.name === n));
+	const serverSrc = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	for (const n of ["ADMIN_NOTIFY_EMAIL", "RATECON_DRIVE_FOLDER_ID"]) {
+		ok(`${n} is never copied, though server.js reads it as plain process.env.${n}`, new RegExp(`process\\.env\\.${n}\\b`).test(serverSrc)
+			&& (cli.skipped.find((x) => x.name === n) || {}).rule === "production only: names a production target", (cli.skipped.find((x) => x.name === n) || {}).rule);
+	}
+	ok("...and no withheld value is in the written file or the output", r.status === 0 && Object.values(withheld).every((v) => !fs.readFileSync(path.join(out, "settings.env"), "utf8").includes(v) && !r.stdout.includes(v)));
+	// Every flag the replica rules know (and each one's first month) is one the
+	// export finds read, without counting replica-rules.js's own lists.
+	const sources = ["server.js", ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join("lib", f))]
+		.map((f) => fs.readFileSync(path.join(ROOT, f), "utf8"));
+	const read = rules.namesReadBy(sources);
+	const known = [...rules.ENABLE_ALLOWED, ...Object.keys(rules.ENABLE_REFUSED), ...Object.values(rules.ENABLE_FROM)];
+	eq("every flag the replica rules know is found read by server.js or lib/", known.filter((n) => !read.has(n)), []);
+}
+{
+	// lib/replica-rules.js names settings only to judge them: a name that only
+	// its lists or comments mention is not read by the app.
+	const app = tmp("replica-settings-rules-");
+	const out = tmp("replica-settings-rules-out-");
+	fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(app, "node_modules"));
+	fs.writeFileSync(path.join(app, "server.js"), "const r = process.env.ROUTEMATE_ENABLED;\n");
+	fs.mkdirSync(path.join(app, "lib"));
+	fs.writeFileSync(path.join(app, "lib", "replica-rules.js"), 'const ENABLE_ALLOWED = ["ONLY_IN_RULES_ENABLED"];\n// see "RULES_COMMENT_FROM"\n');
+	fs.writeFileSync(path.join(app, ".env"), 'ROUTEMATE_ENABLED="true"\nONLY_IN_RULES_ENABLED="true"\nRULES_COMMENT_FROM="2030-01"\n');
+	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
+	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
+	const rule = (n) => (cli.skipped.find((x) => x.name === n) || {}).rule;
+	ok("a name only lib/replica-rules.js lists or mentions in a comment is not read by the app", r.status === 0 && cli.copied.includes("ROUTEMATE_ENABLED")
+		&& rule("ONLY_IN_RULES_ENABLED") === "not read by the app" && rule("RULES_COMMENT_FROM") === "not read by the app", { status: r.status, copied: cli.copied });
 }
 
 // ---- §4 rules and the pull scripts ------------------------------------------------------------

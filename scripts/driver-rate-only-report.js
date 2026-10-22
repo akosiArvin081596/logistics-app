@@ -15,9 +15,11 @@
 // in memory (a month closed before now keeps the old rule).
 //
 // It reports:
-//   - drivers: each daily-rate driver whose rate changes: { driver, ownRate,
-//     truck, truckRate, rateToday, rateUnderRule } (truck: the last truck naming
-//     him, whose rate the pay paths read today);
+//   - drivers: each daily-rate driver whose rate changes on some day of FROM's
+//     month: { driver, ownRate, truck, truckRate, rateToday, rateUnderRule,
+//     ruleRates } (truck: the last truck naming him, whose rate the pay paths
+//     read today; rateToday and rateUnderRule the month-level rates; ruleRates
+//     the rule's rate per day as runs [{ from, to, rate }], dated rates included);
 //   - driverMonths: per scope (owner id; 0 is the company), driver and month,
 //     FROM and later, the payout ledger's days and driver pay now and under the
 //     rule, where they differ;
@@ -255,7 +257,12 @@ async function report({ off, on, from, names }) {
 	const index = await driverIndex({ db, A });
 	const { structs, isDaily, display, truckOf } = index;
 
-	// drivers
+	// drivers: each day of FROM's month priced by each world's driver-day price
+	// (driverDayRater(): under the rule, the rate in effect that day), so a rate
+	// that changes within the month counts (#547 review L5).
+	const offIndex = await driverIndex({ db, A: off.api });
+	const monthDays = [];
+	for (let d = `${from}-01`; d.startsWith(from); d = addDays(d, 1)) monthDays.push(d);
 	const drivers = [];
 	for (const k of [...display.keys()].sort()) {
 		if (!isDaily(k)) continue;
@@ -264,8 +271,17 @@ async function report({ off, on, from, names }) {
 		const truckRate = A.truckDailyRateCandidates(display.get(k)).slice(-1)[0];
 		const rateToday = off.api.resolveDailyRate(own, truckRate, from);
 		const rateUnderRule = A.resolveDailyRate(own, truckRate, from);
-		if (rateToday === rateUnderRule) continue;
-		drivers.push({ driver: k, ownRate: own, truck: truck ? truck.unit_number : "", truckRate: truck ? (Number(truck.driver_pay_daily) || 0) : null, rateToday, rateUnderRule });
+		const ruleRates = [];
+		let changes = false;
+		for (const day of monthDays) {
+			const rate = round2(index.raterOf(k)(day, from));
+			if (cents(rate) !== cents(offIndex.raterOf(k)(day, from))) changes = true;
+			const last = ruleRates[ruleRates.length - 1];
+			if (last && last.rate === rate) last.to = day;
+			else ruleRates.push({ from: day, to: day, rate });
+		}
+		if (!changes) continue;
+		drivers.push({ driver: k, ownRate: own, truck: truck ? truck.unit_number : "", truckRate: truck ? (Number(truck.driver_pay_daily) || 0) : null, rateToday, rateUnderRule, ruleRates });
 	}
 
 	// The payout ledger, rule off and on.
@@ -409,7 +425,10 @@ function printText(r) {
 	lines.push(`Drivers whose rate changes: ${s.driversChanged}. Ledger driver pay ${usd(s.driverPayChange)}; investor payable ${usd(s.investorPayableChange)}.`);
 	lines.push(`Issued invoices to correct: ${s.issuedInvoicesToCorrect} (${usd(s.issuedInvoiceDifference)}). Drafts: ${s.drafts}. Ledger days on no invoice: ${s.ledgerDaysOnNoInvoice}. History gaps: ${s.historyGaps}.`);
 	lines.push("", "Drivers (own rate, truck and its rate, rate today -> under the rule):");
-	for (const d of r.drivers) lines.push(`  ${d.driver}  own ${usd(d.ownRate)}  ${d.truck || "(no truck)"} ${d.truckRate == null ? "" : usd(d.truckRate)}  ${usd(d.rateToday)} -> ${usd(d.rateUnderRule)}`);
+	for (const d of r.drivers) {
+		const perDay = d.ruleRates.length > 1 ? `  per day: ${d.ruleRates.map((x) => `${x.from === x.to ? x.from : `${x.from}..${x.to}`} ${usd(x.rate)}`).join(", ")}` : "";
+		lines.push(`  ${d.driver}  own ${usd(d.ownRate)}  ${d.truck || "(no truck)"} ${d.truckRate == null ? "" : usd(d.truckRate)}  ${usd(d.rateToday)} -> ${usd(d.rateUnderRule)}${perDay}`);
+	}
 	lines.push("", "Payout ledger by scope, driver and month (days, now -> under the rule):");
 	for (const m of r.driverMonths) lines.push(`  owner ${m.ownerId}  ${m.driver}  ${m.month}  ${m.days} day(s)  ${usd(m.payNow)} -> ${usd(m.payUnderRule)}  (${usd(m.difference)})`);
 	lines.push("", "Investor payable by month (now -> under the rule):");

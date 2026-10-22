@@ -132,11 +132,14 @@ function openDb({ root, dbFile, readonly }) {
 // clock. `db`: a handle the script already opened on `dbPath` (from
 // openDb()), shared by several worlds so they all read one snapshot
 // (scripts/october-flags-report.js); null, the default, opens the world's own.
-function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null, db: given = null }) {
+// `memoryCopy`: `db` is a read-only in-memory copy the script made of
+// `dbPath`'s snapshot (the October report's simulated rates), not the file.
+function buildLedgerWorld({ root, dbPath, readonly, sheetData, envFile = null, envOverrides = null, extraRoots = [], extraRoutes = [], now = null, db: given = null, memoryCopy = false }) {
 	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const { env: fileEnv, file: dbFile } = envFor({ root, dbPath, envFile });
-	if (given && given.name !== dbFile) throw new Error(`refusing: the shared SQLite handle is on ${given.name}, not ${dbFile}`);
+	if (memoryCopy && !(given && given.memory && given.readonly)) throw new Error("refusing: a memory copy must be a read-only in-memory SQLite handle");
+	if (given && !memoryCopy && given.name !== dbFile) throw new Error(`refusing: the shared SQLite handle is on ${given.name}, not ${dbFile}`);
 	const db = given || openDb({ root, dbFile, readonly });
 	if (readonly && !db.readonly) throw new Error("refusing: the dry run's SQLite handle is not read-only");
 
