@@ -469,6 +469,7 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		db: { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) },
 		getJobTrackingCached: async () => JT,
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),
+		voiceNotes: require("../lib/voice-notes"),
 		getCarrierDBFromSQLite: () => ({ headers: ["Driver"], data: [] }),
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((x) => ({ ...x })),

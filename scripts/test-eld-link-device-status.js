@@ -494,6 +494,7 @@ function routeWorld(db, verb, route, deps = {}) {
 		const sourceFor = async (vid) => {
 			const get = routeWorld(db, "get", route, {
 				...lifted, eldPosition, geolib: require("geolib"), driverPositionLimiter: null,
+				voiceNoteGate: require("../lib/voice-note-gate"),
 				resolveTruckForDriverName: () => ({ unit: "LogisX-#21", routemate_vehicle_id: vid }),
 			});
 			const res = await get({ session: { user: { role: "Driver", driverName: "Test Driver" } } });
