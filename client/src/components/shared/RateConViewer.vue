@@ -647,7 +647,11 @@ onBeforeUnmount(() => {
   .rcv { height: 55vh; }
 }
 .rcv:fullscreen { height: 100%; border-radius: 0; border: 0; }
-.rcv-expanded { position: fixed; inset: 0; z-index: 70; height: auto; border-radius: 0; border: 0; }
+.rcv-expanded {
+  position: fixed; inset: 0; z-index: 70; height: auto; border-radius: 0; border: 0;
+  /* Full screen: keep the toolbar and pages clear of a notched iPhone's notch and home bar. */
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
 
 .rcv-toolbar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;

@@ -297,6 +297,8 @@ function handleSign() {
 }
 .modal-fullscreen {
   background: #fff; width: 100vw; height: 100vh;
+  /* Full screen: header and Sign button clear of a notched iPhone's notch and home bar. */
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   display: flex; flex-direction: column;
 }
 

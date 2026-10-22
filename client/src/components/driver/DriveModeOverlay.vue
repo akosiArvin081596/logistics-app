@@ -675,9 +675,9 @@ onBeforeUnmount(() => {
 /* Top banner */
 .drive-banner {
   position: absolute;
-  top: max(env(safe-area-inset-top, 0), 0.75rem);
-  left: 0.75rem;
-  right: 0.75rem;
+  top: max(env(safe-area-inset-top, 0px), 0.75rem);
+  left: max(0.75rem, env(safe-area-inset-left, 0px));
+  right: max(0.75rem, env(safe-area-inset-right, 0px));
   z-index: 10;
   display: flex;
   flex-direction: column;
@@ -745,9 +745,9 @@ onBeforeUnmount(() => {
 /* Status chips (rerouting / off route / voice paused) */
 .drive-status-strip {
   position: absolute;
-  top: calc(max(env(safe-area-inset-top, 0), 0.75rem) + 5.4rem);
-  left: 0.75rem;
-  right: 4.5rem; /* clear of the control column */
+  top: calc(max(env(safe-area-inset-top, 0px), 0.75rem) + 5.4rem);
+  left: max(0.75rem, env(safe-area-inset-left, 0px));
+  right: calc(max(0.85rem, env(safe-area-inset-right, 0px)) + 3.65rem); /* clear of the control column */
   z-index: 11;
   display: flex;
   flex-wrap: wrap;
@@ -772,8 +772,8 @@ onBeforeUnmount(() => {
 /* Control column (re-center / voice / fullscreen) */
 .drive-controls {
   position: absolute;
-  top: calc(max(env(safe-area-inset-top, 0), 0.75rem) + 8.4rem);
-  right: 0.85rem;
+  top: calc(max(env(safe-area-inset-top, 0px), 0.75rem) + 8.4rem);
+  right: max(0.85rem, env(safe-area-inset-right, 0px));
   z-index: 12;
   display: flex;
   flex-direction: column;
@@ -806,8 +806,8 @@ onBeforeUnmount(() => {
 /* Speed pill */
 .drive-speed {
   position: absolute;
-  left: 0.85rem;
-  bottom: calc(max(env(safe-area-inset-bottom, 0), 0.75rem) + 5.5rem);
+  left: max(0.85rem, env(safe-area-inset-left, 0px));
+  bottom: calc(max(env(safe-area-inset-bottom, 0px), 0.75rem) + 5.5rem);
   z-index: 10;
   width: 64px;
   height: 64px;
@@ -842,7 +842,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.85rem 1rem calc(max(env(safe-area-inset-bottom, 0), 1rem));
+  padding: 0.85rem max(1rem, env(safe-area-inset-right, 0px)) calc(max(env(safe-area-inset-bottom, 0px), 1rem))
+    max(1rem, env(safe-area-inset-left, 0px));
   background: #fff;
   box-shadow: 0 -4px 14px rgba(0,0,0,0.15);
   gap: 0.75rem;
