@@ -139,10 +139,6 @@ const TIMING_SENSITIVE = new Map([
 		"test-pdf-cold-start.js",
 		"launches Chromium and asserts on wall-clock budgets around an induced event-loop stall; CI's two shared cores can't be trusted to keep them",
 	],
-	[
-		"test-driver-instructions-lib.js",
-		"§8 asserts a 100 ms wall-clock budget on the filter and heuristic; it measured 124 ms on a loaded CI runner (#579) and failed an unrelated PR",
-	],
 ]);
 
 const SKIP_TIMING =
