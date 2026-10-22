@@ -342,6 +342,8 @@ onBeforeUnmount(() => {
 .zoom-img {
   max-width: 90vw;
   max-height: 90vh;
+  /* The visible height on a phone with its toolbars showing (90vh is the fallback). */
+  max-height: 90dvh;
   border-radius: 8px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
   transform-origin: center center;
@@ -412,10 +414,10 @@ onBeforeUnmount(() => {
 
 .zoom-close {
   position: fixed;
-  top: 1rem;
-  right: 1rem;
-  width: 2.5rem;
-  height: 2.5rem;
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: calc(1rem + env(safe-area-inset-right, 0px));
+  width: 2.75rem;
+  height: 2.75rem;
   display: flex;
   align-items: center;
   justify-content: center;

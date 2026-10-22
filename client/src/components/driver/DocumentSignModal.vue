@@ -4,7 +4,7 @@
       <!-- Header bar -->
       <div class="modal-header">
         <div class="modal-title">{{ doc?.doc_name || 'Document' }}</div>
-        <button class="modal-close" @click="$emit('close')">&times;</button>
+        <button type="button" class="modal-close" aria-label="Close" @click="$emit('close')">&times;</button>
       </div>
 
       <!-- Two-panel body -->
@@ -353,20 +353,31 @@ function formatDate(d) {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 999;
   display: flex; align-items: center; justify-content: center;
 }
+/* The screen is the overlay's size, and the overlay (inset: 0) is the part of the
+   window a phone shows. 100vh is the height with the browser's toolbars hidden:
+   while they show, a 100vh screen centred here stuck out at the top and the
+   bottom, taking the close (x) and the Sign button off the screen. The safe-area
+   padding keeps the header clear of the notch and the Sign row of the home bar. */
 .modal-fullscreen {
-  background: #fff; width: 100vw; height: 100vh;
+  background: #fff; width: 100%; height: 100%;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
   display: flex; flex-direction: column;
 }
 
 /* ─── Header ─── */
+/* 0.5rem padding around the 44 px close keeps the header its old height. */
 .modal-header {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 0.75rem 1.25rem; border-bottom: 1px solid #e8edf2; flex-shrink: 0;
+  padding: 0.5rem 1.25rem; border-bottom: 1px solid #e8edf2; flex-shrink: 0;
 }
 .modal-title { font-weight: 700; font-size: 1.05rem; color: #0f172a; }
 .modal-close {
   font-size: 1.6rem; background: none; border: none; cursor: pointer;
-  color: #6b7085; width: 36px; height: 36px; display: flex;
+  color: #6b7085; width: 44px; height: 44px; display: flex;
   align-items: center; justify-content: center; border-radius: 8px;
   transition: background 0.15s;
 }
@@ -502,7 +513,14 @@ function formatDate(d) {
 /* ─── Mobile ─── */
 @media (max-width: 768px) {
   .modal-body { flex-direction: column; }
-  .sign-panel { width: 100%; border-left: none; border-top: 1px solid #e8edf2; max-height: 50vh; }
-  .pdf-panel { min-height: 40vh; }
+  /* dvh is the visible height (each vh line is the fallback for browsers without
+     it). The form panel shrinks, and scrolls, when the PDF's floor and the form
+     ask for more than the screen has, so the Sign button is never clipped. */
+  .sign-panel {
+    width: 100%; border-left: none; border-top: 1px solid #e8edf2;
+    max-height: 50vh; max-height: 50dvh;
+    flex-shrink: 1; min-height: 0; overflow-y: auto;
+  }
+  .pdf-panel { min-height: 40vh; min-height: 40dvh; }
 }
 </style>
