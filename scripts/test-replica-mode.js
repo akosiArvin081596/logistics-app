@@ -48,6 +48,7 @@ const SERVER = path.join(ROOT, "server.js");
 const MODE = path.join(ROOT, "lib", "replica-mode.js");
 const replica = require(MODE);
 const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
+const settingsExport = require(path.join(ROOT, "scripts", "replica", "remote", "settings.js"));
 const SRC = fs.readFileSync(SERVER, "utf8");
 
 let failures = 0;
@@ -121,6 +122,13 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	eq("...but not another quoted code, a lower-case property, another object's field or an unquoted name in a comment",[...rules.namesReadBy(['res.json({ code: "INVOICE_LINE_LIMIT" }); env.length; obj.E_ENABLED; // see F_ENABLED'])], []);
 	for (const n of ["SPREADSHEET_ID", "ADMIN_NOTIFY_EMAIL", "RATECON_DRIVE_FOLDER_ID", "BISON_INVOICE_EMAIL", "DEFAULT_INVOICE_EMAIL", "N8N_BASE_URL", "N8N_WORKFLOW_ID"]) {
 		eq(`${n} is never copied, even when the app reads it`, rules.classifySetting(n, "made-up", { readByApp: new Set([n]) }).rule, "production only: names a production target");
+	}
+	// Decision 36: four more of production's own targets, each with a value of its kind.
+	for (const [n, v] of [["GMAIL_USER", "dispatch@example.test"], ["RATECON_RECONCILE_MAILBOX", "[Gmail]/All Mail"], ["GOOGLE_DRIVE_FOLDER_ID", "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ"], ["ARCHIVE_SPREADSHEET_ID", "made-up-archive-sheet-id"]]) {
+		const verdict = rules.classifySetting(n, v, { readByApp: new Set([n]) });
+		eq(`36 ${n} is never copied, even when the app reads it`, [verdict.copy, verdict.rule], [false, "production only: names a production target"]);
+		const exp = settingsExport.exportSettings({ [n]: v, ROUTEMATE_ENABLED: "true" }, { readByApp: new Set([n, "ROUTEMATE_ENABLED"]) });
+		eq(`36 the settings export skips ${n} and writes no part of its value`, [exp.copied, exp.skipped, exp.text.includes(v)], [["ROUTEMATE_ENABLED"], [{ name: n, rule: "production only: names a production target" }], false]);
 	}
 	eq("proxy settings are found in any case, and NODE_USE_ENV_PROXY", rules.proxySettingsSet({ https_proxy: "x", HTTP_PROXY: "y", All_Proxy: "z", NODE_USE_ENV_PROXY: "1", NO_PROXY: "localhost", PATH: "/bin" }), ["All_Proxy", "HTTP_PROXY", "NODE_USE_ENV_PROXY", "https_proxy"]);
 	eq("outboundCredentialsSet names credentials, ignores empties and SESSION_SECRET", rules.outboundCredentialsSet({ GEMINI_API_KEY: "x", GOOGLE_MAPS_API_KEY: "", SESSION_SECRET: "s", ROUTEMATE_ENABLED: "true", FEED: "https://a:b@x.example.test" }), ["FEED (a URL carrying credentials)", "GEMINI_API_KEY"]);
@@ -451,6 +459,10 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 	refusedAfterSettings("a production target in the settings file (BISON_INVOICE_EMAIL): refused once the file is read, its value not printed", "BISON_INVOICE_EMAIL='ap@example.test'\n", /settings file holds BISON_INVOICE_EMAIL, which a replica does not take \(production only: names a production target\)/, "ap@example.test");
 	refusedAfterSettings("a settings file holding ADMIN_NOTIFY_EMAIL stops the start once the file is read, its value not printed", "ADMIN_NOTIFY_EMAIL='admin@example.test'\n", /settings file holds ADMIN_NOTIFY_EMAIL, which a replica does not take \(production only: names a production target\)/, "admin@example.test");
 	refusedAfterSettings("a settings file holding RATECON_DRIVE_FOLDER_ID stops the start once the file is read, its value not printed", "RATECON_DRIVE_FOLDER_ID='made-up-folder-id'\n", /settings file holds RATECON_DRIVE_FOLDER_ID, which a replica does not take \(production only: names a production target\)/, "made-up-folder-id");
+	// Decision 36: an older settings file holding one of the four stops the start too.
+	for (const [n, v] of [["GMAIL_USER", "dispatch-36@example.test"], ["RATECON_RECONCILE_MAILBOX", "Made-Up-Label-36"], ["GOOGLE_DRIVE_FOLDER_ID", "made-up-uploads-folder-36"], ["ARCHIVE_SPREADSHEET_ID", "made-up-archive-36"]]) {
+		refusedAfterSettings(`36 a settings file holding ${n} stops the start once the file is read, its value not printed`, `${n}='${v}'\n`, new RegExp(`settings file holds ${n}, which a replica does not take \\(production only: names a production target\\)`), v);
+	}
 	refusedAfterSettings("a settings-file refusal says to run npm run replica:pull again for a fresh settings file, with no value printed", "ADMIN_NOTIFY_EMAIL='admin-hint@example.test'\nNODE_OPTIONS='--max-old-space-size=64'\n", /settings file holds ADMIN_NOTIFY_EMAIL[^\n]*\n(?:[^\n]*\n)*\[replica\] {3}- run npm run replica:pull again for a fresh settings file\n/, "admin-hint@example.test");
 	refused("off macOS: refused before listening", () => {}, /this is linux: a replica runs on a developer Mac \(macOS\) only/, platformShim("linux"));
 	{
@@ -467,15 +479,14 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		// The live boot, on every platform: the child reports macOS (the shim above).
 		// The main sheet's ID comes from the server's environment, as replica:start
 		// hands it (scripts/replica/common.js replicaSheetIds), never the settings file.
+		// The archive sheet's ID too (decision 36: the settings file never holds it).
 		const settings = [
-			"ARCHIVE_SPREADSHEET_ID='replica-test-archive'",
 			"PERIOD_FINALIZE_ENABLED='true'", "INVOICE_AUTOGEN_ENABLED='true'", "RATECON_RECONCILE_ENABLED='true'",
 			"FUEL_EVENTS_ENABLED='true'", "ROUTEMATE_ENABLED='true'", "LINXUP_ENABLED='true'", "SCANKIT_ENABLED='true'",
-			"GMAIL_USER='dispatch@example.test'",
 		].join("\n") + "\n";
 		const h = replicaHome({ settings });
 		const cwd = decoy();
-		const child = spawn(process.execPath, ["--require", asMac, SERVER], { cwd, env: { ...baseEnv(h, cwd), SPREADSHEET_ID: "replica-test-main" }, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, ["--require", asMac, SERVER], { cwd, env: { ...baseEnv(h, cwd), SPREADSHEET_ID: "replica-test-main", ARCHIVE_SPREADSHEET_ID: "replica-test-archive" }, stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
 		let err = "";
 		child.stdout.on("data", (c) => (out += c));
@@ -512,7 +523,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 			ok(`...including "${j}", its flag on in the settings`, notStarted.includes(j));
 		}
 		ok("Google Sheets answer from the local copy", /Google Sheets connected — 1 tabs cached/.test(out), out.slice(-300));
-		ok("the repo's .env is not loaded (the settings file is)", /\[replica\] settings: 9 from .*; the repo \.env is not loaded/.test(out) && !/injecting env/.test(out + err));
+		ok("the repo's .env is not loaded (the settings file is)", /\[replica\] settings: 7 from .*; the repo \.env is not loaded/.test(out) && !/injecting env/.test(out + err));
 		const guard = fs.readFileSync(h.env.LOGISX_REPLICA_GUARD_LOG, "utf8");
 		eq("the outbound guard log is empty: no connection, DNS query, .env or key read was attempted", guard, "");
 		ok("nothing was refused on stderr either", !/\[replica-guard\] REFUSED/.test(err), err.slice(-300));
