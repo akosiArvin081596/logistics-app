@@ -20,6 +20,11 @@
 //   §4 the decline confirmation overlay scrolls and its dialog centers with
 //      margin: auto
 //   §5 the Change Password overlay scrolls and its dialog centers with margin: auto
+//   §6 overscroll containment sits on the welcome overlay only, so on a browser
+//      without dvh (both may scroll) a swipe on the card can hand over to it
+//   §7 the keyboard: focus moves to the close (x) when the card opens, and Escape
+//      on the overlay (focusable, so a tap inside the card keeps focus there) calls
+//      dismissWelcome()
 //
 // The components' own markup and styles, parsed with the client's compiler and
 // postcss. No DOM, no browser (scripts/e2e/driver-welcome.mjs is the browser half).
@@ -71,7 +76,8 @@ function decls(root, selector, prop) {
   return out
 }
 const last = (list) => list[list.length - 1]
-const scrolls = (root, sel) => ['auto', 'scroll'].includes(last([...decls(root, sel, 'overflow'), ...decls(root, sel, 'overflow-y')]))
+// overflow and overflow-y read together, in source order: the later one wins.
+const scrolls = (root, sel) => ['auto', 'scroll'].includes(last(decls(root, sel, /^overflow(-y)?$/)))
 // A centered flex item with margin: auto keeps its top in the scrollable area when
 // it is taller than the overlay; align-items: safe center does the same.
 const safeCentered = (root, overlay, card) =>
@@ -140,6 +146,22 @@ console.log('§5 the Change Password overlay scrolls')
 const pw = load(CHANGE_PASSWORD_VUE)
 ok('the Change Password overlay scrolls (overflow-y: auto)', scrolls(pw.root, '.pw-overlay'))
 ok('the Change Password dialog centers with margin: auto', safeCentered(pw.root, '.pw-overlay', '.pw-dialog'))
+
+// ══ §6-§7 the welcome card's scroll handover and keyboard ════════════════════
+console.log('§6 overscroll containment on the welcome overlay only')
+eq('the welcome overlay keeps overscroll-behavior: contain', last(decls(dv.root, '.welcome-overlay', 'overscroll-behavior')), 'contain')
+eq('the welcome card sets no overscroll-behavior', decls(dv.root, '.welcome-card', 'overscroll-behavior').length, 0)
+
+console.log('§7 focus moves into the card and Escape closes it')
+const overlay = findEl(dv.descriptor.template.ast, (el) => hasClass(el, 'welcome-overlay'))
+const escDir = overlay && overlay.props.find((p) => p.type === 7 && p.name === 'on' && p.arg?.content === 'keydown' &&
+  (p.modifiers || []).some((m) => (m?.content ?? m) === 'esc' || (m?.content ?? m) === 'escape'))
+eq('Escape on the welcome overlay calls dismissWelcome', escDir?.exp?.content?.trim(), 'dismissWelcome')
+eq('the welcome overlay is focusable (tabindex="-1")', overlay && attr(overlay, 'tabindex'), '-1')
+const closeRef = firstChild && attr(firstChild, 'ref')
+ok('the close button has a template ref', !!closeRef)
+ok('opening the card focuses the close button after the next render',
+  !!closeRef && new RegExp(`watch\\(showWelcomeModal,[\\s\\S]{0,200}?nextTick\\([\\s\\S]{0,80}?${closeRef}\\.value\\??\\.focus\\(\\)`).test(dv.script))
 
 console.log(`\n${pass} passed, ${failures.length} failed`)
 process.exit(failures.length ? 1 : 0)

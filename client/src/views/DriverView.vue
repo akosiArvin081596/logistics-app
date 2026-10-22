@@ -99,9 +99,9 @@
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
-    <div v-if="showWelcomeModal" class="welcome-overlay" @click.self="dismissWelcome">
+    <div v-if="showWelcomeModal" class="welcome-overlay" tabindex="-1" @click.self="dismissWelcome" @keydown.esc="dismissWelcome">
       <div class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
-        <button type="button" class="welcome-close" aria-label="Close" @click="dismissWelcome">&times;</button>
+        <button ref="welcomeCloseBtn" type="button" class="welcome-close" aria-label="Close" @click="dismissWelcome">&times;</button>
         <div class="welcome-icon">&#127881;</div>
         <h2 id="welcome-title" class="welcome-title">Welcome to the Team!</h2>
         <p class="welcome-sub">Hey <b>{{ driverName }}</b> — you're now an official LogisX driver.</p>
@@ -361,7 +361,7 @@ import 'vant/es/popup/style'
 import 'vant/es/nav-bar/style'
 import 'vant/es/steps/style'
 import 'vant/es/step/style'
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
@@ -433,6 +433,7 @@ const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
+const welcomeCloseBtn = ref(null)
 const respondingLoadIds = reactive(new Set())
 function isResponding(load) {
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
@@ -527,6 +528,11 @@ function dismissWelcome() {
   if (!key) return
   try { localStorage.setItem(key, new Date().toISOString()) } catch { /* ignore */ }
 }
+// Focus moves into the card when it opens, so the keyboard reaches it at once and
+// Escape (handled on the overlay) closes it.
+watch(showWelcomeModal, (open) => {
+  if (open) nextTick(() => welcomeCloseBtn.value?.focus())
+})
 // If a driver is on the onboarding lock screen when the admin uploads their drug test,
 // the store refreshes, isOnboarding flips to false — surface the celebration at that moment too.
 watch(isOnboarding, (v, old) => {
@@ -1284,6 +1290,7 @@ onUnmounted(() => {
 .ob-next-steps p { margin-bottom: 0.4rem; }
 
 /* Welcome / Activation Modal */
+.welcome-overlay:focus { outline: none; }
 .welcome-overlay {
   position: fixed;
   inset: 0;
@@ -1320,7 +1327,6 @@ onUnmounted(() => {
   max-height: calc(100vh - 2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   max-height: calc(100dvh - 2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
-  overscroll-behavior: contain;
   position: relative;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(16, 185, 129, 0.2);
   text-align: center;
