@@ -12,7 +12,8 @@
 // production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS; the
 // carrier's account numbers, CARRIER_ACCOUNT_SETTINGS: CARRIER_ACCOUNT_NUMBERS_DENY_SECRET,
 // also refused as a SECRET name, and its retired name CARRIER_ACCOUNT_NUMBERS_DENY;
-// the sheet, inboxes and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
+// the sheets, inboxes, the Gmail account and its reconcile label, the Drive folders
+// and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
 // allowlist too: only names the running app reads in <app dir>/server.js and
 // lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
 // handed, and the names a helper reads through a table) are copied, so a name
