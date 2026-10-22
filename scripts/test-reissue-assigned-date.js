@@ -100,6 +100,10 @@ if (!DRAFTS_DDL || !LOCKS_DDL) fatal("load_invoice_drafts's or period_locks's CR
 // Production's column order around it: Assigned Date, then Status Update Date, then
 // Completion Date, so the money math's dateCol resolves to the Assigned Date header.
 const SECRET = "test-secret";
+// RATECON_PERSON_EDIT_HOLD_ENABLED from this runner's own environment reaches the lifted
+// route's stand-in env, so every case here also runs with the person-edit hold on
+// (scripts/test-reissue-runners-person-hold-on.js does that run).
+const PERSON_HOLD_ENV = process.env.RATECON_PERSON_EDIT_HOLD_ENABLED === undefined ? {} : { RATECON_PERSON_EDIT_HOLD_ENABLED: process.env.RATECON_PERSON_EDIT_HOLD_ENABLED };
 const SENT = "10/13/2026, 8:00:00 AM";
 const headersFor = (ad) => ["Load ID", "Details", "Pickup Appointment", "Drop-off Appointment", "Job Status", ad, "Status Update Date", "Completion Date", "Payment"];
 // [load id, details, pickup, drop-off, job status, assigned date, status update date, payment]
@@ -132,7 +136,7 @@ function harness(ad, { headers = headersFor(ad), rows = Object.values(LOADS).map
 	const alerts = [];
 	const quiet = { ...console, log: () => {}, error: () => {}, warn: () => {} };
 	new Function(...PROVIDED, `"use strict";\n${ROUTE}`)(
-		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET } }, app, rootRequire, db,
+		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet, { env: { N8N_EXTRACT_SECRET: SECRET, ...PERSON_HOLD_ENV } }, app, rootRequire, db,
 		(a) => { alerts.push(a); return Promise.resolve({ alerted: true }); },
 	);
 	const post = async (load, values = sentFor(ad, load)) => {
