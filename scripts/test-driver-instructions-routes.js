@@ -283,6 +283,8 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_at DATETIME DEFAULT NULL)");
 	db.exec("CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '')");
 	db.exec("CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+	// The dispatch notices table as server.js creates it (the lock alert is stored there).
+	db.exec(/CREATE TABLE IF NOT EXISTS dispatch_notifications \([\s\S]*?\n\t\)/.exec(SRC)[0]);
 	const w = {
 		db, env: { ...env }, files: [...files], gemini: [...gemini], logs: [], sockets: [], emails: [], responses: [], startsJob: [], intervals: [],
 		calls: { list: 0, download: [], meta: [], gemini: 0, geminiBodies: [], sheet: 0, side: 0 }, ingestionAt, sheetFails, sideFails,
@@ -363,6 +365,7 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 		alertChannels: { mailbox: () => "admin-inbox@example.test" },
 		path,
 		DATA_DIR: w.uploads,
+		insertDispatchNotification: db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES (?, ?, ?, ?)"),
 		startsJob: (name) => { w.startsJob.push(name); return false; },
 		setInterval: (fn, ms) => { w.intervals.push(ms); return 0; },
 		requireRole: G.requireRole,
@@ -806,7 +809,7 @@ test("§6 the first deny-list hit raises one alert (socket to super-admin and on
 	const r1 = await w.call("PUT", API, DISP, editBody(`Show t ${EN_DASH} ${DENY_DIGITS} on arrival.`));
 	await w.settle();
 	eq("the first hit: 400 as before", [r1.status, r1.body.code, r1.body.rule], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number"]);
-	eq("one in-app notice to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "driver-instructions-alert"]]);
+	eq("one in-app notice to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
 	eq("one email", w.emails.length, 1);
 	eq("the hit log keeps the refusal", w.db.prepare("SELECT user_id, role, load_last4 FROM driver_instructions_number_hits").all(), [{ user_id: 2, role: "Dispatcher", load_last4: "0345" }]);
 	eq("the person is locked", w.db.prepare("SELECT user_id, username, role FROM driver_instructions_edit_locks").all(), [{ user_id: 2, username: "disp_test", role: "Dispatcher" }]);
@@ -1458,7 +1461,7 @@ test("§12 the event: exactly { loadId } to the load's driver's room only (his a
 	await w.call("GET", DAPI, DRIVER);
 	eq("reads: no event", changedEvents(w).length, 2);
 	eq("each event exactly { loadId } to the driver's room", changedEvents(w).map((s) => [s.room, s.payload]), [["driver:test driver a", { loadId: LOAD_ID }], ["driver:test driver a", { loadId: LOAD_ID }]]);
-	eq("no other event went anywhere but the refusal's alert to super-admin", w.sockets.filter((s) => s.event !== "driver-instructions-changed").map((s) => [s.room, s.event]), [["super-admin", "driver-instructions-alert"]]);
+	eq("no other event went anywhere but the refusal's alert to super-admin", w.sockets.filter((s) => s.event !== "driver-instructions-changed").map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
 	w.accountSpelling = () => "Test  Driver A";
 	await w.call("PUT", API, DISP, editBody("Check in at the north gate with your CDL."));
 	eq("the room follows the driver's account spelling", changedEvents(w).slice(-1).map((s) => s.room), ["driver:test  driver a"]);
@@ -1668,9 +1671,12 @@ test("§13 37 the first deny-list refusal alerts at once: in-app and email name 
 	const r = await w.call("PUT", API, DISP, editBody("Check in with the guard.", `9${DENY_DIGITS}5`));
 	await w.settle();
 	eq("refused as before: 400, rule number, the field kind only", [r.status, r.body.code, r.body.rule, r.body.field], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number", "references"]);
-	eq("one in-app notice, to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "driver-instructions-alert"]]);
+	eq("one in-app notice, to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
 	const n = w.sockets[0].payload;
-	eq("the notice: the person, the load's last 4, the time, locked; nothing else", n, { userId: 2, username: "disp_test", role: "Dispatcher", loadLast4: "0345", at: "2026-10-22T15:00:00Z", locked: true, rule: "number" });
+	eq("the notice: a Super Admin-only dispatch notice whose metadata names the person, the load's last 4, the time, locked; nothing else",
+		[n.type, Object.keys(n).sort(), n.metadata], ["driver-instructions-lock", ["body", "metadata", "title", "type"], { userId: 2, username: "disp_test", role: "Dispatcher", loadLast4: "0345", at: "2026-10-22T15:00:00Z", locked: true, rule: "number" }]);
+	ok("its title and body name the person, the load, the Eastern time and the lock", n.title === "Driver instructions: disp_test's edits are locked" && /disp_test \(Dispatcher\)/.test(n.body) && n.body.includes("0345") && /Oct 22, 2026, 11:00\s?AM EDT/.test(n.body) && /locked/.test(n.body), n);
+	eq("stored once as that notice", w.db.prepare("SELECT type, title, body FROM dispatch_notifications").all(), [{ type: n.type, title: n.title, body: n.body }]);
 	eq("one email, to the admin inbox", w.emails.map((e) => [e.to, e.subject]), [["admin-inbox@example.test", "Driver instructions: a refused number locked a user's edits"]]);
 	const html = w.emails[0].html;
 	ok("the email names the person, the load, the Eastern time and the lock", html.includes("disp_test") && html.includes("(id 2)") && html.includes("Dispatcher") && html.includes("0345") && /Oct 22, 2026, 11:00\s?AM EDT/.test(html) && /locked/.test(html), html);
@@ -1686,13 +1692,58 @@ test("§13 37 the first deny-list refusal alerts at once: in-app and email name 
 	eq("the response neither", refusedValueTrace(r.text).filter((t) => t !== "length or position"), []);
 });
 
+// GET /api/dispatch-notifications and PUT .../read, lifted from server.js over `db`
+// (broker-contact handling stubbed: its own runner covers it).
+function dispatchNoticeRoutes(db) {
+	const handlers = {};
+	const app = { get: (p, ...h) => { handlers[`GET ${p}`] = h[h.length - 1]; }, put: (p, ...h) => { handlers[`PUT ${p}`] = h[h.length - 1]; } };
+	const deps = lift.closure(SRC, { roots: ["noticeTypeScope"], provided: [], denied: ["app", "io", "server", "db"] }).text;
+	const routes = [
+		lift.liftRoute(SRC, 'app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+		lift.liftRoute(SRC, 'app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+	].join("\n");
+	new Function("app", "db", "requireRole", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "staffDispatchNotice", "brokerContact", "currentShownLoadIdIndex", `${deps}\n${routes}`)(
+		app, db, () => null, true, (n) => n, { fullDispatchNotice: (n) => n }, () => null);
+	const call = (key) => async (user, body = {}) => {
+		const out = { code: 200, body: null };
+		const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
+		await handlers[key]({ session: { user }, body, query: {}, params: {} }, res);
+		return out;
+	};
+	return { get: call("GET /api/dispatch-notifications"), read: call("PUT /api/dispatch-notifications/read") };
+}
+
+test("§13 37 M1 the lock alert is a saved Super Admin-only dispatch notice: a Super Admin sees it in GET /api/dispatch-notifications and live; a Dispatcher neither sees it nor marks it read", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	w.db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES ('new-load', 'New Load 771200400', 'x', '{}')").run();
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	await w.settle();
+	eq("live: one dispatch-notification, to the super-admin room only", w.sockets.map((s) => [s.room, s.event, s.payload.type]), [["super-admin", "dispatch-notification", "driver-instructions-lock"]]);
+	const rt = require(RUNTIME);
+	const r = dispatchNoticeRoutes(w.db);
+	const types = (out) => (out.body.notifications || []).map((x) => x.type);
+	const sa = await r.get(SA);
+	const disp = await r.get(DISP);
+	eq("a Super Admin sees it, unread", [sa.code, types(sa), sa.body.unreadCount], [200, [rt.LOCK_NOTICE_TYPE, "new-load"], 2]);
+	eq("a Dispatcher doesn't, nor counts it", [disp.code, types(disp), disp.body.unreadCount], [200, ["new-load"], 1]);
+	const lockId = w.db.prepare("SELECT id FROM dispatch_notifications WHERE type = ?").get(rt.LOCK_NOTICE_TYPE).id;
+	await r.read(DISP, { ids: [lockId] });
+	await r.read(DISP, {});
+	eq("a Dispatcher's mark-read (by id, or all) leaves it unread for the Super Admins", [w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, (await r.get(SA)).body.unreadCount], [0, 1]);
+	await r.read(SA, { ids: [lockId] });
+	eq("a Super Admin marks it read", w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, 1);
+	ok("server.js serves the runtime's type to Super Admins only", /const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\["driver-instructions-lock"\]\);/.test(SRC) && rt.LOCK_NOTICE_TYPE === "driver-instructions-lock");
+});
+
 test("§13 37 the alert's load reference is withheld when the Load ID's own digits overlap a deny value", async ({ eq }) => {
 	useClock();
 	const w = await world({ env: { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: `${DENY}, 9990345` } });
 	insertRow(w, cleanExtraction());
 	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
 	await w.settle();
-	eq("the notice and the hit log carry no load reference", [w.sockets[0].payload.loadLast4, w.db.prepare("SELECT load_last4 FROM driver_instructions_number_hits").get().load_last4], ["", ""]);
+	eq("the notice and the hit log carry no load reference", [w.sockets[0].payload.metadata.loadLast4, w.sockets[0].payload.body.includes("0345"), w.db.prepare("SELECT load_last4 FROM driver_instructions_number_hits").get().load_last4], ["", false, ""]);
 	eq("the email says withheld", [/Load \(last 4 of its Load ID\): withheld/.test(w.emails[0].html), w.emails[0].html.includes("0345")], [true, false]);
 });
 
@@ -1769,7 +1820,7 @@ test("§13 37 clearing a lock: Super Admin only, never their own (403 LOCK_SELF_
 	eq("another Super Admin clears the first one's", [(await w.call("POST", clear(1), SA2, {})).status, lockRows(w)], [200, []]);
 	const again = await w.call("PUT", API, DISP, editBody(`Show t ${EN_DASH} ${DENY_DIGITS} on arrival.`));
 	await w.settle();
-	eq("a hit after a clear locks again and alerts again", [again.status, lockRows(w).map((l) => l.user_id), w.sockets.filter((s) => s.event === "driver-instructions-alert").length], [400, [2], 3]);
+	eq("a hit after a clear locks again and alerts again", [again.status, lockRows(w).map((l) => l.user_id), w.sockets.filter((s) => s.event === "dispatch-notification").length], [400, [2], 3]);
 	const off = await world({ env: { ...ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" } });
 	eq("flag off: both lock routes 404", [(await off.call("GET", LOCKS, SA)).status, (await off.call("POST", clear(2), SA, {})).status], [404, 404]);
 	eq("the answers hold no part of any refused value", w.responses.flatMap(refusedValueTrace).filter((t) => t !== "length or position"), []);
