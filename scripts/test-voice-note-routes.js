@@ -584,6 +584,52 @@ function telemetry(db, { agoMs, speed }) {
 		ok("§16 no length reads 0:00", voiceText.voiceNoteLabel(NaN) === "Voice note (0:00)" && voiceText.voiceNoteLabel(-5) === "Voice note (0:00)");
 	}
 
+	// §17 deleting a user unlinks his voice files
+	{
+		const head = 'app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {';
+		const at = SRC.indexOf(head);
+		const del = at < 0 ? "" : SRC.slice(at, SRC.indexOf("\n});\n", at));
+		const collectAt = del.indexOf("const voiceFiles = userVoiceNoteFiles(id, name);");
+		const txAt = del.indexOf("db.transaction(() => {\n\t\t\tif (name) {");
+		const removeAt = del.indexOf("removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);");
+		const rolledBackAt = del.indexOf('code: "DELETE_ROLLED_BACK"');
+		ok("§17 DELETE /api/users/:id reads the account's voice files beside its delete and unlinks them once it commits",
+			collectAt > 0 && txAt > collectAt && rolledBackAt > txAt && removeAt > rolledBackAt, [collectAt, txAt, rolledBackAt, removeAt]);
+		const messageDelete = (/removed\.messages = db\.prepare\(`DELETE FROM messages[^\n]+/.exec(del) || [])[0] || "";
+		let fns = null;
+		const userDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-note-userdel-"));
+		try {
+			const lifted = closure(SRC, { roots: ["userVoiceNoteFiles", "removeUserVoiceNotes"], provided: ["db", "console", "require", "DATA_DIR"] }).text;
+			const udb = oldDb();
+			migrate(udb);
+			fns = { db: udb, ...new Function("db", "console", "require", "DATA_DIR", `"use strict";\n${lifted}\nreturn { userVoiceNoteFiles, removeUserVoiceNotes };`)(udb, { error() {}, log() {}, warn() {} }, appRequire, userDir) };
+		} catch (err) {
+			ok(`§17 the user-delete voice helpers lift from server.js (${err.message})`, false);
+		}
+		if (fns && messageDelete) {
+			const vdir = path.join(userDir, "storage", "voice-notes");
+			fs.mkdirSync(vdir, { recursive: true });
+			const ins = fns.db.prepare(`INSERT INTO messages (timestamp, "from", "to", message, attachment_type, voice_file, voice_duration_ms, voice_bytes, client_key, sender_user_id, party_user_id)
+				VALUES ('2026-10-20T12:00:00.000Z', ?, ?, 'Voice note (0:03)', 'voice', ?, 3160, 100, ?, ?, ?)`);
+			const names = ["vn_800_00000000000000a1.m4a", "vn_801_00000000000000b2.m4a", "vn_802_00000000000000c3.m4a", "vn_803_00000000000000d4.m4a"];
+			ins.run("Dispatch", DRIVER, names[0], "k-del-0000001", 2, U.drv.id);          // to him, by name
+			ins.run(DRIVER, "Dispatch", names[1], "k-del-0000002", U.drv.id, U.drv.id);   // from him, by name
+			ins.run("Dispatch", "Tamsin Vale-Old", names[2], "k-del-0000003", 2, U.drv.id); // his, under an old name
+			ins.run("Dispatch", DRIVER_B, names[3], "k-del-0000004", 2, U.drvB.id);       // another driver's
+			for (const n of names) fs.writeFileSync(path.join(vdir, n), CHROME);
+			const files = fns.userVoiceNoteFiles(U.drv.id, DRIVER.toLowerCase());
+			ok("§17 the files read: his three notes (by name and by account), not another driver's", files.slice().sort().join(",") === names.slice(0, 3).join(","), files);
+			const removed = {};
+			new Function("db", "name", "removed", messageDelete)(fns.db, DRIVER.toLowerCase(), removed);
+			const gone = fns.removeUserVoiceNotes(U.drv.id, files);
+			ok("§17 after the delete commits, his three files are unlinked", gone === 3 && names.slice(0, 3).every((n) => !fs.existsSync(path.join(vdir, n))), gone);
+			ok("§17 another driver's note and file stay", fs.existsSync(path.join(vdir, names[3])) && fns.db.prepare("SELECT voice_file FROM messages WHERE client_key = 'k-del-0000004'").get().voice_file === names[3]);
+			const kept = fns.db.prepare("SELECT voice_file, voice_bytes FROM messages WHERE client_key = 'k-del-0000003'").get();
+			ok("§17 his note under an old name keeps its row, without its audio", !!kept && kept.voice_file === "" && kept.voice_bytes === 0, kept);
+		}
+		fs.rmSync(userDir, { recursive: true, force: true });
+	}
+
 	for (const s of servers) s.close();
 	fs.rmSync(dataDir, { recursive: true, force: true });
 	console.log(failed ? `\n${failed} failed` : "\nall passed");

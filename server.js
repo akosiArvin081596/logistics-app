@@ -31333,6 +31333,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
+	// Voice notes (lib/voice-notes.js): the stored audio of every message the
+	// delete below removes, and of every note this account was the party to, read
+	// here (no await between this and the delete) and unlinked once it commits.
+	const voiceFiles = userVoiceNoteFiles(id, name);
 	const removed = {};
 	const detached = {};
 	try {
@@ -31444,6 +31448,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			detail: err.message,
 		});
 	}
+	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
 
 	// The account is gone from `users`, but requireRole() reads the SESSION, not
 	// the database — so without this the deleted admin keeps a working Super Admin
@@ -47463,6 +47468,34 @@ app.delete("/api/messages/:id/voice", requireRole("Super Admin"), voiceNoteUploa
 		res.status(500).json({ error: "The voice note could not be removed. Try again." });
 	}
 });
+
+// DELETE /api/users/:id: the stored voice files of every message its delete
+// removes (from or to the account's name, matched as that delete matches) and
+// of every note the account was the party to (by id, under any name).
+function userVoiceNoteFiles(userId, nameLower) {
+	const files = new Set(
+		db.prepare("SELECT voice_file FROM messages WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").all(userId).map((r) => r.voice_file),
+	);
+	if (nameLower) {
+		for (const r of db.prepare(`SELECT voice_file FROM messages WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND COALESCE(voice_file, '') <> ''`).all(nameLower, nameLower)) {
+			files.add(r.voice_file);
+		}
+	}
+	return [...files];
+}
+// ...once that delete has committed: a note of the account's that kept its row
+// (sent under another name) loses its audio, then every file read is unlinked.
+// Returns how many files are gone.
+function removeUserVoiceNotes(userId, files) {
+	try {
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0 WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").run(userId);
+	} catch (err) {
+		console.error("[voice-notes] clearing a deleted account's notes failed:", err.message);
+	}
+	let gone = 0;
+	for (const file of files) if (voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, file)) gone++;
+	return gone;
+}
 
 // The daily retention sweep (lib/voice-notes.js): report only until
 // VOICE_NOTE_SWEEP_APPLY_FROM is set and reached.
