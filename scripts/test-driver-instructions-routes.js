@@ -295,6 +295,8 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	const geminiFetch = async (url, opts) => {
 		w.calls.gemini++;
 		w.calls.geminiBodies.push(String(opts && opts.body ? opts.body : "").length);
+		// Something that happens while Gemini reads (a load reassigned on the sheet).
+		if (typeof w.onGemini === "function") w.onGemini();
 		const next = w.gemini.length ? w.gemini.shift() : geminiAnswer(cleanExtraction());
 		return {
 			ok: next.status >= 200 && next.status < 300,
@@ -870,10 +872,21 @@ test("§6 a removed drag-and-drop document is no source: re-extract answers 404 
 	// A live copy uploaded earlier than a newer one, the newer one inserted first: the
 	// newest upload is read.
 	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}-old.pdf`), Buffer.from("not a pdf"));
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES (?, '', 'RATECON', ?, '2026-10-21 10:00:00')").run(LOAD_ID, `${LOAD_ID}.pdf`);
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES (?, '', 'RATECON', ?, '2026-10-20 10:00:00')").run(LOAD_ID, `${LOAD_ID}-old.pdf`);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, uploaded_at) VALUES (?, '', 'RATECON', ?, ?, '2026-10-21 10:00:00')").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, uploaded_at) VALUES (?, '', 'RATECON', ?, ?, '2026-10-20 10:00:00')").run(LOAD_ID, `${LOAD_ID}-old.pdf`, `/uploads/rate-cons/${LOAD_ID}-old.pdf`);
 	const r2 = await w.call("POST", `${API}/re-extract`, SA, {});
 	eq("the newest live upload is read", [r2.status, r2.body.result, w.calls.gemini], [200, "insert", 1]);
+});
+
+test("§6 a RATECON document linked to a Drive file by content is no source for a re-read, even with a same-named file in uploads/rate-cons/ (as in the backfill)", async ({ eq }) => {
+	useClock();
+	const w = await world();
+	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url) VALUES (?, '', 'RATECON', ?, ?, ?)")
+		.run(LOAD_ID, `${LOAD_ID}.pdf`, "drive-file-under-test", "https://drive.google.com/file/d/drive-file-under-test/view");
+	const r = await w.call("POST", `${API}/re-extract`, SA, {});
+	eq("content-linked: no rate con on file, nothing read, no Gemini call", [r.status, r.body.code, w.calls.gemini, storedCount(w)], [404, "INSTRUCTIONS_NO_RATE_CON", 0, 0]);
 });
 
 // ── §7 drag-and-drop and the dashboard ────────────────────────────────────────
@@ -935,7 +948,7 @@ test("§8 the leak test: a dirty extraction through the sweep, the drop zone and
 	await w.service.afterDropzone({ loadId: LOAD_ID, base64: READABLE_B.toString("base64"), amounts: [OWN_AMOUNT], user: SA });
 	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
 	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE_C);
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', ?)").run(LOAD_ID, `${LOAD_ID}.pdf`);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', ?, ?)").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
 	clock.t += 16 * 60 * 1000;
 	for (const u of [DISP, SA]) {
 		await w.call("GET", API, u);
@@ -1260,7 +1273,7 @@ test("§10 L7 one re-read per load per 15 minutes unless the last one failed", a
 	const w = await world();
 	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
 	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', ?)").run(LOAD_ID, `${LOAD_ID}.pdf`);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', ?, ?)").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
 	eq("first re-read", (await w.call("POST", `${API}/re-extract`, DISP, {})).status, 200);
 	const again = await w.call("POST", `${API}/re-extract`, SA, {});
 	eq("a second within 15 min: 429, no call", [again.status, again.body.code, w.calls.gemini], [429, "INSTRUCTIONS_REREAD_TOO_SOON", 1]);
@@ -1470,6 +1483,41 @@ test("§12 annotateDriverLoads: per load exactly { state, highlights } (codes on
 	const off = [{ "Load ID": LOAD_ID }];
 	w.service.annotateDriverLoads(off, [LOAD_ID]);
 	eq("flag 2 off: no key", "_instructions" in off[0], false);
+});
+
+test("§12 annotateDriverLoads: a published row already flagged refiltered gets no highlights, so the list never names a requirement the card no longer serves", async ({ eq, ok }) => {
+	useClock();
+	const w = await world({ env: ON2 });
+	// Published before the deny list held the value its high-value item carries.
+	const x = driverScreenExtraction();
+	x.loadRequirements = x.loadRequirements.map((r) => (r.category === "high_value" ? { ...r, text: `HIGH VALUE SHIPMENT: give carrier code ${DENY} at the gate.` } : r));
+	insertRow(w, x, { shown: false });
+	const card = await w.call("GET", DAPI, DRIVER);
+	ok("the card re-filters it: no high-value highlight", card.body.state === "published" && !card.body.highlights.includes("high_value"), card.body.highlights);
+	await w.settle();
+	ok("...and the row is flagged refiltered", w.row().review_reasons.includes("refiltered"), w.row().review_reasons);
+	const rows = [{ "Load ID": LOAD_ID }];
+	w.service.annotateDriverLoads(rows, [LOAD_ID]);
+	eq("the list: published, no highlights", rows[0]._instructions, { state: "published", highlights: [] });
+});
+
+test("§12 a load reassigned while the sweep reads its rate con: the notice goes to the driver on the sheet now, or to no one when the sheet can't be read again; never the earlier driver", async ({ eq }) => {
+	const clock = useClock();
+	for (const [label, failRead, expected] of [["read again", false, [["driver:test driver z", { loadId: LOAD_ID }]]], ["read fails", true, []]]) {
+		const rows = ROWS.map((r) => [...r]);
+		const w = await world({ env: ON2, rows, files: [driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE)] });
+		// Minutes of Gemini calls after the sweep's one sheet read; the load moves to
+		// another driver meanwhile.
+		w.onGemini = () => {
+			rows[0][2] = "Test Driver Z";
+			clock.t += 3 * 60 * 1000;
+			if (failRead) w.sheetFails = true;
+		};
+		await w.service.sweep();
+		await w.settle();
+		eq(`${label}: published by the sweep`, !!(w.row() && w.row().published_at), true);
+		eq(`${label}: the notice`, changedEvents(w).map((s) => [s.room, s.payload]), expected);
+	}
 });
 
 test("§12 the leak test extended: a dirty extraction published by the sweep, every driver-route read and every driver event hold none of the four values", async ({ eq, ok }) => {
