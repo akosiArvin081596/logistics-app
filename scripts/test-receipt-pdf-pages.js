@@ -12,6 +12,8 @@
  *   T18-T30 images, inline images, external data, resources, object and decode caps
  *   T31-T35 the child process: heap cap, uid drop, decode-cap self-test, permissions
  *   T39-T40 the self-test line; oom_score_adj before the first IPC message
+ *   R2      the exact pdf-lib pin (R2-L2), metadata never copied (MD0-MD5, R2-L3),
+ *           the image pixel cap (R2-L4), the page-size refusal (R2-L6)
  *   plus the cache (hit, damaged file, never under uploads)
  *
  * Pure apart from child processes and a temp folder; no server, no network.
@@ -179,8 +181,21 @@ const jpegClean = (buf) => {
 		if (r.status === "pages") plainOut = r.pdf;
 		const o = r.status === "pages" ? await inspect(r.pdf) : null;
 		check("a plain receipt comes back as one Letter page", [r.status, r.pages, o && o.pages, o && o.size], ["pages", 1, 1, [612, 792]]);
-		check("its page is drawn from a Form XObject (no catalog, Info or ID copied)",
-			[o && o.names.has("Form"), o && hasAny(o.names, ["Info", "ID", "Outlines", "Names"])], [true, []]);
+		check("its page is drawn from a Form XObject", o && o.names.has("Form"), true);
+
+		const infoSrc = onePage({
+			trailer: "/Info 5 0 R /ID [<1D0C0FFEE1D0C0FFEE1D0C0FFEE1D0C0> <1D0C0FFEE1D0C0FFEE1D0C0FFEE1D0C0>] ",
+			extra: ["<< /Title (info-title-4417) /Author (info-author-4417) /Subject (info-subject-4417) /Keywords (info-keywords-4417) /Creator (info-creator-4417) /Producer (info-producer-4417) /CreationDate (D:19990909090909Z) /ModDate (D:19990910101010Z) >>"],
+		});
+		const infoDoc = await PDFDocument.load(infoSrc, { updateMetadata: false });
+		const withInfo = await prep(infoSrc);
+		const oInfo = withInfo.status === "pages" ? await inspect(withInfo.pdf) : null;
+		check("a source with an Info dictionary and a file ID: pages, no Info or ID in the output, none of their values anywhere",
+			[infoDoc.getTitle(), infoDoc.getAuthor(), infoDoc.getProducer(), withInfo.status,
+				oInfo && oInfo.doc.context.trailerInfo.Info === undefined, oInfo && oInfo.doc.context.trailerInfo.ID === undefined,
+				oInfo && /-4417|19990909|19990910|1D0C0FFEE/i.test(oInfo.raw + oInfo.text),
+				oInfo && hasAny(oInfo.names, ["Title", "Author", "Subject", "Keywords", "Creator", "Producer", "CreationDate", "ModDate", "Info", "ID"])],
+			["info-title-4417", "info-author-4417", "info-producer-4417", "pages", true, true, false, []]);
 
 		const inherited = await prep(rawPdf([
 			"<< /Type /Catalog /Pages 2 0 R >>",
@@ -287,7 +302,11 @@ const jpegClean = (buf) => {
 
 		const t11 = Date.now();
 		const deep = await prep(onePage({ resources: "/Properties << /P0 5 0 R >>", extra: ["[".repeat(100_000) + "]".repeat(100_000)] }));
-		check("T11 100,000 nested arrays: the note, well inside the deadline", [deep.status, Date.now() - t11 < rp.RECEIPT_PDF_PREPARE_TIMEOUT_MS], ["on_file", true]);
+		// pdf-lib reports an object it cannot parse as invalid (unparseable); the
+		// trailer is parsed outside that, so nesting there surfaces as a RangeError.
+		const deepTrailer = await prep(onePage({ trailer: `/X ${"[".repeat(100_000)}${"]".repeat(100_000)} ` }));
+		check("T11 100,000 nested arrays in an object (unparseable) and in the trailer (nesting): the note, well inside the deadline",
+			[deep.status, deep.reason, deepTrailer.status, deepTrailer.reason, Date.now() - t11 < 2 * rp.RECEIPT_PDF_PREPARE_TIMEOUT_MS], ["on_file", "unparseable", "on_file", "nesting", true]);
 
 		const gpsJpeg = fixtureJpeg({ exif: gpsTiff() });
 		const xmp = await prep(onePage({
@@ -577,6 +596,143 @@ const jpegClean = (buf) => {
 			check("L6 the self-test fails on uid 0, on group 0 and on gid 0 (identity), and on nothing else",
 				[root.problems, wheel.problems, gid0.problems], [["identity"], ["identity"], ["identity"]]);
 		}
+	}
+
+	// ---- review round 2 ---------------------------------------------------------
+	console.log("R2 review round 2: the pdf-lib pin, metadata, image and page sizes");
+	{
+		const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+		const lock = JSON.parse(fs.readFileSync(path.join(ROOT, "package-lock.json"), "utf8"));
+		check("R2-L2 package.json pins pdf-lib to exactly 1.17.1, the lock agrees, and so does the library's own check",
+			[pkg.dependencies["pdf-lib"], lock.packages[""].dependencies["pdf-lib"], lock.packages["node_modules/pdf-lib"].version, rp.RECEIPT_PDF_PDF_LIB_VERSION],
+			["1.17.1", "1.17.1", "1.17.1", "1.17.1"]);
+
+		// A made-up pdf-lib of another version, resolved instead of the installed one.
+		const OTHER = path.join(TMP, "other-pdf-lib");
+		const otherLib = path.join(OTHER, "node_modules", "pdf-lib");
+		fs.mkdirSync(path.join(otherLib, "cjs", "core", "streams"), { recursive: true });
+		fs.writeFileSync(path.join(otherLib, "package.json"), JSON.stringify({ name: "pdf-lib", version: "1.17.2", main: "cjs/index.js" }));
+		fs.writeFileSync(path.join(otherLib, "cjs", "index.js"), "module.exports = {};\n");
+		fs.writeFileSync(path.join(otherLib, "cjs", "core", "streams", "DecodeStream.js"), "module.exports = {};\n");
+		const childPath = path.join(ROOT, "lib", "receipt-pdf-child.js");
+		let otherErr = null;
+		try { rp.childModules(childPath, OTHER); } catch (err) { otherErr = err.code || "no_code"; }
+		let installedErr = null;
+		try { rp.childModules(childPath); } catch (err) { installedErr = err.code || "no_code"; }
+		check("R2-L2 the child's setup refuses a pdf-lib of any other version (1.17.2 here) and accepts the installed 1.17.1",
+			[otherErr, installedErr], ["PDF_LIB_VERSION", null]);
+		const otherLogs = [];
+		const otherSvc = rp.createReceiptPdfService({ ...BASE, pdfLibFrom: OTHER, log: (l) => otherLogs.push(l) });
+		const ost = await otherSvc.selfTest();
+		const or = await otherSvc.prepare(put(onePage()));
+		check("R2-L2 with another pdf-lib version the self-test fails (child:pdf_lib_version), pages stay off, no child is started",
+			[ost.passed, ost.problems[0], otherSvc.state(), or.status, or.reason, otherSvc.stats().forks, otherLogs.some((l) => /FAIL \(child:pdf_lib_version /.test(l))],
+			[false, "child:pdf_lib_version", "failed", "on_file", "disabled", 0, true]);
+
+		// Metadata: one made-up PDF carrying every kind, on the document, the
+		// catalog, the page, an image and a form, and a JPEG carrying every kind of
+		// metadata segment after its JFIF APP0.
+		const seg = (marker, payload) => {
+			const p = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "latin1");
+			const h = Buffer.from([0xFF, marker, 0, 0]);
+			h.writeUInt16BE(p.length + 2, 2);
+			return Buffer.concat([h, p]);
+		};
+		const baseJpeg = fixtureJpeg();
+		const app0End = 4 + baseJpeg.readUInt16BE(4);
+		const iccSeg = seg(0xE2, "ICC_PROFILE\0\x01\x01made-up-icc-profile");
+		const adobeSeg = seg(0xEE, "Adobe\0\x64\0\0\0\0\x01");
+		const srcJpeg = Buffer.concat([
+			baseJpeg.subarray(0, app0End),
+			seg(0xE1, Buffer.concat([Buffer.from("Exif\0\0", "latin1"), gpsTiff()])),
+			seg(0xE1, "http://ns.adobe.com/xap/1.0/\0<x:xmpmeta>jpeg-xmp-6203</x:xmpmeta>"),
+			iccSeg,
+			seg(0xED, "Photoshop 3.0\x008BIM\x04\x04\0\0\0\0\0\x0ejpeg-iptc-6203"),
+			seg(0xE3, "jpeg-app3-6203"),
+			seg(0xEC, "Ducky\0jpeg-app12-6203"),
+			adobeSeg,
+			seg(0xFE, "jpeg-comment-6203"),
+			baseJpeg.subarray(app0End),
+			Buffer.from("jpeg-trailing-6203", "latin1"),
+		]);
+		const wantJpeg = Buffer.concat([baseJpeg.subarray(0, app0End), iccSeg, adobeSeg, baseJpeg.subarray(app0End)]);
+		const metaSrc = rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R /Metadata 5 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R /Resources << /XObject << /Im0 7 0 R /Fm0 8 0 R >> >> /Metadata 6 0 R /PieceInfo << /MadeUp << /LastModified (D:19990911111111Z) /Private (page-piece-6203) >> >> /LastModified (D:19990912121212Z) >>",
+			streamObject("", `${DRAW_IM0} /Fm0 Do`),
+			streamObject("/Type /Metadata /Subtype /XML", "<x:xmpmeta>catalog-xmp-6203</x:xmpmeta>"),
+			streamObject("/Type /Metadata /Subtype /XML", "<x:xmpmeta>page-xmp-6203</x:xmpmeta>"),
+			streamObject(`${IMAGE_DICT} /Filter /DCTDecode /Metadata 9 0 R /PieceInfo << /MadeUp << /Private (image-piece-6203) >> >> /LastModified (D:19990913131313Z)`, srcJpeg),
+			streamObject("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Metadata 10 0 R /PieceInfo << /MadeUp << /Private (form-piece-6203) >> >> /LastModified (D:19990914141414Z)", "0 0 5 5 re f"),
+			streamObject("/Type /Metadata /Subtype /XML", "<x:xmpmeta>image-xmp-6203</x:xmpmeta>"),
+			streamObject("/Type /Metadata /Subtype /XML", "<x:xmpmeta>form-xmp-6203</x:xmpmeta>"),
+			"<< /Title (doc-title-6203) /Author (doc-author-6203) /Producer (doc-producer-6203) /CreationDate (D:19990915151515Z) >>",
+		], "/Info 11 0 R ");
+		const srcDoc = await PDFDocument.load(metaSrc, { updateMetadata: false });
+		const keysOf = (d) => (d ? d.keys().map((k) => childLib.plainName(k)) : []);
+		const srcPage = srcDoc.getPage(0).node;
+		const srcImage = srcDoc.context.lookup(PDFRef.of(7));
+		const srcForm = srcDoc.context.lookup(PDFRef.of(8));
+		const has3 = (keys) => ["Metadata", "PieceInfo", "LastModified"].every((k) => keys.includes(k));
+		check("MD0 the made-up source holds every kind (Info, catalog XMP, page/image/form metadata, seven JPEG segments to drop)",
+			[srcDoc.getTitle(), keysOf(srcDoc.catalog).includes("Metadata"), has3(keysOf(srcPage)), has3(keysOf(srcImage.dict)), has3(keysOf(srcForm.dict)), stripImageMetadata(srcJpeg).removed.slice().sort()],
+			["doc-title-6203", true, true, true, true, ["comment", "exif", "marker_e1", "marker_e3", "marker_ec", "marker_ed", "trailing"]]);
+		const meta = await prep(metaSrc);
+		const om = meta.status === "pages" ? await inspect(meta.pdf) : null;
+		const all = om ? om.raw + om.text : "";
+		const absent = (...markers) => om !== null && markers.every((m) => !all.includes(m));
+		const outPageKeys = om ? new Set(keysOf(om.doc.getPage(0).node)) : null;
+		const xobjects = om ? om.streams.filter((s) => s.dict.lookup(PDFName.of("Type")) === PDFName.of("XObject")) : [];
+		const xKeys = new Set(xobjects.flatMap((s) => keysOf(s.dict)));
+		check("MD1 document Info: not copied (no Info in the output, no title, author, producer or date)",
+			[meta.status, om && om.doc.context.trailerInfo.Info === undefined, absent("doc-title-6203", "doc-author-6203", "doc-producer-6203", "19990915")], ["pages", true, true]);
+		check("MD2 catalog XMP: not copied", [om && keysOf(om.doc.catalog).includes("Metadata"), absent("catalog-xmp-6203")], [false, true]);
+		check("MD3 the page's /Metadata, /PieceInfo and /LastModified: gone (output page and the form drawn from it)",
+			[outPageKeys && hasAny(outPageKeys, ["Metadata", "PieceInfo", "LastModified"]), absent("page-xmp-6203", "page-piece-6203", "19990911", "19990912")], [[], true]);
+		check("MD4 an image's and a form's /Metadata and /PieceInfo: gone",
+			[xobjects.length >= 3, hasAny(xKeys, ["Metadata", "PieceInfo"]), absent("image-xmp-6203", "form-xmp-6203", "image-piece-6203", "form-piece-6203")], [true, [], true]);
+		check("R2-L3 an image's and a form's own /LastModified: gone",
+			[hasAny(xKeys, ["LastModified"]), om && om.names.has("LastModified"), absent("19990913", "19990914")], [[], false, true]);
+		check("MD5 the JPEG: EXIF (GPS), XMP, IPTC, APP3, APP12, the comment and trailing bytes removed; JFIF APP0, ICC APP2 and Adobe APP14 kept byte for byte",
+			[om && om.jpegs.length, om && om.jpegs[0] && om.jpegs[0].equals(wantJpeg), om && om.jpegs[0] && om.jpegs[0].includes(gpsTiff()), absent("-6203", "Exif", "Photoshop", "Ducky")],
+			[1, true, false, true]);
+
+		const scanDoc = await PDFDocument.load(rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+			"<< /PieceInfo << /MadeUp << /Private (x) >> >> >>",
+		]), { updateMetadata: false });
+		check("R2-L3 the post-scan refuses a /PieceInfo anywhere in the output", childLib.postScan(pdfLib, stripImageMetadata, scanDoc, childLib.DEFAULT_LIMITS), "key:PieceInfo");
+
+		// L4: an image's declared size.
+		const sizedImage = (dims, extra = []) => prep(onePage({
+			content: DRAW_IM0,
+			resources: "/XObject << /Im0 5 0 R >>",
+			extra: [streamObject(`/Type /XObject /Subtype /Image ${dims} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode`, fixtureJpeg()), ...extra],
+		}));
+		const over = await sizedImage("/Width 8000 /Height 5001");
+		const atCap = await sizedImage("/Width 8000 /Height 5000");
+		const noWidth = await sizedImage("/Width (wide) /Height 8");
+		const bigMask = await sizedImage("/Width 8 /Height 8 /SMask 6 0 R", [streamObject("/Type /XObject /Subtype /Image /Width 10000 /Height 10000 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode", zlib.deflateSync(Buffer.alloc(64)))]);
+		check("R2-L4 an image declaring over 40 megapixels (8000 x 5001), a size that is not a number, or a soft mask over the cap: refused (image_size); 8000 x 5000 copies",
+			[over.reason, noWidth.reason, bigMask.reason, atCap.status, rp.RECEIPT_PDF_MAX_IMAGE_PIXELS],
+			["image_size", "image_size", "image_size", "pages", 40_000_000]);
+
+		// L6: the page-size refusal.
+		const sizedPage = (box) => prep(rawPdf([
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+			`<< /Type /Page /Parent 2 0 R ${box} /Contents 4 0 R >>`,
+			streamObject("", "0 0 1 rg 10 10 50 50 re f"),
+		]));
+		const wide = await sizedPage("/MediaBox [0 0 14401 400]");
+		const thin = await sizedPage("/MediaBox [0 0 300 0.5]");
+		const apart = await sizedPage("/MediaBox [0 0 300 400] /CropBox [500 500 600 600]");
+		const noBox = await sizedPage("");
+		const largest = await sizedPage("/MediaBox [0 0 14400 14400]");
+		check("R2-L6 a page over 14,400 points, under 1 point, a CropBox outside the MediaBox, or no MediaBox: refused (page_box); 14,400 x 14,400 copies",
+			[wide.reason, thin.reason, apart.reason, noBox.reason, largest.status], ["page_box", "page_box", "page_box", "page_box", "pages"]);
 	}
 
 	// ---- the cache ------------------------------------------------------------
