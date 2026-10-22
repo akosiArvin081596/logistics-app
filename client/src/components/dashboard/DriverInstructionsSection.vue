@@ -15,6 +15,12 @@
   server's flag is off every route answers 404 and the section renders nothing.
   A refusal is told by its code and the kind of field only, never which item
   (lib/driverInstructionsView.js; scripts/test-driver-instructions-client.mjs).
+
+  Edit locks (decision 37): a person whose save was refused for a carrier account
+  number is locked out of instruction edits. Their section shows the locked
+  message instead of the edit controls (the server's `editLocked`, or a 423 on a
+  write). A Super Admin also sees the list of locked people, with when each was
+  locked, and clears one at a time; never their own (the server refuses it).
 -->
 <template>
   <section v-if="visible" class="di-section" aria-labelledby="di-title" data-testid="driver-instructions">
@@ -30,6 +36,7 @@
       <p v-if="noticeText" role="status" class="di-msg di-msg-ok" data-testid="di-notice">{{ noticeText }}</p>
 
       <template v-if="body">
+        <p v-if="locked" role="alert" class="di-msg di-msg-error" data-testid="di-locked">{{ EDIT_LOCKED_MESSAGE }}</p>
         <p class="text-xs text-gray-600">
           {{ status.note }}
           <span v-if="reviewedLine" data-testid="di-reviewed">{{ reviewedLine }}</span>
@@ -45,7 +52,7 @@
           </ul>
         </div>
 
-        <div v-if="!editing" class="mt-3 flex flex-wrap gap-2">
+        <div v-if="!editing && !locked" class="mt-3 flex flex-wrap gap-2">
           <Button type="button" size="sm" variant="outline" :disabled="busy" @click="startEdit">Edit</Button>
           <Button v-if="canReview" type="button" size="sm" :disabled="busy" @click="markReviewed">Mark reviewed</Button>
           <Button type="button" size="sm" variant="outline" :disabled="busy" @click="reread">Re-read the rate con</Button>
@@ -66,7 +73,7 @@
               <DriverInstructionsPayload :payload="compare.next" show-flags />
             </div>
           </div>
-          <div class="mt-2 flex flex-wrap gap-2">
+          <div v-if="!locked" class="mt-2 flex flex-wrap gap-2">
             <Button type="button" size="sm" :disabled="busy" @click="decide('accept')">Accept the new rate con</Button>
             <Button type="button" size="sm" variant="outline" :disabled="busy" @click="decide('keep')">Keep current</Button>
           </div>
@@ -168,6 +175,19 @@
           </div>
         </form>
       </template>
+
+      <div v-if="lockList.length" class="mt-3 rounded-md border border-red-200 bg-red-50 p-2" data-testid="di-locks">
+        <p class="text-xs font-semibold text-red-900">Instruction edits locked</p>
+        <p class="mt-0.5 text-xs text-red-900">A save by each person below was refused for a carrier account number, so their driver-instruction edits are locked. Clear a lock once you've checked with them.</p>
+        <ul class="mt-2 space-y-1.5 text-xs">
+          <li v-for="l in lockList" :key="l.userId" class="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="di-lock-row">
+            <span class="font-semibold text-gray-900">{{ l.name }}</span>
+            <span class="text-gray-700">{{ l.role }}<template v-if="l.lockedAt"> · locked {{ fmtAppInstant(l.lockedAt, { fallback: '' }) }}</template></span>
+            <Button v-if="!l.self" type="button" size="sm" variant="outline" :disabled="busy" @click="clearLock(l.userId)">Clear lock</Button>
+            <span v-else class="text-red-900">Another Super Admin must clear your lock.</span>
+          </li>
+        </ul>
+      </div>
     </div>
   </section>
 </template>
@@ -185,6 +205,7 @@ import {
   rereadResultText, pendingCompare, hiddenFromDrivers, draftItemNote, doneText, setReferenceType,
   editDraftFrom, editBody, blankReference, blankRequirement, blankInstruction, blankStop,
   REFERENCE_LABELS, CATEGORY_LABELS, INSTRUCTION_KIND_LABELS, STOP_KIND_LABELS,
+  EDIT_LOCKED_MESSAGE, LOCKS_URL, lockClearUrl, canManageLocks, editLockedOf, lockRows,
 } from '../../lib/driverInstructionsView'
 
 const props = defineProps({
@@ -213,6 +234,11 @@ const errorText = ref('')
 const noticeText = ref('')
 const editing = ref(false)
 const draft = ref(null)
+// This person's instruction edits are locked (decision 37).
+const locked = ref(false)
+// Super Admins only: everyone locked, from the server.
+const lockList = ref([])
+const canLocks = computed(() => canManageLocks(auth.user?.role))
 let seq = 0
 
 const status = computed(() => statusView(body.value))
@@ -240,6 +266,14 @@ function fail(e) {
     off.value = true
     return
   }
+  if (view.locked) {
+    // The locked message replaces the edit controls; a Super Admin's list shows the lock.
+    locked.value = true
+    editing.value = false
+    draft.value = null
+    loadLocks()
+    return
+  }
   errorText.value = view.message
 }
 
@@ -254,6 +288,7 @@ async function load() {
     if (mine !== seq) return
     off.value = false
     body.value = answer
+    locked.value = editLockedOf(answer)
   } catch (e) {
     if (mine !== seq) return
     fail(e)
@@ -274,6 +309,7 @@ async function write(run, done) {
     const answer = await run(id)
     if (mine !== seq) return
     body.value = answer
+    locked.value = editLockedOf(answer)
     noticeText.value = done(answer)
     emit('changed')
     return true
@@ -322,6 +358,41 @@ function reread() {
   return write((id) => api.post(instructionsUrl(id, 're-extract'), {}, { timeout: REREAD_TIMEOUT_MS }), (answer) => rereadResultText(answer?.result))
 }
 
+// Super Admins: the locked people (nothing is fetched for anyone else).
+async function loadLocks() {
+  if (!canLocks.value || !props.open) {
+    lockList.value = []
+    return
+  }
+  const mine = seq
+  try {
+    const answer = await api.get(LOCKS_URL)
+    if (mine !== seq) return
+    lockList.value = lockRows(answer, auth.user?.id)
+  } catch (e) {
+    if (mine !== seq) return
+    fail(e)
+  }
+}
+async function clearLock(userId) {
+  if (busy.value) return
+  const mine = seq
+  busy.value = true
+  resetMessages()
+  try {
+    const answer = await api.post(lockClearUrl(userId), {})
+    if (mine !== seq) return
+    lockList.value = lockRows(answer, auth.user?.id)
+    noticeText.value = 'Lock cleared. That person can edit driver instructions again.'
+  } catch (e) {
+    if (mine !== seq) return
+    fail(e)
+    await loadLocks()
+  } finally {
+    busy.value = false
+  }
+}
+
 watch(() => [props.loadId, props.open, canSee.value], ([id, open]) => {
   seq++
   body.value = null
@@ -329,8 +400,13 @@ watch(() => [props.loadId, props.open, canSee.value], ([id, open]) => {
   draft.value = null
   busy.value = false
   loading.value = false
+  locked.value = false
+  lockList.value = []
   resetMessages()
-  if (open && id) load()
+  if (open && id) {
+    load()
+    loadLocks()
+  }
 }, { immediate: true })
 </script>
 

@@ -17,6 +17,12 @@
 //        edit form fits.
 //   IS7  The flag off: every instructions route answers 404 and the section is not
 //        rendered at all.
+//   IS8  (decision 37, after IS2) IS2's refused save locked the Dispatcher: the section
+//        shows the locked message instead of Edit / Mark reviewed / Re-read; no lock list.
+//   IS9  A made-up Super Admin sees the lock list (the Dispatcher, when locked) with
+//        Clear lock; clearing it answers 200, the list goes, the lock row is gone and
+//        the clear is audited. The Dispatcher continues with IS3.
+//   IS10 390 x 844: the locked Dispatcher's section and the Super Admin's lock list fit.
 //
 // The instructions routes are PR 2's own code: lib/driver-instructions-runtime.js
 // (create() + mount()) on an express app in this process, over an in-memory SQLite
@@ -97,6 +103,10 @@ const SIDE = {
   jobDetails: [['Load ID', 'Payment'], [LOAD_ID, '$1,234.00']],
 }
 const DISPATCHER = { id: 90012, username: 'qa-di-dispatcher', role: 'Dispatcher', driverName: '', email: '', fullName: 'QA Instructions Dispatcher', companyName: '', mustChangePassword: false }
+// Decision 37: a made-up Super Admin who lists and clears edit locks (IS8, IS9).
+const SUPER_ADMIN = { id: 90013, username: 'qa-di-superadmin', role: 'Super Admin', driverName: '', email: '', fullName: 'QA Instructions Super Admin', companyName: '', mustChangePassword: false }
+// Who the made-up session is; the steps switch it.
+let sessionUser = DISPATCHER
 const FOOTNOTE = 'From the rate con. Questions: contact dispatch.'
 const SEED = {
   v: 1,
@@ -124,6 +134,12 @@ const quiet = { warn() {}, error() {}, info() {}, log() {} }
 async function startApi(env) {
   const db = new Database(':memory:')
   const audits = []
+  // A lock is cleared only by an account created before it, and only with its audit
+  // row written (decision 37): the two made-up staff accounts, and an audit table.
+  db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+  for (const u of [DISPATCHER, SUPER_ADMIN]) db.prepare("INSERT INTO users (id, username, role, created_at) VALUES (?, ?, ?, '2026-01-01 00:00:00')").run(u.id, u.username, u.role)
+  db.exec('CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT)')
+  const auditRow = db.prepare('INSERT INTO audit_trail (action, details) VALUES (?, ?)')
   const uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'rcpr3-uploads-'))
   const svc = runtime.create({
     db,
@@ -137,7 +153,7 @@ async function startApi(env) {
     // The made-up row has no broker or contact column; any such pattern serves.
     brokerWithheldRe: /broker|contact|e-?mail|phone/i,
     ingestionGeminiUnavailableAt: () => 0,
-    logAudit: (req, action, entity, id, details) => audits.push({ action, details: String(details || '') }),
+    logAudit: (req, action, entity, id, details) => { auditRow.run(action, String(details || '')); audits.push({ action, details: String(details || '') }) },
     logAuditRefusal: (req, action, entity, id, details, code) => audits.push({ action, details: String(details || ''), code }),
     notifySuperAdmins: () => {},
     sendAdminEmail: () => null,
@@ -146,7 +162,7 @@ async function startApi(env) {
   })
   const app = express()
   app.use(express.json({ limit: '2mb' }))
-  app.use((req, res, next) => { req.session = { user: DISPATCHER }; next() })
+  app.use((req, res, next) => { req.session = { user: sessionUser }; next() })
   const requireRole = (...roles) => (req, res, next) => (req.session.user && roles.includes(req.session.user.role) ? next() : res.status(403).json({ error: 'Forbidden' }))
   svc.mount(app, { requireRole })
   const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)) })
@@ -179,7 +195,7 @@ function dashboard(svc) {
 }
 
 function answerGet(pathname, svc) {
-  if (pathname === '/api/auth/session') return { authenticated: true, user: DISPATCHER, appTimeZone: 'America/New_York' }
+  if (pathname === '/api/auth/session') return { authenticated: true, user: sessionUser, appTimeZone: 'America/New_York' }
   if (pathname === '/api/dashboard') return dashboard(svc)
   if (pathname === '/api/config/maps-key') return { key: 'qa-instructions-no-key' }
   if (pathname === '/api/locations/latest') return { locations: [] }
@@ -263,8 +279,8 @@ async function openPage(browser, api, size) {
     if (url.host !== `${HOST}:${PORT}`) return route.abort()
     if (url.pathname.startsWith('/socket.io/')) return route.abort()
     if (!url.pathname.startsWith('/api/')) return route.continue()
-    // The instructions routes: PR 2's runtime answers them.
-    if (/^\/api\/loads\/[^/]+\/driver-instructions(\/(review|accept-pending|re-extract))?$/.test(url.pathname)) {
+    // The instructions routes and the edit-lock routes: PR 2's runtime answers them.
+    if (/^\/api\/loads\/[^/]+\/driver-instructions(\/(review|accept-pending|re-extract))?$/.test(url.pathname) || /^\/api\/driver-instructions\/edit-locks(\/[^/]+\/clear)?$/.test(url.pathname)) {
       const resp = await route.fetch({ url: `${api.base}${url.pathname}${url.search}` })
       return route.fulfill({ response: resp })
     }
@@ -323,7 +339,7 @@ const PENDING_PHONE = { ...PENDING, stops: [PENDING.stops[0], { ...PENDING.stops
 
 // ---------------------------------------------------------------- the steps
 async function flagOn(browser) {
-  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY: DENY })
+  const api = await startApi({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: 'true', CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY })
   plant(api)
   const { ctx, page } = await openPage(browser, api, DESKTOP)
   try {
@@ -398,6 +414,66 @@ async function flagOn(browser) {
       record('IS2', 'Edit: a reference holding the deny value', `400 INSTRUCTIONS_CONTENT_NOT_ALLOWED, rule "number", field "references", value never echoed; the section says "${want}"; nothing written; the refusal audited with codes only`,
         `${flags(checks)}; shown: "${shown}"`, allTrue(checks), s)
       await form.getByRole('button', { name: 'Cancel' }).click()
+    }
+    // ---- IS8: IS2's refused save locked the Dispatcher (decision 37)
+    {
+      await openLoad(page)
+      const sec = page.locator(SECTION)
+      const lockedMsg = sec.locator('[data-testid="di-locked"]')
+      await lockedMsg.waitFor({ state: 'visible', timeout: 15000 })
+      const locks = api.db.prepare('SELECT user_id FROM driver_instructions_edit_locks').all()
+      const checks = {
+        lockStored: locks.length === 1 && locks[0].user_id === DISPATCHER.id,
+        lockAudited: api.audits.some((a) => a.action === 'edit_locked'),
+        message: (await lockedMsg.innerText()).trim() === 'Your instruction edits are locked. Ask a Super Admin to clear the lock.',
+        noEdit: (await sec.getByRole('button', { name: 'Edit', exact: true }).count()) === 0,
+        noMarkReviewed: (await sec.getByRole('button', { name: 'Mark reviewed' }).count()) === 0,
+        noReread: (await sec.getByRole('button', { name: 'Re-read the rate con' }).count()) === 0,
+        previewStays: await sec.locator('[data-testid="di-preview"]').isVisible(),
+        noLockList: (await sec.locator('[data-testid="di-locks"]').count()) === 0,
+      }
+      const s = await sectionShot(page, 'is8-locked-dispatcher')
+      record('IS8', 'The refused save locked the Dispatcher', 'one lock row for the Dispatcher, audited; the section shows "Your instruction edits are locked. Ask a Super Admin to clear the lock." instead of Edit / Mark reviewed / Re-read; the preview stays; no lock list for a Dispatcher',
+        flags(checks), allTrue(checks), s)
+    }
+    // ---- IS9: a Super Admin sees the lock and clears it
+    {
+      sessionUser = SUPER_ADMIN
+      try {
+        const sa = await openPage(browser, api, DESKTOP)
+        try {
+          await openLoad(sa.page)
+          const sec = sa.page.locator(SECTION)
+          const list = sec.locator('[data-testid="di-locks"]')
+          await list.waitFor({ state: 'visible', timeout: 15000 })
+          const row = list.locator('[data-testid="di-lock-row"]').filter({ hasText: DISPATCHER.username })
+          const before = {
+            listed: (await row.count()) === 1,
+            lockedWhen: /locked .*\d{4}/.test(await row.innerText()),
+            clearButton: (await row.getByRole('button', { name: 'Clear lock' }).count()) === 1,
+            ownControls: (await sec.getByRole('button', { name: 'Edit', exact: true }).count()) === 1,
+          }
+          const s = await sectionShot(sa.page, 'is9-super-admin-lock-list')
+          const [resp] = await Promise.all([
+            sa.page.waitForResponse((r) => r.request().method() === 'POST' && /\/edit-locks\/\d+\/clear$/.test(new URL(r.url()).pathname), { timeout: 30000 }),
+            row.getByRole('button', { name: 'Clear lock' }).click(),
+          ])
+          await sec.locator('[data-testid="di-notice"]').waitFor({ state: 'visible', timeout: 15000 })
+          const after = {
+            status200: resp.status() === 200,
+            listGone: (await sec.locator('[data-testid="di-locks"]').count()) === 0,
+            notice: (await sec.locator('[data-testid="di-notice"]').innerText()).includes('Lock cleared.'),
+            lockRemoved: api.db.prepare('SELECT COUNT(*) AS n FROM driver_instructions_edit_locks').get().n === 0,
+            clearAudited: api.audits.some((a) => a.action === 'edit_lock_cleared'),
+          }
+          const s2 = await sectionShot(sa.page, 'is9-lock-cleared')
+          record('IS9', 'A Super Admin sees the lock and clears it', 'the lock list names the Dispatcher with when the lock was set and a Clear lock button; Clear lock answers 200, the list goes, "Lock cleared." shows, the lock row is gone and the clear is audited',
+            `${flags(before)}; after: ${flags(after)}; cleared shot ${path.basename(s2)}`, allTrue(before) && allTrue(after), s)
+        } finally { await sa.ctx.close() }
+      } finally { sessionUser = DISPATCHER }
+      // The Dispatcher, unlocked, carries on from the section as it is now.
+      await openLoad(page)
+      await page.locator(`${SECTION} [data-testid="di-status"]`).waitFor({ state: 'visible', timeout: 15000 })
     }
     // ---- IS3
     {
@@ -539,6 +615,43 @@ async function flagOn(browser) {
         record('IS6', 'The section at 390 x 844, and the phone list cards with the instructions badge', 'fits the width (no sideways scroll, page or section); the pending columns stack; the edit form fits too; on the Active Loads and Job Board cards the badge stays inside the card',
           `view ${flags(view)}; edit right=${edit.right} sectionOverflow=${edit.sectionOverflow} pageScroll=${edit.pageScroll}; Active Loads card ${activeCard ? flags(activeCard) : 'NOT FOUND'}; Job Board card ${boardCard ? flags(boardCard) : 'NOT FOUND'}; edit shot ${path.basename(s2)}`, ok, s)
       } finally { await p.ctx.close() }
+    }
+    // ---- IS10: 390 x 844, the locked Dispatcher's section and the Super Admin's lock list
+    {
+      api.db.prepare('INSERT OR IGNORE INTO driver_instructions_edit_locks (user_id, username, role, locked_at) VALUES (?, ?, ?, ?)')
+        .run(DISPATCHER.id, DISPATCHER.username, DISPATCHER.role, new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'))
+      const measure = (pg) => pg.evaluate((sel) => {
+        const el = document.querySelector(sel)
+        const r = el.getBoundingClientRect()
+        return { right: Math.round(r.right), vw: window.innerWidth, sectionOverflow: el.scrollWidth - el.clientWidth, pageScroll: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth }
+      }, SECTION)
+      const fits = (m) => !!m && m.right <= m.vw && m.sectionOverflow <= 0 && m.pageScroll <= 0
+      let lockedView = null
+      let listView = null
+      let s = ''
+      let s2 = ''
+      try {
+        const d = await openPage(browser, api, PHONE)
+        try {
+          await openLoad(d.page)
+          await d.page.locator(`${SECTION} [data-testid="di-locked"]`).waitFor({ state: 'visible', timeout: 15000 })
+          lockedView = await measure(d.page)
+          s = await sectionShot(d.page, 'is10-phone-390x844-locked')
+        } finally { await d.ctx.close() }
+        sessionUser = SUPER_ADMIN
+        const sa = await openPage(browser, api, PHONE)
+        try {
+          await openLoad(sa.page)
+          await sa.page.locator(`${SECTION} [data-testid="di-locks"]`).waitFor({ state: 'visible', timeout: 15000 })
+          listView = await measure(sa.page)
+          s2 = await sectionShot(sa.page, 'is10-phone-390x844-lock-list')
+        } finally { await sa.ctx.close() }
+      } finally {
+        sessionUser = DISPATCHER
+        api.db.prepare('DELETE FROM driver_instructions_edit_locks WHERE user_id = ?').run(DISPATCHER.id)
+      }
+      record('IS10', 'The locked section and the lock list at 390 x 844', 'both fit the width: no sideways scroll, page or section',
+        `locked ${lockedView ? flags(lockedView) : 'NOT MEASURED'}; list ${listView ? flags(listView) : 'NOT MEASURED'}; list shot ${path.basename(s2)}`, fits(lockedView) && fits(listView), s)
     }
   } finally {
     await ctx.close()

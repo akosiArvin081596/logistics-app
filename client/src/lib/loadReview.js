@@ -48,6 +48,7 @@ export const INSTRUCTION_REVIEW_WORDS = Object.freeze({
   stop_count_mismatch: 'the rate con lists a different number of stops',
   not_cross_checked: "the rate con's text can't be checked for completeness",
   suspicious_text: 'some items read like instructions to a computer',
+  critical_dropped: 'the newer reading leaves out a critical requirement drivers see now',
   rate_con_changed: 'a newer reading of the rate con is waiting',
 });
 

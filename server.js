@@ -46340,6 +46340,17 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 	}
 });
 
+// Dispatch notices only Super Admins see: the driver-instructions edit lock
+// (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
+// sent to the super-admin room only). For every other role GET
+// /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]);
+// The SQL that leaves them out for `user`, and its parameters.
+function noticeTypeScope(user) {
+	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
+	return { sql: types.length ? `type NOT IN (${types.map(() => "?").join(",")})` : "1 = 1", params: [...types] };
+}
+
 // GET /api/dispatch-notifications — Fetch dispatch notifications
 app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -46347,14 +46358,15 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
 		// then looks ~N hours in the future and the UI stuck on "just now".
 		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
+		const scope = noticeTypeScope(req.session.user);
 		const notifications = db.prepare(
 			`SELECT id, type, title, body, metadata, read,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
-			 FROM dispatch_notifications ORDER BY id DESC LIMIT 200`
-		).all();
+			 FROM dispatch_notifications WHERE ${scope.sql} ORDER BY id DESC LIMIT 200`
+		).all(...scope.params);
 		const unreadCount = db.prepare(
-			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0`
-		).get().count;
+			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0 AND ${scope.sql}`
+		).get(...scope.params).count;
 		// Every role but Super Admin (with BROKER_CONTACT_VALUE_REDACTION_ENABLED):
 		// each notice's title, body and metadata with broker contact withheld, the
 		// copy stored with it (metadata.redactedBody) served as its body, and a
@@ -46376,11 +46388,12 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { ids } = req.body;
+		const scope = noticeTypeScope(req.session.user);
 		if (ids && ids.length) {
 			const placeholders = ids.map(() => "?").join(",");
-			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE id IN (${placeholders}) AND ${scope.sql}`).run(...ids, ...scope.params);
 		} else {
-			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE read = 0`).run();
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE read = 0 AND ${scope.sql}`).run(...scope.params);
 		}
 		res.json({ success: true });
 	} catch (error) {
@@ -48828,8 +48841,10 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 // lib/driver-instructions-runtime.js stores it, reads rate cons for it (a Drive sweep
 // of the rate-con folder, the drag-and-drop hook above) and serves it to staff:
 // GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
-// .../accept-pending, .../re-extract (Super Admin, Dispatcher). Inert, every route
-// 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY
+// .../accept-pending, .../re-extract (Super Admin, Dispatcher), and the edit locks a
+// deny-list refusal sets (GET /api/driver-instructions/edit-locks,
+// POST .../edit-locks/:userId/clear: Super Admin only). Inert, every route
+// 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY_SECRET
 // holds a usable value. The driver's screen (plan PR 4) also needs
 // DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: GET /api/driver/loads/:loadId/instructions
 // (the load's own driver through loadBelongsToDriver(), or Super Admin), the codes on
@@ -48861,7 +48876,12 @@ const driverInstructions = require("./lib/driver-instructions-runtime").create({
 	ingestionGeminiUnavailableAt: () => rateConGeminiUnavailableAt,
 	logAudit,
 	logAuditRefusal,
-	notifySuperAdmins: (event, payload) => io.to("super-admin").emit(event, payload),
+	// The edit-lock notice (decision 37): stored as a Super Admin-only dispatch notice
+	// (SUPER_ADMIN_ONLY_NOTICE_TYPES) and sent live to the super-admin room only.
+	notifySuperAdmins: (notice) => {
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));
+		io.to("super-admin").emit("dispatch-notification", notice);
+	},
 	sendAdminEmail: (subject, html) => (alertChannels.mailbox(process.env) ? sendEmail(alertChannels.mailbox(process.env), subject, html) : null),
 	uploadsDir: path.join(DATA_DIR, "uploads"),
 	log: console,
