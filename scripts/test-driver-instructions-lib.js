@@ -517,6 +517,22 @@ section(() => {
 	eq(di.criticalCategoriesOf(p1), di.CRITICAL_CATEGORIES.filter((c) => p1.loadRequirements.concat(...p1.stops.map((s) => s.requirements)).some((x) => x.category === c && !x.flag)), "§5 40 criticalCategoriesOf: the unflagged requirements' critical categories, in CRITICAL_CATEGORIES' order");
 	ok("§5 40 (fixture) the first reading names same_driver and the re-issue doesn't", di.criticalCategoriesOf(p1).includes("same_driver") && !di.criticalCategoriesOf(lessHv).includes("same_driver"));
 	eq([di.criticalCategoriesOf(null), di.criticalCategoriesOf({ loadRequirements: "x", stops: [null, { requirements: [{ category: "seal" }, { category: "seal", flag: "unusual_content" }, { category: "tarp" }] }] })], [[], ["seal"]], "§5 40 criticalCategoriesOf reads any shape");
+	// Review M2: a dropped requirement is counted per category, on the load and at each
+	// stop (kind and seq), not only by whether the category is still named somewhere.
+	const req = (category, text) => ({ category, text, critical: di.CRITICAL_CATEGORIES.includes(category) });
+	const stopOf = (seq, kind, requirements) => ({ seq, kind, facility: "", place: "", references: [], requirements, instructions: [] });
+	const shell = { v: 1, loadRequirements: [], footnote: "x" };
+	const rowOf = (payload) => ({ payload: JSON.stringify(payload), status: "auto", published_at: "2026-10-22T10:00:00Z", driver_shown_at: "", reviewed_at: "", reviewed_by: "", source: "drive_sweep" });
+	const twoSeals = { ...shell, stops: [stopOf(1, "pickup", [req("seal", "Apply seal before departure.")]), stopOf(2, "delivery", [req("seal", "Seal must be intact at delivery.")])] };
+	const pickupSealOnly = { ...shell, stops: [stopOf(1, "pickup", [req("seal", "Apply seal before departure.")]), stopOf(2, "delivery", [])] };
+	eq(pick(di.decideExtractionWrite(rowOf(twoSeals), { payload: pickupSealOnly, reasons: [] })), ["pending", "auto", false, ["rate_con_changed", "critical_dropped"]], "§5 40 M2 a seal at pickup and at delivery, re-issued with the pickup one only: pending, critical_dropped");
+	const twoTemps = { ...shell, loadRequirements: [req("temperature", "Keep reefer at 34F."), req("temperature", "Pre-cool trailer before loading.")], stops: [] };
+	const oneTemp = { ...shell, loadRequirements: [req("temperature", "Pre-cool trailer before loading.")], stops: [] };
+	eq(pick(di.decideExtractionWrite(rowOf(twoTemps), { payload: oneTemp, reasons: [] })), ["pending", "auto", false, ["rate_con_changed", "critical_dropped"]], "§5 40 M2 two temperature lines re-issued as one: pending, critical_dropped");
+	const sealMoved = { ...shell, stops: [stopOf(1, "pickup", [req("seal", "Apply seal before departure."), req("seal", "Seal must be intact at delivery.")]), stopOf(2, "delivery", [])] };
+	eq(pick(di.decideExtractionWrite(rowOf(twoSeals), { payload: sealMoved, reasons: [] })), ["pending", "auto", false, ["rate_con_changed", "critical_dropped"]], "§5 40 M2 a delivery seal moved to the pickup stop still counts as dropped at delivery");
+	const reworded = { ...shell, stops: [stopOf(1, "pickup", [req("seal", "Seal the trailer before departure.")]), stopOf(2, "delivery", [req("seal", "Seal must be intact at delivery.")])] };
+	eq(pick(di.decideExtractionWrite(rowOf(twoSeals), { payload: reworded, reasons: [] })), ["replace", "auto", true, []], "§5 40 M2 the same count per place, reworded: replaced as before");
 	eq(pick(di.decideExtractionWrite(shown, { payload: JSON.parse(JSON.stringify(p1)), reasons: [] })), ["unchanged", "auto", false, []], "§5 the same payload again changes nothing");
 	eq(pick(di.decideExtractionWrite(shown, { failed: true })), ["unchanged", "auto", false, []], "§5 a failed re-read keeps the current payload");
 	eq(pick(di.decideExtractionWrite({ payload: "", status: "failed", published_at: "", driver_shown_at: "", source: "drive_sweep" }, { payload: p1, reasons: ["not_cross_checked"] })), ["replace", "needs_review", false, []],
