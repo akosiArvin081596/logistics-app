@@ -113,6 +113,11 @@ What it covers today, by section (`ONLY` picks them):
   the Payout Basis panel with its Change history line.
   The section restarts the server itself to switch the flag. Local only (`DB_PATH`); one sign-in; `ONLY=lease`. Its
   L-numbers are its own: the ELD-link section's L1–L3 are different steps.
+- **Driver instructions (DI0–DI6).** The staff screen of the rate-con driver instructions: a Dispatcher opens an active
+  load and sees the Driver instructions section; an edit holding the deny value is refused with the field kind only;
+  Mark reviewed; a pending re-issue side by side and Keep current; the section at 390 x 844. Local only (`DB_PATH`), on a
+  server booted with `E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value>`; two sign-ins; `ONLY=instructions`. See "The
+  driver instructions section", which also covers `instructions-screen.mjs`, the same steps on made-up data.
 
 Beside the browser run, `payout-parity.mjs` compares every investor's payout figures between two builds, to the cent and
 to the word (see "The payout parity check"), and `phone-layout.mjs` checks the load detail's header actions and the
@@ -210,7 +215,9 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 | `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
-| `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). |
+| `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
+| `instructions-screen.mjs` | The driver instructions staff screen on made-up data: the same static server and fixtures, with the instructions routes answered by PR 2's runtime in-process (see "The driver instructions section"). |
+| `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -299,6 +306,16 @@ fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-lease ONLY=lease DB_PATH="$W/qa.db" \
   fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
 fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# Part 10: the driver instructions (2 sign-ins), on a server booted with them ON and an INVENTED deny value, given
+# to the run too. Never a real value.
+E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"
+BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-instructions ONLY=instructions DB_PATH="$W/qa.db" \
+  E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 node scripts/e2e/e2e.mjs
+fnm exec --using=22.23.2 scripts/e2e/stop-server.sh 3181
+# The same screen on made-up data (no server.js, database or sign-in; PR 2's routes in-process)
+E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 node scripts/e2e/instructions-screen.mjs
+# The driver's own load instructions at 390 x 844 on made-up data (PR 4's driver route in-process)
+E2E_DRIVER_INSTRUCTIONS_DENY=T8273641 fnm exec --using=22.23.2 node scripts/e2e/driver-instructions-screen.mjs
 # The payout parity check (no browser, no server of yours: it boots its own two)
 REF_A=main REF_B=HEAD FLAG=off fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
 REF_A=main REF_B=HEAD FLAG=on fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
@@ -446,6 +463,10 @@ command line (dotenv never overrides a set variable):
 - **The lease payout flag:** `INVESTOR_LEASE_PAYOUTS_ENABLED` is passed as the caller set it, and is `false` when unset
   or empty, whatever `.env` says. The lease section and `payout-parity.mjs` set it explicitly. The lease settings
   (`INVESTOR_LEASE_DOWNTIME`, `_PRORATE`, `_RETIREMENT`) pass through from the caller's environment, else `.env`.
+- **The rate-con driver instructions:** off (`RATECON_DRIVER_INSTRUCTIONS_ENABLED=false`, `CARRIER_ACCOUNT_NUMBERS_DENY=`
+  empty) unless the script is run with `E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value>`, which turns them on with that
+  value as the only deny-list entry (never printed; never a real value). The driver screen flag stays off and the Drive
+  uploader blank either way, so no sweep runs.
 
 `E2E_NO_CLIENT=1` boots without `client/dist`, for an API-only run (`payout-parity.mjs`, which never asks for a page).
 
@@ -1439,6 +1460,49 @@ pairs (the ledger's `recomputedAmount`, `monthEarnings`, `monthShare` and the cu
 `GET /api/investor/payouts`, six detail reads, two reports, one statement), and B's own portal-against-ledger check
 flagged 5 months where the unchanged portal copy of the rule now disagreed with the ledger's. On every run, one settled
 row (owner 5, 2026-06, paid and finalized) differs from today's recompute: a frozen figure, listed for information.
+
+## The driver instructions section (DI0–DI6) and `instructions-screen.mjs`
+
+The staff screen of the rate-con driver instructions (plan PR 3): `DriverInstructionsSection.vue` in the load detail of
+the Job Board and Active Loads, for a Super Admin or a Dispatcher. The server is the gate; the section displays what it
+is sent.
+
+`e2e.mjs`, `ONLY=instructions`, on a server booted with `E2E_DRIVER_INSTRUCTIONS_DENY` (Part 10):
+
+- **DI0** the server can check the chosen active load's details (`GET .../driver-instructions` 200). It answers 503
+  `INSTRUCTIONS_UNVERIFIED` when its Job Tracking row or one of the two sheets holding the load's own amounts (Payments
+  Table, Job Details) can't be read or lacks the id or amount column; DI0 then reads both header rows through the app as
+  the Super Admin (status and booleans only), checks the section's plain message, and stops: nothing is planted. On the
+  local sheet as of 2026-10-21, Job Details has no column matching `/load.?id/i`, so DI0 stops there.
+- **DI1–DI5** plant made-up instructions (a `needs_review` row in the copy, for an active load that had none), then:
+  the section renders (status, the driver preview, the reasons, the item drivers don't see); an added reference holding
+  the deny value is refused (400 `INSTRUCTIONS_CONTENT_NOT_ALLOWED`, rule `number`, field `references`) and the screen
+  names the field kind only; Mark reviewed; a planted pending reading side by side, then Keep current; 390 x 844.
+- **DI6** removes the planted row, its versions and the refused-number row the run caused (the audit rows stay in the
+  copy).
+- Screenshots are of the section alone, with the "last reviewed by" line (an account name) masked: the page around it
+  shows the copy's real loads, so no full-page shot is taken.
+
+`instructions-screen.mjs` runs the same steps (IS1–IS7) on made-up data only, for a machine whose local sheet can't
+serve those routes. It serves the built `client/dist` from its own static server (`E2E_PORT`, default 3182; 3000, 3901
+and 5173 refused), answers the session, the dashboard and every other `/api` request in the browser with made-up
+fixtures, and hands the instructions routes to PR 2's own runtime (`lib/driver-instructions-runtime.js`, `create()` +
+`mount()`) on an express app in the same process, with an in-memory database, made-up sheet rows and the invented deny
+value. IS6 also measures the phone list cards (Active Loads and Job Board) whose rows carry instruction codes: the
+badge stays inside the card. IS7 runs a second runtime with the flag off: 404 with no code, no section, and the
+console holds only the browser's own "Failed to load resource … 404" line for the opened load, which is expected
+while the flag is off: the section asks, and the 404 is its answer. The console lines about requests the check
+aborts on purpose (the socket, other hosts) are set aside. Nothing leaves the machine; full page screenshots are fine
+(all made-up). `SHOTS_DIR` puts them outside the work dir.
+
+`driver-instructions-screen.mjs` (DS1–DS6, DSx) is the driver's side, at 390 x 844, the same way (`E2E_PORT`, default
+3184): a made-up Driver opens `/driver`; `GET /api/driver/:driverName` is built from two made-up rows and annotated by
+the runtime's `annotateDriverLoads()`, and `GET /api/driver/loads/:loadId/instructions` is answered by PR 4's runtime
+in-process (both flags on, the invented deny value). It checks the list chips (codes only), the card first under the
+route banner, critical requirements first, Copy buttons at least 44 px tall, a 40-character reference wrapping inside
+the card, flagged items absent, directions and warehouse notes collapsed, Copy, the "being checked by dispatch" line,
+no sideways scroll, and with the driver screen flag off: no key, no chips, no card and no request to the route. The
+socket event isn't sent here (the socket is aborted); `scripts/test-driver-instructions-routes.js` §12 covers it.
 
 ## The phone layout check (`phone-layout.mjs`)
 

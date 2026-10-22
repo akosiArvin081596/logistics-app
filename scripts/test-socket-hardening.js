@@ -309,8 +309,9 @@ async function startWorld({ sources = SRCS, secureCookie = false, mustChange = (
 	const loadIds = new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
 		`const SHOWN_LOAD_ID_STATE = { latest: null };\n${sources.loadIds}\nreturn { shownLoadId, emitDispatchByRole };`)(
 		io, require(path.join(__dirname, "..", "lib", "broker-contact")), true);
-	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", sources.messages)(
-		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole);
+	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", "chatFiles", sources.messages)(
+		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole,
+		require(path.join(__dirname, "..", "lib", "chat-files")));
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");

@@ -27,6 +27,13 @@
 #                 lease section and payout-parity.mjs set it explicitly).
 #   E2E_NO_CLIENT=1  boot without client/dist: for an API-only run
 #                 (payout-parity.mjs), which never requests a page.
+#   E2E_DRIVER_INSTRUCTIONS_DENY=<made-up value>  boot with the rate-con driver
+#                 instructions ON (RATECON_DRIVER_INSTRUCTIONS_ENABLED=true) and this
+#                 value as the only CARRIER_ACCOUNT_NUMBERS_DENY entry, for the
+#                 E2E's instructions section. Use an invented value (e.g. T8273641),
+#                 never a real one; it is set in this server's environment only and
+#                 never printed. Unset or empty: both off and blank, whatever .env
+#                 says. The driver screen flag and the Drive uploader stay off.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -100,6 +107,13 @@ echo "maintenance notice: $([ "$NOTICE" = true ] && echo 'ON (investor audience)
 LEASE="${INVESTOR_LEASE_PAYOUTS_ENABLED:-false}"
 echo "lease payouts: INVESTOR_LEASE_PAYOUTS_ENABLED=$LEASE"
 
+# Rate-con driver instructions: off and blank unless the caller passes a made-up
+# deny value. The value is never echoed.
+DI_ENABLED=false
+DI_DENY="${E2E_DRIVER_INSTRUCTIONS_DENY:-}"
+if [ -n "$DI_DENY" ]; then DI_ENABLED=true; fi
+echo "driver instructions: $([ "$DI_ENABLED" = true ] && echo 'ON (with the caller'"'"'s made-up deny value; not printed)' || echo 'off (deny list blank)'); driver screen off; Drive uploader blank"
+
 # The mail recipients. server.js and lib/broker-invoice.js have no default for
 # them, so the run names example.test inboxes (a reserved name nothing delivers
 # to), whatever .env says: the admin notifications have a recipient, and an
@@ -157,6 +171,8 @@ env PORT="$PORT" BIND_HOST=127.0.0.1 DATABASE_PATH="$DB" NODE_ENV=development \
   INVOICE_UNDATED_ALERT_ENABLED=false RATECON_EXTRACT_ALERT_ENABLED=false \
   MAINTENANCE_NOTICE_ENABLED="$NOTICE" MAINTENANCE_NOTICE_AUDIENCE=investor \
   INVESTOR_LEASE_PAYOUTS_ENABLED="$LEASE" \
+  RATECON_DRIVER_INSTRUCTIONS_ENABLED="$DI_ENABLED" CARRIER_ACCOUNT_NUMBERS_DENY="$DI_DENY" \
+  DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED=false RATECON_DRIVE_UPLOADER_EMAIL= \
   nohup "$NODE_BIN" server.js >"$LOG" 2>&1 &
 PID=$!
 # Line 1: the PID. Line 2: the worktree it runs from (stop-server.sh checks both).

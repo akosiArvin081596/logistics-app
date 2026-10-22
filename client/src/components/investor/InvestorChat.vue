@@ -24,12 +24,21 @@
           <div v-if="msg.asset_ref" class="bubble-asset"><span class="asset-badge">&#128666; {{ msg.asset_ref }}</span></div>
           <div v-if="msg.message" class="bubble-text">{{ msg.message }}</div>
           <div v-if="msg.attachment_url" class="bubble-attachment">
-            <a v-if="msg.attachment_type === 'image'" :href="msg.attachment_url" target="_blank" rel="noopener">
-              <img :src="msg.attachment_url" class="attach-img" />
-            </a>
-            <a v-else :href="msg.attachment_url" target="_blank" rel="noopener" class="attach-link">
+            <!-- A photo opens full size in the viewer below; focus comes back
+                 here on close. -->
+            <button
+              v-if="isChatPhoto(msg)"
+              type="button"
+              class="attach-photo"
+              :aria-label="`Open full size: ${chatPhotoAlt(msg)}`"
+              @click="openPhoto(msg)"
+            >
+              <img :src="msg.attachment_url" :alt="chatPhotoAlt(msg)" class="attach-img" />
+            </button>
+            <a v-else-if="isOwnUploadUrl(msg.attachment_url)" :href="msg.attachment_url" target="_blank" rel="noopener" class="attach-link">
               &#128206; {{ msg.attachment_url.split('/').pop() }}
             </a>
+            <span v-else class="attach-link">File unavailable</span>
           </div>
         </div>
       </div>
@@ -99,11 +108,24 @@
     <div v-else class="chat-readonly-hint">
       Read-only preview &mdash; sending messages is disabled while viewing this investor's portal.
     </div>
+
+    <!-- A thread photo, full size (same viewer and rules as the dashboard and
+         driver threads). -->
+    <ZoomableImage
+      :src="photoView ? photoView.photo.url : null"
+      :alt="photoView ? photoView.photo.alt : 'Photo'"
+      :has-prev="!!photoView && photoView.hasPrev"
+      :has-next="!!photoView && photoView.hasNext"
+      :position="photoView ? photoView.position : ''"
+      @prev="stepPhoto(-1)"
+      @next="stepPhoto(1)"
+      @close="closePhoto"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { useSocket } from '../../composables/useSocket'
 import { useFileDrop } from '../../composables/useFileDrop'
@@ -114,8 +136,10 @@ import {
   uploadChatAttachment,
 } from '../../lib/chatAttachment'
 import { fmtAppInstant } from '../../utils/datetime'
+import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -133,6 +157,16 @@ const investorStore = useInvestorStore()
 const messages = ref([])
 const draft = ref('')
 const sending = ref(false)
+
+// The thread's photos and the one shown full size, tracked by URL (the same
+// rule as the dashboard's MessagingPanel).
+const photos = computed(() => chatPhotos(messages.value))
+const openPhotoUrl = ref('')
+const photoView = computed(() => chatPhotoView(photos.value, openPhotoUrl.value))
+function openPhoto(msg) { openPhotoUrl.value = msg && msg.attachment_url ? msg.attachment_url : '' }
+function stepPhoto(delta) { openPhotoUrl.value = chatPhotoStep(photos.value, openPhotoUrl.value, delta) }
+function closePhoto() { openPhotoUrl.value = '' }
+watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
 const chatBody = ref(null)
 const selectedAsset = ref('')
 // One object for the whole attachment — { displayName, fileName, mediaType,
@@ -274,8 +308,6 @@ async function send() {
       const uploaded = await uploadChatAttachment(pending, (url, body) => api.post(url, body))
       attachmentUrl = uploaded.url
       attachmentType = uploaded.type
-      optimistic.attachment_url = attachmentUrl
-      optimistic.attachment_type = attachmentType
     }
     await api.post('/api/messages', {
       from: auth.user?.username,
@@ -285,6 +317,16 @@ async function send() {
       attachmentType,
       assetRef,
     })
+    // The file opens only once a message names it (uploads/chat/ is served to
+    // the conversation's participants, by the message that sent it), so the
+    // bubble shows it only after that message is saved.
+    if (attachmentUrl) {
+      const shown = messages.value.find((m) => m.id === optimistic.id)
+      if (shown) {
+        shown.attachment_url = attachmentUrl
+        shown.attachment_type = attachmentType
+      }
+    }
     selectedAsset.value = ''
     // Only clear what actually went out — the composer stays live during the
     // request, so the user may already have attached the next file.
@@ -462,6 +504,11 @@ onUnmounted(() => {
 .send-btn:hover { background: #0369a1; }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; background: #94a3b8; }
 .bubble-attachment { margin-top: 0.3rem; }
+.attach-photo {
+  display: block; padding: 0; border: none; background: none; border-radius: 6px;
+  cursor: zoom-in; font: inherit; color: inherit;
+}
+.attach-photo:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .attach-img { max-width: 200px; max-height: 140px; border-radius: 6px; display: block; }
 .attach-link {
   font-size: 0.78rem; color: inherit; opacity: 0.85; text-decoration: underline;

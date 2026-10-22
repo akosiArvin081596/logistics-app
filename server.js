@@ -124,6 +124,9 @@ const invoiceReceipts = require("./lib/invoice-receipts");
 const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
 const receiptFiles = require("./lib/receipt-files");
+// Chat attachment files: who may open one (the conversation's participants),
+// and the copy (photos without metadata).
+const chatFiles = require("./lib/chat-files");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
@@ -7309,6 +7312,10 @@ const RATECON_GEMINI_FIELDS = [
 	"Order Number","PO Number","Move Number","Trailer Number","Total Rate",
 	"Documents Email",
 ];
+// When this extraction last met a 429 or an `unavailable` answer (epoch ms). The
+// rate-con driver-instructions sweep stays paused for 30 minutes after one, so load
+// ingestion keeps the shared key (lib/driver-instructions-runtime.js).
+let rateConGeminiUnavailableAt = 0;
 async function runRateConGemini(base64) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_OCR_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 	const body = {
@@ -7387,6 +7394,7 @@ async function runRateConGemini(base64) {
 			// turned a clean error-branch fallback into a node timeout.
 			// Errors with no .kind (empty body, unparseable JSON, an aborted fetch)
 			// still retry exactly as they did.
+			if (err && err.kind === "unavailable") rateConGeminiUnavailableAt = Date.now();
 			if (err && err.kind && err.kind !== "transient") break;
 			if (attempt < 2) {
 				await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -11516,11 +11524,13 @@ function guardInvoicePdf(req, res, next, url, file) {
 //
 //   Swept at the same time and deliberately left (all timestamped, so the URL is
 //   a weak secret rather than a free enumeration):
-//     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
 //     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
 //   uploads/expense-receipts/ was on that list too, and is guarded since
 //   2026-10-15 (owner's rule: the receipt's driver, Super Admin and the roles
 //   that review receipts). See guardExpenseReceipt.
+//   uploads/chat/ is guarded since 2026-10-22 (owner's rule: only the people
+//   who can read the conversation; photos served without location data). See
+//   guardChatAttachment.
 //   The uploads ROOT was on that list too — `${loadId}_${docType}_${Date.now()}`
 //   PODs, BOLs and receipts — and is now guarded by guardRootLoadDocument (see
 //   there). It is not a GUARDED_UPLOAD_DIRS entry because it is not a directory
@@ -11810,11 +11820,29 @@ function guardExpenseReceipt(req, res, next, url, file) {
 	return expenseReceiptGuard(req, res, next, url, file);
 }
 
+// uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
+// read the conversation it was sent in (Super Admin and Dispatcher every
+// thread; a Driver or Investor his own), decided by the first message that
+// names it; everyone else gets 404. Photos go out without their metadata (no
+// location). The rule and the copy live in lib/chat-files.js. chat_uploads
+// records who stored each file, so a message carries only its sender's own
+// upload (POST /api/messages).
+db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
+const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
+	db,
+	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	logError: (msg) => console.error(msg),
+});
+function guardChatAttachment(req, res, next, url, file) {
+	return chatAttachmentGuard(req, res, next, url, file);
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
 	{ dir: "/invoices/", guard: guardInvoicePdf },
 	{ dir: "/expense-receipts/", guard: guardExpenseReceipt },
+	{ dir: "/chat/", guard: guardChatAttachment },
 	// ⚠️ THE TRAILING SLASH IS LOAD-BEARING. The match is a startsWith, so
 	// "/onboarding" without it would also swallow /onboarding-signed/ and
 	// /onboarding-templates/, routing signed W-9s to the drug-test guard. With
@@ -41417,6 +41445,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			rows: [...respUnassigned, ...respActive, ...respCompleted],
 			includeDraftRefs: req.session.user.role === "Super Admin",
 		});
+		// Driver-instructions review codes on the open loads (codes only; inert while
+		// the flag is off).
+		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -43224,11 +43255,13 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 				driverName.toLowerCase(),
 		);
 
-		// Messages from SQLite (fast indexed query)
+		// Messages from SQLite (fast indexed query). Attachments ride along, so the
+		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
+		// to the conversation's participants only).
 		const nameLower = driverName.toLowerCase();
 		const driverMessages = db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
@@ -43403,6 +43436,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// expense form from, and the one POST /api/expenses enforces. Fresh row
 		// copies; see withExpenseWindows().
 		filteredLoads = withExpenseWindows(filteredLoads, jobTracking.headers);
+		// Rate-con driver instructions (DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED):
+		// `_instructions` { state, highlights } per load, codes only, keyed by each
+		// row's own stored Load ID (lib/driver-instructions-runtime.js).
+		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -46162,6 +46199,12 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		// An attachment is a chat file this same account uploaded through
+		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
+		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
+		if (attachmentRefusal) {
+			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
+		}
 
 		const timestamp = new Date().toISOString();
 		const result = db
@@ -48770,11 +48813,68 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			ratePerMile: rpm.rate_per_mile,
 			warnings,
 		});
+		// Driver instructions from the PDF just archived, read after the answer
+		// (lib/driver-instructions-runtime.js; inert while its flag is off).
+		if (rateconArchived) driverInstructions.afterDropzone({ loadId, base64: rawPdf, amounts: [fields["Rate"], fields["Total Rate"]], user: req.session.user });
 	} catch (error) {
 		console.error("Error creating load from rate-con:", error.message);
 		res.status(500).json({ error: "Failed to create the load. Check the Job Tracking sheet before retrying." });
 	}
 });
+
+// <driver-instructions-wiring>
+// RATE-CON DRIVER INSTRUCTIONS (the owner's request, 2026-10-21; plan PR 2). What a
+// driver may be shown from a rate con: lib/driver-instructions.js filters it,
+// lib/driver-instructions-runtime.js stores it, reads rate cons for it (a Drive sweep
+// of the rate-con folder, the drag-and-drop hook above) and serves it to staff:
+// GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
+// .../accept-pending, .../re-extract (Super Admin, Dispatcher). Inert, every route
+// 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY
+// holds a usable value. The driver's screen (plan PR 4) also needs
+// DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: GET /api/driver/loads/:loadId/instructions
+// (the load's own driver through loadBelongsToDriver(), or Super Admin), the codes on
+// GET /api/driver/:driverName, and `driver-instructions-changed` { loadId } to the
+// load's driver's room. Pinned by scripts/test-driver-instructions-routes.js, which
+// lifts this block, and scripts/test-driver-page-role-gate.js §8.
+let driverInstructionsSideCache = null;
+// The two other sheets holding the load's own amounts (Payments Table, Job Details),
+// one read a minute at most. A failed read throws: the routes then answer 503.
+async function driverInstructionsSideSheets() {
+	if (driverInstructionsSideCache && Date.now() - driverInstructionsSideCache.at < 60 * 1000) return driverInstructionsSideCache.data;
+	const sheets = await getSheets();
+	const resp = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Payments Table", "Job Details"] });
+	const ranges = (resp && resp.data && resp.data.valueRanges) || [];
+	const data = { payments: (ranges[0] && ranges[0].values) || [], jobDetails: (ranges[1] && ranges[1].values) || [] };
+	driverInstructionsSideCache = { data, at: Date.now() };
+	return data;
+}
+const driverInstructions = require("./lib/driver-instructions-runtime").create({
+	db,
+	env: process.env,
+	fetch,
+	geminiApiKey: GEMINI_API_KEY,
+	geminiModel: GEMINI_OCR_MODEL,
+	getDrive,
+	getJobTracking: getJobTrackingCached,
+	getSideSheets: driverInstructionsSideSheets,
+	brokerWithheldRe: BROKER_WITHHELD_RE,
+	ingestionGeminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	logAudit,
+	logAuditRefusal,
+	notifySuperAdmins: (event, payload) => io.to("super-admin").emit(event, payload),
+	sendAdminEmail: (subject, html) => (alertChannels.mailbox(process.env) ? sendEmail(alertChannels.mailbox(process.env), subject, html) : null),
+	uploadsDir: path.join(DATA_DIR, "uploads"),
+	log: console,
+	loadBelongsToDriver,
+	sentIfLoadOwnershipUnverified,
+	// The driver's room by the spelling his account holds, as the geofence notice does.
+	emitToDriver: (name, event, payload) => io.to(driverRoom(findDriverAccountSpelling(name) || name)).emit(event, payload),
+});
+driverInstructions.mount(app, { requireRole });
+if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-instructions sweep")) {
+	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
+}
+// </driver-instructions-wiring>
 
 // GET /api/documents/:loadId — Fetch all documents for a load
 //
@@ -51492,7 +51592,14 @@ app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req,
 		// client-sent mimeType and is a display hint, never evidence.
 		const chatErr = verifyInlineServedBytes(chatBuf, path.extname(safeName));
 		if (chatErr) return res.status(400).json({ error: chatErr });
-		fs.writeFileSync(path.join(chatDir, safeName), chatBuf);
+		// A photo is stored without its metadata (no location, camera or text;
+		// orientation kept); one the strip cannot walk is refused, never stored
+		// as it is. Other files are stored as sent.
+		const stored = chatFiles.chatUploadBytes(chatBuf);
+		if (!stored) return res.status(415).json({ error: "That photo couldn't be read. Try a JPG or PNG.", code: "UNSUPPORTED_IMAGE_TYPE" });
+		fs.writeFileSync(path.join(chatDir, safeName), stored);
+		// Who stored it: POST /api/messages takes it only from this account.
+		chatFiles.recordChatUpload(db, `/uploads/chat/${safeName}`, req.session.user.id);
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);
