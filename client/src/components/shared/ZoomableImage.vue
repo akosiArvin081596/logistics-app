@@ -384,7 +384,7 @@ onBeforeUnmount(() => {
 
 .zoom-controls {
   position: fixed;
-  bottom: 1.25rem;
+  bottom: max(1.25rem, env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -461,12 +461,12 @@ onBeforeUnmount(() => {
 .zoom-nav:hover { background: rgba(255, 255, 255, 0.28); }
 .zoom-nav[aria-disabled='true'] { opacity: 0.3; cursor: default; }
 .zoom-nav[aria-disabled='true']:hover { background: rgba(0, 0, 0, 0.55); }
-.zoom-prev { left: 0.75rem; }
-.zoom-next { right: 0.75rem; }
+.zoom-prev { left: max(0.75rem, env(safe-area-inset-left, 0px)); }
+.zoom-next { right: max(0.75rem, env(safe-area-inset-right, 0px)); }
 
 .zoom-position {
   position: fixed;
-  top: 1.6rem;
+  top: max(1.6rem, env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   margin: 0;

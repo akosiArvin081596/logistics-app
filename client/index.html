@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <!-- viewport-fit=cover: on a notched iPhone the page runs under the notch and the
+       home bar, so the app shell and every fixed bar pad themselves with
+       max(<their padding>, env(safe-area-inset-*)). Without it every env() inset is 0.
+       scripts/test-viewport-safe-area.mjs keeps the list. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>LogisX — Logistics Management</title>
