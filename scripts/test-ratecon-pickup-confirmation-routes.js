@@ -136,12 +136,16 @@ function makeWorld({ env = {} } = {}) {
 	const sheets = { spreadsheets: { values: { get: async () => ({ data: { values: sheet.map((r) => r.slice()) } }) } } };
 	const gemini = { next: null };
 	const role = (who) => (typeof who === "string" ? who : (who && who.session && who.session.user && who.session.user.role) || "");
+	// lib/ratecon-dvir.js as shipped, counting each read of a PDF's text.
+	const realDvir = rootRequire("./lib/ratecon-dvir");
+	const pdfReads = { n: 0 };
+	const countingDvir = { ...realDvir, pdfText: (...a) => { pdfReads.n++; return realDvir.pdfText(...a); } };
 	const deps = {
 		app,
 		db,
 		process: { env: { N8N_EXTRACT_SECRET: SECRET, ...env } },
 		console: quiet,
-		require: rootRequire,
+		require: (p) => (p === "./lib/ratecon-dvir" ? countingDvir : rootRequire(p)),
 		getSheets: async () => sheets,
 		SPREADSHEET_ID: "sheet-under-test",
 		n8nKeepStoredLimiter: (q, r, n) => n(),
@@ -174,7 +178,7 @@ function makeWorld({ env = {} } = {}) {
 	};
 	const user = (r, id) => ({ session: { user: { role: r, id, username: `u${id}` } }, headers: { "x-requested-with": "XMLHttpRequest" } });
 	return {
-		db, sheet, logs, audits, gemini, api, settle,
+		db, sheet, logs, audits, gemini, api, settle, pdfReads,
 		extractEmail: (pdf, fields) => { gemini.next = fields; return call("/api/n8n/extract-pdf-via-gemini", { headers: { "x-webhook-secret": SECRET }, body: { pdf_base64: b64(pdf) } }); },
 		keep: (loadId, values) => call("/api/n8n/keep-stored-values", { headers: { "x-webhook-secret": SECRET }, body: { loadId, values }, ip: "" }),
 		mark: (r, id, body) => call("/api/loads/pickup-confirmed", { ...user(r, id), body }),
@@ -201,8 +205,12 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 	{
 		const w = makeWorld({ env: ON });
 		const before = w.tables();
+		const blank = await w.extractEmail(PDF_FLAGGED_DVIR, GEM(""));
+		eq("§1 (security review Low 1) no Load Number: the route answers, the PDF's text is never read, no reading kept",
+			[blank.status, w.pdfReads.n, w.api.rateConPickupReading(""), w.api.rateConDvirReading("")], [200, 0, null, null]);
 		const r = await w.extractEmail(PDF_FLAGGED_DVIR, GEM("900000101"));
 		eq("§1 the route answers 200 with Gemini's fields", [r.status, r.body && r.body.output && r.body.output["Load Number"]], [200, "900000101"]);
+		eq("§1 the PDF's text is read once for both readings", w.pdfReads.n, 1);
 		eq("§1 the CHR line in the built-in text is kept as the load's pickup reading", w.api.rateConPickupReading("900000101"), { needsConfirmation: true, by: "text" });
 		eq("§1 the route writes nothing to any table (no new table, no row)", w.tables(), before);
 		await w.extractEmail(PDF_PLAIN, GEM("900000101"));

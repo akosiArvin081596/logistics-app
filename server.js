@@ -7556,15 +7556,20 @@ const rateConPickupReadings = pickupConfirmation.createPickupReadingStore({ ttlM
 // `brokerContact` is declared further down.
 const rateConPickupStash = require("./lib/broker-contact").createRateConStash();
 
-// Both readings of an email's rate con from one read of its text. Never throws.
+// Both readings of an email's rate con from one read of its text. Never throws. With no
+// Load Number neither reading is kept, so the PDF isn't read at all; a PDF whose text
+// can't be read is read once (no DVIR reading; the pickup notes are still checked).
 function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) {
+	if (!normLoadKey(loadNumber)) return;
 	let read = null;
+	let failed = false;
 	try {
 		if (typeof base64 === "string") read = rateConPdfTextOf(base64);
-	} catch {
-		read = null; // noteRateConDvir() reads again and logs the failure
+	} catch (e) {
+		failed = true;
+		console.warn(`[ratecon-dvir] rate-con text not read (${e && e.message}); a re-issue alert for this load falls back to the Payment drop`);
 	}
-	noteRateConDvir(loadNumber, base64, now, read);
+	if (!failed) noteRateConDvir(loadNumber, base64, now, read);
 	if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) noteRateConPickupReading(loadNumber, read ? read.text : "", pickupNotes, now);
 }
 
