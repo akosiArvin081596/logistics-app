@@ -70,6 +70,8 @@ const near = (a, b, tol) => Number.isFinite(a) && Math.abs(a - b) <= tol;
 	ok("§2 HTML renamed .m4a is refused", refusedWith(check(Buffer.from("<!doctype html><html><script>alert(1)</script></html>")), UNSUP, 415));
 	ok("§2 an empty body is refused", refusedWith(check(Buffer.alloc(0)), UNSUP, 415));
 	ok("§2 a non-buffer is refused", refusedWith(check("ftyp"), UNSUP, 415) && refusedWith(check(null), UNSUP, 415));
+	ok("§2 a JSON body (an array, a string, an object) is refused",
+		[[0, 0, 0, 32, "ftyp"], "\0\0\0\x20ftypisom".repeat(4), { length: 64 }, Uint8Array.from(fx.chromeFixture())].every((x) => refusedWith(check(x), UNSUP, 415)));
 	ok("§2 an MP4 whose track is video is refused", refusedWith(check(fx.buildPlain({ handler: "vide" })), UNSUP, 415));
 	ok("§2 an MP4 with two tracks is refused", refusedWith(check(fx.buildPlain({ tracks: 2 })), UNSUP, 415));
 	ok("§2 an mp4a entry with no AAC config (no esds) is refused", refusedWith(check(fx.buildPlain({ entry: fx.mp4a(48000, { withEsds: false }) })), UNSUP, 415));
