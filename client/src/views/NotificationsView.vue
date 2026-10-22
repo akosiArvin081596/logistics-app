@@ -262,7 +262,7 @@ onUnmounted(() => {
     bottom: 0;
     left: 0;
     right: 0;
-    padding: 0.75rem 0.75rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+    padding: 0.75rem;
     background: rgba(255, 255, 255, 0.96);
     backdrop-filter: blur(6px);
     border-top: 1px solid var(--border);

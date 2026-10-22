@@ -68,7 +68,8 @@ const showSidebar = computed(() => {
   width: 100%;
   /* Sidebar-less pages (driver, sign-in, apply, invest, tracking) are kept
      clear of the notch in landscape here; their own fixed headers and bars pad
-     the top and bottom (index.html viewport-fit=cover). 0 off iPhones. */
+     the top and bottom (index.html viewport-fit=cover). The insets are 0
+     where the device reports none. */
   padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
   height: 100vh;
 }

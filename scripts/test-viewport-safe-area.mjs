@@ -21,6 +21,8 @@
 //      those values works out to exactly its old value: nothing moves there
 //   §5 the investor guide's bottom sheet counts the home-bar inset once (its
 //      footer), not three times (sheet offset, sheet padding, footer)
+//   §5b the phone Notifications footer and the Messages input bar end at the
+//      content column's padded bottom, so they add no bottom inset of their own
 //   §6 shadcn dialogs are narrowed by the side insets (w-full at 0)
 //
 // The files' own styles, parsed with the client's compiler and postcss. No DOM,
@@ -210,7 +212,6 @@ const ITEMS = [
   ['views/InvestorApplyView.vue', '.photo-overlay-close', 'top', null, '1rem', ['top'], ['max(1rem, env(safe-area-inset-top']],
   ['views/InvestorApplyView.vue', '.photo-overlay-close', 'right', null, '1.5rem', ['right'], ['max(1.5rem, env(safe-area-inset-right']],
   // Sticky / fixed bars
-  ['views/NotificationsView.vue', '.notif-mobile-footer', 'padding', MOBILE, '0.75rem', ['bottom'], ['max(0.75rem, env(safe-area-inset-bottom']],
   ['wizard/components/WizardPanel.vue', '.wizard-panel', 'right', null, '24px', ['right'], ['max(24px, env(safe-area-inset-right']],
   ['wizard/components/WizardResumeBanner.vue', '.wizard-resume', 'right', null, '24px', ['right'], ['max(24px, env(safe-area-inset-right']],
   ['wizard/components/WizardFaqDrawer.vue', '.faq-drawer', 'right', W1024, '24px', ['right'], ['max(24px, env(safe-area-inset-right']],
@@ -248,6 +249,24 @@ console.log('§5 the guide sheet counts the home-bar inset once')
   ok('phone sheet has no inset padding of its own', !hasInset(sheetPad))
   ok('minimized strip has no inset padding (it would squeeze the 56px pill)', !hasInset(tabPad))
   ok('footer clears the home bar', hasInset(footerPad))
+}
+
+// ---------------------------------------------------------------- §5b
+console.log('§5b bars inside the padded content column add no bottom inset of their own')
+{
+  const footer = value('views/NotificationsView.vue', '.notif-mobile-footer', 'padding', MOBILE)
+  ok('phone Notifications footer has no safe-area-inset-bottom', !!footer && !footer.includes('safe-area-inset-bottom'))
+  eq('phone Notifications footer padding (as on main)', footer, '0.75rem')
+  const inputPads = []
+  for (const root of roots('views/MessagesView.vue')) {
+    root.walkRules((rule) => {
+      if (!rule.selector.includes('.msg-chat-input')) return
+      rule.walkDecls(/^padding/, (d) => inputPads.push(norm(d.value)))
+    })
+  }
+  ok('Messages input bar has a padding rule', inputPads.length > 0)
+  ok('Messages input bar carries no bottom inset (the page padding clears the home bar)',
+    inputPads.every((v) => !v.includes('safe-area-inset-bottom')))
 }
 
 // ---------------------------------------------------------------- §6

@@ -75,7 +75,7 @@ body {
   /* Safe areas (index.html viewport-fit=cover): on a notched iPhone in
      landscape the sidebar widens by the left inset and pads its content clear
      of the notch; top and bottom keep the logo and footer clear of the status
-     bar and the home bar. Every inset is 0 on desktop and Android. */
+     bar and the home bar. Every inset is 0 where the device reports none. */
   width: calc(var(--sidebar-w) + env(safe-area-inset-left, 0px)); height: 100vh;
   padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   background: var(--surface);
@@ -162,8 +162,8 @@ body {
    sitting under the menu icon. Desktop behaviour above is untouched. */
 @media (max-width: 767px) {
   .main {
-    /* The top keeps its 2.4rem gap below the hamburger, which moves down with
-       the top inset (App.vue). */
+    /* The top stays 2.4rem below the hamburger's top edge (3rem - 0.6rem),
+       which moves down with the top inset (App.vue). */
     padding: max(3rem, env(safe-area-inset-top, 0px) + 2.4rem) max(0.75rem, env(safe-area-inset-right, 0px))
       max(1.25rem, env(safe-area-inset-bottom, 0px)) max(0.75rem, env(safe-area-inset-left, 0px));
   }
