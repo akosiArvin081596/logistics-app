@@ -463,7 +463,7 @@ command line (dotenv never overrides a set variable):
 - **The lease payout flag:** `INVESTOR_LEASE_PAYOUTS_ENABLED` is passed as the caller set it, and is `false` when unset
   or empty, whatever `.env` says. The lease section and `payout-parity.mjs` set it explicitly. The lease settings
   (`INVESTOR_LEASE_DOWNTIME`, `_PRORATE`, `_RETIREMENT`) pass through from the caller's environment, else `.env`.
-- **The rate-con driver instructions:** off (`RATECON_DRIVER_INSTRUCTIONS_ENABLED=false`, `CARRIER_ACCOUNT_NUMBERS_DENY=`
+- **The rate-con driver instructions:** off (`RATECON_DRIVER_INSTRUCTIONS_ENABLED=false`, `CARRIER_ACCOUNT_NUMBERS_DENY_SECRET=`
   empty) unless the script is run with `E2E_DRIVER_INSTRUCTIONS_DENY=<an invented value>`, which turns them on with that
   value as the only deny-list entry (never printed; never a real value). The driver screen flag stays off and the Drive
   uploader blank either way, so no sweep runs.

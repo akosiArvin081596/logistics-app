@@ -122,7 +122,7 @@ const GEMINI_MARKER = "QZXMARKERQZX";
 const EN_DASH = String.fromCharCode(0x2013);
 const T0 = Date.parse("2026-10-22T15:00:00Z");
 
-const ON = Object.freeze({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY: DENY, RATECON_DRIVE_FOLDER_ID: FOLDER, RATECON_DRIVE_UPLOADER_EMAIL: UPLOADER });
+const ON = Object.freeze({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: DENY, RATECON_DRIVE_FOLDER_ID: FOLDER, RATECON_DRIVE_UPLOADER_EMAIL: UPLOADER });
 const SA = { id: 1, username: "admin_test", role: "Super Admin" };
 const DISP = { id: 2, username: "disp_test", role: "Dispatcher" };
 const DISP2 = { id: 3, username: "disp_two", role: "Dispatcher" };
@@ -283,6 +283,14 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_at DATETIME DEFAULT NULL)");
 	db.exec("CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '')");
 	db.exec("CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+	// The dispatch notices table as server.js creates it (the lock alert is stored there).
+	db.exec(/CREATE TABLE IF NOT EXISTS dispatch_notifications \([\s\S]*?\n\t\)/.exec(SRC)[0]);
+	// The users table as server.js creates it: a lock is cleared only by an account
+	// created before the lock was set.
+	db.exec(/CREATE TABLE IF NOT EXISTS users \([\s\S]*?\n\t\)/.exec(SRC)[0]);
+	for (const u of [SA, DISP, DISP2, DRIVER, INVESTOR, { id: 7, username: "admin_two", role: "Super Admin" }]) {
+		db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, 'x', ?, '2026-01-01 00:00:00')").run(u.id, u.username, u.role);
+	}
 	const w = {
 		db, env: { ...env }, files: [...files], gemini: [...gemini], logs: [], sockets: [], emails: [], responses: [], startsJob: [], intervals: [],
 		calls: { list: 0, download: [], meta: [], gemini: 0, geminiBodies: [], sheet: 0, side: 0 }, ingestionAt, sheetFails, sideFails,
@@ -363,6 +371,7 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 		alertChannels: { mailbox: () => "admin-inbox@example.test" },
 		path,
 		DATA_DIR: w.uploads,
+		insertDispatchNotification: db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES (?, ?, ?, ?)"),
 		startsJob: (name) => { w.startsJob.push(name); return false; },
 		setInterval: (fn, ms) => { w.intervals.push(ms); return 0; },
 		requireRole: G.requireRole,
@@ -457,13 +466,13 @@ test("§1 deny list unset or unusable with the flag on: inert like the flag off,
 	useClock();
 	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
 	for (const deny of [undefined, "", "  ", "12, 3456"]) {
-		const env = { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY: deny };
-		if (deny === undefined) delete env.CARRIER_ACCOUNT_NUMBERS_DENY;
+		const env = { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: deny };
+		if (deny === undefined) delete env.CARRIER_ACCOUNT_NUMBERS_DENY_SECRET;
 		const w = await world({ env, files: [f] });
 		eq(`deny ${JSON.stringify(deny)}: sweep inert`, (await w.service.sweep()).ran, false);
 		for (const [m, u] of ROUTES) eq(`deny ${JSON.stringify(deny)}: ${m} ${u} -> 404`, (await w.call(m, u, SA, m === "GET" ? undefined : {})).status, 404);
 		eq("no Gemini call, no Drive list", [w.calls.gemini, w.calls.list], [0, 0]);
-		ok("one warning names CARRIER_ACCOUNT_NUMBERS_DENY", w.logs.filter((l) => l.includes("CARRIER_ACCOUNT_NUMBERS_DENY is not set")).length === 1, w.logs);
+		ok("one warning names CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", w.logs.filter((l) => l.includes("CARRIER_ACCOUNT_NUMBERS_DENY_SECRET is not set")).length === 1, w.logs);
 		ok("no log line holds a deny value", !w.logs.some((l) => /3456|8273641/.test(l)), w.logs);
 	}
 });
@@ -709,7 +718,7 @@ test("§5 a deny value added later withholds an already-clean stored reference o
 	x.stops[1].references.push({ type: "other_reference", label: "Ref", value: "6127734" });
 	insertRow(w, { v: 1, footnote: "x", ...x });
 	ok("served while not denied", (await w.call("GET", API, DISP)).text.includes("6127734"));
-	w.env.CARRIER_ACCOUNT_NUMBERS_DENY = `${DENY}, X6127734`;
+	w.env.CARRIER_ACCOUNT_NUMBERS_DENY_SECRET = `${DENY}, X6127734`;
 	const r = await w.call("GET", API, DISP);
 	ok("withheld once denied", !r.text.includes("6127734"), r.text.slice(0, 400));
 	eq("refiltered", r.body.refiltered, true);
@@ -736,7 +745,7 @@ test("§5 a context error mid-request (the deny list gone after the gate) answer
 	const w = await world();
 	insertRow(w, cleanExtraction());
 	let reads = 0;
-	Object.defineProperty(w.env, "CARRIER_ACCOUNT_NUMBERS_DENY", { get: () => (reads++ === 0 ? DENY : ""), configurable: true, enumerable: true });
+	Object.defineProperty(w.env, "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", { get: () => (reads++ === 0 ? DENY : ""), configurable: true, enumerable: true });
 	const r = await w.call("GET", API, DISP);
 	eq("404", [r.status, reads >= 2], [404, true]);
 });
@@ -777,8 +786,9 @@ test("§6 PUT refusals: 400 with one code, rule \"number\" for every number rule
 		[editBody(`Send the signed papers to ${EMAIL} today.`), "contact"],
 		[editBody("Driver is paid $50 extra for the wait at the dock."), "money"],
 	];
-	for (const [body, rule] of cases) {
-		const r = await w.call("PUT", API, DISP, body);
+	// One Dispatcher per case: a deny-list refusal locks the person who made it (decision 37, §13).
+	for (const [i, [body, rule]] of cases.entries()) {
+		const r = await w.call("PUT", API, { id: 200 + i, username: `disp_case_${i}`, role: "Dispatcher" }, body);
 		eq(`status ${rule}`, r.status, 400);
 		eq(`code ${rule}`, r.body.code, "INSTRUCTIONS_CONTENT_NOT_ALLOWED");
 		if (rule) eq(`rule ${rule}`, r.body.rule, rule);
@@ -795,24 +805,23 @@ test("§6 PUT refusals: 400 with one code, rule \"number\" for every number rule
 	}
 });
 
-test("§6 three deny-list hits by one user in 24 h raise one alert (socket to super-admin and one email), codes only, once a day", async ({ eq, ok }) => {
+test("§6 the first deny-list hit raises one alert (socket to super-admin and one email) and locks the person; other number refusals do neither", async ({ eq, ok }) => {
 	useClock();
 	const w = await world();
 	insertRow(w, cleanExtraction());
-	for (let i = 0; i < 2; i++) await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
-	eq("two hits: no alert", [w.sockets.length, w.emails.length], [0, 0]);
-	await w.call("PUT", API, DISP, editBody("Give the gate code 12345678901 at the kiosk."));
-	eq("a number refusal that is not a deny hit doesn't count", w.sockets.length, 0);
-	await w.call("PUT", API, DISP, editBody(`Show t ${EN_DASH} ${DENY_DIGITS} on arrival.`));
+	const r0 = await w.call("PUT", API, DISP, editBody("Give the gate code 12345678901 at the kiosk."));
 	await w.settle();
-	eq("third hit: one in-app notice to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "driver-instructions-alert"]]);
-	eq("its payload: codes only", Object.keys(w.sockets[0].payload).sort(), ["count", "loadLast4", "role", "rule", "userId"]);
-	eq("values", [w.sockets[0].payload.userId, w.sockets[0].payload.role, w.sockets[0].payload.rule, w.sockets[0].payload.loadLast4], [2, "Dispatcher", "number", "0345"]);
+	eq("a number refusal that is not a deny hit: 400, no alert, no lock", [r0.status, w.sockets.length, w.emails.length, w.db.prepare("SELECT COUNT(*) AS n FROM driver_instructions_edit_locks").get().n], [400, 0, 0, 0]);
+	const r1 = await w.call("PUT", API, DISP, editBody(`Show t ${EN_DASH} ${DENY_DIGITS} on arrival.`));
+	await w.settle();
+	eq("the first hit: 400 as before", [r1.status, r1.body.code, r1.body.rule], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number"]);
+	eq("one in-app notice to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
 	eq("one email", w.emails.length, 1);
-	eq("the email holds none of the values", leaksIn(JSON.stringify(w.emails)), []);
-	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	eq("the hit log keeps the refusal", w.db.prepare("SELECT user_id, role, load_last4 FROM driver_instructions_number_hits").all(), [{ user_id: 2, role: "Dispatcher", load_last4: "0345" }]);
+	eq("the person is locked", w.db.prepare("SELECT user_id, username, role FROM driver_instructions_edit_locks").all(), [{ user_id: 2, username: "disp_test", role: "Dispatcher" }]);
+	const again = await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
 	await w.settle();
-	eq("fourth hit the same day: no second alert", [w.sockets.length, w.emails.length], [1, 1]);
+	eq("another try while locked: 423, no second alert", [again.status, again.body.code, w.sockets.length, w.emails.length], [423, "INSTRUCTIONS_EDIT_LOCKED", 1, 1]);
 });
 
 test("§6 a valid PUT publishes the person's version (reviewed, versioned, audited); review, accept-pending and keep work", async ({ eq, ok }) => {
@@ -1017,7 +1026,7 @@ test("§9 wiring: the drag-and-drop hook runs after the answer for an archived P
 	const gem = lift.closure(SRC, { roots: ["runRateConGemini"], provided: ["fetch", "GEMINI_OCR_MODEL", "GEMINI_API_KEY", "RATECON_PDF_SYSTEM_PROMPT", "RATECON_PDF_RESPONSE_SCHEMA", "RATECON_GEMINI_FIELDS", "geminiFailure"] });
 	ok("runRateConGemini records an unavailable answer for the sweep's pause", /rateConGeminiUnavailableAt = Date\.now\(\)/.test(gem.text) && gem.names.includes("rateConGeminiUnavailableAt"));
 	const ex = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
-	for (const v of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED", "CARRIER_ACCOUNT_NUMBERS_DENY", "RATECON_DRIVE_UPLOADER_EMAIL"]) {
+	for (const v of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED", "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", "RATECON_DRIVE_UPLOADER_EMAIL"]) {
 		const line = ex.split("\n").find((l) => new RegExp(`^#?\\s*${v}=`).test(l));
 		ok(`.env.example names ${v}`, !!line, v);
 		ok(`.env.example gives ${v} no value`, line && /=\s*$/.test(line), line);
@@ -1032,9 +1041,9 @@ test("§9 replica:pull never copies the deny list or the uploader account, and c
 	const libDir = path.join(ROOT, "lib");
 	const sources = [SRC, ...fs.readdirSync(libDir).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => fs.readFileSync(path.join(libDir, f), "utf8"))];
 	const read = rules.namesReadBy(sources);
-	for (const [name, value] of [["CARRIER_ACCOUNT_NUMBERS_DENY", DENY], ["RATECON_DRIVE_UPLOADER_EMAIL", UPLOADER]]) {
+	for (const [name, value, rule] of [["CARRIER_ACCOUNT_NUMBERS_DENY_SECRET", DENY, /^secret: name contains SECRET$/], ["CARRIER_ACCOUNT_NUMBERS_DENY", DENY, /^production only/], ["RATECON_DRIVE_UPLOADER_EMAIL", UPLOADER, /^production only/]]) {
 		const v = rules.classifySetting(name, value, { readByApp: read });
-		eq(`${name}: never copied, by name`, [v.copy, /^production only/.test(v.rule)], [false, true]);
+		eq(`${name}: never copied, by name`, [v.copy, rule.test(v.rule)], [false, true]);
 		eq(`${name}: never copied, even when listed as read`, rules.classifySetting(name, value, { readByApp: new Set([name]) }).copy, false);
 	}
 	for (const flag of ["RATECON_DRIVER_INSTRUCTIONS_ENABLED", "DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED"]) {
@@ -1060,16 +1069,17 @@ test("§10 M1 a refused number names no item: many references, one on the deny l
 	eq("400, rule number", [r.status, r.body.code, r.body.rule], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number"]);
 	eq("the field names no item", r.body.field, "references");
 	ok("no position anywhere in the answer", !/\[\d+\]|\b7\b/.test(JSON.stringify(r.body)), r.body);
-	const t = await w.call("PUT", API, DISP, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the north gate." }, { category: "check_in", text: `Give the gate code ${DENY_DIGITS} on arrival.` }], stops: [] } });
+	// Each deny-list refusal below comes from another person: the first one locks its maker (decision 37).
+	const t = await w.call("PUT", API, { id: 210, username: "disp_m1_text", role: "Dispatcher" }, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the north gate." }, { category: "check_in", text: `Give the gate code ${DENY_DIGITS} on arrival.` }], stops: [] } });
 	eq("a number in an item's text: field \"text\"", [t.body.rule, t.body.field], ["number", "text"]);
 	const a = w.audits().filter((x) => x.action === "edit_refused");
 	ok("the audit row keeps the full path", a.some((x) => JSON.parse(x.details).field === "stops[0].references[7].value"), a.map((x) => x.details));
-	const m = await w.call("PUT", API, DISP, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the gate." }, { category: "check_in", text: "Driver is paid $50 extra for the wait." }], stops: [] } });
+	const m = await w.call("PUT", API, DISP2, { payload: { loadRequirements: [{ category: "check_in", text: "Check in at the gate." }, { category: "check_in", text: "Driver is paid $50 extra for the wait." }], stops: [] } });
 	eq("other rules keep the position", [m.body.rule, m.body.field], ["money", "loadRequirements[1].text"]);
-	const c = await w.call("PUT", API, DISP, { payload: { loadRequirements: [], stops: [{ kind: "pickup", facility: "Test Mill North", place: "Springfield, IL", references: [{ type: "other_reference", label: "Ref", value: "RX400" }, { type: "other_reference", label: "Ref", value: "RX401" }, { type: "other_reference", label: "Ref", value: "Pat Broker" }], requirements: [], instructions: [] }] } });
+	const c = await w.call("PUT", API, DISP2, { payload: { loadRequirements: [], stops: [{ kind: "pickup", facility: "Test Mill North", place: "Springfield, IL", references: [{ type: "other_reference", label: "Ref", value: "RX400" }, { type: "other_reference", label: "Ref", value: "RX401" }, { type: "other_reference", label: "Ref", value: "Pat Broker" }], requirements: [], instructions: [] }] } });
 	eq("a refused contact names no item either", [c.status, c.body.rule, c.body.field], [400, "contact", "references"]);
 	const rt = require(RUNTIME);
-	eq("one alert threshold constant, still 3", rt.ALERT_HITS, 3);
+	eq("no hit threshold any more: the first hit locks (decision 37)", [rt.ALERT_HITS, rt.EDIT_LOCKED_CODE], [undefined, "INSTRUCTIONS_EDIT_LOCKED"]);
 });
 
 test("§10 L1 a re-read uses only a folder file the sweep matched to this load, whose owner, last modifier and bytes are unchanged", async ({ eq }) => {
@@ -1244,26 +1254,18 @@ test("§10 L4 the dashboard badge: a load whose only rate con is a RATECON docum
 	eq("Drive-linked only: no_rate_con, never rate_con_not_read", rows[0]._instructionsReview, ["no_rate_con"]);
 });
 
-test("§10 L5 the alert's day and the daily budget are Eastern days (APP_TIMEZONE), not UTC", async ({ eq }) => {
-	const clock = useClock(Date.parse("2026-10-22T20:00:00Z"));
+test("§10 L5 the daily budget's day is the Eastern day (APP_TIMEZONE), not UTC (the alert has no day since decision 37: one per lock)", async ({ eq }) => {
+	useClock(Date.parse("2026-10-23T03:00:00Z"));
 	const w = await world();
-	insertRow(w, cleanExtraction());
-	for (let i = 0; i < 3; i++) await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
-	await w.settle();
-	eq("first alert", w.emails.length, 1);
-	clock.t = Date.parse("2026-10-23T03:00:00Z");
-	for (let i = 0; i < 3; i++) await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
-	await w.settle();
-	eq("11 PM Eastern on the same day: no second alert", w.emails.length, 1);
 	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
 	w.files.push(f);
 	await w.service.sweep();
 	eq("the budget's day is the Eastern day", w.service.budgetState().day, "2026-10-22");
 });
 
-test("§10 L6 replica:pull refuses a checkout whose replica rules would copy CARRIER_ACCOUNT_NUMBERS_DENY", async ({ eq, ok }) => {
+test("§10 L6 replica:pull refuses a checkout whose replica rules would copy the deny list under its name or its retired one", async ({ eq, ok }) => {
 	const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
-	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
+	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY_SECRET[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
 	ok("pull.sh checks the rules before production does any work", !!m && pull.indexOf(m[0]) < pull.indexOf("REMOTE_FILES=(") + 1e9 && pull.indexOf(m[0]) < pull.indexOf("conn_open()"), m && m[0]);
 	if (!m) return;
 	const { spawnSync } = require("child_process");
@@ -1315,7 +1317,7 @@ function driverScreenExtraction() {
 
 test("§12 flag 2 off, the deny list unset, or flag 1 off: the driver route answers 404 with no code to every role, and no driver event is sent", async ({ eq }) => {
 	useClock();
-	const cases = [["flag 2 off", ON], ["deny list unset", { ...ON2, CARRIER_ACCOUNT_NUMBERS_DENY: "" }], ["flag 1 off", { ...ON2, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" }]];
+	const cases = [["flag 2 off", ON], ["deny list unset", { ...ON2, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: "" }], ["flag 1 off", { ...ON2, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" }]];
 	for (const [label, env] of cases) {
 		const w = await world({ env, files: [driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE)] });
 		await w.service.sweep();
@@ -1459,12 +1461,13 @@ test("§12 the event: exactly { loadId } to the load's driver's room only (his a
 	eq("review publishes: one event", [(await w.call("POST", `${API}/review`, DISP, {})).status, changedEvents(w).length], [200, 1]);
 	eq("review again with nothing changed: no event", [(await w.call("POST", `${API}/review`, DISP, {})).status, changedEvents(w).length], [200, 1]);
 	eq("a valid PUT: one event", [(await w.call("PUT", API, DISP, editBody("Check in with the guard and show your CDL."))).status, changedEvents(w).length], [200, 2]);
-	eq("a refused PUT: no event", [(await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`))).status, changedEvents(w).length], [400, 2]);
+	// Another Dispatcher: a deny-list refusal locks the person who made it (decision 37).
+	eq("a refused PUT: no event", [(await w.call("PUT", API, DISP2, editBody(`Give the gate ${DENY} on arrival.`))).status, changedEvents(w).length], [400, 2]);
 	await w.call("GET", API, DISP);
 	await w.call("GET", DAPI, DRIVER);
 	eq("reads: no event", changedEvents(w).length, 2);
 	eq("each event exactly { loadId } to the driver's room", changedEvents(w).map((s) => [s.room, s.payload]), [["driver:test driver a", { loadId: LOAD_ID }], ["driver:test driver a", { loadId: LOAD_ID }]]);
-	eq("no other event went anywhere", w.sockets.filter((s) => s.event !== "driver-instructions-changed").length, 0);
+	eq("no other event went anywhere but the refusal's alert to super-admin", w.sockets.filter((s) => s.event !== "driver-instructions-changed").map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
 	w.accountSpelling = () => "Test  Driver A";
 	await w.call("PUT", API, DISP, editBody("Check in at the north gate with your CDL."));
 	eq("the room follows the driver's account spelling", changedEvents(w).slice(-1).map((s) => s.room), ["driver:test  driver a"]);
@@ -1560,6 +1563,304 @@ test("§12 wiring: the runtime gets the ownership check, its 503 and a driver-ro
 	const wiring = wiringBlock();
 	ok("loadBelongsToDriver and sentIfLoadOwnershipUnverified are handed in", /\bloadBelongsToDriver,/.test(wiring) && /\bsentIfLoadOwnershipUnverified,/.test(wiring));
 	ok("the driver event goes to driverRoom(findDriverAccountSpelling(name) || name)", /emitToDriver: \(name, event, payload\) => io\.to\(driverRoom\(findDriverAccountSpelling\(name\) \|\| name\)\)\.emit\(event, payload\)/.test(wiring));
+});
+
+// ── §13 decisions 37, 38 and 40 ───────────────────────────────────────────────
+const NEW_NAME = "CARRIER_ACCOUNT_NUMBERS_DENY_SECRET";
+const OLD_NAME = "CARRIER_ACCOUNT_NUMBERS_DENY";
+
+test("§13 38 the deny list is read only from CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: the old name alone leaves everything inert, with one warning per start naming both and no value", async ({ eq, ok }) => {
+	useClock();
+	const rt = require(RUNTIME);
+	eq("the runtime's names", [rt.DENY_LIST_SETTING, rt.RETIRED_DENY_LIST_SETTING], [NEW_NAME, OLD_NAME]);
+	const f = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const oldOnly = { ...ON, [OLD_NAME]: DENY };
+	delete oldOnly[NEW_NAME];
+	const w = await world({ env: oldOnly, files: [f] });
+	eq("the sweep is inert", (await w.service.sweep()).ran, false);
+	for (const [m, u] of ROUTES) eq(`${m} ${u} -> 404`, (await w.call(m, u, SA, m === "GET" ? undefined : {})).status, 404);
+	eq("no Gemini call, no Drive list", [w.calls.gemini, w.calls.list], [0, 0]);
+	const ignored = w.logs.filter((l) => l.includes(`${OLD_NAME} is ignored`));
+	eq("one warning that the old name is ignored", ignored.length, 1);
+	ok("...naming the name it is read from", ignored.length === 1 && ignored[0].includes(NEW_NAME), ignored);
+	ok("no log line holds the value", !w.logs.some((l) => l.includes(DENY_DIGITS)), w.logs);
+	const both = await world({ env: { ...ON, [OLD_NAME]: "X5550001" } });
+	eq("with the new name set the feature runs, and the old name is still named as ignored", [(await both.call("GET", API, SA)).status, both.logs.filter((l) => l.includes(`${OLD_NAME} is ignored`)).length], [200, 1]);
+	const quiet = await world();
+	eq("no warning when the old name is unset", quiet.logs.filter((l) => l.includes(OLD_NAME)).length, 0);
+	ok("the old name's value is never read as a deny value", !rt.readConfig({ RATECON_DRIVER_INSTRUCTIONS_ENABLED: "true", [OLD_NAME]: DENY }).enabled);
+});
+
+test("§13 38 every replica rule refuses the new name: the secret-name rule (as in every version since #432), the boot refusal, and pull.sh's check for both names", async ({ eq, ok }) => {
+	const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
+	ok("SECRET_NAME_RE matches it", rules.SECRET_NAME_RE.test(NEW_NAME) && rules.isSecretName(NEW_NAME));
+	const v = rules.classifySetting(NEW_NAME, DENY, { readByApp: new Set([NEW_NAME]) });
+	eq("never copied, even when listed as read: refused as a secret by name", [v.copy, v.rule], [false, "secret: name contains SECRET"]);
+	eq("a replica refuses to start while it is set", rules.outboundCredentialsSet({ [NEW_NAME]: DENY }), [NEW_NAME]);
+	ok("both names are on the never-copied list", rules.CARRIER_ACCOUNT_SETTINGS.includes(NEW_NAME) && rules.CARRIER_ACCOUNT_SETTINGS.includes(OLD_NAME));
+	const pull = fs.readFileSync(path.join(ROOT, "scripts", "replica", "pull.sh"), "utf8");
+	const m = /"\$NODE_BIN" -e '([^']*CARRIER_ACCOUNT_NUMBERS_DENY[^']*)' "\$REPO\/lib\/replica-rules\.js"/.exec(pull);
+	ok("pull.sh's check names both", !!m && m[1].includes(`"${NEW_NAME}"`) && m[1].includes(`"${OLD_NAME}"`), m && m[1]);
+	if (!m) return;
+	const { spawnSync } = require("child_process");
+	const older = path.join(os.tmpdir(), `rc37-rules-${process.pid}.js`);
+	// Rules that judge the new name by neither its SECRET nor the never-copied list.
+	const src = fs.readFileSync(path.join(ROOT, "lib", "replica-rules.js"), "utf8");
+	const weakened = src.replace(/const SECRET_NAME_PARTS = Object\.freeze\(\[[^\]]*\]\);/, 'const SECRET_NAME_PARTS = Object.freeze(["KEY"]);').replace(`"${NEW_NAME}", `, "");
+	ok("the weakened copy differs in both places", weakened !== src && !weakened.includes(`"${NEW_NAME}"`));
+	fs.writeFileSync(older, weakened);
+	try {
+		eq("this checkout's rules pass", spawnSync(process.execPath, ["-e", m[1], path.join(ROOT, "lib", "replica-rules.js")], { encoding: "utf8" }).status, 0);
+		ok("rules that would copy the new name are refused", spawnSync(process.execPath, ["-e", m[1], older], { encoding: "utf8" }).status !== 0);
+	} finally {
+		fs.rmSync(older, { force: true });
+	}
+});
+
+test("§13 40 a re-issue that drops a published critical requirement waits for staff even when no driver opened the load: pending with its reason, no driver event, the published version stays", async ({ eq, ok }) => {
+	const clock = useClock();
+	const a = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const w = await world({ env: ON2, files: [a] });
+	await w.service.sweep();
+	const first = w.row();
+	eq("published, never shown to a driver", [!!first.published_at, first.driver_shown_at], [true, ""]);
+	const dropped = cleanExtraction();
+	dropped.loadRequirements = dropped.loadRequirements.filter((x) => x.category !== "high_value");
+	const b = driveFile(`Load ${LOAD_ID} Rate Con Revised.pdf`, READABLE_B);
+	w.files.push(b);
+	w.gemini.push(geminiAnswer(dropped));
+	clock.t += 5 * 60 * 1000;
+	await w.service.sweep();
+	await w.settle();
+	const after = w.row();
+	eq("the published payload stays", [after.payload === first.payload, after.published_at === first.published_at], [true, true]);
+	ok("the re-issue waits in pending, without the high-value item", !!after.pending_payload && !after.pending_payload.includes("HIGH VALUE"), after.pending_payload);
+	eq("its reasons", JSON.parse(after.pending_reasons), ["critical_dropped", "rate_con_changed"]);
+	eq("ledger pending", w.ledger(b.meta.id).state, "pending");
+	eq("no driver event for the pending reading (only the first publish sent one)", changedEvents(w).length, 1);
+	const g = await w.call("GET", API, DISP);
+	ok("staff see the reason in words", g.body.pending && g.body.pending.reasons.some((r) => r.code === "critical_dropped" && /critical requirement/.test(r.text)), g.body.pending);
+	const d = await w.call("GET", DAPI, DRIVER);
+	ok("the driver is still served the high-value item", d.status === 200 && JSON.stringify(d.body).includes("HIGH VALUE"), d.body);
+	// A re-issue that keeps every critical category still replaces as before.
+	const kept = cleanExtraction();
+	kept.stops[0].instructions = [];
+	const c = driveFile(`Load ${LOAD_ID} Rate Con Revised Again.pdf`, READABLE_C);
+	const w2 = await world({ files: [a] });
+	await w2.service.sweep();
+	w2.files.push(c);
+	w2.gemini.push(geminiAnswer(kept));
+	clock.t += 5 * 60 * 1000;
+	await w2.service.sweep();
+	eq("a re-issue keeping every critical category replaces (no driver read it, nobody reviewed it)", [w2.row().pending_payload, w2.ledger(c.meta.id).state], ["", "done"]);
+});
+
+const LOCKS = "/api/driver-instructions/edit-locks";
+const SA2 = { id: 7, username: "admin_two", role: "Super Admin" };
+const LOCKED_MESSAGE = "Your instruction edits are locked. Ask a Super Admin to clear the lock.";
+const lockRows = (w) => w.db.prepare("SELECT user_id, username, role FROM driver_instructions_edit_locks ORDER BY user_id").all();
+// Every way the refused value could show: the value, its digits, any 4 of its digits in a
+// row (a last 4 among them), its length, the refused field's position.
+function refusedValueTrace(text) {
+	const s = String(text);
+	const out = [];
+	if (s.includes(DENY) || s.includes(DENY_DIGITS)) out.push("value");
+	for (let i = 0; i + 4 <= DENY_DIGITS.length; i++) if (s.includes(DENY_DIGITS.slice(i, i + 4))) out.push(`digits ${DENY_DIGITS.slice(i, i + 4)}`);
+	if (/\blength\b|\bdigits?\b|\[\d+\]|references|position/i.test(s)) out.push("length or position");
+	return out;
+}
+
+test("§13 37 the first deny-list refusal alerts at once: in-app and email name the person, the load's last 4, the time and the lock, and hold no part of the refused value", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	const r = await w.call("PUT", API, DISP, editBody("Check in with the guard.", `9${DENY_DIGITS}5`));
+	await w.settle();
+	eq("refused as before: 400, rule number, the field kind only", [r.status, r.body.code, r.body.rule, r.body.field], [400, "INSTRUCTIONS_CONTENT_NOT_ALLOWED", "number", "references"]);
+	eq("one in-app notice, to super-admin only", w.sockets.map((s) => [s.room, s.event]), [["super-admin", "dispatch-notification"]]);
+	const n = w.sockets[0].payload;
+	eq("the notice: a Super Admin-only dispatch notice whose metadata names the person, the load's last 4, the time, locked; nothing else",
+		[n.type, Object.keys(n).sort(), n.metadata], ["driver-instructions-lock", ["body", "metadata", "title", "type"], { userId: 2, username: "disp_test", role: "Dispatcher", loadLast4: "0345", at: "2026-10-22T15:00:00Z", locked: true, rule: "number" }]);
+	ok("its title and body name the person, the load, the Eastern time and the lock", n.title === "Driver instructions: disp_test's edits are locked" && /disp_test \(Dispatcher\)/.test(n.body) && n.body.includes("0345") && /Oct 22, 2026, 11:00\s?AM EDT/.test(n.body) && /locked/.test(n.body), n);
+	eq("stored once as that notice", w.db.prepare("SELECT type, title, body FROM dispatch_notifications").all(), [{ type: n.type, title: n.title, body: n.body }]);
+	eq("one email, to the admin inbox", w.emails.map((e) => [e.to, e.subject]), [["admin-inbox@example.test", "Driver instructions: a refused number locked a user's edits"]]);
+	const html = w.emails[0].html;
+	ok("the email names the person, the load, the Eastern time and the lock", html.includes("disp_test") && html.includes("(id 2)") && html.includes("Dispatcher") && html.includes("0345") && /Oct 22, 2026, 11:00\s?AM EDT/.test(html) && /locked/.test(html), html);
+	eq("the email holds no part of the refused value, its length or its position", refusedValueTrace(html), []);
+	eq("nor the notice", refusedValueTrace(JSON.stringify(n)), []);
+	eq("the hit log and the lock: the person and the load's last 4 only", [w.db.prepare("SELECT user_id, role, load_last4, at FROM driver_instructions_number_hits").all(), lockRows(w)],
+		[[{ user_id: 2, role: "Dispatcher", load_last4: "0345", at: "2026-10-22T15:00:00Z" }], [{ user_id: 2, username: "disp_test", role: "Dispatcher" }]]);
+	const lockAudit = w.audits().filter((a) => a.action === "edit_locked");
+	eq("the lock is audited by code", lockAudit.map((a) => [a.username, a.entity, a.entity_id, a.details]), [["disp_test", "driver_instructions", LOAD_ID, '{"code":"INSTRUCTIONS_EDIT_LOCKED","rule":"number"}']]);
+	const rows = w.allRows().filter((x) => !x.startsWith("load_driver_instructions") && !/^audit_trail .*"action":"edit_refused"/.test(x));
+	eq("no table row holds any part of the refused value (the refusal's own audit row keeps its path, as since #559)", rows.filter((x) => refusedValueTrace(x).some((t) => t !== "length or position")), []);
+	eq("no log line either", w.logs.filter((l) => refusedValueTrace(l).length), []);
+	eq("the response neither", refusedValueTrace(r.text).filter((t) => t !== "length or position"), []);
+});
+
+// GET /api/dispatch-notifications and PUT .../read, lifted from server.js over `db`
+// (broker-contact handling stubbed: its own runner covers it).
+function dispatchNoticeRoutes(db) {
+	const handlers = {};
+	const app = { get: (p, ...h) => { handlers[`GET ${p}`] = h[h.length - 1]; }, put: (p, ...h) => { handlers[`PUT ${p}`] = h[h.length - 1]; } };
+	const deps = lift.closure(SRC, { roots: ["noticeTypeScope"], provided: [], denied: ["app", "io", "server", "db"] }).text;
+	const routes = [
+		lift.liftRoute(SRC, 'app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+		lift.liftRoute(SRC, 'app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+	].join("\n");
+	new Function("app", "db", "requireRole", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "staffDispatchNotice", "brokerContact", "currentShownLoadIdIndex", `${deps}\n${routes}`)(
+		app, db, () => null, true, (n) => n, { fullDispatchNotice: (n) => n }, () => null);
+	const call = (key) => async (user, body = {}) => {
+		const out = { code: 200, body: null };
+		const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
+		await handlers[key]({ session: { user }, body, query: {}, params: {} }, res);
+		return out;
+	};
+	return { get: call("GET /api/dispatch-notifications"), read: call("PUT /api/dispatch-notifications/read") };
+}
+
+test("§13 37 M1 the lock alert is a saved Super Admin-only dispatch notice: a Super Admin sees it in GET /api/dispatch-notifications and live; a Dispatcher neither sees it nor marks it read", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	w.db.prepare("INSERT INTO dispatch_notifications (type, title, body, metadata) VALUES ('new-load', 'New Load 771200400', 'x', '{}')").run();
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	await w.settle();
+	eq("live: one dispatch-notification, to the super-admin room only", w.sockets.map((s) => [s.room, s.event, s.payload.type]), [["super-admin", "dispatch-notification", "driver-instructions-lock"]]);
+	const rt = require(RUNTIME);
+	const r = dispatchNoticeRoutes(w.db);
+	const types = (out) => (out.body.notifications || []).map((x) => x.type);
+	const sa = await r.get(SA);
+	const disp = await r.get(DISP);
+	eq("a Super Admin sees it, unread", [sa.code, types(sa), sa.body.unreadCount], [200, [rt.LOCK_NOTICE_TYPE, "new-load"], 2]);
+	eq("a Dispatcher doesn't, nor counts it", [disp.code, types(disp), disp.body.unreadCount], [200, ["new-load"], 1]);
+	const lockId = w.db.prepare("SELECT id FROM dispatch_notifications WHERE type = ?").get(rt.LOCK_NOTICE_TYPE).id;
+	await r.read(DISP, { ids: [lockId] });
+	await r.read(DISP, {});
+	eq("a Dispatcher's mark-read (by id, or all) leaves it unread for the Super Admins", [w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, (await r.get(SA)).body.unreadCount], [0, 1]);
+	await r.read(SA, { ids: [lockId] });
+	eq("a Super Admin marks it read", w.db.prepare("SELECT read FROM dispatch_notifications WHERE id = ?").get(lockId).read, 1);
+	ok("server.js serves the runtime's type to Super Admins only", /const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object\.freeze\(\["driver-instructions-lock"\]\);/.test(SRC) && rt.LOCK_NOTICE_TYPE === "driver-instructions-lock");
+});
+
+test("§13 37 the alert's load reference is withheld when the Load ID's own digits overlap a deny value", async ({ eq }) => {
+	useClock();
+	const w = await world({ env: { ...ON, CARRIER_ACCOUNT_NUMBERS_DENY_SECRET: `${DENY}, 9990345` } });
+	insertRow(w, cleanExtraction());
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	await w.settle();
+	eq("the notice and the hit log carry no load reference", [w.sockets[0].payload.metadata.loadLast4, w.sockets[0].payload.body.includes("0345"), w.db.prepare("SELECT load_last4 FROM driver_instructions_number_hits").get().load_last4], ["", false, ""]);
+	eq("the email says withheld", [/Load \(last 4 of its Load ID\): withheld/.test(w.emails[0].html), w.emails[0].html.includes("0345")], [true, false]);
+});
+
+test("§13 37 a locked person can't write instructions by any route: 423 INSTRUCTIONS_EDIT_LOCKED with the message, nothing written, refusal audited by code; reads still answer with editLocked; others unaffected", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction(), { status: "needs_review", published: false, shown: false });
+	w.db.prepare("UPDATE load_driver_instructions SET pending_payload = ?, pending_reasons = '[\"rate_con_changed\"]' WHERE load_key = ?").run(JSON.stringify(cleanExtraction()), LOAD_ID);
+	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', ?, ?)").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
+	eq("before: editLocked false", (await w.call("GET", API, DISP)).body.editLocked, false);
+	eq("the refused save", (await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`))).status, 400);
+	const before = JSON.stringify(w.row());
+	const versions = () => w.db.prepare("SELECT COUNT(*) AS n FROM load_driver_instructions_versions").get().n;
+	const v0 = versions();
+	const writes = [["PUT", API, editBody("Check in with the guard and show your CDL.")], ["POST", `${API}/review`, {}], ["POST", `${API}/accept-pending`, { action: "accept" }], ["POST", `${API}/accept-pending`, { action: "keep" }], ["POST", `${API}/re-extract`, {}]];
+	for (const [m, u, b] of writes) {
+		const r = await w.call(m, u, DISP, b);
+		eq(`${m} ${u.replace(API, "")}: 423 with the code and message only`, [r.status, r.body], [423, { error: LOCKED_MESSAGE, code: "INSTRUCTIONS_EDIT_LOCKED" }]);
+	}
+	eq("an unknown load answers 423 too, before any sheet read", (await w.call("PUT", "/api/loads/779999999/driver-instructions", DISP, editBody("x"))).status, 423);
+	eq("nothing written, no Gemini call", [JSON.stringify(w.row()) === before, versions() === v0, w.calls.gemini], [true, true, 0]);
+	ok("each refusal audited by code only", w.audits().filter((a) => a.action === "edit_locked_refused").every((a) => a.details === '{"code":"INSTRUCTIONS_EDIT_LOCKED"}') && w.audits().some((a) => a.action === "edit_locked_refused"), w.audits());
+	const g = await w.call("GET", API, DISP);
+	eq("a read still answers, with editLocked true", [g.status, g.body.editLocked, g.body.status], [200, true, "needs_review"]);
+	eq("another Dispatcher: not locked, can write", [(await w.call("GET", API, DISP2)).body.editLocked, (await w.call("POST", `${API}/review`, DISP2, {})).status], [false, 200]);
+	// A rate con the locked person drops: the load is created elsewhere; its instructions aren't read.
+	const other = await world({ rows: [ROWS[2]] });
+	other.db.prepare("INSERT INTO driver_instructions_edit_locks (user_id, username, role, locked_at) VALUES (2, 'disp_test', 'Dispatcher', '2026-10-22T15:00:00Z')").run();
+	eq("drag-and-drop by the locked person: no extraction, nothing stored", [await other.service.afterDropzone({ loadId: OTHER_ID, base64: READABLE.toString("base64"), user: DISP }), other.calls.gemini, storedCount(other)], [null, 0, 0]);
+	ok("...logged by code", other.logs.some((l) => l.includes("drag-and-drop extraction skipped (edit_locked)")), other.logs);
+	// A lock set while the rate con is read (the same person's refused save) stops the re-read's write.
+	const race = await world();
+	fs.mkdirSync(path.join(race.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(race.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
+	race.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', ?, ?)").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
+	race.onGemini = () => race.db.prepare("INSERT INTO driver_instructions_edit_locks (user_id, username, role, locked_at) VALUES (2, 'disp_test', 'Dispatcher', '2026-10-22T15:00:00Z')").run();
+	const rr = await race.call("POST", `${API}/re-extract`, DISP, {});
+	eq("a lock set during the read: 423, nothing written", [rr.status, rr.body.code, storedCount(race)], [423, "INSTRUCTIONS_EDIT_LOCKED", 0]);
+});
+
+test("§13 37 clearing a lock: Super Admin only, never their own (403 LOCK_SELF_CLEAR), audited (who, whose, when); the person writes again; no expiry", async ({ eq, ok }) => {
+	const clock = useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	const clear = (id) => `${LOCKS}/${id}/clear`;
+	eq("the list starts empty", (await w.call("GET", LOCKS, SA)).body, { locks: [] });
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	clock.t += 60 * 1000;
+	await w.call("PUT", API, SA, editBody(`Give the gate ${DENY} on arrival.`));
+	eq("both locked", lockRows(w), [{ user_id: 1, username: "admin_test", role: "Super Admin" }, { user_id: 2, username: "disp_test", role: "Dispatcher" }]);
+	for (const [label, user] of [["Dispatcher", DISP2], ["locked Dispatcher", DISP], ["Driver", DRIVER], ["Investor", INVESTOR]]) {
+		eq(`${label}: list 403, clear 403`, [(await w.call("GET", LOCKS, user)).status, (await w.call("POST", clear(2), user, {})).status], [403, 403]);
+	}
+	eq("signed out: 401", [(await w.call("GET", LOCKS, null)).status, (await w.call("POST", clear(2), null, {})).status], [401, 401]);
+	const list = await w.call("GET", LOCKS, SA2);
+	eq("a Super Admin lists every lock with when it was set", list.body, { locks: [
+		{ userId: 2, username: "disp_test", role: "Dispatcher", lockedAt: "2026-10-22T15:00:00Z" },
+		{ userId: 1, username: "admin_test", role: "Super Admin", lockedAt: "2026-10-22T15:01:00Z" },
+	] });
+	eq("a locked Super Admin can't clear their own lock", [(await w.call("POST", clear(1), SA, {})).status, (await w.call("POST", clear(1), SA, {})).body.code], [403, "LOCK_SELF_CLEAR"]);
+	eq("...nor write instructions", (await w.call("POST", `${API}/review`, SA, {})).status, 423);
+	clock.t += 30 * 24 * 60 * 60 * 1000;
+	eq("no expiry: still locked 30 days later", (await w.call("PUT", API, DISP, editBody("Check in with the guard and show your CDL."))).status, 423);
+	const c = await w.call("POST", clear(2), SA, {});
+	eq("a locked Super Admin may still clear someone else's lock", [c.status, c.body.cleared, c.body.locks.map((l) => l.userId)], [200, true, [1]]);
+	const a = w.audits().filter((x) => x.action === "edit_lock_cleared");
+	eq("audited: who cleared it, whose lock, when it was set (and the row's time is when)", a.map((x) => [x.username, x.role, x.entity, x.entity_id, JSON.parse(x.details)]),
+		[["admin_test", "Super Admin", "driver_instructions", "user:2", { userId: 2, username: "disp_test", role: "Dispatcher", lockedAt: "2026-10-22T15:00:00Z" }]]);
+	eq("the person writes again", (await w.call("PUT", API, DISP, editBody("Check in with the guard and show your CDL."))).status, 200);
+	eq("clearing again: 404 LOCK_NOT_FOUND", [(await w.call("POST", clear(2), SA2, {})).status, (await w.call("POST", clear(2), SA2, {})).body.code], [404, "LOCK_NOT_FOUND"]);
+	eq("a malformed id: 404, nothing cleared", [(await w.call("POST", clear("1 OR 1=1"), SA2, {})).status, (await w.call("POST", clear("0"), SA2, {})).status, lockRows(w).length], [404, 404, 1]);
+	eq("another Super Admin clears the first one's", [(await w.call("POST", clear(1), SA2, {})).status, lockRows(w)], [200, []]);
+	const again = await w.call("PUT", API, DISP, editBody(`Show t ${EN_DASH} ${DENY_DIGITS} on arrival.`));
+	await w.settle();
+	eq("a hit after a clear locks again and alerts again", [again.status, lockRows(w).map((l) => l.user_id), w.sockets.filter((s) => s.event === "dispatch-notification").length], [400, [2], 3]);
+	const off = await world({ env: { ...ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" } });
+	eq("flag off: both lock routes 404", [(await off.call("GET", LOCKS, SA)).status, (await off.call("POST", clear(2), SA, {})).status], [404, 404]);
+	eq("the answers hold no part of any refused value", w.responses.flatMap(refusedValueTrace).filter((t) => t !== "length or position"), []);
+});
+
+test("§13 37 L1 a clear whose audit row can't be written answers 500 LOCK_CLEAR_NOT_AUDITED and keeps the lock", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	w.db.exec("CREATE TRIGGER no_clear_audit BEFORE INSERT ON audit_trail WHEN NEW.action = 'edit_lock_cleared' BEGIN SELECT RAISE(ABORT, 'audit refused'); END;");
+	const r = await w.call("POST", `${LOCKS}/2/clear`, SA, {});
+	eq("500 with its code", [r.status, r.body.code], [500, "LOCK_CLEAR_NOT_AUDITED"]);
+	eq("the lock stays, and no clear is recorded", [lockRows(w).map((l) => l.user_id), w.audits().filter((a) => a.action === "edit_lock_cleared").length], [[2], 0]);
+	eq("the person is still locked", (await w.call("POST", `${API}/review`, DISP, {})).status, 423);
+	ok("logged by code", w.logs.some((l) => l.includes("lock not cleared: its audit row was not written")), w.logs);
+	w.db.exec("DROP TRIGGER no_clear_audit");
+	eq("once the audit row can be written, the clear goes through", [(await w.call("POST", `${LOCKS}/2/clear`, SA, {})).status, lockRows(w), w.audits().filter((a) => a.action === "edit_lock_cleared").length], [200, [], 1]);
+});
+
+test("§13 37 L2 a Super Admin account created after the lock was set (or whose creation can't be read) can't clear it: 403 LOCK_CLEAR_NEWER_ACCOUNT", async ({ eq }) => {
+	const clock = useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	await w.call("PUT", API, SA, editBody(`Give the gate ${DENY} on arrival.`));
+	clock.t += 60 * 1000;
+	w.db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (8, 'admin_new', 'x', 'Super Admin', '2026-10-22 15:01:00')").run();
+	const fresh = { id: 8, username: "admin_new", role: "Super Admin" };
+	const r = await w.call("POST", `${LOCKS}/1/clear`, fresh, {});
+	eq("an account created after the lock: 403 with its own code, the lock stays", [r.status, r.body.code, lockRows(w).map((l) => l.user_id)], [403, "LOCK_CLEAR_NEWER_ACCOUNT", [1]]);
+	w.db.prepare("UPDATE users SET created_at = '2026-10-22 15:00:00' WHERE id = 8").run();
+	eq("created in the same second as the lock: refused too", (await w.call("POST", `${LOCKS}/1/clear`, fresh, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
+	eq("an account the users table doesn't hold: refused", (await w.call("POST", `${LOCKS}/1/clear`, { id: 99, username: "ghost", role: "Super Admin" }, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
+	eq("a Super Admin created before the lock clears it", [(await w.call("POST", `${LOCKS}/1/clear`, SA2, {})).status, lockRows(w)], [200, []]);
 });
 
 if (!fs.existsSync(RUNTIME)) {

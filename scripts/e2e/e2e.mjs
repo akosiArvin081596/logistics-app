@@ -11895,7 +11895,8 @@ async function leaseSection() {
 // ---------------------------------------------------------------- driver instructions (DI1-DI6)
 // The staff screen of the rate-con driver instructions (plan PR 3): a Dispatcher opens
 // an active load's detail and sees the Driver instructions section (DI1); an edit
-// holding the server's deny value is refused with the field kind only (DI2); Mark
+// holding the server's deny value is refused with the field kind only (DI2) and locks
+// the Dispatcher's instruction edits until a Super Admin clears the lock (DI2b); Mark
 // reviewed works (DI3); a pending re-issue shows side by side and Keep current clears
 // it (DI4); the section at 390 x 844 is one pane with no sideways scroll (DI5);
 // clean-up (DI6).
@@ -11962,6 +11963,7 @@ async function instructionsSection() {
     ['DI3', 'Mark reviewed'],
     ['DI4', 'A pending re-issue side by side; Keep current'],
     ['DI5', 'The section at 390 x 844'],
+    ['DI2b', 'The refusal locked the Dispatcher; a Super Admin clears the lock'],
   ]
   if (!CREDS.dispatcher) { for (const [s, t] of TITLES) skip(s, t, 'the logins file has no dispatcher login (run setup-db.cjs)'); return }
   if (!DB_PATH || !LOCAL) { for (const [s, t] of TITLES) skip(s, t, 'needs DB_PATH and a server on this machine (the made-up instructions are planted in the copy)'); return }
@@ -11973,6 +11975,7 @@ async function instructionsSection() {
   let key = ''
   let planted = false
   let hitsBefore = 0
+  let lockedBefore = false
   try {
     await login(page, 'Step DI1 — Dispatcher', CREDS.dispatcher.username, CREDS.dispatcher.password, '/dashboard')
     const probe = await api(page, 'GET', '/api/loads/QA-DI-NO-SUCH-LOAD/driver-instructions')
@@ -12022,6 +12025,7 @@ async function instructionsSection() {
     const codesBefore = (dash.activeJobs || []).filter((r) => Array.isArray(r._instructionsReview)).length
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
     hitsBefore = ddb.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM driver_instructions_number_hits').get().n
+    lockedBefore = !!ddb.prepare('SELECT 1 FROM driver_instructions_edit_locks WHERE user_id = ?').get(Number(CREDS.dispatcher.userId))
     ddb.prepare(`INSERT INTO load_driver_instructions (load_key, load_id, payload, status, review_reasons, review_counts, source, created_at, updated_at)
       VALUES (?, ?, ?, 'needs_review', ?, ?, 'e2e_seed', ?, ?)`).run(key, load, JSON.stringify(DI_SEED), JSON.stringify(['unusual_content', 'not_cross_checked']), JSON.stringify({ unusual_content: 1 }), now, now)
     planted = true
@@ -12089,6 +12093,47 @@ async function instructionsSection() {
         observed: `${Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' ')}; shown: "${shown}"`, verdict: verdict(ok), shot: s,
       })
       await form.getByRole('button', { name: 'Cancel' }).click()
+    }
+
+    // ---- DI2b: that refusal locked the Dispatcher (decision 37); a Super Admin clears it
+    {
+      const uid = Number(CREDS.dispatcher.userId)
+      const lockRow = () => ddb.prepare('SELECT user_id FROM driver_instructions_edit_locks WHERE user_id = ?').get(uid)
+      const sec = await diOpen(page, load)
+      const lockedMsg = sec.locator('[data-testid="di-locked"]')
+      const checks = {
+        lockStored: !!lockRow(),
+        message: await lockedMsg.waitFor({ state: 'visible', timeout: 15000 }).then(async () => (await lockedMsg.innerText()).trim() === 'Your instruction edits are locked. Ask a Super Admin to clear the lock.', () => false),
+        noEditControls: (await sec.getByRole('button', { name: 'Edit', exact: true }).count()) === 0 && (await sec.getByRole('button', { name: 'Mark reviewed' }).count()) === 0,
+      }
+      await caption(page, 'Step DI2b — the Dispatcher\'s instruction edits are locked')
+      const s = await diShot(page, 'di2b-locked')
+      const notes = []
+      if (CREDS.superAdmin) {
+        const sa = await freshPage(ADMIN_VP)
+        try {
+          await login(sa.page, 'Step DI2b — Super Admin clears the lock', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
+          const ssec = await diOpen(sa.page, load)
+          const row = ssec.locator('[data-testid="di-lock-row"]').filter({ hasText: CREDS.dispatcher.username })
+          checks.listed = await row.waitFor({ state: 'visible', timeout: 15000 }).then(() => true, () => false)
+          notes.push(`lock list shot ${await diShot(sa.page, 'di2b-lock-list')}`)
+          const [resp] = await Promise.all([
+            sa.page.waitForResponse((r) => r.request().method() === 'POST' && /\/edit-locks\/\d+\/clear$/.test(pathOf(r.url())), { timeout: 30000 }),
+            row.getByRole('button', { name: 'Clear lock' }).click(),
+          ])
+          checks.cleared = resp.status() === 200 && !lockRow()
+        } finally { await sa.ctx.close().catch(() => {}) }
+      } else {
+        notes.push('no Super Admin login: the lock was removed from the copy directly')
+        ddb.prepare('DELETE FROM driver_instructions_edit_locks WHERE user_id = ?').run(uid)
+      }
+      const ok = Object.values(checks).every(Boolean)
+      record({
+        step: 'DI2b', title: TITLES[5][1],
+        expected: 'a lock row for the Dispatcher; the section shows "Your instruction edits are locked. Ask a Super Admin to clear the lock." instead of Edit / Mark reviewed; a Super Admin sees the Dispatcher in the lock list and Clear lock answers 200 and removes the lock',
+        observed: `${Object.entries(checks).map(([k, b]) => `${k}=${b}`).join(' ')}${notes.length ? `; ${notes.join('; ')}` : ''}`, verdict: verdict(ok), shot: s,
+      })
+      await diOpen(page, load)
     }
 
     // ---- DI3: Mark reviewed
@@ -12195,6 +12240,8 @@ async function instructionsSection() {
         notes.push(`instructions rows removed: ${ddb.prepare('DELETE FROM load_driver_instructions WHERE load_key = ?').run(key).changes}`)
         notes.push(`version rows removed: ${ddb.prepare('DELETE FROM load_driver_instructions_versions WHERE load_key = ?').run(key).changes}`)
         notes.push(`refused-number rows removed: ${ddb.prepare('DELETE FROM driver_instructions_number_hits WHERE id > ?').run(hitsBefore).changes}`)
+        // DI2's refusal locked the Dispatcher (decision 37); DI2b clears it, this is the fallback.
+        if (!lockedBefore) notes.push(`edit locks removed: ${ddb.prepare('DELETE FROM driver_instructions_edit_locks WHERE user_id = ?').run(Number(CREDS.dispatcher.userId)).changes}`)
         ok = !ddb.prepare('SELECT 1 FROM load_driver_instructions WHERE load_key = ?').get(key)
       }
     } catch (e) { ok = false; notes.push(`clean-up error: ${e.message}`) }

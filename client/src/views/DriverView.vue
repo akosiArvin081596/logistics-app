@@ -99,10 +99,11 @@
     <!-- NORMAL DRIVER UI — shown when fully onboarded (or no onboarding record) -->
     <template v-else>
     <!-- Welcome / Activation Modal — shown once when a driver first lands here after becoming fully onboarded -->
-    <div v-if="showWelcomeModal" class="welcome-overlay" @click.self="dismissWelcome">
-      <div class="welcome-card">
+    <div v-if="showWelcomeModal" class="welcome-overlay" tabindex="-1" @click.self="dismissWelcome" @keydown.esc="dismissWelcome">
+      <div class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+        <button ref="welcomeCloseBtn" type="button" class="welcome-close" aria-label="Close" @click="dismissWelcome">&times;</button>
         <div class="welcome-icon">&#127881;</div>
-        <h2 class="welcome-title">Welcome to the Team!</h2>
+        <h2 id="welcome-title" class="welcome-title">Welcome to the Team!</h2>
         <p class="welcome-sub">Hey <b>{{ driverName }}</b> — you're now an official LogisX driver.</p>
         <div class="welcome-checklist">
           <div class="welcome-check"><span class="wc-icon">&#9989;</span> Onboarding documents signed</div>
@@ -360,7 +361,7 @@ import 'vant/es/popup/style'
 import 'vant/es/nav-bar/style'
 import 'vant/es/steps/style'
 import 'vant/es/step/style'
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDriverStore } from '../stores/driver'
@@ -432,6 +433,7 @@ const showFilters = ref(false)
 const detailRowIndex = ref(null)
 const assignedNotification = ref(null)
 const showWelcomeModal = ref(false)
+const welcomeCloseBtn = ref(null)
 const respondingLoadIds = reactive(new Set())
 function isResponding(load) {
   const loadIdCol = findCol(driverStore.headers.jobTracking, /load.?id|job.?id/i)
@@ -526,6 +528,11 @@ function dismissWelcome() {
   if (!key) return
   try { localStorage.setItem(key, new Date().toISOString()) } catch { /* ignore */ }
 }
+// Focus moves into the card when it opens, so the keyboard reaches it at once and
+// Escape (handled on the overlay) closes it.
+watch(showWelcomeModal, (open) => {
+  if (open) nextTick(() => welcomeCloseBtn.value?.focus())
+})
 // If a driver is on the onboarding lock screen when the admin uploads their drug test,
 // the store refreshes, isOnboarding flips to false — surface the celebration at that moment too.
 watch(isOnboarding, (v, old) => {
@@ -1283,6 +1290,7 @@ onUnmounted(() => {
 .ob-next-steps p { margin-bottom: 0.4rem; }
 
 /* Welcome / Activation Modal */
+.welcome-overlay:focus { outline: none; }
 .welcome-overlay {
   position: fixed;
   inset: 0;
@@ -1294,6 +1302,13 @@ onUnmounted(() => {
   justify-content: center;
   z-index: 500;
   padding: 1rem;
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  /* A card taller than the window (a short phone, large text) scrolls here
+     instead of being cut off; the card's margin: auto centers it only while
+     it fits, so its top is never pushed off the screen. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   animation: welcome-fade 0.3s ease-out;
 }
 @keyframes welcome-fade {
@@ -1306,6 +1321,13 @@ onUnmounted(() => {
   padding: 2rem 1.75rem 1.75rem;
   max-width: 380px;
   width: 100%;
+  margin: auto;
+  /* Never taller than the window inside the overlay's padding; the card's own
+     content scrolls when it doesn't fit. 100vh first for browsers without dvh. */
+  max-height: calc(100vh - 2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - 2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  position: relative;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(16, 185, 129, 0.2);
   text-align: center;
   animation: welcome-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1314,6 +1336,25 @@ onUnmounted(() => {
   from { transform: scale(0.85); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
 }
+.welcome-close {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #475569;
+  font-size: 1.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.welcome-close:hover { background: rgba(15, 23, 42, 0.06); }
+.welcome-close:focus-visible { outline: 2px solid #10b981; outline-offset: 2px; }
 .welcome-icon {
   font-size: 3.5rem;
   line-height: 1;
@@ -1809,6 +1850,8 @@ onUnmounted(() => {
   justify-content: center;
   z-index: 1000;
   padding: 1rem;
+  /* Scrolls instead of cutting the dialog off on a short window or large text. */
+  overflow-y: auto;
 }
 .confirm-dialog {
   background: var(--surface, #fff);
@@ -1816,6 +1859,7 @@ onUnmounted(() => {
   padding: 1.5rem;
   max-width: 320px;
   width: 100%;
+  margin: auto;
 }
 .confirm-title {
   font-weight: 700;
