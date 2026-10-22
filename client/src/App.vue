@@ -66,7 +66,11 @@ const showSidebar = computed(() => {
 .main.no-sidebar {
   margin-left: 0;
   width: 100%;
-  padding: 0;
+  /* Sidebar-less pages (driver, sign-in, apply, invest, tracking) are kept
+     clear of the notch in landscape here; their own fixed headers and bars pad
+     the top and bottom (index.html viewport-fit=cover). The insets are 0
+     where the device reports none. */
+  padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
   height: 100vh;
 }
 /* Mobile: sidebar overlays instead of pushing, so main takes the full
@@ -81,8 +85,8 @@ const showSidebar = computed(() => {
    the drawer header has its own close X. */
 .mobile-menu-btn {
   position: fixed;
-  top: 0.6rem;
-  left: 0.6rem;
+  top: max(0.6rem, env(safe-area-inset-top, 0px));
+  left: max(0.6rem, env(safe-area-inset-left, 0px));
   width: 44px;
   height: 44px;
   border-radius: 10px;

@@ -2006,7 +2006,7 @@ async function submitOnboarding() {
   cursor: pointer;
 }
 .photo-overlay-close {
-  position: absolute; top: 1rem; right: 1.5rem;
+  position: absolute; top: max(1rem, env(safe-area-inset-top, 0px)); right: max(1.5rem, env(safe-area-inset-right, 0px));
   font-size: 2rem; color: #fff; background: none; border: none;
   cursor: pointer; z-index: 1001;
 }

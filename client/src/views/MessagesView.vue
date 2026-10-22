@@ -249,11 +249,6 @@ onUnmounted(() => {
   }
   :deep(.msg-back-btn) { display: inline-flex; align-items: center; }
 
-  /* Sticky input bar + iOS safe-area. padding-bottom picks up the home
-     indicator inset; on non-iOS devices env() returns 0. */
-  :deep(.msg-chat-input) {
-    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0));
-  }
   :deep(.msg-chat-header) {
     display: flex;
     align-items: center;

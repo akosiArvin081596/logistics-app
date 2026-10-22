@@ -12,7 +12,9 @@
     <div v-else-if="fleetWide" class="empty-state">Per-truck figures are per investor. Open an investor's portal to see each truck's figures.</div>
     <div v-else-if="trucks.length === 0" class="empty-state">No trucks in database yet.</div>
 
-    <table v-else class="fleet-table">
+    <!-- Scrolls sideways on its own: the page clips overflow (.admin-page). -->
+    <div v-else class="table-wrapper">
+    <table class="fleet-table">
       <thead>
         <tr>
           <th></th>
@@ -204,6 +206,7 @@
         </tr>
       </tfoot>
     </table>
+    </div>
     <!-- One note for the split and the lease: the server takes no costs per
          truck, it divides the fleet's take-home across the trucks by the revenue
          each one's loads produced (see the Est. Your Revenue dialog). A lease adds
@@ -556,7 +559,7 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 }
 .fleet-table th.clickable-header:hover { color: var(--accent); }
 .fleet-table th.clickable-header:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent);
+  outline: 2px solid var(--accent); outline-offset: -2px; color: var(--accent);
 }
 .info-marker {
   display: inline-flex; align-items: center; justify-content: center;

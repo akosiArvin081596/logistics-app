@@ -1437,7 +1437,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem max(1rem, env(safe-area-inset-right, 0px)) 0.75rem max(1rem, env(safe-area-inset-left, 0px));
   background: #fef2f2;
   border-bottom: 2px solid #fca5a5;
   color: #991b1b;

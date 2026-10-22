@@ -249,7 +249,7 @@ async function handleLogout() {
 
 /* Collapsed state overrides */
 .sidebar.collapsed {
-  width: 64px;
+  width: calc(64px + env(safe-area-inset-left, 0px));
 }
 .sidebar.collapsed .sidebar-header {
   padding: 0.75rem 0.5rem;
