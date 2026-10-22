@@ -139,7 +139,7 @@ const fuelChip = computed(() => {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
-  padding: 0.75rem 1rem;
+  padding: 0.75rem max(1rem, env(safe-area-inset-right, 0px)) 0.75rem max(1rem, env(safe-area-inset-left, 0px));
   padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
   display: flex;
   align-items: center;

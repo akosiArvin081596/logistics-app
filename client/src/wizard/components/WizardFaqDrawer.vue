@@ -212,7 +212,7 @@ watch(() => props.open, (next) => {
 
 @media (max-width: 1024px) {
   .faq-drawer {
-    right: 24px;
+    right: max(24px, env(safe-area-inset-right, 0px));
     top: 96px;
     bottom: auto;
     width: calc(100vw - 48px);
@@ -230,6 +230,7 @@ watch(() => props.open, (next) => {
     max-width: none;
     height: 70vh;
     border-radius: 18px 18px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
 @media (prefers-reduced-motion: reduce) {
