@@ -305,6 +305,9 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 		eq("§3 a Super Admin: 200", [sa.status, sa.body.ok, sa.body.stored], [200, true, "2026-10-06"]);
 		eq("§3 one person row of the current value, role and user id", w.cellRows("900000301").filter((r) => r.source === "person"), [{ source: "person", value: "10/6/2026 7:00:00", actor: "Super Admin#1" }]);
 		eq("§3 one audit row: load / pickup_confirmed, the value only", w.audits, [{ role: "Super Admin", action: "pickup_confirmed", entity: "load", entityId: "900000301", details: JSON.stringify({ value: "10/6/2026 7:00:00" }) }]);
+		const again = await w.mark("Dispatcher", 2, { rowIndex: 2, loadId: "900000301" });
+		eq("§3 confirming again: 200, already confirmed, no second person row or audit row",
+			[again.status, again.body.alreadyConfirmed, w.cellRows("900000301").filter((r) => r.source === "person").length, w.audits.length], [200, true, 1, 1]);
 		const disp = await w.mark("Dispatcher", 2, { rowIndex: 3, loadId: "900000555-[contact withheld]" });
 		eq("§3 a Dispatcher naming a withheld Load ID as served: 200 and one audit row", [disp.status, w.audits.length, w.audits[1] && w.audits[1].role], [200, 2, "Dispatcher"]);
 		eq("§3 the Dispatcher's person row", w.cellRows("900000555-ops@example.test").filter((r) => r.source === "person").map((r) => r.actor), ["Dispatcher#2"]);

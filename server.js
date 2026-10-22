@@ -49650,7 +49650,8 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 //   months are never edited; that variant shows no button).
 // - Writes no sheet cell: a "person" row of the current value in load_cell_writes (the
 //   person-edit hold's record, so the date counts as a person's from then on), then the
-//   audit entry load / pickup_confirmed with the value only.
+//   audit entry load / pickup_confirmed with the value only. A date that is already a
+//   person's answers 200 alreadyConfirmed and records nothing.
 function pickupConfirmedGate(req, res, next) {
 	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return res.status(404).json({ error: "Not found" });
 	return next();
@@ -49720,10 +49721,16 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 				code: "PERIOD_FINALIZED",
 			});
 		}
-		recordLoadCellWrite(key, loadCellColumnName(headers, headers[pickupCol]), stored, "person", { actor: rateConPickupActor(req) });
+		const column = loadCellColumnName(headers, headers[pickupCol]);
+		const day = pickupConfirmation.cellDay(stored) || null;
+		// Already a person's date (confirmed before, or corrected): nothing new to record.
+		if (personEditHold.personSet(stored, loadCellWriteRows(key, column)).set === true) {
+			return res.json({ ok: true, loadId: sentId, stored: day, alreadyConfirmed: true });
+		}
+		recordLoadCellWrite(key, column, stored, "person", { actor: rateConPickupActor(req) });
 		logAudit(req, "pickup_confirmed", "load", raw, JSON.stringify({ value: stored.slice(0, 200) }));
 		notifyChange("dashboard");
-		return res.json({ ok: true, loadId: sentId, stored: pickupConfirmation.cellDay(stored) || null });
+		return res.json({ ok: true, loadId: sentId, stored: day });
 	} catch (e) {
 		console.error("[ratecon-pickup] pickup-confirmed:", e.message);
 		return res.status(500).json({ error: "The pickup date could not be marked confirmed. Try again.", code: "PICKUP_CONFIRM_FAILED" });
