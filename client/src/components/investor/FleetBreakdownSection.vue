@@ -559,7 +559,7 @@ const modalSubtitle = computed(() => MODAL_CONFIG[detailType.value]?.subtitle ||
 }
 .fleet-table th.clickable-header:hover { color: var(--accent); }
 .fleet-table th.clickable-header:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent);
+  outline: 2px solid var(--accent); outline-offset: -2px; color: var(--accent);
 }
 .info-marker {
   display: inline-flex; align-items: center; justify-content: center;

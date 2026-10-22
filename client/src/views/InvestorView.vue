@@ -607,8 +607,11 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
+  /* minmax(0, ...), not 1fr: a 1fr track grows to its widest item's
+     min-content (the 12-month chart), which pushed both sections past a
+     phone's edge, where .admin-page clips them. */
   .sections-grid, .sections-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .quick-stats {
     flex-wrap: wrap;

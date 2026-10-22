@@ -7,7 +7,10 @@
 
     <EmptyState v-if="trucks.length === 0">No trucks yet.</EmptyState>
 
-    <table v-else class="truck-table">
+    <!-- Scrolls sideways on its own: .card clips overflow, so on a phone (or
+         past the column budget below) the right-hand columns were out of reach. -->
+    <div v-else class="table-wrapper">
+    <table class="truck-table">
       <thead>
         <!-- COLUMN BUDGET — measured in a real browser with the real webfonts
              loaded, against origin/main as a baseline. The figures that decide
@@ -46,10 +49,12 @@
              bug this grid was built to fix. See the Odometer row in the view
              modal below.
 
-             ⚠️ Verifying this: probe .card, NOT the table. table.scrollWidth -
-             clientWidth reads 0 at every width on both builds — the table box
-             grows instead of scrolling and .card{overflow:hidden} swallows it
-             silently. -->
+             ⚠️ Verifying this: probe the .table-wrapper around the table, NOT the
+             table. table.scrollWidth - clientWidth reads 0 at every width — the
+             table box grows instead of scrolling. Since the wrapper went in
+             (2026-10-22) an over-budget table scrolls sideways inside it rather
+             than being clipped by .card{overflow:hidden}; wrapper.scrollWidth >
+             wrapper.clientWidth at 1280 means the budget above was overrun. -->
         <tr>
           <th>Unit #</th>
           <th>Vehicle</th>
@@ -178,6 +183,7 @@
         </template>
       </tbody>
     </table>
+    </div>
 
     <!-- Routemate link modal \u2014 picks an unlinked Routemate vehicle to bind
          to a LogisX truck. Auto-match-by-VIN tries an exact VIN match first

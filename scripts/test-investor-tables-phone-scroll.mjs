@@ -7,19 +7,26 @@
 // Expenses table (9 columns, about 702 px) sat straight inside its section with
 // no scroll box of its own, so everything right of about x=366 was clipped: an
 // investor on a phone never saw the Receipt column. My Trucks, Fleet Breakdown
-// and Legal Documents put their tables in the same place the same way.
+// and Legal Documents put their tables in the same place the same way, and the
+// Trucks page an investor reaches from My Trucks (TruckTable) sat in a .card
+// that clips. The Production / Revenue Trends row used a 1fr grid track that
+// grew to the 12-month chart's min-content and pushed both sections off a phone.
 //
-//   §1 every <table> in the investor sections rendered on the investor page sits
-//      inside an element whose class scrolls sideways (overflow-x auto/scroll),
-//      from the component's own styles or the shared .table-wrapper rule
+//   §1 every <table> in those components (and Payouts, which already scrolled)
+//      sits inside an element whose class scrolls sideways (overflow-x
+//      auto/scroll), from the component's own styles or the shared
+//      .table-wrapper rule
 //   §2 the page itself still never scrolls sideways: .admin-page keeps
 //      overflow-x: hidden, and .investor-dashboard adds no overflow of its own
+//   §3 at <= 900 px .sections-row's one column is minmax(0, 1fr); desktop keeps
+//      1fr 1fr
 //
 // The components' own markup and styles, parsed with the client's compiler and
 // postcss. No DOM, no browser.
 //   node scripts/test-investor-tables-phone-scroll.mjs
 //   EXPENSES_SECTION_VUE=/tmp/base/ExpensesSection.vue node scripts/test-investor-tables-phone-scroll.mjs   # a base copy: fails
-//   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, INVESTOR_VIEW_VUE, SHARED_CSS)
+//   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, TRUCK_TABLE_VUE,
+//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, SHARED_CSS)
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -36,6 +43,10 @@ const TABLE_FILES = [
   ['MyTrucks', process.env.MY_TRUCKS_VUE || path.join(INVESTOR, 'MyTrucks.vue')],
   ['FleetBreakdownSection', process.env.FLEET_BREAKDOWN_VUE || path.join(INVESTOR, 'FleetBreakdownSection.vue')],
   ['LegalDocumentPortal', process.env.LEGAL_DOCUMENT_PORTAL_VUE || path.join(INVESTOR, 'LegalDocumentPortal.vue')],
+  // Investors reach it from My Trucks -> /trucks; .card clips its overflow.
+  ['TruckTable', process.env.TRUCK_TABLE_VUE || path.join(SRC, 'components', 'trucks', 'TruckTable.vue')],
+  // Already scrolled on main (.table-wrap, .ld-scroll): kept here so it stays so.
+  ['PayoutsSection', process.env.PAYOUTS_SECTION_VUE || path.join(INVESTOR, 'PayoutsSection.vue')],
 ]
 const INVESTOR_VIEW_VUE = process.env.INVESTOR_VIEW_VUE || path.join(SRC, 'views', 'InvestorView.vue')
 const SHARED_CSS = process.env.SHARED_CSS || path.join(SRC, 'assets', 'shared.css')
@@ -76,11 +87,13 @@ function decls(root, selector, prop) {
 const last = (list) => list[list.length - 1]
 const SCROLLS = new Set(['auto', 'scroll'])
 // The sideways overflow a class sets: overflow-x, or the first value of the
-// overflow shorthand, whichever comes later.
+// overflow shorthand, whichever comes later. With neither, an overflow-y other
+// than visible makes the browser compute overflow-x as auto.
 function overflowX(root, cls) {
-  const values = decls(root, `.${cls}`, /^overflow(-x)?$/)
-  const v = last(values)
-  return v ? v.split(' ')[0] : undefined
+  const v = last(decls(root, `.${cls}`, /^overflow(-x)?$/))
+  if (v) return v.split(' ')[0]
+  const y = last(decls(root, `.${cls}`, 'overflow-y'))
+  return y && y !== 'visible' ? 'auto' : undefined
 }
 
 const sharedRoot = postcss.parse(fs.readFileSync(SHARED_CSS, 'utf8'))
@@ -123,9 +136,24 @@ for (const [name, file] of TABLE_FILES) {
 
 console.log('§2 the page itself never scrolls sideways')
 eq('shared.css .admin-page overflow-x', last(decls(sharedRoot, '.admin-page', 'overflow-x')), 'hidden')
+const investorView = load(INVESTOR_VIEW_VUE)
+eq('InvestorView .investor-dashboard declares no overflow', decls(investorView.root, '.investor-dashboard', /^overflow/).length, 0)
+
+console.log('§3 on a phone the Production / Revenue Trends row fits the page')
 {
-  const { root } = load(INVESTOR_VIEW_VUE)
-  eq('InvestorView .investor-dashboard declares no overflow', decls(root, '.investor-dashboard', /^overflow/).length, 0)
+  // The one-column track at <= 900 px must be allowed below its widest item's
+  // min-content (minmax(0, ...)); a bare 1fr grows to the 12-month chart.
+  const values = []
+  investorView.root.walkAtRules('media', (at) => {
+    if (!/max-width:\s*900px/.test(at.params)) return
+    at.walkRules((rule) => {
+      if (!rule.selectors.map((s) => s.trim()).includes('.sections-row')) return
+      rule.walkDecls('grid-template-columns', (d) => values.push(d.value.replace(/\s+/g, ' ').trim()))
+    })
+  })
+  ok('a max-width: 900px rule sets .sections-row grid-template-columns', values.length > 0)
+  eq('.sections-row one-column track at <= 900 px', last(values), 'minmax(0, 1fr)')
+  eq('.sections-row two columns on desktop unchanged', last(decls(investorView.root, '.sections-row', 'grid-template-columns')), '1fr 1fr')
 }
 
 if (failures.length) {
