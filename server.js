@@ -7485,15 +7485,12 @@ const rateConDvirReadings = new Map();
 // Reads one rate con's DVIR lines (base64: the PDF the route was sent) and keeps
 // them under its load number. Never throws: the extraction must not fail because
 // of it.
-function noteRateConDvir(loadNumber, base64, now = Date.now()) {
+// read: the text already read for this PDF (rateConPdfTextOf()), or null to read it here.
+function noteRateConDvir(loadNumber, base64, now = Date.now(), read = null) {
 	try {
 		const key = normLoadKey(loadNumber).slice(0, 80);
 		if (!key || typeof base64 !== "string") return;
-		const size = Math.floor(base64.length * 3 / 4);
-		let text = "";
-		if (size <= rateconDvir.MAX_PDF_BYTES) {
-			text = rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES });
-		}
+		const { text, size } = read || rateConPdfTextOf(base64);
 		const reading = rateconDvir.readRateConDvir(text, size);
 		for (const [k, v] of rateConDvirReadings) {
 			if (now - v.at < RATECON_DVIR_TTL_MS) break;
@@ -7512,6 +7509,242 @@ function rateConDvirReading(loadId, now = Date.now()) {
 	const key = normLoadKey(loadId).slice(0, 80);
 	const hit = key ? rateConDvirReadings.get(key) : undefined;
 	return hit && now - hit.at < RATECON_DVIR_TTL_MS ? hit : null;
+}
+
+// A rate con's built-in text (rateconDvir.pdfText(), each stream once, its inflating
+// capped), "" for a PDF over rateconDvir.MAX_PDF_BYTES; size: the decoded bytes. Read once
+// for the DVIR reading and the pickup reading below. Throws on bytes it can't read.
+function rateConPdfTextOf(base64) {
+	const size = Math.floor(base64.length * 3 / 4);
+	const text = size <= rateconDvir.MAX_PDF_BYTES
+		? rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES })
+		: "";
+	return { text, size };
+}
+
+// "NEEDS CONFIRMATION" PICKUPS (Arvin, 2026-10-21; plan ~/LogisX-replica/reports/
+// 2026-10-21-needs-confirmation-pickup-plan.md, Revision 3, decisions N1-N12): when a rate
+// con marks the pickup date "Needs Confirmation" (lib/ratecon-pickup-confirmation.js), the
+// load gets a Needs Review reason on the dashboard instead of the date being treated as
+// firm. Display only: nothing that pays reads it, and the app never rewrites the date.
+// - RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED (defaults OFF, /^(true|1|yes|on)$/i). Off: no
+//   reading kept, no record written, no `_review` key, no modal line, and
+//   POST /api/loads/pickup-confirmed answers 404: today's behaviour.
+// - Email path: the extract route below reads the rate con's built-in text once after its
+//   response, for the DVIR line and for this reading (noteRateConReadings()): the phrase
+//   in the text or in Gemini's Pickup Notes/Instructions, kept in memory by load number
+//   with the DVIR reading's TTL and cap, two PDFs of one load OR-ed. The extract route
+//   still writes nothing. POST /api/n8n/keep-stored-values then writes the load's
+//   ratecon_pickup_readings row (recordKeepStoredPickupReading()), never for a Pickup
+//   Appointment a hold kept.
+// - Drag-and-drop: POST /api/loads/ratecon/extract keeps the reading and the extracted
+//   Pickup Appointment in rateConPickupStash for every role (rateConStash holds fields for
+//   non-Super-Admins only) and adds the modal line; POST /api/loads/from-ratecon writes the
+//   row, and records a Pickup Appointment the person changed in the modal as a person's
+//   date in load_cell_writes (a kept one stays the rate con's, as #576 records it).
+// - Who set the sheet's date is load_cell_writes' answer (lib/person-edit-hold.js
+//   personSet()); ratecon_pickup_readings only says what the rate con said.
+// - No reading, so no badge: a restart between the extract and keep-stored-values, a
+//   failed Gemini extraction (502/503 keep none), an email with no PDF.
+const pickupConfirmation = require("./lib/ratecon-pickup-confirmation");
+const loadReviewFlags = require("./lib/load-review-flags");
+const RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED ?? "").trim());
+const RATECON_PICKUP_COLUMN_RE = /pickup.*appo|pickup.*date/i;
+const RATECON_PICKUP_READINGS_MAX_ROWS = 5000;
+const rateConPickupReadings = pickupConfirmation.createPickupReadingStore({ ttlMs: RATECON_DVIR_TTL_MS, max: RATECON_DVIR_MAX_LOADS });
+// By rateConStashKey(), like rateConNumberStash (30 min, 200 PDFs). Required here because
+// `brokerContact` is declared further down.
+const rateConPickupStash = require("./lib/broker-contact").createRateConStash();
+
+// Both readings of an email's rate con from one read of its text. Never throws.
+function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) {
+	let read = null;
+	try {
+		if (typeof base64 === "string") read = rateConPdfTextOf(base64);
+	} catch {
+		read = null; // noteRateConDvir() reads again and logs the failure
+	}
+	noteRateConDvir(loadNumber, base64, now, read);
+	if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) noteRateConPickupReading(loadNumber, read ? read.text : "", pickupNotes, now);
+}
+
+// Keeps one email rate con's pickup reading (OR-ed into the load's). Never throws.
+function noteRateConPickupReading(loadNumber, text, notes, now = Date.now()) {
+	try {
+		const key = normLoadKey(loadNumber).slice(0, 80);
+		if (!key) return;
+		rateConPickupReadings.note(key, pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" }), now);
+	} catch (e) {
+		console.warn(`[ratecon-pickup] the pickup reading was not kept (${e && e.message}); this rate con raises no Needs Confirmation reason`);
+	}
+}
+
+// The pickup reading kept for a load, or null.
+function rateConPickupReading(loadId, now = Date.now()) {
+	return rateConPickupReadings.get(normLoadKey(loadId).slice(0, 80), now);
+}
+
+// A dropped rate con's pickup reading, read now (its built-in text and Gemini's notes).
+// Never throws: bytes that can't be read leave the notes alone.
+function rateConPickupReadingOfPdf(pdfBase64, notes) {
+	let text = "";
+	try {
+		const base64 = String(pdfBase64 == null ? "" : pdfBase64).replace(/^data:application\/pdf;base64,/, "").trim();
+		if (base64) text = rateConPdfTextOf(base64).text;
+	} catch (e) {
+		console.warn(`[ratecon-pickup] a dropped rate con's text was not read (${e && e.message}); its pickup notes alone are checked`);
+	}
+	return pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" });
+}
+
+// One row per load (created on first use): what the rate con said about the pickup.
+// needs_confirmation 1 once a rate con carried the phrase (never cleared by a later one,
+// decision 12 (a)); detected_by text | notes | text+notes; source email | dropzone. No
+// rate-con text is stored. B4 adds its drop/ready/outcome columns (plan section 6). At most
+// RATECON_PICKUP_READINGS_MAX_ROWS rows, the least recently seen dropped first.
+function rateConPickupReadingsTable() {
+	if (rateConPickupReadingsTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS ratecon_pickup_readings (
+			load_key TEXT PRIMARY KEY,
+			load_id TEXT NOT NULL,
+			needs_confirmation INTEGER NOT NULL DEFAULT 0,
+			detected_by TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL
+		)
+	`);
+	rateConPickupReadingsTable.ready = true;
+}
+
+// Applies one rate con's record decision (pickupConfirmation.recordDecision()) to the load's
+// row: pickupSent the Pickup Appointment the write sends ("" for none), held true when a
+// hold kept it. Answers the action taken. Throws on a database error (the callers catch).
+function writeRateConPickupReading(loadId, reading, pickupSent, held, source, at = new Date().toISOString()) {
+	rateConPickupReadingsTable();
+	const key = loadCellKey(loadId);
+	if (!key) return "none";
+	const existing = db.prepare("SELECT needs_confirmation, detected_by FROM ratecon_pickup_readings WHERE load_key = ?").get(key) || null;
+	const d = pickupConfirmation.recordDecision({ existing, reading, pickupSent, held });
+	if (d.action === "insert") {
+		db.prepare("INSERT INTO ratecon_pickup_readings (load_key, load_id, needs_confirmation, detected_by, source, first_seen, last_seen) VALUES (?, ?, 1, ?, ?, ?, ?)")
+			.run(key, String(loadId).trim().slice(0, 200), d.by, source, at, at);
+		db.prepare("DELETE FROM ratecon_pickup_readings WHERE load_key NOT IN (SELECT load_key FROM ratecon_pickup_readings ORDER BY last_seen DESC, load_key LIMIT ?)")
+			.run(RATECON_PICKUP_READINGS_MAX_ROWS);
+	} else if (d.action === "update") {
+		db.prepare("UPDATE ratecon_pickup_readings SET needs_confirmation = ?, detected_by = ?, last_seen = ? WHERE load_key = ?")
+			.run(d.needsConfirmation ? 1 : 0, d.by, at, key);
+	}
+	return d.action;
+}
+
+// keep-stored-values' part, once it has answered (flag on): the email's own Pickup
+// Appointment as the answer sends it, with the load's pickup reading; a hold that kept the
+// date (re-issue or person hold) leaves the record untouched. Never throws.
+function recordKeepStoredPickupReading(loadId, sentValues, answered, reissueHold, personHeld) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return "off";
+	try {
+		const col = Object.keys(sentValues || {}).find((c) => RATECON_PICKUP_COLUMN_RE.test(String(c).trim()));
+		if (col === undefined) return "none";
+		const own = sentValues[col] == null ? "" : String(sentValues[col]);
+		const out = answered && answered[col] != null ? String(answered[col]) : "";
+		const held = Boolean(reissueHold) || (personHeld || []).some((h) => h && h.column === col);
+		return writeRateConPickupReading(loadId, rateConPickupReading(loadId), own.trim() ? out : "", held, "email");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (ingestion unaffected): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// The actor a person row names: role and user id, no name (as recordPersonCellEdits()).
+function rateConPickupActor(req) {
+	const user = (req && req.session && req.session.user) || {};
+	return `${String(user.role || "").slice(0, 40)}#${user.id == null ? "" : String(user.id).slice(0, 20)}`;
+}
+
+// A drag-and-drop create's pickup (flag on): the reading kept by the extract for this PDF
+// (rateConPickupStash, every role), else the PDF's own text read now; and, when the
+// extract's Pickup Appointment is known and the person changed it in the review modal,
+// that column as a person's ({ columns, actor } for recordRateConCreateCellWrites()).
+// Answers { reading, person }, or null (the flag off, or a failure). Never throws.
+function rateConCreatePickup(req, pdfBase64, stashKey, headers, fields) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return null;
+	try {
+		const held = rateConPickupStash.get(stashKey);
+		const f = fields || {};
+		const sent = f["Pickup Appointment Time"] == null ? "" : String(f["Pickup Appointment Time"]);
+		const reading = held
+			? { needsConfirmation: Boolean(held.needsConfirmation), by: String(held.by || "") }
+			: rateConPickupReadingOfPdf(pdfBase64, f["Pickup Notes/Instructions"]);
+		const changed = Boolean(held) && sent.trim() !== "" && pickupConfirmation.pickupChangedInModal(held.pickup, sent);
+		const header = (headers || []).find((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		return { reading, person: changed && header !== undefined ? { columns: [String(header).trim()], actor: rateConPickupActor(req) } : null };
+	} catch (e) {
+		console.error(`[ratecon-pickup] the create's pickup reading failed (the load is created as usual): ${(e && e.message) || e}`);
+		return null;
+	}
+}
+
+// A drag-and-drop create's pickup record (source dropzone), for the Pickup Appointment the
+// row was written with. Never throws.
+function recordRateConCreatePickupReading(loadId, headers, values, reading) {
+	try {
+		const i = (headers || []).findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const written = i >= 0 && values && values[i] != null ? String(values[i]) : "";
+		return writeRateConPickupReading(loadId, reading, written, false, "dropzone");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (the load is created as usual): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// GET /api/dashboard's Needs Confirmation codes (lib/load-review-flags.js): on the
+// request-local raw rows, before sanitizing, so a Load ID withheld from a Dispatcher still
+// gets its code. One query per table. Flag off: nothing, no row gets the key. Never throws.
+function annotateDashboardPickupReview(headers, loadIdHeader, rows) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED || loadIdHeader == null || !Array.isArray(rows)) return 0;
+	try {
+		const pickupHeader = loadReviewFlags.pickupHeaderOf(headers);
+		if (pickupHeader === null) return 0;
+		rateConPickupReadingsTable();
+		loadCellWritesTable();
+		const onBoard = new Set(rows.map((r) => (r && typeof r === "object" ? loadCellKey(r[loadIdHeader]) : "")).filter(Boolean));
+		const flagged = db.prepare("SELECT load_key, needs_confirmation FROM ratecon_pickup_readings WHERE needs_confirmation = 1").all()
+			.filter((r) => onBoard.has(r.load_key));
+		if (!flagged.length) return 0;
+		const keys = flagged.map((r) => r.load_key);
+		const marks = keys.map(() => "?").join(", ");
+		const cellRows = new Map();
+		const column = String(pickupHeader).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+		for (const r of db.prepare(`SELECT load_key, id, source, value, actor, at FROM load_cell_writes WHERE column_name = ? AND load_key IN (${marks}) ORDER BY id`).all(column, ...keys)) {
+			if (!cellRows.has(r.load_key)) cellRows.set(r.load_key, []);
+			cellRows.get(r.load_key).push(r);
+		}
+		const events = new Map();
+		for (const r of db.prepare(`SELECT load_id, new_status, changed_at, source, actor FROM load_status_history WHERE LOWER(LTRIM(TRIM(load_id), '#')) IN (${marks})`).all(...keys)) {
+			const k = loadCellKey(r.load_id);
+			if (!events.has(k)) events.set(k, []);
+			events.get(k).push(r);
+		}
+		return loadReviewFlags.annotateLoadReview({
+			headers,
+			rows,
+			loadIdHeader,
+			keyOf: loadCellKey,
+			pickup: {
+				records: new Map(flagged.map((r) => [r.load_key, r])),
+				cellRows,
+				events,
+				accountingMonths: (cells) => loadRowAccountingMonths(headers, cells),
+				isClosed: (mk) => periodWriteLocked(mk),
+				zone: APP_TIMEZONE,
+			},
+		});
+	} catch (e) {
+		console.error(`[ratecon-pickup] the dashboard's Needs Confirmation codes were not computed: ${(e && e.message) || e}`);
+		return 0;
+	}
 }
 
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
@@ -7629,9 +7862,11 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 					loadId: fields["Load Number"], unusable, fields,
 				}).catch(() => {});
 			}
-			// Read for the re-issue alert once the response below is sent.
+			// Read for the re-issue alert (and, with its flag on, the Needs Confirmation
+			// pickup reading) once the response below is sent.
 			const loadNumber = fields["Load Number"];
-			setImmediate(() => noteRateConDvir(loadNumber, base64));
+			const pickupNotes = fields["Pickup Notes/Instructions"];
+			setImmediate(() => noteRateConReadings(loadNumber, base64, pickupNotes));
 
 			// Mirror the Information Extractor output shape so the n8n
 			// Normalize Load Fields node (which reads $json.output.X) works
@@ -8308,8 +8543,11 @@ function recordPersonCellEdits(req, sheetName, headers, before, after) {
 }
 
 // A drag-and-drop create's dates (POST /api/loads/from-ratecon), recorded as the rate
-// con's ("ratecon_create", decision 5). Never throws.
-function recordRateConCreateCellWrites(loadId, headers, values) {
+// con's ("ratecon_create", decision 5). Never throws. person (the Needs Confirmation pickup
+// plan, Revision 3 item 5; only with RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED on):
+// { columns, actor }, the columns the person changed in the review modal, recorded as
+// "person" rows instead.
+function recordRateConCreateCellWrites(loadId, headers, values, person = null) {
 	try {
 		const key = loadCellKey(loadId);
 		if (!key) return 0;
@@ -8317,7 +8555,10 @@ function recordRateConCreateCellWrites(loadId, headers, values) {
 		let n = 0;
 		(headers || []).forEach((h, i) => {
 			if (!personEditHold.personHoldColumn(h)) return;
-			if (recordLoadCellWrite(key, String(h).trim(), values && values[i] != null ? String(values[i]) : "", "ratecon_create", { at })) n++;
+			const name = String(h).trim();
+			const byPerson = Boolean(person && Array.isArray(person.columns) && person.columns.includes(name));
+			const value = values && values[i] != null ? String(values[i]) : "";
+			if (recordLoadCellWrite(key, name, value, byPerson ? "person" : "ratecon_create", byPerson ? { actor: String(person.actor || ""), at } : { at })) n++;
 		});
 		return n;
 	} catch (e) {
@@ -8428,6 +8669,8 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 			found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept, held: out.held, holdReason, alsoChanged: out.changed,
 		});
 		recordKeepStoredCellWrites(key, headers, stored, body.values, out.values, person, personHeld);
+		// NEEDS CONFIRMATION PICKUPS (flag on): the pickup record (untouched when a hold kept the date)
+		recordKeepStoredPickupReading(loadId, body.values, out.values, hold, personHeld);
 		if (hold && (out.held.length || out.changed.length)) {
 			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
 		} else if (personHeld.length) {
@@ -41891,6 +42134,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		enrichLocations(unassignedJobs);
 		enrichLocations(activeJobs);
 		enrichLocations(completedJobs);
+		// Needs Review codes (`_review`, lib/load-review-flags.js): on these raw rows, before
+		// sanitizing, so a withheld Load ID still gets its code (nothing with the flag off)
+		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
 		const respUnassigned = req.session.user.role !== "Super Admin"
@@ -48657,14 +48903,27 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// person typed (brokerContact.rateConNumberStash).
 			const stashKey = brokerContact.rateConStashKey(base64);
 			brokerContact.rateConNumberStash.put(stashKey, { "Load Number": fields["Load Number"] });
+			// NEEDS CONFIRMATION PICKUPS (flag on): the pickup reading and the extracted
+			// Pickup Appointment, for every role, for the create that follows; the modal
+			// gets one more line when the rate con marks the date "Needs Confirmation".
+			const warnOpts = {};
+			if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) {
+				const reading = rateConPickupReadingOfPdf(base64, fields["Pickup Notes/Instructions"]);
+				rateConPickupStash.put(stashKey, {
+					needsConfirmation: reading.needsConfirmation,
+					by: reading.by,
+					pickup: fields["Pickup Appointment Time"] == null ? "" : String(fields["Pickup Appointment Time"]),
+				});
+				if (reading.needsConfirmation) warnOpts.pickupNeedsConfirmation = pickupConfirmation.MODAL_WARNING;
+			}
 			if (req.session.user.role !== "Super Admin") {
 				brokerContact.rateConStash.put(stashKey, fields);
 				return res.json({
 					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
-					warnings: rateconLoad.extractionWarnings(fields),
+					warnings: rateconLoad.extractionWarnings(fields, warnOpts),
 				});
 			}
-			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
+			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields, warnOpts) });
 		} catch (err) {
 			// A rejected key or an exhausted quota is the same state as having no key
 			// at all, which this route already answers 503 for six lines above — so
@@ -48992,8 +49251,13 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
 		jtCacheInvalidate();
 		// PERSON EDIT HOLD: a drag-and-drop create's dates are the rate con's (decision
-		// 5). The record never fails the create.
-		try { recordRateConCreateCellWrites(loadId, headers, values); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		// 5). The record never fails the create. NEEDS CONFIRMATION PICKUPS (flag on): a
+		// Pickup Appointment the person changed in the review modal is a person's date, and
+		// the load's pickup record is written.
+		let pickupCreate = null;
+		try { pickupCreate = rateConCreatePickup(req, pdfBase64, stashKey, headers, fields); } catch (e) { console.error("[ratecon-pickup] reading failed:", e && e.message); }
+		try { recordRateConCreateCellWrites(loadId, headers, values, pickupCreate ? pickupCreate.person : null); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		if (pickupCreate) recordRateConCreatePickupReading(loadId, headers, values, pickupCreate.reading);
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
@@ -49372,6 +49636,99 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
 }
 // </driver-instructions-wiring>
+
+// POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
+// plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
+// as it is; the dashboard's code then clears.
+// - 404 while RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED is off, before the role check.
+// - Addressed like PUT /api/data/:rowIndex: { rowIndex, loadId }, the Load ID as the caller
+//   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
+//   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
+//   only when no other row reads the same).
+// - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
+//   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
+//   months are never edited; that variant shows no button).
+// - Writes no sheet cell: a "person" row of the current value in load_cell_writes (the
+//   person-edit hold's record, so the date counts as a person's from then on), then the
+//   audit entry load / pickup_confirmed with the value only.
+function pickupConfirmedGate(req, res, next) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return res.status(404).json({ error: "Not found" });
+	return next();
+}
+
+// Whether row `rowIndex` of `all` (Job Tracking as read, headers first) is the load the
+// caller named by `sentId`, as that caller is served it.
+function pickupConfirmedRowMatches(req, all, rowIndex, sentId) {
+	const headers = all[0] || [];
+	const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (idCol < 0) return false;
+	const rowOf = (cells) => Object.fromEntries(headers.map((h, i) => [h, cells[i] == null ? "" : cells[i]]));
+	const cells = all[rowIndex - 1] || [];
+	const raw = String(cells[idCol] == null ? "" : cells[idCol]).trim();
+	if (!normLoadKey(raw)) return false;
+	const shown = String(shownLoadId(req, raw, { row: rowOf(cells) }) ?? "").trim();
+	if (shown === raw) return normLoadKey(raw) === normLoadKey(sentId);
+	if (!shown || shown.toLowerCase() !== sentId.toLowerCase()) return false;
+	let alike = 0;
+	for (let i = 1; i < all.length; i++) {
+		const c = all[i] || [];
+		const r = String(c[idCol] == null ? "" : c[idCol]).trim();
+		if (r && String(shownLoadId(req, r, { row: rowOf(c) }) ?? "").trim().toLowerCase() === shown.toLowerCase()) alike++;
+	}
+	return alike === 1;
+}
+
+app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	const body = req.body || {};
+	const rowIndex = Number(body.rowIndex);
+	const sentId = typeof body.loadId === "string" || typeof body.loadId === "number" ? String(body.loadId).trim() : "";
+	if (!Number.isInteger(rowIndex) || rowIndex < 2 || rowIndex > 1000000) {
+		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
+	}
+	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	let all;
+	try {
+		const sheets = await getSheets();
+		const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		all = (read && read.data && read.data.values) || [];
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed: Job Tracking could not be read:", e.message);
+		return res.status(503).json({ error: "Job Tracking could not be read, so nothing was recorded. Try again.", code: "JOB_TRACKING_UNREADABLE" });
+	}
+	try {
+		const headers = all[0] || [];
+		const row = all[rowIndex - 1] || [];
+		if (!pickupConfirmedRowMatches(req, all, rowIndex, sentId)) {
+			return res.status(409).json({ error: `Row ${rowIndex} no longer holds this load. Reload the dashboard and open the load again.`, code: "ROW_MOVED" });
+		}
+		const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+		const raw = String(row[idCol] == null ? "" : row[idCol]).trim();
+		const pickupCol = headers.findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const statusCol = headers.findIndex((h) => /^(job[\s._-]?)?status$/i.test(String(h == null ? "" : h).trim()));
+		const stored = pickupCol >= 0 && row[pickupCol] != null ? String(row[pickupCol]) : "";
+		rateConPickupReadingsTable();
+		const key = loadCellKey(raw);
+		const record = db.prepare("SELECT needs_confirmation FROM ratecon_pickup_readings WHERE load_key = ?").get(key);
+		const cancelled = statusCol >= 0 && CANCELED_STATUS_RE.test(String(row[statusCol] == null ? "" : row[statusCol]).trim());
+		if (!record || !Number(record.needs_confirmation) || cancelled || !stored.trim()) {
+			return res.status(409).json({ error: "This load has no unconfirmed rate-con pickup date to confirm.", code: "PICKUP_NOT_FLAGGED" });
+		}
+		const months = loadRowAccountingMonths(headers, row);
+		if (!Array.isArray(months) || !months.length || months.some((mk) => periodWriteLocked(mk))) {
+			return res.status(409).json({
+				error: "This load has a date in a closed month, or one that can't be placed in a month, so its pickup date can't be confirmed here.",
+				code: "PERIOD_FINALIZED",
+			});
+		}
+		recordLoadCellWrite(key, loadCellColumnName(headers, headers[pickupCol]), stored, "person", { actor: rateConPickupActor(req) });
+		logAudit(req, "pickup_confirmed", "load", raw, JSON.stringify({ value: stored.slice(0, 200) }));
+		notifyChange("dashboard");
+		return res.json({ ok: true, loadId: sentId, stored: pickupConfirmation.cellDay(stored) || null });
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed:", e.message);
+		return res.status(500).json({ error: "The pickup date could not be marked confirmed. Try again.", code: "PICKUP_CONFIRM_FAILED" });
+	}
+});
 
 // GET /api/documents/:loadId — Fetch all documents for a load
 //

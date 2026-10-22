@@ -1158,6 +1158,9 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		},
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The Needs Confirmation pickup codes (test-ratecon-pickup-confirmation-routes.js
+		// covers them, a withheld Load ID included): inert here, as with their flag off.
+		annotateDashboardPickupReview: () => 0,
 		console: { error: (...a) => errors.push(a.join(" ")), log() {}, warn() {} },
 	};
 	const names = Object.keys(env);
