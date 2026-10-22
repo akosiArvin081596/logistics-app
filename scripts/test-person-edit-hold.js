@@ -73,7 +73,11 @@ eq("§1 stored = an older rate-con row (failed write or overlapping run): the ma
 	const p = peh.personSet("10/14/2026 8:00:00", [row(1, "person", "10/12/2026 08:00", { actor: "Super Admin#1" })]);
 	eq("§1 (R2 L1) a manual row later edited in the sheet: a person's value (rule 2 counts person rows)", [p.set, p.via], [true, "sheet"]);
 }
-eq("§1 a blank stored cell is never a person's value", peh.personSet("  ", [row(1, "ratecon", "10/6/2026 08:00")]).set, false);
+eq("§1 (review M1) stored = the baseline (the sheet's date when the record began): the machine's value",
+	peh.personSet("10/12/2026 8:00:00", [row(1, "baseline", "10/12/2026 8:00:00"), row(2, "ratecon", "10/6/2026 08:00")]).set, false);
+eq("§1 (review M1) a baseline is a machine row: a person row after it still decides",
+	peh.personSet("10/14/2026 8:00:00", [row(1, "baseline", "10/12/2026 8:00:00"), row(2, "person", "10/14/2026 08:00", { actor: "Dispatcher#7" })]).via, "person");
+eq("§1 a blank stored cell is never a person's value",peh.personSet("  ", [row(1, "ratecon", "10/6/2026 08:00")]).set, false);
 eq("§1 the shadow sources prove nothing: only would_hold/held/format rows -> no rows",
 	peh.personSet("10/12/2026 8:00:00", [row(1, "would_hold", "10/6/2026 08:00"), row(2, "held", "10/6/2026"), row(3, "format", "10/06")]).set, false);
 eq("§1 ids decide the order, not the array's order",
@@ -153,11 +157,16 @@ eq("§4 the hold reason, one column", peh.holdReason([{ column: "Pickup Appointm
 eq("§4 the hold reason, two columns", peh.holdReason([{ column: "Pickup Appointment", part: "in the sheet after the rate con of Oct 7" }, { column: "Drop-off Appointment", part: "in LogisX by a Dispatcher on Oct 8" }]),
 	"a person corrected these dates (Pickup Appointment: in the sheet after the rate con of Oct 7; Drop-off Appointment: in LogisX by a Dispatcher on Oct 8)");
 eq("§4 the fold reason names the columns", peh.foldReason(["Pickup Appointment", " Pickup Appointment "]), "a person had corrected it (Pickup Appointment)");
-eq("§4 looser reading: the same day with and without a year is format only", peh.formatOnly("10/06 14:00", "10/6/2026 14:00:00"), true);
-eq("§4 looser reading: a two-digit year", peh.formatOnly("10/6/26 14:00", "2026-10-06 08:00"), true);
-eq("§4 looser reading: another day is not", peh.formatOnly("10/12/2026 8:00:00", "10/6/2026 08:00"), false);
-eq("§4 looser reading: another year is not", peh.formatOnly("10/6/2020 8:00", "10/6/2026 08:00"), false);
-eq("§4 looser reading: no date at all is not", peh.formatOnly("TBD", "10/6/2026"), false);
+eq("§4 looser reading: the same day with and without a year", peh.sameLooseDay("10/06 14:00", "10/6/2026 14:00:00"), true);
+eq("§4 looser reading: a two-digit year", peh.sameLooseDay("10/6/26 14:00", "2026-10-06 08:00"), true);
+eq("§4 looser reading: another day is not", peh.sameLooseDay("10/12/2026 8:00:00", "10/6/2026 08:00"), false);
+eq("§4 looser reading: another year is not", peh.sameLooseDay("10/6/2020 8:00", "10/6/2026 08:00"), false);
+eq("§4 looser reading: no date at all is not", peh.sameLooseDay("TBD", "10/6/2026"), false);
+eq("§4 (review L2) review: two readable times on the same day are a real change, not marked", peh.reviewMark("10/6/2026 14:00", "10/6/2026 8:00:00"), null);
+eq("§4 (review L2) review: two readable dates on different days, not marked", peh.reviewMark("10/12/2026 8:00:00", "10/6/2026 08:00"), null);
+eq("§4 (review L2) review: an unreadable email date on the same day is marked, same day", peh.reviewMark("10/06 14:00", "10/6/2026 14:00:00"), { sameDay: true });
+eq("§4 (review L2) review: an unreadable stored cell on another day is marked", peh.reviewMark("10/6/2026 08:00", "10/8/2026 08:00-14:00 (FCFS)"), { sameDay: false });
+eq("§4 (review L2) review: text that names no date is marked", peh.reviewMark("TBD", "10/6/2026"), { sameDay: false });
 
 // --- §5 the v1 columns -------------------------------------------------------------------
 for (const c of ["Pickup Appointment", " Pickup Appointment Time ", "Pickup Date", "Drop-off Appointment", "Drop Off Appointment", "Delivery Date", "Delivery Appointment"]) {

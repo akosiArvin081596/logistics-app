@@ -8098,8 +8098,9 @@ function keepStoredColumnsOk(obj) {
 // wording. The rule is lib/person-edit-hold.js; this is its record and its wiring.
 //
 // - load_cell_writes records, for those two columns (personEditHold.personHoldColumn()),
-//   every value keep-stored-values tells n8n to write ("ratecon"; the first email after
-//   the deploy is recorded even when it repeats the stored date), every value a
+//   every value keep-stored-values tells n8n to write ("ratecon"; the first time it sees a
+//   column, the date already on the sheet is recorded first as the app's own,
+//   "baseline"), every value a
 //   drag-and-drop create writes ("ratecon_create"), and every date a person saves through
 //   POST /api/data, PUT /api/data/:rowIndex or PUT /api/load/:loadId on Job Tracking
 //   ("person", with role and user id, no name). A stored date matching none of them was
@@ -8126,7 +8127,7 @@ const LOAD_CELL_WRITES_IDLE_DAYS = 180;
 const LOAD_CELL_KEY_MAX = 120;
 const LOAD_CELL_COLUMN_MAX = 200;
 const LOAD_CELL_VALUE_MAX = 20000;
-const LOAD_CELL_EVIDENCE_SOURCES = ["ratecon", "ratecon_create", "person"];
+const LOAD_CELL_EVIDENCE_SOURCES = ["ratecon", "ratecon_create", "baseline", "person"];
 const LOAD_CELL_SHADOW_SOURCES = ["would_hold", "held", "format"];
 
 // The record (created on first use). stored_value: the stored cell a would_hold, held
@@ -8238,24 +8239,28 @@ function personEditHoldCheck(key, headers, stored, values) {
 	return out;
 }
 
-// What keep-stored-values records once it has answered: a "ratecon" row for each held
-// column it tells n8n to write (a new load, a value that really differs from the
-// stored one, or the first sighting of a column with no record yet), then the shadow
-// rows: "held" for each date the person hold kept, "would_hold" for each date it would
-// have kept (flag off) that the answer writes, "format" for each unknown comparison the
-// answer writes. personHeld: the answer's held list when the person hold stood.
+// What keep-stored-values records once it has answered, for each held column the
+// email carries: first, when the column has no record yet, the stored non-blank cell
+// as the app's own "baseline" (R2 review M1: the date already on the sheet before the
+// record began is never taken for a person's, so two overlapping rate cons or a
+// failed n8n write can't make it look like one); then a "ratecon" row for the value it
+// tells n8n to write (a new load, or a value that really differs from the stored one);
+// then the shadow rows: "held" for each date the person hold kept, "would_hold" for
+// each date it would have kept (flag off) that the answer writes, "format" for each
+// unknown comparison the answer writes. personHeld: the answer's held list when the
+// person hold stood.
 function recordKeepStoredCellWrites(key, headers, stored, sentValues, answered, check, personHeld) {
 	try {
 		const at = new Date().toISOString();
 		for (const [col, value] of Object.entries(answered || {})) {
 			if (!personEditHold.personHoldColumn(col)) continue;
-			const out = value == null ? "" : String(value);
-			if (!out.trim()) continue;
 			const column = loadCellColumnName(headers, col);
-			const sent = sentValues[col] == null ? "" : String(sentValues[col]);
-			const wrote = !stored || personEditHold.sameCell(storedCellNamed(stored, col), out) !== true;
-			const firstSighting = !wrote && out === sent && !loadCellWriteRows(key, column).some((r) => LOAD_CELL_EVIDENCE_SOURCES.includes(r.source));
-			if (wrote || firstSighting) recordLoadCellWrite(key, column, out, "ratecon", { at });
+			const have = storedCellNamed(stored, col);
+			if (stored && have.trim() && !loadCellWriteRows(key, column).some((r) => LOAD_CELL_EVIDENCE_SOURCES.includes(r.source))) {
+				recordLoadCellWrite(key, column, have, "baseline", { at });
+			}
+			const out = value == null ? "" : String(value);
+			if (out.trim() && (!stored || personEditHold.sameCell(have, out) !== true)) recordLoadCellWrite(key, column, out, "ratecon", { at });
 		}
 		const keptByPerson = new Set((personHeld || []).map((h) => h.column));
 		const writes = (e) => String(answered[e.column] == null ? "" : answered[e.column]) === e.sent;
@@ -8391,12 +8396,21 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 		// off the decisions are only recorded ("would_hold").
 		const person = match && RATECON_REISSUE_HOLD_ENABLED && !hold ? personEditHoldCheck(key, headers, stored, body.values) : { hold: [], format: [] };
 		const personKeep = RATECON_PERSON_EDIT_HOLD_ENABLED ? person.hold : [];
-		let out = keepStoredSheetValues(stored, body.values, fallbacks, hold, personKeep);
+		let out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 		// The values going out are held to the closed months too: a blank stored
-		// date filled with one in a closed month moves the load into it. A person
-		// hold in the same answer folds into that hold of every column (R2, L3).
+		// date filled with one in a closed month moves the load into it. Checked on
+		// the answer WITHOUT the person hold first, so the person hold only ever adds
+		// holds: an email date it would keep out (a "TBD", a closed-month date) still
+		// holds every column, as it does with the flag off. Then, when the person hold
+		// keeps a date, on the answer it would really send. A person hold in the same
+		// answer as a hold of every column folds into it (R2, L3).
 		if (match && RATECON_REISSUE_HOLD_ENABLED && !(hold && hold.all)) {
-			const outgoing = reissueOutgoingHold(headers, match, out.values);
+			let outgoing = reissueOutgoingHold(headers, match, out.values);
+			if (!outgoing && !hold && personKeep.length) {
+				const kept = keepStoredSheetValues(stored, body.values, fallbacks, null, personKeep);
+				outgoing = reissueOutgoingHold(headers, match, kept.values);
+				if (!outgoing) out = kept;
+			}
 			if (outgoing) {
 				const folded = personEditHold.foldReason(personKeep.map((p) => p.column));
 				hold = { all: true, reasons: [...(hold ? hold.reasons : []), outgoing, ...(folded ? [folded] : [])] };

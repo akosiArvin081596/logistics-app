@@ -7,10 +7,14 @@
 // lib/cell-compare.js momentKey() can't read: never a hold.
 //
 // This lists those rows since a date, by Load ID suffix and column, with the stored
-// (person's) date and the email's date, and marks a "would_hold" whose two dates are
-// the same calendar day under a looser reading (personEditHold.formatOnly()) as
-// "format only". Switch-on needs zero "format" rows and zero "format only" rows (the
-// plan's R2 M2).
+// (person's) date and the email's date, and marks a "would_hold" for review when
+// either date is one momentKey() can't read (personEditHold.reviewMark(): the rule
+// may have read a format difference as a correction), saying whether the two are the
+// same calendar day under a looser reading. Two readable dates are a real change,
+// even on the same day, and are not marked. Switch-on needs zero "format" rows and
+// zero "review" rows (the plan's R2 M2, as the PR review sharpened it). Each value is
+// shown with broker contact withheld (brokerContact.redactNoticeValue()) and cut to
+// VALUE_SHOWN_MAX characters.
 //
 //   node scripts/person-edit-hold-report.js --since=2026-10-23 [--db=app.db] [--json]
 //
@@ -25,9 +29,17 @@
 const path = require("path");
 const personEditHold = require("../lib/person-edit-hold");
 const appTime = require("../lib/app-time");
+const brokerContact = require("../lib/broker-contact");
 
 const ROOT = path.join(__dirname, "..");
 const SHADOW = ["would_hold", "held", "format"];
+const VALUE_SHOWN_MAX = 40;
+
+// A cell as the report shows it: broker contact withheld whole, then cut.
+function shown(v) {
+	const s = brokerContact.redactNoticeValue(v == null ? "" : String(v)).replace(/\s+/g, " ").trim();
+	return s.length > VALUE_SHOWN_MAX ? `${s.slice(0, VALUE_SHOWN_MAX)}…` : s;
+}
 
 // --since as an ISO instant.
 function sinceInstant(since) {
@@ -59,31 +71,35 @@ function buildReport({ dbPath, since }) {
 			? db.prepare(`SELECT load_key, column_name, source, value, stored_value, at FROM load_cell_writes
 				WHERE source IN (${SHADOW.map(() => "?").join(", ")}) AND at >= ? ORDER BY at, id`).all(...SHADOW, sinceIso)
 			: [];
-		const rows = raw.map((r) => ({
-			load: suffix(r.load_key),
-			column: r.column_name,
-			source: r.source,
-			at: r.at,
-			stored: r.stored_value,
-			email: r.value,
-			formatOnly: r.source === "would_hold" && personEditHold.formatOnly(r.value, r.stored_value),
-		}));
+		const rows = raw.map((r) => {
+			const mark = r.source === "would_hold" ? personEditHold.reviewMark(r.value, r.stored_value) : null;
+			return {
+				load: suffix(r.load_key),
+				column: shown(r.column_name),
+				source: r.source,
+				at: r.at,
+				stored: shown(r.stored_value),
+				email: shown(r.value),
+				review: Boolean(mark),
+				sameDay: Boolean(mark && mark.sameDay),
+			};
+		});
 		const counts = {
 			would_hold: rows.filter((r) => r.source === "would_hold").length,
 			held: rows.filter((r) => r.source === "held").length,
 			format: rows.filter((r) => r.source === "format").length,
-			formatOnly: rows.filter((r) => r.formatOnly).length,
+			review: rows.filter((r) => r.review).length,
 		};
-		const switchOnReady = counts.format === 0 && counts.formatOnly === 0;
+		const switchOnReady = counts.format === 0 && counts.review === 0;
 		const zone = appTime.appTimeZone();
 		const when = (iso) => appTime.dateTextInZone(new Date(iso), zone, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 		const lines = [
 			`Person edit hold, shadow report since ${when(sinceIso)}${present ? "" : " (no load_cell_writes table yet)"}`,
-			`would_hold ${counts.would_hold} (format only ${counts.formatOnly}), held ${counts.held}, format ${counts.format}`,
-			...rows.map((r) => `${when(r.at)}  load ${r.load}  ${r.column}  ${r.source}${r.formatOnly ? " (format only)" : ""}: stored "${r.stored}", email "${r.email}"`),
+			`would_hold ${counts.would_hold} (to review ${counts.review}), held ${counts.held}, format ${counts.format}`,
+			...rows.map((r) => `${when(r.at)}  load ${r.load}  ${r.column}  ${r.source}${r.review ? ` (review: a date the reader can't read${r.sameDay ? ", same calendar day" : ""})` : ""}: stored "${r.stored}", email "${r.email}"`),
 			switchOnReady
-				? "Switch-on condition met: no format rows and no format-only would_hold rows."
-				: "Switch-on condition NOT met: format rows or format-only would_hold rows are listed above.",
+				? "Switch-on condition met: no format rows and no would_hold rows to review."
+				: "Switch-on condition NOT met: format rows or would_hold rows to review are listed above.",
 		];
 		return { since: sinceIso, rows, counts, switchOnReady, text: lines.join("\n") };
 	} finally {

@@ -31,7 +31,13 @@
  *   §6 the sweep retries a failed person-hold email with its own wording and gives up at 48 h;
  *      a record failure never fails the call; the record keeps 20 rows per kind; the purge.
  *   §7 scripts/person-edit-hold-report.js: lists would_hold/held/format rows by Load ID suffix and
- *      column, marks "format only", opens the database read-only.
+ *      column, marks a would_hold to review when either date can't be read (two readable times
+ *      on one day are not marked), shows values with broker contact withheld and cut to 40
+ *      characters, opens the database read-only.
+ *   Review fixes: M1 (§2) the sheet's date is the app's own baseline the first time a column is
+ *   seen, so overlapping rate cons or a failed n8n write never make it look like a person's; M2
+ *   (§5) a "TBD" or closed-month email date still holds every column with the flag on.
+ *   scripts/test-reissue-runners-person-hold-on.js runs the re-issue runners with the flag on.
  *
  * SERVER_JS=<file> runs against another copy of server.js. Pure: no server, no network.
  * Run: node scripts/test-keep-stored-person-hold.js  # exits 1 on failure
@@ -92,6 +98,7 @@ function sheetsFormat(v) {
 	return `${mo}/${da}/${y} ${h}:${String(mi).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+const SHEET_WRITES = [];
 // One world: a database, a Job Tracking, the lifted route and its helpers.
 function world({ env = {}, send = async () => true, dbWrap = null, rows = [] } = {}) {
 	const real = new Database(":memory:");
@@ -108,7 +115,13 @@ function world({ env = {}, send = async () => true, dbWrap = null, rows = [] } =
 	let sendImpl = send;
 	const routes = {};
 	const app = { post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
-	const sheets = { spreadsheets: { values: { get: async () => ({ data: { values: sheet.map((r) => r.slice()) } }) } } };
+	// Any Sheets method the route reaches but the read is recorded (SHEET_WRITES): the route
+	// must never write the sheet.
+	const noted = (target, allowed) => new Proxy(target, { get: (t, k) => {
+		if (typeof k === "string" && k !== "then" && !allowed.includes(k)) SHEET_WRITES.push(k);
+		return t[k];
+	} });
+	const sheets = { spreadsheets: noted({ values: noted({ get: async () => ({ data: { values: sheet.map((r) => r.slice()) } }) }, ["get"]) }, ["values"]) };
 	const api = new Function(...PROVIDED, `"use strict";\n${LIFTED}\nreturn { ${ROOTS.join(", ")} };`)(
 		async () => sheets, "sheet-under-test", (q, r, next) => next(), quiet,
 		{ env: { N8N_EXTRACT_SECRET: SECRET, ADMIN_NOTIFY_EMAIL: "admin@example.test", ...env } }, app, rootRequire, db,
@@ -238,8 +251,8 @@ async function section2() {
 	// L4: a load with no record whose email repeats the stored date.
 	const s = world({ env: ON, rows: [["900000212", "Steel", "10/6/2026 8:00:00", "10/8/2026 8:00:00", "Dispatched", "10/5/2026, 9:00:00 AM", "$900.00"]] });
 	const s1 = await s.email("900000212", v({ id: "900000212", details: "Steel", pu: "10/6/2026 08:00", dr: "10/8/2026 08:00", pay: "$900.00" }));
-	eq("§2 (L4) first sighting, same date: answered as sent, and seeded as the rate con's", [s1.body.held, s.cellRows("900000212", "Pickup Appointment").map((x) => [x.source, x.value])],
-		[[], [["ratecon", "10/6/2026 08:00"]]]);
+	eq("§2 (L4, review M1) first sighting, same date: answered as sent; the sheet's date seeded as the app's own baseline, nothing more",
+		[s1.body.held, s.cellRows("900000212", "Pickup Appointment").map((x) => [x.source, x.value])], [[], [["baseline", "10/6/2026 8:00:00"]]]);
 	await s.email("900000212", v({ id: "900000212", details: "Steel", pu: "10/6/2026 08:00", dr: "10/8/2026 08:00", pay: "$900.00" }));
 	eq("§2 (L4) the same date again (a row exists): nothing more recorded", s.cellRows("900000212", "Pickup Appointment").length, 1);
 	s.setCell("900000212", "Pickup Appointment", "10/7/2026 8:00:00");
@@ -249,6 +262,30 @@ async function section2() {
 	const nr = world({ env: ON, rows: [["900000213", "Wood", "10/12/2026 8:00:00", "10/14/2026 8:00:00", "Dispatched", "10/5/2026, 9:00:00 AM", "$900.00"]] });
 	const nr1 = await nr.email("900000213", v({ id: "900000213", details: "Wood", pu: "10/6/2026 08:00", dr: "10/14/2026 08:00", pay: "$900.00" }));
 	eq("§2 (decision 3) no record yet and a different date: today's rule (written)", [nr1.body.values["Pickup Appointment"], nr1.body.held, nr.sends.length], ["10/6/2026 08:00", [], 0]);
+	eq("§2 (review M1) no record yet and a different date: the baseline, then the email's date",
+		nr.cellRows("900000213", "Pickup Appointment").map((x) => [x.source, x.value]), [["baseline", "10/12/2026 8:00:00"], ["ratecon", "10/6/2026 08:00"]]);
+
+	// Review M1: two overlapping rate cons (two PDFs in one email) on a load with no record. The
+	// second read comes before the first write lands, so the sheet still holds the date from
+	// before the record: the app's own (the baseline), never a person's.
+	const PRE = ["900000217", "Steel", "10/6/2026 8:00:00", "10/8/2026 8:00:00", "Dispatched", "10/5/2026, 9:00:00 AM", "$900.00"];
+	const pre = (pu) => v({ id: "900000217", details: "Steel", pu, dr: "10/8/2026 08:00", pay: "$900.00" });
+	for (const [label, env] of [["flag on", ON], ["flag off", {}]]) {
+		const ov = world({ env, rows: [PRE] });
+		const a1 = await ov.post("900000217", pre("10/7/2026 08:00"));
+		const a2 = await ov.post("900000217", pre("10/9/2026 08:00"));
+		eq(`§2 (review M1, ${label}) two overlapping rate cons on a load with no record: no hold, each written as sent`,
+			[a1.body.held, a2.body.held, a1.body.values["Pickup Appointment"], a2.body.values["Pickup Appointment"]], [[], [], "10/7/2026 08:00", "10/9/2026 08:00"]);
+		eq(`§2 (review M1, ${label}) no would_hold, held or format row, no alert`,
+			[ov.cellRows("900000217", "Pickup Appointment").filter((x) => !["baseline", "ratecon"].includes(x.source)).length, ov.sends.length, ov.notes.length], [0, 0, 0]);
+		eq(`§2 (review M1, ${label}) recorded: the sheet's date as the baseline, then each email's date`,
+			ov.cellRows("900000217", "Pickup Appointment").map((x) => [x.source, x.value]), [["baseline", "10/6/2026 8:00:00"], ["ratecon", "10/7/2026 08:00"], ["ratecon", "10/9/2026 08:00"]]);
+	}
+	// Review M1: a failed n8n write on a load with no record (the first answer never landed).
+	const fw = world({ env: ON, rows: [PRE] });
+	await fw.post("900000217", pre("10/7/2026 08:00"));
+	const f2 = await fw.post("900000217", pre("10/7/2026 08:00"));
+	eq("§2 (review M1) a failed n8n write, then the same email again: written, no hold", [f2.body.held, f2.body.values["Pickup Appointment"], fw.sends.length], [[], "10/7/2026 08:00", 0]);
 
 	// L1: a manual row (POST /api/data) later edited in the sheet.
 	const m = world({ env: ON });
@@ -400,6 +437,27 @@ async function section5() {
 	eq("§5 (L3) escalation: the ledger rows are the re-issue's", [...new Set(w.ledger().map((x) => x.source))], ["reissue"]);
 	eq("§5 (L3) escalation: no held row of the person hold's own", w.cellRows("900000241", "Pickup Appointment").filter((x) => x.source === "held").length, 0);
 
+	// Review M2: the flag only ever adds holds. A person-corrected pickup, then an email whose
+	// pickup can't be placed ("TBD") or is in a closed month: every column held, exactly as with
+	// the flag off, the reason adding the person's correction, one re-issue alert.
+	for (const [label, pu] of [["a TBD pickup", "TBD"], ["a closed-month pickup", "9/28/2026 08:00"]]) {
+		const run = {};
+		for (const [name, env] of [["on", ON], ["off", {}]]) {
+			const x = world({ env });
+			await x.email("900000248", v({ id: "900000248", pu: "10/6/2026 08:00", dr: "10/8/2026 08:00", pay: "$3,333.33" }));
+			x.setCell("900000248", "Pickup Appointment", "10/12/2026 8:00:00");
+			run[name] = { x, r: await x.post("900000248", v({ id: "900000248", details: "Crates, 2 skids", pu, dr: "10/8/2026 08:00", pay: "$3,400.00" })) };
+		}
+		const { on, off } = run;
+		eq(`§5 (review M2) ${label}, flag on: every column comes back as stored`,
+			[on.r.body.values["Pickup Appointment"], on.r.body.values["  Payment  "], on.r.body.values.Details], ["10/12/2026 8:00:00", "$3,333.33", "Boxes"]);
+		eq(`§5 (review M2) ${label}: the same values and held columns as with the flag off`, [on.r.body.values, heldCols(on.r)], [off.r.body.values, heldCols(off.r)]);
+		check(`§5 (review M2) ${label}: the flag-off reason, plus "a person had corrected it"`,
+			off.r.body.holdReason !== "" && on.r.body.holdReason === `${off.r.body.holdReason} and a person had corrected it (Pickup Appointment)`, { on: on.r.body.holdReason, off: off.r.body.holdReason });
+		eq(`§5 (review M2) ${label}: one alert, the re-issue wording`, [on.x.sends.length, on.x.notes.length, (on.x.sends[0] || {}).subject, (on.x.notes[0] || {}).title],
+			[1, 1, "Load 900000248: a re-issued rate con was held", "Load 900000248: re-issued rate con held"]);
+	}
+
 	// L3: a value alerted as a person hold, later held as delivered: no second alert.
 	const d = world({ env: ON });
 	await d.email("900000242", v({ id: "900000242", pu: "10/6/2026 08:00", dr: "10/8/2026 08:00" }));
@@ -508,7 +566,7 @@ async function section6() {
 	const tables = k.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((t) => t.name).filter((n) => !/^sqlite_/.test(n));
 	eq("§6 the record writes no table but its own", tables, ["load_cell_writes", "load_invoice_drafts", "period_locks"]);
 	// The route still writes nothing to the sheet: the stand-in has no write method at all.
-	check("§6 the route never writes the sheet (the stand-in Job Tracking has no write method)", true);
+	eq("§6 (review L6) across every call above, the route never reached a Sheets method but the read", SHEET_WRITES, []);
 }
 
 async function section7() {
@@ -525,14 +583,22 @@ async function section7() {
 		w.api.recordLoadCellWrite("900004321", "Pickup Appointment", "10/7/2026 08:00", "held", { stored: "10/8/2026 8:00:00", at: "2026-10-21T17:00:00.000Z" });
 		w.api.recordLoadCellWrite("900002468", "Pickup Appointment", "10/1/2026 08:00", "would_hold", { stored: "10/2/2026 8:00:00", at: "2026-10-01T15:00:00.000Z" });
 		w.api.recordLoadCellWrite("900001357", "Pickup Appointment", "10/9/2026 08:00", "ratecon", { at: "2026-10-21T15:00:00.000Z" });
+		// Review L2: two readable times on the same day are a real change, not marked.
+		w.api.recordLoadCellWrite("900003579", "Pickup Appointment", "10/21/2026 08:00", "would_hold", { stored: "10/21/2026 14:00:00", at: "2026-10-21T18:00:00.000Z" });
+		// Review L4: a long cell holding contact is shown with the contact withheld, cut to 40.
+		w.api.recordLoadCellWrite("900008642", "Pickup Appointment", "10/21/2026 08:00 call ops@example.test for the appointment window please", "would_hold", { stored: "10/20/2026 8:00:00", at: "2026-10-21T19:00:00.000Z" });
 		await w.db.backup(file);
 		const before = fs.readFileSync(file);
 		const out = report.buildReport({ dbPath: file, since: "2026-10-15" });
-		eq("§7 the report lists would_hold, held and format rows since the date, by Load ID suffix and column",
-			out.rows.map((x) => [x.load, x.column, x.source, x.formatOnly]),
-			[["...1234", "Pickup Appointment", "would_hold", false], ["...5678", "Pickup Appointment", "would_hold", true], ["...9999", "Drop-off Appointment", "format", false], ["...4321", "Pickup Appointment", "held", false]]);
-		eq("§7 the report's counts and switch-on condition", [out.counts, out.switchOnReady], [{ would_hold: 2, held: 1, format: 1, formatOnly: 1 }, false]);
+		eq("§7 the report lists would_hold, held and format rows since the date, by Load ID suffix and column, marking would_hold rows to review",
+			out.rows.map((x) => [x.load, x.column, x.source, x.review, x.sameDay]),
+			[["...1234", "Pickup Appointment", "would_hold", false, false], ["...5678", "Pickup Appointment", "would_hold", true, true], ["...9999", "Drop-off Appointment", "format", false, false],
+				["...4321", "Pickup Appointment", "held", false, false], ["...3579", "Pickup Appointment", "would_hold", false, false], ["...8642", "Pickup Appointment", "would_hold", true, false]]);
+		eq("§7 the report's counts and switch-on condition", [out.counts, out.switchOnReady], [{ would_hold: 4, held: 1, format: 1, review: 2 }, false]);
 		check("§7 the text names no full Load ID", !/900001234|900005678/.test(out.text) && /\.\.\.1234/.test(out.text), out.text);
+		const long = out.rows.find((x) => x.load === "...8642") || {};
+		check("§7 (review L4) a value is shown with broker contact withheld and cut to 40 characters",
+			!/ops@example\.test/.test(out.text + JSON.stringify(out.rows)) && long.email === "10/21/2026 08:00 call [contact withheld]…", long.email);
 		check("§7 the database file is unchanged (opened read-only)", Buffer.compare(before, fs.readFileSync(file)) === 0);
 		const clean = report.buildReport({ dbPath: file, since: "2026-10-22" });
 		eq("§7 nothing since the date: the switch-on condition holds on its own rows", [clean.rows.length, clean.switchOnReady], [0, true]);
@@ -557,8 +623,9 @@ async function section7() {
 		await section4();
 		await section5();
 		await section6();
+		// §7 records its rows through the lifted recorder, so it runs only with it.
+		await section7();
 	}
-	await section7();
 	console.log(`\ntest-keep-stored-person-hold: ${passes} passed, ${failures} failed`);
 	process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error("FAILED:", e && e.stack); process.exit(1); });
