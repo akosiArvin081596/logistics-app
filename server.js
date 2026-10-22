@@ -2392,6 +2392,14 @@ try {
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
+// Who uploaded a row (2026-10-22): the uploader's user id and role, written by
+// POST /api/documents/upload. documents.driver is the FILED driver (whose load
+// document it is, documentFiledUnder()), not the uploader: an office upload is
+// filed under the load's driver. NULL = not recorded (rows written before this,
+// and rows other paths write, such as the rate-con archive). Office-only: the
+// load panel and the investor portal name their columns and send neither.
+try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_user_id INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_role TEXT DEFAULT NULL"); } catch {}
 // The hot read is "live docs for this load" (POD gate, per-load list, invoice
 // attach) and the dashboard's load_id IN (...) POD-count fan-out.
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_load_live ON documents(load_id, deleted_at)"); } catch {}
@@ -11670,9 +11678,37 @@ function isRateConDocType(type) {
 }
 
 // The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
-// read by GET /api/documents/:loadId and by guardRootLoadDocument's Driver rule,
-// so the files a driver may open cannot drift from the list they are shown.
+// read by GET /api/documents/:loadId, by guardRootLoadDocument's Driver rule and
+// by GET /api/driver/:driverName's per-load counts, so the files a driver may
+// open cannot drift from the list they are shown. For a Driver, all three also
+// keep only the rows filed under him (documentFiledUnder(), below).
 const LOAD_PANEL_DOCUMENT_FILTER = `deleted_at IS NULL AND NOT (${RATECON_DOCUMENT_SQL})`;
+
+// Is this load document filed under this driver? documents.driver is the FILED
+// driver: a Driver's upload is filed under his session name, an office upload
+// from the dashboard's load panel under the load's Job Tracking driver at the
+// time. A Driver sees a load document only when the load is his today
+// (loadBelongsToDriver(), unchanged) AND the row is filed under him, so after a
+// reassignment the earlier driver's documents stay with the office, and the new
+// driver sees his own and what the office files under him (2026-10-22). A row
+// filed under no one (an office upload to a load with no driver yet) is
+// office-only and never reaches a later driver. Names compare through
+// normalizeDriverName(), as loadBelongsToDriver() does; a blank name on either
+// side matches nothing. ONE copy, read by GET /api/documents/:loadId,
+// guardRootLoadDocument's Driver rule and GET /api/driver/:driverName's per-load
+// counts, so what a driver is shown, what he may open and what his app counts
+// cannot drift. Super Admin and Dispatcher are not narrowed by it. Pinned by
+// scripts/test-driver-docs-current-holder.js.
+//
+// To give the new driver of a relay load the earlier driver's paperwork, the
+// office attaches a copy from the load panel as BOL or Other, never as POD:
+// every live POD on a load goes on its broker invoice, so a second copy of a
+// POD prints twice.
+function documentFiledUnder(row, driverName) {
+	const want = normalizeDriverName(driverName == null ? "" : String(driverName));
+	if (!want) return false;
+	return normalizeDriverName(row && row.driver != null ? String(row.driver) : "") === want;
+}
 
 // The documents an Investor's Document Portal lists: live, not a rate con, and
 // on a driver of theirs. ONE copy, read by GET /api/investor/documents and by
@@ -11713,9 +11749,14 @@ async function guardRootLoadDocument(req, res, next, file) {
 		}
 
 		if (user.role === "Driver") {
-			const loadIds = db.prepare(
-				`SELECT DISTINCT load_id FROM documents WHERE file_name = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}`
-			).all(file).map((r) => r.load_id);
+			// The rows his Documents panel would list: filed under him
+			// (documentFiledUnder()), then whether any of THEIR loads is his
+			// today. Rows first, loads second, so one row must be both: a row
+			// filed under him on a load he does not hold, beside another
+			// driver's row on his load, opens nothing.
+			const loadIds = [...new Set(db.prepare(
+				`SELECT load_id, driver FROM documents WHERE file_name = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}`
+			).all(file).filter((r) => documentFiledUnder(r, user.driverName)).map((r) => r.load_id))];
 			if (!loadIds.length) return res.status(404).end();
 			const owned = await driverOwnsAnyLoad(loadIds, user.driverName);
 			if (sentIfLoadOwnershipUnverified(res, owned)) return;
@@ -43365,39 +43406,46 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			for (const e of driverExpenses) e.personal = personalSummaryForRole(personal[e.id], "Driver");
 		}
 
-		// Count uploaded documents per load (total + per-kind breakdown). The
-		// driver-mobile-view's DocumentUpload needs per-kind counts so BOL /
-		// Receipt / Other show "N uploaded" accurately after a reload, not just
-		// POD. _otherCount is anything that isn't one of the three known kinds.
+		// Count each load's documents (total + per kind).
+		//
+		// _podCount is the LOAD's: every live POD on it, in any letter case and
+		// whoever it is filed under. It is the rule PUT /api/driver/status applies
+		// before Delivered, so the app's Delivered step (StatusStepper.vue, the
+		// only reader of these counts) offers what the server accepts after a
+		// reassignment too. A number only: no document reaches the driver by it.
+		//
+		// The other four count what his Documents panel lists: live, not a rate
+		// con (LOAD_PANEL_DOCUMENT_FILTER), and filed under him
+		// (documentFiledUnder()). Kinds are read without letter case; _otherCount
+		// is anything that isn't POD, BOL or Receipt.
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const loadIds = loads
 			.map((l) => (loadIdCol ? l[loadIdCol] : ""))
 			.filter(Boolean);
-		const docCounts = {};
-		const podCounts = {};
-		const bolCounts = {};
-		const receiptCounts = {};
-		const otherCounts = {};
+		const docCounts = Object.create(null);
+		const podCounts = Object.create(null);
+		const bolCounts = Object.create(null);
+		const receiptCounts = Object.create(null);
+		const otherCounts = Object.create(null);
 		if (loadIds.length) {
 			const placeholders = loadIds.map(() => "?").join(",");
-			const docs = db
-				.prepare(
-					`SELECT load_id,
-						COUNT(*) as count,
-						SUM(CASE WHEN type = 'POD' THEN 1 ELSE 0 END) as pod_count,
-						SUM(CASE WHEN type = 'BOL' THEN 1 ELSE 0 END) as bol_count,
-						SUM(CASE WHEN type = 'Receipt' THEN 1 ELSE 0 END) as receipt_count,
-						SUM(CASE WHEN type NOT IN ('POD', 'BOL', 'Receipt') THEN 1 ELSE 0 END) as other_count
-					FROM documents WHERE load_id IN (${placeholders}) AND deleted_at IS NULL GROUP BY load_id`,
-				)
-				.all(...loadIds);
-			docs.forEach((d) => {
-				docCounts[d.load_id] = d.count;
-				podCounts[d.load_id] = d.pod_count;
-				bolCounts[d.load_id] = d.bol_count;
-				receiptCounts[d.load_id] = d.receipt_count;
-				otherCounts[d.load_id] = d.other_count;
-			});
+			db.prepare(
+				`SELECT load_id, COUNT(*) AS n FROM documents
+				 WHERE load_id IN (${placeholders}) AND UPPER(type) = 'POD' AND deleted_at IS NULL
+				 GROUP BY load_id`,
+			).all(...loadIds).forEach((d) => { podCounts[d.load_id] = d.n; });
+			const bump = (counts, lid) => { counts[lid] = (counts[lid] || 0) + 1; };
+			const listed = db.prepare(
+				`SELECT load_id, driver, type FROM documents
+				 WHERE load_id IN (${placeholders}) AND ${LOAD_PANEL_DOCUMENT_FILTER}`,
+			).all(...loadIds).filter((d) => documentFiledUnder(d, driverName));
+			for (const d of listed) {
+				bump(docCounts, d.load_id);
+				const kind = String(d.type == null ? "" : d.type).toUpperCase();
+				if (kind === "BOL") bump(bolCounts, d.load_id);
+				else if (kind === "RECEIPT") bump(receiptCounts, d.load_id);
+				else if (kind !== "POD") bump(otherCounts, d.load_id);
+			}
 		}
 		loads.forEach((load) => {
 			const lid = loadIdCol ? load[loadIdCol] : "";
@@ -48993,7 +49041,14 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 		// LOAD_PANEL_DOCUMENT_FILTER (live, not a rate con) is shared with the
 		// /uploads root-file guard, which lets a driver open exactly the files
 		// this list shows them.
-		const docs = db
+		//
+		// A Driver gets only the rows filed under him (documentFiledUnder(), the
+		// copy the root-file guard reads too): on a reassigned load the earlier
+		// driver's documents, OCR text included, stay with the office, and so
+		// does a row filed under no one. Super Admin and Dispatcher get every row.
+		// The column list is explicit: who uploaded a row (uploaded_by_*) is
+		// office-only and never sent here.
+		const rows = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
 				 FROM documents
@@ -49001,6 +49056,9 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 				 ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
+		const docs = req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher"
+			? rows.filter((d) => documentFiledUnder(d, req.session.user.driverName))
+			: rows;
 		res.json({ documents: docs });
 	} catch (error) {
 		console.error("Error fetching documents:", error.message);
@@ -53030,12 +53088,17 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 			ocrSource = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
 		}
 
-		// Store metadata in SQLite
+		// Store metadata in SQLite. `driver` is the FILED driver: the Driver's
+		// own session name, or the name the office's load panel sends (the
+		// load's driver; blank on a load with no driver yet, which leaves the row
+		// office-only, see documentFiledUnder()). The uploader is recorded beside
+		// it, office-only.
 		let documentId = null;
 		try {
+			const uploader = req.session.user;
 			documentId = db.prepare(
-				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text, uploaded_by_user_id, uploaded_by_role)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			).run(
 				loadId,
 				driverName || "",
@@ -53044,6 +53107,8 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 				"",
 				driveUrl,
 				"",
+				Number.isInteger(uploader.id) ? uploader.id : null,
+				typeof uploader.role === "string" && uploader.role ? uploader.role : null,
 			).lastInsertRowid;
 		} catch (dbErr) {
 			console.error("SQLite insert error:", dbErr.message);

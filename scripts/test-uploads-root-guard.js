@@ -9,7 +9,8 @@
  * which admits:
  *   Super Admin — always;
  *   a Dispatcher — anything but a rate con (they read every load's documents);
- *   a Driver   — a row their load's Documents panel lists, on a load that is theirs;
+ *   a Driver   — a row their load's Documents panel lists, on a load that is theirs:
+ *                live, not a rate con, and filed under them (documentFiledUnder());
  *   an Investor — a row their Document Portal lists;
  * and answers everyone else 404. A miss anywhere under /uploads is a 404, and
  * 404s are counted per user by uploadMissLimiter.
@@ -22,6 +23,7 @@
  * WHAT IS REAL HERE. Every piece of decision code is LIFTED from server.js and
  * run as shipped: normalizedUploadPath, uploadsPathGuard, GUARDED_UPLOAD_DIRS,
  * guardRootLoadDocument, driverOwnsAnyLoad, sentIfLoadOwnershipUnverified,
+ * documentFiledUnder, normalizeDriverName,
  * investorDocumentScope, getInvestorDriverSet, getCarrierDBFromSQLite,
  * LOAD_PANEL_DOCUMENT_FILTER, uploadMissLimiter and its constants, the
  * GET /api/documents/:loadId and GET /api/investor/documents handlers, and
@@ -125,6 +127,8 @@ const LIFTED = {
 	investorDocumentScope: liftFn("investorDocumentScope"),
 	resolvePreviewUser: liftFn("resolvePreviewUser"),
 	sentIfLoadOwnershipUnverified: liftFn("sentIfLoadOwnershipUnverified"),
+	normalizeDriverName: liftFn("normalizeDriverName"),
+	documentFiledUnder: liftFn("documentFiledUnder"),
 	driverOwnsAnyLoad: liftFn("driverOwnsAnyLoad"),
 	guardRootLoadDocument: liftFn("guardRootLoadDocument"),
 	normalizedUploadPath: liftFn("normalizedUploadPath"),
@@ -156,6 +160,9 @@ const F = {
 	CARRIER: "L400_POD_1788000000010.pdf",       // driver reached through the carrier name
 	A_RATECON_DASH: "L100_Rate-Con_1788000000013.pdf", // a root rate con whose row types it "Rate-Con"
 	NON_ASCII: `L100_POD_1788000000012${String.fromCharCode(0xE9)}.pdf`, // a root file whose name is not ASCII, no row
+	A_ON_B: "L200_Other_1788000000014.pdf",     // filed under Desoren King, on Soren King's load
+	B_ON_A: "L100_Other_1788000000015.pdf",     // filed under Soren King, on Desoren King's load
+	CROSS: "L100_BOL_1788000000016.pdf",        // ONE name: a Desoren King row on L200, a Soren King row on L100
 };
 const body = (name) => `BODY:${name}`;
 
@@ -199,6 +206,10 @@ function makeDb() {
 	add("L200", "Soren King", "BOL", F.SHARED);
 	add("L200", "SOREN KING", "Other", F.B_UPPER);
 	add("L400", "Hollis Renner", "POD", F.CARRIER);
+	add("L200", "Desoren King", "Other", F.A_ON_B);
+	add("L100", "Soren King", "Other", F.B_ON_A);
+	add("L200", "Desoren King", "BOL", F.CROSS);
+	add("L100", "Soren King", "BOL", F.CROSS);
 	db.exec(`
 		INSERT INTO users (id, username, role, company_name) VALUES
 			(50, 'inv_acme', 'Investor', 'Acme Haul'), (51, 'inv_bravo', 'Investor', ''), (52, 'inv_empty', 'Investor', '');
@@ -241,7 +252,8 @@ function compose(L) {
 	return [
 		'"use strict";',
 		...L.consts, L.isRateConDocType, L.findCol, L.getInvestorDriverSet, L.getCarrierDBFromSQLite, L.investorDocumentScope,
-		L.resolvePreviewUser, L.sentIfLoadOwnershipUnverified, L.driverOwnsAnyLoad, L.guardRootLoadDocument,
+		L.resolvePreviewUser, L.sentIfLoadOwnershipUnverified, L.normalizeDriverName, L.documentFiledUnder,
+		L.driverOwnsAnyLoad, L.guardRootLoadDocument,
 		L.normalizedUploadPath, L.uploadMissLimiter, L.uploadsPathGuard,
 		...L.mounts, L.loadDocsRoute, L.investorDocsRoute,
 		"return { uploadMissCounts, UPLOAD_MISS_MAX, UPLOAD_MISS_BURST_MAX, UPLOAD_MISS_WINDOW_MS, guardRootLoadDocument, uploadMissLimiter, RATECON_DOCUMENT_SQL, isRateConDocType };",
@@ -380,6 +392,13 @@ async function guardCall(M, user, file) {
 	}
 	ok("MEMBERSHIP: one name with rows on two loads opens for BOTH drivers",
 		served(await T.get(url(F.SHARED), U.drvA), F.SHARED) && served(await T.get(url(F.SHARED), U.drvB), F.SHARED));
+	// The row must be filed under the driver (documentFiledUnder()) AND sit on a
+	// load he holds: an earlier driver's document on a reassigned load is the
+	// office's, and a row filed under him on another driver's load is not his.
+	await expectRefused(U.drvB, F.A_ON_B, "a Driver is refused a document on HIS load that is filed under another driver (404)");
+	await expectRefused(U.drvB, F.B_ON_A, "a Driver is refused a document filed under him on a load he does not hold (404)");
+	await expectRefused(U.drvB, F.CROSS, "ONE name, another driver's row on his load and his row on another load: 404 (one row must be both)");
+	await expectRefused(U.drvA, F.CROSS, "...in both directions");
 
 	ok("an Investor reads a document of a driver on their truck", served(await T.get(url(F.A), U.inv1), F.A));
 	ok("...and of a driver reached through their carrier name", served(await T.get(url(F.CARRIER), U.inv1), F.CARRIER));
@@ -525,17 +544,30 @@ async function guardCall(M, user, file) {
 		ok("...while Super Admin's own view of the portal still lists the live one",
 			sa.some((d) => d.file_name === F.A_RATECON));
 	}
-	{
-		const r = await T.get("/api/documents/L100", U.drvA);
+	for (const [who, drv, load] of [["Driver A", U.drvA, "L100"], ["Driver B", U.drvB, "L200"]]) {
+		const r = await T.get(`/api/documents/${load}`, drv);
 		const docs = (JSON.parse(r.body).documents || []);
-		ok("Driver A: their load's Documents panel lists root documents", r.status === 200 && docs.length >= 2);
+		ok(`${who}: their load's Documents panel lists root documents`, r.status === 200 && docs.length >= 2);
 		let opened = 0;
-		for (const d of docs) if (served(await T.get(d.drive_url, U.drvA), d.file_name)) opened++;
-		ok(`Driver A: every listed document opens (${opened}/${docs.length})`, opened === docs.length);
+		for (const d of docs) if (served(await T.get(d.drive_url, drv), d.file_name)) opened++;
+		ok(`${who}: every listed document opens (${opened}/${docs.length})`, opened === docs.length);
 		const listed = new Set(docs.map((d) => d.file_name));
+		let leaked = 0;
+		for (const name of Object.values(F)) {
+			if (listed.has(name)) continue;
+			if ((await T.get(url(name), drv)).status === 200) leaked++;
+		}
+		ok(`${who}: no root file the panel does NOT list opens`, leaked === 0);
+		ok(`${who}: the panel lists only rows filed under them`,
+			docs.every((d) => d.driver.trim().toLowerCase() === drv.driverName.toLowerCase()));
+	}
+	{
+		const listed = new Set((JSON.parse((await T.get("/api/documents/L100", U.drvA)).body).documents || []).map((d) => d.file_name));
 		ok("Driver A: the panel hides the soft-deleted document and the rate con — and so does the guard",
 			!listed.has(F.A_DELETED) && !listed.has(F.A_RATECON) &&
 			refused(await T.get(url(F.A_DELETED), U.drvA), F.A_DELETED) && refused(await T.get(url(F.A_RATECON), U.drvA), F.A_RATECON));
+		ok("Driver A: the panel hides a row on his load filed under another driver — and so does the guard",
+			!listed.has(F.B_ON_A) && refused(await T.get(url(F.B_ON_A), U.drvA), F.B_ON_A));
 		ok("Driver A cannot list another driver's load (the lifted route's own check)",
 			(await T.get("/api/documents/L200", U.drvA)).status === 403);
 	}
@@ -709,6 +741,11 @@ async function guardCall(M, user, file) {
 			'if (req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher") return res.status(403).json({ error: "Forbidden" });'));
 		ok("MUTANT Dispatcher re-admitted to the rate-cons branch: a Dispatcher reads /uploads//rate-cons/<id>.pdf — so §3's 403 is load-bearing",
 			served(await M.get("/uploads//rate-cons/L100.pdf", U.disp), "rate-cons/L100.pdf"));
+	}
+	{
+		const M = await build(mutate("guardRootLoadDocument", ".filter((r) => documentFiledUnder(r, user.driverName))", ""));
+		ok("MUTANT the Driver rule without the filed-driver clause: Driver B reads a document on his load filed under Driver A — so §1's refusal is load-bearing",
+			served(await M.get(url(F.A_ON_B), U.drvB), F.A_ON_B));
 	}
 	{
 		const M = await build(mutate("guardRootLoadDocument", "if (rateCon.length) return res.status(404).end();", ""));
