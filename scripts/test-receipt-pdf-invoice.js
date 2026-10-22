@@ -263,19 +263,22 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const d = lastRender(w).data;
 		const n = notes(d);
 		const anchors = (d.receiptPages || []).map((p) => p.anchor);
-		check("T36 9 images then 2 PDFs: 10 sheets (the 10th the first PDF's), the 11th \"More receipts on file\" and never prepared, no receipt-11",
+		check("T36 9 images then 2 PDFs: 10 sheets (the 10th the first PDF's), the 11th (a PDF, which the app never opens for a driver) \"PDF receipt on file\" and never prepared, no receipt-11",
 			[anchors.length, anchors[9], (d.receiptPages || [])[9] && d.receiptPages[9].pdfPages, n[n.length - 1], cached(w, 5).length,
 				JSON.stringify(d).includes("receipt-11"), g.body && g.body.invoice ? (await pagesOf(storedFile(w, g.body.invoice.id))).length : 0],
-			[10, "receipt-10", 1, "More receipts on file: open this receipt in the app", 0, false, 12]);
+			[10, "receipt-10", 1, NOTE_PDF, 0, false, 12]);
 		w.cleanup();
 
 		const entries = Array.from({ length: 11 }, (_, i) => ({ rowId: i + 1, kind: "personal", label: `Personal expense, Store ${i + 1}, Oct 12, 2026`, cents: -100 }));
 		const rows = entries.map((e) => ({ id: e.rowId, expense_id: 700 + e.rowId }));
 		const prepared = new Map(rows.map((r, i) => [r.expense_id, i < 9 ? { status: "image", dataUri: "data:image/jpeg;base64,AAAA" } : { status: "pdf_pages", pages: 2 }]));
 		const out = layoutLib.receiptLayout(entries, rows, prepared);
-		check("T36 the layout: 10 sheets, one insert (sheet 10 of 10, 2 pages), the 11th line over the cap",
+		check("T36 the layout: 10 sheets, one insert (sheet 10 of 10, 2 pages), the 11th line (a PDF) over the cap keeps \"PDF receipt on file\"",
 			[out.pages.length, out.inserts, out.entries[10].receiptNote, out.pages[9] && out.pages[9].note],
-			[10, [{ expenseId: 710, anchor: "receipt-10", index: 10, total: 10, pages: 2 }], "More receipts on file: open this receipt in the app", "The receipt's 2 pages follow this page"]);
+			[10, [{ expenseId: 710, anchor: "receipt-10", index: 10, total: 10, pages: 2 }], NOTE_PDF, "The receipt's 2 pages follow this page"]);
+		const imageOver = layoutLib.receiptLayout(entries, rows, new Map(rows.map((r) => [r.expense_id, { status: "image", dataUri: "data:image/jpeg;base64,AAAA" }])));
+		check("T36 an image over the cap still says \"More receipts on file\" (a driver can open his image receipts in the app)",
+			imageOver.entries[10].receiptNote, "More receipts on file: open this receipt in the app");
 		const sheets = [...out.pages, { anchor: "receipt-11", header: "x", pdfPages: 1, note: "n" }];
 		const f = maps.service_invoice({ personalLines: out.entries, receiptPages: sheets });
 		check("T36 the field map and the renderer's sink keep 10 sheets (the PDF sheet with no image) and never a receipt-11",
@@ -320,8 +323,8 @@ fs.promises.readFile = function readFile(file, ...rest) {
 	section("the startup self-test and the warm-up");
 	{
 		const listen = SRC.indexOf("server.listen(PORT, BIND_HOST");
-		check("server.js runs the PDF child's self-test once listening, whatever the flags",
-			listen > 0 && /^\s*receiptPdfService\(\)\.selfTest\(\);$/m.test(SRC.slice(listen, listen + 4000)), true);
+		check("server.js runs the PDF child's self-test once listening, whatever the flags, and a setup failure cannot stop the start",
+			listen > 0 && /try \{\s*receiptPdfService\(\)\.selfTest\(\);\s*\} catch \{\s*console\.warn\(/.test(SRC.slice(listen, listen + 4000)), true);
 		const w = world();
 		putPdf(w, 1);
 		await mark(w, 1);

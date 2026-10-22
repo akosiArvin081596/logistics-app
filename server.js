@@ -27094,14 +27094,27 @@ function receiptPdfProbePaths() {
 		db: process.env.DATABASE_PATH || path.join(__dirname, "app.db"),
 	};
 }
+// Never throws: a service that cannot be set up (a cache folder it refuses) is
+// replaced by one that keeps every PDF receipt on its note, so no invoice
+// render fails because of it.
 function receiptPdfService() {
 	if (!receiptPdfService.instance) {
-		receiptPdfService.instance = receiptPdfLib.createReceiptPdfService({
-			receiptsDir: RECEIPTS_DIR,
-			cacheDir: path.join(DATA_DIR, "storage", "receipt-pdfs"),
-			probes: receiptPdfProbePaths(),
-			log: (m) => console.warn(`[receipt-pdfs] ${m}`),
-		});
+		try {
+			receiptPdfService.instance = receiptPdfLib.createReceiptPdfService({
+				receiptsDir: RECEIPTS_DIR,
+				cacheDir: path.join(DATA_DIR, "storage", "receipt-pdfs"),
+				probes: receiptPdfProbePaths(),
+				log: (m) => console.warn(`[receipt-pdfs] ${m}`),
+			});
+		} catch (err) {
+			console.warn(`[receipt-pdfs] PDF receipt pages off: ${err.message}`);
+			receiptPdfService.instance = {
+				prepare: async () => ({ status: "on_file", reason: "disabled" }),
+				merge: async () => ({ status: "failed", reason: "disabled" }),
+				selfTest: async () => ({ passed: false, problems: ["setup"], report: null, line: "" }),
+				state: () => "failed",
+			};
+		}
 	}
 	return receiptPdfService.instance;
 }
@@ -27144,7 +27157,9 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
 			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
 			sheets += 1;
-			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "over_cap" }];
+			// Past the sheet cap a PDF keeps its own note: the app does not open a
+			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
+			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
 			const res = await receiptPdfService().prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
 			return [id, res.status === "pages" ? { status: "pdf_pages", pages: res.pages, pdf: res.pdf } : { status: "pdf" }];
 		}
@@ -27167,7 +27182,7 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 		copiedBytes += p.pdf.length;
 	}
 	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
-	const inserts = layout.inserts.map((x) => ({ anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
+	const inserts = layout.inserts.map((x) => ({ expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
 	const out = { ...data, receiptPages: layout.pages };
 	if (data.personalCorrection) {
 		// A correction's line items and deductions are its lines, in the same order.
@@ -27194,7 +27209,7 @@ async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver
 	if (!first.inserts.length) return pdf;
 	const merged = await receiptPdfService().merge(pdf, first.inserts);
 	if (merged.status === "merged") return merged.pdf;
-	console.warn(`[receipt-pdfs] receipt pages not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	console.warn(`[receipt-pdfs] receipt pages for expense ${first.inserts.map((x) => x.expenseId).join(", ")} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
 	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
 	return renderPolicy(templateName, again.data);
 }
@@ -69907,7 +69922,12 @@ server.listen(PORT, BIND_HOST, async () => {
 	// The PDF receipt child's self-test, at every start whatever the flags: one
 	// line (uid, gid, groups, whether the settings file and the database are
 	// readable: yes/no only). Until it passes, every PDF receipt keeps its note.
-	receiptPdfService().selfTest();
+	// Creating the service throws on a cache folder it refuses (under uploads/).
+	try {
+		receiptPdfService().selfTest();
+	} catch {
+		console.warn("[receipt-pdfs] self-test not started; PDF receipt pages off");
+	}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);
