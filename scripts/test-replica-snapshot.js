@@ -225,8 +225,10 @@ console.log("§3 the settings export copies business settings only");
 		DRIVE_FOLDER_ID: "1Xy7-kQ2_wErT5yU8iOp3aSdF6gHjK9lZ",
 	};
 	const { copied, skipped, text } = exportSettings(prod);
-	eq("business settings are copied", copied, ["CSRF_HEADER_REQUIRED", "DRIVE_FOLDER_ID", "GEMINI_OCR_MODEL", "GMAIL_USER", "MAINTENANCE_NOTICE_MESSAGE", "PLAIN_URL", "RATECON_RECONCILE_MAILBOX", "ROUTEMATE_ENABLED"]);
+	eq("business settings are copied", copied, ["CSRF_HEADER_REQUIRED", "DRIVE_FOLDER_ID", "GEMINI_OCR_MODEL", "MAINTENANCE_NOTICE_MESSAGE", "PLAIN_URL", "ROUTEMATE_ENABLED"]);
 	const rule = (n) => (skipped.find((s) => s.name === n) || {}).rule;
+	// Decision 36: the app's Gmail account and its reconcile label are production targets.
+	for (const n of ["GMAIL_USER", "RATECON_RECONCILE_MAILBOX"]) eq(`${n} is skipped as a production target`, rule(n), "production only: names a production target");
 	for (const [n, part] of [["GEMINI_API_KEY", "KEY"], ["GMAIL_APP_PASSWORD", "PASS"], ["SESSION_SECRET", "SECRET"], ["LINXUP_WEBHOOK_TOKEN", "TOKEN"], ["N8N_WEBHOOK_SECRET", "SECRET"], ["SETUP_RECOVERY_TOKEN", "TOKEN"], ["PRIVATE_THING", "PRIVATE"], ["SMTP_HOST", "SMTP"], ["SENTRY_DSN", "DSN"], ["OAUTH_CLIENT", "AUTH"]]) {
 		eq(`${n} is skipped as a secret (name contains ${part})`, rule(n), `secret: name contains ${part}`);
 	}
@@ -250,7 +252,7 @@ console.log("§3 the settings export copies business settings only");
 	const r = spawnSync(process.execPath, [path.join(REMOTE, "settings.js"), `--app=${app}`, `--out=${path.join(out, "settings.env")}`], { encoding: "utf8" });
 	eq("settings.js exits 0", r.status, 0);
 	const cli = r.status === 0 ? JSON.parse(r.stdout) : { copied: [], skipped: [] };
-	ok("...and prints names, never a value", !/dispatch@example|gemini-2\.5|Sunday|smtp\.example|"k"|"p"|AIzaSy/.test(r.stdout) && cli.copied.length === 8);
+	ok("...and prints names, never a value", !/dispatch@example|gemini-2\.5|Sunday|smtp\.example|"k"|"p"|AIzaSy/.test(r.stdout) && cli.copied.length === 6);
 	eq("...a setting no app code reads is skipped by the allowlist", (cli.skipped.find((x) => x.name === "NOT_READ_SETTING") || {}).rule, "not read by the app");
 	eq("...and one the app reads that looks like a key is still skipped", (cli.skipped.find((x) => x.name === "REPORT_SETTING") || {}).rule, "secret: value looks like a key");
 	eq("...writing the file 0600", (fs.statSync(path.join(out, "settings.env")).mode & 0o777).toString(8), "600");
