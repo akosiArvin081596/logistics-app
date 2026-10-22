@@ -133,7 +133,7 @@ function clampScale(v) {
 // Keep the image from being dragged entirely off-screen: pan room equals how
 // far the scaled image overflows the viewport, plus a little slack so edges
 // stay comfortably reachable. clientWidth/Height are the un-transformed
-// (layout) dimensions, which the CSS already caps at 90vw/90vh.
+// (layout) dimensions, which the CSS already caps at 90vw/90dvh.
 function clampPan() {
   const img = imgRef.value
   if (!img) return
@@ -342,6 +342,8 @@ onBeforeUnmount(() => {
 .zoom-img {
   max-width: 90vw;
   max-height: 90vh;
+  /* The visible height on a phone with its toolbars showing (90vh is the fallback). */
+  max-height: 90dvh;
   border-radius: 8px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
   transform-origin: center center;
@@ -412,10 +414,10 @@ onBeforeUnmount(() => {
 
 .zoom-close {
   position: fixed;
-  top: 1rem;
-  right: 1rem;
-  width: 2.5rem;
-  height: 2.5rem;
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: calc(1rem + env(safe-area-inset-right, 0px));
+  width: 2.75rem;
+  height: 2.75rem;
   display: flex;
   align-items: center;
   justify-content: center;
