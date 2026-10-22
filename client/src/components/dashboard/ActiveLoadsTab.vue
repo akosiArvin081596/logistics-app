@@ -13,6 +13,7 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           Needs Review ({{ needsReviewCount }})
         </button>
+        <DeletedLoadsLink v-if="auth.isSuperAdmin" />
       </div>
       <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
@@ -513,6 +514,7 @@ import LoadHaulSection from './LoadHaulSection.vue'
 import DriverInstructionsSection from './DriverInstructionsSection.vue'
 import { freshInstructionCodes } from '../../lib/driverInstructionsView'
 import RateConPdfSection from './RateConPdfSection.vue'
+import DeletedLoadsLink from './DeletedLoadsLink.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'

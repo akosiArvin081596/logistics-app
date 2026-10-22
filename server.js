@@ -142,6 +142,8 @@ const rateconNormalize = require("./lib/ratecon-normalize");
 // ids to decide money — excludeDroppedLoads(), the weekly invoice — goes through
 // this one function rather than its own `.toLowerCase()`.
 const { normalizeLoadId } = require("./lib/ratecon-load");
+// The rows of GET /api/admin/deleted-loads (the Super Admin "Deleted loads" list).
+const deletedLoadsView = require("./lib/deleted-loads-view");
 const receiptDuplicates = require("./lib/receipt-duplicates");
 const expenseWindowRule = require("./lib/expense-window");
 const { geminiFailure } = require("./lib/gemini-errors");
@@ -40474,6 +40476,58 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	} catch (error) {
 		console.error("Error deleting load:", error.message);
 		res.status(500).json({ error: error.message });
+	}
+});
+
+// GET /api/admin/deleted-loads — the soft-deleted loads, newest first, for the
+// Super Admin "Deleted loads" page. A list only: nothing here restores a load.
+// Each row's route, driver and settlement months come from its Job Tracking
+// row, matched as the delete above matches (lib/deleted-loads-view.js); a
+// month is closed when period_locks says 'locked'. An unreadable sheet or lock
+// table answers 503 rather than a guessed month or an "open" that may not be.
+app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!periodLocksReadable()) {
+			return res.status(503).json({
+				error: "The month-end lock table could not be read, so closed months can't be shown. Try again in a moment.",
+				code: "PERIOD_LOCK_UNREADABLE",
+			});
+		}
+		let jobTracking;
+		try {
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Deleted loads — Job Tracking unreadable:", e.message);
+			return res.status(503).json({
+				error: "Job Tracking could not be read, so the deleted loads' routes and months can't be shown. Try again in a moment.",
+				code: "SHEET_UNREADABLE",
+			});
+		}
+		const cols = jobTrackingMonthCols(jobTracking.headers);
+		const tripCover = tripDayLockCover(jobTracking.headers);
+		if (tripCover) cols.tripCover = tripCover;
+		const originCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
+		const destCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
+		const auditStmt = db.prepare("SELECT timestamp, details FROM audit_trail WHERE entity = ? AND entity_id = ? AND action = ? ORDER BY id");
+		const deleted = db.prepare("SELECT id, load_id, row_index, deleted_at, deleted_by FROM deleted_loads ORDER BY deleted_at DESC, id DESC").all();
+		const loads = deletedLoadsView.deletedLoadRows({
+			deleted,
+			rows: jobTracking.data,
+			cols,
+			auditsFor: (loadId) => auditStmt.all("load", loadId, "delete_load"),
+			laneOf: (row) => ({
+				pickup: resolveCityState(row, "pickup", row[cols.loadIdCol], originCol ? row[originCol] : ""),
+				dropoff: resolveCityState(row, "drop", row[cols.loadIdCol], destCol ? row[destCol] : ""),
+			}),
+			normalizeLoadId,
+			loadRowPeriods,
+			isLocked,
+			timeZone: APP_TIMEZONE,
+		});
+		res.json({ loads, count: loads.length });
+	} catch (error) {
+		console.error("Error listing deleted loads:", error.message);
+		res.status(500).json({ error: "The deleted loads could not be listed." });
 	}
 });
 
