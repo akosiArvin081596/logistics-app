@@ -94,6 +94,24 @@ console.log("§1 lib/load-miles.js");
 	check("§1.8 ... and gives a lane, never a throw", hugeLanes.every((l) => typeof l === "string"), true);
 	check("§1.9 a normal address, padded with spaces, keeps its lane",
 		lane(`   4528 W Royal Ln\nIrving, TX 75063${" ".repeat(600)}`, `${" ".repeat(600)}818 Hallmark Dr, LAREDO, TX 78045`), "irving, tx 75063 - laredo, tx 78045");
+	// A hand-typed address over 500 characters whose cut lands right after a space
+	// (here a line break, then a space): ingestion bounds it (server.js
+	// boundAddressForStorage(), lifted verbatim) and calculateRatePerMile() trims it
+	// again, so the lane read back must trim after the cut too (made-up address).
+	{
+		const boundSrc = lift(/function boundAddressForStorage\(raw\) \{[\s\S]*?\n\}/g, "§1.9b boundAddressForStorage()");
+		if (boundSrc) {
+			const bound = new Function("ADDRESS_MAX_CHARS", `${boundSrc}\nreturn boundAddressForStorage;`)(500);
+			const longPickup = `1 Test Rd ${"X".repeat(488)}\n Irving, TX 75063`;
+			const drop = "818 Hallmark Dr, LAREDO, TX 78045";
+			check("§1.9b the made-up address is cut right after a space", [longPickup.length > 500, longPickup[499]], [true, " "]);
+			const okMatrix = { rows: [{ elements: [{ status: "OK", distance: { value: 160934, text: "100 mi" } }] }] };
+			const written = require("../lib/ratecon-load").calculateRatePerMile(okMatrix, {
+				"Pickup Address": bound(longPickup).value, "Drop-off Address": bound(drop).value, Rate: "1000",
+			}).details;
+			check("§1.9b ...and gets the lane ingestion wrote", lane(longPickup, drop), loadMilesLib.normLane(written));
+		}
+	}
 
 	// Job Details as the Sheets API returns it: column A's header is blank, the
 	// retired `output` column sits at the end.

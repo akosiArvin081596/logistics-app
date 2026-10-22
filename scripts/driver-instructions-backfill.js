@@ -48,16 +48,18 @@
 // or an unavailable answer or after 2 passing failures in a row (the loads left are
 // skipped as gemini_cap or gemini_stopped, for a later run). Per load it prints the last 4
 // of the Load ID, the source kind, the reference counts by type, the requirement
-// categories, the review reasons and a fingerprint of what it read (the filtered payload
-// and its reasons, hashed), never Gemini's text; then the "Apply with:" command, which
+// categories, the review reasons and a fingerprint of what it read and what writing it
+// would do (the filtered payload, its reasons and the write decision's action, status and
+// publish, hashed), never Gemini's text; then the "Apply with:" command, which
 // carries those fingerprints and names the sheet only as =env or =production.
 // --preview=<Load ID> reads that one load and also prints its driver view (re-filtered,
 // flagged items hidden: what a driver would be served once published).
 //
 // --apply needs --expect=<last 4>:<fingerprint>,... (the dry run's, or none) and writes a
 // load only when its own reading has the fingerprint the dry run printed for it: Gemini is
-// called again, and a reading that differs from what was shown is skipped as
-// changed_since_dry_run, written nowhere. It writes only: load_driver_instructions and its
+// called again, and a reading that differs from what was shown, or whose write would differ
+// (the row changed since the dry run, or while Gemini read it: decided again inside the
+// write's transaction), is skipped as changed_since_dry_run, written nowhere. It writes only: load_driver_instructions and its
 // versions, through the runtime's
 // writeExtraction() (so the publish rule is the sweep's: a clean first reading is
 // published, one with review reasons is not); the sweep's ledger
@@ -217,11 +219,18 @@ function canonical(v) {
 	if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
 	return JSON.stringify(v === undefined ? null : v);
 }
-// What a run read for a load: its filtered payload and its review reasons, hashed. The
-// dry run prints it; an apply writes a load only when its own reading has the fingerprint
-// the dry run printed (--expect).
-function fingerprintOf(payload, reasons) {
-	return crypto.createHash("sha256").update(canonical({ payload, reasons })).digest("hex").slice(0, 12);
+// The part of decideExtractionWrite()'s answer a fingerprint covers: what the write does
+// to the row and whether a driver can see it.
+function writeOf(decision) {
+	const d = decision || {};
+	return { action: String(d.action || ""), status: String(d.status || ""), publish: !!d.publish };
+}
+// What a run read for a load and what writing it would do: its filtered payload, its
+// review reasons and the write decision (action, status, publish), hashed. The dry run
+// prints it; an apply writes a load only when its own reading has the fingerprint the dry
+// run printed (--expect).
+function fingerprintOf(payload, reasons, decision) {
+	return crypto.createHash("sha256").update(canonical({ payload, reasons, write: writeOf(decision) })).digest("hex").slice(0, 12);
 }
 // --expect=<last 4>:<fingerprint>,... (or none): the loads the dry run would write.
 function parseExpect(value) {
@@ -535,7 +544,9 @@ async function run(o) {
 		const ctx = bf.contextFor(facts);
 		const filtered = di.filterInstructions(extraction, ctx);
 		const r = di.reviewReasons({ ctx, extraction, filtered, visibleText: src.text, byteLength: src.buffer.length, source: src.kind === "documents" ? "dropzone" : "drive_sweep", loadId: facts.loadId });
-		const fingerprint = fingerprintOf(filtered.payload, r.codes);
+		// What this reading would do to the row as it stood when this load's turn began.
+		const decision = di.decideExtractionWrite(current, { payload: filtered.payload, reasons: r.codes });
+		const fingerprint = fingerprintOf(filtered.payload, r.codes, decision);
 		rec.extracted = { references: referenceCounts(filtered.payload), categories: bf.payloadSummary(filtered.payload).categories, reasons: r.codes, fingerprint };
 		if (preview) rec.preview = { label: r.codes.length ? "held for review: no driver sees it until a person reviews it" : "what a driver would be served once published", payload: driverView(filtered.payload, facts) };
 		if (!filtered.payload.stops.length) {
@@ -549,9 +560,8 @@ async function run(o) {
 		}
 		const exception = r.codes.length > 0;
 		if (!apply) {
-			const d = di.decideExtractionWrite(current, { payload: filtered.payload, reasons: r.codes });
-			if (d.action === "unchanged") rec.code = "unchanged";
-			else Object.assign(rec, { decision: d, exception });
+			if (decision.action === "unchanged") rec.code = "unchanged";
+			else Object.assign(rec, { decision, exception });
 			return rec;
 		}
 		// Write only what the dry run showed: this reading's fingerprint, under this load.
@@ -567,6 +577,10 @@ async function run(o) {
 			const h = handledCode(now2);
 			if (h) return { skip: h };
 			if (holds(now2, src.sha)) return { skip: "unchanged" };
+			// Decided again on the row as it is now: a row written since this load's turn
+			// began (a sweep, a drop) would get a write the dry run never showed.
+			const again = writeOf(di.decideExtractionWrite(now2, { payload: filtered.payload, reasons: r.codes }));
+			if (canonical(again) !== canonical(writeOf(decision))) return { skip: "changed_since_dry_run" };
 			const d = bf.writeExtraction({ facts, filtered, codes: r.codes, counts: r.counts, source: SOURCE, sourceRef, sha: src.sha, actor: ACTOR });
 			if (d.action === "unchanged") return { skip: "unchanged" };
 			if (src.kind === "drive") bf.ledger(src.file, d.action === "pending" ? "pending" : "done", SOURCE, { loadKey: facts.key, sha256: src.sha, tried: true });

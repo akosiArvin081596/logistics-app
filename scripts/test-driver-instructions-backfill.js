@@ -838,6 +838,46 @@ test("§16 --apply writes only loads whose reading has the fingerprint the dry r
 	eq("--expect=none: no load written, the cursor alone", [none.code, w2.count("load_driver_instructions"), w2.count("ratecon_instruction_sweeps")], [0, 0, 1]);
 });
 
+test("§16 a row written after the dry run, or while Gemini reads during the apply, that changes the write is skipped as changed_since_dry_run: the row stays as it was", async ({ eq, ok }) => {
+	// A sweep's reading waiting for review: the dry run showed a first write (insert,
+	// published); on this row the same reading would replace it instead.
+	const sweepRow = existingRow(A, { status: "needs_review", review_reasons: "[\"unusual_content\"]" });
+	const insert = (w) => w.exec(`INSERT INTO load_driver_instructions (${Object.keys(sweepRow).join(", ")}) VALUES (${Object.keys(sweepRow).map(() => "?").join(", ")})`, ...Object.values(sweepRow));
+	const backfillAudits = (w) => w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'backfill' AND entity_id = ?", A.id)[0].n;
+	const versions = (w) => w.q("SELECT COUNT(*) AS n FROM load_driver_instructions_versions WHERE load_key = ?", A.id)[0].n;
+	const w = usual();
+	const expect = await w.expectFor([]);
+	insert(w);
+	const r = await w.run(["--apply", expect]);
+	eq("after the dry run: exit 0", r.code, 0);
+	ok("...A skipped as changed_since_dry_run", /SKIPPED changed_since_dry_run/.test(lineOf(r.out, A)), lineOf(r.out, A));
+	eq("...A's row as the sweep left it, no version or backfill audit row", [w.row(A), versions(w), backfillAudits(w)], [sweepRow, 0, 0]);
+	eq("...B, unchanged since its dry run, written", w.row(B) && w.row(B).status, "auto");
+	const w2 = usual();
+	const expect2 = await w2.expectFor([]);
+	w2.beforeAnswer = (sha) => {
+		if (sha === sha256(w2.files[0].bytes)) insert(w2);
+	};
+	const r2 = await w2.run(["--apply", expect2]);
+	eq("while Gemini reads: exit 0", r2.code, 0);
+	ok("...A skipped as changed_since_dry_run", /SKIPPED changed_since_dry_run/.test(lineOf(r2.out, A)), lineOf(r2.out, A));
+	eq("...A's row as the sweep left it, no version or backfill audit row", [w2.row(A), versions(w2), backfillAudits(w2)], [sweepRow, 0, 0]);
+	eq("...B written", w2.row(B) && w2.row(B).status, "auto");
+});
+
+test("§16 the same payload read back at apply time with a new review reason (the same write) is skipped as changed_since_dry_run", async ({ eq, ok }) => {
+	// B is a dropped rate con: a load number naming another load adds
+	// load_number_unconfirmed and leaves the payload as it was.
+	const w = usual({ answers: [[readable(B), geminiAnswer(withOther(B))]] });
+	const expect = await w.expectFor(["--write-needs-review"]);
+	ok("the dry run would write B for review", expect.includes(`${B.last4}:`), expect);
+	w.answers.set(sha256(readable(B)), geminiAnswer({ ...withOther(B), loadNumber: "771209999" }));
+	const r = await w.run(["--apply", "--write-needs-review", expect]);
+	eq("exit 0", r.code, 0);
+	ok("B skipped as changed_since_dry_run and written nowhere", /SKIPPED changed_since_dry_run/.test(lineOf(r.out, B)) && !w.row(B), lineOf(r.out, B));
+	eq("A, read as the dry run showed, written", w.row(A) && w.row(A).status, "auto");
+});
+
 // ── §17 the sheet ─────────────────────────────────────────────────────────────
 test("§17 the sheet is named by the operator; the apply command never prints a sheet ID; =production only for production's own database", async ({ eq, ok }) => {
 	const w = usual();

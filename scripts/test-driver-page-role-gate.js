@@ -907,7 +907,7 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			};
 			const page = (src = ROUTE_SRC) => buildRoute(src, { driverInstructions: svc, getJobTrackingCached: getJT });
 			const row = (key) => ddb.prepare("SELECT * FROM load_driver_instructions WHERE load_key = ?").get(key);
-			return { svc, st, read, page, row, mounted: !!driverRoute };
+			return { svc, st, read, page, row, db: ddb, mounted: !!driverRoute };
 		}
 		const said = (x) => `${x.status} ${JSON.stringify(x.body)}`.slice(0, 240);
 		const notFound = (x) => x.status === 404 && !(x.body && x.body.code);
@@ -965,16 +965,22 @@ const brief = (r) => `status ${r.status}, reads ${r.reads}${r.status === 500 ? `
 			r.status === 503 && r.body && r.body.code === "INSTRUCTIONS_UNVERIFIED" && !JSON.stringify(r.body).includes("QA-PU"), said(r));
 		w.st.sideFails = false;
 
+		// The reads above re-filtered the stored payload (its redirect and injection items),
+		// which flags both published rows refiltered: the list then sends no highlights.
 		const p = await call(w.page(), DK, "Desoren King");
 		const codes = pageCodes(p);
-		ok("§8.17 the payload: codes only per load, { state, highlights }",
+		ok("§8.17 the payload: codes only per load, { state, highlights }; a row flagged refiltered has none",
 			JSON.stringify(codes) === JSON.stringify([
-				["QA-DI-100", { state: "published", highlights: ["no_unattended", "ppe"] }],
+				["QA-DI-100", { state: "published", highlights: [] }],
 				["QA-DI-300", { state: "checking", highlights: [] }],
 				["QA-DI-400", { state: "none", highlights: [] }],
 			]), JSON.stringify(codes));
 		ok("§8.18 ...and none of the instructions' text anywhere in it", p.status === 200 && TEXTS.every((s) => !JSON.stringify(p.body).includes(s)),
 			TEXTS.filter((s) => JSON.stringify(p.body || {}).includes(s)).join());
+		w.db.prepare("UPDATE load_driver_instructions SET review_reasons = '[]' WHERE load_key IN ('qa-di-100', 'qa-di-200')").run();
+		const unflagged = pageCodes(await call(w.page(), DK, "Desoren King"));
+		ok("§8.17b a published row not flagged refiltered carries its critical category codes",
+			JSON.stringify(unflagged && unflagged[0]) === JSON.stringify(["QA-DI-100", { state: "published", highlights: ["no_unattended", "ppe"] }]), JSON.stringify(unflagged));
 		const sp = await call(w.page(), SUPER, "Soren King");
 		ok("§8.19 Super Admin on a driver's page: that driver's loads carry their codes", JSON.stringify(pageCodes(sp)) === JSON.stringify([["QA-DI-200", { state: "published", highlights: ["no_unattended", "ppe"] }]]), JSON.stringify(pageCodes(sp)));
 
