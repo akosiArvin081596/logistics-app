@@ -30687,8 +30687,8 @@ function blockedExpensePeriods(rows) {
 // month still depends on, plus (5) the load documents filed under the account
 // and (6) the receipts it would remove from an OPEN month (2026-10-22). With (6)
 // every expense row the cascade matches refuses the delete, closed month or
-// open, so a delete never changes a month's figures. `blockers: []` means the
-// delete is safe to run.
+// open, so a delete never removes a receipt from any month's figures.
+// `blockers: []` means the delete is safe to run.
 //
 // `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
 // the note at the call site. A guard that resolved the name its own way would be
@@ -30965,7 +30965,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 		// (6) receipts in an OPEN month (2026-10-22, DD10). The rows (1) did not
 		// find locked: the cascade would remove them, and with them a figure the
 		// open month's P&L counts. Every such row refuses, a rejected receipt
-		// included, so a delete never changes a month's figures, open or closed.
+		// included, so a delete never removes a receipt from any month's figures.
 		// Same match as (1) and the cascade (the stored spelling, case aside): a
 		// receipt under another spelling is not removed, so it is not judged.
 		if (openExpenseRows) blockers.push({

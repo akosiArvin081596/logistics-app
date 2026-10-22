@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * scripts/test-driver-delete-keeps-documents.js — deleting an account never
- * removes the load documents filed under it, and never changes an open month's
- * figures (2026-10-22, plan option A plus DD10).
+ * removes the load documents filed under it, and never removes a receipt from
+ * any month's figures (2026-10-22, plan option A plus DD10).
  *
  * THE BUG. The cascade inside DELETE /api/users/:id removed every documents
  * row filed under the account's name, so deleting a driver hard-deleted his
@@ -439,7 +439,7 @@ for (const type of ["BOL", "Other", "Receipt", "Rate Con"]) {
 
 // ---------------------------------------------------------------------------
 // §6 DD10: an expense row the cascade would remove, in an open month, refuses
-// the delete, so a delete never changes an open month's figures.
+// the delete, so a delete never removes a receipt from any month's figures.
 // ---------------------------------------------------------------------------
 const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 {
@@ -484,6 +484,8 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	const r = del(w, TVALE.id);
 	eq("§6 closed + open receipts: PERIOD_FINALIZED, naming the closed month", [r.status, r.body.code, r.body.periods], [409, "PERIOD_FINALIZED", ["2026-09"]]);
 	ok("§6 ...the open-month blocker is listed too", !!blockerOf(r, "OPEN_MONTH_EXPENSES"), JSON.stringify(r.body.blockers));
+	eq("§6 ...counting exactly the one open-month row (the closed-month row is not counted twice)",
+		(blockerOf(r, "OPEN_MONTH_EXPENSES") || {}).rows, 1);
 	done(w);
 }
 {
@@ -559,15 +561,18 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	done(w);
 }
 {
-	// A paid invoice and a live POD: INVOICE_ALREADY_PAID stays the code (the
-	// new blockers are appended after the invoices blocker).
+	// A paid invoice, a live POD and an open-month receipt: INVOICE_ALREADY_PAID
+	// stays the code (both new blockers are appended after the invoices blocker).
 	const w = world({
 		invoices: [{ n: "INV-MADEUP-01", driver: "tamsin vale", ws: "2026-10-03", we: "2026-10-09", paid: "2026-10-12" }],
+		expenses: [OPEN_RCPT],
 		docs: [{ load: "L-9009", driver: "Tamsin Vale", type: "POD", file: "L-9009_POD_tv.jpg" }],
 	});
 	const r = del(w, TVALE.id);
-	eq("§7 paid invoice + POD: refused with INVOICE_ALREADY_PAID, as before", [r.status, r.body.code], [409, "INVOICE_ALREADY_PAID"]);
+	eq("§7 paid invoice + POD + open-month receipt: refused with INVOICE_ALREADY_PAID, as before", [r.status, r.body.code], [409, "INVOICE_ALREADY_PAID"]);
 	ok("§7 ...the invoices blocker comes first", (r.body.blockers || [])[0] && r.body.blockers[0].table === "invoices", JSON.stringify(r.body.blockers));
+	eq("§7 ...then the documents and open-month receipt blockers, in that order",
+		(r.body.blockers || []).map((b) => b.code), ["INVOICE_ALREADY_PAID", "DRIVER_HAS_DOCUMENTS", "OPEN_MONTH_EXPENSES"]);
 	done(w);
 }
 
