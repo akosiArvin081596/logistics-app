@@ -146,6 +146,9 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	ok("§5 the PDF route is mounted with that gate", /require\("\.\/lib\/ratecon-pdf-route"\)\.mount\(app, \{[^\n]*viewerGate: rateconViewGate \}\);/.test(SRC));
 	const ex = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
 	ok("§5 .env.example names RATECON_PDF_VIEWER_IDS, commented out (unset by default)", /^# RATECON_PDF_VIEWER_IDS=$/m.test(ex) && !/^RATECON_PDF_VIEWER_IDS=/m.test(ex));
+	const block = ex.slice(ex.indexOf("# --- Rate-con viewers and protected accounts"), ex.indexOf("# RATECON_PDF_VIEWER_IDS="));
+	ok("§5 .env.example says to create the account first, then list its id (ids are given out in order)", /create the account first, then list its id/i.test(block) && /in order/i.test(block));
+	ok("§5 .env.example gives the recovery: if every listed account loses Super Admin, fix or unset the list and restart", /fix or unset the list and restart/i.test(block));
 }
 
 console.log(`\nlisted-accounts: ${passed} passed, ${failed} failed`);

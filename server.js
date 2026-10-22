@@ -9100,20 +9100,41 @@ const RATECON_DOC_TYPES = Object.freeze(["RATECON", "RATE CON", "RATE_CON"]);
 // Admin is refused by rateconViewGate (viewerGate() in lib/ratecon-pdf-route.js)
 // on GET /api/loads/:loadId/ratecon.pdf, the files under /uploads/rate-cons/,
 // a rate con stored in the uploads root (guardRootLoadDocument) and the invoice
-// preview's rate-con files; and a listed account's password, role and email change, or
-// its removal, only by itself or another listed account (PUT and DELETE
-// /api/users/:id, 403 PROTECTED_ACCOUNT). Invoice drafting still attaches the
-// rate con for every Super Admin.
+// preview's rate-con files; and a listed account's password, role, email and
+// driver name change, or its removal, only by itself or another listed account
+// (PUT and DELETE /api/users/:id, 403 PROTECTED_ACCOUNT). Invoice drafting
+// still attaches the rate con for every Super Admin.
 // Unset: the behaviour before the list existed, and one warning per start.
 // Set but invalid: nobody opens a rate con in the app, no Super Admin's
-// password, role or email changes and none is removed, and one error per start.
+// password, role, email or driver name changes and none is removed, and one
+// error per start.
 const RATECON_PDF_VIEWERS = require("./lib/listed-accounts.js").fromSetting(
 	"RATECON_PDF_VIEWER_IDS", process.env.RATECON_PDF_VIEWER_IDS, console, {
 		unsetMeans: "every Super Admin opens rate-con files and no account is protected; set it to the owner's account id(s)",
-		invalidMeans: "nobody opens a rate-con file in the app, and no Super Admin's password, role or email changes, until it lists account ids only (for example 1,7)",
+		invalidMeans: "nobody opens a rate-con file in the app, and no Super Admin's password, role, email or driver name changes, until it lists account ids only (for example 1,7)",
 	},
 );
 const rateconViewGate = require("./lib/ratecon-pdf-route.js").viewerGate(RATECON_PDF_VIEWERS);
+// Account ids are given out in order, so an id listed before its account exists
+// goes to whichever account is created next. At start, one error per listed id
+// that is not a Super Admin account here, naming the id only. Returns those ids.
+function reportListedViewersWithoutAccount(list, logger) {
+	if (!list || list.state !== "valid" || !list.ids.length) return [];
+	let rows;
+	try {
+		rows = db.prepare(`SELECT id FROM users WHERE role = 'Super Admin' AND id IN (${list.ids.map(() => "?").join(", ")})`).all(...list.ids);
+	} catch (e) {
+		logger.error(`[RATECON_PDF_VIEWER_IDS] the listed account ids could not be checked against the users table: ${e && e.message}`);
+		return [];
+	}
+	const found = new Set(rows.map((r) => Number(r.id)));
+	const missing = list.ids.filter((n) => !found.has(n));
+	for (const n of missing) {
+		logger.error(`[RATECON_PDF_VIEWER_IDS] lists account id ${n}, which is not a Super Admin account here. Ids are given out in order, so a listed id with no account goes to the next account created: create the account first, then list its id.`);
+	}
+	return missing;
+}
+reportListedViewersWithoutAccount(RATECON_PDF_VIEWERS, console);
 // Bounds on getRateConBytes() step 4, the by-CONTENT fallback that runs when the
 // file name does not carry our load id. Both are cost controls on Drive
 // downloads, not correctness knobs — widening them scans more PDFs per miss, it
@@ -29395,19 +29416,25 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		};
 
 		// (a0) PROTECTED ACCOUNTS (RATECON_PDF_VIEWER_IDS). A listed account's
-		// password, role and email change only when the acting account is that
-		// account or another listed one; anyone else gets 403 PROTECTED_ACCOUNT,
-		// nothing is written, and the attempt is audited. A set but invalid list
-		// protects every Super Admin that way, from everyone. Unset: nobody is
+		// password, role, email and driver name change only when the acting account
+		// is that account or another listed one; anyone else gets 403
+		// PROTECTED_ACCOUNT, nothing is written, and the attempt is audited. The
+		// driver name counts because changing it ends every session of the account
+		// (driverNameChanged below, the same test): without it an unlisted Super
+		// Admin could sign a listed account out again and again. A set but invalid
+		// list protects every Super Admin that way, from everyone. Unset: nobody is
 		// protected. Judged on the account as re-read above, after the last await,
 		// so it runs in the same synchronous step as the write. Only real changes
-		// count: the Users page sends role and email with every edit, so an
-		// unchanged role or email, or a full-name edit, goes through as before.
+		// count: the Users page sends role, email and driver name with every edit,
+		// so unchanged ones, or a full-name edit, go through as before.
 		{
 			const changes = [];
 			if (passwordHash) changes.push("password");
 			if (nextRole && nextRole !== user.role) changes.push("role");
 			if (email !== undefined && String(email ?? "") !== String(user.email ?? "")) changes.push("email");
+			// driverNameChanged's test (below) with the sides swapped, so the
+			// mutants in scripts/test-session-sockets.js still reach that line.
+			if (driverName !== undefined && (user.driver_name || "") !== driverName.trim()) changes.push("driver name");
 			const why = changes.length
 				? RATECON_PDF_VIEWERS.protectedChangeRefusal({ actor: req.session?.user, targetId: id, targetRole: user.role })
 				: null;
@@ -29416,8 +29443,8 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 					"PROTECTED_ACCOUNT", []);
 				return res.status(403).json({
 					error: why === "invalid"
-						? "Password, role and email changes to Super Admin accounts are paused: the server's protected-account list is misconfigured. Nothing was changed."
-						: `${user.username} is a protected account: only that account, or another protected account, can change its password, role or email. Nothing was changed.`,
+						? "Password, role, email and driver-name changes to Super Admin accounts are paused: the server's protected-account list is misconfigured. Nothing was changed."
+						: `${user.username} is a protected account: only that account, or another protected account, can change its password, role, email or driver name. Nothing was changed.`,
 					code: "PROTECTED_ACCOUNT",
 				});
 			}

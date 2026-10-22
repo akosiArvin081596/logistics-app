@@ -14,9 +14,14 @@
  *   - a set but invalid list refuses those changes to every Super Admin, from
  *     everyone; an unset list protects nobody (the behaviour before the list).
  *
- * §1 PUT, list "1,7"   §2 DELETE, list "1,7"   §3 a set but invalid list
- * §4 unset             §5 placement in server.js (after PUT's last await, no
- *                      await before the write; before DELETE's lock guard)
+ * §1 PUT, list "1,7"   §1b a driver-name change (it ends every session of the
+ *                      account, so it is a protected change too)
+ * §2 DELETE, list "1,7"   §3 a set but invalid list   §4 unset
+ * §5 placement in server.js (after PUT's last await, no await before the
+ *    write; before DELETE's lock guard)
+ * §6 at start, one error per listed id that is not a Super Admin account (ids
+ *    are given out in order, so a listed id with no account goes to the next
+ *    account created); the id only, never a username
  *
  * WHAT IS REAL. Both routes are lifted from server.js whole and run as shipped,
  * with the shipped audit helpers (logAudit, logAuditRefusal,
@@ -243,6 +248,33 @@ async function main() {
 		ok(`...and changing Dispatcher 9's role: not refused as protected (${d.status} ${code(d)})`, code(d) !== "PROTECTED_ACCOUNT");
 	}
 
+	// ── §1b a driver-name change (review L2) ─────────────────────────────────
+	// A driver-name change ends every session of the account, so on a listed
+	// account it is a protected change too: otherwise an unlisted Super Admin
+	// could sign the owner out again and again.
+	console.log("\n§1b PUT /api/users/:id, a driver-name change on a listed account");
+	{
+		const driverNameOf = (w, id) => w.db.prepare("SELECT driver_name FROM users WHERE id = ?").get(id).driver_name;
+		for (const [who, actor] of [["unlisted Super Admin 5", STAFF], ["a session without an id", NO_ID]]) {
+			const w = world("1,7");
+			const r = await w.put(actor, 1, { driverName: "Made Up Name" });
+			ok(`${who} changing account 1's driver name: 403 PROTECTED_ACCOUNT (${r.status} ${code(r)})`, r.status === 403 && code(r) === "PROTECTED_ACCOUNT");
+			ok(`...nothing written (driver name ${JSON.stringify(driverNameOf(w, 1))}) and no session ended (${w.seen.purges.length})`, driverNameOf(w, 1) === "" && w.seen.purges.length === 0);
+			const a = w.audits("update_user_blocked");
+			ok(`...one update_user_blocked row with [PROTECTED_ACCOUNT] naming the driver name (${a.length})`, a.length === 1 && a[0].details.includes("[PROTECTED_ACCOUNT]") && /driver name/.test(a[0].details));
+		}
+		const listed = world("1,7");
+		const ok7 = await listed.put(SECOND, 1, { driverName: "Made Up Name" });
+		ok(`listed account 7 changing account 1's driver name: 200, its sessions end as before (${ok7.status} ${code(ok7)})`, ok7.status === 200 && driverNameOf(listed, 1) === "Made Up Name" && listed.seen.purges.includes(1));
+		const same = world("1,7");
+		const keep = await same.put(STAFF, 1, { driverName: "  ", fullName: "Owner A. Admin" });
+		ok(`the same (blank) driver name resent with padding is no change: 200 (${keep.status} ${code(keep)})`, keep.status === 200 && same.seen.purges.length === 0);
+		const other = await world("1,7").put(STAFF, 6, { driverName: "Made Up Name" });
+		ok(`unlisted account 6's driver name: not refused as protected (${other.status} ${code(other)})`, other.status === 200);
+		const inv = await world("owner_admin").put(SECOND, 6, { driverName: "Made Up Name" });
+		ok(`a set but invalid list: a Super Admin's driver-name change is refused (${inv.status} ${code(inv)})`, inv.status === 403 && code(inv) === "PROTECTED_ACCOUNT");
+	}
+
 	// ── §2 DELETE, list "1,7" ─────────────────────────────────────────────────
 	console.log("\n§2 DELETE /api/users/:id, RATECON_PDF_VIEWER_IDS=1,7");
 	// (A session under account 1's username is refused earlier, as CANNOT_DELETE_SELF.)
@@ -316,6 +348,48 @@ async function main() {
 		const lock = DELETE_ROUTE.indexOf("userDeleteLockBlockers(user, name)");
 		ok("DELETE: the protected check runs after the self check, before the last-Super-Admin and month-end guards", self > 0 && a2 > self && last > a2 && lock > a2);
 		ok("DELETE: no await between the protected check and the cascade (the route stays synchronous)", !/\bawait\b/.test(DELETE_ROUTE.slice(a2)));
+	}
+
+	// ── §6 a listed id with no Super Admin account, at start (review L4) ─────
+	// Account ids are given out in order, so an id listed before its account
+	// exists goes to the next account created. The start-up check logs one error
+	// per listed id that is not a Super Admin account, naming the id only.
+	console.log("\n§6 at start: one error per listed id that is not a Super Admin account");
+	{
+		const head = "\nfunction reportListedViewersWithoutAccount(";
+		const at = SRC.indexOf(head);
+		ok("server.js defines reportListedViewersWithoutAccount()", at >= 0);
+		const gateAt = SRC.indexOf("\nconst rateconViewGate = ");
+		const callAt = SRC.indexOf("\nreportListedViewersWithoutAccount(RATECON_PDF_VIEWERS, console);\n");
+		ok("...and calls it once at module scope, right after reading the list",
+			gateAt > 0 && at > gateAt && callAt > at && (SRC.match(/\nreportListedViewersWithoutAccount\(/g) || []).length === 1 &&
+			SRC.slice(at, callAt + 1).split("\n}\n").length === 2);
+		if (at >= 0 && listedAccounts) {
+			const fnSrc = SRC.slice(at + 1, SRC.indexOf("\n}\n", at + 1) + 2);
+			const run = (raw, seed) => {
+				const db = new Database(":memory:");
+				for (const sql of usersDdl()) db.exec(sql);
+				const add = db.prepare("INSERT INTO users (id, username, password_hash, role, email, full_name, driver_name) VALUES (?, ?, 'x', ?, '', '', '')");
+				for (const [id, name, role] of seed) add.run(id, name, role);
+				const logs = { error: [], warn: [] };
+				const logger = { error: (m) => logs.error.push(String(m)), warn: (m) => logs.warn.push(String(m)), log() {} };
+				const fn = new Function("db", `${fnSrc}\nreturn reportListedViewersWithoutAccount;`)(db);
+				const missing = fn(listedAccounts.parseListedAccountIds(raw), logger);
+				db.close();
+				return { missing, logs };
+			};
+			const SEED = [[1, "owner_admin", "Super Admin"], [7, "desk_person", "Dispatcher"], [5, "staff_admin", "Super Admin"]];
+			const r = run("1,7,12", SEED);
+			ok(`list "1,7,12" (7 a Dispatcher, 12 no account): one error each for 7 and 12 (${r.logs.error.length})`,
+				r.logs.error.length === 2 && /\b7\b/.test(r.logs.error[0]) && /\b12\b/.test(r.logs.error[1]) && JSON.stringify(r.missing) === "[7,12]");
+			ok("...each names the id only, never a username", r.logs.error.every((m) => !/owner_admin|desk_person|staff_admin/.test(m)));
+			ok("...and says to create the account first, then list its id", r.logs.error.every((m) => /create the account first/i.test(m)));
+			const good = run("1,5", SEED);
+			ok(`list "1,5", both Super Admins: nothing logged (${good.logs.error.length})`, good.logs.error.length === 0 && good.missing.length === 0);
+			const unset = run(undefined, SEED);
+			const invalid = run("owner_admin", SEED);
+			ok("unset or invalid: no per-id errors (the parser already logged once)", unset.logs.error.length === 0 && invalid.logs.error.length === 0);
+		}
 	}
 
 	console.log(`\nprotected-accounts: ${passed} passed, ${failed} failed`);
