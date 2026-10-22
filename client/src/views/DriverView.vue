@@ -1835,11 +1835,6 @@ onUnmounted(() => {
   100% { background-position: -200% 0; }
 }
 
-/* Toast position override for bottom nav */
-:deep(.toast-container) {
-  bottom: 80px;
-}
-
 /* Decline confirmation overlay */
 .confirm-overlay {
   position: fixed;
