@@ -235,6 +235,8 @@ function makeApp() {
 		applyDriverRenameSqlite: () => ({ counts: {} }),
 		purgeUserSessions: () => 0,
 		refreshOwnSession: () => true,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
 	};
 	const putNames = Object.keys(putEnv);
 	new Function(...putNames, USER_PUT_ROUTE)(...putNames.map((k) => putEnv[k]));

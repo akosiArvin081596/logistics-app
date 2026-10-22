@@ -322,13 +322,15 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "", limi
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
 		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
-		"userPasswordResetLimiter", SRCS.updateUser)(
+		"userPasswordResetLimiter", "RATECON_PDF_VIEWERS", SRCS.updateUser)(
 		app, requireRole, db, noSheetRows, "b21-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, purgeUserSessions, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
 		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {},
 		new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
-		() => null, () => [], () => null, notifyPasswordChanged, passwordRules, userPasswordResetLimiter);
+		() => null, () => [], () => null, notifyPasswordChanged, passwordRules, userPasswordResetLimiter,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		require("../lib/listed-accounts.js").parseListedAccountIds(undefined));
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");

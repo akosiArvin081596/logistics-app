@@ -203,6 +203,8 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 		fetchDocumentBytes: async () => Buffer.from("%PDF-1.4 pod"),
 		buildRateConLoadCtx: () => ({}),
 		getRateConBytes: async () => ({ buffer: null, candidates: [] }),
+		// The rate-con viewer gate with RATECON_PDF_VIEWER_IDS unset (shipped lib code).
+		rateconViewGate: require("../lib/ratecon-pdf-route.js").viewerGate(require("../lib/listed-accounts.js").parseListedAccountIds(undefined)),
 		GEMINI_API_KEY: "",
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => MINTED,
