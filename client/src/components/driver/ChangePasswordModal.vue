@@ -136,10 +136,14 @@ async function submit() {
   position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5);
   display: flex; align-items: center; justify-content: center; z-index: 9999;
   padding: 1rem;
+  /* Scrolls instead of cutting the dialog off on a short window, large text or
+     an open keyboard; the dialog's margin: auto keeps its top reachable. */
+  overflow-y: auto;
 }
 .pw-dialog {
   background: #fff; border-radius: 14px;
   max-width: 440px; width: 100%;
+  margin: auto;
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
   overflow: hidden;
 }
