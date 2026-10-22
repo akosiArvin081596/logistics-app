@@ -27,9 +27,10 @@
 //      doesn't show) wins, with no Gemini call before the match; else the newest
 //      unreadable one whose Gemini answer matches (its load number, a stop city, and the
 //      sheet's pickup number among its references);
-//   2. else the load's dropped rate con: its documents RATECON row (not removed) and the
-//      copy in uploads/rate-cons/, written when a signed-in Super Admin or Dispatcher
-//      dropped it (no link followed).
+//   2. else the load's dropped rate con: its documents RATECON row as drag-and-drop writes
+//      it (pointing at its own uploads/rate-cons/ copy; not removed) and that copy, written
+//      when a signed-in Super Admin or Dispatcher dropped it (no link followed). A Drive
+//      file linked to the load by content is not one.
 // A load whose current row already holds those bytes from the same extractor is skipped as
 // unchanged, with no Gemini call.
 //
@@ -43,13 +44,21 @@
 // such audit row says so.
 //
 // --dry-run (the default): a read-only database handle (checked); nothing is written
-// anywhere. Gemini is called: one call per load read, at most 30 a run, none after a 429
-// or an unavailable answer. Per load it prints the last 4 of the Load ID, the source kind,
-// the reference counts by type, the requirement categories and the review reasons, never
-// Gemini's text. --preview=<Load ID> reads that one load and also prints its driver view
-// (re-filtered, flagged items hidden: what a driver would be served once published).
+// anywhere. Gemini is called: one call per load read, at most 15 a run, none after a 429
+// or an unavailable answer or after 2 passing failures in a row (the loads left are
+// skipped as gemini_cap or gemini_stopped, for a later run). Per load it prints the last 4
+// of the Load ID, the source kind, the reference counts by type, the requirement
+// categories, the review reasons and a fingerprint of what it read (the filtered payload
+// and its reasons, hashed), never Gemini's text; then the "Apply with:" command, which
+// carries those fingerprints and names the sheet only as =env or =production.
+// --preview=<Load ID> reads that one load and also prints its driver view (re-filtered,
+// flagged items hidden: what a driver would be served once published).
 //
-// --apply writes only: load_driver_instructions and its versions, through the runtime's
+// --apply needs --expect=<last 4>:<fingerprint>,... (the dry run's, or none) and writes a
+// load only when its own reading has the fingerprint the dry run printed for it: Gemini is
+// called again, and a reading that differs from what was shown is skipped as
+// changed_since_dry_run, written nowhere. It writes only: load_driver_instructions and its
+// versions, through the runtime's
 // writeExtraction() (so the publish rule is the sweep's: a clean first reading is
 // published, one with review reasons is not); the sweep's ledger
 // (ratecon_instruction_files) for a folder file; the sweep's starting cursor
@@ -57,24 +66,30 @@
 // since then less its 10-minute overlap; written only while no sweep has run, never
 // moved); and audit_trail rows as the system actor "system: driver-instructions backfill"
 // (action backfill per load, backfill_cursor for the cursor; details are codes and
-// counts). Each load is one transaction, its row re-read after the last await, and rolled
-// back if its audit row isn't written. A replay writes 0 rows.
+// counts). Each load is one transaction (taking the write lock at its start), its row
+// re-read after the last await, and rolled back if its audit row isn't written. A replay
+// writes 0 rows.
 //
 // Refused (exit 2, nothing read or written): the deny list (the runtime's
 // DENY_LIST_SETTING) or RATECON_DRIVE_UPLOADER_EMAIL not set to a usable value,
 // RATECON_DRIVE_FOLDER_ID or GEMINI_API_KEY not set, no --sheet-id, an unknown option,
-// --apply with --dry-run or --preview, a --preview load that isn't open, a database
-// without the driver-instructions tables or the audit trail.
+// --apply with --dry-run or --preview, --apply without --expect (or --expect without
+// --apply), a --preview load that isn't open, a database missing any table the backfill
+// reads or writes (TABLES: the audit trail, deleted_loads, documents and every table the
+// runtime's schema creates; nothing is created).
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs the app with):
-//   node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<sheet> [--write-needs-review] [--preview=<Load ID>]
-//   node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<sheet> --apply [--write-needs-review]
+//   node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=production [--write-needs-review] [--preview=<Load ID>]
+//   node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=production --apply [--write-needs-review] --expect=<from the dry run>
 //   --db=<file>          default app.db in the app directory; else a copy under the temp
 //                        directory (scripts/lib/ledger-world.js dbScope())
 //   --env-file=<file>    the settings to read, for such a copy only (default: the app's .env)
 //   --sheet-id=<id>      Job Tracking, Payments Table and Job Details, read with the
-//                        spreadsheets.readonly scope; =env takes SPREADSHEET_ID from the
-//                        settings. There is no default sheet.
+//                        spreadsheets.readonly scope. =env takes SPREADSHEET_ID from the
+//                        settings; =production names lib/sheet-id.js's production sheet,
+//                        for the app's own database in production's directory only
+//                        (production's .env names no SPREADSHEET_ID). There is no default.
+//   --expect=<list>      for --apply: the dry run's <last 4>:<fingerprint> list, or none
 //   --key=<file>         the service-account key (default: the app's
 //                        service-account-key.json); the folder is read with the
 //                        drive.readonly scope
@@ -100,6 +115,7 @@ const { closure } = require("./lib/server-lift");
 const { envFor, dbScope, openDb } = require("./lib/ledger-world");
 const runtime = require("../lib/driver-instructions-runtime");
 const di = require("../lib/driver-instructions");
+const sheetIds = require("../lib/sheet-id");
 
 const ROOT = path.join(__dirname, "..");
 const ACTOR = Object.freeze({ id: 0, username: "system: driver-instructions backfill", role: "system" });
@@ -109,19 +125,26 @@ const FOLDER_SETTING = "RATECON_DRIVE_FOLDER_ID";
 const MAX_FILES_PER_LOAD = 5;
 const MAX_DOCS_PER_LOAD = 5;
 const MAX_LISTED_FILES = 5000;
-const MAX_GEMINI_CALLS = 30;
-const TABLES = ["load_driver_instructions", "load_driver_instructions_versions", "ratecon_instruction_files", "ratecon_instruction_sweeps", "audit_trail"];
-const UNCERTAIN = new Set(["no_source", "match_unconfirmed", "uploader_mismatch", "extract_failed", "extract_invalid", "needs_review", "sheet_unverified"]);
+// The plan expects 6 to 12 calls; a run stops at this many.
+const MAX_GEMINI_CALLS = 15;
+// Every table the backfill reads or writes, the runtime's own ones read off its schema. A
+// missing one refuses the run before anything is created.
+const TABLES = Object.freeze(["audit_trail", "deleted_loads", "documents", ...runtime.SCHEMA_TABLES]);
+const UNCERTAIN = new Set(["no_source", "match_unconfirmed", "uploader_mismatch", "extract_failed", "extract_invalid", "needs_review", "sheet_unverified", "changed_since_dry_run"]);
 // Gemini answered, but not with something usable.
 const INVALID_CODES = new Set(["invalid_json", "truncated", "blocked", "empty", "too_long"]);
 // Gemini's "not now": no further call this run.
 const STOP_CODES = new Set(["gemini_429", "gemini_unavailable"]);
+// Gemini's passing trouble: this many in a row, and no further call this run.
+const TRANSIENT_CODES = new Set(["gemini_transient", "timeout", "network"]);
+const MAX_TRANSIENT_IN_A_ROW = 2;
+const FINGERPRINT_RE = /^([A-Za-z0-9]{1,4}):([0-9a-f]{12})$/;
 const LIFT_ROOTS = ["logAudit", "parseSheet", "deduplicateLoads", "BROKER_WITHHELD_RE", "GEMINI_API_KEY", "GEMINI_OCR_MODEL"];
 const LIFT_DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "io", "app", "jtCacheInvalidate", "sendEmail", "transporter", "getDrive", "fetch"];
 const SHEET_RANGES = ["Job Tracking", "Payments Table", "Job Details"];
 const USAGE = [
-	"Usage: node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<sheet> [--dry-run] [--write-needs-review] [--preview=<Load ID>]",
-	"       node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<sheet> --apply [--write-needs-review]",
+	"Usage: node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<production|env|id> [--dry-run] [--write-needs-review] [--preview=<Load ID>]",
+	"       node scripts/driver-instructions-backfill.js --db=app.db --sheet-id=<production|env|id> --apply [--write-needs-review] --expect=<the dry run's list, or none>",
 	"       [--env-file=<file>] [--uploads-dir=<dir>] (a database copy only) [--key=<service-account key>]",
 ].join("\n");
 
@@ -144,7 +167,7 @@ const last4 = (id) => String(id == null ? "" : id).replace(/[^A-Za-z0-9]/g, "").
 // --write-needs-review and --help take none. Anything else is refused, so a mistyped
 // --dry-run never falls through to an apply.
 function parseCli(argv) {
-	const VALUE = new Set(["db", "env-file", "sheet-id", "key", "uploads-dir", "preview"]);
+	const VALUE = new Set(["db", "env-file", "sheet-id", "key", "uploads-dir", "preview", "expect"]);
 	const BOOL = new Set(["dry-run", "apply", "write-needs-review", "help"]);
 	const out = {};
 	for (let i = 0; i < argv.length; i++) {
@@ -189,6 +212,47 @@ function referenceCounts(payload) {
 	for (const s of payload.stops) for (const r of s.references) n[r.type] = (n[r.type] || 0) + 1;
 	return Object.keys(n).sort().map((t) => `${t} ${n[t]}`).join(", ");
 }
+function canonical(v) {
+	if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+	if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+	return JSON.stringify(v === undefined ? null : v);
+}
+// What a run read for a load: its filtered payload and its review reasons, hashed. The
+// dry run prints it; an apply writes a load only when its own reading has the fingerprint
+// the dry run printed (--expect).
+function fingerprintOf(payload, reasons) {
+	return crypto.createHash("sha256").update(canonical({ payload, reasons })).digest("hex").slice(0, 12);
+}
+// --expect=<last 4>:<fingerprint>,... (or none): the loads the dry run would write.
+function parseExpect(value) {
+	const map = new Map();
+	if (value === "none") return map;
+	for (const part of String(value).split(",")) {
+		const m = FINGERPRINT_RE.exec(part.trim());
+		if (!m) throw new Refusal(`--expect takes <last 4 of the Load ID>:<fingerprint>, comma-separated, as the dry run prints them (or none); "${part.trim().slice(0, 40)}" is not one`);
+		const key = m[1].toLowerCase();
+		if (!map.has(key)) map.set(key, new Set());
+		map.get(key).add(m[2]);
+	}
+	return map;
+}
+// The sheet a run reads: --sheet-id=env, SPREADSHEET_ID from the settings;
+// --sheet-id=production, lib/sheet-id.js's production sheet, accepted only for the app's
+// own database in production's directory (production's .env names no SPREADSHEET_ID);
+// anything else is the ID itself. Answers { id, shown }: `shown` is what an "Apply with"
+// line may print, never an ID.
+function sheetIdFor(arg, { env, root, scope }) {
+	if (arg === "env") {
+		const id = String((env && env.SPREADSHEET_ID) || "").trim();
+		if (!id) throw new Refusal("--sheet-id=env: the settings name no SPREADSHEET_ID; on production use --sheet-id=production, elsewhere name the sheet");
+		return { id, shown: "env" };
+	}
+	if (arg === "production") {
+		if (scope !== "app" || path.resolve(root) !== sheetIds.PRODUCTION_DIR) throw new Refusal(`--sheet-id=production is only for production's own database, run in ${sheetIds.PRODUCTION_DIR}`);
+		return { id: sheetIds.PRODUCTION_SPREADSHEET_ID, shown: "production" };
+	}
+	return { id: arg, shown: "<the sheet ID this dry run named>" };
+}
 
 // The server's own audit writer, sheet parser and Gemini settings, lifted from this
 // checkout's server.js. `env`: the app's settings, as the server reads them.
@@ -198,7 +262,8 @@ function liftServer(root, db, env) {
 	return new Function("db", "console", "process", `"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(db, console, { env: { ...env } });
 }
 
-// A change and its audit row in one transaction: no audit row, no change.
+// A change and its audit row in one transaction, taking the write lock at its start (the
+// server writes the same database): no audit row, no change.
 function writeAudited(db, fn) {
 	const maxId = () => db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM audit_trail").get().n;
 	return db.transaction(() => {
@@ -207,7 +272,7 @@ function writeAudited(db, fn) {
 		if (result && result.skip) return result;
 		if (maxId() <= before) throw new Error("an audit row was not written, so its change was rolled back");
 		return result;
-	})();
+	}).immediate();
 }
 
 // Every file in the folder, newest first, metadata only.
@@ -251,6 +316,7 @@ function describe(rec) {
 		lines.push(`  references: ${rec.extracted.references || "none"}`);
 		lines.push(`  requirement categories: ${rec.extracted.categories.join(", ") || "none"}`);
 		lines.push(`  review reasons: ${rec.extracted.reasons.join(", ") || "none"}`);
+		lines.push(`  fingerprint: ${rec.extracted.fingerprint}`);
 	}
 	if (rec.preview) {
 		lines.push(`  driver view (${rec.preview.label}):`);
@@ -328,16 +394,27 @@ async function run(o) {
 		cursor.written = true;
 	}
 
-	const gem = { calls: 0, stopped: "" };
+	// One Gemini call. No call after a 429 or an unavailable answer, after
+	// MAX_TRANSIENT_IN_A_ROW passing failures in a row, or past MAX_GEMINI_CALLS: the loads
+	// left are skipped (gemini_stopped, gemini_cap) for a later run.
+	const gem = { calls: 0, stopped: "", transient: 0 };
 	async function readPdf(buffer) {
-		if (gem.stopped) throw codeError(gem.stopped);
+		if (gem.stopped) throw codeError("gemini_stopped");
 		if (gem.calls >= MAX_GEMINI_CALLS) throw codeError("gemini_cap");
 		gem.calls++;
 		try {
-			return await runtime.runDriverInstructionsGemini(buffer.toString("base64"), { fetch: deps.fetch, apiKey: lifted.GEMINI_API_KEY, model: lifted.GEMINI_OCR_MODEL });
+			const answer = await runtime.runDriverInstructionsGemini(buffer.toString("base64"), { fetch: deps.fetch, apiKey: lifted.GEMINI_API_KEY, model: lifted.GEMINI_OCR_MODEL });
+			gem.transient = 0;
+			return answer;
 		} catch (e) {
 			const code = e && typeof e.code === "string" ? e.code : "error";
 			if (STOP_CODES.has(code)) gem.stopped = code;
+			else if (TRANSIENT_CODES.has(code)) {
+				gem.transient++;
+				if (gem.transient >= MAX_TRANSIENT_IN_A_ROW) gem.stopped = `${code} x${gem.transient}`;
+			} else {
+				gem.transient = 0;
+			}
 			throw codeError(code);
 		}
 	}
@@ -347,7 +424,10 @@ async function run(o) {
 	function readDocument(facts, seen) {
 		let rows;
 		try {
-			rows = db.prepare("SELECT id, file_name FROM documents WHERE load_id IN (?, ?) AND UPPER(type) = 'RATECON' AND deleted_at IS NULL ORDER BY uploaded_at DESC, id DESC LIMIT ?")
+			// Drag-and-drop copies only: the row POST /api/loads/from-ratecon writes points at
+			// its own uploads/rate-cons/ file (a Drive file id is added when its Drive mirror
+			// succeeds, so that id can't tell). A Drive file linked by content has no such URL.
+			rows = db.prepare("SELECT id, file_name FROM documents WHERE load_id IN (?, ?) AND UPPER(type) = 'RATECON' AND drive_url = '/uploads/rate-cons/' || file_name AND deleted_at IS NULL ORDER BY uploaded_at DESC, id DESC LIMIT ?")
 				.all(facts.loadId, `#${facts.loadId}`, MAX_DOCS_PER_LOAD);
 		} catch {
 			seen.add("documents_unreadable");
@@ -455,7 +535,8 @@ async function run(o) {
 		const ctx = bf.contextFor(facts);
 		const filtered = di.filterInstructions(extraction, ctx);
 		const r = di.reviewReasons({ ctx, extraction, filtered, visibleText: src.text, byteLength: src.buffer.length, source: src.kind === "documents" ? "dropzone" : "drive_sweep", loadId: facts.loadId });
-		rec.extracted = { references: referenceCounts(filtered.payload), categories: bf.payloadSummary(filtered.payload).categories, reasons: r.codes };
+		const fingerprint = fingerprintOf(filtered.payload, r.codes);
+		rec.extracted = { references: referenceCounts(filtered.payload), categories: bf.payloadSummary(filtered.payload).categories, reasons: r.codes, fingerprint };
 		if (preview) rec.preview = { label: r.codes.length ? "held for review: no driver sees it until a person reviews it" : "what a driver would be served once published", payload: driverView(filtered.payload, facts) };
 		if (!filtered.payload.stops.length) {
 			rec.code = "extract_invalid";
@@ -471,6 +552,12 @@ async function run(o) {
 			const d = di.decideExtractionWrite(current, { payload: filtered.payload, reasons: r.codes });
 			if (d.action === "unchanged") rec.code = "unchanged";
 			else Object.assign(rec, { decision: d, exception });
+			return rec;
+		}
+		// Write only what the dry run showed: this reading's fingerprint, under this load.
+		const expected = o.expect.get(rec.last4.toLowerCase());
+		if (!expected || !expected.has(fingerprint)) {
+			rec.code = "changed_since_dry_run";
 			return rec;
 		}
 		const sourceRef = src.kind === "drive" ? src.file.id : String(src.doc.id);
@@ -518,7 +605,7 @@ async function run(o) {
 	for (const rec of records) for (const line of describe(rec)) out(line);
 	out("");
 	for (const n of notes) out(`Note: ${n}`);
-	out(`Gemini calls: ${gem.calls}${gem.stopped ? ` (no more after ${gem.stopped}; rerun later)` : ""}${gem.calls >= MAX_GEMINI_CALLS ? ` (the run's limit of ${MAX_GEMINI_CALLS}; rerun for the rest)` : ""}`);
+	out(`Gemini calls: ${gem.calls}${gem.stopped ? ` (stopped after ${gem.stopped}; rerun later)` : ""}${gem.calls >= MAX_GEMINI_CALLS ? ` (the run's limit of ${MAX_GEMINI_CALLS}; rerun for the rest)` : ""}`);
 	if (cursor.kept) out("Sweep cursor: kept (a sweep or an earlier backfill set it)");
 	else if (cursor.written) out(`Sweep cursor: written; the first sweep starts at ${cursor.at} less its 10-minute overlap`);
 	else out("Sweep cursor: none yet; an apply writes its own start as the first sweep's start");
@@ -530,7 +617,9 @@ async function run(o) {
 		const would = records.filter((r) => !r.code).length;
 		out(`Result: dry run: ${would} load(s) would be written; ${uncertain} skipped as uncertain; ${handled} skipped as already handled. Nothing was written.`);
 		const extra = [args["env-file"] ? ` --env-file=${path.resolve(args["env-file"])}` : "", args["uploads-dir"] ? ` --uploads-dir=${path.resolve(args["uploads-dir"])}` : "", args.key ? ` --key=${path.resolve(args.key)}` : ""].join("");
-		out(`Apply with: cd ${o.root} && ${process.execPath} scripts/driver-instructions-backfill.js --db=${o.dbFile} --sheet-id=${args["sheet-id"]}${extra} --apply${needsReviewOk ? " --write-needs-review" : ""}`);
+		// The loads this dry run would write, each with the fingerprint of what it read.
+		const expect = records.filter((r) => !r.code && r.extracted).map((r) => `${r.last4}:${r.extracted.fingerprint}`).join(",") || "none";
+		if (!preview) out(`Apply with: cd ${o.root} && ${process.execPath} scripts/driver-instructions-backfill.js --db=${o.dbFile} --sheet-id=${o.sheetShown}${extra} --apply${needsReviewOk ? " --write-needs-review" : ""} --expect=${expect}`);
 	}
 	return { records, writtenLoads };
 }
@@ -560,6 +649,14 @@ async function main(argv, deps = {}) {
 	const apply = args.apply === true;
 	if (apply && args["dry-run"]) return refuse("--apply and --dry-run together");
 	if (apply && args.preview !== undefined) return refuse("--preview is for a dry run; it never writes");
+	if (!apply && args.expect !== undefined) return refuse("--expect is for --apply: it names the loads, and what was read for each, that the dry run showed");
+	if (apply && args.expect === undefined) return refuse("--apply writes only what a dry run showed: pass the dry run's fingerprints, --expect=<last 4>:<fingerprint>,... (its \"Apply with:\" line), or --expect=none");
+	let expect = new Map();
+	try {
+		if (apply) expect = parseExpect(args.expect);
+	} catch (e) {
+		return refuse(e.message);
+	}
 	const root = deps.root || ROOT;
 	const dbPath = args.db || path.join(root, "app.db");
 	let env;
@@ -576,8 +673,12 @@ async function main(argv, deps = {}) {
 	if (!cfg.uploaderEmail) return refuse(`${UPLOADER_SETTING} is not set to an address in the app's settings; a folder file's uploader can't be checked without it`);
 	if (!cfg.folderId) return refuse(`${FOLDER_SETTING} is not set in the app's settings; the backfill reads the rate-con folder`);
 	if (!args["sheet-id"]) return refuse("--sheet-id is required; there is no default sheet");
-	const sheetId = args["sheet-id"] === "env" ? String(env.SPREADSHEET_ID || "").trim() : args["sheet-id"];
-	if (!sheetId) return refuse("--sheet-id=env: the settings name no SPREADSHEET_ID; name the sheet");
+	let sheet;
+	try {
+		sheet = sheetIdFor(args["sheet-id"], { env, root, scope });
+	} catch (e) {
+		return refuse(e.message);
+	}
 	if (args["uploads-dir"] && scope !== "copy") return refuse("--uploads-dir is for a copy of the database under the temp directory; the app's own database reads the app's uploads/");
 	if (!fs.existsSync(dbFile)) return refuse(`no database at ${dbFile}`);
 	const uploadsDir = args["uploads-dir"] ? path.resolve(args["uploads-dir"]) : path.join(root, "uploads");
@@ -593,7 +694,7 @@ async function main(argv, deps = {}) {
 		if (missing.length) return refuse(`the database has no ${missing.join(", ")} (the server creates the driver-instructions tables when it starts)`);
 		const lifted = liftServer(root, db, env);
 		if (!lifted.GEMINI_API_KEY) return refuse("GEMINI_API_KEY is not set in the app's settings");
-		await run({ db, dbFile, env, cfg, apply, args, deps, lifted, sheetId, keyFile, uploadsDir, root, out });
+		await run({ db, dbFile, env, cfg, apply, args, deps, lifted, sheetId: sheet.id, sheetShown: sheet.shown, expect, keyFile, uploadsDir, root, out });
 		return 0;
 	} catch (e) {
 		if (e instanceof Refusal) return refuse(e.message);
@@ -635,4 +736,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { ACTOR, SOURCE, UNCERTAIN, parseCli, handledCode, holds, main };
+module.exports = { ACTOR, SOURCE, UNCERTAIN, MAX_GEMINI_CALLS, TABLES, parseCli, parseExpect, sheetIdFor, fingerprintOf, handledCode, holds, main };

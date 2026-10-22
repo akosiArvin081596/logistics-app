@@ -28,7 +28,17 @@
  *   §9 the sweep's starting cursor is written on apply, and the sweep starts from it
  *   §10 no Gemini text in the output, the logs, the audit trail or any table
  *   §11 --preview prints only driver-safe content, and only for a dry run
- *   §12 the documents source: the uploads copy of a dropped rate con
+ *   §12 the documents source: the uploads copy of a dropped rate con, never a removed one
+ *      or a Drive file linked by content
+ *   §13 a refused audit row rolls its load back (exit 1)
+ *   §14 a person reviewing or editing while Gemini reads wins (the in-transaction re-check)
+ *   §15 Gemini's limits: a 429, 2 passing failures in a row, 15 calls a run
+ *   §16 --apply writes only the readings the dry run's fingerprints name
+ *   §17 the sheet: never printed in the apply command; =production for production only
+ *   §18 a database missing any table the backfill reads or writes is refused
+ *
+ * An apply runs as an operator runs it: a dry run first, then --apply with the --expect
+ * list the dry run printed (w.go()).
  *
  * Every value is made up: the account number, amounts, phones, emails, names, places,
  * references and load numbers. No network: no real Gemini, Drive or Sheets.
@@ -128,6 +138,7 @@ const G = L("771200955");
 const H = L("771201066");
 const U = L("771201177");
 const V = L("771201288");
+const X = L("771201499");
 const N = L("771201399", "");
 const CLOSED = [L("771202001", "Delivered"), L("771202002", "Completed"), L("771202003", "Cancel"), L("771202004", "Canceled"), L("771202005", "Cancelled"), L("771202006", "Invoiced")];
 const SOFT_DELETED = L("771202007");
@@ -256,7 +267,7 @@ function existingRow(l, over = {}) {
 	};
 }
 
-function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env = ENV_ON, answers = [], sweeps = [] } = {}) {
+function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env = ENV_ON, answers = [], sweeps = [], payments = [] } = {}) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rcpr5-"));
 	cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
 	const dbFile = path.join(dir, "app.db");
@@ -273,15 +284,15 @@ function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env
 	const uploads = path.join(dir, "uploads");
 	fs.mkdirSync(path.join(uploads, "rate-cons"), { recursive: true });
 	for (const d of docs) {
-		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, deleted_at) VALUES (?, '', ?, ?, ?, ?)")
-			.run(d.loadId, d.type || "RATECON", d.fileName, `/uploads/rate-cons/${d.fileName}`, d.deletedAt || null);
+		db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, deleted_at) VALUES (?, '', ?, ?, ?, ?, ?)")
+			.run(d.loadId, d.type || "RATECON", d.fileName, d.driveFileId || "", d.driveUrl !== undefined ? d.driveUrl : `/uploads/rate-cons/${d.fileName}`, d.deletedAt || null);
 		if (d.bytes) fs.writeFileSync(path.join(uploads, "rate-cons", d.fileName), d.bytes);
 	}
 	db.close();
 	const envFile = path.join(dir, "flags.env");
 	fs.writeFileSync(envFile, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n");
 
-	const w = { dir, dbFile, envFile, uploads, files: [...files], answers: new Map(answers.map(([bytes, a]) => [sha256(bytes), a])), loads,
+	const w = { dir, dbFile, envFile, uploads, files: [...files], answers: new Map(answers.map(([bytes, a]) => [sha256(bytes), a])), queue: new Map(), loads, beforeAnswer: null,
 		calls: { sheets: 0, list: 0, listQueries: [], media: [], meta: [], gemini: 0, geminiShas: [], drive: 0 } };
 	const drive = {
 		files: {
@@ -311,7 +322,10 @@ function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env
 			sha = sha256(Buffer.from(body.contents[0].parts[0].inline_data.data, "base64"));
 		} catch { /* not a Gemini body */ }
 		w.calls.geminiShas.push(sha);
-		const next = w.answers.get(sha) || { status: 500, body: { error: { message: `no answer under test ${GEMINI_MARKER}` } } };
+		// A person acting while Gemini reads (the case the in-transaction re-check is for).
+		if (typeof w.beforeAnswer === "function") w.beforeAnswer(sha);
+		const queued = w.queue.get(sha);
+		const next = (queued && queued.length ? queued.shift() : null) || w.answers.get(sha) || { status: 500, body: { error: { message: `no answer under test ${GEMINI_MARKER}` } } };
 		return { ok: next.status >= 200 && next.status < 300, status: next.status, text: async () => JSON.stringify(next.body), json: async () => next.body };
 	};
 	const readSheets = async ({ sheetId }) => {
@@ -319,7 +333,7 @@ function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env
 		w.calls.sheetId = sheetId;
 		return {
 			jobTracking: [HEADERS, ...w.loads.map(jtRow)],
-			payments: [PT_HEADERS, ...w.loads.map((l) => ["Pat Broker", l.id, "", "$1,200.00"])],
+			payments: [PT_HEADERS, ...w.loads.map((l) => ["Pat Broker", l.id, "", "$1,200.00"]), ...payments],
 			jobDetails: [JD_HEADERS, ["", "1,180 Miles", "$1.02", LANE, "", "", "", "1200"]],
 		};
 	};
@@ -342,6 +356,20 @@ function world({ loads = [], files = [], docs = [], rows = [], deleted = [], env
 			Object.assign(console, saved);
 		}
 		return { code, out: out.join("\n"), logs: logs.join("\n") };
+	};
+	// The dry run an apply follows, with the same flags: its --expect=... argument.
+	w.expectFor = async (flags = []) => {
+		const dry = await w.run(flags.filter((a) => a !== "--apply"));
+		const m = /^Apply with: .* (--expect=\S+)$/m.exec(dry.out);
+		if (!m) throw new Error(`the dry run printed no apply command:\n${dry.out}`);
+		return m[1];
+	};
+	// As an operator applies: a dry run, then --apply with the fingerprints it printed.
+	w.go = async (args = []) => (args.includes("--apply") && !args.some((a) => a.startsWith("--expect")) ? w.run([...args, await w.expectFor(args)]) : w.run(args));
+	// A change made beside the script, as another process (the server, a person) would.
+	w.exec = (sql, ...params) => {
+		const h = new Database(w.dbFile);
+		try { if (params.length) h.prepare(sql).run(...params); else h.exec(sql); } finally { h.close(); }
 	};
 	w.open = () => {
 		const h = new Database(w.dbFile, { readonly: true });
@@ -372,18 +400,20 @@ const counts = (w) => Object.fromEntries(TABLES.map((t) => [t, w.count(t)]));
 // The line the script prints for a load.
 const lineOf = (out, l) => (out.split("\n").find((x) => x.startsWith(`Load ...${l.last4}:`)) || "");
 
-// The usual world: two loads the backfill writes (a Drive file, a dropped rate con).
+// The usual world: two loads the backfill writes (A from a Drive file, B from a dropped
+// rate con), in that order on Job Tracking unless `bFirst`.
 function usual(extra = {}) {
 	const fa = driveFile(A, readable(A));
 	const bBytes = readable(B);
 	return world({
-		loads: [A, B, ...(extra.loads || [])],
+		loads: [...(extra.bFirst ? [B, A] : [A, B]), ...(extra.loads || [])],
 		files: [fa, ...(extra.files || [])],
 		docs: [{ loadId: B.id, fileName: `${B.id}.pdf`, bytes: bBytes }, ...(extra.docs || [])],
 		answers: [[fa.bytes, geminiAnswer(clean(A))], [bBytes, geminiAnswer(clean(B))], ...(extra.answers || [])],
 		rows: extra.rows || [],
 		deleted: extra.deleted || [],
 		sweeps: extra.sweeps || [],
+		payments: extra.payments || [],
 		env: extra.env || ENV_ON,
 	});
 }
@@ -415,7 +445,7 @@ test("§2 exit 2 without the deny list or the uploader account: nothing read, ca
 		["uploader account not an address", (e) => { e.RATECON_DRIVE_UPLOADER_EMAIL = "n8n-uploader"; }, "RATECON_DRIVE_UPLOADER_EMAIL"],
 	];
 	for (const [label, change, name] of cases) {
-		for (const mode of [[], ["--apply"]]) {
+		for (const mode of [[], ["--apply", "--expect=none"]]) {
 			const env = { ...ENV_ON };
 			change(env);
 			const w = usual({ env });
@@ -433,6 +463,9 @@ test("§2 exit 2 without the deny list or the uploader account: nothing read, ca
 	const rt = fs.readFileSync(RUNTIME_FILE, "utf8");
 	eq("the runtime spells the setting once, in DENY_LIST_SETTING", (rt.match(/"CARRIER_ACCOUNT_NUMBERS_DENY"/g) || []).length, 1);
 	ok("...and reads it only through that constant", !/env\.CARRIER_ACCOUNT_NUMBERS_DENY|\.CARRIER_ACCOUNT_NUMBERS_DENY\b/.test(rt.replace(/\/\/[^\n]*/g, "")));
+	const replicaRulesFile = path.join(ROOT, "lib", "replica-rules.js");
+	ok("the replica rules never copy the deny list under the runtime's name for it", require(replicaRulesFile).CARRIER_ACCOUNT_SETTINGS.includes(runtime.DENY_LIST_SETTING));
+	ok("...and stay standalone (they ship to the server alone): no require of the runtime", !/require\(/.test(fs.readFileSync(replicaRulesFile, "utf8").replace(/\/\/[^\n]*/g, "")));
 	const w = usual();
 	const r = await w.run([], { sheet: false });
 	eq("no --sheet-id: exit 2, no default sheet", [r.code, w.calls.sheets], [2, 0]);
@@ -445,7 +478,7 @@ test("§2 exit 2 without the deny list or the uploader account: nothing read, ca
 // ── §3 apply and replay ───────────────────────────────────────────────────────
 test("§3 apply writes the open loads; a replay writes 0 rows and calls Gemini 0 times", async ({ eq, ok }) => {
 	const w = usual();
-	const r = await w.run(["--apply"]);
+	const r = await w.go(["--apply"]);
 	eq("exit 0", r.code, 0);
 	ok("the output says a writable handle", /writable handle/.test(r.out), r.out);
 	const a = w.row(A);
@@ -461,7 +494,7 @@ test("§3 apply writes the open loads; a replay writes 0 rows and calls Gemini 0
 	const file = w.fileState();
 	const calls = w.calls.gemini;
 	w.clock = T0 + 60 * 60 * 1000;
-	const replay = await w.run(["--apply"]);
+	const replay = await w.go(["--apply"]);
 	eq("replay: exit 0", replay.code, 0);
 	eq("replay: every table unchanged (0 rows written)", w.allRows(), snap);
 	eq("replay: the database file unchanged", w.fileState(), file);
@@ -484,7 +517,7 @@ test("§4 reviewed, staff-edited and published rows, and a waiting reading, are 
 	const w = usual({ loads: [R, S, P, W], files: [fr, fs2, fp, fw], rows, answers: [fr, fs2, fp, fw].map((f, i) => [f.bytes, geminiAnswer(clean([R, S, P, W][i]))]) });
 	const before = Object.fromEntries([R, S, P, W].map((l) => [l.id, w.row(l)]));
 	for (const mode of [[], ["--apply"], ["--apply", "--write-needs-review"]]) {
-		const r = await w.run(mode);
+		const r = await w.go(mode);
 		eq(`${mode.join(" ") || "dry run"}: exit 0`, r.code, 0);
 		for (const [l, code] of [[R, "reviewed"], [S, "staff_edited"], [P, "published"], [W, "pending_waiting"]]) {
 			eq(`${mode.join(" ") || "dry run"}: ${code} row byte-for-byte unchanged`, w.row(l), before[l.id]);
@@ -502,7 +535,7 @@ test("§5 only active and upcoming loads are in scope: Delivered, Completed, Can
 	const outFiles = out.map((l) => driveFile(l, readable(l)));
 	const fn = driveFile(N, readable(N));
 	const w = usual({ loads: [N, ...out], files: [fn, ...outFiles], deleted: [SOFT_DELETED], answers: [[fn.bytes, geminiAnswer(clean(N))], ...outFiles.map((f, i) => [f.bytes, geminiAnswer(clean(out[i]))])] });
-	const r = await w.run(["--apply"]);
+	const r = await w.go(["--apply"]);
 	eq("exit 0", r.code, 0);
 	eq("rows for the active (Dispatched), upcoming (Assigned) and unassigned loads only", w.q("SELECT load_key FROM load_driver_instructions ORDER BY load_key").map((x) => x.load_key), [A.id, B.id, N.id].sort());
 	eq("no out-of-scope file downloaded or sent to Gemini", [outFiles.filter((f) => w.calls.media.includes(f.meta.id)).length, outFiles.filter((f) => w.calls.geminiShas.includes(sha256(f.bytes))).length], [0, 0]);
@@ -520,10 +553,14 @@ test("§6 each uncertain kind is skipped and logged with its code, and written n
 	const fgt = driveFile(G, readable(G, " Revised"));
 	const fv = driveFile(V, unreadable(V));
 	const fx = driveFile(C, readable(C), { mimeType: "image/png" });
-	const uncertain = [[C, "no_source"], [D, "match_unconfirmed"], [E, "uploader_mismatch"], [E2, "uploader_mismatch"], [F, "extract_failed"], [G, "extract_invalid"], [V, "match_unconfirmed"]];
+	// X's own amounts on the Payments Table are more than the filter reads: its facts can't
+	// be verified, so it is not read at all.
+	const fX = driveFile(X, readable(X));
+	const uncertain = [[C, "no_source"], [D, "match_unconfirmed"], [E, "uploader_mismatch"], [E2, "uploader_mismatch"], [F, "extract_failed"], [G, "extract_invalid"], [V, "match_unconfirmed"], [X, "sheet_unverified"]];
 	const w = usual({
 		loads: uncertain.map(([l]) => l),
-		files: [fd, fe, fe2, ff, fg, fgt, fv, fx],
+		payments: Array.from({ length: 57 }, (_, i) => ["Pat Broker", X.id, "", `$${2001 + i}.00`]),
+		files: [fd, fe, fe2, ff, fg, fgt, fv, fx, fX],
 		docs: [{ loadId: C.id, fileName: `${C.id}.pdf`, bytes: null }, { loadId: C.id, fileName: `${C.id}-old.pdf`, bytes: readable(C), deletedAt: "2026-10-20 10:00:00" }],
 		answers: [
 			[fd.bytes, geminiAnswer(clean(D))], [fe.bytes, geminiAnswer(clean(E))], [fe2.bytes, geminiAnswer(clean(E2))],
@@ -533,7 +570,7 @@ test("§6 each uncertain kind is skipped and logged with its code, and written n
 		],
 	});
 	for (const mode of [[], ["--apply"]]) {
-		const r = await w.run(mode);
+		const r = await w.go(mode);
 		eq(`${mode.join(" ") || "dry run"}: exit 0`, r.code, 0);
 		for (const [l, code] of uncertain) {
 			ok(`${mode.join(" ") || "dry run"}: ...${l.last4} SKIPPED ${code}, marked written nowhere`, new RegExp(`^Load \\.\\.\\.${l.last4}: SKIPPED ${code}\\b.*written nowhere`).test(lineOf(r.out, l)), lineOf(r.out, l));
@@ -546,7 +583,7 @@ test("§6 each uncertain kind is skipped and logged with its code, and written n
 	}
 	eq("the two control loads were written", w.count("load_driver_instructions"), 2);
 	eq("no ledger row for any file of an uncertain load", w.q("SELECT drive_file_id FROM ratecon_instruction_files").map((x) => x.drive_file_id), [w.files[0].meta.id]);
-	eq("the wrong-owner and wrong-modifier files were never downloaded", [fe, fe2].filter((f) => w.calls.media.includes(f.meta.id)).length, 0);
+	eq("the wrong-owner and wrong-modifier files, and the unverified load's, were never downloaded", [fe, fe2, fX].filter((f) => w.calls.media.includes(f.meta.id)).length, 0);
 	eq("the wrong-facts readable file was never sent to Gemini", w.calls.geminiShas.includes(sha256(fd.bytes)), false);
 	ok("the unreadable file was matched from Gemini's answer (sent, then refused)", w.calls.geminiShas.includes(sha256(fv.bytes)));
 });
@@ -554,7 +591,7 @@ test("§6 each uncertain kind is skipped and logged with its code, and written n
 // ── §7 the audit trail ────────────────────────────────────────────────────────
 test("§7 every audit row the backfill writes carries the system actor; versions and the ledger name it too", async ({ eq, ok }) => {
 	const w = usual();
-	const r = await w.run(["--apply"]);
+	const r = await w.go(["--apply"]);
 	eq("exit 0", r.code, 0);
 	const rows = w.q("SELECT user_id, username, role, action, entity, entity_id, details FROM audit_trail ORDER BY id");
 	ok("one row per load written, plus the cursor's", rows.length === 3, rows);
@@ -573,7 +610,7 @@ test("§8 --write-needs-review writes a confirmed match with review reasons as n
 	const fh = driveFile(H, readable(H));
 	const fu = driveFile(U, unreadable(U));
 	const w = usual({ loads: [H, U], files: [fh, fu], answers: [[fh.bytes, geminiAnswer(withOther(H))], [fu.bytes, geminiAnswer(clean(U))]] });
-	const r0 = await w.run(["--apply"]);
+	const r0 = await w.go(["--apply"]);
 	eq("without the flag: exit 0", r0.code, 0);
 	ok("without the flag: both listed SKIPPED needs_review with their reasons", /SKIPPED needs_review.*written nowhere/.test(lineOf(r0.out, H)) && /SKIPPED needs_review/.test(lineOf(r0.out, U)) && /unusual_content/.test(r0.out) && /not_cross_checked/.test(r0.out), r0.out);
 	eq("without the flag: no row, ledger or audit row for them", [w.row(H) || null, w.row(U) || null, w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE entity_id IN (?, ?)", H.id, U.id)[0].n], [null, null, 0]);
@@ -582,7 +619,7 @@ test("§8 --write-needs-review writes a confirmed match with review reasons as n
 	ok("dry run with the flag: would write needs_review, unpublished, under the exception", /WOULD WRITE insert as needs_review \(unpublished\) \[decision 11 exception\]/.test(lineOf(dry.out, H)), lineOf(dry.out, H));
 	ok("dry run with the flag: the run prints the exception is on", /exception \(decision 11\): ON/.test(dry.out), dry.out);
 	eq("dry run with the flag: nothing written", [w.row(H) || null, w.row(U) || null], [null, null]);
-	const r1 = await w.run(["--apply", "--write-needs-review"]);
+	const r1 = await w.go(["--apply", "--write-needs-review"]);
 	eq("with the flag: exit 0", r1.code, 0);
 	for (const [l, reason] of [[H, "unusual_content"], [U, "not_cross_checked"]]) {
 		const row = w.row(l);
@@ -593,7 +630,7 @@ test("§8 --write-needs-review writes a confirmed match with review reasons as n
 	eq("the clean load needs no exception", JSON.parse(w.q("SELECT details FROM audit_trail WHERE entity_id = ? AND action = 'backfill'", A.id)[0].details).exception, undefined);
 	const snap = w.allRows();
 	const calls = w.calls.gemini;
-	const r2 = await w.run(["--apply", "--write-needs-review"]);
+	const r2 = await w.go(["--apply", "--write-needs-review"]);
 	eq("replay with the flag: 0 rows written, no Gemini call", [r2.code, w.allRows(), w.calls.gemini - calls], [0, snap, 0]);
 	ok("replay: the needs_review rows are unchanged (same bytes, same extractor)", /SKIPPED unchanged/.test(lineOf(r2.out, H)) && /SKIPPED unchanged/.test(lineOf(r2.out, U)), r2.out);
 });
@@ -603,7 +640,7 @@ test("§9 apply records the backfill time as the sweep's starting cursor; the sw
 	const w = usual();
 	await w.run([]);
 	eq("a dry run writes no cursor", w.count("ratecon_instruction_sweeps"), 0);
-	const r = await w.run(["--apply"]);
+	const r = await w.go(["--apply"]);
 	eq("exit 0", r.code, 0);
 	const sw = w.q("SELECT started_at, listed, note FROM ratecon_instruction_sweeps");
 	eq("one cursor row at the run's start, counted as a complete sweep", sw, [{ started_at: isoOf(T0), listed: 1, note: "backfill" }]);
@@ -621,7 +658,7 @@ test("§9 apply records the backfill time as the sweep's starting cursor; the sw
 	const s = await svc.sweep();
 	ok("the first sweep lists files created since the backfill time minus its 10-minute overlap", s.ran && queries.length === 1 && queries[0].includes(`createdTime >= '${isoOf(T0 - 10 * 60 * 1000)}'`), queries);
 	const w2 = usual({ sweeps: ["2026-10-22T14:30:00Z"] });
-	const r2 = await w2.run(["--apply"]);
+	const r2 = await w2.go(["--apply"]);
 	eq("with a sweep already run: exit 0, its row kept, no cursor added", [r2.code, w2.q("SELECT started_at FROM ratecon_instruction_sweeps").map((x) => x.started_at)], [0, ["2026-10-22T14:30:00Z"]]);
 	ok("...and the output says it is kept", /cursor: kept/.test(r2.out), r2.out);
 });
@@ -632,7 +669,7 @@ test("§10 no Gemini text in the output, the logs, the audit trail or any table"
 	const ff = driveFile(F, readable(F));
 	const fg = driveFile(G, readable(G));
 	const w = usual({ loads: [H, F, G], files: [fh, ff, fg], answers: [[fh.bytes, geminiAnswer(dirty(H))], [ff.bytes, { status: 503, body: { error: { message: `overloaded ${GEMINI_MARKER}` } } }], [fg.bytes, geminiAnswer(`{"x": "${GEMINI_MARKER}`)]] });
-	const runs = [await w.run([]), await w.run(["--apply", "--write-needs-review"]), await w.run(["--preview", H.id])];
+	const runs = [await w.run([]), await w.go(["--apply", "--write-needs-review"]), await w.run(["--preview", H.id])];
 	for (const [i, r] of runs.entries()) {
 		eq(`run ${i + 1}: exit 0`, r.code, 0);
 		eq(`run ${i + 1}: nothing withheld or Gemini's own text in the output or the logs`, leaksIn(`${r.out}\n${r.logs}`), []);
@@ -683,20 +720,162 @@ test("§11 --preview prints only the driver-safe payload, for one load, and only
 });
 
 // ── §12 the documents source ──────────────────────────────────────────────────
-test("§12 a dropped rate con (documents RATECON, uploads/rate-cons/) is the source when the folder has none; a removed document is not", async ({ eq, ok }) => {
+test("§12 a dropped rate con (documents RATECON, uploads/rate-cons/) is the source when the folder has none; a removed document, or a Drive file linked by content, is not", async ({ eq, ok }) => {
 	const w = world({
-		loads: [B, C],
+		loads: [B, C, D, E],
 		docs: [{ loadId: B.id, fileName: `${B.id}.pdf`, bytes: readable(B) }, { loadId: C.id, fileName: `${C.id}.pdf`, bytes: readable(C), deletedAt: "2026-10-21 09:00:00" },
-			{ loadId: B.id, type: "BOL", fileName: `${B.id}-bol.pdf`, bytes: readable(B, " Bill") }],
-		answers: [[readable(B), geminiAnswer(clean(B))], [readable(C), geminiAnswer(clean(C))]],
+			{ loadId: B.id, type: "BOL", fileName: `${B.id}-bol.pdf`, bytes: readable(B, " Bill") },
+			// D: a folder file linked to the load by content (rememberRateConMatch()'s row: a
+			// Drive file id, no URL), with a same-named file in uploads/rate-cons/.
+			{ loadId: D.id, fileName: `${D.id}.pdf`, bytes: readable(D), driveFileId: "drive-linked-under-test", driveUrl: "" },
+			// E: a dropped rate con whose Drive mirror succeeded (from-ratecon adds the id later).
+			{ loadId: E.id, fileName: `${E.id}.pdf`, bytes: readable(E), driveFileId: "drive-mirror-under-test" }],
+		answers: [[readable(B), geminiAnswer(clean(B))], [readable(C), geminiAnswer(clean(C))], [readable(D), geminiAnswer(clean(D))], [readable(E), geminiAnswer(clean(E))]],
 	});
-	const r = await w.run(["--apply"]);
+	const r = await w.go(["--apply"]);
 	eq("exit 0", r.code, 0);
 	const b = w.row(B);
 	eq("B written from its documents row", [b.status, b.source, b.source_ref], ["auto", "backfill", String(w.q("SELECT id FROM documents WHERE load_id = ? AND type = 'RATECON'", B.id)[0].id)]);
 	ok("its source is printed as documents", /source: documents/.test(r.out), r.out);
 	ok("C's removed document is no source", /SKIPPED no_source/.test(lineOf(r.out, C)) && !w.row(C), lineOf(r.out, C));
+	ok("D's content-linked Drive file is no source, and is never read", /SKIPPED no_source/.test(lineOf(r.out, D)) && !w.row(D) && !w.calls.geminiShas.includes(sha256(readable(D))), lineOf(r.out, D));
+	eq("E's dropped copy whose Drive mirror succeeded is still its source", [w.row(E) && w.row(E).status, w.row(E) && w.row(E).source_ref], ["auto", String(w.q("SELECT id FROM documents WHERE load_id = ?", E.id)[0].id)]);
 	eq("no ledger row for a documents source", w.count("ratecon_instruction_files"), 0);
+});
+
+// ── §13 a refused audit row ───────────────────────────────────────────────────
+test("§13 a load whose audit row is refused is rolled back: exit 1, the load before it written, it has no row, version, ledger or audit row (a dropped rate con, and a folder file)", async ({ eq, ok }) => {
+	for (const [label, bFirst, kept, refused] of [["a dropped rate con refused", false, A, B], ["a folder file refused", true, B, A]]) {
+		const w = usual({ bFirst });
+		const expect = await w.expectFor([]);
+		w.exec(`CREATE TRIGGER rcpr5_refuse BEFORE INSERT ON audit_trail WHEN NEW.action = 'backfill' AND NEW.entity_id = '${refused.id}' BEGIN SELECT RAISE(ABORT, 'refused under test'); END`);
+		const r = await w.run(["--apply", expect]);
+		eq(`${label}: exit 1`, r.code, 1);
+		ok(`${label}: the error says the audit row was not written`, /ERROR: an audit row was not written/.test(r.out), r.out);
+		eq(`${label}: the load before it is written and audited`, [!!w.row(kept), w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'backfill' AND entity_id = ?", kept.id)[0].n], [true, 1]);
+		eq(`${label}: the refused load has no row, version, ledger or audit row`, [w.row(refused) || null, w.q("SELECT COUNT(*) AS n FROM load_driver_instructions_versions WHERE load_key = ?", refused.id)[0].n,
+			w.q("SELECT COUNT(*) AS n FROM ratecon_instruction_files WHERE load_key = ?", refused.id)[0].n, w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE entity_id = ?", refused.id)[0].n], [null, 0, 0, 0]);
+		if (refused === A) eq(`${label}: its folder file left out of the ledger`, w.q("SELECT COUNT(*) AS n FROM ratecon_instruction_files WHERE drive_file_id = ?", w.files[0].meta.id)[0].n, 0);
+	}
+});
+
+// ── §14 a person acts while Gemini reads ──────────────────────────────────────
+test("§14 a load a person reviews or edits while Gemini reads it is skipped: the row stays as the person left it, no reading waits, no backfill audit row", async ({ eq, ok }) => {
+	const w = usual();
+	const expect = await w.expectFor([]);
+	const staff = existingRow(A, { status: "reviewed", source: "staff", extractor: "", reviewed_by: "disp_test", reviewed_at: "2026-10-22T15:00:01Z", published_at: "2026-10-22T15:00:01Z" });
+	const reviewed = existingRow(B, { status: "reviewed", reviewed_by: "admin_test", reviewed_at: "2026-10-22T15:00:02Z", published_at: "2026-10-22T15:00:02Z" });
+	const insert = (row) => w.exec(`INSERT INTO load_driver_instructions (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
+	w.beforeAnswer = (sha) => {
+		if (sha === sha256(w.files[0].bytes)) insert(staff);
+		if (sha === sha256(readable(B))) insert(reviewed);
+	};
+	const r = await w.run(["--apply", expect]);
+	eq("exit 0", r.code, 0);
+	ok("A listed SKIPPED staff_edited, B SKIPPED reviewed", /SKIPPED staff_edited/.test(lineOf(r.out, A)) && /SKIPPED reviewed/.test(lineOf(r.out, B)), r.out);
+	eq("both rows exactly as the person left them (no waiting reading)", [w.row(A), w.row(B)], [staff, reviewed]);
+	eq("no version, ledger or backfill audit row for either", [w.count("load_driver_instructions_versions"), w.count("ratecon_instruction_files"), w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'backfill'")[0].n], [0, 0, 0]);
+});
+
+// ── §15 Gemini's limits ───────────────────────────────────────────────────────
+test("§15 Gemini: no call after a 429, after 2 passing failures in a row, or past the run's 15 calls; the loads left are skipped", async ({ eq, ok }) => {
+	eq("the run's limit is 15 calls (the plan expects 6 to 12)", backfill().MAX_GEMINI_CALLS, 15);
+	// A 429 first: one call, then none.
+	const fa = driveFile(A, readable(A));
+	const w1 = world({ loads: [A, B, C], files: [fa], docs: [{ loadId: B.id, fileName: `${B.id}.pdf`, bytes: readable(B) }, { loadId: C.id, fileName: `${C.id}.pdf`, bytes: readable(C) }],
+		answers: [[fa.bytes, { status: 429, body: { error: { message: "quota" } } }], [readable(B), geminiAnswer(clean(B))], [readable(C), geminiAnswer(clean(C))]] });
+	const r1 = await w1.run([]);
+	eq("a 429 first: exit 0, exactly 1 call", [r1.code, w1.calls.gemini], [0, 1]);
+	ok("...the 429 load named, the rest skipped as gemini_stopped", /SKIPPED extract_failed \(gemini_429\)/.test(lineOf(r1.out, A)) && /\(gemini_stopped\)/.test(lineOf(r1.out, B)) && /\(gemini_stopped\)/.test(lineOf(r1.out, C)) && /stopped after gemini_429/.test(r1.out), r1.out);
+	// Two passing failures in a row: no third call.
+	const w2 = world({ loads: [A, B, C], files: [fa], docs: [{ loadId: B.id, fileName: `${B.id}.pdf`, bytes: readable(B) }, { loadId: C.id, fileName: `${C.id}.pdf`, bytes: readable(C) }],
+		answers: [[fa.bytes, { status: 503, body: { error: { message: "busy" } } }], [readable(B), { status: 503, body: { error: { message: "busy" } } }], [readable(C), geminiAnswer(clean(C))]] });
+	const r2 = await w2.run([]);
+	eq("two 503s in a row: exactly 2 calls", w2.calls.gemini, 2);
+	ok("...the third load skipped as gemini_stopped", /\(gemini_transient\)/.test(lineOf(r2.out, B)) && /\(gemini_stopped\)/.test(lineOf(r2.out, C)), r2.out);
+	// A success between them resets the count.
+	const w3 = world({ loads: [A, B, C, D], files: [fa], docs: [B, C, D].map((l) => ({ loadId: l.id, fileName: `${l.id}.pdf`, bytes: readable(l) })),
+		answers: [[fa.bytes, { status: 503, body: {} }], [readable(B), geminiAnswer(clean(B))], [readable(C), { status: 503, body: {} }], [readable(D), geminiAnswer(clean(D))]] });
+	const r3 = await w3.run([]);
+	eq("503, answer, 503, answer: 4 calls, 2 loads would be written", [w3.calls.gemini, /2 load\(s\) would be written/.test(r3.out)], [4, true]);
+	// 33 open loads: the run's limit, then gemini_cap.
+	const many = Array.from({ length: 33 }, (_, i) => L(`7713000${String(i).padStart(2, "0")}`));
+	const w4 = world({ loads: many, docs: many.map((l) => ({ loadId: l.id, fileName: `${l.id}.pdf`, bytes: readable(l) })), answers: many.map((l) => [readable(l), geminiAnswer(clean(l))]) });
+	const r4 = await w4.run([]);
+	eq("33 open loads: exactly 15 calls", [r4.code, w4.calls.gemini], [0, 15]);
+	eq("...15 would be written, the other 18 skipped as gemini_cap", [/15 load\(s\) would be written/.test(r4.out), many.filter((l) => /SKIPPED extract_failed \(gemini_cap\)/.test(lineOf(r4.out, l))).length], [true, 18]);
+	ok("...and the output says to rerun for the rest", /the run's limit of 15; rerun for the rest/.test(r4.out), r4.out);
+});
+
+// ── §16 write only what the dry run showed ────────────────────────────────────
+test("§16 --apply writes only loads whose reading has the fingerprint the dry run printed; without --expect it refuses", async ({ eq, ok }) => {
+	const w = usual({ loads: [C], docs: [{ loadId: C.id, fileName: `${C.id}.pdf`, bytes: readable(C) }], answers: [[readable(C), geminiAnswer(clean(C))]] });
+	const before = w.fileState();
+	const bare = await w.run(["--apply"]);
+	eq("--apply without --expect: exit 2, nothing read or written", [bare.code, w.calls.sheets, w.calls.gemini, w.fileState()], [2, 0, 0, before]);
+	ok("...and it says to pass the dry run's fingerprints", /pass the dry run's fingerprints/.test(bare.out), bare.out);
+	eq("--expect without --apply: exit 2", (await w.run(["--expect=0345:0123456789ab"])).code, 2);
+	eq("a malformed --expect: exit 2", (await w.run(["--apply", "--expect=0345:xyz"])).code, 2);
+	const dry = await w.run([]);
+	const fps = Object.fromEntries([A, B, C].map((l) => {
+		const block = dry.out.split("\n");
+		const at = block.findIndex((x) => x.startsWith(`Load ...${l.last4}:`));
+		const m = /^ {2}fingerprint: ([0-9a-f]{12})$/.exec(block.slice(at, at + 7).find((x) => x.startsWith("  fingerprint:")) || "");
+		return [l.id, m ? m[1] : ""];
+	}));
+	ok("the dry run prints a 12-hex fingerprint per load read", Object.values(fps).every((f) => /^[0-9a-f]{12}$/.test(f)), dry.out);
+	ok("its apply command carries them", dry.out.includes(`--expect=${A.last4}:${fps[A.id]},${B.last4}:${fps[B.id]},${C.last4}:${fps[C.id]}`), dry.out);
+	// Gemini reads A differently at apply time; C is left off the list.
+	w.answers.set(sha256(w.files[0].bytes), geminiAnswer(clean(A, { loadRequirements: [{ category: "seal", text: "Seal the trailer before leaving the shipper." }] })));
+	const r = await w.run(["--apply", `--expect=${A.last4}:${fps[A.id]},${B.last4}:${fps[B.id]}`]);
+	eq("exit 0", r.code, 0);
+	ok("A, read differently, skipped as changed_since_dry_run and written nowhere", /SKIPPED changed_since_dry_run.*written nowhere/.test(lineOf(r.out, A)) && !w.row(A), lineOf(r.out, A));
+	ok("C, not on the list, skipped the same way", /SKIPPED changed_since_dry_run/.test(lineOf(r.out, C)) && !w.row(C), lineOf(r.out, C));
+	eq("B, read as the dry run showed, written", w.row(B) && w.row(B).status, "auto");
+	eq("no audit row for A or C", w.q("SELECT COUNT(*) AS n FROM audit_trail WHERE entity_id IN (?, ?)", A.id, C.id)[0].n, 0);
+	const w2 = usual();
+	const none = await w2.run(["--apply", "--expect=none"]);
+	eq("--expect=none: no load written, the cursor alone", [none.code, w2.count("load_driver_instructions"), w2.count("ratecon_instruction_sweeps")], [0, 0, 1]);
+});
+
+// ── §17 the sheet ─────────────────────────────────────────────────────────────
+test("§17 the sheet is named by the operator; the apply command never prints a sheet ID; =production only for production's own database", async ({ eq, ok }) => {
+	const w = usual();
+	const r = await w.run([]);
+	ok("an ID named on the command line is never printed", !r.out.includes("sheet-under-test") && /--sheet-id=<the sheet ID this dry run named>/.test(r.out), r.out);
+	eq("...and is the one read", w.calls.sheetId, "sheet-under-test");
+	const w2 = usual({ env: { ...ENV_ON, SPREADSHEET_ID: "sheet-from-settings-under-test" } });
+	const r2 = await w2.run(["--sheet-id=env"], { sheet: false });
+	eq("--sheet-id=env reads the settings' sheet", [r2.code, w2.calls.sheetId], [0, "sheet-from-settings-under-test"]);
+	ok("...and the apply command says --sheet-id=env, never the ID", /--sheet-id=env /.test(r2.out) && !r2.out.includes("sheet-from-settings-under-test"), r2.out);
+	const r3 = await w.run(["--sheet-id=env"], { sheet: false });
+	eq("--sheet-id=env with no SPREADSHEET_ID: exit 2, nothing read", [r3.code, w.calls.sheets], [2, 1]);
+	const r4 = await w.run(["--sheet-id=production"], { sheet: false });
+	eq("--sheet-id=production on a copy: exit 2, nothing read", [r4.code, w.calls.sheets], [2, 1]);
+	const ids = require(path.join(ROOT, "lib", "sheet-id.js"));
+	eq("=production names lib/sheet-id.js's production sheet, for the app's own database in production's directory", backfill().sheetIdFor("production", { env: {}, root: ids.PRODUCTION_DIR, scope: "app" }), { id: ids.PRODUCTION_SPREADSHEET_ID, shown: "production" });
+	let threw = "";
+	try { backfill().sheetIdFor("production", { env: {}, root: ids.PRODUCTION_DIR, scope: "copy" }); } catch (e) { threw = e.message; }
+	ok("...never for a copy", /only for production's own database/.test(threw), threw);
+});
+
+// ── §18 the tables ────────────────────────────────────────────────────────────
+test("§18 a database missing any table the backfill reads or writes: exit 2 naming it, nothing created", async ({ eq, ok }) => {
+	const tables = backfill().TABLES;
+	ok("TABLES holds the audit trail, deleted_loads, documents and every table the runtime's schema creates", ["audit_trail", "deleted_loads", "documents", ...runtime.SCHEMA_TABLES].every((t) => tables.includes(t)) && runtime.SCHEMA_TABLES.length === 6, tables);
+	for (const t of ["audit_trail", "deleted_loads", "documents", ...runtime.SCHEMA_TABLES]) {
+		const w = usual();
+		w.exec(`DROP TABLE ${t}`);
+		const before = w.fileState();
+		const r = await w.run([]);
+		eq(`${t} missing: exit 2, named, nothing read`, [r.code, r.out.includes(t), w.calls.sheets], [2, true, 0]);
+		eq(`${t} missing: the file unchanged and the table still missing`, [w.fileState(), w.q("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", t)[0].n], [before, 0]);
+	}
+	const w = usual();
+	w.exec("DROP TABLE driver_instructions_alerts");
+	const before = w.fileState();
+	const r = await w.run(["--apply", "--expect=none"]);
+	eq("on --apply too: exit 2, nothing created", [r.code, w.fileState()], [2, before]);
 });
 
 runAll();
