@@ -78,6 +78,36 @@ export function instructionsUrl(loadId, action = '') {
   return action ? `${base}/${action}` : base
 }
 
+// ---------------------------------------------------------------- edit locks (decision 37)
+// The server answers every instruction write by a locked person with 423 and says on
+// each read whether the reader is locked (`editLocked`). Super Admins list the locks and
+// clear one person's at a time, never their own (the server refuses that too).
+export const LOCKS_URL = '/api/driver-instructions/edit-locks'
+export function lockClearUrl(userId) {
+  return `${LOCKS_URL}/${encodeURIComponent(String(userId ?? ''))}/clear`
+}
+export function canManageLocks(role) {
+  return role === 'Super Admin'
+}
+export function editLockedOf(body) {
+  return !!body && body.editLocked === true
+}
+// The server's lock list -> rows to show: { userId, name, role, lockedAt, self }, oldest
+// first as sent; anything that isn't a lock is left out.
+export function lockRows(answer, myUserId) {
+  const locks = answer && Array.isArray(answer.locks) ? answer.locks : []
+  const me = Number(myUserId)
+  return locks
+    .filter((l) => l && Number.isSafeInteger(l.userId) && l.userId > 0)
+    .map((l) => ({
+      userId: l.userId,
+      name: typeof l.username === 'string' && l.username ? l.username : `User ${l.userId}`,
+      role: typeof l.role === 'string' ? l.role : '',
+      lockedAt: typeof l.lockedAt === 'string' ? l.lockedAt : '',
+      self: Number.isSafeInteger(me) && me === l.userId,
+    }))
+}
+
 // ---------------------------------------------------------------- errors
 // The kind of field a refusal names: "references" for any part of a reference,
 // else the last part of the path ("text", "facility", "place", "category",
@@ -109,7 +139,15 @@ const RULE_MESSAGES = Object.freeze({
 const RULE_FALLBACK = "This can't be saved: it holds something drivers must not see."
 const INVALID_MESSAGE = "This can't be saved: an entry isn't in the expected form."
 
+// Decision 37: after a save refused for an account number, the person's instruction
+// edits are locked until a Super Admin clears the lock (the server's own words, pinned
+// equal by scripts/test-driver-instructions-client.mjs).
+export const EDIT_LOCKED_MESSAGE = 'Your instruction edits are locked. Ask a Super Admin to clear the lock.'
+
 const CODE_MESSAGES = Object.freeze({
+  INSTRUCTIONS_EDIT_LOCKED: EDIT_LOCKED_MESSAGE,
+  LOCK_SELF_CLEAR: 'Another Super Admin must clear a lock on your own account.',
+  LOCK_NOT_FOUND: 'That lock was already cleared. The list has been refreshed.',
   INSTRUCTIONS_UNVERIFIED: "Couldn't check this load's details right now; try again.",
   INSTRUCTIONS_REREAD_TOO_SOON: 'You can re-read this rate con again in a few minutes.',
   RATE_LIMITED: 'Too many changes in a short time. Try again in a few minutes.',
@@ -122,13 +160,15 @@ const CODE_MESSAGES = Object.freeze({
 })
 const FALLBACK_MESSAGE = 'Something went wrong with the driver instructions. Try again.'
 
-// An error as useApi() throws it -> { hidden, message, fieldKind? }. `hidden`: the
-// flag is off (a 404 with no code), so the section doesn't render at all.
+// An error as useApi() throws it -> { hidden, message, fieldKind?, locked? }. `hidden`:
+// the flag is off (a 404 with no code), so the section doesn't render at all.
+// `locked`: the person's instruction edits are locked (423 INSTRUCTIONS_EDIT_LOCKED).
 export function instructionsError(err) {
   const status = err && typeof err.status === 'number' ? err.status : -1
   const code = err && typeof err.code === 'string' ? err.code : ''
   const data = err && err.data && typeof err.data === 'object' ? err.data : {}
   if (status === 404 && !code) return { hidden: true, message: '' }
+  if (code === 'INSTRUCTIONS_EDIT_LOCKED') return { hidden: false, message: EDIT_LOCKED_MESSAGE, locked: true }
   if (code === 'INSTRUCTIONS_CONTENT_NOT_ALLOWED' || code === 'INSTRUCTIONS_INVALID') {
     const fieldKind = fieldKindOf(data.field)
     const base = code === 'INSTRUCTIONS_INVALID'

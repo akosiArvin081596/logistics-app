@@ -48828,7 +48828,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 // lib/driver-instructions-runtime.js stores it, reads rate cons for it (a Drive sweep
 // of the rate-con folder, the drag-and-drop hook above) and serves it to staff:
 // GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
-// .../accept-pending, .../re-extract (Super Admin, Dispatcher). Inert, every route
+// .../accept-pending, .../re-extract (Super Admin, Dispatcher), and the edit locks a
+// deny-list refusal sets (GET /api/driver-instructions/edit-locks,
+// POST .../edit-locks/:userId/clear: Super Admin only). Inert, every route
 // 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY_SECRET
 // holds a usable value. The driver's screen (plan PR 4) also needs
 // DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: GET /api/driver/loads/:loadId/instructions

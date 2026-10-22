@@ -25,6 +25,7 @@
 //   §7 the edit draft and the body sent: shape only, content untouched
 //   §8 the display labels match the server's (lib/driver-instructions.js)
 //   §9 the source: the section, its routes, the two tabs
+//   §10 the edit lock (decision 37): the locked message, the Super Admin's lock list
 //
 // No DOM, no server, no build.
 //   node scripts/test-driver-instructions-client.mjs      # exits 1 on any failure
@@ -325,6 +326,34 @@ eq('the routes', ['', 'review', 'accept-pending', 're-extract'].map((a) => v.ins
 }
 
 // ---------------------------------------------------------------------------
+console.log('§10 37 the edit lock')
+// ---------------------------------------------------------------------------
+{
+  const runtime = createRequire(import.meta.url)(path.join(ROOT, 'lib', 'driver-instructions-runtime.js'))
+  eq('the locked message is the server\'s, word for word', [v.EDIT_LOCKED_MESSAGE, v.EDIT_LOCKED_MESSAGE === runtime.EDIT_LOCKED_MESSAGE], ['Your instruction edits are locked. Ask a Super Admin to clear the lock.', true])
+  const view = typeof v.instructionsError === 'function' ? v.instructionsError(apiError(423, { code: 'INSTRUCTIONS_EDIT_LOCKED', error: 'server text' })) : {}
+  eq('423 INSTRUCTIONS_EDIT_LOCKED: the message, flagged locked', [view.message, view.locked, view.hidden], [v.EDIT_LOCKED_MESSAGE, true, false])
+  eq('a clear refused for one\'s own lock, or already cleared: plain messages',
+    [v.instructionsError(apiError(403, { code: 'LOCK_SELF_CLEAR' })).message, v.instructionsError(apiError(404, { code: 'LOCK_NOT_FOUND' })).message],
+    ['Another Super Admin must clear a lock on your own account.', 'That lock was already cleared. The list has been refreshed.'])
+  eq('the lock routes', [v.LOCKS_URL, typeof v.lockClearUrl === 'function' && v.lockClearUrl(42), typeof v.lockClearUrl === 'function' && v.lockClearUrl('1/x')],
+    ['/api/driver-instructions/edit-locks', '/api/driver-instructions/edit-locks/42/clear', '/api/driver-instructions/edit-locks/1%2Fx/clear'])
+  eq('...the server\'s', v.LOCKS_URL, runtime.LOCKS_ROUTE)
+  eq('only a Super Admin manages locks', ['Super Admin', 'Dispatcher', 'Driver', '', undefined].map((r) => typeof v.canManageLocks === 'function' && v.canManageLocks(r)), [true, false, false, false, false])
+  eq('editLocked only when the server says true', [{ editLocked: true }, { editLocked: 'true' }, {}, null].map((b) => typeof v.editLockedOf === 'function' && v.editLockedOf(b)), [true, false, false, false])
+  const rows = typeof v.lockRows === 'function' ? v.lockRows({ locks: [
+    { userId: 2, username: 'qa-disp', role: 'Dispatcher', lockedAt: '2026-10-22T15:00:00Z' },
+    { userId: 1, username: '', role: 'Super Admin', lockedAt: '2026-10-22T15:01:00Z' },
+    { userId: '3', username: 'not a lock' }, null,
+  ] }, 1) : []
+  eq('lockRows: the locks as sent, the own row marked, anything else left out', rows, [
+    { userId: 2, name: 'qa-disp', role: 'Dispatcher', lockedAt: '2026-10-22T15:00:00Z', self: false },
+    { userId: 1, name: 'User 1', role: 'Super Admin', lockedAt: '2026-10-22T15:01:00Z', self: true },
+  ])
+  eq('lockRows of nothing', typeof v.lockRows === 'function' && [v.lockRows(null, 1), v.lockRows({ locks: 'x' }, 1)], [[], []])
+}
+
+// ---------------------------------------------------------------------------
 console.log('§9 the source')
 // ---------------------------------------------------------------------------
 {
@@ -370,6 +399,25 @@ console.log('§9 the source')
   eq('a successful write emits changed', /const emit = defineEmits\(\['changed'\]\)/.test(src) && /noticeText\.value = done\(answer\)\s*\n\s*emit\('changed'\)/.test(src), true)
   eq('a failed first read offers Try again', /<Button v-if="!body && errorText && !loading"[^>]*@click="load"[^>]*>Try again<\/Button>/.test(src), true)
   eq('the section keeps a gap above it', /\.di-section \{ margin: 1rem 0; \}/.test(src), true)
+  // Decision 37: the locked person's screen and the Super Admin's lock list.
+  eq('37 the locked message replaces the edit controls and the Accept / Keep buttons',
+    [
+      /<p v-if="locked" role="alert" class="di-msg di-msg-error" data-testid="di-locked">\{\{ EDIT_LOCKED_MESSAGE \}\}<\/p>/.test(src),
+      src.includes('<div v-if="!editing && !locked" class="mt-3 flex flex-wrap gap-2">'),
+      /<div v-if="!locked" class="mt-2 flex flex-wrap gap-2">\s*\n\s*<Button[^\n]*>Accept the new rate con<\/Button>/.test(src),
+    ], [true, true, true])
+  eq('37 the lock state comes from the server: every read and write answer, and a 423',
+    [(src.match(/locked\.value = editLockedOf\(answer\)/g) || []).length, /if \(view\.locked\) \{\s*\n[^\n]*\n\s*locked\.value = true\s*\n\s*editing\.value = false/.test(src)], [2, true])
+  eq('37 the lock list: fetched for a Super Admin only, cleared one person at a time, the own row has no button',
+    [
+      /if \(!canLocks\.value \|\| !props\.open\) \{\s*\n\s*lockList\.value = \[\]/.test(src),
+      src.includes('const canLocks = computed(() => canManageLocks(auth.user?.role))'),
+      src.includes('await api.get(LOCKS_URL)'),
+      src.includes('await api.post(lockClearUrl(userId), {})'),
+      /<Button v-if="!l\.self"[^>]*@click="clearLock\(l\.userId\)"[^>]*>Clear lock<\/Button>/.test(src),
+      /<div v-if="lockList\.length"[^>]*data-testid="di-locks">/.test(src),
+      src.includes("fmtAppInstant(l.lockedAt, { fallback: '' })"),
+    ], [true, true, true, true, true, true, true])
   for (const [name, tab] of [['ActiveLoadsTab.vue', active], ['JobBoardTab.vue', board]]) {
     eq(`${name}: a change refreshes the dashboard and the open load's codes`,
       tab.includes('<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />') &&

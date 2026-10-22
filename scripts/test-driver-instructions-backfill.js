@@ -924,7 +924,7 @@ test("§18 a database missing any table the backfill reads or writes: exit 2 nam
 		eq(`${t} missing: the file unchanged and the table still missing`, [w.fileState(), w.q("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", t)[0].n], [before, 0]);
 	}
 	const w = usual();
-	w.exec("DROP TABLE driver_instructions_alerts");
+	w.exec("DROP TABLE driver_instructions_edit_locks");
 	const before = w.fileState();
 	const r = await w.run(["--apply", "--expect=none"]);
 	eq("on --apply too: exit 2, nothing created", [r.code, w.fileState()], [2, before]);
