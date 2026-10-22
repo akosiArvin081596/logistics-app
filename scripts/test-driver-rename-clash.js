@@ -315,7 +315,12 @@ const snapshot = (db) => JSON.stringify({
 function mountRoute(routeSrc, env) {
 	let handler = null;
 	const grab = (p, ...rest) => { handler = rest[rest.length - 1]; };
-	const all = { app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), userPasswordResetLimiter: (req, res, next) => next(), ...env };
+	const all = {
+		app: { get: grab, post: grab, put: grab, delete: grab }, requireRole: () => (req, res, next) => next(), userPasswordResetLimiter: (req, res, next) => next(),
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
+		...env,
+	};
 	const names = Object.keys(all);
 	new Function(...names, routeSrc)(...names.map((k) => all[k]));
 	if (typeof handler !== "function") die("a lifted route did not register a handler");

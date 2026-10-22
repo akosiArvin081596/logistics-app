@@ -62,10 +62,15 @@ async function fetchRateCon(id) {
     })
     if (!res.ok) {
       let serverMessage = ''
-      try { serverMessage = (await res.json()).error || '' } catch { serverMessage = '' }
+      let serverCode = ''
+      try {
+        const body = await res.json()
+        serverMessage = body.error || ''
+        serverCode = body.code || ''
+      } catch { serverMessage = '' }
       if (controller !== ctrl) return
       state.value = 'error'
-      message.value = rateConFailureText(res.status, serverMessage)
+      message.value = rateConFailureText(res.status, serverMessage, serverCode)
       return
     }
     const blob = await res.blob()

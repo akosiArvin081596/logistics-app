@@ -429,7 +429,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
 		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
-		"userPasswordResetLimiter", sources.updateUser)(
+		"userPasswordResetLimiter", "RATECON_PDF_VIEWERS", sources.updateUser)(
 		app, requireRole, db, noSheetRows, "t3-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, recordPurge, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
@@ -445,7 +445,9 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		// The password-change email (above): sends nothing.
 		notifyPasswordChanged, passwordRules,
 		// The password-reset limiter (test-password-change-notice.js section 9): lets every request through.
-		passThrough);
+		passThrough,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		require("../lib/listed-accounts.js").parseListedAccountIds(undefined));
 
 	// PUT /api/admin/fix-driver-name on the REAL cascade: the executor, the target
 	// list and its builders are server.js's own, so "the accounts whose sessions
