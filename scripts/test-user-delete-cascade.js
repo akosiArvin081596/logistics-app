@@ -445,6 +445,7 @@ function seedOnboardedDriver(db) {
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
 			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
+			CREATE TABLE documents (id INTEGER PRIMARY KEY, driver TEXT, type TEXT DEFAULT '', deleted_at TEXT DEFAULT NULL);
 		`);
 		return db;
 	};
@@ -645,6 +646,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
 			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
+			CREATE TABLE documents (id INTEGER PRIMARY KEY, driver TEXT, type TEXT DEFAULT '', deleted_at TEXT DEFAULT NULL);
 		`);
 		return db;
 	};
