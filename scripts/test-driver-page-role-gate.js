@@ -127,7 +127,12 @@ const helpers = new Function("require", [
 	liftFn("resolveBrokerWithheldColumns"),
 	liftFn("sanitizeBrokerColumns"),
 	liftFn("invoiceTotalDue"),
-	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue };",
+	// The per-load document counts (their own subject is
+	// scripts/test-driver-docs-current-holder.js §4).
+	liftConstLine("RATECON_DOCUMENT_SQL"),
+	liftConstLine("LOAD_PANEL_DOCUMENT_FILTER"),
+	liftFn("documentFiledUnder"),
+	"return { normalizeDriverName, findCol, sanitizeBrokerColumns, invoiceTotalDue, LOAD_PANEL_DOCUMENT_FILTER, documentFiledUnder };",
 ].join("\n"))((p) => require(/^\.\/lib\//.test(p) ? path.join(ROOT, p) : p));
 // The route finds the driver's directory row through findDirectoryRowForDriver(),
 // which reads `db`, so it is built over whichever db a route runs on.

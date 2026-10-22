@@ -105,6 +105,10 @@ const LOAD_PANEL_DOCUMENT_FILTER = (() => {
 	return new Function(`${line("RATECON_DOCUMENT_SQL")}${line("LOAD_PANEL_DOCUMENT_FILTER")}return LOAD_PANEL_DOCUMENT_FILTER;`)();
 })();
 const isRateConDocType = new Function(`${liftFn("isRateConDocType")}\nreturn isRateConDocType;`)();
+// Which rows a Driver's panel keeps: those filed under him (its own runner is
+// scripts/test-driver-docs-current-holder.js).
+const documentFiledUnder = new Function("normalizeDriverName",
+	`${liftFn("documentFiledUnder")}\nreturn documentFiledUnder;`)(normalizeDriverName);
 const UPLOAD_TYPE_SRC = liftFn("uploadDocTypeFor");
 const buildUploadDocTypeFor = (src) => new Function(`${src}\nreturn uploadDocTypeFor;`)();
 
@@ -174,7 +178,8 @@ docDb.exec(`
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL,
 		drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '',
-		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL
+		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, ocr_text TEXT DEFAULT '', deleted_at DATETIME DEFAULT NULL,
+		uploaded_by_user_id INTEGER DEFAULT NULL, uploaded_by_role TEXT DEFAULT NULL
 	);
 	INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES
 		('L-100', 'Desoren King', 'POD', 'L-100_POD_1.pdf', '/uploads/L-100_POD_1.pdf'),
@@ -194,6 +199,7 @@ function documentDeps(overrides = {}) {
 	return {
 		requireRole, requireAuth, driverWriteLimiter: limiter,
 		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER, isRateConDocType,
+		documentFiledUnder,
 		uploadDocTypeFor: buildUploadDocTypeFor(UPLOAD_TYPE_SRC),
 		db: docDbRecorded,
 		// Upload plumbing. The image branch is never taken (every upload below is a
@@ -478,6 +484,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 		// So are the load-instructions codes (scripts/test-driver-page-role-gate.js §8).
 		driverInstructions: { annotateDriverLoads() {} },
+		// The per-load document counts (scripts/test-driver-docs-current-holder.js §4).
+		LOAD_PANEL_DOCUMENT_FILTER, documentFiledUnder,
 		console: quiet,
 	};
 	const driverRoute = buildRoute("get", "/api/driver/:driverName", driverDeps);
