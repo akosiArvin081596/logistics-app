@@ -58,7 +58,9 @@
     <!-- Doc list -->
     <div v-if="loading" class="doc-empty">Loading...</div>
     <div v-else-if="docs.length === 0 && onboardingDocs.length === 0" class="doc-empty">No legal documents on file.</div>
-    <table v-else class="doc-table">
+    <!-- Scrolls sideways on its own: the page clips overflow (.admin-page). -->
+    <div v-else class="table-wrapper">
+    <table class="doc-table">
       <thead>
         <tr>
           <th>Type</th>
@@ -94,6 +96,7 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
   </div>

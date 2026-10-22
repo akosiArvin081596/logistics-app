@@ -26,7 +26,9 @@
     <!-- Trucks Table -->
     <div v-if="trucksError" class="empty-msg load-error" role="alert">Couldn't load your trucks: {{ trucksError }} Refresh the page to try again.</div>
     <div v-else-if="trucks.length === 0" class="empty-msg">No trucks added yet.</div>
-    <table v-else class="trucks-table">
+    <!-- Scrolls sideways on its own: the page clips overflow (.admin-page). -->
+    <div v-else class="table-wrapper">
+    <table class="trucks-table">
       <thead>
         <tr>
           <th></th>
@@ -101,6 +103,7 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     <!-- Full-size vehicle photo. Same shared viewer the Expenses receipt
          preview uses (wheel/pinch zoom, drag-pan, Esc/backdrop to close), so

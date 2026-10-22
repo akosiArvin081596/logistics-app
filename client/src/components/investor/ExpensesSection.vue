@@ -29,6 +29,9 @@
     <div v-if="loading" class="skeleton skeleton-card"></div>
     <div v-else-if="expenses.length === 0" class="empty-msg">No expenses found for the selected filters.</div>
     <template v-else>
+    <!-- Scrolls sideways on its own: the page clips overflow (.admin-page), so on
+         a phone the columns past the screen edge (Receipt) were out of reach. -->
+    <div class="table-wrapper">
     <table class="data-table">
       <thead>
         <tr>
@@ -64,6 +67,7 @@
         </tr>
       </tbody>
     </table>
+    </div>
     <div
       class="totals-footer clickable"
       role="button" tabindex="0"
