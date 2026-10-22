@@ -47,9 +47,27 @@ const Vue = clientRequire('vue')
 const { parse, compileScript } = clientRequire('vue/compiler-sfc')
 const { renderToString } = clientRequire('vue/server-renderer')
 
-// Rendered HTML to its visible text: comments dropped, tags as spaces.
+// Rendered HTML to its visible text: comments dropped, tags as spaces, the two
+// entities the renderer emits here decoded, whitespace collapsed. A scan, not a
+// regex replace (the same walk as scripts/test-fix-age-tracking.mjs).
 function text(html) {
-  return String(html).replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]*>/g, ' ').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
+  const s = String(html)
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    const lt = s.indexOf('<', i)
+    if (lt === -1) { out += s.slice(i); break }
+    out += s.slice(i, lt)
+    if (s.startsWith('<!--', lt)) {
+      const end = s.indexOf('-->', lt + 4)
+      i = end === -1 ? s.length : end + 3
+    } else {
+      const end = s.indexOf('>', lt + 1)
+      out += ' '
+      i = end === -1 ? s.length : end + 1
+    }
+  }
+  return out.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
 }
 
 // Compile a committed SFC's <script setup> + <template> into a component.
