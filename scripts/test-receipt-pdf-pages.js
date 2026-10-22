@@ -327,8 +327,17 @@ const jpegClean = (buf) => {
 	console.log("T12 a child that never answers");
 	{
 		const HANG = scratchChild("hang-child.js", "process.once('message', () => { setInterval(() => {}, 1000); });\n");
+		// The self-test runs under the same 600 ms deadline; a made-up child that
+		// passes it at once keeps this check about the job's deadline alone, even
+		// on a loaded machine.
+		const PASSING = plainOut && scratchChild("passing-selftest-child.js", [
+			`const pdf = Buffer.from(${JSON.stringify(Buffer.from(plainOut).toString("base64"))}, "base64");`,
+			"process.once('message', (m) => process.send(m.kind === 'selftest'",
+			"  ? { ok: true, identity: { uid: 501, gid: 20, groups: [20], env: 'no', db: 'no', permission: 'on' }, hook: true, result: { ok: true, pdf, pages: 1 } }",
+			"  : { ok: false, reason: 'decode_cap' }, () => process.exit(0)));",
+		].join("\n"));
 		const pids = [];
-		const hang = rp.createReceiptPdfService({ ...BASE, childPath: HANG, timeoutMs: 600, trace: (e, i) => { if (e === "fork") pids.push(i.pid); } });
+		const hang = rp.createReceiptPdfService({ ...BASE, childPath: HANG, ...(PASSING ? { selfTestChildPath: PASSING } : {}), timeoutMs: 600, trace: (e, i) => { if (e === "fork") pids.push(i.pid); } });
 		const r = await hang.prepare(put(onePage()));
 		const jobPid = pids[pids.length - 1];
 		await new Promise((res) => setTimeout(res, 200));
