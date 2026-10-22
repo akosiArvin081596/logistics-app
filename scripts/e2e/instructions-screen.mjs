@@ -134,6 +134,12 @@ const quiet = { warn() {}, error() {}, info() {}, log() {} }
 async function startApi(env) {
   const db = new Database(':memory:')
   const audits = []
+  // A lock is cleared only by an account created before it, and only with its audit
+  // row written (decision 37): the two made-up staff accounts, and an audit table.
+  db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+  for (const u of [DISPATCHER, SUPER_ADMIN]) db.prepare("INSERT INTO users (id, username, role, created_at) VALUES (?, ?, ?, '2026-01-01 00:00:00')").run(u.id, u.username, u.role)
+  db.exec('CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT)')
+  const auditRow = db.prepare('INSERT INTO audit_trail (action, details) VALUES (?, ?)')
   const uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'rcpr3-uploads-'))
   const svc = runtime.create({
     db,
@@ -147,7 +153,7 @@ async function startApi(env) {
     // The made-up row has no broker or contact column; any such pattern serves.
     brokerWithheldRe: /broker|contact|e-?mail|phone/i,
     ingestionGeminiUnavailableAt: () => 0,
-    logAudit: (req, action, entity, id, details) => audits.push({ action, details: String(details || '') }),
+    logAudit: (req, action, entity, id, details) => { auditRow.run(action, String(details || '')); audits.push({ action, details: String(details || '') }) },
     logAuditRefusal: (req, action, entity, id, details, code) => audits.push({ action, details: String(details || ''), code }),
     notifySuperAdmins: () => {},
     sendAdminEmail: () => null,

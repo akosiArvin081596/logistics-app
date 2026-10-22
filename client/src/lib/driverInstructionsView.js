@@ -148,6 +148,8 @@ const CODE_MESSAGES = Object.freeze({
   INSTRUCTIONS_EDIT_LOCKED: EDIT_LOCKED_MESSAGE,
   LOCK_SELF_CLEAR: 'Another Super Admin must clear a lock on your own account.',
   LOCK_NOT_FOUND: 'That lock was already cleared. The list has been refreshed.',
+  LOCK_CLEAR_NEWER_ACCOUNT: 'An account created after this lock was set can\'t clear it. Ask another Super Admin.',
+  LOCK_CLEAR_NOT_AUDITED: 'The lock couldn\'t be cleared because its audit record couldn\'t be saved. Try again.',
   INSTRUCTIONS_UNVERIFIED: "Couldn't check this load's details right now; try again.",
   INSTRUCTIONS_REREAD_TOO_SOON: 'You can re-read this rate con again in a few minutes.',
   RATE_LIMITED: 'Too many changes in a short time. Try again in a few minutes.',

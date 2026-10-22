@@ -285,6 +285,12 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	db.exec("CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
 	// The dispatch notices table as server.js creates it (the lock alert is stored there).
 	db.exec(/CREATE TABLE IF NOT EXISTS dispatch_notifications \([\s\S]*?\n\t\)/.exec(SRC)[0]);
+	// The users table as server.js creates it: a lock is cleared only by an account
+	// created before the lock was set.
+	db.exec(/CREATE TABLE IF NOT EXISTS users \([\s\S]*?\n\t\)/.exec(SRC)[0]);
+	for (const u of [SA, DISP, DISP2, DRIVER, INVESTOR, { id: 7, username: "admin_two", role: "Super Admin" }]) {
+		db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, 'x', ?, '2026-01-01 00:00:00')").run(u.id, u.username, u.role);
+	}
 	const w = {
 		db, env: { ...env }, files: [...files], gemini: [...gemini], logs: [], sockets: [], emails: [], responses: [], startsJob: [], intervals: [],
 		calls: { list: 0, download: [], meta: [], gemini: 0, geminiBodies: [], sheet: 0, side: 0 }, ingestionAt, sheetFails, sideFails,
@@ -1824,6 +1830,37 @@ test("§13 37 clearing a lock: Super Admin only, never their own (403 LOCK_SELF_
 	const off = await world({ env: { ...ON, RATECON_DRIVER_INSTRUCTIONS_ENABLED: "" } });
 	eq("flag off: both lock routes 404", [(await off.call("GET", LOCKS, SA)).status, (await off.call("POST", clear(2), SA, {})).status], [404, 404]);
 	eq("the answers hold no part of any refused value", w.responses.flatMap(refusedValueTrace).filter((t) => t !== "length or position"), []);
+});
+
+test("§13 37 L1 a clear whose audit row can't be written answers 500 LOCK_CLEAR_NOT_AUDITED and keeps the lock", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	await w.call("PUT", API, DISP, editBody(`Give the gate ${DENY} on arrival.`));
+	w.db.exec("CREATE TRIGGER no_clear_audit BEFORE INSERT ON audit_trail WHEN NEW.action = 'edit_lock_cleared' BEGIN SELECT RAISE(ABORT, 'audit refused'); END;");
+	const r = await w.call("POST", `${LOCKS}/2/clear`, SA, {});
+	eq("500 with its code", [r.status, r.body.code], [500, "LOCK_CLEAR_NOT_AUDITED"]);
+	eq("the lock stays, and no clear is recorded", [lockRows(w).map((l) => l.user_id), w.audits().filter((a) => a.action === "edit_lock_cleared").length], [[2], 0]);
+	eq("the person is still locked", (await w.call("POST", `${API}/review`, DISP, {})).status, 423);
+	ok("logged by code", w.logs.some((l) => l.includes("lock not cleared: its audit row was not written")), w.logs);
+	w.db.exec("DROP TRIGGER no_clear_audit");
+	eq("once the audit row can be written, the clear goes through", [(await w.call("POST", `${LOCKS}/2/clear`, SA, {})).status, lockRows(w), w.audits().filter((a) => a.action === "edit_lock_cleared").length], [200, [], 1]);
+});
+
+test("§13 37 L2 a Super Admin account created after the lock was set (or whose creation can't be read) can't clear it: 403 LOCK_CLEAR_NEWER_ACCOUNT", async ({ eq }) => {
+	const clock = useClock();
+	const w = await world();
+	insertRow(w, cleanExtraction());
+	await w.call("PUT", API, SA, editBody(`Give the gate ${DENY} on arrival.`));
+	clock.t += 60 * 1000;
+	w.db.prepare("INSERT INTO users (id, username, password_hash, role, created_at) VALUES (8, 'admin_new', 'x', 'Super Admin', '2026-10-22 15:01:00')").run();
+	const fresh = { id: 8, username: "admin_new", role: "Super Admin" };
+	const r = await w.call("POST", `${LOCKS}/1/clear`, fresh, {});
+	eq("an account created after the lock: 403 with its own code, the lock stays", [r.status, r.body.code, lockRows(w).map((l) => l.user_id)], [403, "LOCK_CLEAR_NEWER_ACCOUNT", [1]]);
+	w.db.prepare("UPDATE users SET created_at = '2026-10-22 15:00:00' WHERE id = 8").run();
+	eq("created in the same second as the lock: refused too", (await w.call("POST", `${LOCKS}/1/clear`, fresh, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
+	eq("an account the users table doesn't hold: refused", (await w.call("POST", `${LOCKS}/1/clear`, { id: 99, username: "ghost", role: "Super Admin" }, {})).body.code, "LOCK_CLEAR_NEWER_ACCOUNT");
+	eq("a Super Admin created before the lock clears it", [(await w.call("POST", `${LOCKS}/1/clear`, SA2, {})).status, lockRows(w)], [200, []]);
 });
 
 if (!fs.existsSync(RUNTIME)) {

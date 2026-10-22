@@ -336,6 +336,9 @@ console.log('§10 37 the edit lock')
   eq('a clear refused for one\'s own lock, or already cleared: plain messages',
     [v.instructionsError(apiError(403, { code: 'LOCK_SELF_CLEAR' })).message, v.instructionsError(apiError(404, { code: 'LOCK_NOT_FOUND' })).message],
     ['Another Super Admin must clear a lock on your own account.', 'That lock was already cleared. The list has been refreshed.'])
+  eq('a clear by an account newer than the lock, or one whose audit row could not be saved: plain messages',
+    [v.instructionsError(apiError(403, { code: 'LOCK_CLEAR_NEWER_ACCOUNT' })).message, v.instructionsError(apiError(500, { code: 'LOCK_CLEAR_NOT_AUDITED' })).message],
+    ['An account created after this lock was set can\'t clear it. Ask another Super Admin.', 'The lock couldn\'t be cleared because its audit record couldn\'t be saved. Try again.'])
   eq('the lock routes', [v.LOCKS_URL, typeof v.lockClearUrl === 'function' && v.lockClearUrl(42), typeof v.lockClearUrl === 'function' && v.lockClearUrl('1/x')],
     ['/api/driver-instructions/edit-locks', '/api/driver-instructions/edit-locks/42/clear', '/api/driver-instructions/edit-locks/1%2Fx/clear'])
   eq('...the server\'s', v.LOCKS_URL, runtime.LOCKS_ROUTE)
