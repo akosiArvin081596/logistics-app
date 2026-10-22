@@ -8018,6 +8018,17 @@ function reissueHeldAssignedClosedReason(held, named = []) {
 	return months.size ? `the email's Assigned Date is in a closed month (${[...months].sort().join(", ")})` : "";
 }
 
+// A stored row's cell (the row by header, or null for a new load) for a column
+// named exactly as the sheet has it, or by its trimmed name in any case; "" when
+// there is none.
+function storedCellNamed(stored, col) {
+	if (!stored) return "";
+	if (Object.prototype.hasOwnProperty.call(stored, col)) return stored[col] == null ? "" : String(stored[col]);
+	const want = String(col).trim().toLowerCase();
+	const hit = Object.keys(stored).find((h) => String(h).trim().toLowerCase() === want);
+	return hit === undefined || stored[hit] == null ? "" : String(stored[hit]);
+}
+
 // The values a later email may write to a load already in Job Tracking, by
 // sheet column: a blank (missing, null or only spaces) never replaces a stored
 // value, and a stored Assigned Date (every column assignedDateColumn() names) is
@@ -8026,27 +8037,31 @@ function reissueHeldAssignedClosedReason(held, named = []) {
 // still blank takes its `fallbacks` value. `stored` is the row by header, or null
 // for a new load. `protect` (from reissueHoldFor(), for a stored load) keeps the
 // held columns and every Assigned Date column, a blank one included, or with
-// `all` every column, as stored. Returns { values, kept, held, changed } (kept: the
+// `all` every column, as stored. `personKeep` (from personEditHoldCheck(), for a
+// stored load no re-issue hold protects, with RATECON_PERSON_EDIT_HOLD_ENABLED on):
+// [{ column }], the dates a person set that the email would change, kept as stored
+// and listed as held. Returns { values, kept, held, changed } (kept: the
 // columns whose stored value won; held: { column, stored, sent } where a
 // protected column's sent value really differed; changed: the other columns a
 // protected load's values change).
-function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
+function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null, personKeep = null) {
 	const blank = (v) => v === undefined || v === null || String(v).trim() === "";
-	const storedOf = (col) => {
-		if (!stored) return "";
-		if (Object.prototype.hasOwnProperty.call(stored, col)) return stored[col] == null ? "" : String(stored[col]);
-		const want = String(col).trim().toLowerCase();
-		const hit = Object.keys(stored).find((h) => String(h).trim().toLowerCase() === want);
-		return hit === undefined || stored[hit] == null ? "" : String(stored[hit]);
-	};
+	const storedOf = (col) => storedCellNamed(stored, col);
 	const out = {};
 	const kept = [];
 	const held = [];
 	const changed = [];
 	const guarded = Boolean(protect && stored);
+	const personKept = new Set(stored && !guarded && Array.isArray(personKeep) ? personKeep.map((p) => p.column) : []);
 	for (const [col, val] of Object.entries(values)) {
 		const have = storedOf(col);
 		const assigned = assignedDateColumn(col);
+		if (personKept.has(col)) {
+			out[col] = have;
+			if (String(val == null ? "" : val) !== have) kept.push(col);
+			held.push({ column: col, stored: have, sent: String(val) });
+			continue;
+		}
 		if (guarded && (protect.all || reissueHeldColumn(col) || assigned)) {
 			out[col] = have;
 			if (String(val == null ? "" : val) !== have) kept.push(col);
@@ -8075,6 +8090,272 @@ function keepStoredColumnsOk(obj) {
 	const entries = Object.entries(obj);
 	return entries.length <= KEEP_STORED_MAX_COLUMNS
 		&& entries.every(([, v]) => v === null || v === undefined || ((typeof v !== "object") && String(v).length <= KEEP_STORED_MAX_VALUE));
+}
+
+// PERSON EDIT HOLD (2026-10-22, Arvin's rule of 2026-10-21): a Pickup or Drop-off
+// Appointment a person corrected on an open load is never overwritten by a later
+// rate-con email; the email raises the re-issue alert instead, with its own
+// wording. The rule is lib/person-edit-hold.js; this is its record and its wiring.
+//
+// - load_cell_writes records, for those two columns (personEditHold.personHoldColumn()),
+//   every value keep-stored-values tells n8n to write ("ratecon"; the first time it sees a
+//   column, the date already on the sheet is recorded first as the app's own,
+//   "baseline"), every value a
+//   drag-and-drop create writes ("ratecon_create"), and every date a person saves through
+//   POST /api/data, PUT /api/data/:rowIndex or PUT /api/load/:loadId on Job Tracking
+//   ("person", with role and user id, no name). A stored date matching none of them was
+//   set by a person in the Google Sheet. Data-fix scripts write the sheet directly and are
+//   not recorded, so a fixed date counts as a person's (intended: a fix is deliberate).
+// - The hold runs only where the re-issue hold isn't protecting the load (not delivered,
+//   not invoiced, status readable, no closed month), and only while
+//   RATECON_REISSUE_HOLD_ENABLED is on too: with it off, that hold can't tell an open load,
+//   so nothing is held and one warning per start says why (decision 8).
+// - RATECON_PERSON_EDIT_HOLD_ENABLED (defaults OFF, /^(true|1|yes|on)$/i): on, the stored
+//   date is answered, listed as held and alerted; off, the answer is today's and a
+//   "would_hold" row is recorded for the shadow report (scripts/person-edit-hold-report.js).
+//   A comparison that turns on a date form momentKey() can't read is never a hold: today's
+//   write, one log line and a "format" row. The record runs whatever the flags.
+// - The record only ever writes its own table, in a try/catch: a failed record never
+//   blocks ingestion or an edit, and is logged (once, then at most hourly). A missed
+//   "ratecon" row can only make a later value look like a person's, so it fails toward
+//   holding and asking. Rows: the last LOAD_CELL_WRITES_KEEP per load, column and kind
+//   (evidence or shadow); a load untouched for LOAD_CELL_WRITES_IDLE_DAYS is purged daily.
+const personEditHold = require("./lib/person-edit-hold");
+const RATECON_PERSON_EDIT_HOLD_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_PERSON_EDIT_HOLD_ENABLED ?? "").trim());
+const LOAD_CELL_WRITES_KEEP = 20;
+const LOAD_CELL_WRITES_IDLE_DAYS = 180;
+const LOAD_CELL_KEY_MAX = 120;
+const LOAD_CELL_COLUMN_MAX = 200;
+const LOAD_CELL_VALUE_MAX = 20000;
+const LOAD_CELL_EVIDENCE_SOURCES = ["ratecon", "ratecon_create", "baseline", "person"];
+const LOAD_CELL_SHADOW_SOURCES = ["would_hold", "held", "format"];
+
+// The record (created on first use). stored_value: the stored cell a would_hold, held
+// or format row was judged against (the shadow report shows both dates); "" otherwise.
+function loadCellWritesTable() {
+	if (loadCellWritesTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS load_cell_writes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			load_key TEXT NOT NULL,
+			column_name TEXT NOT NULL,
+			value TEXT NOT NULL,
+			source TEXT NOT NULL,
+			actor TEXT NOT NULL DEFAULT '',
+			stored_value TEXT NOT NULL DEFAULT '',
+			at TEXT NOT NULL
+		)
+	`);
+	db.exec("CREATE INDEX IF NOT EXISTS idx_load_cell_writes ON load_cell_writes(load_key, column_name, id)");
+	loadCellWritesTable.ready = true;
+}
+
+let loadCellWritesFailures = 0;
+let loadCellWritesFailureLoggedAt = 0;
+function loadCellWritesFailed(what, e) {
+	loadCellWritesFailures++;
+	const now = Date.now();
+	if (loadCellWritesFailures === 1 || now - loadCellWritesFailureLoggedAt > 60 * 60 * 1000) {
+		loadCellWritesFailureLoggedAt = now;
+		console.error(`[person-edit-hold] the load_cell_writes ${what} failed (${loadCellWritesFailures} so far; ingestion and edits unaffected): ${(e && e.message) || e}`);
+	}
+}
+
+function loadCellKey(loadId) {
+	return normLoadKey(loadId).slice(0, LOAD_CELL_KEY_MAX);
+}
+
+// The column as the sheet names it (exactly, or by its trimmed name in any case), trimmed.
+function loadCellColumnName(headers, col) {
+	const want = String(col == null ? "" : col).trim().toLowerCase();
+	const hit = (headers || []).find((h) => h === col) ?? (headers || []).find((h) => String(h == null ? "" : h).trim().toLowerCase() === want);
+	return String(hit === undefined ? col : hit).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+}
+
+function loadCellWriteRows(key, column) {
+	loadCellWritesTable();
+	return db.prepare("SELECT id, source, value, actor, stored_value, at FROM load_cell_writes WHERE load_key = ? AND column_name = ? ORDER BY id")
+		.all(String(key).slice(0, LOAD_CELL_KEY_MAX), String(column).slice(0, LOAD_CELL_COLUMN_MAX));
+}
+
+// One row. A blank value is never recorded; a shadow row the same as one already
+// there is not recorded again. Keeps the newest LOAD_CELL_WRITES_KEEP of its kind.
+// Throws on a database error (the callers catch).
+function recordLoadCellWrite(key, column, value, source, { actor = "", stored = "", at = new Date().toISOString() } = {}) {
+	loadCellWritesTable();
+	const k = String(key == null ? "" : key).slice(0, LOAD_CELL_KEY_MAX);
+	const c = String(column == null ? "" : column).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+	const v = String(value == null ? "" : value).slice(0, LOAD_CELL_VALUE_MAX);
+	const s = String(stored == null ? "" : stored).slice(0, LOAD_CELL_VALUE_MAX);
+	if (!k || !c || !v.trim()) return false;
+	const kind = LOAD_CELL_SHADOW_SOURCES.includes(source) ? LOAD_CELL_SHADOW_SOURCES : LOAD_CELL_EVIDENCE_SOURCES;
+	if (kind === LOAD_CELL_SHADOW_SOURCES && db.prepare("SELECT 1 FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source = ? AND value = ? AND stored_value = ? LIMIT 1").get(k, c, source, v, s)) return false;
+	db.prepare("INSERT INTO load_cell_writes (load_key, column_name, value, source, actor, stored_value, at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+		.run(k, c, v, source, String(actor || "").slice(0, 80), s, at);
+	const inKind = kind.map(() => "?").join(", ");
+	db.prepare(`DELETE FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source IN (${inKind}) AND id NOT IN (
+		SELECT id FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source IN (${inKind}) ORDER BY id DESC LIMIT ?)`)
+		.run(k, c, ...kind, k, c, ...kind, LOAD_CELL_WRITES_KEEP);
+	return true;
+}
+
+// A LogisX edit that an email write overwrote (R2, L7: keep-stored-values read the
+// sheet before the edit and n8n wrote after it), logged once per edit.
+const lostPersonEditsLogged = new Set();
+function noteLostPersonEdit(key, column, personRow) {
+	const id = `${key}|${column}|${personRow.id}`;
+	if (lostPersonEditsLogged.has(id)) return;
+	if (lostPersonEditsLogged.size > 1000) lostPersonEditsLogged.clear();
+	lostPersonEditsLogged.add(id);
+	console.warn(`[person-edit-hold] load ${key} ${column}: the LogisX edit of ${personRow.at} is not in the sheet, which holds an earlier rate con's date (an email written after a read made before the edit); check the load`);
+}
+
+// For a found load no re-issue hold protects: each held column's decision. Answers
+// { hold: [{ column, header, stored, sent, part }], format: [{ column, header, stored, sent }] };
+// nothing when the record can't be read (today's rule).
+function personEditHoldCheck(key, headers, stored, values) {
+	const out = { hold: [], format: [] };
+	try {
+		for (const [col, val] of Object.entries(values || {})) {
+			if (!personEditHold.personHoldColumn(col)) continue;
+			const header = loadCellColumnName(headers, col);
+			const have = storedCellNamed(stored, col);
+			const sent = val == null ? "" : String(val);
+			const rows = loadCellWriteRows(key, header);
+			const lost = personEditHold.lostEdit(have, rows);
+			if (lost) noteLostPersonEdit(key, header, lost);
+			const d = personEditHold.decideColumn({ stored: have, sent, rows });
+			if (d.action === "hold") {
+				out.hold.push({ column: col, header, stored: have, sent, part: personEditHold.reasonPart(d, APP_TIMEZONE) });
+			} else if (d.action === "format") {
+				out.format.push({ column: col, header, stored: have, sent });
+				console.warn(`[person-edit-hold] load ${key} ${header}: "${have.slice(0, 40)}" and "${sent.slice(0, 40)}" can't be compared (a date form that can't be read); written as the email gave it`);
+			}
+		}
+	} catch (e) {
+		loadCellWritesFailed("read", e);
+		return { hold: [], format: [] };
+	}
+	return out;
+}
+
+// What keep-stored-values records once it has answered, for each held column the
+// email carries: first, when the column has no record yet, the stored non-blank cell
+// as the app's own "baseline" (R2 review M1: the date already on the sheet before the
+// record began is never taken for a person's, so two overlapping rate cons or a
+// failed n8n write can't make it look like one); then a "ratecon" row for the value it
+// tells n8n to write (a new load, or a value that really differs from the stored one);
+// then the shadow rows: "held" for each date the person hold kept, "would_hold" for
+// each date it would have kept (flag off) that the answer writes, "format" for each
+// unknown comparison the answer writes. personHeld: the answer's held list when the
+// person hold stood.
+function recordKeepStoredCellWrites(key, headers, stored, sentValues, answered, check, personHeld) {
+	try {
+		const at = new Date().toISOString();
+		for (const [col, value] of Object.entries(answered || {})) {
+			if (!personEditHold.personHoldColumn(col)) continue;
+			const column = loadCellColumnName(headers, col);
+			const have = storedCellNamed(stored, col);
+			if (stored && have.trim() && !loadCellWriteRows(key, column).some((r) => LOAD_CELL_EVIDENCE_SOURCES.includes(r.source))) {
+				recordLoadCellWrite(key, column, have, "baseline", { at });
+			}
+			const out = value == null ? "" : String(value);
+			if (out.trim() && (!stored || personEditHold.sameCell(have, out) !== true)) recordLoadCellWrite(key, column, out, "ratecon", { at });
+		}
+		const keptByPerson = new Set((personHeld || []).map((h) => h.column));
+		const writes = (e) => String(answered[e.column] == null ? "" : answered[e.column]) === e.sent;
+		for (const h of check.hold) {
+			if (keptByPerson.has(h.column)) recordLoadCellWrite(key, h.header, h.sent, "held", { stored: h.stored, at });
+			else if (writes(h)) recordLoadCellWrite(key, h.header, h.sent, "would_hold", { stored: h.stored, at });
+		}
+		for (const f of check.format) {
+			if (writes(f)) recordLoadCellWrite(key, f.header, f.sent, "format", { stored: f.stored, at });
+		}
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+	}
+}
+
+// The dates a person's save changed on Job Tracking (POST /api/data with before [],
+// PUT /api/data/:rowIndex, PUT /api/load/:loadId), recorded as "person" rows with role
+// and user id, after the write succeeded. A date only, and only when the dates really
+// differ (reissueSameValue(); the audit's own list compares exact text). Any other
+// sheet records nothing. Never throws.
+function recordPersonCellEdits(req, sheetName, headers, before, after) {
+	try {
+		if (String(sheetName == null ? "" : sheetName).trim().toLowerCase() !== "job tracking") return 0;
+		const hs = Array.isArray(headers) ? headers : [];
+		const idIdx = hs.findIndex((h) => String(h == null ? "" : h).trim().toLowerCase() === "load id");
+		if (idIdx === -1) return 0;
+		const cell = (row, i) => (Array.isArray(row) && row[i] != null ? String(row[i]) : "");
+		const key = loadCellKey(cell(after, idIdx) || cell(before, idIdx));
+		if (!key) return 0;
+		const user = (req && req.session && req.session.user) || {};
+		const actor = `${String(user.role || "").slice(0, 40)}#${user.id == null ? "" : String(user.id).slice(0, 20)}`;
+		const at = new Date().toISOString();
+		let n = 0;
+		hs.forEach((h, i) => {
+			if (!personEditHold.personHoldColumn(h)) return;
+			const to = cell(after, i);
+			if (!to.trim() || reissueSameValue(h, cell(before, i), to)) return;
+			if (recordLoadCellWrite(key, String(h).trim(), to, "person", { actor, at })) n++;
+		});
+		return n;
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+		return 0;
+	}
+}
+
+// A drag-and-drop create's dates (POST /api/loads/from-ratecon), recorded as the rate
+// con's ("ratecon_create", decision 5). Never throws.
+function recordRateConCreateCellWrites(loadId, headers, values) {
+	try {
+		const key = loadCellKey(loadId);
+		if (!key) return 0;
+		const at = new Date().toISOString();
+		let n = 0;
+		(headers || []).forEach((h, i) => {
+			if (!personEditHold.personHoldColumn(h)) return;
+			if (recordLoadCellWrite(key, String(h).trim(), values && values[i] != null ? String(values[i]) : "", "ratecon_create", { at })) n++;
+		});
+		return n;
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+		return 0;
+	}
+}
+
+// Why the person hold holds nothing although its flag is on, or "".
+function personEditHoldInertReason() {
+	return RATECON_PERSON_EDIT_HOLD_ENABLED && !RATECON_REISSUE_HOLD_ENABLED
+		? "RATECON_PERSON_EDIT_HOLD_ENABLED is on but RATECON_REISSUE_HOLD_ENABLED is off, so no corrected date is held (the person hold runs only where the re-issue hold can tell an open load); the record is still kept"
+		: "";
+}
+function warnPersonEditHoldInert() {
+	const why = personEditHoldInertReason();
+	if (why) console.warn(`[person-edit-hold] ${why}`);
+	return why;
+}
+warnPersonEditHoldInert();
+
+// Rows of loads with no row newer than LOAD_CELL_WRITES_IDLE_DAYS.
+function purgeOldLoadCellWrites(now = new Date()) {
+	try {
+		loadCellWritesTable();
+		const before = new Date(now.getTime() - LOAD_CELL_WRITES_IDLE_DAYS * 86400000).toISOString();
+		const r = db.prepare("DELETE FROM load_cell_writes WHERE load_key IN (SELECT load_key FROM load_cell_writes GROUP BY load_key HAVING MAX(at) < ?)").run(before);
+		if (r.changes > 0) console.log(`[person-edit-hold] purged ${r.changes} load_cell_writes row(s) of loads untouched for ${LOAD_CELL_WRITES_IDLE_DAYS} days`);
+		return r.changes;
+	} catch (e) {
+		loadCellWritesFailed("purge", e);
+		return 0;
+	}
+}
+if (startsJob("load cell-write record purge (at boot, then daily)")) {
+	purgeOldLoadCellWrites();
+	const timer = setInterval(() => purgeOldLoadCellWrites(), 24 * 60 * 60 * 1000);
+	if (typeof timer.unref === "function") timer.unref();
 }
 
 app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) => {
@@ -8110,26 +8391,47 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 			headers.forEach((h, i) => { stored[h] = match[i] == null ? "" : match[i]; });
 		}
 		let hold = match && RATECON_REISSUE_HOLD_ENABLED ? reissueHoldFor(headers, match, key) : null;
+		// PERSON EDIT HOLD: a date a person set, on a found load the re-issue hold isn't
+		// protecting (and only with that switch on). Kept only with the flag on; with it
+		// off the decisions are only recorded ("would_hold").
+		const person = match && RATECON_REISSUE_HOLD_ENABLED && !hold ? personEditHoldCheck(key, headers, stored, body.values) : { hold: [], format: [] };
+		const personKeep = RATECON_PERSON_EDIT_HOLD_ENABLED ? person.hold : [];
 		let out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 		// The values going out are held to the closed months too: a blank stored
-		// date filled with one in a closed month moves the load into it.
+		// date filled with one in a closed month moves the load into it. Checked on
+		// the answer WITHOUT the person hold first, so the person hold only ever adds
+		// holds: an email date it would keep out (a "TBD", a closed-month date) still
+		// holds every column, as it does with the flag off. Then, when the person hold
+		// keeps a date, on the answer it would really send. A person hold in the same
+		// answer as a hold of every column folds into it (R2, L3).
 		if (match && RATECON_REISSUE_HOLD_ENABLED && !(hold && hold.all)) {
-			const outgoing = reissueOutgoingHold(headers, match, out.values);
+			let outgoing = reissueOutgoingHold(headers, match, out.values);
+			if (!outgoing && !hold && personKeep.length) {
+				const kept = keepStoredSheetValues(stored, body.values, fallbacks, null, personKeep);
+				outgoing = reissueOutgoingHold(headers, match, kept.values);
+				if (!outgoing) out = kept;
+			}
 			if (outgoing) {
-				hold = { all: true, reasons: [...(hold ? hold.reasons : []), outgoing] };
+				const folded = personEditHold.foldReason(personKeep.map((p) => p.column));
+				hold = { all: true, reasons: [...(hold ? hold.reasons : []), outgoing, ...(folded ? [folded] : [])] };
 				out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 			}
 		}
+		const personHeld = !hold && personKeep.length ? out.held : [];
 		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held, hold.all ? hold.reasons : []) : "";
-		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ") : "";
+		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ")
+			: personHeld.length ? personEditHold.holdReason(personKeep.map((p) => ({ column: p.column, part: p.part }))) : "";
 		// storedLoadId: the stored row's Load ID cell as the sheet has it, so n8n can
 		// write to that row (its appendOrUpdate matches the exact text).
 		res.json({
 			loadId, ...(match ? { storedLoadId: match[idCol] == null ? "" : String(match[idCol]) } : {}),
 			found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept, held: out.held, holdReason, alsoChanged: out.changed,
 		});
+		recordKeepStoredCellWrites(key, headers, stored, body.values, out.values, person, personHeld);
 		if (hold && (out.held.length || out.changed.length)) {
 			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
+		} else if (personHeld.length) {
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: personHeld, source: "person" })).catch(() => {});
 		}
 	} catch (err) {
 		console.error("n8n keep-stored-values:", err.message);
@@ -8180,8 +8482,11 @@ const REISSUE_TRACKED_SQL = "NOT (alerted_at IS NOT NULL AND emailed_at IS NULL 
 // row, so two overlapping calls never both send (a claim older than
 // REISSUE_CLAIM_STALE_MS, a call that died mid-send, can be retaken). note: the
 // DVIR line the first alert carried (rateconDvir.dvirAlertLine()), so a retry
-// says it too; it is no part of the dedupe key. Created on first use; the later
-// columns are added to a table made before them.
+// says it too; it is no part of the dedupe key. source: what held the value,
+// "reissue" (the re-issue hold) or "person" (PERSON EDIT HOLD: a date a person set);
+// it picks the alert's wording, and the first row for a load, column and value
+// decides it (a value alerted as a person hold isn't alerted again as a re-issue).
+// Created on first use; the later columns are added to a table made before them.
 function reissueHoldTable() {
 	if (reissueHoldTable.ready) return;
 	db.exec(`
@@ -8203,13 +8508,15 @@ function reissueHoldTable() {
 			attempts INTEGER,
 			last_try TEXT,
 			note TEXT,
+			source TEXT DEFAULT 'reissue',
 			PRIMARY KEY (load_id, column_name, sent_value)
 		)
 	`);
 	db.transaction(() => {
 		const have = new Set(db.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((c) => c.name));
 		const later = [["claimed_at", "TEXT"], ["emailed_at", "TEXT"], ["notified_at", "TEXT"], ["email_skipped", "TEXT"],
-			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"], ["note", "TEXT"]];
+			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"], ["note", "TEXT"],
+			["source", "TEXT DEFAULT 'reissue'"]];
 		for (const [col, type] of later) {
 			if (!have.has(col)) db.exec(`ALTER TABLE ratecon_reissue_holds ADD COLUMN ${col} ${type}`);
 		}
@@ -8222,14 +8529,28 @@ function reissueHoldTable() {
 }
 
 // Claims a ledger row for one call (claimedAt) when it still owes a channel and
-// no live call holds it, and counts the try. Answers which channels it owes, or
-// null.
+// no live call holds it, and counts the try. Answers which channels it owes, with
+// the row's source and reason, or null.
 function claimReissueRow(key, column, sent, claimedAt, staleBefore) {
 	const owed = db.prepare(`UPDATE ratecon_reissue_holds SET claimed_at = ?, attempts = COALESCE(attempts, 0) + 1, last_try = ?
 		WHERE load_id = ? AND column_name = ? AND sent_value = ? AND ${REISSUE_OWES_SQL} AND ${REISSUE_TRACKED_SQL}
 		AND (claimed_at IS NULL OR claimed_at < ?)
-		RETURNING emailed_at, notified_at, email_skipped, notify_skipped`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
-	return owed ? { email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped } : null;
+		RETURNING emailed_at, notified_at, email_skipped, notify_skipped, source, reason`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
+	return owed ? {
+		email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped,
+		source: owed.source === "person" ? "person" : "reissue", ledgerReason: owed.reason || "",
+	} : null;
+}
+
+// Rows grouped by source ("reissue" first), each group sent with its own wording.
+function reissueRowsBySource(rows) {
+	const groups = new Map();
+	for (const r of rows) {
+		const s = r.source === "person" ? "person" : "reissue";
+		if (!groups.has(s)) groups.set(s, []);
+		groups.get(s).push(r);
+	}
+	return [...groups.entries()].sort(([a], [b]) => (a === b ? 0 : a === "reissue" ? -1 : 1));
 }
 
 // Whether a ledger row's next retry slot has come at nowMs (REISSUE_RETRY_BACKOFF_MS
@@ -8249,11 +8570,14 @@ function reissueRetryDue(r, nowMs) {
 // the next sighting or retry sweep, on its own. rows: [{ column, stored, sent,
 // kind, email, inApp }]; firstSeen marks a retry, and the email says when the
 // change was first seen. note (the DVIR line, or "") goes in both channels.
-async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null }) {
+// source "person" (PERSON EDIT HOLD: the rows are dates a person set, kept) has its
+// own title, subject and text; "reissue" keeps the re-issue wording.
+async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null, source = "reissue" }) {
 	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
 	const toEmail = rows.filter((e) => e.email);
 	const toNotify = rows.filter((e) => e.inApp);
-	const why = String(reason || "").slice(0, 160) || "protected";
+	const byPerson = source === "person";
+	const why = String(reason || "").slice(0, 160) || (byPerson ? "a person corrected this date" : "protected");
 	const fieldName = (e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`;
 	let capped = false;
 	let skipped = null;
@@ -8277,7 +8601,8 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			}
 		}
 		if (toNotify.length) {
-			const title = toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
+			const title = byPerson ? `Load ${label}: corrected date kept`
+				: toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
 			// Each listed column with its old and new value, so a change the email cap
 			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
 			// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
@@ -8296,10 +8621,11 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			};
 			const bodyOf = (view) => toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
+				: byPerson ? `${e.column}: ${cut(view(e.stored))} kept; the rate con said ${cut(view(e.sent))}`
+					: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
 			const body = bodyOf((v) => String(v));
 			const redactedBody = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? bodyOf((v) => brokerContact.redactNoticeValue(v)) : null;
-			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
+			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })), ...(byPerson ? { source: "person" } : {}) };
 			const storedMetadata = redactedBody == null ? metadata : { ...metadata, redactedBody };
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(storedMetadata));
@@ -8318,26 +8644,43 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 		}
 		let mailing = null;
 		if (toEmail.length && !capped) {
-			const anyHeld = toEmail.some((e) => e.kind === "held");
-			const subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
 			const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
-			const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
-			const lead = anyHeld
-				? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
-				: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
 			const retry = firstSeen
 				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
 				: "";
-			const html =
-				`<p><b>${lead}</b></p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
-				"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
-				"The held fields keep their stored values; the others were written as the email gave them.</p>" +
-				"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
-				"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
-				"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
-				tableRows + "</table>" +
-				"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
-				"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			let subject;
+			let html;
+			if (byPerson) {
+				const th = (t) => `<th style="padding:6px 10px;border:1px solid #ddd;">${t}</th>`;
+				const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell("kept: the person's date")}</tr>`).join("");
+				const columns = [...new Set(toEmail.map((e) => e.column))];
+				const named = columns.length > 1 ? `${columns.slice(0, -1).join(", ")} and ${columns[columns.length - 1]}` : columns[0];
+				subject = `Load ${label}: a later rate con did not replace a corrected date`;
+				html =
+					`<p><b>A later rate con for load ${escHtml(label)} carried a different ${escHtml(named)} from the one a person set. The person's date was kept.</b></p>` +
+					`<p>Kept because ${escHtml(why)}.</p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
+					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+					`<tr>${th("Field")}${th("Kept")}${th("In the email")}${th("Result")}</tr>` + tableRows + "</table>" +
+					"<p style=\"margin-top:14px;\">If the email's date is right (a real reschedule), change the load in LogisX. Nothing is applied for you.</p>" +
+					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			} else {
+				const anyHeld = toEmail.some((e) => e.kind === "held");
+				subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
+				const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
+				const lead = anyHeld
+					? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
+					: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
+				html =
+					`<p><b>${lead}</b></p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
+					"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
+					"The held fields keep their stored values; the others were written as the email gave them.</p>" +
+					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+					"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
+					"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
+					tableRows + "</table>" +
+					"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
+					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			}
 			if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(ADMIN_NOTIFY_EMAIL, subject, html);
 			else skipped = "no_recipient";
 		}
@@ -8375,9 +8718,12 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 // later sighting of the same change, whatever the retry slot). Both channels also
 // carry the DVIR line (rateconDvir.dvirAlertLine(), from the reading the extract
 // route kept for this load, rateConDvirReading()), which changes nothing held or
-// written and nothing in the ledger's key. Fire-and-forget: never throws, never
-// rejects.
-async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
+// written and nothing in the ledger's key. source: "reissue", or "person" for a
+// date a person set (PERSON EDIT HOLD), recorded on each new ledger row; the rows a
+// call sends go out once per source, each with its own wording (a row first seen
+// under the other source keeps that source and its reason). Fire-and-forget:
+// never throws, never rejects.
+async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [], source = "reissue" }) {
 	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
 	try {
 		reissueHoldTable();
@@ -8392,19 +8738,27 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		const note = cap(rateconDvir.dvirAlertLine(rateConDvirReading(raw), held));
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+		const src = source === "person" ? "person" : "reissue";
+		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 		const staleBefore = new Date(now.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
 		const fresh = [];
 		for (const e of entries) {
-			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label, note);
+			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label, note, src);
 			const owed = claimReissueRow(key, e.column, e.sent, nowIso, staleBefore);
 			if (owed) fresh.push({ ...e, ...owed });
 		}
 		if (!fresh.length) return { alerted: false, reason: "already_alerted", key };
-		const r = await sendReissueAlert({ key, label, reason: cap(reason), note, rows: fresh, claimedAt: nowIso, now });
-		console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
-			label, r.why, r.fields, r.emailState, r.inAppState);
-		return { alerted: r.emailed || r.notified, emailed: r.emailed, notified: r.notified, key, ...(r.capped ? { reason: "daily_cap" } : {}) };
+		const sent = [];
+		for (const [group, rows] of reissueRowsBySource(fresh)) {
+			const why = group === src ? cap(reason) : [...new Set(rows.map((x) => x.ledgerReason).filter(Boolean))].join("; ");
+			const r = await sendReissueAlert({ key, label, reason: why, note, rows, claimedAt: nowIso, now, source: group });
+			console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
+				label, r.why, r.fields, r.emailState, r.inAppState);
+			sent.push(r);
+		}
+		const emailed = sent.some((r) => r.emailed);
+		const notified = sent.some((r) => r.notified);
+		return { alerted: emailed || notified, emailed, notified, key, ...(sent.some((r) => r.capped) ? { reason: "daily_cap" } : {}) };
 	} catch (e) {
 		console.error("[ratecon-reissue] alert failed:", e && e.message);
 		return { alerted: false, reason: "error" };
@@ -8469,14 +8823,23 @@ async function sweepRateConReissueHolds({ now = new Date(), clock = () => new Da
 			if (owed) claimed.push({ column: r.column_name, stored: r.stored_value, sent: r.sent_value, kind: r.kind, ...owed });
 		}
 		if (!claimed.length) continue;
-		const reason = [...new Set(due.map((r) => r.reason).filter(Boolean))].join("; ");
 		const label = due[0].load_label || key;
-		// The newest alert's DVIR line (due is in first_seen order).
-		const noted = due.filter((r) => r.note);
-		const note = noted.length ? noted[noted.length - 1].note : "";
-		const res = await sendReissueAlert({ key, label, reason, note, rows: claimed, claimedAt, now: at, firstSeen: due[0].first_seen });
+		// Each source's rows go out with their own wording (a load's re-issue rows and
+		// person-hold rows are two alerts, as they were first sent).
+		let emailFailed = false;
+		let inAppFailed = false;
+		for (const [group, rows] of reissueRowsBySource(claimed)) {
+			const own = due.filter((r) => (r.source === "person" ? "person" : "reissue") === group);
+			const reason = [...new Set(own.map((r) => r.reason).filter(Boolean))].join("; ");
+			// The newest alert's DVIR line (due is in first_seen order).
+			const noted = own.filter((r) => r.note);
+			const note = noted.length ? noted[noted.length - 1].note : "";
+			const res = await sendReissueAlert({ key, label, reason, note, rows, claimedAt, now: at, firstSeen: own[0].first_seen, source: group });
+			emailFailed = emailFailed || res.emailFailed;
+			inAppFailed = inAppFailed || res.inAppFailed;
+		}
 		tried++;
-		if (res.emailFailed || res.inAppFailed) failing.push(`${label} (${[res.emailFailed ? "email" : "", res.inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
+		if (emailFailed || inAppFailed) failing.push(`${label} (${[emailFailed ? "email" : "", inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
 		else delivered++;
 	}
 	if (tried) {
@@ -30321,13 +30684,18 @@ function blockedExpensePeriods(rows) {
 }
 
 // Everything DELETE /api/users/:id would destroy or restate that a FINALIZED
-// month still depends on. `blockers: []` means the delete is safe to run.
+// month still depends on, plus (5) the load documents filed under the account
+// and (6) the receipts it would remove from an OPEN month (2026-10-22). With (6)
+// every expense row the cascade matches refuses the delete, closed month or
+// open, so a delete never removes a receipt from any month's figures.
+// `blockers: []` means the delete is safe to run.
 //
 // `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
 // the note at the call site. A guard that resolved the name its own way would be
-// answering for a different set of rows than the DELETEs remove. Blocker (4)
-// adds to that match rather than replacing it: it judges rows the delete leaves
-// in place, not rows it removes, so it also takes the driver's other spellings.
+// answering for a different set of rows than the DELETEs remove. Blockers (4)
+// and (5) add to that match rather than replacing it: they judge rows the delete
+// leaves in place, not rows it removes, so they also take the driver's other
+// spellings.
 function userDeleteLockBlockers(user, cascadeName) {
 	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
 	// isLocked() swallows every error and answers "not locked", so an unreadable
@@ -30336,6 +30704,8 @@ function userDeleteLockBlockers(user, cascadeName) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 
 	const blockers = [];
+	// The rows of (1) in an open month, judged by (6) below.
+	let openExpenseRows = 0;
 
 	// (1) expenses — the direct violation, and the only cascaded table whose rows
 	// each carry a period of their own. expenseRowPeriodLocked() is the shared
@@ -30348,6 +30718,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
 		).all(cascadeName);
 		const locked = rows.filter(expenseRowPeriodLocked);
+		openExpenseRows = rows.length - locked.length;
 		// A Personal line (any, undone or reversed ones included) points at a
 		// receipt by id: deleting the receipts would leave the ledger, and any
 		// invoice carrying the line, pointing at nothing.
@@ -30495,9 +30866,15 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// binds no other spelling). Wider only ever means more rows judged, so this
 	// can only refuse more; it removes nothing. A failed read throws, like every
 	// read in this guard, before the delete has written anything.
+	//
+	// The other-spellings answer is asked ONCE (driverRenameWidens()) and shared
+	// by (4) and (5), so the two legs cannot disagree about whose rows a spacing
+	// variant is.
+	const legOpts = !cascadeName ? null
+		: String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
+	if (legOpts && typeof legOpts.widens !== "boolean") legOpts.widens = driverRenameWidens(cascadeName, legOpts);
 	if (cascadeName) {
 		const invoicesLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "invoices");
-		const legOpts = String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
 		const rows = db.prepare(
 			`SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE (${driverRenameWhereSql(invoicesLeg, legOpts)}) AND deleted_at = ''`
 		).all(...driverRenameWhereArgs(invoicesLeg, cascadeName, legOpts));
@@ -30549,6 +30926,55 @@ function userDeleteLockBlockers(user, cascadeName) {
 			rows: unresolvable.length,
 			periods: asUnknown(namedLockedPeriods(unresolvable.map(() => []))),
 			detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
+		});
+	}
+
+	// (5) and (6) are appended AFTER every older blocker on purpose: the route
+	// answers with the first blocker's code when no month is finalized, so an
+	// existing refusal (INVOICE_ALREADY_PAID, EXPENSE_PERSONAL_LINES) keeps its
+	// code. Both carry counts only, never a load, a file name or an amount.
+	if (cascadeName) {
+		const noun = String(user.driver_name || "").trim() ? "driver" : "account";
+
+		// (5) load documents (2026-10-22). A POD is the proof a broker paid
+		// against and the Delivered rule counts it, so it is never removed with an
+		// account: the cascade below leaves every documents row in place, and
+		// deleting the account would leave the live ones filed under a name no
+		// account holds, where the next account given that name would inherit
+		// them. So any LIVE row refuses, whatever its type. Soft-deleted rows are
+		// already out of every list; they stay under the deleted name and are
+		// reported as retained. Matched like (4), through the rename cascade's
+		// documents leg (the same rows PUT /api/users/:id counts before blanking a
+		// name). PODs are counted whatever their letter case or edge spaces.
+		const docsLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "documents");
+		const docs = db.prepare(
+			`SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN UPPER(TRIM(COALESCE(type, ''))) = 'POD' THEN 1 ELSE 0 END), 0) AS pods
+			   FROM documents WHERE (${driverRenameWhereSql(docsLeg, legOpts)}) AND deleted_at IS NULL`
+		).get(...driverRenameWhereArgs(docsLeg, cascadeName, legOpts));
+		if (docs.n) blockers.push({
+			table: "documents",
+			code: "DRIVER_HAS_DOCUMENTS",
+			rows: docs.n,
+			pods: docs.pods,
+			periods: [],
+			detail: `${docs.n} load document${docs.n === 1 ? "" : "s"}` +
+				(docs.pods ? ` (${docs.pods} POD${docs.pods === 1 ? "" : "s"})` : "") +
+				` ${docs.n === 1 ? "is" : "are"} filed under this ${noun}`,
+		});
+
+		// (6) receipts in an OPEN month (2026-10-22, DD10). The rows (1) did not
+		// find locked: the cascade would remove them, and with them a figure the
+		// open month's P&L counts. Every such row refuses, a rejected receipt
+		// included, so a delete never removes a receipt from any month's figures.
+		// Same match as (1) and the cascade (the stored spelling, case aside): a
+		// receipt under another spelling is not removed, so it is not judged.
+		if (openExpenseRows) blockers.push({
+			table: "expenses",
+			code: "OPEN_MONTH_EXPENSES",
+			rows: openExpenseRows,
+			periods: [],
+			detail: `${openExpenseRows} open-month expense${openExpenseRows === 1 ? "" : "s"} (receipt${openExpenseRows === 1 ? "" : "s"})` +
+				` ${openExpenseRows === 1 ? "is" : "are"} filed under this ${noun}`,
 		});
 	}
 
@@ -30804,7 +31230,24 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			} else {
 				if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
 				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
-				remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
+				// Load documents and open-month receipts (blockers (5) and (6)) have
+				// nothing to do with a closed month, so their sentence REPLACES the
+				// fallback below, which would claim one. "it"/"them" only when the
+				// blocker is the only one, so the pronoun has one referent.
+				const docBlock = lock.blockers.find((b) => b.code === "DRIVER_HAS_DOCUMENTS");
+				const openBlock = lock.blockers.find((b) => b.code === "OPEN_MONTH_EXPENSES");
+				const them = (b) => (lock.blockers.length === 1 ? (b.rows === 1 ? "it" : "them") : null);
+				if (docBlock && openBlock) {
+					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its open-month expenses, changing an open month's figures, so it stays in place.");
+				} else if (docBlock) {
+					remedy.push(`Deleting the account would leave ${them(docBlock) || "its load documents"} under a name no account holds, so it stays in place.`);
+				} else if (openBlock) {
+					remedy.push(`Deleting the account would delete ${them(openBlock) || "its open-month expenses"} and change an open month's figures, so it stays in place.`);
+				}
+				if (docBlock) remedy.push("A document filed in error can be removed from its load's Documents panel first.");
+				remedy.push(docBlock || openBlock
+					? "Nothing was changed."
+					: "Or leave the account in place — a closed month's figures are attributed to it.");
 			}
 		}
 
@@ -30823,9 +31266,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
-	// Past the guard: every row below belongs to an open month (or carries no
-	// period at all — messages, notifications, driver_locations, load_responses
-	// and the assigned_driver clear are operational, not accounting, rows).
+	// Past the guard: no expense row matches (the guard refuses every one, closed
+	// month or open), and every row below carries no period at all — messages,
+	// notifications, driver_locations, load_responses and the assigned_driver
+	// clear are operational, not accounting, rows.
 	//
 	// ⚠️ ONE TRANSACTION. The guard above decides the delete is safe AS A WHOLE,
 	// and this route has no try/catch — so before this wrapper a throw anywhere in
@@ -30872,25 +31316,28 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// counts rows under another spelling of the name too (a doubled or
 				// edge space); these DELETEs do not, and for a removal that is the
 				// safe direction. userDeleteLockBlockers() judges the expense rows by
-				// this same match, so every expense removed here was judged, and the
-				// other tables carry no period. A row of these tables under another
+				// this same match and refuses any of them, closed month or open, so
+				// past the guard this removes none. A row of these tables under another
 				// spelling is neither judged nor removed: it stays in every month it
-				// was counted in. Widening these would permanently delete receipts and
-				// documents under another spelling, and would need the expense check
-				// widened in step. The cost is that such rows stay behind under a
-				// spelling no account holds, and the counts this route reports do not
-				// include them. The guard does see other spellings where this delete
-				// leaves a row in place rather than removing it: its invoice check
-				// matches the rename cascade's `invoices` leg, and only refuses. Of
-				// these writes, the truck is the one matched wider: it is cleared, not
+				// was counted in. Widening these would permanently delete receipts
+				// under another spelling, and would need the expense check widened in
+				// step. The cost is that such rows stay behind under a spelling no
+				// account holds, and the counts this route reports do not include
+				// them. The guard does see other spellings where this delete leaves a
+				// row in place rather than removing it: its invoice and load-document
+				// checks match the rename cascade's legs, and only refuse. Of these
+				// writes, the truck is the one matched wider: it is cleared, not
 				// deleted (findTruckForDriverAccount()). See
 				// docs/claude/user-routes-guards.md.
+				//
+				// Load documents are not in this list (2026-10-22): a live one refuses
+				// the delete, and a soft-deleted one stays where it is, under this
+				// name, counted as retained below.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
 				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
 				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
-				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
 				// The driver's truck is found the way the driver app finds it
 				// (findTruckForDriverAccount()): case aside, as before — every such
 				// truck — else the one naming them under another spacing, unless
@@ -31021,6 +31468,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	//                            paid, finalized or in a locked month; anything
 	//                            still counted here is an open month, which the
 	//                            next reconcile recomputes.
+	//  • documents             — blocker (5) refuses the delete while any live
+	//                            row is filed under the account, so what is
+	//                            counted here is soft-deleted rows, kept under
+	//                            the deleted name, recoverable by one UPDATE.
 	//
 	// Read-only: this runs AFTER the delete, so `users` is already gone and these
 	// are pure counts.
@@ -31037,6 +31488,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		countRetained("carrier_driver_history", "SELECT COUNT(*) AS cnt FROM carrier_driver_history WHERE LOWER(driver_name) = ?", name);
 		countRetained("job_applications", "SELECT COUNT(*) AS cnt FROM job_applications WHERE LOWER(full_name) = ? AND deleted_at IS NULL", name);
 		countRetained("load_ratings", "SELECT COUNT(*) AS cnt FROM load_ratings WHERE LOWER(driver_name) = ?", name);
+		countRetained("documents", "SELECT COUNT(*) AS cnt FROM documents WHERE LOWER(driver) = ?", name);
 		countRetained("routemate_dvir", "SELECT COUNT(*) AS cnt FROM routemate_dvir WHERE LOWER(driver_name) = ?", name);
 		countRetained("routemate_hos_daily", "SELECT COUNT(*) AS cnt FROM routemate_hos_daily WHERE LOWER(driver_name) = ?", name);
 	}
@@ -38696,6 +39148,11 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			})),
 			guardedChanged: appendHeaders ? changedGuardedCells(appendHeaders, [], values) : [],
 		}));
+		// PERSON EDIT HOLD: a new Job Tracking row's dates are a person's (decision 7).
+		// The record never fails the save.
+		if (appendHeaders) {
+			try { recordPersonCellEdits(req, sheetName, appendHeaders, [], values); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		}
 
 		// Save coordinates to load_coordinates if provided
 		if (sheetName === "Job Tracking" && coordinates && coordinates.loadId) {
@@ -39122,6 +39579,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
+		// PERSON EDIT HOLD: the dates this save changed on Job Tracking are a person's.
+		// The record never fails the save.
+		try { recordPersonCellEdits(req, sheetName, headers, before, after); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
@@ -48620,6 +49080,9 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
 		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
 		jtCacheInvalidate();
+		// PERSON EDIT HOLD: a drag-and-drop create's dates are the rate con's (decision
+		// 5). The record never fails the create.
+		try { recordRateConCreateCellWrites(loadId, headers, values); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
@@ -54780,6 +55243,9 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
+			// PERSON EDIT HOLD: the dates this save changed are a person's. The record
+			// never fails the save.
+			try { recordPersonCellEdits(req, sheetName, headers, before, after); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
 			// The 60s Job Tracking cache would otherwise keep serving the old figures.
 			if (guarded) jtCacheInvalidate();
 		}

@@ -228,6 +228,10 @@ const XHEAD = 'app.post("/api/n8n/extract-pdf-via-gemini"';
 const KHEAD = 'app.post("/api/n8n/keep-stored-values"';
 const XPROVIDED = ["app", "pdfOcrLimiter", "GEMINI_API_KEY", "runRateConGemini", "alertUnusableRateConExtraction", "console", "process", "require"];
 const has = (fn) => new RegExp(`\\n(async )?function ${fn}\\(`).test(SRC);
+// RATECON_PERSON_EDIT_HOLD_ENABLED from this runner's own environment reaches the lifted
+// code's stand-in env (scripts/test-reissue-runners-person-hold-on.js runs this runner with
+// it on). Neither the extract route nor the alert reads it; the run shows they are unchanged.
+const PERSON_HOLD_ENV = process.env.RATECON_PERSON_EDIT_HOLD_ENABLED === undefined ? {} : { RATECON_PERSON_EDIT_HOLD_ENABLED: process.env.RATECON_PERSON_EDIT_HOLD_ENABLED };
 
 // A server.js without the reading (the base) runs every case with stand-ins that keep nothing.
 const KEEPS = has("rateConDvirReading") && has("noteRateConDvir");
@@ -239,7 +243,7 @@ function liftExtract(gemini) {
 	const app = { post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
 	const quiet = { ...console, log: () => {}, error: () => {}, warn: () => {} };
 	const api = new Function(...XPROVIDED, `"use strict";\n${lifted.text}\n${KEEPS ? "" : STAND_INS}\nreturn { rateConDvirReading, noteRateConDvir, RATECON_DVIR_TTL_MS, RATECON_DVIR_MAX_LOADS };`)(
-		app, (q, r, next) => next(), "test-key", gemini, async () => {}, quiet, { env: { N8N_EXTRACT_SECRET: "test-secret" } }, rootRequire,
+		app, (q, r, next) => next(), "test-key", gemini, async () => {}, quiet, { env: { N8N_EXTRACT_SECRET: "test-secret", ...PERSON_HOLD_ENV } }, rootRequire,
 	);
 	// settle: also wait for the reading after the response (the next setImmediate turn).
 	const post = async (pdf, { settle = true } = {}) => {
@@ -339,7 +343,7 @@ function liftAlert(db, { send = async () => true } = {}) {
 		`"use strict";\n${lifted.text}\n${KEEPS ? "" : "const noteRateConDvir = () => {};"}\nreturn { alert: alertRateConReissueHold, sweep: sweepRateConReissueHolds, noteRateConDvir };`)(
 		db, async (to, subject, html) => { sends.push({ to, subject, html }); return send(to, subject, html); },
 		{ run: (...a) => { notes.push({ type: a[0], title: a[1], body: a[2] }); } }, { to: () => ({ emit: () => {} }) },
-		quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test" } }, rootRequire,
+		quiet, { env: { ADMIN_NOTIFY_EMAIL: "admin@example.test", ...PERSON_HOLD_ENV } }, rootRequire,
 	);
 	return { ...api, sends, notes };
 }
