@@ -220,10 +220,13 @@ function canonical(v) {
 	return JSON.stringify(v === undefined ? null : v);
 }
 // The part of decideExtractionWrite()'s answer a fingerprint covers: what the write does
-// to the row and whether a driver can see it.
+// to the row, whether a driver can see it, and the reasons a pending reading waits with
+// (decision 40's critical_dropped among them; it needs a published row, which the
+// backfill never touches, but the binding covers the whole decision).
 function writeOf(decision) {
 	const d = decision || {};
-	return { action: String(d.action || ""), status: String(d.status || ""), publish: !!d.publish };
+	const pendingReasons = Array.isArray(d.pendingReasons) ? d.pendingReasons.map(String) : [];
+	return { action: String(d.action || ""), status: String(d.status || ""), publish: !!d.publish, pendingReasons };
 }
 // What a run read for a load and what writing it would do: its filtered payload, its
 // review reasons and the write decision (action, status, publish), hashed. The dry run

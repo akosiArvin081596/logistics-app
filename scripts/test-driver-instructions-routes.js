@@ -1614,6 +1614,44 @@ test("§13 38 every replica rule refuses the new name: the secret-name rule (as 
 	}
 });
 
+test("§13 40 a re-issue that drops a published critical requirement waits for staff even when no driver opened the load: pending with its reason, no driver event, the published version stays", async ({ eq, ok }) => {
+	const clock = useClock();
+	const a = driveFile(`Load ${LOAD_ID} Rate Con.pdf`, READABLE);
+	const w = await world({ env: ON2, files: [a] });
+	await w.service.sweep();
+	const first = w.row();
+	eq("published, never shown to a driver", [!!first.published_at, first.driver_shown_at], [true, ""]);
+	const dropped = cleanExtraction();
+	dropped.loadRequirements = dropped.loadRequirements.filter((x) => x.category !== "high_value");
+	const b = driveFile(`Load ${LOAD_ID} Rate Con Revised.pdf`, READABLE_B);
+	w.files.push(b);
+	w.gemini.push(geminiAnswer(dropped));
+	clock.t += 5 * 60 * 1000;
+	await w.service.sweep();
+	await w.settle();
+	const after = w.row();
+	eq("the published payload stays", [after.payload === first.payload, after.published_at === first.published_at], [true, true]);
+	ok("the re-issue waits in pending, without the high-value item", !!after.pending_payload && !after.pending_payload.includes("HIGH VALUE"), after.pending_payload);
+	eq("its reasons", JSON.parse(after.pending_reasons), ["critical_dropped", "rate_con_changed"]);
+	eq("ledger pending", w.ledger(b.meta.id).state, "pending");
+	eq("no driver event for the pending reading (only the first publish sent one)", changedEvents(w).length, 1);
+	const g = await w.call("GET", API, DISP);
+	ok("staff see the reason in words", g.body.pending && g.body.pending.reasons.some((r) => r.code === "critical_dropped" && /critical requirement/.test(r.text)), g.body.pending);
+	const d = await w.call("GET", DAPI, DRIVER);
+	ok("the driver is still served the high-value item", d.status === 200 && JSON.stringify(d.body).includes("HIGH VALUE"), d.body);
+	// A re-issue that keeps every critical category still replaces as before.
+	const kept = cleanExtraction();
+	kept.stops[0].instructions = [];
+	const c = driveFile(`Load ${LOAD_ID} Rate Con Revised Again.pdf`, READABLE_C);
+	const w2 = await world({ files: [a] });
+	await w2.service.sweep();
+	w2.files.push(c);
+	w2.gemini.push(geminiAnswer(kept));
+	clock.t += 5 * 60 * 1000;
+	await w2.service.sweep();
+	eq("a re-issue keeping every critical category replaces (no driver read it, nobody reviewed it)", [w2.row().pending_payload, w2.ledger(c.meta.id).state], ["", "done"]);
+});
+
 if (!fs.existsSync(RUNTIME)) {
 	console.log("FAIL lib/driver-instructions-runtime.js does not exist (the PR 2 build adds it)");
 }

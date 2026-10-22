@@ -881,6 +881,15 @@ test("§16 the same payload read back at apply time with a new review reason (th
 	eq("A, read as the dry run showed, written", w.row(A) && w.row(A).status, "auto");
 });
 
+test("§16 40 the fingerprint binds the whole write decision: a pending write with other reasons (critical_dropped) is another fingerprint; a published row is never touched", async ({ eq, ok }) => {
+	const fp = backfill().fingerprintOf;
+	const payload = { v: 1, loadRequirements: [], stops: [], footnote: "x" };
+	const pending = (reasons) => ({ action: "pending", status: "auto", publish: false, pendingReasons: reasons });
+	ok("pendingReasons are bound", fp(payload, [], pending(["rate_con_changed"])) !== fp(payload, [], pending(["rate_con_changed", "critical_dropped"])));
+	eq("the same decision, the same fingerprint", fp(payload, [], pending(["rate_con_changed"])), fp(payload, [], pending(["rate_con_changed"])));
+	eq("handledCode: a published row (the only kind decision 40 holds) is skipped before any read", backfill().handledCode({ status: "auto", published_at: "2026-10-22T10:00:00Z", source: "drive_sweep" }), "published");
+});
+
 // ── §17 the sheet ─────────────────────────────────────────────────────────────
 test("§17 the sheet is named by the operator; the apply command never prints a sheet ID; =production only for production's own database", async ({ eq, ok }) => {
 	const w = usual();
