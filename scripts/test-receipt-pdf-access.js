@@ -236,7 +236,9 @@ function receiptFilesUnder(pdfAccess) {
 	};
 }
 
-async function build({ pdfAccess = "" } = {}) {
+async function build({ pdfAccess = "", readFile = null } = {}) {
+	const lib = receiptFilesUnder(pdfAccess);
+	const libUsed = readFile ? { ...lib, createExpenseReceiptGuard: (o) => lib.createExpenseReceiptGuard({ ...o, readFile }) } : lib;
 	const db = makeDb();
 	const app = express();
 	app.use((req, res, next) => {
@@ -265,7 +267,7 @@ async function build({ pdfAccess = "" } = {}) {
 		"guardRootLoadDocument", "guardChatAttachment", "console", "require",
 		body,
 	)(app, express, path, fs, crypto, TMP, RECEIPTS_DIR, db, requireAuth, requireRole,
-		receiptFilesUnder(pdfAccess), stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"),
+		libUsed, stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"),
 		stub("guardDrugTestFile"), stub("guardRootLoadDocument"), stub("guardChatAttachment"), fakeConsole, serverRequire);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
@@ -417,6 +419,11 @@ const rowOf = (list, id) => list.find((e) => Number(e.id) === id) || {};
 	ok("T6 the receipt's driver still opens his photo receipt", isImage(await T.get(R(F.A_JPG), U.drvA)));
 	ok("T6 the own-truck investor still opens it", isImage(await T.get(R(F.A_JPG), U.inv)));
 	ok("T6 another driver is still refused it", refused(await T.get(R(F.A_JPG), U.drvB)));
+	// T1/T2 A JPEG on disk whose whole read comes back as PDF bytes (changed since its head was read): never sent.
+	const TS = await build({ readFile: async () => IMG.pdfA });
+	ok("T1 PDF bytes from the whole read of an image are refused to the receipt's driver", refused(await TS.get(R(F.A_JPG), U.drvA)));
+	ok("T2 ... and to the own-truck investor", refused(await TS.get(R(F.A_JPG), U.inv)));
+	ok("T1 ... and to a Range past the header (bytes=8-20)", refused(await TS.get(R(F.A_JPG), U.drvA, { headers: { Range: "bytes=8-20" } })));
 
 	// T10 A request from another site
 	{
