@@ -20,13 +20,21 @@
 //      overflow-x: hidden, and .investor-dashboard adds no overflow of its own
 //   §3 at <= 900 px .sections-row's one column is minmax(0, 1fr); desktop keeps
 //      1fr 1fr
+//   §4 Production Performance's 12-month bar chart (12 bars at min-width 40 px
+//      plus gaps, about 568 px) scrolls sideways inside its own box on a phone,
+//      bars and month labels together, instead of running about 177 px past
+//      the card. The box takes .chart-bars' place in the card's column (flex 1)
+//      and its padding is cancelled by an equal negative margin, so desktop
+//      keeps the same layout while a focused bar's outline and the bars' -2 px
+//      margins stay inside the box; .chart-bars is at least as wide as its bars,
+//      so the axis line runs under every bar when scrolled (2026-10-22)
 //
 // The components' own markup and styles, parsed with the client's compiler and
 // postcss. No DOM, no browser.
 //   node scripts/test-investor-tables-phone-scroll.mjs
 //   EXPENSES_SECTION_VUE=/tmp/base/ExpensesSection.vue node scripts/test-investor-tables-phone-scroll.mjs   # a base copy: fails
 //   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, TRUCK_TABLE_VUE,
-//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, SHARED_CSS)
+//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, PRODUCTION_SECTION_VUE, SHARED_CSS)
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -49,6 +57,7 @@ const TABLE_FILES = [
   ['PayoutsSection', process.env.PAYOUTS_SECTION_VUE || path.join(INVESTOR, 'PayoutsSection.vue')],
 ]
 const INVESTOR_VIEW_VUE = process.env.INVESTOR_VIEW_VUE || path.join(SRC, 'views', 'InvestorView.vue')
+const PRODUCTION_SECTION_VUE = process.env.PRODUCTION_SECTION_VUE || path.join(INVESTOR, 'ProductionSection.vue')
 const SHARED_CSS = process.env.SHARED_CSS || path.join(SRC, 'assets', 'shared.css')
 
 let pass = 0
@@ -154,6 +163,50 @@ console.log('§3 on a phone the Production / Revenue Trends row fits the page')
   ok('a max-width: 900px rule sets .sections-row grid-template-columns', values.length > 0)
   eq('.sections-row one-column track at <= 900 px', last(values), 'minmax(0, 1fr)')
   eq('.sections-row two columns on desktop unchanged', last(decls(investorView.root, '.sections-row', 'grid-template-columns')), '1fr 1fr')
+}
+
+console.log('§4 the Production Performance chart scrolls sideways inside its own box')
+{
+  const { descriptor, root } = load(PRODUCTION_SECTION_VUE)
+  // Every element carrying static class `cls`, with the elements above it.
+  function byClass(cls) {
+    const found = []
+    function walk(node, ancestors) {
+      if (node.type === 1 && staticClasses(node).includes(cls)) found.push({ node, ancestors })
+      const next = node.type === 1 ? [...ancestors, node] : ancestors
+      for (const child of node.children || []) walk(child, next)
+    }
+    walk(descriptor.template.ast, [])
+    return found
+  }
+  const bars = byClass('chart-bars')
+  eq('ProductionSection: one .chart-bars', bars.length, 1)
+  const scroller = bars.length
+    ? bars[0].ancestors.slice().reverse().find((a) => staticClasses(a).some((c) => classScrollsX(root, c)))
+    : undefined
+  ok('.chart-bars is inside an element with overflow-x auto or scroll', !!scroller)
+  if (scroller) {
+    const cls = staticClasses(scroller).find((c) => classScrollsX(root, c))
+    for (const part of ['chart-bar', 'chart-label', 'chart-amount']) {
+      const list = byClass(part)
+      ok(`.${part} is present`, list.length > 0)
+      ok(`every .${part} scrolls with the bars (inside .${cls})`, list.every(({ ancestors }) => ancestors.includes(scroller)))
+    }
+    // Desktop unchanged: the box takes .chart-bars' flex 1 place in the card's
+    // column and lays .chart-bars out in a column of its own, so the chart
+    // still grows to the card's height beside Revenue Trends.
+    eq(`.${cls} flex`, last(decls(root, `.${cls}`, 'flex')), '1')
+    eq(`.${cls} display`, last(decls(root, `.${cls}`, 'display')), 'flex')
+    eq(`.${cls} flex-direction`, last(decls(root, `.${cls}`, 'flex-direction')), 'column')
+    // Room for a focused bar's outline (2 px + 2 px offset) and the bars' -2 px
+    // margins, cancelled by an equal negative margin.
+    const pad = last(decls(root, `.${cls}`, 'padding'))
+    const px = /^(\d+(?:\.\d+)?)px$/.exec(pad || '')
+    ok(`.${cls} padding is one length of at least 6px (got ${JSON.stringify(pad)})`, !!px && Number(px[1]) >= 6)
+    eq(`.${cls} margin cancels its padding`, last(decls(root, `.${cls}`, 'margin')), px ? `-${px[1]}px` : '(no padding)')
+  }
+  // The axis line (.chart-bars' bottom border) spans every bar when scrolled.
+  eq('.chart-bars min-width', last(decls(root, '.chart-bars', 'min-width')), 'min-content')
 }
 
 if (failures.length) {
