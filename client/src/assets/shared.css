@@ -328,6 +328,12 @@ body {
   position: fixed; bottom: max(2rem, env(safe-area-inset-bottom, 0px) + 0.5rem); left: 50%; transform: translateX(-50%);
   z-index: 100; pointer-events: none;
 }
+/* The driver app: above its bottom tab bar (50 px, padded by the home bar). The
+   toast renders in App.vue outside the page, so a scoped rule in DriverView.vue
+   can't reach it; this one is global and keyed to the driver page's root. */
+body:has(.driver-app) .toast-container {
+  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+}
 .toast {
   background: var(--text); color: #fff;
   padding: 0.65rem 1.25rem; border-radius: 8px;

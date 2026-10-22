@@ -295,8 +295,13 @@ function handleSign() {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 10000;
   display: flex; align-items: center; justify-content: center;
 }
+/* The screen is the overlay's size, and the overlay (inset: 0) is the part of the
+   window a phone shows. 100vh is the height with the browser's toolbars hidden:
+   while they show, a 100vh screen centred here sticks out at the top and the
+   bottom, taking the close (x) and the Sign button off the screen. */
 .modal-fullscreen {
-  background: #fff; width: 100vw; height: 100vh;
+  background: #fff; width: 100%; height: 100%;
+  box-sizing: border-box;
   /* Full screen: header and Sign button clear of a notched iPhone's notch and home bar. */
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   display: flex; flex-direction: column;
@@ -441,7 +446,14 @@ function handleSign() {
 /* ─── Mobile ─── */
 @media (max-width: 768px) {
   .modal-body { flex-direction: column; }
-  .sign-panel { width: 100%; border-left: none; border-top: 1px solid #e8edf2; max-height: 45vh; }
-  .pdf-panel { min-height: 40vh; }
+  /* dvh is the visible height (each vh line is the fallback for browsers without
+     it). The form panel shrinks, and scrolls, when the PDF's floor and the form
+     ask for more than the screen has, so the Sign button is never clipped. */
+  .sign-panel {
+    width: 100%; border-left: none; border-top: 1px solid #e8edf2;
+    max-height: 45vh; max-height: 45dvh;
+    flex-shrink: 1; min-height: 0; overflow-y: auto;
+  }
+  .pdf-panel { min-height: 40vh; min-height: 40dvh; }
 }
 </style>
