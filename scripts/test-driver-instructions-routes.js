@@ -280,7 +280,7 @@ async function world({ env = ON, headers = HEADERS, rows = ROWS, side = SIDE, fi
 	const db = new Database(":memory:");
 	db.exec(`CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER, username TEXT, role TEXT, action TEXT NOT NULL,
 		entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
-	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, driver TEXT NOT NULL, type TEXT NOT NULL, file_name TEXT NOT NULL, drive_file_id TEXT DEFAULT '', drive_url TEXT DEFAULT '', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_at DATETIME DEFAULT NULL)");
 	db.exec("CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP, deleted_by TEXT DEFAULT '')");
 	db.exec("CREATE TABLE ratecon_load_aliases (alias TEXT PRIMARY KEY, load_id TEXT NOT NULL, source TEXT DEFAULT '', drive_file_id TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
 	const w = {
@@ -854,6 +854,26 @@ test("§6 re-extract reads the stored drag-and-drop PDF; a busy budget answers 5
 	const bad = await w.call("POST", `${API}/re-extract`, DISP, {});
 	eq("invalid answer -> 502, the published version stays", [bad.status, bad.body.code, w.row().status], [502, "INSTRUCTIONS_EXTRACT_FAILED", "auto"]);
 	ok("no Gemini text anywhere", !w.logs.some((l) => l.includes(GEMINI_MARKER)) && !w.allRows().some((x) => x.includes(GEMINI_MARKER)) && !w.responses.some((x) => x.includes(GEMINI_MARKER)));
+});
+
+test("§6 a removed drag-and-drop document is no source: re-extract answers 404 and the dashboard says no_rate_con; the newest live one is read", async ({ eq, ok }) => {
+	useClock();
+	const w = await world();
+	fs.mkdirSync(path.join(w.uploads, "uploads", "rate-cons"), { recursive: true });
+	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}.pdf`), READABLE);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url, deleted_at) VALUES (?, '', 'RATECON', ?, ?, '2026-10-21 09:00:00')").run(LOAD_ID, `${LOAD_ID}.pdf`, `/uploads/rate-cons/${LOAD_ID}.pdf`);
+	const r = await w.call("POST", `${API}/re-extract`, SA, {});
+	eq("removed: no rate con on file, no Gemini call", [r.status, r.body.code, w.calls.gemini], [404, "INSTRUCTIONS_NO_RATE_CON", 0]);
+	const rows = [{ "Load ID": LOAD_ID }];
+	w.service.annotateDashboardRows({ headers: HEADERS, rows });
+	eq("the dashboard doesn't count it as on file", rows[0]._instructionsReview, ["no_rate_con"]);
+	// A live copy uploaded earlier than a newer one, the newer one inserted first: the
+	// newest upload is read.
+	fs.writeFileSync(path.join(w.uploads, "uploads", "rate-cons", `${LOAD_ID}-old.pdf`), Buffer.from("not a pdf"));
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES (?, '', 'RATECON', ?, '2026-10-21 10:00:00')").run(LOAD_ID, `${LOAD_ID}.pdf`);
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES (?, '', 'RATECON', ?, '2026-10-20 10:00:00')").run(LOAD_ID, `${LOAD_ID}-old.pdf`);
+	const r2 = await w.call("POST", `${API}/re-extract`, SA, {});
+	eq("the newest live upload is read", [r2.status, r2.body.result, w.calls.gemini], [200, "insert", 1]);
 });
 
 // ── §7 drag-and-drop and the dashboard ────────────────────────────────────────
