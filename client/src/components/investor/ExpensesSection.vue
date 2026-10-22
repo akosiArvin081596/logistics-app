@@ -53,7 +53,8 @@
           <td class="desc-cell">{{ e.description || '—' }}</td>
           <td class="mono-sm">${{ Number(e.amount).toLocaleString('en-US', { minimumFractionDigits: 2 }) }}</td>
           <td>
-            <a v-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
+            <span v-if="e.receipt_kind === 'pdf_office_copy'" class="receipt-office-copy">PDF receipt (office copy)</span>
+            <a v-else-if="isPdfReceipt(e.photo_data)" class="receipt-pdf-chip" :href="e.photo_data" target="_blank" rel="noopener">PDF</a>
             <img v-else-if="e.photo_data" :src="e.photo_data" class="receipt-thumb" @click="previewImg = e.photo_data" />
             <span v-else class="dim">—</span>
           </td>
@@ -189,7 +190,9 @@ function fmtLocation(e) {
 }
 
 // PDF receipts (admin/dispatcher uploads) render as a link chip instead of a
-// broken <img>. Mirrors ExpensesTab.vue's helper.
+// broken <img>. Mirrors ExpensesTab.vue's helper. An investor never gets a PDF
+// link: the server sends receipt_kind 'pdf_office_copy' instead, shown as text
+// (the file is staff only). The chip stays for a Super Admin's own list.
 function isPdfReceipt(p) {
   return typeof p === 'string' && (/\.pdf$/i.test(p) || p.startsWith('data:application/pdf'))
 }
@@ -335,6 +338,11 @@ onMounted(loadExpenses)
   transition: border-color 0.15s;
 }
 .receipt-pdf-chip:hover { border-color: #b91c1c; }
+
+.receipt-office-copy {
+  font-size: 0.72rem;
+  color: #64748b;
+}
 
 .totals-footer {
   margin-top: 0.85rem;
