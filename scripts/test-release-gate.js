@@ -742,6 +742,11 @@ function checkLocal() {
 	}
 	ok(/const alone = toRun\.filter\(\(f\) => TIMING_SENSITIVE\.has\(f\)\)/.test(harness) && /queue = alone;\n\tawait worker\(\);/.test(harness),
 		"§4 …and runs the timing-sensitive runners alone, after the pool");
+	const timed = (skip) => spawnSync(process.execPath, [path.join(ROOT, "scripts/run-unit-tests.js"), "--list"],
+		{ encoding: "utf8", env: { ...process.env, UNIT_TEST_SHARD: "", UNIT_TEST_SKIP_TIMING: skip } }).stdout.split("\n").filter(Boolean);
+	const [withTiming, withoutTiming] = [timed(""), timed("1")];
+	ok(["test-pdf-cold-start.js", "test-driver-instructions-lib.js"].every((f) => withTiming.includes(f) && !withoutTiming.includes(f)),
+		"§4 …and CI's UNIT_TEST_SKIP_TIMING skips test-pdf-cold-start.js and test-driver-instructions-lib.js (the 100 ms budget), which still run locally");
 	const mode = fs.statSync(HOOK).mode;
 	ok((mode & 0o111) === 0o111, `§4 .githooks/pre-push is executable (mode ${(mode & 0o777).toString(8)})`);
 
