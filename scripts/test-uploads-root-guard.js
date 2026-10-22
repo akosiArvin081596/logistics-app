@@ -163,7 +163,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "uploads-root-guard-"));
 const UP = path.join(TMP, "uploads");
 fs.mkdirSync(UP);
 for (const name of Object.values(F)) fs.writeFileSync(path.join(UP, name), body(name));
-for (const [dir, name] of [["expense-receipts", "r.jpg"], ["invoices", "INV-1.pdf"], ["rate-cons", "L100.pdf"], ["onboarding-signed", "w9-10-signed.pdf"], ["chat", "chat_1_abcde.jpg"]]) {
+for (const [dir, name] of [["expense-receipts", "r.jpg"], ["invoices", "INV-1.pdf"], ["rate-cons", "L100.pdf"], ["onboarding-signed", "w9-10-signed.pdf"], ["chat", "chat_1_abcde.jpg"], ["onboarding-templates", "blank-form.pdf"]]) {
 	fs.mkdirSync(path.join(UP, dir));
 	fs.writeFileSync(path.join(UP, dir, name), body(`${dir}/${name}`));
 }
@@ -271,11 +271,11 @@ async function build(L = LIFTED, { db = makeDb() } = {}) {
 	const fakeConsole = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
 	const mod = new Function(
 		"app", "express", "path", "__dirname", "DATA_DIR", "db", "requireAuth", "requireRole", "loadBelongsToDriver",
-		"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "guardExpenseReceipt", "console", "Date",
+		"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "guardExpenseReceipt", "guardChatAttachment", "console", "Date",
 		compose(L),
 	)(app, express, path, TMP, TMP, db, requireAuth, requireRole, loadBelongsToDriver,
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"), stub("guardExpenseReceipt"),
-		fakeConsole, FakeDate);
+		stub("guardChatAttachment"), fakeConsole, FakeDate);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -453,6 +453,8 @@ async function guardCall(M, user, file) {
 		["/uploads/invoices/INV-1.pdf", "guardInvoicePdf"],
 		["/uploads/Invoices/INV-1.pdf", "guardInvoicePdf"],
 		["/uploads/onboarding-signed/w9-10-signed.pdf", "guardDriverSignedDoc"],
+		["/uploads/chat/chat_1_abcde.jpg", "guardChatAttachment"],
+		["/uploads/Chat/chat_1_abcde.jpg", "guardChatAttachment"],
 	]) {
 		const r = await T.get(p, U.drvA);
 		ok(`${p} reaches ${guard}, not the root rule`, r.headers["x-test-guard"] === guard);
@@ -490,8 +492,8 @@ async function guardCall(M, user, file) {
 	ok("...and the normalized spellings still open for Super Admin (the guard judges the path express.static resolves)",
 		served(await T.get("/uploads//rate-cons/L100.pdf", U.sa), RC) && served(await T.get("/uploads/rate-cons%2FL100.pdf", U.sa), RC) &&
 		served(await T.get("/uploads/%72ate-cons/L100.pdf", U.sa), RC));
-	ok("an unguarded directory is unchanged (a Driver still opens chat/)",
-		served(await T.get("/uploads/chat/chat_1_abcde.jpg", U.drvA), "chat/chat_1_abcde.jpg"));
+	ok("an unguarded directory is unchanged (a Driver still opens onboarding-templates/)",
+		served(await T.get("/uploads/onboarding-templates/blank-form.pdf", U.drvA), "onboarding-templates/blank-form.pdf"));
 	ok("a directory name without its slash is a single segment → root rule → 404 to a Driver",
 		(await T.get("/uploads/invoices", U.drvA)).status === 404);
 

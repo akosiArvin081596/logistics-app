@@ -12,6 +12,11 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
+    <!-- Critical requirements from the rate con, as the server's codes (plan PR 4). -->
+    <ul v-if="chips.length" class="card-chips" aria-label="Load requirements">
+      <li v-for="c in chips" :key="c.code" class="card-chip">{{ c.label }}</li>
+    </ul>
+
     <!-- Dates row -->
     <div v-if="pickupDate || deliveryDate" class="card-dates">
       <div v-if="pickupDate" class="date-item">
@@ -60,6 +65,7 @@ import { computed } from 'vue'
 import StatusBadge from '../shared/StatusBadge.vue'
 import { parseYmdLocal } from '../../utils/datetime'
 import { formatLoadRoute } from '../../lib/address.js'
+import { listChips } from '../../lib/loadInstructions.js'
 
 const props = defineProps({
   load: { type: Object, required: true },
@@ -91,6 +97,8 @@ const loadId = computed(() => loadIdCol.value ? props.load[loadIdCol.value] : ''
 // what keeps the ~324 historical route-shaped rows rendering unchanged.
 const route = computed(() => formatLoadRoute(props.load, props.headers))
 
+const chips = computed(() => listChips(props.load))
+
 const pickupDate = computed(() => pickupCol.value ? props.load[pickupCol.value] : '')
 const deliveryDate = computed(() => delivCol.value ? props.load[delivCol.value] : '')
 
@@ -117,6 +125,27 @@ function formatDate(str) {
   margin-bottom: 0.6rem;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+}
+
+.card-chip {
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: var(--danger-dim);
+  color: #b91c1c;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
 }
 
 .load-card:active {

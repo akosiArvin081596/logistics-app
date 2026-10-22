@@ -13,6 +13,11 @@
       <span class="route-text">{{ route }}</span>
     </div>
 
+    <!-- The load's instructions from the rate con, first on the load (plan PR 4).
+         Only while the server's flag is on (the payload then carries
+         `_instructions`); what it shows is the server's (LoadInstructions.vue). -->
+    <LoadInstructions v-if="load._instructions" :load-id="String(loadId || '')" :summary="load._instructions" />
+
     <!-- Phone-GPS outcome. Shown ONLY on the load whose Navigate button was
          actually tapped — DriverView folds that match into `phoneGpsModeActive`,
          because the status behind it is a module singleton and would otherwise
@@ -284,6 +289,7 @@ import DriverFuelPanel from './DriverFuelPanel.vue'
 import ExpenseForm from './ExpenseForm.vue'
 import ExpenseCard from './ExpenseCard.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import LoadInstructions from './LoadInstructions.vue'
 
 const receiptPreview = ref('')
 

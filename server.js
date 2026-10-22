@@ -124,6 +124,9 @@ const invoiceReceipts = require("./lib/invoice-receipts");
 const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
 const receiptFiles = require("./lib/receipt-files");
+// Chat attachment files: who may open one (the conversation's participants),
+// and the copy (photos without metadata).
+const chatFiles = require("./lib/chat-files");
 const fuelModel = require("./lib/fuel-model");
 const eldMiles = require("./lib/eld-miles");
 const usStates = require("./lib/us-states");
@@ -139,6 +142,8 @@ const rateconNormalize = require("./lib/ratecon-normalize");
 // ids to decide money — excludeDroppedLoads(), the weekly invoice — goes through
 // this one function rather than its own `.toLowerCase()`.
 const { normalizeLoadId } = require("./lib/ratecon-load");
+// The rows of GET /api/admin/deleted-loads (the Super Admin "Deleted loads" list).
+const deletedLoadsView = require("./lib/deleted-loads-view");
 const receiptDuplicates = require("./lib/receipt-duplicates");
 const expenseWindowRule = require("./lib/expense-window");
 const { geminiFailure } = require("./lib/gemini-errors");
@@ -7309,6 +7314,10 @@ const RATECON_GEMINI_FIELDS = [
 	"Order Number","PO Number","Move Number","Trailer Number","Total Rate",
 	"Documents Email",
 ];
+// When this extraction last met a 429 or an `unavailable` answer (epoch ms). The
+// rate-con driver-instructions sweep stays paused for 30 minutes after one, so load
+// ingestion keeps the shared key (lib/driver-instructions-runtime.js).
+let rateConGeminiUnavailableAt = 0;
 async function runRateConGemini(base64) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_OCR_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 	const body = {
@@ -7387,6 +7396,7 @@ async function runRateConGemini(base64) {
 			// turned a clean error-branch fallback into a node timeout.
 			// Errors with no .kind (empty body, unparseable JSON, an aborted fetch)
 			// still retry exactly as they did.
+			if (err && err.kind === "unavailable") rateConGeminiUnavailableAt = Date.now();
 			if (err && err.kind && err.kind !== "transient") break;
 			if (attempt < 2) {
 				await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -11516,11 +11526,13 @@ function guardInvoicePdf(req, res, next, url, file) {
 //
 //   Swept at the same time and deliberately left (all timestamped, so the URL is
 //   a weak secret rather than a free enumeration):
-//     uploads/chat/         `chat_${Date.now()}_${rand5}.<ext>`
 //     uploads/legal/        `${scope}_${DocType}_${Date.now()}.pdf`
 //   uploads/expense-receipts/ was on that list too, and is guarded since
 //   2026-10-15 (owner's rule: the receipt's driver, Super Admin and the roles
 //   that review receipts). See guardExpenseReceipt.
+//   uploads/chat/ is guarded since 2026-10-22 (owner's rule: only the people
+//   who can read the conversation; photos served without location data). See
+//   guardChatAttachment.
 //   The uploads ROOT was on that list too — `${loadId}_${docType}_${Date.now()}`
 //   PODs, BOLs and receipts — and is now guarded by guardRootLoadDocument (see
 //   there). It is not a GUARDED_UPLOAD_DIRS entry because it is not a directory
@@ -11810,11 +11822,29 @@ function guardExpenseReceipt(req, res, next, url, file) {
 	return expenseReceiptGuard(req, res, next, url, file);
 }
 
+// uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
+// read the conversation it was sent in (Super Admin and Dispatcher every
+// thread; a Driver or Investor his own), decided by the first message that
+// names it; everyone else gets 404. Photos go out without their metadata (no
+// location). The rule and the copy live in lib/chat-files.js. chat_uploads
+// records who stored each file, so a message carries only its sender's own
+// upload (POST /api/messages).
+db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
+const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
+	db,
+	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	logError: (msg) => console.error(msg),
+});
+function guardChatAttachment(req, res, next, url, file) {
+	return chatAttachmentGuard(req, res, next, url, file);
+}
+
 const GUARDED_UPLOAD_DIRS = [
 	{ dir: "/onboarding-signed/", guard: guardDriverSignedDoc },
 	{ dir: "/investor-onboarding-signed/", guard: guardInvestorSignedDoc },
 	{ dir: "/invoices/", guard: guardInvoicePdf },
 	{ dir: "/expense-receipts/", guard: guardExpenseReceipt },
+	{ dir: "/chat/", guard: guardChatAttachment },
 	// ⚠️ THE TRAILING SLASH IS LOAD-BEARING. The match is a startsWith, so
 	// "/onboarding" without it would also swallow /onboarding-signed/ and
 	// /onboarding-templates/, routing signed W-9s to the drug-test guard. With
@@ -40449,6 +40479,58 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// GET /api/admin/deleted-loads — the soft-deleted loads, newest first, for the
+// Super Admin "Deleted loads" page. A list only: nothing here restores a load.
+// Each row's route, driver and settlement months come from its Job Tracking
+// row, matched as the delete above matches (lib/deleted-loads-view.js); a
+// month is closed when period_locks says 'locked'. An unreadable sheet or lock
+// table answers 503 rather than a guessed month or an "open" that may not be.
+app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!periodLocksReadable()) {
+			return res.status(503).json({
+				error: "The month-end lock table could not be read, so closed months can't be shown. Try again in a moment.",
+				code: "PERIOD_LOCK_UNREADABLE",
+			});
+		}
+		let jobTracking;
+		try {
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Deleted loads — Job Tracking unreadable:", e.message);
+			return res.status(503).json({
+				error: "Job Tracking could not be read, so the deleted loads' routes and months can't be shown. Try again in a moment.",
+				code: "SHEET_UNREADABLE",
+			});
+		}
+		const cols = jobTrackingMonthCols(jobTracking.headers);
+		const tripCover = tripDayLockCover(jobTracking.headers);
+		if (tripCover) cols.tripCover = tripCover;
+		const originCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
+		const destCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
+		const auditStmt = db.prepare("SELECT timestamp, details FROM audit_trail WHERE entity = ? AND entity_id = ? AND action = ? ORDER BY id");
+		const deleted = db.prepare("SELECT id, load_id, row_index, deleted_at, deleted_by FROM deleted_loads ORDER BY deleted_at DESC, id DESC").all();
+		const loads = deletedLoadsView.deletedLoadRows({
+			deleted,
+			rows: jobTracking.data,
+			cols,
+			auditsFor: (loadId) => auditStmt.all("load", loadId, "delete_load"),
+			laneOf: (row) => ({
+				pickup: resolveCityState(row, "pickup", row[cols.loadIdCol], originCol ? row[originCol] : ""),
+				dropoff: resolveCityState(row, "drop", row[cols.loadIdCol], destCol ? row[destCol] : ""),
+			}),
+			normalizeLoadId,
+			loadRowPeriods,
+			isLocked,
+			timeZone: APP_TIMEZONE,
+		});
+		res.json({ loads, count: loads.length });
+	} catch (error) {
+		console.error("Error listing deleted loads:", error.message);
+		res.status(500).json({ error: "The deleted loads could not be listed." });
+	}
+});
+
 // WHICH settlement months does one (driver, date, action) override move?
 //
 // ⚠️ NOT simply the month the date falls in — that answer is right for `add` and
@@ -41417,6 +41499,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			rows: [...respUnassigned, ...respActive, ...respCompleted],
 			includeDraftRefs: req.session.user.role === "Super Admin",
 		});
+		// Driver-instructions review codes on the open loads (codes only; inert while
+		// the flag is off).
+		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -43224,11 +43309,13 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 				driverName.toLowerCase(),
 		);
 
-		// Messages from SQLite (fast indexed query)
+		// Messages from SQLite (fast indexed query). Attachments ride along, so the
+		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
+		// to the conversation's participants only).
 		const nameLower = driverName.toLowerCase();
 		const driverMessages = db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
@@ -43403,6 +43490,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// expense form from, and the one POST /api/expenses enforces. Fresh row
 		// copies; see withExpenseWindows().
 		filteredLoads = withExpenseWindows(filteredLoads, jobTracking.headers);
+		// Rate-con driver instructions (DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED):
+		// `_instructions` { state, highlights } per load, codes only, keyed by each
+		// row's own stored Load ID (lib/driver-instructions-runtime.js).
+		driverInstructions.annotateDriverLoads(filteredLoads, loads.map((r) => (loadIdCol ? r[loadIdCol] : "")));
 
 		// PRIVACY: do not expose other drivers' names to a Driver-role caller.
 		// Previously this returned the full carrier driver list to every
@@ -46162,6 +46253,12 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		// An attachment is a chat file this same account uploaded through
+		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
+		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
+		if (attachmentRefusal) {
+			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
+		}
 
 		const timestamp = new Date().toISOString();
 		const result = db
@@ -46297,6 +46394,17 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 	}
 });
 
+// Dispatch notices only Super Admins see: the driver-instructions edit lock
+// (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
+// sent to the super-admin room only). For every other role GET
+// /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]);
+// The SQL that leaves them out for `user`, and its parameters.
+function noticeTypeScope(user) {
+	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
+	return { sql: types.length ? `type NOT IN (${types.map(() => "?").join(",")})` : "1 = 1", params: [...types] };
+}
+
 // GET /api/dispatch-notifications — Fetch dispatch notifications
 app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
@@ -46304,14 +46412,15 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		// ("2026-04-20 14:30:00"), which JS parses as local time — every row
 		// then looks ~N hours in the future and the UI stuck on "just now".
 		// Force ISO-8601 with Z so `new Date(...)` parses it as UTC.
+		const scope = noticeTypeScope(req.session.user);
 		const notifications = db.prepare(
 			`SELECT id, type, title, body, metadata, read,
 			        strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS createdAt
-			 FROM dispatch_notifications ORDER BY id DESC LIMIT 200`
-		).all();
+			 FROM dispatch_notifications WHERE ${scope.sql} ORDER BY id DESC LIMIT 200`
+		).all(...scope.params);
 		const unreadCount = db.prepare(
-			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0`
-		).get().count;
+			`SELECT COUNT(*) AS count FROM dispatch_notifications WHERE read = 0 AND ${scope.sql}`
+		).get(...scope.params).count;
 		// Every role but Super Admin (with BROKER_CONTACT_VALUE_REDACTION_ENABLED):
 		// each notice's title, body and metadata with broker contact withheld, the
 		// copy stored with it (metadata.redactedBody) served as its body, and a
@@ -46333,11 +46442,12 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { ids } = req.body;
+		const scope = noticeTypeScope(req.session.user);
 		if (ids && ids.length) {
 			const placeholders = ids.map(() => "?").join(",");
-			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE id IN (${placeholders}) AND ${scope.sql}`).run(...ids, ...scope.params);
 		} else {
-			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE read = 0`).run();
+			db.prepare(`UPDATE dispatch_notifications SET read = 1 WHERE read = 0 AND ${scope.sql}`).run(...scope.params);
 		}
 		res.json({ success: true });
 	} catch (error) {
@@ -48770,11 +48880,75 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			ratePerMile: rpm.rate_per_mile,
 			warnings,
 		});
+		// Driver instructions from the PDF just archived, read after the answer
+		// (lib/driver-instructions-runtime.js; inert while its flag is off).
+		if (rateconArchived) driverInstructions.afterDropzone({ loadId, base64: rawPdf, amounts: [fields["Rate"], fields["Total Rate"]], user: req.session.user });
 	} catch (error) {
 		console.error("Error creating load from rate-con:", error.message);
 		res.status(500).json({ error: "Failed to create the load. Check the Job Tracking sheet before retrying." });
 	}
 });
+
+// <driver-instructions-wiring>
+// RATE-CON DRIVER INSTRUCTIONS (the owner's request, 2026-10-21; plan PR 2). What a
+// driver may be shown from a rate con: lib/driver-instructions.js filters it,
+// lib/driver-instructions-runtime.js stores it, reads rate cons for it (a Drive sweep
+// of the rate-con folder, the drag-and-drop hook above) and serves it to staff:
+// GET / PUT /api/loads/:loadId/driver-instructions, POST .../review,
+// .../accept-pending, .../re-extract (Super Admin, Dispatcher), and the edit locks a
+// deny-list refusal sets (GET /api/driver-instructions/edit-locks,
+// POST .../edit-locks/:userId/clear: Super Admin only). Inert, every route
+// 404, unless RATECON_DRIVER_INSTRUCTIONS_ENABLED is on AND CARRIER_ACCOUNT_NUMBERS_DENY_SECRET
+// holds a usable value. The driver's screen (plan PR 4) also needs
+// DRIVER_LOAD_INSTRUCTIONS_SCREEN_ENABLED: GET /api/driver/loads/:loadId/instructions
+// (the load's own driver through loadBelongsToDriver(), or Super Admin), the codes on
+// GET /api/driver/:driverName, and `driver-instructions-changed` { loadId } to the
+// load's driver's room. Pinned by scripts/test-driver-instructions-routes.js, which
+// lifts this block, and scripts/test-driver-page-role-gate.js §8.
+let driverInstructionsSideCache = null;
+// The two other sheets holding the load's own amounts (Payments Table, Job Details),
+// one read a minute at most. A failed read throws: the routes then answer 503.
+async function driverInstructionsSideSheets() {
+	if (driverInstructionsSideCache && Date.now() - driverInstructionsSideCache.at < 60 * 1000) return driverInstructionsSideCache.data;
+	const sheets = await getSheets();
+	const resp = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: ["Payments Table", "Job Details"] });
+	const ranges = (resp && resp.data && resp.data.valueRanges) || [];
+	const data = { payments: (ranges[0] && ranges[0].values) || [], jobDetails: (ranges[1] && ranges[1].values) || [] };
+	driverInstructionsSideCache = { data, at: Date.now() };
+	return data;
+}
+const driverInstructions = require("./lib/driver-instructions-runtime").create({
+	db,
+	env: process.env,
+	fetch,
+	geminiApiKey: GEMINI_API_KEY,
+	geminiModel: GEMINI_OCR_MODEL,
+	getDrive,
+	getJobTracking: getJobTrackingCached,
+	getSideSheets: driverInstructionsSideSheets,
+	brokerWithheldRe: BROKER_WITHHELD_RE,
+	ingestionGeminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	logAudit,
+	logAuditRefusal,
+	// The edit-lock notice (decision 37): stored as a Super Admin-only dispatch notice
+	// (SUPER_ADMIN_ONLY_NOTICE_TYPES) and sent live to the super-admin room only.
+	notifySuperAdmins: (notice) => {
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify(notice.metadata || {}));
+		io.to("super-admin").emit("dispatch-notification", notice);
+	},
+	sendAdminEmail: (subject, html) => (alertChannels.mailbox(process.env) ? sendEmail(alertChannels.mailbox(process.env), subject, html) : null),
+	uploadsDir: path.join(DATA_DIR, "uploads"),
+	log: console,
+	loadBelongsToDriver,
+	sentIfLoadOwnershipUnverified,
+	// The driver's room by the spelling his account holds, as the geofence notice does.
+	emitToDriver: (name, event, payload) => io.to(driverRoom(findDriverAccountSpelling(name) || name)).emit(event, payload),
+});
+driverInstructions.mount(app, { requireRole });
+if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-instructions sweep")) {
+	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
+}
+// </driver-instructions-wiring>
 
 // GET /api/documents/:loadId — Fetch all documents for a load
 //
@@ -51492,7 +51666,14 @@ app.post("/api/chat/attachment", requireAuth, chatAttachmentLimiter, async (req,
 		// client-sent mimeType and is a display hint, never evidence.
 		const chatErr = verifyInlineServedBytes(chatBuf, path.extname(safeName));
 		if (chatErr) return res.status(400).json({ error: chatErr });
-		fs.writeFileSync(path.join(chatDir, safeName), chatBuf);
+		// A photo is stored without its metadata (no location, camera or text;
+		// orientation kept); one the strip cannot walk is refused, never stored
+		// as it is. Other files are stored as sent.
+		const stored = chatFiles.chatUploadBytes(chatBuf);
+		if (!stored) return res.status(415).json({ error: "That photo couldn't be read. Try a JPG or PNG.", code: "UNSUPPORTED_IMAGE_TYPE" });
+		fs.writeFileSync(path.join(chatDir, safeName), stored);
+		// Who stored it: POST /api/messages takes it only from this account.
+		chatFiles.recordChatUpload(db, `/uploads/chat/${safeName}`, req.session.user.id);
 		res.json({ success: true, fileUrl: `/uploads/chat/${safeName}`, attachmentType });
 	} catch (err) {
 		console.error("Chat attachment error:", err.message);

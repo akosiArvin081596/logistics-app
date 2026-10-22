@@ -3,8 +3,13 @@ import { useApi } from '../composables/useApi'
 import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
 import { replyLost } from '../lib/saveOutcome'
 import { expensesOffLoads } from '../lib/loadId'
+import { driverInstructionsUrl, entryAfter, entryLoading, instructionsKey } from '../lib/loadInstructions'
 
 const api = useApi()
+
+// The latest load-instructions read per load key: an answer to an older read (a slow
+// one overtaken by the socket's re-read) is dropped, never shown over a newer one.
+const instructionSeq = new Map()
 
 // How long the driver's expense save may take before the phone stops waiting.
 //
@@ -44,6 +49,10 @@ export const useDriverStore = defineStore('driver', {
     // DRIVER_TIME_OFF_SCREEN_ENABLED is off): the Kit card and the Loads
     // banner then render nothing.
     timeOff: null,
+    // Rate-con load instructions per load key (lib/loadInstructions.js entries):
+    // GET /api/driver/loads/:loadId/instructions's last answer, read when a load
+    // opens and again on `driver-instructions-changed`.
+    instructions: {},
     currentTab: 'loads',
     selectedStatusLoad: null,
     isLoading: true,
@@ -365,6 +374,26 @@ export const useDriverStore = defineStore('driver', {
       }
     },
 
+    // One load's instructions card. The server decides everything it holds; a 404 or
+    // 403 leaves nothing to show, any other failure keeps the last answer.
+    async fetchLoadInstructions(loadId) {
+      const key = instructionsKey(loadId)
+      if (!key) return
+      const seq = (instructionSeq.get(key) || 0) + 1
+      instructionSeq.set(key, seq)
+      const prev = this.instructions[key] || null
+      this.instructions = { ...this.instructions, [key]: entryLoading(prev) }
+      let next
+      try {
+        const body = await api.get(driverInstructionsUrl(loadId))
+        next = entryAfter(prev, { body })
+      } catch (error) {
+        next = entryAfter(prev, { error })
+      }
+      if (instructionSeq.get(key) !== seq) return
+      this.instructions = { ...this.instructions, [key]: next }
+    },
+
     async respondToLoad(loadId, rowIndex, response) {
       await api.post('/api/driver/respond', {
         loadId,
@@ -551,6 +580,9 @@ export const useDriverStore = defineStore('driver', {
         message: msg.message,
         loadId: msg.loadId || '',
         read: this.currentTab === 'messages' ? 1 : 0,
+        // A photo from Dispatch shows (and opens full size) without a reload.
+        attachment_url: msg.attachment_url || '',
+        attachment_type: msg.attachment_type || '',
       })
     },
   },

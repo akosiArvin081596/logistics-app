@@ -9,10 +9,15 @@
 // PASS, CREDENTIAL, PRIVATE, AUTH, SMTP, DSN or WEBHOOK is a secret and is never
 // copied, nor is a value that is a URL carrying credentials or looks like a key,
 // nor a runtime setting replica:start sets itself (NODE_ENV, PORT, ...), nor a
-// production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS). It is an
-// allowlist too: only names the running app reads (process.env.NAME in
-// <app dir>/server.js and lib/) are copied, so a name nothing reads, whatever it
-// holds, stays on the server. The rest is written, file mode 600, and only
+// production-only one (the payout bank's numbers, PRODUCTION_ONLY_SETTINGS; the
+// carrier's account numbers, CARRIER_ACCOUNT_SETTINGS: CARRIER_ACCOUNT_NUMBERS_DENY_SECRET,
+// also refused as a SECRET name, and its retired name CARRIER_ACCOUNT_NUMBERS_DENY;
+// the sheets, inboxes, the Gmail account and its reconcile label, the Drive folders
+// and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
+// allowlist too: only names the running app reads in <app dir>/server.js and
+// lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
+// handed, and the names a helper reads through a table) are copied, so a name
+// nothing reads, whatever it holds, stays on the server. The rest is written, file mode 600, and only
 // names are printed: the copied keys, and each skipped key with the rule that
 // skipped it. No value is ever printed.
 "use strict";
@@ -59,7 +64,9 @@ if (require.main === module) {
 		const dotenv = require(path.join(appDir, "node_modules", "dotenv"));
 		const envFile = path.join(appDir, ".env");
 		const parsed = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
-		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join(appDir, "lib", f))]
+		// replica-rules.js only names settings to judge them (its lists and
+		// comments), so it never makes a name count as read.
+		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join(appDir, "lib", f))]
 			.map((f) => fs.readFileSync(f, "utf8"));
 		const { copied, skipped, text } = exportSettings(parsed, { readByApp: rules.namesReadBy(appSources) });
 		fs.writeFileSync(out, text, { mode: 0o600, flag: "wx" });

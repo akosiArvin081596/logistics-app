@@ -23,6 +23,20 @@
           :class="['msg-bubble', isSent(m) ? 'sent' : 'received']"
         >
           <div v-if="!isSent(m)" class="msg-sender">{{ m.from }}</div>
+          <div v-if="m.attachment_url" class="msg-attachment">
+            <!-- A photo opens full size below; focus comes back here on close. -->
+            <button
+              v-if="isChatPhoto(m)"
+              type="button"
+              class="msg-photo"
+              :aria-label="`Open full size: ${chatPhotoAlt(m)}`"
+              @click="openPhoto(m)"
+            >
+              <img :src="m.attachment_url" :alt="chatPhotoAlt(m)" class="msg-photo-img" />
+            </button>
+            <a v-else-if="isOwnUploadUrl(m.attachment_url)" :href="m.attachment_url" target="_blank" class="msg-file">{{ m.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
+            <span v-else class="msg-file">File unavailable</span>
+          </div>
           {{ m.message }}
           <div class="msg-footer">
             <span v-if="m.loadId" class="msg-load">{{ m.loadId }}</span>
@@ -54,13 +68,29 @@
         @click="handleSend"
       >{{ sending ? '&hellip;' : '&#10148;' }}</button>
     </div>
+
+    <!-- A thread photo, full size: pinch or the buttons to zoom, swipe or the
+         arrows for next/previous, X or a tap outside to close. Same /uploads
+         URL the bubble shows. -->
+    <ZoomableImage
+      :src="photoView ? photoView.photo.url : null"
+      :alt="photoView ? photoView.photo.alt : 'Photo'"
+      :has-prev="!!photoView && photoView.hasPrev"
+      :has-next="!!photoView && photoView.hasNext"
+      :position="photoView ? photoView.position : ''"
+      @prev="stepPhoto(-1)"
+      @next="stepPhoto(1)"
+      @close="closePhoto"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
+import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import EmptyState from '../shared/EmptyState.vue'
+import ZoomableImage from '../shared/ZoomableImage.vue'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -98,6 +128,16 @@ const currentLoadId = computed(() => {
 function isSent(m) {
   return (m.from || '').toLowerCase() === props.driverName.toLowerCase()
 }
+
+// The thread's photos and the one shown full size, tracked by URL (the same
+// rule as the dashboard's MessagingPanel).
+const photos = computed(() => chatPhotos(props.messages))
+const openPhotoUrl = ref('')
+const photoView = computed(() => chatPhotoView(photos.value, openPhotoUrl.value))
+function openPhoto(m) { openPhotoUrl.value = m && m.attachment_url ? m.attachment_url : '' }
+function stepPhoto(delta) { openPhotoUrl.value = chatPhotoStep(photos.value, openPhotoUrl.value, delta) }
+function closePhoto() { openPhotoUrl.value = '' }
+watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
 
 // `messages.timestamp` is a true instant (server writes new Date().toISOString()),
 // so left alone it renders in whatever zone the phone is set to. The carrier
@@ -259,6 +299,34 @@ watch(
   font-weight: 600;
   font-size: 0.75rem;
   margin-bottom: 0.15rem;
+}
+
+.msg-attachment { margin-bottom: 0.3rem; }
+.msg-photo {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: zoom-in;
+  font: inherit;
+  color: inherit;
+}
+.msg-photo:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.msg-photo-img {
+  display: block;
+  max-width: min(220px, 100%);
+  max-height: 180px;
+  border-radius: 8px;
+}
+.msg-file {
+  display: inline-block;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.15);
+  font-size: 0.78rem;
+  color: inherit;
+  text-decoration: underline;
 }
 
 .msg-footer {

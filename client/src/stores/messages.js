@@ -92,6 +92,9 @@ export const useMessagesStore = defineStore('messages', {
           message: msg.message,
           loadId: msg.loadId || '',
           read: 1,
+          // A photo that arrives live shows (and opens full size) without a reload.
+          attachment_url: msg.attachment_url || '',
+          attachment_type: msg.attachment_type || '',
         })
         if (msg.id) {
           api.put('/api/messages/read', { messageIds: [msg.id] })

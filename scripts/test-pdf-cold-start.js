@@ -152,7 +152,15 @@ async function main() {
 		// NAV=3000 while the render was perfectly healthy (valid PDF, no retry).
 		// A test that cries wolf gets ignored, and the two assertions that matter
 		// are §1 and §2.
-		await getBrowser();
+		const warm = await getBrowser();
+
+		// The real Chromium's own arguments: controlled over a pipe, with no
+		// debugging port (the launch options are pinned hermetically in
+		// scripts/test-pdf-browser-pipe.js; this is the spawned process).
+		const proc = typeof warm.process === "function" ? warm.process() : null;
+		const spawnargs = (proc && proc.spawnargs) || [];
+		ok(spawnargs.includes("--remote-debugging-pipe"), "Chromium is controlled over a pipe");
+		ok(!spawnargs.some((a) => /^--remote-debugging-(port|address)/.test(a)), "Chromium gets no debugging port argument");
 
 		const cap = captureRenderLogs();
 		const t = Date.now();

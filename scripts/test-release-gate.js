@@ -33,7 +33,8 @@
  *      timeout; ci.yml runs on every push to main with no path filter, and a
  *      manual run can never cancel the push run (its group expression is
  *      evaluated per event); the unit runners run once in CI, in parts 1..n
- *      that run-unit-tests.js proves cover every runner exactly once; the
+ *      that run-unit-tests.js proves cover every runner exactly once, its
+ *      printed list and failure output reaching a slow reader whole; the
  *      verdict job needs every other job, runs whatever they concluded and
  *      fails unless each succeeded (its gate run under bash); package.json
  *   §5 mutants of each script, workflow and the dispatch gate, caught above
@@ -658,6 +659,54 @@ function checkCi(ciText, tag = "") {
 	return r;
 }
 
+// run-unit-tests.js's output reaches a reader that drains it late (a loaded CI
+// machine) whole. Its stdout is a pipe, and a process.exit() right after
+// printing dropped whatever had not drained: checkLocal's --list once read 189
+// of 328 runners (2026-10-21). Here the reader holds off until the harness has
+// exited, or 1.5 s, so anything an early exit drops is missing. The output is
+// larger than a pipe holds on macOS or Linux.
+async function checkHarnessFlush() {
+	const harness = fs.readFileSync(path.join(ROOT, "scripts/run-unit-tests.js"));
+	const drainLate = (dir, args) => new Promise((resolve) => {
+		const child = spawn(process.execPath, [path.join(dir, "run-unit-tests.js"), ...args], {
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, UNIT_TEST_SHARD: "", UNIT_TEST_SKIP_TIMING: "", UNIT_TEST_CONCURRENCY: "1" },
+		});
+		let out = "";
+		// The listener first: child_process drains an unread pipe at exit.
+		child.stdout.on("data", (d) => (out += d));
+		child.stdout.pause();
+		child.stderr.resume();
+		const late = setTimeout(() => child.stdout.resume(), 1500);
+		child.on("exit", () => { clearTimeout(late); child.stdout.resume(); });
+		child.on("close", (code) => resolve({ code, out }));
+	});
+
+	const listDir = tmpDir("harness-list");
+	fs.writeFileSync(path.join(listDir, "run-unit-tests.js"), harness);
+	// About 640 KB: well past a socket buffer plus the paused reader's own, so
+	// even one write followed by process.exit() would lose some.
+	const names = Array.from({ length: 3000 }, (_, k) => `test-${"x".repeat(200)}-${String(k).padStart(4, "0")}.js`);
+	for (const f of names) fs.writeFileSync(path.join(listDir, f), "");
+
+	const LINE = "loud-runner-line";
+	const LOUD = 40000; // about 680 KB, which the harness prints in one write
+	const failDir = tmpDir("harness-fail");
+	fs.writeFileSync(path.join(failDir, "run-unit-tests.js"), harness);
+	fs.writeFileSync(path.join(failDir, "test-loud.js"), `process.stdout.write(${JSON.stringify(`${LINE}\n`)}.repeat(${LOUD}));\nprocess.exitCode = 1;\n`);
+
+	const [list, fail] = await Promise.all([drainLate(listDir, ["--list"]), drainLate(failDir, [])]);
+	const listed = list.out.split("\n").filter(Boolean);
+	const lines = (fail.out.match(new RegExp(LINE, "g")) || []).length;
+	const summary = /\n0\/1 passed in [^\n]* — 1 FAILED\n$/.test(fail.out);
+	return [
+		[list.code === 0 && listed.length === names.length && listed.every((f, k) => f === names[k]),
+			`§4 run-unit-tests.js --list prints every runner to a reader that drains late (${listed.length} of ${names.length}, exit ${list.code})`],
+		[fail.code === 1 && lines === LOUD && summary,
+			`§4 run-unit-tests.js prints a failed runner's whole output and the summary to a reader that drains late (${lines} of ${LOUD} lines, summary ${summary}, exit ${fail.code})`],
+	];
+}
+
 function checkLocal() {
 	const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts;
 	ok(pkg.check === "npm run lint && npm run test:unit", `§4 npm run check is the syntax check plus every unit runner (got ${pkg.check})`);
@@ -931,6 +980,7 @@ function mutants() {
 	// sections after them block the loop.
 	const [smoke, dispatch, cli] = await Promise.all([checkSmoke(SMOKE), checkDispatch(require("./deploy/dispatch-gate.js")), checkDispatchCli(), asyncMutants()]);
 	for (const [c, m] of [...smoke, ...dispatch, ...cli]) ok(c, m);
+	for (const [c, m] of await checkHarnessFlush()) ok(c, m);
 	for (const [c, m] of checkWait(WAIT)) ok(c, m);
 	checkJq();
 	for (const [c, m] of checkHook(fs.readFileSync(HOOK, "utf8"))) ok(c, m);
