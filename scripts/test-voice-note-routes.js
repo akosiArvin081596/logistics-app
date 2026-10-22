@@ -368,6 +368,10 @@ function telemetry(db, { agoMs, speed }) {
 	{
 		const toB = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders(DRIVER_B, newKey()) });
 		ok("§6 a driver sending to another driver: 403 VOICE_NOTE_RECIPIENT", toB.status === 403 && toB.json && toB.json.code === "VOICE_NOTE_RECIPIENT", [toB.status, toB.json]);
+		const drvAdmin = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders("admin", newKey()) });
+		ok("§6 a driver sending to \"admin\" (the investor portal's desk): 403 VOICE_NOTE_RECIPIENT", drvAdmin.status === 403 && drvAdmin.json && drvAdmin.json.code === "VOICE_NOTE_RECIPIENT", [drvAdmin.status, drvAdmin.json]);
+		const invDispatch = await request(P, "POST", "/api/messages/voice", U.inv, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
+		ok("§6 an investor sending to \"Dispatch\" (the driver app's desk): 403 VOICE_NOTE_RECIPIENT", invDispatch.status === 403 && invDispatch.json && invDispatch.json.code === "VOICE_NOTE_RECIPIENT", [invDispatch.status, invDispatch.json]);
 		const unknown = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Nobody Here", newKey()) });
 		ok("§6 staff to a name no account holds: 422 VOICE_NOTE_RECIPIENT", unknown.status === 422 && unknown.json && unknown.json.code === "VOICE_NOTE_RECIPIENT", [unknown.status, unknown.json]);
 		const desk = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });

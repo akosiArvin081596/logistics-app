@@ -47193,9 +47193,10 @@ const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_
 const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
 	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
 	: "";
-// The staff desk a Driver or an Investor sends to: the driver app names it
-// "Dispatch", the investor portal "admin".
-const VOICE_NOTE_DESK_NAMES = new Map([["dispatch", "Dispatch"], ["admin", "admin"]]);
+// The one staff desk each role sends to, as its own app names it: a Driver
+// only to "Dispatch" (the driver app), an Investor only to "admin" (the
+// investor portal). [the name as matched, the name as stored].
+const VOICE_NOTE_DESK_BY_ROLE = Object.freeze({ Driver: ["dispatch", "Dispatch"], Investor: ["admin", "admin"] });
 const VOICE_NOTE_REFUSALS = {
 	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
 	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
@@ -47232,16 +47233,17 @@ const voiceNotePlaybackLimiter = rateLimit({
 
 // Who a voice note goes from and to, and the Driver or Investor account it
 // belongs to (party_user_id: besides staff, the one account that may play it).
-// A Driver or an Investor sends as himself and only to the staff desk; staff
-// send as "Dispatch" or as themselves, only to one existing Driver or Investor
-// account. { from, to, partyUserId } or { status, code, error }.
+// A Driver or an Investor sends as himself and only to his role's staff desk
+// (VOICE_NOTE_DESK_BY_ROLE); staff send as "Dispatch" or as themselves, only
+// to one existing Driver or Investor account. { from, to, partyUserId } or
+// { status, code, error }.
 function resolveVoiceNoteParties(user, toName, fromName) {
 	const role = user && user.role;
 	const own = String((user && (user.driverName || user.username)) || "").trim();
 	if (role === "Driver" || role === "Investor") {
-		const desk = VOICE_NOTE_DESK_NAMES.get(String(toName).toLowerCase());
+		const [deskKey, desk] = VOICE_NOTE_DESK_BY_ROLE[role];
 		const id = Number(user.id);
-		if (!own || !desk || !Number.isInteger(id) || id <= 0) {
+		if (!own || String(toName).toLowerCase() !== deskKey || !Number.isInteger(id) || id <= 0) {
 			return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes go to Dispatch." };
 		}
 		return { from: own, to: desk, partyUserId: id };

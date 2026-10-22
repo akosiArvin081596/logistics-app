@@ -171,7 +171,7 @@ function fakeRsync() {
 	const host = src.slice(0, src.indexOf(":"));
 	const remote = src.slice(src.indexOf(":") + 1);
 	const label = remote.startsWith("/root/logisx-replica-tmp/") ? "download" : path.basename(remote);
-	fs.appendFileSync(process.env.FAKE_LOG, `${JSON.stringify({ kind: "rsync", label, rsh })}\n`);
+	fs.appendFileSync(process.env.FAKE_LOG, `${JSON.stringify({ kind: "rsync", label, rsh, flags: args.filter((a) => a.startsWith("--")) })}\n`);
 	const [cmd, ...opts] = rsh.split(/\s+/).filter(Boolean);
 	// FAKE_DROP_SOCK_AT: the shared connection ends between the step's check and its start.
 	if (process.env.FAKE_DROP_SOCK_AT === `rsync-${label}`) {
@@ -482,6 +482,24 @@ console.log("§2 an interrupted swap");
 	ok("the next pull puts that snapshot back once it holds the lock, and says so", /a pull stopped during its swap left no clean\/; its previous snapshot was put back/.test(p.out) && fs.existsSync(path.join(p.R, "clean", "previous-snapshot")) && !fs.existsSync(path.join(p.R, "clean.old")), p.out);
 	const src = fs.readFileSync(PULL, "utf8");
 	ok("...and makes clean/ only after that", /^for d in logs uploads storage evidence-archive work; do/m.test(src) && src.search(/^if restore_clean; then$/m) > src.search(/^echo "\$PULL_PID" >"\$LOCK\/pid"$/m) && src.search(/^mkdir -p "\$ROOT\/clean"$/m) > src.search(/^if restore_clean; then$/m));
+}
+
+// ---- §2b voice notes stay on the server unless the pull opts in ----------------------------
+console.log("§2b voice notes (storage/voice-notes/)");
+{
+	const flagsOf = (p, label) => ((p.calls.find((c) => c.kind === "rsync" && c.label === label) || {}).flags || null);
+	const plain = pull();
+	const f = flagsOf(plain, "storage");
+	ok("the storage/ copy leaves voice-notes/ out and removes a copy an earlier pull left (--exclude=/voice-notes/ --delete-excluded)",
+		plain.r.status === 0 && !!f && f.includes("--exclude=/voice-notes/") && f.includes("--delete-excluded"), [plain.r.status, f]);
+	ok("...and the log says so", /storage\/: voice notes left out \(set REPLICA_PULL_VOICE_NOTES=1 to copy them\)/.test(plain.out), plain.out);
+	ok("...uploads/ and evidence-archive/ exclude nothing",
+		["uploads", "evidence-archive"].every((l) => { const x = flagsOf(plain, l); return !!x && !x.some((a) => /exclude/.test(a)); }),
+		["uploads", "evidence-archive"].map((l) => flagsOf(plain, l)));
+	const opted = pull({ env: () => ({ REPLICA_PULL_VOICE_NOTES: "1" }) });
+	const g = flagsOf(opted, "storage");
+	ok("REPLICA_PULL_VOICE_NOTES=1: the storage/ copy takes voice-notes/ too", opted.r.status === 0 && !!g && !g.some((a) => /exclude/.test(a)), [opted.r.status, g]);
+	ok("...and the log says so", /storage\/: voice notes are copied \(REPLICA_PULL_VOICE_NOTES=1\)/.test(opted.out), opted.out);
 }
 
 // ---- §3 settings and the uploads -----------------------------------------------------------

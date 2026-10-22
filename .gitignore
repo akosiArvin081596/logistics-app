@@ -176,6 +176,9 @@ storage/payout-statements/
 # Re-encoded receipt images for invoice receipt pages (lib/receipt-images.js):
 # real receipts, rebuilt on demand.
 storage/receipt-images/
+# Voice notes in Messages (lib/voice-notes.js): people's recorded voices. A dev
+# or worktree run writes them into the checkout; this repo is public.
+storage/voice-notes/
 
 # Written by the deploy drift monitor on the VPS — one heal attempt per commit.
 .drift-heal-attempted
