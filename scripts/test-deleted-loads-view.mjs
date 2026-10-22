@@ -202,6 +202,11 @@ ok('§3 the page shows every column: Load ID, Route, Driver, Date deleted, Delet
 ok('§3 list only: neither the page nor the link sends anything but a GET',
   !/api\.(post|put|patch|del)\(/.test(VIEW) && !/api\.(post|put|patch|del)\(/.test(LINK_SRC) && !/fetch\(/.test(VIEW + LINK_SRC))
 ok('§3 the page has a phone layout (cards below md)', /v-else-if="isMobile"/.test(VIEW) && /useViewport\(\)/.test(VIEW))
+// Review L1 (#568): two deletes of one load in the same second share load ID,
+// time and row index; only the deleted_loads id the route sends tells them apart.
+const rowLoops = VIEW.match(/v-for="l in loads" :key="[^"]*"/g) || []
+eq('§3 the table rows and the phone cards are keyed on the deleted_loads id', rowLoops,
+  ['v-for="l in loads" :key="l.id"', 'v-for="l in loads" :key="l.id"'])
 
 if (failures.length) {
   console.error(`\n${pass} passed, ${failures.length} failed`)

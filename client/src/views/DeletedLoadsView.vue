@@ -23,7 +23,7 @@
 
       <!-- Phone: one card per deleted load, every field labelled. -->
       <ul v-else-if="isMobile" class="dl-cards" aria-label="Deleted loads">
-        <li v-for="l in loads" :key="rowKey(l)" class="dl-card">
+        <li v-for="l in loads" :key="l.id" class="dl-card">
           <div class="dl-card-id">{{ l.loadId || '—' }}</div>
           <dl class="dl-fields">
             <div class="dl-field"><dt>Route</dt><dd>{{ deletedLoadRoute(l) }}</dd></div>
@@ -57,7 +57,7 @@
           </TableRow>
         </TableHeader>
         <TableBody>
-          <TableRow v-for="l in loads" :key="rowKey(l)" class="dl-row">
+          <TableRow v-for="l in loads" :key="l.id" class="dl-row">
             <TableCell class="dl-id">{{ l.loadId || '—' }}</TableCell>
             <TableCell>{{ deletedLoadRoute(l) }}</TableCell>
             <TableCell>{{ l.driver || '—' }}</TableCell>
@@ -92,6 +92,8 @@ import EmptyState from '../components/shared/EmptyState.vue'
 
 // GET /api/admin/deleted-loads as the server sent it. Super Admin only (router
 // meta and requireRole on the route). A list only: nothing here restores a load.
+// Rows are keyed on deleted_loads' own id: a load deleted twice in the same
+// second has two rows alike in every other field.
 const api = useApi()
 const { isMobile } = useViewport()
 const loads = ref([])
@@ -111,12 +113,6 @@ async function load() {
   } finally {
     loading.value = false
   }
-}
-
-// deleted_loads has no unique key the page receives; a load deleted twice has
-// two rows with different times.
-function rowKey(l) {
-  return `${l.loadId}|${l.deletedAt}|${l.rowIndex}`
 }
 
 // A delete anywhere announces dashboard:changed.

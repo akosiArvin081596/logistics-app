@@ -16,6 +16,11 @@
  *   §3 an unreadable sheet answers 503 SHEET_UNREADABLE and an unreadable
  *      period_locks 503 PERIOD_LOCK_UNREADABLE: no months are guessed.
  *   §4 parameterized SQL only, and a mutant that re-admits Dispatcher is caught.
+ *   §5 the module's edges (an impossible stamp, the audit text).
+ *   §6 review lows on #568: every row carries its deleted_loads id (two deletes
+ *      of one load in the same second stay two rows); when any matched row's
+ *      dates can't be read, the delete record's months answer, not the readable
+ *      rows' alone.
  *
  * WHAT IS REAL. The route registration, requireRole, periodLocksReadable,
  * isLocked, jobTrackingMonthCols, loadRowPeriods (and the date readers under
@@ -349,6 +354,54 @@ async function main() {
 		"Soft-deleted load LX-1 — no matching Job Tracking row. Reversible: …",
 		null,
 	].map(deletedLoadsView.auditMonths), [["2026-03"], ["2026-03", "2026-04"], [], []]);
+
+	// ------------------------------------------------------------ §6 review lows (#568)
+	console.log("\n§6 one key per deleted_loads row; a partly readable load");
+	{
+		// L1: a second delete of the same load in the same second is a second row
+		// with the same load ID, time and row index; only deleted_loads.id tells them apart.
+		const db = makeDb();
+		db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_at, deleted_by) VALUES (?, ?, ?, ?)")
+			.run("lx-1002", 3, "2026-10-20 12:00:00", "admin_two");
+		const ids = db.prepare("SELECT id FROM deleted_loads ORDER BY id").all().map((x) => x.id);
+		const got = await call(build(ROUTE, db, JT).chain, USERS["Super Admin"]);
+		const rows = (got.body && got.body.loads) || [];
+		eq("L1 every row carries its deleted_loads id", rows.map((l) => l.id).sort((a, b) => a - b), ids);
+		const twins = rows.filter((l) => l.loadId === "lx-1002");
+		ok("L1 the two same-second deletes of one load have different ids",
+			twins.length === 2 && Number.isInteger(twins[0].id) && twins[0].id !== twins[1].id, JSON.stringify(twins.map((l) => l.id)));
+	}
+	{
+		// L2: two rows carry one load (one spelled with "#"); one has an October
+		// Assigned Date, the other dates nobody can read. The readable row alone
+		// could miss a closed month, so the delete record's months answer.
+		const jt = { headers: HEADERS, data: JT.data.concat([
+			row(20, { "Load ID": "LX-7", Driver: "Test Driver Six", "Assigned Date": "2026-10-04",
+				"Pickup Address": "Elm Grove, WI 53122", "Drop-off Address": "Birch Run, MI 48415" }),
+			row(21, { "Load ID": "#lx-7", Driver: "Test Driver Six", "Assigned Date": "TBD" }),
+			row(22, { "Load ID": "LX-8", Driver: "Test Driver Seven", "Assigned Date": "2026-10-06" }),
+			row(23, { "Load ID": "lx-8", Driver: "Test Driver Seven", "Assigned Date": "TBD" }),
+		]) };
+		const db = makeDb();
+		const del = db.prepare("INSERT INTO deleted_loads (load_id, row_index, deleted_at, deleted_by) VALUES (?, ?, ?, ?)");
+		del.run("lx-7", 20, "2026-10-18 14:00:00", "super_admin");
+		del.run("lx-8", 22, "2026-10-18 15:00:00", "super_admin");
+		const audit = db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, 1, 'super_admin', 'Super Admin', ?, 'load', ?, ?)");
+		audit.run("2026-10-18T14:00:00.300Z", "delete_load", "lx-7",
+			"Soft-deleted load LX-7 (sheet row 20) — settlement months 2026-05, 2026-10. Reversible: DELETE FROM deleted_loads WHERE load_id = 'lx-7'");
+		audit.run("2026-10-18T15:00:00.300Z", "delete_load", "lx-8",
+			"Soft-deleted load LX-8 — no matching Job Tracking row. Reversible: DELETE FROM deleted_loads WHERE load_id = 'lx-8'");
+		const got = await call(build(ROUTE, db, jt).chain, USERS["Super Admin"]);
+		const byId = Object.fromEntries(((got.body && got.body.loads) || []).map((l) => [l.loadId, l]));
+		const l7 = byId["lx-7"];
+		eq("L2 one row readable, one not: the delete record's months, each with its lock",
+			l7 && { months: l7.months, monthsFrom: l7.monthsFrom, pickup: l7.pickup, driver: l7.driver },
+			{ months: [{ month: "2026-05", closed: true }, { month: "2026-10", closed: false }], monthsFrom: "audit",
+				pickup: "Elm Grove, WI 53122", driver: "Test Driver Six" });
+		const l8 = byId["lx-8"];
+		eq("L2 ...and with a delete record naming none, no months rather than the readable row's alone",
+			l8 && { months: l8.months, monthsFrom: l8.monthsFrom }, { months: [], monthsFrom: "none" });
+	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);

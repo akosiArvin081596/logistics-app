@@ -40509,7 +40509,7 @@ app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res)
 		const originCol = pickAddressColumn(jobTracking.headers, /origin|pickup|shipper/i);
 		const destCol = pickAddressColumn(jobTracking.headers, /dest|drop|receiver|delivery/i);
 		const auditStmt = db.prepare("SELECT timestamp, details FROM audit_trail WHERE entity = ? AND entity_id = ? AND action = ? ORDER BY id");
-		const deleted = db.prepare("SELECT load_id, row_index, deleted_at, deleted_by FROM deleted_loads ORDER BY deleted_at DESC, id DESC").all();
+		const deleted = db.prepare("SELECT id, load_id, row_index, deleted_at, deleted_by FROM deleted_loads ORDER BY deleted_at DESC, id DESC").all();
 		const loads = deletedLoadsView.deletedLoadRows({
 			deleted,
 			rows: jobTracking.data,
