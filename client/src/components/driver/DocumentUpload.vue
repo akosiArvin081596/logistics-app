@@ -962,6 +962,8 @@ button.photo-add:disabled {
 .dup-preview-img {
   max-width: 96vw;
   max-height: 92vh;
+  /* The visible height on a phone with its toolbars showing (92vh is the fallback). */
+  max-height: 92dvh;
   object-fit: contain;
   border-radius: 6px;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
@@ -969,16 +971,17 @@ button.photo-add:disabled {
 .dup-preview-frame {
   width: 96vw;
   height: 92vh;
+  height: 92dvh;
   border: none;
   border-radius: 6px;
   background: #fff;
 }
 .dup-preview-close {
   position: fixed;
-  top: 1rem;
-  right: 1rem;
-  width: 40px;
-  height: 40px;
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: calc(1rem + env(safe-area-inset-right, 0px));
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: none;
   background: rgba(0, 0, 0, 0.6);
