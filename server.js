@@ -11745,7 +11745,8 @@ async function guardRootLoadDocument(req, res, next, file) {
 //
 // Opened by the receipt's own driver, Super Admin and the roles that review
 // receipts (approve / reject: Super Admin, Dispatcher), plus the Investor rule
-// below, and always sent without location or other metadata. The rule and the
+// below; a PDF receipt by those two roles only (2026-10-22, PDF_RECEIPT_ACCESS);
+// and always sent without location or other metadata. The rule and the
 // copy live in lib/receipt-files.js; this wires them to the database. The
 // guard serves the file itself, so express.static never sends a stored
 // receipt, and carries its own limits (RECEIPT_SERVE_LIMITS there: a few image
@@ -43342,14 +43343,14 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
 		// on submit and only the URL is stored), so the payload stays small
 		// even for drivers with hundreds of expenses. PDF receipts (admin/
-		// dispatcher-logged via savePdfReceiptToDisk) are blanked here: the
-		// driver app renders photoData in an <img> and would show a broken
-		// thumbnail — the deliberately-unchanged driver UI is image-only.
+		// dispatcher-logged via savePdfReceiptToDisk) are blanked here, a legacy
+		// inline one too: their files are staff only (lib/receipt-files.js), and
+		// the driver app renders photoData in an <img>.
 		const driverExpenses = db
 			.prepare(
 				`SELECT id, timestamp, driver, load_id AS loadId, type, amount,
 				        description, date,
-				        CASE WHEN photo_data LIKE '%.pdf' THEN '' ELSE photo_data END AS photoData,
+				        CASE WHEN photo_data LIKE '%.pdf' OR photo_data LIKE 'data:application/pdf%' THEN '' ELSE photo_data END AS photoData,
 				        status,
 				        location_city AS locationCity, location_state AS locationState
 				 FROM expenses
@@ -61668,11 +61669,21 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		const expenses = db.prepare(sql).all(...params);
 		// Receipt photos follow the Investor rule (investorReceiptImageIds(), beside
 		// the receipt file guard): a photo it withholds is sent blank, so the list
-		// never links a receipt the guard refuses. A Super Admin preview sees what
-		// the investor sees.
+		// never links a receipt the guard refuses. A PDF receipt it would link (by
+		// its name, or inline) is staff only (lib/receipt-files.js,
+		// PDF_RECEIPT_ACCESS): sent blank with receipt_kind PDF_OFFICE_COPY, shown
+		// as "PDF receipt (office copy)". A Super Admin preview sees what the
+		// investor sees.
 		if (!isSuperAdmin) {
 			const shown = investorReceiptImageIds(expenses.map((e) => e.id));
-			for (const e of expenses) if (!shown.has(Number(e.id))) e.photo_data = "";
+			const pdfOpens = receiptFiles.pdfReceiptOpensFor({ role: "Investor" });
+			for (const e of expenses) {
+				if (!shown.has(Number(e.id))) e.photo_data = "";
+				else if (!pdfOpens && receiptFiles.isPdfReceiptRef(e.photo_data)) {
+					e.photo_data = "";
+					e.receipt_kind = receiptFiles.PDF_OFFICE_COPY;
+				}
+			}
 		}
 		res.json({ expenses });
 	} catch (err) {
