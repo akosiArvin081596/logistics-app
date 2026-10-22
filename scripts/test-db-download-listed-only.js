@@ -7,14 +7,17 @@
  * 2026-10-22-db-download-listed-only-plan.md):
  *   - a listed Super Admin downloads the database as today, and the download
  *     is audited (db_download, as today);
- *   - every other Super Admin gets 403 DB_DOWNLOAD_RESTRICTED: no copy is made,
- *     the limiter is not spent, and the attempt is audited as
- *     db_download_blocked (who, when, from where; never file contents),
- *     coalesced to one row a minute per account like every other refusal;
+ *   - every other Super Admin gets 403 DB_DOWNLOAD_RESTRICTED (body: code and
+ *     error only; Cache-Control: no-store), after the cross-site guard and
+ *     before the limiter: no copy is made, the limiter is not spent, and the
+ *     attempt is audited as db_download_blocked with its reason (who, when,
+ *     from where; never file contents or the setting's text), coalesced to
+ *     one row a minute per account like every other refusal;
  *   - a session without a usable account id is told to sign in again (same
  *     code), and a username never counts;
  *   - Dispatcher, Driver, Investor and signed-out callers are refused exactly as
- *     today (requireRole's 403 "Forbidden" / 401), with no audit row;
+ *     today (requireRole's 403 "Forbidden" / 401), with no audit row, even
+ *     when a Dispatcher's id is on the list;
  *   - the list set but invalid: every Super Admin refused (fail closed);
  *   - the list unset: decision D3 (UNSET_REFUSES_EVERYONE below; the plan
  *     recommends refusing everyone).
@@ -61,11 +64,16 @@ const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 
 let passed = 0;
 let failed = 0;
+// The made-up databases and export copies live here; every exit removes it.
+let TMP_ROOT = null;
+function cleanUp() {
+	if (TMP_ROOT) { try { fs.rmSync(TMP_ROOT, { recursive: true, force: true }); } catch { /* best effort */ } }
+}
 function ok(name, cond) {
 	if (cond) { passed++; console.log(`ok    ${name}`); }
 	else { failed++; console.log(`FAIL  ${name}`); }
 }
-function die(msg) { console.error(`FAIL  ${msg}`); process.exit(1); }
+function die(msg) { console.error(`FAIL  ${msg}`); cleanUp(); process.exit(1); }
 
 let Database;
 try { Database = require("better-sqlite3"); } catch (e) { die(`a server dependency did not load (${e.message}); run it under the .nvmrc Node`); }
@@ -125,7 +133,7 @@ const DRIVER = { id: 11, username: "made_up_driver", role: "Driver", driverName:
 const INVESTOR = { id: 12, username: "made_up_investor", role: "Investor" };
 
 const quiet = { log() {}, warn() {}, error() {}, info() {} };
-const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "dbdl-test-"));
+TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "dbdl-test-"));
 let worldCount = 0;
 
 // One world per case: a fresh database file, a fresh temp folder for the
@@ -245,15 +253,22 @@ async function expectAllowed(label, viewers, user) {
 	ok("...the audit row holds no file contents", a.length === 1 && a[0].details.length < 500 && !a[0].details.includes("SQLite format"));
 	ok("...no refusal row", w.audits("db_download_blocked").length === 0);
 	ok("...the temp copy is gone", w.leftovers().length === 0);
+	ok(`...the limiter was spent once (${w.seen.limiter})`, w.seen.limiter === 1);
 	w.close();
 }
 
-async function expectRestricted(label, viewers, user, message) {
+// `reason` is the D5 wording the refusal row carries: "unlisted",
+// "no account id", "list unset" or "list invalid". `secretish` is raw
+// setting text that must never be echoed back or written to the audit log.
+async function expectRestricted(label, viewers, user, message, reason, secretish = []) {
 	const w = world(viewers);
 	const r = await w.post(user);
 	ok(`${label}: 403 DB_DOWNLOAD_RESTRICTED (${r.status} ${code(r) || JSON.stringify(r.body && r.body.error)})`, r.status === 403 && code(r) === "DB_DOWNLOAD_RESTRICTED");
 	ok(`...says ${JSON.stringify(message)}`, !!r.body && r.body.error === message);
+	ok(`...the body holds exactly code and error (${r.body ? Object.keys(r.body).sort().join(",") : "none"})`, !!r.body && Object.keys(r.body).sort().join(",") === "code,error");
+	ok(`...Cache-Control: no-store (${r.headers["cache-control"]})`, r.headers["cache-control"] === "no-store");
 	ok("...no database copy sent and none made", r.bytes === null && r.downloadName === null && w.leftovers().length === 0);
+	ok(`...the cross-site guard ran first (${w.seen.crossSite})`, w.seen.crossSite === 1);
 	ok(`...the limiter is not spent (${w.seen.limiter})`, w.seen.limiter === 0);
 	const blocked = w.audits("db_download_blocked");
 	const uid = user.id === undefined ? 0 : Number(user.id);
@@ -261,6 +276,11 @@ async function expectRestricted(label, viewers, user, message) {
 		blocked.length === 1 && Number(blocked[0].user_id) === uid && blocked[0].username === user.username && blocked[0].role === "Super Admin"
 		&& blocked[0].entity === "database" && blocked[0].entity_id === "app.db"
 		&& blocked[0].details.includes("[DB_DOWNLOAD_RESTRICTED]") && blocked[0].details.includes(TEST_IP));
+	ok(`...the row gives the reason ${JSON.stringify(reason)}`, blocked.length === 1 && blocked[0].details.includes(reason));
+	for (const s of secretish) {
+		ok(`...the setting's text ${JSON.stringify(s)} is in neither the answer nor the row`,
+			!JSON.stringify(r.body || {}).includes(s) && blocked.every((b) => !b.details.includes(s)));
+	}
 	ok("...and no db_download row", w.audits("db_download").length === 0);
 	w.close();
 	return r;
@@ -279,9 +299,9 @@ async function main() {
 	console.log("\n§1 RATECON_PDF_VIEWER_IDS=1,7");
 	await expectAllowed("listed account 1 (Super Admin)", "1,7", OWNER);
 	await expectAllowed("listed account 7 (id held as plain-digit text)", "1,7", SECOND_AS_TEXT);
-	await expectRestricted("unlisted Super Admin 5", "1,7", STAFF, RESTRICTED_MESSAGE);
-	await expectRestricted("Super Admin 5 under account 1's username", "1,7", STAFF_AS_OWNER_NAME, RESTRICTED_MESSAGE);
-	await expectRestricted("a Super Admin session without an account id", "1,7", NO_ID, SIGN_IN_AGAIN_MESSAGE);
+	await expectRestricted("unlisted Super Admin 5", "1,7", STAFF, RESTRICTED_MESSAGE, "unlisted");
+	await expectRestricted("Super Admin 5 under account 1's username", "1,7", STAFF_AS_OWNER_NAME, RESTRICTED_MESSAGE, "unlisted");
+	await expectRestricted("a Super Admin session without an account id", "1,7", NO_ID, SIGN_IN_AGAIN_MESSAGE, "no account id");
 	{
 		// Refusals coalesce like every other refusal: one row a minute per account.
 		const w = world("1,7");
@@ -304,12 +324,15 @@ async function main() {
 		await expectRoleRefusal("Investor", viewers, INVESTOR, 403, "Forbidden");
 		await expectRoleRefusal("signed out", viewers, null, 401, "Not authenticated");
 	}
+	// The role check comes first: listing a Dispatcher's id never opens the route to it.
+	console.log("\n§2 RATECON_PDF_VIEWER_IDS=1,9 (a Dispatcher's id on the list)");
+	await expectRoleRefusal("listed Dispatcher 9", "1,9", DISPATCHER, 403, "Forbidden");
 
 	// ── §3 unset ──────────────────────────────────────────────────────────────
 	console.log(`\n§3 RATECON_PDF_VIEWER_IDS unset (D3: ${UNSET_REFUSES_EVERYONE ? "nobody downloads in the app" : "every Super Admin, as before"})`);
 	if (UNSET_REFUSES_EVERYONE) {
-		await expectRestricted("Super Admin 1, list unset", undefined, OWNER, RESTRICTED_MESSAGE);
-		await expectRestricted("Super Admin 5, list unset", undefined, STAFF, RESTRICTED_MESSAGE);
+		await expectRestricted("Super Admin 1, list unset", undefined, OWNER, RESTRICTED_MESSAGE, "list unset");
+		await expectRestricted("Super Admin 5, list unset", undefined, STAFF, RESTRICTED_MESSAGE, "list unset");
 	} else {
 		await expectAllowed("Super Admin 1, list unset", undefined, OWNER);
 		await expectAllowed("Super Admin 5, list unset", undefined, STAFF);
@@ -317,8 +340,8 @@ async function main() {
 
 	// ── §4 set but invalid: fail closed ───────────────────────────────────────
 	console.log("\n§4 RATECON_PDF_VIEWER_IDS set but invalid");
-	for (const raw of ["", "   ", "1,abc", "01", "1,,7", "owner_admin"]) {
-		await expectRestricted(`Super Admin 1, list ${JSON.stringify(raw)}`, raw, OWNER, RESTRICTED_MESSAGE);
+	for (const [raw, secretish] of [["", []], ["   ", []], ["1,abc", ["abc"]], ["01", []], ["1,,7", []], ["owner_admin", ["owner_admin"]]]) {
+		await expectRestricted(`Super Admin 1, list ${JSON.stringify(raw)}`, raw, OWNER, RESTRICTED_MESSAGE, "list invalid", secretish);
 	}
 
 	// ── §5 GET stays 405 ──────────────────────────────────────────────────────
@@ -340,16 +363,19 @@ async function main() {
 		const invalidMeans = (call.match(/invalidMeans:\s*"([^"]*)"/) || [])[1] || "";
 		ok("found the RATECON_PDF_VIEWER_IDS start-up messages", !!unsetMeans && !!invalidMeans);
 		ok("the unset warning says what it means for the database download", /database/i.test(unsetMeans));
+		if (UNSET_REFUSES_EVERYONE) {
+			ok("...and says nobody downloads it (D3 = B)", /(nobody|no one)[^.;]*database/i.test(unsetMeans));
+		}
 		ok("the invalid error says what it means for the database download", /database/i.test(invalidMeans));
 	}
 
-	try { fs.rmSync(TMP_ROOT, { recursive: true, force: true }); } catch { /* best effort */ }
+	cleanUp();
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 }
 
 main().catch((e) => {
-	try { fs.rmSync(TMP_ROOT, { recursive: true, force: true }); } catch { /* best effort */ }
+	cleanUp();
 	console.error(`FAIL  ${e && e.stack || e}`);
 	process.exit(1);
 });
