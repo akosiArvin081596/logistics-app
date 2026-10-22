@@ -168,9 +168,11 @@ function world(viewers, opts = {}) {
 	fs.mkdirSync(exportDir, { recursive: true });
 	const db = new Database(path.join(dir, "made-up.db"));
 	db.exec(ddl("audit_trail"));
-	db.exec(ddl("users"));
-	const addUser = db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, 'made-up-hash', ?)");
-	for (const u of opts.users || USERS) addUser.run(...u);
+	if (!opts.noUsersTable) {
+		db.exec(ddl("users"));
+		const addUser = db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, 'made-up-hash', ?)");
+		for (const u of opts.users || USERS) addUser.run(...u);
+	}
 	db.exec("CREATE TABLE made_up_rows (id INTEGER PRIMARY KEY, note TEXT)");
 	const add = db.prepare("INSERT INTO made_up_rows (note) VALUES (?)");
 	for (const n of ["alpha", "bravo", "charlie"]) add.run(`made-up ${n}`);
@@ -498,6 +500,7 @@ async function main() {
 	await expectRestricted("listed 7, session says Super Admin, account now a Dispatcher", "1,7", SECOND, SIGN_IN_AGAIN_MESSAGE, "role changed", [], "download", { users: demoted });
 	await expectRestricted("listed 7, session says Super Admin, account removed", "1,7", SECOND, SIGN_IN_AGAIN_MESSAGE, "account not found", [], "download", { users: removed });
 	await expectRestricted("listed 7, account now a Dispatcher, tables", "1,7", SECOND, SIGN_IN_AGAIN_MESSAGE, "role changed", [], "tables", { users: demoted });
+	await expectRestricted("listed 1, the account can't be re-read: fail closed", "1,7", OWNER, RESTRICTED_MESSAGE, "account unreadable", [], "download", { noUsersTable: true });
 
 	// ── §10 who sees the notice (L5) ──────────────────────────────────────────
 	console.log("\n§10 the notice is Super Admin-only");
