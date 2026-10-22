@@ -16,6 +16,9 @@
  *   §5 the count is the parsing every check uses (lib/driver-instructions.js
  *      parseDenyList()): a value written twice counts once
  *   §6 server.js calls create() at the top level, so the line logs on every start
+ *   §7 two lists with the same counts but different values (other digits, other lengths)
+ *      log the same lines word for word, at every level: nothing logged depends on a
+ *      value, so no digit count, length, hash or prefix of one can appear, on any line
  *
  * In every case: no digit run of any made-up value, and no value's digit count, appears in
  * any captured log line at any level. Every value here is made up.
@@ -157,6 +160,12 @@ section("§6 server.js calls create() at the top level, on every start");
 {
 	const needle = '\nconst driverInstructions = require("./lib/driver-instructions-runtime").create({';
 	eq(SERVER_SRC.split(needle).length - 1, 1, "§6 one top-level create() call, outside any mode check");
+}
+
+section("§7 the start lines depend on the counts only, never on the values");
+for (const [a, b] of [[`${USABLE_A}, ${USABLE_B}`, "55555, 77777777777777777777"], [`${USABLE_A}, ${SHORT}`, "1234567890123, 9"]]) {
+	const lines = (v) => start({ ...FLAGS_ON, [SETTING]: v }).map((l) => `${l.level} ${l.text}`);
+	eq(lines(b), lines(a), "§7 two lists with the same counts log the same lines, word for word");
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`);
