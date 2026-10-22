@@ -914,7 +914,7 @@ test("§7 dashboard `_instructionsReview`: codes only, for loads that need a per
 	insertRow(w, cleanExtraction(), { status: "needs_review", published: false });
 	w.db.prepare("UPDATE load_driver_instructions SET review_reasons = ? WHERE load_key = ?").run(JSON.stringify(["reference_unknown_type", "not_cross_checked", "made_up_code"]), LOAD_ID);
 	const rows = [{ "Load ID": LOAD_ID }, { "Load ID": OTHER_ID }, { "Load ID": "771200555" }];
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', 'x.pdf')").run("771200555");
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', 'x.pdf', '/uploads/rate-cons/x.pdf')").run("771200555");
 	w.service.annotateDashboardRows({ headers: HEADERS, rows });
 	eq("needs review: its codes (unknown codes dropped)", rows[0]._instructionsReview, ["reference_unknown_type", "not_cross_checked"]);
 	eq("nothing on file: no_rate_con", rows[1]._instructionsReview, ["no_rate_con"]);
@@ -1226,12 +1226,22 @@ test("§10 L4 the dashboard badge: only a matched file counts as on file; an unm
 	ledgerRow(w, u, "match_unconfirmed", { loadKey: LOAD_ID });
 	const fl = driveFile("f.pdf", READABLE);
 	ledgerRow(w, fl, "failed", { loadKey: OTHER_ID });
-	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name) VALUES (?, '', 'RATECON', 'x.pdf')").run("771200555");
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_url) VALUES (?, '', 'RATECON', 'x.pdf', '/uploads/rate-cons/x.pdf')").run("771200555");
 	const rows = [{ "Load ID": LOAD_ID }, { "Load ID": OTHER_ID }, { "Load ID": "771200555" }];
 	w.service.annotateDashboardRows({ headers: HEADERS, rows });
 	eq("unmatched file", rows[0]._instructionsReview, ["rate_con_unmatched"]);
 	eq("a failed file is not on file", rows[1]._instructionsReview, ["no_rate_con"]);
 	eq("a dropped rate con never read", rows[2]._instructionsReview, ["rate_con_not_read"]);
+});
+
+test("§10 L4 the dashboard badge: a load whose only rate con is a RATECON document linked to a Drive file by content is not \"rate con not read\" (a re-read can't use it)", async ({ eq }) => {
+	useClock();
+	const w = await world();
+	w.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url) VALUES (?, '', 'RATECON', 'x.pdf', ?, ?)")
+		.run("771200555", "drive-file-under-test", "https://drive.google.com/file/d/drive-file-under-test/view");
+	const rows = [{ "Load ID": "771200555" }];
+	w.service.annotateDashboardRows({ headers: HEADERS, rows });
+	eq("Drive-linked only: no_rate_con, never rate_con_not_read", rows[0]._instructionsReview, ["no_rate_con"]);
 });
 
 test("§10 L5 the alert's day and the daily budget are Eastern days (APP_TIMEZONE), not UTC", async ({ eq }) => {
@@ -1485,7 +1495,7 @@ test("§12 annotateDriverLoads: per load exactly { state, highlights } (codes on
 	eq("flag 2 off: no key", "_instructions" in off[0], false);
 });
 
-test("§12 annotateDriverLoads: a published row already flagged refiltered gets no highlights, so the list never names a requirement the card no longer serves", async ({ eq, ok }) => {
+test("§12 annotateDriverLoads: for a row already flagged refiltered, the list sends no highlights, so it names no requirement the card no longer serves", async ({ eq, ok }) => {
 	useClock();
 	const w = await world({ env: ON2 });
 	// Published before the deny list held the value its high-value item carries.
