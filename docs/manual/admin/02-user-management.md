@@ -63,13 +63,11 @@ Common edits:
 
 Click **Delete** on the user's row (or in their detail view). Confirm.
 
-The user can no longer sign in. Their historical activity remains:
+The delete is refused, with the reason on screen and nothing changed, while the account still has records that must stay attributed to it: receipts (expenses) in any month, load documents such as PODs, invoices that are paid or in a closed month, or settled investor payouts. Such an account stays in place. A document filed in error can be removed from its load's Documents panel first.
 
-- Their authored messages, status updates, expense submissions, etc. are preserved.
-- Their name might still appear on old loads.
-- Their submitted applications (if a Driver who was hired) stay.
+When the delete goes through, the user can no longer sign in, and their messages, notifications and location history are removed. Kept: their invoices, their driver directory row, their submitted applications and their name on old loads.
 
-Deletion is reversible by recreating the user with the same username, but it's not seamless — the new user starts with no session history. Be deliberate.
+Recreating a user with the same username does not bring back removed messages. Be deliberate.
 
 ## Roles and permissions in detail
 
