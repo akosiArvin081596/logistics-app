@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
+import { voiceNoteLabel } from '../lib/voiceNoteText'
+import { uploadVoiceNote } from '../lib/voiceNoteUpload'
 
 const api = useApi()
 
@@ -76,6 +78,36 @@ export const useMessagesStore = defineStore('messages', {
       this.loadConversations()
     },
 
+    // A voice note from Dispatch (MESSAGE_VOICE_NOTES_ENABLED). Unlike a text,
+    // it shows once the server has it: its id is what plays it. Throws on
+    // failure; the composer keeps the clip and the same key for the retry.
+    async sendVoiceNote(driver, loadId, clip) {
+      const sent = await uploadVoiceNote(api.request, {
+        blob: clip.blob,
+        to: driver,
+        loadId: loadId || '',
+        from: 'Dispatch',
+        key: clip.key,
+        durationMs: clip.durationMs,
+      })
+      const open = this.selectedDriver && this.selectedDriver.toLowerCase() === String(driver).toLowerCase()
+      if (open && !this.currentMessages.some((m) => m.id === sent.id)) {
+        this.currentMessages.push({
+          id: sent.id,
+          timestamp: new Date().toISOString(),
+          from: 'Dispatch',
+          to: driver,
+          message: voiceNoteLabel(sent.durationMs),
+          loadId: loadId || '',
+          read: 1,
+          attachment_url: '',
+          attachment_type: 'voice',
+          voice_duration_ms: sent.durationMs,
+        })
+      }
+      this.loadConversations()
+    },
+
     addIncomingMessage(msg) {
       this.loadConversations()
       // If viewing this driver's chat for this load, add it
@@ -95,6 +127,8 @@ export const useMessagesStore = defineStore('messages', {
           // A photo that arrives live shows (and opens full size) without a reload.
           attachment_url: msg.attachment_url || '',
           attachment_type: msg.attachment_type || '',
+          // A voice note plays live too, at the length the server measured.
+          voice_duration_ms: Number(msg.voice_duration_ms) || 0,
         })
         if (msg.id) {
           api.put('/api/messages/read', { messageIds: [msg.id] })

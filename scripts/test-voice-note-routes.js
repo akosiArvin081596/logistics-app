@@ -39,6 +39,11 @@
  *       and unnamed files older than an hour
  *   §15 GET /api/driver/position's stoppedSinceMs and the moving gate's table
  *   §16 the label: "Voice note (0:42)"
+ *   §17 deleting a user unlinks his voice files
+ *   §18 the conversation list (GET /api/messages): each conversation's newest
+ *       message as lastKind ("text" | "photo" | "file" | "voice"), lastText
+ *       (60 characters) and lastVoiceMs (0 once the audio is gone), nothing
+ *       else of it; a Dispatcher gets the same, with a withheld load ID as shown
  *
  * Made-up names and audio only. Run: node scripts/test-voice-note-routes.js
  * (an optional first argument names another server.js to lift, to show the
@@ -135,6 +140,7 @@ const HEADS = {
 	voiceDelete: 'app.delete("/api/messages/:id/voice", requireRole("Super Admin"), voiceNoteUploadLimiter, (req, res) => {',
 	textPost: 'app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {',
 	staffThread: 'app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
+	conversationList: 'app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {',
 	investorThread: 'app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, res) => {',
 	session: 'app.get("/api/auth/session", (req, res) => {',
 };
@@ -368,10 +374,20 @@ function telemetry(db, { agoMs, speed }) {
 	{
 		const toB = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders(DRIVER_B, newKey()) });
 		ok("§6 a driver sending to another driver: 403 VOICE_NOTE_RECIPIENT", toB.status === 403 && toB.json && toB.json.code === "VOICE_NOTE_RECIPIENT", [toB.status, toB.json]);
+		// Audited as a text refusal is: the code and the sender's role, never the
+		// name asked for.
+		const refusals = db.prepare("SELECT * FROM audit_trail WHERE action = 'message_blocked'").all();
+		ok("§6 ...the refusal is audited (message_blocked): its code and the sender's role, not the name asked for",
+			refusals.some((r) => /\[VOICE_NOTE_RECIPIENT\]/.test(r.details) && /\bDriver\b/.test(r.details))
+			&& !refusals.some((r) => JSON.stringify(r).toLowerCase().includes(DRIVER_B.toLowerCase())), refusals);
 		const drvAdmin = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders("admin", newKey()) });
 		ok("§6 a driver sending to \"admin\" (the investor portal's desk): 403 VOICE_NOTE_RECIPIENT", drvAdmin.status === 403 && drvAdmin.json && drvAdmin.json.code === "VOICE_NOTE_RECIPIENT", [drvAdmin.status, drvAdmin.json]);
 		const invDispatch = await request(P, "POST", "/api/messages/voice", U.inv, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
 		ok("§6 an investor sending to \"Dispatch\" (the driver app's desk): 403 VOICE_NOTE_RECIPIENT", invDispatch.status === 403 && invDispatch.json && invDispatch.json.code === "VOICE_NOTE_RECIPIENT", [invDispatch.status, invDispatch.json]);
+		// Each role's refusal names its own desk, as its own app does.
+		ok("§6 ...a driver's refusal names Dispatch, an investor's the admin", /Dispatch/.test(String(drvAdmin.json && drvAdmin.json.error))
+			&& /\bthe admin\b/.test(String(invDispatch.json && invDispatch.json.error)) && !/Dispatch/.test(String(invDispatch.json && invDispatch.json.error)),
+			[drvAdmin.json && drvAdmin.json.error, invDispatch.json && invDispatch.json.error]);
 		const unknown = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Nobody Here", newKey()) });
 		ok("§6 staff to a name no account holds: 422 VOICE_NOTE_RECIPIENT", unknown.status === 422 && unknown.json && unknown.json.code === "VOICE_NOTE_RECIPIENT", [unknown.status, unknown.json]);
 		const desk = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
@@ -632,6 +648,56 @@ function telemetry(db, { agoMs, speed }) {
 			ok("§17 his note under an old name keeps its row, without its audio", !!kept && kept.voice_file === "" && kept.voice_bytes === 0, kept);
 		}
 		fs.rmSync(userDir, { recursive: true, force: true });
+	}
+
+	// §18 the conversation list's last-message line
+	{
+		const ldb = oldDb(); // Tamsin Vale's General thread: five text messages already
+		migrate(ldb);
+		const listDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-note-list-"));
+		let t = 0;
+		const add = (row) => ldb.prepare(
+			`INSERT INTO messages (timestamp, "from", "to", message, load_id, read, attachment_url, attachment_type, voice_file, voice_duration_ms, party_user_id)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+		).run(`2026-10-21T1${Math.floor(t / 60)}:${String(t++ % 60).padStart(2, "0")}:00.000Z`, row.from, row.to, row.message || "", row.load || "",
+			row.url || "", row.type || "", row.file || "", row.ms || 0, row.party || null).lastInsertRowid;
+		// General: a voice note from the driver, newest, its file stored.
+		add({ from: DRIVER, to: "Dispatch", message: "Voice note (0:42)", type: "voice", file: "vn_900_00000000000000e5.m4a", ms: 42500, party: U.drv.id });
+		// A load thread: a text, then a photo with no caption (newest).
+		add({ from: DRIVER, to: "Dispatch", message: "At the shipper", load: "QA-LIST-1" });
+		add({ from: "Dispatch", to: DRIVER, url: "/uploads/chat/chat_1700000000001_aaaaa.jpg", type: "image", load: "QA-LIST-1" });
+		// Another driver: a PDF from Dispatch.
+		add({ from: "Dispatch", to: DRIVER_B, message: "Rate con attached", url: "/uploads/chat/chat_1700000000002_bbbbb.pdf", type: "pdf" });
+		// Another driver, a withheld load: a note whose audio a Super Admin removed.
+		add({ from: "Dispatch", to: DRIVER_B, message: "Voice note removed by an administrator", type: "voice", file: "", ms: 3160, load: WITHHELD_ID, party: U.drvB.id });
+		// An investor: one long text.
+		add({ from: "inv_t", to: "admin", message: `${"Truck 901 is back from the shop and ready ".repeat(2)}for loads`, });
+		const L = await buildApp({ db: ldb, dataDir: listDir });
+		const sa = await request(L.port, "GET", "/api/messages", U.sa);
+		const disp = await request(L.port, "GET", "/api/messages", U.disp);
+		const byKey = (r) => new Map(((r.json && r.json.conversations) || []).map((c) => [`${c.driver}|${c.loadId}`, c]));
+		const s = byKey(sa);
+		const d = byKey(disp);
+		const general = s.get(`${DRIVER}|`);
+		const photo = s.get(`${DRIVER}|QA-LIST-1`);
+		const pdf = s.get(`${DRIVER_B}|`);
+		const removed = s.get(`${DRIVER_B}|${WITHHELD_ID}`);
+		const investor = s.get("inv_t|");
+		ok("§18 the list answers 200 with five conversations", sa.status === 200 && s.size === 5, sa.json);
+		ok("§18 a voice note last: lastKind \"voice\", its label and the server's length", !!general && general.lastKind === "voice" && general.lastText === "Voice note (0:42)" && general.lastVoiceMs === 42500, general);
+		ok("§18 a photo with no caption last: lastKind \"photo\" (the earlier text is not the last message)", !!photo && photo.lastKind === "photo" && photo.lastText === "" && photo.lastVoiceMs === 0, photo);
+		ok("§18 a PDF last: lastKind \"file\", with its text", !!pdf && pdf.lastKind === "file" && pdf.lastText === "Rate con attached" && pdf.lastVoiceMs === 0, pdf);
+		ok("§18 a note whose audio is gone: lastKind \"voice\", lastVoiceMs 0, the stored text", !!removed && removed.lastKind === "voice" && removed.lastVoiceMs === 0 && removed.lastText === "Voice note removed by an administrator", removed);
+		ok("§18 a text last: lastKind \"text\", cut at 60 characters", !!investor && investor.lastKind === "text" && investor.lastText === `${"Truck 901 is back from the shop and ready ".repeat(2)}for loads`.slice(0, 60) && investor.lastVoiceMs === 0, investor);
+		const KEYS = "driver,loadId,lastTimestamp,unread,lastKind,lastText,lastVoiceMs";
+		ok("§18 each conversation carries exactly its old fields plus the three (no file name, URL, id or account)", [...s.values()].every((c) => Object.keys(c).join(",") === KEYS), [...s.values()].map((c) => Object.keys(c).join(",")));
+		const order = ((sa.json && sa.json.conversations) || []).map((c) => c.lastTimestamp);
+		ok("§18 still newest first", order.length === 5 && order.every((v, i) => i === 0 || order[i - 1] >= v), order);
+		const dRemoved = d.get(`${DRIVER_B}|[contact withheld]`);
+		ok("§18 a Dispatcher: the withheld load ID as shown, the same last-message fields", disp.status === 200 && !d.has(`${DRIVER_B}|${WITHHELD_ID}`) && !!dRemoved
+			&& dRemoved.lastKind === "voice" && dRemoved.lastVoiceMs === 0 && dRemoved.lastText === removed?.lastText, dRemoved);
+		ok("§18 a Dispatcher's other conversations read as a Super Admin's", ["|", "|QA-LIST-1"].every((k) => JSON.stringify(d.get(`${DRIVER}${k}`)) === JSON.stringify(s.get(`${DRIVER}${k}`))));
+		fs.rmSync(listDir, { recursive: true, force: true });
 	}
 
 	for (const s of servers) s.close();

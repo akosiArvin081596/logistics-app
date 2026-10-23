@@ -4,20 +4,22 @@
 //
 //   fnm exec --using=22.23.2 node scripts/e2e/payout-parity.mjs
 //
-// What it does (LOCAL only; nothing leaves the machine but reads of the local sheet,
-// and the statement renders' request for their template's Google Font):
+// What it does (LOCAL only; nothing leaves the machine but the statement renders'
+// request for their template's Google Font; no key and no settings file is read):
 //   1. Exports two builds into the work dir: REF_A and REF_B with `git archive`
 //      (committed content only), or DIR_A / DIR_B, a checkout's working tree as it
 //      stands. PATCH_A / PATCH_B apply a unified diff to that export only (a
 //      throwaway mutation: the export is deleted at the end). Each export links the
-//      main checkout's node_modules, client/node_modules, .env and Google key.
+//      main checkout's node_modules and client/node_modules, and nothing else.
 //   2. Takes ONE read-only `.backup()` of SOURCE_DB (default: the main checkout's
 //      app.db), sets a random Super Admin password on that copy (the repo's own
 //      reset script; the password lives in this process's memory only), then backs
 //      the copy up once more: two private, identical databases, one per server.
 //   3. Boots each build on its own copy with scripts/e2e/boot-server.sh (every
-//      integration, mail, alert and autogen job off, 127.0.0.1, random ports), after
-//      refusing a SPREADSHEET_ID that is unset, empty or production's. FLAG=on boots
+//      integration, mail, alert and autogen job off, 127.0.0.1, random ports). Both
+//      read their Sheets from their own copy of the made-up fixture through the
+//      Google stand-in (fake-google.cjs), so the loads are the fixture's, the same on
+//      both sides; every other figure comes from the database copies. FLAG=on boots
 //      B with INVESTOR_LEASE_PAYOUTS_ENABLED=true; A always runs with it off.
 //   4. Signs the Super Admin in on each, then, for EVERY investor (GET /api/payouts
 //      and the users with role Investor), sends the same requests to both servers
@@ -65,9 +67,21 @@ import paths from './paths.cjs'
 const APP_ZONE = createRequire(import.meta.url)('../../lib/app-time.js').appTimeZone()
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PROD_SHEET = '1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo'
 const RESERVED_PORTS = new Set([3000, 3003, 5173])
-const LINKS = ['node_modules', 'client/node_modules', '.env', 'service-account-key.json']
+const LINKS = ['node_modules', 'client/node_modules']
+// The loads both servers read: the made-up fixture's Job Tracking rows. They belong to no
+// real investor, so a run that finds no difference has not exercised load-driven payout
+// figures, and the headline says so.
+const SAME_HEADLINE = 'IDENTICAL (fixture loads only: load-driven figures not exercised)'
+const FIXTURE_LOADS = (() => {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'e2e-sheets.json'), 'utf8'))
+    const jt = Object.values(doc.spreadsheets)[0].sheets.find((s) => s.properties.title === 'Job Tracking')
+    const ownerCol = jt.values[0].indexOf('Owner ID')
+    const rows = jt.values.slice(1)
+    return { count: rows.length, owners: [...new Set(rows.map((r) => String(r[ownerCol] ?? '').trim()))] }
+  } catch { return { count: 0, owners: [] } }
+})()
 // Per server process, 15-minute windows: statementLimiter is 20 per IP, the report
 // and tax-CSV limiters 20 per signed-in user. A server is restarted (same copy, same
 // session) before a window would run out, so a run never meets a 429.
@@ -91,23 +105,6 @@ try {
   SOURCE_DB = fs.realpathSync(process.env.SOURCE_DB || path.join(MAIN, 'app.db'))
   Database = paths.appRequire('better-sqlite3')
 } catch (e) { die(e.message) }
-
-// The sheet both servers will read: the environment's SPREADSHEET_ID when set (it
-// beats .env, and boot-server.sh passes it on), else the linked .env's. Never printed.
-function refuseProductionSheet() {
-  let id = process.env.SPREADSHEET_ID
-  let from = 'the environment'
-  if (id === undefined) {
-    const envFile = path.join(MAIN, '.env')
-    if (!fs.existsSync(envFile)) die(`no .env in the main checkout (${MAIN}) to read SPREADSHEET_ID from`)
-    id = paths.appRequire('dotenv').parse(fs.readFileSync(envFile)).SPREADSHEET_ID
-    from = envFile
-  }
-  id = String(id ?? '').trim()
-  if (!id) die(`refusing: SPREADSHEET_ID is unset or empty in ${from}; server.js would fall back to PRODUCTION's sheet`)
-  if (id === PROD_SHEET) die(`refusing: SPREADSHEET_ID in ${from} is PRODUCTION's sheet`)
-}
-refuseProductionSheet()
 
 const git = (args, opts = {}) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts }).trim()
 function resolveSource(side) {
@@ -156,7 +153,7 @@ function cleanupSync() {
   for (const s of bothSides) {
     // The links first, so nothing below can reach the main checkout's installs.
     for (const rel of LINKS) { try { fs.unlinkSync(path.join(s.dir, rel)) } catch { /* not linked */ } }
-    for (const suffix of ['', '-wal', '-shm']) { try { fs.unlinkSync(s.db + suffix) } catch { /* absent */ } }
+    for (const suffix of ['', '-wal', '-shm', '.sheets.json']) { try { fs.unlinkSync(s.db + suffix) } catch { /* absent */ } }
     if (s.port) { try { fs.unlinkSync(path.join(WORK, `server-${s.port}.log`)) } catch { /* absent */ } }
   }
   if (fs.existsSync(RUN_DIR)) {
@@ -487,7 +484,7 @@ async function main() {
   log(`payout parity, FLAG=${FLAG} (B ${FLAG === 'on' ? 'boots with INVESTOR_LEASE_PAYOUTS_ENABLED=true' : 'and A both boot with the lease flag off'})`)
   log(`  A: ${SRC.A.text}${SRC.A.patch ? `, patched with ${SRC.A.patch}` : ''}`)
   log(`  B: ${SRC.B.text}${SRC.B.patch ? `, patched with ${SRC.B.patch}` : ''}`)
-  log(`  sheet: SPREADSHEET_ID is set and is not production's; work dir: ${WORK}`)
+  log(`  sheet: each server reads its own copy of the made-up fixture (fake-google.cjs); work dir: ${WORK}`)
   fs.mkdirSync(RUN_DIR, { mode: 0o700 })
   for (const s of bothSides) exportBuild(s)
   log(`  exported both builds into ${RUN_DIR}`)
@@ -564,8 +561,9 @@ async function main() {
   const showLogged = diffs.some((d) => d.paths.some((p) => p.startsWith('(status) a server error'))) || logged[0].count !== logged[1].count
   if (!showLogged) for (const g of logged) g.last = []
   const lines = [
-    `# Payout parity — FLAG=${FLAG} — ${diffs.length ? 'DIFFERENCES FOUND' : 'IDENTICAL'}`,
+    `# Payout parity — FLAG=${FLAG} — ${diffs.length ? 'DIFFERENCES FOUND' : SAME_HEADLINE}`,
     '',
+    `- Sheet: the made-up fixture (scripts/e2e/fixtures/e2e-sheets.json) through fake-google.cjs, the same copy on both sides: ${FIXTURE_LOADS.count} Job Tracking loads, Owner ID(s) ${FIXTURE_LOADS.owners.join(', ') || 'none'}`,
     `- A: ${SRC.A.text}${SRC.A.patch ? ` (patched: ${path.basename(SRC.A.patch)})` : ''}`,
     `- B: ${SRC.B.text}${SRC.B.patch ? ` (patched: ${path.basename(SRC.B.patch)})` : ''}; INVESTOR_LEASE_PAYOUTS_ENABLED=${sides.B.flag ? 'true' : 'false'} (A: false)`,
     `- Started ${RUN_START.toISOString()}, ${secs} s`,

@@ -117,8 +117,10 @@ const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDe
 const expenseAi = require("./lib/expense-ai");
 // "Personal" receipts: the rules, the line text and the two expense sources.
 const personalExpense = require("./lib/personal-expense");
-// Their receipts on the invoice: the re-encode service and the page layout.
+// Their receipts on the invoice: the re-encode service, the PDF receipt pages
+// service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
+const receiptPdfLib = require("./lib/receipt-pdf");
 const invoiceReceipts = require("./lib/invoice-receipts");
 // An invoice's Address line from a drivers_directory row, each part once.
 const { providerAddressLine } = require("./lib/invoice-header");
@@ -285,6 +287,20 @@ function emitDispatchByRole(event, full, redacted) {
 	io.to("super-admin").emit(event, full);
 	io.to("dispatch").except("super-admin").emit(event, redacted);
 }
+// THE STAFF DESKS (decision 30, 2026-10-21: drivers and investors message
+// staff only, never each other). Each role's app names one desk: the driver
+// app "Dispatch", the investor portal "admin" (resolveChatParties()). A desk is
+// never a person: no account may take its name (findDriverNameClashes()'s
+// reserved names, POST /api/users, POST /api/auth/setup), chatRooms() gives it
+// no identity room, and an account delete never removes its messages. Keyed by
+// the name as matched (trimmed and lower-cased, nothing else folded, so a
+// look-alike spelling is no desk), valued by the name as stored.
+const CHAT_DESK_NAMES = Object.freeze({ dispatch: "Dispatch", admin: "admin" });
+// The desk a name is ("dispatch" or "admin"), or "" for any other value.
+function chatDeskKey(name) {
+	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
+	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
+}
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
 // A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
@@ -292,7 +308,7 @@ function emitDispatchByRole(event, full, redacted) {
 // reader selects its thread by LOWER("from") / LOWER("to"). Each name reaches
 // only the driver room and the user room of that name, through the helpers,
 // so no value in a request can select a role room or another kind's room.
-// "Dispatch", the desk's own name, adds no identity room: the dispatch room
+// A desk's name ("Dispatch", "admin") adds no identity room: the dispatch room
 // already has the message. One list, deduplicated, so a socket in two of
 // these rooms receives the message once, and never empty: io.to([]) would
 // send to every socket.
@@ -300,7 +316,7 @@ function chatRooms(from, to) {
 	const rooms = new Set(["dispatch"]);
 	for (const party of [from, to]) {
 		const key = identityRoomKey(party);
-		if (!key || key === "dispatch") continue;
+		if (!key || chatDeskKey(key)) continue;
 		rooms.add(driverRoom(key));
 		rooms.add(userRoom(key));
 	}
@@ -1314,6 +1330,9 @@ const PURGEABLE_REFUSAL_ACTIONS = [
 	"status_override_blocked",
 	"create_sheet_row_blocked",
 	"update_sheet_row_blocked",
+	// POST /api/messages refusing a recipient or sender (decision 30): cheap, on
+	// demand, a Driver can repeat it, and it returns before any write.
+	"message_blocked",
 ];
 const REFUSAL_AUDIT_RETENTION_DAYS = 90;
 
@@ -19491,8 +19510,7 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	// carries now (the snapshot is otherwise frozen): personalRenderData().
 	const personalRows = personalRowsOnInvoice(invoiceRow.id);
 	const { templateName, data } = personalRenderData(renderData, invoiceRow, personalRows);
-	const withReceipts = await personalReceiptRenderData(data, personalRows);
-	const pdfBuffer = await renderPolicy(templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(templateName, data, personalRows, invoiceRow.driver);
 	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
@@ -20318,8 +20336,7 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 	for (const e of added) for (const l of e.loads) if (!loadIds.includes(l)) loadIds.push(l);
 	const personalRows = personalRowsOnInvoice(inv.id);
 	const rendered = personalRenderData(next, { ...inv, total_earnings: total }, personalRows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, personalRows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, personalRows, inv.driver);
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, inv.pdf_file_name);
@@ -21613,11 +21630,10 @@ async function generateInvoiceHandler(req, res) {
 			Math.round((totalEarnings + (preservedAdjustment ? Number(preservedAdjustment.adjustment) || 0 : 0)) * 100));
 		if (personalFit.renderFields) Object.assign(renderData, personalFit.renderFields);
 		// Their receipts join the data for the render only, never the snapshot
-		const renderInput = personalFit.fit.length ? await personalReceiptRenderData(renderData, personalFit.fit) : renderData;
-
+		// (renderInvoiceWithReceipts(); with no Personal line it is the plain render).
 		// The LAST await. Everything below runs synchronously, so what the write
 		// re-checks is what it writes against.
-		const pdfBuffer = await renderPolicy(templateName, renderInput);
+		const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData, personalFit.fit, canonicalDriverName(driverName));
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -27329,12 +27345,28 @@ function personalRenderData(snapshot, invoiceRow, rows) {
 }
 
 // RECEIPTS ON THE INVOICE. Each Personal line says where its receipt is, and
-// each image receipt prints on its own page after the invoice
+// each receipt prints on its own sheet after the invoice
 // (lib/invoice-receipts.js receiptLayout()). The images are re-encoded off the
 // event loop (lib/receipt-images.js) and cached under DATA_DIR/storage, outside
 // uploads/. None of it is stored in render_data: it joins the data for the
 // render only, so a snapshot never holds an image or a note that went stale.
+//
+// PDF receipts (R3 v2): only with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on AND
+// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set; it stays off until
+// the driver-privacy rule for multi-page statements ships), a PDF receipt's
+// pages are prepared in a locked-down child process (lib/receipt-pdf.js) and
+// inserted after its sheet once Chrome has rendered the invoice. Only the
+// invoice's own driver's receipt (both names non-empty, normalizeDriverName())
+// is ever read from the cache. Anything that fails keeps "PDF receipt on
+// file"; a failed insert renders the invoice once more with every PDF receipt
+// on that note, so an invoice never fails because of a receipt. The child's
+// self-test runs at every start whatever the flags; until it passes, every PDF
+// keeps the note.
 const PERSONAL_RECEIPT_WAIT_MS = 15_000;
+const RECEIPT_PDF_PAGES_ENABLED = process.env.RECEIPT_PDF_PAGES_ENABLED === "true";
+function receiptPdfPagesOn() {
+	return PERSONAL_EXPENSE_DEDUCTIONS_ENABLED && RECEIPT_PDF_PAGES_ENABLED;
+}
 function receiptImageService() {
 	if (!receiptImageService.instance) {
 		receiptImageService.instance = receiptImagesLib.createReceiptImageService({
@@ -27345,6 +27377,39 @@ function receiptImageService() {
 	}
 	return receiptImageService.instance;
 }
+// The files the self-test proves the child cannot read (yes/no only, never
+// opened): the settings file this process loaded (the repo .env dotenv reads,
+// or a replica's settings file) and the database.
+function receiptPdfProbePaths() {
+	return {
+		env: REPLICA ? REPLICA.settingsPath : path.resolve(process.cwd(), ".env"),
+		db: process.env.DATABASE_PATH || path.join(__dirname, "app.db"),
+	};
+}
+// Never throws: a service that cannot be set up (a cache folder it refuses) is
+// replaced by one that keeps every PDF receipt on its note, so no invoice
+// render fails because of it.
+function receiptPdfService() {
+	if (!receiptPdfService.instance) {
+		try {
+			receiptPdfService.instance = receiptPdfLib.createReceiptPdfService({
+				receiptsDir: RECEIPTS_DIR,
+				cacheDir: path.join(DATA_DIR, "storage", "receipt-pdfs"),
+				probes: receiptPdfProbePaths(),
+				log: (m) => console.warn(`[receipt-pdfs] ${m}`),
+			});
+		} catch (err) {
+			console.warn(`[receipt-pdfs] PDF receipt pages off: ${err.message}`);
+			receiptPdfService.instance = {
+				prepare: async () => ({ status: "on_file", reason: "disabled" }),
+				merge: async () => ({ status: "failed", reason: "disabled" }),
+				selfTest: async () => ({ passed: false, problems: ["setup"], report: null, line: "" }),
+				state: () => "failed",
+			};
+		}
+	}
+	return receiptPdfService.instance;
+}
 
 // Start (or join) one receipt's re-encode; never waits, never throws.
 function warmReceiptImage(expense) {
@@ -27354,30 +27419,62 @@ function warmReceiptImage(expense) {
 
 // The render data with its receipts: `data` from personalRenderData() (or the
 // generation's), `rows` the lines it prints (a provisional line carries its
-// expense_id). Only the image receipts that can have a page (the first
-// RECEIPT_PAGES_MAX in print order) are prepared, waiting at most
-// PERSONAL_RECEIPT_WAIT_MS; one not ready by then prints "Receipt image not
-// available". A new object.
-async function personalReceiptRenderData(data, rows) {
-	if (!rows || !rows.length) return data;
+// expense_id). Only the receipts that can have a sheet (the first
+// RECEIPT_SHEETS_MAX in print order, images and attachable PDFs counted
+// together) are prepared, waiting at most PERSONAL_RECEIPT_WAIT_MS; an image
+// not ready by then prints "Receipt image not available", a PDF "PDF receipt
+// on file". A PDF receipt is attachable only with opts.pdfPages and when its
+// driver and opts.invoiceDriver are the same non-empty name, checked before
+// anything is read; its pages count toward RECEIPT_PDF_INVOICE_MAX_PAGES and
+// its bytes toward RECEIPT_PDF_INSERT_MAX_BYTES in print order, and one that
+// would cross either keeps the note. { data (a new object), inserts: the PDF
+// pages to put after their sheets (lib/receipt-pdf.js merge()) }.
+async function personalReceiptRenderData(data, rows, opts = {}) {
+	if (!rows || !rows.length) return { data, inserts: [] };
 	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
 	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
 	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
 		.map((l) => expenseOfRow.get(l.rowId)).filter((n) => Number.isInteger(n) && n > 0))];
-	const photoOf = new Map(order.length
-		? db.prepare(`SELECT id, photo_data FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e.photo_data])
+	const expenseOf = new Map(order.length
+		? db.prepare(`SELECT id, photo_data, driver FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e])
 		: []);
+	const invoiceDriver = normalizeDriverName(typeof opts.invoiceDriver === "string" ? opts.invoiceDriver : "");
+	const pdfPages = opts.pdfPages === true;
 	const service = receiptImageService();
-	let images = 0;
+	let sheets = 0;
 	const prepared = new Map(await Promise.all(order.map(async (id) => {
-		const kind = receiptImagesLib.receiptImageKind(photoOf.get(id), RECEIPTS_DIR);
-		if (kind === "pdf") return [id, { status: "pdf" }];
+		const e = expenseOf.get(id) || {};
+		const kind = receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR);
+		if (kind === "pdf") {
+			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
+			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
+			sheets += 1;
+			// Past the sheet cap a PDF keeps its own note: the app does not open a
+			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
+			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
+			const res = await receiptPdfService().prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
+			return [id, res.status === "pages" ? { status: "pdf_pages", pages: res.pages, pdf: res.pdf } : { status: "pdf" }];
+		}
 		if (kind !== "image") return [id, { status: "unavailable", reason: "missing" }];
-		images += 1;
-		if (images > invoiceReceipts.RECEIPT_PAGES_MAX) return [id, { status: "over_cap" }];
-		return [id, await service.prepare({ expenseId: id, photoData: photoOf.get(id) }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
+		sheets += 1;
+		if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "over_cap" }];
+		return [id, await service.prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
 	})));
+	// The invoice-wide caps on copied pages, in print order.
+	let copiedPages = 0;
+	let copiedBytes = 0;
+	for (const id of order) {
+		const p = prepared.get(id);
+		if (!p || p.status !== "pdf_pages") continue;
+		if (copiedPages + p.pages > receiptPdfLib.RECEIPT_PDF_INVOICE_MAX_PAGES || copiedBytes + p.pdf.length > receiptPdfLib.RECEIPT_PDF_INSERT_MAX_BYTES) {
+			prepared.set(id, { status: "pdf" });
+			continue;
+		}
+		copiedPages += p.pages;
+		copiedBytes += p.pdf.length;
+	}
 	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
+	const inserts = layout.inserts.map((x) => ({ expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
 	const out = { ...data, receiptPages: layout.pages };
 	if (data.personalCorrection) {
 		// A correction's line items and deductions are its lines, in the same order.
@@ -27388,31 +27485,51 @@ async function personalReceiptRenderData(data, rows) {
 	} else {
 		out.personalLines = layout.entries;
 	}
-	return out;
+	return { data: out, inserts };
+}
+
+// Every weekly or correction invoice render that carries Personal lines: the
+// receipts join the data (personalReceiptRenderData()), Chrome renders it, and
+// each attachable PDF receipt's pages go in after its sheet (lib/receipt-pdf.js
+// merge(), in the child). A failed merge renders once more with every PDF
+// receipt on its note. invoiceDriver: the invoice's own driver, for the PDF
+// driver check. Resolves the PDF bytes to write.
+async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver) {
+	if (!rows || !rows.length) return renderPolicy(templateName, data);
+	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: receiptPdfPagesOn() });
+	const pdf = await renderPolicy(templateName, first.data);
+	if (!first.inserts.length) return pdf;
+	const merged = await receiptPdfService().merge(pdf, first.inserts);
+	if (merged.status === "merged") return merged.pdf;
+	console.warn(`[receipt-pdfs] receipt pages for expense ${first.inserts.map((x) => x.expenseId).join(", ")} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
+	return renderPolicy(templateName, again.data);
 }
 
 // Before the Friday batch renders: every image receipt behind a Personal line of
 // that week (waiting, or on one of its invoices) is re-encoded and cached first,
-// one at a time, so the batch's renders read the cache instead of racing the
-// re-encode; an image not ready within a render's wait would print "Receipt image
-// not available" on an invoice nothing redraws. Bounded by
-// PERSONAL_RECEIPT_WARM_MS overall (each re-encode by its own deadline); never
-// throws. { receipts, prepared }.
+// and, with PDF receipt pages on, every PDF receipt's pages are prepared, one at
+// a time, so the batch's renders read the caches instead of racing the
+// children; a receipt not ready within a render's wait would print its note on
+// an invoice nothing redraws. Bounded by PERSONAL_RECEIPT_WARM_MS overall (each
+// job by its own deadline); never throws. { receipts, prepared }.
 const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
 async function warmPersonalReceiptsForWeek(weekStart) {
 	const out = { receipts: 0, prepared: 0 };
 	try {
 		if (!personalLedgerPresent()) return out;
+		const pdfPages = receiptPdfPagesOn();
 		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
 			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
-			.filter((e) => receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) === "image");
+			.map((e) => ({ ...e, kind: receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) }))
+			.filter((e) => e.kind === "image" || (pdfPages && e.kind === "pdf"));
 		out.receipts = list.length;
-		const service = receiptImageService();
 		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
 		for (const e of list) {
 			if (Date.now() > deadline) break;
+			const service = e.kind === "pdf" ? receiptPdfService() : receiptImageService();
 			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
-			if (res.status === "image") out.prepared += 1;
+			if (res.status === "image" || res.status === "pages") out.prepared += 1;
 		}
 	} catch (err) {
 		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
@@ -27650,8 +27767,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	const finalPath = path.join(dir, inv.pdf_file_name);
 	if (touchesInvoice && !softDelete) {
 		rendered = personalRenderData(snap, inv, next);
-		const withReceipts = await personalReceiptRenderData(rendered.data, next);
-		const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+		const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, next, inv.driver);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
 		fs.writeFileSync(tmpPath, pdfBuffer);
@@ -27758,8 +27874,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		adjustmentNote: "",
 	};
 	const rendered = personalRenderData(snapshot, { adjustment: 0, adjustment_note: "" }, rows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, rows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, rows, display);
 	let insertedId = null;
 	const result = commitInvoiceWithPdf({
 		invoiceNumber, pdfFileName, pdfBuffer,
@@ -28827,6 +28942,12 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 		if (!username || !password) {
 			return res.status(400).json({ error: "Username and password required" });
 		}
+		// A staff desk's name (or "investor") is no account's, the first Super
+		// Admin's included: POST /api/users refuses it the same way.
+		const setupClash = findDriverNameClash(String(username));
+		if (setupClash && setupClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${String(username).trim()}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 
 		const hash = await bcrypt.hash(password, 10);
 
@@ -29245,11 +29366,28 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("POST /api/users: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
+		// A USERNAME IS AN IDENTITY NAME TOO (THE ACCOUNT NAMESPACE IS WIDER THAN
+		// DRIVER NAMES, beside findDriverNameClashes()): an investor's thread is
+		// selected by his username and chat parties are names, so a new username
+		// is one no other identity answers to. Asked of the same helper the
+		// investor-application path asks, after the last await: a reserved name
+		// (a staff desk, "investor") is 409 USERNAME_RESERVED; an existing
+		// username keeps its 400; any other identity's name (an account's driver
+		// name, a username under another spacing, a drivers-directory row) is 409
+		// USERNAME_TAKEN. The helper lists reserved names first, so its first
+		// match says which.
+		const usernameClash = findDriverNameClash(newUsername);
+		if (usernameClash && usernameClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${newUsername}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 		const existing = db
 			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
 			.get(newUsername.toLowerCase());
 		if (existing) {
 			return res.status(400).json({ error: "Username already exists" });
+		}
+		if (usernameClash) {
+			return res.status(409).json({ error: `The username "${newUsername}" is already used by another account or driver. Choose another.`, code: "USERNAME_TAKEN" });
 		}
 
 		// ⚠️ THE DRIVER-NAME COLLISION CHECK PUT HAS AND POST DID NOT.
@@ -31613,8 +31751,12 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// the delete, and a soft-deleted one stays where it is, under this
 				// name, counted as retained below.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
-				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
-				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
+				// A staff desk's messages and bell are every party's conversation with
+				// it, never one account's: an account named like a desk (none can be
+				// made since the reserved names cover the desks) removes neither.
+				const deskName = !!chatDeskKey(name);
+				removed.messages = deskName ? 0 : db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
+				removed.notifications = deskName ? 0 : db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
 				// The driver's truck is found the way the driver app finds it
@@ -32694,9 +32836,9 @@ function truckFeeLockedRows(unitNumber, locked) {
 	// `unit` here is trimmed — so a fee row stored as ' logisx-#33 ' against an
 	// untrimmed unit_number IS summed by the P&L and would NOT have matched a bare
 	// `LOWER(truck) = ?`, i.e. the guard would miss a row the money counts. TRIM on
-	// this side is strictly WIDER than both the join and the cascade's own
-	// `LOWER(truck) = ?` delete, which is the correct direction for a guard: it
-	// can only over-report, never under-report.
+	// this side is strictly WIDER than the join, which is the correct direction
+	// for a guard: it can only over-report, never under-report. The cascade's own
+	// delete matches the same way since 2026-10-22 (LOWER(TRIM(truck)) = ?).
 	return {
 		maintenance: blocked(db.prepare(
 			"SELECT id, amount, strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ? AND type = 'service'"
@@ -33626,10 +33768,48 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 // is safe" would mean dropping the maintenance rows from open months while
 // keeping the truck, or vice versa — a half-deleted truck whose fee rows now
 // point at nothing. Not decomposable, so not partially applied.
+//
+// Besides `blockers` (closed months, answered PERIOD_FINALIZED by the route) it
+// returns two counts the route answers with refusals of their own (2026-10-22):
+//   • openFees — every maintenance_fund / compliance_fees row the delete would
+//     remove that is not already a closed-month blocker in (3)+(4) below: an
+//     open-month service row or Paid fee, and a contribution or Pending fee in
+//     any month. The route refuses OPEN_MONTH_TRUCK_FEES while any exists.
+//   • legalDocuments — the truck's legal_documents rows. The route refuses
+//     TRUCK_HAS_DOCUMENTS while any exists.
+// They are counted BEFORE the "no month locked" early return, so they hold
+// when no month is closed, and they are kept OUT of `blockers`: the route
+// answers blockers through periodBlockedResponse(), which always says
+// PERIOD_FINALIZED and audits it so, which would mislabel an open-month refusal.
 function truckDeleteLockBlockers(truck) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 	const locked = lockedPeriodsDesc();
-	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	// Fee rows are matched case and edge spaces aside, like truckFeeLockedRows()
+	// and the cascade, and not at all for a blank unit number (the cascade
+	// removes none then). `.all()` and a length, not COUNT(*): every row is
+	// needed to subtract the closed-month blockers by id.
+	const unit = String(truck.unit_number || "").trim().toLowerCase();
+	const feeRows = unit
+		? {
+			maintenance: db.prepare("SELECT id FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").all(unit),
+			compliance: db.prepare("SELECT id FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").all(unit),
+		}
+		: { maintenance: [], compliance: [] };
+	const fees = locked.length ? truckFeeLockedRows(truck.unit_number, locked) : { maintenance: [], compliance: [] };
+	const notHeld = (rows, held) => {
+		const ids = new Set(held.map((r) => r.id));
+		return rows.filter((r) => !ids.has(r.id)).length;
+	};
+	const openFees = {
+		maintenance: notHeld(feeRows.maintenance, fees.maintenance),
+		compliance: notHeld(feeRows.compliance, fees.compliance),
+	};
+	// By truck id, whatever the unit number: with a blank one the cascade keeps
+	// the rows but deletes the truck, leaving them pointing at nothing.
+	const legalDocuments = db.prepare("SELECT id FROM legal_documents WHERE truck_id = ?").all(truck.id).length;
+
+	if (!locked.length) return { unreadable: false, blockers: [], openFees, legalDocuments };
 
 	const blockers = [];
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -33675,8 +33855,8 @@ function truckDeleteLockBlockers(truck) {
 	// (3)+(4) maintenance_fund and compliance_fees — HARD deletes. Neither table
 	// has a deleted_at nor a soft-delete peer, so these rows are the part of this
 	// operation that is not merely a restatement but permanent loss, exactly like
-	// the `expenses` leg of the user delete.
-	const fees = truckFeeLockedRows(truck.unit_number, locked);
+	// the `expenses` leg of the user delete. (`fees` was read above, before the
+	// early return, to tell these rows apart from openFees.)
 	for (const [table, rows, what] of [
 		["maintenance_fund", fees.maintenance, "maintenance service payment"],
 		["compliance_fees", fees.compliance, "paid compliance fee"],
@@ -33733,7 +33913,7 @@ function truckDeleteLockBlockers(truck) {
 		}
 	}
 
-	return { unreadable: false, blockers };
+	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
 // ============================================================
@@ -35553,7 +35733,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 // the trucks row is an input every closed month re-reads (see the notes above
 // truckEditLockBlockers). The guard therefore runs before the first DELETE and
 // refuses the whole operation; see truckDeleteLockBlockers for why it is not
-// partially applied.
+// partially applied. Since 2026-10-22 any fee row or legal document refuses the
+// delete (OPEN_MONTH_TRUCK_FEES, TRUCK_HAS_DOCUMENTS), so past the guard the
+// cascade's fee and document deletes find nothing to remove.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -35587,6 +35769,39 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			lock.blockers,
 			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. To take it out of service, give it a retirement date in an open month. Nothing was changed.",
 			truckDelAudit);
+	}
+
+	// Fee rows and legal documents (2026-10-22). Neither table has a soft delete,
+	// so the cascade below would remove them for good; any row refuses the delete.
+	// Each refusal has its own code, audited under that code (never through
+	// periodBlockedResponse(), which answers and audits PERIOD_FINALIZED), and
+	// comes after the closed-month answer, so PERIOD_FINALIZED still wins, and
+	// before TRUCK_REFERENCED. Counts only.
+	const truckLabel = truck.unit_number || `truck #${id}`;
+	const retireNote = "To take it out of service, give it a retirement date in an open month. Nothing was changed.";
+	const feeCount = lock.openFees.maintenance + lock.openFees.compliance;
+	if (feeCount) {
+		const parts = [];
+		if (lock.openFees.maintenance) parts.push(`${lock.openFees.maintenance} maintenance fund entr${lock.openFees.maintenance === 1 ? "y" : "ies"}`);
+		if (lock.openFees.compliance) parts.push(`${lock.openFees.compliance} compliance fee${lock.openFees.compliance === 1 ? "" : "s"}`);
+		recordPeriodRefusal({ req, ...truckDelAudit }, "OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${parts.join(" and ")} ${feeCount === 1 ? "is" : "are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${feeCount === 1 ? "it" : "them"}, so it stays in place. ${retireNote}`,
+			code: "OPEN_MONTH_TRUCK_FEES",
+			counts: { maintenance_fund: lock.openFees.maintenance, compliance_fees: lock.openFees.compliance },
+		});
+	}
+	if (lock.legalDocuments) {
+		const n = lock.legalDocuments;
+		recordPeriodRefusal({ req, ...truckDelAudit }, "TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
+				`A document filed in error can be removed from the truck's documents first. ${retireNote}`,
+			code: "TRUCK_HAS_DOCUMENTS",
+			counts: { legal_documents: n },
+		});
 	}
 
 	// ⚠️ SEPARATE BUG, found end-to-end while testing the guard above, and it is
@@ -35623,8 +35838,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	db.transaction(() => {
 		if (unit) {
 			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
-			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit).changes;
-			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit).changes;
+			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
 		}
 		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 	})();
@@ -42787,7 +43002,10 @@ function findDriverAccountSpelling(name) {
 // never match for the same reason. A failed read throws; each caller asks
 // inside its try, so a read error refuses the write rather than admitting it.
 function findDriverNameClashes(name, opts = {}) {
-	const RESERVED_NAMES = ["dispatch", "investor"];
+	// The staff desks (CHAT_DESK_NAMES) and the investors' room's name. Written
+	// out here because many runners lift this function on its own;
+	// scripts/test-socket-hardening.js pins it to CHAT_DESK_NAMES.
+	const RESERVED_NAMES = ["dispatch", "admin", "investor"];
 	const needle = normalizeDriverName(typeof name === "string" ? name : "");
 	if (!needle) return [];
 	const { exceptUserId = null, exceptUserIds = [], exceptDirectoryId = null, users = true, directory = true } = opts || {};
@@ -47044,23 +47262,84 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 	}
 });
 
+// WHO A CHAT MESSAGE GOES FROM AND TO (decision 30, 2026-10-21: drivers and
+// investors message staff only, never each other). The one rule for
+// POST /api/messages and POST /api/messages/voice:
+//   • a Driver sends as his driver name, an Investor as his username (the names
+//     their threads are read by: GET /api/driver/:driverName, GET
+//     /api/investor/messages), and only to his own role's desk
+//     (CHAT_DESK_BY_ROLE), stored in the desk's own spelling. Anything else is
+//     403: the other desk, another driver, an investor, a staff member's name,
+//     a look-alike spelling, or a sender with no such name or a desk's name.
+//   • staff send as "Dispatch" (also when no sender is named) or as themselves
+//     (422 otherwise), to exactly one existing Driver or Investor account (422
+//     otherwise: a staff account, a name no account holds, a name two hold),
+//     or, where the route allows it (`staffToDesk`: the text route, for a Super
+//     Admin in the driver app), to a desk under their own name only.
+//   • any other role: 403.
+// A desk's name is tested before any account is looked up, so an account named
+// like a desk is never a recipient. Returns { from, to, partyUserId } or
+// { status, reason: "recipient" | "sender", role, error }; each route names its
+// own code (MESSAGE_*, VOICE_NOTE_*). `noun` and `item` word the refusals.
+const CHAT_DESK_BY_ROLE = Object.freeze({ Driver: "dispatch", Investor: "admin" });
+// Each desk as its own app names it in a sentence ("get in touch with the admin").
+const CHAT_DESK_LABEL = Object.freeze({ dispatch: "Dispatch", admin: "the admin" });
+function resolveChatParties(user, toName, fromName, { noun = "Messages", item = "message", staffToDesk = false } = {}) {
+	const role = user && user.role;
+	const askedDesk = chatDeskKey(toName);
+	if (role === "Driver" || role === "Investor") {
+		const deskKey = CHAT_DESK_BY_ROLE[role];
+		const own = String((role === "Driver" ? user.driverName : user.username) || "").trim();
+		const id = Number(user.id);
+		if (!own || chatDeskKey(own) || askedDesk !== deskKey || !Number.isInteger(id) || id <= 0) {
+			return { status: 403, reason: "recipient", role, error: `${noun} go to ${CHAT_DESK_LABEL[deskKey]}.` };
+		}
+		return { from: own, to: CHAT_DESK_NAMES[deskKey], partyUserId: id };
+	}
+	if (role !== "Super Admin" && role !== "Dispatcher") {
+		return { status: 403, reason: "recipient", role: String(role || ""), error: `${noun} can't be sent from this account.` };
+	}
+	const own = String(user.driverName || user.username || "").trim();
+	const asked = String(fromName || "").trim();
+	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
+	if (!from) return { status: 422, reason: "sender", role, error: "Send as Dispatch or as yourself." };
+	const pick = `Pick a driver or an investor to send the ${item} to.`;
+	if (askedDesk) {
+		if (!staffToDesk || from === "Dispatch") return { status: 422, reason: "recipient", role, error: pick };
+		return { from, to: CHAT_DESK_NAMES[askedDesk], partyUserId: null };
+	}
+	const name = typeof toName === "string" ? toName.trim() : "";
+	const spelling = findDriverAccountSpelling(name);
+	// Case aside, so two Driver accounts spelled alike but for letter case are
+	// two hits (a name two accounts hold), as every thread reads LOWER().
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?)").all(spelling) : [];
+	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
+	const hits = [...drivers, ...investors];
+	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
+	return { from, to: hits[0].name, partyUserId: hits[0].id };
+}
+
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
-		// SECURITY: never trust the client-supplied `from`. A logged-in driver
-		// who hits this endpoint directly could otherwise impersonate any user
-		// (including dispatch). Drivers + Investors are pinned to their session
-		// identity; Super Admin / Dispatcher may speak as the dispatch desk so
-		// we keep their `from` overridable but default it to driverName / username.
+		// SECURITY: never trust the client-supplied `from` or `to`. Who may write
+		// to whom, and under which name, is resolveChatParties()'s to decide:
+		// a Driver or an Investor only as himself to his own desk, staff as
+		// "Dispatch" or as themselves to one Driver or Investor account.
 		const sessionUser = req.session.user;
-		const sessionName = (sessionUser?.driverName || sessionUser?.username || "").trim();
-		const isPrivilegedSender = sessionUser?.role === "Super Admin" || sessionUser?.role === "Dispatcher";
-		const requestedFrom = (req.body.from || "").trim();
-		const from = isPrivilegedSender ? (requestedFrom || sessionName) : sessionName;
-		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
+		if (typeof to !== "string" || !to.trim() || (req.body.from != null && typeof req.body.from !== "string")
+			|| (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		const parties = resolveChatParties(sessionUser, to, req.body.from, { staffToDesk: true });
+		if (parties.status) {
+			const code = parties.reason === "sender" ? "MESSAGE_SENDER" : "MESSAGE_RECIPIENT";
+			// Neither the name asked for nor the text: the code and the sender's role
+			logAuditRefusal(req, "message_blocked", "message", "", `Message refused for a ${parties.role || "signed-in"} sender [${code}]`, code);
+			return res.status(parties.status).json({ error: parties.error, code });
+		}
+		const { from } = parties;
 		// A voice note is the server's to type: only POST /api/messages/voice
 		// writes one (its bytes checked, its file stored, its player keyed on the
 		// row's id). A text message may not claim the type or point at a voice
@@ -47076,7 +47355,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const sent = sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef });
+		const sent = sendChatMessage({ from, to: parties.to, message, loadId, attachmentUrl, attachmentType, assetRef });
 		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
@@ -47327,21 +47606,47 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 });
 
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
+// Each conversation also names its newest message (highest id) for the list's
+// last-message line: lastKind "voice" | "photo" | "file" | "text", lastText (its
+// first 60 characters, the text the thread serves) and lastVoiceMs (a voice
+// note's measured length while its audio is stored, else 0). Never its file
+// name, URL or id.
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
-				`SELECT
-					CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
-					load_id AS loadId,
-					MAX(timestamp) AS lastTimestamp,
-					SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread
-				 FROM messages
-				 GROUP BY driver, load_id
-				 ORDER BY lastTimestamp DESC`,
+				`SELECT g.driver, g.loadId, g.lastTimestamp, g.unread,
+				        m.message AS lastMessage, m.attachment_url AS lastUrl, m.attachment_type AS lastType,
+				        m.voice_file AS lastVoiceFile, m.voice_duration_ms AS lastDurationMs
+				 FROM (
+					SELECT
+						CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
+						load_id AS loadId,
+						MAX(timestamp) AS lastTimestamp,
+						SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+						MAX(id) AS lastId
+					 FROM messages
+					 GROUP BY driver, load_id
+				 ) g
+				 JOIN messages m ON m.id = g.lastId
+				 ORDER BY g.lastTimestamp DESC`,
 			)
-			.all();
+			.all()
+			.map((c) => {
+				const voice = c.lastType === "voice";
+				const kind = voice ? "voice" : c.lastUrl ? (c.lastType === "image" ? "photo" : "file") : "text";
+				const stored = voice && voiceNotes.VOICE_FILE_RE.test(c.lastVoiceFile || "");
+				return {
+					driver: c.driver,
+					loadId: c.loadId,
+					lastTimestamp: c.lastTimestamp,
+					unread: c.unread,
+					lastKind: kind,
+					lastText: Array.from(String(c.lastMessage || "")).slice(0, 60).join(""),
+					lastVoiceMs: stored && Number(c.lastDurationMs) > 0 ? Number(c.lastDurationMs) : 0,
+				};
+			});
 
 		// Every role but Super Admin: each conversation's load named as shownLoadId()
 		// does; GET /api/messages/:driverName?loadId= takes that text back.
@@ -47444,10 +47749,6 @@ const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_
 const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
 	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
 	: "";
-// The one staff desk each role sends to, as its own app names it: a Driver
-// only to "Dispatch" (the driver app), an Investor only to "admin" (the
-// investor portal). [the name as matched, the name as stored].
-const VOICE_NOTE_DESK_BY_ROLE = Object.freeze({ Driver: ["dispatch", "Dispatch"], Investor: ["admin", "admin"] });
 const VOICE_NOTE_REFUSALS = {
 	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
 	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
@@ -47483,34 +47784,13 @@ const voiceNotePlaybackLimiter = rateLimit({
 });
 
 // Who a voice note goes from and to, and the Driver or Investor account it
-// belongs to (party_user_id: besides staff, the one account that may play it).
-// A Driver or an Investor sends as himself and only to his role's staff desk
-// (VOICE_NOTE_DESK_BY_ROLE); staff send as "Dispatch" or as themselves, only
-// to one existing Driver or Investor account. { from, to, partyUserId } or
-// { status, code, error }.
+// belongs to (party_user_id: besides staff, the one account that may play it):
+// the chat rule (resolveChatParties()), without a staff note to a desk.
+// { from, to, partyUserId } or { status, code, error }.
 function resolveVoiceNoteParties(user, toName, fromName) {
-	const role = user && user.role;
-	const own = String((user && (user.driverName || user.username)) || "").trim();
-	if (role === "Driver" || role === "Investor") {
-		const [deskKey, desk] = VOICE_NOTE_DESK_BY_ROLE[role];
-		const id = Number(user.id);
-		if (!own || String(toName).toLowerCase() !== deskKey || !Number.isInteger(id) || id <= 0) {
-			return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes go to Dispatch." };
-		}
-		return { from: own, to: desk, partyUserId: id };
-	}
-	if (role !== "Super Admin" && role !== "Dispatcher") {
-		return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes can't be sent from this account." };
-	}
-	const asked = String(fromName || "").trim();
-	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
-	if (!from) return { status: 422, code: "VOICE_NOTE_SENDER", error: "Send as Dispatch or as yourself." };
-	const spelling = findDriverAccountSpelling(toName);
-	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND driver_name = ?").all(spelling) : [];
-	const investors = toName ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(username) = LOWER(?)").all(toName) : [];
-	const hits = [...drivers, ...investors];
-	if (hits.length !== 1) return { status: 422, code: "VOICE_NOTE_RECIPIENT", error: "Pick a driver or an investor to send the voice note to." };
-	return { from, to: hits[0].name, partyUserId: hits[0].id };
+	const parties = resolveChatParties(user, toName, fromName, { noun: "Voice notes", item: "voice note" });
+	if (!parties.status) return parties;
+	return { status: parties.status, code: parties.reason === "sender" ? "VOICE_NOTE_SENDER" : "VOICE_NOTE_RECIPIENT", error: parties.error };
 }
 
 // A Driver's truck's latest clean fix since its device was linked, or null
@@ -47591,7 +47871,11 @@ function voiceNoteSendChecks(req, res, next) {
 		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
 	}
 	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
-	if (parties.error) return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	if (parties.error) {
+		// As POST /api/messages audits it: the code and the sender's role only
+		logAuditRefusal(req, "message_blocked", "message", "", `Voice note refused for a ${String(user.role || "signed-in")} sender [${parties.code}]`, parties.code);
+		return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	}
 	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
 		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
 	}
@@ -70640,6 +70924,15 @@ server.listen(PORT, BIND_HOST, async () => {
 			console.error(`WARNING: umask is ${effective.toString(8).padStart(4, "0")}, expected ${BOOT_UMASK.toString(8).padStart(4, "0")} — new uploads may be world-readable`);
 		}
 	} catch {}
+	// The PDF receipt child's self-test, at every start whatever the flags: one
+	// line (uid, gid, groups, whether the settings file and the database are
+	// readable: yes/no only). Until it passes, every PDF receipt keeps its note.
+	// Creating the service throws on a cache folder it refuses (under uploads/).
+	try {
+		receiptPdfService().selfTest();
+	} catch {
+		console.warn("[receipt-pdfs] self-test not started; PDF receipt pages off");
+	}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);

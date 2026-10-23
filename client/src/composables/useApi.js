@@ -79,5 +79,7 @@ export function useApi() {
   const patch = (url, body, opts = {}) => request(url, { method: 'PATCH', body: JSON.stringify(body), ...opts })
   const del = (url, opts) => request(url, { method: 'DELETE', ...(opts || {}) })
 
-  return { get, post, put, patch, del }
+  // `request` for a body that is not JSON (a voice note's raw audio/mp4): the
+  // caller sets Content-Type in its headers, which win the merge above.
+  return { get, post, put, patch, del, request }
 }

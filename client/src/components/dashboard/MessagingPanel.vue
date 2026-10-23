@@ -30,6 +30,9 @@
             <div>{{ c.driver }}</div>
             <div v-if="c.loadId" class="msg-load-label">Load {{ c.loadId }}</div>
             <div v-else class="msg-load-label">General</div>
+            <!-- The last message: its text, "Photo", "File" or "Voice note (0:42)",
+                 from GET /api/messages's lastKind / lastText / lastVoiceMs. -->
+            <div v-if="conversationPreview(c)" class="msg-preview">{{ conversationPreview(c) }}</div>
             <div class="msg-time">{{ formatTime(c.lastTimestamp) }}</div>
           </div>
           <div v-if="c.unread > 0" class="msg-unread">{{ c.unread }}</div>
@@ -95,7 +98,7 @@
       <div
         v-if="store.selectedDriver"
         class="msg-chat-input"
-        :class="{ 'is-drop-active': dragActive }"
+        :class="{ 'is-drop-active': dragActive, 'is-recording': recording }"
         v-bind="dropzoneProps"
       >
         <span v-if="dragActive" class="msg-drop-hint" aria-hidden="true">Drop to attach</span>
@@ -115,6 +118,9 @@
           maxlength="500"
           @keydown.enter.prevent="sendMessage"
         />
+        <!-- Voice notes (MESSAGE_VOICE_NOTES_ENABLED), sent as Dispatch to this
+             conversation's driver or investor; recording takes the row. -->
+        <VoiceNoteRecorder v-if="voiceOn" :key="store.selectedDriver + ':' + store.selectedLoadId" :send="sendVoice" @active="recording = $event" />
         <button class="msg-send-btn" :disabled="!!preparing || sending" @click="sendMessage">&#10148;</button>
       </div>
     </div>
@@ -150,9 +156,13 @@ import {
 } from '../../lib/chatAttachment'
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoStep, chatPhotoView, chatPhotos } from '../../lib/chatPhotos'
+import { conversationPreview } from '../../lib/voiceNotes'
+import { messageSendFailureText } from '../../lib/messageSendFailure'
+import { useVoiceNotesFeature } from '../../composables/useVoiceNotesFeature'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import VoiceNoteRecorder from '../shared/VoiceNoteRecorder.vue'
 
 const props = defineProps({
   driverNames: { type: Array, default: () => [] },
@@ -162,6 +172,17 @@ const store = useMessagesStore()
 const dashStore = useDashboardStore()
 const { show: toast } = useToast()
 const api = useApi()
+
+// Voice notes: the record button only with the flag on; notes already sent
+// play either way. The recorder is keyed by the conversation, so a clip never
+// follows the dispatcher into another thread.
+const voiceFeature = useVoiceNotesFeature(api)
+const voiceOn = computed(() => !!voiceFeature.value)
+const recording = ref(false)
+watch(() => [store.selectedDriver, store.selectedLoadId], () => { recording.value = false })
+function sendVoice(clip) {
+  return store.sendVoiceNote(store.selectedDriver, store.selectedLoadId, clip)
+}
 
 const messageInput = ref('')
 const messagesEl = ref(null)
@@ -303,12 +324,12 @@ async function sendMessage() {
     // request, so the user may already have attached the next file.
     if (attachment.value === pending) clearAttachment()
     scrollToBottom()
-  } catch {
+  } catch (err) {
     // The attachment stays on screen on purpose. It is the user's file, they
     // cannot get it back from us, and the upload result (if it got that far) is
     // memoized on it — so pressing send again reuses the uploaded file rather
-    // than orphaning another copy.
-    toast('Failed to send', 'error')
+    // than orphaning another copy. A refused recipient or sender says why.
+    toast(messageSendFailureText(err), 'error')
   } finally {
     sending.value = false
   }
@@ -426,9 +447,24 @@ watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
    no position on this row, so nothing is being overridden. */
 .msg-chat-input {
   position: relative;
+  /* The voice-note controls match the send button (36 px). */
+  --vn-size: 36px;
 }
 .msg-chat-input.is-drop-active {
   background: var(--accent-dim);
+}
+/* While a voice note is recorded or reviewed it takes the row. */
+.msg-chat-input.is-recording .msg-attach-btn,
+.msg-chat-input.is-recording .msg-input,
+.msg-chat-input.is-recording .msg-send-btn { display: none; }
+
+.msg-preview {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* pointer-events:none is load-bearing, not polish. The hint appears UNDER the
