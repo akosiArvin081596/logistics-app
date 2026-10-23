@@ -309,6 +309,9 @@
           :driver-name="driverName"
           :load-id="chatLoadId"
           :send-handler="handleSendMessage"
+          :voice-notes="voiceNotesOn"
+          :voice-gate="voiceGate"
+          :voice-send-handler="handleSendVoiceNote"
           @mark-read="handleMarkRead"
         />
       </section>
@@ -371,6 +374,9 @@ import { useApi } from '../composables/useApi'
 import { useDriverPosition } from '../composables/useDriverPosition'
 import { expensesForLoad } from '../lib/loadId'
 import { instructionsKey, isInstructionsEvent } from '../lib/loadInstructions'
+import { useVoiceNotesFeature } from '../composables/useVoiceNotesFeature'
+import { recordGate } from '../lib/voiceNoteGate'
+import { voiceNoteTitle } from '../lib/voiceNoteText'
 
 import DriverHeader from '../components/driver/DriverHeader.vue'
 import BottomNav from '../components/driver/BottomNav.vue'
@@ -900,6 +906,23 @@ async function handleSendMessage({ recipient, message, loadId }) {
   await driverStore.sendMessage(recipient, message, loadId)
 }
 
+// Voice notes (MESSAGE_VOICE_NOTES_ENABLED). The record button follows the
+// truck's ELD (lib/voiceNoteGate.js): off while moving or stopped under 2
+// minutes, on when parked or when the ELD says nothing. The server refuses a
+// send from a moving truck too (409), and the composer keeps the clip. Only a
+// Driver records here: a Super Admin looking at this page would be refused (a
+// staff note goes to a driver, from the dashboard), so he gets no mic.
+const voiceFeature = useVoiceNotesFeature(api)
+const voiceNotesOn = computed(() => !!voiceFeature.value && auth.user?.role === 'Driver')
+const voiceGate = computed(() => {
+  const motion = driverPos.eldMotion.value
+  return recordGate({ fix: motion ? motion.fix : null, stoppedSince: motion ? motion.stoppedSince : null, nowMs: driverPos.clock.value })
+})
+// Errors propagate: the recorder keeps the clip and shows why.
+async function handleSendVoiceNote({ clip, loadId }) {
+  await driverStore.sendVoiceNote(clip, loadId)
+}
+
 function handleMarkRead(ids) {
   driverStore.markMessagesRead(ids)
 }
@@ -1091,18 +1114,22 @@ function onNewMessage(msg) {
     if (from === myName) return
 
     driverStore.addIncomingMessage(msg)
+    // A voice note's text is already its label ("Voice note (0:42)"), and its
+    // title matches the server's notification row.
+    const title = msg.attachment_type === 'voice' ? voiceNoteTitle(msg.from) : `New message from ${msg.from}`
+    const body = String(msg.message || '')
     driverStore.addNotification({
       id: msg.notificationId || Date.now(),
       type: 'message',
-      title: `New message from ${msg.from}`,
-      body: msg.message.length > 100 ? msg.message.substring(0, 100) + '...' : msg.message,
+      title,
+      body: body.length > 100 ? body.substring(0, 100) + '...' : body,
       metadata: JSON.stringify({ from: msg.from, to: msg.to, loadId: msg.loadId || '' }),
       read: 0,
       createdAt: new Date().toISOString(),
     })
 
     if (currentTab.value !== 'messages') {
-      toast.show('New message from ' + msg.from)
+      toast.show(title)
     }
   }
 }
