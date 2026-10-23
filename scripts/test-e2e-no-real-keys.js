@@ -113,6 +113,8 @@ function scriptsText() {
 	eq("no other scripts/e2e script names the key or reads a settings file", offenders, []);
 	const parity = read(path.join(E2E, "payout-parity.mjs")) || "";
 	ok("payout-parity.mjs links only the two node_modules folders", /const LINKS = \['node_modules', 'client\/node_modules'\]/.test(parity));
+	ok("payout-parity.mjs's no-difference headline says load-driven figures were not exercised, and names the sheet source",
+		parity.includes("'IDENTICAL (fixture loads only: load-driven figures not exercised)'") && /- Sheet: the made-up fixture/.test(parity));
 	const setup = read(path.join(E2E, "setup-db.cjs")) || "";
 	ok("setup-db.cjs removes the run's Sheets copy with the database", /\["", "-wal", "-shm", "\.sheets\.json"\]/.test(setup));
 }

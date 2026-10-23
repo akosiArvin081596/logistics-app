@@ -95,8 +95,9 @@ done
 # They go on the server's command line below with the other overrides, so whatever
 # the caller exported is never used for them.
 #   SHEET          the made-up fixture's book (fixtures/e2e-sheets.json), which the
-#                  stand-in answers; server.js would fall back to PRODUCTION's sheet
-#                  on an empty value, so it is never empty
+#                  stand-in answers. Never empty: server.js refuses to start without
+#                  one (lib/sheet-id.js); only old exported builds (REF_A in
+#                  payout-parity.mjs) fell back to PRODUCTION's sheet on an empty value
 #   ARCHIVE_SHEET  a made-up archive book (the stand-in answers 404), so production's
 #                  archive id (server.js's default) is never named
 #   DRIVE_FOLDER   blank: no Drive folder

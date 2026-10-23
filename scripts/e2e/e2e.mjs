@@ -10468,7 +10468,7 @@ async function leaseSection() {
         await closeInviteDialog(page)
         return {
           verdict: verdict(c.status === 201 && !!c.path && warningOk),
-          observed: `sheet: SPREADSHEET_ID from ${sheetFrom} is set and not production's; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
+          observed: `sheet: ${sheetFrom}; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
             `the form's lease warning ${warning.shown ? `shows ("${warning.text}")` : 'is hidden'}; POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${c.id ?? '?'}, link ${c.path ? 'shown' : 'NOT shown'}`,
           shot: s,
         }

@@ -4,8 +4,8 @@
 #   - symlink node_modules and client/node_modules from the main checkout (both
 #     gitignored, so the worktree stays clean). Nothing else of the main checkout's
 #     setup is linked or copied, in any mode: the e2e server runs on the made-up
-#     scripts/e2e/e2e.env and the Google stand-in (boot-server.sh), never on a
-#     settings file or a key
+#     settings boot-server.sh puts on the server's command line and the Google
+#     stand-in, never on a settings file or a key
 #   - warn if the worktree's dependency manifests differ from the main checkout's,
 #     because then the linked node_modules may be missing a package
 #   - build the client (client/dist, gitignored)

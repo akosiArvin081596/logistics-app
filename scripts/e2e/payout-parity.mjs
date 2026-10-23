@@ -69,6 +69,19 @@ const APP_ZONE = createRequire(import.meta.url)('../../lib/app-time.js').appTime
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RESERVED_PORTS = new Set([3000, 3003, 5173])
 const LINKS = ['node_modules', 'client/node_modules']
+// The loads both servers read: the made-up fixture's Job Tracking rows. They belong to no
+// real investor, so a run that finds no difference has not exercised load-driven payout
+// figures, and the headline says so.
+const SAME_HEADLINE = 'IDENTICAL (fixture loads only: load-driven figures not exercised)'
+const FIXTURE_LOADS = (() => {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'e2e-sheets.json'), 'utf8'))
+    const jt = Object.values(doc.spreadsheets)[0].sheets.find((s) => s.properties.title === 'Job Tracking')
+    const ownerCol = jt.values[0].indexOf('Owner ID')
+    const rows = jt.values.slice(1)
+    return { count: rows.length, owners: [...new Set(rows.map((r) => String(r[ownerCol] ?? '').trim()))] }
+  } catch { return { count: 0, owners: [] } }
+})()
 // Per server process, 15-minute windows: statementLimiter is 20 per IP, the report
 // and tax-CSV limiters 20 per signed-in user. A server is restarted (same copy, same
 // session) before a window would run out, so a run never meets a 429.
@@ -548,8 +561,9 @@ async function main() {
   const showLogged = diffs.some((d) => d.paths.some((p) => p.startsWith('(status) a server error'))) || logged[0].count !== logged[1].count
   if (!showLogged) for (const g of logged) g.last = []
   const lines = [
-    `# Payout parity — FLAG=${FLAG} — ${diffs.length ? 'DIFFERENCES FOUND' : 'IDENTICAL'}`,
+    `# Payout parity — FLAG=${FLAG} — ${diffs.length ? 'DIFFERENCES FOUND' : SAME_HEADLINE}`,
     '',
+    `- Sheet: the made-up fixture (scripts/e2e/fixtures/e2e-sheets.json) through fake-google.cjs, the same copy on both sides: ${FIXTURE_LOADS.count} Job Tracking loads, Owner ID(s) ${FIXTURE_LOADS.owners.join(', ') || 'none'}`,
     `- A: ${SRC.A.text}${SRC.A.patch ? ` (patched: ${path.basename(SRC.A.patch)})` : ''}`,
     `- B: ${SRC.B.text}${SRC.B.patch ? ` (patched: ${path.basename(SRC.B.patch)})` : ''}; INVESTOR_LEASE_PAYOUTS_ENABLED=${sides.B.flag ? 'true' : 'false'} (A: false)`,
     `- Started ${RUN_START.toISOString()}, ${secs} s`,
