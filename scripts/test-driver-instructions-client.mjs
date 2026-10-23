@@ -393,7 +393,8 @@ console.log('§9 the source')
   const board = fs.readFileSync(path.join(dash, 'JobBoardTab.vue'), 'utf8')
   for (const [name, tab] of [['ActiveLoadsTab.vue', active], ['JobBoardTab.vue', board]]) {
     eq(`${name}: imports the section`, tab.includes("import DriverInstructionsSection from './DriverInstructionsSection.vue'"), true)
-    eq(`${name}: renders it once in the load detail, for the open load`, (tab.match(/<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" \/>/g) || []).length, 1)
+    // Named by loadRef() (scripts/test-load-ref.mjs): a withheld load's key, else its ID.
+    eq(`${name}: renders it once in the load detail, for the open load`, (tab.match(/<DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" \/>/g) || []).length, 1)
   }
   eq('ActiveLoadsTab.vue: beside LoadHaulSection', /<LoadHaulSection[^\n]*\/>\s*\n\s*<\/div>\s*\n\s*<DriverInstructionsSection /.test(active), true)
   eq('M1 a reference\'s kind changes through setReferenceType()', /<select :value="ref\.type"[^>]*@change="setReferenceType\(ref, \$event\.target\.value\)"/.test(src) && !/v-model="ref\.type"/.test(src), true)
@@ -423,7 +424,7 @@ console.log('§9 the source')
     ], [true, true, true, true, true, true, true])
   for (const [name, tab] of [['ActiveLoadsTab.vue', active], ['JobBoardTab.vue', board]]) {
     eq(`${name}: a change refreshes the dashboard and the open load's codes`,
-      tab.includes('<DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />') &&
+      tab.includes('<DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />') &&
       /async function onInstructionsChanged\(\) \{\s*\n\s*try \{ await dashStore\.refresh\(\) \} catch \{[^}]*\}\s*\n\s*await nextTick\(\)\s*\n\s*const codes = freshInstructionCodes\(selectedJob\.value, props\.jobs\)/.test(tab), true)
   }
 }
