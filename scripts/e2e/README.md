@@ -668,11 +668,17 @@ expected to fail). It is 1 when a block aborted, and 2 when the run refused to s
 section that runs.
 
 **R16's throwaway drivers.** Assigning a driver writes a `truck_assignments` row and a `drivers_directory` row, and a
-truck with an assignment row cannot be deleted (409 `TRUCK_REFERENCED`). So R16 deletes both rows through `DB_PATH`
-by exact name, then its two trucks. Only names that start `QA-TEST-DRV-` are ever deleted, and a run starts by
-deleting any that an aborted run left behind. No real driver's assignment is touched. When one save is refused but
-answered long before the other, the two did not overlap in the server, and the row is `PASS (vacuous)`. A save that
-failed (500) is INFO.
+truck with an assignment row cannot be deleted (409 `TRUCK_REFERENCED`). So R16 clears its two trucks' drivers,
+deletes both rows through `DB_PATH` by exact name, then its two trucks. Only names that start `QA-TEST-DRV-` are ever
+deleted, and a run starts by deleting any that an aborted run left behind. No real driver's assignment is touched.
+When one save is refused but answered long before the other, the two did not overlap in the server, and the row is
+`PASS (vacuous)`. A save that failed (500) is INFO.
+
+**Deleting test trucks.** A truck whose costs, reserve, purchase price, driver or ELD link feed an open month cannot
+be deleted (409 `OPEN_MONTH_TRUCK_FIGURES`). Every truck delete in the run goes through `qaDeleteTruck()`: it re-reads
+the truck, touches only a unit number that starts `QA-TEST-`, sets those values back to 0 or blank through the
+Trucks API (audited, as a person's edits are), unlinks the ELD device, then deletes the truck. Any other truck is left
+alone.
 
 **Trucks it creates:**
 

@@ -304,7 +304,9 @@ const S = loadShipped(db);
 	// six correct sites plus one wrong one, because a wrong site does not call the builder.
 	// The eighth (2026-10-15) is investorMaySeeReceipt(): may an Investor open a receipt
 	// photo, i.e. is that receipt in the scope GET /api/investor/expenses lists.
-	ok(callers === 9, `§1 investorExpenseScopeSql should have 1 definition + 8 callers; found ${callers}`);
+	// The ninth (2026-10-23, TD8 review M1) is truckDeleteOpenMonthHolds(): which
+	// open months would lose a receipt if an investor's last truck were deleted.
+	ok(callers === 10, `§1 investorExpenseScopeSql should have 1 definition + 9 callers; found ${callers}`);
 
 	for (const marker of [
 		'FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER} GROUP BY m',

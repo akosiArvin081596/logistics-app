@@ -57,8 +57,8 @@
  * periodLockUnreadableResponse(), periodLabel() and periodRefusalDetail(), over an in-memory database
  * built from server.js's own CREATE TABLE statements for the fee, legal
  * document, trailer and assignment tables. The money checks the guard also runs
- * (fixed costs, driver pay, the investor driver set) are stubbed empty; they
- * have their own runners. No server, no port, no app.db, no files, no network.
+ * (fixed costs, driver pay, the investor driver set) are stubbed empty, as are
+ * the open-month holds (TD8); they have their own runners. No server, no port, no app.db, no files, no network.
  * Made-up unit numbers only.
  *
  * Run: node scripts/test-truck-delete-open-month-fees.js   # exits 1 on any failure
@@ -198,6 +198,8 @@ function deleteRoute(w, rec, guardSrc = GUARD) {
 		requireRole: () => (req, res, next) => next(),
 		db: w.db,
 		truckDeleteLockBlockers: guard,
+		// No open-month item holds (test-truck-delete-open-month-figures.js has them).
+		truckDeleteOpenMonthHolds: () => ({ fixed_cost_months: 0, driver: 0, eld_link: 0, financials_line_months: 0, lease_months: 0 }),
 		auditText,
 		periodBlockedResponse: responses.periodBlockedResponse,
 		periodLockUnreadableResponse: responses.periodLockUnreadableResponse,
