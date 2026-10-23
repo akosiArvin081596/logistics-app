@@ -109,7 +109,29 @@ section('§1 the helper', () => {
 const read = (rel) => fs.readFileSync(path.join(CLIENT, rel), 'utf8')
 // The child components a template hands the served Load ID text (`:load-id="loadIdValue"`),
 // by tag name: a per-load panel asks its routes by what it is handed.
-const servedIdPanels = (src) => [...src.matchAll(/<([A-Z]\w*)\b[^<>]*?:load-id="loadIdValue"/g)].map((m) => m[1])
+// A quoted attribute value may hold a ">" (an arrow function), so quotes are skipped whole.
+const servedIdPanels = (src) => [...src.matchAll(/<([A-Z]\w*)\b(?:[^<>"]|"[^"]*")*?:load-id="loadIdValue"/g)].map((m) => m[1])
+// What a template shows for a withheld load's documents: from the docsWithheldNote
+// branch to the next v-else branch. Anything that opens, names or deletes a file in
+// it is a link the server meant to withhold.
+const withheldDocsBlock = (src) => {
+  const start = src.indexOf('v-else-if="docsWithheldNote"')
+  if (start < 0) return null
+  const end = src.indexOf('<div v-else', start)
+  return src.slice(start, end < 0 ? undefined : end)
+}
+const linksIn = (block) => (block == null ? null : ['<a', 'href', 'drive_url', 'file_name', 'confirmDeleteDoc'].filter((s) => block.includes(s)))
+
+section('§2 the template helpers', () => {
+  check('§2 servedIdPanels(): finds a panel after an attribute whose value holds a ">", and none handed the reference',
+    servedIdPanels('<Foo @click="v => x" :open="a > b" :load-id="loadIdValue" />\n<Bar :load-id="loadRefValue" />\n<Baz\n  @lane="(l) => go(l)"\n  :load-id="loadIdValue"\n/>'),
+    ['Foo', 'Baz'])
+  check('§2 withheldDocsBlock(): a link, a file name or a delete in the withheld branch is caught; the next v-else branch is not read',
+    [linksIn(withheldDocsBlock('<div v-else-if="docsWithheldNote"><a :href="doc.drive_url">{{ doc.file_name }}</a></div>\n<div v-else>')),
+      linksIn(withheldDocsBlock('<div v-else-if="docsWithheldNote">{{ doc.type }}</div>\n<div v-else><a :href="doc.drive_url">View</a></div>')),
+      withheldDocsBlock('<div v-else>')],
+    [['<a', 'href', 'drive_url', 'file_name'], [], null])
+})
 
 section('§2 Active Loads', () => {
   const src = read('components/dashboard/ActiveLoadsTab.vue')
@@ -141,7 +163,7 @@ section('§2 Active Loads', () => {
     [/<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src), (src.match(/loadIdShown\(job, /g) || []).length >= 2],
     [true, true])
   check('§2 Active Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
-    /v-else-if="docsWithheldNote"/.test(src) && /r\.documentsWithheld \?/.test(src), true)
+    [/v-else-if="docsWithheldNote"/.test(src) && /r\.documentsWithheld \?/.test(src), linksIn(withheldDocsBlock(src))], [true, []])
 })
 
 section('§2 Job Board', () => {
@@ -182,7 +204,7 @@ section('§2 Completed Loads', () => {
   check('§2 Completed Loads: only the Super Admin-only panels are handed the served Load ID text',
     servedIdPanels(src), ['RateConPdfSection', 'InvoiceDraftPreviewModal'])
   check('§2 Completed Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
-    [/v-else-if="docsWithheldNote"/.test(src), (src.match(/r\.documentsWithheld \?/g) || []).length], [true, 2])
+    [/v-else-if="docsWithheldNote"/.test(src), (src.match(/r\.documentsWithheld \?/g) || []).length, linksIn(withheldDocsBlock(src))], [true, 2, []])
   check('§2 Completed Loads: the title and the list show the ID as served ("[contact withheld]" when served blank)',
     [/<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src),
       /Details for load \{\{ loadIdShownValue \}\}/.test(src), /\{\{ cellValue\(job, col\) \|\| loadIdShown\(job, col\) \}\}/.test(src)],
