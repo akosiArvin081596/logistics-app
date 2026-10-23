@@ -52,6 +52,10 @@ const HARNESS = "scripts/run-unit-tests.js";
 const CODE_RE = /\.(?:js|mjs|cjs)$/;
 const SERVER = "server.js";
 
+// A string as a literal inside a RegExp: every metacharacter escaped,
+// backslash included.
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // A change to any of these can change any runner's result.
 const RUN_ALL = [
 	/^scripts\/run-unit-tests\.js$/,
@@ -392,7 +396,7 @@ function buildMap({ files, read }) {
 			for (const m of text.matchAll(/\bprovided\s*:\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)/g)) {
 				let list = m[1];
 				if (!list.startsWith("[")) {
-					const def = new RegExp(`\\b(?:const|let|var)\\s+${list.replace(/\$/g, "\\$")}\\s*=\\s*(\\[[^\\]]*\\])`).exec(text);
+					const def = new RegExp(`\\b(?:const|let|var)\\s+${reEscape(list)}\\s*=\\s*(\\[[^\\]]*\\])`).exec(text);
 					list = def ? def[1] : "";
 				}
 				for (const x of list.matchAll(/(["'`])([A-Za-z_$][\w$]*)\1/g)) provided.add(x[2]);

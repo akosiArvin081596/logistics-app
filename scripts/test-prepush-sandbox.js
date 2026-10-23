@@ -83,8 +83,10 @@ const QUOTE_FN = (() => {
 	if (!m) throw new Error("no sbpl_quote() in .githooks/pre-push");
 	return m[0];
 })();
+// The hook's own sbpl_quote(), run by bash from a script file in this
+// runner's temp folder (QUOTE_SCRIPT, below), with the path as its argument.
 function sbplQuote(p) {
-	const r = spawnSync("/bin/bash", ["-c", `${QUOTE_FN}\nsbpl_quote "$1"`, "quote", p], { encoding: "utf8" });
+	const r = spawnSync("/bin/bash", [QUOTE_SCRIPT, p], { encoding: "utf8" });
 	if (r.status !== 0) throw new Error(`sbpl_quote failed: ${r.stderr}`);
 	return r.stdout;
 }
@@ -100,6 +102,8 @@ process.on("exit", () => {
 	fs.rmSync(TMP, { recursive: true, force: true });
 	fs.rmSync(NT, { recursive: true, force: true });
 });
+const QUOTE_SCRIPT = path.join(TMP, "sbpl-quote.sh");
+fs.writeFileSync(QUOTE_SCRIPT, `${QUOTE_FN}\nsbpl_quote "$1"\n`);
 const H = path.join(NT, "h.o+m(e)[1]{2}");
 const W = path.join(NT, "w.t+(x)[3]{4}|^$");
 const SCRATCH = path.join(TMP, "scratch");

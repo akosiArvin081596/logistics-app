@@ -73,6 +73,9 @@ const { spawnSync } = require("child_process");
 
 const HOOK_TEXT = fs.readFileSync(path.join(__dirname, "..", ".githooks/pre-push"), "utf8");
 const PROFILE = (/<<'SANDBOX_PROFILE' \|\| true\n([\s\S]*?)\nSANDBOX_PROFILE\n/.exec(HOOK_TEXT) || [])[1];
+// What the hook's sbpl_quote() makes of a path: every regex metacharacter
+// escaped, backslash included.
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const failures = [];
 let pass = 0;
@@ -214,7 +217,9 @@ function run(cmd, args, cwd, env, input) {
 	const r = spawnSync(cmd, args, { cwd, env: { ...ENV, ...env }, encoding: "utf8", timeout: 30000, input, stdio: input === undefined ? ["ignore", "pipe", "pipe"] : "pipe" });
 	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}`, calls: takeCalls() };
 }
-const push = (cwd, hooks, args, env = {}) => run("git", ["-c", `core.hooksPath=${hooks}`, "push", ...args], cwd, env);
+// core.hooksPath for this one push, through git's environment (what
+// `git -c core.hooksPath=...` does).
+const push = (cwd, hooks, args, env = {}) => run("git", ["push", ...args], cwd, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: hooks, ...env });
 const byHand = (hooks, cwd, env = {}) => run("bash", [path.join(hooks, "pre-push")], cwd, env);
 const scenario = (s) => fs.writeFileSync(SCENARIO, s);
 const ranIn = (r, dir) => r.calls.length === 1 && r.calls[0].as === "sandbox-exec" && r.calls[0].cwd === dir;
@@ -307,7 +312,7 @@ try {
 	ok(inv.code === 0 && inv.calls.length === 1 && call.as === "sandbox-exec", `§7 the check runs as one child under the absolute sandbox-exec (exit ${inv.code}, calls ${where(inv)})`);
 	ok(!!PROFILE && a[0] === "-p" && a[1] === PROFILE, "§7 …with the profile kept in the hook itself");
 	ok(dParam("HOME") === realHome && dParam("WORK") === W, `§7 …the real home and worktree as HOME and WORK (got ${dParam("HOME")}, ${dParam("WORK")})`);
-	ok(dParam("HOME_RE") === realHome.replace(/\./g, "\\.") && dParam("WORK_RE") === W.replace(/\./g, "\\."), `§7 …and the same quoted for a regex as HOME_RE and WORK_RE (got ${dParam("HOME_RE")})`);
+	ok(dParam("HOME_RE") === reEscape(realHome) && dParam("WORK_RE") === reEscape(W), `§7 …and the same quoted for a regex as HOME_RE and WORK_RE (got ${dParam("HOME_RE")})`);
 	const cmd = a.slice(a.lastIndexOf("-D") + 2);
 	ok(cmd[0] === path.join(BIN, "node") && cmd[1] === "scripts/run-unit-tests.js" && cmd.includes("--lint") && cmd[cmd.indexOf("--budget-ms") + 1] === "115000"
 		&& cmd.includes("--changed-list") && cmd.includes("--changed-count") && cmd.includes("--server-diff") && !cmd.includes("--full"),
