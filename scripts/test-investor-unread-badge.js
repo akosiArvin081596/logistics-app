@@ -1,23 +1,28 @@
 #!/usr/bin/env node
 /**
  * scripts/test-investor-unread-badge.js — the Dispatch inbox counts and clears
- * messages to both staff desks.
+ * messages to both staff desks, for the staff who read each.
  *
  * An investor writes to the "admin" desk (#589: the investor portal's one
  * desk; staff reply as "Dispatch"). The Messages inbox (/messages) is where
  * staff read both desks, so its unread badge counts a message to "admin" the
  * way it counts one to "Dispatch", and opening the conversation clears it.
+ * Investor conversations are Super Admin only (P1): a Dispatcher's inbox holds
+ * none, so his badge counts the "Dispatch" desk only
+ * (scripts/test-investor-chats-super-admin-only.js covers every path).
  *
  *   §1 GET /api/messages, lifted from server.js (scripts/lib/server-lift.js)
- *      over an in-memory SQLite, for a Super Admin and a Dispatcher: each
- *      conversation's `unread` counts its unread messages to either desk
- *      ("Dispatch" or "admin", any letter case). Not counted: a message staff
- *      sent (to a driver or an investor), a message already read, and a
- *      look-alike name that is no desk ("admin2", "administrator").
- *   §2 PUT /api/messages/read then GET /api/messages: staff marking an
- *      investor's "admin" messages read clears that conversation's count. An
- *      Investor marks only messages addressed to him (his own "admin" messages
- *      stay unread), and a Driver cannot mark the investor's either.
+ *      over an in-memory SQLite: for a Super Admin, each conversation's
+ *      `unread` counts its unread messages to either desk ("Dispatch" or
+ *      "admin", any letter case); a Dispatcher's lists no investor and counts
+ *      the driver's as before. Not counted: a message staff sent (to a driver
+ *      or an investor), a message already read, and a look-alike name that is
+ *      no desk ("admin2", "administrator").
+ *   §2 PUT /api/messages/read then GET /api/messages: a Super Admin marking an
+ *      investor's "admin" messages read clears that conversation's count; a
+ *      Dispatcher's mark leaves them unread. An Investor marks only messages
+ *      addressed to him (his own "admin" messages stay unread), and a Driver
+ *      cannot mark the investor's either.
  *
  * The client half (stores/messages.js marking "admin" messages read when the
  * conversation opens) is scripts/test-investor-unread-badge-store.mjs.
@@ -68,6 +73,11 @@ function makeDb() {
 		message TEXT NOT NULL, load_id TEXT DEFAULT '', read INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		asset_ref TEXT DEFAULT '', attachment_url TEXT DEFAULT '', attachment_type TEXT DEFAULT '',
 		voice_file TEXT DEFAULT '', voice_duration_ms INTEGER DEFAULT 0, party_user_id INTEGER)`);
+	// The accounts: who is an Investor decides which conversations are investor
+	// conversations (server.js INVESTOR_CHAT_SQL).
+	db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, driver_name TEXT DEFAULT '')");
+	const add = db.prepare("INSERT INTO users (id, username, role, driver_name) VALUES (?, ?, ?, ?)");
+	for (const u of [...Object.values(U), { id: 51, role: "Investor", username: INVESTOR_2, driverName: "" }]) add.run(u.id, u.username, u.role, u.driverName);
 	return db;
 }
 let clock = 0;
@@ -167,16 +177,26 @@ function section1() {
 	addMessage(db, "Orrin Cade", "admin2", "not a desk");
 	addMessage(db, "Orrin Cade", "administrator", "not a desk either");
 
-	for (const [label, user] of [["Super Admin", U.sa], ["Dispatcher", U.disp]]) {
-		const r = m.list(user);
-		eq(`§1 ${label}: 200`, r.status, 200);
+	{
+		const r = m.list(U.sa);
+		eq("§1 Super Admin: 200", r.status, 200);
 		const u = unreadBy(r);
-		eq(`§1 ${label}: the driver's message to "Dispatch" counts, as before`, u[`${DRIVER}|L-100`], 1);
-		eq(`§1 ${label}: the investor's three unread messages to "admin" count (any case; the read one and staff's reply do not)`, u[`${INVESTOR}|`], 3);
-		eq(`§1 ${label}: an investor whose only message is read counts 0`, u[`${INVESTOR_2}|`], 0);
-		eq(`§1 ${label}: a look-alike desk name counts 0`, u["Orrin Cade|"], 0);
+		eq("§1 Super Admin: the driver's message to \"Dispatch\" counts, as before", u[`${DRIVER}|L-100`], 1);
+		eq("§1 Super Admin: the investor's three unread messages to \"admin\" count (any case; the read one and staff's reply do not)", u[`${INVESTOR}|`], 3);
+		eq("§1 Super Admin: an investor whose only message is read counts 0", u[`${INVESTOR_2}|`], 0);
+		eq("§1 Super Admin: a look-alike desk name counts 0", u["Orrin Cade|"], 0);
 		const total = Object.values(u).reduce((s, n) => s + n, 0);
-		eq(`§1 ${label}: the inbox total is 4`, total, 4);
+		eq("§1 Super Admin: the inbox total is 4", total, 4);
+	}
+	{
+		const r = m.list(U.disp);
+		eq("§1 Dispatcher: 200", r.status, 200);
+		const u = unreadBy(r);
+		eq("§1 Dispatcher: the driver's message to \"Dispatch\" counts, as before", u[`${DRIVER}|L-100`], 1);
+		eq("§1 Dispatcher: no investor's conversation is listed or counted", [u[`${INVESTOR}|`], u[`${INVESTOR_2}|`]], [undefined, undefined]);
+		eq("§1 Dispatcher: a look-alike desk name counts 0", u["Orrin Cade|"], 0);
+		const total = Object.values(u).reduce((s, n) => s + n, 0);
+		eq("§1 Dispatcher: the inbox total is the dispatch desk's, 1", total, 1);
 	}
 }
 
@@ -184,27 +204,34 @@ function section1() {
 // §2 opening the conversation clears it
 // ---------------------------------------------------------------------------
 function section2() {
-	console.log("§2 PUT /api/messages/read clears the investor's count for staff only");
-	for (const [label, staff] of [["Super Admin", U.sa], ["Dispatcher", U.disp]]) {
+	console.log("§2 PUT /api/messages/read clears the investor's count for a Super Admin only");
+	{
 		const db = makeDb();
 		const m = mount(db);
 		const a = addMessage(db, INVESTOR, "admin", "Question about my statement");
 		const b = addMessage(db, INVESTOR, "admin", "And one more");
 		const drv = addMessage(db, DRIVER, "Dispatch", "At the shipper");
 
-		// Neither the investor nor a driver can clear the desk's unread messages.
-		eq(`§2 (${label} run) an Investor marking his own "admin" messages: 200`, m.markRead(U.inv, [a, b]).status, 200);
-		ok(`§2 (${label} run) ...they stay unread (not addressed to him)`, !isRead(db, a) && !isRead(db, b));
+		// Neither the investor, a driver nor a Dispatcher can clear the desk's
+		// unread investor messages.
+		eq("§2 an Investor marking his own \"admin\" messages: 200", m.markRead(U.inv, [a, b]).status, 200);
+		ok("§2 ...they stay unread (not addressed to him)", !isRead(db, a) && !isRead(db, b));
 		m.markRead(U.drv, [a, b]);
-		ok(`§2 (${label} run) a Driver cannot mark them either`, !isRead(db, a) && !isRead(db, b));
-		eq(`§2 (${label} run) the count is still 2`, unreadBy(m.list(staff))[`${INVESTOR}|`], 2);
+		ok("§2 a Driver cannot mark them either", !isRead(db, a) && !isRead(db, b));
+		eq("§2 a Dispatcher marking them: 200", m.markRead(U.disp, [a, b]).status, 200);
+		ok("§2 ...they stay unread (an investor conversation is Super Admin only)", !isRead(db, a) && !isRead(db, b));
+		eq("§2 the Super Admin's count is still 2", unreadBy(m.list(U.sa))[`${INVESTOR}|`], 2);
 
-		eq(`§2 ${label} marks the investor's "admin" messages: 200`, m.markRead(staff, [a, b]).status, 200);
-		ok(`§2 ${label}: both are read`, isRead(db, a) && isRead(db, b));
-		const after = unreadBy(m.list(staff));
-		eq(`§2 ${label}: the investor's conversation counts 0`, after[`${INVESTOR}|`], 0);
-		eq(`§2 ${label}: the driver's conversation is untouched`, after[`${DRIVER}|`], 1);
-		ok(`§2 ${label}: the driver's message is still unread`, !isRead(db, drv));
+		eq("§2 Super Admin marks the investor's \"admin\" messages: 200", m.markRead(U.sa, [a, b]).status, 200);
+		ok("§2 Super Admin: both are read", isRead(db, a) && isRead(db, b));
+		const after = unreadBy(m.list(U.sa));
+		eq("§2 Super Admin: the investor's conversation counts 0", after[`${INVESTOR}|`], 0);
+		eq("§2 Super Admin: the driver's conversation is untouched", after[`${DRIVER}|`], 1);
+		ok("§2 Super Admin: the driver's message is still unread", !isRead(db, drv));
+
+		eq("§2 a Dispatcher marks the driver's message: 200", m.markRead(U.disp, [drv]).status, 200);
+		ok("§2 ...it is read, as before", isRead(db, drv));
+		eq("§2 ...the Dispatcher's inbox counts 0", unreadBy(m.list(U.disp))[`${DRIVER}|`], 0);
 	}
 }
 

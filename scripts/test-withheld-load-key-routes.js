@@ -789,6 +789,9 @@ section("§5 the Messages page: the conversation list serves loadKey, the thread
 		message TEXT NOT NULL, load_id TEXT DEFAULT '', read INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		asset_ref TEXT DEFAULT '', attachment_url TEXT DEFAULT '', attachment_type TEXT DEFAULT '',
 		voice_file TEXT DEFAULT '', voice_duration_ms INTEGER DEFAULT 0, party_user_id INTEGER)`);
+	// The accounts the routes read to tell an investor conversation (Super Admin
+	// only, scripts/test-investor-chats-super-admin-only.js): none here.
+	db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, driver_name TEXT DEFAULT '')");
 	let n = 0;
 	const add = (from, to, message, loadId) => Number(db.prepare(`INSERT INTO messages (timestamp, "from", "to", message, load_id) VALUES (?, ?, ?, ?, ?)`)
 		.run(`2030-01-14T10:${String(++n).padStart(2, "0")}:00.000Z`, from, to, message, loadId).lastInsertRowid);

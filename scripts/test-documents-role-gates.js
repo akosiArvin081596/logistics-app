@@ -7,8 +7,9 @@
  *   POST /api/documents/upload     the same gate, mounted before the limiter; a
  *                                  Dispatcher or a Driver uploads only POD, BOL,
  *                                  Receipt or Other (400 DOC_TYPE_NOT_ALLOWED).
- *   PUT  /api/messages/read        Super Admin and Dispatcher mark any message;
- *                                  every other caller only messages addressed to them.
+ *   PUT  /api/messages/read        Super Admin marks any message, a Dispatcher any
+ *                                  but one in an investor conversation; every
+ *                                  other caller only messages addressed to them.
  *   PUT  /api/notifications/read   Super Admin marks any notification; every
  *                                  other caller only notifications addressed to them.
  *   GET  /api/driver/:driverName   builds its `diagnostic` block for Super Admin only.
@@ -93,6 +94,13 @@ const sentIfLoadOwnershipUnverified = new Function(`${liftFn("sentIfLoadOwnershi
 const resolveDriverActor = new Function("normalizeDriverName",
 	`${liftFn("resolveDriverActor")}\nreturn resolveDriverActor;`)(normalizeDriverName);
 const readFlagOwnName = new Function(`${liftFn("readFlagOwnName")}\nreturn readFlagOwnName;`)();
+// Investor conversations are Super Admin only: the rule and who reads them.
+const readsInvestorChats = new Function(`${liftFn("readsInvestorChats")}\nreturn readsInvestorChats;`)();
+const INVESTOR_CHAT_SQL = (() => {
+	const m = SRC.match(/\nconst INVESTOR_CHAT_SQL = (`[^`]*`);/);
+	if (!m) fatal("could not locate INVESTOR_CHAT_SQL in server.js");
+	return new Function(`return ${m[1]};`)();
+})();
 // The Documents-panel filter the list route shares with the /uploads root guard,
 // and the rate-con fragment it is built from, evaluated from server.js so the
 // lifted route runs with the shipped value.
@@ -426,8 +434,10 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 			(3, 'investor1', 'message', 'n3'),
 			(4, 'dispatch1', 'message', 'n4'),
 			(5, '', 'message', 'n5');
+		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL);
+		INSERT INTO users (id, username, role) VALUES (5, 'investor1', 'Investor'), (6, 'investor2', 'Investor');
 	`);
-	const flagDeps = { requireAuth, driverWriteLimiter: limiter, db: flagDb, readFlagOwnName, console: quiet };
+	const flagDeps = { requireAuth, driverWriteLimiter: limiter, db: flagDb, readFlagOwnName, readsInvestorChats, INVESTOR_CHAT_SQL, console: quiet };
 	const msgRead = buildRoute("put", "/api/messages/read", flagDeps);
 	const notifRead = buildRoute("put", "/api/notifications/read", flagDeps);
 	const ALL = [1, 2, 3, 4, 5, 6];
@@ -452,6 +462,9 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	r = await mark(msgRead, "messages", DISPATCH, [1, 3]);
 	ok("messages: Dispatcher keeps the inbox-wide form (the Dispatch desk's rows and others)",
 		r.status === 200 && r.marked === "1,3", JSON.stringify(r));
+	r = await mark(msgRead, "messages", DISPATCH, ALL);
+	ok("messages: Dispatcher marks none of an investor conversation's (Super Admin only)",
+		r.status === 200 && r.marked === "1,2,3,6", JSON.stringify(r));
 	r = await mark(msgRead, "messages", SUPER, [5, 6]);
 	ok("messages: Super Admin keeps the inbox-wide form", r.status === 200 && r.marked === "5,6", JSON.stringify(r));
 

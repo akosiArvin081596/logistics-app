@@ -35,7 +35,8 @@
  *      driver room only as a Driver, or as a Super Admin previewing the driver
  *      app under his own driver name, never as a Dispatcher or an Investor), and
  *      receives only their events; chat through the SHIPPED POST /api/messages
- *      reaches the dispatch room and each party's rooms exactly once per
+ *      reaches the dispatch room (for an investor conversation the super-admin
+ *      room only) and each party's rooms exactly once per
  *      socket, and a role room never by name, whatever the recipient is
  *      called or spelled like; a driver target spelled like another kind's
  *      room reaches no one; a register payload that is not a string is read
@@ -203,6 +204,12 @@ const SRCS = {
 	// The one send both chat routes use (POST /api/messages and
 	// POST /api/messages/voice): the row, the notification and the emits.
 	sendChat: liftFunction("function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {"),
+	// Which messages are an investor conversation's (Super Admin only): the rule,
+	// asked of the accounts table.
+	investorChat: [
+		liftLine(/\nconst INVESTOR_CHAT_SQL = `[^`]*`;/, "INVESTOR_CHAT_SQL").trim(),
+		liftFunction("function investorChatParties(from, to) {"),
+	].join("\n"),
 	// What the chat route sends a message about a withheld load ID through: the
 	// one Load ID rule and the per-role dispatch-room send (2026-10-21).
 	loadIds: [
@@ -351,7 +358,7 @@ async function startWorld({ sources = SRCS, secureCookie = false, mustChange = (
 		`const SHOWN_LOAD_ID_STATE = { latest: null };\n${sources.loadIds}\nreturn { shownLoadId, emitDispatchByRole };`)(
 		io, require(path.join(__dirname, "..", "lib", "broker-contact")), true);
 	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", "chatFiles",
-		"chatDeskKey", "CHAT_DESK_NAMES", "logAuditRefusal", `${sources.parties}\n${sources.messageLoadId}\n${sources.sendChat}\n${sources.messages}`)(
+		"chatDeskKey", "CHAT_DESK_NAMES", "logAuditRefusal", `${sources.parties}\n${sources.messageLoadId}\n${sources.investorChat}\n${sources.sendChat}\n${sources.messages}`)(
 		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole,
 		require(path.join(__dirname, "..", "lib", "chat-files")), rooms.chatDeskKey, rooms.CHAT_DESK_NAMES, logAuditRefusal);
 
@@ -716,9 +723,10 @@ const SCENARIOS = {
 			p.chatAmbiguousNameRefused = delivered && refusedEverywhere("m2") && refusedEverywhere("m12");
 			// The desk to a driver: his rooms and the dispatch room, no other account.
 			p.chatFromDeskToDriver = delivered && sameSet(receivers("new-message", msg("m13")), ["bob", "ops", "root"]);
-			// An investor to his desk: his name's rooms and the dispatch room ("admin"
-			// adds none).
-			p.chatFromInvestorSparesRoleNames = delivered && sameSet(receivers("new-message", msg("m3")), ["dMike", "mike", "ops", "root"]);
+			// An investor to his desk: his name's rooms and the super-admin room
+			// ("admin" adds none). An investor conversation is Super Admin only: the
+			// Dispatcher ("ops") gets no copy.
+			p.chatFromInvestorSparesRoleNames = delivered && sameSet(receivers("new-message", msg("m3")), ["dMike", "mike", "root"]);
 			// A sender whose own name is a desk's is refused.
 			p.chatDriverNamedDispatchToDesk = delivered && refusedEverywhere("m4");
 			// A Driver account with no driver name can't be written to (no thread
@@ -1023,9 +1031,12 @@ function roomPinProblems(fullSrc) {
 	}
 	// Chat: one emit to chatRooms(), and beside it the one to chatRooms() without
 	// the dispatch room for a message about a withheld load ID (its dispatch-room
-	// copies go through emitDispatchByRole()).
+	// copies go through emitDispatchByRole()) or in an investor conversation,
+	// whose staff copy is the one emit to the super-admin room (Super Admin only).
 	const chatSites = emits.filter((x) => x.event === "new-message");
-	if (chatSites.length !== 2 || !chatSites.every((x) => isCallOf(x.arg, ["chatRooms"]))) problems.push(`"new-message" must be the two emits to chatRooms() (all rooms, and all but the dispatch room), found ${chatSites.map((x) => x.arg).join(", ") || "none"}`);
+	const chatRoomSites = chatSites.filter((x) => isCallOf(x.arg, ["chatRooms"]));
+	const superAdminSites = chatSites.filter((x) => x.arg === '"super-admin"');
+	if (chatSites.length !== 3 || chatRoomSites.length !== 2 || superAdminSites.length !== 1) problems.push(`"new-message" must be the two emits to chatRooms() (all rooms, and all but the dispatch room) and the one to the super-admin room, found ${chatSites.map((x) => x.arg).join(", ") || "none"}`);
 	for (const x of emits) {
 		if (isCallOf(x.arg, ["chatRooms"]) && x.event !== "new-message") bad(x.at, `chatRooms() is for chat only, not "${x.event}"`);
 		if (isCallOf(x.arg, ["userRoom"])) bad(x.at, `userRoom() emits nothing today; "${x.event}" to ${x.arg} needs a reason and a pin`);
@@ -1035,13 +1046,14 @@ function roomPinProblems(fullSrc) {
 	// routes send through (the routes themselves name no room). The check above
 	// holds every room to a helper; this names the request-fed sites, so a
 	// failure says which, and pins that nothing else in those routes names a
-	// room but the dispatch room.
+	// room but the dispatch room (and, in sendChatMessage(), the super-admin
+	// room for an investor conversation).
 	const REQUEST_FED = [
 		['app.post("/api/dispatch", ', ["driverRoom(driver)"]],
 		['app.post("/api/dispatch/reassign", ', ["driverRoom(newDriver)", "driverRoom(oldDriverKey)"]],
 		['app.post("/api/messages", ', []],
 		['app.post("/api/messages/voice", ', []],
-		["function sendChatMessage(", ["chatRooms(from, to)", "chatRooms(from, to)"], "\n}\n"],
+		["function sendChatMessage(", ["chatRooms(from, to)", "chatRooms(from, to)", '"super-admin"'], "\n}\n"],
 	];
 	for (const [head, want, end] of REQUEST_FED) {
 		const range = body(head, end);
@@ -1149,7 +1161,7 @@ Object.assign(PROPS, {
 	chatByRoleNameSparesRoleRoom: ["rooms", "§3 a driver writing to a role's name must be refused, no copy to any socket (m1, m8)"],
 	chatAmbiguousNameRefused: ["rooms", "§3 the desk writing to a name a Driver and an Investor both hold must be refused, no copy (m2, m12)"],
 	chatFromDeskToDriver: ["rooms", "§3 chat from the dispatch desk to a driver must reach that driver and the dispatch room, and no other account (m13)"],
-	chatFromInvestorSparesRoleNames: ["rooms", "§3 chat from an investor must reach the parties' rooms and the dispatch room only (m3)"],
+	chatFromInvestorSparesRoleNames: ["rooms", "§3 chat from an investor must reach the parties' rooms and the super-admin room only, no Dispatcher (m3)"],
 	chatDriverNamedDispatchToDesk: ["rooms", "§3 a driver whose own name is a desk's must be refused, no copy (m4)"],
 	chatUnlinkedDriverRefused: ["rooms", "§3 the desk writing to a driver account with no driver name must be refused, no copy (m5)"],
 	chatToDispatchByDriver: ["rooms", "§3 chat a driver addresses to the desk's name must reach the dispatch room and the sender only (m7)"],
@@ -1311,7 +1323,8 @@ const MUTANTS = [
 		target: "sendChat",
 		mutate: cut("io.to(chatRooms(from, to)).emit(\"new-message\", payload);",
 			"const fromRoom = (from || \"\").trim().toLowerCase();\n\t\tconst toRoom = (to || \"\").trim().toLowerCase();\n\t\tif (fromRoom) io.to(fromRoom).emit(\"new-message\", payload);\n\t\tif (toRoom && toRoom !== fromRoom) io.to(toRoom).emit(\"new-message\", payload);\n\t\tif (fromRoom !== \"dispatch\" && toRoom !== \"dispatch\") io.to(\"dispatch\").emit(\"new-message\", payload);"),
-		caughtBy: ["chatFromInvestorSparesRoleNames", "chatToDispatchByDriver"],
+		// (An investor's message, m3, takes the other branch since P1.)
+		caughtBy: ["chatToDispatchByDriver"],
 	},
 	{
 		// A message about a withheld load ID sent to every room in one payload, as
@@ -1328,6 +1341,21 @@ const MUTANTS = [
 		target: "sendChat",
 		mutate: cut("io.to(chatRooms(from, to)).except(\"dispatch\").emit(\"new-message\", payload);", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);"),
 		caughtBy: ["chatOncePerSocket"],
+	},
+	{
+		// An investor conversation's message sent like any other, as before P1
+		// (2026-10-23): the whole dispatch room, Dispatchers included, gets it.
+		name: "an investor conversation's chat sent to the dispatch room",
+		target: "sendChat",
+		mutate: cut("if (!investorChat && staffLoadId === payload.loadId) {", "if (staffLoadId === payload.loadId) {"),
+		caughtBy: ["chatFromInvestorSparesRoleNames"],
+	},
+	{
+		// ...or its staff copy sent to the dispatch room instead of the super-admin room.
+		name: "an investor conversation's staff copy to the dispatch room",
+		target: "sendChat",
+		mutate: cut("if (investorChat) io.to(\"super-admin\").emit(\"new-message\", payload);", "if (investorChat) io.to(\"dispatch\").emit(\"new-message\", payload);"),
+		caughtBy: ["chatFromInvestorSparesRoleNames"],
 	},
 	{
 		name: "register normalises a name without checking its type",
@@ -1355,6 +1383,7 @@ const MUTANTS = [
 		["chat to the bare recipient name", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);", "io.to((to || \"\").trim().toLowerCase()).emit(\"new-message\", payload);"],
 		["a reassign emit to the bare new driver", "io.to(driverRoom(newDriver)).emit(\"load-assigned\"", "io.to(newDriver.trim().toLowerCase()).emit(\"load-assigned\""],
 		["chat to the dispatch room when the recipient says so", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);", "io.to(to === \"dispatch\" ? \"dispatch\" : chatRooms(from, to)).emit(\"new-message\", payload);"],
+		["an investor conversation's staff copy to the dispatch room", "if (investorChat) io.to(\"super-admin\").emit(\"new-message\", payload);", "if (investorChat) io.to(\"dispatch\").emit(\"new-message\", payload);"],
 		["register joining the bare username", "\t\t\tif (usernameLower) socket.join(userRoom(usernameLower));\n\t\t} else if (role === \"Investor\")", "\t\t\tif (usernameLower) socket.join(usernameLower);\n\t\t} else if (role === \"Investor\")"],
 		["a new emit to every socket", "setTimeout(() => io.emit(\"reload\"), 500);", "setTimeout(() => io.emit(\"reload\"), 500);\nio.emit(\"location-update\", {});"],
 		["the Server built without the handshake rule", "\tallowRequest: liveUpdateHandshakeAllowed,\n", ""],
