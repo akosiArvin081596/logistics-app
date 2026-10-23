@@ -129,7 +129,8 @@ is deliberately excluded from CI. Before running it:
   and the second run's 429s look like regressions.
 
 Browser end-to-end tests (Playwright, local and staging) live in
-[`scripts/e2e/`](scripts/e2e/README.md) — also outside CI.
+[`scripts/e2e/`](scripts/e2e/README.md). They are outside `ci.yml`; their own
+workflow, `e2e.yml`, runs the sections the made-up seed supports on made-up data.
 
 ## CI/CD
 

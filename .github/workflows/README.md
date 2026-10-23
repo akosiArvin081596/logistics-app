@@ -12,6 +12,8 @@ Four workflows. `ci.yml` verifies, `deploy.yml` ships, `deploy-drift.yml` catche
 
 A fifth, `pr-checks.yml`, runs beside CI on every PR into `main` (opened, edited, pushed, reopened) and never touches the box: **PR title** (a squash merge's subject is the PR title, so it must be a conventional commit, or GitHub's own `Revert "..."` title) and **dependency review** (fails a PR that adds a runtime or development dependency version with a known high or critical vulnerability). Every action in every workflow is pinned by commit SHA; Dependabot's `github-actions` entry moves the pins, and `scripts/test-release-gate.js` §4 fails on an unpinned one.
 
+A sixth, `e2e.yml`, runs the browser e2e harness (`scripts/e2e/ci-run.sh`) on the same triggers as `ci.yml`, on **made-up data only**: the made-up seed, the Google stand-in, servers on the runner with every outbound effect off, and passwords generated for the run. It has `permissions: contents: read`, no secret, no environment and no `pull_request_target`, uses only `ci.yml`'s two pinned actions, and never touches the box. It is its own workflow on purpose: `ci.yml`'s `verify` must need every job in that file (`test-release-gate.js` §4), and `deploy.yml`'s CI wait is sized to `ci.yml`, so a job there would hold up production's gate behind the browser run. It is not a required check. Which sections run, which can't on the seed and why, and how a section fails the job: the "CI" section of [`scripts/e2e/README.md`](../../scripts/e2e/README.md#ci). `scripts/test-e2e-ci-gate.js` pins its permissions, triggers and actions.
+
 ---
 
 ## One-time setup
