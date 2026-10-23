@@ -31966,10 +31966,23 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
-// List investor users (for owner dropdown)
+// List investor users (for owner dropdown). `username` is the investor's full
+// name, as the truck owner pickers have always shown it. A Super Admin's answer
+// also carries `accountUsername`: the linked Investor account's sign-in
+// username, the name POST /api/messages addresses an investor by (null when no
+// Investor account is linked). Investor conversations are Super Admin only, so
+// a Dispatcher's answer has no such field.
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	if (req.session.user.role !== "Super Admin") {
+		const investors = db
+			.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+			.all();
+		return res.json({ investors });
+	}
 	const investors = db
-		.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+		.prepare(`SELECT i.user_id AS id, i.full_name AS username, i.full_name AS CompanyName, u.username AS accountUsername
+			FROM investors i LEFT JOIN users u ON u.id = i.user_id AND u.role = 'Investor'
+			ORDER BY i.full_name ASC`)
 		.all();
 	res.json({ investors });
 });
@@ -47791,6 +47804,9 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 //     otherwise: a staff account, a name no account holds, a name two hold),
 //     or, where the route allows it (`staffToDesk`: the text route, for a Super
 //     Admin in the driver app), to a desk under their own name only.
+//   • a Dispatcher writes to drivers only (2026-10-23): the investor desk, and
+//     any message INVESTOR_CHAT_SQL would count as an investor conversation
+//     (which only Super Admins read), is 403.
 //   • any other role: 403.
 // A desk's name is tested before any account is looked up, so an account named
 // like a desk is never a recipient. Returns { from, to, partyUserId } or
@@ -47818,10 +47834,16 @@ function resolveChatParties(user, toName, fromName, { noun = "Messages", item = 
 	const asked = String(fromName || "").trim();
 	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
 	if (!from) return { status: 422, reason: "sender", role, error: "Send as Dispatch or as yourself." };
-	const pick = `Pick a driver or an investor to send the ${item} to.`;
+	const driversOnly = role === "Dispatcher"
+		? { status: 403, reason: "recipient", role, error: `Dispatchers can send ${noun.toLowerCase()} to drivers only.` }
+		: null;
+	// The resolved send, unless it is a Dispatcher's into an investor conversation.
+	const send = (to, partyUserId) => (driversOnly && investorChatParties(from, to) ? driversOnly : { from, to, partyUserId });
+	const pick = driversOnly ? `Pick a driver to send the ${item} to.` : `Pick a driver or an investor to send the ${item} to.`;
 	if (askedDesk) {
+		if (driversOnly && askedDesk === CHAT_DESK_BY_ROLE.Investor) return driversOnly;
 		if (!staffToDesk || from === "Dispatch") return { status: 422, reason: "recipient", role, error: pick };
-		return { from, to: CHAT_DESK_NAMES[askedDesk], partyUserId: null };
+		return send(CHAT_DESK_NAMES[askedDesk], null);
 	}
 	const name = typeof toName === "string" ? toName.trim() : "";
 	const spelling = findDriverAccountSpelling(name);
@@ -47831,7 +47853,7 @@ function resolveChatParties(user, toName, fromName, { noun = "Messages", item = 
 	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
 	const hits = [...drivers, ...investors];
 	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
-	return { from, to: hits[0].name, partyUserId: hits[0].id };
+	return send(hits[0].name, hits[0].id);
 }
 
 // POST /api/messages — Send a new message

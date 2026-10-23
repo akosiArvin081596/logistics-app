@@ -29,7 +29,9 @@
  *      `register` joins: an investor's message and every staff message to an
  *      investor or the investor desk reach the parties and the Super Admins, never
  *      a Dispatcher (his own name's room included), each socket once. A driver's
- *      message and Dispatch's to a driver reach the Dispatcher as before.
+ *      message and Dispatch's to a driver reach the Dispatcher as before. A
+ *      Dispatcher's own send to an investor or the investor desk is refused (403
+ *      MESSAGE_RECIPIENT): no row, no notification, no live copy.
  *   §7 the investor still reads his own thread (GET /api/investor/messages).
  *   §8 the rule's desk is the investor portal's desk (CHAT_DESK_BY_ROLE), and
  *      no desk's name is ever read as an investor's username.
@@ -422,8 +424,7 @@ async function section6() {
 		["an investor to the investor desk", U.inv, { to: "admin", message: "Question about my payout" }, ["inv", "sa"]],
 		["a Super Admin as \"Dispatch\" to the investor", U.sa, { from: "Dispatch", to: INVESTOR, message: "Statement attached" }, ["inv", "sa"]],
 		["a Super Admin under his own name to the investor desk", U.sa, { from: U.sa.username, to: "admin", message: "Testing" }, ["sa"]],
-		["a Dispatcher as \"Dispatch\" to the investor", U.disp, { from: "Dispatch", to: INVESTOR, message: "Hello" }, ["inv", "sa"]],
-		["a Dispatcher under his own name to the investor", U.disp, { from: U.disp.username, to: ` ${INVESTOR} `, message: "Hello" }, ["inv", "sa"]],
+		["a Super Admin under his own name to the investor", U.sa, { from: U.sa.username, to: ` ${INVESTOR} `, message: "Hello" }, ["inv", "sa"]],
 		["the driver to \"Dispatch\" (as before)", U.drv, { to: "Dispatch", message: "At the shipper" }, ["disp", "drv", "sa"]],
 		["a Dispatcher as \"Dispatch\" to the driver (as before)", U.disp, { from: "Dispatch", to: DRIVER, message: "Call when loaded" }, ["disp", "drv", "sa"]],
 	];
@@ -437,7 +438,22 @@ async function section6() {
 	}
 	const notes = m.log.notifications.map((n) => n[0]);
 	ok("§6 no message to or from an investor makes a notification for the dispatch desk",
-		notes.slice(0, 5).every((to) => to !== "dispatch"), notes);
+		notes.slice(0, 4).every((to) => to !== "dispatch"), notes);
+	// A Dispatcher writes to drivers only (2026-10-23): his send into an
+	// investor conversation is refused before anything is written or emitted.
+	const refused = [
+		["a Dispatcher as \"Dispatch\" to the investor", { from: "Dispatch", to: INVESTOR, message: "Hello" }],
+		["a Dispatcher under his own name to the investor", { from: U.disp.username, to: ` ${INVESTOR} `, message: "Hello" }],
+		["a Dispatcher under his own name to the investor desk", { from: U.disp.username, to: "admin", message: "Hello" }],
+	];
+	for (const [label, body] of refused) {
+		const before = { emits: m.log.emits.length, notes: m.log.notifications.length, rows: db.prepare("SELECT COUNT(*) AS n FROM messages").get().n };
+		const r = await m.send(U.disp, body);
+		eq(`§6 ${label}: refused`, [r.status, r.body && r.body.code], [403, "MESSAGE_RECIPIENT"]);
+		ok(`§6 ${label}: no row, no notification, no live copy`,
+			m.log.emits.length === before.emits && m.log.notifications.length === before.notes
+			&& db.prepare("SELECT COUNT(*) AS n FROM messages").get().n === before.rows);
+	}
 }
 
 // ---------------------------------------------------------------------------
