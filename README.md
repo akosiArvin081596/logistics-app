@@ -63,7 +63,7 @@ No Jest/Vitest/ESLint. Instead, standalone runners plus a manual HTTP harness:
 ```bash
 npm run lint       # node --check over server.js and every .js/.mjs/.cjs in lib/ and scripts/ (about a second)
 npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), one per core — no server needed
-npm run check      # lint + test:unit: the local check the pre-push hook runs
+npm run check      # lint + test:unit: the whole suite (the pre-push hook runs lint and the runners a push reaches)
 npm run ci         # check + build:client — the same gate CI runs
 ```
 
@@ -78,16 +78,38 @@ rest. CI runs the runners in parts, as parallel jobs: `UNIT_TEST_SHARD=2/3 npm
 run test:unit` runs the second of three locally, and `node
 scripts/run-unit-tests.js --list` prints what a run would start.
 
-**Pre-push hook.** `.githooks/pre-push` runs `npm run check` before every push
-and blocks the push if it fails. Turn it on once per clone:
+**Pre-push hook.** `.githooks/pre-push` runs lint and the unit runners a push's
+changes reach, inside a sandbox, in about two minutes, and blocks the push if
+anything fails. Turn it on once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-It switches to the Node in `.nvmrc` through fnm when fnm is installed, and skips
-a push that only deletes branches. It checks the working tree, so commit first.
-`git push --no-verify` skips it for one push; CI runs the same runners anyway.
+- **What runs.** Lint over every file, then the runners the changed files reach:
+  the branch against its merge-base with `origin/main` (as last fetched), plus
+  uncommitted and untracked files. `scripts/lib/test-selection.js` picks them from
+  requires and imports, file names in string literals and, for `server.js`, the
+  declarations and routes each runner lifts. They run in tiers inside a 115 s
+  budget: changed runners and `test-pdf-cold-start.js` always finish; anything
+  else that doesn't fit is listed "not run for time", and CI runs it (its
+  `check · unit · build` stays the merge gate). `LOGISX_PREPUSH=full git push`
+  runs every runner with no budget.
+- **The sandbox.** Everything it runs from the repository runs in one child under
+  `/usr/bin/sandbox-exec`, with the profile kept in the hook file and the
+  environment emptied to an allowlist. The child can't read or write env files,
+  `settings.env`, the service-account key, `app.db`, `uploads/`, `~/.ssh`,
+  `~/Documents/Credentials`, `~/LogisX-replica`, the Keychain files, or the gh,
+  npm, AWS, gcloud, Docker, git-credentials, netrc and Claude token stores. It
+  writes only in temp dirs, has no terminal, and reaches the network only on
+  loopback. On macOS a sandbox that can't start (from inside another sandbox,
+  for example) refuses the push: push with plain `git push` from the worktree.
+  Elsewhere it runs unsandboxed and says so. `node scripts/test-prepush-sandbox.js`,
+  run from a plain terminal, proves the profile.
+- It switches to the Node in `.nvmrc` through fnm when fnm is installed, skips a
+  push that only deletes branches, and checks the working tree, so commit first. A
+  worktree branched before this hook gets lint and the whole suite instead.
+  `npm run check` by hand is still the whole suite, unsandboxed.
 
 `test-suite.js` at the repo root is a **separate, manual** HTTP harness. It needs
 a running server, it **writes** (it logs an expense, among other things), and it
