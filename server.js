@@ -117,8 +117,10 @@ const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDe
 const expenseAi = require("./lib/expense-ai");
 // "Personal" receipts: the rules, the line text and the two expense sources.
 const personalExpense = require("./lib/personal-expense");
-// Their receipts on the invoice: the re-encode service and the page layout.
+// Their receipts on the invoice: the re-encode service, the PDF receipt pages
+// service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
+const receiptPdfLib = require("./lib/receipt-pdf");
 const invoiceReceipts = require("./lib/invoice-receipts");
 // An invoice's Address line from a drivers_directory row, each part once.
 const { providerAddressLine } = require("./lib/invoice-header");
@@ -19491,8 +19493,7 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	// carries now (the snapshot is otherwise frozen): personalRenderData().
 	const personalRows = personalRowsOnInvoice(invoiceRow.id);
 	const { templateName, data } = personalRenderData(renderData, invoiceRow, personalRows);
-	const withReceipts = await personalReceiptRenderData(data, personalRows);
-	const pdfBuffer = await renderPolicy(templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(templateName, data, personalRows, invoiceRow.driver);
 	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
@@ -20318,8 +20319,7 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 	for (const e of added) for (const l of e.loads) if (!loadIds.includes(l)) loadIds.push(l);
 	const personalRows = personalRowsOnInvoice(inv.id);
 	const rendered = personalRenderData(next, { ...inv, total_earnings: total }, personalRows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, personalRows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, personalRows, inv.driver);
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, inv.pdf_file_name);
@@ -21613,11 +21613,10 @@ async function generateInvoiceHandler(req, res) {
 			Math.round((totalEarnings + (preservedAdjustment ? Number(preservedAdjustment.adjustment) || 0 : 0)) * 100));
 		if (personalFit.renderFields) Object.assign(renderData, personalFit.renderFields);
 		// Their receipts join the data for the render only, never the snapshot
-		const renderInput = personalFit.fit.length ? await personalReceiptRenderData(renderData, personalFit.fit) : renderData;
-
+		// (renderInvoiceWithReceipts(); with no Personal line it is the plain render).
 		// The LAST await. Everything below runs synchronously, so what the write
 		// re-checks is what it writes against.
-		const pdfBuffer = await renderPolicy(templateName, renderInput);
+		const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData, personalFit.fit, canonicalDriverName(driverName));
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -27329,12 +27328,28 @@ function personalRenderData(snapshot, invoiceRow, rows) {
 }
 
 // RECEIPTS ON THE INVOICE. Each Personal line says where its receipt is, and
-// each image receipt prints on its own page after the invoice
+// each receipt prints on its own sheet after the invoice
 // (lib/invoice-receipts.js receiptLayout()). The images are re-encoded off the
 // event loop (lib/receipt-images.js) and cached under DATA_DIR/storage, outside
 // uploads/. None of it is stored in render_data: it joins the data for the
 // render only, so a snapshot never holds an image or a note that went stale.
+//
+// PDF receipts (R3 v2): only with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on AND
+// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set; it stays off until
+// the driver-privacy rule for multi-page statements ships), a PDF receipt's
+// pages are prepared in a locked-down child process (lib/receipt-pdf.js) and
+// inserted after its sheet once Chrome has rendered the invoice. Only the
+// invoice's own driver's receipt (both names non-empty, normalizeDriverName())
+// is ever read from the cache. Anything that fails keeps "PDF receipt on
+// file"; a failed insert renders the invoice once more with every PDF receipt
+// on that note, so an invoice never fails because of a receipt. The child's
+// self-test runs at every start whatever the flags; until it passes, every PDF
+// keeps the note.
 const PERSONAL_RECEIPT_WAIT_MS = 15_000;
+const RECEIPT_PDF_PAGES_ENABLED = process.env.RECEIPT_PDF_PAGES_ENABLED === "true";
+function receiptPdfPagesOn() {
+	return PERSONAL_EXPENSE_DEDUCTIONS_ENABLED && RECEIPT_PDF_PAGES_ENABLED;
+}
 function receiptImageService() {
 	if (!receiptImageService.instance) {
 		receiptImageService.instance = receiptImagesLib.createReceiptImageService({
@@ -27345,6 +27360,39 @@ function receiptImageService() {
 	}
 	return receiptImageService.instance;
 }
+// The files the self-test proves the child cannot read (yes/no only, never
+// opened): the settings file this process loaded (the repo .env dotenv reads,
+// or a replica's settings file) and the database.
+function receiptPdfProbePaths() {
+	return {
+		env: REPLICA ? REPLICA.settingsPath : path.resolve(process.cwd(), ".env"),
+		db: process.env.DATABASE_PATH || path.join(__dirname, "app.db"),
+	};
+}
+// Never throws: a service that cannot be set up (a cache folder it refuses) is
+// replaced by one that keeps every PDF receipt on its note, so no invoice
+// render fails because of it.
+function receiptPdfService() {
+	if (!receiptPdfService.instance) {
+		try {
+			receiptPdfService.instance = receiptPdfLib.createReceiptPdfService({
+				receiptsDir: RECEIPTS_DIR,
+				cacheDir: path.join(DATA_DIR, "storage", "receipt-pdfs"),
+				probes: receiptPdfProbePaths(),
+				log: (m) => console.warn(`[receipt-pdfs] ${m}`),
+			});
+		} catch (err) {
+			console.warn(`[receipt-pdfs] PDF receipt pages off: ${err.message}`);
+			receiptPdfService.instance = {
+				prepare: async () => ({ status: "on_file", reason: "disabled" }),
+				merge: async () => ({ status: "failed", reason: "disabled" }),
+				selfTest: async () => ({ passed: false, problems: ["setup"], report: null, line: "" }),
+				state: () => "failed",
+			};
+		}
+	}
+	return receiptPdfService.instance;
+}
 
 // Start (or join) one receipt's re-encode; never waits, never throws.
 function warmReceiptImage(expense) {
@@ -27354,30 +27402,62 @@ function warmReceiptImage(expense) {
 
 // The render data with its receipts: `data` from personalRenderData() (or the
 // generation's), `rows` the lines it prints (a provisional line carries its
-// expense_id). Only the image receipts that can have a page (the first
-// RECEIPT_PAGES_MAX in print order) are prepared, waiting at most
-// PERSONAL_RECEIPT_WAIT_MS; one not ready by then prints "Receipt image not
-// available". A new object.
-async function personalReceiptRenderData(data, rows) {
-	if (!rows || !rows.length) return data;
+// expense_id). Only the receipts that can have a sheet (the first
+// RECEIPT_SHEETS_MAX in print order, images and attachable PDFs counted
+// together) are prepared, waiting at most PERSONAL_RECEIPT_WAIT_MS; an image
+// not ready by then prints "Receipt image not available", a PDF "PDF receipt
+// on file". A PDF receipt is attachable only with opts.pdfPages and when its
+// driver and opts.invoiceDriver are the same non-empty name, checked before
+// anything is read; its pages count toward RECEIPT_PDF_INVOICE_MAX_PAGES and
+// its bytes toward RECEIPT_PDF_INSERT_MAX_BYTES in print order, and one that
+// would cross either keeps the note. { data (a new object), inserts: the PDF
+// pages to put after their sheets (lib/receipt-pdf.js merge()) }.
+async function personalReceiptRenderData(data, rows, opts = {}) {
+	if (!rows || !rows.length) return { data, inserts: [] };
 	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
 	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
 	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
 		.map((l) => expenseOfRow.get(l.rowId)).filter((n) => Number.isInteger(n) && n > 0))];
-	const photoOf = new Map(order.length
-		? db.prepare(`SELECT id, photo_data FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e.photo_data])
+	const expenseOf = new Map(order.length
+		? db.prepare(`SELECT id, photo_data, driver FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e])
 		: []);
+	const invoiceDriver = normalizeDriverName(typeof opts.invoiceDriver === "string" ? opts.invoiceDriver : "");
+	const pdfPages = opts.pdfPages === true;
 	const service = receiptImageService();
-	let images = 0;
+	let sheets = 0;
 	const prepared = new Map(await Promise.all(order.map(async (id) => {
-		const kind = receiptImagesLib.receiptImageKind(photoOf.get(id), RECEIPTS_DIR);
-		if (kind === "pdf") return [id, { status: "pdf" }];
+		const e = expenseOf.get(id) || {};
+		const kind = receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR);
+		if (kind === "pdf") {
+			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
+			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
+			sheets += 1;
+			// Past the sheet cap a PDF keeps its own note: the app does not open a
+			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
+			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
+			const res = await receiptPdfService().prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
+			return [id, res.status === "pages" ? { status: "pdf_pages", pages: res.pages, pdf: res.pdf } : { status: "pdf" }];
+		}
 		if (kind !== "image") return [id, { status: "unavailable", reason: "missing" }];
-		images += 1;
-		if (images > invoiceReceipts.RECEIPT_PAGES_MAX) return [id, { status: "over_cap" }];
-		return [id, await service.prepare({ expenseId: id, photoData: photoOf.get(id) }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
+		sheets += 1;
+		if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "over_cap" }];
+		return [id, await service.prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
 	})));
+	// The invoice-wide caps on copied pages, in print order.
+	let copiedPages = 0;
+	let copiedBytes = 0;
+	for (const id of order) {
+		const p = prepared.get(id);
+		if (!p || p.status !== "pdf_pages") continue;
+		if (copiedPages + p.pages > receiptPdfLib.RECEIPT_PDF_INVOICE_MAX_PAGES || copiedBytes + p.pdf.length > receiptPdfLib.RECEIPT_PDF_INSERT_MAX_BYTES) {
+			prepared.set(id, { status: "pdf" });
+			continue;
+		}
+		copiedPages += p.pages;
+		copiedBytes += p.pdf.length;
+	}
 	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
+	const inserts = layout.inserts.map((x) => ({ expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
 	const out = { ...data, receiptPages: layout.pages };
 	if (data.personalCorrection) {
 		// A correction's line items and deductions are its lines, in the same order.
@@ -27388,31 +27468,51 @@ async function personalReceiptRenderData(data, rows) {
 	} else {
 		out.personalLines = layout.entries;
 	}
-	return out;
+	return { data: out, inserts };
+}
+
+// Every weekly or correction invoice render that carries Personal lines: the
+// receipts join the data (personalReceiptRenderData()), Chrome renders it, and
+// each attachable PDF receipt's pages go in after its sheet (lib/receipt-pdf.js
+// merge(), in the child). A failed merge renders once more with every PDF
+// receipt on its note. invoiceDriver: the invoice's own driver, for the PDF
+// driver check. Resolves the PDF bytes to write.
+async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver) {
+	if (!rows || !rows.length) return renderPolicy(templateName, data);
+	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: receiptPdfPagesOn() });
+	const pdf = await renderPolicy(templateName, first.data);
+	if (!first.inserts.length) return pdf;
+	const merged = await receiptPdfService().merge(pdf, first.inserts);
+	if (merged.status === "merged") return merged.pdf;
+	console.warn(`[receipt-pdfs] receipt pages for expense ${first.inserts.map((x) => x.expenseId).join(", ")} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
+	return renderPolicy(templateName, again.data);
 }
 
 // Before the Friday batch renders: every image receipt behind a Personal line of
 // that week (waiting, or on one of its invoices) is re-encoded and cached first,
-// one at a time, so the batch's renders read the cache instead of racing the
-// re-encode; an image not ready within a render's wait would print "Receipt image
-// not available" on an invoice nothing redraws. Bounded by
-// PERSONAL_RECEIPT_WARM_MS overall (each re-encode by its own deadline); never
-// throws. { receipts, prepared }.
+// and, with PDF receipt pages on, every PDF receipt's pages are prepared, one at
+// a time, so the batch's renders read the caches instead of racing the
+// children; a receipt not ready within a render's wait would print its note on
+// an invoice nothing redraws. Bounded by PERSONAL_RECEIPT_WARM_MS overall (each
+// job by its own deadline); never throws. { receipts, prepared }.
 const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
 async function warmPersonalReceiptsForWeek(weekStart) {
 	const out = { receipts: 0, prepared: 0 };
 	try {
 		if (!personalLedgerPresent()) return out;
+		const pdfPages = receiptPdfPagesOn();
 		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
 			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
-			.filter((e) => receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) === "image");
+			.map((e) => ({ ...e, kind: receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) }))
+			.filter((e) => e.kind === "image" || (pdfPages && e.kind === "pdf"));
 		out.receipts = list.length;
-		const service = receiptImageService();
 		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
 		for (const e of list) {
 			if (Date.now() > deadline) break;
+			const service = e.kind === "pdf" ? receiptPdfService() : receiptImageService();
 			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
-			if (res.status === "image") out.prepared += 1;
+			if (res.status === "image" || res.status === "pages") out.prepared += 1;
 		}
 	} catch (err) {
 		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
@@ -27650,8 +27750,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	const finalPath = path.join(dir, inv.pdf_file_name);
 	if (touchesInvoice && !softDelete) {
 		rendered = personalRenderData(snap, inv, next);
-		const withReceipts = await personalReceiptRenderData(rendered.data, next);
-		const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+		const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, next, inv.driver);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
 		fs.writeFileSync(tmpPath, pdfBuffer);
@@ -27758,8 +27857,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		adjustmentNote: "",
 	};
 	const rendered = personalRenderData(snapshot, { adjustment: 0, adjustment_note: "" }, rows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, rows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, rows, display);
 	let insertedId = null;
 	const result = commitInvoiceWithPdf({
 		invoiceNumber, pdfFileName, pdfBuffer,
@@ -47400,21 +47498,47 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 });
 
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
+// Each conversation also names its newest message (highest id) for the list's
+// last-message line: lastKind "voice" | "photo" | "file" | "text", lastText (its
+// first 60 characters, the text the thread serves) and lastVoiceMs (a voice
+// note's measured length while its audio is stored, else 0). Never its file
+// name, URL or id.
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
-				`SELECT
-					CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
-					load_id AS loadId,
-					MAX(timestamp) AS lastTimestamp,
-					SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread
-				 FROM messages
-				 GROUP BY driver, load_id
-				 ORDER BY lastTimestamp DESC`,
+				`SELECT g.driver, g.loadId, g.lastTimestamp, g.unread,
+				        m.message AS lastMessage, m.attachment_url AS lastUrl, m.attachment_type AS lastType,
+				        m.voice_file AS lastVoiceFile, m.voice_duration_ms AS lastDurationMs
+				 FROM (
+					SELECT
+						CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
+						load_id AS loadId,
+						MAX(timestamp) AS lastTimestamp,
+						SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+						MAX(id) AS lastId
+					 FROM messages
+					 GROUP BY driver, load_id
+				 ) g
+				 JOIN messages m ON m.id = g.lastId
+				 ORDER BY g.lastTimestamp DESC`,
 			)
-			.all();
+			.all()
+			.map((c) => {
+				const voice = c.lastType === "voice";
+				const kind = voice ? "voice" : c.lastUrl ? (c.lastType === "image" ? "photo" : "file") : "text";
+				const stored = voice && voiceNotes.VOICE_FILE_RE.test(c.lastVoiceFile || "");
+				return {
+					driver: c.driver,
+					loadId: c.loadId,
+					lastTimestamp: c.lastTimestamp,
+					unread: c.unread,
+					lastKind: kind,
+					lastText: Array.from(String(c.lastMessage || "")).slice(0, 60).join(""),
+					lastVoiceMs: stored && Number(c.lastDurationMs) > 0 ? Number(c.lastDurationMs) : 0,
+				};
+			});
 
 		// Every role but Super Admin: each conversation's load named as shownLoadId()
 		// does; GET /api/messages/:driverName?loadId= takes that text back.
@@ -70713,6 +70837,15 @@ server.listen(PORT, BIND_HOST, async () => {
 			console.error(`WARNING: umask is ${effective.toString(8).padStart(4, "0")}, expected ${BOOT_UMASK.toString(8).padStart(4, "0")} — new uploads may be world-readable`);
 		}
 	} catch {}
+	// The PDF receipt child's self-test, at every start whatever the flags: one
+	// line (uid, gid, groups, whether the settings file and the database are
+	// readable: yes/no only). Until it passes, every PDF receipt keeps its note.
+	// Creating the service throws on a cache folder it refuses (under uploads/).
+	try {
+		receiptPdfService().selfTest();
+	} catch {
+		console.warn("[receipt-pdfs] self-test not started; PDF receipt pages off");
+	}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);

@@ -156,7 +156,9 @@ const SHARED_CONSTS = [
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines",
 	// The batch caches the week's Personal receipt images first (none here).
-	"warmPersonalReceiptsForWeek"];
+	"warmPersonalReceiptsForWeek",
+	// Every invoice render goes through it (with no Personal line, the plain render).
+	"renderInvoiceWithReceipts"];
 
 // The declarations a world lifts from one source text — cached, because each
 // lift scans all of server.js and every world needs the same ~70: the shipped
