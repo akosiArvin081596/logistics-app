@@ -1,0 +1,239 @@
+{
+ "format": 1,
+ "exportedAt": "2026-10-22T00:00:00.000Z",
+ "note": "Made-up data for the browser harness's server (scripts/e2e/fake-google.cjs). No real load, person, company, sheet or address.",
+ "spreadsheets": {
+  "e2e-made-up-sheet": {
+   "role": "main",
+   "properties": {
+    "title": "LogisX e2e (made-up)"
+   },
+   "sheets": [
+    {
+     "properties": {
+      "sheetId": 0,
+      "title": "Job Tracking",
+      "index": 0,
+      "sheetType": "GRID",
+      "gridProperties": {
+       "rowCount": 1000,
+       "columnCount": 26
+      }
+     },
+     "values": [
+      [
+       "Contract ID",
+       "Load ID",
+       "Details",
+       "Trailer Number",
+       "Driver",
+       "Pickup Info",
+       "Pickup Address",
+       "Pickup Appointment",
+       "Drop-off Info",
+       "Drop-off Address",
+       "Drop-off Appointment",
+       "Job Status",
+       "Phase of Progress",
+       "Carrier Stage",
+       "Broker Contact Name",
+       "Phone Number",
+       "Email",
+       "Assigned Date",
+       "Status Update Date",
+       "Completion Date",
+       "Location Link",
+       "Documents",
+       "  Payment  ",
+       "Truck",
+       "Owner ID",
+       "output"
+      ],
+      [
+       "",
+       "QA-E2E-1001",
+       "Dry van",
+       "QA-TR-1",
+       "QA E2E Driver One",
+       "",
+       "100 Test Way, Testville, TX 75001",
+       "10/20/2026 8:00",
+       "",
+       "200 Sample Rd, Sampletown, OK 73001",
+       "10/21/2026 14:00",
+       "Dispatched",
+       "",
+       "",
+       "QA Broker Desk",
+       "",
+       "",
+       "10/19/2026",
+       "",
+       "",
+       "",
+       "",
+       "$1,500.00",
+       "QA-E2E-T1",
+       "0",
+       ""
+      ],
+      [
+       "",
+       "QA-E2E-1002",
+       "Reefer",
+       "QA-TR-2",
+       "QA E2E Driver Two",
+       "",
+       "300 Example Ave, Exampleton, AR 72001",
+       "10/21/2026 9:00",
+       "",
+       "400 Mock St, Mockburg, LA 70001",
+       "10/23/2026 10:00",
+       "In Transit",
+       "",
+       "",
+       "",
+       "",
+       "",
+       "10/20/2026",
+       "",
+       "",
+       "",
+       "",
+       "$2,250.00",
+       "QA-E2E-T2",
+       "0",
+       ""
+      ],
+      [
+       "",
+       "QA-E2E-1003",
+       "Dry van",
+       "QA-TR-1",
+       "QA E2E Driver One",
+       "",
+       "500 Fixture Blvd, Fixtureville, TX 75002",
+       "10/12/2026 7:30",
+       "",
+       "100 Test Way, Testville, TX 75001",
+       "10/13/2026 16:00",
+       "Delivered",
+       "",
+       "",
+       "",
+       "",
+       "",
+       "10/11/2026",
+       "10/13/2026",
+       "10/13/2026",
+       "",
+       "",
+       "$980.00",
+       "QA-E2E-T1",
+       "0",
+       ""
+      ]
+     ],
+     "formulas": {}
+    },
+    {
+     "properties": {
+      "sheetId": 1,
+      "title": "Payments Table",
+      "index": 1,
+      "sheetType": "GRID",
+      "gridProperties": {
+       "rowCount": 1000,
+       "columnCount": 26
+      }
+     },
+     "values": [
+      [
+       " Job ID",
+       "Contract ID",
+       "Payment Amount"
+      ],
+      [
+       "QA-E2E-1001",
+       "",
+       "$1,500.00"
+      ],
+      [
+       "QA-E2E-1002",
+       "",
+       "$2,250.00"
+      ],
+      [
+       "QA-E2E-1003",
+       "",
+       "$980.00"
+      ]
+     ],
+     "formulas": {}
+    },
+    {
+     "properties": {
+      "sheetId": 2,
+      "title": "Job Details",
+      "index": 2,
+      "sheetType": "GRID",
+      "gridProperties": {
+       "rowCount": 1000,
+       "columnCount": 26
+      }
+     },
+     "values": [
+      [
+       "",
+       "Rate Per Mile",
+       "Distance",
+       "Details",
+       "Payment"
+      ],
+      [
+       "",
+       "$3.00",
+       "500 mi",
+       "Testville, TX 75001 - Sampletown, OK 73001",
+       "$1,500.00"
+      ]
+     ],
+     "formulas": {}
+    },
+    {
+     "properties": {
+      "sheetId": 3,
+      "title": "Carrier Database",
+      "index": 3,
+      "sheetType": "GRID",
+      "gridProperties": {
+       "rowCount": 1000,
+       "columnCount": 26
+      }
+     },
+     "values": [
+      [
+       "Driver Name",
+       "Carrier Name",
+       "Truck",
+       "State"
+      ],
+      [
+       "QA E2E Driver One",
+       "QA E2E Carrier",
+       "QA-E2E-T1",
+       "TX"
+      ],
+      [
+       "QA E2E Driver Two",
+       "QA E2E Carrier",
+       "QA-E2E-T2",
+       "TX"
+      ]
+     ],
+     "formulas": {}
+    }
+   ]
+  }
+ }
+}

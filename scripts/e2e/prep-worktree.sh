@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Make a worktree bootable for the browser harness WITHOUT npm install / npm ci
 # there (either would rewrite client/package-lock.json):
-#   - symlink node_modules, client/node_modules, .env and service-account-key.json
-#     from the main checkout (all gitignored, so the worktree stays clean)
+#   - symlink node_modules and client/node_modules from the main checkout (both
+#     gitignored, so the worktree stays clean). Nothing else of the main checkout's
+#     setup is linked or copied, in any mode: the e2e server runs on the made-up
+#     settings boot-server.sh puts on the server's command line and the Google
+#     stand-in, never on a settings file or a key
 #   - warn if the worktree's dependency manifests differ from the main checkout's,
 #     because then the linked node_modules may be missing a package
 #   - build the client (client/dist, gitignored)
@@ -46,8 +49,6 @@ link() {
 }
 link node_modules
 link client/node_modules
-link .env
-link service-account-key.json
 [ "$missing" = 0 ] || { echo "prep-worktree: set up the main checkout first (the files marked MISSING)"; exit 2; }
 
 if [ "${E2E_LINK_PODS:-}" = "1" ]; then
