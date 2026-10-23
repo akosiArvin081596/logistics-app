@@ -217,6 +217,7 @@ function makeDeps() {
 		findTruckForDriver: truckLookup(db),
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
+		voiceNotes: require("../lib/voice-notes"),
 		getCarrierDBFromSQLite: () => { reads.push("getCarrierDBFromSQLite"); return CARRIER; },
 		computeDriverQueues: () => ({}),
 		withExpenseWindows: (rows) => rows.map((r) => ({ ...r })),

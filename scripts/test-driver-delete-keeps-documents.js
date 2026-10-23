@@ -258,6 +258,9 @@ function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 		purgeUserSessions: (id) => { rec.purged.push(id); return 0; },
 		syncDriverToCarrierSheet: (name, o) => rec.synced.push({ name, action: o && o.action }),
 		notifyChange: () => {},
+		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
+		userVoiceNoteFiles: () => [],
+		removeUserVoiceNotes: () => 0,
 		DATA_DIR: w.root,
 		fs, path, console: quiet,
 	};

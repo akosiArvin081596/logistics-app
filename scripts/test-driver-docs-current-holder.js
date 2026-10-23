@@ -276,6 +276,7 @@ const driverDeps = (over = {}) => ({
 	db: driverDb,
 	getJobTrackingCached: async () => JT,
 	liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),
+	voiceNotes: require("../lib/voice-notes"),
 	getCarrierDBFromSQLite: () => ({ headers: ["Driver"], data: [] }),
 	computeDriverQueues: () => ({}),
 	withExpenseWindows: (rows) => rows.map((x) => ({ ...x })),
