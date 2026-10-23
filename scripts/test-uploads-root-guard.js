@@ -114,6 +114,7 @@ function liftStatements(needle) {
 	for (let at = SRC.indexOf(needle); at >= 0; at = SRC.indexOf(needle, at + 1)) out.push(statementFrom(at + 1));
 	return out;
 }
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
 
 const LIFTED = {
 	consts: [
@@ -281,13 +282,16 @@ async function build(L = LIFTED, { db = makeDb() } = {}) {
 	const stub = (name) => (req, res) => { res.setHeader("X-Test-Guard", name); res.status(404).end(); };
 	const logs = [];
 	const fakeConsole = { log() {}, warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
+	// loadIdFor(): the list reads its load ID through the WITHHELD LOAD KEYS helper,
+	// as shipped (flag off, no key named: the ID as sent). Only Drivers list here.
 	const mod = new Function(
 		"app", "express", "path", "__dirname", "DATA_DIR", "db", "requireAuth", "requireRole", "loadBelongsToDriver",
 		"guardDriverSignedDoc", "guardInvestorSignedDoc", "guardInvoicePdf", "guardDrugTestFile", "guardExpenseReceipt", "guardChatAttachment", "console", "Date",
+		"loadIdFor",
 		compose(L),
 	)(app, express, path, TMP, TMP, db, requireAuth, requireRole, loadBelongsToDriver,
 		stub("guardDriverSignedDoc"), stub("guardInvestorSignedDoc"), stub("guardInvoicePdf"), stub("guardDrugTestFile"), stub("guardExpenseReceipt"),
-		stub("guardChatAttachment"), fakeConsole, FakeDate);
+		stub("guardChatAttachment"), fakeConsole, FakeDate, KEY_HELPERS.loadIdFor);
 	app.get("*", (req, res) => res.status(200).send("<html>SPA-CATCH-ALL</html>"));
 	const server = http.createServer(app);
 	await new Promise((r) => server.listen(0, "127.0.0.1", r));

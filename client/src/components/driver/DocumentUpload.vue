@@ -169,6 +169,9 @@ import { uploadFailureToast } from '../../lib/uploadFailure'
 
 const props = defineProps({
   loadId: { type: String, required: true },
+  // How the hint names the load, when that differs from `loadId` (a Dispatcher's
+  // withheld-ID load is sent by its key and shown as its served text).
+  loadLabel: { type: String, default: '' },
   driverName: { type: String, required: true },
   rowIndex: { type: Number, required: true },
   docType: { type: String, default: null },
@@ -330,9 +333,10 @@ const headerText = computed(() => {
 })
 
 const hintText = computed(() => {
+  const load = props.loadLabel || props.loadId
   const base = selectedType.value === 'Receipt'
-    ? `Take photos of the receipt for Load ${props.loadId}`
-    : `Take photos or upload files for Load ${props.loadId}`
+    ? `Take photos of the receipt for Load ${load}`
+    : `Take photos or upload files for Load ${load}`
   // Copy only, and desktop only — supportsDrag is false on touch, where "drag"
   // is an instruction nobody can follow. It gates no handler.
   return supportsDrag.value ? `${base} — or drag files onto this card` : base

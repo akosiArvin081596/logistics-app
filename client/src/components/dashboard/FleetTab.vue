@@ -47,7 +47,7 @@
               <div v-if="selected?.QueuedLoadIds && selected.QueuedLoadIds.length" style="display:flex;flex-direction:column;gap:4px;padding:0.75rem;border-bottom:1px solid #f3f4f6;grid-column:1 / -1;">
                 <span style="font-size:0.68rem;font-weight:600;text-transform:uppercase;color:#9ca3af;">Queued ({{ selected.QueuedLoadIds.length }})</span>
                 <div style="display:flex;flex-wrap:wrap;gap:0.35rem;">
-                  <span v-for="(lid, i) in selected.QueuedLoadIds" :key="lid" style="font-size:0.6875rem;font-family:'JetBrains Mono',monospace;color:#92400e;background:#fef3c7;padding:2px 8px;border-radius:4px;">{{ i + 1 }}. {{ lid }}</span>
+                  <span v-for="(lid, i) in selected.QueuedLoadIds" :key="queuedLoadListKey(selected, i)" style="font-size:0.6875rem;font-family:'JetBrains Mono',monospace;color:#92400e;background:#fef3c7;padding:2px 8px;border-radius:4px;">{{ i + 1 }}. {{ lid }}</span>
                 </div>
               </div>
             </div>
@@ -86,6 +86,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import EmptyState from '../shared/EmptyState.vue'
 import DriverAvailabilityPanel from '../drivers-db/DriverAvailabilityPanel.vue'
 import { fleetPillText } from '../../lib/availabilityText'
+// Two queued loads can read alike once their IDs are withheld ("QA-[contact
+// withheld]"): each chip is keyed by its load's key, else its position.
+import { queuedLoadListKey } from '../../lib/loadRef'
 
 const props = defineProps({ fleet: { type: Array, required: true }, activeJobs: { type: Array, default: () => [] }, headers: { type: Array, default: () => [] } })
 const emit = defineEmits(['availability-changed'])

@@ -232,10 +232,29 @@ const DA = { id: 10, role: "Driver", username: "LogisX-2001", driverName: "Drive
 const DB = { id: 11, role: "Driver", username: "LogisX-2002", driverName: "Driver B" };
 const NAMELESS = { id: 12, role: "Driver", username: "LogisX-2003", driverName: "" };
 
+// The Load ID rule the list names a load by for a Dispatcher, shipped as is with
+// value redaction on (as production runs), and the WITHHELD LOAD KEYS helpers the
+// list reads the load ID through (flag off, no key named: the ID as sent).
+// None of this fixture's Load IDs holds contact, so every list is as before.
+const LOAD_IDS = (() => {
+	const re = SRC.match(/\nconst BROKER_WITHHELD_RE = (\/[^\n]*\/i);\n/);
+	if (!re) fatal("BROKER_WITHHELD_RE not found in server.js");
+	const names = ["loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadIdIndex", "routeShownLoadIdIndex", "shownLoadId"];
+	return new Function("brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+		`const BROKER_WITHHELD_RE = ${re[1]};\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n` +
+		"const SHOWN_LOAD_ID_INDEX = Symbol(\"shownLoadIdIndex\");\nconst SHOWN_LOAD_ID_INDEXES = new WeakMap();\n" +
+		`${names.map((n) => liftFn(n)).join("\n")}\nreturn { ${names.join(", ")} };`,
+	)(require("../lib/broker-contact"), true);
+})();
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+
 // --- the three surfaces, buildable with a helper or a source of one's own -----
+// The list's own Job Tracking read (a Dispatcher's shown Load ID) is not an
+// ownership read: it does not count in sheet.reads.
 const listDeps = (over = {}) => ({
 	requireRole, requireAuth, loadBelongsToDriver, sentIfLoadOwnershipUnverified, LOAD_PANEL_DOCUMENT_FILTER,
-	documentFiledUnder, db: docDbRecorded, console: quiet, ...over,
+	documentFiledUnder, db: docDbRecorded, console: quiet,
+	...KEY_HELPERS, ...LOAD_IDS, getJobTrackingCached: async () => JT, ...over,
 });
 const LIST_SRC = routeSource("get", "/api/documents/:loadId");
 const buildList = (over, src = LIST_SRC) => buildRoute("get", "/api/documents/:loadId", listDeps(over), src);
@@ -432,6 +451,7 @@ const sorted = (...xs) => [...xs].sort().join();
 	const upload = (loadId, docType, extra = {}) => ({ loadId, rowIndex: 2, photoData: PDF, fileType: "document", fileName: "scan.pdf", docType, ...extra });
 	const io = { to: () => ({ emit() {}, except: () => ({ emit() {} }) }) };
 	const up = buildRoute("post", "/api/documents/upload", {
+		...KEY_HELPERS, ...LOAD_IDS,
 		requireRole, requireAuth, driverWriteLimiter: (req, res, next) => next(),
 		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, uploadDocTypeFor, isRateConDocType,
 		db: docDb,

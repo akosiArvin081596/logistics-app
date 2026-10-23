@@ -85,6 +85,7 @@ const eldFeedHealth = require("../lib/eld-feed-health");
 const loadMilesLib = require("../lib/load-miles");
 
 const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SHIPPED);
 
 // The built-in names, read before any lifted code runs, for an oracle written
 // apart from the shipped predicate.
@@ -444,6 +445,9 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 	const errors = [];
 	const passthrough = (req, res, next) => (next ? next() : undefined);
 	const deps = {
+		// The WITHHELD LOAD KEYS helpers the dashboard and the tracking map name a
+		// load's key through, as shipped (flag off: no key served).
+		...KEY_HELPERS,
 		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
 		db, app, geolib, fuelModel, normalizeLoadId, loadMilesLib, financialsReport: require("../lib/financials-report"), invoiceMonthSplit: require("../lib/invoice-month-split"), Date: FixedDate,
 		requireRole: () => passthrough, requireAuth: passthrough, fuelAnalyticsLimiter: passthrough,

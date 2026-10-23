@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { useApi } from '../composables/useApi'
 import { resolveLoadRoute } from '../lib/address'
+import { loadRef } from '../lib/loadRef'
 
 const api = useApi()
 
@@ -56,9 +57,11 @@ export const useDashboardStore = defineStore('dashboard', {
     // consults `Details` only when it is genuinely route-shaped.
     // `opts.confirmOffDuty`: the person chose "Assign anyway" after the server
     // answered 409 DRIVER_OFF_DUTY (useOffDutyConfirm()).
+    // The load is named by loadRef(): its key when this user is served its Load
+    // ID withheld (the Dispatcher Load ID plan, PR 2), else the ID as served.
     async assignDriver(rowIndex, driver, job, headers, opts = {}) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
-      const loadId = loadIdCol ? job[loadIdCol] || '' : ''
+      const loadId = loadRef(job, loadIdCol)
       const { origin, destination } = resolveLoadRoute(job, headers)
 
       await api.post('/api/dispatch', { rowIndex, driver, loadId, origin, destination, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) })
@@ -67,7 +70,7 @@ export const useDashboardStore = defineStore('dashboard', {
     async reassignDriver(rowIndex, newDriver, job, headers, opts = {}) {
       const loadIdCol = headers.find((h) => /load.?id|job.?id/i.test(h))
       const driverCol = headers.find((h) => /driver/i.test(h))
-      const loadId = loadIdCol ? job[loadIdCol] || '' : ''
+      const loadId = loadRef(job, loadIdCol)
       const oldDriver = driverCol ? job[driverCol] || '' : ''
       await api.post('/api/dispatch/reassign', { rowIndex, newDriver, loadId, oldDriver, ...(opts.confirmOffDuty ? { confirmOffDuty: true } : {}) })
     },
@@ -88,8 +91,10 @@ export const useDashboardStore = defineStore('dashboard', {
       await api.del(`/api/loads/${encodeURIComponent(loadId)}`)
     },
 
+    // A row with a key (`_loadKey`) is named by it, whatever ID the caller read off it.
     async updateStatus(rowIndex, driverName, loadId, newStatus, rowData) {
-      await api.put('/api/driver/status', { rowIndex, driverName, loadId, newStatus, rowData })
+      const ref = rowData && typeof rowData._loadKey === 'string' && rowData._loadKey ? rowData._loadKey : loadId
+      await api.put('/api/driver/status', { rowIndex, driverName, loadId: ref, newStatus, rowData })
     },
   },
 })

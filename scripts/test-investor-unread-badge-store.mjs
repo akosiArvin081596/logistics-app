@@ -13,15 +13,18 @@
 //      before; nothing unread sends no PUT.
 //
 // The store runs as shipped, its imports stubbed (pinia's defineStore, useApi,
-// the voice-note helpers). Made-up names only.
+// the voice-note helpers; the load-reference helper is the real one). Made-up
+// names only.
 //   node scripts/test-investor-unread-badge-store.mjs
 //   MESSAGES_STORE_JS=/path/to/base/messages.js node scripts/test-investor-unread-badge-store.mjs   # the base: fails §1
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORE = process.env.MESSAGES_STORE_JS || path.join(__dirname, '..', 'client', 'src', 'stores', 'messages.js')
+// The load-reference helper (withheld-load keys) is pure: the store uses it as shipped.
+const loadRef = await import(pathToFileURL(path.join(__dirname, '..', 'client', 'src', 'lib', 'loadRef.js')).href)
 
 let failed = 0
 function ok(name, cond, detail) {
@@ -71,6 +74,7 @@ function loadStore() {
     '../composables/useApi': { useApi: () => api },
     '../lib/voiceNoteText': { voiceNoteLabel: () => 'Voice note' },
     '../lib/voiceNoteUpload': { uploadVoiceNote: async () => ({}) },
+    '../lib/loadRef': loadRef,
   }
   for (const spec of specs) if (!(spec in deps)) throw new Error(`stores/messages.js imports ${spec}, which this runner does not stub`)
   const exportsObj = {}
