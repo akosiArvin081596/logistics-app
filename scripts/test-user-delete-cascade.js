@@ -965,6 +965,46 @@ check("refusal extraction picked up the 409 and its code selection", [
 		!/\blogAudit\(/.test(handler) || mount.includes("refuseCrossSite"), true);
 }
 
+// ---------------------------------------------------------------------------
+// A ROLLED-BACK DELETE IS AUDITED. When the cascade throws, the transaction
+// rolls back and the route answers 500 DELETE_ROLLED_BACK; it also records one
+// refusal row under the route's own descriptor (delete_user_blocked), with a
+// fixed tail and none of the error's text. The catch block is lifted verbatim
+// and run with a stand-in recorder; the answer itself is unchanged.
+// ---------------------------------------------------------------------------
+{
+	const marker = `console.error("delete user cascade failed, rolled back:", err.message);`;
+	const hits = SRC.split(marker).length - 1;
+	check("rolled-back delete: the catch's log line is unique", hits, 1);
+	const at = SRC.indexOf(marker);
+	const head = "} catch (err) {\n";
+	const open = SRC.lastIndexOf(head, at);
+	const end = SRC.indexOf("\n\t}\n", at);
+	const body = hits === 1 && open >= 0 && end > at ? SRC.slice(open + head.length, end) : "";
+	check("rolled-back delete: the catch block was located", body.includes(`code: "DELETE_ROLLED_BACK"`), true);
+	if (body) {
+		const recorded = [];
+		const logged = [];
+		const out = {};
+		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+		const req = { session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } };
+		const userDelAudit = { action: "delete_user_blocked", entity: "user", entityId: "7", subject: "delete made_up_user (role Driver)" };
+		const run = new Function("err", "req", "res", "userDelAudit", "recordPeriodRefusal", "console", body);
+		run(new Error("FOREIGN KEY constraint failed"), req, res, userDelAudit,
+			(...args) => recorded.push(args), { error: (...a) => logged.push(a.join(" ")) });
+		check("rolled-back delete: still answers 500 DELETE_ROLLED_BACK", [out.status, out.body && out.body.code], [500, "DELETE_ROLLED_BACK"]);
+		check("rolled-back delete: one refusal recorded", recorded.length, 1);
+		const [audit, code, periods] = recorded[0] || [];
+		check("rolled-back delete: ...under the route's descriptor, its actor and DELETE_ROLLED_BACK",
+			audit ? [audit.req === req, audit.action, audit.entity, audit.entityId, code, periods] : null,
+			[true, "delete_user_blocked", "user", "7", "DELETE_ROLLED_BACK", []]);
+		check("rolled-back delete: ...with the fixed tail", audit && audit.tail, "nothing was written — rolled back");
+		check("rolled-back delete: ...and none of the error's text in the row",
+			JSON.stringify(recorded).includes("FOREIGN KEY"), false);
+		check("rolled-back delete: the error still goes to the server log", logged.length === 1 && logged[0].includes("FOREIGN KEY"), true);
+	}
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) {
 	console.log("\nFailures:");

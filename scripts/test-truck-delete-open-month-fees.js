@@ -30,7 +30,8 @@
  *     maintenance_fund=N, compliance_fees=M" / "legal_documents=N"), and no
  *     subject or tail holds a dollar amount or a file name;
  *   - if the cascade ever removes a fee row or a legal document anyway, the
- *     transaction rolls back and the route answers 500 DELETE_ROLLED_BACK.
+ *     transaction rolls back and the route answers 500 DELETE_ROLLED_BACK,
+ *     audited as a refusal ("nothing was written — rolled back").
  *
  * WHAT MUST NOT CHANGE (these pass on main too):
  *   - a truck with no fee rows, no legal documents, no assignment history and
@@ -508,6 +509,11 @@ for (const locked of [[], ["2026-09"]]) {
 		eq(`§9 ...the truck's own documents are kept (${label})`,
 			count(w.db, "SELECT COUNT(*) AS n FROM legal_documents WHERE truck_id = 5"), opts.legal || 0);
 		eq(`§9 ...no delete_truck success row (${label})`, r.audits.filter((a) => a.action === "delete_truck").length, 0);
+		// The rollback is audited like the 409s: one refusal row under the route's
+		// descriptor, a fixed tail, no counts from the error and no error text.
+		eq(`§9 ...one refusal row, delete_truck_blocked under DELETE_ROLLED_BACK (${label})`,
+			r.refusals.map((x) => [x.action, x.code, x.periods, x.tail]),
+			[["delete_truck_blocked", "DELETE_ROLLED_BACK", [], "nothing was written — rolled back"]]);
 		eq(`§9 ...the body names no row (${label})`, Object.keys(r.body).sort(), ["code", "error"]);
 		// One server-log line, naming tables and counts only: every "=" is
 		// followed by a whole number, and no file name or dollar amount.

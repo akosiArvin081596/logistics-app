@@ -31829,6 +31829,11 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		})();
 	} catch (err) {
 		console.error("delete user cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", []);
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
@@ -35833,9 +35838,9 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const unit = (truck.unit_number || "").trim().toLowerCase();
 	const removed = {};
 	// One transaction, so a constraint this handler has not anticipated rolls the
-	// cascade back instead of half-applying it. There are no transactions anywhere
-	// else in this file, but there is also nowhere else that hard-deletes finance
-	// rows as a prelude to a statement that can throw.
+	// cascade back instead of half-applying it, as DELETE /api/users/:id does for
+	// its own cascade: both hard-delete rows as a prelude to a statement that can
+	// throw.
 	//
 	// The guard above refuses any fee row or legal document, so these deletes
 	// must find nothing. If one removes a row anyway (the guard and this cascade
@@ -35856,6 +35861,11 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		})();
 	} catch (err) {
 		console.error("delete truck cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// (table counts) stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", [], `Cannot delete ${truckLabel}`);
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
@@ -35876,6 +35886,15 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 // ============================================================
 // TRAILERS CRUD
 // ============================================================
+
+// A trailer's truck as its audit lines name it: the unit number and id, the id
+// alone when the truck row is gone, "none" when the trailer is on no truck.
+function trailerTruckLabel(truckId) {
+	if (!truckId) return "none";
+	const t = db.prepare("SELECT unit_number FROM trucks WHERE id = ?").get(truckId);
+	const unit = t ? auditText(t.unit_number, 100) : "";
+	return unit ? `${unit} (#${truckId})` : `#${truckId}`;
+}
 app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trailers = db.prepare(`
@@ -35929,21 +35948,43 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 		// whitespace, so a resend (padded or not) keeps the stored value as it is,
 		// and a real change is stored trimmed.
 		const vinChanged = vin != null && String(vin).trim() !== String(trailer.vin ?? "").trim();
+		const next = {
+			trailer_number: trailer_number ?? trailer.trailer_number,
+			type: type ?? trailer.type,
+			length: length ?? trailer.length,
+			year: year ?? trailer.year,
+			vin: vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
+			license_plate: license_plate ?? trailer.license_plate,
+			status: status ?? trailer.status,
+			truck_id: truck_id === undefined ? trailer.truck_id : (truck_id || null),
+			notes: notes ?? trailer.notes,
+		};
 		db.prepare(`
 			UPDATE trailers SET trailer_number = ?, type = ?, length = ?, year = ?, vin = ?, license_plate = ?, status = ?, truck_id = ?, notes = ?
 			WHERE id = ?
 		`).run(
-			trailer_number ?? trailer.trailer_number,
-			type ?? trailer.type,
-			length ?? trailer.length,
-			year ?? trailer.year,
-			vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
-			license_plate ?? trailer.license_plate,
-			status ?? trailer.status,
-			truck_id === undefined ? trailer.truck_id : (truck_id || null),
-			notes ?? trailer.notes,
+			next.trailer_number, next.type, next.length, next.year, next.vin,
+			next.license_plate, next.status, next.truck_id, next.notes,
 			id
 		);
+		// One update_trailer line per save that really changes a field, like the
+		// truck edit's lines: each changed field old -> new, compared as text to the
+		// row as read (the page resends the whole row, so presence means nothing).
+		// The plate and the notes are named, never quoted: the truck edit records
+		// neither, and notes are free text.
+		const same = (a, b) => String(a ?? "") === String(b ?? "");
+		const shown = (v) => auditText(v, 100) || "not set";
+		const changes = [];
+		for (const [col, label] of [["trailer_number", "trailer number"], ["type", "type"], ["length", "length"], ["year", "year"], ["vin", "VIN"], ["status", "status"]]) {
+			if (!same(trailer[col], next[col])) changes.push(`${label} ${shown(trailer[col])} → ${shown(next[col])}`);
+		}
+		if (!same(trailer.truck_id, next.truck_id)) changes.push(`truck ${trailerTruckLabel(trailer.truck_id)} → ${trailerTruckLabel(next.truck_id)}`);
+		if (!same(trailer.license_plate, next.license_plate)) changes.push("license plate changed");
+		if (!same(trailer.notes, next.notes)) changes.push("notes changed");
+		if (changes.length) {
+			logAudit(req, "update_trailer", "trailer", String(id),
+				`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`}: ${changes.join(", ")}`);
+		}
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
@@ -35957,6 +35998,12 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
 		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
 		db.prepare("DELETE FROM trailers WHERE id = ?").run(id);
+		// Like delete_truck: the row is gone, so the line says which trailer it was
+		// (number, VIN) and which truck it was on. Notes and plate are not recorded.
+		const deletedVin = auditText(trailer.vin, 100);
+		logAudit(req, "delete_trailer", "trailer", String(id),
+			`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`} (${trailer.type}, ${trailer.status}, ` +
+			`${trailer.truck_id ? `on ${trailerTruckLabel(trailer.truck_id)}` : "not on a truck"}${deletedVin ? `, VIN ${deletedVin}` : ""}) deleted`);
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
