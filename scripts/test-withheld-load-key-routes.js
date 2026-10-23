@@ -27,9 +27,12 @@
 //      with its key: success and error branches (LOAD_NOT_ON_SHEET,
 //      AMBIGUOUS_LOAD, ROW_LOAD_MISMATCH, the override's 404, period refusals)
 //      act on the stored ID, name it as shown, and the reply guard counts no hit;
-//      documents are listed closed; a message names the load as stored only to
-//      its own driver; a message thread by key keeps that load's messages; a row
-//      save of an ID that is only contact is confirmed by the key.
+//      a dispatch or a reassign by key names the load as stored only to the
+//      Super Admins' room and in a driver notice to a Driver account on the load
+//      (the old driver read off the load's own row, never the request); documents
+//      are listed closed; a message names the load as stored only to its own
+//      driver's Driver account; a message thread by key keeps that load's
+//      messages; a row save of an ID that is only contact is confirmed by the key.
 //
 // Every route is lifted whole out of server.js and run with only its I/O
 // stubbed (sheet reads, SQLite, sockets); any other name it touches is the
@@ -546,6 +549,90 @@ section("§5 POST /api/dispatch and /api/dispatch/reassign by key: every branch 
 	check("§5 dispatch: no error logged (beside the made-up read failure)", errors.filter((e) => !/made-up read failure/.test(e)), []);
 });
 
+// The made-up Driver accounts the dispatch routes look a driver name up in (by
+// driver name, letter case aside); every other statement reads and writes nothing.
+const driverAccountsDb = (names) => ({
+	prepare: (sql) => ({
+		get: (name) => (/\bFROM users\b/.test(sql) && /role = 'Driver'/.test(sql)
+			? names.filter((n) => n.toLowerCase() === String(name).trim().toLowerCase()).map((n) => ({ driver_name: n }))[0]
+			: undefined),
+		run: () => ({ changes: 0 }),
+		all: () => [],
+	}),
+});
+// dispatchStubs() with every live emit and driver notification row recorded into
+// `rec`, nothing stubbed between the route and the recording io: the shipped
+// emitDispatchNotice() and emitLoadEventToDispatch() run too, so the dispatch
+// room's per-role copies are recorded beside the driver's.
+function recordingDispatchStubs(state, errors, sheet, accounts, rec) {
+	const stubs = dispatchStubs(state, errors, sheet, {
+		io: fakeIo(rec.emitted), db: driverAccountsDb(accounts),
+		insertNotification: { run: (...row) => { rec.notified.push(row); return { lastInsertRowid: rec.notified.length }; } },
+	});
+	delete stubs.emitDispatchNotice;
+	delete stubs.emitLoadEventToDispatch;
+	return stubs;
+}
+// Where a call named a withheld load as stored: each room its live copy went to
+// ("<room> except <room>" for the dispatch room's redacted copy) and each driver
+// inbox ("inbox:<name>") whose notification row holds the stored ID.
+function storedIdSinks(rec) {
+	const out = new Set();
+	for (const e of rec.emitted) if (hiddenIn(e.payload).length) out.add(e.except ? `${e.room} except ${e.except}` : e.room);
+	for (const row of rec.notified) if (hiddenIn(row).length) out.add(`inbox:${row[0]}`);
+	return [...out].sort();
+}
+section("§5 dispatch and reassign by key: a driver notice names the load as stored only to a Driver account on the load", async () => {
+	const errors = [];
+	const state = { replyGuardHits: 0 };
+	const gate = liftFunction("withheldLoadKeyGate", keyStubs(state, errors));
+	// A Dispatcher whose own account carries a driver name.
+	const D = session("Dispatcher", { driverName: "Dee Dispatcher" });
+	const ACCOUNTS = [TD, OD]; // Driver accounts; "New Driver" and "Dee Dispatcher" are none
+	const HEADS = {
+		"/api/dispatch": 'app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
+		"/api/dispatch/reassign": 'app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {',
+	};
+	const run = async (route, body, accounts = ACCOUNTS) => {
+		const rec = { emitted: [], notified: [] };
+		const handler = liftHandler(HEADS[route], recordingDispatchStubs(state, errors, fakeSheets(SHEET()), accounts, rec));
+		const r = await call(gate, handler, { method: "POST", path: route, body, session: D });
+		const addressed = [...new Set([...rec.emitted.map((e) => e.room), ...rec.notified.map((row) => `inbox:${row[0]}`)])].sort();
+		return { code: r.code, body: r.body, sinks: storedIdSinks(rec), addressed, rec };
+	};
+	const driverCopy = (rec, room, event) => (rec.emitted.find((e) => e.room === room && e.event === event) || {}).payload;
+	const inboxRow = (rec, name) => rec.notified.find((row) => row[0] === name);
+
+	const own = await run("/api/dispatch", { loadId: K1, rowIndex: ROWNO(H1), driver: TD });
+	check("§5 dispatch by key to a Driver account: the stored ID to his room and inbox, and to the Super Admins' room; no one else",
+		[own.code, own.sinks], [200, ["driver:test driver", "inbox:test driver", "super-admin"]]);
+	for (const name of ["New Driver", "Dee Dispatcher"]) {
+		const r = await run("/api/dispatch", { loadId: K1, rowIndex: ROWNO(H1), driver: name });
+		const key = name.toLowerCase();
+		check(`§5 dispatch by key to "${name}", no Driver account: the notice names the load as shown; the stored ID only in the Super Admins' room`,
+			[r.code, r.sinks, (driverCopy(r.rec, `driver:${key}`, "load-assigned") || {}).loadId, (inboxRow(r.rec, key) || [])[2]],
+			[200, ["super-admin"], `QA-${WITHHELD}`, `New Load Assigned: QA-${WITHHELD}`]);
+	}
+
+	// Reassign: the old driver is the one H3's own row names (Other Driver, a Driver
+	// account), never the body's made-up `oldDriver`.
+	const moved = await run("/api/dispatch/reassign", { loadId: K3, rowIndex: ROWNO(H3), newDriver: TD, oldDriver: "Dee Dispatcher" });
+	check("§5 reassign by key with a made-up oldDriver: the stored ID to the new and the old Driver accounts and the Super Admins' room only",
+		[moved.code, moved.sinks], [200, ["driver:other driver", "driver:test driver", "inbox:other driver", "inbox:test driver", "super-admin"]]);
+	check("§5 reassign by key with a made-up oldDriver: the load's own old driver is told it moved; the made-up name is sent nothing",
+		[!!driverCopy(moved.rec, "driver:other driver", "load-cancelled"), moved.addressed.filter((a) => /dee dispatcher/.test(a))], [true, []]);
+	const none = await run("/api/dispatch/reassign", { loadId: K3, rowIndex: ROWNO(H3), newDriver: TD, oldDriver: "Dee Dispatcher" }, []);
+	check("§5 reassign by key, no Driver account on either side, a made-up oldDriver: no stored ID anywhere but the Super Admins' room",
+		[none.code, none.sinks, (driverCopy(none.rec, "driver:other driver", "load-cancelled") || {}).loadId, none.addressed.filter((a) => /dee dispatcher/.test(a))],
+		[200, ["super-admin"], `QA-${WITHHELD}`, []]);
+	const same = await run("/api/dispatch/reassign", { loadId: K3, rowIndex: ROWNO(H3), newDriver: OD, oldDriver: OD });
+	check("§5 reassign by key to the driver its row already names: the load-assigned notice only, no removal notice",
+		[same.code, same.rec.emitted.filter((e) => e.room.startsWith("driver:")).map((e) => [e.room, e.event]), same.rec.notified.map((row) => [row[0], row[1]])],
+		[200, [["driver:other driver", "load-assigned"]], [["other driver", "load-assigned"]]]);
+	check("§5 dispatch and reassign by key: no reply holds the stored ID, no hit, no error logged",
+		[hiddenIn([own, moved, none, same].map((r) => r.body)), state.replyGuardHits, errors], [[], 0, []]);
+});
+
 section("§5 PUT /api/loads/:loadId/status-override by key", async () => {
 	const errors = [];
 	const state = { replyGuardHits: 0 };
@@ -634,21 +721,26 @@ section("§5 a message by key names the load as stored only to its own driver", 
 	const state = { replyGuardHits: 0 };
 	const gate = liftFunction("withheldLoadKeyGate", keyStubs(state, errors));
 	const sent = [];
-	// The made-up Driver accounts resolveChatParties() looks the recipient up in
-	// (one per fixture driver, no Investor): the users table is the route's only read.
-	const ACCOUNTS = [{ id: 21, name: TD }, { id: 22, name: OD }];
-	const usersDb = {
+	// The made-up accounts resolveChatParties() looks the recipient up in (one
+	// Driver account per fixture driver), and messageLoadIdFor() reads a recipient's
+	// role from by id: the users table is the route's only read.
+	const ACCOUNTS = [{ id: 21, role: "Driver", name: TD }, { id: 22, role: "Driver", name: OD }];
+	const accountsDb = (accounts) => ({
 		prepare: (sql) => {
-			const rows = (name) => (/role = 'Driver'/.test(sql) ? ACCOUNTS : [])
-				.filter((a) => name === undefined || a.name.toLowerCase() === String(name).trim().toLowerCase())
-				.map((a) => ({ id: a.id, name: a.name, driver_name: a.name }));
-			return { all: (name) => rows(name), get: (name) => rows(name)[0] };
+			const role = /role = 'Driver'/.test(sql) ? "Driver" : /role = 'Investor'/.test(sql) ? "Investor" : null;
+			const rows = (arg) => accounts
+				.filter((a) => (/\bWHERE id = \?/.test(sql) ? a.id === Number(arg)
+					: a.role === role && (arg === undefined || a.name.toLowerCase() === String(arg).trim().toLowerCase())))
+				.map((a) => ({ id: a.id, role: a.role, name: a.name, driver_name: a.role === "Driver" ? a.name : "" }));
+			return { all: (arg) => rows(arg), get: (arg) => rows(arg)[0] };
 		},
-	};
-	const handler = liftHandler('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {', keyStubs(state, errors, {
-		requireAuth: null, driverWriteLimiter: null, db: usersDb, chatFiles: { chatAttachmentRefusal: () => null },
+	});
+	const usersDb = accountsDb(ACCOUNTS);
+	const messageRoute = (db) => liftHandler('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {', keyStubs(state, errors, {
+		requireAuth: null, driverWriteLimiter: null, db, chatFiles: { chatAttachmentRefusal: () => null },
 		sendChatMessage: (m) => { sent.push(m); return { id: sent.length }; },
 	}));
+	const handler = messageRoute(usersDb);
 	const D = session("Dispatcher");
 	const own = await call(gate, handler, { method: "POST", path: "/api/messages", body: { to: TD, from: "Dispatch", message: "Gate code 12", loadId: K1 }, session: D });
 	const other = await call(gate, handler, { method: "POST", path: "/api/messages", body: { to: OD, from: "Dispatch", message: "Heads up", loadId: K1 }, session: D });
@@ -656,26 +748,35 @@ section("§5 a message by key names the load as stored only to its own driver", 
 	check("§5 message by key: to the load's driver as stored; to another driver as shown; a normal load as sent; no hit",
 		[[own.code, other.code, plain.code], sent.map((m) => m.loadId), state.replyGuardHits],
 		[[200, 200, 200], ["QA-555-010-0161", `QA-${WITHHELD}`, "80000031"], 0]);
-	const voice = liftFunction("messageLoadIdFor", keyStubs(state, errors));
-	check("§5 the voice note's load (X-Message-Load-Id) follows the same rule",
-		[voice(own.req, K1, "test  DRIVER"), voice(own.req, K1, OD), voice({}, K1, TD)], ["QA-555-010-0161", `QA-${WITHHELD}`, K1]);
+	// A legacy Investor account whose username is the name in H1's Driver cell,
+	// which no Driver account holds: the chat rule resolves the recipient to the
+	// Investor, who is served the load as shown, never as stored.
+	const LEGACY = [{ id: 22, role: "Driver", name: OD }, { id: 31, role: "Investor", name: TD }];
+	const toInvestor = await call(gate, messageRoute(accountsDb(LEGACY)), { method: "POST", path: "/api/messages", body: { to: TD, from: "Dispatch", message: "Rate check", loadId: K1 }, session: D });
+	check("§5 message by key to an Investor account named like the load's Driver cell: the load as shown, never as stored",
+		[toInvestor.code, sent[sent.length - 1].to, sent[sent.length - 1].loadId, state.replyGuardHits], [200, TD, `QA-${WITHHELD}`, 0]);
+	const voice = liftFunction("messageLoadIdFor", keyStubs(state, errors, { db: accountsDb([...ACCOUNTS, { id: 31, role: "Investor", name: TD }]) }));
+	check("§5 the voice note's load (X-Message-Load-Id) follows the same rule: as stored only to a Driver account on the load",
+		[voice(own.req, K1, "test  DRIVER", 21), voice(own.req, K1, OD, 22), voice({}, K1, TD, 21), voice(own.req, K1, TD, 31), voice(own.req, K1, TD, null)],
+		["QA-555-010-0161", `QA-${WITHHELD}`, K1, `QA-${WITHHELD}`, `QA-${WITHHELD}`]);
 	// The voice route's own header checks (voiceNoteSendChecks()), through the
 	// gate: the recipient as the chat rule resolves it, then the load by that name.
-	const voiceChecks = liftFunction("voiceNoteSendChecks", keyStubs(state, errors, {
-		db: { prepare: (sql) => (/FROM messages/.test(sql) ? { get: () => undefined } : usersDb.prepare(sql)) },
+	const voiceChecksOver = (accounts) => liftFunction("voiceNoteSendChecks", keyStubs(state, errors, {
+		db: { prepare: (sql) => (/FROM messages/.test(sql) ? { get: () => undefined } : accountsDb(accounts).prepare(sql)) },
 		voiceNoteBytesToday: () => 0, voiceNoteDiskLow: () => false, VOICE_NOTE_DAILY_BYTES: 1024, logAuditRefusal: () => {},
 	}));
-	const voiceTo = async (to, loadId, n) => {
+	const voiceChecks = voiceChecksOver(ACCOUNTS);
+	const voiceTo = async (to, loadId, n, checks = voiceChecks) => {
 		let nexted = false;
-		const r = await call(gate, (req, res) => voiceChecks(req, res, () => { nexted = true; }), {
+		const r = await call(gate, (req, res) => checks(req, res, () => { nexted = true; }), {
 			method: "POST", path: "/api/messages/voice", session: D,
 			headers: { "idempotency-key": `qa-voice-note-${n}`, "x-message-to": encodeURIComponent(to), "x-message-load-id": loadId },
 		});
 		return [r.code, nexted, r.req.voiceNote ? r.req.voiceNote.loadId : null];
 	};
-	check("§5 voice note by key: to the load's driver as stored; to another driver as shown; a normal load as sent; no hit",
-		[await voiceTo(TD, K1, 1), await voiceTo(OD, K1, 2), await voiceTo(OD, "80000031", 3), state.replyGuardHits],
-		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], 0]);
+	check("§5 voice note by key: to the load's driver as stored; to another driver as shown; a normal load as sent; to an Investor named like the load's Driver cell as shown; no hit",
+		[await voiceTo(TD, K1, 1), await voiceTo(OD, K1, 2), await voiceTo(OD, "80000031", 3), await voiceTo(TD, K1, 4, voiceChecksOver(LEGACY)), state.replyGuardHits],
+		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], [200, true, `QA-${WITHHELD}`], 0]);
 	check("§5 message by key: no error logged", errors, []);
 });
 

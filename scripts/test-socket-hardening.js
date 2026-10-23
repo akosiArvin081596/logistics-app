@@ -31,7 +31,9 @@
  *      other connections carry on
  *   §3 ROOMS, on the SHIPPED connection handler with real sockets: every
  *      identity, whatever its driver name or username and whatever names it
- *      registers, joins only its role's room and its own identity rooms, and
+ *      registers, joins only its role's room and its own identity rooms (a
+ *      driver room only as a Driver, or as a Super Admin previewing the driver
+ *      app under his own driver name, never as a Dispatcher or an Investor), and
  *      receives only their events; chat through the SHIPPED POST /api/messages
  *      reaches the dispatch room and each party's rooms exactly once per
  *      socket, and a role room never by name, whatever the recipient is
@@ -197,7 +199,7 @@ const SRCS = {
 	// The load a message names, read through a Dispatcher's load key when the
 	// request named one (WITHHELD LOAD KEYS). No key gate runs here, so every
 	// load ID goes on as sent.
-	messageLoadId: liftFunction("function messageLoadIdFor(req, value, to) {"),
+	messageLoadId: liftFunction("function messageLoadIdFor("),
 	// The one send both chat routes use (POST /api/messages and
 	// POST /api/messages/voice): the row, the notification and the emits.
 	sendChat: liftFunction("function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {"),
@@ -276,6 +278,11 @@ const USERS = {
 	bob: { id: 8, username: "bob", role: "Driver", driverName: "Bob Driver" },
 	lone: { id: 9, username: "lone.driver", role: "Driver", driverName: "" },
 	unlinked: { id: 10, username: "dispatch", role: "Driver", driverName: "" },
+	// Accounts of other roles that carry a driver name (set by mistake, or left
+	// from a role change).
+	opsNamed: { id: 11, username: "dee", role: "Dispatcher", driverName: "Dee Dispatcher" },
+	invNamed: { id: 12, username: "ivy", role: "Investor", driverName: "Ivy Investor" },
+	rootNamed: { id: 13, username: "root.preview", role: "Super Admin", driverName: "Root Preview" },
 };
 const ALLOWLIST = ["https://driver-mobile.example"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -761,6 +768,41 @@ const SCENARIOS = {
 		} finally { await w.close(); }
 	},
 
+	// §3, accounts of other roles that carry a driver name. A driver room's
+	// notices name the driver's loads as stored, which a Dispatcher and an
+	// Investor are served withheld: registering that name joins the driver room
+	// for a Super Admin only (his /driver preview), and a Driver still joins his.
+	async staffNames(sources, p) {
+		const w = await startWorld({ sources });
+		try {
+			const who = ["opsNamed", "invNamed", "rootNamed", "bob"];
+			const c = {};
+			for (const k of who) c[k] = await openClient(w, { user: k });
+			const all = who.map((k) => c[k]);
+			// What /driver sends (the driver name), then the username, then a sentinel.
+			for (const k of who) {
+				c[k].s.emit("register", USERS[k].driverName);
+				c[k].s.emit("register", USERS[k].username);
+				c[k].s.emit("register", "__sentinel__");
+			}
+			const settled = await waitUntil(() => all.every((x) => w.received.some((r) => r.id === x.id && r.args[0] === "__sentinel__")));
+			const actual = Object.fromEntries(who.map((k) => [k, roomsOf(w, c[k])]));
+			p.staffNamesDetail = JSON.stringify(actual);
+			p.staffDriverNameJoinsNoDriverRoom = settled && sameSet(actual.opsNamed, ["dispatch", "user:dee"]) && sameSet(actual.invNamed, ["investor", "user:ivy"]);
+			p.superAdminPreviewJoinsOwnDriverRoom = settled && sameSet(actual.rootNamed, ["dispatch", "super-admin", "user:root.preview", "driver:root preview"]);
+			p.driverJoinsOwnDriverRoom = settled && sameSet(actual.bob, ["driver:bob driver", "user:bob"]);
+			// One driver event to each account's driver-name room, sent the way every
+			// shipped site sends it (driverRoom()).
+			for (const k of who) w.io.to(w.rooms.driverRoom(USERS[k].driverName)).emit("load-assigned", { k });
+			const delivered = await barrier(w, all, 1);
+			const own = (k) => copies(c[k], "load-assigned", (x) => x && x.k === k);
+			p.staffDriverNameGetsNoDriverEvent = delivered && copies(c.opsNamed, "load-assigned") === 0 && copies(c.invNamed, "load-assigned") === 0;
+			p.driverRoomEventsReachDriverAndPreview = delivered && own("bob") === 1 && own("rootNamed") === 1 &&
+				copies(c.bob, "load-assigned") === 1 && copies(c.rootNamed, "load-assigned") === 1;
+			p.staffNamesRan = true;
+		} finally { await w.close(); }
+	},
+
 	// §3, a register payload that is not a string. A fake socket, so the call is
 	// synchronous and its outcome is observed directly.
 	async nonString(sources, p) {
@@ -1122,6 +1164,12 @@ Object.assign(PROPS, {
 	unlinkedJoinsOwnRoomOnly: ["unlinked", "§3 a driver with no driver name must join only its own user room (fixture unlinked)"],
 	unlinkedGetsNoDispatchEvents: ["unlinked", "§3 ...and receive no dispatch-room event"],
 	unlinkedRan: ["unlinked", "§3 the unlinked-driver scenario must run to the end"],
+	staffDriverNameJoinsNoDriverRoom: ["staffNames", "§3 a Dispatcher or an Investor whose account carries a driver name must join no driver room, whatever it registers (fixtures opsNamed, invNamed)"],
+	staffDriverNameGetsNoDriverEvent: ["staffNames", "§3 ...and receive no event sent to that driver room"],
+	superAdminPreviewJoinsOwnDriverRoom: ["staffNames", "§3 a Super Admin registering his own driver name (the /driver preview) must join that driver room (fixture rootNamed)"],
+	driverJoinsOwnDriverRoom: ["staffNames", "§3 a Driver registering his driver name must still join his driver room (fixture bob)"],
+	driverRoomEventsReachDriverAndPreview: ["staffNames", "§3 ...and each must receive his own driver room's event once"],
+	staffNamesRan: ["staffNames", "§3 the staff-driver-name scenario must run to the end"],
 	nonStringNameSafe: ["nonString", "§3 a register payload that is not a string must be read as no name: the caller joins only its own rooms"],
 	nonStringRan: ["nonString", "§3 the non-string scenario must run to the end"],
 	throwingHandlerNoCrash: ["resilience", "§5 a fault in a socket event handler must not reach the process, and must leave the socket connected"],
@@ -1224,9 +1272,21 @@ const MUTANTS = [
 	{
 		name: "register joins the requested name as sent",
 		target: "ioHandler",
-		mutate: cut(/\n\t\tif \(requested && requested === driverNameLower\) socket\.join\(driverRoom\(driverNameLower\)\);\n\t\tif \(requested && requested === usernameLower\) socket\.join\(userRoom\(usernameLower\)\);/,
+		mutate: cut(/\n\t\tif \(role === "Super Admin" && requested && requested === driverNameLower\) socket\.join\(driverRoom\(driverNameLower\)\);\n\t\tif \(requested && requested === usernameLower\) socket\.join\(userRoom\(usernameLower\)\);/,
 			"\n\t\tif (requested && (requested === driverNameLower || requested === usernameLower)) socket.join(requested);"),
 		caughtBy: ["roomsExact", "dispatchEventsToDispatchersOnly", "unlinkedJoinsOwnRoomOnly", "unlinkedGetsNoDispatchEvents"],
+	},
+	{
+		name: "register lets any role join the driver room of its own driver name",
+		target: "ioHandler",
+		mutate: cut('if (role === "Super Admin" && requested && requested === driverNameLower)', "if (requested && requested === driverNameLower)"),
+		caughtBy: ["staffDriverNameJoinsNoDriverRoom", "staffDriverNameGetsNoDriverEvent"],
+	},
+	{
+		name: "register leaves out the Super Admin's /driver preview",
+		target: "ioHandler",
+		mutate: cut('if (role === "Super Admin" && requested && requested === driverNameLower)', 'if (role === "Driver" && requested && requested === driverNameLower)'),
+		caughtBy: ["superAdminPreviewJoinsOwnDriverRoom", "driverRoomEventsReachDriverAndPreview"],
 	},
 	{
 		name: "userRoom() without its prefix",
@@ -1321,6 +1381,7 @@ const MUTANTS = [
 	const shipped = await runScenarios(SRCS, Object.keys(SCENARIOS));
 	for (const [prop, [, msg]] of Object.entries(PROPS)) ok(shipped[prop] === true, msg);
 	if (shipped.roomsExact !== true) failures.push(`     rooms joined: ${shipped.roomsDetail}`);
+	if (shipped.staffDriverNameJoinsNoDriverRoom !== true || shipped.superAdminPreviewJoinsOwnDriverRoom !== true) failures.push(`     rooms joined: ${shipped.staffNamesDetail}`);
 	if (shipped.chatOncePerSocket !== true) failures.push(`     chat statuses m1-m14: ${shipped.chatStatusesDetail}`);
 	if (shipped.roomPinsHold !== true) failures.push(`     ${shipped.roomPinProblems}`);
 	if (shipped.handlerGuardsHold !== true) failures.push(`     ${shipped.handlerGuardProblems}`);

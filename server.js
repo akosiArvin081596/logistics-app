@@ -40902,18 +40902,22 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		});
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
-		// Persist notification and notify the driver in real-time
+		// Persist notification and notify the driver in real-time. The notice names
+		// the load as stored to a Driver account, now the load's driver (served his
+		// loads' IDs so, #549); to a name no Driver account holds, a request that
+		// named the load by its key names it as shown (WITHHELD LOAD KEYS).
+		const noticeLoadId = userMatch ? loadId : idText;
 		const route = [origin, destination].filter(Boolean).join(' → ') || '';
 		const notifResult = insertNotification.run(
 			driver.trim().toLowerCase(), 'load-assigned',
-			`New Load Assigned: ${loadId || 'Load'}`,
+			`New Load Assigned: ${noticeLoadId || 'Load'}`,
 			route,
-			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
+			JSON.stringify({ loadId: noticeLoadId, rowIndex, origin: origin || '', destination: destination || '' })
 		);
 		// Always notify the driver in real time. Drivers can hold multiple
 		// accepted loads at once (dispatcher pre-planning), so there's no
 		// busy-suppression — every assignment surfaces immediately.
-		io.to(driverRoom(driver)).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+		io.to(driverRoom(driver)).emit("load-assigned", { loadId: noticeLoadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
 
 		// Notify dispatch team
 		insertDispatchNotification.run(
@@ -40947,7 +40951,9 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 // POST /api/dispatch/reassign — Reassign a load to a different driver
 app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, newDriver: rawNewDriver, oldDriver } = req.body;
+		// The old driver is NOT taken from the body: it is read off the bound row
+		// below (`oldDriver`), as POST /api/dispatch/cancel reads its driver.
+		const { rowIndex: rawRowIndex, newDriver: rawNewDriver } = req.body;
 		// A Dispatcher's key reads as the stored ID; every reply names it as shown
 		// (WITHHELD LOAD KEYS).
 		const loadId = loadIdFor(req, req.body.loadId);
@@ -40996,6 +41002,11 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
 		}
+		// The driver the load is taken from: the cell this route overwrites, read
+		// off the bound row before the write (resolveLoadBinding() above proved the
+		// row holds the load). Never a name the request sends: the old driver's
+		// notice names the load, so it goes only to whom the sheet names.
+		const oldDriver = String((snapshot.row || [])[driverCol] || "").trim();
 
 		// NO FORMULAS, for every caller but a Super Admin — same rule and reason as
 		// POST /api/dispatch: `newDriver` is the caller's own text whenever it names
@@ -41081,30 +41092,39 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		});
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
+		// Each driver notice names the load as stored to a Driver account (the new
+		// driver now holds the load, the old one held it; each is served his loads'
+		// IDs so, #549); to a name no Driver account holds, a request that named
+		// the load by its key names it as shown (WITHHELD LOAD KEYS).
+		const newNoticeLoadId = userMatch ? loadId : idText;
 		// Notify new driver
 		insertNotification.run(
 			newDriver.trim().toLowerCase(), 'load-assigned',
-			`Load Reassigned: ${loadId || 'Load'}`,
+			`Load Reassigned: ${newNoticeLoadId || 'Load'}`,
 			`Previously assigned to ${oldDriver || 'another driver'}`,
-			JSON.stringify({ loadId, rowIndex })
+			JSON.stringify({ loadId: newNoticeLoadId, rowIndex })
 		);
 		// Always notify the new driver in real time (multi-load acceptance).
-		io.to(driverRoom(newDriver)).emit("load-assigned", { loadId, rowIndex });
+		io.to(driverRoom(newDriver)).emit("load-assigned", { loadId: newNoticeLoadId, rowIndex });
 
 		// Notify old driver — also emit a socket event so their app
 		// optimistically removes the ghost load instead of waiting for the
 		// next manual refresh. Without this, the old driver's UI keeps the
 		// load visible and they hit a confusing 403 when they try to act on it.
-		if (oldDriver) {
-			const oldDriverKey = oldDriver.trim().toLowerCase();
+		// Not when the load stays with the same driver: his app would drop the
+		// load it was just sent.
+		if (oldDriver && normalizeDriverName(oldDriver) !== normalizeDriverName(newDriver)) {
+			const oldDriverKey = oldDriver.toLowerCase();
+			const oldMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(oldDriver);
+			const oldNoticeLoadId = oldMatch ? loadId : idText;
 			const oldNotif = insertNotification.run(
 				oldDriverKey, 'load-cancelled',
-				`Load Removed: ${loadId || 'Load'}`,
+				`Load Removed: ${oldNoticeLoadId || 'Load'}`,
 				`Reassigned to ${newDriver}`,
-				JSON.stringify({ loadId, rowIndex, reassignedTo: newDriver })
+				JSON.stringify({ loadId: oldNoticeLoadId, rowIndex, reassignedTo: newDriver })
 			);
 			io.to(driverRoom(oldDriverKey)).emit("load-cancelled", {
-				loadId, rowIndex, reason: 'reassigned',
+				loadId: oldNoticeLoadId, rowIndex, reason: 'reassigned',
 				notificationId: oldNotif.lastInsertRowid,
 			});
 		}
@@ -42975,12 +42995,17 @@ function loadIdBindingOpts(req, loadId, extra) {
 	return { ...(extra || {}), shownAs: w.shown };
 }
 // POST /api/messages and POST /api/messages/voice: a message names a load by
-// its key as stored only when it goes to that load's own driver (the Driver
-// cell of its row), who is served the ID so (#549); to anyone else, as shown.
-function messageLoadIdFor(req, value, to) {
+// its key as stored only when it goes to that load's own driver, who is served
+// the ID so (#549): a Driver account (`partyUserId`, the recipient
+// resolveChatParties() resolved) whose name `to` is in the Driver cell of the
+// load's row. To anyone else, an Investor account of that name included, as shown.
+function messageLoadIdFor(req, value, to, partyUserId) {
 	const w = req && req.withheldLoad;
 	if (!w || typeof value !== "string" || value.trim() !== w.key) return value;
-	return w.drivers && w.drivers.has(normalizeDriverName(to)) ? w.raw : w.shown;
+	if (!w.drivers || !w.drivers.has(normalizeDriverName(to))) return w.shown;
+	const id = Number(partyUserId);
+	const party = Number.isInteger(id) && id > 0 ? db.prepare("SELECT role FROM users WHERE id = ?").get(id) : null;
+	return party && party.role === "Driver" ? w.raw : w.shown;
 }
 // The reply guard for a request that named a load by its key: res.json and a
 // string res.send are swept (lib/withheld-load-key.js guardReply()); streams,
@@ -47596,7 +47621,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const sent = sendChatMessage({ from, to: parties.to, message, loadId: messageLoadIdFor(req, loadId, parties.to), attachmentUrl, attachmentType, assetRef });
+		const sent = sendChatMessage({ from, to: parties.to, message, loadId: messageLoadIdFor(req, loadId, parties.to, parties.partyUserId), attachmentUrl, attachmentType, assetRef });
 		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
@@ -48145,7 +48170,7 @@ function voiceNoteSendChecks(req, res, next) {
 	if (voiceNoteDiskLow()) {
 		return res.status(507).json({ error: "Voice notes can't be stored right now. Send a text message instead.", code: "STORAGE_LOW" });
 	}
-	req.voiceNote = { ...parties, loadId: messageLoadIdFor(req, loadId.value, parties.to), clientKey, senderUserId };
+	req.voiceNote = { ...parties, loadId: messageLoadIdFor(req, loadId.value, parties.to, parties.partyUserId), clientKey, senderUserId };
 	next();
 }
 
@@ -71131,7 +71156,12 @@ io.on("connection", (socket) => {
 		// driver room when it is their driver name, the user room when it is
 		// their username (the driver app sends the username when the account
 		// has no driver name). Anything else joins nothing more.
-		if (requested && requested === driverNameLower) socket.join(driverRoom(driverNameLower));
+		// A driver room is a Driver's (joined above) or a Super Admin's, previewing
+		// the driver app (/driver) under his own driver name; never a Dispatcher's
+		// or an Investor's, whatever driver name the account carries: a driver
+		// room's notices name his loads as stored (#549), which those roles are
+		// served withheld.
+		if (role === "Super Admin" && requested && requested === driverNameLower) socket.join(driverRoom(driverNameLower));
 		if (requested && requested === usernameLower) socket.join(userRoom(usernameLower));
 	}));
 });

@@ -137,7 +137,7 @@ ${extract("a1SheetPrefix")}
 ${extract("a1ColumnLetter")}
 ${extract("sheetRowAfterUpdate")}
 ${extract("sheetRowCellWrites")}
-return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, reservedDriverNameRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
+return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, normalizeDriverName, reservedDriverNameRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
 	a1SheetPrefix, sheetRowAfterUpdate, sheetRowCellWrites };
 `)();
 const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_FIELDS")};`)();
@@ -664,6 +664,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 		// The Truck / Owner ID lookup (its own subject is
 		// scripts/test-truck-stamp-spacing.js): the driver's truck, as before.
 		findTruckForDriverStamp: () => ({ unit_number: "LogisX-#91", owner_id: 5, matchedBy: "case" }),
+		normalizeDriverName: H.normalizeDriverName,
 		getSheets: sheet.getSheets,
 		readJobTrackingSnapshot,
 		sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked.code }),

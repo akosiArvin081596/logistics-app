@@ -459,6 +459,7 @@ function mountDispatch(db, routeSrc, helperOver) {
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db,
 		findTruckForDriverStamp: helpers.findTruckForDriverStamp,
+		normalizeDriverName: helpers.normalizeDriverName,
 		getSheets: sheet.getSheets,
 		readJobTrackingSnapshot,
 		sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked.code }),

@@ -92,6 +92,16 @@ attempt("§2 the key table", () => {
 			["dispatch.desk@example.invalid", WITHHELD, [], true],
 		]);
 	check("§2 a normal ID has no key in the table", table.has(keys.keyFor("80000013")), false);
+	// A "Driver Pay" column before "Driver": the drivers are still the Driver
+	// column's, as every Driver lookup in server.js prefers the exact header.
+	const PAY_FIRST = ["Load ID", "Driver Pay", "Driver", "Job Status", "Phone Number", "Email"];
+	const payRows = ROWS.map((r) => ({ ...r, "Driver Pay": "$300.00" }));
+	const payTable = lib.buildLoadKeyTable(PAY_FIRST, payRows, {
+		index: bc.buildShownLoadIdIndex(PAY_FIRST, payRows, { withheldRe: WITHHELD_RE }), keyFor: keys.keyFor,
+		driverKey: (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " "),
+	});
+	check("§2 a \"Driver Pay\" column before \"Driver\": each load's drivers are still the Driver column's",
+		[...payTable.values()].map((e) => [e.raw, [...e.drivers].sort()]), entries.map(([raw, , drivers]) => [raw, drivers]));
 	check("§2 no index, no key function, or no Load ID column: an empty table",
 		[lib.buildLoadKeyTable(HEADERS, ROWS, { keyFor: keys.keyFor }).size, lib.buildLoadKeyTable(HEADERS, ROWS, { index }).size,
 			lib.buildLoadKeyTable(["Driver"], [{ Driver: "x" }], { index, keyFor: keys.keyFor }).size], [0, 0, 0]);
