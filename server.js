@@ -301,6 +301,26 @@ function chatDeskKey(name) {
 	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
 	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
 }
+// INVESTOR CONVERSATIONS ARE SUPER ADMIN ONLY (P1, Arvin 2026-10-22). An
+// investor conversation is every message with the investor desk ("admin") or
+// an Investor account's username on either side, trimmed and in any letter case
+// (how every thread reads its names); a desk's name is never an investor's,
+// even on a legacy account that holds one. Super Admins read them, and the investor
+// reads his own (GET /api/investor/messages, by his username); a Dispatcher
+// reads none: not in the inbox list or its unread count (GET /api/messages), not
+// as a thread (GET /api/messages/:driverName, 404), not live (sendChatMessage():
+// the super-admin room, never the dispatch room), not a chat file or a voice note
+// (lib/chat-files.js, lib/voice-notes.js, 404), and he marks none read
+// (PUT /api/messages/read). The one rule, as SQL: 1 for a row of `messages` in an
+// investor conversation, else 0. The query names the row's table `messages`: a
+// stored row, or the two names of a message being sent (investorChatParties()).
+// One line: several runners lift a top-level const by its line.
+const INVESTOR_CHAT_SQL = `(LOWER(TRIM(messages."from")) = 'admin' OR LOWER(TRIM(messages."to")) = 'admin' OR LOWER(TRIM(messages."from")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')) OR LOWER(TRIM(messages."to")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')))`;
+// Whether `user` reads investor conversations among the staff threads: Super
+// Admin only. (Investors read their own through their own routes.)
+function readsInvestorChats(user) {
+	return !!user && user.role === "Super Admin";
+}
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
 // A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
@@ -12523,16 +12543,17 @@ function guardExpenseReceipt(req, res, next, url, file) {
 }
 
 // uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
-// read the conversation it was sent in (Super Admin and Dispatcher every
-// thread; a Driver or Investor his own), decided by the first message that
-// names it; everyone else gets 404. Photos go out without their metadata (no
-// location). The rule and the copy live in lib/chat-files.js. chat_uploads
-// records who stored each file, so a message carries only its sender's own
-// upload (POST /api/messages).
+// read the conversation it was sent in (Super Admin every thread, a Dispatcher
+// every thread but an investor conversation's (INVESTOR_CHAT_SQL); a Driver or
+// Investor his own), decided by the first message that names it; everyone else
+// gets 404. Photos go out without their metadata (no location). The rule and
+// the copy live in lib/chat-files.js. chat_uploads records who stored each file,
+// so a message carries only its sender's own upload (POST /api/messages).
 db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
 const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
 	db,
 	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	investorChatSql: INVESTOR_CHAT_SQL,
 	logError: (msg) => console.error(msg),
 });
 function guardChatAttachment(req, res, next, url, file) {
@@ -47705,6 +47726,8 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 // throws, the row is rolled back, and nothing is notified or emitted. A text
 // message's insert is the statement it always was.
 function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {
+	// Read before anything is written: the live copy's rooms depend on it.
+	const investorChat = investorChatParties(from, to);
 	const timestamp = new Date().toISOString();
 	const insert = () => {
 		const id = voice
@@ -47754,15 +47777,28 @@ function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentT
 	// as stored) goes per role in the dispatch room: Super Admins as sent, the
 	// rest of the room with the load as shown (emitDispatchByRole()), and the
 	// parties' own rooms as sent, without the dispatch room's sockets, so each
-	// socket gets it once. Any other message, as before:
+	// socket gets it once. A message in an investor conversation
+	// (INVESTOR_CHAT_SQL) goes the same way but to the super-admin room only:
+	// no Dispatcher's socket gets it, his own name's room included. Any other
+	// message, as before:
 	const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
-	if (staffLoadId === payload.loadId) {
+	if (!investorChat && staffLoadId === payload.loadId) {
 		io.to(chatRooms(from, to)).emit("new-message", payload);
 	} else {
 		io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
-		emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+		if (investorChat) io.to("super-admin").emit("new-message", payload);
+		else emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
 	}
 	return { id, timestamp };
+}
+
+// Is a message between the names `from` and `to` in an investor conversation?
+// INVESTOR_CHAT_SQL, asked of the two names as a row. Anything but a plain "no"
+// counts as one, so its live copy goes to Super Admins only.
+function investorChatParties(from, to) {
+	const row = db.prepare(`SELECT ${INVESTOR_CHAT_SQL} AS investor_chat FROM (SELECT ? AS "from", ? AS "to") AS messages`)
+		.get(String(from ?? ""), String(to ?? ""));
+	return !row || row.investor_chat !== 0;
 }
 
 // The one name a caller's own messages and notifications are addressed to, for
@@ -47778,7 +47814,8 @@ function readFlagOwnName(user) {
 
 // PUT /api/messages/read — Mark messages as read
 //
-// ⚠️ SUPER ADMIN AND DISPATCHER MARK ANY MESSAGE; EVERY OTHER CALLER MARKS ONLY
+// ⚠️ SUPER ADMIN MARKS ANY MESSAGE, A DISPATCHER ANY BUT ONE IN AN INVESTOR
+// CONVERSATION (INVESTOR_CHAT_SQL); EVERY OTHER CALLER MARKS ONLY
 // MESSAGES ADDRESSED TO THEM (readFlagOwnName()), and a caller with no name
 // marks nothing. Staff keep the inbox-wide form because the dispatch inbox
 // (/messages) clears messages addressed to the shared
@@ -47795,8 +47832,9 @@ app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 		const placeholders = messageIds.map(() => "?").join(",");
 		const user = req.session.user;
 		if (user.role === "Super Admin" || user.role === "Dispatcher") {
+			const scope = readsInvestorChats(user) ? "" : ` AND NOT ${INVESTOR_CHAT_SQL}`;
 			db.prepare(
-				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
+				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})${scope}`,
 			).run(...messageIds);
 		} else {
 			const recipient = readFlagOwnName(user);
@@ -47942,10 +47980,13 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 // name, URL or id.
 // `unread` counts unread messages to either staff desk (CHAT_DESK_NAMES): a
 // driver writes to "Dispatch", an investor to "admin", and this inbox is where
-// staff read both (scripts/test-investor-unread-badge.js).
+// staff read both (scripts/test-investor-unread-badge.js). A Dispatcher's inbox
+// holds no investor conversation (INVESTOR_CHAT_SQL): it neither lists nor
+// counts one (scripts/test-investor-chats-super-admin-only.js).
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const deskKeys = Object.keys(CHAT_DESK_NAMES);
+		const scope = readsInvestorChats(req.session.user) ? "" : `WHERE NOT ${INVESTOR_CHAT_SQL}`;
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
@@ -47960,6 +48001,7 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 						SUM(CASE WHEN LOWER("to") IN (${deskKeys.map(() => "?").join(", ")}) AND read = 0 THEN 1 ELSE 0 END) AS unread,
 						MAX(id) AS lastId
 					 FROM messages
+					 ${scope}
 					 GROUP BY driver, load_id
 				 ) g
 				 JOIN messages m ON m.id = g.lastId
@@ -48007,6 +48049,14 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
+		// A Dispatcher reads no investor conversation (INVESTOR_CHAT_SQL): asking
+		// for one by its name (the investor desk, an investor's username) is 404,
+		// as a chat file or voice note he can't open is; any other thread is
+		// served without such messages (a staff name's thread holds them too).
+		// Each row carries investor_chat for the voice-note rule; never served.
+		const hideInvestorChats = !readsInvestorChats(req.session.user);
+		if (hideInvestorChats && investorChatParties(driverName, "")) return res.status(404).json({ error: "Not found" });
+		const scope = hideInvestorChats ? ` AND NOT ${INVESTOR_CHAT_SQL}` : "";
 		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
 		const loadId = loadIdFor(req, req.query.loadId) || "";
 		// Every role but Super Admin is served each load as shownLoadId() names it
@@ -48024,9 +48074,9 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 			messages = db
 				.prepare(
 					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
-					        voice_file, voice_duration_ms, party_user_id
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower, loadId);
@@ -48034,9 +48084,9 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 			messages = db
 				.prepare(
 					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
-					        voice_file, voice_duration_ms, party_user_id
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE LOWER("from") = ? OR LOWER("to") = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?)${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower);
@@ -48299,8 +48349,9 @@ app.post("/api/messages/voice", requireAuth, voiceNoteFeatureGate, voiceNoteUplo
 	}
 });
 
-// GET /api/messages/:id/voice — play a voice note. Super Admin and Dispatcher
-// play any; a Driver or an Investor only a note whose party_user_id is his own
+// GET /api/messages/:id/voice — play a voice note. Super Admin plays any, a
+// Dispatcher any but one in an investor conversation (INVESTOR_CHAT_SQL); a
+// Driver or an Investor only a note whose party_user_id is his own
 // account id. Anyone else, an id that is not a voice note, or a file the sweep
 // removed: 404, never 403 (a 403 would confirm the note exists). Range requests
 // answer 206 (iOS refuses media from a server that ignores Range). Never cached
@@ -48309,7 +48360,7 @@ app.get("/api/messages/:id/voice", requireAuth, voiceNotePlaybackLimiter, upload
 	const notFound = () => res.status(404).json({ error: "Not found" });
 	try {
 		if (!/^\d{1,12}$/.test(String(req.params.id))) return notFound();
-		const row = db.prepare("SELECT id, attachment_type, voice_file, party_user_id FROM messages WHERE id = ?").get(Number(req.params.id));
+		const row = db.prepare(`SELECT id, attachment_type, voice_file, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat FROM messages WHERE id = ?`).get(Number(req.params.id));
 		if (!row || row.attachment_type !== "voice" || !voiceNotes.canPlayVoiceNote(req.session.user, row)) return notFound();
 		if (!voiceNotes.voiceFilePath(VOICE_NOTE_DIR, row.voice_file)) return notFound();
 		res.sendFile(row.voice_file, {
