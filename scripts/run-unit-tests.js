@@ -75,7 +75,8 @@
  * --full runs every runner with no budget. Workers: the cores less one, less
  * the 1-minute load average, at least 2 (UNIT_TEST_CONCURRENCY overrides).
  * Each run saves its runners' times to $TMPDIR/logisx-prepush-times-<repo>.json
- * (numbers only) for the next run's estimates.
+ * (numbers only) for the next run's estimates; an estimate is never more than
+ * the runner's timeout (twice that for the runner allowed a retry).
  * The last line is the verdict the hook reads:
  *   pre-push verdict: lint=<pass|fail|skipped> selection=<...> runners=<...>
  * and the exit code is 0 only when nothing in it failed. UNIT_TEST_SHARD and
@@ -485,13 +486,20 @@ function readTimes(file, notes) {
 		const obj = JSON.parse(raw);
 		const out = new Map();
 		for (const [k, v] of Object.entries(obj && typeof obj === "object" ? obj : {})) {
-			if (/^(?:test|check)-[^/]*\.(?:js|mjs)$/.test(k) && Number.isFinite(v) && v >= 0 && v <= 3600000) out.set(k, v);
+			if (/^(?:test|check)-[^/]*\.(?:js|mjs)$/.test(k) && Number.isFinite(v) && v >= 0) out.set(k, v);
 		}
 		return out;
 	} catch (err) {
 		notes.push(`times cache unreadable (${err.message}); every runner counts as the median`);
 		return new Map();
 	}
+}
+
+// The longest a runner can take: it is killed at TIMEOUT_MS, and the one
+// allowed a retry gets two tries. No estimate is longer, whatever the cache
+// says.
+function estimateCap(file) {
+	return (FLAKY_ALLOWED_ONE_RETRY.has(file) ? 2 : 1) * TIMEOUT_MS;
 }
 
 function writeTimes(file, times, notes) {
@@ -600,7 +608,7 @@ async function prepushMain() {
 	const times = readTimes(cacheFile, notes);
 	const known = [...times.values()].sort((x, y) => x - y);
 	const median = known.length ? known[Math.floor(known.length / 2)] : 1000;
-	for (const it of items) it.est = times.has(it.file) ? times.get(it.file) : median;
+	for (const it of items) it.est = Math.min(times.has(it.file) ? times.get(it.file) : median, estimateCap(it.file));
 	const explicit = Number(process.env.UNIT_TEST_CONCURRENCY);
 	const workers = explicit >= 1 ? Math.floor(explicit) : sel.workersFor(os.availableParallelism(), os.loadavg()[0]);
 	const budgetMs = args.full ? Infinity : args.budgetMs;

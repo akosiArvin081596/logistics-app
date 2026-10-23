@@ -36,8 +36,10 @@
  *      the verdict line is last and the exit code agrees; lint failing, a
  *      missing or short changed list, a throwing selector, an unknown flag
  *      or a failing runner each fail it; an unreadable times cache is only a
- *      note; --full runs everything; tier 0 finishes past the budget; a
- *      platform skip is reported as SKIP; --list is unchanged
+ *      note; a cached time counts as at most the runner's timeout (twice that
+ *      for the runner allowed a retry); --full runs everything; tier 0
+ *      finishes past the budget; a platform skip is reported as SKIP; --list
+ *      is unchanged
  *   mutants of the selector, each caught above: the closure walk dropped,
  *      the comment rule dropped, scripts/lib helpers unmapped, text edges
  *      limited to code files
@@ -368,6 +370,18 @@ function harnessChecks() {
 	if (cache) fs.writeFileSync(path.join(fx.tmp, cache), "{not json");
 	const garbled = pre(fx, ["scripts/test-pass.js"]);
 	r.push([garbled.code === 0 && garbled.last === PASS && /note: times cache unreadable/.test(garbled.out), `§10 an unreadable times cache is a note, never a failure (exit ${garbled.code})`]);
+
+	// A cached time counts as at most the runner's timeout (twice that for the
+	// runner allowed a retry): the cache can't claim more than a runner can take.
+	const capped = harnessFixture({ ...RUNNERS, "scripts/test-pdf-cold-start.js": "process.exitCode = 0;\n" });
+	fs.writeFileSync(path.join(capped.tmp, `logisx-prepush-times-${path.basename(capped.dir)}.json`),
+		JSON.stringify({ "test-pass.js": 3000000, "test-also.js": 3000000, "test-pdf-cold-start.js": 3000000 }));
+	const cap = harness(capped, ["--lint", "--changed-list", listFile(capped, ["package.json"]), "--changed-count", "1", "--budget-ms", "115000"],
+		{ UNIT_TEST_TIMEOUT_MS: "70000", UNIT_TEST_CONCURRENCY: "1" });
+	r.push([cap.code === 0 && cap.last === PASS && /ok\s+\d+ms\s+test-pass\.js/.test(cap.out) && /ok\s+\d+ms\s+test-also\.js/.test(cap.out) && !/Not run for time/.test(cap.out),
+		`§10 a cached time over the timeout counts as the timeout, so a runner that fits still runs (exit ${cap.code}): ${cap.out.slice(-300)}`]);
+	r.push([/Tier 0 alone is estimated at 140 s/.test(cap.out),
+		`§10 …and the runner allowed a retry counts as twice the timeout (want "estimated at 140 s"): ${(/Tier 0 alone[^\n]*/.exec(cap.out) || ["no estimate line"])[0]}`]);
 
 	const missing = harness(fx, ["--lint", "--changed-list", path.join(fx.tmp, "nope"), "--changed-count", "1"]);
 	r.push([missing.code === 1 && missing.last === "pre-push verdict: lint=pass selection=fail runners=skipped", `§10 a missing changed list fails selection (exit ${missing.code}, last ${JSON.stringify(missing.last)})`]);
