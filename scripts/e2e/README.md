@@ -134,11 +134,16 @@ expected to FAIL exactly the fix rows.
 - **Never production.** `e2e.mjs` refuses `app.logisx.com`. Staging, `staging-app.logisx.com`, is allowed.
   `boot-server.sh` refuses ports 3000 (production on the VPS) and 5173 (Vite), and any port already in use. It binds the
   server to 127.0.0.1.
-- **The local data is real.** A local run uses a private copy of the main checkout's `app.db`: unsanitized production
-  data, PII included. The copies, the logins, the screenshots, the results and the server logs all live in the
+- **The local data is made up by default.** `setup-db.cjs` with no `SOURCE_DB` builds the database from the app's own
+  schema with invented records only (see `setup-db.cjs` below). Real data is used only on purpose: `SOURCE_DB` naming a
+  database under `~/LogisX-replica/` (refused inside any checkout or worktree) gives a private copy of it, unsanitized,
+  PII included. Either way the database, the logins, the screenshots, the results and the server logs all live in the
   **work dir**, which is created `0700` outside every checkout. The scripts refuse a database outside the work dir or a
-  symlinked one. They also refuse a work dir that is inside a checkout, contains one, or is open to other users. The source
-  database is only ever opened read-only, and it is copied with SQLite's backup API, never `cp`.
+  symlinked one. They also refuse a work dir that is inside a checkout, contains one, or is open to other users. A
+  `SOURCE_DB` is only ever opened read-only, and it is copied with SQLite's backup API, never `cp`.
+- **Verified on made-up data:** part 1 of the recipe below (`ONLY=trucks,dispatcher`: steps 1–12, R1–R16, D1–D3), all
+  PASS on 2026-10-23. The other sections have not been run on the made-up database yet; until they are, a step that
+  needs records the seed does not hold may FAIL or SKIP there.
 - **No real settings file and no Google key, ever.** `prep-worktree.sh` links only the two `node_modules` folders.
   `boot-server.sh` refuses a worktree that holds a `.env` or a `service-account-key.json` (a file or a link), and it
   never reads either. There is no settings file: `boot-server.sh` puts every setting on the server's command line,
@@ -160,9 +165,11 @@ expected to FAIL exactly the fix rows.
     Google for the Maps script, with the blank browser key.
   - **Does not go out:** no write to production, no mail (Gmail is blanked) and no pushes (the n8n webhook, Routemate,
     Linxup and ScanKit are blanked or off).
-  - **The data mix.** The database is still a private copy of the main checkout's `app.db` (real data), while the
-    loads now come from the made-up fixture. Steps that look for a real load on the sheet (a delivered load with a POD,
-    a Bison load, a load per driver) find the fixture's three `QA-E2E-` loads instead, and say so or SKIP.
+  - **The data.** By default both halves are made up: the database is `setup-db.cjs`'s made-up seed, whose driver
+    (`QA E2E Driver One`) and truck (`QA-E2E-T1`) are the fixture's, and the loads come from the made-up fixture. With
+    `SOURCE_DB` the database is a copy of real data while the loads are still the fixture's. Steps that look for a real
+    load on the sheet (a delivered load with a POD, a Bison load, a load per driver) find the fixture's three `QA-E2E-`
+    loads instead, and say so or SKIP.
   - **The rate-con Drive folder is never reached.** `server.js` has no default for `RATECON_DRIVE_FOLDER_ID`, and
     `boot-server.sh` blanks it like a key: the rate-con Drive features are off, no Drive call is made, and the server
     log carries one `[ratecon-drive]` warning at start saying so. `POST /api/loads/from-ratecon` (RC1) archives a
@@ -220,7 +227,8 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 |---|---|
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
 | `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
-| `setup-db.cjs` | Makes a fresh private copy of the main checkout's `app.db` in the work dir and sets five logins on the copy. |
+| `setup-db.cjs` | Makes the run's database in the work dir with five logins: made-up by default (`seed-made-up.cjs`); a copy of a real database only when `SOURCE_DB` names one under `~/LogisX-replica/`. |
+| `seed-made-up.cjs` | The made-up database: the app's own schema (server.js booted once on an empty file), the five logins and the driver's truck, application and onboarding, all invented. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the logins file matches a copy. Prints booleans and ids only. |
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's `node_modules` and `client/node_modules` (nothing else), then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
@@ -244,9 +252,9 @@ directory outside every checkout.
 
 | In the work dir | What it is |
 |---|---|
-| `*.db` (+ `-wal`, `-shm`) | **Private copies of an unsanitized production database, PII included.** Never copy them elsewhere. |
+| `*.db` (+ `-wal`, `-shm`) | The run's databases: made up by default. A database made with `SOURCE_DB` is **a private copy of real data, PII included**: never copy it elsewhere. |
 | `logins.json` (`0600`) | The five logins' names and ids: Super Admin, Driver, two Investors (`investor`, `investor2`), Dispatcher. No passwords: those are in the Keychain. |
-| `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. The screenshots show real data. |
+| `shots/<tag>/`, `results-<tag>.md` | A run's screenshots and verdict table. On a `SOURCE_DB` copy, the screenshots show real data. |
 | `server-<port>.log`, `server-<port>.pid` | The server's output, and the PID `stop-server.sh` stops. |
 | `fake-gmail/` (`0700`) | The drafts the fake Gmail captured (`E2E_FAKE_GMAIL=1`): each holds a real recipient, and the real invoice and POD PDFs of the load under test. |
 | `plant-journal.json` | Exists only while a planted value, a row the money path created, F1's planted sheet cell or RC1's sheet rows are live (see "Planting"). |
@@ -258,7 +266,7 @@ Run every command from the checkout under test (a worktree, or the main checkout
 ```bash
 fnm exec --using=22.23.2 npm --prefix scripts/e2e ci                        # once
 W="$(node scripts/e2e/paths.cjs work-dir)"                                   # the work dir (created 0700)
-fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # add --force to replace a copy
+fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # made-up data (no SOURCE_DB); add --force to replace it
 fnm exec --using=22.23.2 node scripts/e2e/verify-creds.cjs "$W/qa.db"        # expect "password matches=true must_change_password=0" x5
 # Once per worktree: link the main checkout's two node_modules folders as fix-bug.md step 3 says (running prep-worktree.sh is
 # still blocked by the secrets guard, whose rule predates this script linking only the installs). Never link .env or the key:
@@ -376,8 +384,32 @@ planted cases SKIP. They are never silently mis-tested.
 
 ### `setup-db.cjs <db> [--force]`
 
-- The source is `SOURCE_DB`, by default the main checkout's `app.db`. It is opened **read-only**
-  (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API. The copy must be inside the work dir.
+**Made-up data by default.** With no `SOURCE_DB` (unset or empty), no existing database is opened. `seed-made-up.cjs`
+makes `<db>` (inside the work dir) an empty file and boots this checkout's `server.js` on it once with `boot-server.sh`
+(made-up settings, the Google stand-in, `E2E_NO_CLIENT=1`, a free port), so the schema is the one the app creates on a
+new install. It then makes the records through the app's own routes and stops that server by its PID with
+`stop-server.sh`:
+
+| Record | How | Made-up value |
+|---|---|---|
+| Super Admin | `POST /api/auth/setup` | `qa-e2e-admin` |
+| Dispatcher, two Investors | `POST /api/users` | `qa-e2e-dispatcher`, `qa-e2e-investor1`, `qa-e2e-investor2` |
+| Driver | `POST /api/users` | `qa-e2e-driver`, driver name `QA E2E Driver One` (the fixture's driver of `QA-E2E-1001` and `-1003`) |
+| Truck | `POST /api/trucks` | `QA-E2E-T1` (the fixture's truck), assigned to that driver, with a JPEG photo drawn at run time (the app's jimp) |
+| Application | SQL, server stopped | the driver's accepted application, a PNG `cdl_front` drawn at run time, `example.test` mail, no SSN or licence number |
+| Onboarding | SQL, server stopped | the driver `fully_onboarded` on that application 60 days ago (the Kit tab renders; the driver app's welcome card, shown for 14 days after onboarding, does not cover the run's taps) |
+
+Every login gets `must_change_password = 0` and no session is left. The seed server's log, pid file and Sheets copy are
+removed, so the run's first boot starts a fresh copy of the fixture. The truck is not `QA-TEST-`: the run deletes
+those as its own leftovers, and R2a needs a truck that is not one of its own.
+
+**Real data only on purpose, from `~/LogisX-replica/`.** `SOURCE_DB=<path>` copies that database instead. It is
+accepted only under `~/LogisX-replica/` (symlinks resolved first), and refused inside any checkout or worktree (this
+one, the main checkout, or any folder holding `.git`), with a message saying to unset it. The copy is real data: keep
+its screenshots and results out of the repo.
+
+- The source is opened **read-only** (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API.
+  The copy must be inside the work dir.
 - Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also clears the copy's sessions.
 - Driver: a Driver whose `driver_name` matches (case-insensitively) the `assigned_driver` of exactly one truck with an
   image photo. The Driver must be `fully_onboarded` (or have no onboarding status), so the Kit tab renders, and their
@@ -390,8 +422,10 @@ planted cases SKIP. They are never silently mis-tested.
   and D1–D3 SKIP.
 - The Driver, both Investors and the Dispatcher each get a random password (a bcryptjs hash,
   `must_change_password = 0`) on the copy only.
-- The Keychain's passwords are reused, so one set of logins works for every copy. The script prints the ids it
-  picked, never a password.
+
+Either way, the passwords go to the Keychain and the names and ids to `logins.json`, whose `seed` says `made-up` or
+`copy`. The Keychain's passwords are reused (for the made-up logins, while the logins file names the same made-up
+user), so one set of logins works for every database. The script prints ids, never a password.
 
 ### `plant-before-boot.cjs <db> [--force | --remove]`
 
