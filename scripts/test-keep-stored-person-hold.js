@@ -321,6 +321,8 @@ async function section2() {
 	eq("§2 (review L1, flag off) the answer is today's (written), and a would_hold row records it",
 		[ro1.body.values["Pickup Appointment"], ro1.body.held, ro.cellRows("900000218", "Pickup Appointment").filter((x) => x.source === "would_hold").map((x) => [x.value, x.stored_value]), ro.sends.length],
 		["10/6/2026 08:00", [], [["10/6/2026 08:00", "10/12/2026 8:00:00"]], 0]);
+	const roToday = await world({ rows: [RESTORED] }).post("900000218", v({ id: "900000218", pu: "10/6/2026 08:00", dr: "10/14/2026 08:00", pay: "$900.00" }));
+	eq("§2 (review L1, flag off) the whole answer is the same as a route with no record at all", ro1.body, roToday.body);
 
 	// L2: PUT /api/data of another sheet, or the same date in another format.
 	const l2 = world({ env: ON });
