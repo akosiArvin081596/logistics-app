@@ -262,7 +262,8 @@ directory outside every checkout.
 
 ## Local run
 
-Run every command from the checkout under test (a worktree, or the main checkout):
+Run every command from the checkout under test (a worktree, or the main checkout), except `setup-db.cjs`, which needs a
+worktree:
 
 ```bash
 fnm exec --using=22.23.2 npm --prefix scripts/e2e ci                        # once

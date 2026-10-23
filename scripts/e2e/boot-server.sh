@@ -183,6 +183,11 @@ else
   echo "gmail: blanked (no mail target: an approve answers preview only)"
 fi
 
+# How long to wait for the server to answer: E2E_BOOT_WAIT_S seconds (default 90;
+# the harness's tests use a short one). Checked before anything is launched.
+WAIT_S="${E2E_BOOT_WAIT_S:-90}"
+case "$WAIT_S" in ''|*[!0-9]*) refuse "E2E_BOOT_WAIT_S must be a number of seconds, got '$WAIT_S'";; esac
+
 cd "$WT"
 # The fakes are preloaded into the server alone: nothing below this line but the
 # server runs node. fake-google.cjs always; fake-gmail.cjs with E2E_FAKE_GMAIL=1.
@@ -218,9 +223,7 @@ printf '%s\n%s\n' "$PID" "$WT" >"$PIDFILE"
 echo "started pid $PID on 127.0.0.1:$PORT from $WT (log: $LOG)"
 
 # Wait until it answers (the boot reads the sheet copy first, and exits if it cannot),
-# up to E2E_BOOT_WAIT_S seconds (default 90; the harness's tests use a short one).
-WAIT_S="${E2E_BOOT_WAIT_S:-90}"
-case "$WAIT_S" in ''|*[!0-9]*) refuse "E2E_BOOT_WAIT_S must be a number of seconds, got '$WAIT_S'";; esac
+# up to WAIT_S seconds (checked before the launch, above).
 for i in $(seq 1 "$WAIT_S"); do
   if ! kill -0 "$PID" 2>/dev/null; then echo "server exited; see $LOG" >&2; tail -20 "$LOG" >&2; exit 1; fi
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/auth/session" || true)"
