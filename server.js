@@ -31965,10 +31965,23 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
-// List investor users (for owner dropdown)
+// List investor users (for owner dropdown). `username` is the investor's full
+// name, as the truck owner pickers have always shown it. A Super Admin's answer
+// also carries `accountUsername`: the linked Investor account's sign-in
+// username, the name POST /api/messages addresses an investor by (null when no
+// Investor account is linked). Investor conversations are Super Admin only, so
+// a Dispatcher's answer has no such field.
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	if (req.session.user.role !== "Super Admin") {
+		const investors = db
+			.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+			.all();
+		return res.json({ investors });
+	}
 	const investors = db
-		.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+		.prepare(`SELECT i.user_id AS id, i.full_name AS username, i.full_name AS CompanyName, u.username AS accountUsername
+			FROM investors i LEFT JOIN users u ON u.id = i.user_id AND u.role = 'Investor'
+			ORDER BY i.full_name ASC`)
 		.all();
 	res.json({ investors });
 });
