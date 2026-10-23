@@ -107,6 +107,9 @@ section('§1 the helper', () => {
 })
 
 const read = (rel) => fs.readFileSync(path.join(CLIENT, rel), 'utf8')
+// The child components a template hands the served Load ID text (`:load-id="loadIdValue"`),
+// by tag name: a per-load panel asks its routes by what it is handed.
+const servedIdPanels = (src) => [...src.matchAll(/<([A-Z]\w*)\b[^<>]*?:load-id="loadIdValue"/g)].map((m) => m[1])
 
 section('§2 Active Loads', () => {
   const src = read('components/dashboard/ActiveLoadsTab.vue')
@@ -115,8 +118,12 @@ section('§2 Active Loads', () => {
     (src.match(/api\.(get|put|post|del)\([^)\n]*encodeURIComponent\(loadIdValue\.value\)/g) || []), [])
   check('§2 Active Loads: the detail\'s reads (documents, rating, geocode) go by loadRef()',
     /const lid = loadRef\(job, lc\)\.trim\(\)/.test(src), true)
-  // The driver instructions section keeps the served ID until its routes
-  // (lib/driver-instructions-runtime.js) read keys: a follow-up.
+  check('§2 Active Loads: the driver instructions panel is handed the load\'s reference',
+    /<DriverInstructionsSection :load-id="loadRefValue"/.test(src), true)
+  // The rate-con PDF section is the one exception: it renders for a Super Admin
+  // only, who is never served a key (loadRef() is the served ID for him).
+  check('§2 Active Loads: no per-load panel but the Super Admin-only rate-con PDF is handed the served Load ID text',
+    servedIdPanels(src), ['RateConPdfSection'])
   check('§2 Active Loads: the override, the status timeline, the haul, the POD upload and the documents refresh go by the load\'s reference',
     [/status-override`/.test(src) && /encodeURIComponent\(loadRefValue\.value\)\}\/status-override/.test(src),
       /<StatusTimeline v-if="loadRefValue" :load-id="loadRefValue"/.test(src), /<LoadHaulSection :load-id="loadRefValue"/.test(src),
@@ -145,6 +152,10 @@ section('§2 Job Board', () => {
     [/<span v-if="selectedLoadIdWithheld"[^>]*>Ask a Super Admin for this link<\/span>\s*<button\s+v-else-if="loadIdValue"/.test(src),
       /if \(!loadIdValue\.value \|\| selectedLoadIdWithheld\.value\) return/.test(src)], [true, true])
   check('§2 Job Board: the title shows the ID as served', /<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src), true)
+  check('§2 Job Board: the driver instructions panel is handed the load\'s reference (loadRef() of the open load)',
+    [/const loadRefValue = computed\(\(\) => \(selectedJob\.value \? loadRef\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src),
+      /<DriverInstructionsSection :load-id="loadRefValue"/.test(src)], [true, true])
+  check('§2 Job Board: no per-load panel is handed the served Load ID text', servedIdPanels(src), [])
 })
 
 section('§2 the dashboard store (assign, reassign, status)', () => {
