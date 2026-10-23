@@ -9,8 +9,11 @@
 //   §1 the route list: every route that reads a load ID from its path, its query,
 //      its body or X-Message-Load-Id either reads it through loadIdFor() (or
 //      messageLoadIdFor()) or is listed here with why it needs no key; a new
-//      such route fails this runner until it is one or the other. The gate is
-//      mounted above every route.
+//      such route fails this runner until it is one or the other. The lib/ files
+//      that read a load ID from a request are listed the same way (the
+//      driver-instructions routes read it through routeLoadId(); its own runner
+//      is scripts/test-driver-instructions-load-key.js). The gate is mounted
+//      above every route.
 //   §2 the gate (withheldLoadKeyGate()): a key in the path, a load field of the
 //      query or the body, or X-Message-Load-Id reads as its load and leaves the
 //      request as sent; an unknown key in one of those answers 404
@@ -341,6 +344,27 @@ section("§1 every route that reads a load ID reads a key through loadIdFor()", 
 		reading.filter((r) => RESOLVED.includes(r.route) && !r.resolved).map((r) => r.route), []);
 	check("§1 no exempt route resolves keys (each is Super Admin only, public or n8n)",
 		reading.filter((r) => EXEMPT[r.route] && r.resolved).map((r) => r.route), []);
+	// lib/ routes (a module's mount(), wired in server.js), which the scan above can't see:
+	// each lib file that reads a load ID from a request reads it through its own key-aware
+	// helper, or is listed as needing none, with why.
+	const LIB_READS_RE = /req\.(params|body|query)\.(loadId|load_id)\b|\{[^}]*\b(loadId|load_id)\b[^}]*\}\s*=\s*req\.(params|body|query)|x-message-load-id/i;
+	const libText = (f) => fs.readFileSync(path.join(ROOT, "lib", f), "utf8");
+	// Code only: block comments and whole-line comments dropped.
+	const codeOf = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+	const libReading = fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && LIB_READS_RE.test(codeOf(libText(f)))).sort();
+	const LIB_RESOLVED = ["driver-instructions-runtime.js"];
+	const LIB_EXEMPT = { "ratecon-pdf-route.js": "Super Admin only: requireRole before any lookup" };
+	check("§1 lib/: the files that read a load ID from a request are exactly the listed ones: unlisted, then gone",
+		[libReading.filter((f) => !LIB_RESOLVED.includes(f) && !LIB_EXEMPT[f]), [...LIB_RESOLVED, ...Object.keys(LIB_EXEMPT)].filter((f) => !libReading.includes(f)).sort()], [[], []]);
+	const runtime = libText("driver-instructions-runtime.js");
+	const helper = /\nfunction routeLoadId\(req\) \{\n[\s\S]*?\n\}\n/.exec(runtime);
+	const pathReads = (s) => (codeOf(s).match(/req\.params\.loadId/g) || []).length;
+	check("§1 lib/driver-instructions-runtime.js reads req.params.loadId only in routeLoadId(), which reads the key on req.withheldLoad",
+		[!!helper, !!helper && pathReads(runtime) > 0 && pathReads(helper[0]) === pathReads(runtime), !!helper && /\breq\.withheldLoad\b/.test(helper[0])], [true, true, true]);
+	const unguarded = Object.keys(LIB_EXEMPT).filter((f) => libText(f).split("\n")
+		.filter((l) => /\bapp\.(get|post|put|patch|delete)\(/.test(l))
+		.some((l) => !/\bapp\.(get|post|put|patch|delete)\([^,]+, requireRole\("Super Admin"\)/.test(l)));
+	check("§1 each exempt lib/ route opens with requireRole(\"Super Admin\")", unguarded, []);
 	const lines = SRC.split("\n");
 	const at = (re) => lines.findIndex((l) => re.test(l));
 	const gateAt = at(/^app\.use\(withheldLoadKeyGate\);/);
