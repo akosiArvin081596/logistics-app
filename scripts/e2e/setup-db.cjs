@@ -90,7 +90,9 @@ const reuse = (key, userId) => {
 };
 
 (async () => {
-	for (const suffix of ["", "-wal", "-shm"]) {
+	// <db>.sheets.json is the e2e server's copy of the made-up Sheets fixture (boot-server.sh):
+	// a new database starts from a fresh copy.
+	for (const suffix of ["", "-wal", "-shm", ".sheets.json"]) {
 		const f = destAbs + suffix;
 		if (fs.existsSync(f)) {
 			if (!force) fail(`refusing: ${f} exists (pass --force to replace it)`);

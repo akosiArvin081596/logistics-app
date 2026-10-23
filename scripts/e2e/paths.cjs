@@ -6,11 +6,11 @@
 // load before any install exists.
 //
 //   REPO            the checkout this harness lives in (<REPO>/scripts/e2e)
-//   mainCheckout()  the checkout that owns app.db, .env, the Google key and the
-//                   installs a worktree lacks: the parent of git's common dir
-//                   (MAIN_CHECKOUT overrides)
+//   mainCheckout()  the checkout that owns app.db and the installs a worktree
+//                   lacks: the parent of git's common dir (MAIN_CHECKOUT overrides).
+//                   Its settings file and Google key are never used by the harness
 //   appDir()        the checkout whose node_modules (better-sqlite3, bcryptjs,
-//                   puppeteer, dotenv) and scripts/ are used: APP_DIR, else REPO
+//                   puppeteer) and scripts/ are used: APP_DIR, else REPO
 //                   once it has installs (its own, or prep-worktree.sh's links),
 //                   else the main checkout
 //   workDir()       E2E_WORK_DIR, default $TMPDIR/logisx-e2e: the DB copies,
