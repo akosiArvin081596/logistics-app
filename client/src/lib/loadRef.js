@@ -2,7 +2,7 @@
 //
 // Every role but Super Admin is served a Load ID that holds broker contact as
 // its shown text ("QA-[contact withheld]", or a blank cell when the ID is only
-// contact). With WITHHELD_LOAD_KEYS_ENABLED on, a Dispatcher also gets an opaque
+// contact). With WITHHELD_LOAD_REFS_ENABLED on, a Dispatcher also gets an opaque
 // key beside it: `_loadKey` on a load row, `loadKey` beside a `loadId` (the
 // tracking map, live events, a notice's metadata), `CurrentLoadKey` and
 // `QueuedLoadKeys` on a Fleet entry. The server reads the key back as the load.

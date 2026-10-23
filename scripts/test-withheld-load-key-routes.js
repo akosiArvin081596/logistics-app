@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A Dispatcher opens, edits, assigns and overrides a load whose Load ID holds
 // broker contact by an opaque key, and never receives the ID text (the
-// Dispatcher raw Load ID plan, PR 2; WITHHELD_LOAD_KEYS_ENABLED, off by default).
+// Dispatcher raw Load ID plan, PR 2; WITHHELD_LOAD_REFS_ENABLED, off by default).
 //
 // Written before the change: on main every section fails (no gate, no
 // loadIdFor(), no keys served), except the Super Admin and flag-off pins.
@@ -268,7 +268,7 @@ function hiddenIn(body, list = HIDDEN) {
 
 // The stubs every lifted piece shares: the flag on, the runner's keys, the read.
 const keyStubs = (state, errors, more = {}) => ({
-	WITHHELD_LOAD_KEYS_ENABLED: true, WITHHELD_LOAD_KEYS: KEYS, WITHHELD_LOAD_KEY_STATE: state,
+	WITHHELD_LOAD_REFS_ENABLED: true, WITHHELD_LOAD_KEYS: KEYS, WITHHELD_LOAD_KEY_STATE: state,
 	getJobTrackingCached: async () => JT, currentShownLoadIdIndex: () => INDEX, normalizeLoadId,
 	console: quietConsole(errors), ...more,
 });
@@ -345,8 +345,8 @@ section("§1 every route that reads a load ID reads a key through loadIdFor()", 
 	check("§1 the gate is mounted once, below the session and the password-change refresh, above every route",
 		[lines.filter((l) => /^app\.use\(withheldLoadKeyGate\)/.test(l)).length, gateAt > at(/^app\.use\(refreshPasswordChangeFlag\);/), gateAt >= 0 && gateAt < firstApi],
 		[1, true, true]);
-	check("§1 the flag is off unless set (WITHHELD_LOAD_KEYS_ENABLED reads true/1/yes/on only)",
-		/^const WITHHELD_LOAD_KEYS_ENABLED = \/\^\(true\|1\|yes\|on\)\$\/i\.test\(String\(process\.env\.WITHHELD_LOAD_KEYS_ENABLED \?\? ""\)\.trim\(\)\);$/m.test(SRC), true);
+	check("§1 the flag is off unless set (WITHHELD_LOAD_REFS_ENABLED reads true/1/yes/on only)",
+		/^const WITHHELD_LOAD_REFS_ENABLED = \/\^\(true\|1\|yes\|on\)\$\/i\.test\(String\(process\.env\.WITHHELD_LOAD_REFS_ENABLED \?\? ""\)\.trim\(\)\);$/m.test(SRC), true);
 });
 
 // ================================================================== §2 the gate
@@ -388,7 +388,7 @@ section("§2 the gate reads a key and leaves the request as sent", async () => {
 	}
 	check("§2 a Super Admin, a Driver or an Investor naming a key: passed on, never read (keys are for Dispatchers)",
 		roles, [["Super Admin", true, true], ["Driver", true, true], ["Investor", true, true]]);
-	const off = liftFunction("withheldLoadKeyGate", keyStubs(state, errors, { WITHHELD_LOAD_KEYS_ENABLED: false }));
+	const off = liftFunction("withheldLoadKeyGate", keyStubs(state, errors, { WITHHELD_LOAD_REFS_ENABLED: false }));
 	const valueOff = liftFunction("withheldLoadKeyGate", keyStubs(state, errors, { BROKER_CONTACT_VALUE_REDACTION_ENABLED: false }));
 	const flagged = await call(gate, null, { path: `/api/load/${STRANGER}`, session: session("Dispatcher", { mustChangePassword: true }) });
 	const signedOut = await call(gate, null, { path: `/api/load/${STRANGER}`, session: {} });
@@ -455,7 +455,7 @@ section("§4 keys are served beside each withheld ID, to a Dispatcher only", asy
 		queue.map((x) => [x.load_id, x.load_key || ""]).sort(), queue.map((x) => [x.load_id, x.load_id === "80000031" ? "" : K2]).sort());
 	check("§4 dashboard, Dispatcher: no withheld ID anywhere in the answer", hiddenIn(disp.body), []);
 	const admin = await run("Super Admin");
-	const off = await run("Dispatcher", { WITHHELD_LOAD_KEYS_ENABLED: false });
+	const off = await run("Dispatcher", { WITHHELD_LOAD_REFS_ENABLED: false });
 	const anyKey = (body) => {
 		const text = JSON.stringify(body || {});
 		return [K1, K2, K3, K4].some((k) => k && text.includes(k)) || /_loadKey|LoadKey|load_key/.test(text);
