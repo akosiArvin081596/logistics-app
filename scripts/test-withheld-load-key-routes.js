@@ -20,16 +20,16 @@
 //   §3 the reply guard as the gate installs it: it keeps the status code,
 //      swaps the stored ID and its phone, counts the hit and logs the route only.
 //   §4 keys served: the dashboard rows, the Fleet chips and queues, the load
-//      detail and a stored notice carry a key beside each withheld ID, to a
-//      Dispatcher only; never to a Super Admin, never on the Driver page, never
-//      with the flag off.
+//      detail, a stored notice and the Messages conversation list carry a key
+//      beside each withheld ID, to a Dispatcher only; never to a Super Admin,
+//      never on the Driver page, never with the flag off.
 //   §5 every route a Dispatcher opens a withheld load by, run through the gate
 //      with its key: success and error branches (LOAD_NOT_ON_SHEET,
 //      AMBIGUOUS_LOAD, ROW_LOAD_MISMATCH, the override's 404, period refusals)
 //      act on the stored ID, name it as shown, and the reply guard counts no hit;
 //      documents are listed closed; a message names the load as stored only to
-//      its own driver; a row save of an ID that is only contact is confirmed by
-//      the key.
+//      its own driver; a message thread by key keeps that load's messages; a row
+//      save of an ID that is only contact is confirmed by the key.
 //
 // Every route is lifted whole out of server.js and run with only its I/O
 // stubbed (sheet reads, SQLite, sockets); any other name it touches is the
@@ -677,6 +677,76 @@ section("§5 a message by key names the load as stored only to its own driver", 
 		[await voiceTo(TD, K1, 1), await voiceTo(OD, K1, 2), await voiceTo(OD, "80000031", 3), state.replyGuardHits],
 		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], 0]);
 	check("§5 message by key: no error logged", errors, []);
+});
+
+section("§5 the Messages page: the conversation list serves loadKey, the thread reads it", async () => {
+	const errors = [];
+	const state = { replyGuardHits: 0 };
+	const Database = require("better-sqlite3");
+	const db = new Database(":memory:");
+	db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, "from" TEXT NOT NULL, "to" TEXT NOT NULL,
+		message TEXT NOT NULL, load_id TEXT DEFAULT '', read INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		asset_ref TEXT DEFAULT '', attachment_url TEXT DEFAULT '', attachment_type TEXT DEFAULT '',
+		voice_file TEXT DEFAULT '', voice_duration_ms INTEGER DEFAULT 0, party_user_id INTEGER)`);
+	let n = 0;
+	const add = (from, to, message, loadId) => Number(db.prepare(`INSERT INTO messages (timestamp, "from", "to", message, load_id) VALUES (?, ?, ?, ?, ?)`)
+		.run(`2030-01-14T10:${String(++n).padStart(2, "0")}:00.000Z`, from, to, message, loadId).lastInsertRowid);
+	// Test Driver's messages: H1 under its ID as stored (his own, and staff's sent
+	// by key) and in another spelling; H3, which reads as H1 does once withheld;
+	// H1's shown text (staff's, sent before keys); a normal load.
+	add(TD, "Dispatch", "At the shipper", "QA-555-010-0161");
+	add("Dispatch", TD, "Gate code 12", "QA-555-010-0161");
+	add(TD, "Dispatch", "Loaded", " qa-555-010-0161 ");
+	add(TD, "Dispatch", "On my way", "QA-555-010-0162");
+	add("Dispatch", TD, "Heads up", `QA-${WITHHELD}`);
+	add(TD, "Dispatch", "Delivered", "80000031");
+	const D = session("Dispatcher");
+	const stubs = (more = {}) => keyStubs(state, errors, { requireRole: () => null, db, ...more });
+	const LIST = 'app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {';
+	const THREAD = 'app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (req, res) => {';
+	const gate = liftFunction("withheldLoadKeyGate", keyStubs(state, errors));
+	const list = (session_, more) => call(gate, liftHandler(LIST, stubs(more)), { path: "/api/messages", session: session_ });
+	const disp = await list(D);
+	check("§4 the conversation list, Dispatcher: loadKey beside each withheld load (one key for every spelling), none beside a normal load or a shown text",
+		[disp.code, ((disp.body || {}).conversations || []).map((c) => [c.loadId, c.loadKey || ""])],
+		[200, [["80000031", ""], [`QA-${WITHHELD}`, ""], [`QA-${WITHHELD}`, K3], [`QA-${WITHHELD}`, K1], [`QA-${WITHHELD}`, K1]]]);
+	check("§4 the conversation list, Dispatcher: no withheld ID in the answer", hiddenIn(disp.body), []);
+	const admin = await list(session("Super Admin"));
+	const off = await list(D, { WITHHELD_LOAD_REFS_ENABLED: false });
+	const keyIn = (body) => /loadKey/.test(JSON.stringify(body || {})) || [K1, K3].some((k) => JSON.stringify(body || {}).includes(k));
+	check("§4 the conversation list: a Super Admin (each load as stored) and, with the flag off, a Dispatcher get no key",
+		[admin.code, ((admin.body || {}).conversations || []).map((c) => c.loadId), keyIn(admin.body), off.code, keyIn(off.body)],
+		[200, ["80000031", `QA-${WITHHELD}`, "QA-555-010-0162", " qa-555-010-0161 ", "QA-555-010-0161"], false, 200, false]);
+
+	const thread = (loadId, st = state, errs = errors) => call(liftFunction("withheldLoadKeyGate", keyStubs(st, errs)),
+		liftHandler(THREAD, keyStubs(st, errs, { requireRole: () => null, db })), {
+			path: `/api/messages/${encodeURIComponent(TD)}`, params: { driverName: TD },
+			query: loadId == null ? {} : { loadId }, session: D, route: { path: "/api/messages/:driverName" },
+		});
+	const rows = (r) => ((r.body || {}).messages || []).map((m) => [m.id, m.loadId]);
+	const byKey = await thread(K1);
+	check("§5 the thread by its key: the load's messages in every spelling, each naming the load as shown; not H3's, not the shown text's; no hit",
+		[byKey.code, rows(byKey), state.replyGuardHits, hiddenIn(byKey.body)],
+		[200, [[1, `QA-${WITHHELD}`], [2, `QA-${WITHHELD}`], [3, `QA-${WITHHELD}`]], 0, []]);
+	const byShown = await thread(`QA-${WITHHELD}`);
+	check("§5 the thread by the shown text (no key): every message whose load reads so, as before",
+		[byShown.code, rows(byShown).map((r) => r[0]), hiddenIn(byShown.body)], [200, [1, 2, 3, 4, 5], []]);
+	const other = await thread(K3);
+	const stale = await thread(STRANGER);
+	check("§5 the thread by another load's key: that load's only; an unknown key: 404 LOAD_KEY_UNKNOWN before the handler",
+		[rows(other), stale.code, stale.body && stale.body.code, stale.nexted], [[[4, `QA-${WITHHELD}`]], 404, "LOAD_KEY_UNKNOWN", false]);
+	check("§5 the Messages page: no error logged", errors, []);
+
+	// A message whose own text names the stored ID: by key, the reply guard swaps
+	// it for the shown text and counts the hit (expected on this route).
+	add(TD, "Dispatch", "Load QA-555-010-0161 is running late", "QA-555-010-0161");
+	const guarded = { replyGuardHits: 0 };
+	const guardErrors = [];
+	const typed = await thread(K1, guarded, guardErrors);
+	const last = ((typed.body || {}).messages || []).slice(-1)[0] || {};
+	check("§5 the thread by key: a message naming the stored ID in its text reads the shown text instead; the hit counted and logged by route only",
+		[typed.code, last.message, guarded.replyGuardHits, guardErrors, hiddenIn([typed.body, guardErrors])],
+		[200, `Load QA-${WITHHELD} is running late`, 1, ["[load-keys] reply guard withheld a Load ID in GET /api/messages/:driverName"], []]);
 });
 
 section("§5 a receipt and a row save by key", async () => {

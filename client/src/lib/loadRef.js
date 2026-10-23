@@ -5,7 +5,8 @@
 // contact). With WITHHELD_LOAD_REFS_ENABLED on, a Dispatcher also gets an opaque
 // key beside it: `_loadKey` on a load row, `loadKey` beside a `loadId` (the
 // tracking map, live events, a notice's metadata), `CurrentLoadKey` and
-// `QueuedLoadKeys` on a Fleet entry. The server reads the key back as the load.
+// `QueuedLoadKeys` on a Fleet entry, `loadKey` on a Messages conversation. The
+// server reads the key back as the load.
 // So every per-load call and every list key goes through loadRef(); the screen
 // shows the shown text (loadIdShown()). Without a key, the reference is the
 // Load ID as served, as before.
@@ -83,4 +84,25 @@ export function loadMatches(row, ref, loadIdCol = '') {
   const col = loadIdColumn(row, loadIdCol)
   const v = col ? text(row[col]).toLowerCase() : ''
   return !!v && v === want.toLowerCase()
+}
+
+// A Messages conversation (GET /api/messages): its key, else its loadId exactly
+// as served ("" for a general one). The thread is read and replied to by it.
+export function conversationRef(c) {
+  if (!c || typeof c !== 'object') return ''
+  if (typeof c.loadKey === 'string' && c.loadKey) return c.loadKey
+  return c.loadId == null ? '' : String(c.loadId)
+}
+
+// The key a Vue list renders a conversation under: its position, driver and
+// reference, so two that read alike (two spellings of one load share a key;
+// two withheld loads can read the same) never share one.
+export function conversationListKey(c, i) {
+  return `${i}:${c && c.driver != null ? c.driver : ''}:${conversationRef(c)}`
+}
+
+// Whether a request failed on a stale key (404 LOAD_KEY_UNKNOWN: the server
+// restarted since the page read its rows). The page then reads them again, once.
+export function loadKeyStale(err) {
+  return !!err && err.status === 404 && err.code === 'LOAD_KEY_UNKNOWN'
 }

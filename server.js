@@ -47894,10 +47894,18 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 			});
 
 		// Every role but Super Admin: each conversation's load named as shownLoadId()
-		// does; GET /api/messages/:driverName?loadId= takes that text back.
+		// does; GET /api/messages/:driverName?loadId= takes that text back. A
+		// Dispatcher also gets `loadKey` beside a withheld one (WITHHELD LOAD KEYS),
+		// which that route reads as the load.
 		if (loadIdWithheldFor(req)) {
 			const index = currentShownLoadIdIndex();
-			return res.json({ conversations: conversations.map((c) => ({ ...c, loadId: shownLoadId(req, c.loadId, { index }) })) });
+			return res.json({
+				conversations: conversations.map((c) => {
+					const loadKey = loadKeyFor(req, c.loadId, { index });
+					const served = { ...c, loadId: shownLoadId(req, c.loadId, { index }) };
+					return loadKey ? { ...served, loadKey } : served;
+				}),
+			});
 		}
 		res.json({ conversations });
 	} catch (error) {
@@ -47911,13 +47919,17 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
-		const loadId = req.query.loadId || "";
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.query.loadId) || "";
 		// Every role but Super Admin is served each load as shownLoadId() names it
 		// (the conversation list above too), so a thread is asked for by that text:
 		// the driver's messages are read whole and kept when their load reads as
-		// asked, stored or shown.
+		// asked, stored or shown. Asked by its key, the thread keeps the messages
+		// stored under that load's ID, in any spelling the key covers (normLoadKey());
+		// those stored under its shown text stay on the conversation of that text.
 		const withholdIds = loadIdWithheldFor(req);
 		const index = withholdIds ? currentShownLoadIdIndex() : null;
+		const byKey = !!(req.withheldLoad && loadId && loadId === req.withheldLoad.raw);
 
 		let messages;
 		if (loadId && !withholdIds) {
@@ -47943,9 +47955,12 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		}
 		if (withholdIds) {
 			const asked = String(loadId);
+			const kept = byKey
+				? (m) => normLoadKey(m.loadId) === normLoadKey(asked)
+				: (m) => !asked || m.loadId === asked || m.shown === asked;
 			messages = messages
 				.map((m) => ({ ...m, shown: shownLoadId(req, m.loadId, { index }) }))
-				.filter((m) => !asked || m.loadId === asked || m.shown === asked)
+				.filter(kept)
 				.map(({ shown, ...m }) => ({ ...m, loadId: shown }));
 		}
 

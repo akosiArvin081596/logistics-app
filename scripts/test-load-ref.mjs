@@ -10,11 +10,18 @@
 //   §1 the helper: loadRef() (a row's key, else its ID exactly as served),
 //      loadIdRef() (a { loadId, loadKey } pair), loadIdWithheld(), loadIdShown()
 //      (decision 8: "[contact withheld]" for an ID served blank), the Fleet chip
-//      list key, loadMatches() (a notification's ?load=).
+//      list key, loadMatches() (a notification's ?load=), conversationRef() and
+//      the conversation list key (Messages), loadKeyStale() (404 LOAD_KEY_UNKNOWN).
 //   §2 the call sites, read from source: every per-load call and list key in
 //      Active Loads, the Job Board, the Fleet, the tracking map, the notification
-//      tap and the dashboard store goes through the helper; a withheld load has
-//      no tracking link to copy (decision 7: "Ask a Super Admin for this link").
+//      tap, the dashboard store and the Messages panel goes through the helper; a
+//      withheld load has no tracking link to copy (decision 7: "Ask a Super Admin
+//      for this link"); the dashboard reads its rows again, once, when an action
+//      meets a stale key, and its assign toast names the load as shown.
+//   §3 the Messages store, run as shipped (its imports stubbed, the helper real):
+//      a thread opened by its key is read and replied to by the key and shows the
+//      served text; a live message joins it by that text; a stale key empties the
+//      thread and reads the list again, once.
 //
 // Pure: no server, no DOM, no network. Made-up IDs and keys.
 //   node scripts/test-load-ref.mjs      # exits 1 on any failure
@@ -83,6 +90,20 @@ section('§1 the helper', () => {
     [loadMatches(keyed, KEY), loadMatches(keyed, KEY.toLowerCase()), loadMatches(normal, '80000031'), loadMatches({ 'Load ID': 'ab-1' }, 'AB-1'),
       loadMatches(blank, ''), loadMatches(blank, WITHHELD)],
     [true, false, true, true, false, false])
+  const { conversationRef, conversationListKey, loadKeyStale } = lib
+  check('§1 conversationRef(): a conversation\'s key, else its loadId exactly as served ("" for a general one)',
+    [conversationRef({ driver: 'A', loadId: `QA-${WITHHELD}`, loadKey: KEY }), conversationRef({ loadId: ' 80000031 ' }), conversationRef({ loadId: 'X', loadKey: '' }),
+      conversationRef({ loadId: '' }), conversationRef({}), conversationRef(null)],
+    [KEY, ' 80000031 ', 'X', '', '', ''])
+  const alike = [{ driver: 'A', loadId: `QA-${WITHHELD}`, loadKey: KEY }, { driver: 'A', loadId: `QA-${WITHHELD}`, loadKey: KEY }, { driver: 'A', loadId: `QA-${WITHHELD}` }, { driver: 'A', loadId: `QA-${WITHHELD}` }]
+  const listKeys = alike.map((c, i) => conversationListKey(c, i))
+  check('§1 the conversation list key: position, driver and reference, so conversations that read alike never share one',
+    [listKeys, new Set(listKeys).size], [[`0:A:${KEY}`, `1:A:${KEY}`, `2:A:QA-${WITHHELD}`, `3:A:QA-${WITHHELD}`], 4])
+  const apiError = (status, code) => Object.assign(new Error('made-up'), { status, code })
+  check('§1 loadKeyStale(): only a 404 LOAD_KEY_UNKNOWN (not the retryable 503, another 404, a timeout or nothing)',
+    [loadKeyStale(apiError(404, 'LOAD_KEY_UNKNOWN')), loadKeyStale(apiError(503, 'LOAD_KEY_UNVERIFIED')), loadKeyStale(apiError(404, '')),
+      loadKeyStale(apiError(0, 'TIMEOUT')), loadKeyStale(null), loadKeyStale(undefined)],
+    [true, false, false, false, false, false])
 })
 
 const read = (rel) => fs.readFileSync(path.join(CLIENT, rel), 'utf8')
@@ -150,6 +171,129 @@ section('§2 Fleet, tracking map, notifications', () => {
     [true, true, true, true])
   const notes = read('views/NotificationsView.vue')
   check('§2 notifications: the tap opens a load by metadata.loadKey, else its loadId', /loadId = loadIdRef\(meta\)/.test(notes), true)
+})
+
+section('§2 the Messages panel', () => {
+  const src = read('components/dashboard/MessagingPanel.vue')
+  check('§2 Messages: imports the helper', /import \{[^}]*\bconversationRef\b[^}]*\} from '\.\.\/\.\.\/lib\/loadRef'/.test(src), true)
+  check('§2 Messages: each conversation is keyed by conversationListKey() and opened by conversationRef(), its label still the served loadId',
+    [/v-for="\(c, i\) in store\.conversations"\s*:key="conversationListKey\(c, i\)"/.test(src), /:key="c\.driver \+ ':' \+ c\.loadId"/.test(src),
+      /store\.selectConversation\(c\.driver, conversationRef\(c\), c\.loadId \|\| ''\)/.test(src), /conversationRef\(c\) === store\.selectedLoadId/.test(src),
+      /Load \{\{ c\.loadId \}\}/.test(src)],
+    [true, false, true, true, true])
+  check('§2 Messages: the header shows the conversation\'s shown text, never its reference',
+    [/— Load \{\{ store\.selectedLoadShown \}\}/.test(src), /Load \{\{ store\.selectedLoadId \}\}/.test(src)], [true, false])
+  check('§2 Messages: the text and voice sends name the load by the open conversation\'s reference',
+    [/store\.sendMessage\(store\.selectedDriver, msg, store\.selectedLoadId, attachmentUrl, attachmentType\)/.test(src),
+      /store\.sendVoiceNote\(store\.selectedDriver, store\.selectedLoadId, clip\)/.test(src)], [true, true])
+  check('§2 Messages: a new conversation picks the driver\'s load by loadRef() and shows it by loadIdShown()',
+    [/const ref = idCol \? loadRef\(job, idCol\) : ''/.test(src), /label: loadIdShown\(job, idCol\)/.test(src),
+      /<option v-for="l in loadsForDriver" :key="l\.ref" :value="l\.ref">Load \{\{ l\.label \}\}<\/option>/.test(src),
+      /store\.selectConversation\(newDriver\.value, newLoadId\.value, picked \? picked\.label : ''\)/.test(src)],
+    [true, true, true, true])
+})
+
+section('§2 the dashboard page: a stale key, and the assign toast', () => {
+  const src = read('views/DashboardView.vue')
+  check('§2 dashboard: imports loadKeyStale() and loadIdShown()', /import \{ loadIdShown, loadKeyStale \} from '\.\.\/lib\/loadRef'/.test(src), true)
+  const failed = /function actionFailed\(err, fallback\) \{\n\s*toast\(\(err && err\.message\) \|\| fallback, 'error'\)\n\s*if \(loadKeyStale\(err\)\) refresh\(\)\n\}/.test(src)
+  const catches = (src.match(/catch \(err\) \{ actionFailed\(err, '[^']+'\) \}/g) || []).length
+  check('§2 dashboard: an action that meets a stale key says why and reads the rows again, once (assign, reassign, cancel, status)',
+    [failed, catches, /catch \(err\) \{ toast\(\(err && err\.message\)/.test(src)], [true, 4, false])
+  check('§2 dashboard: the assign toast names the load as shown ("[contact withheld]" for an ID served blank), never blank',
+    [/toast\(`\$\{driver\} assigned to \$\{\(lc && loadIdShown\(job, lc\)\) \|\| 'load'\}`, 'success'\)/.test(src), /assigned to \$\{lc \? job\[lc\] : 'load'\}/.test(src)],
+    [true, false])
+})
+
+// ══ §3 the Messages store, as shipped ════════════════════════════════════════
+// A minimal defineStore: state, getters as live properties, actions bound.
+function defineStore(id, def) {
+  return () => {
+    const s = def.state()
+    for (const [k, fn] of Object.entries(def.getters || {})) Object.defineProperty(s, k, { get: () => fn(s), enumerable: true })
+    for (const [k, fn] of Object.entries(def.actions || {})) s[k] = fn.bind(s)
+    return s
+  }
+}
+function loadMessagesStore(deps) {
+  let body = read('stores/messages.js')
+  body = body.replace(/^import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2;?[ \t]*$/gm, (_, names, q, spec) => {
+    if (!(spec in deps)) throw new Error(`stores/messages.js imports ${spec}, which this runner does not stub`)
+    const binds = names.split(',').map((n) => n.trim()).filter(Boolean).map((n) => n.replace(/\s+as\s+/, ': '))
+    return `const { ${binds.join(', ')} } = __deps[${JSON.stringify(spec)}];`
+  })
+  body = body.replace(/^export const (\w+)\s*=/m, (_, name) => `const ${name} = __exports.${name} =`)
+  if (/^\s*(import|export)\s/m.test(body)) throw new Error('stores/messages.js: an import/export this runner cannot map')
+  const out = {}
+  new Function('__deps', '__exports', body)(deps, out)
+  return out.useMessagesStore
+}
+async function sectionAsync(name, fn) {
+  try { await fn() } catch (e) { fail++; failures.push(name); console.log(`  FAIL  ${name}: ${e && e.message}`) }
+}
+
+await sectionAsync('§3 the Messages store: a thread by its key', async () => {
+  const calls = []
+  const uploads = []
+  let stale = false
+  const staleError = () => Object.assign(new Error('This load\'s link is out of date. Reload the page and open the load again.'), { status: 404, code: 'LOAD_KEY_UNKNOWN' })
+  const api = {
+    async get(url) {
+      calls.push(['GET', url])
+      if (url === '/api/messages') return { conversations: [] }
+      if (stale) throw staleError()
+      return { messages: [{ id: 1, from: 'Test Driver', to: 'Dispatch', message: 'At the shipper', loadId: `QA-${WITHHELD}`, read: 1 }] }
+    },
+    async put(url, body) { calls.push(['PUT', url, body]); return { success: true } },
+    async post(url, body) { calls.push(['POST', url, body]); if (stale) throw staleError(); return { success: true } },
+    request: async () => ({}),
+  }
+  const useMessagesStore = loadMessagesStore({
+    pinia: { defineStore },
+    '../composables/useApi': { useApi: () => api },
+    '../lib/voiceNoteText': { voiceNoteLabel: () => 'Voice note (0:04)' },
+    '../lib/voiceNoteUpload': { uploadVoiceNote: async (request, o) => { uploads.push(o); if (stale) throw staleError(); return { id: 9, durationMs: 4000 } } },
+    '../lib/loadRef': lib,
+  })
+  const store = useMessagesStore()
+  const listReads = () => calls.filter((c) => c[0] === 'GET' && c[1] === '/api/messages').length
+  await store.selectConversation('Test Driver', KEY, `QA-${WITHHELD}`)
+  check('§3 store: the thread is asked for by the key; the header\'s text is the served one',
+    [calls[0], store.selectedLoadId, store.selectedLoadShown, store.currentMessages.length],
+    [['GET', `/api/messages/Test%20Driver?loadId=${KEY}`], KEY, `QA-${WITHHELD}`, 1])
+  await store.sendMessage('Test Driver', 'Gate code 12', store.selectedLoadId, '', '')
+  await store.sendVoiceNote('Test Driver', store.selectedLoadId, { blob: {}, key: 'vn-key-0000000001', durationMs: 4000 })
+  const post = calls.find((c) => c[0] === 'POST')
+  check('§3 store: a reply and a voice note name the load by its key; their bubbles show the served text, never the key',
+    [post && post[2].loadId, uploads[0] && uploads[0].loadId, store.currentMessages.slice(-2).map((m) => m.loadId), JSON.stringify(store.currentMessages).includes(KEY)],
+    [KEY, KEY, [`QA-${WITHHELD}`, `QA-${WITHHELD}`], false])
+  const before = store.currentMessages.length
+  store.addIncomingMessage({ id: 12, from: 'Test Driver', to: 'Dispatch', message: 'Loaded', loadId: `QA-${WITHHELD}`, timestamp: '2030-01-14T10:00:00.000Z' })
+  store.addIncomingMessage({ id: 13, from: 'Test Driver', to: 'Dispatch', message: 'Another load', loadId: '80000031', timestamp: '2030-01-14T10:01:00.000Z' })
+  check('§3 store: a live message on the thread\'s load (the dispatch room gets it as shown) joins the open thread; another load\'s does not',
+    store.currentMessages.slice(before).map((m) => m.id), [12])
+
+  stale = true
+  calls.length = 0
+  await store.selectConversation('Test Driver', KEY2, `QA-${WITHHELD}`)
+  check('§3 store: opening a conversation on a stale key: the thread is emptied (no other conversation\'s under its header) and the list read again, once',
+    [store.currentMessages.length, listReads()], [0, 1])
+  for (const [what, send] of [
+    ['a reply', () => store.sendMessage('Test Driver', 'Hi', KEY2, '', '')],
+    ['a voice note', () => store.sendVoiceNote('Test Driver', KEY2, { blob: {}, key: 'vn-key-0000000002', durationMs: 4000 })],
+  ]) {
+    calls.length = 0
+    let thrown = null
+    try { await send() } catch (e) { thrown = e }
+    check(`§3 store: ${what} on a stale key still fails to the panel, and the list is read again, once`,
+      [thrown && thrown.code, listReads()], ['LOAD_KEY_UNKNOWN', 1])
+  }
+
+  stale = false
+  calls.length = 0
+  await store.selectConversation('Test Driver', 'L-100')
+  check('§3 store: a conversation with no key, as before: asked for by its loadId, which is also its text',
+    [calls[0], store.selectedLoadId, store.selectedLoadShown], [['GET', '/api/messages/Test%20Driver?loadId=L-100'], 'L-100', 'L-100'])
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)

@@ -15,14 +15,14 @@
         </select>
         <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver">
           <option value="">General</option>
-          <option v-for="id in loadsForDriver" :key="id" :value="id">Load {{ id }}</option>
+          <option v-for="l in loadsForDriver" :key="l.ref" :value="l.ref">Load {{ l.label }}</option>
         </select>
         <button class="new-msg-start" :disabled="!newDriver" @click="startConversation">Open Chat</button>
       </div>
       <div class="msg-driver-list">
         <div
-          v-for="c in store.conversations"
-          :key="c.driver + ':' + c.loadId"
+          v-for="(c, i) in store.conversations"
+          :key="conversationListKey(c, i)"
           :class="['msg-driver-item', { active: isActive(c) }]"
           @click="selectConversation(c)"
         >
@@ -54,7 +54,7 @@
         >&#8592;</button>
         <template v-if="store.selectedDriver">
           {{ store.selectedDriver }}
-          <span v-if="store.selectedLoadId" class="msg-header-load">— Load {{ store.selectedLoadId }}</span>
+          <span v-if="store.selectedLoadShown" class="msg-header-load">— Load {{ store.selectedLoadShown }}</span>
         </template>
         <template v-else>Select a conversation</template>
       </div>
@@ -158,6 +158,7 @@ import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoStep, chatPhotoView, chatPhotos } from '../../lib/chatPhotos'
 import { conversationPreview } from '../../lib/voiceNotes'
 import { messageSendFailureText } from '../../lib/messageSendFailure'
+import { conversationListKey, conversationRef, loadIdShown, loadRef } from '../../lib/loadRef'
 import { useVoiceNotesFeature } from '../../composables/useVoiceNotesFeature'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
@@ -175,7 +176,9 @@ const api = useApi()
 
 // Voice notes: the record button only with the flag on; notes already sent
 // play either way. The recorder is keyed by the conversation, so a clip never
-// follows the dispatcher into another thread.
+// follows the dispatcher into another thread. A send names the conversation's
+// load by its reference (store.selectedLoadId: a Dispatcher's key for a
+// withheld Load ID, client/src/lib/loadRef.js), as the text send does.
 const voiceFeature = useVoiceNotesFeature(api)
 const voiceOn = computed(() => !!voiceFeature.value)
 const recording = ref(false)
@@ -253,23 +256,29 @@ const showNewMsg = ref(false)
 const newDriver = ref('')
 const newLoadId = ref('')
 
+// The driver's active loads, each by its reference (`ref`: a Dispatcher's key
+// for a withheld Load ID, else the ID as served) and the text it shows (`label`:
+// "[contact withheld]" for an ID served blank).
 const loadsForDriver = computed(() => {
   if (!newDriver.value) return []
   const name = newDriver.value.toLowerCase()
-  const ids = new Set()
+  const loads = new Map()
   for (const job of dashStore.activeJobs) {
     const driverKey = Object.keys(job).find((k) => /^driver$/i.test(k))
     if (driverKey && (job[driverKey] || '').toLowerCase() === name) {
-      const loadKey = Object.keys(job).find((k) => /load.?id|job.?id/i.test(k))
-      if (loadKey && job[loadKey]) ids.add(String(job[loadKey]))
+      const idCol = Object.keys(job).find((k) => /load.?id|job.?id/i.test(k))
+      const ref = idCol ? loadRef(job, idCol) : ''
+      if (ref && !loads.has(ref)) loads.set(ref, { ref, label: loadIdShown(job, idCol) })
     }
   }
-  return [...ids]
+  return [...loads.values()]
 })
 
 function startConversation() {
   if (!newDriver.value || !newLoadId.value) return
-  store.selectConversation(newDriver.value, newLoadId.value)
+  // The header shows the picked load's text; never a key, even if the list moved on.
+  const picked = loadsForDriver.value.find((l) => l.ref === newLoadId.value)
+  store.selectConversation(newDriver.value, newLoadId.value, picked ? picked.label : '')
   showNewMsg.value = false
   newDriver.value = ''
   newLoadId.value = ''
@@ -278,7 +287,7 @@ function startConversation() {
 function isActive(c) {
   return store.selectedDriver &&
     c.driver.toLowerCase() === store.selectedDriver.toLowerCase() &&
-    c.loadId === store.selectedLoadId
+    conversationRef(c) === store.selectedLoadId
 }
 
 function deselectConversation() {
@@ -288,8 +297,9 @@ function deselectConversation() {
   if (store.selectConversation) store.selectConversation('', '')
 }
 
+// The thread is read by the conversation's reference; the header shows its text.
 function selectConversation(c) {
-  store.selectConversation(c.driver, c.loadId || '')
+  store.selectConversation(c.driver, conversationRef(c), c.loadId || '')
 }
 
 // Conversation-list "last message" time. Pinned to the app zone (APP_TIMEZONE,

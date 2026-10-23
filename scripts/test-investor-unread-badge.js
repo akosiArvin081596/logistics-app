@@ -86,7 +86,7 @@ const HEADS = {
 	read: 'app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {',
 };
 const PROVIDED = ["app", "db", "console", "require", "requireAuth", "requireRole", "driverWriteLimiter",
-	"loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadId", "voiceNotes"];
+	"loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadId", "loadKeyFor", "voiceNotes"];
 
 let LIFTED;
 try {
@@ -111,6 +111,8 @@ function mount(db) {
 		loadIdWithheldFor: (req) => req.session.user.role !== "Super Admin",
 		currentShownLoadIdIndex: () => null,
 		shownLoadId: (req, raw) => raw,
+		// Nor are the withheld-load keys (scripts/test-withheld-load-key-routes.js): none served.
+		loadKeyFor: () => "",
 		voiceNotes: { VOICE_FILE_RE: /^vn-[a-z0-9]+\.m4a$/ },
 	};
 	const names = Object.keys(env);
