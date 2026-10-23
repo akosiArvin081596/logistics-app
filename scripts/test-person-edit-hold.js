@@ -156,9 +156,9 @@ eq("§3 a time window a person changed in the sheet: hold (compared as text)",
 	// and none matches: hold.
 	eq("§3 (L1) a person row in a form the reader can't parse no longer makes rule 2 unknown: hold",
 		peh.decideColumn({ stored: "10/12/2026 14:00:00", sent: "10/9/2026 08:00", rows: [row(1, "ratecon", "10/6/2026 08:00"), row(2, "person", "10/12 14:00", { actor: "Dispatcher#7" })] }).action, "hold");
-	eq("§3 (L1) personSet() called on its own keeps rule 2 as it was (Needs Confirmation reads it): a person row clears",
-		peh.personSet("10/12/2026 8:00:00", restored).set, false);
-	eq("§3 (L1) personSet() with onlyAppClears: a person's date", peh.personSet("10/12/2026 8:00:00", restored, { onlyAppClears: true }).set, true);
+	eq("§3 (L1) personSet() called without the option takes the app-only rule by default: a person's date",
+		peh.personSet("10/12/2026 8:00:00", restored).set, true);
+	eq("§3 (L1) personSet() with onlyAppClears: false: a person row clears", peh.personSet("10/12/2026 8:00:00", restored, { onlyAppClears: false }).set, false);
 }
 
 // --- §4 lostEdit(), reasons, the looser reading ---------------------------------------

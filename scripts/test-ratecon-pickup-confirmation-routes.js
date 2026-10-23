@@ -23,8 +23,9 @@
  *   §4 the dashboard (R2 L2): the codes are computed on the raw rows before sanitizing, so a
  *      Dispatcher's row whose Load ID is withheld still carries `_review`; the straddling row gets
  *      the closed variant; with the person hold off, a later email over a person's date brings the
- *      code back with `replaced`; the flag off adds no key; the call sits between enrichLocations()
- *      and sanitizeBrokerColumns().
+ *      code back with `replaced`, and (#588's rule) the person's date put back in the sheet clears
+ *      it again, "Mark pickup confirmed" then answering already confirmed; the flag off adds no
+ *      key; the call sits between enrichLocations() and sanitizeBrokerColumns().
  *   §5 drag-and-drop, as Super Admin and as Dispatcher: the extract keeps the reading and the
  *      extracted pickup for every role and adds the modal line; the create records a person row
  *      for a date changed in the modal and ratecon_create for a kept one, and the load's record
@@ -361,6 +362,18 @@ const ON = { RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED: "true" };
 		const replaced = w.rows();
 		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", replaced);
 		eq("§4 the code is back with `replaced`, read from load_cell_writes alone", replaced[2]._review, [{ code: "pickup_unconfirmed", stored: "2026-10-06", replaced: true }]);
+
+		// #588's rule: a person puts their date back in the sheet after the email replaced it. Only
+		// the app's own writes clear a value, so it is a person's date again: no code, and "Mark
+		// pickup confirmed" answers already confirmed without a second person row or audit row.
+		w.sheet[3][IDX["Pickup Appointment"]] = "10/9/2026 7:00:00";
+		const restored = w.rows();
+		w.api.annotateDashboardPickupReview(HEADERS, "Load ID", restored);
+		eq("§4 (#588 rule) a person's date restored in the sheet after the email: no code", restored[2]._review, undefined);
+		const auditsBefore = w.audits.length;
+		const reMark = await w.mark("Dispatcher", 2, { rowIndex: 4, loadId: "900000403" });
+		eq("§4 (#588 rule) \"Mark pickup confirmed\" on the restored date: 200, already confirmed, nothing new recorded or audited",
+			[reMark.status, reMark.body.alreadyConfirmed, w.cellRows("900000403").filter((r) => r.source === "person").length, w.audits.length - auditsBefore], [200, true, 1, 0]);
 
 		const off = makeWorld();
 		off.sheet.push(jtRow("900000403"));
