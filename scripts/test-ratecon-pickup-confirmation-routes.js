@@ -24,8 +24,8 @@
  *      Dispatcher's row whose Load ID is withheld still carries `_review`; the straddling row gets
  *      the closed variant; with the person hold off, a later email over a person's date brings the
  *      code back with `replaced`, and (#588's rule) the person's date put back in the sheet clears
- *      it again, "Mark pickup confirmed" then answering already confirmed; the flag off adds no key; the call sits between enrichLocations()
- *      and sanitizeBrokerColumns().
+ *      it again, "Mark pickup confirmed" then answering already confirmed; the flag off adds no
+ *      key; the call sits between enrichLocations() and sanitizeBrokerColumns().
  *   §5 drag-and-drop, as Super Admin and as Dispatcher: the extract keeps the reading and the
  *      extracted pickup for every role and adds the modal line; the create records a person row
  *      for a date changed in the modal and ratecon_create for a kept one, and the load's record
