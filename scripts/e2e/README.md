@@ -235,6 +235,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `driver-instructions-screen.mjs` | The driver's own load instructions at 390 x 844 on made-up data: the driver app as a made-up Driver, with the driver route answered by PR 4's runtime in-process (see "The driver instructions section"). |
 | `driver-welcome.mjs` | The driver's "Welcome to the Team!" card at 375 x 667, 390 x 664 and 390 x 664 with a 125% font, on made-up data with the same static server: the card's top, close (x) and "Let's Get Started" are reachable (#569). |
 | `driver-document-sign.mjs` | The driver's document-signing screen at the same sizes, on made-up data with the same static server, with the phone's toolbars simulated (vh 100 px taller than the window): the screen fits, and its close (x), Sign button and "Back to Documents" are reachable (#571). |
+| `voice-notes.mjs` | Voice notes in Messages (client) on made-up data with the same static server: record and play on the dashboard, the driver app at 390 x 844 (truck moving and parked) and the investor portal, with the microphone and recorder stubbed and playback served with Range (see "The voice notes check"). |
 
 **The work dir** (`E2E_WORK_DIR`, default `$TMPDIR/logisx-e2e`, or `/tmp/logisx-e2e` without `TMPDIR`) holds everything
 a run produces. None of it belongs in the repo. As a second guard, the root `.gitignore` covers these names under
@@ -1572,6 +1573,36 @@ ProcessSingleton"): run it outside that sandbox.
 Output, in the work dir: `shots/<OUT_TAG>/`, `results-<OUT_TAG>.md` and `desktop-geometry-<OUT_TAG>.json`
 (`OUT_TAG` defaults to `phone-layout`). The screenshots show made-up data only. Exit 0 only when every row PASSes; on a
 build without the fix, W1-\*, W1-\*t, W2-\* and W2-\*t FAIL.
+
+## The voice notes check (`voice-notes.mjs`)
+
+The client of voice notes (MESSAGE_VOICE_NOTES_ENABLED, plan 2026-10-22 PR 2) in Chrome, on made-up data only, like
+`phone-layout.mjs`: no `server.js`, database, `.env`, key or sign-in. The built `client/dist` is served on
+`127.0.0.1:$E2E_PORT` (default 3611); every `/api` request is answered in the browser (a made-up Super Admin, the driver
+"Pat Example" on load `QA-VOICE-1`, the investor `qa-voice-investor`, a session with `features.voiceNotes: true`), except
+`GET /api/messages/<id>/voice`, which the static server answers with `scripts/fixtures/voice-note-chrome-fake-mic.m4a` (a
+synthetic tone, no voice) and Range support. Chrome for Testing has no AAC encoder, so `getUserMedia` and
+`MediaRecorder` are stubbed in the page: the recorder hands back that fixture, typed `audio/mp4`. Uploads to
+`/api/messages/voice` are captured (URL, headers, body) and answered as the server would.
+
+```bash
+npm run build:client
+SHOT_DIR=/an/absolute/folder/outside/the/checkout fnm exec --using=22.23.2 node scripts/e2e/voice-notes.mjs   # HEADED=1 to watch
+```
+
+Run it outside the Claude Code Bash sandbox (Chrome binds its own sockets).
+
+| Step | What it does | Expected |
+|---|---|---|
+| V1 | Dashboard `/messages`, 1280x800: the list line of the first conversation, then Play on the driver's note. | "Voice note (0:42)"; a 206 for `/api/messages/9101/voice` |
+| V2 | Mic, about 1.3 s, Stop, review, Send. | One POST to `/api/messages/voice` with no query; `audio/mp4` body equal to the recording; `X-Message-To`, `X-Message-Load-Id` and `X-Message-From: Dispatch` percent-encoded; an `Idempotency-Key`; the sent note shows as a player |
+| V3 | Driver app, 390x844 touch, a fresh ELD fix at 55 mph; the Messages tab. | The mic is natively disabled and described by `#vn-drive-note` ("Voice notes are off while the truck is moving. Park first, then record."); Dispatch's note plays (206) |
+| V4 | The same, parked 10 minutes; record and send. | The mic works, the note reads "Record only when parked."; one POST to Dispatch with no `X-Message-From` |
+| V5 | Investor portal, 1280x800: Play, then record and send. | A 206; one POST to `admin` |
+
+Output, in the work dir: `results-<OUT_TAG>.md` (`OUT_TAG` defaults to `voice-notes`), and the screenshots in `SHOT_DIR`
+(default `<work dir>/shots/<OUT_TAG>/`). The screenshots show made-up data only. Other writes, unanswered endpoints and
+page errors are listed, not scored. Exit 0 only when every row PASSes.
 
 ## Teardown (once the whole QA cycle is done)
 

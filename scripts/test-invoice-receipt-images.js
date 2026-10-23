@@ -294,7 +294,7 @@ const SLOW = scratchChild("slow-child.js", "process.once('message', (job) => set
 			[["receipt-1"], 10, []]);
 		for (const file of ["service-invoice.html", "service-invoice-owner-op.html", "service-invoice-manual.html"]) {
 			const html = fs.readFileSync(path.join(ROOT, "onboarding-templates", "policy", file), "utf8");
-			const section9 = /<section class="document receipt-pages" data-receipt-pages style="display:none">\s*<div class="receipt-page" data-receipt-page-template style="display:none">\s*<h2 data-cell="header"><\/h2>\s*<img data-cell="image" alt="Receipt">\s*<\/div>\s*<\/section>/.test(html);
+			const section9 = /<section class="document receipt-pages" data-receipt-pages style="display:none">\s*<div class="receipt-page" data-receipt-page-template style="display:none">\s*<h2 data-cell="header"><\/h2>\s*<img data-cell="image" alt="Receipt">\s*<p class="receipt-pdf-note" data-cell="pdf-note"><\/p>\s*<\/div>\s*<\/section>/.test(html);
 			check(`${file}: a hidden receipt-page template after the invoice, one sheet per page`, [section9, /\.receipt-page \{ break-before: page; page-break-before: always; \}/.test(html)], [true, true]);
 			if (file !== "service-invoice-manual.html") check(`${file}: the Personal row has a note cell`, /data-personal-line-template[\s\S]{0,400}data-cell="note"/.test(html), true);
 		}
