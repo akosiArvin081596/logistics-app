@@ -1343,8 +1343,8 @@ const MUTANTS = [
 		caughtBy: ["chatOncePerSocket"],
 	},
 	{
-		// An investor conversation's message sent like any other, as before P1
-		// (2026-10-23): the whole dispatch room, Dispatchers included, gets it.
+		// The mutant drops the investor-conversation check, so an investor
+		// conversation's message goes out like any other, to the dispatch room.
 		name: "an investor conversation's chat sent to the dispatch room",
 		target: "sendChat",
 		mutate: cut("if (!investorChat && staffLoadId === payload.loadId) {", "if (staffLoadId === payload.loadId) {"),

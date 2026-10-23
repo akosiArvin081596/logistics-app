@@ -315,7 +315,7 @@ function chatDeskKey(name) {
 // investor conversation, else 0. The query names the row's table `messages`: a
 // stored row, or the two names of a message being sent (investorChatParties()).
 // One line: several runners lift a top-level const by its line.
-const INVESTOR_CHAT_SQL = `(LOWER(TRIM(messages."from")) = 'admin' OR LOWER(TRIM(messages."to")) = 'admin' OR EXISTS (SELECT 1 FROM users investor_party WHERE investor_party.role = 'Investor' AND LOWER(TRIM(investor_party.username)) NOT IN ('', 'dispatch', 'admin') AND LOWER(TRIM(investor_party.username)) IN (LOWER(TRIM(messages."from")), LOWER(TRIM(messages."to")))))`;
+const INVESTOR_CHAT_SQL = `(LOWER(TRIM(messages."from")) = 'admin' OR LOWER(TRIM(messages."to")) = 'admin' OR LOWER(TRIM(messages."from")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')) OR LOWER(TRIM(messages."to")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')))`;
 // Whether `user` reads investor conversations among the staff threads: Super
 // Admin only. (Investors read their own through their own routes.)
 function readsInvestorChats(user) {
