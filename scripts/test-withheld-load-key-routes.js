@@ -751,6 +751,16 @@ section("§5 a message by key names the load as stored only to its own driver", 
 	const ACCOUNTS = [{ id: 21, role: "Driver", name: TD }, { id: 22, role: "Driver", name: OD }];
 	const accountsDb = (accounts) => ({
 		prepare: (sql) => {
+			// investorChatParties(): INVESTOR_CHAT_SQL asked of (from, to), as the
+			// rule reads it (the investor desk or an Investor account's name, either
+			// side, trimmed, any case).
+			if (/AS investor_chat FROM \(SELECT \? AS "from", \? AS "to"\)/.test(sql)) {
+				const investorSide = (n) => {
+					const k = String(n).trim().toLowerCase();
+					return k === "admin" || accounts.some((a) => a.role === "Investor" && a.name.trim().toLowerCase() === k);
+				};
+				return { get: (from, to) => ({ investor_chat: investorSide(from) || investorSide(to) ? 1 : 0 }) };
+			}
 			const role = /role = 'Driver'/.test(sql) ? "Driver" : /role = 'Investor'/.test(sql) ? "Investor" : null;
 			const rows = (arg) => accounts
 				.filter((a) => (/\bWHERE id = \?/.test(sql) ? a.id === Number(arg)
@@ -760,9 +770,11 @@ section("§5 a message by key names the load as stored only to its own driver", 
 		},
 	});
 	const usersDb = accountsDb(ACCOUNTS);
+	const refusals = [];
 	const messageRoute = (db) => liftHandler('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {', keyStubs(state, errors, {
 		requireAuth: null, driverWriteLimiter: null, db, chatFiles: { chatAttachmentRefusal: () => null },
 		sendChatMessage: (m) => { sent.push(m); return { id: sent.length }; },
+		logAuditRefusal: (req, action, entity, entityId, details, code) => refusals.push(code),
 	}));
 	const handler = messageRoute(usersDb);
 	const D = session("Dispatcher");
@@ -774,11 +786,14 @@ section("§5 a message by key names the load as stored only to its own driver", 
 		[[200, 200, 200], ["QA-555-010-0161", `QA-${WITHHELD}`, "80000031"], 0]);
 	// A legacy Investor account whose username is the name in H1's Driver cell,
 	// which no Driver account holds: the chat rule resolves the recipient to the
-	// Investor, who is served the load as shown, never as stored.
+	// Investor, and a Dispatcher writes to drivers only (2026-10-23), so nothing
+	// is sent. (An investor is served the load as shown, never as stored:
+	// messageLoadIdFor() below.)
 	const LEGACY = [{ id: 22, role: "Driver", name: OD }, { id: 31, role: "Investor", name: TD }];
+	const sentBefore = sent.length;
 	const toInvestor = await call(gate, messageRoute(accountsDb(LEGACY)), { method: "POST", path: "/api/messages", body: { to: TD, from: "Dispatch", message: "Rate check", loadId: K1 }, session: D });
-	check("§5 message by key to an Investor account named like the load's Driver cell: the load as shown, never as stored",
-		[toInvestor.code, sent[sent.length - 1].to, sent[sent.length - 1].loadId, state.replyGuardHits], [200, TD, `QA-${WITHHELD}`, 0]);
+	check("§5 a Dispatcher's message by key to an Investor account named like the load's Driver cell: 403 MESSAGE_RECIPIENT, nothing sent, one refusal audited",
+		[toInvestor.code, toInvestor.body && toInvestor.body.code, sent.length - sentBefore, refusals, state.replyGuardHits], [403, "MESSAGE_RECIPIENT", 0, ["MESSAGE_RECIPIENT"], 0]);
 	const voice = liftFunction("messageLoadIdFor", keyStubs(state, errors, { db: accountsDb([...ACCOUNTS, { id: 31, role: "Investor", name: TD }]) }));
 	check("§5 the voice note's load (X-Message-Load-Id) follows the same rule: as stored only to a Driver account on the load",
 		[voice(own.req, K1, "test  DRIVER", 21), voice(own.req, K1, OD, 22), voice({}, K1, TD, 21), voice(own.req, K1, TD, 31), voice(own.req, K1, TD, null)],
@@ -798,9 +813,9 @@ section("§5 a message by key names the load as stored only to its own driver", 
 		});
 		return [r.code, nexted, r.req.voiceNote ? r.req.voiceNote.loadId : null];
 	};
-	check("§5 voice note by key: to the load's driver as stored; to another driver as shown; a normal load as sent; to an Investor named like the load's Driver cell as shown; no hit",
+	check("§5 voice note by key: to the load's driver as stored; to another driver as shown; a normal load as sent; a Dispatcher's to an Investor named like the load's Driver cell refused (403); no hit",
 		[await voiceTo(TD, K1, 1), await voiceTo(OD, K1, 2), await voiceTo(OD, "80000031", 3), await voiceTo(TD, K1, 4, voiceChecksOver(LEGACY)), state.replyGuardHits],
-		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], [200, true, `QA-${WITHHELD}`], 0]);
+		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], [403, false, null], 0]);
 	check("§5 message by key: no error logged", errors, []);
 });
 
