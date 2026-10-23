@@ -4,6 +4,8 @@ import { parseYmdLocal, sheetSortKey } from '../utils/datetime'
 import { replyLost } from '../lib/saveOutcome'
 import { expensesOffLoads } from '../lib/loadId'
 import { driverInstructionsUrl, entryAfter, entryLoading, instructionsKey } from '../lib/loadInstructions'
+import { voiceNoteLabel } from '../lib/voiceNoteText'
+import { uploadVoiceNote } from '../lib/voiceNoteUpload'
 
 const api = useApi()
 
@@ -450,6 +452,34 @@ export const useDriverStore = defineStore('driver', {
       })
     },
 
+    // A voice note to Dispatch (MESSAGE_VOICE_NOTES_ENABLED; a driver's go to
+    // Dispatch only). Unlike a text, it shows once the server has it: its id is
+    // what plays it. Throws on failure (409 while the truck is moving among
+    // them); the composer keeps the clip and the same key for the retry.
+    async sendVoiceNote(clip, loadId) {
+      const sent = await uploadVoiceNote(api.request, {
+        blob: clip.blob,
+        to: 'Dispatch',
+        loadId: loadId || '',
+        key: clip.key,
+        durationMs: clip.durationMs,
+      })
+      if (!this.messages.some((m) => m.id === sent.id)) {
+        this.messages.push({
+          id: sent.id,
+          timestamp: new Date().toISOString(),
+          from: this.driverName,
+          to: 'Dispatch',
+          message: voiceNoteLabel(sent.durationMs),
+          loadId: loadId || '',
+          read: 1,
+          attachment_url: '',
+          attachment_type: 'voice',
+          voice_duration_ms: sent.durationMs,
+        })
+      }
+    },
+
     async markMessagesRead(ids) {
       if (!ids || ids.length === 0) return
       try {
@@ -583,6 +613,8 @@ export const useDriverStore = defineStore('driver', {
         // A photo from Dispatch shows (and opens full size) without a reload.
         attachment_url: msg.attachment_url || '',
         attachment_type: msg.attachment_type || '',
+        // A voice note from Dispatch plays live too, at the server's length.
+        voice_duration_ms: Number(msg.voice_duration_ms) || 0,
       })
     },
   },

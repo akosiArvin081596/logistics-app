@@ -47425,21 +47425,47 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 });
 
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
+// Each conversation also names its newest message (highest id) for the list's
+// last-message line: lastKind "voice" | "photo" | "file" | "text", lastText (its
+// first 60 characters, the text the thread serves) and lastVoiceMs (a voice
+// note's measured length while its audio is stored, else 0). Never its file
+// name, URL or id.
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
-				`SELECT
-					CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
-					load_id AS loadId,
-					MAX(timestamp) AS lastTimestamp,
-					SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread
-				 FROM messages
-				 GROUP BY driver, load_id
-				 ORDER BY lastTimestamp DESC`,
+				`SELECT g.driver, g.loadId, g.lastTimestamp, g.unread,
+				        m.message AS lastMessage, m.attachment_url AS lastUrl, m.attachment_type AS lastType,
+				        m.voice_file AS lastVoiceFile, m.voice_duration_ms AS lastDurationMs
+				 FROM (
+					SELECT
+						CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
+						load_id AS loadId,
+						MAX(timestamp) AS lastTimestamp,
+						SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+						MAX(id) AS lastId
+					 FROM messages
+					 GROUP BY driver, load_id
+				 ) g
+				 JOIN messages m ON m.id = g.lastId
+				 ORDER BY g.lastTimestamp DESC`,
 			)
-			.all();
+			.all()
+			.map((c) => {
+				const voice = c.lastType === "voice";
+				const kind = voice ? "voice" : c.lastUrl ? (c.lastType === "image" ? "photo" : "file") : "text";
+				const stored = voice && voiceNotes.VOICE_FILE_RE.test(c.lastVoiceFile || "");
+				return {
+					driver: c.driver,
+					loadId: c.loadId,
+					lastTimestamp: c.lastTimestamp,
+					unread: c.unread,
+					lastKind: kind,
+					lastText: Array.from(String(c.lastMessage || "")).slice(0, 60).join(""),
+					lastVoiceMs: stored && Number(c.lastDurationMs) > 0 ? Number(c.lastDurationMs) : 0,
+				};
+			});
 
 		// Every role but Super Admin: each conversation's load named as shownLoadId()
 		// does; GET /api/messages/:driverName?loadId= takes that text back.
