@@ -204,7 +204,7 @@ function deleteRoute(w, rec, guardSrc = GUARD) {
 		AUDITED_UPSTREAM,
 		logAudit: (req, action, entity, id, details) => rec.audits.push({ action, entity, id, details }),
 		notifyChange: () => {},
-		console: { log() {}, warn() {}, error() {} },
+		console: { log() {}, warn() {}, error: (...a) => rec.errors.push(a.map(String).join(" ")) },
 	};
 	let captured = null;
 	const app = { delete: (p, ...chain) => { captured = { path: p, chain }; } };
@@ -213,7 +213,7 @@ function deleteRoute(w, rec, guardSrc = GUARD) {
 	return captured.chain;
 }
 function del(w, id = T5.id, guardSrc) {
-	const rec = { refusals: [], audits: [] };
+	const rec = { refusals: [], audits: [], errors: [] };
 	const chain = deleteRoute(w, rec, guardSrc);
 	const req = { method: "DELETE", params: { id: String(id) }, body: {}, query: {}, headers: {}, session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } };
 	const res = {
@@ -344,6 +344,9 @@ const OPEN_SERVICE = { type: "service", date: "2026-10-06" };
 	const w = world({ target: BLANK, maintenance: [{ type: "service", date: "2026-10-06", truck: "" }] });
 	const r = del(w);
 	eq("§5 a blank unit number: no fee count, the delete goes through", [r.status, r.body.success], [200, true]);
+	eq("§5 ...only the documents leg ran, removing nothing", r.body.removed, { legal_documents: 0 });
+	ok("§5 ...the audit line still reads \"cascade: no rows\"",
+		r.audits.some((a) => a.action === "delete_truck" && String(a.details).endsWith("cascade: no rows")), JSON.stringify(r.audits));
 	eq("§5 ...the blank-truck fee row is untouched (the cascade matches none)",
 		count(w.db, "SELECT COUNT(*) AS n FROM maintenance_fund WHERE truck = ''"), 1);
 	done(w);
@@ -492,6 +495,8 @@ for (const locked of [[], ["2026-09"]]) {
 		["one legal document", { legal: 1 }],
 		["one open-month service row", { maintenance: [OPEN_SERVICE] }],
 		["one Pending compliance fee", { compliance: [{ due: "2026-11-15", status: "Pending" }] }],
+		// A blank unit number skips the fee match, never the documents (filed by truck id).
+		["a blank unit number with one legal document", { target: { id: 5, unit_number: "" }, legal: 1 }],
 	];
 	for (const [label, opts] of blind ? cases : []) {
 		const w = world(opts);
@@ -500,8 +505,16 @@ for (const locked of [[], ["2026-09"]]) {
 		eq(`§9 drift (${label}): 500 DELETE_ROLLED_BACK`, [r.status, r.body.code], [500, "DELETE_ROLLED_BACK"]);
 		ok(`§9 ...the route did not throw (${label})`, r.threw === null, r.threw);
 		eq(`§9 ...rolled back: truck, fee rows and documents all still there (${label})`, snapshot(w), before);
+		eq(`§9 ...the truck's own documents are kept (${label})`,
+			count(w.db, "SELECT COUNT(*) AS n FROM legal_documents WHERE truck_id = 5"), opts.legal || 0);
 		eq(`§9 ...no delete_truck success row (${label})`, r.audits.filter((a) => a.action === "delete_truck").length, 0);
 		eq(`§9 ...the body names no row (${label})`, Object.keys(r.body).sort(), ["code", "error"]);
+		// One server-log line, naming tables and counts only: every "=" is
+		// followed by a whole number, and no file name or dollar amount.
+		const logText = r.errors.join("\n");
+		ok(`§9 ...exactly one error logged (${label})`, r.errors.length === 1, JSON.stringify(r.errors));
+		ok(`§9 ...the log line holds only =N counts (${label})`,
+			/=\d/.test(logText) && !/=(?!\d+(,|$))/.test(logText) && !/\$|\.(pdf|jpe?g|png)\b|\/uploads\/|t5-reg/i.test(logText), logText);
 		done(w);
 	}
 }

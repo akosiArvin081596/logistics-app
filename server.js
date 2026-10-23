@@ -33805,8 +33805,7 @@ function truckDeleteLockBlockers(truck) {
 		maintenance: notHeld(feeRows.maintenance, fees.maintenance),
 		compliance: notHeld(feeRows.compliance, fees.compliance),
 	};
-	// By truck id, whatever the unit number: with a blank one the cascade keeps
-	// the rows but deletes the truck, leaving them pointing at nothing.
+	// By truck id, whatever the unit number, the same way the cascade deletes them.
 	const legalDocuments = db.prepare("SELECT id FROM legal_documents WHERE truck_id = ?").all(truck.id).length;
 
 	if (!locked.length) return { unreadable: false, blockers: [], openFees, legalDocuments };
@@ -35844,13 +35843,14 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// soft delete to recover them from.
 	try {
 		db.transaction(() => {
+			// Legal documents are filed by truck id, so a blank unit number is checked too.
+			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
 			if (unit) {
-				removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
 				removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
 				removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
-				if (removed.legal_documents || removed.maintenance_fund || removed.compliance_fees) {
-					throw new Error(`truck delete cascade would remove rows the guard did not count: legal_documents=${removed.legal_documents}, maintenance_fund=${removed.maintenance_fund}, compliance_fees=${removed.compliance_fees}`);
-				}
+			}
+			if (removed.legal_documents || removed.maintenance_fund || removed.compliance_fees) {
+				throw new Error(`truck delete cascade would remove rows the guard did not count: ${Object.entries(removed).map(([t, n]) => `${t}=${n}`).join(", ")}`);
 			}
 			db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 		})();
