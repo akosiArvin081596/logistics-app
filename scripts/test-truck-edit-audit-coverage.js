@@ -94,6 +94,9 @@ const MUST_AUDIT = {
 	// the VIN that says which physical truck it is. A rename left no trail.
 	unit_number: "the number every load's Truck cell is matched against",
 	vin: "which physical truck the row is",
+	// TD8-13 (2026-10-23): clearing the driver is one of the edits a refused
+	// truck delete names, so it leaves a trail like the others.
+	assigned_driver: "decides whose pay the truck's rate prices and which investor ledger the driver is on",
 };
 
 // The eight audited together on one `update_truck_costs` line.
@@ -105,7 +108,7 @@ const COST_AUDITED = [
 // Descriptive only: wrong values here are visible and harmless.
 const COSMETIC = new Set([
 	"make", "model", "year", "license_plate", "notes", "photo",
-	"title_status", "assigned_driver", "routemate_vehicle_id",
+	"title_status", "routemate_vehicle_id",
 ]);
 
 // The cost audit's own code: its bare block, from the `{` that opens it to its
@@ -156,6 +159,7 @@ function isAudited(src, col, tableSrc = TABLE_SRC) {
 		|| (col === "driver_pay_daily" && calls.includes("update_driver_pay"))
 		|| (col === "fuel_tank_gallons" && calls.includes("update_truck_fuel_tank"))
 		|| (col === "owner_id" && calls.includes("update_truck_owner"))
+		|| (col === "assigned_driver" && calls.includes("update_truck_driver"))
 		|| (COST_AUDITED.includes(col) && calls.includes("update_truck_costs") && costAuditColumns(src, tableSrc).has(col));
 }
 

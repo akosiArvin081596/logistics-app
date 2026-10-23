@@ -1198,7 +1198,9 @@ section("§8 GET /api/expenses/all, GET /api/messages: stored load ids", async (
 		{ id: 1, timestamp: "2030-01-14T10:00:00Z", from: HD, to: "Dispatch", message: "at the dock", loadId: "5550100163", read: 0, driver: HD, lastTimestamp: "2030-01-14T10:00:00Z", unread: 1 },
 		{ id: 2, timestamp: "2030-01-14T11:00:00Z", from: "Dispatch", to: HD, message: "ok", loadId: "QA-555-010-0162", read: 1, driver: HD, lastTimestamp: "2030-01-14T11:00:00Z", unread: 0 },
 	];
-	const msgDb = emptyDb([[/FROM messages/i, messageRows]]);
+	// The driver is no investor (the investor-conversation check, Super Admin
+	// only: scripts/test-investor-chats-super-admin-only.js).
+	const msgDb = emptyDb([[/AS investor_chat FROM \(SELECT/i, [{ investor_chat: 0 }]], [/FROM messages/i, messageRows]]);
 	const list = (role) => lift('app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {', {
 		requireRole: () => null, db: msgDb, currentShownLoadIdIndex: () => HIDX, console: quietConsole(errors),
 	})({ session: session(role) });

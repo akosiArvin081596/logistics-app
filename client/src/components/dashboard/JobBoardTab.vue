@@ -177,7 +177,7 @@
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
         </div>
       </DialogContent>
     </Dialog>
@@ -421,6 +421,7 @@ const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 // The Dispatcher Load ID plan (PR 2): per-load calls name the load by loadRef(),
 // the screen shows loadIdShown(), and a withheld ID has no tracking link to copy.
+const loadRefValue = computed(() => (selectedJob.value ? loadRef(selectedJob.value, loadIdCol.value) : ''))
 const loadIdShownValue = computed(() => (selectedJob.value ? loadIdShown(selectedJob.value, loadIdCol.value) : ''))
 const selectedLoadIdWithheld = computed(() => !!selectedJob.value && loadIdWithheld(selectedJob.value, loadIdCol.value))
 const statusValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /^status$/i.test(h) || /load.*status/i.test(h)); return c ? selectedJob.value[c] || '' : '' })

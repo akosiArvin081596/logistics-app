@@ -42,6 +42,11 @@
  *      and notes by name only); a resend, a refused save or an unknown trailer
  *      writes none. DELETE /api/trailers/:id writes one delete_trailer line
  *      naming the trailer, its truck and its VIN.
+ *   §7 PUT drivers (TD8-13): one update_truck_driver line when a save changes
+ *      the truck's driver (cleared, set or moved here), old -> new, under the
+ *      account that saved it; a resend (as stored, padded, in another case and
+ *      spacing, or in a whole-row body), a save that sends no driver and a
+ *      refused save write none.
  *
  * Pure: no server, no app.db, no network. Made-up trucks and names.
  *
@@ -318,6 +323,8 @@ function mountAll(db, { blockEdit = false } = {}) {
 		truckEditLockBlockers: () => ({ unreadable: false, blockers: blockEdit ? [{ field: "unit_number", month: "2026-09" }] : [] }),
 		truckCreateLockBlockers: () => ({ unreadable: false, blockers: [] }),
 		truckDeleteLockBlockers: () => ({ unreadable: false, blockers: [], openFees: { maintenance: 0, compliance: 0 }, legalDocuments: 0 }),
+		// No open-month item holds (test-truck-delete-open-month-figures.js has them).
+		truckDeleteOpenMonthHolds: () => ({ fixed_cost_months: 0, driver: 0, eld_link: 0, financials_line_months: 0, lease_months: 0 }),
 		periodBlockedResponse: refuse,
 		periodLockUnreadableResponse: refuse,
 		truckChargeFromMonth: () => "",
@@ -671,6 +678,51 @@ async function trailerAuditSection() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════ §7
+// TD8-13 (2026-10-23): the truck's driver decides whose days the truck's rate
+// prices and which investor ledger the driver is on, and clearing it is one of
+// the edits a refused truck delete names. A change writes one
+// update_truck_driver line, before -> after; a resend writes none.
+async function driverSection() {
+	section("§7 PUT /api/trucks/:id — a driver change is audited, old -> new");
+	const driverRows = (db) => audits(db, "update_truck_driver");
+	for (const [label, user, id, body, details] of [
+		["the driver cleared", SUPER, 1, { assignedDriver: "" }, "Driver for LogisX-#41: Soren King → no driver"],
+		["the driver cleared with null", SUPER, 1, { assignedDriver: null }, "Driver for LogisX-#41: Soren King → no driver"],
+		["a driver set on a truck that had none", DISPATCHER, 2, { assignedDriver: "Made Up Driver" }, "Driver for LogisX-#91: no driver → Made Up Driver"],
+		["a driver moved here from another truck", SUPER, 2, { assignedDriver: "Soren King" }, "Driver for LogisX-#91: no driver → Soren King"],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(user, id, body);
+		const rows = driverRows(db);
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === details,
+			`§7 ${label}: 200 and one update_truck_driver line ${JSON.stringify(details)} (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		ok(rows.length === 1 && rows[0].entity === "truck" && rows[0].entity_id === String(id) && rows[0].username === user.username,
+			`§7 ${label}: on truck ${id}, under ${user.username} (got ${JSON.stringify(rows.map((x) => [x.entity, x.entity_id, x.username]))})`);
+	}
+	for (const [label, body] of [
+		["the driver resent as stored", () => ({ assignedDriver: "Soren King", notes: "new tires" })],
+		["the driver resent padded", () => ({ assignedDriver: "  Soren King  " })],
+		["the driver resent in another case and spacing", () => ({ assignedDriver: "soren  KING" })],
+		["a whole-row resend", (db) => truckFormBody(truckRow(db, 1))],
+		["a save that sends no driver", () => ({ notes: "new tires" })],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, body(db));
+		ok(r.status === 200 && truckRow(db, 1).assigned_driver === "Soren King" && driverRows(db).length === 0,
+			`§7 ${label}: 200, the driver kept, no update_truck_driver line (got ${r.status}, ${JSON.stringify(truckRow(db, 1).assigned_driver)}, ${driverRows(db).length} lines)`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db, { blockEdit: true });
+		const r = await app.put(SUPER, 1, { assignedDriver: "" });
+		ok(r.status === 409 && truckRow(db, 1).assigned_driver === "Soren King" && driverRows(db).length === 0,
+			`§7 a driver change the month-end lock refuses: 409, the driver kept, no line (got ${r.status}, ${driverRows(db).length} lines)`);
+	}
+}
+
 (async () => {
 	await renameSection();
 	await vinSection();
@@ -678,6 +730,7 @@ async function trailerAuditSection() {
 	await deleteSection();
 	await trailerSection();
 	await trailerAuditSection();
+	await driverSection();
 })().then(() => {
 	if (failures.length) {
 		for (const f of failures) console.error(`  FAIL  ${f}`);
