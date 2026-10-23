@@ -137,22 +137,25 @@
             </div>
             <!-- Level 1: Active loads list (expands when driver is selected) -->
             <div v-if="selectedDriver === loc.driver && loc.activeLoads && loc.activeLoads.length > 0" class="loads-accordion">
+              <!-- Each load is keyed and opened by loadIdRef(): its key when its
+                   Load ID is withheld from this user (two can read alike), else
+                   its ID; the screen shows the ID as served. -->
               <div
                 v-for="al in loc.activeLoads"
-                :key="al.loadId"
+                :key="loadIdRef(al)"
                 class="load-entry"
               >
                 <div
-                  :class="['load-entry-header', { active: expandedLoadId === al.loadId }]"
+                  :class="['load-entry-header', { active: expandedLoadId === loadIdRef(al) }]"
                   @click.stop="toggleLoad(al, loc)"
                 >
-                  <span class="load-entry-id">{{ al.loadId }}</span>
+                  <span class="load-entry-id">{{ al.loadId || (al.loadKey ? WITHHELD_TEXT : '') }}</span>
                   <span class="load-entry-status">{{ al.status }}</span>
-                  <span class="load-entry-chevron" :class="{ open: expandedLoadId === al.loadId }">&#9662;</span>
+                  <span class="load-entry-chevron" :class="{ open: expandedLoadId === loadIdRef(al) }">&#9662;</span>
                 </div>
                 <div v-if="al.details" class="load-entry-details">{{ al.details }}</div>
                 <!-- Level 2: Point A/B details (expands when load is clicked) -->
-                <div v-if="expandedLoadId === al.loadId" class="route-accordion">
+                <div v-if="expandedLoadId === loadIdRef(al)" class="route-accordion">
                   <div v-if="al.originLat" class="route-point clickable" @click.stop="focusPoint(al.originLat, al.originLng)">
                     <div class="route-point-header">
                       <span class="route-point-dot pickup"></span>
@@ -215,6 +218,7 @@ import { useGoogleMaps, createDotPin, createTruckArrow, createFuelPricePin } fro
 import { formatMinutes, formatClockMs } from '../../lib/duration'
 import { fixAgeMs, lastSeenText, fixAllowsEta, fixHidesFigures } from '../../lib/fixAge'
 import { normDriver } from '../../lib/driverName'
+import { loadIdRef, WITHHELD_TEXT } from '../../lib/loadRef'
 import { fmtAppInstant, fmtArrivalClock } from '../../utils/datetime'
 import {
   stopPrice,
@@ -694,7 +698,7 @@ function buildSingleLoadPath(driverOverride = null) {
   if (routePoints.value.length < 2) return null
   const points = routePoints.value
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
-  const al = loc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  const al = loc?.activeLoads?.find(l => loadIdRef(l) === expandedLoadId.value)
   const isPastPickup = al && PAST_PICKUP_RE.test(al.status)
 
   if (!isPastPickup) {
@@ -1269,7 +1273,9 @@ async function focusDriver(loc) {
 async function toggleLoad(al, loc) {
   ++focusGeneration
 
-  if (expandedLoadId.value === al.loadId) {
+  // expandedLoadId holds the load's reference (loadIdRef(): its key when its ID
+  // is withheld from this user), which every per-load read below sends.
+  if (expandedLoadId.value === loadIdRef(al)) {
     // Collapse
     expandedLoadId.value = ''
     routePoints.value = []
@@ -1285,7 +1291,7 @@ async function toggleLoad(al, loc) {
   }
 
   // Expand: show origin/destination markers
-  expandedLoadId.value = al.loadId
+  expandedLoadId.value = loadIdRef(al)
   routePoints.value = []
   approachRoutePoints.value = []
   clearSingleLoadOverlays()
@@ -1393,7 +1399,7 @@ async function toggleLoad(al, loc) {
     fetchingRoute.value = true
     let lane = []
     try {
-      lane = await fetchPlannedLane(al.loadId)
+      lane = await fetchPlannedLane(loadIdRef(al))
     } finally {
       fetchingRoute.value = false
     }
@@ -1455,7 +1461,7 @@ async function maybeRefetchRoute(lat, lng) {
   // while the load is still Assigned. The dynamic leg (driver→pickup) is
   // refreshed via maybeRefetchApproachLeg() instead.
   const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
-  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => loadIdRef(l) === expandedLoadId.value)
   if (!focusLoad || !PAST_PICKUP_RE.test(focusLoad.status)) return
 
   const now = Date.now()
@@ -1531,7 +1537,7 @@ async function updateDriverToDestStats(fromLat, fromLng, toLat, toLng, gen) {
 async function maybeRefetchApproachLeg(driverLat, driverLng) {
   if (!originLatLng.value || !expandedLoadId.value) return
   const focusLoc = locations.value.find(l => l.driver === selectedDriver.value)
-  const focusLoad = focusLoc?.activeLoads?.find(l => l.loadId === expandedLoadId.value)
+  const focusLoad = focusLoc?.activeLoads?.find(l => loadIdRef(l) === expandedLoadId.value)
   if (!focusLoad || PAST_PICKUP_RE.test(focusLoad.status)) return
 
   const now = Date.now()
@@ -1579,7 +1585,7 @@ async function focusAll() {
       const i = nextIdx++
       const loc = onlineWithLoad[i]
       try {
-        const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(loc.loadId)}`)
+        const data = await api.get(`/api/locations/trail?driver=${encodeURIComponent(loc.driver)}&loadId=${encodeURIComponent(loadIdRef(loc))}`)
         results[i] = {
           driver: loc.driver,
           route: (data.route || []).map(p => [p.latitude, p.longitude]),
@@ -1814,7 +1820,7 @@ const selectedPinIsLive = computed(() => {
 watch(() => [selectedDriver.value, selectedPinIsLive.value], ([driver, live], [wasDriver, wasLive]) => {
   if (driver !== wasDriver || live || !wasLive || !expandedLoadId.value) return
   const loc = selectedDriverLoc.value
-  const al = loc && (loc.activeLoads || []).find((l) => l.loadId === expandedLoadId.value)
+  const al = loc && (loc.activeLoads || []).find((l) => loadIdRef(l) === expandedLoadId.value)
   if (!al) return
   expandedLoadId.value = ''
   toggleLoad(al, loc)
@@ -1826,7 +1832,7 @@ watch(() => [selectedDriver.value, selectedPinIsLive.value], ([driver, live], [w
 const selectedActiveLoad = computed(() => {
   const loc = locations.value.find(l => l.driver === selectedDriver.value)
   if (!loc || !Array.isArray(loc.activeLoads) || loc.activeLoads.length === 0) return null
-  return loc.activeLoads.find(l => l.loadId === expandedLoadId.value) || loc.activeLoads[0] || null
+  return loc.activeLoads.find(l => loadIdRef(l) === expandedLoadId.value) || loc.activeLoads[0] || null
 })
 
 function updateMarkerVisibility() {
@@ -1970,6 +1976,8 @@ function onLocationUpdate(payload) {
     // Update non-position fields immediately
     locations.value[idx].speed = payload.speed || 0
     locations.value[idx].loadId = payload.loadId || ''
+    // The load's key beside a withheld ID (the Dispatcher Load ID plan).
+    locations.value[idx].loadKey = payload.loadKey || ''
     locations.value[idx].timestamp = payload.timestamp
     if (Number.isFinite(payload.heading)) locations.value[idx].heading = payload.heading
     // Live fuel level from the ELD ping (null when the device omits it —
@@ -2003,6 +2011,7 @@ function onLocationUpdate(payload) {
       longitude: targetLng,
       speed: payload.speed || 0,
       loadId: payload.loadId || '',
+      loadKey: payload.loadKey || '',
       timestamp: payload.timestamp,
       fuelPct: payload.fuelPct != null ? payload.fuelPct : null,
     })
@@ -2014,7 +2023,7 @@ function onLocationUpdate(payload) {
   if (
     isSelectedDriver &&
     trailLoadId.value &&
-    payload.loadId === trailLoadId.value &&
+    loadIdRef(payload) === trailLoadId.value &&
     trailPoints.value.length > 0
   ) {
     trailPoints.value = [...trailPoints.value, [payload.latitude, payload.longitude]]
