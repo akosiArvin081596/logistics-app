@@ -30,8 +30,8 @@
             <div>{{ c.driver }}</div>
             <div v-if="c.loadId" class="msg-load-label">Load {{ c.loadId }}</div>
             <div v-else class="msg-load-label">General</div>
-            <!-- The last message: its text, "Photo", "File" or "Voice note (0:42)".
-                 Shown once GET /api/messages sends the preview fields. -->
+            <!-- The last message: its text, "Photo", "File" or "Voice note (0:42)",
+                 from GET /api/messages's lastKind / lastText / lastVoiceMs. -->
             <div v-if="conversationPreview(c)" class="msg-preview">{{ conversationPreview(c) }}</div>
             <div class="msg-time">{{ formatTime(c.lastTimestamp) }}</div>
           </div>
