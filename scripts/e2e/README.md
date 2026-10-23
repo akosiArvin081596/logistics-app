@@ -4,9 +4,10 @@ Playwright (`playwright-core`) drives the real LogisX UI in Chrome for Testing. 
 the screens, captions every step on the page, screenshots it, and writes one verdict per step to a results table. In this
 repo, "test" means this: a real browser run through the UI, headed so a person can watch, on a local server **and** on staging.
 
-It is **not part of `npm run ci`**, and it never runs in CI or on deploy. It is its own npm package (`package.json` here):
-the root install, CI and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
-`scripts/test-*` / `check-*` files.
+It is **not part of `npm run ci`** or of `ci.yml`, and it never runs on deploy. It is its own npm package (`package.json`
+here): the root install, `ci.yml` and the deploy never install it, and `scripts/run-unit-tests.js` only runs the top-level
+`scripts/test-*` / `check-*` files. Its own workflow, `.github/workflows/e2e.yml`, runs the sections the made-up seed
+supports on every PR into `main` and every push to `main`, on made-up data only (see "CI").
 
 What it covers today, by section (`ONLY` picks them):
 
@@ -237,6 +238,9 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `fixtures/e2e-sheets.json` | The made-up Sheets book (Job Tracking with production's 26 headers, Payments Table, Job Details, Carrier Database; `QA-E2E-` loads only). Never written: each database gets its own copy. |
 | `boot-server.sh` / `stop-server.sh` | Start a local server on a copy with every outbound effect off; stop exactly that PID. |
 | `fake-gmail.cjs` | A stand-in for Gmail, preloaded into a server booted with `E2E_FAKE_GMAIL=1`: it captures each IMAP APPEND in the work dir and refuses SMTP. Its `readCapturedDrafts(dir)` reads the captures back (I14, I14b). |
+| `ci-run.sh` | The whole CI run on the made-up seed, the same command locally and in `e2e.yml` (see "CI"). |
+| `ci-gate.cjs` | The verdict on one part's `results-<tag>.md` for CI: fails on a FAIL row, a SKIP not on the part's allow list, no PASS, or a run never stamped finished. |
+| `ci-keychain.cjs` | A stand-in for macOS's `security` for a run with no Keychain: service `logisx-e2e-ci` only, the run's generated passwords in a `0600` file inside the work dir. |
 | `stored-format-audit.cjs` | Read-only tally of the stored truck photos and CDL files: data-URI label vs actual bytes. |
 | `payout-parity.mjs` | Not a browser run: boots two builds on two identical private copies and compares every investor's payout answers between them (see "The payout parity check"). |
 | `phone-layout.mjs` | A browser run on made-up data only: serves the built `client/dist` from its own static server and answers every `/api` request in the browser (see "The phone layout check"). The driver-instructions routes answer as with their flag off. |
@@ -540,6 +544,57 @@ whatever the caller exported:
 `stop-server.sh <port>` reads `<work dir>/server-<port>.pid`. It sends SIGTERM only if that PID is still a `server.js`
 whose working directory is the worktree it was booted from. Otherwise it kills nothing.
 
+## CI
+
+`.github/workflows/e2e.yml` runs `ci-run.sh` on every PR into `main`, every push to `main`, and by hand. It is its own
+workflow, not a job in `ci.yml`: `ci.yml`'s `verify` job is production's gate and must need every job in that file
+(`scripts/test-release-gate.js` §4), and `deploy.yml`'s CI wait is sized to `ci.yml`. So the browser run never slows the
+unit check or a deploy, and it is not a required check.
+
+- **Made-up data only.** `ci-run.sh` refuses `SOURCE_DB`, builds the made-up database with `setup-db.cjs`, and boots every
+  server with `boot-server.sh` (the Google stand-in, made-up settings, every outbound effect off). No secret, settings
+  file, key or Keychain: the logins' passwords are generated for the run and kept by `ci-keychain.cjs` (service
+  `logisx-e2e-ci`) in a `0600` file inside the `0700` work dir.
+- **The workflow** has `permissions: contents: read`, no `pull_request_target`, no secret and no environment, checks out
+  without keeping a token, and uses only the two actions `ci.yml` uses, at the same pinned SHAs. It installs the app
+  (`npm ci`), the harness (`npm --prefix scripts/e2e ci`), Playwright's Chromium with its system libraries, builds the
+  client, and runs `ci-run.sh` with `E2E_WORK_DIR` under `runner.temp` and `E2E_BROWSER=playwright`. Nothing is uploaded:
+  the verdicts go to the log and the job summary, and the screenshots go away with the runner.
+- **How a part fails.** `e2e.mjs` exits 0 with FAIL rows (see "Verdicts and exit code"), so `ci-gate.cjs` reads each
+  part's results table: a FAIL row (an aborted block is one), a SKIP not on that part's allow list, no PASS at all, or a
+  run never stamped finished fails the part. `e2e.mjs` exiting non-zero fails it too. Every part runs even after one
+  failed; `ci-run.sh` then exits 1 and the job fails. An allowed SKIP that starts passing is noted, so it can come off
+  the list.
+
+Each part boots a fresh server process on the run's database (the sign-in and preview limiters are per process):
+
+| Part | Sections and steps | Allowed SKIPs | Server |
+|---|---|---|---|
+| `trucks-dispatcher` | `trucks` (1–12, R1–R16), `dispatcher` (D1–D3) | none | as booted |
+| `signout` | `signout` (S1–S7) | none | as booted |
+| `maintenance` | `maintenance` (M1) | none | `E2E_MAINTENANCE_NOTICE=1` |
+| `moneypath` | `moneypath` with `STEPS=P1,E1,N1,B1` (N1b included); B1's expense planted before the boot | none | as booted |
+| `terms-t0` | `terms`, `STEPS=T0` | none | as booted |
+| `terms` | `terms`, `STEPS=T1`–`T11` | none | as booted |
+| `investorfixes` | `investorfixes` (F1–F14) | none | as booted |
+| `lease` | `lease` (LA–LH, LP, LS, LV, LW, LX, LY) | LV, LY (no finalized month on the seed), LG (no second investor with ledger rows) | the section restarts it to switch the flag |
+| `instructions` | `instructions` (DI0–DI6) | none | `E2E_DRIVER_INSTRUCTIONS_DENY=T8273641` (invented) |
+
+Not run in CI: `names`, and the money path's F1 and RC1 (they SKIP in every run: they read sheet formulas and cell
+formats with the Google API, which the stand-in does not model); `eldlink` (the seed has no ELD device and no finalized
+month); `invoice` (it needs a delivered load's POD files on disk and a Bison load); `report` (the seed has no Investor
+who owns a truck); and the money path's E2, which waits for the Financials month table that the current Fleet P&L
+replaced, so it fails on any data until it is rewritten for that page. They still run locally as "Local run" says.
+
+A whole run took about 11 minutes headless on a Mac. To rehearse it exactly, on a new work dir and a port nothing else
+uses (run it outside the Claude Code sandbox, which blocks `lsof`, `ps` and the browser):
+
+```bash
+(cd scripts/e2e && fnm exec --using=22.23.2 ./node_modules/.bin/playwright-core install chromium)          # once
+E2E_WORK_DIR=~/LogisX-replica/screens/<task>/run1 E2E_PORT=3191 E2E_BROWSER=playwright \
+  fnm exec --using=22.23.2 bash scripts/e2e/ci-run.sh                         # E2E_CI_PARTS=moneypath,lease picks parts
+```
+
 ## Staging
 
 ```bash
@@ -605,6 +660,9 @@ BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHA
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
 | `MAIN_CHECKOUT` | The main checkout. Default: the parent of `git rev-parse --git-common-dir`. |
 | `CHROME_PATH` | Another Chrome binary. Default: the app's puppeteer Chrome for Testing. |
+| `E2E_BROWSER=playwright` | Drive the Chromium build `playwright-core` is released with (`./node_modules/.bin/playwright-core install chromium` in `scripts/e2e`), as CI does. `CHROME_PATH` still wins; any other value is refused. |
+| `E2E_SECURITY_BIN` | The `security` binary `keychain.cjs` runs. Default: `/usr/bin/security`. `ci-run.sh` sets `ci-keychain.cjs`. |
+| `E2E_CI_PARTS`, `E2E_PORT` | For `ci-run.sh`: the parts to run (default: all) and the servers' port (default 3181). |
 | `NODE_BIN` | The `node` binary the shell scripts run. Default: `node` on `PATH`. |
 | `MASK_PII=0` | Stops masking the driver's identity documents in saved screenshots. Masking only affects the saved PNGs; the live page is not masked. |
 | `EXTRA=1` | Adds X1, an INFO probe of the Edit-modal-vs-refresh bug. R1 now scores the same behaviour, so X1 is redundant. |

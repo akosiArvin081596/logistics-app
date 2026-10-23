@@ -1,0 +1,79 @@
+name: E2E
+
+# The browser e2e harness (scripts/e2e) on MADE-UP data only, beside CI: the
+# made-up seed (scripts/e2e/setup-db.cjs, no SOURCE_DB), the made-up Sheets
+# fixture behind the Google stand-in, and servers booted by boot-server.sh with
+# made-up settings on their command line. No secret, settings file, key or
+# Keychain: the logins' passwords are generated for the run and kept in the
+# runner's temp folder by scripts/e2e/ci-keychain.cjs. Nothing goes to Google,
+# Gmail or the VPS. What runs, and why the rest can't: scripts/e2e/ci-run.sh.
+#
+# ⚠️ Its own workflow on purpose, not a job in ci.yml. ci.yml's `verify` job is
+# production's gate and must need every job in that file (test-release-gate.js
+# §4), and deploy.yml's CI wait is sized to ci.yml's 15-minute chain. Here the
+# browser run never slows the unit check or the deploy chain, and it is not a
+# required check (branch protection names `check · unit · build` only).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# As ci.yml: a PR's new push supersedes its previous run; a push or manual run
+# never cancels anything. Safe to cancel: the run writes only on the runner.
+concurrency:
+  group: e2e-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e · made-up data
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      # The run never pushes or reads the API: no token is left in the checkout.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # The same Node as ci.yml (.nvmrc: the version pm2 runs the app with).
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+            scripts/e2e/package-lock.json
+
+      # The app, the client and puppeteer's Chrome (the server renders PDFs with it).
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The harness is its own package: playwright-core, pinned in its lockfile.
+      - name: Install the e2e harness
+        run: npm --prefix scripts/e2e ci --no-audit --no-fund
+
+      # The Chromium build that playwright-core is released with, and the system
+      # libraries it needs. The harness drives it (E2E_BROWSER=playwright below).
+      - name: Install Playwright's Chromium
+        working-directory: scripts/e2e
+        run: ./node_modules/.bin/playwright-core install --with-deps chromium
+
+      # boot-server.sh refuses a checkout without client/dist.
+      - name: Build client
+        run: npm run build:client
+
+      # Every part on its own server process; a FAIL row, an unexpected SKIP or a
+      # part that never finished fails this step (scripts/e2e/ci-gate.cjs). The
+      # verdicts go to the job summary; screenshots stay on the runner.
+      - name: Browser e2e on the made-up seed
+        env:
+          E2E_WORK_DIR: ${{ runner.temp }}/logisx-e2e
+          E2E_BROWSER: playwright
+        run: bash scripts/e2e/ci-run.sh
