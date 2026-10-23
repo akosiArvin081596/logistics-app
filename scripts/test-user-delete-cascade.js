@@ -1002,6 +1002,10 @@ check("refusal extraction picked up the 409 and its code selection", [
 		check("rolled-back delete: ...and none of the error's text in the row",
 			JSON.stringify(recorded).includes("FOREIGN KEY"), false);
 		check("rolled-back delete: the error still goes to the server log", logged.length === 1 && logged[0].includes("FOREIGN KEY"), true);
+		// The answer names no database text either: error and code only, as the
+		// truck delete's rollback answers.
+		check("rolled-back delete: the 500 body is error and code only", Object.keys(out.body || {}).sort(), ["code", "error"]);
+		check("rolled-back delete: ...with none of the error's text", JSON.stringify(out.body || {}).includes("FOREIGN KEY"), false);
 	}
 }
 

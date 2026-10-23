@@ -31837,10 +31837,8 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
-			// The old response named no cause at all, which is how a FOREIGN KEY
-			// failure read as "the app is broken" rather than "this user is
-			// onboarded". SQLite's message is schema text, not user data.
-			detail: err.message,
+			// Error and code only, as the truck delete answers: the database's
+			// message (schema text) goes to the server log above, never the client.
 		});
 	}
 	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
