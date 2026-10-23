@@ -5,6 +5,11 @@ import { uploadVoiceNote } from '../lib/voiceNoteUpload'
 
 const api = useApi()
 
+// The staff desks a message to staff is addressed to: a driver writes to
+// "Dispatch", an investor to "admin" (server.js CHAT_DESK_NAMES). Opening a
+// conversation marks both read, as GET /api/messages counts both unread.
+const STAFF_DESKS = ['dispatch', 'admin']
+
 export const useMessagesStore = defineStore('messages', {
   state: () => ({
     conversations: [],
@@ -38,7 +43,7 @@ export const useMessagesStore = defineStore('messages', {
         this.currentMessages = data.messages || []
         // Mark unread as read
         const unreadIds = this.currentMessages
-          .filter((m) => m.to.toLowerCase() === 'dispatch' && !m.read)
+          .filter((m) => STAFF_DESKS.includes(m.to.toLowerCase()) && !m.read)
           .map((m) => m.id)
         if (unreadIds.length > 0) {
           await api.put('/api/messages/read', { messageIds: unreadIds })
