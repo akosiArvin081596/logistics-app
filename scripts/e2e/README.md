@@ -586,7 +586,8 @@ month); `invoice` (it needs a delivered load's POD files on disk and a Bison loa
 who owns a truck); and the money path's E2, which waits for the Financials month table that the current Fleet P&L
 replaced, so it fails on any data until it is rewritten for that page. They still run locally as "Local run" says.
 
-A whole run took about 11 minutes headless on a Mac. To rehearse it exactly, on a new work dir and a port nothing else
+A whole run takes about 11 minutes headless on a Mac, and about 10 minutes for the job in CI (9 for the parts; the job's
+timeout is 25). To rehearse it exactly, on a new work dir and a port nothing else
 uses (run it outside the Claude Code sandbox, which blocks `lsof`, `ps` and the browser):
 
 ```bash

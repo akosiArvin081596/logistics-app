@@ -126,6 +126,11 @@ eq("an unknown option is a usage error", runGate(resultsMd(good), ["--bogus"]).s
 		"the job summary gets the part's verdict and its FAIL rows", md);
 }
 {
+	// A backslash before a pipe must not turn the pipe's escape into a literal backslash and end the cell.
+	const md = gate.report("x", { ok: false, counts: { FAIL: 1 }, fails: [{ step: "S4", title: "made-up", observed: "a\\|b", verdict: "FAIL" }], unexpectedSkips: [], problems: [], notes: [] }).md;
+	ok(md.includes("| S4 | made-up | a\\\\\\|b | FAIL |"), "the job summary escapes a backslash as well as a pipe", md);
+}
+{
 	// The table e2e.mjs writes is the one parsed here.
 	const src = fs.readFileSync(path.join(E2E, "e2e.mjs"), "utf8");
 	ok(src.includes("'| Step | What | Expected (after the fix) | Observed | Verdict | Screenshot |',"), "e2e.mjs: the table header the gate looks for");

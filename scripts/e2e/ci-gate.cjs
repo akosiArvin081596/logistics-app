@@ -84,7 +84,8 @@ const short = (s, n = 300) => {
   const t = String(s).replace(/\s+/g, ' ').trim()
   return t.length > n ? `${t.slice(0, n)}…` : t
 }
-const mdCell = (s) => short(s).replace(/\|/g, '\\|')
+// A backslash first, then a pipe, as e2e.mjs's cell() does, so neither can end a cell early.
+const mdCell = (s) => short(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 
 function report(label, v) {
   const totals = Object.entries(v.counts).map(([k, n]) => `${k} ${n}`).join(' · ') || 'no rows'

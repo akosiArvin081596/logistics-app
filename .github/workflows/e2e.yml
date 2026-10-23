@@ -33,7 +33,8 @@ jobs:
   e2e:
     name: e2e · made-up data
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # The first run took about 10 minutes (9 for the browser parts): room for a slow runner.
+    timeout-minutes: 25
 
     steps:
       # The run never pushes or reads the API: no token is left in the checkout.
