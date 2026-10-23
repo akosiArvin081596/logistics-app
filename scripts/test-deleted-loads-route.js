@@ -203,10 +203,12 @@ function build(routeText, db, jobTracking) {
 		routeText,
 		"return { requireRole };",
 	].join("\n\n");
+	// The restore flag off: the list as it was (scripts/test-deleted-load-restore.js
+	// covers the "Restored loads" history with it on).
 	const scope = new Function(
-		"app", "db", "getJobTrackingCached", "tripDayLockCover", "deletedLoadsView", "normalizeLoadId", "APP_TIMEZONE", "console",
+		"app", "db", "getJobTrackingCached", "tripDayLockCover", "deletedLoadsView", "normalizeLoadId", "APP_TIMEZONE", "console", "RESTORE_DELETED_LOADS_ENABLED",
 		body,
-	)(app, db, getJobTrackingCached, () => null, deletedLoadsView, normalizeLoadId, "America/New_York", quiet);
+	)(app, db, getJobTrackingCached, () => null, deletedLoadsView, normalizeLoadId, "America/New_York", quiet, false);
 	return { chain: captured, reads, requireRole: scope.requireRole };
 }
 

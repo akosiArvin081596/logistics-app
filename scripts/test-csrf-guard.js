@@ -350,10 +350,13 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // only, from the SPA's KPI page. So are the four Personal receipt writes (mark,
 // undo — POST and DELETE on /api/expenses/:id/personal — the reversal, and the
 // correction invoice): each charges a driver for a receipt or credits it back,
-// Super Admin only, from the SPA's Expenses screen.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes and the Personal receipt writes",
+// Super Admin only, from the SPA's Expenses screen. So is POST
+// /api/admin/deleted-loads/:id/restore: it puts a deleted load back in revenue,
+// pay and payouts, Super Admin only, from the SPA's Deleted loads page.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes, the Personal receipt writes and the load restore",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen", "/api/admin/financials/freeze-closed-months", "/api/financials/settings",
+	 "/api/admin/deleted-loads/:id/restore",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
 	 "/api/invoices/:id/adjust",
 	 "/api/admin/ratecon-reconcile", "/api/admin/ratecon-reconcile/run",
@@ -362,7 +365,7 @@ eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, t
 	 "/api/investor/config", "/api/investors/:id/payout-basis",
 	 "/api/admin/kpis/approvals/:key", "/api/admin/kpis/settings", "/api/admin/kpis/recompute",
 	 "/api/expenses/:id/personal", "/api/expenses/:id/personal", "/api/expenses/:id/personal/reverse", "/api/invoices/personal-corrections"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 22);
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 23);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

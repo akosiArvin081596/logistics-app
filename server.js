@@ -1397,9 +1397,11 @@ function scrubPurgeMarker(s) {
 // Purge refusal rows older than the retention window. Mirrors
 // purgeOldDriverLocations() below: run once at boot to seed, then weekly.
 // ⚠️ The cutoff is computed in JS as an ISO string, NOT with
-// datetime('now','-90 days'). logAudit() is the ONLY writer of this table and
-// always stores `new Date().toISOString()` (verified: 0 of 1,314 production rows
-// deviate), so an ISO-to-ISO comparison is exact — whereas SQLite's datetime()
+// datetime('now','-90 days'). logAudit() is the writer of this table (the load
+// restore's commitRestore() inserts its row directly, inside its transaction,
+// with the same columns) and both always store `new Date().toISOString()`
+// (verified: 0 of 1,314 production rows deviate), so an ISO-to-ISO comparison is
+// exact — whereas SQLite's datetime()
 // renders `YYYY-MM-DD HH:MM:SS`, and comparing that to `YYYY-MM-DDTHH:MM:SS.sssZ`
 // is a string comparison in which the 'T' sorts above the space. That happens to
 // fail SAFE here (it keeps a row a fraction longer) but it is an accident, and an
@@ -41779,6 +41781,347 @@ app.delete("/api/loads/:loadId", requireRole("Super Admin"), async (req, res) =>
 	}
 });
 
+// ============================================================================
+// RESTORING A SOFT-DELETED LOAD (the restore plan of 2026-10-22, Revision 2;
+// decisions 1-14 approved). A restore removes every deleted_loads row of the
+// load's normalizeLoadId() key, so the load counts again in revenue, driver pay
+// and payouts wherever excludeDroppedLoads() reads. Nothing else is stored by a
+// delete, so nothing else is undone: no sheet, invoice, payout or ledger write.
+//
+// Behind RESTORE_DELETED_LOADS_ENABLED (off; on with true/1/yes/on): off, both
+// routes answer 404 FEATURE_OFF, and the Deleted loads page shows no button and
+// no history. Before it goes on, the read-only list
+// scripts/deleted-loads-restore-report.js runs on production's data.
+//
+// ⚠️ THE CLOSED-MONTH GUARD IS THE DELETE'S, AND MORE. A restore is refused
+// (nothing written) when: period_locks can't be read (PERIOD_LOCK_UNREADABLE);
+// the sheet or the row's dates (or the trip rule's history) can't be read
+// (PERIOD_UNRESOLVED); a month the row books is closed, or any month after its
+// earliest is (decision 13), or the before/after payout ledger would change a
+// closed month (PERIOD_FINALIZED); the delete record names a closed month the
+// row no longer books (DELETE_RECORD_MONTH_CLOSED, decision 12); no sheet row
+// carries the load (RESTORE_NO_ROW); a payout for a month it moves is not
+// `owed` (PAYOUT_SETTLED). The locks and payouts are checked again inside the
+// write's transaction, after the last await.
+// ============================================================================
+const RESTORE_DELETED_LOADS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RESTORE_DELETED_LOADS_ENABLED ?? "").trim());
+const loadSearchRefs = require("./lib/load-search-refs");
+// The dashboard's active statuses (/api/dashboard's activeStatuses): a load in
+// one of them is still in flight, and tracking, the geofence and the driver app
+// pick it up again when it is restored.
+const RESTORE_IN_FLIGHT_RE = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i;
+const RESTORE_FEATURE_OFF = Object.freeze({ error: "Restoring deleted loads is not switched on.", code: "FEATURE_OFF" });
+
+// A deleted_loads id from the path: a positive whole number, or null.
+function restoreIdParam(v) {
+	const s = String(v == null ? "" : v).trim();
+	if (!/^[1-9]\d{0,15}$/.test(s)) return null;
+	const n = Number(s);
+	return Number.isSafeInteger(n) ? n : null;
+}
+
+// The 409 sendPeriodRefusal() answers, as a refusal object and without its audit
+// row (the preview and the switch-on report record nothing; the POST records it
+// when it answers, sendRestoreRefusal()).
+function periodRefusalOf(kind, periods, extra) {
+	const capture = { statusCode: 0, body: null };
+	capture.status = (c) => { capture.statusCode = c; return capture; };
+	capture.json = (b) => { capture.body = b; return capture; };
+	sendPeriodRefusal(null, capture, kind, periods || [], extra, AUDITED_UPSTREAM);
+	return { status: capture.statusCode, code: capture.body.code, error: capture.body.error, periods: capture.body.periods || [], periodKind: kind, extra };
+}
+// Decision 12: the delete record names a closed month the sheet row no longer books.
+function restoreRecordMonthRefusal(label, closed, sheetMonths) {
+	return {
+		status: 409,
+		code: "DELETE_RECORD_MONTH_CLOSED",
+		periods: closed,
+		sheetMonths,
+		error: `Load ${label} was deleted from ${closed.map(periodLabel).join(", ")}, which ${closed.length === 1 ? "is" : "are"} now closed; the sheet now books it in ${sheetMonths.map(periodLabel).join(", ")}. The row changed while the load was deleted, so a person checks it first. Nothing was changed.`,
+	};
+}
+// Plan section 3f: a payout row for a month the restore moves that is not `owed`.
+function restorePayoutRefusal(label, months) {
+	return {
+		status: 409,
+		code: "PAYOUT_SETTLED",
+		periods: months,
+		error: `A payout for ${months.map(periodLabel).join(", ")} is already processing or paid, so restoring load ${label} would move the figures behind it. Nothing was changed.`,
+	};
+}
+// Of `months`, those with an investor payout row that is not `owed` (any investor:
+// attributing the exact one is the ledger's job and too heavy for a guard).
+function settledPayoutMonths(months) {
+	const want = new Set(months || []);
+	if (!want.size) return [];
+	const rows = db.prepare("SELECT DISTINCT period FROM investor_payouts WHERE status != 'owed'").all();
+	return rows.map((r) => r.period).filter((p) => want.has(p)).sort();
+}
+// Any month after `earliest` that period_locks records as closed (decision 13: the
+// ledger day-once rule and loss carry-forward carry a restored month into later ones).
+function closedMonthsAfter(earliest) {
+	if (!earliest) return [];
+	return lockedAmong(db.prepare("SELECT period FROM period_locks WHERE period > ?").all(earliest).map((r) => r.period));
+}
+// deleted_at (SQLite UTC) as ISO-8601 "Z", or "".
+function restoreStamp(v) {
+	const ms = deletedLoadsView.sqliteUtcMs(v);
+	return Number.isNaN(ms) ? "" : new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// What restoring the deleted_loads row `deletedId` would do, and whether it may:
+// the preview (GET .../restore-preview), the POST's recompute and the switch-on
+// report all use this one function, so they cannot disagree. Returns
+//   { notFound: true }    no such deleted_loads row
+//   { unreadable: true }  deleted_loads could not be read
+//   or the plan: { id, key, loadId (as stored), label (the sheet's Load ID),
+//     deleteRecords, canRestore, refusal ({ status, code, error, periods?, ... }
+//     or null), row, months, deleteRecordMonths, revenue, invoices, ledger,
+//     inFlight, possibleDuplicates, timeOffOverlap, fingerprint, check }
+//   `check` holds what the write re-checks inside its transaction; it is never
+//   sent to a browser (restorePreviewBody()).
+// After a refusal the later parts are not computed (their fields stay empty).
+//
+// ⚠️ WRITE-FREE (the plan's M2): only reads. The ledger comes from
+// restoreLedgerChanges(), never from reconcileInvestorPayouts() or anything that
+// calls it. `jobTracking` is a snapshot to read instead of the cache (the
+// switch-on report passes its own).
+async function restorePlanFor(deletedId, { jobTracking: snapshot = null } = {}) {
+	let stored;
+	let records;
+	try {
+		stored = db.prepare("SELECT id, load_id, row_index, deleted_at, deleted_by FROM deleted_loads WHERE id = ?").get(deletedId);
+		if (!stored) return { notFound: true };
+		const storedKey = normalizeLoadId(stored.load_id);
+		records = db.prepare("SELECT id, load_id, row_index, deleted_at, deleted_by FROM deleted_loads ORDER BY id").all()
+			.filter((d) => normalizeLoadId(d.load_id) === storedKey);
+	} catch (e) {
+		console.error("Restore: deleted_loads unreadable:", e.message);
+		return { unreadable: true };
+	}
+	const key = normalizeLoadId(stored.load_id);
+	const plan = {
+		id: stored.id, key, loadId: String(stored.load_id || ""), label: String(stored.load_id || ""),
+		deleteRecords: records.map((d) => ({ id: d.id, loadId: String(d.load_id || ""), rowIndex: Number(d.row_index) || 0, deletedAt: restoreStamp(d.deleted_at), deletedBy: String(d.deleted_by || "") })),
+		canRestore: false, refusal: null, row: null, months: [], deleteRecordMonths: [], revenue: null, invoices: [], ledger: null,
+		inFlight: null, possibleDuplicates: [], timeOffOverlap: [], fingerprint: null, check: null,
+	};
+	const refuse = (refusal) => { plan.refusal = refusal; return plan; };
+	if (!periodLocksReadable()) return refuse(periodRefusalOf("unreadable", null, null));
+
+	// The months each delete record names: its delete_load audit entry nearest the
+	// deletion (lib/deleted-loads-view.js). Shown, and used only for decision 12;
+	// the sheet row decides which months are checked.
+	const auditStmt = db.prepare("SELECT timestamp, details FROM audit_trail WHERE entity = 'load' AND entity_id = ? AND action = 'delete_load' ORDER BY id");
+	const recordMonths = new Set();
+	for (const d of records) {
+		const entry = deletedLoadsView.nearestAudit(auditStmt.all(String(d.load_id || "")), deletedLoadsView.sqliteUtcMs(d.deleted_at));
+		for (const m of entry ? deletedLoadsView.auditMonths(entry.details) : []) recordMonths.add(m);
+	}
+	plan.deleteRecordMonths = [...recordMonths].sort().map((month) => ({ month, closed: isLocked(month) }));
+
+	let jobTracking = snapshot;
+	if (!jobTracking) {
+		try {
+			jobTracking = await getJobTrackingCached();
+		} catch (e) {
+			console.error("Restore: Job Tracking unreadable:", e.message);
+			return refuse(periodRefusalOf("unresolved", null, `Restoring load ${plan.label}`));
+		}
+	}
+	const headers = jobTracking.headers;
+	const cols = jobTrackingMonthCols(headers);
+	const tripCover = tripDayLockCover(headers);
+	if (tripCover) cols.tripCover = tripCover;
+	const matches = cols.loadIdCol ? jobTracking.data.filter((r) => normalizeLoadId(r[cols.loadIdCol]) === key) : [];
+	if (!matches.length) {
+		return refuse({ status: 409, code: "RESTORE_NO_ROW", error: `No Job Tracking row carries load ${plan.label}, so there is nothing to restore. The row may have been archived, or its Load ID retyped.` });
+	}
+	// The row that comes back: getJobTrackingCached() keeps the last row of each
+	// key (deduplicateLoads()), which may not be the row that was deleted.
+	const back = matches[matches.length - 1];
+	const cell = (r, col) => (col && r[col] != null ? String(r[col]).trim() : "");
+	plan.label = cell(back, cols.loadIdCol) || plan.label;
+	const extra = `Restoring load ${plan.label}`;
+	const statusCol = findCol(headers, /^(job[\s._-]?)?status$/i) || findCol(headers, /status/i);
+	const paymentCol = findCol(headers, /payment|rate|amount|revenue/i);
+	const status = cell(back, statusCol);
+	const storedRowIndex = Number(stored.row_index) || 0;
+	plan.row = {
+		rowIndex: back._rowIndex, storedRowIndex, rowMoved: !!storedRowIndex && back._rowIndex !== storedRowIndex,
+		loadId: plan.label, status, driver: cell(back, cols.driverCol),
+		truck: cell(back, findCol(headers, /^truck$|truck[._\s-]?(unit|number|#)|unit[._\s-]?number/i)),
+		assignedDate: cell(back, findCol(headers, /assigned.*date/i)), pickup: cell(back, cols.pickupDateCol), dropoff: cell(back, cols.dropoffDateCol),
+		payment: cell(back, paymentCol), cancelled: CANCELED_STATUS_RE.test(status),
+	};
+
+	// The months, from the sheet row(s), as the delete reads them.
+	const periods = new Set();
+	let resolved = true;
+	for (const r of matches) {
+		const p = loadRowPeriods(r, cols);
+		if (!p.resolved) resolved = false;
+		p.periods.forEach((m) => periods.add(m));
+	}
+	const sheetMonths = [...periods].sort();
+	const thisMonth = appMonthKey();
+	plan.months = sheetMonths.map((month) => ({ month, closed: isLocked(month), pending: month < thisMonth && !isLocked(month) }));
+	if (!resolved) return refuse(periodRefusalOf("unresolved", null, extra));
+	const lockedNow = lockedAmong(sheetMonths);
+	if (lockedNow.length) return refuse(periodRefusalOf("finalized", lockedNow, extra));
+	const recordClosed = lockedAmong([...recordMonths]).filter((m) => !periods.has(m));
+	if (recordClosed.length) return refuse(restoreRecordMonthRefusal(plan.label, recordClosed, sheetMonths));
+	const later = closedMonthsAfter(sheetMonths[0]);
+	if (later.length) return refuse(periodRefusalOf("finalized", later, extra));
+
+	// The payout ledger before and after (write-free), from this same sheet read.
+	const changes = await restoreLedgerChanges(key, { jobTracking });
+	plan.ledger = { scopes: changes.scopes, fleet: changes.fleet, closedMonths: changes.closedMonths, dayOnce: changes.dayOnce };
+	if (changes.closedMonths.length) return refuse(periodRefusalOf("finalized", changes.closedMonths, extra));
+	const touched = [...new Set([...sheetMonths, ...changes.scopes.map((r) => r.month), ...changes.fleet.map((r) => r.month)])].sort();
+	const settled = settledPayoutMonths(touched);
+	if (settled.length) return refuse(restorePayoutRefusal(plan.label, settled));
+	plan.check = { periods: sheetMonths, touched, recordMonths: [...recordMonths].sort(), ids: records.map((d) => d.id) };
+
+	// Revenue books in the Assigned month; with none it books nowhere.
+	const assignedMonth = loadAssignedMonthKey(back, cols);
+	plan.revenue = !plan.row.cancelled && assignedMonth
+		? { month: assignedMonth, amount: parseFloat(cell(back, paymentCol).replace(/[$,]/g, "")) || 0 }
+		: null;
+
+	const driverNorm = normalizeDriverName(plan.row.driver);
+	const windowDays = loadWindowDays(back, cols);
+	if (!plan.row.cancelled && driverNorm && windowDays.length) {
+		// Each Sat-Fri pay week the window touches: the driver's live weekly invoice.
+		const weeks = new Map();
+		for (const day of windowDays) {
+			const { weekStart, weekEnd } = getWeekRange(day);
+			if (!weeks.has(weekStart)) weeks.set(weekStart, { weekStart, weekEnd, days: [] });
+			weeks.get(weekStart).days.push(day);
+		}
+		const invoiceStmt = db.prepare("SELECT id, invoice_number, status, load_ids, driver FROM invoices WHERE week_start = ? AND COALESCE(deleted_at, '') = '' AND COALESCE(is_manual, 0) = 0 ORDER BY id DESC");
+		const holders = invoicePaidDayHolders(driverNorm, windowDays);
+		plan.invoices = deletedLoadRestore.invoiceLines({
+			weeks: [...weeks.values()].sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1)),
+			invoiceFor: (weekStart) => invoiceStmt.all(weekStart).find((i) => normalizeDriverName(i.driver) === driverNorm) || null,
+			holderOf: (day) => holders.get(day) || null,
+			key, normalizeLoadId, todayKey: appTodayKey(), tripRule: !!TRIP_WORK_DAYS_FROM,
+		});
+	}
+
+	const live = liveJobTrackingView(jobTracking);
+	if (RESTORE_IN_FLIGHT_RE.test(status)) {
+		const otherActive = live.data
+			.filter((r) => normalizeLoadId(r[cols.loadIdCol]) !== key && driverNorm && normalizeDriverName(r[cols.driverCol]) === driverNorm && RESTORE_IN_FLIGHT_RE.test(cell(r, statusCol)))
+			.map((r) => ({ loadId: cell(r, cols.loadIdCol), status: cell(r, statusCol) }));
+		plan.inFlight = {
+			status,
+			otherActive,
+			note: `Still marked ${status}: tracking, geofence auto-status and the driver app pick it up again.${otherActive.length ? ` The driver also has ${otherActive.map((o) => `${o.loadId} in ${o.status}`).join(", ")}; the driver app will show both.` : ""}`,
+		};
+	}
+	if (!plan.row.cancelled) {
+		// Possible duplicates among the live loads: request-local copies only, since
+		// annotateLoadSearchRefs() writes each row's reference numbers onto it.
+		const mine = { ...back };
+		loadSearchRefs.annotateLoadSearchRefs({ db, headers: live.headers, rows: [mine, ...live.data], includeDraftRefs: true, logger: console });
+		const shape = (r) => ({
+			key: normalizeLoadId(r[cols.loadIdCol]), loadId: cell(r, cols.loadIdCol), rowIndex: r._rowIndex,
+			driver: normalizeDriverName(r[cols.driverCol]), days: loadWindowDays(r, cols), refs: deletedLoadRestore.rowRefs(r),
+		});
+		plan.possibleDuplicates = deletedLoadRestore.possibleDuplicates({ target: shape(mine), others: live.data.map(shape), normalizeRef: loadSearchRefs.normalizeRef });
+	}
+	if (DRIVER_AVAILABILITY_ENABLED && driverNorm && windowDays.length) {
+		// Time off (R11) overlapping the window: informational, never a refusal.
+		try {
+			plan.timeOffOverlap = db.prepare("SELECT driver_name, kind, from_date, to_date FROM driver_availability WHERE cancelled_at IS NULL AND from_date <= ? AND to_date >= ? ORDER BY from_date")
+				.all(windowDays[windowDays.length - 1], windowDays[0])
+				.filter((t) => normalizeDriverName(t.driver_name) === driverNorm)
+				.map((t) => ({ kind: t.kind, from: t.from_date, to: t.to_date }));
+		} catch (e) {
+			console.error("Restore: time off unreadable:", e.message);
+		}
+	}
+
+	plan.canRestore = true;
+	plan.fingerprint = deletedLoadRestore.restoreFingerprint({
+		key, ids: plan.check.ids, months: plan.months, deleteRecordMonths: plan.deleteRecordMonths, row: plan.row, revenue: plan.revenue,
+		invoices: plan.invoices, possibleDuplicates: plan.possibleDuplicates, ledger: { scopes: changes.scopes, fleet: changes.fleet },
+	});
+	return plan;
+}
+
+// The preview as a browser gets it: the plan without `check`, a refusal without
+// its internal fields.
+function restorePreviewBody(plan) {
+	const { check, refusal, ...rest } = plan;
+	let shown = null;
+	if (refusal) {
+		const { status, periodKind, extra, ...body } = refusal;
+		shown = body;
+	}
+	return { ...rest, refusal: shown };
+}
+
+// THE WRITE. One immediate transaction, synchronous (better-sqlite3), so nothing
+// interleaves: the locks, the later months, the delete record's months and the
+// payouts are checked again, then the key's delete rows are re-read (a delete that
+// landed since the plan read them refuses RESTORE_CONFLICT; none left refuses
+// LOAD_NOT_DELETED), then every one is removed, the audit row inserted (directly,
+// not through logAudit(), which swallows a failed insert: if it fails, nothing is
+// restored) and the dispatch notice saved. Returns { removed, notice } or
+// { refusal }. The caller invalidates the Job Tracking cache right after, with no
+// await between.
+function commitRestore(plan, req, reason) {
+	const user = (req && req.session && req.session.user) || {};
+	const restoredBy = user.username || user.full_name || "";
+	const check = plan.check;
+	const extra = `Restoring load ${plan.label}`;
+	const write = db.transaction(() => {
+		if (!periodLocksReadable()) return { refusal: periodRefusalOf("unreadable", null, null) };
+		const locked = lockedAmong([...check.periods, ...check.touched]);
+		if (locked.length) return { refusal: periodRefusalOf("finalized", locked, extra) };
+		const recordClosed = lockedAmong(check.recordMonths).filter((m) => !check.periods.includes(m));
+		if (recordClosed.length) return { refusal: restoreRecordMonthRefusal(plan.label, recordClosed, check.periods) };
+		const later = closedMonthsAfter(check.periods[0]);
+		if (later.length) return { refusal: periodRefusalOf("finalized", later, extra) };
+		const settled = settledPayoutMonths(check.touched);
+		if (settled.length) return { refusal: restorePayoutRefusal(plan.label, settled) };
+		const now = db.prepare("SELECT id, load_id FROM deleted_loads ORDER BY id").all().filter((d) => normalizeLoadId(d.load_id) === plan.key);
+		if (!now.length) return { refusal: { status: 409, code: "LOAD_NOT_DELETED", error: `Load ${plan.label} is not deleted any more (it may have been restored already). Reload the page.` } };
+		const ids = now.map((d) => d.id);
+		if (ids.join(",") !== check.ids.join(",")) return { refusal: { status: 409, code: "RESTORE_CONFLICT", error: `Load ${plan.label} was deleted again while you were restoring it. Reload the page.` } };
+		const del = db.prepare("DELETE FROM deleted_loads WHERE id = ?");
+		for (const id of ids) del.run(id);
+		// The sheet's Load ID text and the stored deleter as one audit line each
+		// (auditText(): no line breaks or control characters), like the reason.
+		const details = deletedLoadRestore.restoreAuditDetails({
+			loadId: auditText(plan.label, 100), rowIndex: plan.row.rowIndex, months: check.periods, reason,
+			removed: plan.deleteRecords.map((d) => ({ ...d, deletedBy: auditText(d.deletedBy, 100) })),
+		});
+		db.prepare("INSERT INTO audit_trail (timestamp, user_id, username, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+			.run(new Date().toISOString(), user.id || 0, user.username || "system", user.role || "system", "restore_load", "load", plan.key, details);
+		// The same text for every role, and never the reason (the plan's M3): the
+		// saved row is read back by every dispatch-room role.
+		const notice = { type: "load-restored", title: `Restored Load ${plan.label}`, body: `Restored by ${restoredBy || "admin"}` };
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, JSON.stringify({ loadId: plan.label, restoredBy }));
+		return { removed: ids, notice };
+	});
+	return write.immediate();
+}
+
+// A refusal as the POST answers it: a period code through sendPeriodRefusal()
+// (audited, never coalesced), any other through logAuditRefusal() (coalesced).
+// LOAD_NOT_DELETED is not audited: nothing was attempted on a deleted load.
+function sendRestoreRefusal(req, res, refusal, restoreAudit) {
+	if (refusal.periodKind) return sendPeriodRefusal(req, res, refusal.periodKind, refusal.periods, refusal.extra, restoreAudit);
+	const { status, periodKind, extra, ...body } = refusal;
+	if (refusal.code !== "LOAD_NOT_DELETED") {
+		logAuditRefusal(req, restoreAudit.action, restoreAudit.entity, auditText(restoreAudit.entityId, 100), `Refused: ${auditText(restoreAudit.subject, 200)} [${refusal.code}]`, refusal.code);
+	}
+	return res.status(status).json(body);
+}
+
 // GET /api/admin/deleted-loads — the soft-deleted loads, newest first, for the
 // Super Admin "Deleted loads" page. A list only: nothing here restores a load.
 // Each row's route, driver and settlement months come from its Job Tracking
@@ -41824,10 +42167,90 @@ app.get("/api/admin/deleted-loads", requireRole("Super Admin"), async (req, res)
 			isLocked,
 			timeZone: APP_TIMEZONE,
 		});
-		res.json({ loads, count: loads.length });
+		// With the restore on: the "Restored loads" history (restore_load audit rows,
+		// the last 90 days, newest first, at most 100) and, on each deleted row, its
+		// key's latest earlier restore. Off: neither, and restoreEnabled false.
+		if (!RESTORE_DELETED_LOADS_ENABLED) return res.json({ loads, count: loads.length, restoreEnabled: false, restored: [] });
+		const since = new Date(Date.now() - 90 * 86400000).toISOString();
+		const restored = deletedLoadsView.restoredLoadRows(
+			db.prepare("SELECT id, timestamp, username, entity_id, details FROM audit_trail WHERE action = 'restore_load' AND entity = 'load' AND timestamp >= ? ORDER BY id DESC LIMIT 100").all(since),
+			{ timeZone: APP_TIMEZONE },
+		);
+		const listed = deletedLoadsView.withRestoredBefore(loads, restored, normalizeLoadId);
+		res.json({ loads: listed, count: listed.length, restoreEnabled: true, restored });
 	} catch (error) {
 		console.error("Error listing deleted loads:", error.message);
 		res.status(500).json({ error: "The deleted loads could not be listed." });
+	}
+});
+
+// GET /api/admin/deleted-loads/:id/restore-preview — what restoring the
+// deleted_loads row :id would do, all computed on the server and write-free
+// (restorePlanFor()): canRestore, or the refusal it would get (the POST's checks,
+// unaudited); the row that returns; its months (the sheet's and the delete
+// record's); the revenue it adds; each pay week's invoice; every investor-month,
+// company month and fleet month the payout ledger moves (before, after, change,
+// later open months included); an in-flight note; possible duplicates; time off;
+// and the fingerprint the POST must send back.
+app.get("/api/admin/deleted-loads/:id/restore-preview", requireRole("Super Admin"), async (req, res) => {
+	try {
+		if (!RESTORE_DELETED_LOADS_ENABLED) return res.status(404).json(RESTORE_FEATURE_OFF);
+		const id = restoreIdParam(req.params.id);
+		if (!id) return res.status(400).json({ error: "The deleted load's id must be a whole number.", code: "INVALID_ID" });
+		const plan = await restorePlanFor(id);
+		if (plan.notFound) return res.status(404).json({ error: "That load is not deleted (it may have been restored already). Reload the page.", code: "LOAD_NOT_DELETED" });
+		if (plan.unreadable) return res.status(503).json({ error: "The deleted loads could not be read. Try again in a moment.", code: "DELETED_LOADS_UNREADABLE" });
+		res.json(restorePreviewBody(plan));
+	} catch (error) {
+		console.error("Error previewing a restore:", error.message);
+		res.status(500).json({ error: "The restore preview could not be computed." });
+	}
+});
+
+// POST /api/admin/deleted-loads/:id/restore — restore the deleted load. Body:
+// { confirm: true, reason (3-500 characters, no email or phone), fingerprint (the
+// preview's), notDuplicate (true when the preview listed possible duplicates) }.
+// The 400s come first and are not audited (nothing was attempted). Then the plan
+// is recomputed: any refusal is audited (restore_load_blocked) and answered;
+// a fingerprint that differs from the recompute's is 409 PREVIEW_STALE, listed
+// duplicates without the tick 409 DUPLICATE_UNCONFIRMED. Then the write
+// (commitRestore()), with no await from there: the cache invalidation, the live
+// notice ("Restored by <user>", no reason) and the dashboard refresh follow the
+// commit in the same tick.
+app.post("/api/admin/deleted-loads/:id/restore", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {
+	try {
+		if (!RESTORE_DELETED_LOADS_ENABLED) return res.status(404).json(RESTORE_FEATURE_OFF);
+		const id = restoreIdParam(req.params.id);
+		if (!id) return res.status(400).json({ error: "The deleted load's id must be a whole number.", code: "INVALID_ID" });
+		const body = req.body || {};
+		if (body.confirm !== true) {
+			return res.status(400).json({ error: "Restoring a load puts it back in revenue and pay. Send confirm: true to proceed.", code: "CONFIRMATION_REQUIRED" });
+		}
+		const reason = deletedLoadRestore.checkRestoreReason(body.reason, { auditText, hasContact: brokerContact.hasContact });
+		if (!reason.ok) return res.status(reason.status).json(reason.body);
+		const plan = await restorePlanFor(id);
+		if (plan.notFound) return res.status(404).json({ error: "That load is not deleted (it may have been restored already). Reload the page.", code: "LOAD_NOT_DELETED" });
+		if (plan.unreadable) return res.status(503).json({ error: "The deleted loads could not be read, so nothing was restored. Try again in a moment.", code: "DELETED_LOADS_UNREADABLE" });
+		const audit = { action: "restore_load_blocked", entity: "load", entityId: plan.key, subject: `restore load ${plan.label}` };
+		if (plan.refusal) return sendRestoreRefusal(req, res, plan.refusal, audit);
+		if (typeof body.fingerprint !== "string" || body.fingerprint !== plan.fingerprint) {
+			return sendRestoreRefusal(req, res, { status: 409, code: "PREVIEW_STALE", error: "The figures changed since the preview was opened. Open the preview again and confirm the new figures." }, audit);
+		}
+		if (plan.possibleDuplicates.length && body.notDuplicate !== true) {
+			return sendRestoreRefusal(req, res, {
+				status: 409, code: "DUPLICATE_UNCONFIRMED", possibleDuplicates: plan.possibleDuplicates,
+				error: `This load may already be on the sheet under another Load ID (${plan.possibleDuplicates.map((d) => d.loadId).join(", ")}). Tick "This is not a duplicate" to restore it anyway.`,
+			}, audit);
+		}
+		const done = commitRestore(plan, req, reason.reason);
+		if (done.refusal) return sendRestoreRefusal(req, res, done.refusal, audit);
+		jtCacheInvalidate();
+		emitDispatchNotice(done.notice);
+		notifyChange("dashboard");
+		res.json({ success: true, loadId: plan.label, removed: done.removed, months: plan.months, invoices: plan.invoices });
+	} catch (error) {
+		console.error("Error restoring a deleted load:", error.message);
+		res.status(500).json({ error: "The load could not be restored." });
 	}
 });
 
@@ -50563,11 +50986,14 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 			}
 			// Soft-deleted loads keep their sheet row, so "already exists" would
 			// otherwise be baffling — the dispatcher can't see the load anywhere.
+			// With the restore on (decision 11), the way back depends on the role:
+			// only a Super Admin can restore it from Deleted loads.
 			const softDeleted = getDeletedLoadIds().has(loadKey);
 			return res.status(409).json({
-				error: softDeleted
-					? `Load ${loadId} already exists (row ${existing._rowIndex}) but was deleted. Restore it instead of re-creating it.`
-					: `Load ${loadId} already exists (row ${existing._rowIndex}).`,
+				error: deletedLoadRestore.duplicateLoadMessage({
+					loadId, rowIndex: existing._rowIndex, softDeleted,
+					restoreEnabled: RESTORE_DELETED_LOADS_ENABLED, superAdmin: req.session.user.role === "Super Admin",
+				}),
 				code: "DUPLICATE_LOAD",
 				existingRowIndex: existing._rowIndex,
 			});

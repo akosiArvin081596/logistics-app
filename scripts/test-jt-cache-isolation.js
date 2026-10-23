@@ -462,9 +462,16 @@ console.log("\n§7  the dashboard's search references (_refs) never land on cach
 		rawLogger.errors.length > 0 && JSON.stringify(cache) === before);
 	const dash = routeSource("get", "/api/dashboard");
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
-	ok("server.js calls the module once, in /api/dashboard, on the three served lists built from the view",
-		code(SRC).split("annotateLoadSearchRefs(").length - 1 === 1 &&
-		/rows: \[\.\.\.respUnassigned, \.\.\.respActive, \.\.\.respCompleted\],/.test(code(dash)) && dash.includes(BINDING));
+	// The second caller, the restore preview's duplicate check (restorePlanFor()),
+	// annotates request-local copies too, and serves none of them: the view's rows
+	// and a spread copy of the row that would come back.
+	const planStart = SRC.indexOf("\nasync function restorePlanFor(");
+	const plan = planStart === -1 ? "" : SRC.slice(planStart, SRC.indexOf("\n}\n", planStart));
+	ok("server.js calls the module twice: in /api/dashboard, on the three served lists built from the view, and in the restore preview on copies",
+		code(SRC).split("annotateLoadSearchRefs(").length - 1 === 2 &&
+		/rows: \[\.\.\.respUnassigned, \.\.\.respActive, \.\.\.respCompleted\],/.test(code(dash)) && dash.includes(BINDING) &&
+		code(plan).split("annotateLoadSearchRefs(").length - 1 === 1 && /const live = liveJobTrackingView\(jobTracking\);/.test(plan) &&
+		/const mine = \{ \.\.\.back \};/.test(plan) && /rows: \[mine, \.\.\.live\.data\],/.test(plan));
 }
 
 Promise.allSettled(pending).then((results) => {
