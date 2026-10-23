@@ -372,6 +372,10 @@ function telemetry(db, { agoMs, speed }) {
 		ok("§6 a driver sending to \"admin\" (the investor portal's desk): 403 VOICE_NOTE_RECIPIENT", drvAdmin.status === 403 && drvAdmin.json && drvAdmin.json.code === "VOICE_NOTE_RECIPIENT", [drvAdmin.status, drvAdmin.json]);
 		const invDispatch = await request(P, "POST", "/api/messages/voice", U.inv, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
 		ok("§6 an investor sending to \"Dispatch\" (the driver app's desk): 403 VOICE_NOTE_RECIPIENT", invDispatch.status === 403 && invDispatch.json && invDispatch.json.code === "VOICE_NOTE_RECIPIENT", [invDispatch.status, invDispatch.json]);
+		// Each role's refusal names its own desk, as its own app does.
+		ok("§6 ...a driver's refusal names Dispatch, an investor's the admin", /Dispatch/.test(String(drvAdmin.json && drvAdmin.json.error))
+			&& /\bthe admin\b/.test(String(invDispatch.json && invDispatch.json.error)) && !/Dispatch/.test(String(invDispatch.json && invDispatch.json.error)),
+			[drvAdmin.json && drvAdmin.json.error, invDispatch.json && invDispatch.json.error]);
 		const unknown = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Nobody Here", newKey()) });
 		ok("§6 staff to a name no account holds: 422 VOICE_NOTE_RECIPIENT", unknown.status === 422 && unknown.json && unknown.json.code === "VOICE_NOTE_RECIPIENT", [unknown.status, unknown.json]);
 		const desk = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
