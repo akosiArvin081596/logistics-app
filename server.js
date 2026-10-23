@@ -2365,6 +2365,31 @@ catch {
 	db.exec(`ALTER TABLE messages ADD COLUMN attachment_type TEXT DEFAULT ''`);
 }
 
+// Migration: voice notes (POST /api/messages/voice, lib/voice-notes.js). Each
+// column is added only when missing, so a second boot changes nothing.
+//   sender_user_id     the session account that sent it (staff all send as
+//                      "Dispatch", so the name cannot tell two people apart)
+//   client_key         the sender's Idempotency-Key; '' on every text message
+//   party_user_id      the Driver or Investor account the note belongs to: the
+//                      one id, besides staff, that may play it
+//   voice_file         vn_<id>_<16 hex>.m4a under storage/voice-notes; '' once
+//                      the sweep or a Super Admin removed it
+//   voice_duration_ms  the length the server measured
+//   voice_bytes        the stored size (the per-user daily cap sums it)
+// The duplicate-send index is PARTIAL: rows with client_key '' (every text
+// message, before and after this) are outside it, so it can neither fail to
+// build on existing data nor refuse a second text message.
+{
+	const messageColumns = new Set(db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name));
+	if (!messageColumns.has("sender_user_id")) db.exec("ALTER TABLE messages ADD COLUMN sender_user_id INTEGER");
+	if (!messageColumns.has("client_key")) db.exec("ALTER TABLE messages ADD COLUMN client_key TEXT DEFAULT ''");
+	if (!messageColumns.has("party_user_id")) db.exec("ALTER TABLE messages ADD COLUMN party_user_id INTEGER");
+	if (!messageColumns.has("voice_file")) db.exec("ALTER TABLE messages ADD COLUMN voice_file TEXT DEFAULT ''");
+	if (!messageColumns.has("voice_duration_ms")) db.exec("ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER DEFAULT 0");
+	if (!messageColumns.has("voice_bytes")) db.exec("ALTER TABLE messages ADD COLUMN voice_bytes INTEGER DEFAULT 0");
+	db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_key ON messages(sender_user_id, client_key) WHERE client_key <> ''");
+}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7487,15 +7512,12 @@ const rateConDvirReadings = new Map();
 // Reads one rate con's DVIR lines (base64: the PDF the route was sent) and keeps
 // them under its load number. Never throws: the extraction must not fail because
 // of it.
-function noteRateConDvir(loadNumber, base64, now = Date.now()) {
+// read: the text already read for this PDF (rateConPdfTextOf()), or null to read it here.
+function noteRateConDvir(loadNumber, base64, now = Date.now(), read = null) {
 	try {
 		const key = normLoadKey(loadNumber).slice(0, 80);
 		if (!key || typeof base64 !== "string") return;
-		const size = Math.floor(base64.length * 3 / 4);
-		let text = "";
-		if (size <= rateconDvir.MAX_PDF_BYTES) {
-			text = rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES });
-		}
+		const { text, size } = read || rateConPdfTextOf(base64);
 		const reading = rateconDvir.readRateConDvir(text, size);
 		for (const [k, v] of rateConDvirReadings) {
 			if (now - v.at < RATECON_DVIR_TTL_MS) break;
@@ -7514,6 +7536,247 @@ function rateConDvirReading(loadId, now = Date.now()) {
 	const key = normLoadKey(loadId).slice(0, 80);
 	const hit = key ? rateConDvirReadings.get(key) : undefined;
 	return hit && now - hit.at < RATECON_DVIR_TTL_MS ? hit : null;
+}
+
+// A rate con's built-in text (rateconDvir.pdfText(), each stream once, its inflating
+// capped), "" for a PDF over rateconDvir.MAX_PDF_BYTES; size: the decoded bytes. Read once
+// for the DVIR reading and the pickup reading below. Throws on bytes it can't read.
+function rateConPdfTextOf(base64) {
+	const size = Math.floor(base64.length * 3 / 4);
+	const text = size <= rateconDvir.MAX_PDF_BYTES
+		? rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES })
+		: "";
+	return { text, size };
+}
+
+// "NEEDS CONFIRMATION" PICKUPS (Arvin, 2026-10-21; plan ~/LogisX-replica/reports/
+// 2026-10-21-needs-confirmation-pickup-plan.md, Revision 3, decisions N1-N12): when a rate
+// con marks the pickup date "Needs Confirmation" (lib/ratecon-pickup-confirmation.js), the
+// load gets a Needs Review reason on the dashboard instead of the date being treated as
+// firm. Display only: nothing that pays reads it, and the app never rewrites the date.
+// - RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED (defaults OFF, /^(true|1|yes|on)$/i). Off: no
+//   reading kept, no record written, no `_review` key, no modal line, and
+//   POST /api/loads/pickup-confirmed answers 404: today's behaviour.
+// - Email path: the extract route below reads the rate con's built-in text once after its
+//   response, for the DVIR line and for this reading (noteRateConReadings()): the phrase
+//   in the text or in Gemini's Pickup Notes/Instructions, kept in memory by load number
+//   with the DVIR reading's TTL and cap, two PDFs of one load OR-ed. The extract route
+//   still writes nothing. POST /api/n8n/keep-stored-values then writes the load's
+//   ratecon_pickup_readings row (recordKeepStoredPickupReading()), never for a Pickup
+//   Appointment a hold kept.
+// - Drag-and-drop: POST /api/loads/ratecon/extract keeps the reading and the extracted
+//   Pickup Appointment in rateConPickupStash for every role (rateConStash holds fields for
+//   non-Super-Admins only) and adds the modal line; POST /api/loads/from-ratecon writes the
+//   row, and records a Pickup Appointment the person changed in the modal as a person's
+//   date in load_cell_writes (a kept one stays the rate con's, as #576 records it).
+// - Who set the sheet's date is load_cell_writes' answer (lib/person-edit-hold.js
+//   personSet()); ratecon_pickup_readings only says what the rate con said.
+// - No reading, so no badge: a restart between the extract and keep-stored-values, a
+//   failed Gemini extraction (502/503 keep none), an email with no PDF.
+const pickupConfirmation = require("./lib/ratecon-pickup-confirmation");
+const loadReviewFlags = require("./lib/load-review-flags");
+const RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED ?? "").trim());
+const RATECON_PICKUP_COLUMN_RE = /pickup.*appo|pickup.*date/i;
+const RATECON_PICKUP_READINGS_MAX_ROWS = 5000;
+const rateConPickupReadings = pickupConfirmation.createPickupReadingStore({ ttlMs: RATECON_DVIR_TTL_MS, max: RATECON_DVIR_MAX_LOADS });
+// By rateConStashKey(), like rateConNumberStash (30 min, 200 PDFs). Required here because
+// `brokerContact` is declared further down.
+const rateConPickupStash = require("./lib/broker-contact").createRateConStash();
+
+// Both readings of an email's rate con from one read of its text. Never throws. With no
+// Load Number neither reading is kept, so the PDF isn't read at all; a PDF whose text
+// can't be read is read once (no DVIR reading; the pickup notes are still checked).
+function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) {
+	if (!normLoadKey(loadNumber)) return;
+	let read = null;
+	let failed = false;
+	try {
+		if (typeof base64 === "string") read = rateConPdfTextOf(base64);
+	} catch (e) {
+		failed = true;
+		console.warn(`[ratecon-dvir] rate-con text not read (${e && e.message}); a re-issue alert for this load falls back to the Payment drop`);
+	}
+	if (!failed) noteRateConDvir(loadNumber, base64, now, read);
+	if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) noteRateConPickupReading(loadNumber, read ? read.text : "", pickupNotes, now);
+}
+
+// Keeps one email rate con's pickup reading (OR-ed into the load's). Never throws.
+function noteRateConPickupReading(loadNumber, text, notes, now = Date.now()) {
+	try {
+		const key = normLoadKey(loadNumber).slice(0, 80);
+		if (!key) return;
+		rateConPickupReadings.note(key, pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" }), now);
+	} catch (e) {
+		console.warn(`[ratecon-pickup] the pickup reading was not kept (${e && e.message}); this rate con raises no Needs Confirmation reason`);
+	}
+}
+
+// The pickup reading kept for a load, or null.
+function rateConPickupReading(loadId, now = Date.now()) {
+	return rateConPickupReadings.get(normLoadKey(loadId).slice(0, 80), now);
+}
+
+// A dropped rate con's pickup reading, read now (its built-in text and Gemini's notes).
+// Never throws: bytes that can't be read leave the notes alone.
+function rateConPickupReadingOfPdf(pdfBase64, notes) {
+	let text = "";
+	try {
+		const base64 = String(pdfBase64 == null ? "" : pdfBase64).replace(/^data:application\/pdf;base64,/, "").trim();
+		if (base64) text = rateConPdfTextOf(base64).text;
+	} catch (e) {
+		console.warn(`[ratecon-pickup] a dropped rate con's text was not read (${e && e.message}); its pickup notes alone are checked`);
+	}
+	return pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" });
+}
+
+// One row per load (created on first use): what the rate con said about the pickup.
+// needs_confirmation 1 once a rate con carried the phrase (never cleared by a later one,
+// decision 12 (a)); detected_by text | notes | text+notes; source email | dropzone. No
+// rate-con text is stored. B4 adds its drop/ready/outcome columns (plan section 6). At most
+// RATECON_PICKUP_READINGS_MAX_ROWS rows, the least recently seen dropped first.
+function rateConPickupReadingsTable() {
+	if (rateConPickupReadingsTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS ratecon_pickup_readings (
+			load_key TEXT PRIMARY KEY,
+			load_id TEXT NOT NULL,
+			needs_confirmation INTEGER NOT NULL DEFAULT 0,
+			detected_by TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL
+		)
+	`);
+	rateConPickupReadingsTable.ready = true;
+}
+
+// Applies one rate con's record decision (pickupConfirmation.recordDecision()) to the load's
+// row: pickupSent the Pickup Appointment the write sends ("" for none), held true when a
+// hold kept it. Answers the action taken. Throws on a database error (the callers catch).
+function writeRateConPickupReading(loadId, reading, pickupSent, held, source, at = new Date().toISOString()) {
+	rateConPickupReadingsTable();
+	const key = loadCellKey(loadId);
+	if (!key) return "none";
+	const existing = db.prepare("SELECT needs_confirmation, detected_by FROM ratecon_pickup_readings WHERE load_key = ?").get(key) || null;
+	const d = pickupConfirmation.recordDecision({ existing, reading, pickupSent, held });
+	if (d.action === "insert") {
+		db.prepare("INSERT INTO ratecon_pickup_readings (load_key, load_id, needs_confirmation, detected_by, source, first_seen, last_seen) VALUES (?, ?, 1, ?, ?, ?, ?)")
+			.run(key, String(loadId).trim().slice(0, 200), d.by, source, at, at);
+		db.prepare("DELETE FROM ratecon_pickup_readings WHERE load_key NOT IN (SELECT load_key FROM ratecon_pickup_readings ORDER BY last_seen DESC, load_key LIMIT ?)")
+			.run(RATECON_PICKUP_READINGS_MAX_ROWS);
+	} else if (d.action === "update") {
+		db.prepare("UPDATE ratecon_pickup_readings SET needs_confirmation = ?, detected_by = ?, last_seen = ? WHERE load_key = ?")
+			.run(d.needsConfirmation ? 1 : 0, d.by, at, key);
+	}
+	return d.action;
+}
+
+// keep-stored-values' part, once it has answered (flag on): the email's own Pickup
+// Appointment as the answer sends it, with the load's pickup reading; a hold that kept the
+// date (re-issue or person hold) leaves the record untouched. Never throws.
+function recordKeepStoredPickupReading(loadId, sentValues, answered, reissueHold, personHeld) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return "off";
+	try {
+		const col = Object.keys(sentValues || {}).find((c) => RATECON_PICKUP_COLUMN_RE.test(String(c).trim()));
+		if (col === undefined) return "none";
+		const own = sentValues[col] == null ? "" : String(sentValues[col]);
+		const out = answered && answered[col] != null ? String(answered[col]) : "";
+		const held = Boolean(reissueHold) || (personHeld || []).some((h) => h && h.column === col);
+		return writeRateConPickupReading(loadId, rateConPickupReading(loadId), own.trim() ? out : "", held, "email");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (ingestion unaffected): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// The actor a person row names: role and user id, no name (as recordPersonCellEdits()).
+function rateConPickupActor(req) {
+	const user = (req && req.session && req.session.user) || {};
+	return `${String(user.role || "").slice(0, 40)}#${user.id == null ? "" : String(user.id).slice(0, 20)}`;
+}
+
+// A drag-and-drop create's pickup (flag on): the reading kept by the extract for this PDF
+// (rateConPickupStash, every role), else the PDF's own text read now; and, when the
+// extract's Pickup Appointment is known and the person changed it in the review modal,
+// that column as a person's ({ columns, actor } for recordRateConCreateCellWrites()).
+// Answers { reading, person }, or null (the flag off, or a failure). Never throws.
+function rateConCreatePickup(req, pdfBase64, stashKey, headers, fields) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return null;
+	try {
+		const held = rateConPickupStash.get(stashKey);
+		const f = fields || {};
+		const sent = f["Pickup Appointment Time"] == null ? "" : String(f["Pickup Appointment Time"]);
+		const reading = held
+			? { needsConfirmation: Boolean(held.needsConfirmation), by: String(held.by || "") }
+			: rateConPickupReadingOfPdf(pdfBase64, f["Pickup Notes/Instructions"]);
+		const changed = Boolean(held) && sent.trim() !== "" && pickupConfirmation.pickupChangedInModal(held.pickup, sent);
+		const header = (headers || []).find((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		return { reading, person: changed && header !== undefined ? { columns: [String(header).trim()], actor: rateConPickupActor(req) } : null };
+	} catch (e) {
+		console.error(`[ratecon-pickup] the create's pickup reading failed (the load is created as usual): ${(e && e.message) || e}`);
+		return null;
+	}
+}
+
+// A drag-and-drop create's pickup record (source dropzone), for the Pickup Appointment the
+// row was written with. Never throws.
+function recordRateConCreatePickupReading(loadId, headers, values, reading) {
+	try {
+		const i = (headers || []).findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const written = i >= 0 && values && values[i] != null ? String(values[i]) : "";
+		return writeRateConPickupReading(loadId, reading, written, false, "dropzone");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (the load is created as usual): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// GET /api/dashboard's Needs Confirmation codes (lib/load-review-flags.js): on the
+// request-local raw rows, before sanitizing, so a Load ID withheld from a Dispatcher still
+// gets its code. One query per table. Flag off: nothing, no row gets the key. Never throws.
+function annotateDashboardPickupReview(headers, loadIdHeader, rows) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED || loadIdHeader == null || !Array.isArray(rows)) return 0;
+	try {
+		const pickupHeader = loadReviewFlags.pickupHeaderOf(headers);
+		if (pickupHeader === null) return 0;
+		rateConPickupReadingsTable();
+		loadCellWritesTable();
+		const onBoard = new Set(rows.map((r) => (r && typeof r === "object" ? loadCellKey(r[loadIdHeader]) : "")).filter(Boolean));
+		const flagged = db.prepare("SELECT load_key, needs_confirmation FROM ratecon_pickup_readings WHERE needs_confirmation = 1").all()
+			.filter((r) => onBoard.has(r.load_key));
+		if (!flagged.length) return 0;
+		const keys = flagged.map((r) => r.load_key);
+		const marks = keys.map(() => "?").join(", ");
+		const cellRows = new Map();
+		const column = String(pickupHeader).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+		for (const r of db.prepare(`SELECT load_key, id, source, value, actor, at FROM load_cell_writes WHERE column_name = ? AND load_key IN (${marks}) ORDER BY id`).all(column, ...keys)) {
+			if (!cellRows.has(r.load_key)) cellRows.set(r.load_key, []);
+			cellRows.get(r.load_key).push(r);
+		}
+		const events = new Map();
+		for (const r of db.prepare(`SELECT load_id, new_status, changed_at, source, actor FROM load_status_history WHERE LOWER(LTRIM(TRIM(load_id), '#')) IN (${marks})`).all(...keys)) {
+			const k = loadCellKey(r.load_id);
+			if (!events.has(k)) events.set(k, []);
+			events.get(k).push(r);
+		}
+		return loadReviewFlags.annotateLoadReview({
+			headers,
+			rows,
+			loadIdHeader,
+			keyOf: loadCellKey,
+			pickup: {
+				records: new Map(flagged.map((r) => [r.load_key, r])),
+				cellRows,
+				events,
+				accountingMonths: (cells) => loadRowAccountingMonths(headers, cells),
+				isClosed: (mk) => periodWriteLocked(mk),
+				zone: APP_TIMEZONE,
+			},
+		});
+	} catch (e) {
+		console.error(`[ratecon-pickup] the dashboard's Needs Confirmation codes were not computed: ${(e && e.message) || e}`);
+		return 0;
+	}
 }
 
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
@@ -7631,9 +7894,11 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 					loadId: fields["Load Number"], unusable, fields,
 				}).catch(() => {});
 			}
-			// Read for the re-issue alert once the response below is sent.
+			// Read for the re-issue alert (and, with its flag on, the Needs Confirmation
+			// pickup reading) once the response below is sent.
 			const loadNumber = fields["Load Number"];
-			setImmediate(() => noteRateConDvir(loadNumber, base64));
+			const pickupNotes = fields["Pickup Notes/Instructions"];
+			setImmediate(() => noteRateConReadings(loadNumber, base64, pickupNotes));
 
 			// Mirror the Information Extractor output shape so the n8n
 			// Normalize Load Fields node (which reads $json.output.X) works
@@ -8310,8 +8575,11 @@ function recordPersonCellEdits(req, sheetName, headers, before, after) {
 }
 
 // A drag-and-drop create's dates (POST /api/loads/from-ratecon), recorded as the rate
-// con's ("ratecon_create", decision 5). Never throws.
-function recordRateConCreateCellWrites(loadId, headers, values) {
+// con's ("ratecon_create", decision 5). Never throws. person (the Needs Confirmation pickup
+// plan, Revision 3 item 5; only with RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED on):
+// { columns, actor }, the columns the person changed in the review modal, recorded as
+// "person" rows instead.
+function recordRateConCreateCellWrites(loadId, headers, values, person = null) {
 	try {
 		const key = loadCellKey(loadId);
 		if (!key) return 0;
@@ -8319,7 +8587,10 @@ function recordRateConCreateCellWrites(loadId, headers, values) {
 		let n = 0;
 		(headers || []).forEach((h, i) => {
 			if (!personEditHold.personHoldColumn(h)) return;
-			if (recordLoadCellWrite(key, String(h).trim(), values && values[i] != null ? String(values[i]) : "", "ratecon_create", { at })) n++;
+			const name = String(h).trim();
+			const byPerson = Boolean(person && Array.isArray(person.columns) && person.columns.includes(name));
+			const value = values && values[i] != null ? String(values[i]) : "";
+			if (recordLoadCellWrite(key, name, value, byPerson ? "person" : "ratecon_create", byPerson ? { actor: String(person.actor || ""), at } : { at })) n++;
 		});
 		return n;
 	} catch (e) {
@@ -8430,6 +8701,8 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 			found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept, held: out.held, holdReason, alsoChanged: out.changed,
 		});
 		recordKeepStoredCellWrites(key, headers, stored, body.values, out.values, person, personHeld);
+		// NEEDS CONFIRMATION PICKUPS (flag on): the pickup record (untouched when a hold kept the date)
+		recordKeepStoredPickupReading(loadId, body.values, out.values, hold, personHeld);
 		if (hold && (out.held.length || out.changed.length)) {
 			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
 		} else if (personHeld.length) {
@@ -28847,7 +29120,9 @@ app.post("/api/auth/logout", (req, res) => {
 // server dates instants in, so a viewer's "today" never comes from their laptop.
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
-		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE });
+		// features: what the signed-in client may offer. voiceNotes is the record
+		// button (MESSAGE_VOICE_NOTES_ENABLED); notes already sent play either way.
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
 	} else {
 		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
 	}
@@ -31402,6 +31677,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
+	// Voice notes (lib/voice-notes.js): the stored audio of every message the
+	// delete below removes, and of every note this account was the party to, read
+	// here (no await between this and the delete) and unlinked once it commits.
+	const voiceFiles = userVoiceNoteFiles(id, name);
 	const removed = {};
 	const detached = {};
 	try {
@@ -31513,6 +31792,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			detail: err.message,
 		});
 	}
+	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
 
 	// The account is gone from `users`, but requireRole() reads the SESSION, not
 	// the database — so without this the deleted admin keeps a working Super Admin
@@ -42076,6 +42356,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		enrichLocations(unassignedJobs);
 		enrichLocations(activeJobs);
 		enrichLocations(completedJobs);
+		// Needs Review codes (`_review`, lib/load-review-flags.js): on these raw rows, before
+		// sanitizing, so a withheld Load ID still gets its code (nothing with the flag off)
+		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
 		const respUnassigned = req.session.user.role !== "Super Admin"
@@ -43779,6 +44062,20 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
+		// truck has been stopped, from its recent clean fixes taken since the
+		// link: the last fix above the moving threshold, else the oldest one read
+		// (stopped at least since then). Null while the latest fix is moving.
+		// Bounded: at most 120 rows of the same index read as above.
+		let stoppedSinceMs = null;
+		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
+			const recent = db.prepare(
+				`SELECT speed, location_date_ms FROM routemate_telemetry
+				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+				  ORDER BY id DESC LIMIT 120`
+			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));
+			stoppedSinceMs = voiceNoteGate.stoppedSinceMs(recent);
+		}
 		res.json({
 			ok: true,
 			unit: (truck && truck.unit) || "",
@@ -43804,6 +44101,7 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 				// so the driver and the dispatcher cannot disagree about whether the
 				// truck is moving.
 				movement: classifyMovement({ lastPingAge, speed: speedMps }),
+				stoppedSinceMs,
 			},
 		});
 	} catch (err) {
@@ -43909,16 +44207,17 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 
 		// Messages from SQLite (fast indexed query). Attachments ride along, so the
 		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
-		// to the conversation's participants only).
+		// to the conversation's participants only). Voice notes too, as the reader
+		// may play them (lib/voice-notes.js: by account id, never by name).
 		const nameLower = driverName.toLowerCase();
-		const driverMessages = db
+		const driverMessages = voiceNotes.voiceThreadRows(req.session.user, db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, voice_file, voice_duration_ms, party_user_id
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
 			)
-			.all(nameLower, nameLower);
+			.all(nameLower, nameLower));
 
 		// Notifications from SQLite
 		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
@@ -46858,6 +47157,14 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		// A voice note is the server's to type: only POST /api/messages/voice
+		// writes one (its bytes checked, its file stored, its player keyed on the
+		// row's id). A text message may not claim the type or point at a voice
+		// note's address.
+		if (String(attachmentType ?? "").trim().toLowerCase() === "voice"
+			|| (typeof attachmentUrl === "string" && attachmentUrl.trim().toLowerCase().startsWith("/api/messages/"))) {
+			return res.status(400).json({ error: "That attachment can't be sent.", code: "ATTACHMENT_TYPE_RESERVED" });
+		}
 		// An attachment is a chat file this same account uploaded through
 		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
 		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
@@ -46865,60 +47172,86 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const timestamp = new Date().toISOString();
-		const result = db
-			.prepare(
-				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "");
-
-		// Persist notification for recipient
-		const msgNotif = insertNotification.run(
-			to.trim().toLowerCase(), 'message',
-			`New message from ${from}`,
-			(message || "").length > 100 ? message.substring(0, 100) + '...' : (message || ""),
-			JSON.stringify({ from, to, loadId: loadId || '' })
-		);
-
-		// PRIVACY: only emit to the actual participants + the dispatch room
-		// (so admins can see all messages they're authorized to see). Previously
-		// this used io.emit() which broadcast every message to every connected
-		// client — drivers were receiving messages between other parties even
-		// though the UI hid them. chatRooms() names those rooms: the dispatch
-		// room always, plus each other party's identity rooms (the desk's own
-		// name adds none); one emit to the list reaches each socket once.
-		const payload = {
-			id: result.lastInsertRowid,
-			notificationId: msgNotif.lastInsertRowid,
-			timestamp,
-			from,
-			to,
-			message,
-			loadId: loadId || "",
-			attachment_url: attachmentUrl || "",
-			attachment_type: attachmentType || "",
-		};
-		// A message about a load whose ID every role but Super Admin is served
-		// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
-		// as stored) goes per role in the dispatch room: Super Admins as sent, the
-		// rest of the room with the load as shown (emitDispatchByRole()), and the
-		// parties' own rooms as sent, without the dispatch room's sockets, so each
-		// socket gets it once. Any other message, as before:
-		const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
-		if (staffLoadId === payload.loadId) {
-			io.to(chatRooms(from, to)).emit("new-message", payload);
-		} else {
-			io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
-			emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
-		}
-
-		res.json({ success: true, id: result.lastInsertRowid });
+		const sent = sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef });
+		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ONE MESSAGE, SENT: its row, the recipient's notification, and the live copy to
+// the conversation's rooms. POST /api/messages and POST /api/messages/voice both
+// send through here, so a change to who receives what reaches both.
+//
+// `voice` ({ senderUserId, clientKey, partyUserId, durationMs, bytes, title })
+// makes it a voice note: the row is typed "voice" with no attachment_url, the
+// notification is `title` over the message text, "Voice note (0:42)" (never a
+// file name, URL or id), and the
+// live copy carries voice_duration_ms. `store(id)`, when given, runs inside the
+// same transaction as the insert (the voice route writes its file there): if it
+// throws, the row is rolled back, and nothing is notified or emitted. A text
+// message's insert is the statement it always was.
+function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {
+	const timestamp = new Date().toISOString();
+	const insert = () => {
+		const id = voice
+			? db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref,
+					sender_user_id, client_key, party_user_id, voice_file, voice_duration_ms, voice_bytes)
+				 VALUES (?, ?, ?, ?, ?, '', 'voice', '', ?, ?, ?, '', ?, ?)`,
+			).run(timestamp, from, to, message, loadId || "", voice.senderUserId, voice.clientKey, voice.partyUserId, voice.durationMs, voice.bytes).lastInsertRowid
+			: db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "").lastInsertRowid;
+		if (store) store(id);
+		return id;
+	};
+	const id = store ? db.transaction(insert)() : insert();
+
+	// Persist notification for recipient
+	const msgNotif = insertNotification.run(
+		to.trim().toLowerCase(), 'message',
+		voice ? voice.title : `New message from ${from}`,
+		voice ? message : ((message || "").length > 100 ? message.substring(0, 100) + '...' : (message || "")),
+		JSON.stringify({ from, to, loadId: loadId || '' })
+	);
+
+	// PRIVACY: only emit to the actual participants + the dispatch room
+	// (so admins can see all messages they're authorized to see). Previously
+	// this used io.emit() which broadcast every message to every connected
+	// client — drivers were receiving messages between other parties even
+	// though the UI hid them. chatRooms() names those rooms: the dispatch
+	// room always, plus each other party's identity rooms (the desk's own
+	// name adds none); one emit to the list reaches each socket once.
+	const payload = {
+		id,
+		notificationId: msgNotif.lastInsertRowid,
+		timestamp,
+		from,
+		to,
+		message,
+		loadId: loadId || "",
+		attachment_url: voice ? "" : (attachmentUrl || ""),
+		attachment_type: voice ? "voice" : (attachmentType || ""),
+	};
+	if (voice) payload.voice_duration_ms = voice.durationMs;
+	// A message about a load whose ID every role but Super Admin is served
+	// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
+	// as stored) goes per role in the dispatch room: Super Admins as sent, the
+	// rest of the room with the load as shown (emitDispatchByRole()), and the
+	// parties' own rooms as sent, without the dispatch room's sockets, so each
+	// socket gets it once. Any other message, as before:
+	const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
+	if (staffLoadId === payload.loadId) {
+		io.to(chatRooms(from, to)).emit("new-message", payload);
+	} else {
+		io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
+		emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+	}
+	return { id, timestamp };
+}
 
 // The one name a caller's own messages and notifications are addressed to, for
 // the two read-flag routes below: a Driver's driver name (their thread is read
@@ -47070,7 +47403,8 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
-			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref,
+			        voice_file, voice_duration_ms, party_user_id
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
@@ -47079,7 +47413,9 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 			// Mark messages to this investor as read
 			db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
 		}
-		res.json({ messages });
+		// Voice notes as the reader may play them (lib/voice-notes.js): the
+		// investor by his account id; a Super Admin previewing, as staff.
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (err) {
 		console.error("Error fetching investor messages:", err.message);
 		res.status(500).json({ error: err.message });
@@ -47133,7 +47469,8 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		if (loadId && !withholdIds) {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id
 					 FROM messages
 					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
 					 ORDER BY id ASC`,
@@ -47142,7 +47479,8 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		} else {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id
 					 FROM messages
 					 WHERE LOWER("from") = ? OR LOWER("to") = ?
 					 ORDER BY id ASC`,
@@ -47157,12 +47495,373 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 				.map(({ shown, ...m }) => ({ ...m, loadId: shown }));
 		}
 
-		res.json({ messages });
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (error) {
 		console.error("Error fetching driver messages:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ============================================================================
+// VOICE NOTES IN MESSAGES (MESSAGE_VOICE_NOTES_ENABLED, off by default)
+// ============================================================================
+// Anyone in a conversation records a voice note; the others play it. Arvin's
+// V1-V13 (2026-10-21), plan 2026-10-22 Revision 2. The flag gates SENDING only:
+// notes already sent stay playable with it off.
+//
+//   POST   /api/messages/voice      one request, the raw audio/mp4 body; the
+//                                   recipient and load in headers, never in the
+//                                   URL (request lines reach the proxy's logs)
+//   GET    /api/messages/:id/voice  the audio, to the people in the conversation
+//   DELETE /api/messages/:id/voice  Super Admin only, audited; the row stays
+//
+// The bytes are checked by lib/voice-note-mp4.js (AAC in MP4, 4 MB, 0.5 s to
+// 3:00, length measured on the server, metadata blanked); the file lives under
+// storage/voice-notes, outside every static mount (lib/voice-notes.js); who may
+// play it is decided by account id, never by name; the send goes through
+// sendChatMessage(), so its notification and live copy follow the text route's
+// rules (#549's per-role load IDs included).
+const voiceNoteMp4 = require("./lib/voice-note-mp4");
+const voiceNoteText = require("./lib/voice-note-text");
+const voiceNoteGate = require("./lib/voice-note-gate");
+const voiceNotes = require("./lib/voice-notes");
+const MESSAGE_VOICE_NOTES_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MESSAGE_VOICE_NOTES_ENABLED ?? "").trim());
+const VOICE_NOTE_DIR = voiceNotes.voiceNoteDir(DATA_DIR);
+function voiceNoteNumberSetting(raw, fallback) {
+	const n = Number(String(raw ?? "").trim());
+	return String(raw ?? "").trim() !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+// Per user per Eastern day, summed from the stored sizes (429 past it).
+const VOICE_NOTE_DAILY_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_DAILY_MB, 40) * 1024 * 1024;
+// Sends are refused while the data disk has less than this free (507).
+const VOICE_NOTE_MIN_FREE_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_MIN_FREE_GB, 2) * 1024 * 1024 * 1024;
+const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_RETENTION_DAYS, 180);
+// The first day the retention sweep deletes (YYYY-MM-DD). Unset: report only.
+const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
+	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
+	: "";
+// The one staff desk each role sends to, as its own app names it: a Driver
+// only to "Dispatch" (the driver app), an Investor only to "admin" (the
+// investor portal). [the name as matched, the name as stored].
+const VOICE_NOTE_DESK_BY_ROLE = Object.freeze({ Driver: ["dispatch", "Dispatch"], Investor: ["admin", "admin"] });
+const VOICE_NOTE_REFUSALS = {
+	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
+	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
+	VOICE_NOTE_TOO_LONG: "Voice notes can be at most 3 minutes long.",
+	VOICE_NOTE_TOO_SHORT: "That voice note is too short to send.",
+};
+
+// Same shape as chatAttachmentLimiter: per user, requireAuth mounted first, a
+// permanent cost (bytes on disk), so tighter than the general limiters.
+const voiceNoteUploadLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 40 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many voice notes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// Playback: iPhone sends many range requests for one play, so a wide window.
+const voiceNotePlaybackLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+
+// Who a voice note goes from and to, and the Driver or Investor account it
+// belongs to (party_user_id: besides staff, the one account that may play it).
+// A Driver or an Investor sends as himself and only to his role's staff desk
+// (VOICE_NOTE_DESK_BY_ROLE); staff send as "Dispatch" or as themselves, only
+// to one existing Driver or Investor account. { from, to, partyUserId } or
+// { status, code, error }.
+function resolveVoiceNoteParties(user, toName, fromName) {
+	const role = user && user.role;
+	const own = String((user && (user.driverName || user.username)) || "").trim();
+	if (role === "Driver" || role === "Investor") {
+		const [deskKey, desk] = VOICE_NOTE_DESK_BY_ROLE[role];
+		const id = Number(user.id);
+		if (!own || String(toName).toLowerCase() !== deskKey || !Number.isInteger(id) || id <= 0) {
+			return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes go to Dispatch." };
+		}
+		return { from: own, to: desk, partyUserId: id };
+	}
+	if (role !== "Super Admin" && role !== "Dispatcher") {
+		return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes can't be sent from this account." };
+	}
+	const asked = String(fromName || "").trim();
+	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
+	if (!from) return { status: 422, code: "VOICE_NOTE_SENDER", error: "Send as Dispatch or as yourself." };
+	const spelling = findDriverAccountSpelling(toName);
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND driver_name = ?").all(spelling) : [];
+	const investors = toName ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(username) = LOWER(?)").all(toName) : [];
+	const hits = [...drivers, ...investors];
+	if (hits.length !== 1) return { status: 422, code: "VOICE_NOTE_RECIPIENT", error: "Pick a driver or an investor to send the voice note to." };
+	return { from, to: hits[0].name, partyUserId: hits[0].id };
+}
+
+// A Driver's truck's latest clean fix since its device was linked, or null
+// (no truck, no ELD, no fix): the input to lib/voice-note-gate.js.
+function voiceNoteTruckFix(driverName) {
+	const truck = resolveTruckForDriverName(driverName);
+	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+	if (!vehicleId) return null;
+	const fix = db.prepare(
+		`SELECT speed, location_date_ms FROM routemate_telemetry
+		  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+		  ORDER BY id DESC LIMIT 1`
+	).get(vehicleId);
+	if (!fix || eldPosition.fixPredatesLink(fix.location_date_ms, eldDeviceLinkedSinceMs(truck.id, vehicleId))) return null;
+	return fix;
+}
+
+// The voice-note bytes this account stored today (Eastern day).
+function voiceNoteBytesToday(userId) {
+	const today = appTodayKey();
+	const since = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+	return db.prepare(
+		`SELECT timestamp, voice_bytes FROM messages
+		  WHERE sender_user_id = ? AND client_key <> '' AND timestamp >= ?`
+	).all(userId, since)
+		.filter((r) => appDay(new Date(r.timestamp)) === today)
+		.reduce((n, r) => n + (Number(r.voice_bytes) || 0), 0);
+}
+
+// True when the data disk is under VOICE_NOTE_MIN_FREE_BYTES. Staff get one
+// notice a day about it. A disk it cannot measure is not refused.
+let voiceNoteStorageNoticeDay = "";
+function voiceNoteDiskLow() {
+	let free;
+	try {
+		const st = fs.statfsSync(DATA_DIR);
+		free = Number(st.bavail) * Number(st.bsize);
+	} catch {
+		return false;
+	}
+	if (!(free < VOICE_NOTE_MIN_FREE_BYTES)) return false;
+	const today = appTodayKey();
+	if (voiceNoteStorageNoticeDay !== today) {
+		voiceNoteStorageNoticeDay = today;
+		const gb = (n) => (n / (1024 * 1024 * 1024)).toFixed(1);
+		const title = "ACTION NEEDED — the server is low on disk space";
+		const body = `Voice notes are refused while less than ${gb(VOICE_NOTE_MIN_FREE_BYTES)} GB is free (${gb(free)} GB now). Free space on the server.`;
+		try {
+			insertDispatchNotification.run("voice-note-storage-low", title, body, JSON.stringify({ freeBytes: free }));
+			emitDispatchNotice({ type: "voice-note-storage-low", title, body });
+		} catch (err) {
+			console.error("[voice-notes] storage notice failed:", err.message);
+		}
+		console.error(`[voice-notes] ${title}: ${body}`);
+	}
+	return true;
+}
+
+function voiceNoteFeatureGate(req, res, next) {
+	if (!MESSAGE_VOICE_NOTES_ENABLED) return res.status(404).json({ error: "Voice notes are not switched on.", code: "FEATURE_OFF" });
+	next();
+}
+
+// Everything that can be decided from the headers, before a byte of the body
+// is read: the key and its earlier send, the recipient and load, the moving
+// truck, the daily cap and the disk. Leaves req.voiceNote for the handler.
+function voiceNoteSendChecks(req, res, next) {
+	const user = req.session.user;
+	const clientKey = voiceNotes.idempotencyKey(req.headers["idempotency-key"]);
+	if (!clientKey) return res.status(400).json({ error: "The voice note is missing its send key. Update the app and try again.", code: "VOICE_NOTE_KEY_REQUIRED" });
+	const senderUserId = Number(user.id);
+	const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(senderUserId, clientKey);
+	if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+	const to = voiceNotes.messageHeader(req.headers["x-message-to"], { required: true });
+	const loadId = voiceNotes.messageHeader(req.headers["x-message-load-id"]);
+	const fromAsked = voiceNotes.messageHeader(req.headers["x-message-from"]);
+	if (to.error || loadId.error || fromAsked.error) {
+		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
+	}
+	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
+	if (parties.error) return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
+		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
+	}
+	if (voiceNoteBytesToday(senderUserId) >= VOICE_NOTE_DAILY_BYTES) {
+		return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+	}
+	if (voiceNoteDiskLow()) {
+		return res.status(507).json({ error: "Voice notes can't be stored right now. Send a text message instead.", code: "STORAGE_LOW" });
+	}
+	req.voiceNote = { ...parties, loadId: loadId.value, clientKey, senderUserId };
+	next();
+}
+
+// The body, read only now: audio/mp4 up to 4 MB. A declared length over that
+// is refused before reading; a body that grows past it, as it passes 4 MB.
+const voiceNoteRawBody = express.raw({ type: "audio/mp4", limit: voiceNoteMp4.VOICE_NOTE_MAX_BYTES });
+function readVoiceNoteBody(req, res, next) {
+	const tooLarge = () => res.status(413).json({ error: VOICE_NOTE_REFUSALS.VOICE_NOTE_TOO_LARGE, code: "VOICE_NOTE_TOO_LARGE" });
+	const declared = Number(req.headers["content-length"]);
+	if (Number.isFinite(declared) && declared > voiceNoteMp4.VOICE_NOTE_MAX_BYTES) return tooLarge();
+	voiceNoteRawBody(req, res, (err) => {
+		if (!err) return next();
+		if (err.type === "entity.too.large") return tooLarge();
+		return res.status(400).json({ error: "The recording could not be read. Try sending it again.", code: "VOICE_NOTE_UNREADABLE" });
+	});
+}
+
+// POST /api/messages/voice — send a voice note.
+// Headers: X-Requested-With (the CSRF rule), Idempotency-Key (a retry with
+// the same key answers the first note's id and writes nothing), X-Message-To,
+// optional X-Message-Load-Id and (staff) X-Message-From, each percent-encoded
+// UTF-8. Body: the recording, Content-Type audio/mp4.
+app.post("/api/messages/voice", requireAuth, voiceNoteFeatureGate, voiceNoteUploadLimiter, voiceNoteSendChecks, readVoiceNoteBody, (req, res) => {
+	const v = req.voiceNote;
+	let stored = "";
+	try {
+		const checked = voiceNoteMp4.checkVoiceNote(Buffer.isBuffer(req.body) ? req.body : null);
+		if (!checked.ok) return res.status(checked.status).json({ error: VOICE_NOTE_REFUSALS[checked.code], code: checked.code });
+		// Re-read after the body's await: today's total with this note.
+		if (voiceNoteBytesToday(v.senderUserId) + checked.bytes.length > VOICE_NOTE_DAILY_BYTES) {
+			return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+		}
+		const sent = sendChatMessage({
+			from: v.from,
+			to: v.to,
+			message: voiceNoteText.voiceNoteLabel(checked.durationMs),
+			loadId: v.loadId,
+			voice: {
+				senderUserId: v.senderUserId, clientKey: v.clientKey, partyUserId: v.partyUserId,
+				durationMs: checked.durationMs, bytes: checked.bytes.length, title: voiceNoteText.voiceNoteTitle(v.from),
+			},
+			// Inside the insert's transaction: the row, then its file (never over
+			// another), then the row naming it. A failure rolls the row back and
+			// removes the file this send wrote.
+			store: (id) => {
+				const name = voiceNotes.newVoiceFileName(id);
+				voiceNotes.storeVoiceFile(VOICE_NOTE_DIR, name, checked.bytes);
+				stored = name;
+				db.prepare("UPDATE messages SET voice_file = ? WHERE id = ?").run(name, id);
+			},
+		});
+		res.json({ success: true, id: sent.id, durationMs: checked.durationMs });
+	} catch (error) {
+		const committed = stored && db.prepare("SELECT 1 FROM messages WHERE voice_file = ?").get(stored);
+		if (stored && !committed) voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, stored);
+		// The same key sent twice at once: the index refused the second row.
+		if (error && error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+			const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(v.senderUserId, v.clientKey);
+			if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+		}
+		console.error("Error sending voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be sent. Try again." });
+	}
+});
+
+// GET /api/messages/:id/voice — play a voice note. Super Admin and Dispatcher
+// play any; a Driver or an Investor only a note whose party_user_id is his own
+// account id. Anyone else, an id that is not a voice note, or a file the sweep
+// removed: 404, never 403 (a 403 would confirm the note exists). Range requests
+// answer 206 (iOS refuses media from a server that ignores Range). Never cached
+// by a shared cache, never sniffed, never embedded by another origin.
+app.get("/api/messages/:id/voice", requireAuth, voiceNotePlaybackLimiter, uploadMissLimiter, (req, res) => {
+	const notFound = () => res.status(404).json({ error: "Not found" });
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return notFound();
+		const row = db.prepare("SELECT id, attachment_type, voice_file, party_user_id FROM messages WHERE id = ?").get(Number(req.params.id));
+		if (!row || row.attachment_type !== "voice" || !voiceNotes.canPlayVoiceNote(req.session.user, row)) return notFound();
+		if (!voiceNotes.voiceFilePath(VOICE_NOTE_DIR, row.voice_file)) return notFound();
+		res.sendFile(row.voice_file, {
+			root: VOICE_NOTE_DIR,
+			dotfiles: "deny",
+			acceptRanges: true,
+			cacheControl: false,
+			headers: {
+				"Content-Type": "audio/mp4",
+				"Content-Disposition": `inline; filename="voice-note-${row.id}.m4a"`,
+				"X-Content-Type-Options": "nosniff",
+				"Cache-Control": "private, max-age=0, must-revalidate",
+				"Cross-Origin-Resource-Policy": "same-origin",
+			},
+		}, (err) => {
+			if (err && !res.headersSent) notFound();
+		});
+	} catch (error) {
+		console.error("Error serving voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be played." });
+	}
+});
+
+// DELETE /api/messages/:id/voice — a Super Admin removes a voice note's audio
+// (there is no unsend). The row stays and reads "Voice note removed by an
+// administrator"; the removal is audited.
+app.delete("/api/messages/:id/voice", requireRole("Super Admin"), voiceNoteUploadLimiter, (req, res) => {
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return res.status(404).json({ error: "Not found" });
+		const id = Number(req.params.id);
+		const row = db.prepare(`SELECT id, "from", "to", attachment_type, voice_file, voice_duration_ms FROM messages WHERE id = ?`).get(id);
+		if (!row || row.attachment_type !== "voice") return res.status(404).json({ error: "Not found" });
+		if (row.voice_file && !voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, row.voice_file)) {
+			return res.status(500).json({ error: "The voice note could not be removed. Try again." });
+		}
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0, message = ? WHERE id = ?").run(voiceNoteText.VOICE_NOTE_REMOVED, id);
+		logAudit(req, "voice_note_delete", "message", id, JSON.stringify({ from: row.from, to: row.to, durationMs: row.voice_duration_ms, file: row.voice_file ? "removed" : "already gone" }));
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error removing voice note:", error.message);
+		res.status(500).json({ error: "The voice note could not be removed. Try again." });
+	}
+});
+
+// DELETE /api/users/:id: the stored voice files of every message its delete
+// removes (from or to the account's name, matched as that delete matches) and
+// of every note the account was the party to (by id, under any name).
+function userVoiceNoteFiles(userId, nameLower) {
+	const files = new Set(
+		db.prepare("SELECT voice_file FROM messages WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").all(userId).map((r) => r.voice_file),
+	);
+	if (nameLower) {
+		for (const r of db.prepare(`SELECT voice_file FROM messages WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND COALESCE(voice_file, '') <> ''`).all(nameLower, nameLower)) {
+			files.add(r.voice_file);
+		}
+	}
+	return [...files];
+}
+// ...once that delete has committed: a note of the account's that kept its row
+// (sent under another name) loses its audio, then every file read is unlinked.
+// Returns how many files are gone.
+function removeUserVoiceNotes(userId, files) {
+	try {
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0 WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").run(userId);
+	} catch (err) {
+		console.error("[voice-notes] clearing a deleted account's notes failed:", err.message);
+	}
+	let gone = 0;
+	for (const file of files) if (voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, file)) gone++;
+	return gone;
+}
+
+// The daily retention sweep (lib/voice-notes.js): report only until
+// VOICE_NOTE_SWEEP_APPLY_FROM is set and reached.
+function sweepVoiceNotesNow() {
+	try {
+		return voiceNotes.sweepVoiceNotes({
+			db, dir: VOICE_NOTE_DIR, retentionDays: VOICE_NOTE_RETENTION_DAYS, applyFrom: VOICE_NOTE_SWEEP_APPLY_FROM, todayKey: appTodayKey(), log: console,
+		});
+	} catch (err) {
+		console.error("[voice-notes] sweep failed:", err.message);
+		return null;
+	}
+}
+if (startsJob("voice note retention sweep")) {
+	setTimeout(sweepVoiceNotesNow, 6 * 60 * 1000);
+	setInterval(sweepVoiceNotesNow, 24 * 60 * 60 * 1000);
+}
 
 // Receipt photo storage helpers — write base64 data URIs to disk and return
 // the URL path. Old base64-in-DB rows still work because the frontend img tag
@@ -48842,14 +49541,27 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// person typed (brokerContact.rateConNumberStash).
 			const stashKey = brokerContact.rateConStashKey(base64);
 			brokerContact.rateConNumberStash.put(stashKey, { "Load Number": fields["Load Number"] });
+			// NEEDS CONFIRMATION PICKUPS (flag on): the pickup reading and the extracted
+			// Pickup Appointment, for every role, for the create that follows; the modal
+			// gets one more line when the rate con marks the date "Needs Confirmation".
+			const warnOpts = {};
+			if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) {
+				const reading = rateConPickupReadingOfPdf(base64, fields["Pickup Notes/Instructions"]);
+				rateConPickupStash.put(stashKey, {
+					needsConfirmation: reading.needsConfirmation,
+					by: reading.by,
+					pickup: fields["Pickup Appointment Time"] == null ? "" : String(fields["Pickup Appointment Time"]),
+				});
+				if (reading.needsConfirmation) warnOpts.pickupNeedsConfirmation = pickupConfirmation.MODAL_WARNING;
+			}
 			if (req.session.user.role !== "Super Admin") {
 				brokerContact.rateConStash.put(stashKey, fields);
 				return res.json({
 					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
-					warnings: rateconLoad.extractionWarnings(fields),
+					warnings: rateconLoad.extractionWarnings(fields, warnOpts),
 				});
 			}
-			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
+			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields, warnOpts) });
 		} catch (err) {
 			// A rejected key or an exhausted quota is the same state as having no key
 			// at all, which this route already answers 503 for six lines above — so
@@ -49177,8 +49889,13 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
 		jtCacheInvalidate();
 		// PERSON EDIT HOLD: a drag-and-drop create's dates are the rate con's (decision
-		// 5). The record never fails the create.
-		try { recordRateConCreateCellWrites(loadId, headers, values); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		// 5). The record never fails the create. NEEDS CONFIRMATION PICKUPS (flag on): a
+		// Pickup Appointment the person changed in the review modal is a person's date, and
+		// the load's pickup record is written.
+		let pickupCreate = null;
+		try { pickupCreate = rateConCreatePickup(req, pdfBase64, stashKey, headers, fields); } catch (e) { console.error("[ratecon-pickup] reading failed:", e && e.message); }
+		try { recordRateConCreateCellWrites(loadId, headers, values, pickupCreate ? pickupCreate.person : null); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		if (pickupCreate) recordRateConCreatePickupReading(loadId, headers, values, pickupCreate.reading);
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
@@ -49557,6 +50274,106 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
 }
 // </driver-instructions-wiring>
+
+// POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
+// plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
+// as it is; the dashboard's code then clears.
+// - 404 while RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED is off, before the role check.
+// - Addressed like PUT /api/data/:rowIndex: { rowIndex, loadId }, the Load ID as the caller
+//   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
+//   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
+//   only when no other row reads the same).
+// - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
+//   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
+//   months are never edited; that variant shows no button).
+// - Writes no sheet cell: a "person" row of the current value in load_cell_writes (the
+//   person-edit hold's record, so the date counts as a person's from then on), then the
+//   audit entry load / pickup_confirmed with the value only. A date that is already a
+//   person's answers 200 alreadyConfirmed and records nothing.
+function pickupConfirmedGate(req, res, next) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return res.status(404).json({ error: "Not found" });
+	return next();
+}
+
+// Whether row `rowIndex` of `all` (Job Tracking as read, headers first) is the load the
+// caller named by `sentId`, as that caller is served it.
+function pickupConfirmedRowMatches(req, all, rowIndex, sentId) {
+	const headers = all[0] || [];
+	const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (idCol < 0) return false;
+	const rowOf = (cells) => Object.fromEntries(headers.map((h, i) => [h, cells[i] == null ? "" : cells[i]]));
+	const cells = all[rowIndex - 1] || [];
+	const raw = String(cells[idCol] == null ? "" : cells[idCol]).trim();
+	if (!normLoadKey(raw)) return false;
+	const shown = String(shownLoadId(req, raw, { row: rowOf(cells) }) ?? "").trim();
+	if (shown === raw) return normLoadKey(raw) === normLoadKey(sentId);
+	if (!shown || shown.toLowerCase() !== sentId.toLowerCase()) return false;
+	let alike = 0;
+	for (let i = 1; i < all.length; i++) {
+		const c = all[i] || [];
+		const r = String(c[idCol] == null ? "" : c[idCol]).trim();
+		if (r && String(shownLoadId(req, r, { row: rowOf(c) }) ?? "").trim().toLowerCase() === shown.toLowerCase()) alike++;
+	}
+	return alike === 1;
+}
+
+app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	const body = req.body || {};
+	const rowIndex = Number(body.rowIndex);
+	const sentId = typeof body.loadId === "string" || typeof body.loadId === "number" ? String(body.loadId).trim() : "";
+	if (!Number.isInteger(rowIndex) || rowIndex < 2 || rowIndex > 1000000) {
+		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
+	}
+	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	let all;
+	try {
+		const sheets = await getSheets();
+		const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		all = (read && read.data && read.data.values) || [];
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed: Job Tracking could not be read:", e.message);
+		return res.status(503).json({ error: "Job Tracking could not be read, so nothing was recorded. Try again.", code: "JOB_TRACKING_UNREADABLE" });
+	}
+	try {
+		const headers = all[0] || [];
+		const row = all[rowIndex - 1] || [];
+		if (!pickupConfirmedRowMatches(req, all, rowIndex, sentId)) {
+			return res.status(409).json({ error: `Row ${rowIndex} no longer holds this load. Reload the dashboard and open the load again.`, code: "ROW_MOVED" });
+		}
+		const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+		const raw = String(row[idCol] == null ? "" : row[idCol]).trim();
+		const pickupCol = headers.findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const statusCol = headers.findIndex((h) => /^(job[\s._-]?)?status$/i.test(String(h == null ? "" : h).trim()));
+		const stored = pickupCol >= 0 && row[pickupCol] != null ? String(row[pickupCol]) : "";
+		rateConPickupReadingsTable();
+		const key = loadCellKey(raw);
+		const record = db.prepare("SELECT needs_confirmation FROM ratecon_pickup_readings WHERE load_key = ?").get(key);
+		const cancelled = statusCol >= 0 && CANCELED_STATUS_RE.test(String(row[statusCol] == null ? "" : row[statusCol]).trim());
+		if (!record || !Number(record.needs_confirmation) || cancelled || !stored.trim()) {
+			return res.status(409).json({ error: "This load has no unconfirmed rate-con pickup date to confirm.", code: "PICKUP_NOT_FLAGGED" });
+		}
+		const months = loadRowAccountingMonths(headers, row);
+		if (!Array.isArray(months) || !months.length || months.some((mk) => periodWriteLocked(mk))) {
+			return res.status(409).json({
+				error: "This load has a date in a closed month, or one that can't be placed in a month, so its pickup date can't be confirmed here.",
+				code: "PERIOD_FINALIZED",
+			});
+		}
+		const column = loadCellColumnName(headers, headers[pickupCol]);
+		const day = pickupConfirmation.cellDay(stored) || null;
+		// Already a person's date (confirmed before, or corrected): nothing new to record.
+		if (personEditHold.personSet(stored, loadCellWriteRows(key, column)).set === true) {
+			return res.json({ ok: true, loadId: sentId, stored: day, alreadyConfirmed: true });
+		}
+		recordLoadCellWrite(key, column, stored, "person", { actor: rateConPickupActor(req) });
+		logAudit(req, "pickup_confirmed", "load", raw, JSON.stringify({ value: stored.slice(0, 200) }));
+		notifyChange("dashboard");
+		return res.json({ ok: true, loadId: sentId, stored: day });
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed:", e.message);
+		return res.status(500).json({ error: "The pickup date could not be marked confirmed. Try again.", code: "PICKUP_CONFIRM_FAILED" });
+	}
+});
 
 // GET /api/documents/:loadId — Fetch all documents for a load
 //

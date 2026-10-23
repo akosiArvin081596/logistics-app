@@ -28,13 +28,17 @@
 //      close sits below and inside the safe-area insets and is 44x44
 //   §6 the photo zoom viewer's image cap uses dvh after a vh fallback; its close
 //      sits inside the safe-area insets and is 44x44
+//   §7 the investor's signing screen (InvestorSignModal.vue, the same layout) had
+//      the same 100vw x 100vh: it fills its overlay, pads the safe-area insets
+//      inside its own height, and on the phone layout no bare vh wins and the
+//      form panel shrinks and scrolls (2026-10-22)
 //
 // The components' own markup and styles, parsed with the client's compiler and
 // postcss. No DOM, no browser (scripts/e2e/driver-document-sign.mjs is the
 // browser half).
 //   node scripts/test-driver-fullscreen-viewport.mjs
 //   DOCUMENT_SIGN_VUE=/tmp/base/DocumentSignModal.vue node scripts/test-driver-fullscreen-viewport.mjs   # a base copy: fails
-//   MAINTENANCE_MODAL_VUE=… DOCUMENT_UPLOAD_VUE=… ZOOMABLE_IMAGE_VUE=…                                   # likewise
+//   MAINTENANCE_MODAL_VUE=… DOCUMENT_UPLOAD_VUE=… ZOOMABLE_IMAGE_VUE=… INVESTOR_SIGN_VUE=…               # likewise
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -48,6 +52,7 @@ const DOCUMENT_SIGN_VUE = process.env.DOCUMENT_SIGN_VUE || path.join(SRC, 'drive
 const MAINTENANCE_MODAL_VUE = process.env.MAINTENANCE_MODAL_VUE || path.join(SRC, 'shared', 'MaintenanceModal.vue')
 const DOCUMENT_UPLOAD_VUE = process.env.DOCUMENT_UPLOAD_VUE || path.join(SRC, 'driver', 'DocumentUpload.vue')
 const ZOOMABLE_IMAGE_VUE = process.env.ZOOMABLE_IMAGE_VUE || path.join(SRC, 'shared', 'ZoomableImage.vue')
+const INVESTOR_SIGN_VUE = process.env.INVESTOR_SIGN_VUE || path.join(SRC, 'invest', 'InvestorSignModal.vue')
 
 let pass = 0
 const failures = []
@@ -221,6 +226,32 @@ const ziLeaks = vhWinners(zi.root)
 ok(`no bare vh wins in the zoom viewer (bare: ${ziLeaks.join('; ') || 'none'})`, ziLeaks.length === 0)
 eq('the zoom close is position: fixed', last(decls(zi.root, '.zoom-close', 'position')), 'fixed')
 safeCorner(zi.root, '.zoom-close', 'the zoom close')
+
+// ══ §7 the investor's signing screen ═════════════════════════════════════════
+console.log('§7 the investor\'s signing screen is the overlay\'s size and pads the safe-area insets')
+const is = load(INVESTOR_SIGN_VUE)
+eq('the overlay is position: fixed', last(decls(is.root, '.modal-overlay', 'position')), 'fixed')
+eq('the overlay is pinned to every edge of the window (inset: 0)', last(decls(is.root, '.modal-overlay', 'inset')), '0')
+eq('the overlay stays above the /invest guided tour (z-index 10000)', last(decls(is.root, '.modal-overlay', 'z-index')), '10000')
+const isH = decls(is.root, '.modal-fullscreen', 'height')
+ok('the screen\'s height is never a bare 100vh', !bareVh(last(isH)))
+ok('the screen fills the overlay (height: 100%), or is 100dvh after a 100vh fallback',
+  last(isH) === '100%' || dvhAfterVh(isH, 100))
+ok('the screen\'s width is never a bare 100vw (it fills the overlay)', !/(^|[^a-z])100vw\b/.test(last(decls(is.root, '.modal-fullscreen', 'width')) || ''))
+eq('the screen counts its padding inside its height (box-sizing: border-box)', last(decls(is.root, '.modal-fullscreen', 'box-sizing')), 'border-box')
+// #577's safe-area padding, as the shorthand or the longhands.
+const isPad = (side) => last(decls(is.root, '.modal-fullscreen', `padding-${side}`)) || last(decls(is.root, '.modal-fullscreen', 'padding')) || ''
+ok('the screen pads the top by the safe-area inset (the header clears the notch)', /env\(safe-area-inset-top/.test(isPad('top')))
+ok('the screen pads the bottom by the safe-area inset (the Sign row clears the home bar)', /env\(safe-area-inset-bottom/.test(isPad('bottom')))
+const isLeaks = vhWinners(is.root)
+ok(`every vh size has a dvh line after it (bare: ${isLeaks.join('; ') || 'none'})`, isLeaks.length === 0)
+ok('phone layout: the form panel\'s cap is 45dvh after a 45vh fallback', dvhAfterVh(decls(is.root, '.sign-panel', 'max-height', PHONE), 45))
+ok('phone layout: the PDF\'s floor is 40dvh after a 40vh fallback', dvhAfterVh(decls(is.root, '.pdf-panel', 'min-height', PHONE), 40))
+eq('phone layout: the form panel may shrink when the PDF and the form ask for more than the screen', last(decls(is.root, '.sign-panel', 'flex-shrink', PHONE)), '1')
+eq('phone layout: the form panel may shrink below its content (min-height: 0)', last(decls(is.root, '.sign-panel', 'min-height', PHONE)), '0')
+ok('phone layout: the form panel scrolls', ['auto', 'scroll'].includes(last(decls(is.root, '.sign-panel', /^overflow(-y)?$/, PHONE))))
+const isContent = findEl(is.descriptor.template.ast, (el) => hasClass(el, 'sign-content'))
+ok('the Sign button sits in the form\'s scroller (.sign-content)', !!isContent && !!findEl(isContent, (el) => el.tag === 'button' && hasClass(el, 'sign-btn')))
 
 console.log(`\n${pass} passed, ${failures.length} failed`)
 process.exit(failures.length ? 1 : 0)

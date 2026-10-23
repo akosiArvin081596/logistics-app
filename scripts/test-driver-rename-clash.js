@@ -1244,6 +1244,9 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 		normalizeDriverName: m.normalizeDriverName,
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
+		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
+		userVoiceNoteFiles: () => [],
+		removeUserVoiceNotes: () => 0,
 	});
 	return { del: (id) => quiet(() => call({ params: { id: String(id) } })) };
 }
