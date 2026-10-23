@@ -994,7 +994,10 @@ test("§9 the n8n extract route still writes nothing new and never calls the ins
 	const proc = { env: { N8N_EXTRACT_SECRET: "extract-secret-under-test" } };
 	let geminiRuns = 0;
 	const deps = {
-		app: fakeApp, db: w.db, process: proc, console: { log() {}, warn() {}, error() {}, info() {} }, require,
+		// server.js's "./lib/..." requires (the shared rate-con text read the DVIR and the
+		// Needs Confirmation pickup readings use) resolve from the checkout's root.
+		app: fakeApp, db: w.db, process: proc, console: { log() {}, warn() {}, error() {}, info() {} },
+		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(ROOT, p) : p),
 		pdfOcrLimiter: (req, res, next) => next(),
 		runRateConGemini: async () => { geminiRuns++; return { "Load Number": LOAD_ID, "Pickup Address": "100 Test Park Dr, Springfield, IL 62701", "Drop-off Address": "55 Depot Ln, Riverton, WY 82501", Rate: OWN_AMOUNT }; },
 		alertUnusableRateConExtraction: async () => {}, noteRateConDvir: () => {}, GEMINI_API_KEY: "k", fetch: async () => { throw new Error("no network"); },
