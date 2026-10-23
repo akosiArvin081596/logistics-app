@@ -9,30 +9,34 @@
  *
  *   §1 POST /api/messages, lifted from server.js with every declaration it
  *      reaches (scripts/lib/server-lift.js), over an in-memory SQLite:
- *      - a Driver or an Investor sends only to the staff desk. Another driver,
- *        an investor, a staff member's own name or a name no one holds is
- *        403 MESSAGE_RECIPIENT: no row, no notification, no live copy, and the
- *        refusal is audited. A desk name in another case or with edge spaces is
- *        stored as the desk's own spelling ("Dispatch", "admin"). A recipient
- *        that is not a string is refused before anything is written.
- *      - staff send as "Dispatch" or as themselves (422 MESSAGE_SENDER
- *        otherwise), to one existing Driver or Investor account or the desk
- *        (422 MESSAGE_RECIPIENT otherwise, a staff account included).
+ *      - one desk per role, as #583: a Driver (by his driver name) sends only to
+ *        "Dispatch", an Investor (by his username) only to "admin". Anything
+ *        else (the other desk, another driver, an investor, a staff member's
+ *        name, a made-up or look-alike name) is 403 MESSAGE_RECIPIENT: no row,
+ *        no notification, no live copy; one refusal audit row whose `details`
+ *        names the code and the sender's role, with no field carrying the
+ *        attempted name or the message text; each role's refusal names its own
+ *        desk. A Driver with no driver name is refused. A desk name in another
+ *        case or with edge spaces is stored in the desk's own spelling. A
+ *        recipient that is not a string is refused before anything is written.
+ *      - staff send as "Dispatch" (also when `from` is blank) or as themselves
+ *        (422 MESSAGE_SENDER otherwise; a `from` that is not a string is 400),
+ *        to exactly one existing Driver or Investor account, or to a desk under
+ *        their own name only (422 MESSAGE_RECIPIENT otherwise: a staff account,
+ *        a directory-only name, a name two accounts hold, "Dispatch" to itself).
  *      - unchanged: the driver app's send (to "Dispatch"), the investor
  *        portal's (to "admin"), the dispatch inbox's ("Dispatch" to a driver or
  *        an investor, any case), a Super Admin in the driver app (his own name
  *        to "Dispatch"), a Driver's `from` pinned to his session.
- *   §2 the desk names are reserved: findDriverNameClash() reports "admin" as
+ *   §2 names no account may take: findDriverNameClash() reports "admin" as
  *      reserved, as it does "dispatch" and "investor"; POST /api/users refuses a
- *      username that is a desk name (any case, edge spaces) with 409
- *      USERNAME_RESERVED and writes nothing, and a driver name "Admin" with
- *      409 DRIVER_NAME_TAKEN; an ordinary account still creates.
+ *      username that is a desk name (409 USERNAME_RESERVED) or that another
+ *      identity already answers to (409 USERNAME_TAKEN), and a driver name
+ *      "Admin" (409 DRIVER_NAME_TAKEN), writing nothing; POST /api/auth/setup
+ *      refuses " admin " (409 USERNAME_RESERVED); ordinary accounts still create.
  *
- * Which desk each role may use (MS2 in the plan) is left unasserted: the
- * driver app names "Dispatch", the investor portal "admin", and both are
- * pinned. The account delete (DELETE /api/users/:id never removing a desk's
- * messages) belongs in scripts/test-user-delete-cascade.js, whose harness
- * mounts that route.
+ * The account delete keeping a desk's messages belongs in
+ * scripts/test-user-delete-cascade.js, whose harness mounts that route.
  *
  * FIXTURES: an in-memory SQLite, made-up names only. No network, no app.db.
  * Run: node scripts/test-messages-staff-only.js
@@ -68,14 +72,24 @@ const DRIVER_A = "Tamsin Vale";
 const DRIVER_B = "Orrin Cade";
 const INVESTOR = "inv_t";
 const INVESTOR_2 = "inv_u";
+// A driver name an investor's username also spells (legacy data the name
+// checks would refuse today): a staff send to it is ambiguous.
+const SHARED_NAME = "Kestrel";
+// Only on the drivers directory, with no account.
+const DIRECTORY_ONLY = "Desmond Pike";
 const U = {
 	sa: { id: 1, role: "Super Admin", username: "boss_t", driverName: "" },
 	disp: { id: 2, role: "Dispatcher", username: "desk_t", driverName: "" },
 	drvA: { id: 10, role: "Driver", username: "drv_a", driverName: DRIVER_A },
 	drvB: { id: 11, role: "Driver", username: "drv_b", driverName: DRIVER_B },
+	drvBlank: { id: 12, role: "Driver", username: "drv_blank", driverName: "" },
+	drvShared: { id: 13, role: "Driver", username: "drv_k", driverName: SHARED_NAME },
 	inv: { id: 50, role: "Investor", username: INVESTOR, driverName: "" },
 	inv2: { id: 51, role: "Investor", username: INVESTOR_2, driverName: "" },
+	invShared: { id: 52, role: "Investor", username: SHARED_NAME.toLowerCase(), driverName: "" },
 };
+// A message text no audit row may carry.
+const SECRET_TEXT = "zebra-quartz-77 made-up text";
 
 function makeDb() {
 	const db = new Database(":memory:");
@@ -91,6 +105,7 @@ function makeDb() {
 	for (const u of Object.values(U)) add.run(u.id, u.username, u.role, u.driverName);
 	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES (?)").run(DRIVER_A);
 	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES (?)").run(DRIVER_B);
+	db.prepare("INSERT INTO drivers_directory (driver_name) VALUES (?)").run(DIRECTORY_ONLY);
 	return db;
 }
 
@@ -138,7 +153,11 @@ function mountMessages(db) {
 		}),
 	};
 	const insertNotification = { run: (...args) => { log.notifications.push(args); return { lastInsertRowid: log.notifications.length }; } };
-	const audit = (kind) => (...args) => log.audits.push({ kind, text: args.map((a) => (typeof a === "string" ? a : "")).join(" | ") });
+	// logAudit(req, action, entity, entityId, details) and
+	// logAuditRefusal(req, action, entity, entityId, details, code): kept by
+	// position, so the checks below read `details` and the entity id themselves.
+	const audit = (kind) => (req, action, entity, entityId, details, code) =>
+		log.audits.push({ kind, action, entity, entityId: String(entityId ?? ""), details: String(details ?? ""), code: code == null ? "" : String(code) });
 	const { app, handlers } = captureApp();
 	const env = {
 		app, db, requireAuth: () => {}, driverWriteLimiter: () => {}, chatFiles, console: { log() {}, warn() {}, error() {} }, require,
@@ -154,7 +173,12 @@ function mountMessages(db) {
 
 const rowCount = (db) => db.prepare("SELECT COUNT(*) AS n FROM messages").get().n;
 const lastRow = (db) => db.prepare('SELECT "from" AS f, "to" AS t, message, load_id AS loadId FROM messages ORDER BY id DESC LIMIT 1').get();
-const audited = (log, code) => log.audits.some((a) => a.text.includes(code));
+// The refusal's audit row: `details` names the code and the sender's role;
+// neither `details` nor the entity id (nor any other field) carries the
+// attempted name or the message text.
+const refusalAudits = (log, code) => log.audits.filter((a) => a.details.includes(code));
+const auditLeaks = (log, ...needles) => log.audits.some((a) =>
+	[a.action, a.entity, a.entityId, a.details, a.code].some((f) => needles.some((n) => f.toLowerCase().includes(n.toLowerCase()))));
 
 // A refused send: the status and code, nothing stored, no notification, no
 // live copy. Returns the response for the caller's own checks.
@@ -207,11 +231,32 @@ async function section1() {
 	await expectSent("§1 a Super Admin in the driver app: his own name to \"Dispatch\"", m, db, U.sa,
 		{ from: U.sa.username, to: "Dispatch", message: "Testing the driver chat" },
 		{ name: "stored from his own name", test: (row) => row.f === U.sa.username && row.t === "Dispatch" });
+	await expectSent("§1 staff under their own name to the investor desk", m, db, U.sa,
+		{ from: U.sa.username, to: "admin", message: "Testing the investor chat" },
+		{ name: "stored from his own name to \"admin\"", test: (row) => row.f === U.sa.username && row.t === "admin" });
 
-	// The rule: a Driver or an Investor sends to the staff desk only.
-	const r1 = await expectRefused("§1 Driver to another driver", m, db, U.drvA, { from: DRIVER_A, to: DRIVER_B, message: "hey" }, 403, "MESSAGE_RECIPIENT");
-	ok("§1 ...the refusal is audited (MESSAGE_RECIPIENT)", audited(m.log, "MESSAGE_RECIPIENT"));
+	// The rule: a Driver or an Investor sends to his own role's staff desk only.
+	const auditsBefore = m.log.audits.length;
+	const r1 = await expectRefused("§1 Driver to another driver", m, db, U.drvA, { from: DRIVER_A, to: DRIVER_B, message: SECRET_TEXT }, 403, "MESSAGE_RECIPIENT");
+	{
+		const rows = refusalAudits({ audits: m.log.audits.slice(auditsBefore) }, "MESSAGE_RECIPIENT");
+		ok("§1 ...one refusal audit row whose details name the code and the sender's role",
+			rows.length === 1 && rows[0].details.includes("Driver"));
+		ok("§1 ...no audit field carries the attempted name or the message text",
+			!auditLeaks(m.log, DRIVER_B, SECRET_TEXT, "zebra-quartz"));
+	}
 	ok("§1 ...and the answer names no other account", !!r1.body && !JSON.stringify(r1.body).includes(DRIVER_B));
+	const rDrv = await expectRefused("§1 Driver to the investor desk (one desk per role, as #583)", m, db, U.drvA, { from: DRIVER_A, to: "admin", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	const rInv = await expectRefused("§1 Investor to the dispatch desk (one desk per role, as #583)", m, db, U.inv, { from: INVESTOR, to: "Dispatch", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	// Each role's refusal names its own desk: the driver app's "Dispatch", the
+	// investor portal's "the admin" (InvestorChat.vue's own wording).
+	const errorOf = (r) => String((r && r.body && r.body.error) || "");
+	ok("§1 ...a Driver's refusal names Dispatch", /Dispatch/.test(errorOf(rDrv)));
+	ok("§1 ...an Investor's refusal names the admin, not Dispatch", /\badmin\b/i.test(errorOf(rInv)) && !/dispatch/i.test(errorOf(rInv)));
+	await expectRefused("§1 a Driver with no driver name (his thread can't be read)", m, db, U.drvBlank, { from: "drv_blank", to: "Dispatch", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 a look-alike desk (Cyrillic і)", m, db, U.drvA, { from: DRIVER_A, to: "Dіspatch", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 a look-alike desk (zero-width space)", m, db, U.drvA, { from: DRIVER_A, to: "Dispatch​", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 a look-alike desk (dotted capital İ)", m, db, U.inv, { from: INVESTOR, to: "ADMİN", message: "hey" }, 403, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 Driver to another driver, in another case", m, db, U.drvA, { from: DRIVER_A, to: "ORRIN CADE", message: "hey" }, 403, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 Driver to an investor", m, db, U.drvA, { from: DRIVER_A, to: INVESTOR, message: "hey" }, 403, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 Driver to a staff member's own name", m, db, U.drvA, { from: DRIVER_A, to: U.sa.username, message: "hey" }, 403, "MESSAGE_RECIPIENT");
@@ -237,6 +282,22 @@ async function section1() {
 	// Staff: as "Dispatch" or as themselves, to one Driver or Investor account or the desk.
 	await expectRefused("§1 a Dispatcher sending as a driver", m, db, U.disp, { from: DRIVER_B, to: DRIVER_A, message: "hey" }, 422, "MESSAGE_SENDER");
 	await expectRefused("§1 staff to a name no account holds", m, db, U.disp, { from: "Dispatch", to: "Nobody Here", message: "hey" }, 422, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 staff to a drivers-directory name with no account", m, db, U.disp, { from: "Dispatch", to: DIRECTORY_ONLY, message: "hey" }, 422, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 staff to a name a Driver and an Investor both hold (ambiguous)", m, db, U.disp, { from: "Dispatch", to: SHARED_NAME, message: "hey" }, 422, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 staff as \"Dispatch\" to the desk itself", m, db, U.disp, { from: "Dispatch", to: "Dispatch", message: "hey" }, 422, "MESSAGE_RECIPIENT");
+	await expectSent("§1 staff with no `from`", m, db, U.disp,
+		{ to: DRIVER_A, message: "Blank sender" },
+		{ name: "is stored as \"Dispatch\"", test: (row) => row.f === "Dispatch" });
+	await expectSent("§1 staff to an investor named with edge spaces", m, db, U.disp,
+		{ from: "Dispatch", to: ` ${INVESTOR} `, message: "Your statement" },
+		{ name: "is stored as the account's username", test: (row) => row.t === INVESTOR });
+	{
+		const before = rowCount(db);
+		let r;
+		try { r = await m.send(U.disp, { from: ["Dispatch"], to: DRIVER_A, message: "hey" }); } catch (e) { r = { status: "threw" }; }
+		ok(`§1 a staff \`from\` that is not a string is 400 (got ${r.status})`, r.status === 400);
+		ok("§1 ...and nothing is stored", rowCount(db) === before);
+	}
 	await expectRefused("§1 staff to another staff account", m, db, U.disp, { from: "Dispatch", to: U.sa.username, message: "hey" }, 422, "MESSAGE_RECIPIENT");
 }
 
@@ -286,6 +347,33 @@ function mountUsers(db) {
 	return { create: (body) => call(handler, U.sa, body), clash };
 }
 
+// POST /api/auth/setup, lifted the same way. Its latch, limiter and sign-in
+// tail are stubs: an empty users table and no earlier accounts, so only the
+// name check can refuse.
+const SETUP_HEAD = 'app.post("/api/auth/setup", setupLimiter, async (req, res) => {';
+const SETUP_STUBS = { setupLimiter: () => {}, usersEverExisted: () => false, stampLastLogin: () => {} };
+// A lifted declaration's require("./lib/...") is relative to server.js.
+const rootRequire = (id) => require(id.startsWith(".") ? path.join(__dirname, "..", id) : id);
+function mountSetup(db) {
+	const provided = ["app", "db", "bcrypt", "console", "require", ...AUDIT_STUBS, ...Object.keys(SETUP_STUBS)];
+	let lifted;
+	try {
+		lifted = closure(SRC, { roots: [], routes: [SETUP_HEAD], provided, denied: ["server", "httpServer", "io", "sheets"] }).text;
+	} catch (e) {
+		die(`POST /api/auth/setup could not be lifted: ${e.message}`);
+	}
+	const { app, handlers } = captureApp();
+	const env = {
+		app, db, bcrypt: { hash: (pw) => bcrypt.hash(pw, 4) }, console: { log() {}, warn() {}, error() {} }, require: rootRequire,
+		logAudit: () => {}, logAuditRefusal: () => {}, ...SETUP_STUBS,
+	};
+	const names = Object.keys(env);
+	new Function(...names, `"use strict";\n${lifted}`)(...names.map((k) => env[k]));
+	const handler = handlers.get("POST /api/auth/setup");
+	if (typeof handler !== "function") die("the lifted POST /api/auth/setup registered no handler");
+	return { call: (body) => call(handler, null, body) };
+}
+
 async function section2() {
 	const u = mountUsers(makeDb());
 	const reserved = (name) => { const hit = u.clash(name); return !!hit && hit.source === "reserved"; };
@@ -312,6 +400,29 @@ async function section2() {
 	await refusedName("username \"DISPATCH\" (a Dispatcher)", { username: "DISPATCH", password: "made-up-pw-1", role: "Dispatcher" }, "USERNAME_RESERVED");
 	await refusedName("username \"investor\" (a Driver)", { username: "investor", password: "made-up-pw-1", role: "Driver", driverName: "Wren Holt" }, "USERNAME_RESERVED");
 	await refusedName("driver name \"Admin\"", { username: "wren_h", password: "made-up-pw-1", role: "Driver", driverName: "Admin" }, "DRIVER_NAME_TAKEN");
+	// MS11: a username another identity already answers to is refused too.
+	await refusedName("username that is a driver's name, in another case", { username: "orrin cade", password: "made-up-pw-1", role: "Investor" }, "USERNAME_TAKEN");
+	await refusedName("username that is a drivers-directory name", { username: DIRECTORY_ONLY, password: "made-up-pw-1", role: "Dispatcher" }, "USERNAME_TAKEN");
+	{
+		const db = makeDb();
+		const dup = mountUsers(db);
+		const before = count(db);
+		const r = await dup.create({ username: INVESTOR.toUpperCase(), password: "made-up-pw-1", role: "Investor" });
+		ok(`§2 an existing username in another case is still refused, 400 or 409 (got ${r.status})`, (r.status === 400 || r.status === 409) && count(db) === before);
+	}
+
+	// POST /api/auth/setup (the first Super Admin, on an empty database) refuses a
+	// desk name too.
+	{
+		const db = makeDb();
+		db.exec("DELETE FROM users");
+		const setup = mountSetup(db);
+		let r;
+		try { r = await setup.call({ username: " admin ", password: "made-up-pw-1" }); } catch (e) { r = { status: "threw", body: { error: e.message } }; }
+		const got = `${r.status} ${(r.body && r.body.code) || ""}`.trim();
+		ok(`§2 POST /api/auth/setup username " admin ": 409 USERNAME_RESERVED (got ${got})`, r.status === 409 && r.body && r.body.code === "USERNAME_RESERVED");
+		ok("§2 ...and no account is written", count(db) === 0);
+	}
 
 	const db = makeDb();
 	const plain = mountUsers(db);
