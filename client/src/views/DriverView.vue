@@ -909,8 +909,11 @@ async function handleSendMessage({ recipient, message, loadId }) {
 // Voice notes (MESSAGE_VOICE_NOTES_ENABLED). The record button follows the
 // truck's ELD (lib/voiceNoteGate.js): off while moving or stopped under 2
 // minutes, on when parked or when the ELD says nothing. The server refuses a
-// send from a moving truck too (409), and the composer keeps the clip.
-const voiceNotesOn = useVoiceNotesFeature(api)
+// send from a moving truck too (409), and the composer keeps the clip. Only a
+// Driver records here: a Super Admin looking at this page would be refused (a
+// staff note goes to a driver, from the dashboard), so he gets no mic.
+const voiceFeature = useVoiceNotesFeature(api)
+const voiceNotesOn = computed(() => !!voiceFeature.value && auth.user?.role === 'Driver')
 const voiceGate = computed(() => {
   const motion = driverPos.eldMotion.value
   return recordGate({ fix: motion ? motion.fix : null, stoppedSince: motion ? motion.stoppedSince : null, nowMs: driverPos.clock.value })
