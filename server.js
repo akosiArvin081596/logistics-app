@@ -33922,6 +33922,78 @@ function truckDeleteLockBlockers(truck) {
 	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
+// What deleting this truck would change in an OPEN month (TD8, 2026-10-23).
+// truckDeleteLockBlockers() above judges the truck row for closed months only,
+// and a month that is not closed recomputes from the trucks row whenever it is
+// read, so a delete restates it. DELETE /api/trucks/:id refuses
+// OPEN_MONTH_TRUCK_FIGURES while any count is above 0. Counts only, each 0 when
+// it does not apply:
+//   fixed_cost_months       the open months its monthly fixed costs are billed
+//                           in: in the fleet (truckInFleet()), a fixed-cost
+//                           total above 0, charged that month
+//                           (truckChargedInMonth(), the money math's gate);
+//   driver                  1 while it names a driver, whatever its status, the
+//                           pay type or the rate. The rate that prices the
+//                           driver's days (truckRatesByDriver() reads the LAST
+//                           truck naming him) and the investor ledger his
+//                           revenue, receipts and pay land on
+//                           (getInvestorDriverSet(), getInvestorDriverMonthWindows())
+//                           both read it;
+//   eld_link                1 while an ELD device is linked: the loads naming the
+//                           unit pay their ELD days, and the whole scheduled
+//                           window without the link. No sheet read (TD8-2 (a));
+//   financials_line_months  the open months its maintenance reserve or purchase
+//                           price is a Financials line in (financialsExtraItems():
+//                           in the fleet, charged that month), counted even
+//                           while those Financials lines are switched off
+//                           (TD8-3). Depreciation also stops after its years,
+//                           so this can only over-report;
+//   lease_months            the open months it keeps its owner's lease in
+//                           service: a lease row governs the month and the truck
+//                           covers a day of it on or after the lease's first day
+//                           (leaseCoverage(), under the lease retirement
+//                           setting), whether or not the lease payout flag is on
+//                           (TD8-4).
+// An open month has no locked period_locks row and is no later than the
+// current business month (appDay(), APP_TIMEZONE): a later month is no open
+// month's figure yet, so a truck entering service next month is not held, even
+// at 23:30 ET on the last day of this one (TD8-6). The driver and the ELD link
+// have no month without the sheet, so each counts 1: that can only over-report.
+// The route calls this only once the lock table has been read.
+function truckDeleteOpenMonthHolds(truck) {
+	const current = appDay().slice(0, 7);
+	const locked = new Set(lockedPeriodsDesc());
+	const ownerId = Number(truck.owner_id) || 0;
+	const leaseRows = ownerId > 0
+		? db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId)
+		: [];
+	// Every month without a lock from the earliest one a count below can reach,
+	// through this month. The truck's first and last charged months, the lease
+	// rows and the closed months bound it; the predicates below decide.
+	const earliest = [truckChargeFromMonth(truck), truckChargeUntilMonth(truck), ...leaseRows.map((r) => r.effective_month), ...locked, current]
+		.filter((m) => investorPayoutBasis.isMonthKey(m) && m <= current)
+		.sort()[0];
+	const open = [];
+	for (let mk = earliest; mk <= current; mk = investorPayoutBasis.addMonths(mk, 1)) {
+		if (!locked.has(mk)) open.push(mk);
+	}
+	const inFleet = investorPayoutBasis.truckInFleet(truck);
+	const charged = open.filter((mk) => truckChargedInMonth(truck, mk));
+	const financialsLine = (Number(truck.maintenance_fund_monthly) || 0) > 0 || (Number(truck.purchase_price) || 0) > 0;
+	const leaseCovers = (mk) => {
+		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
+		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
+			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+		}).coveredDays > 0;
+	};
+	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
+	const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;
+	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
+	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
+	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
+	return { fixed_cost_months, driver, eld_link, financials_line_months, lease_months };
+}
+
 // ============================================================
 // The same lock, for the two routes that reach the SAME money by a different
 // door: drivers_directory (the pay STRUCTURE) and POST /api/trucks (creating
@@ -35429,8 +35501,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
-		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg, _unit_number,
-		// _vin), plus one
+		// _in_service_date, _retired_at, _owner, _driver, _fuel_tank, _avg_mpg,
+		// _unit_number, _vin), plus one
 		// update_truck_costs line per save that names every cost it changed; a
 		// refusal has no such split because the whole edit is refused as one, so the
 		// single row has to name every field that moved and what it would have
@@ -35619,6 +35691,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_truck_owner", "truck", String(id),
 				`Owner for ${unitLabel}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
+		// The truck's driver decides whose days the truck's rate prices and which
+		// investor ledger the driver is on, and clearing it is one of the edits a
+		// refused truck delete names (TD8-13, 2026-10-23). It left no trail. Keyed
+		// on `changed`, a real change of the trimmed name against the row as
+		// re-read, like the owner line above: a resend writes nothing.
+		if (Object.prototype.hasOwnProperty.call(changed, "assigned_driver")) {
+			const fmtDriver = (v) => auditText(String(v || "").trim(), 100) || "no driver";
+			logAudit(req, "update_truck_driver", "truck", String(id),
+				`Driver for ${unitLabel}: ${fmtDriver(truck.assigned_driver)} → ${fmtDriver(changed.assigned_driver)}`);
+		}
 		// ⚠️ THE FUEL-RANGE CONFIG IS AUDITED BECAUSE IT HAS BEEN WRONG THREE TIMES.
 		// `fuel_tank_gallons` has now been corrected on three separate occasions
 		// (#33 300→198→203, #91 240→189) and every time the investigation stalled on
@@ -35741,7 +35823,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 // refuses the whole operation; see truckDeleteLockBlockers for why it is not
 // partially applied. Since 2026-10-22 any fee row or legal document refuses the
 // delete (OPEN_MONTH_TRUCK_FEES, TRUCK_HAS_DOCUMENTS), so past the guard the
-// cascade's fee and document deletes find nothing to remove.
+// cascade's fee and document deletes find nothing to remove. Since 2026-10-23
+// (TD8) a truck whose own inputs feed an open month's figures is refused too
+// (OPEN_MONTH_TRUCK_FIGURES, truckDeleteOpenMonthHolds()): a delete never
+// changes an open month.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -35799,6 +35884,13 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			counts: { maintenance_fund: lock.openFees.maintenance, compliance_fees: lock.openFees.compliance },
 		});
 	}
+	// The references, read once here, above the documents check: whether the
+	// truck has assignment history decides the text of the two refusals below
+	// (TD8-8, TD8-9), and TRUCK_REFERENCED answers from the same two counts. No
+	// route removes an assignment row, so a truck with one can never be deleted;
+	// a trailer can be detached.
+	const assignmentRows = db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n;
+	const trailerRows = db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n;
 	if (lock.legalDocuments) {
 		const n = lock.legalDocuments;
 		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — legal_documents=${n}` },
@@ -35806,9 +35898,56 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
-				`A document filed in error can be removed from the truck's documents first. ${retireNote}`,
+				// Removing a document filed in error leads to a delete only for a
+				// truck without assignment history (TD8-9).
+				(assignmentRows ? "" : "A document filed in error can be removed from the truck's documents first. ") +
+				retireNote,
 			code: "TRUCK_HAS_DOCUMENTS",
 			counts: { legal_documents: n },
+		});
+	}
+
+	// The truck's own inputs to an OPEN month (TD8, 2026-10-23): its fixed
+	// costs, the driver it names, its ELD link, its reserve and depreciation
+	// lines and its lease (truckDeleteOpenMonthHolds()). Deleting it would restate
+	// the open month, so any of them refuses the delete with its own code, after
+	// #590's two refusals and before TRUCK_REFERENCED, audited under that code
+	// (never through periodBlockedResponse(), which answers PERIOD_FINALIZED).
+	// Counts only in the answer; the audit tail names the items, no amounts.
+	// ⚠️ The remedy never says "set it Inactive", for the reason given at the
+	// closed-month answer above. A truck with assignment history can never be
+	// deleted, so it gets the retirement date only (TD8-8); any other truck also
+	// gets the audited edits that clear each item.
+	const holds = truckDeleteOpenMonthHolds(truck);
+	const openMonths = (n) => `${n} open month${n === 1 ? "" : "s"}`;
+	const held = [
+		[holds.fixed_cost_months, "fixed costs", `its monthly fixed costs are billed in ${openMonths(holds.fixed_cost_months)}`],
+		[holds.driver, "driver", "it names a driver, so it sets that driver's daily rate and investor ledger"],
+		[holds.eld_link, "ELD link", "its ELD device sets the paid days of the loads that name it"],
+		[holds.financials_line_months, "reserve or depreciation", `its maintenance reserve or depreciation is a Financials line in ${openMonths(holds.financials_line_months)}`],
+		[holds.lease_months, "lease", `it keeps its investor's lease in service in ${openMonths(holds.lease_months)}`],
+	].filter(([n]) => n > 0);
+	if (held.length) {
+		// Each step is an audited edit: update_truck_costs, update_truck_driver,
+		// routemate_unlink, update_truck_owner (TD8-14) and update_trailer.
+		const steps = assignmentRows ? [] : [
+			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
+			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
+			[holds.driver, "clear its driver"],
+			[holds.eld_link, "unlink its ELD device"],
+			[holds.lease_months, "set its owner to the company"],
+			[trailerRows, "detach its trailer"],
+		].filter(([n]) => n > 0).map(([, step]) => step);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — holds: ${held.map(([, name]) => name).join(", ")}` },
+			"OPEN_MONTH_TRUCK_FIGURES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${held.map(([, , part]) => part).join("; ")}. ` +
+				"Deleting the truck would change an open month's figures, so it stays in place. " +
+				"To take it out of service, give it a retirement date in an open month." +
+				(steps.length ? ` If it was added by mistake, do these first, then delete it: ${steps.join("; ")}.` : "") +
+				" Nothing was changed.",
+			code: "OPEN_MONTH_TRUCK_FIGURES",
+			counts: holds,
 		});
 	}
 
@@ -35826,10 +35965,13 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// made to succeed: detaching assignment history or re-parenting a trailer as a
 	// side effect of a delete is a bigger decision than this handler should take.
 	const refs = [
-		["truck_assignments", db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n, "assignment history row"],
-		["trailers", db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n, "attached trailer"],
+		["truck_assignments", assignmentRows, "assignment history row"],
+		["trailers", trailerRows, "attached trailer"],
 	].filter(([, n]) => n > 0);
 	if (refs.length) {
+		// Audited like the refusals above, counts only (#594 review, Low 2).
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — truck_assignments=${assignmentRows}, trailers=${trailerRows}` },
+			"TRUCK_REFERENCED", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truck.unit_number || `truck #${id}`}: it still has ${refs.map(([, n, what]) => `${n} ${what}${n === 1 ? "" : "s"}`).join(" and ")}. Detach ${refs.some(([t]) => t === "trailers") ? "the trailer(s) " : ""}first — until then the database itself refuses the delete, and every attempt used to destroy the truck's documents and fee history on the way to failing.`,
 			code: "TRUCK_REFERENCED",
