@@ -101,8 +101,8 @@ git config core.hooksPath .githooks
   `settings.env`, the service-account key, `app.db`, `uploads/`, `~/.ssh`,
   `~/Documents/Credentials`, `~/LogisX-replica`, the Keychain files, or the gh,
   npm, AWS, gcloud, Docker, git-credentials, netrc and Claude token stores. It
-  writes only in temp dirs and reaches the network only on loopback (on any port:
-  a known gap). On macOS a sandbox that can't start (from inside another sandbox,
+  writes only in temp dirs, has no terminal, and reaches the network only on
+  loopback. On macOS a sandbox that can't start (from inside another sandbox,
   for example) refuses the push: push with plain `git push` from the worktree.
   Elsewhere it runs unsandboxed and says so. `node scripts/test-prepush-sandbox.js`,
   run from a plain terminal, proves the profile.
