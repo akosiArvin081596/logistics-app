@@ -31651,11 +31651,11 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				const openBlock = lock.blockers.find((b) => b.code === "OPEN_MONTH_EXPENSES");
 				const them = (b) => (lock.blockers.length === 1 ? (b.rows === 1 ? "it" : "them") : null);
 				if (docBlock && openBlock) {
-					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its open-month expenses, changing an open month's figures, so it stays in place.");
+					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its expenses from an open month's records, so it stays in place.");
 				} else if (docBlock) {
 					remedy.push(`Deleting the account would leave ${them(docBlock) || "its load documents"} under a name no account holds, so it stays in place.`);
 				} else if (openBlock) {
-					remedy.push(`Deleting the account would delete ${them(openBlock) || "its open-month expenses"} and change an open month's figures, so it stays in place.`);
+					remedy.push(`Deleting the account would delete ${them(openBlock) || "its expenses"} from an open month's records, so it stays in place.`);
 				}
 				if (docBlock) remedy.push("A document filed in error can be removed from its load's Documents panel first.");
 				remedy.push(docBlock || openBlock
@@ -35776,7 +35776,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// Each refusal has its own code, audited under that code (never through
 	// periodBlockedResponse(), which answers and audits PERIOD_FINALIZED), and
 	// comes after the closed-month answer, so PERIOD_FINALIZED still wins, and
-	// before TRUCK_REFERENCED. Counts only.
+	// before TRUCK_REFERENCED. Counts only, in the answer and in the audit tail.
 	const truckLabel = truck.unit_number || `truck #${id}`;
 	const retireNote = "To take it out of service, give it a retirement date in an open month. Nothing was changed.";
 	const feeCount = lock.openFees.maintenance + lock.openFees.compliance;
@@ -35784,7 +35784,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		const parts = [];
 		if (lock.openFees.maintenance) parts.push(`${lock.openFees.maintenance} maintenance fund entr${lock.openFees.maintenance === 1 ? "y" : "ies"}`);
 		if (lock.openFees.compliance) parts.push(`${lock.openFees.compliance} compliance fee${lock.openFees.compliance === 1 ? "" : "s"}`);
-		recordPeriodRefusal({ req, ...truckDelAudit }, "OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — maintenance_fund=${lock.openFees.maintenance}, compliance_fees=${lock.openFees.compliance}` },
+			"OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${parts.join(" and ")} ${feeCount === 1 ? "is" : "are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${feeCount === 1 ? "it" : "them"}, so it stays in place. ${retireNote}`,
@@ -35794,7 +35795,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	}
 	if (lock.legalDocuments) {
 		const n = lock.legalDocuments;
-		recordPeriodRefusal({ req, ...truckDelAudit }, "TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — legal_documents=${n}` },
+			"TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
@@ -35835,14 +35837,30 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// cascade back instead of half-applying it. There are no transactions anywhere
 	// else in this file, but there is also nowhere else that hard-deletes finance
 	// rows as a prelude to a statement that can throw.
-	db.transaction(() => {
-		if (unit) {
-			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
-			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
-			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
-		}
-		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
-	})();
+	//
+	// The guard above refuses any fee row or legal document, so these deletes
+	// must find nothing. If one removes a row anyway (the guard and this cascade
+	// drifted apart), the throw rolls the whole delete back: those rows have no
+	// soft delete to recover them from.
+	try {
+		db.transaction(() => {
+			if (unit) {
+				removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
+				removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+				removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+				if (removed.legal_documents || removed.maintenance_fund || removed.compliance_fees) {
+					throw new Error(`truck delete cascade would remove rows the guard did not count: legal_documents=${removed.legal_documents}, maintenance_fund=${removed.maintenance_fund}, compliance_fees=${removed.compliance_fees}`);
+				}
+			}
+			db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+		})();
+	} catch (err) {
+		console.error("delete truck cascade failed, rolled back:", err.message);
+		return res.status(500).json({
+			error: "The delete could not be completed and was rolled back. Nothing was removed.",
+			code: "DELETE_ROLLED_BACK",
+		});
+	}
 	// Like the user delete, this previously left no trace at all — "a truck was
 	// removed" does not tell a later reader that its service history went too.
 	// The VIN, when the truck had one, says which physical truck it was: the row
