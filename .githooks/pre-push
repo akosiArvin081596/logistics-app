@@ -25,11 +25,16 @@
 # /usr/bin/sandbox-exec with the profile below, in an environment that
 # `env -i` empties down to an allowlist (PATH with this Node, HOME, TMPDIR,
 # LANG, USER, LOGNAME, SHELL, TERM, NODE_ENV=test, UNIT_TEST_TIMEOUT_MS and
-# UNIT_TEST_CONCURRENCY). git and this file run outside it: git connected to
-# GitHub before the hook started and sends the pack after it exits. The
-# profile lives in this file, not in the tree being checked, so a branch
-# can't loosen it. On macOS a sandbox that can't start blocks the push (no
-# variable turns it off); elsewhere the check runs unsandboxed and says so.
+# UNIT_TEST_CONCURRENCY). Its stdin is /dev/null and its output goes through a
+# pipe, so it holds no terminal, and the profile won't open one. The hook's
+# own files (the changed list, the server.js diff, the log) live in a folder
+# under ~/Library/Caches that the child can read but not write. git and this
+# file run outside it: git connected to GitHub before the hook started and
+# sends the pack after it exits. The profile lives in this file, not in the
+# tree being checked, so a branch can't loosen it. On macOS (as
+# /usr/bin/uname says, never a uname on PATH) a sandbox that can't start
+# blocks the push (no variable turns it off); elsewhere the check runs
+# unsandboxed and says so.
 #
 # EXIT. 0 only when the child exits 0 AND its last line is exactly
 #   pre-push verdict: lint=pass selection=pass runners=pass
@@ -107,7 +112,7 @@ case "$node_bin" in
 esac
 node_dir=${node_bin%/*}
 
-platform=$(uname -s)
+platform=$(/usr/bin/uname -s)
 SANDBOX_EXEC=/usr/bin/sandbox-exec
 ENV_BIN=/usr/bin/env
 
@@ -115,13 +120,10 @@ ENV_BIN=/usr/bin/env
 # HOME_RE and WORK_RE, the same paths quoted for a regex. Allow by default,
 # then: writes only in temp space; no read or write of secrets and token
 # stores anywhere in home or the worktree (temp space stays free, so runners
-# can plant fake ones in mkdtemp); network only to loopback; no Keychain,
-# AppleScript, open, launchctl, ssh or nested sandbox-exec. Loopback is open
-# on every port, local LogisX servers included (an accepted residual): a
-# per-port rule did not hold reliably on macOS 26 ("localhost:PORT" never
-# matched; "*:PORT" held or not depending on the port and on the other rules
-# around it). One rule a line: scripts/test-prepush-sandbox.js deletes each
-# deny line in turn and proves a probe notices.
+# can plant fake ones in mkdtemp); no terminal (/dev/tty and the ptys);
+# network only to loopback; no Keychain, AppleScript, open, launchctl, ssh or
+# nested sandbox-exec. One rule a line: scripts/test-prepush-sandbox.js
+# deletes each deny line in turn and proves a probe notices.
 read -r -d '' PROFILE <<'SANDBOX_PROFILE' || true
 (version 1)
 (allow default)
@@ -132,10 +134,8 @@ read -r -d '' PROFILE <<'SANDBOX_PROFILE' || true
   (subpath "/private/var/tmp")
   (literal "/dev/null")
   (literal "/dev/zero")
-  (literal "/dev/tty")
   (literal "/dev/dtracehelper")
   (regex #"^/dev/fd/")
-  (regex #"^/dev/ttys")
 )
 (deny file-read* file-write*
   (regex (string-append "^" (param "HOME_RE") "/(.+/)?\\.env(\\.[^/]*)?$"))
@@ -165,6 +165,10 @@ read -r -d '' PROFILE <<'SANDBOX_PROFILE' || true
 (allow file-read*
   (regex (string-append "^" (param "WORK_RE") "/(.+/)?\\.env\\.example$"))
 )
+(deny file-read* file-write* file-ioctl
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys")
+)
 (deny network-outbound)
 (allow network-outbound
   (remote ip "localhost:*")
@@ -185,7 +189,17 @@ sbpl_quote() {
 	printf '%s' "$1" | sed -e 's/[][\\.*^$+?(){}|]/\\&/g'
 }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/logisx-prepush.XXXXXX") || block "can't make a temp directory."
+# The hook's own files: the changed list, the server.js diff and the log. On
+# macOS they live in a folder under ~/Library/Caches, which the child can read
+# but not write.
+if [ "$platform" = Darwin ]; then
+	workroot="$HOME/Library/Caches"
+	hint=" (from inside another sandbox? Push with plain \`git push\` from the worktree)"
+else
+	workroot="${TMPDIR:-/tmp}"
+	hint=""
+fi
+tmp=$(mktemp -d "$workroot/logisx-prepush.XXXXXX") || block "can't make a temp directory in $workroot$hint."
 trap 'rm -rf "$tmp"' EXIT
 
 # Which harness: a worktree branched before the pre-push mode existed gets
@@ -248,13 +262,13 @@ if [ "$platform" = Darwin ]; then
 		-D "HOME_RE=$(sbpl_quote "$home_real")" -D "WORK_RE=$(sbpl_quote "$work_real")"
 		"${child[@]}")
 else
-	echo "pre-push: no sandbox on $platform; the checks run with your full rights."
+	echo "pre-push: no sandbox on ${platform:-this system}; the checks run with your full rights."
 	run=("${child[@]}")
 fi
 
 log="$tmp/out"
 start=$SECONDS
-"$ENV_BIN" -i "${envs[@]}" "${run[@]}" 2>&1 | tee "$log"
+"$ENV_BIN" -i "${envs[@]}" "${run[@]}" < /dev/null 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 took=$((SECONDS - start))
 last=$(tail -n 1 "$log")

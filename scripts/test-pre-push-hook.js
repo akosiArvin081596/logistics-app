@@ -30,17 +30,22 @@
  *      LOGISX_PREPUSH=full passes --full instead, still sandboxed; any other
  *      value blocks (no off switch)
  *   §8 a sandbox that can't start blocks the push with the D6 message (exit
- *      71, or sandbox-exec missing); off macOS it runs unsandboxed and says so
+ *      71, or sandbox-exec missing); off macOS it runs unsandboxed and says so;
+ *      the platform comes from /usr/bin/uname, so a `uname` on PATH that
+ *      names the other platform changes nothing
  *   §9 the child's environment is the allowlist (GH_TOKEN, SSH_AUTH_SOCK,
- *      UNIT_TEST_SHARD, UNIT_TEST_SKIP_TIMING and the rest never reach it)
+ *      UNIT_TEST_SHARD, UNIT_TEST_SKIP_TIMING and the rest never reach it),
+ *      and its stdin is /dev/null, never the hook's
  *   §10 the changed list: every pushed ref's files against its merge-base
  *      with origin/main, plus dirty and untracked files; --changed-count
- *      agrees with it
+ *      agrees with it; on macOS the hook keeps it (and its log) in a folder
+ *      under ~/Library/Caches, outside the temp space the child may write
  *   §11 (= §3) a deletion-only push still runs nothing
  *   §12 the exit contract: it passes only on exit 0 AND the exact PASS
  *      verdict as the last line. It blocks on a selection failure, lint
  *      failing while every runner passed (exit 0 or 1), a failed merge-base,
- *      no writable temp space, exit 71, a profile parse error (65), a signal,
+ *      no folder to work in (~/Library/Caches on macOS, temp space elsewhere),
+ *      exit 71, a profile parse error (65), a signal,
  *      exit 0 without the verdict, and the PASS verdict with a non-zero exit.
  *      It passes with runners "not run for time" and with a times-cache note.
  *      Mutants: a missing verdict read as a pass, a non-zero exit ignored,
@@ -54,9 +59,10 @@
  * Hermetic: a mkdtemp sandbox, local git only (the remote is a bare repo in
  * it, global and system git config ignored). The hook copies have their
  * absolute /usr/bin/sandbox-exec rewritten to a stub and their platform read
- * as Darwin; the stub records its argv, cwd, environment and changed list in
- * files (the hook empties its environment, so nothing can be passed in), and
- * answers per a scenario file. Stub node and fnm first on PATH. No network.
+ * as Darwin; the stub records its argv, cwd, environment, stdin and changed
+ * list in files (the hook empties its environment, so nothing can be passed
+ * in), and answers per a scenario file. Stub node and fnm first on PATH. No
+ * network.
  * Run: node scripts/test-pre-push-hook.js
  */
 "use strict";
@@ -85,6 +91,8 @@ const HOME = path.join(T, "ho.me");
 const CALLS = path.join(T, "calls");
 const SCENARIO = path.join(T, "scenario");
 for (const d of [OUTSIDE, BIN, HOME, CALLS]) fs.mkdirSync(d);
+const CACHES = path.join(HOME, "Library", "Caches");
+fs.mkdirSync(CACHES, { recursive: true });
 const EMPTY_GITCONFIG = path.join(HOME, "gitconfig");
 fs.writeFileSync(EMPTY_GITCONFIG, "");
 
@@ -123,6 +131,7 @@ printf '%s' "$as" > "$d/as"
 printf '%s\\0' "$@" > "$d/argv"
 pwd -P > "$d/cwd"
 /usr/bin/env > "$d/env"
+if [ /dev/fd/0 -ef /dev/null ]; then echo null > "$d/stdin"; else echo other > "$d/stdin"; fi
 prev=""
 for a in "$@"; do
 	[ "$prev" = "--changed-list" ] && /bin/cp "$a" "$d/list"
@@ -150,12 +159,15 @@ stub("npm", `exec ${BIN}/child npm "$@"`);
 stub("fnm", "exit 0");
 
 // A hook copy: the stub in place of /usr/bin/sandbox-exec, the platform read
-// as Darwin (so the sandboxed path runs on Linux CI too) or as given.
+// as Darwin (so the sandboxed path runs on Linux CI too) or as given; null
+// keeps the hook's own platform line.
+const PLATFORM_LINE = "platform=$(/usr/bin/uname -s)\n";
 function adapt(text, { sandboxExec = `${BIN}/sandbox-exec`, platform = "Darwin" } = {}) {
-	return text.replace("SANDBOX_EXEC=/usr/bin/sandbox-exec\n", `SANDBOX_EXEC=${sandboxExec}\n`).replace("platform=$(uname -s)\n", `platform=${platform}\n`);
+	const out = text.replace("SANDBOX_EXEC=/usr/bin/sandbox-exec\n", `SANDBOX_EXEC=${sandboxExec}\n`);
+	return platform === null ? out : out.replace(PLATFORM_LINE, `platform=${platform}\n`);
 }
 ok(adapt(HOOK_TEXT) !== HOOK_TEXT && adapt(HOOK_TEXT).includes(`SANDBOX_EXEC=${BIN}/sandbox-exec`) && adapt(HOOK_TEXT).includes("platform=Darwin\n"),
-	"§7 the hook names /usr/bin/sandbox-exec and reads the platform from uname, on lines a copy can rewrite");
+	"§7 the hook names /usr/bin/sandbox-exec and reads the platform from /usr/bin/uname, on lines a copy can rewrite");
 
 // The sandbox: a main checkout M whose .githooks every worktree uses through
 // an ABSOLUTE core.hooksPath, linked worktrees W and W2, a bare remote R with
@@ -192,7 +204,7 @@ function takeCalls() {
 		const read = (f) => (fs.existsSync(path.join(d, f)) ? fs.readFileSync(path.join(d, f), "utf8") : null);
 		const env = Object.fromEntries((read("env") || "").split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
 		const list = read("list");
-		out.push({ as: read("as"), argv: (read("argv") || "").split("\0").slice(0, -1), cwd: (read("cwd") || "").trim(), env, list: list === null ? null : list.split("\0").filter(Boolean) });
+		out.push({ as: read("as"), argv: (read("argv") || "").split("\0").slice(0, -1), cwd: (read("cwd") || "").trim(), env, list: list === null ? null : list.split("\0").filter(Boolean), stdin: (read("stdin") || "").trim() });
 		fs.rmSync(d, { recursive: true, force: true });
 	}
 	return out;
@@ -314,6 +326,16 @@ try {
 	ok(linux.code === 0 && linux.calls.length === 1 && linux.calls[0].as === "node" && /no sandbox on Linux; the checks run with your full rights/.test(linux.out)
 		&& !Object.keys(linux.calls[0].env).includes("GH_TOKEN"),
 	`§8 off macOS it runs the same check unsandboxed, environment still scrubbed, and says so (exit ${linux.code}, calls ${where(linux)})`);
+	// The hook's own platform line, with a `uname` first on PATH that names the
+	// other platform: the branch follows /usr/bin/uname.
+	const real = spawnSync("/usr/bin/uname", ["-s"], { encoding: "utf8" });
+	const realPlatform = real.status === 0 ? real.stdout.trim() : "";
+	stub("uname", `echo ${realPlatform === "Darwin" ? "Linux" : "Darwin"}`);
+	const lied = byHand(hooksDir(adapt(HOOK_TEXT, { platform: null })), W);
+	fs.rmSync(path.join(BIN, "uname"));
+	const wantBranch = realPlatform === "Darwin" ? "sandbox-exec" : "node";
+	ok(lied.code === 0 && lied.calls.length === 1 && lied.calls[0].as === wantBranch,
+		`§8 a uname on PATH naming the other platform doesn't change the branch (this is ${realPlatform || "not macOS"}: want ${wantBranch}, got ${where(lied)}): ${lied.out.trim().split("\n").slice(-2).join(" | ")}`);
 
 	// §9 the environment.
 	const BASH_OWN = new Set(["PWD", "SHLVL", "_", "OLDPWD", "__CF_USER_TEXT_ENCODING"]);
@@ -324,6 +346,11 @@ try {
 		`§9 …PATH is this Node's folder plus /usr/bin:/bin, NODE_ENV=test, HOME kept, UNIT_TEST_TIMEOUT_MS passed through (got ${call.env.PATH}, ${call.env.NODE_ENV})`);
 	ok(!["GH_TOKEN", "SSH_AUTH_SOCK", "UNIT_TEST_SHARD", "UNIT_TEST_SKIP_TIMING", "SOMETHING_ELSE", "GIT_CONFIG_GLOBAL"].some((k) => k in call.env),
 		"§9 …and GH_TOKEN, SSH_AUTH_SOCK, UNIT_TEST_SHARD, UNIT_TEST_SKIP_TIMING and everything else never reach it");
+	// The hook's stdin is a pipe here (a terminal when run by hand from one).
+	const piped = run("bash", [path.join(hooks, "pre-push")], W, {}, "");
+	const pipedCall = piped.calls[0] || {};
+	ok(piped.code === 0 && piped.calls.length === 1 && pipedCall.stdin === "null",
+		`§9 …and its stdin is /dev/null, never the hook's own (exit ${piped.code}, got ${pipedCall.stdin})`);
 
 	// §10 the changed list, several refs at once.
 	fs.writeFileSync(path.join(W, "a.txt"), "a\n");
@@ -340,13 +367,20 @@ try {
 	ok(both.code === 0 && JSON.stringify(got) === JSON.stringify(["a.txt", "b.txt", "c.txt", "sub/file.txt"]),
 		`§10 the changed list holds both refs' files against the merge-base, the dirty file and the untracked one (exit ${both.code}, got ${JSON.stringify(got)})`);
 	ok(lc.list !== null && lc.argv[lc.argv.indexOf("--changed-count") + 1] === String(lc.list.length), `§10 …and --changed-count is how many it wrote (${lc.argv[lc.argv.indexOf("--changed-count") + 1]} vs ${lc.list && lc.list.length})`);
+	const listPath = lc.argv[lc.argv.indexOf("--changed-list") + 1] || "";
+	const diffPath = lc.argv[lc.argv.indexOf("--server-diff") + 1] || "";
+	ok(listPath.startsWith(`${CACHES}/logisx-prepush.`) && path.dirname(diffPath) === path.dirname(listPath),
+		`§10 on macOS the list and the server.js diff live in a folder under ~/Library/Caches, outside the child's temp space (got ${listPath}, ${diffPath})`);
 	git(W, "checkout", "-q", "--", "sub/file.txt");
 	fs.rmSync(path.join(W, "c.txt"));
 
 	// §12 the exit contract, then its failures that come before the child.
 	for (const [c, m] of contract(hooks)) ok(c, m);
-	const noTmp = byHand(hooks, W, { TMPDIR: path.join(T, "no-such-dir") });
-	ok(noTmp.code === 1 && noTmp.calls.length === 0 && /can't make a temp directory/.test(noTmp.out), `§12 no writable temp space blocks before the child starts (exit ${noTmp.code})`);
+	const noCaches = byHand(hooks, W, { HOME: path.join(T, "no-such-home") });
+	ok(noCaches.code === 1 && noCaches.calls.length === 0 && /can't make a temp directory in \S*no-such-home\/Library\/Caches/.test(noCaches.out),
+		`§12 on macOS, no ~/Library/Caches to work in blocks before the child starts (exit ${noCaches.code}): ${noCaches.out.trim().split("\n").slice(-2).join(" | ")}`);
+	const noTmp = byHand(hooksDir(adapt(HOOK_TEXT, { platform: "Linux" })), W, { TMPDIR: path.join(T, "no-such-dir") });
+	ok(noTmp.code === 1 && noTmp.calls.length === 0 && /can't make a temp directory/.test(noTmp.out), `§12 elsewhere, no writable temp space blocks before the child starts (exit ${noTmp.code})`);
 	const lone = path.join(T, "lone");
 	git(T, "init", "-q", "-b", "main", lone);
 	fs.mkdirSync(path.join(lone, "scripts"));

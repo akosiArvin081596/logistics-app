@@ -15,20 +15,26 @@
  *      .aws, .config/gcloud, .docker/config.json, .git-credentials, .netrc,
  *      .claude, .claude.json
  *   §4 writes to the fake home and worktree are refused; temp writes work
- *   §5 network: loopback to its own port-0 server works; a TEST-NET address
- *      and an external DNS lookup do not. Loopback to another process's
- *      listening server is reached: the accepted residual (plan D10, Risk
- *      3b), pinned so changing it is a decision
+ *   §5 network: loopback only. Its own port-0 server and another process's
+ *      listening server on loopback are reached (pinned, so a change to the
+ *      network rule is a decision); a TEST-NET address and an external DNS
+ *      lookup are not
  *   §6 security, osascript, open, launchctl, ssh and sandbox-exec can't be
- *      started; git can
+ *      started; git can. /dev/tty can't be opened and the terminal devices
+ *      /dev/ttys* can't even be looked at
  *   §7 the hook end to end, with the real sandbox-exec: a copy of the hook
  *      run as git runs it in a fixture repository whose path holds regex
  *      characters. The child sees only the allowlisted environment (no
  *      GH_TOKEN, SSH_AUTH_SOCK, UNIT_TEST_SHARD or UNIT_TEST_SKIP_TIMING), the
- *      worktree's env file is refused inside it, and the hook passes on the
- *      verdict line
+ *      worktree's env file is refused inside it, it can't write the folder
+ *      holding the hook's list and log, and the hook passes on the verdict
+ *      line. Then with a terminal, under /usr/bin/script (a push from
+ *      Terminal.app, and a run by hand there): the child can't open /dev/tty
+ *      or the terminal by name, its stdin is not the terminal, and the hook's
+ *      own lines still reach the terminal
  *   §8 mutants: every deny rule of the profile deleted in turn, the path
- *      quoting dropped, and `env -i` dropped, are each noticed above
+ *      quoting dropped, `env -i` dropped, and the child's stdin from
+ *      /dev/null dropped, are each noticed above
  *
  * macOS only, and only outside any sandbox: sandbox-exec can't start inside
  * another one (Claude's Bash sandbox, the pre-push hook's own child), and CI
@@ -179,6 +185,11 @@ for (const [bin, args] of spec.execs) {
   const r = spawnSync(bin, args, { stdio: "ignore", timeout: 5000 });
   out["exec " + bin] = r.error ? (r.error.code || "error") : "allowed";
 }
+const C = fs.constants;
+rec("open-r /dev/tty", () => fs.closeSync(fs.openSync("/dev/tty", C.O_RDONLY | C.O_NOCTTY)));
+rec("open-w /dev/tty", () => fs.closeSync(fs.openSync("/dev/tty", C.O_WRONLY | C.O_NOCTTY)));
+out.ptys = fs.readdirSync("/dev").filter((d) => /^ttys\d+$/.test(d)).slice(0, 3);
+for (const d of out.ptys) rec("stat /dev/" + d, () => fs.statSync("/dev/" + d));
 out.env = Object.keys(process.env).sort();
 const connect = (host, port) => new Promise((res) => {
   const s = net.connect({ host, port });
@@ -262,6 +273,12 @@ function expectations(o) {
 	r.push([`§5 an external DNS lookup fails (got ${o.dns})`, o.dns !== "allowed"]);
 	for (const [bin] of EXEC_REFUSED) r.push([`§6 ${bin} can't be started (got ${o[`exec ${bin}`]})`, o[`exec ${bin}`] === "EPERM"]);
 	r.push([`§6 /usr/bin/true and git still start (got ${o["exec /usr/bin/true"]}, ${o["exec /usr/bin/git"]})`, o["exec /usr/bin/true"] === "allowed" && o["exec /usr/bin/git"] === "allowed"]);
+	// With no terminal, an open the profile allows fails ENXIO; only EPERM is
+	// the profile's refusal.
+	r.push([`§6 /dev/tty can't be opened, to read or to write (got ${o["open-r /dev/tty"]}, ${o["open-w /dev/tty"]})`, o["open-r /dev/tty"] === "EPERM" && o["open-w /dev/tty"] === "EPERM"]);
+	const ptys = Array.isArray(o.ptys) ? o.ptys : [];
+	r.push([`§6 the terminal devices can't even be looked at (${ptys.length ? ptys.map((d) => `/dev/${d}: ${o[`stat /dev/${d}`]}`).join(", ") : "no /dev/ttys* here to probe: run it from a terminal"})`,
+		ptys.length > 0 && ptys.every((d) => o[`stat /dev/${d}`] === "EPERM")]);
 	return r;
 }
 
@@ -269,11 +286,10 @@ function expectations(o) {
 const base = probe(PROFILE);
 for (const [m, c] of expectations(base)) ok(c, m);
 
-// §5 the accepted residual, pinned so a change to it is a decision: loopback
-// to a LISTENING local service (another process's server, on a free port of
-// this runner's own) is reached from inside the sandbox. A per-port rule did
-// not hold reliably on macOS 26 (see the hook). The kernel completes the
-// probe's handshake while this process waits on spawnSync.
+// §5 loopback only, pinned so a change to the network rule is a decision:
+// loopback to a LISTENING local server (another process's, on a free port of
+// this runner's own) is reached from inside the sandbox. The kernel completes
+// the probe's handshake while this process waits on spawnSync.
 async function listeningCheck() {
 	const net = require("net");
 	const srv = net.createServer((s) => s.destroy());
@@ -281,7 +297,7 @@ async function listeningCheck() {
 	const P = srv.address().port;
 	const o = probe(PROFILE, { ports: [P] });
 	srv.close();
-	ok(o[`port ${P}`] === "allowed", `§5 accepted residual: loopback to a listening local service is reached (got ${o[`port ${P}`]})`);
+	ok(o[`port ${P}`] === "allowed", `§5 loopback to another process's listening server is reached (network: loopback only) (got ${o[`port ${P}`]})`);
 }
 
 // ── §7 the hook end to end.
@@ -305,11 +321,20 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const out = { argv: process.argv.slice(2), env: Object.keys(process.env).sort(), timeout: process.env.UNIT_TEST_TIMEOUT_MS || "" };
 const tryRead = (p) => { try { fs.readFileSync(p); return "allowed"; } catch (e) { return e.code; } };
+const tryOpen = (p) => { try { fs.closeSync(fs.openSync(p, fs.constants.O_RDWR | fs.constants.O_NOCTTY)); return "allowed"; } catch (e) { return e.code; } };
 out.envFile = tryRead(path.join(ROOT, ".env"));
 out.plain = tryRead(path.join(ROOT, "README.md"));
 const i = process.argv.indexOf("--changed-list");
 out.list = i > 0 ? fs.readFileSync(process.argv[i + 1], "utf8").split("\0").filter(Boolean).sort() : null;
 try { fs.writeFileSync(path.join(ROOT, "written.txt"), "x"); out.write = "allowed"; } catch (e) { out.write = e.code; }
+out.workWrite = "no list";
+if (i > 0) try { fs.writeFileSync(path.join(path.dirname(process.argv[i + 1]), "planted.txt"), "x"); out.workWrite = "allowed"; } catch (e) { out.workWrite = e.code; }
+out.tty = tryOpen("/dev/tty");
+let pty = "";
+try { pty = fs.readFileSync(path.join(ROOT, "..", "pty-name"), "utf8").trim(); } catch {}
+out.pty = pty;
+out.ptyOpen = /^\/dev\/ttys\d+$/.test(pty) ? tryOpen(pty) : "";
+out.stdinTTY = require("tty").isatty(0);
 const s = net.connect({ host: "192.0.2.1", port: 443 });
 const t = setTimeout(() => { s.destroy(); done("TIMEOUT"); }, 1500);
 s.on("connect", () => { s.end(); done("allowed"); });
@@ -341,29 +366,62 @@ plant(path.join(REPO, ENVFILE));
 const OID = git(REPO, "rev-parse", "HEAD");
 const HOOK_TMP = path.join(TMP, "hook-tmp");
 fs.mkdirSync(HOOK_TMP);
-
-function runHook(text) {
-	const hook = path.join(TMP, `pre-push-${++round}`);
-	fs.writeFileSync(hook, text, { mode: 0o755 });
-	fs.rmSync(path.join(REPO, "written.txt"), { force: true });
-	const r = spawnSync("/bin/bash", [hook, "origin", "git@github.com:o/r.git"], {
-		cwd: REPO,
-		input: `refs/heads/feature ${OID} refs/heads/feature ${"0".repeat(40)}\n`,
-		encoding: "utf8",
-		timeout: 60000,
-		env: {
-			...GIT_ENV,
-			PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
-			TMPDIR: HOOK_TMP, LANG: "C", USER: "t", LOGNAME: "t", SHELL: "/bin/bash", TERM: "dumb",
-			GH_TOKEN: "fake-not-a-token", SSH_AUTH_SOCK: "/nonexistent/agent.sock", SOMETHING_ELSE: "x",
-			UNIT_TEST_SHARD: "1/3", UNIT_TEST_SKIP_TIMING: "1", UNIT_TEST_TIMEOUT_MS: "5000",
-		},
-	});
+// On macOS the hook works in a folder under ~/Library/Caches.
+fs.mkdirSync(path.join(H, "Library", "Caches"), { recursive: true });
+const REFS = `refs/heads/feature ${OID} refs/heads/feature ${"0".repeat(40)}\n`;
+const HOOK_ENV = {
+	...GIT_ENV,
+	PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+	TMPDIR: HOOK_TMP, LANG: "C", USER: "t", LOGNAME: "t", SHELL: "/bin/bash", TERM: "dumb",
+	GH_TOKEN: "fake-not-a-token", SSH_AUTH_SOCK: "/nonexistent/agent.sock", SOMETHING_ELSE: "x",
+	UNIT_TEST_SHARD: "1/3", UNIT_TEST_SKIP_TIMING: "1", UNIT_TEST_TIMEOUT_MS: "5000",
+};
+// Not anchored at the line start: on a terminal, script's end-of-input echo
+// ("^D" and two backspaces) comes first on the first line.
+const hookResult = (r) => {
 	const outText = `${r.stdout || ""}${r.stderr || ""}`;
-	const m = /^FIXTURE (.*)$/m.exec(outText);
+	const m = /FIXTURE (\{.*\})\r?$/m.exec(outText);
 	let fixture = null;
 	try { fixture = m ? JSON.parse(m[1]) : null; } catch { fixture = null; }
 	return { code: r.status, out: outText, fixture };
+};
+function hookCopy(text) {
+	const hook = path.join(TMP, `pre-push-${++round}`);
+	fs.writeFileSync(hook, text, { mode: 0o755 });
+	fs.rmSync(path.join(REPO, "written.txt"), { force: true });
+	return hook;
+}
+
+function runHook(text) {
+	const hook = hookCopy(text);
+	return hookResult(spawnSync("/bin/bash", [hook, "origin", "git@github.com:o/r.git"], {
+		cwd: REPO, input: REFS, encoding: "utf8", timeout: 60000, env: HOOK_ENV,
+	}));
+}
+
+// With a terminal: /usr/bin/script runs the hook on a new pty, which becomes
+// its controlling terminal and takes its output, as a push from Terminal.app
+// does. The wrapper writes the pty's name where the fixture harness reads it.
+// As git runs it, stdin is the refs; by hand, stdin is the terminal.
+const PTY_NAME = path.join(W, "pty-name");
+const REFS_FILE = path.join(TMP, "refs");
+fs.writeFileSync(REFS_FILE, REFS);
+function runHookOnTerminal(text, { byHand = false } = {}) {
+	const hook = hookCopy(text);
+	fs.rmSync(PTY_NAME, { force: true });
+	const wrap = `/usr/bin/tty > "$1" || exit 97; exec /bin/bash "$2" origin git@github.com:o/r.git${byHand ? "" : ' < "$3"'}`;
+	return hookResult(spawnSync("/usr/bin/script", ["-q", "/dev/null", "/bin/bash", "-c", wrap, "wrap", PTY_NAME, hook, REFS_FILE], {
+		cwd: REPO, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 60000, env: HOOK_ENV,
+	}));
+}
+function terminalChecks(h, how, tag = "") {
+	const f = h.fixture || {};
+	return [
+		[`${tag}§7 ${how}: the hook's own lines reach the terminal (exit ${h.code}): ${h.out.slice(-200)}`, /pre-push: passed in/.test(h.out)],
+		[`${tag}§7 ${how}: the hook ran on a terminal (pty ${JSON.stringify(f.pty)})`, typeof f.pty === "string" && /^\/dev\/ttys\d+$/.test(f.pty)],
+		[`${tag}§7 ${how}: the child can't open /dev/tty or the terminal by name (got ${f.tty}, ${f.ptyOpen})`, f.tty === "EPERM" && f.ptyOpen === "EPERM"],
+		[`${tag}§7 ${how}: the child's stdin is not the terminal (isatty ${f.stdinTTY})`, f.stdinTTY === false],
+	];
 }
 const ALLOWED_ENV = ["HOME", "LANG", "LOGNAME", "NODE_ENV", "PATH", "SHELL", "TERM", "TMPDIR", "UNIT_TEST_TIMEOUT_MS", "USER"];
 // macOS adds this one to every process it starts (the uid and text encoding).
@@ -379,6 +437,8 @@ function hookChecks(h, tag = "") {
 			Array.isArray(f.env) && !f.env.some((k) => ["GH_TOKEN", "SSH_AUTH_SOCK", "UNIT_TEST_SHARD", "UNIT_TEST_SKIP_TIMING", "SOMETHING_ELSE"].includes(k)) && f.timeout === "5000"],
 		[`${tag}§7 the worktree's env file is refused inside the child, a plain file is not (got ${f.envFile}, ${f.plain})`, f.envFile === "EPERM" && f.plain === "allowed"],
 		[`${tag}§7 the child can't write into the worktree (got ${f.write})`, f.write === "EPERM" && !fs.existsSync(path.join(REPO, "written.txt"))],
+		[`${tag}§7 the child can't write into the folder holding the hook's list and log (got ${f.workWrite})`, f.workWrite === "EPERM"],
+		[`${tag}§7 the child can't open /dev/tty (got ${f.tty})`, f.tty === "EPERM"],
 		[`${tag}§7 the child can't reach a TEST-NET address (got ${f.net})`, f.net === "EPERM"],
 		[`${tag}§7 the child gets the lint, budget and changed-list flags (got ${JSON.stringify(f.argv)})`,
 			Array.isArray(f.argv) && f.argv.includes("--lint") && f.argv.includes("--changed-list") && f.argv[f.argv.indexOf("--budget-ms") + 1] === "115000"],
@@ -388,6 +448,8 @@ function hookChecks(h, tag = "") {
 }
 const hookRun = runHook(HOOK_TEXT);
 for (const [m, c] of hookChecks(hookRun)) ok(c, m);
+for (const [m, c] of terminalChecks(runHookOnTerminal(HOOK_TEXT), "a push from a terminal")) ok(c, m);
+for (const [m, c] of terminalChecks(runHookOnTerminal(HOOK_TEXT, { byHand: true }), "run by hand in a terminal")) ok(c, m);
 
 // ── §8 mutants.
 // Every rule inside a deny form, and each one-line deny, deleted in turn.
@@ -419,6 +481,14 @@ for (const [name, from, to] of [
 	const text = HOOK_TEXT.split(from).join(to);
 	ok(text !== HOOK_TEXT, `§8 mutant '${name}' must change the hook`);
 	ok(hookChecks(runHook(text), "[mutant] ").some(([, c]) => !c), `§8 mutant '${name}' must be noticed by §7`);
+}
+// The child's stdin from /dev/null dropped: run by hand in a terminal, the
+// child's stdin would be the terminal.
+{
+	const text = HOOK_TEXT.split('"${run[@]}" < /dev/null 2>&1 | tee').join('"${run[@]}" 2>&1 | tee');
+	ok(text !== HOOK_TEXT, "§8 mutant 'stdin from /dev/null dropped' must change the hook");
+	ok(terminalChecks(runHookOnTerminal(text, { byHand: true }), "run by hand in a terminal", "[mutant] ").some(([, c]) => !c),
+		"§8 mutant 'stdin from /dev/null dropped' must be noticed by §7");
 }
 
 listeningCheck().catch((err) => failures.push(`§5 the listening fixture: ${err.stack || err}`)).then(() => {

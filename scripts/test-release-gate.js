@@ -333,6 +333,9 @@ function checkJq() {
 function hookFixture(hookText, { fnm = false, nodeVersion = "v22.23.2", checkExit = 0 } = {}) {
 	const repo = tmpDir("hook-repo");
 	const bin = tmpDir("hook-bin");
+	// On macOS the hook works in a folder under ~/Library/Caches.
+	const home = tmpDir("hook-home");
+	fs.mkdirSync(path.join(home, "Library", "Caches"), { recursive: true });
 	const log = path.join(repo, "..", `${path.basename(repo)}.log`);
 	// A real repository with origin/main: the hook checks the worktree git
 	// names, found with git rev-parse (scripts/test-pre-push-hook.js pins
@@ -350,7 +353,7 @@ function hookFixture(hookText, { fnm = false, nodeVersion = "v22.23.2", checkExi
 	git("init", "-q", repo);
 	fs.mkdirSync(path.join(repo, ".githooks"));
 	fs.writeFileSync(path.join(repo, ".githooks/pre-push"),
-		hookText.replace("SANDBOX_EXEC=/usr/bin/sandbox-exec\n", `SANDBOX_EXEC=${bin}/sandbox-exec\n`).replace("platform=$(uname -s)\n", "platform=Darwin\n"), { mode: 0o755 });
+		hookText.replace("SANDBOX_EXEC=/usr/bin/sandbox-exec\n", `SANDBOX_EXEC=${bin}/sandbox-exec\n`).replace("platform=$(/usr/bin/uname -s)\n", "platform=Darwin\n"), { mode: 0o755 });
 	fs.writeFileSync(path.join(repo, ".nvmrc"), "22.23.2\n");
 	fs.mkdirSync(path.join(repo, "scripts"));
 	fs.writeFileSync(path.join(repo, "scripts/run-unit-tests.js"), "// const PREPUSH_PROTOCOL = 1;\n");
@@ -364,7 +367,7 @@ if [ "${checkExit}" = 0 ]; then echo "pre-push verdict: lint=pass selection=pass
 exit ${checkExit}`);
 	stub("node", `echo ${nodeVersion}`);
 	if (fnm) stub("fnm", `printf "fnm %s\\n" "$*" >> "${log}"\n[ "$1" = env ] && echo "export STUB_FNM_ENV=1"\nexit 0`);
-	return { repo, bin, head, log };
+	return { repo, bin, home, head, log };
 }
 
 function runHook(hookText, { input, checkExit = 0, fnm = false, nodeVersion } = {}) {
@@ -378,7 +381,7 @@ function runHook(hookText, { input, checkExit = 0, fnm = false, nodeVersion } = 
 		cwd: f.repo,
 		env: {
 			PATH: `${f.bin}:/usr/bin:/bin`,
-			HOME: f.repo,
+			HOME: f.home,
 			TMPDIR: os.tmpdir(),
 			GH_TOKEN: "fake-not-a-token",
 			GIT_DIR: path.join(f.repo, ".git"),
