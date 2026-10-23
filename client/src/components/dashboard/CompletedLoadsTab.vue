@@ -85,7 +85,7 @@
               </div>
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-                {{ cellValue(job, col) }}
+                {{ cellValue(job, col) || loadIdShown(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
@@ -99,7 +99,7 @@
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+            <DialogTitle>{{ loadIdShownValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
                  draft route answers anyone else 403. -->
@@ -115,7 +115,7 @@
               <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
             </div>
           </template>
-          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+          <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
           <!-- Why the load is flagged, and where it can be fixed: a completed load
@@ -156,7 +156,7 @@
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Status Timeline</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
-              <StatusTimeline v-if="loadIdValue" :load-id="loadIdValue" />
+              <StatusTimeline v-if="loadRefValue" :load-id="loadRefValue" />
             </div>
           </div>
           <div style="margin-bottom:1rem;">
@@ -168,6 +168,15 @@
               <div v-if="docError" role="alert" :style="docErrorStyle">{{ docError }}</div>
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <!-- A load whose ID this user is served withheld: the server lists its
+                   documents by type and upload time only (documentsWithheld). -->
+              <div v-else-if="docsWithheldNote" style="display:flex;flex-direction:column;gap:0.5rem;">
+                <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;">
+                  <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;flex-shrink:0;">{{ doc.type }}</span>
+                  <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
+                </div>
+                <span style="font-size:0.75rem;color:#6b7280;">{{ docsWithheldNote }}</span>
+              </div>
               <!-- Filename over a muted upload time, matching ActiveLoadsTab and the
                    driver's DocumentList. On a completed load this is the evidence
                    trail for when the POD backing the invoice actually arrived. -->
@@ -207,9 +216,10 @@
                  noticed *after* the load lands here (it's what blocks Draft
                  Invoice Email above), so this is the screen where a Super Admin
                  or Dispatcher needs to attach one on the driver's behalf. -->
-            <div v-if="loadIdValue && canManageDocs" style="margin-top:0.75rem;">
+            <div v-if="loadRefValue && canManageDocs" style="margin-top:0.75rem;">
               <DocumentUpload
-                :load-id="loadIdValue"
+                :load-id="loadRefValue"
+                :load-label="loadIdShownValue"
                 :driver-name="selectedJobDriverName"
                 :row-index="selectedJob?._rowIndex || 0"
                 @uploaded="refreshDocs"
@@ -231,7 +241,7 @@
             <!-- A delivered load has no live position: the one map draws the
                  planned pickup → drop-off lane LoadHaulSection reads. -->
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" :planned-lane="plannedLane" dispatch-mode />
-            <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" @lane="onPlannedLane" />
+            <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" @lane="onPlannedLane" />
           </div>
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
@@ -274,6 +284,7 @@ import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE 
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
+import { loadRef, loadIdShown } from '../../lib/loadRef'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
@@ -482,6 +493,8 @@ function downloadExport() {
 // filter bar became its own surface — the disabled state is :disabled now, so
 // the computed style object it needed is gone with it.
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
+// The server's note when it lists a withheld load's documents by type and time only.
+const docsWithheldNote = ref('')
 // --- Document management (Super Admin + Dispatcher) -------------------------
 // Same pair that can upload can delete: a POD gets attached here on the driver's
 // behalf, so whoever attached the wrong one has to be able to take it back off.
@@ -514,10 +527,11 @@ const selectedJobDriverName = computed(() => {
   return c ? (selectedJob.value[c] || '').toString().trim() : ''
 })
 async function refreshDocs() {
-  if (!loadIdValue.value) return
+  if (!loadRefValue.value) return
   try {
-    const r = await api.get(`/api/documents/${encodeURIComponent(loadIdValue.value)}`)
+    const r = await api.get(`/api/documents/${encodeURIComponent(loadRefValue.value)}`)
     loadDocs.value = r.documents || []
+    docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : ''
   } catch {
     // Keep the existing list on a transient failure — the upload/delete that
     // triggered this already succeeded server-side.
@@ -564,11 +578,12 @@ function onPlannedLane(lane) { plannedLane.value = lane }
 async function openDetail(job) {
   selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
   plannedLane.value = { status: 'loading' }
-  docError.value = ''; deletingDocId.value = null
+  docError.value = ''; deletingDocId.value = null; docsWithheldNote.value = ''
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
-  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
+  // The load's key when its Load ID is withheld from this user, else its ID (loadRef()).
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = loadRef(job, lc).trim()
   const p = []
-  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || []; docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : '' }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   // Super Admin only, like the route: anyone else would only collect a 403.
   if (lid && auth.isSuperAdmin) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`).then(r => { approvedDraft.value = r.draft || null }).catch(() => {}))
@@ -581,8 +596,8 @@ async function openDetail(job) {
 }
 async function submitRating(r) {
   if (!selectedJob.value) return
-  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (selectedJob.value[lc] || '').trim() : ''
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (selectedJob.value[dc] || '').trim() : ''
+  const lid = loadRefValue.value.trim()
   if (!lid || !dn) return
   try { await api.put(`/api/load-ratings/${encodeURIComponent(lid)}`, { rating: r, driverName: dn }); loadRating.value = r } catch {}
 }
@@ -649,6 +664,13 @@ const sectionPatterns = [
 // single-line raw value in the Route section is redundant.
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+// The Dispatcher Load ID plan (PR 2), as in Active Loads: every per-load call names
+// the load by loadRef() (its key when this user is served its Load ID withheld, else
+// the ID); the screen shows loadIdShown() ("[contact withheld]" for an ID that is
+// only contact, served blank). The Super Admin-only invoice draft and rate-con PDF
+// keep the served ID: a Super Admin is never served a key.
+const loadRefValue = computed(() => (selectedJob.value ? loadRef(selectedJob.value, loadIdCol.value) : ''))
+const loadIdShownValue = computed(() => (selectedJob.value ? loadIdShown(selectedJob.value, loadIdCol.value) : ''))
 
 // --- Draft Invoice Email (every broker) ------------------------------------
 // One-click: the backend pulls the rate-con from Drive, generates the invoice,
