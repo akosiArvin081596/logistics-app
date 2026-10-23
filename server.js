@@ -50549,8 +50549,10 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		}
 		const column = loadCellColumnName(headers, headers[pickupCol]);
 		const day = pickupConfirmation.cellDay(stored) || null;
-		// Already a person's date (confirmed before, or corrected): nothing new to record.
-		if (personEditHold.personSet(stored, loadCellWriteRows(key, column)).set === true) {
+		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
+		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
+		// to record.
+		if (personEditHold.personSet(stored, loadCellWriteRows(key, column), { onlyAppClears: true }).set === true) {
 			return res.json({ ok: true, loadId: sentId, stored: day, alreadyConfirmed: true });
 		}
 		recordLoadCellWrite(key, column, stored, "person", { actor: rateConPickupActor(req) });
