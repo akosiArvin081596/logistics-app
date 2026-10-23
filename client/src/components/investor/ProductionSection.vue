@@ -6,23 +6,26 @@
     </div>
 
     <!-- Monthly Revenue Chart — always shows 12 months -->
-    <div class="chart-bars">
-      <div
-        v-for="m in chartMonths"
-        :key="m.key"
-        class="chart-bar-wrap"
-        :class="{ current: m.isCurrent, clickable: m.amount > 0 || m.isCurrent }"
-        :role="(m.amount > 0 || m.isCurrent) ? 'button' : undefined"
-        :tabindex="(m.amount > 0 || m.isCurrent) ? 0 : undefined"
-        :aria-label="(m.amount > 0 || m.isCurrent) ? `Open breakdown of revenue for ${monthFullLabel(m.key)}` : undefined"
-        :title="(m.amount > 0 || m.isCurrent) ? `${monthFullLabel(m.key)}: ${m.amount > 0 ? fmt(m.amount) : 'no revenue yet'} — click for details` : undefined"
-        @click="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
-        @keyup.enter="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
-        @keyup.space.prevent="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
-      >
-        <div class="chart-amount">{{ m.amount > 0 ? fmt(m.amount) : '' }}</div>
-        <div class="chart-bar" :class="{ empty: m.amount === 0, 'bar-current': m.isCurrent }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
-        <div class="chart-label" :class="{ 'label-current': m.isCurrent }">{{ m.label }}</div>
+    <div class="chart-scroll">
+      <div class="chart-bars">
+        <div
+          v-for="m in chartMonths"
+          :key="m.key"
+          class="chart-bar-wrap"
+          :class="{ current: m.isCurrent, clickable: m.amount > 0 || m.isCurrent }"
+          :role="(m.amount > 0 || m.isCurrent) ? 'button' : undefined"
+          :tabindex="(m.amount > 0 || m.isCurrent) ? 0 : undefined"
+          :aria-label="(m.amount > 0 || m.isCurrent) ? `Open breakdown of revenue for ${monthFullLabel(m.key)}` : undefined"
+          :title="(m.amount > 0 || m.isCurrent) ? `${monthFullLabel(m.key)}: ${m.amount > 0 ? fmt(m.amount) : 'no revenue yet'} — click for details` : undefined"
+          @click="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
+          @keyup.enter="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
+          @keyup.space.prevent="(m.amount > 0 || m.isCurrent) && openMonthDetail(m)"
+          @focus="revealBar"
+        >
+          <div class="chart-amount">{{ m.amount > 0 ? fmt(m.amount) : '' }}</div>
+          <div class="chart-bar" :class="{ empty: m.amount === 0, 'bar-current': m.isCurrent }" :style="{ height: m.amount > 0 ? barHeight(m.amount) : '2px' }"></div>
+          <div class="chart-label" :class="{ 'label-current': m.isCurrent }">{{ m.label }}</div>
+        </div>
       </div>
     </div>
     <div class="chart-caption">Monthly Revenue &middot; <span class="caption-hint">click any month for details</span></div>
@@ -116,6 +119,7 @@ import { appToday, shiftYm } from '../../utils/datetime'
 import MetricInfoDialog from './MetricInfoDialog.vue'
 import { leaseBasisOf, leaseNotes } from '../../lib/payoutPeriod'
 import { LEASE_LABEL } from '../../lib/leasePayoutText'
+import { revealOnKeyboardFocus } from '../../lib/revealInScroller'
 
 const props = defineProps({
   production: { type: Object, required: true },
@@ -166,6 +170,11 @@ function monthFullLabel(key) {
 const selectedMonth = ref(null)
 function openMonthDetail(m) {
   selectedMonth.value = m
+}
+// Tab to a bar the phone-width chart box only partly shows: scroll the box so
+// the bar and its focus outline (2px + 2px offset) are in view.
+function revealBar(e) {
+  revealOnKeyboardFocus(e.currentTarget, e.currentTarget.closest('.chart-scroll'), 4)
 }
 
 const selectedMonthEarnings = computed(() => {
@@ -222,6 +231,19 @@ const modalSubtitle = computed(() => {
   display: flex;
   flex-direction: column;
 }
+/* The 12 bars need about 568 px. On a phone the chart scrolls sideways in
+   this box, bars and month labels together, instead of running past the card.
+   The box takes the chart's flex 1 place, so on desktop the chart still grows
+   to the card's height. Its padding leaves room for a focused bar's outline and
+   the bars' -2px margins; the equal negative margin keeps the layout as it was. */
+.chart-scroll {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  padding: 6px;
+  margin: -6px;
+}
 .chart-bars { flex: 1; }
 
 .section-title {
@@ -250,6 +272,8 @@ const modalSubtitle = computed(() => {
   height: 180px;
   padding-top: 1rem;
   border-bottom: 1px solid var(--border);
+  /* As wide as its bars when scrolled, so the axis line runs under all 12. */
+  min-width: min-content;
 }
 
 .chart-bar-wrap {

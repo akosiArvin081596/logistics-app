@@ -636,6 +636,9 @@ section(() => {
 }, "§7");
 
 // --- §8 timing ----------------------------------------------------------------------------
+// CI sets UNIT_TEST_SKIP_TIMING: a shared runner measured 124 ms here (#579). CI keeps a looser
+// budget that still catches a backtracking pattern (seconds on these inputs); the tight one runs locally.
+const SLACK = /^(1|true|yes|on)$/i.test(String(process.env.UNIT_TEST_SKIP_TIMING ?? "").trim()) ? 5 : 1;
 section(() => {
 	const ctx = context();
 	const nasty = [
@@ -650,18 +653,18 @@ section(() => {
 		// The fastest of up to 3 runs: a busy machine only adds time, while a pattern
 		// that backtracks is slow on every run.
 		let ms = Infinity;
-		for (let run = 0; run < 3 && ms >= 100; run++) {
+		for (let run = 0; run < 3 && ms >= 100 * SLACK; run++) {
 			const t = Date.now();
 			di.filterInstructions({ loadRequirements: [{ category: "check_in", text }], stops: [{ kind: "pickup", facility: text, place: text, references: [{ type: "other_reference", label: text, value: text }], instructions: [{ kind: "shipper", text }] }] }, ctx);
 			di.validateStaffEdit({ loadRequirements: [{ category: "check_in", text: text.slice(0, 600) }] }, ctx);
 			di.reviewReasons({ extraction: { loadRequirements: [{ category: "check_in", text }] }, filtered: di.filterInstructions({}, ctx), visibleText: `${VISIBLE} ${text}`.repeat(1), byteLength: 1000, ctx });
 			ms = Math.min(ms, Date.now() - t);
 		}
-		ok(`§8 ${what}: filter, staff check and heuristic under 100 ms (${ms} ms)`, ms < 100, ms);
+		ok(`§8 ${what}: filter, staff check and heuristic under ${100 * SLACK} ms (${ms} ms)`, ms < 100 * SLACK, ms);
 	}
 	const t = Date.now();
 	di.reviewReasons({ extraction: dirtyExtraction(), filtered: di.filterInstructions(dirtyExtraction(), ctx), visibleText: `${VISIBLE} `.repeat(250).slice(0, 200000), byteLength: 1000, ctx });
-	ok(`§8 the heuristic on 200,000 characters of rate-con text runs under 300 ms (${Date.now() - t} ms)`, Date.now() - t < 300);
+	ok(`§8 the heuristic on 200,000 characters of rate-con text runs under ${300 * SLACK} ms (${Date.now() - t} ms)`, Date.now() - t < 300 * SLACK);
 }, "§8");
 
 // --- §9 review round 1 (PR #554) ---------------------------------------------------------

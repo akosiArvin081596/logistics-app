@@ -20,13 +20,28 @@
 //      overflow-x: hidden, and .investor-dashboard adds no overflow of its own
 //   §3 at <= 900 px .sections-row's one column is minmax(0, 1fr); desktop keeps
 //      1fr 1fr
+//   §4 Production Performance's 12-month bar chart (12 bars at min-width 40 px
+//      plus gaps, about 568 px) scrolls sideways inside its own box on a phone,
+//      bars and month labels together, instead of running about 177 px past
+//      the card. The box takes .chart-bars' place in the card's column (flex 1)
+//      and its padding is cancelled by an equal negative margin, so desktop
+//      keeps the same layout while a focused bar's outline and the bars' -2 px
+//      margins stay inside the box; .chart-bars is at least as wide as its bars,
+//      so the axis line runs under every bar when scrolled (2026-10-22)
+//   §5 Tab to a bar the box only partly shows (the current month, at the right
+//      edge on a phone) scrolls the box so the bar and its focus outline are in
+//      view. Keyboard focus only (:focus-visible), and only the box moves, never
+//      the page: a click or tap, or a box with nothing to scroll (desktop), stays
+//      as it is (#578 browser check, 2026-10-22)
 //
 // The components' own markup and styles, parsed with the client's compiler and
-// postcss. No DOM, no browser.
+// postcss; §5 runs client/src/lib/revealInScroller.js on fake elements. No DOM,
+// no browser.
 //   node scripts/test-investor-tables-phone-scroll.mjs
 //   EXPENSES_SECTION_VUE=/tmp/base/ExpensesSection.vue node scripts/test-investor-tables-phone-scroll.mjs   # a base copy: fails
 //   (also MY_TRUCKS_VUE, FLEET_BREAKDOWN_VUE, LEGAL_DOCUMENT_PORTAL_VUE, TRUCK_TABLE_VUE,
-//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, SHARED_CSS)
+//    PAYOUTS_SECTION_VUE, INVESTOR_VIEW_VUE, PRODUCTION_SECTION_VUE, SHARED_CSS,
+//    REVEAL_IN_SCROLLER_JS)
 import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
@@ -49,6 +64,8 @@ const TABLE_FILES = [
   ['PayoutsSection', process.env.PAYOUTS_SECTION_VUE || path.join(INVESTOR, 'PayoutsSection.vue')],
 ]
 const INVESTOR_VIEW_VUE = process.env.INVESTOR_VIEW_VUE || path.join(SRC, 'views', 'InvestorView.vue')
+const PRODUCTION_SECTION_VUE = process.env.PRODUCTION_SECTION_VUE || path.join(INVESTOR, 'ProductionSection.vue')
+const REVEAL_IN_SCROLLER_JS = process.env.REVEAL_IN_SCROLLER_JS || path.join(SRC, 'lib', 'revealInScroller.js')
 const SHARED_CSS = process.env.SHARED_CSS || path.join(SRC, 'assets', 'shared.css')
 
 let pass = 0
@@ -154,6 +171,109 @@ console.log('§3 on a phone the Production / Revenue Trends row fits the page')
   ok('a max-width: 900px rule sets .sections-row grid-template-columns', values.length > 0)
   eq('.sections-row one-column track at <= 900 px', last(values), 'minmax(0, 1fr)')
   eq('.sections-row two columns on desktop unchanged', last(decls(investorView.root, '.sections-row', 'grid-template-columns')), '1fr 1fr')
+}
+
+console.log('§4 the Production Performance chart scrolls sideways inside its own box')
+{
+  const { descriptor, root } = load(PRODUCTION_SECTION_VUE)
+  // Every element carrying static class `cls`, with the elements above it.
+  function byClass(cls) {
+    const found = []
+    function walk(node, ancestors) {
+      if (node.type === 1 && staticClasses(node).includes(cls)) found.push({ node, ancestors })
+      const next = node.type === 1 ? [...ancestors, node] : ancestors
+      for (const child of node.children || []) walk(child, next)
+    }
+    walk(descriptor.template.ast, [])
+    return found
+  }
+  const bars = byClass('chart-bars')
+  eq('ProductionSection: one .chart-bars', bars.length, 1)
+  const scroller = bars.length
+    ? bars[0].ancestors.slice().reverse().find((a) => staticClasses(a).some((c) => classScrollsX(root, c)))
+    : undefined
+  ok('.chart-bars is inside an element with overflow-x auto or scroll', !!scroller)
+  if (scroller) {
+    const cls = staticClasses(scroller).find((c) => classScrollsX(root, c))
+    for (const part of ['chart-bar', 'chart-label', 'chart-amount']) {
+      const list = byClass(part)
+      ok(`.${part} is present`, list.length > 0)
+      ok(`every .${part} scrolls with the bars (inside .${cls})`, list.every(({ ancestors }) => ancestors.includes(scroller)))
+    }
+    // Desktop unchanged: the box takes .chart-bars' flex 1 place in the card's
+    // column and lays .chart-bars out in a column of its own, so the chart
+    // still grows to the card's height beside Revenue Trends.
+    eq(`.${cls} flex`, last(decls(root, `.${cls}`, 'flex')), '1')
+    eq(`.${cls} display`, last(decls(root, `.${cls}`, 'display')), 'flex')
+    eq(`.${cls} flex-direction`, last(decls(root, `.${cls}`, 'flex-direction')), 'column')
+    // Room for a focused bar's outline (2 px + 2 px offset) and the bars' -2 px
+    // margins, cancelled by an equal negative margin.
+    const pad = last(decls(root, `.${cls}`, 'padding'))
+    const px = /^(\d+(?:\.\d+)?)px$/.exec(pad || '')
+    ok(`.${cls} padding is one length of at least 6px (got ${JSON.stringify(pad)})`, !!px && Number(px[1]) >= 6)
+    eq(`.${cls} margin cancels its padding`, last(decls(root, `.${cls}`, 'margin')), px ? `-${px[1]}px` : '(no padding)')
+  }
+  // The axis line (.chart-bars' bottom border) spans every bar when scrolled.
+  eq('.chart-bars min-width', last(decls(root, '.chart-bars', 'min-width')), 'min-content')
+}
+
+console.log('§5 a keyboard-focused bar the chart box only partly shows scrolls into view')
+{
+  const { descriptor } = load(PRODUCTION_SECTION_VUE)
+  // The @focus handler on each bar, and that it hands the bar to the helper.
+  let wrap
+  ;(function walk(node) {
+    if (!wrap && node.type === 1 && staticClasses(node).includes('chart-bar-wrap')) wrap = node
+    for (const child of node.children || []) walk(child)
+  })(descriptor.template.ast)
+  const onFocus = wrap && (wrap.props || []).find((p) => p.type === 7 && p.name === 'on' && p.arg && p.arg.content === 'focus')
+  ok('.chart-bar-wrap has an @focus handler', !!onFocus)
+  const handler = onFocus && onFocus.exp ? onFocus.exp.content.trim() : ''
+  const script = descriptor.scriptSetup ? descriptor.scriptSetup.content : ''
+  ok('ProductionSection imports revealOnKeyboardFocus from lib/revealInScroller',
+    /import\s*\{[^}]*\brevealOnKeyboardFocus\b[^}]*\}\s*from\s*'\.\.\/\.\.\/lib\/revealInScroller'/.test(script))
+  const body = /^\w+$/.test(handler) ? new RegExp(`function ${handler}\\s*\\([^)]*\\)\\s*\\{([^}]*)\\}`).exec(script) : null
+  ok(`the @focus handler (${JSON.stringify(handler)}) calls revealOnKeyboardFocus with the bar and its .chart-scroll box`,
+    !!body && /revealOnKeyboardFocus\(\s*e\.currentTarget\s*,\s*e\.currentTarget\.closest\('\.chart-scroll'\)\s*,\s*4\s*\)/.test(body[1]))
+
+  let reveal
+  try {
+    ;({ revealOnKeyboardFocus: reveal } = await import(REVEAL_IN_SCROLLER_JS))
+  } catch (err) {
+    ok(`client/src/lib/revealInScroller.js loads (${err.code || err.message})`, false)
+  }
+  if (reveal) {
+    // A 340 px box at x 20..360; `left` is the bar's on-screen left edge.
+    const box = (scrollLeft = 0) => ({ scrollLeft, getBoundingClientRect: () => ({ left: 20, right: 360 }) })
+    const bar = (left, keyboard = true) => ({
+      matches: (sel) => sel === ':focus-visible' && keyboard,
+      getBoundingClientRect: () => ({ left, right: left + 46 }),
+    })
+    let b = box(0); reveal(bar(330), b, 4)
+    eq('a bar cut off on the right (16 of 46 px hidden): scrolls 16 + the 4 px outline', b.scrollLeft, 20)
+    b = box(100); reveal(bar(10), b, 4)
+    eq('a bar cut off on the left: scrolls back 10 + 4 px', b.scrollLeft, 86)
+    b = box(50); reveal(bar(200), b, 4)
+    eq('a bar fully in view (and every bar at desktop width): no scroll', b.scrollLeft, 50)
+    b = box(0); reveal(bar(310), b, 4)
+    eq('a bar whose outline just fits (right edge 360): no scroll', b.scrollLeft, 0)
+    b = box(0); reveal(bar(330, false), b, 4)
+    eq('mouse or touch focus (not :focus-visible): no scroll', b.scrollLeft, 0)
+    b = box(0)
+    reveal(bar(330), null, 4)
+    reveal(null, b, 4)
+    eq('no box or no bar: nothing thrown, nothing moved', b.scrollLeft, 0)
+    // A browser without :focus-visible throws a SyntaxError from matches().
+    const oldBrowserBar = {
+      matches: () => { throw new SyntaxError("':focus-visible' is not a valid selector") },
+      getBoundingClientRect: () => ({ left: 330, right: 376 }),
+    }
+    b = box(0)
+    let threw = null
+    try { reveal(oldBrowserBar, b, 4) } catch (err) { threw = err }
+    ok(`:focus-visible unsupported (matches() throws): no exception (got ${threw && threw.message})`, threw === null)
+    eq(':focus-visible unsupported: no scroll', b.scrollLeft, 0)
+  }
 }
 
 if (failures.length) {
