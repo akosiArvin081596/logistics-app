@@ -12,6 +12,10 @@
         <select v-model="newDriver" class="new-msg-select" @change="newLoadId = ''">
           <option value="" disabled>Select recipient</option>
           <option v-for="d in props.driverNames" :key="d" :value="d">{{ d }}</option>
+          <!-- An investor shows by name and is written to by his sign-in username. -->
+          <optgroup v-if="props.investors.length" label="Investors">
+            <option v-for="inv in props.investors" :key="'investor:' + inv.to" :value="inv.to">{{ inv.label }}</option>
+          </optgroup>
         </select>
         <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver">
           <option value="">General</option>
@@ -167,6 +171,8 @@ import VoiceNoteRecorder from '../shared/VoiceNoteRecorder.vue'
 
 const props = defineProps({
   driverNames: { type: Array, default: () => [] },
+  // Super Admin only: [{ to: the account's sign-in username, label: the name shown }].
+  investors: { type: Array, default: () => [] },
 })
 
 const store = useMessagesStore()
@@ -274,8 +280,10 @@ const loadsForDriver = computed(() => {
   return [...loads.values()]
 })
 
+// "General" (no load) opens the recipient's general thread; an investor has no
+// loads, so it is his only choice.
 function startConversation() {
-  if (!newDriver.value || !newLoadId.value) return
+  if (!newDriver.value) return
   // The header shows the picked load's text; never a key, even if the list moved on.
   const picked = loadsForDriver.value.find((l) => l.ref === newLoadId.value)
   store.selectConversation(newDriver.value, newLoadId.value, picked ? picked.label : '')

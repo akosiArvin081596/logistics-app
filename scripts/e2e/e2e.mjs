@@ -678,6 +678,38 @@ async function getTruck(page, id) {
   return (r.json?.trucks || []).find((t) => String(t.id) === String(id)) || null
 }
 
+// ---------------------------------------------------------------- test-truck clean-up (TD8)
+// A truck delete is refused while the truck would change an open month (409
+// OPEN_MONTH_TRUCK_FIGURES): fixed costs, a maintenance reserve or purchase price,
+// a named driver or a linked ELD device. Every truck delete in this run goes
+// through qaDeleteTruck(). It re-reads the truck and touches only one whose unit
+// number starts with QA-TEST-: each of those items goes back to 0 or blank through
+// the edits a person would make (PUT /api/trucks/:id, the ELD unlink), then the
+// truck is deleted. Any other truck is left alone (status 0, NOT_QA_TRUCK).
+// qaClearTruck() is the first half alone, for R16 and the pre-run clean-up: their
+// throwaway-driver rows are deleted after the driver is cleared, because clearing
+// a driver whose directory row is gone writes that row again.
+const QA_TRUCK_RE = /^QA-TEST-/
+const QA_TRUCK_ZERO = [['InsuranceMonthly', 'insuranceMonthly'], ['EldMonthly', 'eldMonthly'], ['TruckPaymentMonthly', 'truckPaymentMonthly'],
+  ['HvutAnnual', 'hvutAnnual'], ['IrpAnnual', 'irpAnnual'], ['MaintenanceFundMonthly', 'maintenanceFundMonthly'], ['PurchasePrice', 'purchasePrice']]
+async function qaClearTruck(page, id) {
+  const t = await getTruck(page, id)
+  if (!t) return { status: 404, json: { code: 'NOT_FOUND' } }
+  if (!QA_TRUCK_RE.test(t.UnitNumber || '')) return { status: 0, json: { code: 'NOT_QA_TRUCK' } }
+  const body = {}
+  for (const [col, key] of QA_TRUCK_ZERO) if (Number(t[col]) !== 0) body[key] = 0
+  if (String(t.AssignedDriver || '').trim()) body.assignedDriver = ''
+  const steps = []
+  if (Object.keys(body).length) steps.push(`PUT ${(await api(page, 'PUT', `/api/trucks/${id}`, body)).status}`)
+  if (t.RoutemateVehicleId) steps.push(`unlink ${(await api(page, 'DELETE', `/api/trucks/${id}/link-routemate`)).status}`)
+  return { status: 200, json: { steps } }
+}
+async function qaDeleteTruck(page, id) {
+  const cleared = await qaClearTruck(page, id)
+  if (cleared.status !== 200) return cleared
+  return api(page, 'DELETE', `/api/trucks/${id}`)
+}
+
 const costsOf = (t) => t ? `ins=${t.InsuranceMonthly} eld=${t.EldMonthly} pay=${t.TruckPaymentMonthly} hvut=${t.HvutAnnual} irp=${t.IrpAnnual}` : '(truck missing)'
 const photoHead = (t) => (t && typeof t.Photo === 'string' ? (t.Photo.slice(0, 30) + (t.Photo.length > 30 ? '…' : '')) : String(t?.Photo))
 
@@ -967,17 +999,20 @@ async function truckSteps() {
     if (!ok) throw new Error('cannot continue without the Super Admin session')
   }
 
-  // Clean leftovers from an earlier aborted run (our own naming only). R16's
-  // throwaway-driver rows go first: a truck that still has one cannot be deleted.
+  // Clean leftovers from an earlier aborted run (our own naming only). Their
+  // drivers are cleared first (qaClearTruck()), then R16's throwaway-driver rows
+  // go (a truck that still has one cannot be deleted), then the trucks.
   {
+    const r = await api(admin, 'GET', '/api/trucks')
+    const leftovers = (r.json?.trucks || []).filter((t) => QA_TRUCK_RE.test(t.UnitNumber || ''))
+    for (const t of leftovers) await qaClearTruck(admin, t.id)
     if (db) {
       const n = removeLeftoverQaDriverRows()
       if (n.truck_assignments || n.drivers_directory) console.log(`  pre-clean: leftover QA driver rows: ${JSON.stringify(n)}`)
     }
-    const r = await api(admin, 'GET', '/api/trucks')
-    for (const t of (r.json?.trucks || []).filter((t) => /^QA-TEST-/.test(t.UnitNumber || ''))) {
-      const d = await api(admin, 'DELETE', `/api/trucks/${t.id}`)
-      console.log(`  pre-clean: leftover ${t.UnitNumber} (#${t.id}) -> ${d.status}`)
+    for (const t of leftovers) {
+      const d = await qaDeleteTruck(admin, t.id)
+      console.log(`  pre-clean: leftover ${t.UnitNumber} (#${t.id}) -> ${d.status}${d.json?.code ? ` ${d.json.code}` : ''}`)
     }
   }
 
@@ -1222,7 +1257,7 @@ async function truckSteps() {
       const r = await api(admin, 'POST', '/api/trucks', { unitNumber: unit, status: 'Active', insuranceMonthly: 'Infinity' })
       const list = await api(admin, 'GET', '/api/trucks')
       const made = (list.json?.trucks || []).find((t) => t.UnitNumber === unit)
-      if (made) { created.add(made.id); await api(admin, 'DELETE', `/api/trucks/${made.id}`); created.delete(made.id) }
+      if (made) { created.add(made.id); await qaDeleteTruck(admin, made.id); created.delete(made.id) }
       const ok = r.status === 400 && r.json?.code === 'INVALID_AMOUNT' && !made
       logs.push(`5h POST insurance "Infinity" → ${r.status} ${r.json?.code || ''}`)
       record({
@@ -1368,7 +1403,7 @@ async function truckSteps() {
       const r = await api(admin, 'POST', '/api/trucks', { unitNumber: unit, status: 'Active', photo: PLANTS.html.value })
       const list = await api(admin, 'GET', '/api/trucks')
       const made = (list.json?.trucks || []).find((t) => t.UnitNumber === unit)
-      if (made) { created.add(made.id); await api(admin, 'DELETE', `/api/trucks/${made.id}`); created.delete(made.id) }
+      if (made) { created.add(made.id); await qaDeleteTruck(admin, made.id); created.delete(made.id) }
       logs.push(`8e POST → ${r.status} ${r.json?.code || ''}`)
       record({
         step: '8e', title: 'API POST /api/trucks with photo = data:text/html', expected: '415 UNSUPPORTED_IMAGE_TYPE; no truck created',
@@ -1712,7 +1747,7 @@ async function truckSteps() {
       const unit = `${UNIT}-BADFUEL`
       const r = await api(admin, 'POST', '/api/trucks', { unitNumber: unit, status: 'Active', fuel_tank_gallons: 600 })
       const made = ((await api(admin, 'GET', '/api/trucks')).json?.trucks || []).find((t) => t.UnitNumber === unit)
-      if (made) { created.add(made.id); await api(admin, 'DELETE', `/api/trucks/${made.id}`); created.delete(made.id) }
+      if (made) { created.add(made.id); await qaDeleteTruck(admin, made.id); created.delete(made.id) }
       logs.push(`R7e POST fuel 600 → ${r.status} ${r.json?.code || ''}`)
       record({
         step: 'R7e', title: 'API POST /api/trucks with fuel_tank_gallons 600 (Super Admin)', expected: '400 INVALID_AMOUNT, field "fuel_tank_gallons"; no truck created',
@@ -1852,7 +1887,7 @@ async function truckSteps() {
         if (c.verb === 'POST') {
           r = await api(admin, 'POST', '/api/trucks', { unitNumber: c.unit, status: 'Active' })
           const made = ((await api(admin, 'GET', '/api/trucks')).json?.trucks || []).find((t) => t.UnitNumber === c.unit)
-          if (made) { created.add(made.id); const d = await api(admin, 'DELETE', `/api/trucks/${made.id}`); if (d.status === 200) created.delete(made.id) }
+          if (made) { created.add(made.id); const d = await qaDeleteTruck(admin, made.id); if (d.status === 200) created.delete(made.id) }
           effect = { changed: !!made, text: made ? `truck CREATED (#${made.id}) with the character in its unit number — deleted again` : 'no truck created' }
         } else if (!target) {
           r = { status: 0, json: null, text: 'no target truck (its POST failed)' }
@@ -1876,7 +1911,7 @@ async function truckSteps() {
     } catch (e) {
       record({ step: 'R14', title: 'Unit numbers with control characters', expected: '400 INVALID_UNIT_NUMBER', observed: `error: ${e.message}`, verdict: 'FAIL', shot: '' })
     } finally {
-      if (target) { const d = await api(admin, 'DELETE', `/api/trucks/${target}`).catch(() => null); if (d?.status === 200) created.delete(target) }
+      if (target) { const d = await qaDeleteTruck(admin, target).catch(() => null); if (d?.status === 200) created.delete(target) }
     }
     await caption(admin, `Step R14 — ${logs.join(' · ')}`)
     const s = await shot(admin, 'r14-api-unit-control-chars')
@@ -2082,13 +2117,16 @@ async function truckSteps() {
         observed = `${observed ? `${observed}; ` : ''}error: ${e.message}`
         v = 'FAIL'
       } finally {
-        // The throwaway drivers' rows first (a truck with an assignment row cannot be
+        // The two trucks' drivers cleared first (a truck naming a driver cannot be
+        // deleted, and clearing one whose directory row is gone writes it again),
+        // then the throwaway drivers' rows (a truck with an assignment row cannot be
         // deleted), then the two trucks.
+        for (const id of ids) await qaClearTruck(admin, id).catch(() => null)
         const n = (() => { try { return removeQaDriverRows(drivers) } catch (e) { return { error: e.message } } })()
         const del = []
         for (const id of ids) {
-          const d = await api(admin, 'DELETE', `/api/trucks/${id}`).catch(() => ({ status: 0 }))
-          del.push(`#${id} → ${d.status}`)
+          const d = await qaDeleteTruck(admin, id).catch(() => ({ status: 0 }))
+          del.push(`#${id} → ${d.status}${d.json?.code ? ` ${d.json.code}` : ''}`)
           if (d.status === 200) created.delete(id)
         }
         observed += `. Clean-up: throwaway-driver rows deleted ${JSON.stringify(n)}; DELETE ${del.join(', ')}`
@@ -4555,7 +4593,7 @@ async function cleanup() {
       const all = await api(admin, 'GET', '/api/trucks')
       for (const t of (all.json?.trucks || []).filter((t) => (t.UnitNumber || '').startsWith(UNIT) || t.UnitNumber === INV_UNIT)) created.add(t.id)
       for (const id of created) {
-        const d = await api(admin, 'DELETE', `/api/trucks/${id}`)
+        const d = await qaDeleteTruck(admin, id)
         notes.push(`DELETE /api/trucks/${id} → ${d.status}${d.json?.code ? ` ${d.json.code}` : ''}`)
         if (d.status !== 200) ok = false
       }
@@ -4712,9 +4750,7 @@ async function eldLinkSection() {
   } finally {
     if (truckId) {
       try {
-        const t = await getTruck(page, truckId)
-        if (t?.RoutemateVehicleId) await api(page, 'DELETE', `/api/trucks/${truckId}/link-routemate`)
-        const d = await api(page, 'DELETE', `/api/trucks/${truckId}`)
+        const d = await qaDeleteTruck(page, truckId)
         if (d.status !== 200) console.log(`  (L clean-up: DELETE /api/trucks/${truckId} → ${d.status}${d.json?.code ? ` ${d.json.code}` : ''})`)
       } catch (e) { console.log(`  (L clean-up failed: ${e.message})`) }
     }
@@ -9460,8 +9496,10 @@ async function investorFixesSection() {
           if (d.status === 200 || d.status === 404) ifxForget('legal_documents', r.id)
           notes.push(`DELETE /api/legal-documents/${r.id} → ${d.status}`)
         }
+        // A truck the API refuses, or one without the QA-TEST- prefix (an accepted
+        // application's INV-<id>- truck), is deleted by its exact id in the copy below.
         for (const r of ifxRows.filter((x) => x.table === 'trucks')) {
-          const d = await api(sa, 'DELETE', `/api/trucks/${r.id}`)
+          const d = await qaDeleteTruck(sa, r.id)
           if (d.status === 200) ifxForget('trucks', r.id)
           notes.push(`DELETE /api/trucks/${r.id} → ${codeOf(d)}`)
         }

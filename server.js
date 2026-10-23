@@ -301,6 +301,26 @@ function chatDeskKey(name) {
 	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
 	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
 }
+// INVESTOR CONVERSATIONS ARE SUPER ADMIN ONLY (P1, Arvin 2026-10-22). An
+// investor conversation is every message with the investor desk ("admin") or
+// an Investor account's username on either side, trimmed and in any letter case
+// (how every thread reads its names); a desk's name is never an investor's,
+// even on a legacy account that holds one. Super Admins read them, and the investor
+// reads his own (GET /api/investor/messages, by his username); a Dispatcher
+// reads none: not in the inbox list or its unread count (GET /api/messages), not
+// as a thread (GET /api/messages/:driverName, 404), not live (sendChatMessage():
+// the super-admin room, never the dispatch room), not a chat file or a voice note
+// (lib/chat-files.js, lib/voice-notes.js, 404), and he marks none read
+// (PUT /api/messages/read). The one rule, as SQL: 1 for a row of `messages` in an
+// investor conversation, else 0. The query names the row's table `messages`: a
+// stored row, or the two names of a message being sent (investorChatParties()).
+// One line: several runners lift a top-level const by its line.
+const INVESTOR_CHAT_SQL = `(LOWER(TRIM(messages."from")) = 'admin' OR LOWER(TRIM(messages."to")) = 'admin' OR LOWER(TRIM(messages."from")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')) OR LOWER(TRIM(messages."to")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')))`;
+// Whether `user` reads investor conversations among the staff threads: Super
+// Admin only. (Investors read their own through their own routes.)
+function readsInvestorChats(user) {
+	return !!user && user.role === "Super Admin";
+}
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
 // A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
@@ -2173,10 +2193,11 @@ function getInvestorDriverMonthWindows(userId) {
 // Build the WHERE fragment that scopes `expenses` to one investor, with the month
 // dimension the driver leg never had.
 //
-// ONE definition, EIGHT callers (/api/investor's monthly + category + all-time sums,
+// ONE definition, NINE callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
-// /api/investor/tax-csv, GET /api/investor/report's itemized P&L, and
-// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15). That is the
+// /api/investor/tax-csv, GET /api/investor/report's itemized P&L,
+// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15, and
+// truckDeleteOpenMonthHolds(), the truck delete's open-month check, since 2026-10-23). That is the
 // DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
 // hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
 // investor expense surface gets it.
@@ -12523,16 +12544,17 @@ function guardExpenseReceipt(req, res, next, url, file) {
 }
 
 // uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
-// read the conversation it was sent in (Super Admin and Dispatcher every
-// thread; a Driver or Investor his own), decided by the first message that
-// names it; everyone else gets 404. Photos go out without their metadata (no
-// location). The rule and the copy live in lib/chat-files.js. chat_uploads
-// records who stored each file, so a message carries only its sender's own
-// upload (POST /api/messages).
+// read the conversation it was sent in (Super Admin every thread, a Dispatcher
+// every thread but an investor conversation's (INVESTOR_CHAT_SQL); a Driver or
+// Investor his own), decided by the first message that names it; everyone else
+// gets 404. Photos go out without their metadata (no location). The rule and
+// the copy live in lib/chat-files.js. chat_uploads records who stored each file,
+// so a message carries only its sender's own upload (POST /api/messages).
 db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
 const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
 	db,
 	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	investorChatSql: INVESTOR_CHAT_SQL,
 	logError: (msg) => console.error(msg),
 });
 function guardChatAttachment(req, res, next, url, file) {
@@ -31944,10 +31966,23 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
-// List investor users (for owner dropdown)
+// List investor users (for owner dropdown). `username` is the investor's full
+// name, as the truck owner pickers have always shown it. A Super Admin's answer
+// also carries `accountUsername`: the linked Investor account's sign-in
+// username, the name POST /api/messages addresses an investor by (null when no
+// Investor account is linked). Investor conversations are Super Admin only, so
+// a Dispatcher's answer has no such field.
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	if (req.session.user.role !== "Super Admin") {
+		const investors = db
+			.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+			.all();
+		return res.json({ investors });
+	}
 	const investors = db
-		.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+		.prepare(`SELECT i.user_id AS id, i.full_name AS username, i.full_name AS CompanyName, u.username AS accountUsername
+			FROM investors i LEFT JOIN users u ON u.id = i.user_id AND u.role = 'Investor'
+			ORDER BY i.full_name ASC`)
 		.all();
 	res.json({ investors });
 });
@@ -33922,6 +33957,96 @@ function truckDeleteLockBlockers(truck) {
 	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
+// What deleting this truck would change in an OPEN month (TD8, 2026-10-23).
+// truckDeleteLockBlockers() above judges the truck row for closed months only,
+// and a month that is not closed recomputes from the trucks row whenever it is
+// read, so a delete restates it. DELETE /api/trucks/:id refuses
+// OPEN_MONTH_TRUCK_FIGURES while any count is above 0. Counts only, each 0 when
+// it does not apply:
+//   fixed_cost_months       the open months its monthly fixed costs are billed
+//                           in: in the fleet (truckInFleet()), a fixed-cost
+//                           total above 0, charged that month
+//                           (truckChargedInMonth(), the money math's gate);
+//   driver                  1 while it names a driver, whatever its status, the
+//                           pay type or the rate. The rate that prices the
+//                           driver's days (truckRatesByDriver() reads the LAST
+//                           truck naming him) and the investor ledger his
+//                           revenue, receipts and pay land on
+//                           (getInvestorDriverSet(), getInvestorDriverMonthWindows())
+//                           both read it;
+//   eld_link                1 while an ELD device is linked: the loads naming the
+//                           unit pay their ELD days, and the whole scheduled
+//                           window without the link. No sheet read (TD8-2 (a));
+//   financials_line_months  the open months its maintenance reserve or purchase
+//                           price is a Financials line in (financialsExtraItems():
+//                           in the fleet, charged that month), counted even
+//                           while those Financials lines are switched off
+//                           (TD8-3). Depreciation also stops after its years,
+//                           so this can only over-report;
+//   lease_months            the open months it keeps its owner's lease in
+//                           service: a lease row governs the month and the truck
+//                           covers a day of it on or after the lease's first day
+//                           (leaseCoverage(), under the lease retirement
+//                           setting), whether or not the lease payout flag is on
+//                           (TD8-4);
+//   last_truck_receipt_months  the open months holding a receipt that counts on
+//                           its owner only through the driver windows, when it
+//                           is that investor's last truck: with no truck left,
+//                           getInvestorDriverMonthWindows() returns before its
+//                           carrier-history leg, so those receipts leave the
+//                           investor's expenses (TD8 review M1). The ledger's
+//                           source, Rejected filter and month; the -1 owner
+//                           matches no row, so a receipt stamped with the owner
+//                           can only over-report. Moving the truck to another
+//                           owner empties the windows the same way, so the
+//                           only remedy is the retirement date.
+// An open month has no locked period_locks row and is no later than the
+// current business month (appDay(), APP_TIMEZONE): a later month is no open
+// month's figure yet, so a truck entering service next month is not held, even
+// at 23:30 ET on the last day of this one (TD8-6). The driver and the ELD link
+// have no month without the sheet, so each counts 1: that can only over-report.
+// The route calls this only once the lock table has been read.
+function truckDeleteOpenMonthHolds(truck) {
+	const current = appDay().slice(0, 7);
+	const locked = new Set(lockedPeriodsDesc());
+	const ownerId = Number(truck.owner_id) || 0;
+	const leaseRows = ownerId > 0
+		? db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId)
+		: [];
+	// Every month without a lock from the earliest one a count below can reach,
+	// through this month. The truck's first and last charged months, the lease
+	// rows and the closed months bound it; the predicates below decide.
+	const earliest = [truckChargeFromMonth(truck), truckChargeUntilMonth(truck), ...leaseRows.map((r) => r.effective_month), ...locked, current]
+		.filter((m) => investorPayoutBasis.isMonthKey(m) && m <= current)
+		.sort()[0];
+	const open = [];
+	for (let mk = earliest; mk <= current; mk = investorPayoutBasis.addMonths(mk, 1)) {
+		if (!locked.has(mk)) open.push(mk);
+	}
+	const inFleet = investorPayoutBasis.truckInFleet(truck);
+	const charged = open.filter((mk) => truckChargedInMonth(truck, mk));
+	const financialsLine = (Number(truck.maintenance_fund_monthly) || 0) > 0 || (Number(truck.purchase_price) || 0) > 0;
+	const leaseCovers = (mk) => {
+		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
+		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
+			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+		}).coveredDays > 0;
+	};
+	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
+	const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;
+	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
+	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
+	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
+	let last_truck_receipt_months = 0;
+	if (ownerId > 0 && !db.prepare("SELECT 1 FROM trucks WHERE owner_id = ? AND id != ? LIMIT 1").get(ownerId, truck.id)) {
+		const scope = investorExpenseScopeSql(-1, getInvestorDriverMonthWindows(ownerId), EXPENSE_PERIOD_EXPR);
+		last_truck_receipt_months = db.prepare(
+			`SELECT DISTINCT ${EXPENSE_PERIOD_EXPR} AS m FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`
+		).all(...scope.params).filter((r) => investorPayoutBasis.isMonthKey(r.m) && r.m <= current && !locked.has(r.m)).length;
+	}
+	return { fixed_cost_months, driver, eld_link, financials_line_months, lease_months, last_truck_receipt_months };
+}
+
 // ============================================================
 // The same lock, for the two routes that reach the SAME money by a different
 // door: drivers_directory (the pay STRUCTURE) and POST /api/trucks (creating
@@ -35429,8 +35554,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
-		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg, _unit_number,
-		// _vin), plus one
+		// _in_service_date, _retired_at, _owner, _driver, _fuel_tank, _avg_mpg,
+		// _unit_number, _vin), plus one
 		// update_truck_costs line per save that names every cost it changed; a
 		// refusal has no such split because the whole edit is refused as one, so the
 		// single row has to name every field that moved and what it would have
@@ -35619,6 +35744,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_truck_owner", "truck", String(id),
 				`Owner for ${unitLabel}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
+		// The truck's driver decides whose days the truck's rate prices and which
+		// investor ledger the driver is on, and clearing it is one of the edits a
+		// refused truck delete names (TD8-13, 2026-10-23). It left no trail. Keyed
+		// on `changed`, a real change of the trimmed name against the row as
+		// re-read, like the owner line above: a resend writes nothing.
+		if (Object.prototype.hasOwnProperty.call(changed, "assigned_driver")) {
+			const fmtDriver = (v) => auditText(String(v || "").trim(), 100) || "no driver";
+			logAudit(req, "update_truck_driver", "truck", String(id),
+				`Driver for ${unitLabel}: ${fmtDriver(truck.assigned_driver)} → ${fmtDriver(changed.assigned_driver)}`);
+		}
 		// ⚠️ THE FUEL-RANGE CONFIG IS AUDITED BECAUSE IT HAS BEEN WRONG THREE TIMES.
 		// `fuel_tank_gallons` has now been corrected on three separate occasions
 		// (#33 300→198→203, #91 240→189) and every time the investigation stalled on
@@ -35741,7 +35876,10 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 // refuses the whole operation; see truckDeleteLockBlockers for why it is not
 // partially applied. Since 2026-10-22 any fee row or legal document refuses the
 // delete (OPEN_MONTH_TRUCK_FEES, TRUCK_HAS_DOCUMENTS), so past the guard the
-// cascade's fee and document deletes find nothing to remove.
+// cascade's fee and document deletes find nothing to remove. Since 2026-10-23
+// (TD8) a truck whose own inputs feed an open month's figures is refused too
+// (OPEN_MONTH_TRUCK_FIGURES, truckDeleteOpenMonthHolds()): a delete never
+// changes an open month.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -35799,6 +35937,13 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			counts: { maintenance_fund: lock.openFees.maintenance, compliance_fees: lock.openFees.compliance },
 		});
 	}
+	// The references, read once here, above the documents check: whether the
+	// truck has assignment history decides the text of the two refusals below
+	// (TD8-8, TD8-9), and TRUCK_REFERENCED answers from the same two counts. No
+	// route removes an assignment row, so a truck with one can never be deleted;
+	// a trailer can be detached.
+	const assignmentRows = db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n;
+	const trailerRows = db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n;
 	if (lock.legalDocuments) {
 		const n = lock.legalDocuments;
 		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — legal_documents=${n}` },
@@ -35806,9 +35951,60 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
-				`A document filed in error can be removed from the truck's documents first. ${retireNote}`,
+				// Removing a document filed in error leads to a delete only for a
+				// truck without assignment history (TD8-9).
+				(assignmentRows ? "" : "A document filed in error can be removed from the truck's documents first. ") +
+				retireNote,
 			code: "TRUCK_HAS_DOCUMENTS",
 			counts: { legal_documents: n },
+		});
+	}
+
+	// The truck's own inputs to an OPEN month (TD8, 2026-10-23): its fixed
+	// costs, the driver it names, its ELD link, its reserve and depreciation
+	// lines, its lease and, on an investor's last truck, the receipts that reach
+	// that investor through its driver windows (truckDeleteOpenMonthHolds()). Deleting it would restate
+	// the open month, so any of them refuses the delete with its own code, after
+	// #590's two refusals and before TRUCK_REFERENCED, audited under that code
+	// (never through periodBlockedResponse(), which answers PERIOD_FINALIZED).
+	// Counts only in the answer; the audit tail names the items, no amounts.
+	// ⚠️ The remedy never says "set it Inactive", for the reason given at the
+	// closed-month answer above. A truck with assignment history can never be
+	// deleted, so it gets the retirement date only (TD8-8); any other truck also
+	// gets the audited edits that clear each item.
+	const holds = truckDeleteOpenMonthHolds(truck);
+	const openMonths = (n) => `${n} open month${n === 1 ? "" : "s"}`;
+	const held = [
+		[holds.fixed_cost_months, "fixed costs", `its monthly fixed costs are billed in ${openMonths(holds.fixed_cost_months)}`],
+		[holds.driver, "driver", "it names a driver, so it sets that driver's daily rate and investor ledger"],
+		[holds.eld_link, "ELD link", "its ELD device sets the paid days of the loads that name it"],
+		[holds.financials_line_months, "reserve or depreciation", `its maintenance reserve or depreciation is a Financials line in ${openMonths(holds.financials_line_months)}`],
+		[holds.lease_months, "lease", `it keeps its investor's lease in service in ${openMonths(holds.lease_months)}`],
+		[holds.last_truck_receipt_months, "investor receipts", `it is its investor's last truck, which keeps receipts that name no truck on that investor's ledger in ${openMonths(holds.last_truck_receipt_months)}`],
+	].filter(([n]) => n > 0);
+	if (held.length) {
+		// Each step is an audited edit: update_truck_costs, update_truck_driver,
+		// routemate_unlink, update_truck_owner (TD8-14) and update_trailer. No
+		// edit clears the investor's receipts (changing the owner drops them the
+		// same way), so with that item the retirement date is the only remedy.
+		const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [
+			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
+			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
+			[holds.driver, "clear its driver"],
+			[holds.eld_link, "unlink its ELD device"],
+			[holds.lease_months, "set its owner to the company"],
+			[trailerRows, "detach its trailer"],
+		].filter(([n]) => n > 0).map(([, step]) => step);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — holds: ${held.map(([, name]) => name).join(", ")}` },
+			"OPEN_MONTH_TRUCK_FIGURES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${held.map(([, , part]) => part).join("; ")}. ` +
+				"Deleting the truck would change an open month's figures, so it stays in place. " +
+				"To take it out of service, give it a retirement date in an open month." +
+				(steps.length ? ` If it was added by mistake, do these first, then delete it: ${steps.join("; ")}.` : "") +
+				" Nothing was changed.",
+			code: "OPEN_MONTH_TRUCK_FIGURES",
+			counts: holds,
 		});
 	}
 
@@ -35826,10 +36022,13 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// made to succeed: detaching assignment history or re-parenting a trailer as a
 	// side effect of a delete is a bigger decision than this handler should take.
 	const refs = [
-		["truck_assignments", db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n, "assignment history row"],
-		["trailers", db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n, "attached trailer"],
+		["truck_assignments", assignmentRows, "assignment history row"],
+		["trailers", trailerRows, "attached trailer"],
 	].filter(([, n]) => n > 0);
 	if (refs.length) {
+		// Audited like the refusals above, counts only (#594 review, Low 2).
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — truck_assignments=${assignmentRows}, trailers=${trailerRows}` },
+			"TRUCK_REFERENCED", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truck.unit_number || `truck #${id}`}: it still has ${refs.map(([, n, what]) => `${n} ${what}${n === 1 ? "" : "s"}`).join(" and ")}. Detach ${refs.some(([t]) => t === "trailers") ? "the trailer(s) " : ""}first — until then the database itself refuses the delete, and every attempt used to destroy the truck's documents and fee history on the way to failing.`,
 			code: "TRUCK_REFERENCED",
@@ -47605,6 +47804,9 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 //     otherwise: a staff account, a name no account holds, a name two hold),
 //     or, where the route allows it (`staffToDesk`: the text route, for a Super
 //     Admin in the driver app), to a desk under their own name only.
+//   • a Dispatcher writes to drivers only (2026-10-23): the investor desk, and
+//     any message INVESTOR_CHAT_SQL would count as an investor conversation
+//     (which only Super Admins read), is 403.
 //   • any other role: 403.
 // A desk's name is tested before any account is looked up, so an account named
 // like a desk is never a recipient. Returns { from, to, partyUserId } or
@@ -47632,10 +47834,16 @@ function resolveChatParties(user, toName, fromName, { noun = "Messages", item = 
 	const asked = String(fromName || "").trim();
 	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
 	if (!from) return { status: 422, reason: "sender", role, error: "Send as Dispatch or as yourself." };
-	const pick = `Pick a driver or an investor to send the ${item} to.`;
+	const driversOnly = role === "Dispatcher"
+		? { status: 403, reason: "recipient", role, error: `Dispatchers can send ${noun.toLowerCase()} to drivers only.` }
+		: null;
+	// The resolved send, unless it is a Dispatcher's into an investor conversation.
+	const send = (to, partyUserId) => (driversOnly && investorChatParties(from, to) ? driversOnly : { from, to, partyUserId });
+	const pick = driversOnly ? `Pick a driver to send the ${item} to.` : `Pick a driver or an investor to send the ${item} to.`;
 	if (askedDesk) {
+		if (driversOnly && askedDesk === CHAT_DESK_BY_ROLE.Investor) return driversOnly;
 		if (!staffToDesk || from === "Dispatch") return { status: 422, reason: "recipient", role, error: pick };
-		return { from, to: CHAT_DESK_NAMES[askedDesk], partyUserId: null };
+		return send(CHAT_DESK_NAMES[askedDesk], null);
 	}
 	const name = typeof toName === "string" ? toName.trim() : "";
 	const spelling = findDriverAccountSpelling(name);
@@ -47645,7 +47853,7 @@ function resolveChatParties(user, toName, fromName, { noun = "Messages", item = 
 	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
 	const hits = [...drivers, ...investors];
 	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
-	return { from, to: hits[0].name, partyUserId: hits[0].id };
+	return send(hits[0].name, hits[0].id);
 }
 
 // POST /api/messages — Send a new message
@@ -47705,6 +47913,8 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 // throws, the row is rolled back, and nothing is notified or emitted. A text
 // message's insert is the statement it always was.
 function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {
+	// Read before anything is written: the live copy's rooms depend on it.
+	const investorChat = investorChatParties(from, to);
 	const timestamp = new Date().toISOString();
 	const insert = () => {
 		const id = voice
@@ -47754,15 +47964,28 @@ function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentT
 	// as stored) goes per role in the dispatch room: Super Admins as sent, the
 	// rest of the room with the load as shown (emitDispatchByRole()), and the
 	// parties' own rooms as sent, without the dispatch room's sockets, so each
-	// socket gets it once. Any other message, as before:
+	// socket gets it once. A message in an investor conversation
+	// (INVESTOR_CHAT_SQL) goes the same way but to the super-admin room only:
+	// no Dispatcher's socket gets it, his own name's room included. Any other
+	// message, as before:
 	const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
-	if (staffLoadId === payload.loadId) {
+	if (!investorChat && staffLoadId === payload.loadId) {
 		io.to(chatRooms(from, to)).emit("new-message", payload);
 	} else {
 		io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
-		emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+		if (investorChat) io.to("super-admin").emit("new-message", payload);
+		else emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
 	}
 	return { id, timestamp };
+}
+
+// Is a message between the names `from` and `to` in an investor conversation?
+// INVESTOR_CHAT_SQL, asked of the two names as a row. Anything but a plain "no"
+// counts as one, so its live copy goes to Super Admins only.
+function investorChatParties(from, to) {
+	const row = db.prepare(`SELECT ${INVESTOR_CHAT_SQL} AS investor_chat FROM (SELECT ? AS "from", ? AS "to") AS messages`)
+		.get(String(from ?? ""), String(to ?? ""));
+	return !row || row.investor_chat !== 0;
 }
 
 // The one name a caller's own messages and notifications are addressed to, for
@@ -47778,7 +48001,8 @@ function readFlagOwnName(user) {
 
 // PUT /api/messages/read — Mark messages as read
 //
-// ⚠️ SUPER ADMIN AND DISPATCHER MARK ANY MESSAGE; EVERY OTHER CALLER MARKS ONLY
+// ⚠️ SUPER ADMIN MARKS ANY MESSAGE, A DISPATCHER ANY BUT ONE IN AN INVESTOR
+// CONVERSATION (INVESTOR_CHAT_SQL); EVERY OTHER CALLER MARKS ONLY
 // MESSAGES ADDRESSED TO THEM (readFlagOwnName()), and a caller with no name
 // marks nothing. Staff keep the inbox-wide form because the dispatch inbox
 // (/messages) clears messages addressed to the shared
@@ -47795,8 +48019,9 @@ app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 		const placeholders = messageIds.map(() => "?").join(",");
 		const user = req.session.user;
 		if (user.role === "Super Admin" || user.role === "Dispatcher") {
+			const scope = readsInvestorChats(user) ? "" : ` AND NOT ${INVESTOR_CHAT_SQL}`;
 			db.prepare(
-				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
+				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})${scope}`,
 			).run(...messageIds);
 		} else {
 			const recipient = readFlagOwnName(user);
@@ -47942,10 +48167,13 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 // name, URL or id.
 // `unread` counts unread messages to either staff desk (CHAT_DESK_NAMES): a
 // driver writes to "Dispatch", an investor to "admin", and this inbox is where
-// staff read both (scripts/test-investor-unread-badge.js).
+// staff read both (scripts/test-investor-unread-badge.js). A Dispatcher's inbox
+// holds no investor conversation (INVESTOR_CHAT_SQL): it neither lists nor
+// counts one (scripts/test-investor-chats-super-admin-only.js).
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const deskKeys = Object.keys(CHAT_DESK_NAMES);
+		const scope = readsInvestorChats(req.session.user) ? "" : `WHERE NOT ${INVESTOR_CHAT_SQL}`;
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
@@ -47960,6 +48188,7 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 						SUM(CASE WHEN LOWER("to") IN (${deskKeys.map(() => "?").join(", ")}) AND read = 0 THEN 1 ELSE 0 END) AS unread,
 						MAX(id) AS lastId
 					 FROM messages
+					 ${scope}
 					 GROUP BY driver, load_id
 				 ) g
 				 JOIN messages m ON m.id = g.lastId
@@ -48007,6 +48236,14 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
+		// A Dispatcher reads no investor conversation (INVESTOR_CHAT_SQL): asking
+		// for one by its name (the investor desk, an investor's username) is 404,
+		// as a chat file or voice note he can't open is; any other thread is
+		// served without such messages (a staff name's thread holds them too).
+		// Each row carries investor_chat for the voice-note rule; never served.
+		const hideInvestorChats = !readsInvestorChats(req.session.user);
+		if (hideInvestorChats && investorChatParties(driverName, "")) return res.status(404).json({ error: "Not found" });
+		const scope = hideInvestorChats ? ` AND NOT ${INVESTOR_CHAT_SQL}` : "";
 		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
 		const loadId = loadIdFor(req, req.query.loadId) || "";
 		// Every role but Super Admin is served each load as shownLoadId() names it
@@ -48024,9 +48261,9 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 			messages = db
 				.prepare(
 					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
-					        voice_file, voice_duration_ms, party_user_id
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower, loadId);
@@ -48034,9 +48271,9 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 			messages = db
 				.prepare(
 					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
-					        voice_file, voice_duration_ms, party_user_id
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE LOWER("from") = ? OR LOWER("to") = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?)${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower);
@@ -48299,8 +48536,9 @@ app.post("/api/messages/voice", requireAuth, voiceNoteFeatureGate, voiceNoteUplo
 	}
 });
 
-// GET /api/messages/:id/voice — play a voice note. Super Admin and Dispatcher
-// play any; a Driver or an Investor only a note whose party_user_id is his own
+// GET /api/messages/:id/voice — play a voice note. Super Admin plays any, a
+// Dispatcher any but one in an investor conversation (INVESTOR_CHAT_SQL); a
+// Driver or an Investor only a note whose party_user_id is his own
 // account id. Anyone else, an id that is not a voice note, or a file the sweep
 // removed: 404, never 403 (a 403 would confirm the note exists). Range requests
 // answer 206 (iOS refuses media from a server that ignores Range). Never cached
@@ -48309,7 +48547,7 @@ app.get("/api/messages/:id/voice", requireAuth, voiceNotePlaybackLimiter, upload
 	const notFound = () => res.status(404).json({ error: "Not found" });
 	try {
 		if (!/^\d{1,12}$/.test(String(req.params.id))) return notFound();
-		const row = db.prepare("SELECT id, attachment_type, voice_file, party_user_id FROM messages WHERE id = ?").get(Number(req.params.id));
+		const row = db.prepare(`SELECT id, attachment_type, voice_file, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat FROM messages WHERE id = ?`).get(Number(req.params.id));
 		if (!row || row.attachment_type !== "voice" || !voiceNotes.canPlayVoiceNote(req.session.user, row)) return notFound();
 		if (!voiceNotes.voiceFilePath(VOICE_NOTE_DIR, row.voice_file)) return notFound();
 		res.sendFile(row.voice_file, {

@@ -107,6 +107,31 @@ section('§1 the helper', () => {
 })
 
 const read = (rel) => fs.readFileSync(path.join(CLIENT, rel), 'utf8')
+// The child components a template hands the served Load ID text (`:load-id="loadIdValue"`),
+// by tag name: a per-load panel asks its routes by what it is handed.
+// A quoted attribute value may hold a ">" (an arrow function), so quotes are skipped whole.
+const servedIdPanels = (src) => [...src.matchAll(/<([A-Z]\w*)\b(?:[^<>"]|"[^"]*")*?:load-id="loadIdValue"/g)].map((m) => m[1])
+// What a template shows for a withheld load's documents: from the docsWithheldNote
+// branch to the next v-else branch. Anything that opens, names or deletes a file in
+// it is a link the server meant to withhold.
+const withheldDocsBlock = (src) => {
+  const start = src.indexOf('v-else-if="docsWithheldNote"')
+  if (start < 0) return null
+  const end = src.indexOf('<div v-else', start)
+  return src.slice(start, end < 0 ? undefined : end)
+}
+const linksIn = (block) => (block == null ? null : ['<a', 'href', 'drive_url', 'file_name', 'confirmDeleteDoc'].filter((s) => block.includes(s)))
+
+section('§2 the template helpers', () => {
+  check('§2 servedIdPanels(): finds a panel after an attribute whose value holds a ">", and none handed the reference',
+    servedIdPanels('<Foo @click="v => x" :open="a > b" :load-id="loadIdValue" />\n<Bar :load-id="loadRefValue" />\n<Baz\n  @lane="(l) => go(l)"\n  :load-id="loadIdValue"\n/>'),
+    ['Foo', 'Baz'])
+  check('§2 withheldDocsBlock(): a link, a file name or a delete in the withheld branch is caught; the next v-else branch is not read',
+    [linksIn(withheldDocsBlock('<div v-else-if="docsWithheldNote"><a :href="doc.drive_url">{{ doc.file_name }}</a></div>\n<div v-else>')),
+      linksIn(withheldDocsBlock('<div v-else-if="docsWithheldNote">{{ doc.type }}</div>\n<div v-else><a :href="doc.drive_url">View</a></div>')),
+      withheldDocsBlock('<div v-else>')],
+    [['<a', 'href', 'drive_url', 'file_name'], [], null])
+})
 
 section('§2 Active Loads', () => {
   const src = read('components/dashboard/ActiveLoadsTab.vue')
@@ -115,8 +140,12 @@ section('§2 Active Loads', () => {
     (src.match(/api\.(get|put|post|del)\([^)\n]*encodeURIComponent\(loadIdValue\.value\)/g) || []), [])
   check('§2 Active Loads: the detail\'s reads (documents, rating, geocode) go by loadRef()',
     /const lid = loadRef\(job, lc\)\.trim\(\)/.test(src), true)
-  // The driver instructions section keeps the served ID until its routes
-  // (lib/driver-instructions-runtime.js) read keys: a follow-up.
+  check('§2 Active Loads: the driver instructions panel is handed the load\'s reference',
+    /<DriverInstructionsSection :load-id="loadRefValue"/.test(src), true)
+  // The rate-con PDF section is the one exception: it renders for a Super Admin
+  // only, who is never served a key (loadRef() is the served ID for him).
+  check('§2 Active Loads: no per-load panel but the Super Admin-only rate-con PDF is handed the served Load ID text',
+    servedIdPanels(src), ['RateConPdfSection'])
   check('§2 Active Loads: the override, the status timeline, the haul, the POD upload and the documents refresh go by the load\'s reference',
     [/status-override`/.test(src) && /encodeURIComponent\(loadRefValue\.value\)\}\/status-override/.test(src),
       /<StatusTimeline v-if="loadRefValue" :load-id="loadRefValue"/.test(src), /<LoadHaulSection :load-id="loadRefValue"/.test(src),
@@ -134,7 +163,7 @@ section('§2 Active Loads', () => {
     [/<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src), (src.match(/loadIdShown\(job, /g) || []).length >= 2],
     [true, true])
   check('§2 Active Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
-    /v-else-if="docsWithheldNote"/.test(src) && /r\.documentsWithheld \?/.test(src), true)
+    [/v-else-if="docsWithheldNote"/.test(src) && /r\.documentsWithheld \?/.test(src), linksIn(withheldDocsBlock(src))], [true, []])
 })
 
 section('§2 Job Board', () => {
@@ -145,6 +174,41 @@ section('§2 Job Board', () => {
     [/<span v-if="selectedLoadIdWithheld"[^>]*>Ask a Super Admin for this link<\/span>\s*<button\s+v-else-if="loadIdValue"/.test(src),
       /if \(!loadIdValue\.value \|\| selectedLoadIdWithheld\.value\) return/.test(src)], [true, true])
   check('§2 Job Board: the title shows the ID as served', /<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src), true)
+  check('§2 Job Board: the driver instructions panel is handed the load\'s reference (loadRef() of the open load)',
+    [/const loadRefValue = computed\(\(\) => \(selectedJob\.value \? loadRef\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src),
+      /<DriverInstructionsSection :load-id="loadRefValue"/.test(src)], [true, true])
+  check('§2 Job Board: no per-load panel is handed the served Load ID text', servedIdPanels(src), [])
+})
+
+section('§2 Completed Loads', () => {
+  const src = read('components/dashboard/CompletedLoadsTab.vue')
+  check('§2 Completed Loads: imports the helper', /import \{[^}]*\bloadRef\b[^}]*\bloadIdShown\b[^}]*\} from '\.\.\/\.\.\/lib\/loadRef'/.test(src), true)
+  check('§2 Completed Loads: the open load\'s reference and shown ID come from loadRef() and loadIdShown()',
+    [/const loadRefValue = computed\(\(\) => \(selectedJob\.value \? loadRef\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src),
+      /const loadIdShownValue = computed\(\(\) => \(selectedJob\.value \? loadIdShown\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src)],
+    [true, true])
+  // The Super Admin-only invoice draft excepted (POST .../draft-invoice).
+  check('§2 Completed Loads: no API call but the Super Admin-only invoice draft names the load by the served Load ID text',
+    (src.match(/api\.(get|put|post|del)\([^)\n]*encodeURIComponent\(loadIdValue\.value\)\}[^`\n]*/g) || []).filter((m) => !/\}\/draft-invoice(\?|$)/.test(m)), [])
+  check('§2 Completed Loads: the detail\'s reads (documents, rating, geocode) go by loadRef()',
+    /const lid = loadRef\(job, lc\)\.trim\(\)/.test(src), true)
+  check('§2 Completed Loads: the rating save goes by the load\'s reference',
+    /async function submitRating\(r\) \{[^}]*const lid = loadRefValue\.value\.trim\(\)[\s\S]{0,200}?api\.put\(`\/api\/load-ratings\/\$\{encodeURIComponent\(lid\)\}`/.test(src), true)
+  check('§2 Completed Loads: the status timeline, the haul, the document upload and the documents refresh go by the load\'s reference',
+    [/<StatusTimeline v-if="loadRefValue" :load-id="loadRefValue"/.test(src), /<LoadHaulSection :load-id="loadRefValue"/.test(src),
+      /<DocumentUpload\s+:load-id="loadRefValue"\s+:load-label="loadIdShownValue"/.test(src),
+      /api\.get\(`\/api\/documents\/\$\{encodeURIComponent\(loadRefValue\.value\)\}`\)/.test(src)],
+    [true, true, true, true])
+  // The Super Admin-only rate-con PDF section and invoice draft preview stay on the
+  // served ID: a Super Admin is never served a key.
+  check('§2 Completed Loads: only the Super Admin-only panels are handed the served Load ID text',
+    servedIdPanels(src), ['RateConPdfSection', 'InvoiceDraftPreviewModal'])
+  check('§2 Completed Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
+    [/v-else-if="docsWithheldNote"/.test(src), (src.match(/r\.documentsWithheld \?/g) || []).length, linksIn(withheldDocsBlock(src))], [true, 2, []])
+  check('§2 Completed Loads: the title and the list show the ID as served ("[contact withheld]" when served blank)',
+    [/<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src),
+      /Details for load \{\{ loadIdShownValue \}\}/.test(src), /\{\{ cellValue\(job, col\) \|\| loadIdShown\(job, col\) \}\}/.test(src)],
+    [true, true, true])
 })
 
 section('§2 the dashboard store (assign, reassign, status)', () => {

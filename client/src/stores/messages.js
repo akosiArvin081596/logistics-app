@@ -8,7 +8,8 @@ const api = useApi()
 
 // The staff desks a message to staff is addressed to: a driver writes to
 // "Dispatch", an investor to "admin" (server.js CHAT_DESK_NAMES). Opening a
-// conversation marks both read, as GET /api/messages counts both unread.
+// conversation marks both read, as GET /api/messages counts both unread (a
+// Dispatcher is served no investor conversation: server.js INVESTOR_CHAT_SQL).
 const STAFF_DESKS = ['dispatch', 'admin']
 
 export const useMessagesStore = defineStore('messages', {
@@ -44,12 +45,21 @@ export const useMessagesStore = defineStore('messages', {
       this.selectedDriver = driverName
       this.selectedLoadId = loadId || ''
       this.selectedLoadShown = shown == null ? this.selectedLoadId : String(shown)
+      const query = loadId
+        ? `/api/messages/${encodeURIComponent(driverName)}?loadId=${encodeURIComponent(loadId)}`
+        : `/api/messages/${encodeURIComponent(driverName)}`
+      let data
       try {
-        const query = loadId
-          ? `/api/messages/${encodeURIComponent(driverName)}?loadId=${encodeURIComponent(loadId)}`
-          : `/api/messages/${encodeURIComponent(driverName)}`
-        const data = await api.get(query)
-        this.currentMessages = data.messages || []
+        data = await api.get(query)
+      } catch (err) {
+        // A thread not served (a stale key, or a conversation this account
+        // can't read): the header shows no other conversation's thread.
+        this.currentMessages = []
+        this.refetchIfKeyStale(err)
+        return
+      }
+      this.currentMessages = data.messages || []
+      try {
         // Mark unread as read
         const unreadIds = this.currentMessages
           .filter((m) => STAFF_DESKS.includes(m.to.toLowerCase()) && !m.read)
@@ -58,9 +68,8 @@ export const useMessagesStore = defineStore('messages', {
           await api.put('/api/messages/read', { messageIds: unreadIds })
           this.loadConversations()
         }
-      } catch (err) {
-        // A stale key: the header shows no other conversation's thread.
-        if (this.refetchIfKeyStale(err)) this.currentMessages = []
+      } catch {
+        // ignore: the list shows the count until the next read
       }
     },
 

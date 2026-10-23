@@ -20,7 +20,9 @@
  *       body is read, a streamed body past 4 MB 413, 422 too long or short, no
  *       key 400, unreadable headers 400, a recipient in the query string ignored
  *   §6  recipients: a driver to another driver 403, staff to an unknown name
- *       422, staff as someone else 422, an investor to the desk 200
+ *       422, staff as someone else 422, an investor to the desk 200; a
+ *       Dispatcher to an investor, or to "admin" under his own name, 403 with
+ *       nothing stored or emitted and one refusal audit row, and to a driver 200
  *   §7  a driver whose truck is moving gets 409; a stale, future-dated or
  *       stopped fix is accepted
  *   §8  the notification reads "Voice note (0:03)"; the live copy carries the
@@ -399,6 +401,26 @@ function telemetry(db, { agoMs, speed }) {
 		const toInv = await request(P, "POST", "/api/messages/voice", U.sa, { body: CHROME, headers: voiceHeaders("INV_T", newKey()) });
 		ok("§6 staff to an investor (username, any case): 200, the note the investor's", toInv.status === 200 && toInv.json && rowOf(db, toInv.json.id).party_user_id === U.inv.id && rowOf(db, toInv.json.id).to === "inv_t", [toInv.status, toInv.json]);
 		ok("§6 ...the investor plays it; another investor gets 404", toInv.json && (await play(U.inv, toInv.json.id)).status === 200 && (await play(U.invOther, toInv.json.id)).status === 404);
+		// A Dispatcher writes to drivers only (2026-10-23): an investor, or the
+		// investor desk under his own name, is refused before anything is stored.
+		// Each case is a Dispatcher with no earlier refusal, so its audit row is the
+		// first of its window (logAuditRefusal coalesces a repeat within one).
+		const countRows = () => db.prepare("SELECT COUNT(*) AS n FROM messages").get().n;
+		const dispRefusals = (id) => db.prepare("SELECT * FROM audit_trail WHERE action = 'message_blocked' AND user_id = ?").all(id)
+			.filter((r) => /\[VOICE_NOTE_RECIPIENT\]/.test(r.details) && /\bDispatcher\b/.test(r.details)).length;
+		for (const [label, user, to, extra] of [
+			["a Dispatcher to an investor", { id: 3, role: "Dispatcher", username: "dispatch_u" }, "INV_T", {}],
+			["a Dispatcher under his own name to \"admin\"", { id: 4, role: "Dispatcher", username: "dispatch_v" }, "admin", { "X-Message-From": "dispatch_v" }],
+		]) {
+			const before = { rows: countRows(), emits: on.emitted.length, notes: on.notifications.length, audits: dispRefusals(user.id) };
+			const r = await request(P, "POST", "/api/messages/voice", user, { body: CHROME, headers: voiceHeaders(to, newKey(), extra) });
+			ok(`§6 ${label}: 403 VOICE_NOTE_RECIPIENT`, r.status === 403 && r.json && r.json.code === "VOICE_NOTE_RECIPIENT", [r.status, r.json]);
+			ok(`§6 ...nothing stored, no notification, no live copy`, countRows() === before.rows && on.emitted.length === before.emits && on.notifications.length === before.notes);
+			ok(`§6 ...one refusal audit row naming the Dispatcher role`, dispRefusals(user.id) === before.audits + 1);
+			ok(`§6 ...the reason offers drivers only`, /\bdrivers only\b/i.test(String(r.json && r.json.error)) && !/investor/i.test(String(r.json && r.json.error)), r.json);
+		}
+		const toDrv = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders(DRIVER, newKey(), { "X-Message-From": U.disp.username }) });
+		ok("§6 the same Dispatcher under his own name to a driver: 200", toDrv.status === 200 && toDrv.json && rowOf(db, toDrv.json.id).party_user_id === U.drv.id, [toDrv.status, toDrv.json]);
 	}
 
 	// §7 the moving truck

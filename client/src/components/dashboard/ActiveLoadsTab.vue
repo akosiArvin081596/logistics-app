@@ -313,7 +313,7 @@
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :fix-at="mapDriverPosition ? mapDriverPosition.fixAt : null" :planned-lane="plannedLane" dispatch-mode show-arrival />
             <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
