@@ -146,6 +146,9 @@ const rateconNormalize = require("./lib/ratecon-normalize");
 const { normalizeLoadId } = require("./lib/ratecon-load");
 // The rows of GET /api/admin/deleted-loads (the Super Admin "Deleted loads" list).
 const deletedLoadsView = require("./lib/deleted-loads-view");
+// What restoring a soft-deleted load would change in the payout ledger
+// (restoreLedgerChanges()).
+const deletedLoadRestore = require("./lib/deleted-load-restore");
 const receiptDuplicates = require("./lib/receipt-duplicates");
 const expenseWindowRule = require("./lib/expense-window");
 const { geminiFailure } = require("./lib/gemini-errors");
@@ -60655,8 +60658,15 @@ function truckBilledMonthCount(t, now) {
 // `ownerOfBlankRow(r)`, given (the datedAttribution payout rule), decides a row
 // with a blank Owner ID instead of the driver set: the owner of the truck the
 // row's driver held on the load's date.
-function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow = null }) {
-	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers);
+//
+// `deletedIds`, given, is the soft-deleted set to leave out in place of the
+// stored one (getDeletedLoadIds()): a restore's preview reads the ledger as it
+// would stand with one load put back (restoreLedgerSnapshot()). It must be a Set:
+// excludeDroppedLoads() reads anything else as "use the stored set", which here
+// would silently answer for the wrong set. null (the default) is the stored set.
+function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow = null, deletedIds = null }) {
+	if (deletedIds != null && !(deletedIds instanceof Set)) throw new TypeError("ledgerLoadRows: deletedIds must be a Set of load ids, or null for the stored set");
+	const data = excludeDroppedLoads(jobTracking.data, jobTracking.headers, deletedIds);
 	const headers = jobTracking.headers;
 	// Column resolution — same regexes as GET /api/investor.
 	const jtRateCol = findCol(headers, /payment|rate|amount|revenue/i);
@@ -60723,7 +60733,9 @@ function ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, owner
 // Everything computeLedgerScope() needs for one scope, read the way the payout
 // ledger has always read it. investorDriverSet null = the fleet (Super Admin);
 // otherwise the investor `investorOwnerId` (whose trucks are `user.id`'s).
-async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth = null, jobTracking: snapshot = null, rules = payoutRules() }) {
+// `deletedIds`: the soft-deleted set to leave out (ledgerLoadRows()); null, the
+// default, is the stored one.
+async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth = null, jobTracking: snapshot = null, rules = payoutRules(), deletedIds = null }) {
 	let jobTracking = snapshot;
 	if (!jobTracking) jobTracking = await getJobTrackingCached();
 	// The truck each driver held on a day: the datedAttribution and datedRates
@@ -60742,7 +60754,7 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 			};
 		})()
 		: null;
-	const { rows, headers } = ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow });
+	const { rows, headers } = ledgerLoadRows(jobTracking, { investorDriverSet, investorOwnerId, ownerOfBlankRow, deletedIds });
 	// Reuse the dashboard's address-column picker (skips lat/lng/date/appt
 	// columns) so the drill-down route text never grabs a coordinate.
 	const jtPickupCol = pickAddressColumn(headers, /origin|pickup|shipper/i);
@@ -60969,9 +60981,13 @@ async function gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, i
 // The math is lib/financials-calc.js computeLedgerScope(); this gathers its
 // facts and settles the months it returns. `items` are the dated line items
 // behind those months (see the module), for Financials and its groupings.
-async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null, rules = payoutRules() }) {
+// `jobTracking` (a snapshot to read instead of the cache) and `deletedIds` (the
+// soft-deleted set to leave out instead of the stored one) are for a reader
+// comparing two ledgers on one sheet read (restoreLedgerSnapshot()); both
+// default to what every other caller reads.
+async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriverSet, investorOwnerId, config, detailForMonth = null, rules = payoutRules(), jobTracking = null, deletedIds = null }) {
 	const investorSplit = resolveInvestorSplitPct(config) / 100;
-	const facts = await gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth, rules });
+	const facts = await gatherLedgerScopeFacts({ user, isSuperAdmin, investorDriverSet, investorOwnerId, detailForMonth, rules, jobTracking, deletedIds });
 	const { months, items, detail } = financialsCalc.computeLedgerScope(facts);
 	if (detail) detail.tripExpenseItems = facts.tripExpenseItems;
 
@@ -61083,13 +61099,19 @@ async function computeInvestorMonthlyEarnings({ user, isSuperAdmin, investorDriv
 // load whose driver is in two investors' driver sets, a receipt inside two
 // expense scopes). Each of those investors' ledgers counts it, so the fleet does
 // too; it is reported, not split.
-async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
+//
+// `deletedIds` (a Set, or null for the stored set) is the soft-deleted set every
+// scope leaves out, and `jobTracking` a snapshot to read instead of the cache:
+// a restore's preview runs this twice on one snapshot, before and after the
+// load comes back (restoreLedgerSnapshot()). Without them nothing changes.
+async function computeFleetLedger({ rules: given = payoutRules(), deletedIds = null, jobTracking: snapshot = null } = {}) {
 	// One trip work-day reading (the status history) for every scope
 	// (gatherLedgerScopeFacts() takes it from rules.tripFacts), or the caller's
 	// (the work-days dry run reads each load's answer from it afterwards).
 	const rules = { ...given, tripFacts: given.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
 	// One Job Tracking snapshot for every scope, so they all read the same sheet.
-	const jobTracking = await getJobTrackingCached();
+	let jobTracking = snapshot;
+	if (!jobTracking) jobTracking = await getJobTrackingCached();
 	const carrierDB = getCarrierDBFromSQLite();
 	const carrierDriverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
 	const carrierCarrierCol = findCol(carrierDB.headers, /carrier/i);
@@ -61101,7 +61123,7 @@ async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
 	for (const inv of investors) {
 		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, carrierDriverCol, carrierCarrierCol);
 		for (const d of investorDriverSet) investorDrivers.add(d);
-		const facts = await gatherLedgerScopeFacts({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, jobTracking, rules });
+		const facts = await gatherLedgerScopeFacts({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, jobTracking, rules, deletedIds });
 		for (const r of facts.rows) claim(claimed.load, r.source._rowIndex, inv.ownerId);
 		for (const x of facts.receipts) claim(claimed.receipt, x.id, inv.ownerId);
 		for (const x of facts.maintRows) claim(claimed.maintenance, x.id, inv.ownerId);
@@ -61109,7 +61131,7 @@ async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
 		const { months, items, dayOnceDrops } = financialsCalc.computeLedgerScope(facts);
 		scopes.push({ ownerId: inv.ownerId, name: inv.name, months, items, ...(dayOnceDrops && { dayOnceDrops }) });
 	}
-	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking, rules });
+	const fleet = await gatherLedgerScopeFacts({ user: { id: 0 }, isSuperAdmin: true, investorDriverSet: null, investorOwnerId: null, jobTracking, rules, deletedIds });
 	const investorIds = new Set(investors.map((i) => i.ownerId));
 	// The company's added override days: a driver's day no investor scope took.
 	const heldTrucks = rules.datedAttribution ? buildHeldTruckIndex() : null;
@@ -61167,6 +61189,73 @@ async function computeFleetLedger({ rules: given = payoutRules() } = {}) {
 		for (const [key, owners] of map) if (owners.length > 1) overlaps.push({ kind, key, owners });
 	}
 	return { scopes, overlaps, currentMonthKey: fleet.currentMonthKey };
+}
+
+// The payout ledger as it would stand with `deletedIds` (a Set, or null for the
+// stored set) as the soft-deleted set: computeFleetLedger()'s scopes, plus
+// `payable`, each settlable investor's payable after loss carry-forward by month
+// ({ ownerId: { "YYYY-MM": amount } }), computed as reconcileInvestorPayouts()
+// computes it (computeInvestorMonthlyEarnings() + computeLossCarryForward()).
+// Every figure reads one Job Tracking snapshot and one rules object (one trip
+// work-day reading), so two runs that differ only in `deletedIds` differ only by
+// those loads. The restore plan's preview and switch-on report compare two runs
+// (restoreLedgerChanges()).
+//
+// ⚠️ WRITE-FREE. This is the restore plan's write-free path (M2): it only reads.
+// It must never call reconcileInvestorPayouts(), or anything that does (GET
+// /api/investor/payouts, GET /api/payouts, the payout statement,
+// investorReportPayoutEntries()): that function writes investor_payouts, their
+// history and closed-month audit notes, and a preview must change nothing.
+// scripts/test-deleted-load-restore.js (case 15) checks every table after it.
+async function restoreLedgerSnapshot({ deletedIds = null, rules: given = payoutRules(), jobTracking: snapshot = null } = {}) {
+	const rules = { ...given, tripFacts: given.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: given }) };
+	let jobTracking = snapshot;
+	if (!jobTracking) jobTracking = await getJobTrackingCached();
+	const fleet = await computeFleetLedger({ rules, deletedIds, jobTracking });
+	const carrierDB = getCarrierDBFromSQLite();
+	const driverCol = findCol(carrierDB.headers, /driver/i) || carrierDB.headers[0];
+	const carrierCol = findCol(carrierDB.headers, /carrier/i);
+	const globalConfig = {};
+	db.prepare("SELECT key, value FROM investor_config WHERE owner_id = 0").all().forEach((r) => { globalConfig[r.key] = r.value; });
+	const payable = {};
+	for (const inv of listSettlableInvestors()) {
+		const config = { ...globalConfig };
+		db.prepare("SELECT key, value FROM investor_config WHERE owner_id = ?").all(inv.ownerId).forEach((r) => { config[r.key] = r.value; });
+		const investorDriverSet = getInvestorDriverSet(inv.ownerId, carrierDB.data, driverCol, carrierCol);
+		const { monthlyEarnings } = await computeInvestorMonthlyEarnings({ user: { id: inv.ownerId }, isSuperAdmin: false, investorDriverSet, investorOwnerId: inv.ownerId, config, rules, jobTracking, deletedIds });
+		const carry = computeLossCarryForward(monthlyEarnings);
+		payable[inv.ownerId] = Object.fromEntries(monthlyEarnings.map((m) => [m.month, carry[m.month].payable]));
+	}
+	return { ...fleet, payable };
+}
+
+// What restoring the soft-deleted load `loadKey` would change in the payout
+// ledger: lib/deleted-load-restore.js ledgerChanges() over two
+// restoreLedgerSnapshot() runs on one sheet read, "before" with the stored
+// soft-deleted set and "after" with every stored row of that load taken out of
+// it. Rows match by normalizeLoadId(), not by the stored text, so a row stored
+// as "#X" comes back with "x" (the plan's finding F3). Every scope-month and
+// fleet month that moves is listed, later open months included (the ledger
+// day-once rule and loss carry-forward carry a restored month into the next);
+// `closedMonths` names any closed month that would move, which the restore
+// refuses. A lock table that cannot be read counts every month as closed
+// (periodWriteLocked()). Write-free, as restoreLedgerSnapshot() is.
+// Throws when deleted_loads cannot be read: an empty set there would read every
+// soft-deleted load as live.
+async function restoreLedgerChanges(loadKey, { jobTracking: snapshot = null } = {}) {
+	const key = normalizeLoadId(loadKey);
+	if (!key) throw new Error("restoreLedgerChanges: a Load ID is required");
+	let jobTracking = snapshot;
+	if (!jobTracking) jobTracking = await getJobTrackingCached();
+	// Read after the sheet read, its only real wait, so a delete or restore that
+	// landed during it is in both runs.
+	const stored = getDeletedLoadIds({ strict: true });
+	const without = new Set([...stored].filter((id) => normalizeLoadId(id) !== key));
+	const base = payoutRules();
+	const rules = { ...base, tripFacts: base.tripFacts || financialsCalc.tripWorkDays.ledgerFacts({ db, env: process.env, rules: base }) };
+	const before = await restoreLedgerSnapshot({ deletedIds: stored, rules, jobTracking });
+	const after = await restoreLedgerSnapshot({ deletedIds: without, rules, jobTracking });
+	return { key, ...deletedLoadRestore.ledgerChanges({ before, after, isClosed: (month) => periodWriteLocked(month) }) };
 }
 
 // The items a closed month is frozen with, across every scope of the fleet,
@@ -66139,10 +66228,14 @@ app.get("/api/admin/period-lock-issues", requireRole("Super Admin"), periodIssue
 // the receipts booked into the months (each one's figure and attribution), the
 // maintenance-fund and compliance rows and override days in them, the trucks,
 // assignments, pay settings, pairings, investor accounts, payout bases and split
-// config the attribution and the math read, and the in-process Job Tracking
-// write counter (_jtEpoch, bumped by jtCacheInvalidate()). ELD telemetry is not
-// in it: the close reads travel days through the same cached index as every
-// other read. The close
+// config the attribution and the math read, the soft-deleted loads (every
+// deleted_loads row: a delete or a restore during the close moves the months it
+// touches, and the count, the ids and the stored Load IDs change with either,
+// whether or not the Job Tracking cache was invalidated; not filtered by month,
+// as the table is small and a retry costs one sweep pass), and the in-process
+// Job Tracking write counter (_jtEpoch, bumped by jtCacheInvalidate()). ELD
+// telemetry is not in it: the close reads travel days through the same cached
+// index as every other read. The close
 // takes it before it computes and again inside the freeze; if they differ,
 // something changed while the figures were being computed and nothing closes
 // (the next pass recomputes and tries again). Direct edits in the Google Sheet
@@ -66177,6 +66270,7 @@ function closingFingerprint(periods) {
 		ordered("owner_id || ',' || key || ',' || value", "investor_config"),
 		ordered("id || ',' || COALESCE(role,'') || ',' || COALESCE(company_name,'')", "users"),
 		ordered("id || ',' || COALESCE(owner_id,'') || ',' || COALESCE(effective_month,'') || ',' || COALESCE(basis_type,'') || ',' || COALESCE(lease_amount_cents,'')", "investor_payout_basis"),
+		ordered("id || ',' || COALESCE(load_id,'')", "deleted_loads"),
 		_jtEpoch,
 	]);
 }
