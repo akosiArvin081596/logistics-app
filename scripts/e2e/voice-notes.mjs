@@ -326,7 +326,9 @@ async function dashboard(browser) {
     const reviewShot = await shot(page, 'V2b-dashboard-review')
     await page.getByRole('button', { name: /^Send voice note, / }).click()
     await page.getByRole('button', { name: 'Record a voice note' }).first().waitFor({ timeout: 10000 })
-    const players = await page.getByRole('button', { name: /^Play voice note, 3 seconds/ }).count()
+    // Counted by the player's group name: its button reads "Pause" while V1's note
+    // is still playing.
+    const players = await page.getByRole('group', { name: 'Voice note, 3 seconds', exact: true }).count()
     const problems = posts.length === 1 ? checkPost(posts[0], { to: DRIVER, loadId: LOAD, from: 'Dispatch' }) : [`${posts.length} uploads`]
     record('V2', 'Dashboard: record, review, send', 'one POST /api/messages/voice (no query), audio/mp4 body = the recording, To/Load/From headers encoded, an Idempotency-Key; the sent note shows as a player',
       `${problems.length ? problems.join('; ') : 'upload as expected'}; players for 3 s notes: ${players}; screenshots ${path.basename(recShot)}, ${path.basename(reviewShot)}`,
@@ -411,7 +413,8 @@ async function main() {
   if (await portInUse(PORT)) die(`port ${PORT} is in use (another e2e server?): set E2E_PORT to a free one`)
   const server = http.createServer(serveDist)
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(PORT, HOST, resolve) })
-  console.log(`voice-notes: serving ${DIST} on ${BASE} (made-up data; no server.js)`)
+  // The static server lives in this process: it stops when the run ends.
+  console.log(`voice-notes: serving ${DIST} on ${BASE} (made-up data; no server.js; pid ${process.pid})`)
   const browser = await chromium.launch({ executablePath: await paths.chromePath(), headless: !HEADED, args: ['--autoplay-policy=no-user-gesture-required'] })
   const guard = async (name, fn) => {
     try { await fn() } catch (e) { record(name, 'step ran to the end', 'no exception', String(e.message || e).split('\n')[0].slice(0, 300), false) }
