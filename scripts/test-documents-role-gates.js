@@ -126,9 +126,12 @@ const JT = {
 
 // Every Job Tracking read and every statement prepared is counted, so "refused
 // before any read" is asserted rather than assumed.
-const counters = { sheetReads: 0, prepared: [], limiter: 0, files: [], emits: 0, emitted: [] };
+// `indexReads`: the list route's own Job Tracking read for a Dispatcher, which
+// names the load as shown (WITHHELD LOAD KEYS); no ownership read.
+const counters = { sheetReads: 0, indexReads: 0, prepared: [], limiter: 0, files: [], emits: 0, emitted: [] };
 function resetCounters() {
 	counters.sheetReads = 0;
+	counters.indexReads = 0;
 	counters.prepared.length = 0;
 	counters.limiter = 0;
 	counters.files.length = 0;
@@ -147,14 +150,20 @@ const DOC_IO = {
 		except: (other) => ({ emit: (event, payload) => { counters.emits++; counters.emitted.push({ room, except: other, event, payload }); } }),
 	}),
 };
-const DISPATCH_EMIT_NAMES = ["emitDispatchByRole", "loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadId", "staffDispatchNotice", "emitDispatchNotice", "emitLoadEventToDispatch"];
+// The WITHHELD LOAD KEYS helpers both routes read the load ID through (and the
+// per-role send names a key by), as shipped: flag off, no key named, so the ID
+// as sent and no key served.
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+const DISPATCH_EMIT_NAMES = ["emitDispatchByRole", "loadIdWithheldFor", "currentShownLoadIdIndex", "shownLoadIdIndex", "routeShownLoadIdIndex",
+	"shownLoadId", "staffDispatchNotice", "emitDispatchNotice", "emitLoadEventToDispatch"];
 const DISPATCH_EMITS = (() => {
 	const re = SRC.match(/\nconst BROKER_WITHHELD_RE = (\/[^\n]*\/i);\n/);
 	if (!re) fatal("BROKER_WITHHELD_RE not found in server.js");
-	return new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
+	return new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "loadKeyFor",
 		`const BROKER_WITHHELD_RE = ${re[1]};\nconst SHOWN_LOAD_ID_STATE = { latest: null };\n` +
+		"const SHOWN_LOAD_ID_INDEX = Symbol(\"shownLoadIdIndex\");\nconst SHOWN_LOAD_ID_INDEXES = new WeakMap();\n" +
 		`${DISPATCH_EMIT_NAMES.map((n) => liftFn(n)).join("\n")}\nreturn { ${DISPATCH_EMIT_NAMES.join(", ")} };`,
-	)(DOC_IO, require("../lib/broker-contact"), true);
+	)(DOC_IO, require("../lib/broker-contact"), true, KEY_HELPERS.loadKeyFor);
 })();
 
 // The real ownership check, over the canned sheet and an empty deleted_loads.
@@ -197,6 +206,8 @@ const limiter = (req, res, next) => { counters.limiter++; next(); };
 
 function documentDeps(overrides = {}) {
 	return {
+		...KEY_HELPERS,
+		getJobTrackingCached: async () => { counters.indexReads++; return JT; },
 		requireRole, requireAuth, driverWriteLimiter: limiter,
 		loadBelongsToDriver, sentIfLoadOwnershipUnverified, resolveDriverActor, LOAD_PANEL_DOCUMENT_FILTER, isRateConDocType,
 		documentFiledUnder,

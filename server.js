@@ -7174,6 +7174,9 @@ io.engine.use(sessionMiddleware);
 // would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
 // guards; scripts/test-password-change-enforced.js pins this position.
 app.use(refreshPasswordChangeFlag);
+// A Dispatcher's opaque load key, read before routing (WITHHELD LOAD KEYS, beside
+// shownLoadId()): inert unless WITHHELD_LOAD_REFS_ENABLED is on.
+app.use(withheldLoadKeyGate);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
@@ -31014,7 +31017,8 @@ app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
 
 // Per-load rating: get single
 app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
-	const loadId = decodeURIComponent(req.params.loadId).trim();
+	// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+	const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim();
 	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
 	res.json({ rating: row ? row.rating : null });
 });
@@ -38623,8 +38627,11 @@ async function staffRowMovedRefusal(req, sheets, a1, headers, rowIndex, before, 
 	const storedRaw = String(b[col] == null ? "" : b[col]).trim();
 	const stored = servedText(hs, b, col);
 	const opened = String(baseline[col] == null ? "" : baseline[col]).trim();
-	let confirmed = false;
-	if (stored && stored !== storedRaw && opened.toLowerCase() === stored.toLowerCase()) {
+	// A Dispatcher's key (`loadId` in the body; WITHHELD LOAD KEYS) names the load
+	// itself: it confirms the row whose stored ID it is, an ID that is only contact
+	// included.
+	let confirmed = !!(req.withheldLoad && normalizeLoadId(storedRaw) && normalizeLoadId(req.withheldLoad.raw) === normalizeLoadId(storedRaw));
+	if (!confirmed && stored && stored !== storedRaw && opened.toLowerCase() === stored.toLowerCase()) {
 		try {
 			const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: a1 });
 			const all = (read && read.data && read.data.values) || [];
@@ -40518,7 +40525,10 @@ function resolveLoadBinding(headers, rows, rowIndex, loadId, opts) {
 	// body-parser inflates, so an unbounded id in an error string is the same
 	// reflection PR #246 capped on the status route — and POST /api/driver/respond
 	// is Driver-reachable at driverWriteLimiter's 60/min.
-	const shown = typed ? String(loadId).trim().slice(0, 64) : "";
+	// `opts.shownAs`: the text a Dispatcher's request named the load by when it
+	// named it by its key (WITHHELD LOAD KEYS), so no refusal echoes the stored ID.
+	const shownAs = opts && Object.hasOwn(opts, "shownAs") && typeof opts.shownAs === "string" ? opts.shownAs : null;
+	const shown = typed ? (shownAs != null ? shownAs : String(loadId)).trim().slice(0, 64) : "";
 	const wanted = typed ? normLoadKey(loadId) : "";
 	if (!wanted) {
 		return {
@@ -40738,7 +40748,11 @@ function recordOffDutyConfirmation(req, c) {
 // drawn and why it is not a blanket refusal.
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
+		const { rowIndex: rawRowIndex, driver: rawDriver, origin, destination } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		if (!rawDriver) {
 			return res.status(400).json({ error: "rowIndex and driver required" });
 		}
@@ -40772,7 +40786,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"dispatch_blocked", loadId, `Assigning ${driver} to load ${loadId || "(unknown)"}`
+				"dispatch_blocked", loadId, `Assigning ${driver} to load ${idText || "(unknown)"}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -40782,7 +40796,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// load the caller named, its verdict is about the wrong load, so the
 		// subject has to be established first. See resolveLoadBinding().
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "dispatch_blocked", loadId,
@@ -40841,7 +40855,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "dispatch_blocked", loadId,
-					`Assigning ${driver} to load ${loadId || "(unknown)"}`
+					`Assigning ${driver} to load ${idText || "(unknown)"}`
 				);
 			}
 		}
@@ -40933,7 +40947,11 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 // POST /api/dispatch/reassign — Reassign a load to a different driver
 app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, newDriver: rawNewDriver, loadId, oldDriver } = req.body;
+		const { rowIndex: rawRowIndex, newDriver: rawNewDriver, oldDriver } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		if (!rawNewDriver) {
 			return res.status(400).json({ error: "rowIndex and newDriver required" });
 		}
@@ -40955,7 +40973,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"reassign_blocked", loadId, `Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+				"reassign_blocked", loadId, `Reassigning load ${idText || "(unknown)"} to ${newDriver}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -40965,7 +40983,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// load's revenue to another investor (Owner ID) and its active-day pay to
 		// another person (Driver), on a load nobody asked about.
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "reassign_blocked", loadId,
@@ -41019,7 +41037,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "reassign_blocked", loadId,
-					`Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+					`Reassigning load ${idText || "(unknown)"} to ${newDriver}`
 				);
 			}
 		}
@@ -41880,7 +41898,11 @@ const locationLimiter = rateLimit({
 // no budget.
 app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, rowIndex: rawRowIndex, response } = req.body;
+		const { rowIndex: rawRowIndex, response } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return; // 401/403 already sent
 		if (!loadId || !response || !driverName) {
@@ -41920,7 +41942,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"driver_respond_blocked", loadId, `Recording "${response}" on load ${loadId || "(unknown)"}`
+				"driver_respond_blocked", loadId, `Recording "${response}" on load ${idText || "(unknown)"}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -41932,7 +41954,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 		// "Unassigned"` on a stranger's live load. Ownership of the id is not
 		// ownership of the row, so the two have to be tied together.
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "driver_respond_blocked", loadId,
@@ -41966,7 +41988,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "driver_respond_blocked", loadId,
-					`Recording "${response}" on load ${loadId || "(unknown)"}`
+					`Recording "${response}" on load ${idText || "(unknown)"}`
 				);
 			}
 		}
@@ -42373,6 +42395,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const withholdIds = loadIdWithheldFor(req);
 		const loadIdIndex = withholdIds ? routeShownLoadIdIndex(jobTracking) : null;
 		const idShown = (raw, row) => (withholdIds ? shownLoadId(req, raw, { row, index: loadIdIndex }) : raw);
+		// A Dispatcher's key beside each withheld ID (WITHHELD LOAD KEYS; "" otherwise).
+		const keysOn = loadKeysFor(req);
+		const idKey = (raw) => (keysOn ? loadKeyFor(req, raw, { index: loadIdIndex }) : "");
 
 		// Fleet details. "On Load" should only fire when the driver is actually
 		// mid-trip (heading-to-shipper..unloading); a driver whose only loads are
@@ -42424,6 +42449,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 					: "",
 				QueueCount: queue.length,
 				QueuedLoadIds: queue.map((q) => idShown(q.load_id)),
+				...(keysOn ? {
+					CurrentLoadKey: inProgressLoad && loadIdCol ? idKey(inProgressLoad[loadIdCol]) : "",
+					QueuedLoadKeys: queue.map((q) => idKey(q.load_id)),
+				} : {}),
 				CompletedLoads: completedJobs.filter((j) => {
 					return driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm;
 				}).length,
@@ -42480,14 +42509,17 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
+		// A Dispatcher's rows also carry `_loadKey` beside a withheld Load ID
+		// (withLoadKeys(); WITHHELD LOAD KEYS), never inside sanitizeBrokerColumns(),
+		// which the Driver page shares.
 		const respUnassigned = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, unassignedJobs)
+			? withLoadKeys(req, jobTracking.headers, unassignedJobs, sanitizeBrokerColumns(jobTracking.headers, unassignedJobs), { index: loadIdIndex })
 			: unassignedJobs;
 		const respActive = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
+			? withLoadKeys(req, jobTracking.headers, activeJobs, sanitizeBrokerColumns(jobTracking.headers, activeJobs), { index: loadIdIndex })
 			: activeJobs;
 		const respCompleted = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
+			? withLoadKeys(req, jobTracking.headers, completedJobs, sanitizeBrokerColumns(jobTracking.headers, completedJobs), { index: loadIdIndex })
 			: completedJobs;
 
 		// Search references for the load search (lib/load-search-refs.js), on the
@@ -42525,7 +42557,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			fleet,
 			drivers: driverList,
 			driverQueues: withholdIds
-				? Object.assign(Object.create(null), Object.fromEntries(Object.entries(driverQueues).map(([k, list]) => [k, list.map((q) => ({ ...q, load_id: idShown(q.load_id) }))])))
+				? Object.assign(Object.create(null), Object.fromEntries(Object.entries(driverQueues).map(([k, list]) => [k, list.map((q) => {
+					const key = idKey(q.load_id);
+					return { ...q, load_id: idShown(q.load_id), ...(key ? { load_key: key } : {}) };
+				})])))
 				: driverQueues,
 			...(offUntilByName
 				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
@@ -42774,9 +42809,207 @@ function emitDispatchNotice(notice, { staffNotice = null, index = currentShownLo
 function emitLoadEventToDispatch(event, payload, { row = null, index = currentShownLoadIdIndex(), dropForStaff = [] } = {}) {
 	if (!io) return;
 	const staff = { ...payload };
-	if (Object.prototype.hasOwnProperty.call(staff, "loadId")) staff.loadId = shownLoadId("Dispatcher", staff.loadId, { row, index });
+	if (Object.prototype.hasOwnProperty.call(staff, "loadId")) {
+		const key = loadKeyFor("Dispatcher", staff.loadId, { index });
+		staff.loadId = shownLoadId("Dispatcher", staff.loadId, { row, index });
+		if (key) staff.loadKey = key;
+	}
 	for (const k of dropForStaff) delete staff[k];
 	emitDispatchByRole(event, payload, staff);
+}
+
+// WITHHELD LOAD KEYS (the Dispatcher raw Load ID plan, PR 2, decisions 6 and 7;
+// lib/withheld-load-key.js). A Load ID that holds broker contact reaches a
+// Dispatcher as its shown text only, so since #525 a Dispatcher could see such a
+// load but not open, edit, assign or override it. With WITHHELD_LOAD_REFS_ENABLED
+// on (off by default; on after the replica check and Arvin's yes), a Dispatcher
+// is also served an opaque key beside each withheld ID (`_loadKey` on a load row,
+// `loadKey` beside a `loadId`, `CurrentLoadKey`, `QueuedLoadKeys`, `load_key`),
+// and may name the load by it wherever a route takes a Load ID:
+//   - withheldLoadKeyGate() (mounted above every route) finds a key in the path,
+//     in a `loadId` / `load_id` field of the query or the body, or in
+//     X-Message-Load-Id, and puts the load on req.withheldLoad = { raw, shown,
+//     key, drivers }. Path, query and body stay as sent. A key no load of the
+//     current Job Tracking read has answers 404 LOAD_KEY_UNKNOWN before any
+//     handler, so it is never stored as a load_id; key-shaped text in any other
+//     field is left alone; /api/public/* is never read.
+//   - each handler reads its load ID through loadIdFor() and names it in every
+//     reply through loadIdShownFor(), so the stored ID never reaches the caller.
+//   - the reply guard (installed with req.withheldLoad) swaps the stored ID, and
+//     each phone or email its shown text withholds, out of every res.json and
+//     string res.send of that request, keeps the status code, and logs the route
+//     only. A hit is a bug: the runners fail on any.
+// Keys are issued and read for Dispatchers only, never for a Super Admin (served
+// every ID as stored), a Driver (served his own loads' IDs as stored, #549) or an
+// Investor. Nothing changes with the flag off, or with
+// BROKER_CONTACT_VALUE_REDACTION_ENABLED off (no ID is withheld then).
+const withheldLoadKey = require("./lib/withheld-load-key");
+const WITHHELD_LOAD_REFS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.WITHHELD_LOAD_REFS_ENABLED ?? "").trim());
+// Random per process: a restart makes every key unknown, and the page reads again.
+const WITHHELD_LOAD_KEYS = withheldLoadKey.createLoadKeys();
+const WITHHELD_LOAD_KEY_TABLES = new WeakMap();
+const WITHHELD_LOAD_KEY_FIELDS = ["loadId", "load_id"];
+// Whether `who` (a request, or a role name) is issued keys and may name a load by one.
+function loadKeysFor(who) {
+	if (!WITHHELD_LOAD_REFS_ENABLED || !loadIdWithheldFor(who)) return false;
+	const role = typeof who === "string" ? who : (who && who.session && who.session.user && who.session.user.role) || "";
+	return role === "Dispatcher";
+}
+// The key `who` is served beside `raw`: "" unless keys are for `who` and the
+// index withholds `raw` (an ID on no sheet row gets none: no key could read it back).
+function loadKeyFor(who, raw, { index = currentShownLoadIdIndex() } = {}) {
+	if (!loadKeysFor(who) || !index || !index.byKey) return "";
+	const s = typeof raw === "number" ? String(raw) : raw;
+	if (typeof s !== "string" || !s.trim()) return "";
+	const hit = index.byKey.get(brokerContact.loadIdKey(s));
+	return hit && hit.hidden ? WITHHELD_LOAD_KEYS.keyFor(s) : "";
+}
+// Copies of `served` (sanitizeBrokerColumns() of `source`, row for row) with
+// `_loadKey` on each row whose stored Load ID is withheld from `who`.
+function withLoadKeys(who, headers, source, served, { index = currentShownLoadIdIndex() } = {}) {
+	if (!loadKeysFor(who)) return served;
+	const idCol = (headers || []).find((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (!idCol) return served;
+	return served.map((row, i) => {
+		const key = loadKeyFor(who, source[i] && source[i][idCol], { index });
+		return key ? { ...row, _loadKey: key } : row;
+	});
+}
+// A stored dispatch notice as `served` to `who` (staffDispatchNotice()), with
+// metadata.loadKey beside a withheld load the stored notice names in
+// metadata.loadId (or load_id), so its tap opens the load. JSON text stays text.
+function withNoticeLoadKey(who, stored, served, index = currentShownLoadIdIndex()) {
+	if (!loadKeysFor(who) || !served || served.metadata == null) return served;
+	let meta = null;
+	try { meta = typeof stored.metadata === "object" ? stored.metadata : JSON.parse(String(stored.metadata || "")); } catch { meta = null; }
+	if (!meta || typeof meta !== "object") return served;
+	const key = loadKeyFor(who, meta.loadId != null ? meta.loadId : meta.load_id, { index });
+	if (!key) return served;
+	let shown = null;
+	try { shown = typeof served.metadata === "object" ? served.metadata : JSON.parse(String(served.metadata)); } catch { shown = null; }
+	if (!shown || typeof shown !== "object") return served;
+	const withKey = { ...shown, loadKey: key };
+	return { ...served, metadata: typeof served.metadata === "object" ? withKey : JSON.stringify(withKey) };
+}
+// The key table of one Job Tracking read (lib/withheld-load-key.js
+// buildLoadKeyTable()), built once per read.
+function loadKeyTable(jt) {
+	if (!jt || typeof jt !== "object") return new Map();
+	let table = WITHHELD_LOAD_KEY_TABLES.get(jt);
+	if (!table) {
+		table = withheldLoadKey.buildLoadKeyTable(jt.headers || [], jt.data || [], {
+			index: shownLoadIdIndex(jt), keyFor: WITHHELD_LOAD_KEYS.keyFor, driverKey: normalizeDriverName,
+		});
+		WITHHELD_LOAD_KEY_TABLES.set(jt, table);
+	}
+	return table;
+}
+// The keys a request names a load by: path segments, the query's and the body's
+// load fields, and X-Message-Load-Id (POST /api/messages/voice).
+function namedLoadKeys(req) {
+	const out = [];
+	const take = (v) => {
+		if (typeof v !== "string") return;
+		let s = v.trim();
+		try { s = decodeURIComponent(s); } catch { return; }
+		if (withheldLoadKey.isLoadKey(s)) out.push(s);
+	};
+	for (const seg of String(req.path || "").split("/")) take(seg);
+	for (const src of [req.query, req.body]) {
+		if (!src || typeof src !== "object" || Array.isArray(src)) continue;
+		for (const f of WITHHELD_LOAD_KEY_FIELDS) if (Object.prototype.hasOwnProperty.call(src, f)) take(src[f]);
+	}
+	take(req.headers && req.headers["x-message-load-id"]);
+	return out;
+}
+async function withheldLoadKeyGate(req, res, next) {
+	const user = req.session && req.session.user;
+	if (!user || user.mustChangePassword || !/^\/api\//i.test(req.path || "") || /^\/api\/public(\/|$)/i.test(req.path || "")) return next();
+	if (!loadKeysFor(req)) return next();
+	let entry = null;
+	try {
+		const named = namedLoadKeys(req);
+		if (!named.length) return next();
+		let jt = null;
+		try {
+			jt = await getJobTrackingCached();
+		} catch (e) {
+			console.error("[load-keys] Job Tracking could not be read to resolve a load key:", e.message);
+			return res.status(503).json({ error: "This load couldn't be checked right now. Try again.", code: "LOAD_KEY_UNVERIFIED", retryable: true });
+		}
+		// A key-shaped text that is itself a Load ID on the sheet is that load's ID.
+		const index = shownLoadIdIndex(jt);
+		const keys = [...new Set(named.filter((k) => !(index && index.byKey && index.byKey.has(brokerContact.loadIdKey(k)))))];
+		if (!keys.length) return next();
+		entry = keys.length === 1 ? loadKeyTable(jt).get(keys[0]) : null;
+		if (!entry) {
+			return res.status(404).json({ error: "This load's link is out of date. Reload the page and open the load again.", code: "LOAD_KEY_UNKNOWN" });
+		}
+		req.withheldLoad = { raw: entry.raw, shown: entry.shown, key: entry.key, drivers: entry.drivers };
+		guardWithheldLoadReply(req, res);
+	} catch (e) {
+		console.error("[load-keys] a load key could not be read:", e.message);
+		return res.status(500).json({ error: "This load couldn't be opened. Try again." });
+	}
+	next();
+}
+// The stored Load ID a handler acts on: the load a key names, else `value` as sent.
+function loadIdFor(req, value) {
+	const w = req && req.withheldLoad;
+	if (!w || typeof value !== "string" || value.trim() !== w.key) return value;
+	return w.raw;
+}
+// A Load ID as a reply names it: the shown text for the load the request named
+// by its key, else `value` as it is.
+function loadIdShownFor(req, value) {
+	const w = req && req.withheldLoad;
+	if (!w || value == null) return value;
+	const s = String(value).trim();
+	return s === w.key || normLoadKey(s) === normLoadKey(w.raw) ? w.shown : value;
+}
+// resolveLoadBinding()'s options for a request: when it named `loadId` by its
+// key, the refusals name the load as shown (`shownAs`). `extra` as given otherwise.
+function loadIdBindingOpts(req, loadId, extra) {
+	const w = req && req.withheldLoad;
+	if (!w || normLoadKey(loadId) !== normLoadKey(w.raw)) return extra;
+	return { ...(extra || {}), shownAs: w.shown };
+}
+// POST /api/messages and POST /api/messages/voice: a message names a load by
+// its key as stored only when it goes to that load's own driver (the Driver
+// cell of its row), who is served the ID so (#549); to anyone else, as shown.
+function messageLoadIdFor(req, value, to) {
+	const w = req && req.withheldLoad;
+	if (!w || typeof value !== "string" || value.trim() !== w.key) return value;
+	return w.drivers && w.drivers.has(normalizeDriverName(to)) ? w.raw : w.shown;
+}
+// The reply guard for a request that named a load by its key: res.json and a
+// string res.send are swept (lib/withheld-load-key.js guardReply()); streams,
+// files and buffers are not. The status code and the rest of the reply are kept.
+const WITHHELD_LOAD_KEY_STATE = { replyGuardHits: 0 };
+function guardWithheldLoadReply(req, res) {
+	const w = req.withheldLoad;
+	if (!w || !loadIdWithheldFor(req)) return;
+	const guard = withheldLoadKey.replyGuardFor(w.raw, w.shown);
+	const noteHits = (hits) => {
+		if (!hits) return;
+		WITHHELD_LOAD_KEY_STATE.replyGuardHits += hits;
+		console.error(`[load-keys] reply guard withheld a Load ID in ${req.method} ${(req.route && req.route.path) || "(no route)"}`);
+	};
+	const json = res.json.bind(res);
+	const send = res.send.bind(res);
+	let inJson = false;
+	res.json = (body) => {
+		const r = withheldLoadKey.guardReply(body, guard);
+		noteHits(r.hits);
+		inJson = true;
+		try { return json(r.value); } finally { inJson = false; }
+	};
+	res.send = (body) => {
+		if (inJson || typeof body !== "string") return send(body);
+		const r = withheldLoadKey.guardReply(body, guard);
+		noteHits(r.hits);
+		return send(r.value);
+	};
 }
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
@@ -45106,7 +45339,11 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// `rowData` is deliberately NOT destructured any more — see the load-binding
 		// block below. Clients still send it and it is simply ignored, so no client
 		// needs a change.
-		let { rowIndex: rawRowIndex, loadId, newStatus } = req.body;
+		let { rowIndex: rawRowIndex, newStatus } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
 		// ⚠️ ROW 1 IS THE HEADER ROW. This route had NO rowIndex validation of any
@@ -45275,13 +45512,13 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// `rowData` is still ACCEPTED in the body and ignored, so no client needs a
 		// change; it is simply no longer consulted.
 		{
-			const unbound = resolveLoadBinding(headers, dataRows, rowIndex, loadId, {
+			const unbound = resolveLoadBinding(headers, dataRows, rowIndex, loadId, loadIdBindingOpts(req, loadId, {
 				// ⚠️ See the rung-4 ⚠️ in resolveLoadBinding(): measured on the
 				// production sheet, a blanket AMBIGUOUS_LOAD would have refused 4 real
 				// driver taps on load 7052901 and stranded the driver mid-load. The
 				// caller's row must still carry the caller's own load id.
 				callerRowWinsAmongDuplicates: true,
-			});
+			}));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "status_update_blocked", loadId,
@@ -45419,7 +45656,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "status_update_blocked", loadId,
-					`Setting load ${loadId || "(unknown)"} to "${newStatus}"`
+					`Setting load ${idText || "(unknown)"} to "${newStatus}"`
 				);
 			}
 		}
@@ -45571,7 +45808,10 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 // described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const { newStatus, reason } = req.body || {};
 		if (!newStatus || typeof newStatus !== "string") {
 			return res.status(400).json({ error: "newStatus is required" });
@@ -45641,7 +45881,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		} catch (e) {
 			console.error("Status override blocked — Job Tracking unreadable:", e.message);
 			auditBlocked("PERIOD_UNRESOLVED", [], canonicalStatus);
-			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
+			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${idText}`, AUDITED_UPSTREAM);
 		}
 		const allRows = sheetRes.data.values || [];
 		const headers = allRows[0] || [];
@@ -45679,7 +45919,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			if (lid === targetLid) matches.push({ row: dataRows[i], rowIndex: i + 2 });
 		}
 		if (!matches.length) {
-			return res.status(404).json({ error: `Load ${loadId} not found` });
+			return res.status(404).json({ error: `Load ${idText} not found` });
 		}
 
 		const now = new Date();
@@ -45710,12 +45950,12 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			// AUDITED_UPSTREAM on all three: auditBlocked() one line above wrote the
 			// row, and it did so for the AMBIGUOUS_LOAD branch below too.
 			if (blocker.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(req, res, "unreadable", null, null, AUDITED_UPSTREAM);
-			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
+			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, `Load ${idText}`, AUDITED_UPSTREAM);
 			if (blocker.code === "PERIOD_FINALIZED") {
-				return sendPeriodRefusal(req, res, "finalized", blocker.periods, `Changing the status of load ${loadId}`, AUDITED_UPSTREAM);
+				return sendPeriodRefusal(req, res, "finalized", blocker.periods, `Changing the status of load ${idText}`, AUDITED_UPSTREAM);
 			}
 			return res.status(409).json({
-				error: `Load ${loadId} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
+				error: `Load ${idText} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
 				code: "AMBIGUOUS_LOAD",
 				rowIndices: matches.map((m) => m.rowIndex),
 			});
@@ -45827,7 +46067,8 @@ function computeStatusPhases(loadId) {
 // empty array (the UI shows a friendly empty state).
 app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 	try {
-		const rawId = (req.params.loadId || "").trim();
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const rawId = (loadIdFor(req, req.params.loadId) || "").trim();
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
 		}
@@ -45841,7 +46082,7 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 		}
 
 		const phases = computeStatusPhases(rawId);
-		res.json({ loadId: rawId, phases });
+		res.json({ loadId: loadIdShownFor(req, rawId), phases });
 	} catch (error) {
 		console.error("status-history error:", error.message);
 		res.status(500).json({ error: error.message });
@@ -47355,7 +47596,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const sent = sendChatMessage({ from, to: parties.to, message, loadId, attachmentUrl, attachmentType, assetRef });
+		const sent = sendChatMessage({ from, to: parties.to, message, loadId: messageLoadIdFor(req, loadId, parties.to), attachmentUrl, attachmentType, assetRef });
 		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
@@ -47551,7 +47792,7 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		// Otherwise each as stored, without the copy (brokerContact.fullDispatchNotice()).
 		const index = currentShownLoadIdIndex();
 		const served = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin"
-			? notifications.map((n) => staffDispatchNotice(n, { index }))
+			? notifications.map((n) => withNoticeLoadKey(req, n, staffDispatchNotice(n, { index }), index))
 			: notifications.map((n) => brokerContact.fullDispatchNotice(n));
 		res.json({ notifications: served, unreadCount });
 	} catch (error) {
@@ -47885,7 +48126,7 @@ function voiceNoteSendChecks(req, res, next) {
 	if (voiceNoteDiskLow()) {
 		return res.status(507).json({ error: "Voice notes can't be stored right now. Send a text message instead.", code: "STORAGE_LOW" });
 	}
-	req.voiceNote = { ...parties, loadId: loadId.value, clientKey, senderUserId };
+	req.voiceNote = { ...parties, loadId: messageLoadIdFor(req, loadId.value, parties.to), clientKey, senderUserId };
 	next();
 }
 
@@ -48427,7 +48668,8 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		// Sanitize free-text fields
 		const safeDescription = (description || "").toString().slice(0, 500);
-		const safeLoadId = (loadId || "").toString().slice(0, 100);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const safeLoadId = (loadIdFor(req, loadId) || "").toString().slice(0, 100);
 		// Merchant City/State (optional — prefilled by receipt OCR, editable).
 		// city: trimmed, <=60 chars. state: a 2-letter US code, else dropped.
 		const safeCity = (city || "").toString().trim().slice(0, 60);
@@ -50493,6 +50735,8 @@ function pickupConfirmedRowMatches(req, all, rowIndex, sentId) {
 	const cells = all[rowIndex - 1] || [];
 	const raw = String(cells[idCol] == null ? "" : cells[idCol]).trim();
 	if (!normLoadKey(raw)) return false;
+	// A load named by its key (WITHHELD LOAD KEYS) is the row's own when the key's stored ID is.
+	if (req.withheldLoad && normLoadKey(sentId) === normLoadKey(req.withheldLoad.raw)) return normLoadKey(raw) === normLoadKey(sentId);
 	const shown = String(shownLoadId(req, raw, { row: rowOf(cells) }) ?? "").trim();
 	if (shown === raw) return normLoadKey(raw) === normLoadKey(sentId);
 	if (!shown || shown.toLowerCase() !== sentId.toLowerCase()) return false;
@@ -50525,7 +50769,9 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 	try {
 		const headers = all[0] || [];
 		const row = all[rowIndex - 1] || [];
-		if (!pickupConfirmedRowMatches(req, all, rowIndex, sentId)) {
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS); the answer
+		// echoes the key as sent.
+		if (!pickupConfirmedRowMatches(req, all, rowIndex, loadIdFor(req, sentId))) {
 			return res.status(409).json({ error: `Row ${rowIndex} no longer holds this load. Reload the dashboard and open the load again.`, code: "ROW_MOVED" });
 		}
 		const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
@@ -50575,7 +50821,8 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 // Pinned by scripts/test-documents-role-gates.js.
 app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
 	try {
-		const loadId = decodeURIComponent(req.params.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, decodeURIComponent(req.params.loadId));
 		// SECURITY: drivers can only read documents for their own loads.
 		// Without this guard, any logged-in driver could enumerate PODs and
 		// receipts on any other driver's load by guessing the loadId.
@@ -50623,6 +50870,27 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 		const docs = req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher"
 			? rows.filter((d) => documentFiledUnder(d, req.session.user.driverName))
 			: rows;
+		// A load whose Load ID a Dispatcher is served withheld (WITHHELD LOAD KEYS):
+		// its documents are listed by type and upload time only, for a Super Admin to
+		// open. A stored file name and its link begin with the stored ID, and OCR text
+		// can hold the broker's contact. A Driver is served his own load's ID (#549).
+		// Judged on the route's own Job Tracking read (by the patterns alone when it
+		// can't be read).
+		if (req.session.user.role === "Dispatcher" && loadIdWithheldFor(req)) {
+			let jt = null;
+			try {
+				jt = await getJobTrackingCached();
+			} catch {
+				jt = null;
+			}
+			if (shownLoadId(req, loadId, { index: routeShownLoadIdIndex(jt) }) !== loadId) {
+				return res.json({
+					documents: docs.map((d) => ({ id: d.id, type: d.type, uploaded_at: d.uploaded_at })),
+					documentsWithheld: true,
+					note: "A Super Admin can open these documents.",
+				});
+			}
+		}
 		res.json({ documents: docs });
 	} catch (error) {
 		console.error("Error fetching documents:", error.message);
@@ -54524,7 +54792,9 @@ function uploadDocTypeFor(role, requested) {
 // scripts/test-documents-role-gates.js.
 app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
+		const { rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
 		const docType = uploadDocTypeFor(req.session.user.role, req.body.docType || req.body.type || "POD");
@@ -54703,6 +54973,12 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 
 		// No `ocrText`: the text does not exist yet (see queueReceiptOcr()), and no
 		// client read the field. It reaches DocumentList via documents.ocr_text.
+		// A document on a load whose Load ID a Dispatcher is served withheld: its
+		// link begins with the stored ID, so the answer leaves it out (WITHHELD LOAD
+		// KEYS; GET /api/documents/:loadId lists it for a Super Admin to open). The
+		// row above already holds the link, and JSON leaves an undefined field out;
+		// the work after the answer (the POD cell, a receipt's OCR) runs either way.
+		if (req.session.user.role === "Dispatcher" && shownLoadId(req, loadId) !== loadId) driveUrl = undefined;
 		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
 
@@ -55642,9 +55918,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 							// Every role but Super Admin: the entry's text (details and the
 							// address parts) with broker contact withheld, the row's own
 							// contact included (BROKER CONTACT BY VALUE).
-							loadsBySpelling[spelling].push(redactEntries
+							const servedEntry = redactEntries
 								? brokerContact.redactContactDeep(entry, brokerContact.ownContact(brokerWithheld.map((h) => [h, obj[h]])))
-								: entry);
+								: entry;
+							// A Dispatcher's key beside a withheld ID (WITHHELD LOAD KEYS), after the redaction.
+							const entryKey = loadKeyFor(req, lid);
+							loadsBySpelling[spelling].push(entryKey ? { ...servedEntry, loadKey: entryKey } : servedEntry);
 						}
 					}
 				}
@@ -55802,7 +56081,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		if (loadIdWithheldFor(req)) {
 			const index = currentShownLoadIdIndex();
 			for (const loc of locations) {
-				if (loc.loadId) loc.loadId = shownLoadId(req, loc.loadId, { row: sheetRowForLoad(loc.loadId) || null, index });
+				if (!loc.loadId) continue;
+				// A Dispatcher's key beside a withheld ID (WITHHELD LOAD KEYS).
+				const key = loadKeyFor(req, loc.loadId, { index });
+				loc.loadId = shownLoadId(req, loc.loadId, { row: sheetRowForLoad(loc.loadId) || null, index });
+				if (key) loc.loadKey = key;
 			}
 		}
 
@@ -55952,7 +56235,9 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 // GET /api/load/:loadId — Look up a specific load from Job Tracking sheet
 app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; the answer names it as shown,
+		// with its key (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
@@ -55976,11 +56261,11 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				obj._rowIndex = i + 1;
 				// Every role but Super Admin gets the broker contact columns blank,
 				// as from GET /api/data and /api/dashboard (sanitizeBrokerColumns()).
-				return res.json({ load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [obj])[0] : obj });
+				return res.json({ load: req.session.user.role !== "Super Admin" ? withLoadKeys(req, headers, [obj], sanitizeBrokerColumns(headers, [obj]))[0] : obj });
 			}
 		}
 
-		res.status(404).json({ error: `Load ${loadId} not found` });
+		res.status(404).json({ error: `Load ${loadIdShownFor(req, loadId)} not found` });
 	} catch (error) {
 		console.error("Error fetching load:", error.message);
 		res.status(500).json({ error: error.message });
@@ -56002,7 +56287,10 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 // naming the door.
 app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown,
+		// with its key (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const updates = req.body; // { "Column Name": "value", ... }
 		// Arrays and null are both typeof "object". An array body would turn every
 		// key into a numeric index that matches no header, which is worth refusing
@@ -56110,7 +56398,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (wantedLid && normLid(cell) === wantedLid) normRows.push(i);
 		}
 		if (!exactRows.length) {
-			return res.status(404).json({ error: `Load ${loadId} not found` });
+			return res.status(404).json({ error: `Load ${idText} not found` });
 		}
 		// ⚠️ AMBIGUITY REFUSES, IT DOES NOT GUESS — the same rule, code and reasoning
 		// PUT /api/loads/:loadId/status-override adopted in #223, on the same sheet.
@@ -56125,7 +56413,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		if (candidateRows.length > 1) {
 			const shown = candidateRows.map((i) => i + 1);
 			return res.status(409).json({
-				error: `Load '${loadId}' matches ${candidateRows.length} rows in Job Tracking (rows ${shown.join(", ")}). Every total in this app collapses duplicate load ids to the last row, so writing one of them cannot be shown to change what the app reads. Edit the row directly with PUT /api/data/<rowIndex>, or make the load ids unique.`,
+				error: `Load '${idText}' matches ${candidateRows.length} rows in Job Tracking (rows ${shown.join(", ")}). Every total in this app collapses duplicate load ids to the last row, so writing one of them cannot be shown to change what the app reads. Edit the row directly with PUT /api/data/<rowIndex>, or make the load ids unique.`,
 				code: "AMBIGUOUS_LOAD",
 				rowIndexes: shown,
 			});
@@ -56305,7 +56593,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (!same(fresh, before)) {
 				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "SHEET_CHANGED" }), "SHEET_CHANGED"));
 				return res.status(409).json({
-					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${loadId}' no longer resolves to the row that was validated. Re-read the load and try again.`,
+					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${idText}' no longer resolves to the row that was validated. Re-read the load and try again.`,
 					code: "SHEET_CHANGED",
 				});
 			}
@@ -56359,7 +56647,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		result._rowIndex = rowIndex;
 		res.json({
 			success: true,
-			load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result,
+			load: req.session.user.role !== "Super Admin" ? withLoadKeys(req, headers, [result], sanitizeBrokerColumns(headers, [result]))[0] : result,
 			...(cellWrites.length ? {} : { unchanged: true }),
 		});
 	} catch (error) {
@@ -56885,7 +57173,9 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 // GET /api/locations/trail — ELD trail for a specific driver/load
 app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { driver, loadId } = req.query;
+		const { driver } = req.query;
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.query.loadId);
 		if (!driver) {
 			return res.status(400).json({ error: "driver query param required" });
 		}
@@ -57843,7 +58133,8 @@ const haulLimiter = rateLimit({
 // 401s — the same ordering /api/route documents.
 app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) => {
 	try {
-		const rawId = (req.params.loadId || "").trim();
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const rawId = (loadIdFor(req, req.params.loadId) || "").trim();
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
 		}
@@ -57909,7 +58200,7 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 			return role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactContactText(s).text : s;
 		};
 		res.json({
-			loadId: rawId,
+			loadId: loadIdShownFor(req, rawId),
 			origin: hasOrigin
 				? { lat: originLat, lng: originLng, address: shownAddress(coords && coords.pickup_address) }
 				: null,
@@ -58601,7 +58892,8 @@ const fuelPlanLimiter = rateLimit({
 app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"), fuelPlanLimiter, async (req, res) => {
 	try {
 		const isDriver = req.session.user.role === "Driver";
-		const loadId = queryStr(req.query.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, queryStr(req.query.loadId));
 		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
 
 		// The load's Job Tracking row. Hoisted out of the dispatcher branch because
@@ -58738,7 +59030,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 
 		res.json({
 			ok: true,
-			loadId,
+			loadId: loadIdShownFor(req, loadId),
 			unit: (truck && truck.unit) || null,
 			...(isDriver ? {} : { vehicleId: vehicleId || null }),
 			routeSource,
@@ -58989,7 +59281,8 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 	try {
 		let oLat = parseFloat(req.query.originLat), oLng = parseFloat(req.query.originLng),
 		    dLat = parseFloat(req.query.destLat), dLng = parseFloat(req.query.destLng);
-		const loadId = queryStr(req.query.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, queryStr(req.query.loadId));
 		if (req.session.user.role === "Driver") {
 			if (!loadId) {
 				return res.status(400).json({ ok: false, error: "loadId required", stops: [] });
@@ -59556,7 +59849,8 @@ app.get("/api/geocode/search", geocodeLimiter, async (req, res) => {
 // GET /api/geocode/load/:loadId — get coordinates for a load (SQLite lookup, geocodes on-demand if missing)
 app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 	try {
-		const loadId = decodeURIComponent(req.params.loadId).trim().toLowerCase().replace(/^#/, "");
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim().toLowerCase().replace(/^#/, "");
 		// SECURITY: allow-list, not a deny-list for one role.
 		//
 		// This used to read `if (role === "Driver")`, which guarded the role

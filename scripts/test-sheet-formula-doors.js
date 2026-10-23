@@ -155,7 +155,10 @@ ${extract("currentShownLoadIdIndex")}
 ${extract("shownLoadId")}
 return { loadIdWithheldFor, shownLoadId };
 `)(brokerContact, BROKER_WITHHELD_RE, BROKER_CONTACT_VALUE_REDACTION_ENABLED);
-const RATECON_GEMINI_FIELDS = new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
+// The WITHHELD LOAD KEYS helpers the dispatch routes read their load ID through,
+// as shipped (flag off, no key named: the ID as sent).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+const RATECON_GEMINI_FIELDS =new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
 const QUIET = { error() {}, log() {}, warn() {} };
 const readJobTrackingSnapshot = new Function("SPREADSHEET_ID", "console",
 	`${extract("readJobTrackingSnapshot")}\nreturn readJobTrackingSnapshot;`)("sheet-under-test", QUIET);
@@ -648,6 +651,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 	const audits = [];
 	let handler = null;
 	const env = {
+		...KEY_HELPERS,
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,

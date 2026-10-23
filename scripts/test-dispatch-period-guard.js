@@ -320,9 +320,10 @@ check("dispatchWriteBlocker is called from exactly the 4 routes",
 // the load-row-binding PR, which deleted the rowMatchesData re-resolution this
 // route used to carry — `rowData` is now accepted and ignored, and nothing
 // reassigns `rowIndex`. The property pinned here is unchanged: the destructured
-// raw value is validated through the ONE shared helper, never inline.
+// raw value is validated through the ONE shared helper, never inline. (The load
+// ID is read through loadIdFor() since the withheld-load keys, not destructured.)
 check("PUT /api/driver/status validates rowIndex through the shared helper",
-	/rowIndex: rawRowIndex, loadId, newStatus \}[\s\S]{0,2400}const rowIndex = resolveSheetDataRow\(res, rawRowIndex\)/.test(SRC), true);
+	/rowIndex: rawRowIndex, newStatus \}[\s\S]{0,2400}const rowIndex = resolveSheetDataRow\(res, rawRowIndex\)/.test(SRC), true);
 // The guard judges a WHOLE row, never a single cell (PR #218's `A{n}` bug, where
 // `Job Tracking!A5` reads one cell rather than row 5). The two-range batchGet that
 // used to carry this property was replaced by a full-tab read, because the load

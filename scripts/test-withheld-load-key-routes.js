@@ -611,19 +611,21 @@ section("§5 the load's own pages by key: detail 404, status history, documents 
 	check("§5 documents: a normal load as before; a Super Admin gets the withheld load's in full",
 		[(normal.body.documents || [])[0] && (normal.body.documents || [])[0].file_name, normal.body.documentsWithheld, (admin.body.documents || [])[0] && (admin.body.documents || [])[0].file_name],
 		["80000031_POD_1.pdf", undefined, "QA-555-010-0161_POD_1.pdf"]);
-	// A POD upload by key: stored under the stored ID, the answer without its link.
+	// A POD upload by key: stored under the stored ID, the answer without its link,
+	// and the POD cell's update still deferred after the answer.
 	const stored = [];
+	const deferred = [];
 	const pdf = `data:application/pdf;base64,${Buffer.from("%PDF-1.4 a made-up POD").toString("base64")}`;
 	const upload = liftHandler('app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {', keyStubs(state, errors, {
 		requireRole: () => null, driverWriteLimiter: null, loadBelongsToDriver: async () => true,
 		db: { prepare: (sql) => ({ run: (...a) => { if (/INSERT INTO documents/i.test(sql)) stored.push(a); return { lastInsertRowid: 9, changes: 1 }; }, get: () => undefined, all: () => [] }) },
 		fs: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} }, DATA_DIR: path.join(ROOT, "no-such-dir"),
-		setImmediate: () => {}, queueReceiptOcr: () => {}, io: fakeIo([]), emitLoadEventToDispatch: () => {}, emitDispatchNotice: () => {},
+		setImmediate: (fn) => { deferred.push(fn); }, queueReceiptOcr: () => {}, io: fakeIo([]), emitLoadEventToDispatch: () => {}, emitDispatchNotice: () => {},
 		insertDispatchNotification: { run: () => ({}) }, logAudit: () => {}, notifyChange: () => {},
 	}));
 	const up = await call(gate, upload, { method: "POST", path: "/api/documents/upload", body: { loadId: K1, rowIndex: ROWNO(H1), docType: "POD", photoData: pdf, fileType: "document", fileName: "pod.pdf", driverName: TD }, session: D });
-	check("§5 POD upload by key: 200 without its link, filed under the stored ID, no hit",
-		[up.code, up.body, stored.length === 1 && stored[0].includes("QA-555-010-0161"), state.replyGuardHits], [200, { success: true }, true, 0]);
+	check("§5 POD upload by key: 200 without its link, filed under the stored ID, the POD cell's update deferred, no hit",
+		[up.code, up.body, stored.length === 1 && stored[0].includes("QA-555-010-0161"), deferred.length, state.replyGuardHits], [200, { success: true }, true, 1, 0]);
 	check("§5 the load's pages: no error logged", errors, []);
 });
 
@@ -632,8 +634,19 @@ section("§5 a message by key names the load as stored only to its own driver", 
 	const state = { replyGuardHits: 0 };
 	const gate = liftFunction("withheldLoadKeyGate", keyStubs(state, errors));
 	const sent = [];
+	// The made-up Driver accounts resolveChatParties() looks the recipient up in
+	// (one per fixture driver, no Investor): the users table is the route's only read.
+	const ACCOUNTS = [{ id: 21, name: TD }, { id: 22, name: OD }];
+	const usersDb = {
+		prepare: (sql) => {
+			const rows = (name) => (/role = 'Driver'/.test(sql) ? ACCOUNTS : [])
+				.filter((a) => name === undefined || a.name.toLowerCase() === String(name).trim().toLowerCase())
+				.map((a) => ({ id: a.id, name: a.name, driver_name: a.name }));
+			return { all: (name) => rows(name), get: (name) => rows(name)[0] };
+		},
+	};
 	const handler = liftHandler('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {', keyStubs(state, errors, {
-		requireAuth: null, driverWriteLimiter: null, db: {}, chatFiles: { chatAttachmentRefusal: () => null },
+		requireAuth: null, driverWriteLimiter: null, db: usersDb, chatFiles: { chatAttachmentRefusal: () => null },
 		sendChatMessage: (m) => { sent.push(m); return { id: sent.length }; },
 	}));
 	const D = session("Dispatcher");
@@ -646,6 +659,24 @@ section("§5 a message by key names the load as stored only to its own driver", 
 	const voice = liftFunction("messageLoadIdFor", keyStubs(state, errors));
 	check("§5 the voice note's load (X-Message-Load-Id) follows the same rule",
 		[voice(own.req, K1, "test  DRIVER"), voice(own.req, K1, OD), voice({}, K1, TD)], ["QA-555-010-0161", `QA-${WITHHELD}`, K1]);
+	// The voice route's own header checks (voiceNoteSendChecks()), through the
+	// gate: the recipient as the chat rule resolves it, then the load by that name.
+	const voiceChecks = liftFunction("voiceNoteSendChecks", keyStubs(state, errors, {
+		db: { prepare: (sql) => (/FROM messages/.test(sql) ? { get: () => undefined } : usersDb.prepare(sql)) },
+		voiceNoteBytesToday: () => 0, voiceNoteDiskLow: () => false, VOICE_NOTE_DAILY_BYTES: 1024, logAuditRefusal: () => {},
+	}));
+	const voiceTo = async (to, loadId, n) => {
+		let nexted = false;
+		const r = await call(gate, (req, res) => voiceChecks(req, res, () => { nexted = true; }), {
+			method: "POST", path: "/api/messages/voice", session: D,
+			headers: { "idempotency-key": `qa-voice-note-${n}`, "x-message-to": encodeURIComponent(to), "x-message-load-id": loadId },
+		});
+		return [r.code, nexted, r.req.voiceNote ? r.req.voiceNote.loadId : null];
+	};
+	check("§5 voice note by key: to the load's driver as stored; to another driver as shown; a normal load as sent; no hit",
+		[await voiceTo(TD, K1, 1), await voiceTo(OD, K1, 2), await voiceTo(OD, "80000031", 3), state.replyGuardHits],
+		[[200, true, "QA-555-010-0161"], [200, true, `QA-${WITHHELD}`], [200, true, "80000031"], 0]);
+	check("§5 message by key: no error logged", errors, []);
 });
 
 section("§5 a receipt and a row save by key", async () => {

@@ -194,6 +194,10 @@ const SRCS = {
 	ioHandler: liftHandler('io.on("connection", (socket) => {', 'io.on("connection", '),
 	tracker: liftHandler('publicTrack.on("connection", (socket) => {', 'publicTrack.on("connection", '),
 	messages: liftStatement('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {'),
+	// The load a message names, read through a Dispatcher's load key when the
+	// request named one (WITHHELD LOAD KEYS). No key gate runs here, so every
+	// load ID goes on as sent.
+	messageLoadId: liftFunction("function messageLoadIdFor(req, value, to) {"),
 	// The one send both chat routes use (POST /api/messages and
 	// POST /api/messages/voice): the row, the notification and the emits.
 	sendChat: liftFunction("function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {"),
@@ -340,7 +344,7 @@ async function startWorld({ sources = SRCS, secureCookie = false, mustChange = (
 		`const SHOWN_LOAD_ID_STATE = { latest: null };\n${sources.loadIds}\nreturn { shownLoadId, emitDispatchByRole };`)(
 		io, require(path.join(__dirname, "..", "lib", "broker-contact")), true);
 	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", "chatFiles",
-		"chatDeskKey", "CHAT_DESK_NAMES", "logAuditRefusal", `${sources.parties}\n${sources.sendChat}\n${sources.messages}`)(
+		"chatDeskKey", "CHAT_DESK_NAMES", "logAuditRefusal", `${sources.parties}\n${sources.messageLoadId}\n${sources.sendChat}\n${sources.messages}`)(
 		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole,
 		require(path.join(__dirname, "..", "lib", "chat-files")), rooms.chatDeskKey, rooms.CHAT_DESK_NAMES, logAuditRefusal);
 

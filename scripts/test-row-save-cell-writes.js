@@ -148,6 +148,9 @@ const HELPERS = [
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
 // The load-id comparison key server.js imports, the shipped module.
 const { normalizeLoadId } = require("../lib/ratecon-load");
+// The WITHHELD LOAD KEYS helpers PUT /api/load/:loadId reads its load ID
+// through, as shipped (flag off, no key named: the ID as sent).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
 // The shipped helpers, with `overrides` swapping one source for a mutant.
 // The broker contact value rule the reader and both saves apply: the shipped
 // module and kill switch, handed to the routes with the helpers.
@@ -301,6 +304,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 	let handler = null;
 	const env = {
 		...helpers,
+		...KEY_HELPERS,
 		normalizeLoadId,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
