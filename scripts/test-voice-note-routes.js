@@ -374,6 +374,12 @@ function telemetry(db, { agoMs, speed }) {
 	{
 		const toB = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders(DRIVER_B, newKey()) });
 		ok("§6 a driver sending to another driver: 403 VOICE_NOTE_RECIPIENT", toB.status === 403 && toB.json && toB.json.code === "VOICE_NOTE_RECIPIENT", [toB.status, toB.json]);
+		// Audited as a text refusal is: the code and the sender's role, never the
+		// name asked for.
+		const refusals = db.prepare("SELECT * FROM audit_trail WHERE action = 'message_blocked'").all();
+		ok("§6 ...the refusal is audited (message_blocked): its code and the sender's role, not the name asked for",
+			refusals.some((r) => /\[VOICE_NOTE_RECIPIENT\]/.test(r.details) && /\bDriver\b/.test(r.details))
+			&& !refusals.some((r) => JSON.stringify(r).toLowerCase().includes(DRIVER_B.toLowerCase())), refusals);
 		const drvAdmin = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders("admin", newKey()) });
 		ok("§6 a driver sending to \"admin\" (the investor portal's desk): 403 VOICE_NOTE_RECIPIENT", drvAdmin.status === 403 && drvAdmin.json && drvAdmin.json.code === "VOICE_NOTE_RECIPIENT", [drvAdmin.status, drvAdmin.json]);
 		const invDispatch = await request(P, "POST", "/api/messages/voice", U.inv, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });

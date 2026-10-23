@@ -47139,7 +47139,9 @@ function resolveChatParties(user, toName, fromName, { noun = "Messages", item = 
 	}
 	const name = typeof toName === "string" ? toName.trim() : "";
 	const spelling = findDriverAccountSpelling(name);
-	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND driver_name = ?").all(spelling) : [];
+	// Case aside, so two Driver accounts spelled alike but for letter case are
+	// two hits (a name two accounts hold), as every thread reads LOWER().
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?)").all(spelling) : [];
 	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
 	const hits = [...drivers, ...investors];
 	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
@@ -47162,7 +47164,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		const parties = resolveChatParties(sessionUser, to, req.body.from, { staffToDesk: true });
 		if (parties.status) {
 			const code = parties.reason === "sender" ? "MESSAGE_SENDER" : "MESSAGE_RECIPIENT";
-			// Neither the name asked for nor the text: the code and the sender's role.
+			// Neither the name asked for nor the text: the code and the sender's role
 			logAuditRefusal(req, "message_blocked", "message", "", `Message refused for a ${parties.role || "signed-in"} sender [${code}]`, code);
 			return res.status(parties.status).json({ error: parties.error, code });
 		}
@@ -47698,7 +47700,11 @@ function voiceNoteSendChecks(req, res, next) {
 		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
 	}
 	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
-	if (parties.error) return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	if (parties.error) {
+		// As POST /api/messages audits it: the code and the sender's role only
+		logAuditRefusal(req, "message_blocked", "message", "", `Voice note refused for a ${String(user.role || "signed-in")} sender [${parties.code}]`, parties.code);
+		return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	}
 	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
 		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
 	}

@@ -87,6 +87,9 @@ const U = {
 	inv: { id: 50, role: "Investor", username: INVESTOR, driverName: "" },
 	inv2: { id: 51, role: "Investor", username: INVESTOR_2, driverName: "" },
 	invShared: { id: 52, role: "Investor", username: SHARED_NAME.toLowerCase(), driverName: "" },
+	// Two Driver accounts spelled alike but for letter case (legacy data).
+	drvCaseA: { id: 14, role: "Driver", username: "drv_r1", driverName: "Rowan Ellis" },
+	drvCaseB: { id: 15, role: "Driver", username: "drv_r2", driverName: "rowan ellis" },
 };
 // A message text no audit row may carry.
 const SECRET_TEXT = "zebra-quartz-77 made-up text";
@@ -284,6 +287,7 @@ async function section1() {
 	await expectRefused("§1 staff to a name no account holds", m, db, U.disp, { from: "Dispatch", to: "Nobody Here", message: "hey" }, 422, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 staff to a drivers-directory name with no account", m, db, U.disp, { from: "Dispatch", to: DIRECTORY_ONLY, message: "hey" }, 422, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 staff to a name a Driver and an Investor both hold (ambiguous)", m, db, U.disp, { from: "Dispatch", to: SHARED_NAME, message: "hey" }, 422, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 staff to a name two Driver accounts hold but for letter case (ambiguous)", m, db, U.disp, { from: "Dispatch", to: "Rowan Ellis", message: "hey" }, 422, "MESSAGE_RECIPIENT");
 	await expectRefused("§1 staff as \"Dispatch\" to the desk itself", m, db, U.disp, { from: "Dispatch", to: "Dispatch", message: "hey" }, 422, "MESSAGE_RECIPIENT");
 	await expectSent("§1 staff with no `from`", m, db, U.disp,
 		{ to: DRIVER_A, message: "Blank sender" },
@@ -403,6 +407,9 @@ async function section2() {
 	// MS11: a username another identity already answers to is refused too.
 	await refusedName("username that is a driver's name, in another case", { username: "orrin cade", password: "made-up-pw-1", role: "Investor" }, "USERNAME_TAKEN");
 	await refusedName("username that is a drivers-directory name", { username: DIRECTORY_ONLY, password: "made-up-pw-1", role: "Dispatcher" }, "USERNAME_TAKEN");
+	// Kept as reviewed (L3): even a new Driver account's own driver name is a
+	// taken username while a directory row holds it, as the gate script counts.
+	await refusedName("Driver username that is its own driver name, a directory row's", { username: DIRECTORY_ONLY, password: "made-up-pw-1", role: "Driver", driverName: DIRECTORY_ONLY }, "USERNAME_TAKEN");
 	{
 		const db = makeDb();
 		const dup = mountUsers(db);
