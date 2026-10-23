@@ -282,6 +282,33 @@ for (const [label, anchor] of AVAILABILITY) {
 	check("exactly one userDelAudit descriptor exists", SRC.split("const userDelAudit = {").length - 1, 1);
 }
 
+// ── 3c. a rolled-back delete is audited ─────────────────────────────────────
+// The user and truck deletes run their cascade in one transaction and answer
+// 500 DELETE_ROLLED_BACK when it throws. Nothing is written, so without a
+// refusal row the attempt leaves no trace at all. Every such answer, found by
+// its code in the CODE lines (so a third delete that copies the shape is
+// covered too), records a refusal in its catch, under DELETE_ROLLED_BACK, with
+// the fixed tail and no error text (the database's message is not audit text).
+section("3c. every DELETE_ROLLED_BACK answer records a refusal");
+{
+	const ANSWER = `code: "DELETE_ROLLED_BACK",`;
+	const sites = [];
+	for (let at = CODE.indexOf(ANSWER); at >= 0; at = CODE.indexOf(ANSWER, at + 1)) sites.push(at);
+	check("there are DELETE_ROLLED_BACK answers to check (user and truck delete)", sites.length >= 2, true);
+	for (const at of sites) {
+		const open = CODE.lastIndexOf("} catch (err) {", at);
+		const block = open >= 0 ? CODE.slice(open, at) : "";
+		const where = block.includes("delete user") ? "user delete" : block.includes("delete truck") ? "truck delete" : `site at ${at}`;
+		const call = callSites("recordPeriodRefusal").find((a) => block.includes(a)) || "";
+		check(`${where}: the catch records a refusal before it answers`, call !== "" && block.indexOf(call) < block.indexOf("res.status(500)"), true);
+		check(`${where}: ...under DELETE_ROLLED_BACK, not a period code`, /\},\s*"DELETE_ROLLED_BACK"/.test(call), true);
+		check(`${where}: ...with the route's own descriptor and the fixed tail`,
+			/\.\.\.(userDelAudit|truckDelAudit)\b/.test(call) && call.includes(`tail: "nothing was written — rolled back"`), true);
+		// PAIRED: the error text stays in the server log, never in the row.
+		check(`${where}: ...and no error text in the row`, /\berr\b/.test(call), false);
+	}
+}
+
 // ── 4. the recording actually reaches the database ──────────────────────────
 // Sections 2 and 3 prove the calls are written. This proves they do something:
 // the real recordPeriodRefusal() → the real logAuditRefusal() → the real

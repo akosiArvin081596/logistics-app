@@ -37,6 +37,11 @@
  *   §5 Trailers, the same VIN rule: POST /api/trailers stores a padded VIN
  *      trimmed; PUT /api/trailers/:id keeps the stored VIN as it is on a padded
  *      resend or a save that sends none, and stores a real change trimmed.
+ *   §6 Trailer audit lines: PUT /api/trailers/:id writes one update_trailer
+ *      line naming each field the save really changed, old -> new (the plate
+ *      and notes by name only); a resend, a refused save or an unknown trailer
+ *      writes none. DELETE /api/trailers/:id writes one delete_trailer line
+ *      naming the trailer, its truck and its VIN.
  *
  * Pure: no server, no app.db, no network. Made-up trucks and names.
  *
@@ -99,6 +104,7 @@ const ROUTES = {
 	del: liftRoute('app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {'),
 	trailerPost: liftRoute('app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
 	trailerPut: liftRoute('app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+	trailerDel: liftRoute('app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {'),
 };
 
 // Everything the three routes call from module scope, verbatim.
@@ -128,6 +134,7 @@ const MODULE_SRC = [
 	liftFunction("logAuditRefusal"),
 	liftFunction("scrubPurgeMarker"),
 	liftFunction("auditText"),
+	liftFunction("trailerTruckLabel"),
 	// names and the assignment a reassigning save writes
 	liftFunction("normalizeDriverName"),
 	liftFunction("isBuiltInPropertyName"),
@@ -146,7 +153,7 @@ const MODULE_SRC = [
 const MODULE_EXPORTS = [
 	"parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "parseAdminFeePct", "truckMonthlyFixed",
-	"refusePayEdit", "logAudit", "auditText",
+	"refusePayEdit", "logAudit", "auditText", "trailerTruckLabel",
 	"normalizeDriverName", "reservedDriverNameRefusal", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 ];
@@ -327,6 +334,7 @@ function mountAll(db, { blockEdit = false } = {}) {
 	const del = mountRoute(ROUTES.del, env);
 	const trailerPost = mountRoute(ROUTES.trailerPost, env);
 	const trailerPut = mountRoute(ROUTES.trailerPut, env);
+	const trailerDel = mountRoute(ROUTES.trailerDel, env);
 	const as = (user) => ({ session: { user } });
 	return {
 		put: (user, id, body) => quiet(() => put({ ...as(user), params: { id: String(id) }, body })),
@@ -334,6 +342,7 @@ function mountAll(db, { blockEdit = false } = {}) {
 		del: (user, id) => quiet(() => del({ ...as(user), params: { id: String(id) } })),
 		trailerPost: (user, body) => quiet(() => trailerPost({ ...as(user), body })),
 		trailerPut: (user, id, body) => quiet(() => trailerPut({ ...as(user), params: { id: String(id) }, body })),
+		trailerDel: (user, id) => quiet(() => trailerDel({ ...as(user), params: { id: String(id) } })),
 	};
 }
 
@@ -577,12 +586,98 @@ async function trailerSection() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════ §6
+async function trailerAuditSection() {
+	section("§6 Trailers — an edit writes one update_trailer line, a delete one delete_trailer line");
+	const seed = (db) => {
+		db.prepare(`INSERT INTO trailers (id, trailer_number, type, length, year, vin, license_plate, status, truck_id, notes)
+			VALUES (7, 'TR-5301', 'Dry Van', '53', 2019, ?, 'MADE-UP-PL1', 'Available', NULL, 'old note')`).run(VIN_A);
+	};
+	const stored = (db) => db.prepare("SELECT * FROM trailers WHERE id = 7").get();
+	const wholeRow = (t) => ({
+		trailer_number: t.trailer_number, type: t.type, length: t.length, year: t.year, vin: t.vin,
+		license_plate: t.license_plate, status: t.status, truck_id: t.truck_id ?? "", notes: t.notes,
+	});
+	for (const [label, user, body, expected] of [
+		["status and truck changed", DISPATCHER, { status: "In Use", truck_id: 1 },
+			"Trailer TR-5301: status Available → In Use, truck none → LogisX-#41 (#1)"],
+		["number, type, length, year and VIN changed", SUPER,
+			{ trailer_number: "TR-5309", type: "Reefer", length: "48", year: 2022, vin: ` ${VIN_B} ` },
+			`Trailer TR-5301: trailer number TR-5301 → TR-5309, type Dry Van → Reefer, length 53 → 48, year 2019 → 2022, VIN ${VIN_A} → ${VIN_B}`],
+		["the VIN cleared", SUPER, { vin: "" }, `Trailer TR-5301: VIN ${VIN_A} → not set`],
+		["plate and notes changed: named, values not recorded", SUPER, { license_plate: "MADE-UP-PL2", notes: "new mud flaps" },
+			"Trailer TR-5301: license plate changed, notes changed"],
+	]) {
+		const db = makeDb();
+		seed(db);
+		const app = mountAll(db);
+		const r = await app.trailerPut(user, 7, body);
+		const rows = audits(db, "update_trailer");
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === expected,
+			`§6 PUT, ${label}: one update_trailer line ${JSON.stringify(expected)} (got ${r.status}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		ok(rows.length === 1 && rows[0].entity === "trailer" && rows[0].entity_id === "7" && rows[0].username === user.username,
+			`§6 PUT, ${label}: the line is on trailer 7 under ${user.username} (got ${JSON.stringify(rows.map((x) => [x.entity, x.entity_id, x.username]))})`);
+		ok(!rows.some((x) => /mud flaps|MADE-UP-PL2|old note|MADE-UP-PL1/.test(x.details)),
+			`§6 PUT, ${label}: no plate or notes text in the line`);
+	}
+	for (const [label, bodyOf] of [
+		["the whole row resent as stored", (t) => wholeRow(t)],
+		["the whole row resent with the VIN padded", (t) => ({ ...wholeRow(t), vin: `  ${t.vin}\t` })],
+		["an empty body", () => ({})],
+	]) {
+		const db = makeDb();
+		seed(db);
+		const app = mountAll(db);
+		const before = JSON.stringify(stored(db));
+		const r = await app.trailerPut(SUPER, 7, bodyOf(stored(db)));
+		ok(r.status === 200 && audits(db, "update_trailer").length === 0 && JSON.stringify(stored(db)) === before,
+			`§6 PUT, ${label}: 200, nothing changed and no update_trailer line (got ${r.status}, ${audits(db, "update_trailer").length} lines)`);
+	}
+	{
+		const db = makeDb();
+		seed(db);
+		db.prepare("INSERT INTO trailers (id, trailer_number, type, status, truck_id) VALUES (8, 'TR-5302', 'Reefer', 'In Use', 1)").run();
+		const app = mountAll(db);
+		const before = JSON.stringify(stored(db));
+		const r = await app.trailerPut(SUPER, 7, { truck_id: 1 });
+		ok(r.status === 409 && audits(db, "update_trailer").length === 0 && JSON.stringify(stored(db)) === before,
+			`§6 PUT refused (the truck already has a trailer): 409, nothing written, no line (got ${r.status}, ${audits(db, "update_trailer").length})`);
+		const r404 = await app.trailerPut(SUPER, 99, { status: "In Use" });
+		ok(r404.status === 404 && audits(db, "update_trailer").length === 0, `§6 PUT on an unknown trailer: 404, no line (got ${r404.status})`);
+	}
+	{
+		const db = makeDb();
+		seed(db);
+		db.prepare("UPDATE trailers SET truck_id = 1 WHERE id = 7").run();
+		const app = mountAll(db);
+		const r = await app.trailerDel(SUPER, 7);
+		const rows = audits(db, "delete_trailer");
+		const expected = `Trailer TR-5301 (Dry Van, Available, on LogisX-#41 (#1), VIN ${VIN_A}) deleted`;
+		ok(r.status === 200 && !db.prepare("SELECT 1 FROM trailers WHERE id = 7").get() && rows.length === 1 && rows[0].details === expected
+			&& rows[0].entity === "trailer" && rows[0].entity_id === "7" && rows[0].username === "super_admin",
+			`§6 DELETE an attached trailer with a VIN: one delete_trailer line ${JSON.stringify(expected)} (got ${r.status}, ${JSON.stringify(rows)})`);
+		ok(!rows.some((x) => /old note|MADE-UP-PL1/.test(x.details)), "§6 DELETE: no plate or notes text in the line");
+	}
+	{
+		const db = makeDb();
+		db.prepare("INSERT INTO trailers (id, trailer_number, type, status) VALUES (7, 'TR-5301', 'Flatbed', 'Out of Service')").run();
+		const app = mountAll(db);
+		const r = await app.trailerDel(SUPER, 7);
+		const rows = audits(db, "delete_trailer");
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === "Trailer TR-5301 (Flatbed, Out of Service, not on a truck) deleted",
+			`§6 DELETE an unattached trailer with no VIN (got ${r.status}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		const r404 = await app.trailerDel(SUPER, 99);
+		ok(r404.status === 404 && audits(db, "delete_trailer").length === 1, `§6 DELETE an unknown trailer: 404, no line (got ${r404.status})`);
+	}
+}
+
 (async () => {
 	await renameSection();
 	await vinSection();
 	await createSection();
 	await deleteSection();
 	await trailerSection();
+	await trailerAuditSection();
 })().then(() => {
 	if (failures.length) {
 		for (const f of failures) console.error(`  FAIL  ${f}`);
