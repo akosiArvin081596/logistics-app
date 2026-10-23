@@ -110,8 +110,10 @@ const live = computed(() => sentNotice.value || rec.announcement.value)
 
 watch(open, (v) => emit('active', v), { immediate: true })
 
-watch(() => props.blocked, (b) => {
-  if (b && phase.value === 'recording') rec.stop('blocked')
+// Both inputs: the truck may start moving while the browser is still asking for
+// the microphone, so a recording that starts after that stops at once too.
+watch([() => props.blocked, phase], ([b, p]) => {
+  if (b && p === 'recording') rec.stop('blocked')
 })
 
 function dismiss() {
@@ -230,7 +232,8 @@ async function onSend() {
   border-radius: 20px;
   background: var(--bg, #f4f4f5);
 }
-.vn-review :deep(.vn-player) { max-width: none; min-width: 0; width: 100%; --vn-play-size: 32px; }
+/* The review's play button matches the composer's other buttons (44 px in the driver app). */
+.vn-review :deep(.vn-player) { max-width: none; min-width: 0; width: 100%; --vn-play-size: var(--vn-size, 40px); }
 .vn-stop, .vn-send {
   width: var(--vn-size, 40px);
   height: var(--vn-size, 40px);

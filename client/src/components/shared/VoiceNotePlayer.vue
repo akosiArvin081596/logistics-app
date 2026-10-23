@@ -3,7 +3,7 @@
     <button
       type="button"
       class="vn-play"
-      :aria-label="playing ? 'Pause voice note' : `Play voice note, ${spokenDuration(durationSec)}`"
+      :aria-label="`Play voice note, ${spokenDuration(durationSec)}`"
       :aria-pressed="playing ? 'true' : 'false'"
       @click="toggle"
     >
@@ -222,8 +222,9 @@ onBeforeUnmount(() => {
   font-weight: 700;
   padding: 0.05rem 0.45rem;
   cursor: pointer;
-  min-height: 24px;
-  min-width: 36px;
+  /* The driver app sets 44 px (touch targets there). */
+  min-height: var(--vn-rate-size, 24px);
+  min-width: var(--vn-rate-size, 36px);
 }
 .vn-error { margin: 0.25rem 0 0; font-size: 0.7rem; color: var(--danger, #b91c1c); }
 .is-sent .vn-error { color: #fff; }

@@ -172,10 +172,12 @@ const messages = ref([])
 const draft = ref('')
 const sending = ref(false)
 
-// Voice notes: the record button only with the flag on and never in a Super
-// Admin's preview; notes already sent play either way.
+// Voice notes: the record button only with the flag on, for an Investor account
+// and never in a Super Admin's preview (a staff note goes to an investor from
+// the dashboard; sent from here it could only be refused). Notes already sent
+// play either way.
 const voiceFeature = useVoiceNotesFeature(api)
-const voiceOn = computed(() => !!voiceFeature.value && !props.isPreview)
+const voiceOn = computed(() => !!voiceFeature.value && !props.isPreview && auth.user?.role === 'Investor')
 // True while the recorder holds the toolbar (recording or reviewing).
 const recording = ref(false)
 // The investor's desk is "admin". The bubble is added once the server has the

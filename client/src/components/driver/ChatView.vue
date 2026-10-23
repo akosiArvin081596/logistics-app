@@ -305,6 +305,9 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  /* Voice-note play and speed buttons: 44 px touch targets in the driver app. */
+  --vn-play-size: 44px;
+  --vn-rate-size: 44px;
 }
 
 .msg-bubble {

@@ -204,7 +204,9 @@ if (vn) {
   ok('§5 a voice note: "Voice note (0:42)" from the server\'s length', typeof p === 'function' && p(c({ lastKind: 'voice', lastText: 'Voice note (0:42)', lastVoiceMs: 42500 })) === 'Voice note (0:42)')
   ok('§5 a voice note whose audio is gone: the stored text', typeof p === 'function' && p(c({ lastKind: 'voice', lastText: 'Voice note removed by an administrator', lastVoiceMs: 0 })) === 'Voice note removed by an administrator')
   ok('§5 a server without the preview (no lastKind): no line', typeof p === 'function' && p(c({})) === '' && p(null) === '')
-  ok('§5 a long text is cut at 60 characters', typeof p === 'function' && p(c({ lastKind: 'text', lastText: 'x'.repeat(80) })).length <= 61)
+  // The server cuts lastText at 60 characters; the client shows it as sent, so
+  // a trailing emoji is never split in two.
+  ok('§5 the text is shown as the server sent it (a trailing emoji whole)', typeof p === 'function' && p(c({ lastKind: 'text', lastText: `${'x'.repeat(59)}👍` })) === `${'x'.repeat(59)}👍`)
 }
 
 // ══ §6 the upload ═════════════════════════════════════════════════════════════
@@ -523,6 +525,13 @@ const PLAYER_REL = 'client/src/components/shared/VoiceNotePlayer.vue'
     ok('§8 ...the length shown is the server\'s (0:42)', /0:42/.test(m.textOf(m.root)))
     await click(play)
     ok('§8 Play: the source is the one given, and it plays', srcOf(audio) === '/api/messages/41/voice' && audio.played === 1)
+    // The element reports that it plays: the button keeps its name, and
+    // aria-pressed carries the state.
+    const onPlay = audio.props.onPlay
+    if (typeof onPlay === 'function') onPlay({})
+    await drain()
+    const playing = m.find((n) => n.tag === 'button' && hasClass(n, 'vn-play'))
+    ok('§8 while playing: the same name ("Play voice note, 42 seconds"), aria-pressed true', !!playing && playing.props['aria-label'] === 'Play voice note, 42 seconds' && String(playing.props['aria-pressed']) === 'true')
     const speed = named(m, /^Playback speed/)
     const rates = []
     for (let i = 0; i < 3; i++) { await click(speed); rates.push(named(m, /^Playback speed/)?.props?.['aria-label']) }
@@ -577,6 +586,29 @@ const RECORDER_REL = 'client/src/components/shared/VoiceNoteRecorder.vue'
     await click(named(m, /^Send voice note/))
     ok('§8 the second try sends the same clip (same key), then back to the mic', sent.length === 2 && sent[1].key === sent[0].key && currentRecorder.phase.value === 'idle' && !!named(m, /^Record a voice note/))
     m.unmount()
+
+    // The truck starts moving while the browser still asks for the microphone:
+    // the recording that then starts is stopped at once, and kept for review.
+    const held = fakeRecorder()
+    let release = null
+    held.start = async () => {
+      held.calls.push('start')
+      held.phase.value = 'starting'
+      await new Promise((r) => { release = r })
+      held.phase.value = 'recording'
+    }
+    currentRecorder = held
+    const heldProps = Vue.reactive({ blocked: false, describedBy: 'vn-note', send: async () => {} })
+    const hm = mountInMemory(Recorder, heldProps)
+    await drain()
+    await click(named(hm, /^Record a voice note/))
+    ok('§8 (the mic waits at "starting" for the microphone prompt)', held.phase.value === 'starting')
+    heldProps.blocked = true
+    await drain()
+    if (release) release()
+    await drain()
+    ok('§8 the truck starts moving during the microphone prompt: the recording stops as soon as it starts, the clip kept', held.calls.includes('stop') && held.phase.value === 'review')
+    hm.unmount()
 
     currentRecorder = Object.assign(fakeRecorder(), { supported: false })
     const u = mountInMemory(Recorder, { send: async () => {} })
@@ -704,13 +736,14 @@ const unsaved = { ...voiceRow, id: 0, attachment_url: '/api/messages/41/voice' }
     { id: 51, timestamp: '2026-10-22T13:00:00.000Z', from: 'Dispatch', to: 'inv_t', message: 'Voice note (0:09)', read: 1, attachment_url: '', attachment_type: 'voice', voice_duration_ms: 9000 },
     { id: 52, timestamp: '2026-10-22T13:01:00.000Z', from: 'Dispatch', to: 'inv_t', message: 'Voice note (unavailable)', read: 1, attachment_url: '', attachment_type: 'voice' },
   ]
+  const invAuth = { user: { id: 7, username: 'inv_t', role: 'Investor' } }
   const api = { get: async (url) => (url === '/api/auth/session' ? { authenticated: true, features: { voiceNotes: true } } : { messages: invThread.map((r) => ({ ...r })) }), put: async () => ({}), post: async () => ({}), request: async () => ({ success: true, id: 60, durationMs: 7000 }) }
   const overrides = {
     ...recorderOverrides,
     '../../composables/useApi': { useApi: () => api },
     '../../composables/useSocket': { useSocket: () => ({ on() {}, off() {} }) },
     '../../composables/useFileDrop': { useFileDrop: () => ({ dropzoneProps: {}, inputProps: {}, setInputEl() {}, dragActive: Vue.ref(false), error: Vue.ref(''), notice: Vue.ref(''), clearMessages() {} }) },
-    '../../stores/auth': { useAuthStore: () => ({ user: { id: 7, username: 'inv_t', role: 'Investor' } }) },
+    '../../stores/auth': { useAuthStore: () => invAuth },
     '../../stores/investor': { useInvestorStore: () => ({ data: null }) },
     '../../composables/useVoiceNotesFeature': { useVoiceNotesFeature: () => Vue.ref(true) },
   }
@@ -728,6 +761,13 @@ const unsaved = { ...voiceRow, id: 0, attachment_url: '/api/messages/41/voice' }
     await drain()
     ok('§8 investor preview (a Super Admin looking): no mic', !named(pv, /^Record a voice note/))
     pv.unmount()
+    // A Super Admin on /investor outside a preview: his note could only be
+    // refused (staff send to a driver or an investor, from the dashboard).
+    invAuth.user = { id: 1, username: 'admin_t', role: 'Super Admin' }
+    const sa = mountInMemory(Inv, { trucks: [] })
+    await drain()
+    ok('§8 investor portal opened by a Super Admin (not a preview): no mic; notes still play', !named(sa, /^Record a voice note/) && !!named(sa, /^Play voice note/))
+    sa.unmount()
   }
 }
 
@@ -737,6 +777,14 @@ for (const [store, label] of [['messages.js', 'dashboard'], ['driver.js', 'drive
   const live = /addIncomingMessage\s*\(msg\)\s*\{[\s\S]*?\n {4}\},/.exec(src)
   ok(`§9 stores/${store} (${label}): a live message keeps voice_duration_ms`, !!live && /voice_duration_ms:\s*Number\(msg\.voice_duration_ms\)\s*\|\|\s*0/.test(live[0]))
   ok(`§9 stores/${store}: sends a voice note through uploadVoiceNote()`, /sendVoiceNote\s*\(/.test(src) && /uploadVoiceNote\(/.test(src))
+}
+{
+  // Touch targets in the driver app: 44 px play and speed buttons in the thread.
+  const chat = read('client', 'src', 'components', 'driver', 'ChatView.vue')
+  const list = /\.chat-messages\s*\{[^}]*\}/.exec(chat)
+  ok('§9 the driver thread sets 44 px voice-note play and speed buttons', !!list && /--vn-play-size:\s*44px/.test(list[0]) && /--vn-rate-size:\s*44px/.test(list[0]))
+  const player = read('client', 'src', 'components', 'shared', 'VoiceNotePlayer.vue')
+  ok('§9 the player\'s speed button takes its size from --vn-rate-size', /\.vn-rate\s*\{[^}]*min-height:\s*var\(--vn-rate-size/.test(player))
 }
 {
   const src = read('client', 'src', 'views', 'DriverView.vue')

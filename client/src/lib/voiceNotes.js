@@ -64,10 +64,12 @@ export function spokenDuration(sec) {
 
 // The conversation list's last-message line, from the GET /api/messages
 // preview fields (lastKind "text" | "photo" | "file" | "voice", lastText, the
-// first 60 characters, and lastVoiceMs). '' when the server sends none.
+// first 60 characters as the server cut them, and lastVoiceMs). '' when the
+// server sends none. The text is shown as sent: cutting it again here by UTF-16
+// units could split a trailing emoji; the list's CSS ellipsis fits it.
 export function conversationPreview(c) {
   if (!c || !c.lastKind) return ''
-  const textPart = String(c.lastText || '').slice(0, 60)
+  const textPart = String(c.lastText || '')
   switch (c.lastKind) {
     case 'voice': return Number(c.lastVoiceMs) > 0 ? voiceNoteLabel(Number(c.lastVoiceMs)) : (textPart || 'Voice note')
     case 'photo': return 'Photo'
