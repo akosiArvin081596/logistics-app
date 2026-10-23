@@ -43,16 +43,16 @@
 //   N1b re-spelling an account onto its own directory row's spacing (the space
 //      doubled) on the Users page saves; it is not refused as a merge (planted, local)
 //   F1 an Active Loads edit writes only the changed cell, so formula cells survive
-//      (local only: it edits the local non-production sheet, then restores it)
+//      (SKIPPED for now: it read formulas with the Google API; see SHEET_STEP_SKIP)
 //   E2 a Fuel expense stored under a percentage-paid driver's name with its space
 //      doubled is deducted from their pay on the Financials page (planted, local)
 //   B1 the startup expense backfill stamps the truck onto an expense whose driver
 //      is a spacing variant of the name its truck assignment carries (planted
 //      BEFORE boot with plant-before-boot.cjs, local)
 //   RC1 a rate-con import onto a load whose Payments Table row already exists
-//      writes only the cells that change: text cells stay text (local only: it
-//      writes the local non-production sheet, then restores it)
-// Names section (K1, K2, K3; ONLY=names, local only):
+//      writes only the cells that change: text cells stay text (SKIPPED for now,
+//      like F1)
+// Names section (K1, K2, K3; ONLY=names; SKIPPED for now, like F1):
 //   K1 a driver name that reads as a built-in property name is refused at
 //      dispatch (400 DRIVER_NAME_RESERVED), and nothing is written to the load
 //   K2 the same name stored on a completed load leaves the dashboard and
@@ -710,10 +710,8 @@ function writeCol(table, col, id, value) {
 // Originals live in memory only (no PII on disk); the journal holds ids, not values.
 const originals = new Map()
 // Rows the money-path section INSERTs (or has the app create) and deletes again,
-// by table and id; F1's planted sheet cell and RC1's sheet rows by address. Ids and
-// addresses only.
+// by table and id. Ids only.
 const createdRows = []
-const sheetPlants = []
 // The investor-fixes section's own rows (QA-TEST users, investor records, trucks,
 // applications and their children, legal documents, planted investor_config rows),
 // by table and id (investor_config by owner and key). Ids only, never values.
@@ -721,18 +719,17 @@ const ifxRows = []
 const ifxUserIds = new Set() // every QA-TEST account id the section recorded, kept after its row is gone
 // The lease section's own rows (its QA-LEASE account, investor record, truck,
 // application, invite, maintenance entry and ledger rows) by table and id, and the
-// load id of the Job Tracking row it appended to the local sheet. Ids only.
+// load id of the Job Tracking row it appended to the run's fixture copy. Ids only.
 const leaseRows = []
 let leaseSheetLoad = ''
 function writeJournal() {
-  if (!originals.size && !createdRows.length && !sheetPlants.length && !ifxRows.length && !leaseRows.length && !leaseSheetLoad) {
+  if (!originals.size && !createdRows.length && !ifxRows.length && !leaseRows.length && !leaseSheetLoad) {
     if (fs.existsSync(JOURNAL)) fs.unlinkSync(JOURNAL)
     return
   }
   fs.writeFileSync(JOURNAL, JSON.stringify([
     ...[...originals.values()].map(({ table, col, id }) => ({ table, col, id })),
     ...createdRows.map(({ table, id }) => ({ table, id, created: true })),
-    ...sheetPlants.map(({ range, what }) => ({ sheet: range, planted: what || 'formula (clear this cell by hand if the run died)' })),
     ...ifxRows.map(({ table, id, owner, key }) => ({ table, ...(id != null ? { id } : { owner, key }), created: true, section: 'investorfixes' })),
     ...leaseRows.map(({ table, id, owner }) => ({ table, ...(id != null ? { id } : { owner }), created: true, section: 'lease' })),
     ...(leaseSheetLoad ? [{ sheet: 'Job Tracking', loadId: leaseSheetLoad, planted: 'a QA-LEASE row: delete the row holding this load id by hand if the run died' }] : []),
@@ -4201,155 +4198,18 @@ async function renameOntoOwnDirectorySpelling(page) {
   record({ step: 'N1b', title, expected, observed, verdict: v, shot: s })
 }
 
-// ---- F1: an Active Loads edit writes only the changed cell. Local only: it edits a
-// row of the LOCAL non-production sheet, read and restored with the service
-// account (valueRenderOption FORMULA). A row with no formula cell gets one, =1+1,
-// in an empty column no feature reads, and loses it again at the end.
-const PROD_SHEET = '1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo'
-function localSheetId() {
-  let id = process.env.SPREADSHEET_ID
-  let from = 'the environment'
-  if (id === undefined) {
-    const envFile = [path.join(paths.REPO, '.env'), path.join(paths.mainCheckout(), '.env')].find((f) => fs.existsSync(f))
-    if (!envFile) throw new Error('no .env to read SPREADSHEET_ID from')
-    id = paths.appRequire('dotenv').parse(fs.readFileSync(envFile)).SPREADSHEET_ID
-    from = envFile
-  }
-  id = String(id ?? '').trim()
-  if (!id) throw new Error(`SPREADSHEET_ID is unset or empty in ${from}`)
-  if (id === PROD_SHEET) throw new Error(`SPREADSHEET_ID in ${from} is PRODUCTION's sheet`)
-  return id
-}
-const colLetter = (n) => { let s = ''; for (let x = n; x > 0; x = Math.floor((x - 1) / 26)) s = String.fromCharCode(65 + ((x - 1) % 26)) + s; return s }
-// Columns a planted =1+1 must never land in: anything a feature reads. Among the
-// rest, a column that reads like progress or holds a link is used only when no
-// other one is empty.
-const F1_NOT_HARMLESS = /load.?id|job.?id|driver|status|truck|trailer|pay|rate|amount|revenue|charge|price|cost|mile|dist|date|time|appoint|lat|lng|lon|pick|drop|deliver|dest|origin|broker|phone|e-?mail|contact|fax|mobile|cell|details|contract|owner|invoice|pod|document|output|weight|hazmat|temp|note|info|address|city|state|zip/i
-const F1_LAST_RESORT = /phase|progress|link/i
-async function cellOnlySaveCase(page) {
-  const title = 'Active Loads → a load → Edit → change Details only → Save changes; the row read back from the sheet (valueRenderOption FORMULA)'
-  const expected = 'Only the edited cell changed; every formula cell of the row is still a formula'
-  if (!LOCAL) return record({ step: 'F1', title, expected, observed: 'SKIPPED — local only (it edits the local non-production sheet)', verdict: 'SKIP', shot: '' })
-  let observed = ''; let v = 'FAIL'; let s = ''
-  let sheets; let spreadsheetId; let range; let rowIndex; let width; let before = null; let plantedIdx = -1
-  const TAB = "'Job Tracking'"
-  const readRow = async () => ((await sheets.spreadsheets.values.get({ spreadsheetId, range, valueRenderOption: 'FORMULA' })).data.values || [[]])[0] || []
-  try {
-    spreadsheetId = localSheetId()
-    const { google } = paths.appRequire('googleapis')
-    const auth = new google.auth.GoogleAuth({ keyFile: path.join(paths.mainCheckout(), 'service-account-key.json'), scopes: ['https://www.googleapis.com/auth/spreadsheets'] })
-    sheets = google.sheets({ version: 'v4', auth })
-    const dash = (await api(page, 'GET', '/api/dashboard')).json || {}
-    const heads = dash.jobTrackingHeaders || []
-    width = heads.length
-    const idCol = heads.find((h) => /load.?id|job.?id/i.test(String(h || '')))
-    const detailsIdx = heads.findIndex((h) => String(h || '').trim().toLowerCase() === 'details')
-    if (!idCol || detailsIdx < 0) throw new Error('the dashboard\'s Job Tracking headers have no load id or no Details column')
-    const idIdx = heads.indexOf(idCol)
-    const active = (dash.activeJobs || []).filter((r) => Number(r._rowIndex) >= 2 && String(r[idCol] ?? '').trim()).slice(0, 12)
-    if (!active.length) throw new Error('the dashboard lists no active load')
-    const got = await sheets.spreadsheets.values.batchGet({
-      spreadsheetId, valueRenderOption: 'FORMULA',
-      ranges: active.map((r) => `${TAB}!A${r._rowIndex}:${colLetter(width)}${r._rowIndex}`),
-    })
-    const rowsF = (got.data.valueRanges || []).map((vr) => (vr.values || [[]])[0] || [])
-    // Same sheet as the server? The load id cell must match the server's copy.
-    const matchIdx = active.map((r, i) => String(rowsF[i]?.[idIdx] ?? '').trim() === String(r[idCol]).trim())
-    if (!matchIdx.some(Boolean)) throw new Error('no candidate row\'s load id matches the server\'s copy: this sheet is not the server\'s')
-    const withFormula = active.findIndex((r, i) => matchIdx[i] && rowsF[i].some((c, j) => j < width && j !== detailsIdx && typeof c === 'string' && c.startsWith('=')))
-    const pick = withFormula >= 0 ? withFormula : matchIdx.indexOf(true)
-    const job = active[pick]
-    rowIndex = Number(job._rowIndex)
-    range = `${TAB}!A${rowIndex}:${colLetter(width)}${rowIndex}`
-    const loadId = String(job[idCol]).trim()
-    meta.ids.f1Row = `${rowIndex} (load ${loadId})`
-    before = await readRow()
-    let formulas = before.map((c, j) => (j < width && typeof c === 'string' && c.startsWith('=') ? j : -1)).filter((j) => j >= 0)
-    if (!formulas.length) {
-      const emptyAt = (h, j) => String(h || '').trim() && !F1_NOT_HARMLESS.test(String(h)) && (before[j] === undefined || before[j] === '')
-      plantedIdx = heads.findIndex((h, j) => emptyAt(h, j) && !F1_LAST_RESORT.test(String(h)))
-      if (plantedIdx < 0) plantedIdx = heads.findIndex(emptyAt)
-      if (plantedIdx < 0) throw new Error('the row has no formula cell and no empty column that no feature reads')
-      const cell = `${TAB}!${colLetter(plantedIdx + 1)}${rowIndex}`
-      sheetPlants.push({ range: cell })
-      writeJournal()
-      await sheets.spreadsheets.values.update({ spreadsheetId, range: cell, valueInputOption: 'USER_ENTERED', requestBody: { values: [['=1+1']] } })
-      before = await readRow()
-      formulas = [plantedIdx]
-      // Wait (up to ~75 s) for the server's cached copy to show the computed value,
-      // as a person opening the load would see it.
-      const col = heads[plantedIdx]
-      for (let i = 0; i < 16; i++) {
-        const d = (await api(page, 'GET', '/api/dashboard')).json || {}
-        const r = (d.activeJobs || []).find((x) => Number(x._rowIndex) === rowIndex)
-        if (String(r?.[col] ?? '') === '2') break
-        await page.waitForTimeout(5000)
-      }
-    }
-    const formulaText = formulas.map((j) => `${String(heads[j] || '').trim() || colLetter(j + 1)} ${JSON.stringify(before[j])}`).join(', ')
-    // The UI: open the load from the dashboard, Edit, change Details only, Save.
-    await page.goto(`${BASE_URL}/dashboard?load=${encodeURIComponent(loadId)}`)
-    const editBtn = page.locator('button[title^="Manually edit load fields"]').first()
-    await editBtn.waitFor({ state: 'visible', timeout: 45000 })
-    await editBtn.click()
-    const box = page.locator('#edit-details')
-    await box.waitFor({ state: 'visible', timeout: 15000 })
-    const typed = `${(await box.inputValue()).trim()} QA-F1-${stamp}`.trim()
-    await box.fill(typed)
-    await caption(page, `Step F1 — load ${loadId} (sheet row ${rowIndex}): Details edited; formula cell(s): ${formulaText}${plantedIdx >= 0 ? ' (planted)' : ''}`)
-    const [resp] = await Promise.all([
-      page.waitForResponse((r) => r.request().method() !== 'GET' && /^\/api\/(data\/\d+|load\/)/.test(pathOf(r.url())), { timeout: 60000 }),
-      page.getByRole('button', { name: 'Save changes' }).click(),
-    ])
-    let rb = null
-    try { rb = await resp.json() } catch { /* not json */ }
-    const after = await readRow()
-    const n = Math.max(width, before.length, after.length)
-    const changed = []
-    for (let j = 0; j < n; j++) if (JSON.stringify(before[j] ?? '') !== JSON.stringify(after[j] ?? '')) changed.push(j)
-    const still = formulas.filter((j) => typeof after[j] === 'string' && after[j].startsWith('='))
-    const onlyDetails = changed.length === 1 && changed[0] === detailsIdx && after[detailsIdx] === typed
-    if (resp.status() !== 200) {
-      v = resp.status() === 409 ? 'INFO' : 'FAIL'
-      observed = `the save (${resp.request().method()} ${pathOf(resp.url())}) → ${resp.status()} ${rb?.code || ''}: ${String(rb?.error || '').slice(0, 200)}`
-    } else {
-      v = verdict(onlyDetails && still.length === formulas.length)
-      observed = `load ${loadId}, sheet row ${rowIndex}: the save → ${resp.status()} (${pathOf(resp.url())}); ${changed.length} cell(s) changed: ` +
-        `${changed.map((j) => String(heads[j] || '').trim() || colLetter(j + 1)).join(', ') || 'none'}; Details as typed: ${after[detailsIdx] === typed}; ` +
-        `formula cells still formulas: ${still.length} of ${formulas.length} (${formulas.map((j) => `${String(heads[j] || '').trim() || colLetter(j + 1)} now ${JSON.stringify(after[j] ?? '')}`).join(', ')})`
-    }
-    await page.waitForTimeout(600)
-    await caption(page, `Step F1 — ${v}: ${observed}`)
-    s = await shot(page, 'f1-active-loads-edit')
-  } catch (e) {
-    observed = `error: ${e.message}`
-    s = await shot(page, 'f1-error')
-  } finally {
-    // Put every cell that differs from the first read back (formulas and numbers as
-    // entered, text as raw text), and clear the planted formula.
-    if (sheets && before) {
-      try {
-        const now = await readRow()
-        const orig = before.slice()
-        if (plantedIdx >= 0) orig[plantedIdx] = ''
-        const raw = []; const entered = []
-        for (let j = 0; j < Math.max(width, orig.length, now.length); j++) {
-          if (JSON.stringify(orig[j] ?? '') === JSON.stringify(now[j] ?? '')) continue
-          const val = orig[j] ?? ''
-          const d = { range: `${TAB}!${colLetter(j + 1)}${rowIndex}`, values: [[val]] }
-          if (typeof val === 'number' || typeof val === 'boolean' || (typeof val === 'string' && val.startsWith('='))) entered.push(d)
-          else raw.push(d)
-        }
-        if (raw.length) await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data: raw } })
-        if (entered.length) await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'USER_ENTERED', data: entered } })
-        const back = await readRow()
-        const ok = Array.from({ length: Math.max(width, orig.length, back.length) }, (_, j) => JSON.stringify(orig[j] ?? '') === JSON.stringify(back[j] ?? '')).every(Boolean)
-        mpNotes.push(`F1 sheet row ${rowIndex}: ${raw.length + entered.length} cell(s) written back${plantedIdx >= 0 ? ' (incl. the planted formula cleared)' : ''} — ${ok ? 'restored' : 'RESTORE MISMATCH'}`)
-        if (ok) { sheetPlants.length = 0; writeJournal() }
-      } catch (e) { mpNotes.push(`F1 sheet restore error: ${e.message}`) }
-    }
-  }
-  record({ step: 'F1', title, expected, observed, verdict: v, shot: s })
+// ---- The steps that read the sheet with the Google API directly (F1, RC1, K1-K3)
+// are SKIPPED. The harness holds no Google key, and the local server reads its sheets
+// from a made-up fixture through the Sheets stand-in (scripts/e2e/fake-google.cjs).
+// Each of these steps compared a row's formulas or its cells' entered types and
+// formats as Google stores them, and restored rows from such a snapshot; the
+// stand-in keeps a formula as its text and has no formats, so on it they would pass
+// on any build. Porting them needs a stand-in that models both.
+const SHEET_STEP_SKIP = 'SKIPPED — it reads and restores the sheet\'s formulas and cell formats with the Google API, which the e2e run no longer reaches (no key; the server reads the made-up Sheets stand-in, which does not model them)'
+
+// ---- F1: an Active Loads edit writes only the changed cell. SKIPPED (above).
+async function cellOnlySaveCase() {
+  record({ step: 'F1', title: 'Active Loads → a load → Edit → change Details only → Save changes; the row read back from the sheet (valueRenderOption FORMULA)', expected: 'Only the edited cell changed; every formula cell of the row is still a formula', observed: SHEET_STEP_SKIP, verdict: 'SKIP', shot: '' })
 }
 
 // ---- E2: a Fuel expense stored under a percentage-paid driver's name with its space
@@ -4624,644 +4484,18 @@ async function bootBackfillSpacingCase(page) {
 }
 
 // ---- RC1: a rate-con import onto a load whose Payments Table row already exists
-// writes only the cells that change. POST /api/loads/from-ratecon appends the load to
-// Job Tracking, then upserts the Payments Table (key " Job ID") and Job Details. The
-// planted row holds two texts and a formula in columns the import does not map, and
-// they must come back exactly as stored (a build that writes the whole row back as
-// entered returns the texts as a number and a formula). Local only: the load is
-// synthetic (QA-RC1-<timestamp>), and every sheet row the step or the import writes
-// is snapshotted first (values and formats) and put back from the snapshot, then
-// re-read. The route is called with the reviewed fields only: no PDF (it archives a
-// rate-con to disk and mirrors it to Drive only for an attached PDF), and no addresses
-// (no geocode, no Distance Matrix). Gemini (POST /api/loads/ratecon/extract) is never
-// called.
-const RC1_RATE = '$1,234.00'
-const RC1_RATE_NUM = 1234
-// Stable JSON (sorted keys), so a snapshot and its read-back compare by content.
-const stableJson = (x) => JSON.stringify(x, (k, val) => (val && typeof val === 'object' && !Array.isArray(val)
-  ? Object.fromEntries(Object.keys(val).sort().map((kk) => [kk, val[kk]])) : val))
-const enteredText = (c) => {
-  const u = c?.userEnteredValue
-  if (!u) return 'blank'
-  if ('stringValue' in u) return `the text ${u.stringValue}`
-  if ('formulaValue' in u) return `the formula ${u.formulaValue}`
-  if ('numberValue' in u) return `the number ${u.numberValue}`
-  if ('boolValue' in u) return `the boolean ${u.boolValue}`
-  return stableJson(u)
-}
-// The Data Manager (/data), one tab, filtered by its search box to `needle`: the
-// row's cells as the page shows them, by header. A fresh page load each time, so the
-// page reads the sheet again.
-async function showSheetRow(page, tabTitle, needle) {
-  // The page first loads its default tab; switching before that answer lands would
-  // let it overwrite the tab asked for.
-  const first = page.waitForResponse((r) => pathOf(r.url()) === '/api/data' && r.request().method() === 'GET', { timeout: 60000 }).catch(() => null)
-  await page.goto(`${BASE_URL}/data`)
-  await first
-  const tabBtn = page.locator('button.nav-item', { hasText: tabTitle }).first()
-  await tabBtn.waitFor({ state: 'visible', timeout: 30000 })
-  const isData = (r, withSearch) => pathOf(r.url()) === '/api/data' && new URL(r.url()).searchParams.get('sheet') === tabTitle &&
-    (!withSearch || new URL(r.url()).searchParams.get('search') === needle)
-  await Promise.all([page.waitForResponse((r) => isData(r, false), { timeout: 30000 }), tabBtn.click()])
-  const box = page.locator('.page-header input.search-input')
-  await Promise.all([page.waitForResponse((r) => isData(r, true), { timeout: 30000 }), box.fill(needle)])
-  const table = page.locator('.table-wrapper table')
-  const tr = table.locator('tbody tr', { hasText: needle }).first()
-  await tr.waitFor({ state: 'visible', timeout: 15000 })
-  // textContent, not innerText: the headers are upper-cased by CSS. Keyed by the
-  // trimmed header, lower-cased.
-  const heads = await table.locator('thead th').evaluateAll((ths) => ths.map((th) => th.textContent.trim().toLowerCase()))
-  const cells = await tr.locator('td').evaluateAll((tds) => tds.map((td) => td.textContent.trim()))
-  return Object.fromEntries(heads.map((h, j) => [h, cells[j]]))
-}
-async function rateconUpsertCase(page) {
-  const title = 'A rate-con import (POST /api/loads/from-ratecon from the Super Admin page: the reviewed fields, no PDF) for a load whose Payments Table row already exists (planted in the local sheet); the row read back (FORMULA render and each cell\'s entered type) and shown on the Data Manager'
-  const expected = 'Only the blank Payment Amount changes (filled with the rate): the text 00123 and the text =QA stay text, the formula stays the same formula'
-  if (!LOCAL) return record({ step: 'RC1', title, expected, observed: 'SKIPPED — local only (it writes the local non-production sheet)', verdict: 'SKIP', shot: '' })
-  if (!db) return record({ step: 'RC1', title, expected, observed: skipWhy(), verdict: 'SKIP', shot: '' })
-  const loadId = `QA-RC1-${stamp}`
-  let observed = ''; let v = 'FAIL'; let s = ''
-  let sheets; let spreadsheetId
-  const tabs = {}
-  const snaps = [] // { key, tab, row, cells }: the rows as they were before the step
-  let jtRow = null
-  let notifMax = 0
-  let idIdx = -1; let jtIdIdx = -1; let jdDetailsIdx = -1; let jdPaymentIdx = -1
-  const q = (t) => `'${String(t).replace(/'/g, "''")}'`
-  const rowRange = (t, r) => `${q(t.title)}!A${r}:${colLetter(t.colCount)}${r}`
-  const cellsOf = async (t, r) => {
-    const g = await sheets.spreadsheets.get({ spreadsheetId, ranges: [rowRange(t, r)], includeGridData: true, fields: 'sheets(data(rowData(values(userEnteredValue,userEnteredFormat))))' })
-    const vals = g.data.sheets?.[0]?.data?.[0]?.rowData?.[0]?.values || []
-    return Array.from({ length: t.colCount }, (_, j) => {
-      const c = vals[j] || {}
-      return { ...(c.userEnteredValue ? { userEnteredValue: c.userEnteredValue } : {}), ...(c.userEnteredFormat ? { userEnteredFormat: c.userEnteredFormat } : {}) }
-    })
-  }
-  const formulaRow = async (t, r) => ((await sheets.spreadsheets.values.get({ spreadsheetId, range: rowRange(t, r), valueRenderOption: 'FORMULA' })).data.values || [[]])[0] || []
-  const dataRows = async (t) => ((await sheets.spreadsheets.values.get({ spreadsheetId, range: q(t.title), valueRenderOption: 'FORMULA' })).data.values || []).length
-  try {
-    spreadsheetId = localSheetId() // refuses production's sheet, as F1 does
-    const { google } = paths.appRequire('googleapis')
-    const auth = new google.auth.GoogleAuth({ keyFile: path.join(paths.mainCheckout(), 'service-account-key.json'), scopes: ['https://www.googleapis.com/auth/spreadsheets'] })
-    sheets = google.sheets({ version: 'v4', auth })
-    const props = (await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)))' })).data.sheets || []
-    for (const [k, title] of [['jt', 'Job Tracking'], ['pt', 'Payments Table'], ['jd', 'Job Details']]) {
-      const p = props.find((x) => x.properties?.title === title)?.properties
-      if (!p) throw new Error(`the local sheet has no "${title}" tab`)
-      const vals = (await sheets.spreadsheets.values.get({ spreadsheetId, range: q(title), valueRenderOption: 'FORMULA' })).data.values || []
-      tabs[k] = { title, sheetId: p.sheetId, colCount: p.gridProperties.columnCount, rows: vals.length, headers: vals[0] || [] }
-      if (vals.length + 1 > p.gridProperties.rowCount) throw new Error(`"${title}" has no empty row below its data (the step does not grow a tab)`)
-    }
-    jtIdIdx = tabs.jt.headers.findIndex((h) => /load.?id|job.?id/i.test(String(h || '')))
-    const ph = tabs.pt.headers.map((h) => String(h ?? '').trim().toLowerCase())
-    idIdx = ph.indexOf('job id')
-    const amtIdx = ph.indexOf('payment amount')
-    const contractIdx = ph.indexOf('contract id')
-    if (jtIdIdx < 0 || idIdx < 0 || amtIdx < 0) throw new Error('Job Tracking has no load id column, or the Payments Table no " Job ID" or "Payment Amount" column')
-    jdDetailsIdx = tabs.jd.headers.findIndex((h) => String(h ?? '').trim().toLowerCase() === 'details')
-    jdPaymentIdx = tabs.jd.headers.findIndex((h) => String(h ?? '').trim().toLowerCase() === 'payment')
-    // Three unmapped Payments Table columns (the route maps " Job ID", Contract ID and
-    // Payment Amount): the text 00123, the text =QA and a formula.
-    const free = ph.map((h, j) => j).filter((j) => ph[j] && ![idIdx, amtIdx, contractIdx].includes(j))
-    const used = []
-    const take = (re) => { const j = free.find((x) => re.test(ph[x]) && !used.includes(x)) ?? free.find((x) => !used.includes(x)); if (j !== undefined) used.push(j); return j }
-    const textIdx = take(/invoice/)
-    const eqIdx = take(/status/)
-    const fIdx = take(/due|carrier/)
-    if ([textIdx, eqIdx, fIdx].some((j) => j === undefined)) throw new Error('the Payments Table has fewer than three columns the import does not map')
-    const P = tabs.pt.rows + 1
-    const feeIdx = ph.indexOf('tender fee')
-    const formula = feeIdx >= 0 && !used.includes(feeIdx) ? `=${colLetter(amtIdx + 1)}${P}-${colLetter(feeIdx + 1)}${P}` : `=${colLetter(amtIdx + 1)}${P}*1`
-    const label = (j) => String(tabs.pt.headers[j] || '').trim() || colLetter(j + 1)
-    // Snapshot every row the step or the import writes, BEFORE the first write: the
-    // planted Payments Table row, and the next free row of Job Tracking and of Job
-    // Details (where the import appends).
-    for (const [key, t, r] of [['pt', tabs.pt, P], ['jt', tabs.jt, tabs.jt.rows + 1], ['jd', tabs.jd, tabs.jd.rows + 1]]) {
-      const cells = await cellsOf(t, r)
-      if (cells.some((c) => c.userEnteredValue)) throw new Error(`row ${r} of "${t.title}" is not empty`)
-      snaps.push({ key, tab: t, row: r, cells })
-      sheetPlants.push({ range: rowRange(t, r), what: `RC1 ${key === 'pt' ? 'planted Payments Table row' : 'row the import appends'} (clear it by hand if the run died)` })
-    }
-    writeJournal()
-    meta.ids.rc1 = `${loadId} (Payments Table row ${P})`
-    // Plant the Payments Table row: the key and the two texts RAW (stored as text), the formula as entered.
-    const cellAt = (j) => `${q(tabs.pt.title)}!${colLetter(j + 1)}${P}`
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId,
-      requestBody: { valueInputOption: 'RAW', data: [{ range: cellAt(idIdx), values: [[loadId]] }, { range: cellAt(textIdx), values: [['00123']] }, { range: cellAt(eqIdx), values: [['=QA']] }] },
-    })
-    await sheets.spreadsheets.values.update({ spreadsheetId, range: cellAt(fIdx), valueInputOption: 'USER_ENTERED', requestBody: { values: [[formula]] } })
-    const plantedCells = await cellsOf(tabs.pt, P)
-    const want = [[idIdx, 'stringValue', loadId], [textIdx, 'stringValue', '00123'], [eqIdx, 'stringValue', '=QA'], [fIdx, 'formulaValue', formula]]
-    for (const [j, kind, val] of want) if (plantedCells[j]?.userEnteredValue?.[kind] !== val) throw new Error(`the planted row did not store ${label(j)} as intended`)
-    if (plantedCells[amtIdx]?.userEnteredValue) throw new Error('the planted row\'s Payment Amount is not blank')
-    // The server reads this sheet: its sheet reader lists the planted row.
-    const seen = await api(page, 'GET', `/api/data?sheet=${encodeURIComponent(tabs.pt.title)}&search=${encodeURIComponent(loadId)}`)
-    if (seen.status !== 200 || !(seen.json?.data || []).some((r) => String(r[tabs.pt.headers[idIdx]] ?? '').trim() === loadId)) {
-      throw new Error(`the server does not list the planted row (GET /api/data → ${seen.status}): it does not read this sheet`)
-    }
-    // What the Data Manager shows for the planted cells and Payment Amount.
-    const shownText = (shown) => [textIdx, eqIdx, fIdx, amtIdx].map((j) => `${label(j)} "${shown[label(j).toLowerCase()] ?? '(column not shown)'}"`).join(', ')
-    const shownBefore = await showSheetRow(page, tabs.pt.title, loadId)
-    await caption(page, `Step RC1 — before the import: Payments Table row ${P} for ${loadId} shows ${shownText(shownBefore)}`)
-    // The import, from this signed-in page, as the review modal sends it (no PDF).
-    notifMax = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM dispatch_notifications').get().m
-    await caption(page, `Step RC1 — POST /api/loads/from-ratecon for ${loadId}: Rate ${RC1_RATE}, no PDF, no addresses`)
-    const res = await api(page, 'POST', '/api/loads/from-ratecon', { fields: { 'Load Number': loadId, Rate: RC1_RATE, Details: 'QA-TEST RC1 synthetic load (the E2E harness deletes it)' } })
-    jtRow = Number(res.json?.rowIndex) || null
-    // The row read back: each cell's entered type, and the FORMULA render.
-    const afterCells = await cellsOf(tabs.pt, P)
-    const afterF = await formulaRow(tabs.pt, P)
-    const changed = []
-    for (let j = 0; j < tabs.pt.colCount; j++) {
-      if (j !== amtIdx && stableJson(afterCells[j].userEnteredValue ?? null) !== stableJson(plantedCells[j].userEnteredValue ?? null)) changed.push(j)
-    }
-    const filled = Number(afterF[amtIdx]) === RC1_RATE_NUM
-    const shownAfter = await showSheetRow(page, tabs.pt.title, loadId)
-    if (res.status !== 200) {
-      v = res.status === 409 ? 'INFO' : 'FAIL'
-      observed = `POST /api/loads/from-ratecon → ${res.status}${res.json?.code ? ` ${res.json.code}` : ''}: ${String(res.json?.error || res.text || '').slice(0, 200)}`
-    } else {
-      v = verdict(!changed.length && filled)
-      observed = `${loadId}: Payments Table row ${P} planted with ${label(textIdx)} = the text 00123, ${label(eqIdx)} = the text =QA, ${label(fIdx)} = the formula ${formula}, Payment Amount blank; ` +
-        `the server lists it; the import → 200 (Job Tracking row ${jtRow ?? '?'}, ${(res.json?.warnings || []).length} warning(s)); read back: ` +
-        `${[textIdx, eqIdx, fIdx].map((j) => `${label(j)} ${enteredText(afterCells[j])}${changed.includes(j) ? ' (CHANGED)' : ' (unchanged)'}`).join('; ')}; ` +
-        `Payment Amount ${filled ? 'filled' : 'NOT filled with the number'} (${enteredText(afterCells[amtIdx])}); ` +
-        `other cells changed: ${changed.filter((j) => ![textIdx, eqIdx, fIdx].includes(j)).map(label).join(', ') || 'none'}; ` +
-        `the Data Manager showed ${shownText(shownBefore)} before, and shows ${shownText(shownAfter)} after`
-    }
-    // A short caption, so the tab's header row stays in the screenshot; the results table has the rest.
-    await caption(page, `Step RC1 — ${v}: Payments Table row ${P} (${loadId}) after the import: ${shownText(shownAfter)}. Before it: ${shownText(shownBefore)}`)
-    s = await shot(page, 'rc1-payments-table-row')
-  } catch (e) {
-    observed = `error: ${e.message}`
-    s = await shot(page, 'rc1-error')
-  } finally {
-    // Put back every snapshotted row that differs, only when it holds this step's
-    // load (Job Details has no load id column: the row the import appended below its
-    // data, recognized by the Payment it wrote), then read it back.
-    if (sheets && snaps.length) {
-      let allOk = true
-      for (const sn of snaps) {
-        try {
-          if (stableJson(await cellsOf(sn.tab, sn.row)) === stableJson(sn.cells)) { mpNotes.push(`RC1 ${sn.tab.title} row ${sn.row} unchanged`); continue }
-          const f = await formulaRow(sn.tab, sn.row)
-          const ours = sn.key === 'pt' ? String(f[idIdx] ?? '').trim() === loadId
-            : sn.key === 'jt' ? String(f[jtIdIdx] ?? '').trim() === loadId
-              : jdPaymentIdx < 0 || Number(f[jdPaymentIdx]) === RC1_RATE_NUM
-          if (!ours) { allOk = false; mpNotes.push(`RC1 ${sn.tab.title} row ${sn.row} holds another row now: NOT restored (LEFT BEHIND?)`); continue }
-          await sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
-            requestBody: { requests: [{ updateCells: { range: { sheetId: sn.tab.sheetId, startRowIndex: sn.row - 1, endRowIndex: sn.row, startColumnIndex: 0, endColumnIndex: sn.tab.colCount }, rows: [{ values: sn.cells }], fields: 'userEnteredValue,userEnteredFormat' } }] },
-          })
-          const ok = stableJson(await cellsOf(sn.tab, sn.row)) === stableJson(sn.cells)
-          if (!ok) allOk = false
-          mpNotes.push(`RC1 ${sn.tab.title} row ${sn.row} ${ok ? 'put back (values and formats), re-read: as before' : 'RESTORE MISMATCH'}`)
-        } catch (e) { allOk = false; mpNotes.push(`RC1 ${sn.tab.title} row ${sn.row} restore error: ${e.message}`) }
-      }
-      // A Job Tracking row the import appended where no snapshot was taken.
-      if (jtRow && !snaps.some((sn) => sn.key === 'jt' && sn.row === jtRow)) {
-        try {
-          const t = tabs.jt
-          if (String((await formulaRow(t, jtRow))[jtIdIdx] ?? '').trim() === loadId) {
-            await sheets.spreadsheets.values.clear({ spreadsheetId, range: rowRange(t, jtRow) })
-            mpNotes.push(`RC1 Job Tracking row ${jtRow} (outside the snapshot) cleared of values; its formats were not snapshotted`)
-          }
-        } catch (e) { allOk = false; mpNotes.push(`RC1 Job Tracking row ${jtRow} clear error: ${e.message}`) }
-      }
-      for (const t of Object.values(tabs)) {
-        try {
-          const n = await dataRows(t)
-          if (n !== t.rows) allOk = false
-          mpNotes.push(`RC1 ${t.title} data ${n === t.rows ? `ends at row ${n}, as before` : `now ends at row ${n}, was ${t.rows} (MISMATCH)`}`)
-        } catch (e) { allOk = false; mpNotes.push(`RC1 ${t.title} row count error: ${e.message}`) }
-      }
-      if (allOk) {
-        for (let i = sheetPlants.length - 1; i >= 0; i--) if (String(sheetPlants[i].what || '').startsWith('RC1')) sheetPlants.splice(i, 1)
-        writeJournal()
-      }
-    }
-    // The private-DB rows the import wrote. Its create_load_ratecon audit line stays,
-    // as the harness's other audit lines do.
-    try {
-      const nNotif = db.prepare("DELETE FROM dispatch_notifications WHERE id > ? AND type = 'new-load' AND title = ?").run(notifMax, `New Load ${loadId}`).changes
-      const nDocs = db.prepare('DELETE FROM documents WHERE load_id = ?').run(loadId).changes
-      const nCoords = db.prepare('DELETE FROM load_coordinates WHERE load_id = ? OR load_id = ?').run(loadId, loadId.toLowerCase()).changes
-      const nAudit = db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE action = 'create_load_ratecon' AND entity_id = ?").get(loadId).n
-      mpNotes.push(`RC1 DB: ${nNotif} dispatch notification(s) deleted, ${nDocs} document row(s), ${nCoords} load_coordinates row(s); ${nAudit} create_load_ratecon audit line(s) kept`)
-    } catch (e) { mpNotes.push(`RC1 DB clean-up error: ${e.message}`) }
-  }
-  record({ step: 'RC1', title, expected, observed, verdict: v, shot: s })
+// writes only the cells that change. SKIPPED (see F1's note).
+async function rateconUpsertCase() {
+  record({ step: 'RC1', title: 'A rate-con import (POST /api/loads/from-ratecon from the Super Admin page: the reviewed fields, no PDF) for a load whose Payments Table row already exists (planted in the local sheet); the row read back (FORMULA render and each cell\'s entered type) and shown on the Data Manager', expected: 'Only the blank Payment Amount changes (filled with the rate): the text 00123 and the text =QA stay text, the formula stays the same formula', observed: SHEET_STEP_SKIP, verdict: 'SKIP', shot: '' })
 }
 
 // ================================================================ names section (K1, K2, K3)
-// ONLY=names, local only (it writes the local non-production sheet, like F1 and
-// RC1, and restores every row it touches from a snapshot taken first). Every
-// "Expected" column is the behaviour AFTER the fix; a BEFORE run fails the fix rows.
-//   K1 a driver name that reads as a built-in property name, dispatched to a real
-//      load, is refused 400 DRIVER_NAME_RESERVED and nothing is written.
-//   K2 the same name stored on a completed load in the current open month leaves
-//      GET /api/dashboard and GET /api/financials answering 200, with an unrelated
-//      driver's figure and the fleet revenue unchanged (the load counts unassigned).
-//   K3 for a non-Super-Admin, saving a changed cell the sheet would store as a
-//      formula is refused 400 FORMULA_NOT_ALLOWED; a plain signed number is kept.
-// The name under test is test data; real driver names are never printed (rows are
-// named by id, drivers by role). The screenshots show the real pages, as the rest
-// of this harness does, and live only in the work dir.
-const NAMES_KEY = '__proto__' // reads as a built-in property name; test data only
-const namesNotes = []
-// A loose month bucket for choosing candidate rows (not the server's own parser):
-// enough to prefer a load dated in the current Central month.
-const jtMonthKey = (s) => {
-  if (!s) return ''
-  const iso = String(s).match(/(\d{4})-(\d{2})-\d{2}/)
-  if (iso) return `${iso[1]}-${iso[2]}`
-  const d = new Date(String(s).replace(/^Date:\s*/i, ''))
-  return isNaN(d) ? '' : dayApp(d).slice(0, 7)
-}
-// The local Job Tracking sheet, opened with the service account (formulas as
-// formulas), exactly as F1 and RC1 do. Refuses production's sheet.
-async function openNamesSheet() {
-  const spreadsheetId = localSheetId()
-  const { google } = paths.appRequire('googleapis')
-  const auth = new google.auth.GoogleAuth({ keyFile: path.join(paths.mainCheckout(), 'service-account-key.json'), scopes: ['https://www.googleapis.com/auth/spreadsheets'] })
-  const sheets = google.sheets({ version: 'v4', auth })
-  const props = (await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title,gridProperties(columnCount)))' })).data.sheets || []
-  const jt = props.find((p) => p.properties?.title === 'Job Tracking')?.properties
-  if (!jt) throw new Error('the local sheet has no "Job Tracking" tab')
-  const S = { sheets, spreadsheetId, sheetId: jt.sheetId, colCount: jt.gridProperties.columnCount }
-  const values = (await sheets.spreadsheets.values.get({ spreadsheetId, range: "'Job Tracking'", valueRenderOption: 'FORMATTED_VALUE' })).data.values || []
-  S.headers = values[0] || []
-  S.rows = values.slice(1)
-  return S
-}
-const jtRange = (S, r) => `'Job Tracking'!A${r}:${colLetter(S.colCount)}${r}`
-// A whole-row snapshot (values and formats), and its restore — the RC1 pattern,
-// so a row put back is byte-identical to how it was read.
-async function jtSnapshotRow(S, r) {
-  const g = await S.sheets.spreadsheets.get({ spreadsheetId: S.spreadsheetId, ranges: [jtRange(S, r)], includeGridData: true, fields: 'sheets(data(rowData(values(userEnteredValue,userEnteredFormat))))' })
-  const vals = g.data.sheets?.[0]?.data?.[0]?.rowData?.[0]?.values || []
-  return Array.from({ length: S.colCount }, (_, j) => { const c = vals[j] || {}; return { ...(c.userEnteredValue ? { userEnteredValue: c.userEnteredValue } : {}), ...(c.userEnteredFormat ? { userEnteredFormat: c.userEnteredFormat } : {}) } })
-}
-async function jtRestoreRow(S, r, cells) {
-  await S.sheets.spreadsheets.batchUpdate({ spreadsheetId: S.spreadsheetId, requestBody: { requests: [{ updateCells: { range: { sheetId: S.sheetId, startRowIndex: r - 1, endRowIndex: r, startColumnIndex: 0, endColumnIndex: S.colCount }, rows: [{ values: cells }], fields: 'userEnteredValue,userEnteredFormat' } }] } })
-}
-const jtFormulaRow = async (S, r) => ((await S.sheets.spreadsheets.values.get({ spreadsheetId: S.spreadsheetId, range: jtRange(S, r), valueRenderOption: 'FORMULA' })).data.values || [[]])[0] || []
-const jtFormattedRow = async (S, r) => ((await S.sheets.spreadsheets.values.get({ spreadsheetId: S.spreadsheetId, range: jtRange(S, r), valueRenderOption: 'FORMATTED_VALUE' })).data.values || [[]])[0] || []
-// The kind of value a cell holds as it was entered: 'formulaValue' (the sheet
-// stored it as a formula, e.g. "+1+1" or "+7"), 'numberValue', 'stringValue',
-// 'boolValue', or 'blank'. USER_ENTERED turns any "+...": or "=..." into a formula.
-const uevKind = (cell) => { const u = cell && cell.userEnteredValue; return u ? (Object.keys(u)[0] || 'blank') : 'blank' }
-const uevJson = (cell) => stableJson((cell && cell.userEnteredValue) ?? null)
-// Clear a step's own live sheet-plant markers from the journal once its row is
-// verified back (mirrors RC1's own clean-up).
-function clearNamesPlants(prefix) {
-  for (let i = sheetPlants.length - 1; i >= 0; i--) if (String(sheetPlants[i].what || '').startsWith(prefix)) sheetPlants.splice(i, 1)
-  writeJournal()
-}
-
-// ---- K1: dispatch to a reserved driver name is refused; nothing is written.
-async function reservedDispatchCase(dp, S, cols, active) {
-  const title = 'Dispatcher dispatches a real load to a reserved driver name (POST /api/dispatch, the same call the Job Board Assign makes; its dropdown only offers real drivers)'
-  const expected = '400 DRIVER_NAME_RESERVED (field "driver"); the refusal is shown on the page; the load\'s Driver cell is unchanged (nothing written)'
-  if (!active.length) return record({ step: 'K1', title, expected, observed: 'SKIPPED — the local sheet has no non-completed, unique-id load to dispatch', verdict: 'SKIP', shot: '' })
-  const load = active[0]
-  let observed = ''; let v = 'FAIL'; let s = ''
-  let snap = null; let notifMax = 0; let dispMax = 0
-  try {
-    meta.ids.k1 = `${load.lid} (Job Tracking row ${load.rowIndex})`
-    snap = await jtSnapshotRow(S, load.rowIndex)
-    sheetPlants.push({ range: jtRange(S, load.rowIndex), what: 'K1 dispatch target (restore this row by hand if the run died)' }); writeJournal()
-    if (db) {
-      try { notifMax = db.prepare('SELECT COALESCE(MAX(id),0) AS m FROM notifications').get().m } catch { /* table shape may differ */ }
-      try { dispMax = db.prepare('SELECT COALESCE(MAX(id),0) AS m FROM dispatch_notifications').get().m } catch { /* ignore */ }
-    }
-    await dp.goto(`${BASE_URL}/dashboard`)
-    await dp.locator(KPI).first().waitFor({ state: 'visible', timeout: 45000 }).catch(() => {})
-    await caption(dp, `Step K1 — dispatching load ${load.lid} (row ${load.rowIndex}) to the reserved name ${JSON.stringify(NAMES_KEY)} (page fetch, as the app posts)`)
-    const res = await api(dp, 'POST', '/api/dispatch', { rowIndex: load.rowIndex, driver: NAMES_KEY, loadId: load.lid, origin: '', destination: '' })
-    const after = await jtFormulaRow(S, load.rowIndex)
-    const drvAfter = String(after[cols.driver] ?? '')
-    const stAfter = cols.status >= 0 ? String(after[cols.status] ?? '') : ''
-    const unchanged = drvAfter === load.drv && (cols.status < 0 || stAfter === load.st)
-    const code = res.json?.code || ''
-    const field = res.json?.field || ''
-    if (res.status === 400 && code === 'DRIVER_NAME_RESERVED') {
-      v = verdict(unchanged && field === 'driver')
-      observed = `POST /api/dispatch -> 400 ${code} (field ${JSON.stringify(field)}); the load's Driver cell is ${unchanged ? 'unchanged' : 'CHANGED'} (stored driver kept, status ${JSON.stringify(stAfter)})`
-    } else if (res.status === 200) {
-      v = 'FAIL'
-      observed = `POST /api/dispatch -> 200 (accepted): the Driver cell was written to ${JSON.stringify(drvAfter)} (status ${JSON.stringify(stAfter)}) — the reserved name was NOT refused. Restored below.`
-    } else {
-      v = 'INFO'
-      observed = `POST /api/dispatch -> ${res.status}${code ? ` ${code}` : ''}: ${String(res.json?.error || res.text || '').slice(0, 200)}`
-    }
-    await caption(dp, `Step K1 — ${v}: ${observed}`)
-    s = await shot(dp, 'k1-dispatch-reserved-name')
-  } catch (e) {
-    observed = `error: ${e.message}`
-    s = await shot(dp, 'k1-error')
-  } finally {
-    if (snap) {
-      try {
-        await jtRestoreRow(S, load.rowIndex, snap)
-        const back = await jtSnapshotRow(S, load.rowIndex)
-        const ok = stableJson(back) === stableJson(snap)
-        namesNotes.push(`K1 Job Tracking row ${load.rowIndex} ${ok ? 'restored, re-read: as before' : 'RESTORE MISMATCH'}`)
-        if (ok) clearNamesPlants('K1')
-      } catch (e) { namesNotes.push(`K1 restore error: ${e.message}`) }
-    }
-    if (db) {
-      try {
-        const n1 = db.prepare('DELETE FROM notifications WHERE id > ? AND LOWER(driver_name) = LOWER(?)').run(notifMax, NAMES_KEY).changes
-        const n2 = db.prepare('DELETE FROM dispatch_notifications WHERE id > ?').run(dispMax).changes
-        if (n1 || n2) namesNotes.push(`K1 DB: ${n1} notification(s), ${n2} dispatch notification(s) deleted (throwaway copy)`)
-      } catch (e) { namesNotes.push(`K1 DB clean-up error: ${e.message}`) }
-    }
-  }
-  record({ step: 'K1', title, expected, observed, verdict: v, shot: s })
-}
-
-// ---- K2: a reserved name stored on a completed load keeps the totals working.
-async function reservedTotalsCase(sp, S, cols, completedThisMonth) {
-  const title = 'A reserved driver name is planted on a completed load in the current open month; the Super Admin opens the Dashboard and Financials'
-  const expected = 'Dashboard and Financials both 200; an unrelated driver\'s figure and the fleet revenue match the baseline read taken before planting (the planted load counts as unassigned)'
-  if (!completedThisMonth.length) return record({ step: 'K2', title, expected, observed: 'SKIPPED — no completed load with a payment dated in the current month', verdict: 'SKIP', shot: '' })
-  const load = completedThisMonth[0]
-  let observed = ''; let v = 'FAIL'; let s = ''
-  let snap = null; let planted = false
-  try {
-    meta.ids.k2 = `${load.lid} (Job Tracking row ${load.rowIndex})`
-    const baseFinRes = await api(sp, 'GET', '/api/financials')
-    const baseDashRes = await api(sp, 'GET', '/api/dashboard')
-    if (baseFinRes.status !== 200) throw new Error(`baseline GET /api/financials -> ${baseFinRes.status}`)
-    const baseFin = baseFinRes.json || {}
-    const baseBoard = baseFin.drivers || []
-    const perturbedKey = normName(load.drv)
-    const other = baseBoard.find((d) => !d.isUnassigned && normName(d.name) !== perturbedKey && Number(d.grossRevenue) > 0)
-    if (!other) throw new Error('the Financials leaderboard has no second driver to compare against')
-    const otherKey = normName(other.name)
-    const baseTotalRevenue = Number(baseFin.summary?.totalRevenue)
-    const baseUnassigned = Number(baseFin.summary?.unassignedRevenue)
-    const perturbedEntry = baseBoard.find((d) => !d.isUnassigned && normName(d.name) === perturbedKey) || {}
-    const basePerturbedGross = Number(perturbedEntry.grossRevenue)
-    const baseOtherGross = Number(other.grossRevenue)
-    const baseOtherPay = Number(other.totalEarnings)
-    await caption(sp, `Step K2 — baseline read (dashboard ${baseDashRes.status}, financials 200); planting ${JSON.stringify(NAMES_KEY)} on completed load ${load.lid} (row ${load.rowIndex})`)
-    snap = await jtSnapshotRow(S, load.rowIndex)
-    sheetPlants.push({ range: jtRange(S, load.rowIndex), what: 'K2 planted Driver cell (restore this row by hand if the run died)' }); writeJournal()
-    const drvCells = snap.map((c, j) => (j === cols.driver ? { ...(c.userEnteredFormat ? { userEnteredFormat: c.userEnteredFormat } : {}), userEnteredValue: { stringValue: NAMES_KEY } } : c))
-    await jtRestoreRow(S, load.rowIndex, drvCells)
-    planted = true
-    const check = await jtFormulaRow(S, load.rowIndex)
-    if (String(check[cols.driver] ?? '') !== NAMES_KEY) throw new Error('the planted Driver cell did not store the reserved name')
-    // Wait for the server's 60 s Job Tracking cache to pick the row up (F1's pattern):
-    // refreshed when Financials errors (the corruption) or the figures move.
-    let refreshed = false; let lastFin = null; let waited = 0
-    for (let i = 0; i < 24; i++) {
-      lastFin = await api(sp, 'GET', '/api/financials')
-      if (lastFin.status !== 200) { refreshed = true; break }
-      const j = lastFin.json || {}
-      const board = j.drivers || []
-      const curPerturbed = Number((board.find((d) => !d.isUnassigned && normName(d.name) === perturbedKey) || {}).grossRevenue)
-      const curUnassigned = Number(j.summary?.unassignedRevenue)
-      if (curUnassigned !== baseUnassigned || curPerturbed !== basePerturbedGross) { refreshed = true; break }
-      await sp.waitForTimeout(5000); waited += 5
-    }
-    const dash2 = await api(sp, 'GET', '/api/dashboard')
-    const fin2 = lastFin && lastFin.status ? lastFin : await api(sp, 'GET', '/api/financials')
-    const j2 = fin2.status === 200 ? (fin2.json || {}) : {}
-    const board2 = j2.drivers || []
-    const other2 = board2.find((d) => !d.isUnassigned && normName(d.name) === otherKey) || null
-    const otherHeld = !!other2 && Number(other2.grossRevenue) === baseOtherGross && Number(other2.totalEarnings) === baseOtherPay
-    const revHeld = Number(j2.summary?.totalRevenue) === baseTotalRevenue
-    const movedToUnassigned = fin2.status === 200 && Number(j2.summary?.unassignedRevenue) > baseUnassigned
-    if (!refreshed) {
-      v = 'INFO'
-      observed = `the server's 60 s Job Tracking cache did not pick up the planted row within ${waited}s (dashboard ${dash2.status}, financials ${fin2.status}) — nothing to judge`
-    } else {
-      v = verdict(dash2.status === 200 && fin2.status === 200 && otherHeld && revHeld)
-      observed = `planted ${JSON.stringify(NAMES_KEY)} on completed load ${load.lid} (row ${load.rowIndex}); after the cache refreshed (~${waited}s): ` +
-        `GET /api/dashboard -> ${dash2.status}, GET /api/financials -> ${fin2.status}${fin2.status !== 200 ? ` ${fin2.json?.code || ''} ${String(fin2.json?.error || '').slice(0, 120)}`.trimEnd() : ''}; ` +
-        `an unrelated driver's figure ${otherHeld ? 'matches the baseline' : (other2 ? 'CHANGED' : 'could not be read')}; fleet totalRevenue ${revHeld ? 'unchanged' : 'CHANGED / unreadable'}; ` +
-        `the planted load ${movedToUnassigned ? 'moved into the unassigned bucket (its revenue still counted)' : (fin2.status === 200 ? 'did not move to unassigned' : 'could not be read: Financials errored (totals corrupted process-wide)')}`
-    }
-    await caption(sp, `Step K2 — ${v}: dashboard ${dash2.status}, financials ${fin2.status}`)
-    try {
-      await sp.goto(`${BASE_URL}/admin/financials`)
-      await sp.locator('table.monthly-table, .kpi-value, .toast-container .toast').first().waitFor({ state: 'visible', timeout: 30000 }).catch(() => {})
-    } catch { /* best effort */ }
-    await caption(sp, `Step K2 — ${v}: ${observed}`)
-    s = await shot(sp, 'k2-financials-after-plant', { fullPage: true })
-  } catch (e) {
-    observed = `error: ${e.message}`
-    s = await shot(sp, 'k2-error')
-  } finally {
-    if (planted && snap) {
-      try {
-        await jtRestoreRow(S, load.rowIndex, snap)
-        const back = await jtSnapshotRow(S, load.rowIndex)
-        const ok = stableJson(back) === stableJson(snap)
-        namesNotes.push(`K2 Job Tracking row ${load.rowIndex} Driver cell ${ok ? 'restored, re-read: as before' : 'RESTORE MISMATCH'}`)
-        if (ok) clearNamesPlants('K2')
-      } catch (e) { namesNotes.push(`K2 restore error: ${e.message}`) }
-    }
-  }
-  record({ step: 'K2', title, expected, observed, verdict: v, shot: s })
-}
-
-// ---- K3: a changed cell the sheet would store as a formula is refused for a
-// non-Super-Admin; a plain signed number is kept. The edited column is a harmless
-// non-driver, non-broker one (Trailer Number), and the row is restored from a snapshot.
-async function formulaCellSaveCase(dp, S, cols, active) {
-  const col = cols.trailer >= 0 ? String(S.headers[cols.trailer] || 'Trailer Number') : ''
-  const title = `Dispatcher edits a load (Active Loads -> Edit) and saves ${col ? `the "${col}" cell` : 'a harmless cell'} as "+1+1" (a computing formula), then as "+7" (a plain signed number)`
-  const expected = '"+1+1" -> 400 FORMULA_NOT_ALLOWED shown, nothing written (the cell keeps its stored value); "+7" -> 200 accepted (the sheet shows 7)'
-  if (cols.trailer < 0) return record({ step: 'K3', title, expected, observed: 'SKIPPED — the sheet has no Trailer Number column to edit', verdict: 'SKIP', shot: '' })
-  const load = active.length > 1 ? active[1] : active[0]
-  if (!load) return record({ step: 'K3', title, expected, observed: 'SKIPPED — the local sheet has no active load to open in Active Loads', verdict: 'SKIP', shot: '' })
-  let observed = ''; let v = 'FAIL'; let s = ''
-  let snap = null
-  const fieldId = 'edit-' + col.trim().replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase()
-  const openEdit = async () => {
-    await dp.goto(`${BASE_URL}/dashboard?load=${encodeURIComponent(load.lid)}`)
-    const editBtn = dp.locator('button[title^="Manually edit load fields"]').first()
-    await editBtn.waitFor({ state: 'visible', timeout: 45000 })
-    await editBtn.click()
-    const box = dp.locator(`#${fieldId}`)
-    await box.waitFor({ state: 'visible', timeout: 15000 })
-    return box
-  }
-  // A 409 ROW_READ_FAILED is a transient Sheets read failure (the row could not be
-  // read), NOT the fix's refusal; the modal stays open, so retry it a couple of times.
-  const saveAndCapture = async () => {
-    for (let attempt = 0; ; attempt++) {
-      const [resp] = await Promise.all([
-        dp.waitForResponse((r) => r.request().method() === 'PUT' && /^\/api\/data\/\d+/.test(pathOf(r.url())), { timeout: 60000 }),
-        dp.getByRole('button', { name: 'Save changes' }).click(),
-      ])
-      let body = null; try { body = await resp.json() } catch { /* not json */ }
-      const out = { status: resp.status(), code: body?.code || '', error: String(body?.error || '').slice(0, 200) }
-      if (out.code !== 'ROW_READ_FAILED' || attempt >= 2) return out
-      await dp.waitForTimeout(4000)
-    }
-  }
-  try {
-    meta.ids.k3 = `${load.lid} (Job Tracking row ${load.rowIndex})`
-    snap = await jtSnapshotRow(S, load.rowIndex)
-    sheetPlants.push({ range: jtRange(S, load.rowIndex), what: 'K3 edit target (restore this row by hand if the run died)' }); writeJournal()
-    const origUevJson = uevJson(snap[cols.trailer])
-    // Sub-step A: "+1+1" — the sheet stores a leading "+" or "=" as a formula (here
-    // one that computes 2). The fix refuses it for a non-Super-Admin.
-    let box = await openEdit()
-    await box.fill('+1+1')
-    await caption(dp, `Step K3 — load ${load.lid}, ${col} set to "+1+1"; Save changes (expect a refusal)`)
-    const a = await saveAndCapture()
-    await dp.waitForTimeout(500)
-    const errShown = await dp.locator('[role="dialog"]').getByText(/formula|not allowed|remove the leading/i).first().isVisible().catch(() => false)
-    const cellA = (await jtSnapshotRow(S, load.rowIndex))[cols.trailer]
-    const dispA = String((await jtFormattedRow(S, load.rowIndex))[cols.trailer] ?? '')
-    const unchangedA = uevJson(cellA) === origUevJson
-    const kindA = uevKind(cellA)
-    const refusedA = a.status === 400 && a.code === 'FORMULA_NOT_ALLOWED'
-    s = await shot(dp, 'k3-formula-cell-refused')
-    // Sub-step B: "+7" — a plain signed number the fix keeps (the sheet shows 7).
-    box = await openEdit()
-    await box.fill('+7')
-    await caption(dp, `Step K3 — load ${load.lid}, ${col} set to "+7"; Save changes (expect it accepted)`)
-    const b = await saveAndCapture()
-    await dp.waitForTimeout(500)
-    const dispB = String((await jtFormattedRow(S, load.rowIndex))[cols.trailer] ?? '')
-    const kindB = uevKind((await jtSnapshotRow(S, load.rowIndex))[cols.trailer])
-    const bAccepted = b.status === 200
-    v = verdict(refusedA && unchangedA && bAccepted)
-    observed = `${col} = "+1+1" -> ${a.status}${a.code ? ` ${a.code}` : ''}${a.status === 200 ? ' (SAVED)' : ''}; the cell ${unchangedA ? 'kept its stored value (nothing written)' : `is now a ${kindA} showing ${JSON.stringify(dispA)} (the sheet stored the formula)`}; the page ${errShown ? 'shows the refusal' : 'shows no refusal'}. ` +
-      `Then "+7" -> ${b.status}${b.code ? ` ${b.code}` : ''}${bAccepted ? ' (accepted)' : ''}; the sheet shows ${JSON.stringify(dispB)} (stored as ${kindB})`
-    await caption(dp, `Step K3 — ${v}: ${observed}`)
-    s = await shot(dp, 'k3-formula-cell-save')
-  } catch (e) {
-    observed = `error: ${e.message}`
-    s = await shot(dp, 'k3-error')
-  } finally {
-    if (snap) {
-      try {
-        await jtRestoreRow(S, load.rowIndex, snap)
-        const back = await jtSnapshotRow(S, load.rowIndex)
-        const ok = stableJson(back) === stableJson(snap)
-        namesNotes.push(`K3 Job Tracking row ${load.rowIndex} ${ok ? 'restored, re-read: as before' : 'RESTORE MISMATCH'}`)
-        if (ok) clearNamesPlants('K3')
-      } catch (e) { namesNotes.push(`K3 restore error: ${e.message}`) }
-    }
-  }
-  record({ step: 'K3', title, expected, observed, verdict: v, shot: s })
-}
-
+// ONLY=names. SKIPPED (see F1's note): K1-K3 planted a reserved driver name and a
+// formula-looking cell in Job Tracking and put each row back from a snapshot of its
+// entered values and formats, read with the Google API.
 async function namesSection() {
-  if (!LOCAL) {
-    for (const [step, t] of [['K1', 'reserved name refused at dispatch'], ['K2', 'reserved name on a completed load keeps totals working'], ['K3', 'a formula-looking cell is refused for a non-Super-Admin']]) {
-      record({ step, title: t, expected: '—', observed: 'SKIPPED — local only (it writes the local non-production sheet)', verdict: 'SKIP', shot: '' })
-    }
-    return
-  }
-  const ownDb = !db
-  if (!db) db = openDb()
-  const dispCtx = await freshPage(ADMIN_VP)
-  const saCtx = await freshPage(ADMIN_VP)
-  try {
-    const S = await openNamesSheet()
-    const idx = (re) => S.headers.findIndex((h) => re.test(String(h ?? '')))
-    const idxExact = (re, loose) => { const i = S.headers.findIndex((h) => re.test(String(h ?? ''))); return i >= 0 ? i : idx(loose) }
-    const cols = {
-      id: idx(/load.?id|job.?id/i),
-      driver: idxExact(/^\s*driver\s*$/i, /driver/i),
-      status: idxExact(/^\s*(job[\s._-]?)?status\s*$/i, /status/i),
-      date: idxExact(/status.*update.*date|completion.*date|assigned.*date/i, /date/i),
-      pay: S.headers.findIndex((h) => /^\s*payment\s*$/i.test(String(h ?? ''))),
-      trailer: idx(/trailer/i),
-    }
-    if (cols.id < 0 || cols.driver < 0) throw new Error('the local Job Tracking has no load id or driver column')
-    const completedRe = /^(delivered|completed|pod received)$/i
-    const activeRe = /^(heading to shipper|in transit|dispatched|assigned|picked up|at shipper|at receiver|loading|unloading)$/i
-    const num = (x) => parseFloat(String(x).replace(/[$,]/g, '')) || 0
-    const curMonth = dayApp().slice(0, 7)
-    const recOf = (r, i) => ({
-      rowIndex: i + 2, lid: String(r[cols.id] ?? '').trim(),
-      st: cols.status >= 0 ? String(r[cols.status] ?? '').trim() : '',
-      drv: String(r[cols.driver] ?? '').trim(),
-      pay: cols.pay >= 0 ? String(r[cols.pay] ?? '').trim() : '',
-      date: cols.date >= 0 ? String(r[cols.date] ?? '').trim() : '',
-    })
-    const all = S.rows.map(recOf).filter((x) => x.lid)
-    const idCount = new Map(); all.forEach((x) => idCount.set(x.lid, (idCount.get(x.lid) || 0) + 1))
-    // K1 dispatches through the load-binding guard, so it needs a load whose id is
-    // on exactly one row; K3 edits by row index, so it does not.
-    const active = all.filter((x) => activeRe.test(x.st) && idCount.get(x.lid) === 1)
-    const completedThisMonth = all
-      .filter((x) => completedRe.test(x.st) && num(x.pay) > 0 && jtMonthKey(x.date) === curMonth)
-      .sort((a, b) => num(b.pay) - num(a.pay))
-    let monthOpen = true
-    try { monthOpen = String(db.prepare('SELECT status FROM period_locks WHERE period = ?').get(curMonth)?.status || '') !== 'locked' } catch { /* no lock table: treat open */ }
-    meta.ids.namesMonth = `${curMonth} (${monthOpen ? 'open' : 'locked'})`
-    if (!db) namesNotes.push('no DB_PATH: the month-open check and the K1 notification clean-up were skipped')
-
-    // ⚠️ K2 runs LAST, and this is load-bearing. On a build without the fix, planting
-    // the reserved name on a completed load and reading it back writes a month key
-    // onto Object.prototype (a per-driver monthly map keyed by the reserved name),
-    // which pollutes the whole process: that key then leaks into later Google API
-    // requests and every subsequent Sheets read/write fails. The task's "corrupted in
-    // memory, must not be reused" is exactly this. So the two Dispatcher steps run
-    // FIRST, on a clean server; K2 runs after them, and nothing runs after K2.
-    // K1's dispatch is different: it only leaves a "Dispatched" row under the reserved
-    // name in the sheet + 60 s cache, which makes GET /api/dashboard throw (the queue
-    // builder — a read, not a write, so no pollution) until the row is restored and
-    // the cache refreshes. K3 opens a load from the dashboard, so it waits for a 200.
-    const waitDashboardHealthy = async (page, tag, maxMs = 80000) => {
-      const start = Date.now(); let last = 0
-      while (Date.now() - start < maxMs) {
-        const r = await api(page, 'GET', '/api/dashboard'); last = r.status
-        if (r.status === 200) return true
-        await page.waitForTimeout(5000)
-      }
-      namesNotes.push(`${tag}: GET /api/dashboard did not return 200 within ${Math.round(maxMs / 1000)}s (last ${last})`)
-      return false
-    }
-    const hasDispatcher = !!(CREDS.dispatcher && CREDS.dispatcher.username)
-    if (hasDispatcher) {
-      meta.ids.namesDispatcher = CREDS.dispatcher.userId
-      await login(dispCtx.page, 'Names — Dispatcher', CREDS.dispatcher.username, CREDS.dispatcher.password, '/dashboard')
-      await reservedDispatchCase(dispCtx.page, S, cols, active)
-      await waitDashboardHealthy(dispCtx.page, 'before K3') // clear K1's dispatch poison; K3 opens a load from the dashboard
-      await formulaCellSaveCase(dispCtx.page, S, cols, active)
-    } else {
-      record({ step: 'K1', title: 'Dispatcher dispatches a real load to a reserved driver name', expected: '—', observed: 'SKIPPED — the logins file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
-      record({ step: 'K3', title: 'Dispatcher edits a load and saves a formula-looking cell', expected: '—', observed: 'SKIPPED — the logins file has no dispatcher login (run setup-db.cjs)', verdict: 'SKIP', shot: '' })
-    }
-
-    if (!monthOpen) {
-      record({ step: 'K2', title: 'A reserved driver name is planted on a completed load in the current open month', expected: '—', observed: `SKIPPED — the current month ${curMonth} is finalized (K2 needs an open month)`, verdict: 'SKIP', shot: '' })
-    } else {
-      await login(saCtx.page, 'Names — Super Admin', CREDS.superAdmin.username, CREDS.superAdmin.password, '/dashboard')
-      await reservedTotalsCase(saCtx.page, S, cols, completedThisMonth)
-    }
-
-    // The steps ran K1, K3, K2 (see above); show them K1, K2, K3 in the table.
-    const kOrder = { K1: 0, K2: 1, K3: 2 }
-    const kSlots = rows.map((r, i) => (/^K[123]$/.test(r.step) ? i : -1)).filter((i) => i >= 0)
-    const kSorted = kSlots.map((i) => rows[i]).sort((a, b) => kOrder[a.step] - kOrder[b.step])
-    kSlots.forEach((slot, n) => { rows[slot] = kSorted[n] })
-    writeResults()
-  } finally {
-    const left = fs.existsSync(JOURNAL)
-    if (namesNotes.length || left) {
-      record({
-        step: 'Kc', title: 'Names: restore every sheet row the section wrote', expected: 'Every touched row restored; no plant journal left',
-        observed: [...namesNotes, left ? 'plant journal still present!' : 'no plant journal left'].join('; '),
-        verdict: verdict(!left && !namesNotes.some((n) => /MISMATCH|error|LEFT BEHIND/.test(n))), shot: '',
-      })
-    }
-    await dispCtx.ctx.close().catch(() => {})
-    await saCtx.ctx.close().catch(() => {})
-    if (ownDb && db) { try { db.close() } catch { /* ignore */ } db = null }
+  for (const [step, t] of [['K1', 'reserved name refused at dispatch'], ['K2', 'reserved name on a completed load keeps totals working'], ['K3', 'a formula-looking cell is refused for a non-Super-Admin']]) {
+    record({ step, title: t, expected: '—', observed: SHEET_STEP_SKIP, verdict: 'SKIP', shot: '' })
   }
 }
 
@@ -10999,20 +10233,16 @@ function leaseServer() {
   const [pid, wt] = fs.readFileSync(pidFile, 'utf8').split('\n').map((s) => s.trim())
   return pid && wt ? { port, wt } : null
 }
-// The sheet that server reads: the environment's SPREADSHEET_ID when set (boot-server.sh
-// passes it on), else its worktree's .env. Refused unless set and not production's.
+// The sheet that server reads: boot-server.sh preloads scripts/e2e/fake-google.cjs, so
+// its Sheets are the work dir's copy of the made-up fixture, never Google. Refused
+// unless that server's log (boot-server.sh writes it afresh at each boot) shows the
+// stand-in in place.
+const FAKE_GOOGLE_LINE = 'fake-google: googleapis is a stand-in'
 function leaseSheetCheck(srv) {
-  let id = process.env.SPREADSHEET_ID
-  let from = 'the environment'
-  if (id === undefined) {
-    const envFile = path.join(srv.wt, '.env')
-    id = fs.existsSync(envFile) ? paths.appRequire('dotenv').parse(fs.readFileSync(envFile)).SPREADSHEET_ID : ''
-    from = envFile
-  }
-  id = String(id ?? '').trim()
-  if (!id) throw new Error(`SPREADSHEET_ID is unset or empty in ${from}`)
-  if (id === PROD_SHEET) throw new Error(`SPREADSHEET_ID in ${from} is PRODUCTION's sheet`)
-  return from
+  const log = path.join(WORK, `server-${srv.port}.log`)
+  const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''
+  if (!text.includes(FAKE_GOOGLE_LINE)) throw new Error(`the server log ${log} does not show fake-google.cjs in place (boot it with boot-server.sh)`)
+  return 'the made-up fixture copy (fake-google.cjs)'
 }
 function runScript(file, args, env) {
   return new Promise((resolve) => {
@@ -11025,7 +10255,7 @@ function runScript(file, args, env) {
 }
 // Stops the server by its recorded PID and boots it again on DB_PATH, from the same
 // worktree and port, with `flags` (unset = boot-server.sh's defaults: the flag off,
-// the downtime setting .env's or the server's default).
+// the downtime setting the server's default).
 async function leaseReboot(srv, flags) {
   const env = { ...process.env, NODE_BIN: process.execPath, E2E_WORK_DIR: WORK }
   delete env.INVESTOR_LEASE_PAYOUTS_ENABLED
@@ -11238,7 +10468,7 @@ async function leaseSection() {
         await closeInviteDialog(page)
         return {
           verdict: verdict(c.status === 201 && !!c.path && warningOk),
-          observed: `sheet: SPREADSHEET_ID from ${sheetFrom} is set and not production's; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
+          observed: `sheet: ${sheetFrom}; months ${months.join(', ')} open in the copy; lease payouts in this build: ${S.feature ? `yes (enabled ${S.settings.enabled}, downtime ${S.settings.settings?.downtime})` : 'NO (LF-LH will SKIP)'}; ` +
             `the form's lease warning ${warning.shown ? `shows ("${warning.text}")` : 'is hidden'}; POST → ${c.status}${c.code ? ` ${c.code}` : ''}, invite #${c.id ?? '?'}, link ${c.path ? 'shown' : 'NOT shown'}`,
           shot: s,
         }
