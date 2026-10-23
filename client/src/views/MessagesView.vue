@@ -14,12 +14,14 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
 import { useMessagesStore } from '../stores/messages'
+import { useAuthStore } from '../stores/auth'
 import { useSocket } from '../composables/useSocket'
 import { useApi } from '../composables/useApi'
 import MessagingPanel from '../components/dashboard/MessagingPanel.vue'
 
 const store = useDashboardStore()
 const msgStore = useMessagesStore()
+const auth = useAuthStore()
 const socket = useSocket()
 const api = useApi()
 const investorNames = ref([])
@@ -41,6 +43,9 @@ onMounted(async () => {
   socket.on('new-message', onNewMessage)
   if (store.fleet.length === 0) await store.refresh()
   msgStore.loadConversations()
+  // Investor conversations are Super Admin only (server.js INVESTOR_CHAT_SQL):
+  // a Dispatcher is offered drivers only.
+  if (!auth.isSuperAdmin) return
   try {
     const data = await api.get('/api/users/investors')
     investorNames.value = (data.investors || []).map(i => i.username)

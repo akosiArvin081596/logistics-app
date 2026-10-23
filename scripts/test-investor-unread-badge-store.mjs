@@ -11,6 +11,10 @@
 //      and a look-alike name ("admin2") are not. The list reloads after.
 //   §2 a driver's conversation: unread messages to "Dispatch" are marked, as
 //      before; nothing unread sends no PUT.
+//   §3 a thread the server refuses (404: an investor conversation asked for by a
+//      Dispatcher, scripts/test-investor-chats-super-admin-only.js) shows no
+//      other conversation's messages and marks nothing; a failed mark keeps the
+//      thread it was opened with.
 //
 // The store runs as shipped, its imports stubbed (pinia's defineStore, useApi,
 // the voice-note helpers; the load-reference helper is the real one). Made-up
@@ -47,14 +51,23 @@ function defineStore(id, def) {
 const calls = []
 let threads = {}
 let conversations = []
+// Thread names the server answers 404, and whether a mark fails.
+let refused = new Set()
+let markFails = false
+const apiError = (status, error) => Object.assign(new Error(error), { status, code: '', data: { error } })
 const api = {
   async get(url) {
     calls.push({ method: 'GET', url })
     if (url === '/api/messages') return { conversations }
     const name = decodeURIComponent(url.replace(/^\/api\/messages\//, '').replace(/\?.*$/, ''))
+    if (refused.has(name)) throw apiError(404, 'Not found')
     return { messages: threads[name] || [] }
   },
-  async put(url, body) { calls.push({ method: 'PUT', url, body }); return { success: true } },
+  async put(url, body) {
+    calls.push({ method: 'PUT', url, body })
+    if (markFails) throw apiError(500, 'The server is busy')
+    return { success: true }
+  },
   async post(url, body) { calls.push({ method: 'POST', url, body }); return { success: true } },
   request: async () => ({}),
 }
@@ -130,6 +143,28 @@ if (useMessagesStore) {
     threads = { [DRIVER]: [{ id: 43, from: DRIVER, to: 'Dispatch', message: 'Read earlier', read: 1 }] }
     await store.selectConversation(DRIVER, '')
     eq('§2 nothing unread: no PUT', markCalls().length, 0)
+  }
+
+  console.log('§3 a thread the server refuses')
+  {
+    calls.length = 0
+    threads = { [DRIVER]: [{ id: 51, from: DRIVER, to: 'Dispatch', message: 'At the shipper', read: 1 }] }
+    refused = new Set([INVESTOR])
+    const store = useMessagesStore()
+    await store.selectConversation(DRIVER, '')
+    eq('§3 the driver\'s thread is open first', store.currentMessages.map((m) => m.id), [51])
+    await store.selectConversation(INVESTOR, '')
+    eq('§3 the refused conversation shows no message (not the driver\'s)', store.currentMessages.map((m) => m.id), [])
+    eq('§3 ...its header names the conversation asked for', store.selectedDriver, INVESTOR)
+    eq('§3 ...and nothing is marked', markCalls().length, 0)
+    refused = new Set()
+
+    calls.length = 0
+    threads = { [DRIVER]: [{ id: 52, from: DRIVER, to: 'Dispatch', message: 'Loaded', read: 0 }] }
+    markFails = true
+    await store.selectConversation(DRIVER, '')
+    markFails = false
+    eq('§3 a failed mark keeps the thread it opened', store.currentMessages.map((m) => m.id), [52])
   }
 }
 
