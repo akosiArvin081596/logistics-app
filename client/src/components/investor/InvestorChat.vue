@@ -22,8 +22,13 @@
             <span class="bubble-time">{{ fmtTime(msg.timestamp) }}</span>
           </div>
           <div v-if="msg.asset_ref" class="bubble-asset"><span class="asset-badge">&#128666; {{ msg.asset_ref }}</span></div>
-          <div v-if="msg.message" class="bubble-text">{{ msg.message }}</div>
-          <div v-if="msg.attachment_url" class="bubble-attachment">
+          <!-- A voice note the server measured plays from its own route; any
+               other row shows its text ("Voice note (unavailable)"). -->
+          <div v-if="isServerVoiceNote(msg)" class="bubble-attachment">
+            <VoiceNotePlayer :src="voiceNoteSrc(msg)" :duration-ms="Number(msg.voice_duration_ms)" :sent="isMine(msg)" />
+          </div>
+          <div v-else-if="msg.message" class="bubble-text">{{ msg.message }}</div>
+          <div v-if="msg.attachment_url && !isServerVoiceNote(msg)" class="bubble-attachment">
             <!-- A photo opens full size in the viewer below; focus comes back
                  here on close. -->
             <button
@@ -50,7 +55,7 @@
     <div
       v-if="!isPreview"
       class="chat-composer"
-      :class="{ 'is-drop-active': dragActive }"
+      :class="{ 'is-drop-active': dragActive, 'is-recording': recording }"
       v-bind="dropzoneProps"
     >
       <span v-if="dragActive" class="composer-drop-hint" aria-hidden="true">Drop to attach</span>
@@ -63,6 +68,9 @@
           @keydown.enter.exact.prevent="send"
         ></textarea>
         <div class="composer-toolbar">
+          <!-- Voice notes (MESSAGE_VOICE_NOTES_ENABLED) go to the admin desk;
+               while one is recorded or reviewed it takes the toolbar. -->
+          <VoiceNoteRecorder v-if="voiceOn" :send="sendVoice" @active="recording = $event" />
           <label class="attach-btn" title="Attach file">
             &#128206;
             <!-- :disabled AFTER v-bind so it wins the merge. A file picked while
@@ -139,7 +147,13 @@ import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import { useAuthStore } from '../../stores/auth'
 import { useInvestorStore } from '../../stores/investor'
+import { useVoiceNotesFeature } from '../../composables/useVoiceNotesFeature'
+import { isServerVoiceNote, voiceNoteSrc } from '../../lib/voiceNotes'
+import { voiceNoteLabel } from '../../lib/voiceNoteText'
+import { uploadVoiceNote } from '../../lib/voiceNoteUpload'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import VoiceNotePlayer from '../shared/VoiceNotePlayer.vue'
+import VoiceNoteRecorder from '../shared/VoiceNoteRecorder.vue'
 
 const props = defineProps({
   trucks: { type: Array, default: () => [] },
@@ -157,6 +171,34 @@ const investorStore = useInvestorStore()
 const messages = ref([])
 const draft = ref('')
 const sending = ref(false)
+
+// Voice notes: the record button only with the flag on and never in a Super
+// Admin's preview; notes already sent play either way.
+const voiceFeature = useVoiceNotesFeature(api)
+const voiceOn = computed(() => !!voiceFeature.value && !props.isPreview)
+// True while the recorder holds the toolbar (recording or reviewing).
+const recording = ref(false)
+// The investor's desk is "admin". The bubble is added once the server has the
+// note (its id plays it); a retry it already had is not added twice.
+async function sendVoice(clip) {
+  const sent = await uploadVoiceNote(api.request, { blob: clip.blob, to: 'admin', key: clip.key, durationMs: clip.durationMs })
+  if (!messages.value.some((m) => m.id === sent.id)) {
+    messages.value.push({
+      id: sent.id,
+      asset_ref: '',
+      from: auth.user?.username,
+      to: 'admin',
+      message: voiceNoteLabel(sent.durationMs),
+      timestamp: new Date().toISOString(),
+      read: 1,
+      attachment_url: '',
+      attachment_type: 'voice',
+      voice_duration_ms: sent.durationMs,
+    })
+  }
+  await nextTick()
+  scrollBottom()
+}
 
 // The thread's photos and the one shown full size, tracked by URL (the same
 // rule as the dashboard's MessagingPanel).
@@ -477,7 +519,14 @@ onUnmounted(() => {
 .chat-input:focus { border-color: var(--accent); }
 .composer-toolbar {
   display: flex; align-items: center; gap: 0.5rem;
+  --vn-size: 40px;
 }
+/* While a voice note is recorded or reviewed it takes the toolbar. */
+.chat-composer.is-recording .chat-input,
+.chat-composer.is-recording .attach-btn,
+.chat-composer.is-recording .asset-select,
+.chat-composer.is-recording .attach-preview,
+.chat-composer.is-recording .send-btn { display: none; }
 .attach-btn {
   cursor: pointer; font-size: 1rem; padding: 0.2rem 0.4rem;
   border-radius: 5px; background: var(--bg); border: 1px solid var(--border);

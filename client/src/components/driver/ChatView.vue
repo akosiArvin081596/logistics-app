@@ -23,7 +23,12 @@
           :class="['msg-bubble', isSent(m) ? 'sent' : 'received']"
         >
           <div v-if="!isSent(m)" class="msg-sender">{{ m.from }}</div>
-          <div v-if="m.attachment_url" class="msg-attachment">
+          <!-- A voice note the server measured plays from its own route; any
+               other row shows its text ("Voice note (unavailable)"). -->
+          <div v-if="isServerVoiceNote(m)" class="msg-attachment">
+            <VoiceNotePlayer :src="voiceNoteSrc(m)" :duration-ms="Number(m.voice_duration_ms)" :sent="isSent(m)" />
+          </div>
+          <div v-else-if="m.attachment_url" class="msg-attachment">
             <!-- A photo opens full size below; focus comes back here on close. -->
             <button
               v-if="isChatPhoto(m)"
@@ -37,7 +42,7 @@
             <a v-else-if="isOwnUploadUrl(m.attachment_url)" :href="m.attachment_url" target="_blank" class="msg-file">{{ m.attachment_type === 'pdf' ? 'PDF Document' : 'File Attachment' }}</a>
             <span v-else class="msg-file">File unavailable</span>
           </div>
-          {{ m.message }}
+          <template v-if="!isServerVoiceNote(m)">{{ m.message }}</template>
           <div class="msg-footer">
             <span v-if="m.loadId" class="msg-load">{{ m.loadId }}</span>
             <span class="msg-time">{{ formatTime(m.timestamp) }}</span>
@@ -52,7 +57,7 @@
     </div>
 
     <!-- Input bar (always visible) -->
-    <div class="chat-input-bar">
+    <div :class="['chat-input-bar', { 'is-recording': recording }]">
       <input
         v-model="messageText"
         class="chat-input"
@@ -62,12 +67,23 @@
         :disabled="sending"
         @keydown.enter.prevent="handleSend"
       />
+      <!-- Voice notes (MESSAGE_VOICE_NOTES_ENABLED): while the ELD says the
+           truck is moving, or stopped under 2 minutes, the mic is natively
+           disabled and the note below says why. -->
+      <VoiceNoteRecorder
+        v-if="voiceOn"
+        :send="sendVoice"
+        :blocked="voiceBlocked"
+        described-by="vn-drive-note"
+        @active="recording = $event"
+      />
       <button
         class="send-btn"
         :disabled="!messageText.trim() || sending"
         @click="handleSend"
       >{{ sending ? '&hellip;' : '&#10148;' }}</button>
     </div>
+    <p v-if="voiceOn" id="vn-drive-note" :class="['vn-drive-note', { 'is-moving': voiceBlocked }]">{{ voiceGateNote(voiceGate) }}</p>
 
     <!-- A thread photo, full size: pinch or the buttons to zoom, swipe or the
          arrows for next/previous, X or a tap outside to close. Same /uploads
@@ -89,8 +105,12 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoAlt, chatPhotoStep, chatPhotoView, chatPhotos, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
+import { isServerVoiceNote, voiceNoteSrc } from '../../lib/voiceNotes'
+import { voiceGateNote } from '../../lib/voiceNoteGate'
 import EmptyState from '../shared/EmptyState.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import VoiceNotePlayer from '../shared/VoiceNotePlayer.vue'
+import VoiceNoteRecorder from '../shared/VoiceNoteRecorder.vue'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -98,6 +118,12 @@ const props = defineProps({
   driverName: { type: String, required: true },
   loadId: { type: String, default: '' },
   sendHandler: { type: Function, default: null },
+  // Voice notes: the session's feature flag, the record gate from the truck's
+  // ELD ({ allowed, state }, lib/voiceNoteGate.js) and the upload
+  // (async ({ clip, loadId }); throws on failure, the clip is kept).
+  voiceNotes: { type: Boolean, default: false },
+  voiceGate: { type: Object, default: null },
+  voiceSendHandler: { type: Function, default: null },
 })
 
 const emit = defineEmits(['send', 'markRead'])
@@ -106,6 +132,15 @@ const chatMessagesEl = ref(null)
 const messageText = ref('')
 const sending = ref(false)
 const sendError = ref('')
+
+const voiceOn = computed(() => props.voiceNotes && typeof props.voiceSendHandler === 'function')
+const voiceBlocked = computed(() => !!props.voiceGate && props.voiceGate.allowed === false)
+// True while the recorder holds the composer row (recording or reviewing).
+const recording = ref(false)
+watch(voiceOn, (on) => { if (!on) recording.value = false })
+function sendVoice(clip) {
+  return props.voiceSendHandler({ clip, loadId: currentLoadId.value })
+}
 
 // Auto-detect current active load ID
 const currentLoadId = computed(() => {
@@ -378,6 +413,27 @@ watch(
   gap: 0.5rem;
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
+  /* The voice-note controls: 44 px touch targets in the driver app. */
+  --vn-size: 44px;
+}
+/* While a voice note is recorded or reviewed it takes the row. */
+.chat-input-bar.is-recording .chat-input,
+.chat-input-bar.is-recording .send-btn { display: none; }
+
+/* Shown in every state while voice notes are on: a safety aid, not a guarantee. */
+.vn-drive-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+.vn-drive-note.is-moving {
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font-weight: 600;
 }
 
 .chat-input {
