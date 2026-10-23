@@ -47629,8 +47629,12 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 // first 60 characters, the text the thread serves) and lastVoiceMs (a voice
 // note's measured length while its audio is stored, else 0). Never its file
 // name, URL or id.
+// `unread` counts unread messages to either staff desk (CHAT_DESK_NAMES): a
+// driver writes to "Dispatch", an investor to "admin", and this inbox is where
+// staff read both (scripts/test-investor-unread-badge.js).
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
+		const deskKeys = Object.keys(CHAT_DESK_NAMES);
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
@@ -47642,7 +47646,7 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 						CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
 						load_id AS loadId,
 						MAX(timestamp) AS lastTimestamp,
-						SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+						SUM(CASE WHEN LOWER("to") IN (${deskKeys.map(() => "?").join(", ")}) AND read = 0 THEN 1 ELSE 0 END) AS unread,
 						MAX(id) AS lastId
 					 FROM messages
 					 GROUP BY driver, load_id
@@ -47650,7 +47654,7 @@ app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) =>
 				 JOIN messages m ON m.id = g.lastId
 				 ORDER BY g.lastTimestamp DESC`,
 			)
-			.all()
+			.all(...deskKeys)
 			.map((c) => {
 				const voice = c.lastType === "voice";
 				const kind = voice ? "voice" : c.lastUrl ? (c.lastType === "image" ? "photo" : "file") : "text";
@@ -50567,8 +50571,10 @@ app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super 
 		}
 		const column = loadCellColumnName(headers, headers[pickupCol]);
 		const day = pickupConfirmation.cellDay(stored) || null;
-		// Already a person's date (confirmed before, or corrected): nothing new to record.
-		if (personEditHold.personSet(stored, loadCellWriteRows(key, column)).set === true) {
+		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
+		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
+		// to record.
+		if (personEditHold.personSet(stored, loadCellWriteRows(key, column), { onlyAppClears: true }).set === true) {
 			return res.json({ ok: true, loadId: sentId, stored: day, alreadyConfirmed: true });
 		}
 		recordLoadCellWrite(key, column, stored, "person", { actor: rateConPickupActor(req) });
