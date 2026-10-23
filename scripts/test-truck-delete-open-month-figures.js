@@ -30,6 +30,10 @@
  *                               the Financials toggles (TD8-3);
  *       lease_months            a lease basis row governs an open month the truck
  *                               is in service in, whatever the lease flag (TD8-4);
+ *       last_truck_receipt_months  the investor's last truck, and an open month
+ *                               holds a receipt (not Rejected, no truck named)
+ *                               that counts on that investor only through the
+ *                               driver windows (review M1); no clear step;
  *   - an open month has no lock and is no later than the current Eastern month
  *     (appDay()): a truck entering service next month is not held (TD8-6);
  *   - the order: PERIOD_LOCK_UNREADABLE, PERIOD_FINALIZED, OPEN_MONTH_TRUCK_FEES,
@@ -57,6 +61,7 @@
  *   §11 Discrimination (mutants).
  *   §12 Source pins, comments stripped.
  *   §13 No amount, file name or driver name in a refusal's audit row or body.
+ *   §14 The investor's last truck and receipts naming no truck (review M1).
  *
  * The route registration is lifted whole from server.js with the real guard,
  * the new truckDeleteOpenMonthHolds(), and real copies of everything they call:
@@ -65,11 +70,14 @@
  * truckMonthlyFixed(), truckChargeFromMonth(), truckChargeUntilMonth(),
  * truckChargedInMonth(), normalizeDriverName(), getDriverPayStructures(),
  * driverPayLockedMonths(), resolveDailyRate() (driverRateOnlyApplies() off),
- * investorsHoldingDriver(), lib/investor-payout-basis.js and the lease settings
- * at their defaults. The response helpers and the refusal-detail formatter are
- * the real ones. The database is in memory, built from server.js's own CREATE
- * TABLE text for the fee, document, trailer, assignment, lock, directory,
- * carrier-history and lease-basis tables; the trucks and users tables are
+ * investorsHoldingDriver(), getInvestorDriverMonthWindows(),
+ * investorExpenseScopeSql(), expenseFrom() (no Personal ledger: the plain
+ * table), EXPENSE_PNL_FILTER, EXPENSE_PERIOD_EXPR, lib/investor-payout-basis.js
+ * and the lease settings at their defaults. The response helpers and the
+ * refusal-detail formatter are the real ones. The database is in memory, built
+ * from server.js's own CREATE TABLE text for the fee, document, trailer,
+ * assignment, lock, directory, carrier-history, lease-basis and expenses tables
+ * (with their ALTER TABLE columns); the trucks and users tables are
  * reduced to the columns read here (server.js builds trucks through a chain of
  * migrations). No server, no port, no app.db, no files, no network. Made-up
  * unit numbers and names only.
@@ -145,7 +153,15 @@ const MODULE_SRC = [
 	"appDay", "lockedPeriodsDesc", "truckFeeLockedRows", "truckFixedCostLockedMonths", "truckMonthlyFixed",
 	"truckChargeFromMonth", "truckChargeUntilMonth", "truckChargedInMonth", "normalizeDriverName",
 	"getDriverPayStructures", "driverPayLockedMonths", "resolveDailyRate", "investorsHoldingDriver",
+	"assignmentMonthKey", "intersectMonthWindow", "getInvestorDriverMonthWindows", "investorExpenseScopeSql",
+	"expenseFrom", "personalLedgerPresent",
 ].map((n) => liftFn(n)).join("\n");
+function liftConst(name) {
+	const m = SRC.match(new RegExp(`^const ${name} =([\\s\\S]*?);$`, "m"));
+	if (!m) fatal(`const ${name} not found in server.js`);
+	return `const ${name} = ${m[1].trim()};`;
+}
+const CONSTS_SRC = ["EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR"].map(liftConst).join("\n");
 const RESPONSES_SRC = ["periodLabel", "periodBlockedResponse", "periodLockUnreadableResponse"].map((n) => liftFn(n)).join("\n");
 const auditText = (v, max) => String(v == null ? "" : v).slice(0, max);
 const periodRefusalDetail = new Function("auditText", `${liftFn("periodRefusalDetail")}\nreturn periodRefusalDetail;`)(auditText);
@@ -177,8 +193,8 @@ function scratch() {
 		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, company_name TEXT DEFAULT '');
 	`);
 	for (const t of ["maintenance_fund", "compliance_fees", "trailers", "truck_assignments", "legal_documents", "period_locks",
-		"drivers_directory", "carrier_driver_history", "investor_payout_basis"]) db.exec(createTable(t));
-	for (const table of ["legal_documents", "drivers_directory"]) {
+		"drivers_directory", "carrier_driver_history", "investor_payout_basis", "expenses"]) db.exec(createTable(t));
+	for (const table of ["legal_documents", "drivers_directory", "expenses"]) {
 		for (const m of SRC.matchAll(new RegExp(`ALTER TABLE ${table} ADD COLUMN [^"\`\\n]+`, "g"))) {
 			try { db.exec(m[0]); } catch { /* a column added twice, as the boot's try/catch allows */ }
 		}
@@ -229,6 +245,12 @@ function world(opts = {}) {
 	for (const r of opts.maintenance || []) {
 		db.prepare("INSERT INTO maintenance_fund (type, amount, truck, date) VALUES (?, ?, 'MADE-UP-T5', ?)").run(r.type || "service", r.amount || 100, r.date);
 	}
+	// Receipts filed by DRIVER, naming no truck and stamped with no owner unless
+	// the case says so.
+	for (const x of opts.receipts || []) {
+		db.prepare("INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit, posted_period) VALUES (?, ?, 'Fuel', 50, ?, ?, ?, ?, ?)")
+			.run(`${x.date}T15:00:00.000Z`, x.driver || DRIVER, x.date, x.status || "Pending", x.owner || 0, x.truck || "", x.posted || "");
+	}
 	for (let i = 0; i < (opts.legal || 0); i++) {
 		db.prepare("INSERT INTO legal_documents (truck_id, unit_number, doc_type, file_name, file_url) VALUES (5, 'MADE-UP-T5', 'Registration', ?, ?)")
 			.run(`t5-reg-${i}.pdf`, `/uploads/legal/t5-reg-${i}.pdf`);
@@ -241,7 +263,7 @@ function buildModule(w, holdsSrc) {
 	const holds = holdsSrc || "function truckDeleteOpenMonthHolds() { throw new Error(\"truckDeleteOpenMonthHolds() is not in server.js\"); }";
 	return new Function(
 		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console",
-		`let lastPayStructShadowWarnMs = 0;\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
+		`let lastPayStructShadowWarnMs = 0;\n${CONSTS_SRC}\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
 	)(w.db, () => w.readable, investorPayoutBasis, () => false, FixedDate, "America/New_York", LEASE_SETTINGS,
 		{ log() {}, warn() {}, error() {} });
 }
@@ -310,7 +332,7 @@ const done = (w) => w.db.close();
 const truckGone = (w) => count(w.db, "SELECT COUNT(*) AS n FROM trucks WHERE id = 5") === 0;
 
 // --- the expected text -----------------------------------------------------
-const ZERO = { fixed_cost_months: 0, driver: 0, eld_link: 0, financials_line_months: 0, lease_months: 0 };
+const ZERO = { fixed_cost_months: 0, driver: 0, eld_link: 0, financials_line_months: 0, lease_months: 0, last_truck_receipt_months: 0 };
 const counts = (o) => ({ ...ZERO, ...o });
 const P = {
 	fixed: (n) => `its monthly fixed costs are billed in ${n} open month${n === 1 ? "" : "s"}`,
@@ -318,6 +340,7 @@ const P = {
 	eld: "its ELD device sets the paid days of the loads that name it",
 	fin: (n) => `its maintenance reserve or depreciation is a Financials line in ${n} open month${n === 1 ? "" : "s"}`,
 	lease: (n) => `it keeps its investor's lease in service in ${n} open month${n === 1 ? "" : "s"}`,
+	receipts: (n) => `it is its investor's last truck, which keeps receipts that name no truck on that investor's ledger in ${n} open month${n === 1 ? "" : "s"}`,
 };
 const S = {
 	fixed: "set its insurance, ELD fee, truck payment, HVUT and IRP to $0",
@@ -811,7 +834,8 @@ function mutate(src, from, to, label) {
 }
 {
 	// 11f: history tested as "history or a trailer": 9f loses its steps.
-	const routeSrc = mutate(DELETE_SRC, "const steps = assignmentRows ? [] : [", "const steps = assignmentRows || trailerRows ? [] : [", "11f");
+	const routeSrc = mutate(DELETE_SRC, "const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [",
+		"const steps = assignmentRows || trailerRows || holds.last_truck_receipt_months ? [] : [", "11f");
 	if (routeSrc) {
 		const w = world({ truck: { insurance_monthly: 1500 }, trailer: true });
 		eq("§11 11f history or a trailer: 9f has no steps", del(w, { routeSrc }).body.error, figuresText([P.fixed(1)], []));
@@ -820,7 +844,7 @@ function mutate(src, from, to, label) {
 }
 {
 	// 11g: the steps printed for a truck with history: 9d gains them.
-	const routeSrc = mutate(DELETE_SRC, "const steps = assignmentRows ? [] : [", "const steps = false ? [] : [", "11g");
+	const routeSrc = mutate(DELETE_SRC, "const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [", "const steps = false ? [] : [", "11g");
 	if (routeSrc) {
 		const w = world({ truck: { insurance_monthly: 1500 }, assignment: "ended" });
 		eq("§11 11g steps with history: 9d prints them", del(w, { routeSrc }).body.error, figuresText([P.fixed(1)], [S.fixed]));
@@ -899,6 +923,111 @@ function mutate(src, from, to, label) {
 	ok("§12 TD8-13: ...naming the driver before and after",
 		/fmtDriver\(truck\.assigned_driver\)/.test(line) && /fmtDriver\(changed\.assigned_driver\)/.test(line) && /→/.test(line), line);
 	ok("§12 TD8-13: ...after the UPDATE", at > PUT.indexOf("db.prepare(`UPDATE trucks SET ${updates.join(\", \")} WHERE id = ?`)"));
+}
+
+// ---------------------------------------------------------------------------
+// §14 The investor's last truck (review M1). DRIVER is in the investor's
+// carrier history from August and on no truck; his receipts name no truck and
+// carry no owner stamp, so they count on the investor only through the driver
+// windows, which getInvestorDriverMonthWindows() builds only while the investor
+// owns a truck. Deleting the last one would take them out of an open month.
+// ---------------------------------------------------------------------------
+const LAST = { truck: { owner_id: INVESTOR_ID }, history: [{ carrier: CARRIER, driver: DRIVER, started: "2026-08-01" }] };
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-10-06" }] });
+	const before = snapshot(w);
+	const r = del(w);
+	expectFigures("§14a the investor's only truck, an October receipt naming no truck", w, r, before,
+		{ counts: counts({ last_truck_receipt_months: 1 }), parts: [P.receipts(1)], steps: [], held: "investor receipts" });
+	done(w);
+}
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-10-06" }], others: [{ id: 4, unit_number: "MADE-UP-T4", owner_id: INVESTOR_ID }] });
+	const r = del(w);
+	eq("§14b a second truck owned by the same investor: the delete goes through", [r.status, r.body.success], [200, true]);
+	done(w);
+}
+{
+	const w = world({ ...LAST, locked: ["2026-09"], receipts: [{ date: "2026-09-10" }] });
+	const r = del(w);
+	eq("§14c the receipt only in a locked month: the delete goes through", [r.status, r.body.success], [200, true]);
+	done(w);
+}
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-10-06", truck: "MADE-UP-T9" }] });
+	const r = del(w);
+	eq("§14d the receipt names a truck: the delete goes through", [r.status, r.body.success], [200, true]);
+	done(w);
+}
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-10-06", status: "Rejected" }] });
+	const r = del(w);
+	eq("§14e a Rejected receipt: the delete goes through", [r.status, r.body.success], [200, true]);
+	done(w);
+}
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-11-02" }] });
+	const r = del(w);
+	eq("§14f a receipt dated next month only: the delete goes through", [r.status, r.body.success], [200, true]);
+	done(w);
+}
+{
+	// The settlement month decides (EXPENSE_PERIOD_EXPR): dated in a closed
+	// September, posted to October.
+	const w = world({ ...LAST, locked: ["2026-09"], receipts: [{ date: "2026-09-28", posted: "2026-10" }] });
+	const r = del(w);
+	eq("§14g dated in a locked month, posted to October: refused, 1 open month",
+		[r.status, r.body.code, r.body.counts], [409, "OPEN_MONTH_TRUCK_FIGURES", counts({ last_truck_receipt_months: 1 })]);
+	done(w);
+}
+{
+	const w = world({ ...LAST, receipts: [{ date: "2026-09-10" }, { date: "2026-10-06" }, { date: "2026-10-07" }] });
+	const r = del(w);
+	eq("§14h receipts in September and October, no lock: 2 open months", r.body.counts, counts({ last_truck_receipt_months: 2 }));
+	ok("§14h ...the text says \"in 2 open months\"", String(r.body.error || "").includes(`${P.receipts(2)}.`), r.body.error);
+	done(w);
+}
+{
+	// With another item and a trailer, no history: the retirement date only, since
+	// no clear step removes this item.
+	const w = world({ ...LAST, truck: { ...LAST.truck, insurance_monthly: 1500 }, trailer: true, receipts: [{ date: "2026-10-06" }] });
+	const before = snapshot(w);
+	const r = del(w);
+	expectFigures("§14i fixed costs, a trailer and the receipts item", w, r, before, {
+		counts: counts({ fixed_cost_months: 1, last_truck_receipt_months: 1 }),
+		parts: [P.fixed(1), P.receipts(1)], steps: [], held: "fixed costs, investor receipts",
+	});
+	done(w);
+}
+// Mutants: each flips the case it is aimed at.
+{
+	const LAST_TRUCK_CHECK = "!db.prepare(\"SELECT 1 FROM trucks WHERE owner_id = ? AND id != ? LIMIT 1\").get(ownerId, truck.id)";
+	const holdsMutants = [
+		["the count removed", "if (ownerId > 0 && " + LAST_TRUCK_CHECK, "if (false && " + LAST_TRUCK_CHECK,
+			{ ...LAST, receipts: [{ date: "2026-10-06" }] }, [200, undefined]],
+		["counted on any truck, not the last", LAST_TRUCK_CHECK, "true",
+			{ ...LAST, receipts: [{ date: "2026-10-06" }], others: [{ id: 4, unit_number: "MADE-UP-T4", owner_id: INVESTOR_ID }] }, [409, "OPEN_MONTH_TRUCK_FIGURES"]],
+		["locked months counted", " && !locked.has(r.m)).length", ").length",
+			{ ...LAST, locked: ["2026-09"], receipts: [{ date: "2026-09-10" }] }, [409, "OPEN_MONTH_TRUCK_FIGURES"]],
+		["Rejected counted", " AND ${EXPENSE_PNL_FILTER}`", "`",
+			{ ...LAST, receipts: [{ date: "2026-10-06", status: "Rejected" }] }, [409, "OPEN_MONTH_TRUCK_FIGURES"]],
+	];
+	for (const [label, from, to, opts, expected] of holdsMutants) {
+		const holdsSrc = HOLDS ? mutate(HOLDS, from, to, `14 ${label}`) : (ok(`§14 ${label}: the function exists to mutate`, false), null);
+		if (!holdsSrc) continue;
+		const w = world(opts);
+		const r = del(w, { holdsSrc });
+		eq(`§14 mutant, ${label}: the case flips`, [r.status, r.body.code], expected);
+		done(w);
+	}
+	// The clear steps printed with the receipts item: 14i gains them.
+	const routeSrc = mutate(DELETE_SRC, "const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [", "const steps = assignmentRows ? [] : [", "14 steps");
+	if (routeSrc) {
+		const w = world({ ...LAST, truck: { ...LAST.truck, insurance_monthly: 1500 }, trailer: true, receipts: [{ date: "2026-10-06" }] });
+		eq("§14 mutant, steps printed with the receipts item: 14i gains them",
+			del(w, { routeSrc }).body.error, figuresText([P.fixed(1), P.receipts(1)], [S.fixed, S.trailer]));
+		done(w);
+	}
 }
 
 // ---------------------------------------------------------------------------

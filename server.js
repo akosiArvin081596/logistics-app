@@ -2173,10 +2173,11 @@ function getInvestorDriverMonthWindows(userId) {
 // Build the WHERE fragment that scopes `expenses` to one investor, with the month
 // dimension the driver leg never had.
 //
-// ONE definition, EIGHT callers (/api/investor's monthly + category + all-time sums,
+// ONE definition, NINE callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
-// /api/investor/tax-csv, GET /api/investor/report's itemized P&L, and
-// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15). That is the
+// /api/investor/tax-csv, GET /api/investor/report's itemized P&L,
+// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15, and
+// truckDeleteOpenMonthHolds(), the truck delete's open-month check, since 2026-10-23). That is the
 // DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
 // hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
 // investor expense surface gets it.
@@ -33953,7 +33954,18 @@ function truckDeleteLockBlockers(truck) {
 //                           covers a day of it on or after the lease's first day
 //                           (leaseCoverage(), under the lease retirement
 //                           setting), whether or not the lease payout flag is on
-//                           (TD8-4).
+//                           (TD8-4);
+//   last_truck_receipt_months  the open months holding a receipt that counts on
+//                           its owner only through the driver windows, when it
+//                           is that investor's last truck: with no truck left,
+//                           getInvestorDriverMonthWindows() returns before its
+//                           carrier-history leg, so those receipts leave the
+//                           investor's expenses (TD8 review M1). The ledger's
+//                           source, Rejected filter and month; the -1 owner
+//                           matches no row, so a receipt stamped with the owner
+//                           can only over-report. Moving the truck to another
+//                           owner empties the windows the same way, so the
+//                           only remedy is the retirement date.
 // An open month has no locked period_locks row and is no later than the
 // current business month (appDay(), APP_TIMEZONE): a later month is no open
 // month's figure yet, so a truck entering service next month is not held, even
@@ -33991,7 +34003,14 @@ function truckDeleteOpenMonthHolds(truck) {
 	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
 	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
 	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
-	return { fixed_cost_months, driver, eld_link, financials_line_months, lease_months };
+	let last_truck_receipt_months = 0;
+	if (ownerId > 0 && !db.prepare("SELECT 1 FROM trucks WHERE owner_id = ? AND id != ? LIMIT 1").get(ownerId, truck.id)) {
+		const scope = investorExpenseScopeSql(-1, getInvestorDriverMonthWindows(ownerId), EXPENSE_PERIOD_EXPR);
+		last_truck_receipt_months = db.prepare(
+			`SELECT DISTINCT ${EXPENSE_PERIOD_EXPR} AS m FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`
+		).all(...scope.params).filter((r) => investorPayoutBasis.isMonthKey(r.m) && r.m <= current && !locked.has(r.m)).length;
+	}
+	return { fixed_cost_months, driver, eld_link, financials_line_months, lease_months, last_truck_receipt_months };
 }
 
 // ============================================================
@@ -35909,7 +35928,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 
 	// The truck's own inputs to an OPEN month (TD8, 2026-10-23): its fixed
 	// costs, the driver it names, its ELD link, its reserve and depreciation
-	// lines and its lease (truckDeleteOpenMonthHolds()). Deleting it would restate
+	// lines, its lease and, on an investor's last truck, the receipts that reach
+	// that investor through its driver windows (truckDeleteOpenMonthHolds()). Deleting it would restate
 	// the open month, so any of them refuses the delete with its own code, after
 	// #590's two refusals and before TRUCK_REFERENCED, audited under that code
 	// (never through periodBlockedResponse(), which answers PERIOD_FINALIZED).
@@ -35926,11 +35946,14 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		[holds.eld_link, "ELD link", "its ELD device sets the paid days of the loads that name it"],
 		[holds.financials_line_months, "reserve or depreciation", `its maintenance reserve or depreciation is a Financials line in ${openMonths(holds.financials_line_months)}`],
 		[holds.lease_months, "lease", `it keeps its investor's lease in service in ${openMonths(holds.lease_months)}`],
+		[holds.last_truck_receipt_months, "investor receipts", `it is its investor's last truck, which keeps receipts that name no truck on that investor's ledger in ${openMonths(holds.last_truck_receipt_months)}`],
 	].filter(([n]) => n > 0);
 	if (held.length) {
 		// Each step is an audited edit: update_truck_costs, update_truck_driver,
-		// routemate_unlink, update_truck_owner (TD8-14) and update_trailer.
-		const steps = assignmentRows ? [] : [
+		// routemate_unlink, update_truck_owner (TD8-14) and update_trailer. No
+		// edit clears the investor's receipts (changing the owner drops them the
+		// same way), so with that item the retirement date is the only remedy.
+		const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [
 			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
 			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
 			[holds.driver, "clear its driver"],
