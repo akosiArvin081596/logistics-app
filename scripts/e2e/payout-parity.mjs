@@ -11,8 +11,8 @@
 //      stands. PATCH_A / PATCH_B apply a unified diff to that export only (a
 //      throwaway mutation: the export is deleted at the end). Each export links the
 //      main checkout's node_modules and client/node_modules, and nothing else.
-//   2. Takes ONE read-only `.backup()` of SOURCE_DB (default: the main checkout's
-//      app.db), sets a random Super Admin password on that copy (the repo's own
+//   2. Takes ONE read-only `.backup()` of SOURCE_DB (required, no default: a
+//      database under ~/LogisX-replica/, refused inside any checkout), sets a random Super Admin password on that copy (the repo's own
 //      reset script; the password lives in this process's memory only), then backs
 //      the copy up once more: two private, identical databases, one per server.
 //   3. Boots each build on its own copy with scripts/e2e/boot-server.sh (every
@@ -51,7 +51,8 @@
 //   DIR_A / DIR_B   a checkout's working tree instead of a ref (wins over REF_x)
 //   PATCH_A / PATCH_B  a unified diff (-p1) applied to that side's export only
 //   FLAG            off (default) | on: B boots with INVESTOR_LEASE_PAYOUTS_ENABLED=true
-//   SOURCE_DB       the database to copy, opened read-only (default: <main checkout>/app.db)
+//   SOURCE_DB       required: a database under ~/LogisX-replica/ to copy, opened read-only
+//                   (refused inside any checkout or worktree, or anywhere else; source-db.cjs)
 //   PORT_A / PORT_B the ports (default: random free ports; 3000, 3003 and 5173 refused)
 //   E2E_WORK_DIR    the work dir (default: $TMPDIR/logisx-e2e; see paths.cjs)
 //   INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT  passed to both servers as set
@@ -63,6 +64,8 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import paths from './paths.cjs'
+import sourceDbRule from './source-db.cjs'
+const { sourceDb } = sourceDbRule
 
 const APP_ZONE = createRequire(import.meta.url)('../../lib/app-time.js').appTimeZone()
 
@@ -102,7 +105,10 @@ let WORK, MAIN, SOURCE_DB, Database
 try {
   WORK = paths.workDir()
   MAIN = fs.realpathSync(paths.mainCheckout())
-  SOURCE_DB = fs.realpathSync(process.env.SOURCE_DB || path.join(MAIN, 'app.db'))
+  // No default: the payout figures need a real database, taken only from under
+  // ~/LogisX-replica/ and never from a checkout (source-db.cjs, as setup-db.cjs).
+  SOURCE_DB = sourceDb({ unsetHint: 'Set SOURCE_DB to a database under ~/LogisX-replica/.' })
+  if (!SOURCE_DB) throw new Error('SOURCE_DB is required: a database under ~/LogisX-replica/ to copy (it has no default)')
   Database = paths.appRequire('better-sqlite3')
 } catch (e) { die(e.message) }
 
