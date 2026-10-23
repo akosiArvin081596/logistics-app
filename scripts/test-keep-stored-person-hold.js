@@ -300,6 +300,28 @@ async function section2() {
 	check("§2 (L1) the manual row later edited in the sheet: still held, \"in the sheet after a LogisX edit\"",
 		m2.body.values["Pickup Appointment"] === "10/13/2026 8:00:00" && /in the sheet after a LogisX edit/.test(m2.body.holdReason), m2.body);
 
+	// Review L1 (Arvin's yes): only the app's own writes clear a value. A Dispatcher saved
+	// 10/12, an email wrote 10/6 over it (the flag was off), and a person put 10/12 back in the
+	// sheet: the next email's 10/6 meets a person's date again.
+	const RESTORED = ["900000218", "Boxes", "10/12/2026 8:00:00", "10/14/2026 8:00:00", "Dispatched", "10/5/2026, 9:00:00 AM", "$900.00"];
+	const restoreHistory = (x) => {
+		x.api.recordLoadCellWrite("900000218", "Pickup Appointment", "10/12/2026 08:00", "person", { actor: "Dispatcher#7" });
+		x.api.recordLoadCellWrite("900000218", "Pickup Appointment", "10/6/2026 08:00", "ratecon");
+	};
+	const rs = world({ env: ON, rows: [RESTORED] });
+	restoreHistory(rs);
+	const rs1 = await rs.email("900000218", v({ id: "900000218", pu: "10/6/2026 08:00", dr: "10/14/2026 08:00", pay: "$900.00" }));
+	eq("§2 (review L1, flag on) a person's date restored in the sheet after an email replaced it: held",
+		[rs1.body.values["Pickup Appointment"], heldCols(rs1), rs.sends.length, rs.notes.length], ["10/12/2026 8:00:00", ["Pickup Appointment"], 1, 1]);
+	check("§2 (review L1, flag on) the reason: set in the sheet after the rate con",
+		/^a person corrected this date \(in the sheet after the rate con of [A-Z][a-z]{2} \d{1,2}\)$/.test(rs1.body.holdReason), rs1.body.holdReason);
+	const ro = world({ rows: [RESTORED] });
+	restoreHistory(ro);
+	const ro1 = await ro.post("900000218", v({ id: "900000218", pu: "10/6/2026 08:00", dr: "10/14/2026 08:00", pay: "$900.00" }));
+	eq("§2 (review L1, flag off) the answer is today's (written), and a would_hold row records it",
+		[ro1.body.values["Pickup Appointment"], ro1.body.held, ro.cellRows("900000218", "Pickup Appointment").filter((x) => x.source === "would_hold").map((x) => [x.value, x.stored_value]), ro.sends.length],
+		["10/6/2026 08:00", [], [["10/6/2026 08:00", "10/12/2026 8:00:00"]], 0]);
+
 	// L2: PUT /api/data of another sheet, or the same date in another format.
 	const l2 = world({ env: ON });
 	const b0 = ["900000215", "Tiles", "10/12/2026 8:00:00", "10/14/2026 8:00:00", "Dispatched", "", "$700.00"];
