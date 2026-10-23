@@ -158,6 +158,37 @@ section('§2 Job Board', () => {
   check('§2 Job Board: no per-load panel is handed the served Load ID text', servedIdPanels(src), [])
 })
 
+section('§2 Completed Loads', () => {
+  const src = read('components/dashboard/CompletedLoadsTab.vue')
+  check('§2 Completed Loads: imports the helper', /import \{[^}]*\bloadRef\b[^}]*\bloadIdShown\b[^}]*\} from '\.\.\/\.\.\/lib\/loadRef'/.test(src), true)
+  check('§2 Completed Loads: the open load\'s reference and shown ID come from loadRef() and loadIdShown()',
+    [/const loadRefValue = computed\(\(\) => \(selectedJob\.value \? loadRef\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src),
+      /const loadIdShownValue = computed\(\(\) => \(selectedJob\.value \? loadIdShown\(selectedJob\.value, loadIdCol\.value\) : ''\)\)/.test(src)],
+    [true, true])
+  // The Super Admin-only invoice draft excepted (POST .../draft-invoice).
+  check('§2 Completed Loads: no API call but the Super Admin-only invoice draft names the load by the served Load ID text',
+    (src.match(/api\.(get|put|post|del)\([^)\n]*encodeURIComponent\(loadIdValue\.value\)\}[^`\n]*/g) || []).filter((m) => !/\}\/draft-invoice(\?|$)/.test(m)), [])
+  check('§2 Completed Loads: the detail\'s reads (documents, rating, geocode) go by loadRef()',
+    /const lid = loadRef\(job, lc\)\.trim\(\)/.test(src), true)
+  check('§2 Completed Loads: the rating save goes by the load\'s reference',
+    /async function submitRating\(r\) \{[^}]*const lid = loadRefValue\.value\.trim\(\)[\s\S]{0,200}?api\.put\(`\/api\/load-ratings\/\$\{encodeURIComponent\(lid\)\}`/.test(src), true)
+  check('§2 Completed Loads: the status timeline, the haul, the document upload and the documents refresh go by the load\'s reference',
+    [/<StatusTimeline v-if="loadRefValue" :load-id="loadRefValue"/.test(src), /<LoadHaulSection :load-id="loadRefValue"/.test(src),
+      /<DocumentUpload\s+:load-id="loadRefValue"\s+:load-label="loadIdShownValue"/.test(src),
+      /api\.get\(`\/api\/documents\/\$\{encodeURIComponent\(loadRefValue\.value\)\}`\)/.test(src)],
+    [true, true, true, true])
+  // The Super Admin-only rate-con PDF section and invoice draft preview stay on the
+  // served ID: a Super Admin is never served a key.
+  check('§2 Completed Loads: only the Super Admin-only panels are handed the served Load ID text',
+    servedIdPanels(src), ['RateConPdfSection', 'InvoiceDraftPreviewModal'])
+  check('§2 Completed Loads: a withheld load\'s documents are listed by type and time with the server\'s note, no links',
+    [/v-else-if="docsWithheldNote"/.test(src), (src.match(/r\.documentsWithheld \?/g) || []).length], [true, 2])
+  check('§2 Completed Loads: the title and the list show the ID as served ("[contact withheld]" when served blank)',
+    [/<DialogTitle>\{\{ loadIdShownValue \|\| 'Load Details' \}\}<\/DialogTitle>/.test(src),
+      /Details for load \{\{ loadIdShownValue \}\}/.test(src), /\{\{ cellValue\(job, col\) \|\| loadIdShown\(job, col\) \}\}/.test(src)],
+    [true, true, true])
+})
+
 section('§2 the dashboard store (assign, reassign, status)', () => {
   const src = read('stores/dashboard.js')
   check('§2 store: assign and reassign name the load by loadRef(job, ...)',
