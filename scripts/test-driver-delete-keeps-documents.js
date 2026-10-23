@@ -244,6 +244,8 @@ function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 		`${guardSrc}\nreturn userDeleteLockBlockers;`,
 	)(w.db, isLocked, () => true, (r) => isLocked(month(r)), (rows) => [...new Set(rows.map(month))].sort(), () => []);
 	const truck = new Function("db", `${TRUCK_SRC}\n${liftFn("normalizeDriverName")}\nreturn { findTruckForDriverAccount, normalizeDriverName };`)(w.db);
+	// The staff desks: the delete keeps a desk's messages (test-user-delete-cascade.js).
+	const chatDeskKey = new Function(`${liftConst("const CHAT_DESK_NAMES = ", ";\n")}\n${liftFn("chatDeskKey")}\nreturn chatDeskKey;`)();
 	const deps = {
 		requireRole: () => (req, res, next) => next(),
 		db: w.db,
@@ -255,6 +257,7 @@ function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 		logAudit: (req, action, entity, id, details) => rec.audits.push({ action, entity, id, details }),
 		findTruckForDriverAccount: truck.findTruckForDriverAccount,
 		normalizeDriverName: truck.normalizeDriverName,
+		chatDeskKey,
 		purgeUserSessions: (id) => { rec.purged.push(id); return 0; },
 		syncDriverToCarrierSheet: (name, o) => rec.synced.push({ name, action: o && o.action }),
 		notifyChange: () => {},

@@ -428,14 +428,16 @@ check("every purgeable action is a real *_blocked action in server.js",
 	PURGE.every((a) => blockedInSrc.includes(a)), true);
 check("...and there is no dead entry on the list", PURGE.filter((a) => !blockedInSrc.includes(a)), []);
 // ⚠️ THE REVIEWED LIST, pinned as a SUPERSET requirement. This is the half of the
-// old equality pin that is worth keeping: each of these eight was checked call
+// old equality pin that is worth keeping: each of these nine was checked call
 // site by call site and confirmed to return before any sheet or database write,
 // so silently DROPPING one is a regression worth failing on. What is deliberately
 // not asserted is the other direction — a NEW `*_blocked` action is not forced
 // onto the list, because forcing it is what produces an un-reviewed addition.
 const REVIEWED_PURGEABLE = ["dispatch_blocked", "reassign_blocked", "cancel_blocked",
 	"driver_respond_blocked", "status_update_blocked", "status_override_blocked",
-	"create_sheet_row_blocked", "update_sheet_row_blocked"].sort();
+	"create_sheet_row_blocked", "update_sheet_row_blocked",
+	// POST /api/messages refusing a recipient or sender: returns before any write.
+	"message_blocked"].sort();
 check("the reviewed refusal actions are all still purgeable",
 	REVIEWED_PURGEABLE.filter((a) => !PURGE.includes(a)), []);
 // Informational, and deliberately NOT a failure: an unlisted refusal is retained.

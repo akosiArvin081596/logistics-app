@@ -157,6 +157,7 @@ import {
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoStep, chatPhotoView, chatPhotos } from '../../lib/chatPhotos'
 import { conversationPreview } from '../../lib/voiceNotes'
+import { messageSendFailureText } from '../../lib/messageSendFailure'
 import { useVoiceNotesFeature } from '../../composables/useVoiceNotesFeature'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
@@ -323,12 +324,12 @@ async function sendMessage() {
     // request, so the user may already have attached the next file.
     if (attachment.value === pending) clearAttachment()
     scrollToBottom()
-  } catch {
+  } catch (err) {
     // The attachment stays on screen on purpose. It is the user's file, they
     // cannot get it back from us, and the upload result (if it got that far) is
     // memoized on it — so pressing send again reuses the uploaded file rather
-    // than orphaning another copy.
-    toast('Failed to send', 'error')
+    // than orphaning another copy. A refused recipient or sender says why.
+    toast(messageSendFailureText(err), 'error')
   } finally {
     sending.value = false
   }

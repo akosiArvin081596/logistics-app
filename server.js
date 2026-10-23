@@ -287,6 +287,20 @@ function emitDispatchByRole(event, full, redacted) {
 	io.to("super-admin").emit(event, full);
 	io.to("dispatch").except("super-admin").emit(event, redacted);
 }
+// THE STAFF DESKS (decision 30, 2026-10-21: drivers and investors message
+// staff only, never each other). Each role's app names one desk: the driver
+// app "Dispatch", the investor portal "admin" (resolveChatParties()). A desk is
+// never a person: no account may take its name (findDriverNameClashes()'s
+// reserved names, POST /api/users, POST /api/auth/setup), chatRooms() gives it
+// no identity room, and an account delete never removes its messages. Keyed by
+// the name as matched (trimmed and lower-cased, nothing else folded, so a
+// look-alike spelling is no desk), valued by the name as stored.
+const CHAT_DESK_NAMES = Object.freeze({ dispatch: "Dispatch", admin: "admin" });
+// The desk a name is ("dispatch" or "admin"), or "" for any other value.
+function chatDeskKey(name) {
+	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
+	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
+}
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
 // A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
@@ -294,7 +308,7 @@ function emitDispatchByRole(event, full, redacted) {
 // reader selects its thread by LOWER("from") / LOWER("to"). Each name reaches
 // only the driver room and the user room of that name, through the helpers,
 // so no value in a request can select a role room or another kind's room.
-// "Dispatch", the desk's own name, adds no identity room: the dispatch room
+// A desk's name ("Dispatch", "admin") adds no identity room: the dispatch room
 // already has the message. One list, deduplicated, so a socket in two of
 // these rooms receives the message once, and never empty: io.to([]) would
 // send to every socket.
@@ -302,7 +316,7 @@ function chatRooms(from, to) {
 	const rooms = new Set(["dispatch"]);
 	for (const party of [from, to]) {
 		const key = identityRoomKey(party);
-		if (!key || key === "dispatch") continue;
+		if (!key || chatDeskKey(key)) continue;
 		rooms.add(driverRoom(key));
 		rooms.add(userRoom(key));
 	}
@@ -1316,6 +1330,9 @@ const PURGEABLE_REFUSAL_ACTIONS = [
 	"status_override_blocked",
 	"create_sheet_row_blocked",
 	"update_sheet_row_blocked",
+	// POST /api/messages refusing a recipient or sender (decision 30): cheap, on
+	// demand, a Driver can repeat it, and it returns before any write.
+	"message_blocked",
 ];
 const REFUSAL_AUDIT_RETENTION_DAYS = 90;
 
@@ -28925,6 +28942,12 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 		if (!username || !password) {
 			return res.status(400).json({ error: "Username and password required" });
 		}
+		// A staff desk's name (or "investor") is no account's, the first Super
+		// Admin's included: POST /api/users refuses it the same way.
+		const setupClash = findDriverNameClash(String(username));
+		if (setupClash && setupClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${String(username).trim()}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 
 		const hash = await bcrypt.hash(password, 10);
 
@@ -29343,11 +29366,28 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("POST /api/users: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
+		// A USERNAME IS AN IDENTITY NAME TOO (THE ACCOUNT NAMESPACE IS WIDER THAN
+		// DRIVER NAMES, beside findDriverNameClashes()): an investor's thread is
+		// selected by his username and chat parties are names, so a new username
+		// is one no other identity answers to. Asked of the same helper the
+		// investor-application path asks, after the last await: a reserved name
+		// (a staff desk, "investor") is 409 USERNAME_RESERVED; an existing
+		// username keeps its 400; any other identity's name (an account's driver
+		// name, a username under another spacing, a drivers-directory row) is 409
+		// USERNAME_TAKEN. The helper lists reserved names first, so its first
+		// match says which.
+		const usernameClash = findDriverNameClash(newUsername);
+		if (usernameClash && usernameClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${newUsername}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 		const existing = db
 			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
 			.get(newUsername.toLowerCase());
 		if (existing) {
 			return res.status(400).json({ error: "Username already exists" });
+		}
+		if (usernameClash) {
+			return res.status(409).json({ error: `The username "${newUsername}" is already used by another account or driver. Choose another.`, code: "USERNAME_TAKEN" });
 		}
 
 		// ⚠️ THE DRIVER-NAME COLLISION CHECK PUT HAS AND POST DID NOT.
@@ -31711,8 +31751,12 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// the delete, and a soft-deleted one stays where it is, under this
 				// name, counted as retained below.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
-				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
-				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
+				// A staff desk's messages and bell are every party's conversation with
+				// it, never one account's: an account named like a desk (none can be
+				// made since the reserved names cover the desks) removes neither.
+				const deskName = !!chatDeskKey(name);
+				removed.messages = deskName ? 0 : db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
+				removed.notifications = deskName ? 0 : db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
 				// The driver's truck is found the way the driver app finds it
@@ -42958,7 +43002,10 @@ function findDriverAccountSpelling(name) {
 // never match for the same reason. A failed read throws; each caller asks
 // inside its try, so a read error refuses the write rather than admitting it.
 function findDriverNameClashes(name, opts = {}) {
-	const RESERVED_NAMES = ["dispatch", "investor"];
+	// The staff desks (CHAT_DESK_NAMES) and the investors' room's name. Written
+	// out here because many runners lift this function on its own;
+	// scripts/test-socket-hardening.js pins it to CHAT_DESK_NAMES.
+	const RESERVED_NAMES = ["dispatch", "admin", "investor"];
 	const needle = normalizeDriverName(typeof name === "string" ? name : "");
 	if (!needle) return [];
 	const { exceptUserId = null, exceptUserIds = [], exceptDirectoryId = null, users = true, directory = true } = opts || {};
@@ -47215,23 +47262,84 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 	}
 });
 
+// WHO A CHAT MESSAGE GOES FROM AND TO (decision 30, 2026-10-21: drivers and
+// investors message staff only, never each other). The one rule for
+// POST /api/messages and POST /api/messages/voice:
+//   • a Driver sends as his driver name, an Investor as his username (the names
+//     their threads are read by: GET /api/driver/:driverName, GET
+//     /api/investor/messages), and only to his own role's desk
+//     (CHAT_DESK_BY_ROLE), stored in the desk's own spelling. Anything else is
+//     403: the other desk, another driver, an investor, a staff member's name,
+//     a look-alike spelling, or a sender with no such name or a desk's name.
+//   • staff send as "Dispatch" (also when no sender is named) or as themselves
+//     (422 otherwise), to exactly one existing Driver or Investor account (422
+//     otherwise: a staff account, a name no account holds, a name two hold),
+//     or, where the route allows it (`staffToDesk`: the text route, for a Super
+//     Admin in the driver app), to a desk under their own name only.
+//   • any other role: 403.
+// A desk's name is tested before any account is looked up, so an account named
+// like a desk is never a recipient. Returns { from, to, partyUserId } or
+// { status, reason: "recipient" | "sender", role, error }; each route names its
+// own code (MESSAGE_*, VOICE_NOTE_*). `noun` and `item` word the refusals.
+const CHAT_DESK_BY_ROLE = Object.freeze({ Driver: "dispatch", Investor: "admin" });
+// Each desk as its own app names it in a sentence ("get in touch with the admin").
+const CHAT_DESK_LABEL = Object.freeze({ dispatch: "Dispatch", admin: "the admin" });
+function resolveChatParties(user, toName, fromName, { noun = "Messages", item = "message", staffToDesk = false } = {}) {
+	const role = user && user.role;
+	const askedDesk = chatDeskKey(toName);
+	if (role === "Driver" || role === "Investor") {
+		const deskKey = CHAT_DESK_BY_ROLE[role];
+		const own = String((role === "Driver" ? user.driverName : user.username) || "").trim();
+		const id = Number(user.id);
+		if (!own || chatDeskKey(own) || askedDesk !== deskKey || !Number.isInteger(id) || id <= 0) {
+			return { status: 403, reason: "recipient", role, error: `${noun} go to ${CHAT_DESK_LABEL[deskKey]}.` };
+		}
+		return { from: own, to: CHAT_DESK_NAMES[deskKey], partyUserId: id };
+	}
+	if (role !== "Super Admin" && role !== "Dispatcher") {
+		return { status: 403, reason: "recipient", role: String(role || ""), error: `${noun} can't be sent from this account.` };
+	}
+	const own = String(user.driverName || user.username || "").trim();
+	const asked = String(fromName || "").trim();
+	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
+	if (!from) return { status: 422, reason: "sender", role, error: "Send as Dispatch or as yourself." };
+	const pick = `Pick a driver or an investor to send the ${item} to.`;
+	if (askedDesk) {
+		if (!staffToDesk || from === "Dispatch") return { status: 422, reason: "recipient", role, error: pick };
+		return { from, to: CHAT_DESK_NAMES[askedDesk], partyUserId: null };
+	}
+	const name = typeof toName === "string" ? toName.trim() : "";
+	const spelling = findDriverAccountSpelling(name);
+	// Case aside, so two Driver accounts spelled alike but for letter case are
+	// two hits (a name two accounts hold), as every thread reads LOWER().
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?)").all(spelling) : [];
+	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
+	const hits = [...drivers, ...investors];
+	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
+	return { from, to: hits[0].name, partyUserId: hits[0].id };
+}
+
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
-		// SECURITY: never trust the client-supplied `from`. A logged-in driver
-		// who hits this endpoint directly could otherwise impersonate any user
-		// (including dispatch). Drivers + Investors are pinned to their session
-		// identity; Super Admin / Dispatcher may speak as the dispatch desk so
-		// we keep their `from` overridable but default it to driverName / username.
+		// SECURITY: never trust the client-supplied `from` or `to`. Who may write
+		// to whom, and under which name, is resolveChatParties()'s to decide:
+		// a Driver or an Investor only as himself to his own desk, staff as
+		// "Dispatch" or as themselves to one Driver or Investor account.
 		const sessionUser = req.session.user;
-		const sessionName = (sessionUser?.driverName || sessionUser?.username || "").trim();
-		const isPrivilegedSender = sessionUser?.role === "Super Admin" || sessionUser?.role === "Dispatcher";
-		const requestedFrom = (req.body.from || "").trim();
-		const from = isPrivilegedSender ? (requestedFrom || sessionName) : sessionName;
-		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
+		if (typeof to !== "string" || !to.trim() || (req.body.from != null && typeof req.body.from !== "string")
+			|| (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		const parties = resolveChatParties(sessionUser, to, req.body.from, { staffToDesk: true });
+		if (parties.status) {
+			const code = parties.reason === "sender" ? "MESSAGE_SENDER" : "MESSAGE_RECIPIENT";
+			// Neither the name asked for nor the text: the code and the sender's role
+			logAuditRefusal(req, "message_blocked", "message", "", `Message refused for a ${parties.role || "signed-in"} sender [${code}]`, code);
+			return res.status(parties.status).json({ error: parties.error, code });
+		}
+		const { from } = parties;
 		// A voice note is the server's to type: only POST /api/messages/voice
 		// writes one (its bytes checked, its file stored, its player keyed on the
 		// row's id). A text message may not claim the type or point at a voice
@@ -47247,7 +47355,7 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const sent = sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef });
+		const sent = sendChatMessage({ from, to: parties.to, message, loadId, attachmentUrl, attachmentType, assetRef });
 		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
@@ -47641,10 +47749,6 @@ const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_
 const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
 	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
 	: "";
-// The one staff desk each role sends to, as its own app names it: a Driver
-// only to "Dispatch" (the driver app), an Investor only to "admin" (the
-// investor portal). [the name as matched, the name as stored].
-const VOICE_NOTE_DESK_BY_ROLE = Object.freeze({ Driver: ["dispatch", "Dispatch"], Investor: ["admin", "admin"] });
 const VOICE_NOTE_REFUSALS = {
 	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
 	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
@@ -47680,34 +47784,13 @@ const voiceNotePlaybackLimiter = rateLimit({
 });
 
 // Who a voice note goes from and to, and the Driver or Investor account it
-// belongs to (party_user_id: besides staff, the one account that may play it).
-// A Driver or an Investor sends as himself and only to his role's staff desk
-// (VOICE_NOTE_DESK_BY_ROLE); staff send as "Dispatch" or as themselves, only
-// to one existing Driver or Investor account. { from, to, partyUserId } or
-// { status, code, error }.
+// belongs to (party_user_id: besides staff, the one account that may play it):
+// the chat rule (resolveChatParties()), without a staff note to a desk.
+// { from, to, partyUserId } or { status, code, error }.
 function resolveVoiceNoteParties(user, toName, fromName) {
-	const role = user && user.role;
-	const own = String((user && (user.driverName || user.username)) || "").trim();
-	if (role === "Driver" || role === "Investor") {
-		const [deskKey, desk] = VOICE_NOTE_DESK_BY_ROLE[role];
-		const id = Number(user.id);
-		if (!own || String(toName).toLowerCase() !== deskKey || !Number.isInteger(id) || id <= 0) {
-			return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes go to Dispatch." };
-		}
-		return { from: own, to: desk, partyUserId: id };
-	}
-	if (role !== "Super Admin" && role !== "Dispatcher") {
-		return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes can't be sent from this account." };
-	}
-	const asked = String(fromName || "").trim();
-	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
-	if (!from) return { status: 422, code: "VOICE_NOTE_SENDER", error: "Send as Dispatch or as yourself." };
-	const spelling = findDriverAccountSpelling(toName);
-	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND driver_name = ?").all(spelling) : [];
-	const investors = toName ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(username) = LOWER(?)").all(toName) : [];
-	const hits = [...drivers, ...investors];
-	if (hits.length !== 1) return { status: 422, code: "VOICE_NOTE_RECIPIENT", error: "Pick a driver or an investor to send the voice note to." };
-	return { from, to: hits[0].name, partyUserId: hits[0].id };
+	const parties = resolveChatParties(user, toName, fromName, { noun: "Voice notes", item: "voice note" });
+	if (!parties.status) return parties;
+	return { status: parties.status, code: parties.reason === "sender" ? "VOICE_NOTE_SENDER" : "VOICE_NOTE_RECIPIENT", error: parties.error };
 }
 
 // A Driver's truck's latest clean fix since its device was linked, or null
@@ -47788,7 +47871,11 @@ function voiceNoteSendChecks(req, res, next) {
 		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
 	}
 	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
-	if (parties.error) return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	if (parties.error) {
+		// As POST /api/messages audits it: the code and the sender's role only
+		logAuditRefusal(req, "message_blocked", "message", "", `Voice note refused for a ${String(user.role || "signed-in")} sender [${parties.code}]`, parties.code);
+		return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	}
 	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
 		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
 	}

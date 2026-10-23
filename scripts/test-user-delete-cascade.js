@@ -109,6 +109,9 @@ check("cascade extraction found the three FK-bearing children", [
 // (Its cases are scripts/test-driver-rename-clash.js §4d's subject.)
 const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
 	.map(extract).join("\n");
+// The staff desks (decision 30): an account named like one never removes the
+// desk's messages or notifications.
+const DESK_SRC = [extractConst("const CHAT_DESK_NAMES = ", ";\n"), extract("chatDeskKey")].join("\n");
 // The delete guard's invoice blocker matches through the rename cascade's
 // `invoices` leg (the driver's other spellings, with the other-account rule), so
 // every lift of userDeleteLockBlockers() below carries the real helpers.
@@ -121,10 +124,10 @@ const RENAME_LEG_SRC = [
 ].join("\n");
 function runCascade(db, user, name, id, body = CASCADE) {
 	const removed = {}, detached = {};
-	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount };`)(db);
-	const fn = new Function("db", "user", "name", "id", "removed", "detached", "normalizeDriverName", "findTruckForDriverAccount", body);
+	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\n${DESK_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount, chatDeskKey };`)(db);
+	const fn = new Function("db", "user", "name", "id", "removed", "detached", "normalizeDriverName", "findTruckForDriverAccount", "chatDeskKey", body);
 	let threw = null;
-	try { db.transaction(() => fn(db, user, name, id, removed, detached, helpers.normalizeDriverName, helpers.findTruckForDriverAccount))(); }
+	try { db.transaction(() => fn(db, user, name, id, removed, detached, helpers.normalizeDriverName, helpers.findTruckForDriverAccount, helpers.chatDeskKey))(); }
 	catch (err) { threw = err.message; }
 	return { removed, detached, threw };
 }
@@ -294,6 +297,30 @@ function seedOnboardedDriver(db) {
 	check("never-onboarded: cascade completes", threw, null);
 	check("never-onboarded: the three child deletes are no-ops",
 		[removed.onboarding_documents, removed.driver_onboarding, removed.driver_payment_info], [0, 0, 0]);
+	db.close();
+}
+{
+	// An account named like a staff desk (made before the names were reserved):
+	// its delete keeps every conversation with the desk and the desk's bell.
+	for (const desk of ["admin", "Dispatch"]) {
+		const db = scratch();
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (11,?,'','Investor')").run(desk);
+		const add = db.prepare('INSERT INTO messages ("from", "to") VALUES (?, ?)');
+		add.run("inv_t", desk); add.run(desk, "inv_t"); add.run("Tamsin Vale", desk);
+		db.prepare("INSERT INTO notifications (driver_name) VALUES (?)").run(desk.toLowerCase());
+		const { removed, threw } = runCascade(db, { id: 11, username: desk, role: "Investor" }, desk.toLowerCase(), 11);
+		check(`desk-named account "${desk}": the delete completes`, threw, null);
+		check(`desk-named account "${desk}": no message or notification removed`, [removed.messages, removed.notifications], [0, 0]);
+		check(`desk-named account "${desk}": every message with the desk and its bell stay`,
+			[db.prepare("SELECT COUNT(*) AS c FROM messages").get().c, db.prepare("SELECT COUNT(*) AS c FROM notifications").get().c], [3, 1]);
+		db.close();
+	}
+	// ...while any other account's messages still leave with it.
+	const db = scratch();
+	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (12,'inv_t','','Investor')").run();
+	db.prepare('INSERT INTO messages ("from", "to") VALUES (?, ?)').run("inv_t", "admin");
+	const { removed } = runCascade(db, { id: 12, username: "inv_t", role: "Investor" }, "inv_t", 12);
+	check("an ordinary account's messages still leave with it", removed.messages, 1);
 	db.close();
 }
 
