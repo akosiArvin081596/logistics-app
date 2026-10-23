@@ -477,6 +477,9 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		payoutBasisContext: () => null,
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
+		// as with their flag off.
+		annotateDashboardPickupReview: () => 0,
 		// GET /api/dashboard requires lib/load-search-refs.js inline.
 		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(__dirname, "..", p) : p),
 		console: { log: () => {}, warn: () => {}, error: (...a) => errors.push(a.map(String).join(" ")) },
