@@ -252,8 +252,10 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 	// voice-note flag (its features).
 	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
 	if (withSetup) {
-		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", SETUP_SRC)(
-			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub, "America/New_York");
+		// The setup's reserved-name check is scripts/test-messages-staff-only.js's
+		// subject; here no name is reserved.
+		new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "findDriverNameClash", SETUP_SRC)(
+			app, passThrough, db, bcryptImpl, () => false, "", () => false, () => {}, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", () => null);
 	}
 	const requireAuth = buildRequireAuth();
 	app.get("/api/whoami", requireAuth, (req, res) => res.json({ id: req.session.user.id }));

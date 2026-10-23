@@ -387,8 +387,10 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 
 	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.login)(
 		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
-	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.setup)(
-		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
+	// The setup's reserved-name check is scripts/test-messages-staff-only.js's
+	// subject; here no name is reserved.
+	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "findDriverNameClash", sources.setup)(
+		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", () => null);
 	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
 	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);

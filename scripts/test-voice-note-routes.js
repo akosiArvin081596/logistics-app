@@ -374,10 +374,20 @@ function telemetry(db, { agoMs, speed }) {
 	{
 		const toB = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders(DRIVER_B, newKey()) });
 		ok("§6 a driver sending to another driver: 403 VOICE_NOTE_RECIPIENT", toB.status === 403 && toB.json && toB.json.code === "VOICE_NOTE_RECIPIENT", [toB.status, toB.json]);
+		// Audited as a text refusal is: the code and the sender's role, never the
+		// name asked for.
+		const refusals = db.prepare("SELECT * FROM audit_trail WHERE action = 'message_blocked'").all();
+		ok("§6 ...the refusal is audited (message_blocked): its code and the sender's role, not the name asked for",
+			refusals.some((r) => /\[VOICE_NOTE_RECIPIENT\]/.test(r.details) && /\bDriver\b/.test(r.details))
+			&& !refusals.some((r) => JSON.stringify(r).toLowerCase().includes(DRIVER_B.toLowerCase())), refusals);
 		const drvAdmin = await request(P, "POST", "/api/messages/voice", U.drv, { body: CHROME, headers: voiceHeaders("admin", newKey()) });
 		ok("§6 a driver sending to \"admin\" (the investor portal's desk): 403 VOICE_NOTE_RECIPIENT", drvAdmin.status === 403 && drvAdmin.json && drvAdmin.json.code === "VOICE_NOTE_RECIPIENT", [drvAdmin.status, drvAdmin.json]);
 		const invDispatch = await request(P, "POST", "/api/messages/voice", U.inv, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
 		ok("§6 an investor sending to \"Dispatch\" (the driver app's desk): 403 VOICE_NOTE_RECIPIENT", invDispatch.status === 403 && invDispatch.json && invDispatch.json.code === "VOICE_NOTE_RECIPIENT", [invDispatch.status, invDispatch.json]);
+		// Each role's refusal names its own desk, as its own app does.
+		ok("§6 ...a driver's refusal names Dispatch, an investor's the admin", /Dispatch/.test(String(drvAdmin.json && drvAdmin.json.error))
+			&& /\bthe admin\b/.test(String(invDispatch.json && invDispatch.json.error)) && !/Dispatch/.test(String(invDispatch.json && invDispatch.json.error)),
+			[drvAdmin.json && drvAdmin.json.error, invDispatch.json && invDispatch.json.error]);
 		const unknown = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Nobody Here", newKey()) });
 		ok("§6 staff to a name no account holds: 422 VOICE_NOTE_RECIPIENT", unknown.status === 422 && unknown.json && unknown.json.code === "VOICE_NOTE_RECIPIENT", [unknown.status, unknown.json]);
 		const desk = await request(P, "POST", "/api/messages/voice", U.disp, { body: CHROME, headers: voiceHeaders("Dispatch", newKey()) });
