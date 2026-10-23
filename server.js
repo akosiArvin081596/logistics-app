@@ -27334,17 +27334,19 @@ function personalRenderData(snapshot, invoiceRow, rows) {
 // uploads/. None of it is stored in render_data: it joins the data for the
 // render only, so a snapshot never holds an image or a note that went stale.
 //
-// PDF receipts (R3 v2): with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on and the kill
-// switch RECEIPT_PDF_PAGES_ENABLED not "false", a PDF receipt's pages are
-// prepared in a locked-down child process (lib/receipt-pdf.js) and inserted
-// after its sheet once Chrome has rendered the invoice. Only the invoice's own
-// driver's receipt (both names non-empty, normalizeDriverName()) is ever read
-// from the cache. Anything that fails keeps "PDF receipt on file"; a failed
-// insert renders the invoice once more with every PDF receipt on that note, so
-// an invoice never fails because of a receipt. The child's self-test runs at
-// every start whatever the flags; until it passes, every PDF keeps the note.
+// PDF receipts (R3 v2): only with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on AND
+// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set; it stays off until
+// the driver-privacy rule for multi-page statements ships), a PDF receipt's
+// pages are prepared in a locked-down child process (lib/receipt-pdf.js) and
+// inserted after its sheet once Chrome has rendered the invoice. Only the
+// invoice's own driver's receipt (both names non-empty, normalizeDriverName())
+// is ever read from the cache. Anything that fails keeps "PDF receipt on
+// file"; a failed insert renders the invoice once more with every PDF receipt
+// on that note, so an invoice never fails because of a receipt. The child's
+// self-test runs at every start whatever the flags; until it passes, every PDF
+// keeps the note.
 const PERSONAL_RECEIPT_WAIT_MS = 15_000;
-const RECEIPT_PDF_PAGES_ENABLED = !/^(false|0|no|off)$/i.test(String(process.env.RECEIPT_PDF_PAGES_ENABLED || "").trim());
+const RECEIPT_PDF_PAGES_ENABLED = process.env.RECEIPT_PDF_PAGES_ENABLED === "true";
 function receiptPdfPagesOn() {
 	return PERSONAL_EXPENSE_DEDUCTIONS_ENABLED && RECEIPT_PDF_PAGES_ENABLED;
 }

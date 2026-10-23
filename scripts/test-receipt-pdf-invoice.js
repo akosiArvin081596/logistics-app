@@ -13,8 +13,10 @@
  *   T1  a 1-page PDF receipt: "Receipt 1 of 1, attached after this invoice", a
  *       sheet saying its page follows, the page copied in after the sheet and
  *       labelled; the adjustment's re-render the same
- *   T14 the kill switch off, or the R3 flag off: exactly v1 ("PDF receipt on
- *       file", no sheet, the rendered file as it came, nothing prepared)
+ *   T14 RECEIPT_PDF_PAGES_ENABLED unset (the default), anything but exactly
+ *       "true", or the R3 flag off: exactly v1 ("PDF receipt on file", no
+ *       sheet, the rendered file as it came, nothing prepared). PDF pages are
+ *       opt-in until the driver-privacy statement-page rule ships.
  *   T15 a receipt whose driver is not the invoice's driver: the note, and the
  *       cache is never read
  *   T17 a failed merge renders once more with every PDF receipt on its note;
@@ -50,7 +52,9 @@ const PROBES = { env: path.join(TMP, "env-probe.txt"), db: path.join(TMP, "db-pr
 fs.writeFileSync(PROBES.env, "MADE_UP=1\n");
 fs.writeFileSync(PROBES.db, "made up\n");
 
-const ON = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
+// PDF receipt pages are opt-in: they attach only with both flags exactly "true".
+const R3_ONLY = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
+const ON = { ...R3_ONLY, RECEIPT_PDF_PAGES_ENABLED: "true" };
 const NOTE_PDF = "PDF receipt on file";
 
 // What Chrome would hand back for the render data: an invoice page, then one
@@ -165,8 +169,19 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		w.cleanup();
 	}
 
-	section("T14 the kill switch or the R3 flag off: exactly v1");
+	section("T14 PDF pages off (the default), or the R3 flag off: exactly v1");
 	{
+		for (const [label, env] of [["unset (the default)", R3_ONLY], ["\"1\" (only exactly \"true\" turns it on)", { ...R3_ONLY, RECEIPT_PDF_PAGES_ENABLED: "1" }]]) {
+			const d0 = world(env);
+			putPdf(d0, 1);
+			await mark(d0, 1);
+			const g0 = await d0.generate(DRIVER_A);
+			const r0 = lastRender(d0).data;
+			check(`T14 the R3 flag on, RECEIPT_PDF_PAGES_ENABLED ${label}: "PDF receipt on file", no sheet, the rendered file as it came, nothing prepared`,
+				[notes(r0), (r0.receiptPages || []).length, g0.body && g0.body.invoice ? storedFile(d0, g0.body.invoice.id).equals(d0.outputs[0]) : false, cached(d0, 1).length],
+				[[NOTE_PDF], 0, true, 0]);
+			d0.cleanup();
+		}
 		const w = world({ ...ON, RECEIPT_PDF_PAGES_ENABLED: "false" });
 		putPdf(w, 1);
 		await mark(w, 1);
