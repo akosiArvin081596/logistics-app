@@ -31655,11 +31655,11 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				const openBlock = lock.blockers.find((b) => b.code === "OPEN_MONTH_EXPENSES");
 				const them = (b) => (lock.blockers.length === 1 ? (b.rows === 1 ? "it" : "them") : null);
 				if (docBlock && openBlock) {
-					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its open-month expenses, changing an open month's figures, so it stays in place.");
+					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its expenses from an open month's records, so it stays in place.");
 				} else if (docBlock) {
 					remedy.push(`Deleting the account would leave ${them(docBlock) || "its load documents"} under a name no account holds, so it stays in place.`);
 				} else if (openBlock) {
-					remedy.push(`Deleting the account would delete ${them(openBlock) || "its open-month expenses"} and change an open month's figures, so it stays in place.`);
+					remedy.push(`Deleting the account would delete ${them(openBlock) || "its expenses"} from an open month's records, so it stays in place.`);
 				}
 				if (docBlock) remedy.push("A document filed in error can be removed from its load's Documents panel first.");
 				remedy.push(docBlock || openBlock
@@ -31833,13 +31833,16 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		})();
 	} catch (err) {
 		console.error("delete user cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", []);
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
-			// The old response named no cause at all, which is how a FOREIGN KEY
-			// failure read as "the app is broken" rather than "this user is
-			// onboarded". SQLite's message is schema text, not user data.
-			detail: err.message,
+			// Error and code only, as the truck delete answers: the database's
+			// message (schema text) goes to the server log above, never the client.
 		});
 	}
 	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
@@ -33809,8 +33812,7 @@ function truckDeleteLockBlockers(truck) {
 		maintenance: notHeld(feeRows.maintenance, fees.maintenance),
 		compliance: notHeld(feeRows.compliance, fees.compliance),
 	};
-	// By truck id, whatever the unit number: with a blank one the cascade keeps
-	// the rows but deletes the truck, leaving them pointing at nothing.
+	// By truck id, whatever the unit number, the same way the cascade deletes them.
 	const legalDocuments = db.prepare("SELECT id FROM legal_documents WHERE truck_id = ?").all(truck.id).length;
 
 	if (!locked.length) return { unreadable: false, blockers: [], openFees, legalDocuments };
@@ -35780,7 +35782,7 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// Each refusal has its own code, audited under that code (never through
 	// periodBlockedResponse(), which answers and audits PERIOD_FINALIZED), and
 	// comes after the closed-month answer, so PERIOD_FINALIZED still wins, and
-	// before TRUCK_REFERENCED. Counts only.
+	// before TRUCK_REFERENCED. Counts only, in the answer and in the audit tail.
 	const truckLabel = truck.unit_number || `truck #${id}`;
 	const retireNote = "To take it out of service, give it a retirement date in an open month. Nothing was changed.";
 	const feeCount = lock.openFees.maintenance + lock.openFees.compliance;
@@ -35788,7 +35790,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 		const parts = [];
 		if (lock.openFees.maintenance) parts.push(`${lock.openFees.maintenance} maintenance fund entr${lock.openFees.maintenance === 1 ? "y" : "ies"}`);
 		if (lock.openFees.compliance) parts.push(`${lock.openFees.compliance} compliance fee${lock.openFees.compliance === 1 ? "" : "s"}`);
-		recordPeriodRefusal({ req, ...truckDelAudit }, "OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — maintenance_fund=${lock.openFees.maintenance}, compliance_fees=${lock.openFees.compliance}` },
+			"OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${parts.join(" and ")} ${feeCount === 1 ? "is" : "are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${feeCount === 1 ? "it" : "them"}, so it stays in place. ${retireNote}`,
@@ -35798,7 +35801,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	}
 	if (lock.legalDocuments) {
 		const n = lock.legalDocuments;
-		recordPeriodRefusal({ req, ...truckDelAudit }, "TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — legal_documents=${n}` },
+			"TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
 				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
@@ -35836,17 +35840,39 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const unit = (truck.unit_number || "").trim().toLowerCase();
 	const removed = {};
 	// One transaction, so a constraint this handler has not anticipated rolls the
-	// cascade back instead of half-applying it. There are no transactions anywhere
-	// else in this file, but there is also nowhere else that hard-deletes finance
-	// rows as a prelude to a statement that can throw.
-	db.transaction(() => {
-		if (unit) {
+	// cascade back instead of half-applying it, as DELETE /api/users/:id does for
+	// its own cascade: both hard-delete rows as a prelude to a statement that can
+	// throw.
+	//
+	// The guard above refuses any fee row or legal document, so these deletes
+	// must find nothing. If one removes a row anyway (the guard and this cascade
+	// drifted apart), the throw rolls the whole delete back: those rows have no
+	// soft delete to recover them from.
+	try {
+		db.transaction(() => {
+			// Legal documents are filed by truck id, so a blank unit number is checked too.
 			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
-			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
-			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
-		}
-		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
-	})();
+			if (unit) {
+				removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+				removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+			}
+			if (removed.legal_documents || removed.maintenance_fund || removed.compliance_fees) {
+				throw new Error(`truck delete cascade would remove rows the guard did not count: ${Object.entries(removed).map(([t, n]) => `${t}=${n}`).join(", ")}`);
+			}
+			db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+		})();
+	} catch (err) {
+		console.error("delete truck cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// (table counts) stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", [], `Cannot delete ${truckLabel}`);
+		return res.status(500).json({
+			error: "The delete could not be completed and was rolled back. Nothing was removed.",
+			code: "DELETE_ROLLED_BACK",
+		});
+	}
 	// Like the user delete, this previously left no trace at all — "a truck was
 	// removed" does not tell a later reader that its service history went too.
 	// The VIN, when the truck had one, says which physical truck it was: the row
@@ -35862,6 +35888,15 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 // ============================================================
 // TRAILERS CRUD
 // ============================================================
+
+// A trailer's truck as its audit lines name it: the unit number and id, the id
+// alone when the truck row is gone, "none" when the trailer is on no truck.
+function trailerTruckLabel(truckId) {
+	if (!truckId) return "none";
+	const t = db.prepare("SELECT unit_number FROM trucks WHERE id = ?").get(truckId);
+	const unit = t ? auditText(t.unit_number, 100) : "";
+	return unit ? `${unit} (#${truckId})` : `#${truckId}`;
+}
 app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trailers = db.prepare(`
@@ -35915,21 +35950,43 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 		// whitespace, so a resend (padded or not) keeps the stored value as it is,
 		// and a real change is stored trimmed.
 		const vinChanged = vin != null && String(vin).trim() !== String(trailer.vin ?? "").trim();
+		const next = {
+			trailer_number: trailer_number ?? trailer.trailer_number,
+			type: type ?? trailer.type,
+			length: length ?? trailer.length,
+			year: year ?? trailer.year,
+			vin: vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
+			license_plate: license_plate ?? trailer.license_plate,
+			status: status ?? trailer.status,
+			truck_id: truck_id === undefined ? trailer.truck_id : (truck_id || null),
+			notes: notes ?? trailer.notes,
+		};
 		db.prepare(`
 			UPDATE trailers SET trailer_number = ?, type = ?, length = ?, year = ?, vin = ?, license_plate = ?, status = ?, truck_id = ?, notes = ?
 			WHERE id = ?
 		`).run(
-			trailer_number ?? trailer.trailer_number,
-			type ?? trailer.type,
-			length ?? trailer.length,
-			year ?? trailer.year,
-			vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
-			license_plate ?? trailer.license_plate,
-			status ?? trailer.status,
-			truck_id === undefined ? trailer.truck_id : (truck_id || null),
-			notes ?? trailer.notes,
+			next.trailer_number, next.type, next.length, next.year, next.vin,
+			next.license_plate, next.status, next.truck_id, next.notes,
 			id
 		);
+		// One update_trailer line per save that really changes a field, like the
+		// truck edit's lines: each changed field old -> new, compared as text to the
+		// row as read (the page resends the whole row, so presence means nothing).
+		// The plate and the notes are named, never quoted: the truck edit records
+		// neither, and notes are free text.
+		const same = (a, b) => String(a ?? "") === String(b ?? "");
+		const shown = (v) => auditText(v, 100) || "not set";
+		const changes = [];
+		for (const [col, label] of [["trailer_number", "trailer number"], ["type", "type"], ["length", "length"], ["year", "year"], ["vin", "VIN"], ["status", "status"]]) {
+			if (!same(trailer[col], next[col])) changes.push(`${label} ${shown(trailer[col])} → ${shown(next[col])}`);
+		}
+		if (!same(trailer.truck_id, next.truck_id)) changes.push(`truck ${trailerTruckLabel(trailer.truck_id)} → ${trailerTruckLabel(next.truck_id)}`);
+		if (!same(trailer.license_plate, next.license_plate)) changes.push("license plate changed");
+		if (!same(trailer.notes, next.notes)) changes.push("notes changed");
+		if (changes.length) {
+			logAudit(req, "update_trailer", "trailer", String(id),
+				`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`}: ${changes.join(", ")}`);
+		}
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
@@ -35943,6 +36000,12 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
 		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
 		db.prepare("DELETE FROM trailers WHERE id = ?").run(id);
+		// Like delete_truck: the row is gone, so the line says which trailer it was
+		// (number, VIN) and which truck it was on. Notes and plate are not recorded.
+		const deletedVin = auditText(trailer.vin, 100);
+		logAudit(req, "delete_trailer", "trailer", String(id),
+			`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`} (${trailer.type}, ${trailer.status}, ` +
+			`${trailer.truck_id ? `on ${trailerTruckLabel(trailer.truck_id)}` : "not on a truck"}${deletedVin ? `, VIN ${deletedVin}` : ""}) deleted`);
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {

@@ -457,7 +457,7 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	eq("§6 ...audited once as delete_user_blocked", r.refusals.map((x) => [x.action, x.code]), [["delete_user_blocked", "OPEN_MONTH_EXPENSES"]]);
 	eq("§6 ...the message",
 		r.body.error,
-		"Cannot delete Tamsin Vale: 1 open-month expense (receipt) is filed under this driver. Deleting the account would delete it and change an open month's figures, so it stays in place. Nothing was changed.");
+		"Cannot delete Tamsin Vale: 1 open-month expense (receipt) is filed under this driver. Deleting the account would delete it from an open month's records, so it stays in place. Nothing was changed.");
 	const b = blockerOf(r, "OPEN_MONTH_EXPENSES");
 	eq("§6 ...the blocker carries counts only", b ? [Object.keys(b).sort(), b.table, b.rows, b.periods] : null,
 		[["code", "detail", "periods", "rows", "table"], "expenses", 1, []]);
@@ -470,7 +470,7 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	const r = del(w, TVALE.id);
 	eq("§6 a rejected receipt counts too (2 rows)", [r.status, r.body.code, (blockerOf(r, "OPEN_MONTH_EXPENSES") || {}).rows], [409, "OPEN_MONTH_EXPENSES", 2]);
 	ok("§6 ...the plural message",
-		/^Cannot delete Tamsin Vale: 2 open-month expenses \(receipts\) are filed under this driver\. Deleting the account would delete them and change an open month's figures, so it stays in place\. Nothing was changed\.$/.test(String(r.body.error || "")),
+		/^Cannot delete Tamsin Vale: 2 open-month expenses \(receipts\) are filed under this driver\. Deleting the account would delete them from an open month's records, so it stays in place\. Nothing was changed\.$/.test(String(r.body.error || "")),
 		r.body.error);
 	eq("§6 ...both rows stay", count(w.db, "SELECT COUNT(*) AS n FROM expenses WHERE LOWER(driver) = 'tamsin vale'"), 2);
 	done(w);
@@ -502,7 +502,7 @@ const OPEN_RCPT = { driver: "Tamsin Vale", amount: 84.10, date: "2026-10-05" };
 	eq("§6 ...the combined message",
 		r.body.error,
 		"Cannot delete Tamsin Vale: 1 load document (1 POD) is filed under this driver; 1 open-month expense (receipt) is filed under this driver. " +
-		"Deleting the account would leave its load documents under a name no account holds and delete its open-month expenses, changing an open month's figures, so it stays in place. " +
+		"Deleting the account would leave its load documents under a name no account holds and delete its expenses from an open month's records, so it stays in place. " +
 		`${DOC_HINT} Nothing was changed.`);
 	done(w);
 }
