@@ -310,7 +310,7 @@ function mountAll(db, { blockEdit = false } = {}) {
 		...PHOTO_CHECK,
 		truckEditLockBlockers: () => ({ unreadable: false, blockers: blockEdit ? [{ field: "unit_number", month: "2026-09" }] : [] }),
 		truckCreateLockBlockers: () => ({ unreadable: false, blockers: [] }),
-		truckDeleteLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		truckDeleteLockBlockers: () => ({ unreadable: false, blockers: [], openFees: { maintenance: 0, compliance: 0 }, legalDocuments: 0 }),
 		periodBlockedResponse: refuse,
 		periodLockUnreadableResponse: refuse,
 		truckChargeFromMonth: () => "",

@@ -32694,9 +32694,9 @@ function truckFeeLockedRows(unitNumber, locked) {
 	// `unit` here is trimmed — so a fee row stored as ' logisx-#33 ' against an
 	// untrimmed unit_number IS summed by the P&L and would NOT have matched a bare
 	// `LOWER(truck) = ?`, i.e. the guard would miss a row the money counts. TRIM on
-	// this side is strictly WIDER than both the join and the cascade's own
-	// `LOWER(truck) = ?` delete, which is the correct direction for a guard: it
-	// can only over-report, never under-report.
+	// this side is strictly WIDER than the join, which is the correct direction
+	// for a guard: it can only over-report, never under-report. The cascade's own
+	// delete matches the same way since 2026-10-22 (LOWER(TRIM(truck)) = ?).
 	return {
 		maintenance: blocked(db.prepare(
 			"SELECT id, amount, strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ? AND type = 'service'"
@@ -33626,10 +33626,48 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 // is safe" would mean dropping the maintenance rows from open months while
 // keeping the truck, or vice versa — a half-deleted truck whose fee rows now
 // point at nothing. Not decomposable, so not partially applied.
+//
+// Besides `blockers` (closed months, answered PERIOD_FINALIZED by the route) it
+// returns two counts the route answers with refusals of their own (2026-10-22):
+//   • openFees — every maintenance_fund / compliance_fees row the delete would
+//     remove that is not already a closed-month blocker in (3)+(4) below: an
+//     open-month service row or Paid fee, and a contribution or Pending fee in
+//     any month. The route refuses OPEN_MONTH_TRUCK_FEES while any exists.
+//   • legalDocuments — the truck's legal_documents rows. The route refuses
+//     TRUCK_HAS_DOCUMENTS while any exists.
+// They are counted BEFORE the "no month locked" early return, so they hold
+// when no month is closed, and they are kept OUT of `blockers`: the route
+// answers blockers through periodBlockedResponse(), which always says
+// PERIOD_FINALIZED and audits it so, which would mislabel an open-month refusal.
 function truckDeleteLockBlockers(truck) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 	const locked = lockedPeriodsDesc();
-	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	// Fee rows are matched case and edge spaces aside, like truckFeeLockedRows()
+	// and the cascade, and not at all for a blank unit number (the cascade
+	// removes none then). `.all()` and a length, not COUNT(*): every row is
+	// needed to subtract the closed-month blockers by id.
+	const unit = String(truck.unit_number || "").trim().toLowerCase();
+	const feeRows = unit
+		? {
+			maintenance: db.prepare("SELECT id FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").all(unit),
+			compliance: db.prepare("SELECT id FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").all(unit),
+		}
+		: { maintenance: [], compliance: [] };
+	const fees = locked.length ? truckFeeLockedRows(truck.unit_number, locked) : { maintenance: [], compliance: [] };
+	const notHeld = (rows, held) => {
+		const ids = new Set(held.map((r) => r.id));
+		return rows.filter((r) => !ids.has(r.id)).length;
+	};
+	const openFees = {
+		maintenance: notHeld(feeRows.maintenance, fees.maintenance),
+		compliance: notHeld(feeRows.compliance, fees.compliance),
+	};
+	// By truck id, whatever the unit number: with a blank one the cascade keeps
+	// the rows but deletes the truck, leaving them pointing at nothing.
+	const legalDocuments = db.prepare("SELECT id FROM legal_documents WHERE truck_id = ?").all(truck.id).length;
+
+	if (!locked.length) return { unreadable: false, blockers: [], openFees, legalDocuments };
 
 	const blockers = [];
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -33675,8 +33713,8 @@ function truckDeleteLockBlockers(truck) {
 	// (3)+(4) maintenance_fund and compliance_fees — HARD deletes. Neither table
 	// has a deleted_at nor a soft-delete peer, so these rows are the part of this
 	// operation that is not merely a restatement but permanent loss, exactly like
-	// the `expenses` leg of the user delete.
-	const fees = truckFeeLockedRows(truck.unit_number, locked);
+	// the `expenses` leg of the user delete. (`fees` was read above, before the
+	// early return, to tell these rows apart from openFees.)
 	for (const [table, rows, what] of [
 		["maintenance_fund", fees.maintenance, "maintenance service payment"],
 		["compliance_fees", fees.compliance, "paid compliance fee"],
@@ -33733,7 +33771,7 @@ function truckDeleteLockBlockers(truck) {
 		}
 	}
 
-	return { unreadable: false, blockers };
+	return { unreadable: false, blockers, openFees, legalDocuments };
 }
 
 // ============================================================
@@ -35553,7 +35591,9 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 // the trucks row is an input every closed month re-reads (see the notes above
 // truckEditLockBlockers). The guard therefore runs before the first DELETE and
 // refuses the whole operation; see truckDeleteLockBlockers for why it is not
-// partially applied.
+// partially applied. Since 2026-10-22 any fee row or legal document refuses the
+// delete (OPEN_MONTH_TRUCK_FEES, TRUCK_HAS_DOCUMENTS), so past the guard the
+// cascade's fee and document deletes find nothing to remove.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -35587,6 +35627,39 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			lock.blockers,
 			"Leave the truck in place — a closed month's figures are attributed to it, and marking it Inactive would strip those same months instead. To take it out of service, give it a retirement date in an open month. Nothing was changed.",
 			truckDelAudit);
+	}
+
+	// Fee rows and legal documents (2026-10-22). Neither table has a soft delete,
+	// so the cascade below would remove them for good; any row refuses the delete.
+	// Each refusal has its own code, audited under that code (never through
+	// periodBlockedResponse(), which answers and audits PERIOD_FINALIZED), and
+	// comes after the closed-month answer, so PERIOD_FINALIZED still wins, and
+	// before TRUCK_REFERENCED. Counts only.
+	const truckLabel = truck.unit_number || `truck #${id}`;
+	const retireNote = "To take it out of service, give it a retirement date in an open month. Nothing was changed.";
+	const feeCount = lock.openFees.maintenance + lock.openFees.compliance;
+	if (feeCount) {
+		const parts = [];
+		if (lock.openFees.maintenance) parts.push(`${lock.openFees.maintenance} maintenance fund entr${lock.openFees.maintenance === 1 ? "y" : "ies"}`);
+		if (lock.openFees.compliance) parts.push(`${lock.openFees.compliance} compliance fee${lock.openFees.compliance === 1 ? "" : "s"}`);
+		recordPeriodRefusal({ req, ...truckDelAudit }, "OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${parts.join(" and ")} ${feeCount === 1 ? "is" : "are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${feeCount === 1 ? "it" : "them"}, so it stays in place. ${retireNote}`,
+			code: "OPEN_MONTH_TRUCK_FEES",
+			counts: { maintenance_fund: lock.openFees.maintenance, compliance_fees: lock.openFees.compliance },
+		});
+	}
+	if (lock.legalDocuments) {
+		const n = lock.legalDocuments;
+		recordPeriodRefusal({ req, ...truckDelAudit }, "TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
+				`A document filed in error can be removed from the truck's documents first. ${retireNote}`,
+			code: "TRUCK_HAS_DOCUMENTS",
+			counts: { legal_documents: n },
+		});
 	}
 
 	// ⚠️ SEPARATE BUG, found end-to-end while testing the guard above, and it is
@@ -35623,8 +35696,8 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	db.transaction(() => {
 		if (unit) {
 			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
-			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit).changes;
-			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit).changes;
+			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
 		}
 		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
 	})();
