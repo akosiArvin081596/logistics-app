@@ -2363,6 +2363,31 @@ catch {
 	db.exec(`ALTER TABLE messages ADD COLUMN attachment_type TEXT DEFAULT ''`);
 }
 
+// Migration: voice notes (POST /api/messages/voice, lib/voice-notes.js). Each
+// column is added only when missing, so a second boot changes nothing.
+//   sender_user_id     the session account that sent it (staff all send as
+//                      "Dispatch", so the name cannot tell two people apart)
+//   client_key         the sender's Idempotency-Key; '' on every text message
+//   party_user_id      the Driver or Investor account the note belongs to: the
+//                      one id, besides staff, that may play it
+//   voice_file         vn_<id>_<16 hex>.m4a under storage/voice-notes; '' once
+//                      the sweep or a Super Admin removed it
+//   voice_duration_ms  the length the server measured
+//   voice_bytes        the stored size (the per-user daily cap sums it)
+// The duplicate-send index is PARTIAL: rows with client_key '' (every text
+// message, before and after this) are outside it, so it can neither fail to
+// build on existing data nor refuse a second text message.
+{
+	const messageColumns = new Set(db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name));
+	if (!messageColumns.has("sender_user_id")) db.exec("ALTER TABLE messages ADD COLUMN sender_user_id INTEGER");
+	if (!messageColumns.has("client_key")) db.exec("ALTER TABLE messages ADD COLUMN client_key TEXT DEFAULT ''");
+	if (!messageColumns.has("party_user_id")) db.exec("ALTER TABLE messages ADD COLUMN party_user_id INTEGER");
+	if (!messageColumns.has("voice_file")) db.exec("ALTER TABLE messages ADD COLUMN voice_file TEXT DEFAULT ''");
+	if (!messageColumns.has("voice_duration_ms")) db.exec("ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER DEFAULT 0");
+	if (!messageColumns.has("voice_bytes")) db.exec("ALTER TABLE messages ADD COLUMN voice_bytes INTEGER DEFAULT 0");
+	db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_key ON messages(sender_user_id, client_key) WHERE client_key <> ''");
+}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28999,7 +29024,9 @@ app.post("/api/auth/logout", (req, res) => {
 // server dates instants in, so a viewer's "today" never comes from their laptop.
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
-		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE });
+		// features: what the signed-in client may offer. voiceNotes is the record
+		// button (MESSAGE_VOICE_NOTES_ENABLED); notes already sent play either way.
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
 	} else {
 		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
 	}
@@ -31554,6 +31581,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
+	// Voice notes (lib/voice-notes.js): the stored audio of every message the
+	// delete below removes, and of every note this account was the party to, read
+	// here (no await between this and the delete) and unlinked once it commits.
+	const voiceFiles = userVoiceNoteFiles(id, name);
 	const removed = {};
 	const detached = {};
 	try {
@@ -31665,6 +31696,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			detail: err.message,
 		});
 	}
+	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
 
 	// The account is gone from `users`, but requireRole() reads the SESSION, not
 	// the database — so without this the deleted admin keeps a working Super Admin
@@ -43934,6 +43966,20 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
+		// truck has been stopped, from its recent clean fixes taken since the
+		// link: the last fix above the moving threshold, else the oldest one read
+		// (stopped at least since then). Null while the latest fix is moving.
+		// Bounded: at most 120 rows of the same index read as above.
+		let stoppedSinceMs = null;
+		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
+			const recent = db.prepare(
+				`SELECT speed, location_date_ms FROM routemate_telemetry
+				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+				  ORDER BY id DESC LIMIT 120`
+			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));
+			stoppedSinceMs = voiceNoteGate.stoppedSinceMs(recent);
+		}
 		res.json({
 			ok: true,
 			unit: (truck && truck.unit) || "",
@@ -43959,6 +44005,7 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 				// so the driver and the dispatcher cannot disagree about whether the
 				// truck is moving.
 				movement: classifyMovement({ lastPingAge, speed: speedMps }),
+				stoppedSinceMs,
 			},
 		});
 	} catch (err) {
@@ -44064,16 +44111,17 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 
 		// Messages from SQLite (fast indexed query). Attachments ride along, so the
 		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
-		// to the conversation's participants only).
+		// to the conversation's participants only). Voice notes too, as the reader
+		// may play them (lib/voice-notes.js: by account id, never by name).
 		const nameLower = driverName.toLowerCase();
-		const driverMessages = db
+		const driverMessages = voiceNotes.voiceThreadRows(req.session.user, db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, voice_file, voice_duration_ms, party_user_id
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
 			)
-			.all(nameLower, nameLower);
+			.all(nameLower, nameLower));
 
 		// Notifications from SQLite
 		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
@@ -47013,6 +47061,14 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
 		}
+		// A voice note is the server's to type: only POST /api/messages/voice
+		// writes one (its bytes checked, its file stored, its player keyed on the
+		// row's id). A text message may not claim the type or point at a voice
+		// note's address.
+		if (String(attachmentType ?? "").trim().toLowerCase() === "voice"
+			|| (typeof attachmentUrl === "string" && attachmentUrl.trim().toLowerCase().startsWith("/api/messages/"))) {
+			return res.status(400).json({ error: "That attachment can't be sent.", code: "ATTACHMENT_TYPE_RESERVED" });
+		}
 		// An attachment is a chat file this same account uploaded through
 		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
 		const attachmentRefusal = chatFiles.chatAttachmentRefusal(db, sessionUser, attachmentUrl);
@@ -47020,60 +47076,86 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const timestamp = new Date().toISOString();
-		const result = db
-			.prepare(
-				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "");
-
-		// Persist notification for recipient
-		const msgNotif = insertNotification.run(
-			to.trim().toLowerCase(), 'message',
-			`New message from ${from}`,
-			(message || "").length > 100 ? message.substring(0, 100) + '...' : (message || ""),
-			JSON.stringify({ from, to, loadId: loadId || '' })
-		);
-
-		// PRIVACY: only emit to the actual participants + the dispatch room
-		// (so admins can see all messages they're authorized to see). Previously
-		// this used io.emit() which broadcast every message to every connected
-		// client — drivers were receiving messages between other parties even
-		// though the UI hid them. chatRooms() names those rooms: the dispatch
-		// room always, plus each other party's identity rooms (the desk's own
-		// name adds none); one emit to the list reaches each socket once.
-		const payload = {
-			id: result.lastInsertRowid,
-			notificationId: msgNotif.lastInsertRowid,
-			timestamp,
-			from,
-			to,
-			message,
-			loadId: loadId || "",
-			attachment_url: attachmentUrl || "",
-			attachment_type: attachmentType || "",
-		};
-		// A message about a load whose ID every role but Super Admin is served
-		// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
-		// as stored) goes per role in the dispatch room: Super Admins as sent, the
-		// rest of the room with the load as shown (emitDispatchByRole()), and the
-		// parties' own rooms as sent, without the dispatch room's sockets, so each
-		// socket gets it once. Any other message, as before:
-		const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
-		if (staffLoadId === payload.loadId) {
-			io.to(chatRooms(from, to)).emit("new-message", payload);
-		} else {
-			io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
-			emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
-		}
-
-		res.json({ success: true, id: result.lastInsertRowid });
+		const sent = sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef });
+		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ONE MESSAGE, SENT: its row, the recipient's notification, and the live copy to
+// the conversation's rooms. POST /api/messages and POST /api/messages/voice both
+// send through here, so a change to who receives what reaches both.
+//
+// `voice` ({ senderUserId, clientKey, partyUserId, durationMs, bytes, title })
+// makes it a voice note: the row is typed "voice" with no attachment_url, the
+// notification is `title` over the message text, "Voice note (0:42)" (never a
+// file name, URL or id), and the
+// live copy carries voice_duration_ms. `store(id)`, when given, runs inside the
+// same transaction as the insert (the voice route writes its file there): if it
+// throws, the row is rolled back, and nothing is notified or emitted. A text
+// message's insert is the statement it always was.
+function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {
+	const timestamp = new Date().toISOString();
+	const insert = () => {
+		const id = voice
+			? db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref,
+					sender_user_id, client_key, party_user_id, voice_file, voice_duration_ms, voice_bytes)
+				 VALUES (?, ?, ?, ?, ?, '', 'voice', '', ?, ?, ?, '', ?, ?)`,
+			).run(timestamp, from, to, message, loadId || "", voice.senderUserId, voice.clientKey, voice.partyUserId, voice.durationMs, voice.bytes).lastInsertRowid
+			: db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "").lastInsertRowid;
+		if (store) store(id);
+		return id;
+	};
+	const id = store ? db.transaction(insert)() : insert();
+
+	// Persist notification for recipient
+	const msgNotif = insertNotification.run(
+		to.trim().toLowerCase(), 'message',
+		voice ? voice.title : `New message from ${from}`,
+		voice ? message : ((message || "").length > 100 ? message.substring(0, 100) + '...' : (message || "")),
+		JSON.stringify({ from, to, loadId: loadId || '' })
+	);
+
+	// PRIVACY: only emit to the actual participants + the dispatch room
+	// (so admins can see all messages they're authorized to see). Previously
+	// this used io.emit() which broadcast every message to every connected
+	// client — drivers were receiving messages between other parties even
+	// though the UI hid them. chatRooms() names those rooms: the dispatch
+	// room always, plus each other party's identity rooms (the desk's own
+	// name adds none); one emit to the list reaches each socket once.
+	const payload = {
+		id,
+		notificationId: msgNotif.lastInsertRowid,
+		timestamp,
+		from,
+		to,
+		message,
+		loadId: loadId || "",
+		attachment_url: voice ? "" : (attachmentUrl || ""),
+		attachment_type: voice ? "voice" : (attachmentType || ""),
+	};
+	if (voice) payload.voice_duration_ms = voice.durationMs;
+	// A message about a load whose ID every role but Super Admin is served
+	// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
+	// as stored) goes per role in the dispatch room: Super Admins as sent, the
+	// rest of the room with the load as shown (emitDispatchByRole()), and the
+	// parties' own rooms as sent, without the dispatch room's sockets, so each
+	// socket gets it once. Any other message, as before:
+	const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
+	if (staffLoadId === payload.loadId) {
+		io.to(chatRooms(from, to)).emit("new-message", payload);
+	} else {
+		io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
+		emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+	}
+	return { id, timestamp };
+}
 
 // The one name a caller's own messages and notifications are addressed to, for
 // the two read-flag routes below: a Driver's driver name (their thread is read
@@ -47225,7 +47307,8 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
-			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref,
+			        voice_file, voice_duration_ms, party_user_id
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
@@ -47234,7 +47317,9 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 			// Mark messages to this investor as read
 			db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
 		}
-		res.json({ messages });
+		// Voice notes as the reader may play them (lib/voice-notes.js): the
+		// investor by his account id; a Super Admin previewing, as staff.
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (err) {
 		console.error("Error fetching investor messages:", err.message);
 		res.status(500).json({ error: err.message });
@@ -47288,7 +47373,8 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		if (loadId && !withholdIds) {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id
 					 FROM messages
 					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
 					 ORDER BY id ASC`,
@@ -47297,7 +47383,8 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 		} else {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id
 					 FROM messages
 					 WHERE LOWER("from") = ? OR LOWER("to") = ?
 					 ORDER BY id ASC`,
@@ -47312,12 +47399,373 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 				.map(({ shown, ...m }) => ({ ...m, loadId: shown }));
 		}
 
-		res.json({ messages });
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (error) {
 		console.error("Error fetching driver messages:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ============================================================================
+// VOICE NOTES IN MESSAGES (MESSAGE_VOICE_NOTES_ENABLED, off by default)
+// ============================================================================
+// Anyone in a conversation records a voice note; the others play it. Arvin's
+// V1-V13 (2026-10-21), plan 2026-10-22 Revision 2. The flag gates SENDING only:
+// notes already sent stay playable with it off.
+//
+//   POST   /api/messages/voice      one request, the raw audio/mp4 body; the
+//                                   recipient and load in headers, never in the
+//                                   URL (request lines reach the proxy's logs)
+//   GET    /api/messages/:id/voice  the audio, to the people in the conversation
+//   DELETE /api/messages/:id/voice  Super Admin only, audited; the row stays
+//
+// The bytes are checked by lib/voice-note-mp4.js (AAC in MP4, 4 MB, 0.5 s to
+// 3:00, length measured on the server, metadata blanked); the file lives under
+// storage/voice-notes, outside every static mount (lib/voice-notes.js); who may
+// play it is decided by account id, never by name; the send goes through
+// sendChatMessage(), so its notification and live copy follow the text route's
+// rules (#549's per-role load IDs included).
+const voiceNoteMp4 = require("./lib/voice-note-mp4");
+const voiceNoteText = require("./lib/voice-note-text");
+const voiceNoteGate = require("./lib/voice-note-gate");
+const voiceNotes = require("./lib/voice-notes");
+const MESSAGE_VOICE_NOTES_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MESSAGE_VOICE_NOTES_ENABLED ?? "").trim());
+const VOICE_NOTE_DIR = voiceNotes.voiceNoteDir(DATA_DIR);
+function voiceNoteNumberSetting(raw, fallback) {
+	const n = Number(String(raw ?? "").trim());
+	return String(raw ?? "").trim() !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+// Per user per Eastern day, summed from the stored sizes (429 past it).
+const VOICE_NOTE_DAILY_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_DAILY_MB, 40) * 1024 * 1024;
+// Sends are refused while the data disk has less than this free (507).
+const VOICE_NOTE_MIN_FREE_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_MIN_FREE_GB, 2) * 1024 * 1024 * 1024;
+const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_RETENTION_DAYS, 180);
+// The first day the retention sweep deletes (YYYY-MM-DD). Unset: report only.
+const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
+	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
+	: "";
+// The one staff desk each role sends to, as its own app names it: a Driver
+// only to "Dispatch" (the driver app), an Investor only to "admin" (the
+// investor portal). [the name as matched, the name as stored].
+const VOICE_NOTE_DESK_BY_ROLE = Object.freeze({ Driver: ["dispatch", "Dispatch"], Investor: ["admin", "admin"] });
+const VOICE_NOTE_REFUSALS = {
+	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
+	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
+	VOICE_NOTE_TOO_LONG: "Voice notes can be at most 3 minutes long.",
+	VOICE_NOTE_TOO_SHORT: "That voice note is too short to send.",
+};
+
+// Same shape as chatAttachmentLimiter: per user, requireAuth mounted first, a
+// permanent cost (bytes on disk), so tighter than the general limiters.
+const voiceNoteUploadLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 40 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many voice notes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// Playback: iPhone sends many range requests for one play, so a wide window.
+const voiceNotePlaybackLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+
+// Who a voice note goes from and to, and the Driver or Investor account it
+// belongs to (party_user_id: besides staff, the one account that may play it).
+// A Driver or an Investor sends as himself and only to his role's staff desk
+// (VOICE_NOTE_DESK_BY_ROLE); staff send as "Dispatch" or as themselves, only
+// to one existing Driver or Investor account. { from, to, partyUserId } or
+// { status, code, error }.
+function resolveVoiceNoteParties(user, toName, fromName) {
+	const role = user && user.role;
+	const own = String((user && (user.driverName || user.username)) || "").trim();
+	if (role === "Driver" || role === "Investor") {
+		const [deskKey, desk] = VOICE_NOTE_DESK_BY_ROLE[role];
+		const id = Number(user.id);
+		if (!own || String(toName).toLowerCase() !== deskKey || !Number.isInteger(id) || id <= 0) {
+			return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes go to Dispatch." };
+		}
+		return { from: own, to: desk, partyUserId: id };
+	}
+	if (role !== "Super Admin" && role !== "Dispatcher") {
+		return { status: 403, code: "VOICE_NOTE_RECIPIENT", error: "Voice notes can't be sent from this account." };
+	}
+	const asked = String(fromName || "").trim();
+	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
+	if (!from) return { status: 422, code: "VOICE_NOTE_SENDER", error: "Send as Dispatch or as yourself." };
+	const spelling = findDriverAccountSpelling(toName);
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND driver_name = ?").all(spelling) : [];
+	const investors = toName ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(username) = LOWER(?)").all(toName) : [];
+	const hits = [...drivers, ...investors];
+	if (hits.length !== 1) return { status: 422, code: "VOICE_NOTE_RECIPIENT", error: "Pick a driver or an investor to send the voice note to." };
+	return { from, to: hits[0].name, partyUserId: hits[0].id };
+}
+
+// A Driver's truck's latest clean fix since its device was linked, or null
+// (no truck, no ELD, no fix): the input to lib/voice-note-gate.js.
+function voiceNoteTruckFix(driverName) {
+	const truck = resolveTruckForDriverName(driverName);
+	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+	if (!vehicleId) return null;
+	const fix = db.prepare(
+		`SELECT speed, location_date_ms FROM routemate_telemetry
+		  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+		  ORDER BY id DESC LIMIT 1`
+	).get(vehicleId);
+	if (!fix || eldPosition.fixPredatesLink(fix.location_date_ms, eldDeviceLinkedSinceMs(truck.id, vehicleId))) return null;
+	return fix;
+}
+
+// The voice-note bytes this account stored today (Eastern day).
+function voiceNoteBytesToday(userId) {
+	const today = appTodayKey();
+	const since = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+	return db.prepare(
+		`SELECT timestamp, voice_bytes FROM messages
+		  WHERE sender_user_id = ? AND client_key <> '' AND timestamp >= ?`
+	).all(userId, since)
+		.filter((r) => appDay(new Date(r.timestamp)) === today)
+		.reduce((n, r) => n + (Number(r.voice_bytes) || 0), 0);
+}
+
+// True when the data disk is under VOICE_NOTE_MIN_FREE_BYTES. Staff get one
+// notice a day about it. A disk it cannot measure is not refused.
+let voiceNoteStorageNoticeDay = "";
+function voiceNoteDiskLow() {
+	let free;
+	try {
+		const st = fs.statfsSync(DATA_DIR);
+		free = Number(st.bavail) * Number(st.bsize);
+	} catch {
+		return false;
+	}
+	if (!(free < VOICE_NOTE_MIN_FREE_BYTES)) return false;
+	const today = appTodayKey();
+	if (voiceNoteStorageNoticeDay !== today) {
+		voiceNoteStorageNoticeDay = today;
+		const gb = (n) => (n / (1024 * 1024 * 1024)).toFixed(1);
+		const title = "ACTION NEEDED — the server is low on disk space";
+		const body = `Voice notes are refused while less than ${gb(VOICE_NOTE_MIN_FREE_BYTES)} GB is free (${gb(free)} GB now). Free space on the server.`;
+		try {
+			insertDispatchNotification.run("voice-note-storage-low", title, body, JSON.stringify({ freeBytes: free }));
+			emitDispatchNotice({ type: "voice-note-storage-low", title, body });
+		} catch (err) {
+			console.error("[voice-notes] storage notice failed:", err.message);
+		}
+		console.error(`[voice-notes] ${title}: ${body}`);
+	}
+	return true;
+}
+
+function voiceNoteFeatureGate(req, res, next) {
+	if (!MESSAGE_VOICE_NOTES_ENABLED) return res.status(404).json({ error: "Voice notes are not switched on.", code: "FEATURE_OFF" });
+	next();
+}
+
+// Everything that can be decided from the headers, before a byte of the body
+// is read: the key and its earlier send, the recipient and load, the moving
+// truck, the daily cap and the disk. Leaves req.voiceNote for the handler.
+function voiceNoteSendChecks(req, res, next) {
+	const user = req.session.user;
+	const clientKey = voiceNotes.idempotencyKey(req.headers["idempotency-key"]);
+	if (!clientKey) return res.status(400).json({ error: "The voice note is missing its send key. Update the app and try again.", code: "VOICE_NOTE_KEY_REQUIRED" });
+	const senderUserId = Number(user.id);
+	const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(senderUserId, clientKey);
+	if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+	const to = voiceNotes.messageHeader(req.headers["x-message-to"], { required: true });
+	const loadId = voiceNotes.messageHeader(req.headers["x-message-load-id"]);
+	const fromAsked = voiceNotes.messageHeader(req.headers["x-message-from"]);
+	if (to.error || loadId.error || fromAsked.error) {
+		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
+	}
+	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
+	if (parties.error) return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
+		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
+	}
+	if (voiceNoteBytesToday(senderUserId) >= VOICE_NOTE_DAILY_BYTES) {
+		return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+	}
+	if (voiceNoteDiskLow()) {
+		return res.status(507).json({ error: "Voice notes can't be stored right now. Send a text message instead.", code: "STORAGE_LOW" });
+	}
+	req.voiceNote = { ...parties, loadId: loadId.value, clientKey, senderUserId };
+	next();
+}
+
+// The body, read only now: audio/mp4 up to 4 MB. A declared length over that
+// is refused before reading; a body that grows past it, as it passes 4 MB.
+const voiceNoteRawBody = express.raw({ type: "audio/mp4", limit: voiceNoteMp4.VOICE_NOTE_MAX_BYTES });
+function readVoiceNoteBody(req, res, next) {
+	const tooLarge = () => res.status(413).json({ error: VOICE_NOTE_REFUSALS.VOICE_NOTE_TOO_LARGE, code: "VOICE_NOTE_TOO_LARGE" });
+	const declared = Number(req.headers["content-length"]);
+	if (Number.isFinite(declared) && declared > voiceNoteMp4.VOICE_NOTE_MAX_BYTES) return tooLarge();
+	voiceNoteRawBody(req, res, (err) => {
+		if (!err) return next();
+		if (err.type === "entity.too.large") return tooLarge();
+		return res.status(400).json({ error: "The recording could not be read. Try sending it again.", code: "VOICE_NOTE_UNREADABLE" });
+	});
+}
+
+// POST /api/messages/voice — send a voice note.
+// Headers: X-Requested-With (the CSRF rule), Idempotency-Key (a retry with
+// the same key answers the first note's id and writes nothing), X-Message-To,
+// optional X-Message-Load-Id and (staff) X-Message-From, each percent-encoded
+// UTF-8. Body: the recording, Content-Type audio/mp4.
+app.post("/api/messages/voice", requireAuth, voiceNoteFeatureGate, voiceNoteUploadLimiter, voiceNoteSendChecks, readVoiceNoteBody, (req, res) => {
+	const v = req.voiceNote;
+	let stored = "";
+	try {
+		const checked = voiceNoteMp4.checkVoiceNote(Buffer.isBuffer(req.body) ? req.body : null);
+		if (!checked.ok) return res.status(checked.status).json({ error: VOICE_NOTE_REFUSALS[checked.code], code: checked.code });
+		// Re-read after the body's await: today's total with this note.
+		if (voiceNoteBytesToday(v.senderUserId) + checked.bytes.length > VOICE_NOTE_DAILY_BYTES) {
+			return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+		}
+		const sent = sendChatMessage({
+			from: v.from,
+			to: v.to,
+			message: voiceNoteText.voiceNoteLabel(checked.durationMs),
+			loadId: v.loadId,
+			voice: {
+				senderUserId: v.senderUserId, clientKey: v.clientKey, partyUserId: v.partyUserId,
+				durationMs: checked.durationMs, bytes: checked.bytes.length, title: voiceNoteText.voiceNoteTitle(v.from),
+			},
+			// Inside the insert's transaction: the row, then its file (never over
+			// another), then the row naming it. A failure rolls the row back and
+			// removes the file this send wrote.
+			store: (id) => {
+				const name = voiceNotes.newVoiceFileName(id);
+				voiceNotes.storeVoiceFile(VOICE_NOTE_DIR, name, checked.bytes);
+				stored = name;
+				db.prepare("UPDATE messages SET voice_file = ? WHERE id = ?").run(name, id);
+			},
+		});
+		res.json({ success: true, id: sent.id, durationMs: checked.durationMs });
+	} catch (error) {
+		const committed = stored && db.prepare("SELECT 1 FROM messages WHERE voice_file = ?").get(stored);
+		if (stored && !committed) voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, stored);
+		// The same key sent twice at once: the index refused the second row.
+		if (error && error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+			const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(v.senderUserId, v.clientKey);
+			if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+		}
+		console.error("Error sending voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be sent. Try again." });
+	}
+});
+
+// GET /api/messages/:id/voice — play a voice note. Super Admin and Dispatcher
+// play any; a Driver or an Investor only a note whose party_user_id is his own
+// account id. Anyone else, an id that is not a voice note, or a file the sweep
+// removed: 404, never 403 (a 403 would confirm the note exists). Range requests
+// answer 206 (iOS refuses media from a server that ignores Range). Never cached
+// by a shared cache, never sniffed, never embedded by another origin.
+app.get("/api/messages/:id/voice", requireAuth, voiceNotePlaybackLimiter, uploadMissLimiter, (req, res) => {
+	const notFound = () => res.status(404).json({ error: "Not found" });
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return notFound();
+		const row = db.prepare("SELECT id, attachment_type, voice_file, party_user_id FROM messages WHERE id = ?").get(Number(req.params.id));
+		if (!row || row.attachment_type !== "voice" || !voiceNotes.canPlayVoiceNote(req.session.user, row)) return notFound();
+		if (!voiceNotes.voiceFilePath(VOICE_NOTE_DIR, row.voice_file)) return notFound();
+		res.sendFile(row.voice_file, {
+			root: VOICE_NOTE_DIR,
+			dotfiles: "deny",
+			acceptRanges: true,
+			cacheControl: false,
+			headers: {
+				"Content-Type": "audio/mp4",
+				"Content-Disposition": `inline; filename="voice-note-${row.id}.m4a"`,
+				"X-Content-Type-Options": "nosniff",
+				"Cache-Control": "private, max-age=0, must-revalidate",
+				"Cross-Origin-Resource-Policy": "same-origin",
+			},
+		}, (err) => {
+			if (err && !res.headersSent) notFound();
+		});
+	} catch (error) {
+		console.error("Error serving voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be played." });
+	}
+});
+
+// DELETE /api/messages/:id/voice — a Super Admin removes a voice note's audio
+// (there is no unsend). The row stays and reads "Voice note removed by an
+// administrator"; the removal is audited.
+app.delete("/api/messages/:id/voice", requireRole("Super Admin"), voiceNoteUploadLimiter, (req, res) => {
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return res.status(404).json({ error: "Not found" });
+		const id = Number(req.params.id);
+		const row = db.prepare(`SELECT id, "from", "to", attachment_type, voice_file, voice_duration_ms FROM messages WHERE id = ?`).get(id);
+		if (!row || row.attachment_type !== "voice") return res.status(404).json({ error: "Not found" });
+		if (row.voice_file && !voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, row.voice_file)) {
+			return res.status(500).json({ error: "The voice note could not be removed. Try again." });
+		}
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0, message = ? WHERE id = ?").run(voiceNoteText.VOICE_NOTE_REMOVED, id);
+		logAudit(req, "voice_note_delete", "message", id, JSON.stringify({ from: row.from, to: row.to, durationMs: row.voice_duration_ms, file: row.voice_file ? "removed" : "already gone" }));
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error removing voice note:", error.message);
+		res.status(500).json({ error: "The voice note could not be removed. Try again." });
+	}
+});
+
+// DELETE /api/users/:id: the stored voice files of every message its delete
+// removes (from or to the account's name, matched as that delete matches) and
+// of every note the account was the party to (by id, under any name).
+function userVoiceNoteFiles(userId, nameLower) {
+	const files = new Set(
+		db.prepare("SELECT voice_file FROM messages WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").all(userId).map((r) => r.voice_file),
+	);
+	if (nameLower) {
+		for (const r of db.prepare(`SELECT voice_file FROM messages WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND COALESCE(voice_file, '') <> ''`).all(nameLower, nameLower)) {
+			files.add(r.voice_file);
+		}
+	}
+	return [...files];
+}
+// ...once that delete has committed: a note of the account's that kept its row
+// (sent under another name) loses its audio, then every file read is unlinked.
+// Returns how many files are gone.
+function removeUserVoiceNotes(userId, files) {
+	try {
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0 WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").run(userId);
+	} catch (err) {
+		console.error("[voice-notes] clearing a deleted account's notes failed:", err.message);
+	}
+	let gone = 0;
+	for (const file of files) if (voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, file)) gone++;
+	return gone;
+}
+
+// The daily retention sweep (lib/voice-notes.js): report only until
+// VOICE_NOTE_SWEEP_APPLY_FROM is set and reached.
+function sweepVoiceNotesNow() {
+	try {
+		return voiceNotes.sweepVoiceNotes({
+			db, dir: VOICE_NOTE_DIR, retentionDays: VOICE_NOTE_RETENTION_DAYS, applyFrom: VOICE_NOTE_SWEEP_APPLY_FROM, todayKey: appTodayKey(), log: console,
+		});
+	} catch (err) {
+		console.error("[voice-notes] sweep failed:", err.message);
+		return null;
+	}
+}
+if (startsJob("voice note retention sweep")) {
+	setTimeout(sweepVoiceNotesNow, 6 * 60 * 1000);
+	setInterval(sweepVoiceNotesNow, 24 * 60 * 60 * 1000);
+}
 
 // Receipt photo storage helpers — write base64 data URIs to disk and return
 // the URL path. Old base64-in-DB rows still work because the frontend img tag

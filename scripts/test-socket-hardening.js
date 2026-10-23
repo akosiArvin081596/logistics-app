@@ -175,6 +175,9 @@ const SRCS = {
 	ioHandler: liftHandler('io.on("connection", (socket) => {', 'io.on("connection", '),
 	tracker: liftHandler('publicTrack.on("connection", (socket) => {', 'publicTrack.on("connection", '),
 	messages: liftStatement('app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {'),
+	// The one send both chat routes use (POST /api/messages and
+	// POST /api/messages/voice): the row, the notification and the emits.
+	sendChat: liftFunction("function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {"),
 	// What the chat route sends a message about a withheld load ID through: the
 	// one Load ID rule and the per-role dispatch-room send (2026-10-21).
 	loadIds: [
@@ -309,7 +312,7 @@ async function startWorld({ sources = SRCS, secureCookie = false, mustChange = (
 	const loadIds = new Function("io", "brokerContact", "BROKER_CONTACT_VALUE_REDACTION_ENABLED",
 		`const SHOWN_LOAD_ID_STATE = { latest: null };\n${sources.loadIds}\nreturn { shownLoadId, emitDispatchByRole };`)(
 		io, require(path.join(__dirname, "..", "lib", "broker-contact")), true);
-	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", "chatFiles", sources.messages)(
+	new Function("app", "requireAuth", "driverWriteLimiter", "db", "insertNotification", "io", "chatRooms", "shownLoadId", "emitDispatchByRole", "chatFiles", `${sources.sendChat}\n${sources.messages}`)(
 		app, requireAuth, (req, res, next) => next(), db, insertNotification, io, rooms.chatRooms, loadIds.shownLoadId, loadIds.emitDispatchByRole,
 		require(path.join(__dirname, "..", "lib", "chat-files")));
 
@@ -852,9 +855,9 @@ function roomPinProblems(fullSrc) {
 	const code = stripComments(fullSrc);
 	const problems = [];
 	const bad = (at, what) => problems.push(`server.js:${lineOf(code, at)} ${what}`);
-	const body = (head) => {
+	const body = (head, end = "\n});") => {
 		const a = code.indexOf(head);
-		const b = a < 0 ? -1 : code.indexOf("\n});", a);
+		const b = a < 0 ? -1 : code.indexOf(end, a);
 		return a < 0 || b < 0 ? null : [a, b];
 	};
 	const defaultNs = body('io.on("connection", (socket) => {');
@@ -937,17 +940,20 @@ function roomPinProblems(fullSrc) {
 		if (isCallOf(x.arg, ["userRoom"])) bad(x.at, `userRoom() emits nothing today; "${x.event}" to ${x.arg} needs a reason and a pin`);
 	}
 	// Emit targets taken from a request: the driver of POST /api/dispatch and
-	// …/reassign, and the chat parties of POST /api/messages. The check above
+	// …/reassign, and the chat parties of sendChatMessage(), which both chat
+	// routes send through (the routes themselves name no room). The check above
 	// holds every room to a helper; this names the request-fed sites, so a
 	// failure says which, and pins that nothing else in those routes names a
 	// room but the dispatch room.
 	const REQUEST_FED = [
 		['app.post("/api/dispatch", ', ["driverRoom(driver)"]],
 		['app.post("/api/dispatch/reassign", ', ["driverRoom(newDriver)", "driverRoom(oldDriverKey)"]],
-		['app.post("/api/messages", ', ["chatRooms(from, to)", "chatRooms(from, to)"]],
+		['app.post("/api/messages", ', []],
+		['app.post("/api/messages/voice", ', []],
+		["function sendChatMessage(", ["chatRooms(from, to)", "chatRooms(from, to)"], "\n}\n"],
 	];
-	for (const [head, want] of REQUEST_FED) {
-		const range = body(head);
+	for (const [head, want, end] of REQUEST_FED) {
+		const range = body(head, end);
 		if (!range) { problems.push(`could not locate ${head.trim()}`); continue; }
 		const targets = toCalls.filter((x) => within(x.at, range) && x.arg !== '"dispatch"').map((x) => x.arg);
 		if (!sameSet(targets, want)) {
@@ -1191,7 +1197,7 @@ const MUTANTS = [
 	},
 	{
 		name: "chat fanned out by the bare names",
-		target: "messages",
+		target: "sendChat",
 		mutate: cut("io.to(chatRooms(from, to)).emit(\"new-message\", payload);",
 			"const fromRoom = (from || \"\").trim().toLowerCase();\n\t\tconst toRoom = (to || \"\").trim().toLowerCase();\n\t\tif (fromRoom) io.to(fromRoom).emit(\"new-message\", payload);\n\t\tif (toRoom && toRoom !== fromRoom) io.to(toRoom).emit(\"new-message\", payload);\n\t\tif (fromRoom !== \"dispatch\" && toRoom !== \"dispatch\") io.to(\"dispatch\").emit(\"new-message\", payload);"),
 		caughtBy: ["chatByRoleNameSparesRoleRoom", "chatFromDeskReachesParties", "chatReachesUnlinkedDriver"],
@@ -1200,7 +1206,7 @@ const MUTANTS = [
 		// A message about a withheld load ID sent to every room in one payload, as
 		// before 2026-10-21: the Dispatcher gets the ID as sent.
 		name: "chat about a withheld load ID sent in one payload",
-		target: "messages",
+		target: "sendChat",
 		mutate: cut("const staffLoadId = shownLoadId(\"Dispatcher\", payload.loadId);", "const staffLoadId = payload.loadId;"),
 		caughtBy: ["chatWithheldLoadPerRole"],
 	},
@@ -1208,7 +1214,7 @@ const MUTANTS = [
 		// ...and its parties' copy sent without leaving out the dispatch room, so a
 		// socket in the dispatch room gets it twice, one of them as sent.
 		name: "chat about a withheld load ID to the parties without leaving out the dispatch room",
-		target: "messages",
+		target: "sendChat",
 		mutate: cut("io.to(chatRooms(from, to)).except(\"dispatch\").emit(\"new-message\", payload);", "io.to(chatRooms(from, to)).emit(\"new-message\", payload);"),
 		caughtBy: ["chatOncePerSocket"],
 	},

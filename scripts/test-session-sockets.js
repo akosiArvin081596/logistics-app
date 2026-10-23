@@ -391,7 +391,7 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
 	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
-	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");
+	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
 	// Both password routes email the account afterwards (notifyPasswordChanged(),
 	// B21); that email is scripts/test-password-change-notice.js's subject, so here
 	// it is a no-op that sends nothing.
