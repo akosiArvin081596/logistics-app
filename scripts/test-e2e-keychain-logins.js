@@ -80,15 +80,20 @@ process.exit(run(process.argv.slice(2)));
 // A file of some other tool's, outside the work dir, that a stray CREDS_FILE names.
 const OTHER = path.join(SANDBOX, "other-tool-credentials.json");
 fs.writeFileSync(OTHER, JSON.stringify({ hostinger: { token: "not-the-harness" } }));
+// setup-db.cjs copies a real database only from under ~/LogisX-replica/: HOME points
+// into the sandbox, where the synthetic source stands in for one.
+const HOME = path.join(SANDBOX, "home");
+fs.mkdirSync(path.join(HOME, "LogisX-replica"), { recursive: true });
 const ENV = {
 	...process.env,
+	HOME,
 	E2E_SECURITY_BIN: path.join(BIN, "security"),
 	FAKE_KEYCHAIN: STORE,
 	FAKE_KEYCHAIN_LOG: ARGV_LOG,
 	E2E_WORK_DIR: WORK,
 	APP_DIR: ROOT,
 	MAIN_CHECKOUT: ROOT,
-	SOURCE_DB: path.join(SANDBOX, "source.db"),
+	SOURCE_DB: path.join(HOME, "LogisX-replica", "source.db"),
 	CREDS_FILE: OTHER,
 };
 for (const k of ["LOGINS_FILE", "E2E_KEYCHAIN_SERVICE"]) delete ENV[k];
