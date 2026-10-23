@@ -228,6 +228,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `e2e.mjs` | The run. Captions every step on screen, screenshots it, and writes `results-<tag>.md`. |
 | `paths.cjs` | Where everything is: this checkout, the main checkout, the installs, the work dir. Every other script resolves through it. `node scripts/e2e/paths.cjs work-dir` prints the work dir. It also holds the one copy of the private-directory rule (`assertPrivateDir()`: owned by this user, closed to group and other), which the work dir and the fake Gmail's capture folder are both held to. Requiring it has no effect, so the fake can load it while it is preloaded. |
 | `setup-db.cjs` | Makes the run's database in the work dir with five logins: made-up by default (`seed-made-up.cjs`); a copy of a real database only when `SOURCE_DB` names one under `~/LogisX-replica/`. |
+| `source-db.cjs` | The one rule for a real `SOURCE_DB` (`setup-db.cjs`, `payout-parity.mjs`): only under `~/LogisX-replica/`, never inside a checkout or worktree (symlinks resolved, any folder holding `.git`). |
 | `seed-made-up.cjs` | The made-up database: the app's own schema (server.js booted once on an empty file), the five logins and the driver's truck, application and onboarding, all invented. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
 | `verify-creds.cjs` | Confirms the logins file matches a copy. Prints booleans and ids only. |
@@ -265,12 +266,13 @@ Run every command from the checkout under test (a worktree, or the main checkout
 
 ```bash
 fnm exec --using=22.23.2 npm --prefix scripts/e2e ci                        # once
-W="$(node scripts/e2e/paths.cjs work-dir)"                                   # the work dir (created 0700)
-fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # made-up data (no SOURCE_DB); add --force to replace it
-fnm exec --using=22.23.2 node scripts/e2e/verify-creds.cjs "$W/qa.db"        # expect "password matches=true must_change_password=0" x5
 # Once per worktree: link the main checkout's two node_modules folders as fix-bug.md step 3 says (running prep-worktree.sh is
 # still blocked by the secrets guard, whose rule predates this script linking only the installs). Never link .env or the key:
 # boot-server.sh refuses a worktree holding either.
+# setup-db.cjs boots this checkout's server.js once (boot-server.sh), so run it from a worktree, not the main checkout.
+W="$(node scripts/e2e/paths.cjs work-dir)"                                   # the work dir (created 0700)
+fnm exec --using=22.23.2 node scripts/e2e/setup-db.cjs "$W/qa.db"            # made-up data (no SOURCE_DB); add --force to replace it
+fnm exec --using=22.23.2 node scripts/e2e/verify-creds.cjs "$W/qa.db"        # expect "password matches=true must_change_password=0" x5
 # Part 1: trucks + Dispatcher data (5 sign-ins)
 fnm exec --using=22.23.2 scripts/e2e/boot-server.sh "$PWD" 3181 "$W/qa.db"   # waits until it answers
 BASE_URL=http://127.0.0.1:3181 PHASE=after OUT_TAG=after-trucks ONLY=trucks,dispatcher DB_PATH="$W/qa.db" \
@@ -425,7 +427,9 @@ its screenshots and results out of the repo.
 
 Either way, the passwords go to the Keychain and the names and ids to `logins.json`, whose `seed` says `made-up` or
 `copy`. The Keychain's passwords are reused (for the made-up logins, while the logins file names the same made-up
-user), so one set of logins works for every database. The script prints ids, never a password.
+user), so one set of logins works for every database. The script prints ids, never a password. Switching between a
+made-up database and a copy in the same work dir (with the default Keychain service) replaces those passwords, so the
+other kind's databases need `setup-db.cjs` again (or give each kind its own `E2E_WORK_DIR` and `E2E_KEYCHAIN_SERVICE`).
 
 ### `plant-before-boot.cjs <db> [--force | --remove]`
 
@@ -596,7 +600,7 @@ BASE_URL=https://staging-app.logisx.com LOGINS_FILE="$W/logins-staging.json" PHA
 | `LOGINS_FILE` | The logins' names and ids (no passwords). Default: `<work dir>/logins.json`. Not needed when every section given is login-free (`ONLY=terms STEPS=T0`). T1–T11 need only its `superAdmin`. |
 | `E2E_KEYCHAIN_SERVICE` | The Keychain service `setup-db.cjs` stores the local logins' passwords under, and `e2e.mjs` reads them from. Default: `logisx-e2e-local`. An entry's own `keychain` item wins. |
 | `E2E_WORK_DIR` | The work dir. Default: `$TMPDIR/logisx-e2e`. It must be private, outside every checkout, and contain none. |
-| `SOURCE_DB` | `setup-db.cjs`'s source, opened read-only. Default: the main checkout's `app.db`. |
+| `SOURCE_DB` | A database under `~/LogisX-replica/` to copy, opened read-only (refused inside any checkout). Unset: the made-up database (`setup-db.cjs`); `payout-parity.mjs` requires it. |
 | `APP_DIR` | The checkout whose `node_modules` (better-sqlite3, bcryptjs, puppeteer, dotenv) and `scripts/` are used. Default: this checkout once it has installs (or `prep-worktree.sh`'s links), else the main checkout. |
 | `MAIN_CHECKOUT` | The main checkout. Default: the parent of `git rev-parse --git-common-dir`. |
 | `CHROME_PATH` | Another Chrome binary. Default: the app's puppeteer Chrome for Testing. |
@@ -1453,7 +1457,8 @@ REF_A=main REF_B=main PATCH_B=/path/to/change.patch fnm exec --using=22.23.2 nod
    `node_modules` and `client/node_modules`, and nothing else; nothing is installed and no client is built
    (`E2E_NO_CLIENT=1`).
    It warns when a side's package manifests differ from the main checkout's.
-2. **One** read-only `.backup()` of `SOURCE_DB` (default: the main checkout's `app.db`) becomes side A's copy; the
+2. **One** read-only `.backup()` of `SOURCE_DB` (required, no default: a database under `~/LogisX-replica/`, refused
+   inside any checkout or worktree, by the same rule as `setup-db.cjs`) becomes side A's copy; the
    repo's `reset-super-admin-password.js` sets a random password on it (from this process's memory, through
    `NEW_PASSWORD`, never printed) and clears `must_change_password`; that copy is then backed up once more for side B.
    The two databases start byte-for-byte equal.

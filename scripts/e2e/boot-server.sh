@@ -34,6 +34,7 @@
 #   INVESTOR_LEASE_PAYOUTS_ENABLED  the lease payout flag, passed to the server as
 #                 given; unset or empty boots it OFF (the E2E's lease section and
 #                 payout-parity.mjs set it explicitly).
+#   E2E_BOOT_WAIT_S  seconds to wait for the server to answer (default 90).
 #   E2E_NO_CLIENT=1  boot without client/dist: for an API-only run
 #                 (payout-parity.mjs), which never requests a page.
 #   E2E_DRIVER_INSTRUCTIONS_DENY=<made-up value>  boot with the rate-con driver
@@ -216,8 +217,11 @@ PID=$!
 printf '%s\n%s\n' "$PID" "$WT" >"$PIDFILE"
 echo "started pid $PID on 127.0.0.1:$PORT from $WT (log: $LOG)"
 
-# Wait until it answers (the boot reads the sheet copy first, and exits if it cannot).
-for i in $(seq 1 90); do
+# Wait until it answers (the boot reads the sheet copy first, and exits if it cannot),
+# up to E2E_BOOT_WAIT_S seconds (default 90; the harness's tests use a short one).
+WAIT_S="${E2E_BOOT_WAIT_S:-90}"
+case "$WAIT_S" in ''|*[!0-9]*) refuse "E2E_BOOT_WAIT_S must be a number of seconds, got '$WAIT_S'";; esac
+for i in $(seq 1 "$WAIT_S"); do
   if ! kill -0 "$PID" 2>/dev/null; then echo "server exited; see $LOG" >&2; tail -20 "$LOG" >&2; exit 1; fi
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/auth/session" || true)"
   if [ "$code" = "200" ]; then
@@ -239,5 +243,5 @@ for i in $(seq 1 90); do
   fi
   sleep 1
 done
-echo "not ready after 90s; see $LOG. It is still running: stop it with stop-server.sh $PORT" >&2
+echo "not ready after ${WAIT_S}s; see $LOG. It is still running: stop it with stop-server.sh $PORT" >&2
 exit 1

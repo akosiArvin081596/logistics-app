@@ -47,13 +47,14 @@
 //                 (default: this one; for the harness's tests)
 "use strict";
 const path = require("path");
-const os = require("os");
 const fs = require("fs");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 const paths = require("./paths.cjs");
 const keychain = require("./keychain.cjs");
 const { seedMadeUp, ACCOUNTS } = require("./seed-made-up.cjs");
+// SOURCE_DB judged by the shared rule: null means the made-up database.
+const { sourceDb } = require("./source-db.cjs");
 
 function fail(msg, code = 2) {
 	console.error(`setup-db: ${msg}`);
@@ -64,38 +65,6 @@ const args = process.argv.slice(2);
 const dest = args.find((a) => !a.startsWith("--"));
 const force = args.includes("--force");
 if (!dest) fail("usage: node scripts/e2e/setup-db.cjs <dest.db> [--force]  (dest inside the work dir)");
-
-const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
-const isInside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
-
-// The checkout (a folder holding .git: a repo or a worktree) that p lies in, or null.
-function enclosingCheckout(p) {
-	let dir = path.dirname(p);
-	for (;;) {
-		if (fs.existsSync(path.join(dir, ".git"))) return dir;
-		const up = path.dirname(dir);
-		if (up === dir) return null;
-		dir = up;
-	}
-}
-
-// SOURCE_DB, judged: null (unset or empty) means the made-up database. A real
-// database is accepted only under ~/LogisX-replica/, never inside a checkout.
-function sourceDb() {
-	const given = process.env.SOURCE_DB;
-	if (!given) return null;
-	let src;
-	try { src = fs.realpathSync(given); } catch { throw new Error(`SOURCE_DB ${given} does not exist`); }
-	const unset = "Unset SOURCE_DB to build the made-up database (the default).";
-	for (const checkout of [paths.REPO, paths.mainCheckout()].map(realOrSelf)) {
-		if (isInside(src, checkout)) throw new Error(`refusing SOURCE_DB ${src}: it is inside the checkout ${checkout}. Real data stays in ~/LogisX-replica/, never in a checkout or worktree. ${unset}`);
-	}
-	const inCheckout = enclosingCheckout(src);
-	if (inCheckout) throw new Error(`refusing SOURCE_DB ${src}: it is inside the checkout ${inCheckout}. Real data stays in ~/LogisX-replica/, never in a checkout or worktree. ${unset}`);
-	const replica = realOrSelf(path.join(os.homedir(), "LogisX-replica"));
-	if (!isInside(src, replica)) throw new Error(`refusing SOURCE_DB ${src}: a real database is copied only from under ${replica}/. ${unset}`);
-	return src;
-}
 
 paths.warnNodeVersion("setup-db");
 let WORK, destAbs, SRC_DB, Database, bcrypt;

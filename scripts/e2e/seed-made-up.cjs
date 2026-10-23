@@ -154,17 +154,25 @@ const alive = (pid) => {
 };
 
 // Stops the seed server with stop-server.sh (the PID boot-server.sh recorded, while
-// it is still that server). Where stop-server.sh cannot see processes (a sandbox
-// without ps), that same recorded PID, which this setup started moments ago, gets
-// the SIGTERM. Then waits until it has exited, so the database is free.
-async function stopSeedServer(port, env, log) {
+// it is still that server). Only when stop-server.sh could not see the process (a
+// sandbox without ps: "command: none", with the cwd none or this checkout) does that same
+// recorded PID, which this setup started moments ago, get the SIGTERM here; a PID
+// stop-server.sh found to be something else is left alone. Then waits until it has
+// exited, so the database is free.
+async function stopSeedServer(port, env, log, checkout) {
 	const pidFile = path.join(paths.workDir(), `server-${port}.pid`);
 	let pid = null;
 	try { pid = Number(fs.readFileSync(pidFile, "utf8").split("\n")[0]); } catch { /* boot never recorded one */ }
-	const stop = runScript("stop-server.sh", [String(port)], env);
-	if (stop.status !== 0) log(`seed server: stop-server.sh exit ${stop.status}: ${String(stop.stderr || stop.stdout || "").trim()}`);
 	if (!Number.isInteger(pid) || pid <= 0) return;
-	if (alive(pid)) {
+	const stop = runScript("stop-server.sh", [String(port)], env);
+	const said = String(stop.stdout || "") + String(stop.stderr || "");
+	if (stop.status !== 0) log(`seed server: stop-server.sh exit ${stop.status}: ${said.trim()}`);
+	// "command: none" is stop-server.sh not seeing the process (ps refused); its cwd
+	// part must still be none or the checkout this setup booted.
+	const seen = /\(command: none; cwd: (.*)\); nothing killed/.exec(said);
+	const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+	const ours = !!seen && (seen[1] === "none" || (real(seen[1]) !== null && real(seen[1]) === real(checkout)));
+	if (alive(pid) && ours) {
 		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
 	}
 	for (let i = 0; i < 40 && alive(pid); i++) await new Promise((r) => setTimeout(r, 250));
@@ -185,13 +193,15 @@ async function seedMadeUp({ destAbs, passwords, log, Database }) {
 	// The seed server runs with every optional feature off, whatever the caller exported.
 	for (const k of ["E2E_MAINTENANCE_NOTICE", "E2E_FAKE_GMAIL", "E2E_DRIVER_INSTRUCTIONS_DENY", "INVESTOR_LEASE_PAYOUTS_ENABLED"]) delete env[k];
 	const logFile = path.join(WORK, `server-${port}.log`);
-	const boot = runScript("boot-server.sh", [checkout, String(port), destAbs], env);
-	if (boot.status !== 0) {
-		throw new Error(`the seed server did not boot (boot-server.sh exit ${boot.status}): ${String(boot.stderr || boot.stdout || "").trim().split("\n").slice(-3).join(" | ")}`);
-	}
-	log(`seed server: the app's own schema, booted from ${checkout} on 127.0.0.1:${port} (made-up settings, no client)`);
 	let truckId = null;
 	try {
+		// Inside the try: a boot that failed after starting the server (not ready in
+		// time, or the spawn timed out) still stops it in the finally.
+		const boot = runScript("boot-server.sh", [checkout, String(port), destAbs], env);
+		if (boot.status !== 0) {
+			throw new Error(`the seed server did not boot (boot-server.sh exit ${boot.status}): ${String(boot.stderr || boot.stdout || "").trim().split("\n").slice(-3).join(" | ")}`);
+		}
+		log(`seed server: the app's own schema, booted from ${checkout} on 127.0.0.1:${port} (made-up settings, no client)`);
 		const api = client(`http://127.0.0.1:${port}`);
 		const check = await api("GET", "/api/auth/setup-check");
 		if (!check.json || check.json.needsSetup !== true) throw new Error(`the new database is not empty (setup-check ${check.status})`);
@@ -214,7 +224,7 @@ async function seedMadeUp({ destAbs, passwords, log, Database }) {
 		await api("POST", "/api/auth/logout");
 		log(`seed: 5 accounts through POST /api/auth/setup and /api/users; truck ${TRUCK_UNIT} (id ${truckId}) through POST /api/trucks`);
 	} finally {
-		await stopSeedServer(port, env, log);
+		await stopSeedServer(port, env, log, checkout);
 	}
 	fs.rmSync(logFile, { force: true });
 	fs.rmSync(`${destAbs}.sheets.json`, { force: true });

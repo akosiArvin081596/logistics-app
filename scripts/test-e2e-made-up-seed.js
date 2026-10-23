@@ -14,11 +14,14 @@
  *      photo (a JPEG), an application with an image cdl_front (a well-formed PNG)
  *      and is fully onboarded; the seed server is stopped and its Sheets
  *      copy removed.
+ *   §1b a second made-up database reuses the Keychain's passwords.
+ *   §1c a seed server that never gets ready is stopped: no server, no pid file.
  *   §2 a SOURCE_DB inside a checkout or worktree is refused, even under
  *      ~/LogisX-replica/, and so is one outside ~/LogisX-replica/: nothing is
  *      written.
  *   §3 a SOURCE_DB under ~/LogisX-replica/ is copied (a made-up database stands
  *      in for one there: HOME points into this test's sandbox).
+ *   §4 payout-parity.mjs has no SOURCE_DB default and refuses one by the same rule.
  *
  * Hermetic: a mkdtemp sandbox for HOME, the work dir, the checkouts and the
  * Keychain (a stand-in `security`, E2E_SECURITY_BIN). No real database, no real
@@ -309,6 +312,34 @@ eq("the seed server's pid file is gone (it was stopped)", fs.readdirSync(WORK).f
 const raw = fs.existsSync(dest) ? fs.readFileSync(dest) : Buffer.alloc(0);
 ok(raw.length > 0 && !raw.includes("decoy"), "nothing of the main checkout's database is in the new one", "");
 
+console.log("§1b a second made-up database reuses the Keychain's passwords");
+const s1b = node("setup-db.cjs", [path.join(WORK, "qa2.db")]);
+const items1b = store().filter((x) => x.s === "logisx-e2e-local");
+ok(s1b.status === 0 && JSON.stringify(items1b.map((x) => [x.a, x.w]).sort()) === JSON.stringify(items.map((x) => [x.a, x.w]).sort()),
+	"the five Keychain passwords are unchanged", `${s1b.status} ${(s1b.stderr || "").slice(0, 200)}`);
+const v1b = node("verify-creds.cjs", [dest, path.join(WORK, "qa2.db")], { NODE_OPTIONS: "" });
+ok(v1b.status === 0 && (v1b.stdout.match(/password matches=true must_change_password=0/g) || []).length === 10,
+	"…so one set of logins signs in on both made-up databases", `${v1b.status} ${(v1b.stdout + v1b.stderr).slice(0, 300)}`);
+
+console.log("§1c a seed server that never gets ready is still stopped");
+const HANG_WT = path.join(SANDBOX, "seed-wt-hang");
+const HANG_PID = path.join(SANDBOX, "hang.pid");
+fs.mkdirSync(HANG_WT);
+fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(HANG_WT, "node_modules"));
+fs.writeFileSync(path.join(HANG_WT, "server.js"), `
+require("fs").writeFileSync(${JSON.stringify(HANG_PID)}, String(process.pid));
+require("http").createServer((req, res) => { res.writeHead(503); res.end(); }).listen(Number(process.env.PORT), process.env.BIND_HOST);
+`);
+const s1c = node("setup-db.cjs", [path.join(WORK, "hang.db")], { E2E_SEED_CHECKOUT: HANG_WT, E2E_BOOT_WAIT_S: "2" });
+let hangPid = 0;
+try { hangPid = Number(fs.readFileSync(HANG_PID, "utf8")); } catch { /* never started */ }
+let hangAlive = false;
+try { if (hangPid > 0) { process.kill(hangPid, 0); hangAlive = true; } } catch { /* gone */ }
+if (hangAlive) { try { process.kill(hangPid, "SIGTERM"); } catch { /* gone */ } }
+ok(s1c.status !== 0 && /did not boot/.test(s1c.stderr), "setup-db.cjs fails when the seed server never answers", `${s1c.status} ${(s1c.stderr || "").slice(0, 300)}`);
+ok(hangPid > 0 && !hangAlive, "…and the server it started is no longer running", `pid ${hangPid} alive ${hangAlive}`);
+eq("…and no pid file is left in the work dir", fs.readdirSync(WORK).filter((f) => /^server-\d+\.pid$/.test(f)), []);
+
 console.log("§2 a SOURCE_DB inside a checkout, or outside ~/LogisX-replica/, is refused");
 const otherCheckout = path.join(SANDBOX, "other-repo");
 fs.mkdirSync(path.join(otherCheckout, ".git"), { recursive: true });
@@ -343,6 +374,20 @@ const s3 = node("setup-db.cjs", [path.join(WORK, "copy.db")], { SOURCE_DB: repli
 ok(s3.status === 0 && /backup: ok \(source opened read-only\)/.test(s3.stdout), "setup-db.cjs copies it", `${s3.status} ${(s3.stderr || "").slice(0, 300)}`);
 const l3 = readLogins() || {};
 ok(l3.seed === "copy" && (l3.driver || {}).username === "replica-driver", "…and logins.json names the copy's driver and says it is a copy", JSON.stringify({ seed: l3.seed, driver: (l3.driver || {}).username }));
+
+console.log("§4 payout-parity.mjs takes SOURCE_DB by the same rule, with no default");
+const parityCases = [
+	["no SOURCE_DB (no default: the main checkout's app.db is not used)", undefined, /SOURCE_DB is required/],
+	["the main checkout's app.db", path.join(MAIN, "app.db"), /refusing SOURCE_DB .*inside the checkout/],
+	["a worktree (a .git file) under ~/LogisX-replica/", path.join(replicaCheckout, "app.db"), /refusing SOURCE_DB .*inside the checkout/],
+	["a database outside ~/LogisX-replica/", outside, /refusing SOURCE_DB .*only from under/],
+];
+for (const [label, src, want] of parityCases) {
+	const extra = { FLAG: "off", NODE_OPTIONS: "" };
+	if (src) extra.SOURCE_DB = src;
+	const r = node("payout-parity.mjs", [], extra);
+	ok(r.status === 2 && want.test(r.stderr), `payout-parity refuses: ${label}`, `${r.status} ${(r.stderr || r.stdout || "").slice(0, 300)}`);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
