@@ -57,9 +57,32 @@
  * out. `--list` prints the runners a run would start and starts none;
  * scripts/test-release-gate.js §4 reads it to prove the parts cover every
  * runner once.
+ *
+ * PRE-PUSH MODE
+ * -------------
+ * .githooks/pre-push runs this file inside its sandbox (sandbox-exec, a
+ * scrubbed environment) as
+ *   node scripts/run-unit-tests.js --lint --changed-list <file>
+ *     --changed-count <n> --server-diff <file> --budget-ms <ms> [--full]
+ * --lint runs package.json's lint script first. --changed-list is the push's
+ * changed files (NUL-separated, written by the hook from git, outside the
+ * sandbox), --changed-count how many the hook wrote, --server-diff
+ * `git diff -U0 <merge-base> -- server.js`. scripts/lib/test-selection.js
+ * picks the runners those files reach and runs them in tiers inside
+ * --budget-ms: tier 0 (changed runners, the timing-sensitive ones) always
+ * finishes; a tier 1-3 runner that doesn't fit is "not run for time" and one
+ * still going at the budget is "cut off", neither a failure (CI runs them).
+ * --full runs every runner with no budget. Workers: the cores less one, less
+ * the 1-minute load average, at least 2 (UNIT_TEST_CONCURRENCY overrides).
+ * Each run saves its runners' times to $TMPDIR/logisx-prepush-times-<repo>.json
+ * (numbers only) for the next run's estimates.
+ * The last line is the verdict the hook reads:
+ *   pre-push verdict: lint=<pass|fail|skipped> selection=<...> runners=<...>
+ * and the exit code is 0 only when nothing in it failed. UNIT_TEST_SHARD and
+ * UNIT_TEST_SKIP_TIMING mean nothing here and are ignored.
  */
 
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -83,6 +106,13 @@ const TIMEOUT_MS = Number(process.env.UNIT_TEST_TIMEOUT_MS) || 60_000;
 // one by one, after every other runner has finished.
 const CONCURRENCY = Math.max(1, Number(process.env.UNIT_TEST_CONCURRENCY) || Math.max(4, os.availableParallelism() - 1));
 
+// .githooks/pre-push checks for this exact line before it uses the PRE-PUSH
+// MODE flags; a harness without it gets the whole suite instead (a worktree
+// branched before the mode existed).
+const PREPUSH_PROTOCOL = 1;
+const PREPUSH_FLAGS = new Set(["--lint", "--full", "--changed-list", "--changed-count", "--server-diff", "--budget-ms"]);
+const PREPUSH = process.argv.slice(2).some((a) => PREPUSH_FLAGS.has(a));
+
 // UNIT_TEST_SHARD=i/n (see IN PARTS, above). Unset or empty: every runner.
 // Anything else that is not i/n with 1 <= i <= n stops the run: a typo must not
 // quietly run the wrong part, or none.
@@ -98,7 +128,7 @@ function shardOf(value) {
 	}
 	return { i, n };
 }
-const SHARD = shardOf(process.env.UNIT_TEST_SHARD);
+const SHARD = PREPUSH ? null : shardOf(process.env.UNIT_TEST_SHARD);
 
 /**
  * Runners whose assertions are TIMING-SENSITIVE and therefore cannot give a
@@ -141,7 +171,7 @@ const TIMING_SENSITIVE = new Map([
 	],
 ]);
 
-const SKIP_TIMING =
+const SKIP_TIMING = !PREPUSH &&
 	/^(1|true|yes|on)$/i.test(String(process.env.UNIT_TEST_SKIP_TIMING ?? "").trim());
 
 /**
@@ -159,6 +189,23 @@ const SKIP_TIMING =
  */
 const FLAKY_ALLOWED_ONE_RETRY = new Set(["test-pdf-cold-start.js"]);
 
+/**
+ * Runners that can only run on some machines and skip themselves elsewhere.
+ * Such a runner prints a line starting "SKIP (platform):" and exits 0. The
+ * harness then reports it as SKIP, not ok, and repeats it after the summary
+ * like the timing skip: a run that covered less must not read as complete.
+ * Only the runners named here may skip; anyone else printing the line still
+ * counts as a plain pass.
+ */
+const PLATFORM_SKIP = new Map([
+	[
+		"test-prepush-sandbox.js",
+		"needs macOS and runs /usr/bin/sandbox-exec itself, which no sandbox around it allows (CI runs Linux; the pre-push hook and Claude's Bash sandbox are sandboxes). Run it from a plain terminal: node scripts/test-prepush-sandbox.js",
+	],
+]);
+const PLATFORM_SKIP_LINE = /^SKIP \(platform\): /m;
+const skippedForPlatform = (r) => r.ok && PLATFORM_SKIP.has(r.file) && PLATFORM_SKIP_LINE.test(r.out || "");
+
 function discover() {
 	return fs
 		.readdirSync(SCRIPTS_DIR)
@@ -171,9 +218,15 @@ function discover() {
 }
 
 function runOne(file) {
-	return new Promise((resolve) => {
+	return startOne(file).done;
+}
+
+// One runner, with a way to stop it early (the pre-push budget's cut-off).
+function startOne(file) {
+	let child = null;
+	const done = new Promise((resolve) => {
 		const started = Date.now();
-		const child = spawn(process.execPath, [path.join(SCRIPTS_DIR, file)], {
+		child = spawn(process.execPath, [path.join(SCRIPTS_DIR, file)], {
 			cwd: REPO_ROOT,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "test" },
@@ -216,6 +269,7 @@ function runOne(file) {
 			});
 		});
 	});
+	return { done, kill: () => child && child.kill("SIGKILL") };
 }
 
 async function main() {
@@ -283,9 +337,7 @@ async function main() {
 			}
 
 			results.push(r);
-			const mark = r.ok ? (r.retried ? "FLKY" : "ok  ") : r.timedOut ? "TIME" : "FAIL";
-			const note = r.ok && r.retried ? "  (failed once, passed on retry)" : "";
-			console.log(`${mark}  ${String(r.ms).padStart(6)}ms  ${r.file}${note}`);
+			console.log(resultLine(r));
 		}
 	}
 
@@ -335,13 +387,267 @@ async function main() {
 				`\n    \`npm run test:unit\` locally — without that variable — to cover them.`
 		);
 	}
+	printPlatformSkips(results);
 
 	// exitCode, not process.exit(): the failure output above must reach the log
 	// whole (see --list).
 	process.exitCode = failed.length ? 1 : 0;
 }
 
-main().catch((err) => {
+function resultLine(r) {
+	const mark = r.cut ? "CUT " : skippedForPlatform(r) ? "SKIP" : r.ok ? (r.retried ? "FLKY" : "ok  ") : r.timedOut ? "TIME" : "FAIL";
+	const note = r.cut ? "  (cut off at the time budget; CI runs it)"
+		: skippedForPlatform(r) ? `  (${r.out.split("\n").find((l) => PLATFORM_SKIP_LINE.test(l))})`
+			: r.ok && r.retried ? "  (failed once, passed on retry)" : "";
+	return `${mark}  ${String(r.ms).padStart(6)}ms  ${r.file}${note}`;
+}
+
+// Repeated after the summary, like the timing skip.
+function printPlatformSkips(results) {
+	const skippedHere = results.filter(skippedForPlatform);
+	if (!skippedHere.length) return;
+	console.log(
+		`\n⚠️  ${skippedHere.length} runner(s) skipped themselves on this machine, NOT covered by this run:` +
+			skippedHere.map((r) => `\n    ${r.file}: ${PLATFORM_SKIP.get(r.file)}`).join("")
+	);
+}
+
+// ─────────────────────────────────────────────── PRE-PUSH MODE (see header)
+function parsePrepushArgs(argv) {
+	const a = { lint: false, full: false, changedList: null, changedCount: null, serverDiff: null, budgetMs: 115000 };
+	const value = (i, flag) => {
+		const v = argv[i + 1];
+		if (v === undefined || v.startsWith("--")) throw new Error(`${flag} needs a value`);
+		return v;
+	};
+	for (let i = 0; i < argv.length; i++) {
+		const f = argv[i];
+		if (f === "--lint") a.lint = true;
+		else if (f === "--full") a.full = true;
+		else if (f === "--changed-list") a.changedList = value(i++, f);
+		else if (f === "--server-diff") a.serverDiff = value(i++, f);
+		else if (f === "--changed-count" || f === "--budget-ms") {
+			const n = Number(value(i++, f));
+			if (!Number.isInteger(n) || n < 0) throw new Error(`${f} must be a whole number (got ${JSON.stringify(argv[i])})`);
+			if (f === "--changed-count") a.changedCount = n; else a.budgetMs = n;
+		} else throw new Error(`unknown argument ${JSON.stringify(f)}`);
+	}
+	if (!a.full && a.changedList === null) throw new Error("--changed-list is required unless --full");
+	if (!a.full && a.changedCount === null) throw new Error("--changed-count is required with --changed-list");
+	return a;
+}
+
+// package.json's lint script, run as npm would run it (sh -c), without npm:
+// one definition of what lint covers.
+function runLint() {
+	return new Promise((resolve) => {
+		const started = Date.now();
+		let script;
+		try {
+			script = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")).scripts.lint;
+		} catch (err) {
+			resolve({ ok: false, ms: 0, out: `can't read package.json's lint script: ${err.message}` });
+			return;
+		}
+		if (typeof script !== "string" || !script.trim()) {
+			resolve({ ok: false, ms: 0, out: "package.json has no lint script" });
+			return;
+		}
+		const child = spawn("/bin/sh", ["-c", script], { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+		let out = "";
+		child.stdout.on("data", (c) => (out += c));
+		child.stderr.on("data", (c) => (out += c));
+		const timer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+		child.on("close", (code) => { clearTimeout(timer); resolve({ ok: code === 0, ms: Date.now() - started, out }); });
+		child.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, ms: Date.now() - started, out: String(err) }); });
+	});
+}
+
+function timesCachePath() {
+	let name = path.basename(REPO_ROOT);
+	const r = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+		cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+	});
+	if (r.status === 0 && r.stdout.trim()) name = path.basename(path.dirname(r.stdout.trim()));
+	return path.join(os.tmpdir(), `logisx-prepush-times-${name.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+
+// Estimates only: an unreadable cache is a note, never a failure.
+function readTimes(file, notes) {
+	let raw;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch (err) {
+		if (err.code !== "ENOENT") notes.push(`times cache unreadable (${err.code || err.message}); every runner counts as the median`);
+		return new Map();
+	}
+	try {
+		const obj = JSON.parse(raw);
+		const out = new Map();
+		for (const [k, v] of Object.entries(obj && typeof obj === "object" ? obj : {})) {
+			if (/^(?:test|check)-[^/]*\.(?:js|mjs)$/.test(k) && Number.isFinite(v) && v >= 0 && v <= 3600000) out.set(k, v);
+		}
+		return out;
+	} catch (err) {
+		notes.push(`times cache unreadable (${err.message}); every runner counts as the median`);
+		return new Map();
+	}
+}
+
+function writeTimes(file, times, notes) {
+	try {
+		const tmp = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries([...times].sort())));
+		fs.renameSync(tmp, file);
+	} catch (err) {
+		notes.push(`times cache not saved (${err.code || err.message})`);
+	}
+}
+
+function changedFromList(args) {
+	let raw;
+	try {
+		raw = fs.readFileSync(args.changedList);
+	} catch (err) {
+		throw new Error(`can't read the changed list ${args.changedList} (${err.code || err.message})`);
+	}
+	const changed = raw.toString("utf8").split("\0").filter(Boolean);
+	if (changed.length !== args.changedCount) {
+		throw new Error(`the changed list holds ${changed.length} file(s), the hook wrote ${args.changedCount}`);
+	}
+	let serverDiff = "";
+	if (args.serverDiff !== null) {
+		try {
+			serverDiff = fs.readFileSync(args.serverDiff, "utf8");
+		} catch (err) {
+			throw new Error(`can't read the server.js diff ${args.serverDiff} (${err.code || err.message})`);
+		}
+	}
+	return { changed: [...new Set(changed)], serverDiff };
+}
+
+async function prepushMain() {
+	const started = Date.now();
+	const verdict = { lint: "skipped", selection: "skipped", runners: "skipped" };
+	const notes = [];
+	let sel = null;
+	const say = (line) => console.log(line);
+	const finish = () => {
+		for (const n of notes) say(`note: ${n}`);
+		const line = sel ? sel.verdictLine(verdict) : `pre-push verdict: lint=${verdict.lint} selection=${verdict.selection} runners=${verdict.runners}`;
+		say(line);
+		process.exitCode = Object.values(verdict).some((v) => v === "fail") ? 1 : 0;
+	};
+
+	let args;
+	try {
+		args = parsePrepushArgs(process.argv.slice(2));
+	} catch (err) {
+		say(`pre-push mode: ${err.message}`);
+		verdict.selection = "fail";
+		finish();
+		return;
+	}
+
+	if (args.lint) {
+		const lint = await runLint();
+		verdict.lint = lint.ok ? "pass" : "fail";
+		say(`lint: ${lint.ok ? "passed" : "FAILED"} in ${(lint.ms / 1000).toFixed(1)} s`);
+		if (!lint.ok) {
+			say(lint.out.trimEnd() || "(no output)");
+			say("Runners not started: the push is blocked on lint alone.");
+			finish();
+			return;
+		}
+	}
+
+	const all = discover();
+	let items;
+	try {
+		sel = require("./lib/test-selection");
+		if (args.full) {
+			items = all.map((f) => ({ file: f, tier: 0 }));
+			say(`Full run: every runner (${all.length}), no time budget.`);
+		} else {
+			const { changed, serverDiff } = changedFromList(args);
+			const ls = spawnSync("git", ["ls-files", "-z", "-c", "-o", "--exclude-standard"], {
+				cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 28, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+			});
+			if (ls.status !== 0) throw new Error(`git ls-files failed: ${(ls.stderr || "").trim() || `exit ${ls.status}`}`);
+			const read = (rel) => {
+				try { return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8"); } catch { return null; }
+			};
+			const map = sel.buildMap({ files: ls.stdout.split("\0").filter(Boolean), read });
+			const s = sel.select(map, { changed, serverDiff, tierZero: [...TIMING_SENSITIVE.keys()].map((f) => `scripts/${f}`) });
+			items = [...s.picked].map(([rel, tier]) => ({ file: path.basename(rel), tier }));
+			const missing = items.filter((it) => !all.includes(it.file));
+			if (missing.length) throw new Error(`picked runner(s) not on disk: ${missing.map((it) => it.file).join(", ")}`);
+			const perTier = [0, 1, 2, 3].map((t) => items.filter((it) => it.tier === t).length);
+			say(`${changed.length} changed file(s) pick ${items.length} of ${all.length} runners (tier 0: ${perTier[0]}, 1: ${perTier[1]}, 2: ${perTier[2]}, 3: ${perTier[3]})` +
+				(s.runAll ? `; ${s.runAll} changed, so every runner is picked` : "") +
+				(s.server && s.server.top ? `; a top-level server.js change (${s.server.why[0] || "unread"}) picks every runner that names server.js` : ""));
+		}
+		verdict.selection = "pass";
+	} catch (err) {
+		verdict.selection = "fail";
+		say(`selection FAILED: ${err && err.message ? err.message : err}`);
+		say("The push is blocked: nothing can say which runners this push needs. LOGISX_PREPUSH=full git push runs every runner instead.");
+		finish();
+		return;
+	}
+
+	const cacheFile = timesCachePath();
+	const times = readTimes(cacheFile, notes);
+	const known = [...times.values()].sort((x, y) => x - y);
+	const median = known.length ? known[Math.floor(known.length / 2)] : 1000;
+	for (const it of items) it.est = times.has(it.file) ? times.get(it.file) : median;
+	const explicit = Number(process.env.UNIT_TEST_CONCURRENCY);
+	const workers = explicit >= 1 ? Math.floor(explicit) : sel.workersFor(os.availableParallelism(), os.loadavg()[0]);
+	const budgetMs = args.full ? Infinity : args.budgetMs;
+	const tier0 = items.filter((it) => it.tier === 0).reduce((a, it) => a + it.est, 0);
+	if (!args.full && tier0 / Math.max(1, workers) > 120000) {
+		say(`Tier 0 alone is estimated at ${Math.round(tier0 / Math.max(1, workers) / 1000)} s, over the 2-minute budget; it runs to the end anyway.`);
+	}
+	say(`Running ${items.length} runner(s), ${workers} at a time (timeout ${TIMEOUT_MS / 1000}s each)` +
+		(Number.isFinite(budgetMs) ? `, budget ${Math.round(budgetMs / 1000)} s for tiers 1-3` : "") + "\n");
+
+	const run = await sel.runTiered({
+		items,
+		workers,
+		budgetMs,
+		startedAt: started,
+		start: startOne,
+		alone: new Set([...TIMING_SENSITIVE.keys()]),
+		retryOnce: FLAKY_ALLOWED_ONE_RETRY,
+		onResult: (r) => say(resultLine(r)),
+	});
+	const t = sel.tally(run);
+
+	if (t.failedResults.length) {
+		say(`\n${"=".repeat(64)}\nFAILURE OUTPUT\n${"=".repeat(64)}`);
+		for (const r of t.failedResults) {
+			say(`\n--- ${r.file} (${r.timedOut ? `TIMED OUT after ${TIMEOUT_MS / 1000}s` : `exit ${r.code}`}) ---`);
+			say(r.out.trimEnd() || "(no output)");
+		}
+	}
+	for (const r of run.results.filter((x) => x.ok && x.retried)) {
+		say(`\nFLAKY: ${r.file} failed once, passed on retry. First-attempt output:`);
+		say((r.firstAttempt.out || "").trimEnd().split("\n").slice(-12).join("\n"));
+	}
+	if (run.notRun.length) say(`\nNot run for time (CI runs them): ${run.notRun.map((it) => it.file).join(", ")}`);
+	if (run.cut.length) say(`Cut off at the budget (CI runs them): ${run.cut.map((r) => r.file).join(", ")}`);
+	printPlatformSkips(run.results);
+
+	for (const r of run.results) times.set(r.file, r.cut ? Math.max(times.get(r.file) || 0, r.ms) : r.ms);
+	writeTimes(cacheFile, times, notes);
+
+	verdict.runners = t.passed ? "pass" : "fail";
+	say("\n" + sel.summaryLine({ ran: t.ran, picked: items.length, seconds: (Date.now() - started) / 1000, notRun: t.notRun, cut: t.cut, failed: t.failed }));
+	finish();
+}
+
+(PREPUSH ? prepushMain() : main()).catch((err) => {
 	console.error(err);
+	if (PREPUSH) console.log("pre-push verdict: lint=fail selection=fail runners=fail");
 	process.exit(1);
 });

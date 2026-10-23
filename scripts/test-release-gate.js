@@ -19,10 +19,12 @@
  *      a 5xx, a 429 or a rate-limited 403 is retried. Its jq filter runs
  *      through real jq: the newest check run by id decides, even one queued
  *      with no start time yet.
- *   §3 .githooks/pre-push against stub npm, fnm and node: it runs
- *      `npm run check` and blocks on failure, skips a deletion-only push,
- *      switches Node through fnm when present, and never passes git's
- *      repository variables on to the runners
+ *   §3 .githooks/pre-push against stub sandbox-exec, fnm and node: it runs
+ *      the check once, sandboxed (run-unit-tests.js --lint and the changed
+ *      list), and blocks on failure, skips a deletion-only push, switches
+ *      Node through fnm when present, and empties the check's environment
+ *      (no git repository variables, no GH_TOKEN). The rest of the hook's
+ *      contract: scripts/test-pre-push-hook.js
  *   §4 source pins: the serves check, the smoke and the CI wait are push-only
  *      steps of the staging job, after its deploy, with nothing allowed to
  *      fail; the serves check's own script refuses a no-op that leaves a newer
@@ -324,64 +326,91 @@ function checkJq() {
 }
 
 // ─────────────────────────────────────────── §3 the pre-push hook
-function hookFixture(hookText, { fnm = false, nodeVersion = "v22.23.2" } = {}) {
+// The hook empties the check's environment (env -i), so the stubs log to a
+// path written into them, and the check's exit comes from a file. The hook's
+// copy runs a stub in place of /usr/bin/sandbox-exec, with the platform read
+// as Darwin, so the sandboxed path runs on Linux CI too.
+function hookFixture(hookText, { fnm = false, nodeVersion = "v22.23.2", checkExit = 0 } = {}) {
 	const repo = tmpDir("hook-repo");
-	// A real repository: the hook checks the worktree git names, and finds it
-	// with git rev-parse (scripts/test-pre-push-hook.js pins which one).
-	const noGitVars = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
-	const init = spawnSync("git", ["init", "-q", repo], { env: noGitVars, encoding: "utf8" });
-	if (init.status !== 0) throw new Error(`git init ${repo} failed: ${init.stderr}`);
-	fs.mkdirSync(path.join(repo, ".githooks"));
-	fs.writeFileSync(path.join(repo, ".githooks/pre-push"), hookText, { mode: 0o755 });
-	fs.writeFileSync(path.join(repo, ".nvmrc"), "22.23.2\n");
 	const bin = tmpDir("hook-bin");
+	const log = path.join(repo, "..", `${path.basename(repo)}.log`);
+	// A real repository with origin/main: the hook checks the worktree git
+	// names, found with git rev-parse (scripts/test-pre-push-hook.js pins
+	// which one), and diffs it against its merge-base with origin/main.
+	const gitEnv = {
+		...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_"))),
+		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+	};
+	const git = (...args) => {
+		const x = spawnSync("git", args, { cwd: repo, env: gitEnv, encoding: "utf8" });
+		if (x.status !== 0) throw new Error(`git ${args.join(" ")} in ${repo} failed: ${x.stderr}`);
+		return x.stdout.trim();
+	};
+	git("init", "-q", repo);
+	fs.mkdirSync(path.join(repo, ".githooks"));
+	fs.writeFileSync(path.join(repo, ".githooks/pre-push"),
+		hookText.replace("SANDBOX_EXEC=/usr/bin/sandbox-exec\n", `SANDBOX_EXEC=${bin}/sandbox-exec\n`).replace("platform=$(uname -s)\n", "platform=Darwin\n"), { mode: 0o755 });
+	fs.writeFileSync(path.join(repo, ".nvmrc"), "22.23.2\n");
+	fs.mkdirSync(path.join(repo, "scripts"));
+	fs.writeFileSync(path.join(repo, "scripts/run-unit-tests.js"), "// const PREPUSH_PROTOCOL = 1;\n");
+	git("add", ".");
+	git("commit", "-q", "-m", "init");
+	git("update-ref", "refs/remotes/origin/main", "HEAD");
+	const head = git("rev-parse", "HEAD");
 	const stub = (name, body) => fs.writeFileSync(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
-	stub("npm", 'printf "npm %s|cwd=%s|GIT_DIR=%s|GIT_WORK_TREE=%s|GIT_INDEX_FILE=%s\\n" "$*" "$PWD" "${GIT_DIR-}" "${GIT_WORK_TREE-}" "${GIT_INDEX_FILE-}" >> "$STUB_LOG"\nexit "${STUB_NPM_EXIT:-0}"');
+	stub("sandbox-exec", `printf "check %s|cwd=%s|GIT_DIR=%s|GIT_WORK_TREE=%s|GIT_INDEX_FILE=%s|GH_TOKEN=%s\\n" "$(printf '%s' "$*" | /usr/bin/tr '\\n' ' ')" "$PWD" "\${GIT_DIR-}" "\${GIT_WORK_TREE-}" "\${GIT_INDEX_FILE-}" "\${GH_TOKEN-}" >> "${log}"
+if [ "${checkExit}" = 0 ]; then echo "pre-push verdict: lint=pass selection=pass runners=pass"; else echo "pre-push verdict: lint=pass selection=pass runners=fail"; fi
+exit ${checkExit}`);
 	stub("node", `echo ${nodeVersion}`);
-	if (fnm) stub("fnm", 'printf "fnm %s\\n" "$*" >> "$STUB_LOG"\n[ "$1" = env ] && echo "export STUB_FNM_ENV=1"\nexit 0');
-	return { repo, bin };
+	if (fnm) stub("fnm", `printf "fnm %s\\n" "$*" >> "${log}"\n[ "$1" = env ] && echo "export STUB_FNM_ENV=1"\nexit 0`);
+	return { repo, bin, head, log };
 }
 
-function runHook(hookText, { input, npmExit = 0, fnm = false, nodeVersion } = {}) {
-	const f = hookFixture(hookText, { fnm, nodeVersion });
-	const log = path.join(f.repo, "..", `${path.basename(f.repo)}.log`);
+function runHook(hookText, { input, checkExit = 0, fnm = false, nodeVersion } = {}) {
+	const f = hookFixture(hookText, { fnm, nodeVersion, checkExit });
 	const r = spawnSync("bash", [path.join(f.repo, ".githooks/pre-push"), "origin", "git@github.com:o/r.git"], {
 		encoding: "utf8",
 		timeout: 20000,
-		input: input === undefined ? `refs/heads/x ${SHA} refs/heads/x ${"d".repeat(40)}\n` : input,
+		input: input === undefined ? `refs/heads/x ${f.head} refs/heads/x ${"d".repeat(40)}\n` : input.replace(/HEAD_OID/g, f.head),
 		// As git runs it: at the worktree's top, with the repository variables
 		// it exports to hooks.
 		cwd: f.repo,
 		env: {
 			PATH: `${f.bin}:/usr/bin:/bin`,
-			STUB_LOG: log,
-			STUB_NPM_EXIT: String(npmExit),
+			HOME: f.repo,
+			TMPDIR: os.tmpdir(),
+			GH_TOKEN: "fake-not-a-token",
 			GIT_DIR: path.join(f.repo, ".git"),
 			GIT_WORK_TREE: f.repo,
 			GIT_INDEX_FILE: path.join(f.repo, ".git/index"),
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
 		},
 	});
-	const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+	const calls = fs.existsSync(f.log) ? fs.readFileSync(f.log, "utf8").split("\n").filter(Boolean) : [];
 	return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}`, calls, repo: f.repo };
 }
 
 function checkHook(hookText, tag = "") {
 	const r = [];
 	const good = runHook(hookText);
-	const npm = good.calls.filter((c) => c.startsWith("npm "));
-	r.push([good.code === 0 && npm.length === 1 && npm[0].startsWith("npm run check|"), `${tag}§3 a push runs npm run check once and passes when it passes (exit ${good.code}, calls ${JSON.stringify(good.calls)})`]);
-	const cwd = npm[0] ? npm[0].split("|").find((x) => x.startsWith("cwd=")).slice(4) : "";
-	r.push([!!cwd && fs.realpathSync(cwd) === fs.realpathSync(good.repo), `${tag}§3 …in the worktree git runs it in (got ${npm[0]})`]);
-	r.push([npm[0] && /\|GIT_DIR=\|GIT_WORK_TREE=\|GIT_INDEX_FILE=$/.test(npm[0]), `${tag}§3 …with git's repository variables unset, so the deploy runners' own git sandboxes stay theirs (got ${npm[0]})`]);
-	const bad = runHook(hookText, { npmExit: 1 });
+	const check = good.calls.filter((c) => c.startsWith("check "));
+	r.push([good.code === 0 && check.length === 1 && / scripts\/run-unit-tests\.js --lint --budget-ms 115000 --changed-list /.test(check[0]) && /^check -p \(version 1\)/.test(check[0]),
+		`${tag}§3 a push runs the check once, sandboxed (sandbox-exec -p <profile> ... run-unit-tests.js --lint ...), and passes when it passes (exit ${good.code}, calls ${JSON.stringify(good.calls).slice(0, 300)}): ${good.out.trim().split("\n").slice(-2).join(" | ")}`]);
+	const cwd = check[0] ? check[0].split("|").find((x) => x.startsWith("cwd=")).slice(4) : "";
+	r.push([!!cwd && fs.realpathSync(cwd) === fs.realpathSync(good.repo), `${tag}§3 …in the worktree git runs it in (got ${cwd})`]);
+	r.push([check[0] && /\|GIT_DIR=\|GIT_WORK_TREE=\|GIT_INDEX_FILE=\|GH_TOKEN=$/.test(check[0]),
+		`${tag}§3 …with an emptied environment: no git repository variables (the deploy runners' own git sandboxes stay theirs) and no GH_TOKEN (got ${(check[0] || "").split("|").slice(-4).join("|")})`]);
+	const bad = runHook(hookText, { checkExit: 1 });
 	r.push([bad.code === 1 && /push was blocked/.test(bad.out), `${tag}§3 a failing check blocks the push (exit ${bad.code})`]);
 	const deletes = runHook(hookText, { input: `(delete) ${"0".repeat(40)} refs/heads/old ${SHA}\n` });
 	r.push([deletes.code === 0 && deletes.calls.length === 0, `${tag}§3 a push that only deletes a branch runs nothing (exit ${deletes.code}, calls ${deletes.calls.length})`]);
-	const mixed = runHook(hookText, { input: `(delete) ${"0".repeat(40)} refs/heads/old ${SHA}\nrefs/heads/x ${SHA} refs/heads/x ${"0".repeat(40)}\n` });
-	r.push([mixed.calls.some((c) => c.startsWith("npm run check")), `${tag}§3 a deletion beside a real update still runs the check`]);
+	const mixed = runHook(hookText, { input: `(delete) ${"0".repeat(40)} refs/heads/old ${SHA}\nrefs/heads/x HEAD_OID refs/heads/x ${"0".repeat(40)}\n` });
+	r.push([mixed.calls.some((c) => c.startsWith("check ")), `${tag}§3 a deletion beside a real update still runs the check`]);
 	const withFnm = runHook(hookText, { fnm: true });
-	r.push([withFnm.calls.includes("fnm env --shell bash") && withFnm.calls.includes("fnm use") && withFnm.calls.indexOf("fnm use") < withFnm.calls.findIndex((c) => c.startsWith("npm ")),
-		`${tag}§3 with fnm installed it switches to .nvmrc's Node before the check (calls ${JSON.stringify(withFnm.calls)})`]);
+	r.push([withFnm.calls.includes("fnm env --shell bash") && withFnm.calls.includes("fnm use") && withFnm.calls.indexOf("fnm use") < withFnm.calls.findIndex((c) => c.startsWith("check ")),
+		`${tag}§3 with fnm installed it switches to .nvmrc's Node before the check (calls ${JSON.stringify(withFnm.calls).slice(0, 200)})`]);
 	r.push([!good.calls.some((c) => c.startsWith("fnm")), `${tag}§3 without fnm it uses the Node on PATH`]);
 	const oldNode = runHook(hookText, { nodeVersion: "v20.20.1" });
 	r.push([oldNode.code === 0 && /\.nvmrc wants 22\.23\.2/.test(oldNode.out), `${tag}§3 a Node other than .nvmrc's is named before the check runs (exit ${oldNode.code})`]);
@@ -936,10 +965,10 @@ function mutants() {
 	ok(checkWait(m3.p, "[mutant] ").some(([c]) => !c), "§5 mutant 'any conclusion passes' must be caught by §2");
 	const m3b = mut(WAIT, "&& ! printf '%s' \"$out\" | grep -qiE 'rate limit'", "");
 	ok(checkWait(m3b.p, "[mutant] ").some(([c]) => !c), "§5 mutant 'a rate-limited 403 is a refusal' must be caught by §2");
-	const m4 = mut(HOOK, "if npm run check; then", "if npm run check || true; then");
-	ok(checkHook(m4.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'the hook ignores the check's exit code' must be caught by §3");
-	const m5 = mut(HOOK, "unset GIT_DIR", "unset GIT_NOTHING");
-	ok(checkHook(m5.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'GIT_DIR reaches the runners' must be caught by §3");
+	const m4 = mut(HOOK, 'if [ "$protocol" = 1 ] && [ "$status" -eq 0 ] && [ "$last" = "$pass_line" ]; then', "if true; then");
+	ok(checkHook(m4.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'the hook passes whatever the check reports' must be caught by §3");
+	const m5 = mut(HOOK, '"$ENV_BIN" -i "${envs[@]}"', '"$ENV_BIN" "${envs[@]}"');
+	ok(checkHook(m5.text, "[mutant] ").some(([c]) => !c), "§5 mutant 'the check's environment not emptied' must be caught by §3");
 	const deployText = fs.readFileSync(DEPLOY_YML, "utf8");
 	const ciText = fs.readFileSync(CI_YML, "utf8");
 	const smokeStep = /\n {6}- name: Staging smoke[^\n]*\n(?: {8}.*\n)+/.exec(deployText);
