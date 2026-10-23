@@ -24,10 +24,15 @@
  *        to exactly one existing Driver or Investor account, or to a desk under
  *        their own name only (422 MESSAGE_RECIPIENT otherwise: a staff account,
  *        a directory-only name, a name two accounts hold, "Dispatch" to itself).
+ *      - a Dispatcher writes to drivers only (2026-10-23): an Investor account
+ *        (any case, edge spaces) or the investor desk "admin", as "Dispatch" or
+ *        under his own name, is 403 MESSAGE_RECIPIENT, with the same no-row,
+ *        no-live-copy, one-audit-row rule as above, and a reason that offers
+ *        drivers only. A Super Admin still writes to investors and the desk.
  *      - unchanged: the driver app's send (to "Dispatch"), the investor
- *        portal's (to "admin"), the dispatch inbox's ("Dispatch" to a driver or
- *        an investor, any case), a Super Admin in the driver app (his own name
- *        to "Dispatch"), a Driver's `from` pinned to his session.
+ *        portal's (to "admin"), the dispatch inbox's ("Dispatch" to a driver, or
+ *        for a Super Admin to an investor, any case), a Super Admin in the driver
+ *        app (his own name to "Dispatch"), a Driver's `from` pinned to his session.
  *   §2 names no account may take: findDriverNameClash() reports "admin" as
  *      reserved, as it does "dispatch" and "investor"; POST /api/users refuses a
  *      username that is a desk name (409 USERNAME_RESERVED) or that another
@@ -292,7 +297,7 @@ async function section1() {
 	await expectSent("§1 staff with no `from`", m, db, U.disp,
 		{ to: DRIVER_A, message: "Blank sender" },
 		{ name: "is stored as \"Dispatch\"", test: (row) => row.f === "Dispatch" });
-	await expectSent("§1 staff to an investor named with edge spaces", m, db, U.disp,
+	await expectSent("§1 a Super Admin to an investor named with edge spaces", m, db, U.sa,
 		{ from: "Dispatch", to: ` ${INVESTOR} `, message: "Your statement" },
 		{ name: "is stored as the account's username", test: (row) => row.t === INVESTOR });
 	{
@@ -303,6 +308,52 @@ async function section1() {
 		ok("§1 ...and nothing is stored", rowCount(db) === before);
 	}
 	await expectRefused("§1 staff to another staff account", m, db, U.disp, { from: "Dispatch", to: U.sa.username, message: "hey" }, 422, "MESSAGE_RECIPIENT");
+
+	// A Dispatcher writes to drivers only (2026-10-23): never to an Investor
+	// account or the investor desk, which only Super Admins read.
+	{
+		const before = m.log.audits.length;
+		const r = await expectRefused("§1 a Dispatcher, as \"Dispatch\", to an investor", m, db, U.disp, { from: "Dispatch", to: INVESTOR, message: SECRET_TEXT }, 403, "MESSAGE_RECIPIENT");
+		const rows = refusalAudits({ audits: m.log.audits.slice(before) }, "MESSAGE_RECIPIENT");
+		ok("§1 ...one refusal audit row whose details name the code and the Dispatcher role",
+			rows.length === 1 && rows[0].kind === "logAuditRefusal" && rows[0].action === "message_blocked" && rows[0].details.includes("Dispatcher"));
+		ok("§1 ...no audit field carries the investor's name or the message text", !auditLeaks(m.log, INVESTOR, SECRET_TEXT, "zebra-quartz"));
+		ok("§1 ...the answer names no account", !!r.body && !JSON.stringify(r.body).toLowerCase().includes(INVESTOR));
+		ok(`§1 ...the reason offers drivers only (got "${errorOf(r)}")`, /\bdrivers only\b/i.test(errorOf(r)) && !/investor/i.test(errorOf(r)));
+	}
+	await expectRefused("§1 a Dispatcher under his own name to an investor (edge spaces, another case)", m, db, U.disp,
+		{ from: U.disp.username, to: ` ${INVESTOR.toUpperCase()} `, message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 a Dispatcher with no `from` to an investor", m, db, U.disp, { to: INVESTOR_2, message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	{
+		const before = m.log.audits.length;
+		await expectRefused("§1 a Dispatcher under his own name to the investor desk", m, db, U.disp, { from: U.disp.username, to: "admin", message: SECRET_TEXT }, 403, "MESSAGE_RECIPIENT");
+		const rows = refusalAudits({ audits: m.log.audits.slice(before) }, "MESSAGE_RECIPIENT");
+		ok("§1 ...one refusal audit row naming the Dispatcher role", rows.length === 1 && rows[0].details.includes("Dispatcher"));
+	}
+	await expectRefused("§1 a Dispatcher under his own name to the investor desk in another case", m, db, U.disp, { from: U.disp.username, to: " ADMIN ", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	await expectRefused("§1 a Dispatcher, as \"Dispatch\", to the investor desk", m, db, U.disp, { from: "Dispatch", to: "admin", message: "hey" }, 403, "MESSAGE_RECIPIENT");
+	{
+		const r = await expectRefused("§1 a Dispatcher to a name no account holds", m, db, U.disp, { from: "Dispatch", to: "Nobody Here", message: "hey" }, 422, "MESSAGE_RECIPIENT");
+		ok(`§1 ...a Dispatcher's 422 asks for a driver only (got "${errorOf(r)}")`, /driver/i.test(errorOf(r)) && !/investor/i.test(errorOf(r)));
+		const s = await expectRefused("§1 a Super Admin to a name no account holds", m, db, U.sa, { from: "Dispatch", to: "Nobody Here", message: "hey" }, 422, "MESSAGE_RECIPIENT");
+		ok(`§1 ...a Super Admin's 422 still offers a driver or an investor (got "${errorOf(s)}")`, /driver/i.test(errorOf(s)) && /investor/i.test(errorOf(s)));
+	}
+	// What must still go through.
+	await expectSent("§1 the same Dispatcher, as \"Dispatch\", to a driver", m, db, U.disp,
+		{ from: "Dispatch", to: DRIVER_B, message: "Pickup moved to 9" },
+		{ name: "stored from \"Dispatch\" to the driver", test: (row) => row.f === "Dispatch" && row.t === DRIVER_B });
+	await expectSent("§1 the same Dispatcher under his own name to a driver", m, db, U.disp,
+		{ from: U.disp.username, to: DRIVER_A, message: "Call me" },
+		{ name: "stored from his own name to the driver", test: (row) => row.f === U.disp.username && row.t === DRIVER_A });
+	await expectSent("§1 a Super Admin, as \"Dispatch\", to an investor (another case)", m, db, U.sa,
+		{ from: "Dispatch", to: INVESTOR.toUpperCase(), message: "Statement ready" },
+		{ name: "stored to the investor", test: (row) => row.f === "Dispatch" && row.t === INVESTOR });
+	await expectSent("§1 a Super Admin under his own name to an investor", m, db, U.sa,
+		{ from: U.sa.username, to: INVESTOR_2, message: "Following up" },
+		{ name: "stored from his own name to the investor", test: (row) => row.f === U.sa.username && row.t === INVESTOR_2 });
+	await expectSent("§1 an Investor to \"admin\"", m, db, U.inv,
+		{ from: INVESTOR, to: "admin", message: "Thanks" },
+		{ name: "stored from the investor to \"admin\"", test: (row) => row.f === INVESTOR && row.t === "admin" });
 }
 
 // ---------------------------------------------------------------------------
