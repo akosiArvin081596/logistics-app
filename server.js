@@ -41877,9 +41877,11 @@ function restoreStamp(v) {
 //   or the plan: { id, key, loadId (as stored), label (the sheet's Load ID),
 //     deleteRecords, canRestore, refusal ({ status, code, error, periods?, ... }
 //     or null), row, months, deleteRecordMonths, revenue, invoices, ledger,
-//     inFlight, possibleDuplicates, timeOffOverlap, fingerprint, check }
+//     inFlight, possibleDuplicates, timeOffOverlap, fingerprint, check,
+//     timeOffSpan }
 //   `check` holds what the write re-checks inside its transaction; it is never
-//   sent to a browser (restorePreviewBody()).
+//   sent to a browser (restorePreviewBody()). `timeOffOverlap` stays [] here: the
+//   preview route fills it from `timeOffSpan` (driver and window, never sent).
 // After a refusal the later parts are not computed (their fields stay empty).
 //
 // ⚠️ WRITE-FREE (the plan's M2): only reads. The ledger comes from
@@ -42031,17 +42033,10 @@ async function restorePlanFor(deletedId, { jobTracking: snapshot = null } = {}) 
 		});
 		plan.possibleDuplicates = deletedLoadRestore.possibleDuplicates({ target: shape(mine), others: live.data.map(shape), normalizeRef: loadSearchRefs.normalizeRef });
 	}
-	if (DRIVER_AVAILABILITY_ENABLED && driverNorm && windowDays.length) {
-		// Time off (R11) overlapping the window: informational, never a refusal.
-		try {
-			plan.timeOffOverlap = db.prepare("SELECT driver_name, kind, from_date, to_date FROM driver_availability WHERE cancelled_at IS NULL AND from_date <= ? AND to_date >= ? ORDER BY from_date")
-				.all(windowDays[windowDays.length - 1], windowDays[0])
-				.filter((t) => normalizeDriverName(t.driver_name) === driverNorm)
-				.map((t) => ({ kind: t.kind, from: t.from_date, to: t.to_date }));
-		} catch (e) {
-			console.error("Restore: time off unreadable:", e.message);
-		}
-	}
+	// Time off (R11) is display only: the preview route reads it for this span, so
+	// this plan, the restore and the fingerprint never read it
+	// (scripts/test-driver-availability-guards.js §3).
+	if (driverNorm && windowDays.length) plan.timeOffSpan = { driver: driverNorm, from: windowDays[0], to: windowDays[windowDays.length - 1] };
 
 	plan.canRestore = true;
 	plan.fingerprint = deletedLoadRestore.restoreFingerprint({
@@ -42051,10 +42046,10 @@ async function restorePlanFor(deletedId, { jobTracking: snapshot = null } = {}) 
 	return plan;
 }
 
-// The preview as a browser gets it: the plan without `check`, a refusal without
-// its internal fields.
+// The preview as a browser gets it: the plan without `check` or `timeOffSpan`, a
+// refusal without its internal fields.
 function restorePreviewBody(plan) {
-	const { check, refusal, ...rest } = plan;
+	const { check, refusal, timeOffSpan, ...rest } = plan;
 	let shown = null;
 	if (refusal) {
 		const { status, periodKind, extra, ...body } = refusal;
@@ -42200,7 +42195,22 @@ app.get("/api/admin/deleted-loads/:id/restore-preview", requireRole("Super Admin
 		const plan = await restorePlanFor(id);
 		if (plan.notFound) return res.status(404).json({ error: "That load is not deleted (it may have been restored already). Reload the page.", code: "LOAD_NOT_DELETED" });
 		if (plan.unreadable) return res.status(503).json({ error: "The deleted loads could not be read. Try again in a moment.", code: "DELETED_LOADS_UNREADABLE" });
-		res.json(restorePreviewBody(plan));
+		const body = restorePreviewBody(plan);
+		// Time off (R11) overlapping the load's window: shown, never a refusal. It
+		// is read here, after the plan, so it can change no figure, the fingerprint
+		// or the restore (scripts/test-driver-availability-guards.js §3,
+		// scripts/test-deleted-load-restore.js 11d).
+		if (DRIVER_AVAILABILITY_ENABLED && plan.timeOffSpan) {
+			try {
+				body.timeOffOverlap = db.prepare("SELECT driver_name, kind, from_date, to_date FROM driver_availability WHERE cancelled_at IS NULL AND from_date <= ? AND to_date >= ? ORDER BY from_date")
+					.all(plan.timeOffSpan.to, plan.timeOffSpan.from)
+					.filter((t) => normalizeDriverName(t.driver_name) === plan.timeOffSpan.driver)
+					.map((t) => ({ kind: t.kind, from: t.from_date, to: t.to_date }));
+			} catch (e) {
+				console.error("Restore: time off unreadable:", e.message);
+			}
+		}
+		res.json(body);
 	} catch (error) {
 		console.error("Error previewing a restore:", error.message);
 		res.status(500).json({ error: "The restore preview could not be computed." });

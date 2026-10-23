@@ -12,7 +12,9 @@
 //   §3 in server.js every mention of a tracked name sits inside an allowlisted
 //      declaration or route: the migration and the availability routes, the
 //      directory list and delete, eldFeedSnapshot(), the helpers themselves, the
-//      five assign routes, the dashboard and the trucks list. So the payout
+//      five assign routes, the dashboard, the trucks list and the restore
+//      preview route (its display-only timeOffOverlap; restorePlanFor() and
+//      commitRestore() are checked by name like the money paths). So the payout
 //      builders, Financials, the fixed-cost and projection queries and the
 //      invoice generator can neither read the table nor call a helper that does.
 //      The driver app's payload (GET /api/driver/:driverName) is NOT allowlisted:
@@ -171,6 +173,11 @@ async function moneyViews(withRow) {
 			'app.post("/api/data",',
 			'app.get("/api/dashboard",',
 			'app.get("/api/trucks",',
+			// The restore preview's timeOffOverlap (R11, display only): read in the
+			// route after restorePlanFor(), which with commitRestore() stays off this
+			// list (§3.2), so the restore, its ledger figures and its fingerprint
+			// cannot read time off (scripts/test-deleted-load-restore.js 11d).
+			'app.get("/api/admin/deleted-loads/:id/restore-preview",',
 		];
 		const isHead = (l) => /^[^\s}\])`/]/.test(l);
 		const headOf = (i) => { for (let j = i; j >= 0; j--) if (isHead(code[j])) return j; return -1; };
@@ -208,7 +215,7 @@ async function moneyViews(withRow) {
 		// The money paths, by name: none is on the allowlist, so §3.1 covers them;
 		// asserted directly as well so a rename cannot slip one onto it.
 		const money = ["computeInvestorMonthlyEarnings", "buildFinancialsLedger", "buildFinancialsReport", "generateInvoiceHandler", "truckMonthlyFixed",
-			"financialsExtraItems", "computeFleetLedger", "computeLossCarryForward"];
+			"financialsExtraItems", "computeFleetLedger", "computeLossCarryForward", "restorePlanFor", "commitRestore"];
 		for (const fn of money) {
 			const at = SRC.indexOf(`\nfunction ${fn}(`) >= 0 ? SRC.indexOf(`\nfunction ${fn}(`) : SRC.indexOf(`\nasync function ${fn}(`);
 			if (at < 0) { ok(`§3.2 ${fn}() is in server.js`, false); continue; }

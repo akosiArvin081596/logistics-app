@@ -1093,7 +1093,9 @@ async function getDataGate(routeSrc) {
 // shipped liveJobTrackingView(), excludeDroppedLoads(), findCol(),
 // sanitizeBrokerColumns() and module, a real in-memory SQLite and stubs for the
 // rest. No other route adds `_refs`: liveJobTrackingView() feeds
-// /api/driver, /api/investor and /api/financials too.
+// /api/driver, /api/investor and /api/financials too. The restore preview's
+// duplicate check (restorePlanFor()) is the module's one other caller; it serves
+// no reference (pinned below).
 // ---------------------------------------------------------------------------
 const DASH_HEAD = 'app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, res) => {';
 const DASH_SRC = extractRoute(DASH_HEAD);
@@ -1220,8 +1222,44 @@ asyncChecks.push(dashboardSection().then(record).catch((e) => check(`§8b the da
 	const code = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
 	const call = code(DASH_SRC);
 	const at = call.indexOf("annotateLoadSearchRefs(");
-	check("the module is called once in server.js, inside the dashboard handler",
-		[code(SRC).split("annotateLoadSearchRefs(").length - 1, at > 0, code(SRC).split("load-search-refs").length - 1], [1, true, 1]);
+	// The one other call site: restorePlanFor(), the restore preview's duplicate
+	// check (restore plan 3b, L5: a live load sharing a B19 number with the deleted
+	// one). It runs only for the two Super Admin restore routes, on request-local
+	// copies, and returns no reference: a possible duplicate names the other load
+	// and why, never the number. scripts/test-deleted-load-restore.js 11c runs it.
+	const plan = code(extractAsync("restorePlanFor"));
+	check("the module is called twice in server.js: inside the dashboard handler and inside restorePlanFor() (the restore preview's duplicate check)",
+		[code(SRC).split("annotateLoadSearchRefs(").length - 1, at > 0, plan.split("annotateLoadSearchRefs(").length - 1, code(SRC).split("load-search-refs").length - 1], [2, true, 1, 2]);
+	const binding = 'const loadSearchRefs = require("./lib/load-search-refs");';
+	const named = code(SRC).split("\n").filter((l) => /\bloadSearchRefs\b/.test(l));
+	check("...its second binding (loadSearchRefs) is named only by its require and inside restorePlanFor()",
+		[named.filter((l) => l === binding).length, named.length - plan.split("\n").filter((l) => /\bloadSearchRefs\b/.test(l)).length], [1, 1]);
+	check("...restorePlanFor() annotates request-local copies only (the view's rows and a spread copy of the returning row)",
+		[/const live = liveJobTrackingView\(jobTracking\);/.test(plan), /const mine = \{ \.\.\.back \};/.test(plan),
+			/loadSearchRefs\.annotateLoadSearchRefs\(\{ db, headers: live\.headers, rows: \[mine, \.\.\.live\.data\], includeDraftRefs: true, logger: console \}\);/.test(plan)],
+		[true, true, true]);
+	check("...and returns no reference: it names no _refs and reads them only through deletedLoadRestore.rowRefs()",
+		[plan.split("_refs").length - 1, /refs: deletedLoadRestore\.rowRefs\(r\)/.test(plan)], [0, true]);
+	const dupes = require("../lib/deleted-load-restore").possibleDuplicates({
+		target: { key: "80000009", loadId: "80000009", driver: "a", days: ["2030-01-10"], refs: ["7000002", "2700021"] },
+		others: [{ key: "80000001", loadId: "80000001", rowIndex: 2, driver: "b", days: ["2030-03-01"], refs: ["7000002"] }],
+		normalizeRef: loadSearchRefs.normalizeRef,
+	});
+	check("...a possible duplicate carries only { loadId, rowIndex, reasons }, never the number that matched",
+		[dupes.map((d) => Object.keys(d).join()), /7000002|2700021/.test(JSON.stringify(dupes))], [["loadId,rowIndex,reasons"], false]);
+	const lines = code(SRC).split("\n");
+	const callers = [];
+	lines.forEach((l, i) => {
+		if (!/\brestorePlanFor\(/.test(l) || l.startsWith("async function restorePlanFor(")) return;
+		let j = i;
+		while (j >= 0 && !/^[^\s}\])`/]/.test(lines[j])) j--;
+		callers.push(j < 0 ? "?" : lines[j]);
+	});
+	check("...restorePlanFor() is called only by the two Super Admin restore routes, so its result reaches no other response",
+		callers, [
+			'app.get("/api/admin/deleted-loads/:id/restore-preview", requireRole("Super Admin"), async (req, res) => {',
+			'app.post("/api/admin/deleted-loads/:id/restore", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {',
+		]);
 	check("...after the three served lists are built (broker columns blanked) and before the answer",
 		[call.indexOf("const respCompleted = ") < at, at < call.indexOf("res.json({")], [true, true]);
 	check("...on the three served lists, with draft numbers for a Super Admin only",

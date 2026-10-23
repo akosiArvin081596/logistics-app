@@ -33,6 +33,8 @@
  *   9   the flag off
  *   10  a paid payout for the month
  *   11  the preview's invoices, row, in-flight note, duplicates, fingerprint
+ *   11c a duplicate by an invoice draft's number; no answer carries a reference
+ *   11d time off is display only: it changes no figure, nor the fingerprint
  *   12  money: revenue moves, every other table byte-identical
  *   13  notices carry no reason, and withhold a Load ID from a Dispatcher
  *   15b the switch-on report reads only, and agrees with the preview
@@ -809,6 +811,62 @@ const R = W.createRunner("Restore a deleted load: the ledger before and after, a
 		// The second PREVIEW_STALE inside the same minute is coalesced into the
 		// first (logAuditRefusal(): one row per user, action and code a minute).
 		eq("the refusals were audited, a repeat in the same minute coalesced", auditsOf(w, "restore_load_blocked").map((a) => /\[(DUPLICATE_UNCONFIRMED|PREVIEW_STALE)\]/.exec(a.details)?.[1]), ["DUPLICATE_UNCONFIRMED", "PREVIEW_STALE"]);
+	});
+
+	await R.test("11c Possible duplicates by an invoice draft's number (a B19 number, Super Admin only): the preview names the other load and the reason; no answer (the preview, 409 DUPLICATE_UNCONFIRMED, the restore) and no audit row carries _refs, a draft number, its recipient, broker name or notes", async ({ eq }) => {
+		const w = routeWorld({
+			rows: [
+				row({ id: "RL-31", driver: ANN, pickup: "2026-10-06 8:00", dropoff: "2026-10-07 18:00", assigned: "2026-10-06", done: "2026-10-07" }),
+				row({ id: "RL-32", driver: BO, truck: "T2", pickup: "2026-10-20 8:00", dropoff: "2026-10-20 18:00", assigned: "2026-10-20", done: "2026-10-20" }),
+			],
+			deleted: [{ id: "rl-31", row: 2 }],
+		});
+		const have = w.db.prepare("PRAGMA table_info(load_invoice_drafts)").all().map((c) => c.name);
+		for (const c of ["overrides_json", "notes"]) if (!have.includes(c)) w.db.exec(`ALTER TABLE load_invoice_drafts ADD COLUMN ${c} TEXT DEFAULT ''`);
+		const draft = w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, broker_name, order_number, overrides_json, notes) VALUES (?, ?, ?, ?, ?, ?, ?)");
+		draft.run("RL-31", "10062026-1", "ap.desk@example.invalid", "Example Freight Brokers", "7731001-$500 ADV", JSON.stringify({ poNumber: "2731001" }), "Advance taken 0717");
+		draft.run("RL-32", "10202026-1", "ap.desk@example.invalid", "Example Freight Brokers", "7731001", "", "");
+		const s = routeServer(w);
+		const id = idOf(w, "rl-31");
+		const p = await preview(s, id);
+		eq("the preview lists RL-32 by the shared draft order number (other driver, other dates)",
+			[p.status, ((p.body && p.body.possibleDuplicates) || []).map((d) => [d.loadId, d.reasons])], [200, [["RL-32", ["same reference number"]]]]);
+		const noTick = await restore(s, id, { confirm: true, reason: REASON, fingerprint: p.body && p.body.fingerprint });
+		eq("no tick: DUPLICATE_UNCONFIRMED", [noTick.status, noTick.body && noTick.body.code], [409, "DUPLICATE_UNCONFIRMED"]);
+		const done = await restore(s, id, { confirm: true, reason: REASON, fingerprint: p.body && p.body.fingerprint, notDuplicate: true });
+		eq("ticked: restored", done.status, 200);
+		const LEAK = /_refs|7731001|2731001|10062026-1|10202026-1|example\.invalid|Example Freight|Advance taken/;
+		eq("no answer carries a reference, a draft number or a draft's text",
+			[p.body, noTick.body, done.body].map((b) => (LEAK.exec(JSON.stringify(b)) || [null])[0]), [null, null, null]);
+		eq("...nor the refusal's audit row", (LEAK.exec(auditsOf(w, "restore_load_blocked").map((a) => a.details).join("\n")) || [null])[0], null);
+	});
+
+	await R.test("11d Time off (R11) is display only: with DRIVER_AVAILABILITY_ENABLED on, a vacation over the load's window shows in timeOffOverlap, every other preview field (figures, invoices, refusal, fingerprint) is identical to the same preview without it, and the restore takes the no-time-off fingerprint", async ({ eq }) => {
+		const mk = (withRow) => {
+			const w = routeWorld({
+				rows: [row({ id: "RL-41", driver: ANN, pickup: "2026-10-06 8:00", dropoff: "2026-10-08 18:00", assigned: "2026-10-06", done: "2026-10-08", payment: "$1,900.00" })],
+				deleted: [{ id: "rl-41", row: 2 }],
+				env: { DRIVER_AVAILABILITY_ENABLED: "true" },
+			});
+			if (withRow) {
+				const dir = w.db.prepare("SELECT id FROM drivers_directory WHERE driver_name = ?").get(ANN).id;
+				w.db.prepare(`INSERT INTO driver_availability (directory_id, driver_name, kind, from_date, to_date, reason, created_by, created_at)
+					VALUES (?, ?, 'vacation', '2026-10-01', '2026-10-31', 'Vacation', 'super_admin', '2026-09-30T12:00:00Z')`).run(dir, ANN);
+			}
+			return w;
+		};
+		const plain = mk(false);
+		const off = mk(true);
+		const a = await preview(routeServer(plain), idOf(plain, "rl-41"));
+		const sOff = routeServer(off);
+		const b = await preview(sOff, idOf(off, "rl-41"));
+		eq("the overlap shows only where the row exists", [a.status, a.body.timeOffOverlap, b.status, b.body.timeOffOverlap],
+			[200, [], 200, [{ kind: "vacation", from: "2026-10-01", to: "2026-10-31" }]]);
+		const rest = (body) => { const { timeOffOverlap, ...r } = body; return JSON.stringify(r); };
+		eq("every other field is identical (ledger, invoices, revenue, refusal, fingerprint)", rest(b.body), rest(a.body));
+		eq("...on a restorable preview whose ledger moves, with no internal span served", [b.body.canRestore, b.body.ledger.scopes.length > 0, "timeOffSpan" in b.body], [true, true, false]);
+		const done = await restore(sOff, idOf(off, "rl-41"), { confirm: true, reason: REASON, fingerprint: a.body.fingerprint });
+		eq("the restore takes the no-time-off fingerprint and restores", [done.status, deleteRows(off)], [200, []]);
 	});
 
 	await R.test("12 Money: restoring an October load raises the fleet's October revenue by its Payment; every other table (invoices, paid days, payouts and their history, the closed month's freeze) is byte-identical and audit_trail only grows", async ({ eq, ok }) => {
