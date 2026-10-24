@@ -21,8 +21,8 @@
     "socket.io-client": "^4.8.4",
     "tailwind-merge": "^3.7.0",
     "vant": "^4.10.2",
-    "vue": "^3.5.43",
-    "vue-pdf-embed": "^2.1.6",
+    "vue": "^3.5.44",
+    "vue-pdf-embed": "^2.1.7",
     "vue-router": "^4.5.0"
   },
   "//overrides": "vue-pdf-embed@2.1.5 pins pdfjs-dist ^5.7.284, which is inside the CVE-2026-16633 range (>=5.6.83 <6.2.108, arbitrary JS execution from a malicious PDF). 2.1.5 is the latest release and no 5.x backport exists, so the only forward fix is to force 6.2.108 past that range. $pdfjs-dist references the dependency spec above so the two can never drift. NOTE: this override is only load-bearing because PdfZoomViewer.vue imports vue-pdf-embed/dist/index.essential.mjs — the package's DEFAULT entry inlines pdf.js and would ignore it entirely. See the comment in that file before changing either half.",
@@ -34,6 +34,6 @@
     "@vitejs/plugin-vue": "^5.2.3",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
-    "vite": "^6.4.4"
+    "vite": "^6.4.5"
   }
 }
