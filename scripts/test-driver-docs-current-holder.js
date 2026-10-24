@@ -287,6 +287,9 @@ const driverDb = {
 		return { all: () => [], get: () => undefined, run: () => ({}) };
 	},
 };
+// Each invoice card's pay_basis: the shipped invoicePayBasesOf() over that db.
+const invoicePayBasesOf = new Function("db",
+	`${liftFn("invoicePayBasis")}\n${liftFn("invoicePayBasesOf")}\nreturn invoicePayBasesOf;`)(driverDb);
 const driverDeps = (over = {}) => ({
 	requireRole, requireAuth, normalizeDriverName, findCol,
 	sanitizeBrokerColumns: (headers, rows) => rows,
@@ -303,6 +306,7 @@ const driverDeps = (over = {}) => ({
 	personalSummaryByExpense: () => Object.create(null),
 	personalSummaryForRole: () => null,
 	personalLinesForInvoices: () => new Map(),
+	invoicePayBasesOf,
 	ONBOARDING_DOCS: [],
 	DRIVER_TIME_OFF_SCREEN_ENABLED: false,
 	driverInstructions: { annotateDriverLoads() {} },

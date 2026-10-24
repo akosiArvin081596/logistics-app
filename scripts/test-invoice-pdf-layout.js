@@ -344,5 +344,17 @@ test("D4 TOTAL DUE stays with the rows above it: on the weekly invoice no table 
 	ok("service_invoice_manual: nor DRIVER OWES", declares(TEMPLATES.service_invoice_manual, ".pay-summary .owed-row", "break-before: avoid"));
 });
 
+test("D5 (B23, 2026-10-23) Each day row prints its date under the weekday: the day cell holds a \"<weekday> date\" slot after the weekday, on its own line and smaller, filled as text (a span, never an <input>) and taking no room when empty, so a stored invoice without dates prints as before; the field map asks for it on every weekday. Base: no slot", ({ eq, ok }) => {
+	const html = TEMPLATES.service_invoice;
+	const s = slot(html, "${day} date");
+	eq("the slot's element", s && s.tag, "span");
+	ok("in the day cell, right after the weekday", html.includes('<td class="day-cell">${day}<span class="day-date" aria-label="${day} date"></span></td>'));
+	const r = rule(html, ".service-table .day-cell .day-date");
+	ok("on its own line", /display:\s*block/.test(r), r || "(no .service-table .day-cell .day-date rule)");
+	ok("smaller than the table's 14px", /font-size:\s*1[0-2]px/.test(r), r);
+	ok("no box, border, padding or minimum height: an empty slot takes no room", r && !/min-height|border|padding/.test(r), r);
+	eq("the field map asks for it on every weekday", WEEK.map((d) => `${d} date` in FIELD_MAPS.service_invoice({}).text), WEEK.map(() => true));
+});
+
 console.log(`\n${passed} passed, ${failed} failed (of ${passed + failed})`);
 process.exit(failed ? 1 : 0);

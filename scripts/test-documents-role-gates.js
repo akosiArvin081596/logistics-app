@@ -485,12 +485,16 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 	console.log("\n§4  GET /api/driver/:driverName — the diagnostic block");
 	// =========================================================================
 	// A sheet with loads, none of them Nolan's: the "no_loads_for_driver" case.
+	const emptyDb = { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) };
 	const driverDeps = {
 		requireRole, requireAuth, normalizeDriverName, findCol,
 		sanitizeBrokerColumns: (headers, rows) => rows,
 		findDirectoryRowForDriver: () => null,
 		findTruckForDriver: () => null,
-		db: { prepare: () => ({ all: () => [], get: () => undefined, run: () => ({}) }) },
+		db: emptyDb,
+		// Each invoice card's pay_basis: the shipped invoicePayBasesOf() over that db.
+		invoicePayBasesOf: new Function("db",
+			`${liftFn("invoicePayBasis")}\n${liftFn("invoicePayBasesOf")}\nreturn invoicePayBasesOf;`)(emptyDb),
 		getJobTrackingCached: async () => JT,
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((x) => ({ ...x })) }),
 		voiceNotes: require("../lib/voice-notes"),

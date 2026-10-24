@@ -31,10 +31,13 @@
  *      shows one "Admin adjustment" line just above the Total, signed and
  *      formatted as the PDF's adjustment line, with the reason escaped; an
  *      invoice with no adjustment shows none. Manual invoices too. The subject
- *      carries no amount.
+ *      carries no amount. Its counts say what they hold (B23, 2026-10-23):
+ *      "Days paid / Daily rate / Loads" on a daily-rate invoice, "Loads /
+ *      Pay %" on a percentage one, "Line items" on a manual one.
  *   §3 NO ADJUSTMENT, NO CHANGE. With adjustment 0 or null, every email is
  *      byte-identical to the one origin/main sent (sha256 captured on main at
- *      e48f89c, before this change).
+ *      e48f89c, before this change; the daily-rate submit email's re-captured
+ *      with B23's count rows).
  *   §4 MUTANTS — each email reverting to total_earnings, the adjustment line
  *      dropped, and the line shown for a zero adjustment must each flip at
  *      least one assertion above.
@@ -68,7 +71,7 @@ function liftBetween(src, needle, terminator, label) {
 const liftFn = (src, name) => liftBetween(src, `\nfunction ${name}(`, "\n}\n", `function ${name}()`);
 const liftRoute = (src, head) => liftBetween(src, `\n${head}`, "\n});\n", head);
 
-const FNS = ["escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "invoiceTotalDue"];
+const FNS = ["escHtml", "invoiceEmailHtml", "invoiceStatusChangeEmail", "invoiceTotalDue", "invoicePayBasis", "invoiceLoadCount", "invoiceCountRows"];
 const SUBMIT = 'app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {';
 const APPROVE = 'app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res) => {';
 
@@ -80,7 +83,8 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
 	adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '',
 	deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0,
-	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0)`;
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0,
+	load_ids TEXT DEFAULT '[]', render_data TEXT DEFAULT '')`;
 
 const ROOTS = [];
 function buildWorld(src) {
@@ -141,11 +145,11 @@ async function callRoute(w, key, req) {
 }
 function insertInvoice(db, f) {
 	return db.prepare(
-		`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, total_earnings, status, pdf_file_name, adjustment, adjustment_note, is_manual)
-		 VALUES (@invoice_number, @driver, @week_start, @week_end, @loads_count, @total_earnings, @status, @pdf_file_name, @adjustment, @adjustment_note, @is_manual)`
+		`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, pdf_file_name, adjustment, adjustment_note, is_manual, load_ids, render_data)
+		 VALUES (@invoice_number, @driver, @week_start, @week_end, @loads_count, @rate_per_load, @total_earnings, @status, @pdf_file_name, @adjustment, @adjustment_note, @is_manual, @load_ids, @render_data)`
 	).run({
-		driver: "Soren King", week_start: "2026-10-03", week_end: "2026-10-09", loads_count: 5,
-		total_earnings: 1500, status: "Draft", adjustment: 0, adjustment_note: "", is_manual: 0,
+		driver: "Soren King", week_start: "2026-10-03", week_end: "2026-10-09", loads_count: 5, rate_per_load: 250,
+		total_earnings: 1500, status: "Draft", adjustment: 0, adjustment_note: "", is_manual: 0, load_ids: "[]", render_data: "",
 		pdf_file_name: `${f.invoice_number}.pdf`, ...f,
 	}).lastInsertRowid;
 }
@@ -241,10 +245,21 @@ async function batterySubmit(src) {
 	}
 	const plain = await submitEmail(w, { invoice_number: "INV-SK-2026W41-04", total_earnings: 1500 });
 	t("§2 no adjustment: no adjustment line, the Total is total_earnings",
-		[submitRows(plain.html).map(([l]) => l), submitTotal(plain.html)], [["Invoice", "Driver", "Week", "Loads", "Total"], 1500]);
+		[submitRows(plain.html).map(([l]) => l), submitTotal(plain.html)], [["Invoice", "Driver", "Week", "Days paid", "Daily rate", "Loads", "Total"], 1500]);
+	// B23: a daily-rate invoice's loads_count is its paid days and rate_per_load its
+	// daily rate; its loads are load_ids. A percentage invoice's are its loads and
+	// its pay %. invoiceCountRows() names them, as the Invoices panel does.
+	const daily = await submitEmail(w, { invoice_number: "INV-SK-2026W41-08", loads_count: 7, rate_per_load: 300, total_earnings: 2100,
+		load_ids: JSON.stringify(["SK1", "SK2", "SK3", "SK4", "SK5", "SK6"]), render_data: JSON.stringify({ __templateName: "service_invoice" }) });
+	t("§2 a daily-rate invoice: Days paid 7, Daily rate $300.00, Loads 6 (its load_ids)",
+		submitRows(daily.html).slice(3, 6), [["Days paid", "7"], ["Daily rate", "$300.00"], ["Loads", "6"]]);
+	const pct = await submitEmail(w, { invoice_number: "INV-SK-2026W41-07", loads_count: 4, rate_per_load: 30, total_earnings: 900,
+		load_ids: JSON.stringify(["SK7", "SK8", "SK9", "SK10"]), render_data: JSON.stringify({ __templateName: "service_invoice_owner_op" }) });
+	t("§2 a percentage invoice: Loads 4, Pay % 30%", submitRows(pct.html).slice(3, -1), [["Loads", "4"], ["Pay %", "30%"]]);
 	const manual = await submitEmail(w, { invoice_number: "INV-MAN-2026W41-01", driver: "Ana Office", is_manual: 1, loads_count: 2, total_earnings: 980.25, adjustment: -80.25, adjustment_note: "Advance" });
 	t("§2 a manual invoice: the adjustment line and the total due",
 		submitRows(manual.html).slice(-2), [["Admin adjustment <em>Advance</em>", "-$80.25"], ["Total", "$900.00"]]);
+	t("§2 a manual invoice: Line items, no rate", submitRows(manual.html).slice(3, -2), [["Line items", "2"]]);
 	const hostile = await submitEmail(w, { invoice_number: "INV-SK-2026W41-05", total_earnings: 900, adjustment: -100, adjustment_note: `<img src=x onerror="alert(1)"> & 'more'` });
 	t("§2 the adjustment reason is escaped",
 		submitRows(hostile.html).slice(-2)[0][0], "Admin adjustment <em>&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &amp; &#39;more&#39;</em>");
@@ -258,12 +273,15 @@ async function batterySubmit(src) {
 // sha256 of each no-adjustment email as origin/main (e48f89c) built it. To
 // re-capture after a deliberate template change, read the "got" line of a
 // failure here — only once the change is meant to alter every invoice's email.
+// "submit" was re-captured for B23 (2026-10-23): a daily-rate invoice's rows
+// read "Days paid / Daily rate / Loads" where they read "Loads"; every other
+// email here, the manual one's included, is still e48f89c's byte for byte.
 const MAIN_GOLDEN = {
 	"status approve": "5ac559a4fd7d38758d300f8103d51faee124250e142bc93cc88de1dcc9d244df",
 	"status processing": "2bf58b26762c934d303f2203d596ccd49fcce9b5a3ee048990084e1e1e24ccb4",
 	"status paid": "c6bdfc345db9249bffcd48c8f0ff216be038e83b92ee6ea023a691743379ef13",
 	"status reject": "506ed0077ebedb397dc6c53edd57347bc7504d4d0e878eae21ad5e8038e29f3c",
-	"submit": "16c91fe7a33192d02ab4dfb5079468fd58861086c2785bd1a9b40b4587f06a1a",
+	"submit": "d706b4c7ef02451941a0903d377b3b82392ddfecd344184353ebb4614ca53197",
 	"submit manual": "2cde1faa17fbb2d5f0bd52fc3465155597178168f43e370220072c4126d45ca2",
 };
 // Each email's HTML with its (per-row unique) invoice number folded to "INV".
@@ -287,8 +305,8 @@ async function batteryUnchanged(src) {
 		got["submit manual"] = shaOf(mm.html, `INV-MAN-2026W41-${tag}`);
 		byAdjustment[tag] = got;
 	}
-	t("§3 adjustment 0: every email is byte-identical to origin/main's", byAdjustment["0"], MAIN_GOLDEN);
-	t("§3 adjustment null: every email is byte-identical to origin/main's", byAdjustment["null"], MAIN_GOLDEN);
+	t("§3 adjustment 0: every email is byte-identical to its recorded golden (origin/main's; the daily submit email's since B23)", byAdjustment["0"], MAIN_GOLDEN);
+	t("§3 adjustment null: every email is byte-identical to its recorded golden (origin/main's; the daily submit email's since B23)", byAdjustment["null"], MAIN_GOLDEN);
 	return out;
 }
 

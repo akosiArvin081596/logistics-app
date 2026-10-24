@@ -20350,6 +20350,9 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 		// The Daily Rate column's figure for the day, as a generated invoice stores it.
 		cell.rate = e.rate;
 		cell.loadBol = e.loads.join(", ");
+		// The PDF names a late day's loads (trip days) as it names the grid's: a
+		// stored grid without `listed` prints loadBol, as before.
+		if (Array.isArray(cell.listed)) { cell.listed = [...e.loads]; cell.scheduled = []; }
 		added.push(e);
 	}
 	if (!added.length) return null;
@@ -21029,11 +21032,23 @@ function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = I
 // generateInvoiceHandler() and scripts/blank-pickup-dry-run.js both call it, so
 // the dry run computes exactly the days generate pays. `blankPickupFrom` is
 // INVOICE_BLANK_PICKUP_FALLBACK_FROM (null while off); only the dry run passes
-// another. Returns { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads }:
-// blankPickupLoads names each load whose window started at its Assigned Date
-// and that pays a day of the invoice no other load, trip rule or added day pays;
-// tripErrors each load the trip work-day rule could not read ({ loadId, error }:
-// its window paid it).
+// another. Returns { activeDaySet, dayLoadMap, dayListed, dayScheduled,
+// dayPayMonth, blankPickupLoads, tripErrors }: dayLoadMap the loads that pay
+// each day (the grid's loadBol; its readers take a day's pay month from them,
+// as dayPayMonth does); blankPickupLoads each load whose window started at its
+// Assigned Date and that pays a day of the invoice no other load, trip rule or
+// added day pays; tripErrors each load the trip work-day rule could not read
+// ({ loadId, error }: its window paid it).
+//
+// dayListed is the loads each paid day lists on the invoice (B23, 2026-10-23),
+// built once the overrides have set the paid days: a trip-rule load on its trip
+// days and an extraRuleLoads one on its days, as they pay; any other billed load
+// on each paid day of its span, from its window's first day (its Assigned Date
+// when that is later; a date that can't be read is not) to its completion day
+// (invoiceCompletionDay(), else the window's last day), in sheet order. A paid
+// day no load is listed on lists its paying loads, and dayScheduled names them
+// (the PDF prints each "<id> (scheduled)"). Neither changes which days are paid
+// or what they pay.
 function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
 	const { loadIdCol } = cols;
 	const tripErrors = [];
@@ -21079,6 +21094,13 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	const fallbackPayers = {};
 	const paidOtherwise = new Set();
 	const fallbackLoads = [];
+	// For dayListed, built after the overrides: in sheet order, each load and the
+	// days it is listed on ({ id, days } for the trip rule and extraRuleLoads,
+	// { id, from, to } for a window's span). The Assigned Date column is found on
+	// its own: monthCols is null while no pay rule reads the Assigned month, and
+	// the pay rules read it.
+	const listings = [];
+	const assignedCol = findCol(headers, /assigned.*date|date.*assigned/i);
 
 	for (const load of loads) {
 		// The window (lib/load-pay-days.js payWindow(), invoiceLoadWindow()):
@@ -21106,6 +21128,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 					if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
 				}
+				listings.push({ id: ruleLid, days: new Set(trip) });
 				continue;
 			}
 		}
@@ -21159,6 +21182,17 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
 		}
+		// The load's span on the invoice: from the window's first day, or the
+		// Assigned Date when later (read as invoiceLoadWindow() reads it), to the
+		// completion day, else the window's last day.
+		const windowFrom = fmtLocalDate(start);
+		const assignedAt = assignedCol && load[assignedCol] ? moneySheetDate(load[assignedCol]) : null;
+		const assignedDay = assignedAt ? fmtLocalDate(assignedAt) : "";
+		listings.push({
+			id: lid,
+			from: assignedDay > windowFrom ? assignedDay : windowFrom,
+			to: invoiceCompletionDay(load, cols) || fmtLocalDate(end),
+		});
 	}
 	// The trip days in this week of the driver's other completed loads.
 	for (const x of extraRuleLoads) {
@@ -21169,6 +21203,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
 		}
+		listings.push({ id: x.loadId, days: new Set(x.days) });
 	}
 
 	// Apply admin overrides — Super Admin's manual (driver, date) adjustments
@@ -21193,13 +21228,27 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 						paidOtherwise.add(ds);
 						// An added day pays in its own month, as the ledger buckets it.
 						notePayMonth(ds, "");
-						// Admin-added days aren't tied to a load row, so the
-						// BoL column on the invoice grid stays empty for them.
+						// Admin-added days aren't tied to a load row, so no load pays
+						// them (dayListed may still list one, below).
 						if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 					}
 				}
 			}
 		}
+	}
+	// The loads each paid day lists on the invoice (see above), once the
+	// overrides have set the paid days: an admin-added day the loads whose span
+	// covers it, else none; a day no span covers its paying loads, "(scheduled)".
+	const dayListed = {};
+	const dayScheduled = {};
+	for (const ds of activeDaySet) {
+		const ids = [];
+		for (const l of listings) {
+			if (l.id && !ids.includes(l.id) && (l.days ? l.days.has(ds) : ds >= l.from && ds <= l.to)) ids.push(l.id);
+		}
+		const paying = dayLoadMap[ds] || [];
+		dayListed[ds] = ids.length ? ids : [...paying];
+		dayScheduled[ds] = ids.length ? [] : [...paying];
 	}
 	// The blank-pickup loads that gained the invoice a day, in sheet order: a day
 	// still paid after the overrides that only such loads pay.
@@ -21208,7 +21257,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
 	}
 	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
-	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors };
+	return { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors };
 }
 
 // How a weekly invoice prices the days invoiceWeekPaidDays() returns, for a
@@ -21225,6 +21274,40 @@ function invoiceDayPricing({ dailyRate, nameNorm, payDaily, truckRate, weekRule 
 	const rateOf = dayRater ? (ds) => dayRater(ds, dayPayMonth[ds]) : null;
 	const totalOf = (days) => (rateOf ? [...days].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : days.size * dailyRate);
 	return { rateOf, totalOf };
+}
+
+// The weekly invoice's Saturday-Friday day grid (render_data.days, the PDF's day
+// rows), from the days invoiceWeekPaidDays() returns, priced as
+// invoiceDayPricing() prices them (rateOf(ds), else dailyRate). Each of the 7
+// rows carries its `date`, the calendar day counted from weekStart (the week's
+// Saturday) by calendar arithmetic, never through a zone, worked or not. A paid
+// day adds its rate and total, `loadBol`, the loads that pay it (dayLoadMap, as
+// ever: the readers that take a day's pay month from them need exactly those),
+// `listed`, the loads the PDF names on it (dayListed), and `scheduled`, those of
+// them it names only as "(scheduled)" (dayScheduled); a day not worked keeps
+// both lists empty. Pure: generateInvoiceHandler() builds the grid with it.
+function invoiceDayGrid({ days, dayLoadMap = {}, dayListed = {}, dayScheduled = {}, rateOf = null, dailyRate, weekStart }) {
+	const startOk = /^\d{4}-\d{2}-\d{2}$/.test(String(weekStart || "")) && Number.isFinite(Date.parse(`${weekStart}T12:00:00Z`));
+	const grid = {};
+	INVOICE_GRID_DAYS.forEach((name, i) => {
+		grid[name] = { date: startOk ? dayKeyPlus(weekStart, i) : "", loadBol: "", total: 0, completed: false, listed: [], scheduled: [] };
+	});
+	for (const ds of days) {
+		const entry = grid[invoiceGridDayName(ds)];
+		const dayRate = rateOf ? rateOf(ds) : dailyRate;
+		entry.total += dayRate;
+		// The rate this day was priced at, printed in the PDF's Daily Rate column
+		// (one day per grid row, so it is the day's total).
+		entry.rate = dayRate;
+		entry.completed = true;
+		const bols = dayLoadMap[ds] || [];
+		entry.loadBol = entry.loadBol
+			? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
+			: bols.join(", ");
+		entry.listed = [...entry.listed, ...(dayListed[ds] || [])];
+		entry.scheduled = [...entry.scheduled, ...(dayScheduled[ds] || [])];
+	}
+	return grid;
 }
 
 // POST /api/invoices/generate — driver generates weekly invoice
@@ -21424,7 +21507,7 @@ async function generateInvoiceHandler(req, res) {
 		// --- Active-day algorithm for driver pay ---
 		// invoiceWeekPaidDays() (above the route) is the one copy of the week's
 		// days; scripts/blank-pickup-dry-run.js runs it too.
-		const { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
+		const { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
 			headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads, weekRule, weekStart, weekEnd: computedWeekEnd, nameNorm,
 		});
 		// A load paid from its Assigned Date (the blank-pickup fallback) is named
@@ -21497,26 +21580,8 @@ async function generateInvoiceHandler(req, res) {
 		// Generate PDF via HTML → Puppeteer pipeline (see lib/policy-renderer.js)
 		const pdfFileName = invoicePdfFileName(invoiceNumber);
 
-		// Bucket active days into the Sat–Fri template grid
-		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-		const daysMap = {};
-		for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
-		for (const ds of activeDaySet) {
-			const dt = new Date(ds + "T12:00:00");
-			const jsDay = dt.getDay(); // 0=Sun..6=Sat
-			const templateDay = DAY_NAMES[(jsDay + 1) % 7]; // shift so 6(Sat)→0, 0(Sun)→1, ...
-			const entry = daysMap[templateDay];
-			const dayRate = rateOf ? rateOf(ds) : dailyRate;
-			entry.total += dayRate;
-			// The rate this day was priced at, printed in the PDF's Daily Rate column
-			// (one day per grid row, so it is the day's total).
-			entry.rate = dayRate;
-			entry.completed = true;
-			const bols = dayLoadMap[ds] || [];
-			entry.loadBol = entry.loadBol
-				? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
-				: bols.join(", ");
-		}
+		// The Sat–Fri template grid, each row dated (invoiceDayGrid(), above the route).
+		const daysMap = invoiceDayGrid({ days: activeDaySet, dayLoadMap, dayListed, dayScheduled, rateOf, dailyRate, weekStart });
 
 		// Lookup driver's contact info + payment info for the invoice header — this
 		// driver's account in any spelling. Only when exactly ONE account carries the
@@ -26338,9 +26403,11 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 		// personal_lines: the Personal lines each carries, with their receipts
 		// (personalLinesForInvoices()); [] for none. expenses_ref_total: the
 		// Expenses figure the screen shows, a weekly invoice's receipts without
-		// their Personal parts (invoiceExpensesRefTotals()).
+		// their Personal parts (invoiceExpensesRefTotals()). pay_basis and
+		// load_count: what loads_count and rate_per_load hold, and the loads the
+		// row bills (invoicePayBasis(), invoiceLoadCount()).
 		const personalLines = personalLinesForInvoices(invoices.map((r) => r.id));
-		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));
+		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [], pay_basis: invoicePayBasis(r), load_count: invoiceLoadCount(r) }));
 		const expensesRef = invoiceExpensesRefTotals(invoices);
 		for (const r of invoices) r.expenses_ref_total = expensesRef.get(r.id);
 		res.json({ invoices, summary: invoiceListSummary(invoices) });
@@ -26407,6 +26474,46 @@ function invoiceListSummary(rows) {
 		};
 	}
 	return summary;
+}
+
+// What an invoice row's loads_count and rate_per_load hold (B23, 2026-10-23):
+// "manual" (line items, no rate), "percentage" (an owner-operator's weekly
+// invoice, render_data's __templateName service_invoice_owner_op: loads and his
+// pay %), else "daily" (paid days and the daily rate; a row stored before render
+// data reads as one). GET /api/invoices and GET /api/driver/:driverName send it
+// as pay_basis; the submit email labels by it (invoiceCountRows()).
+function invoicePayBasis(row) {
+	if (Number(row && row.is_manual)) return "manual";
+	let snap = null;
+	try { snap = JSON.parse((row && row.render_data) || "{}"); } catch { snap = null; }
+	return snap && snap.__templateName === "service_invoice_owner_op" ? "percentage" : "daily";
+}
+// The loads an invoice row bills: its load_ids' length, 0 when unreadable.
+function invoiceLoadCount(row) {
+	let ids = null;
+	try { ids = JSON.parse((row && row.load_ids) || "[]"); } catch { ids = null; }
+	return Array.isArray(ids) ? ids.length : 0;
+}
+// invoicePayBasis() of each invoice id, read for those rows only: id -> basis.
+function invoicePayBasesOf(ids) {
+	const out = new Map();
+	if (!ids.length) return out;
+	for (const r of db.prepare(`SELECT id, is_manual, render_data FROM invoices WHERE id IN (${ids.map(() => "?").join(", ")})`).all(...ids)) {
+		out.set(r.id, invoicePayBasis(r));
+	}
+	return out;
+}
+// The submit email's count rows, [label, text], labelled as the Invoices panel
+// labels them (client/src/lib/invoiceCounts.js): "Days paid / Daily rate /
+// Loads", "Loads / Pay %" or "Line items"; the daily rate printed as the panel
+// prints money ("$1,250.00").
+function invoiceCountRows(row) {
+	const count = String(Number(row.loads_count || 0));
+	const basis = invoicePayBasis(row);
+	if (basis === "manual") return [["Line items", count]];
+	if (basis === "percentage") return [["Loads", count], ["Pay %", `${Number(row.rate_per_load || 0)}%`]];
+	const rate = Number(row.rate_per_load || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	return [["Days paid", count], ["Daily rate", `$${rate}`], ["Loads", String(invoiceLoadCount(row))]];
 }
 
 // Aggregates every live (non-deleted) invoice for the payee whose billing
@@ -26748,6 +26855,10 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 				const adjustmentLine = Number.isFinite(adjustment) && adjustment !== 0
 					? `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Admin adjustment${invoice.adjustment_note ? ` <em>${escHtml(invoice.adjustment_note)}</em>` : ""}</span><b>${adjustment > 0 ? "+" : "-"}$${Math.abs(adjustment).toFixed(2)}</b></div>`
 					: "";
+				// What the invoice's counts hold, named as the Invoices panel names them.
+				const countLines = invoiceCountRows(invoice)
+					.map(([label, text]) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${escHtml(label)}</span><b>${escHtml(text)}</b></div>`)
+					.join("\n\t\t\t\t\t\t\t");
 				const html = invoiceEmailHtml({
 					heading: `New Invoice: ${escHtml(invoice.invoice_number)}`,
 					bodyHtml: `
@@ -26756,7 +26867,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Invoice</span><b>${escHtml(invoice.invoice_number)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Payee" : "Driver"}</span><b>${escHtml(invoice.driver)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Week</span><b>${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Line items" : "Loads"}</span><b>${Number(invoice.loads_count || 0)}</b></div>${adjustmentLine}
+							${countLines}${adjustmentLine}
 							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${invoiceTotalDue(invoice).toFixed(2)}</b></div>
 						</div>
 						<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:13px">The full invoice PDF is attached. Log in to the admin dashboard to approve, reject, or mark as paid.</p>
@@ -45161,6 +45272,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			.map(({ driver: _driver, ...rest }) => ({ ...rest, total_due: invoiceTotalDue(rest) }));
 		const driverInvoiceLines = personalLinesForInvoices(driverInvoices.map((r) => r.id));
 		for (const inv of driverInvoices) inv.personal_lines = driverInvoiceLines.get(inv.id) || [];
+		// pay_basis: what the card's loads_count holds (days, loads or line items;
+		// invoicePayBasis()), read for these rows only.
+		const driverInvoiceBases = invoicePayBasesOf(driverInvoices.map((r) => r.id));
+		for (const inv of driverInvoices) inv.pay_basis = driverInvoiceBases.get(inv.id) || "daily";
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
 		// pre-fill its navigation handoff and render static-map thumbnails
