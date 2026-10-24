@@ -148,6 +148,10 @@ const truckLookup = (db, src = TRUCK_LOOKUP_SRC) =>
 const HELD_BY_OTHER_SRC = [liftFn("normalizeDriverName"), liftFn("isBuiltInPropertyName"), liftFn("findDriverNameClashes"), liftFn("driverNameHeldByOtherAccount")].join("\n");
 const heldByOtherLookup = (db) =>
 	new Function("db", `"use strict";\n${HELD_BY_OTHER_SRC}\nreturn driverNameHeldByOtherAccount;`)(db);
+// ...and each invoice card's pay_basis through invoicePayBasesOf(), which reads `db`.
+const PAY_BASES_SRC = [liftFn("invoicePayBasis"), liftFn("invoicePayBasesOf")].join("\n");
+const payBasesLookup = (db) =>
+	new Function("db", `"use strict";\n${PAY_BASES_SRC}\nreturn invoicePayBasesOf;`)(db);
 
 // --- fixtures --------------------------------------------------------------
 const JT = {
@@ -215,6 +219,7 @@ function makeDeps() {
 		requireRole, requireAuth, ...helpers, db,
 		findDirectoryRowForDriver: directoryLookup(db),
 		findTruckForDriver: truckLookup(db),
+		invoicePayBasesOf: payBasesLookup(db),
 		getJobTrackingCached: async () => { reads.push("getJobTrackingCached"); return JT; },
 		liveJobTrackingView: (jt) => ({ ...jt, headers: [...jt.headers], data: jt.data.map((r) => ({ ...r })) }),
 		voiceNotes: require("../lib/voice-notes"),
