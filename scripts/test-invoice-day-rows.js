@@ -25,10 +25,13 @@
  *      whose span covers it. `loadBol` stays the loads that pay the day, exactly
  *      as before: integrity check 8, the daily-rate report and the work-days dry
  *      run take a day's pay month from it, as pricing does. A stored row without
- *      `listed` prints loadBol, as before. The week modeled on the real one
+ *      `listed` prints loadBol, as before. A load delivered before its drop-off
+ *      appointment, and one completed before its window starts, list each paid
+ *      day no span covers "(scheduled)" (§3e, §3f pin the rule; loadBol and the
+ *      days stay the base's). The week modeled on the real one
  *      (made-up IDs, ELD travel every day): 7 days, $2,100, Sat [L0, L1] ..
  *      Fri [L5].
- *   §4 NOTHING ELSE MOVES. On seven fixtures, invoiceWeekPaidDays()'s
+ *   §4 NOTHING ELSE MOVES. On nine fixtures, invoiceWeekPaidDays()'s
  *      activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads and tripErrors,
  *      and the generated grid's loadBol and total on every day and the invoice's
  *      total, are the base's (379aa71) exactly; only dayListed and dayScheduled
@@ -43,7 +46,7 @@
  *      scripts/test-invoice-day-rows-client.mjs.
  *
  * Every case fails on the base except the §4 checks of what must not move,
- * which pass on both. Made-up data only. Pure: no server, no app.db, no network,
+ * which pass on both, and the loadBol and days checks of §3e and §3f. Made-up data only. Pure: no server, no app.db, no network,
  * no browser.
  * Run: node scripts/test-invoice-day-rows.js    # exits 1 on failure
  */
@@ -141,6 +144,18 @@ const overrideRows = () => [
 	loadRow({ id: "L6", driver: NIA, pickup: "2026-10-17 8:00", dropoff: "2026-10-17 18:00", assigned: "2026-10-17", done: "2026-10-18", truck: "T7" }),
 ];
 const OVERRIDES = [{ driver: NIA, day: "2026-10-21", action: "remove" }, { driver: NIA, day: "2026-10-18", action: "add" }, { driver: NIA, day: "2026-10-23", action: "add" }];
+// Delivered Tue 10/20, before its Thu 10/22 drop-off appointment: the window
+// still pays Wed and Thu, which no span covers.
+const RUE = "Rue Hale";
+const earlyDeliveryRows = () => [
+	loadRow({ id: "Q1", driver: RUE, pickup: "2026-10-19 8:00", dropoff: "2026-10-22 18:00", assigned: "2026-10-18", done: "2026-10-20", truck: "T7" }),
+];
+// Completed Sun 10/18, before its Tue 10/20 pickup: the span runs from 10/20 to
+// 10/18 (from > to) and covers no day the window pays.
+const CAL = "Cal Voss";
+const completedBeforeWindowRows = () => [
+	loadRow({ id: "R1", driver: CAL, pickup: "2026-10-20 8:00", dropoff: "2026-10-21 18:00", assigned: "2026-10-17", done: "2026-10-18", truck: "T7" }),
+];
 
 const FIXTURES = {
 	F1_real_week: () => [NIA, world(NIA, realRows())],
@@ -150,6 +165,8 @@ const FIXTURES = {
 	F5_blank_pickup: () => [BEA, world(BEA, blankPickupRows(), { env: { INVOICE_BLANK_PICKUP_FALLBACK_ENABLED: "true", INVOICE_BLANK_PICKUP_FALLBACK_FROM: "2026-10" } })],
 	F6_trip_rule: () => [TOM, world(TOM, tripRows(), { env: { TRIP_WORK_DAYS_ENABLED: "true", TRIP_WORK_DAYS_FROM: "2026-10" }, status: tripStatus })],
 	F7_overrides: () => [NIA, world(NIA, overrideRows(), { overrides: OVERRIDES })],
+	F8_early_delivery: () => [RUE, world(RUE, earlyDeliveryRows())],
+	F9_completed_before_window: () => [CAL, world(CAL, completedBeforeWindowRows())],
 };
 
 const sortedEntries = (o) => (o ? Object.fromEntries(Object.entries(o).sort()) : null);
@@ -261,6 +278,8 @@ const BASE_LOAD_MAP = {
 	F5_blank_pickup: { "2026-10-17": ["B2"], "2026-10-18": ["B2"], "2026-10-19": ["B1", "B2"], "2026-10-20": ["B1"], "2026-10-21": ["B1"] },
 	F6_trip_rule: { "2026-10-17": ["T1"], "2026-10-18": ["T1"], "2026-10-19": ["T1"] },
 	F7_overrides: { "2026-10-17": ["L6"], "2026-10-18": [], "2026-10-19": ["L2"], "2026-10-20": ["L2", "L3"], "2026-10-23": [] },
+	F8_early_delivery: { "2026-10-19": ["Q1"], "2026-10-20": ["Q1"], "2026-10-21": ["Q1"], "2026-10-22": ["Q1"] },
+	F9_completed_before_window: { "2026-10-20": ["R1"], "2026-10-21": ["R1"] },
 };
 const none = { dayPayMonth: {}, blankPickupLoads: [], tripErrors: [] };
 const daysOf = (name) => Object.keys(BASE_LOAD_MAP[name]);
@@ -291,10 +310,17 @@ const NEW_LISTED = {
 	F5_blank_pickup: { "2026-10-17": ["B2"], "2026-10-18": ["B2"], "2026-10-19": ["B1", "B2"], "2026-10-20": ["B1"], "2026-10-21": ["B1"] },
 	F6_trip_rule: BASE_LOAD_MAP.F6_trip_rule, // the trip rule's: its trip days, as it pays them
 	F7_overrides: { "2026-10-17": ["L6"], "2026-10-18": ["L6"], "2026-10-19": ["L2"], "2026-10-20": ["L2", "L3"], "2026-10-23": [] },
+	F8_early_delivery: BASE_LOAD_MAP.F8_early_delivery,
+	F9_completed_before_window: BASE_LOAD_MAP.F9_completed_before_window,
 };
 NEW_LISTED.F2_real_week_rate_rule = NEW_LISTED.F1_real_week;
 // dayScheduled: the listed loads a paid day names only as "(scheduled)".
-const SCHEDULED_DAYS = { F3_scheduled: { "2026-10-17": ["S1", "S3"] }, F5_blank_pickup: { "2026-10-17": ["B2"] } };
+const SCHEDULED_DAYS = {
+	F3_scheduled: { "2026-10-17": ["S1", "S3"] },
+	F5_blank_pickup: { "2026-10-17": ["B2"] },
+	F8_early_delivery: { "2026-10-21": ["Q1"], "2026-10-22": ["Q1"] },
+	F9_completed_before_window: { "2026-10-20": ["R1"], "2026-10-21": ["R1"] },
+};
 const NEW_SCHEDULED = Object.fromEntries(Object.keys(BASE_LOAD_MAP).map((name) => [name,
 	Object.fromEntries(daysOf(name).map((d) => [d, (SCHEDULED_DAYS[name] || {})[d] || []]))]));
 
@@ -400,12 +426,31 @@ async function main(R) {
 		eq("listed", listedOf(g), NEW_LISTED.F4_no_assigned_date);
 	});
 
+	const scheduledOf = (g) => Object.fromEntries(GRID.map((n) => g.data && g.data.days[n]).filter((d) => d && d.completed).map((d) => [d.date, d.scheduled]));
+	await R.test("§3e A load delivered before its drop-off appointment (Q1, delivered Tue, appointment Thu) still pays Wed and Thu, which no span covers: they list Q1 \"(scheduled)\"; Mon and Tue list it bare. loadBol and the days are the base's: 4 days, $1,200. Pins the decision's rule", async ({ eq }) => {
+		const g = await W.generate(world(RUE, earlyDeliveryRows()), RUE, REAL_END);
+		eq("listed", listedOf(g), NEW_LISTED.F8_early_delivery);
+		eq("scheduled", scheduledOf(g), NEW_SCHEDULED.F8_early_delivery);
+		const text = g.data ? FIELD_MAPS.service_invoice(g.data).text : {};
+		eq("the PDF's Load/BOL slots", GRID.map((n) => text[`${n} Load/BOL number`]), ["", "", "Q1", "Q1", "Q1 (scheduled)", "Q1 (scheduled)", ""]);
+		eq("loadBol and the days, as the base stores them", storedGrid(g, REAL_END), BASE_STORED.F8_early_delivery);
+	});
+
+	await R.test("§3f A load completed before its window starts (R1, completed Sun, pickup Tue; its span's from is after its to) lists R1 \"(scheduled)\" on each day it pays, Tue and Wed. loadBol and the days are the base's: 2 days, $600. Pins the decision's rule", async ({ eq }) => {
+		const g = await W.generate(world(CAL, completedBeforeWindowRows()), CAL, REAL_END);
+		eq("listed", listedOf(g), NEW_LISTED.F9_completed_before_window);
+		eq("scheduled", scheduledOf(g), NEW_SCHEDULED.F9_completed_before_window);
+		const text = g.data ? FIELD_MAPS.service_invoice(g.data).text : {};
+		eq("the PDF's Load/BOL slots", GRID.map((n) => text[`${n} Load/BOL number`]), ["", "", "", "R1 (scheduled)", "R1 (scheduled)", "", ""]);
+		eq("loadBol and the days, as the base stores them", storedGrid(g, REAL_END), BASE_STORED.F9_completed_before_window);
+	});
+
 	// §4
 	const now = spawnChild("paid-days", {});
 	const baseFile = process.env.BASE_SERVER_JS || "";
 	const base = baseFile ? spawnChild("paid-days", { SERVER_JS: baseFile }) : null;
 
-	await R.test("§4a invoiceWeekPaidDays() on seven fixtures (real week, the daily-rate rule, scheduled loads, no Assigned Date, the blank-pickup fallback, the trip rule, Super Admin overrides): activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads and tripErrors are the base's exactly", async ({ eq }) => {
+	await R.test("§4a invoiceWeekPaidDays() on nine fixtures (real week, the daily-rate rule, scheduled loads, no Assigned Date, the blank-pickup fallback, the trip rule, Super Admin overrides, an early delivery, a completion before the window): activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads and tripErrors are the base's exactly", async ({ eq }) => {
 		for (const name of Object.keys(FIXTURES)) eq(`${name}`, pick(now[name], UNCHANGED), BASE_UNCHANGED[name]);
 	});
 

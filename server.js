@@ -26505,13 +26505,15 @@ function invoicePayBasesOf(ids) {
 }
 // The submit email's count rows, [label, text], labelled as the Invoices panel
 // labels them (client/src/lib/invoiceCounts.js): "Days paid / Daily rate /
-// Loads", "Loads / Pay %" or "Line items".
+// Loads", "Loads / Pay %" or "Line items"; the daily rate printed as the panel
+// prints money ("$1,250.00").
 function invoiceCountRows(row) {
 	const count = String(Number(row.loads_count || 0));
 	const basis = invoicePayBasis(row);
 	if (basis === "manual") return [["Line items", count]];
 	if (basis === "percentage") return [["Loads", count], ["Pay %", `${Number(row.rate_per_load || 0)}%`]];
-	return [["Days paid", count], ["Daily rate", `$${Number(row.rate_per_load || 0).toFixed(2)}`], ["Loads", String(invoiceLoadCount(row))]];
+	const rate = Number(row.rate_per_load || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	return [["Days paid", count], ["Daily rate", `$${rate}`], ["Loads", String(invoiceLoadCount(row))]];
 }
 
 // Aggregates every live (non-deleted) invoice for the payee whose billing

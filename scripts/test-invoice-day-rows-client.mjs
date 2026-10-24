@@ -16,9 +16,9 @@
 //      daily "Days paid / Daily rate / Loads", percentage "Loads / Pay %",
 //      manual "Line items"; a row without pay_basis reads as daily unless it is
 //      manual; a load count not sent shows a dash
-//   §2 PARITY — the same labels, in the same order, as server.js's
+//   §2 PARITY — the same labels and values, in the same order, as server.js's
 //      invoiceCountRows() (the submit email's rows), lifted from the source, on
-//      the same rows
+//      the same rows; the daily rate formatted the same ("$1,250.00")
 //   §3 invoiceCardCount(), the driver's card: "7 days", "3 loads", "2 line items"
 //   §4 invoiceLoadsCell(), the table's Loads column: a daily row's load_count
 //   §5 the wiring: the panel, the table and the card use them, and no
@@ -60,7 +60,7 @@ const DAILY = { invoice_number: 'INV-NB-DAILY', pay_basis: 'daily', is_manual: 0
 const PCT = { invoice_number: 'INV-NB-PCT', pay_basis: 'percentage', is_manual: 0, loads_count: 3, rate_per_load: 30, load_count: 3, load_ids: JSON.stringify(['P1', 'P2', 'P3']), render_data: JSON.stringify({ __templateName: 'service_invoice_owner_op' }) }
 const PCT_HALF = { ...PCT, rate_per_load: 27.5 }
 const MANUAL = { invoice_number: 'INV-M-NB-01', pay_basis: 'manual', is_manual: 1, loads_count: 2, rate_per_load: 0, load_count: 0, load_ids: '[]', render_data: JSON.stringify({ __templateName: 'service_invoice_manual' }) }
-const ONE_DAY = { ...DAILY, loads_count: 1, load_count: 1, rate_per_load: 1250 }
+const ONE_DAY = { ...DAILY, invoice_number: 'INV-NB-ONEDAY', loads_count: 1, load_count: 1, load_ids: JSON.stringify(['L9']), rate_per_load: 1250 }
 
 // §1
 if (lib) {
@@ -89,7 +89,11 @@ if (lib && server) {
   for (const inv of [DAILY, PCT, MANUAL, ONE_DAY]) {
     eq(`§2 ${inv.invoice_number} (${inv.pay_basis}): the panel's labels are the submit email's`,
       lib.invoiceCountRows(inv).map((r) => r.label), server(inv).map((r) => r[0]))
+    eq(`§2 ${inv.invoice_number} (${inv.pay_basis}): the panel's values are the submit email's, formatted the same`,
+      server(inv).map((r) => r[1]), lib.invoiceCountRows(inv).map((r) => r.value))
   }
+  eq('§2 the submit email prints a daily rate over $1,000 as the panel does (en-US, comma thousands, 2 decimals)',
+    server(ONE_DAY)[1], ['Daily rate', '$1,250.00'])
   eq('§2 the server reads a stored percentage invoice as one, a manual one as manual, an old row as daily',
     [server({ ...PCT, pay_basis: undefined }).map((r) => r[0]), server({ ...MANUAL, pay_basis: undefined }).map((r) => r[0]), server({ is_manual: 0, render_data: '' }).map((r) => r[0])],
     [['Loads', 'Pay %'], ['Line items'], ['Days paid', 'Daily rate', 'Loads']])
