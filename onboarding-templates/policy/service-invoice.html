@@ -222,6 +222,16 @@
     .service-table .day-cell {
       font-weight: 400;
     }
+    /* The row's date under its weekday ("${day} date", lib/policy-field-maps.js).
+       No box: an invoice stored before rows carried a date leaves it empty, and
+       an empty one takes no room. */
+    .service-table .day-cell .day-date {
+      display: block;
+      font-size: 11px;
+      color: #444;
+      margin-top: 2px;
+      white-space: nowrap;
+    }
     .service-table .rate-cell {
       white-space: nowrap;
     }
@@ -462,7 +472,8 @@
     // Generate the 7 day rows and wire up auto-calc for Total Due. Each row's
     // Daily Rate is the rate that day was priced at, filled by the renderer
     // ("${day} daily rate", lib/policy-field-maps.js); a day not worked leaves
-    // it blank.
+    // it blank. The day cell prints the row's date under the weekday
+    // ("${day} date").
     (function () {
       const days = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
       const tbody = document.getElementById('invoice-rows');
@@ -470,7 +481,7 @@
       days.forEach((day, i) => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td class="day-cell">${day}</td>
+          <td class="day-cell">${day}<span class="day-date" aria-label="${day} date"></span></td>
           <td class="load-cell"><span class="fill" aria-label="${day} Load/BOL number"></span></td>
           <td class="status-cell">
             <label><input type="checkbox" class="completed" data-row="${i}"> Completed</label>

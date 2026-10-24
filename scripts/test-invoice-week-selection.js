@@ -130,6 +130,8 @@ const SHARED_FNS = [
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "generateInvoiceNumber", "isAfterDeadline",
 	// The week's days and their pricing, out of the handler since money plan D.
 	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceLoadWindow", "invoiceWeekPaidDays", "invoiceDayPricing",
+	// The dated day grid and the loads each day lists (B23).
+	"invoiceDayGrid", "dayKeyPlus", "invoiceGridDayName", "moneySheetDate",
 	// The days a live manual invoice already pays, left off the weekly invoice.
 	"driverLiveManualInvoices", "weeklyManualInvoiceHolds",
 	// The handler's driver identity, pay lookups and guarded write (see
@@ -152,7 +154,7 @@ const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
-	"DAY_PAY_DRAFT_LINE_RE",
+	"DAY_PAY_DRAFT_LINE_RE", "INVOICE_GRID_DAYS",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines",
 	// The batch caches the week's Personal receipt images first (none here).
