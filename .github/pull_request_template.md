@@ -14,8 +14,8 @@
 - HIGH:
   - A test that fails on the base and passes here: `SERVER_JS=<base copy> node scripts/test-…`
   - Feature flag (name; off in production until approved):
-  - Review by another agent (result; a High stops the merge):
-  - The merge waits for the owner's yes; a read-only staging check follows the deploy
+  - Review by another agent (result; a high-severity finding stops the merge):
+  - The merge waits for the maintainer's yes; a read-only staging check follows the deploy
 
 Screenshots: none with real people's data.
 
