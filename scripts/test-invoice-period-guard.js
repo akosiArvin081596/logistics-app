@@ -743,8 +743,8 @@ async function section7() {
 	// The break periodLocksReadable() exists for: the table without its `status`.
 	const breakLockTable = (wdb) => wdb.exec("DROP TABLE period_locks; CREATE TABLE period_locks (period TEXT PRIMARY KEY)");
 
-	// One server start. flag: the flag's raw value (undefined = unset).
-	function world({ flag, locks = [], personal = false } = {}) {
+	// One server start. flag: the flag's raw value (undefined = unset); rows: Job Tracking.
+	function world({ flag, locks = [], personal = false, rows = ROWS } = {}) {
 		const wdb = W7.schemaDb();
 		if (personal) wdb.exec(personalExpense.SCHEMA_SQL);
 		const user = wdb.prepare("INSERT INTO users (id, username, password_hash, role, company_name, driver_name) VALUES (?, ?, 'x', ?, ?, ?)");
@@ -765,14 +765,14 @@ async function section7() {
 		assign.run(2, CM_B);
 		lockMonths(wdb, locks);
 
-		const w = { db: wdb, dataDir: W7.tempDir(), routes: {}, rendered: [], onRender: null };
+		const w = { db: wdb, dataDir: W7.tempDir(), routes: {}, rendered: [], onRender: null, emails: [], clock: { ms: CM_NOW } };
 		class FixedDate extends Date {
-			constructor(...args) { super(...(args.length ? args : [CM_NOW])); }
-			static now() { return CM_NOW; }
+			constructor(...args) { super(...(args.length ? args : [w.clock.ms])); }
+			static now() { return w.clock.ms; }
 		}
 		const register = (method) => (p, ...h) => { w.routes[`${method} ${p}`] = h[h.length - 1]; };
 		const pass = () => (req, res, next) => (next ? next() : undefined);
-		const sheet = () => W7.sheetValues(ROWS);
+		const sheet = () => W7.sheetValues(rows);
 		const deps = {
 			db: wdb,
 			require: createRequire(path.join(ROOT, "server.js")),
@@ -799,7 +799,7 @@ async function section7() {
 			DATA_DIR: w.dataDir,
 			fetch: () => { throw new Error("no network in a test"); },
 			io: null,
-			sendEmail: async () => undefined,
+			sendEmail: async (to, subject, html) => { w.emails.push({ subject, html: String(html || "") }); },
 			// The batch's 90 s per-driver race timers must not hold the run open.
 			setTimeout: (fn, ms, ...a) => { const t = setTimeout(fn, ms, ...a); if (t && t.unref) t.unref(); return t; },
 		};
@@ -853,9 +853,9 @@ async function section7() {
 		const r = await gen(w, DRIVER, "2026-09-25");
 		check("7a ON: a Driver generating W38 (September closed) is refused: 409 PERIOD_FINALIZED naming September",
 			[r.status, r.body && r.body.code, r.body && r.body.periods, r.body && r.body.unresolved], [409, "PERIOD_FINALIZED", ["2026-09"], false]);
-		check("...in plain words: the month is closed, nothing changed, the day goes on a correction dated in the current month",
+		check("...in plain words: the month is closed, nothing changed, the office pays a missed day on a correction dated in the current month",
 			[/^September 2026 is closed, so /.test(errorOf(r)), /nothing was changed/i.test(errorOf(r)),
-				/correction invoice dated in the current month/.test(errorOf(r)), /\/api\//.test(errorOf(r))], [true, true, true, false]);
+				/The office pays .* on a correction invoice dated in the current month/.test(errorOf(r)), /\/api\//.test(errorOf(r))], [true, true, true, false]);
 		check("...refused before any work: nothing rendered, no invoice row, no PDF",
 			[w.rendered.length, weekRows(w, "2026-09-19").length, pdfFiles(w)], [0, 0, []]);
 		check("...audited as the driver: generate_invoice_blocked [PERIOD_FINALIZED] periods=2026-09",
@@ -1020,8 +1020,15 @@ async function section7() {
 					[0, 0, 2, 0, false, 2, 0, 0]);
 				check("...its summary names the driver who worked that week, for a correction in the current month",
 					[/closed month/i.test(String(marker.summary)), String(marker.summary).includes(CM_A), String(marker.summary).includes(CM_B)], [true, true, false]);
+				check("...counts only the driver with no loads as \"skipped (no loads)\"",
+					String(marker.summary).startsWith("0 generated & submitted · 1 skipped (no loads) · 1 NOT BILLED"), true);
 				check("...and the run's notification asks for action",
 					w.db.prepare("SELECT title FROM dispatch_notifications WHERE type = 'invoices-autogen'").all().map((n) => /ACTION NEEDED/.test(n.title)), [true]);
+				const html = (w.emails[0] || {}).html || "";
+				check("...the email names the driver for a correction, says 1 skipped (no loads), and never says to generate it",
+					[/Not billed, the week touches a closed month:<\/b> Test Driver A\. Pay their days on a correction invoice dated in the current month\./.test(html),
+						/Skipped \(no loads\)<\/span><b>1</.test(html), html.includes("Generate these from the Invoices page")],
+					[true, true, false]);
 			} else {
 				check("7h OFF (pin, today): the batch generates and submits W39 in the closed month",
 					[out.created, out.submitted, out.skipped, out.unbilled, rows.map((x) => x.status)], [1, 1, 1, 0, ["Submitted"]]);
@@ -1037,6 +1044,45 @@ async function section7() {
 			[out.created, out.skipped, out.unbilled, marker.failed, /closed month/i.test(String(marker.summary)),
 				w.db.prepare("SELECT title FROM dispatch_notifications WHERE type = 'invoices-autogen'").all().length],
 			[0, 2, 0, 0, false, 0]);
+
+		// A live Draft for the week can still be submitted as is: named for that, not for a
+		// correction (a correction beside it would pay its days twice).
+		const d = world({ flag: "true", locks: ["2026-09"] });
+		const draftId = insertInvoice(d.db, { status: "Draft" });
+		const dOut = await d.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const dMarker = d.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		const dHtml = (d.emails[0] || {}).html || "";
+		check("7h ON: a driver with a live Draft for W39 is named to submit it as is, not for a correction; nothing failed",
+			[dOut.skipped, dOut.problem, dMarker.failed, /NOT BILLED/.test(String(dMarker.summary)),
+				/1 with an unsubmitted Draft for this week, which touches a closed month \(Test Driver A\): submit it as is; only days it misses go on a correction invoice/.test(String(dMarker.summary)),
+				String(dMarker.summary).startsWith("0 generated & submitted · 1 skipped (no loads)")],
+			[2, false, 0, false, true, true]);
+		check("...the Draft stays a Draft, and the email says to submit it",
+			[d.db.prepare("SELECT status FROM invoices WHERE id = ?").get(draftId).status,
+				/Unsubmitted Draft for this week, which touches a closed month:<\/b> Test Driver A\. Submit it as is/.test(dHtml), /Not billed/.test(dHtml)],
+			["Draft", true, false]);
+
+		// A driver missing from the roster who worked the week: no weekly invoice can bill him
+		// either, so he is named for a correction too, and nothing retries.
+		const offRows = [...ROWS, W7.loadRow({ id: "CM39C", driver: "Test Driver C", pickup: "2026-09-29 8:00", dropoff: "2026-09-30 18:00", assigned: "2026-09-29", done: "2026-09-30", truck: "T9" })];
+		const o = world({ flag: "true", locks: ["2026-09"], rows: offRows });
+		const oOut = await o.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const oMarker = o.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		const oHtml = (o.emails[0] || {}).html || "";
+		check("7h ON: an off-roster driver who worked W39 is named with the rest for a correction, not WORKED-BUT-UNBILLED, and not retried",
+			[oOut.unbilled, oOut.problem, oMarker.failed, /2 NOT BILLED, the week touches a closed month \(Test Driver A, test driver c\)/.test(String(oMarker.summary)),
+				/WORKED-BUT-UNBILLED/.test(String(oMarker.summary)), oHtml.includes("Generate these from the Invoices page")],
+			[0, false, 0, true, false, false]);
+
+		// A lock table that can't be read is not a closed month: the batch errors and retries.
+		const u = world({ flag: "true" });
+		breakLockTable(u.db);
+		const uOut = await u.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const uMarker = u.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		check("7h ON: an unreadable lock table errors the run and leaves the driver who worked for the retry",
+			[uOut.created, uOut.unbilled, uOut.problem, uMarker.failed, /2 errored/.test(String(uMarker.summary)),
+				/WORKED-BUT-UNBILLED \(test driver a\)/.test(String(uMarker.summary)), /closed month/i.test(String(uMarker.summary)), weekRows(u, "2026-09-26").length],
+			[0, 1, true, 1, true, true, false, 0]);
 	});
 
 	// 7i. A Personal line waiting on a closed-month week.
@@ -1095,6 +1141,70 @@ async function section7() {
 			statuses.push((await gen(w, ADMIN, "2026-09-25")).status);
 		}
 		check("7k: any value but exactly \"true\" leaves the flag off (W38 generates as today)", statuses, Array(6).fill(200));
+	});
+
+	// 7n. A Driver's repeated refusals: answered every time, recorded once per week a day,
+	// and for at most 10 weeks a day; a Super Admin's are recorded every time.
+	await run("7n (a Driver's repeated refusals)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const taps = [];
+		for (let i = 0; i < 3; i++) taps.push(await gen(w, DRIVER, "2026-09-25"));
+		check("7n ON: a Driver tapping W38 three times is refused three times, the same way",
+			taps.map((t) => [t.status, t.body && t.body.code, errorOf(t) === errorOf(taps[0])]), Array(3).fill([409, "PERIOD_FINALIZED", true]));
+		check("...and recorded once", blocked(w, "generate_invoice_blocked").map((a) => a.username), ["drivera"]);
+		await gen(w, ADMIN, "2026-09-25");
+		await gen(w, ADMIN, "2026-09-25");
+		check("...while a Super Admin's refusals are each recorded",
+			blocked(w, "generate_invoice_blocked").map((a) => a.username), ["drivera", "super_admin", "super_admin"]);
+		w.clock.ms += 24 * 3600 * 1000 + 60 * 1000;
+		await gen(w, DRIVER, "2026-09-25");
+		check("...and 24 h later the Driver's next refusal of W38 is recorded again",
+			blocked(w, "generate_invoice_blocked").filter((a) => a.username === "drivera").length, 2);
+		const many = world({ flag: "true", locks: ["2026-05", "2026-06", "2026-07"] });
+		const fridays = ["2026-05-01", "2026-05-08", "2026-05-15", "2026-05-22", "2026-05-29", "2026-06-05",
+			"2026-06-12", "2026-06-19", "2026-06-26", "2026-07-03", "2026-07-10", "2026-07-17"];
+		const answers = [];
+		for (const f of fridays) answers.push((await gen(many, DRIVER, f)).status);
+		check("7n ON: 12 closed weeks in a day are all refused, and 10 of them recorded",
+			[answers.every((s) => s === 409), blocked(many, "generate_invoice_blocked").length], [true, 10]);
+	});
+
+	// 7o. With the flag on, a weekEnd that is not a real day is a bad request, before the guard.
+	await run("7o (weekEnd)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const bad = [];
+		for (const v of ["2026-13-01", "2026-02-30", "not-a-date", "2026-10-02T12:00:00Z", 12345]) {
+			const r = await gen(w, DRIVER, v);
+			bad.push([r.status, r.body && r.body.code]);
+		}
+		check("7o ON: a weekEnd that is not a real YYYY-MM-DD day answers 400 INVOICE_WEEK_END_INVALID",
+			bad, Array(5).fill([400, "INVOICE_WEEK_END_INVALID"]));
+		check("...with no refusal recorded and nothing rendered", [blocked(w, "generate_invoice_blocked").length, w.rendered.length], [0, 0]);
+		const none = await W7.call(w.api.generateInvoiceHandler, { session: { user: { ...DRIVER } }, headers: {}, query: {}, params: {}, body: { driver: CM_A } });
+		check("...while no weekEnd is still this week (no loads here: today's plain 400)",
+			[none.status, none.body && none.body.code], [400, undefined]);
+		const off = world({ locks: ["2026-09"] });
+		const o = [];
+		for (const v of ["2026-13-01", "not-a-date"]) {
+			const r = await gen(off, DRIVER, v);
+			o.push([r.status, r.body && r.body.code, /No completed loads/.test(errorOf(r))]);
+		}
+		check("7o OFF (pin, today): such a weekEnd finds no loads (400, no code)", o, Array(2).fill([400, undefined, true]));
+	});
+
+	// 7p. A closed week whose settled invoice exists answers with that invoice, as today.
+	await run("7p (settled invoice in a closed week)", async () => {
+		const answers = [];
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"] });
+			insertInvoice(w.db, { invoice_number: "INV-TDA-2026W38-01", week_start: "2026-09-19", week_end: "2026-09-25", status: "Approved" });
+			const r = await gen(w, DRIVER, "2026-09-25");
+			answers.push([r.status, r.body && r.body.code, errorOf(r), r.body && r.body.invoice && r.body.invoice.invoice_number,
+				blocked(w, "generate_invoice_blocked").length]);
+		}
+		const expectedAnswer = [409, "INVOICE_EXISTS", "Invoice already exists for this week (INV-TDA-2026W38-01, status: Approved). Contact admin if this needs to be regenerated.", "INV-TDA-2026W38-01", 0];
+		check("7p ON: a Driver generating a closed week with an approved invoice is told that invoice, unaudited", answers[0], expectedAnswer);
+		check("7p OFF (pin, today): the same answer", answers[1], expectedAnswer);
 	});
 
 	// 7l. The flag, declared once beside its neighbour, on only when exactly "true".
