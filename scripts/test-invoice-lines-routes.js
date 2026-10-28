@@ -39,7 +39,10 @@ function findRoot(start) {
 }
 const ROOT = findRoot(__dirname);
 const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+// The draft route's steps live in lib/broker-invoice-draft.js: read with
+// server.js as one text (lifted() splits them again).
+const draftLift = require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js"));
+const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), ROOT);
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LINES_PATH = path.join(ROOT, "lib", "broker-invoice-lines.js");
 const Database = require("better-sqlite3");
@@ -134,8 +137,14 @@ function lifted() {
 	const shippedBody = CONSTS.map((c) => extractConst(SRC, c)).join("\n") + "\n" + FNS.map((f) => extractFn(SRC, f)).join("\n") +
 		`\nreturn { ${FNS.join(", ")} };`;
 	const createAt = SRC.indexOf("CREATE TABLE IF NOT EXISTS load_invoice_drafts (");
+	const engine = draftLift.engineOf(SRC);
+	const approveRoute = extractRoute(SRC, APPROVE_NEEDLE, "POST /api/loads/:loadId/draft-invoice");
 	LIFTED = {
-		approve: extractRoute(SRC, APPROVE_NEEDLE, "POST /api/loads/:loadId/draft-invoice"),
+		// The text §6 reads (the route with its engine steps inlined), and the
+		// registration and engine the harness runs.
+		approve: draftLift.inlineSteps(approveRoute, engine),
+		approveRoute,
+		engine,
 		preview: extractRoute(SRC, PREVIEW_NEEDLE, "POST /api/loads/:loadId/invoice-preview"),
 		getLines: extractRoute(SRC, GET_LINES, "GET /api/loads/:loadId/invoice-lines"),
 		addLine: extractRoute(SRC, ADD_LINE, "POST /api/loads/:loadId/invoice-lines"),
@@ -233,6 +242,8 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 		invoicePreviewInflight: 0,
 	};
 	scope.brokerInvoiceLinesGate = new Function("brokerInvoice", "process", `${Lf.gate}\nreturn brokerInvoiceLinesGate;`)(brokerInvoice, processStub);
+	// The engine the draft route calls, over the same stubs and the same env.
+	scope.brokerInvoiceDraft = draftLift.loadEngine(Lf.engine, { ...scope, env: processStub.env });
 	const register = (text) => {
 		const registered = [];
 		const app = { post: (...a) => registered.push(a), get: (...a) => registered.push(a) };
@@ -263,7 +274,7 @@ function harness(env = {}, { closedMonths = [], duringDraft = null, failingAudit
 		return { status: r.statusCode, body: r.body, errors: seen.errors.slice() };
 	};
 	const chains = {
-		approve: register(Lf.approve), preview: register(Lf.preview),
+		approve: register(Lf.approveRoute), preview: register(Lf.preview),
 		getLines: register(Lf.getLines), addLine: register(Lf.addLine), voidLine: register(Lf.voidLine),
 	};
 	return {

@@ -40,7 +40,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let failed = 0;
 function ok(name, cond) {

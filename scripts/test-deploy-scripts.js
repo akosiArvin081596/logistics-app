@@ -1439,7 +1439,7 @@ function buildScriptPins(rootScripts, clientScripts, tag = "") {
 // real with this repo's express against a build folder holding one.
 const APP_INDEX_PAGE = '<!doctype html><div id="app"></div>\n';
 async function stampNeverServedPins() {
-	const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+	const server = require("./lib/server-source").serverSource();
 	ok(/^\s*app\.use\(express\.static\(clientDistPath\)\);$/m.test(server),
 		"§18 server.js serves client/dist with express.static's defaults (no dotfiles option)");
 	const express = require("express");

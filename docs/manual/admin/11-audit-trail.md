@@ -139,6 +139,7 @@ The audit trail is sensitive:
 - It reveals who did what — potentially embarrassing if reviewed in the wrong context.
 - It contains user information.
 - It may contain financial events (invoice approvals, expense decisions).
+- With `SIGN_IN_AUDIT_ENABLED` on, it records sign-ins, sign-outs and refused sign-ins by account (`login`, `logout`, `login_refused`), kept like every other row. The IP address and browser of a Super Admin's or Dispatcher's sign-in are kept apart from the audit rows, in `sign_in_network`, for 90 days and then deleted; only Super Admins can read them (`GET /api/admin/sign-ins`, and the database browser and download), and a staging or local copy never holds them.
 
 Treat audit trail data with care. Don't export and share broadly. Don't expose to non-Super-Admin users.
 

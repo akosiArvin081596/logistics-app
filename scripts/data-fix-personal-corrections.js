@@ -101,7 +101,7 @@ function parseCli(argv) {
 
 // The server's own rules, lifted from this checkout's server.js onto `db`.
 function liftServer(db) {
-	const src = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const src = require("./lib/server-source").serverSource();
 	const lifted = closure(src, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const liftedRequire = (m) => {
 		if (m === "crypto" || /^\.\/lib\/[\w.-]+$/.test(m)) return appRequire(m);

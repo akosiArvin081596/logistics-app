@@ -33,7 +33,7 @@ const geolib = require("geolib");
 const loadMilesLib = require("../lib/load-miles");
 const brokerInvoice = require("../lib/broker-invoice");
 
-const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let fail = 0;

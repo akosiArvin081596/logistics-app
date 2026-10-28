@@ -25,8 +25,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SERVER = process.env.SERVER_JS || path.join(__dirname, "..", "server.js");
-const src = fs.readFileSync(SERVER, "utf8");
+const src = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

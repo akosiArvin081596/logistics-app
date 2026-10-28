@@ -36,7 +36,7 @@ const eldFeedHealth = require("../lib/eld-feed-health");
 const eldPosition = require("../lib/eld-position");
 const alertChannels = require("../lib/alert-channels");
 
-const src = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const src = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

@@ -448,7 +448,7 @@ async function main(R) {
 	// §4
 	const now = spawnChild("paid-days", {});
 	const baseFile = process.env.BASE_SERVER_JS || "";
-	const base = baseFile ? spawnChild("paid-days", { SERVER_JS: baseFile }) : null;
+	const base = baseFile ? spawnChild("paid-days", { SERVER_JS: baseFile, SERVER_ROOT: "" }) : null;
 
 	await R.test("§4a invoiceWeekPaidDays() on nine fixtures (real week, the daily-rate rule, scheduled loads, no Assigned Date, the blank-pickup fallback, the trip rule, Super Admin overrides, an early delivery, a completion before the window): activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads and tripErrors are the base's exactly", async ({ eq }) => {
 		for (const name of Object.keys(FIXTURES)) eq(`${name}`, pick(now[name], UNCHANGED), BASE_UNCHANGED[name]);

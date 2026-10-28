@@ -45,6 +45,7 @@
  *
  * FIXTURES: an in-memory SQLite, made-up names only. No network, no app.db.
  * Run: node scripts/test-messages-staff-only.js
+ *      NAMED_LOGINS_ENABLED=true node scripts/test-messages-staff-only.js   # POST /api/users with the named-login rules on
  */
 
 "use strict";
@@ -68,7 +69,7 @@ try {
 	die(`a server dependency did not load (${e.message}); run npm ci under the .nvmrc Node`);
 }
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ---------------------------------------------------------------------------
 // Fixtures (made up)
@@ -359,7 +360,7 @@ async function section1() {
 // ---------------------------------------------------------------------------
 // §2 desk names are reserved
 // ---------------------------------------------------------------------------
-const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {';
+const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {';
 const USERS_STUBS = {
 	requireRole: () => () => {},
 	syncDriverToCarrierSheet: () => {},
@@ -373,6 +374,9 @@ const USERS_STUBS = {
 	investorCompanyMoves: () => [],
 	investorCompanyLockBlockers: () => null,
 	getJobTrackingCached: async () => ({ headers: [], data: [] }),
+	// The password budget the route mounts (scripts/test-account-directory-row-lock.js
+	// §8's subject); the handler is called directly here.
+	userCreatePasswordLimit: (req, res, next) => next(),
 	periodLockUnreadableResponse: (req, res) => res.status(503).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 	periodBlockedResponse: (req, res) => res.status(409).json({ code: "PERIOD_FINALIZED" }),
 };
@@ -390,8 +394,11 @@ function mountUsers(db) {
 	const lifted = usersLifted;
 	const { app, handlers } = captureApp();
 	let clash = null;
+	// require relative to server.js: the route's lifted `passwordRules` is
+	// require("./lib/password-rules"). Its NAMED_LOGINS_ENABLED is lifted too,
+	// so a run with NAMED_LOGINS_ENABLED=true takes the named-login rules.
 	const env = {
-		app, db, bcrypt: { hash: (pw) => bcrypt.hash(pw, 4) }, console: { log() {}, warn() {}, error() {} }, require,
+		app, db, bcrypt: { hash: (pw) => bcrypt.hash(pw, 4), compare: (pw, h) => bcrypt.compare(pw, h) }, console: { log() {}, warn() {}, error() {} }, require: rootRequire,
 		logAudit: () => {}, logAuditRefusal: () => {}, ...USERS_STUBS,
 		exposeClash: (fn) => { clash = fn; },
 	};
@@ -450,22 +457,22 @@ async function section2() {
 		ok(`§2 POST /api/users ${label}: 409 ${code} (got ${got})`, r.status === 409 && r.body && r.body.code === code);
 		ok(`§2 ...${label}: no account written`, count(db) === before);
 	};
-	await refusedName("username \"admin\" (an Investor)", { username: "admin", password: "made-up-pw-1", role: "Investor" }, "USERNAME_RESERVED");
-	await refusedName("username \" Admin \" (a Super Admin)", { username: " Admin ", password: "made-up-pw-1", role: "Super Admin" }, "USERNAME_RESERVED");
-	await refusedName("username \"DISPATCH\" (a Dispatcher)", { username: "DISPATCH", password: "made-up-pw-1", role: "Dispatcher" }, "USERNAME_RESERVED");
-	await refusedName("username \"investor\" (a Driver)", { username: "investor", password: "made-up-pw-1", role: "Driver", driverName: "Wren Holt" }, "USERNAME_RESERVED");
-	await refusedName("driver name \"Admin\"", { username: "wren_h", password: "made-up-pw-1", role: "Driver", driverName: "Admin" }, "DRIVER_NAME_TAKEN");
+	await refusedName("username \"admin\" (an Investor)", { username: "admin", password: "Made-up-pw-1", role: "Investor" }, "USERNAME_RESERVED");
+	await refusedName("username \" Admin \" (a Super Admin)", { username: " Admin ", password: "Made-up-pw-1", role: "Super Admin" }, "USERNAME_RESERVED");
+	await refusedName("username \"DISPATCH\" (a Dispatcher)", { username: "DISPATCH", password: "Made-up-pw-1", role: "Dispatcher" }, "USERNAME_RESERVED");
+	await refusedName("username \"investor\" (a Driver)", { username: "investor", password: "Made-up-pw-1", role: "Driver", driverName: "Wren Holt" }, "USERNAME_RESERVED");
+	await refusedName("driver name \"Admin\"", { username: "wren_h", password: "Made-up-pw-1", role: "Driver", driverName: "Admin" }, "DRIVER_NAME_TAKEN");
 	// MS11: a username another identity already answers to is refused too.
-	await refusedName("username that is a driver's name, in another case", { username: "orrin cade", password: "made-up-pw-1", role: "Investor" }, "USERNAME_TAKEN");
-	await refusedName("username that is a drivers-directory name", { username: DIRECTORY_ONLY, password: "made-up-pw-1", role: "Dispatcher" }, "USERNAME_TAKEN");
+	await refusedName("username that is a driver's name, in another case", { username: "orrin cade", password: "Made-up-pw-1", role: "Investor" }, "USERNAME_TAKEN");
+	await refusedName("username that is a drivers-directory name", { username: DIRECTORY_ONLY, password: "Made-up-pw-1", role: "Dispatcher" }, "USERNAME_TAKEN");
 	// Kept as reviewed (L3): even a new Driver account's own driver name is a
 	// taken username while a directory row holds it, as the gate script counts.
-	await refusedName("Driver username that is its own driver name, a directory row's", { username: DIRECTORY_ONLY, password: "made-up-pw-1", role: "Driver", driverName: DIRECTORY_ONLY }, "USERNAME_TAKEN");
+	await refusedName("Driver username that is its own driver name, a directory row's", { username: DIRECTORY_ONLY, password: "Made-up-pw-1", role: "Driver", driverName: DIRECTORY_ONLY }, "USERNAME_TAKEN");
 	{
 		const db = makeDb();
 		const dup = mountUsers(db);
 		const before = count(db);
-		const r = await dup.create({ username: INVESTOR.toUpperCase(), password: "made-up-pw-1", role: "Investor" });
+		const r = await dup.create({ username: INVESTOR.toUpperCase(), password: "Made-up-pw-1", role: "Investor" });
 		ok(`§2 an existing username in another case is still refused, 400 or 409 (got ${r.status})`, (r.status === 400 || r.status === 409) && count(db) === before);
 	}
 
@@ -476,7 +483,7 @@ async function section2() {
 		db.exec("DELETE FROM users");
 		const setup = mountSetup(db);
 		let r;
-		try { r = await setup.call({ username: " admin ", password: "made-up-pw-1" }); } catch (e) { r = { status: "threw", body: { error: e.message } }; }
+		try { r = await setup.call({ username: " admin ", password: "Made-up-pw-1" }); } catch (e) { r = { status: "threw", body: { error: e.message } }; }
 		const got = `${r.status} ${(r.body && r.body.code) || ""}`.trim();
 		ok(`§2 POST /api/auth/setup username " admin ": 409 USERNAME_RESERVED (got ${got})`, r.status === 409 && r.body && r.body.code === "USERNAME_RESERVED");
 		ok("§2 ...and no account is written", count(db) === 0);
@@ -485,9 +492,9 @@ async function section2() {
 	const db = makeDb();
 	const plain = mountUsers(db);
 	const before = count(db);
-	const r = await plain.create({ username: "wren_h", password: "made-up-pw-1", role: "Investor" });
+	const r = await plain.create({ username: "wren_h", password: "Made-up-pw-1", role: "Investor" });
 	ok(`§2 an ordinary username still creates (got ${r.status})`, r.status === 200 && count(db) === before + 1);
-	const r2 = await plain.create({ username: "admin_wren", password: "made-up-pw-1", role: "Investor" });
+	const r2 = await plain.create({ username: "admin_wren", password: "Made-up-pw-1", role: "Investor" });
 	ok(`§2 a username that only contains a desk name still creates (got ${r2.status})`, r2.status === 200 && count(db) === before + 2);
 }
 

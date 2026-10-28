@@ -1,13 +1,18 @@
 #!/usr/bin/env node
-// replica:pull, on the server, step 2a: clear every stored token and session in
-// the pull's TEMPORARY copy of the database (never the live one), before it is
-// downloaded. Everything else stays exactly as production has it.
+// replica:pull, on the server, step 2a: clear every stored token, session and
+// staff sign-in IP record in the pull's TEMPORARY copy of the database (never
+// the live one), before it is downloaded. Everything else stays exactly as
+// production has it.
 //
 //   node scrub.js --app=<app dir> --db=/root/logisx-replica-tmp/<stamp>/app.db
 //
 // What is cleared, found by reading the copy's own schema (sqlite_master), so a
 // column added later is caught without editing this file:
 //   - sessions: every row (active sign-ins);
+//   - sign_in_network: every row (the IP and browser of staff sign-ins, which
+//     production keeps 90 days and a replica never purges; lib/sign-in.js).
+//     Deleted, not searched for below: a browser string is shared by many
+//     people and occurs elsewhere in the database by design;
 //   - any column whose name says it holds a credential (isCredentialColumn():
 //     token, secret, nonce, otp, bearer, OAuth, API key, password reset, a
 //     *_code or a *_hash, snake_case or camelCase). Today that is
@@ -74,8 +79,12 @@ function scrub(db) {
 			const n = db.prepare("DELETE FROM sessions").run().changes;
 			cleared.push({ table: "sessions", column: "*", rows: n, how: "deleted" });
 		}
+		if (tables.includes("sign_in_network")) {
+			const n = db.prepare("DELETE FROM sign_in_network").run().changes;
+			cleared.push({ table: "sign_in_network", column: "*", rows: n, how: "deleted (staff sign-in IP and browser)" });
+		}
 		for (const t of tables) {
-			if (t === "sessions") continue;
+			if (t === "sessions" || t === "sign_in_network") continue;
 			for (const c of db.prepare(`PRAGMA table_info(${q(t)})`).all()) {
 				if (!isCredentialColumn(c.name)) continue;
 				const id = `${t}.${c.name}`;

@@ -3,7 +3,7 @@
 # in front of it, or in what importing the server starts: say why in the PR.
 
 [routes]
-GET /api/admin/audit-trail · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c22577142f85
+GET /api/admin/audit-trail · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b16a8d9621f5
 POST /api/admin/backfill-road-distances · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b785924d31dc
 GET /api/admin/deleted-loads · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7949de498106
 GET /api/admin/driver-day-overrides · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d9dcec3b11da
@@ -44,6 +44,7 @@ GET /api/admin/scan-driver-mismatches · requireRole("Super Admin")=anon@12b84c4
 GET /api/admin/scan-duplicates · requireRole("Super Admin")=anon@12b84c4b0134 · inline@1ce063deeda2
 GET /api/admin/scan-orphans · requireRole("Super Admin")=anon@12b84c4b0134 · inline@1eba1a062cc3
 GET /api/admin/scan-stale-locations · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e2230c306e1a
+GET /api/admin/sign-ins · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a5a2fd445d84
 GET /api/admin/work-days/dry-run · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d22af87e67b2
 GET /api/analytics/mileage · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@2397256707c5
 GET /api/analytics/mileage/detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@d225cc03cbc1
@@ -54,11 +55,11 @@ GET /api/applications/:id/pdf · requireRole("Super Admin")=anon@12b84c4b0134 ·
 POST /api/applications/:id/restore · requireRole("Super Admin")=anon@12b84c4b0134 · inline@09560daefb04
 GET /api/applications/:id/sensitive · requireRole("Super Admin")=anon@12b84c4b0134 · piiRevealLimiter=limiter · inline@e26fce47159e
 PUT /api/applications/:id/status · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bfbecbcb36d4
-GET /api/archive · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4c96e185c6df
-GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@84e479dbd8a4
+GET /api/archive · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5d41efca67b7
+GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@20cafb2753cb
 POST /api/auth/change-password · requireAuth@2f5c61384511 · changePasswordLimiter=limiter · inline@37627b4fe4bc
-POST /api/auth/login · loginLimiter=limiter · inline@265ebb7af6a6
-POST /api/auth/logout · inline@b0c32c66763b
+POST /api/auth/login · loginLimiter=limiter · inline@3ace7acc66ec
+POST /api/auth/logout · inline@a546bfc2c18f
 GET /api/auth/session · inline@c685a5e5d4e9
 POST /api/auth/setup · setupLimiter=limiter · inline@b5ab1ff117ac
 GET /api/auth/setup-check · inline@9aeadec8551c
@@ -289,8 +290,8 @@ DELETE /api/trucks/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline
 PUT /api/trucks/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f2aac1b52220
 DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b793c4400242
 POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b3f9ec796fd0
-GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@91875c001e81
-POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4f138af8c13b
+GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5f80b4e969d9
+POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@04c1f9c10be8
 PUT /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · userPasswordResetLimiter=limiter · inline@c887c122ecd1
 PUT /api/users/:id/rating · requireRole("Super Admin")=anon@12b84c4b0134 · inline@afdcf7a41d18
@@ -302,7 +303,7 @@ USE /uploads · requireAuth@2f5c61384511 · inline@2f3241547ecf | after: USE /up
 USE /uploads · requireAuth@2f5c61384511 · uploadMissLimiter@8f0251d68f52 · uploadsPathGuard@e828a36f5055 | after: USE /uploads/rate-cons
 USE /uploads/rate-cons · requireRole("Super Admin")=anon@12b84c4b0134
 GET ["/api/driver/position","/api/driver/me/position"] · requireRole("Driver", "Super Admin")=anon@12b84c4b0134 · driverPositionLimiter=limiter · inline@c90bcab9d57f
-POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@a1f1588c2772
+POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@8f1d04f2fd48
 
 [middleware]
 USE / · inline@0b6a9c7a9ce3 | first

@@ -50,8 +50,7 @@ const os = require("os");
 const path = require("path");
 const http = require("http");
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const src = fs.readFileSync(SERVER, "utf8");
+const src = require("./lib/server-source").serverSource();
 
 let passed = 0;
 const failures = [];

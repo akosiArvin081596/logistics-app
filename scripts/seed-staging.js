@@ -21,7 +21,7 @@ const hash = bcrypt.hashSync(password, 10);
 
 // -- Investors --
 db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)")
-  .run("kevin", hash, "Investor", "", "kevin@gmail.com", "Kevin Canunayon", "KC Trucking LLC");
+  .run("kevin", hash, "Investor", "", "kevin@example.test", "Kevin Testinvestor", "Example Test Trucking LLC");
 db.prepare("INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)")
   .run("desoren", hash, "Investor", "", "desorenking@example.com", "Desoren King", "ABC Inc");
 

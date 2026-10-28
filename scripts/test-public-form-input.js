@@ -49,7 +49,7 @@ const { spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const LIB_PATH = path.join(ROOT, "lib", "public-form-input.js");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 const pfi = require(LIB_PATH);
 

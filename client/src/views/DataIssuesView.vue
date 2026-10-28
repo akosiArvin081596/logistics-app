@@ -760,7 +760,7 @@
                     <div v-if="r.suppressed" class="dim tiny">+{{ r.suppressed }} identical refusal<template v-if="r.suppressed !== 1">s</template> folded into this row</div>
                   </td>
                   <td>
-                    {{ r.account || '—' }}
+                    {{ actorLabel(r.account) || '—' }}
                     <div v-if="r.role" class="dim tiny">{{ r.role }}</div>
                   </td>
                   <td class="mono tiny">
@@ -925,6 +925,7 @@
 import { ref, computed, onMounted, h, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { fmtYmd, fmtTimestamp } from '../utils/datetime'
+import { actorLabel } from '../utils/sharedLogin'
 import { monthLabel } from '../lib/monthLabel'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'

@@ -4,7 +4,7 @@ LogisX leans on several external services. This chapter covers each integration,
 
 ## Google Sheets — system of record for loads
 
-The "Job Tracking" tab in spreadsheet `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` is where every active load lives. The spreadsheet is shared with the service account `sheets-bot@logistics-app-491014.iam.gserviceaccount.com` as Editor.
+The "Job Tracking" tab in the spreadsheet `SPREADSHEET_ID` names (production's own process falls back to the production sheet in `lib/sheet-id.js`) is where every active load lives. The spreadsheet is shared with the app's Google service account as Editor.
 
 **Auth.** A JSON service-account key at the project root (`service-account-key.json`, not in git). The Google API client is lazy-initialized as a singleton via `getSheets()`.
 

@@ -67,7 +67,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const MODULE_PATH = path.join(__dirname, "..", "client", "src", "lib", "dataIssues.js");
 
 let pass = 0, fail = 0;

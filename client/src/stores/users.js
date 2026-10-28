@@ -8,6 +8,9 @@ export const useUsersStore = defineStore('users', {
     users: [],
     driverNames: [],
     isLoading: false,
+    // Whether a new Super Admin or Dispatcher changes the password at first
+    // sign-in (GET /api/users, NAMED_LOGINS_ENABLED on the server).
+    newStaffMustChangePassword: false,
   }),
 
   getters: {
@@ -27,6 +30,7 @@ export const useUsersStore = defineStore('users', {
       try {
         const data = await api.get('/api/users')
         this.users = data.users || []
+        this.newStaffMustChangePassword = data.newStaffMustChangePassword === true
       } catch (err) {
         throw err
       } finally {
@@ -50,8 +54,11 @@ export const useUsersStore = defineStore('users', {
       }
     },
 
+    // The create alone: resolves once the server accepted it, rejects with its
+    // refusal. The caller reloads the list (UsersView.vue createUser), so a
+    // reload that fails after a create is never reported as a failed create.
     async addUser(data) {
-      const result = await api.post('/api/users', {
+      return api.post('/api/users', {
         username: data.username,
         password: data.password,
         role: data.role,
@@ -59,8 +66,6 @@ export const useUsersStore = defineStore('users', {
         email: data.email,
         fullName: data.fullName,
       })
-      await this.loadUsers()
-      return result
     },
 
     // The save alone: resolves once the server accepted the edit, rejects with

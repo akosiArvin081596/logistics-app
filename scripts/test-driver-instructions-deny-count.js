@@ -37,7 +37,7 @@ const ROOT = path.join(__dirname, "..");
 const RUNTIME = process.env.DI_RUNTIME_LIB ? path.resolve(process.env.DI_RUNTIME_LIB) : path.join(ROOT, "lib", "driver-instructions-runtime.js");
 const rt = require(RUNTIME);
 const di = require(path.join(ROOT, "lib", "driver-instructions.js"));
-const SERVER_SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SERVER_SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

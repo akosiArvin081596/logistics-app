@@ -56,7 +56,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const LIB_PATH = path.join(ROOT, "lib", "expense-window.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 const lib = require(LIB_PATH);
