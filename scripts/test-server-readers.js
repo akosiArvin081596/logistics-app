@@ -66,6 +66,7 @@ const ADMIN = "admin or operator script run on production data: moves to the hel
 	["scripts/replica/remote/settings.js", "replica tool that reads a deployed app's own files on its host: moves with the admin scripts"],
 	["scripts/replica/remote/sheets-export.js", "replica tool that reads a deployed app's own files on its host: moves with the admin scripts"],
 	["scripts/docs/_patch-indexes.js", "one-off tool that rewrites server.js's own file, so it reads the file itself"],
+	["scripts/test-route-snapshot.js", "imports server.js in a child and maps its stack frames to the real file, which the virtual source can't stand in for; the first move gives it routes/"],
 	["scripts/personal-expenses-dry-run.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-driver-name-matching.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-week-selection.js", owned("fix/personal-receipt-week")],
