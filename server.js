@@ -28963,7 +28963,9 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 			logAuditRefusal(req, "undo_expense_personal_blocked", "expense", id,
 				`undo Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [${block.code}] — nothing was written` + (reason ? ` — reason: ${reason}` : ""),
 				block.code);
-			return res.status(409).json({ error: `${block.message} Use Reverse instead.`, code: block.code });
+			// With the receipt's week on, a line on an approved invoice is final.
+			const final = PERSONAL_RECEIPT_WEEK_ENABLED && block.code === "PERSONAL_INVOICE_APPROVED";
+			return res.status(409).json({ error: `${block.message} ${final ? "Approved invoices are locked." : "Use Reverse instead."}`, code: block.code });
 		}
 		const user = req.session.user;
 		const inv = line.invoice_id ? db.prepare("SELECT * FROM invoices WHERE id = ?").get(line.invoice_id) : null;
@@ -28997,7 +28999,10 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 // takes back an owner-operator's share) on the week the reversal is made in, by
 // the same placement rules; the original line stays on its invoice. Its cost
 // month is the line's own while that month is open, else the open month (a
-// credit row). After a reversal the receipt can be marked again.
+// credit row). After a reversal the receipt can be marked again. With the
+// receipt's week on: a line on an approved invoice is final (409
+// PERSONAL_LOCKED); a line on no invoice is reversed on none, and neither row
+// ever goes on one; otherwise the reversal is placed by the line's own week.
 app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const expense = personalExpenseById(req);
@@ -29015,6 +29020,12 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 		if (!block) {
 			return res.status(409).json({ error: "This Personal line is not on an approved invoice yet, so Undo removes it. A reversing line is only for a line that can no longer be undone.", code: "PERSONAL_USE_UNDO" });
 		}
+		if (PERSONAL_RECEIPT_WEEK_ENABLED && block.code === "PERSONAL_INVOICE_APPROVED") {
+			logAuditRefusal(req, "reverse_expense_personal_blocked", "expense", id,
+				`reverse Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [PERSONAL_LOCKED] — ${block.message} Nothing was written` + (reason ? ` — reason: ${reason}` : ""),
+				"PERSONAL_LOCKED");
+			return res.status(409).json({ error: "The invoice is approved, and approved invoices are locked.", code: "PERSONAL_LOCKED" });
+		}
 		if (block.code === "PERIOD_LOCK_UNREADABLE") {
 			return periodLockUnreadableResponse(req, res, "Reversing a Personal line",
 				{ action: "reverse_expense_personal_blocked", entity: "expense", entityId: String(id), subject: `reverse Personal line ${line.id}`, note: reason });
@@ -29026,17 +29037,30 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 			expense_id: id, kind: "reverse", reverses_id: line.id, cents: line.cents, receipt_cents: line.receipt_cents,
 			merchant: line.merchant, receipt_date: line.receipt_date,
 			cost_period: inPlace ? line.cost_period : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? line.book_date : today,
-			week_start: getWeekRange().weekStart, share_cents: personalReverseShare(line), reason,
+			week_start: PERSONAL_RECEIPT_WEEK_ENABLED ? line.week_start : getWeekRange().weekStart, share_cents: personalReverseShare(line), reason,
 			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
 		};
-		const placed = await placePersonalLine({
-			row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req,
-			onCommit: (newId) => {
-				const r = db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ? AND reversed_by_id IS NULL AND voided_at = ''").run(newId, line.id);
-				if (r.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
-			},
-		});
-		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		const onCommit = (newId) => {
+			const r = db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ? AND reversed_by_id IS NULL AND voided_at = ''").run(newId, line.id);
+			if (r.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
+		};
+		const lineOnInvoice = line.invoice_id != null && !!db.prepare("SELECT 1 FROM invoices WHERE id = ? AND deleted_at = ''").get(line.invoice_id);
+		let placed;
+		if (PERSONAL_RECEIPT_WEEK_ENABLED && !lineOnInvoice) {
+			// The driver was never charged: the reversal stays off every invoice too.
+			const lineId = db.transaction(() => {
+				const newId = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: "" });
+				onCommit(newId);
+				return newId;
+			}).immediate();
+			placed = { lineId, state: "reversed", invoice: null, offInvoices: true };
+		} else {
+			placed = await placePersonalLine({ row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req, onCommit });
+		}
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}`
+			: placed.offInvoices ? "on no invoice (the line it reverses is on none, so neither goes on one)"
+				: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
+					: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
 		logAudit(req, "reverse_expense_personal", "expense", id,
 			`Personal ${personalExpense.formatMoney(line.cents)} reversed (line ${line.id} -> ${placed.lineId}); week ${row.week_start}; ${where}; ` +
 			(row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period}`) +
@@ -29055,9 +29079,14 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 // POST /api/invoices/personal-corrections { driver, weekStart } — a Super Admin
 // creates (or adds to) the week's correction invoice from the lines flagged for
 // it. weekStart is the Saturday that starts the week. A week touching a
-// finalized month is refused for now (409 PERIOD_FINALIZED).
+// finalized month is refused for now (409 PERIOD_FINALIZED). With the receipt's
+// week on, correction invoices are retired (410): a line waits for the driver's
+// next weekly invoice.
 app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+			return res.status(410).json({ error: "Correction invoices for Personal lines are retired: a line waits for the driver's next weekly invoice.", code: "PERSONAL_CORRECTIONS_RETIRED" });
+		}
 		const body = req.body || {};
 		const driver = typeof body.driver === "string" ? body.driver.trim() : "";
 		const weekStart = typeof body.weekStart === "string" ? body.weekStart.trim() : "";
@@ -29107,9 +29136,28 @@ app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refus
 // (netCents()): the Expenses screen's list beside its Create button
 // (POST /api/invoices/personal-corrections). A line whose receipt names no
 // driver cannot have a correction and is not listed (its flag was audited).
+// With the receipt's week on: { groups: [], carried: [...] }, one row per carried
+// line, oldest first, in the server's words (since_label, amount_text, reason).
 app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {
 	try {
-		if (!personalLedgerPresent()) return res.json({ groups: [] });
+		if (!personalLedgerPresent()) return res.json(PERSONAL_RECEIPT_WEEK_ENABLED ? { groups: [], carried: [] } : { groups: [] });
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+			const carried = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+				WHERE ep.voided_at = '' AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') AND ${PERSONAL_COLLECTABLE_SQL}
+				ORDER BY ep.needs_correction_since, ep.id`).all()
+				.filter((r) => normalizeDriverName(r.receipt_driver || ""))
+				.map((r) => {
+					const since = Date.parse(r.needs_correction_since);
+					const wait = personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r);
+					return {
+						line_id: r.id, expense_id: r.expense_id, driver: String(r.receipt_driver || "").trim(),
+						since_label: Number.isFinite(since) ? personalExpense.formatDay(appDay(new Date(since))) : "",
+						amount_text: personalExpense.signedMoney(personalExpense.netCents(r)),
+						reason: wait.reason, wait_text: wait.text,
+					};
+				});
+			return res.json({ groups: [], carried });
+		}
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 			WHERE ep.voided_at = '' AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
 			ORDER BY ep.week_start, ep.id`).all();
@@ -66698,8 +66746,11 @@ function pendingReceiptsInPeriod(period) {
 // yet. The close lists them, like Pending receipts, so they are followed up.
 function personalWaitingInPeriod(period) {
 	if (!personalLedgerPresent()) return [];
+	// With the receipt's week on, a reversed line on no invoice and its reversal
+	// are settled in the books and never wait for one.
 	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 		WHERE ep.voided_at = '' AND ep.cost_period = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
+		${PERSONAL_RECEIPT_WEEK_ENABLED ? `AND ${PERSONAL_COLLECTABLE_SQL}` : ""}
 		ORDER BY ep.id`).all(period).map((r) => ({
 		id: r.id,
 		expense_id: r.expense_id,
@@ -66707,7 +66758,7 @@ function personalWaitingInPeriod(period) {
 		kind: r.kind,
 		week_start: r.week_start,
 		amount_text: personalExpense.formatMoney(r.cents),
-		state: r.needs_correction_since ? "needs_correction" : "pending",
+		state: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending",
 	}));
 }
 
@@ -68193,7 +68244,9 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		} catch { finalized = new Set(); }
 		// personal: the receipt's live Personal line (personalSummaryByExpense()) as
 		// this role may see it (personalSummaryForRole()), or null; personalEnabled:
-		// whether new marks are accepted. The receipt's own amount is listed as filed.
+		// whether new marks are accepted; personalReceiptWeek: whether a line takes
+		// its receipt's week (the Mark dialog's text). The receipt's own amount is
+		// listed as filed.
 		const rows = db.prepare(sql).all(...params);
 		const personal = personalSummaryByExpense(rows.map((e) => e.id));
 		const role = req.session.user.role;
@@ -68208,7 +68261,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
 			};
 		});
-		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED });
+		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
@@ -68465,7 +68518,10 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 				`status ${expense.status || "Pending"} -> ${status} WITHHELD [EXPENSE_PERSONAL] — the receipt has a live Personal line; nothing was written`,
 				"EXPENSE_PERSONAL");
 			return res.status(409).json({
-				error: "This receipt has a Personal line, so it stays Approved. Undo or reverse the Personal line first.",
+				// With the receipt's week on, a line on an approved invoice is final: no Reverse.
+				error: PERSONAL_RECEIPT_WEEK_ENABLED
+					? "This receipt has a Personal line, so it stays Approved. Undo the Personal line first, while its invoice is not approved."
+					: "This receipt has a Personal line, so it stays Approved. Undo or reverse the Personal line first.",
 				code: "EXPENSE_PERSONAL",
 			});
 		}
