@@ -106,6 +106,21 @@ section("T8 another person");
 		[answer && answer.code, JSON.stringify(answer).match(/RIVERA|CASEY|200|PILOT/i)], ["OTHER_PERSON", null]);
 }
 
+section("T8 a longer roster name that holds his");
+{
+	const r2 = call("buildRoster", { people: ["Ann Lee", "Ann Lee Park", "Ann Marie Lee", "Casey Rivera"], trucks: [], cards: [] });
+	const his = { driver: "Ann Lee", truck: "", amountCents: 20000, date: "2026-10-12", vendor: "Pilot", pageCount: 1 };
+	const p = (line) => page(["PILOT", "10/12/2026 TOTAL $200.00", line]);
+	check("T8 another person whose name holds his (\"ANN LEE PARK\", \"PARK, ANN LEE\", \"LEE, ANN MARIE\") is still another person",
+		[code(p("CARDHOLDER ANN LEE PARK"), r2, his), code(p("CARDHOLDER PARK, ANN LEE"), r2, his), code(p("CARDHOLDER LEE, ANN MARIE"), r2, his)],
+		["OTHER_PERSON", "OTHER_PERSON", "OTHER_PERSON"]);
+	check("T8 control: another driver's name; his own name alone, and with a word of that longer name elsewhere on the page",
+		[code(p("CARDHOLDER CASEY RIVERA"), r2, his), code(p("CARDHOLDER ANN LEE"), r2, his), code(page(["PILOT", "10/12/2026 TOTAL $200.00", "CARDHOLDER ANN LEE", "PARK AVE"]), r2, his)],
+		["OTHER_PERSON", "AUTO_RELEASED", "AUTO_RELEASED"]);
+	check("T8 his own longer name never reads as the shorter roster name inside it",
+		code(p("CARDHOLDER ANN LEE PARK"), r2, { ...his, driver: "Ann Lee Park" }), "AUTO_RELEASED");
+}
+
 section("T8 another truck");
 {
 	check("T8 another truck's unit next to a unit label", code(withLine("UNIT T-2"), roster, RECEIPT), "OTHER_TRUCK");

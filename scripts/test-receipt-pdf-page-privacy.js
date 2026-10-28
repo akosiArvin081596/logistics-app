@@ -12,8 +12,12 @@
  *   T9  a 3-page Personal PDF, pages 1 and 3 marked released, page 2 naming
  *       another driver: every stream of the stored invoice inflated; page 1's
  *       and page 3's markers found first (the control), page 2's absent, the
- *       office line present. T9b: page 2's image never reaches the bytes through
- *       a resource dictionary the pages share
+ *       office line present; the render record holds no driver name. T9b: page
+ *       2's image never reaches the bytes through a resource dictionary the
+ *       pages share. T9c: nor through a soft mask's group, a tiling pattern or a
+ *       Type3 font a released page uses whose /Resources is that dictionary (page
+ *       2's image and its form's text absent); an object only page 2 draws,
+ *       reached from page 1 any other way, refuses the copy (page_isolation)
  *   T10 the Super Admin mark: one page per call, a reason code, audited; a
  *       Driver, a Dispatcher and an Investor get 403, a cross-site request is
  *       refused; a page with an OTHER_* code answers 409 with the codes until
@@ -33,8 +37,20 @@
  *       receipt pages are rebuilt at the end, one audit row, the original kept
  *       outside uploads/; then "Update invoice PDF" after a release, same
  *       invariants
+ *   T17 (rule D) an invoice drawn before any of its receipt's pages was released
+ *       still gets a render record; once released, "Update invoice PDF" adds the
+ *       pages at the end, the invoice pages read as before; an "office only"
+ *       mark then takes one out again
+ *   races: a page that stops being released while the pages-only path runs (a
+ *       roster change during the rebuild) is never written, by "Update invoice
+ *       PDF" or by the sweep
+ *   an unverifiable receipt (its file gone, an image now, another driver's, a
+ *       reader that keeps failing): 4 sweeps rewrite the invoice once, then no
+ *       more kept copies, render records or audit rows
+ *   the 15-page cap holds for "Update invoice PDF" (409 PAGE_CAP)
  *   the locked-invoice text check: a rebuild whose invoice pages' text differs
- *       is refused, logged and audited, and the stored file stays as it was
+ *       is refused, logged and audited, and the stored file stays as it was; its
+ *       alert names the invoice, so only Super Admins get it (stored and live)
  *   off: RECEIPT_PDF_PAGES_ENABLED unset, the routes answer 404 FEATURE_OFF and
  *       nothing is computed
  *
@@ -51,6 +67,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { makeChecker, DRIVER_A } = require("./lib/personal-world");
 const { buildPrivacyWorld, receiptPdf, fakeChrome, streamTexts, pageTexts, glyphHex, CROSS_SITE } = require("./lib/receipt-privacy-world");
+const rp = require(path.join(__dirname, "..", "lib", "receipt-pdf.js"));
 const { check, section, finish } = makeChecker();
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "receipt-page-privacy-"));
@@ -62,13 +79,25 @@ const ON = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true", RECEIPT_PDF_PAGES_ENAB
 const OFF = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
 const NOTE_PDF = "PDF receipt on file";
 
-function world(env = ON) {
+function world(env = ON, extra = {}) {
 	return buildPrivacyWorld({
 		env,
 		receiptPdfProbes: PROBES,
 		render: async (templateName, data, record) => { await record(templateName, data); return fakeChrome(templateName, data); },
+		...extra,
 	});
 }
+
+// A socket server stand-in that records each room a live event is sent to.
+function recorderIo(log) {
+	const room = (name) => ({
+		emit: (event) => { log.push({ room: name, event }); return true; },
+		except: (other) => room(`${name} except ${other}`),
+		to: (other) => room(`${name}+${other}`),
+	});
+	return { to: room, in: room, emit: (event) => { log.push({ room: "*", event }); return true; } };
+}
+const addRosterName = (w, name) => w.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_percentage, pay_daily) VALUES (?, '', 'fixed', 0, 250)").run(name);
 
 const receiptFile = (id) => `${1760000000000 + id}-abcdefabcdef.pdf`;
 function putPdf(w, id, bytes) {
@@ -98,12 +127,48 @@ async function has(pdf, needle) {
 }
 // The stored invoice's pages split: copied receipt pages carry the label
 // "Receipt N of M - page x of y" in their own content (a notice page "Receipt N
-// of M - K pages of this statement ..."); every other page, the sheets
-// included, is an invoice page.
+// of M - K pages of this statement ..."), or, added at the end of an invoice
+// drawn before any of them was released, "PDF receipt on file: <its line> -
+// page x of y"; every other page, the sheets included, is an invoice page.
 async function splitPages(pdf) {
 	const texts = await pageTexts(pdf);
-	const receipt = texts.map((t, i) => (/(^|\|)Receipt \d+ of \d+ - (page \d+ of \d+|\d+ pages? of this statement)/.test(t) ? i : -1)).filter((i) => i >= 0);
+	const label = /(^|\|)(Receipt \d+ of \d+ - (page \d+ of \d+|\d+ pages? of this statement)|PDF receipt on file: [^|]{1,120} - page \d+ of \d+)/;
+	const receipt = texts.map((t, i) => (label.test(t) ? i : -1)).filter((i) => i >= 0);
 	return { texts, receipt, invoice: texts.filter((_, i) => !receipt.includes(i)) };
+}
+
+// A made-up 3-page statement whose pages share one /Resources dictionary (4 0 R)
+// listing every page's image and a form that draws page 2's text, which names
+// Test Driver B. Pages 1 and 3 also use, by mode: an ExtGState whose soft mask's
+// group form has that dictionary as its /Resources ("smask"), a tiling pattern
+// with it ("pattern"), a Type3 font with it ("type3"); "junk": page 1's image
+// dictionary also names page 2's image, under a key of its own.
+// 1 Catalog, 2 Pages, 3 Helvetica, 4 the shared resources, 5 the ExtGState, 6 its
+// group form, 7-9 one image per page, 10 the pattern, 11 page 2's form, 12 the
+// Type3 font, 13 its glyph, then page and content pairs from 14.
+function sharedStatement(mode) {
+	const objs = [];
+	objs.push("<< /Type /Catalog /Pages 2 0 R >>");
+	objs.push("<< /Type /Pages /Kids [14 0 R 16 0 R 18 0 R] /Count 3 >>");
+	objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+	objs.push("<< /Font << /F1 3 0 R /T3 12 0 R >> /XObject << /Im1 7 0 R /Im2 8 0 R /Im3 9 0 R /Fm2 11 0 R >> /ExtGState << /GS0 5 0 R >> /Pattern << /P0 10 0 R >> >>");
+	objs.push("<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 6 0 R >> >>");
+	objs.push(rp.streamObject("/Type /XObject /Subtype /Form /BBox [0 0 300 400] /Group << /S /Transparency /CS /DeviceGray >> /Resources 4 0 R", "1 g 0 0 300 400 re f"));
+	for (let i = 1; i <= 3; i++) {
+		const junk = mode === "junk" && i === 1 ? " /Junk 8 0 R" : "";
+		objs.push(rp.streamObject(`/Type /XObject /Subtype /Image /Width 16 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8${junk}`, Buffer.from(`IMGMARK-P${i}`.padEnd(16, "-"), "latin1")));
+	}
+	objs.push(rp.streamObject("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources 4 0 R", "0 g 0 0 5 5 re f"));
+	objs.push(rp.streamObject("/Type /XObject /Subtype /Form /BBox [0 0 300 400] /Resources << /Font << /F1 3 0 R >> >>", "BT /F1 10 Tf 20 300 Td (FORMTEXT-P2 TEST DRIVER B) Tj ET"));
+	objs.push("<< /Type /Font /Subtype /Type3 /FontBBox [0 0 750 750] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 13 0 R >> /Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1000] /Resources 4 0 R >>");
+	objs.push(rp.streamObject("", "1000 0 0 0 750 750 d1 0 0 750 750 re f"));
+	for (let i = 1; i <= 3; i++) {
+		const uses = i === 2 ? "" : { smask: "q /GS0 gs 0 0 10 10 re f Q ", pattern: "q /Pattern cs /P0 scn 0 0 10 10 re f Q ", type3: "BT /T3 10 Tf 20 200 Td (a) Tj ET " }[mode] || "";
+		const content = `${uses}BT /F1 10 Tf 20 380 Td (MARKER-P${i} TOLL STATEMENT) Tj ET q 64 0 0 4 20 10 cm /Im${i} Do Q${i === 2 ? " /Fm2 Do" : ""}`;
+		objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents ${15 + (i - 1) * 2} 0 R /Resources 4 0 R >>`);
+		objs.push(rp.streamObject("", content));
+	}
+	return rp.rawPdf(objs);
 }
 
 // A made-up toll statement of Test Driver A's (3 pages, each with dated money
@@ -152,6 +217,10 @@ async function statementInvoice(w, opts = {}) {
 		check("T9 the sheet: 2 pages follow, \"1 page of this statement is kept by the office\"",
 			[sheet.pdfPages, sheet.note], [2, "The receipt's 2 pages follow this page. 1 page of this statement is kept by the office."]);
 		check("T9 the office line is in the stored bytes", await has(file, "1 page of this statement is kept by the office"), true);
+		let renderRow = {};
+		try { renderRow = w.db.prepare("SELECT * FROM invoice_pdf_renders ORDER BY id DESC LIMIT 1").get() || {}; } catch { renderRow = {}; }
+		check("T9 the render record holds no driver name (file hashes, pages and positions only)",
+			[Object.keys(renderRow).length > 0, "driver_key" in renderRow, /test driver a/i.test(JSON.stringify(renderRow))], [true, false, false]);
 		w.cleanup();
 
 		const s = world();
@@ -160,6 +229,40 @@ async function statementInvoice(w, opts = {}) {
 		check("T9b control: pages 1 and 3 drew their images (IMGMARK-P1, IMGMARK-P3 in the bytes)", [f2.includes("IMGMARK-P1"), f2.includes("IMGMARK-P3")], [true, true]);
 		check("T9b page 2's image, listed in the resource dictionary every page shares, is not in the bytes", f2.includes("IMGMARK-P2"), false);
 		s.cleanup();
+	}
+
+	section("T9c a withheld page's content never rides along with a released page's soft mask, pattern or Type3 font");
+	{
+		for (const mode of ["smask", "pattern"]) {
+			const w = world();
+			putPdf(w, 1, sharedStatement(mode));
+			await markPersonal(w, 1);
+			const d = await detail(w, 1);
+			const r1 = await markPage(w, 1, 1, { mark: "released", reason: "only_his_lines" });
+			const r3 = await markPage(w, 1, 3, { mark: "released", reason: "only_his_lines" });
+			const g = await w.generate(DRIVER_A);
+			const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+			const file = id ? stored(w, id) : Buffer.alloc(0);
+			check(`T9c ${mode}: page 2 (naming Test Driver B through its form) withheld, pages 1 and 3 released`,
+				[(pageCodes(d) || [])[1], r1.status, r3.status], ["OTHER_PERSON", 200, 200]);
+			check(`T9c ${mode}: control first: pages 1 and 3 copied, their text and images in the stored invoice`,
+				[await has(file, "MARKER-P1 TOLL"), await has(file, "MARKER-P3 TOLL"), file.includes("IMGMARK-P1"), file.includes("IMGMARK-P3")], [true, true, true, true]);
+			check(`T9c ${mode}: page 2's image and its form's text are in neither the stored bytes nor any inflated stream`,
+				[file.includes("IMGMARK-P2"), await has(file, "IMGMARK-P2"), await has(file, "FORMTEXT-P2"), await has(file, "TEST DRIVER B")], [false, false, false, false]);
+			w.cleanup();
+		}
+		const w = world();
+		const svc = w.mine.receiptPdfService();
+		const prep = (mode, n) => svc.prepare({ expenseId: 900 + n, photoData: `data:application/pdf;base64,${sharedStatement(mode).toString("base64")}`, allowPages: [1, 3], rosterHash: "0123456789abcdef" });
+		const t3 = await prep("type3", 1);
+		const t3pdf = t3 && t3.pdf ? Buffer.from(t3.pdf) : Buffer.alloc(0);
+		check("T9c type3: pages 1 and 3 copied with their images, page 2's image and its form's text absent",
+			[t3 && t3.status, t3 && t3.pages, t3pdf.includes("IMGMARK-P1"), t3pdf.includes("IMGMARK-P3"), t3pdf.includes("IMGMARK-P2"), await has(t3pdf, "FORMTEXT-P2")],
+			["pages", 2, true, true, false, false]);
+		const junk = await prep("junk", 2);
+		check("T9c an image only page 2 draws, reached from page 1 by another path: the copy is refused (page_isolation), the receipt keeps its note",
+			[junk && junk.status, junk && junk.reason, Boolean(junk && junk.pdf)], ["on_file", "page_isolation", false]);
+		w.cleanup();
 	}
 
 	section("T10 the Super Admin mark");
@@ -329,6 +432,168 @@ async function statementInvoice(w, opts = {}) {
 		w.cleanup();
 	}
 
+	section("T17 (rule D) an invoice drawn before any of its receipt's pages was released");
+	{
+		const w = world();
+		putPdf(w, 1, receiptPdf([
+			["FLEET TOLL STATEMENT", "MARKER-D1-3a9c", "ACCOUNT HOLDER TEST DRIVER A", "10/12/2026 PILOT #123 $200.00", "10/13/2026 PLAZA 4 $4.50"],
+			["MARKER-D2-6e1b", "10/14/2026 PLAZA 2 $3.00", "10/15/2026 PLAZA 2 $3.00", "STATEMENT TOTAL $207.50"],
+		]));
+		await markPersonal(w, 1);
+		const g = await w.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		check("T17 drawn before any mark: \"PDF receipt on file\", no page copied, and a render record for the file all the same",
+			[notes(lastRender(w).data), renderCount(w)], [[NOTE_PDF], 1]);
+		if (id) w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(id);
+		const rowBefore = id ? JSON.stringify(w.invoice(id)) : "";
+		const fileBefore = id ? stored(w, id) : Buffer.alloc(0);
+		const split0 = await splitPages(fileBefore);
+		for (const p of [1, 2]) await markPage(w, 1, p, { mark: "released", reason: "only_his_lines" });
+		const d = await detail(w, 1);
+		check("T17 both pages released: the panel lists the invoice, none of the pages in its PDF, ready to update",
+			((d.body && d.body.invoices) || []).map((i) => [i.id, i.pages_in_pdf, i.can_update]), [[id, [], true]]);
+		const up = id ? await updatePdf(w, id) : { status: 0 };
+		const fileUp = id ? stored(w, id) : Buffer.alloc(0);
+		const split1 = await splitPages(fileUp);
+		check("T17 \"Update invoice PDF\" adds both pages",
+			[up.status, up.body && up.body.added, await has(fileUp, "MARKER-D1-3a9c"), await has(fileUp, "MARKER-D2-6e1b")], [200, 2, true, true]);
+		check("T17 the invoice pages read exactly as before, and the two pages come after them, at the end",
+			[split0.receipt.length, split0.texts.length > 0 && JSON.stringify(split1.invoice) === JSON.stringify(split0.texts), split1.receipt], [0, true, [split0.texts.length, split0.texts.length + 1]]);
+		check("T17 the invoices row is unchanged, and one audit row",
+			[id ? JSON.stringify(w.invoice(id)) === rowBefore : false, audits(w, "invoice_receipt_pages").filter((r) => Number(r.entity_id) === id).length], [true, 1]);
+		const again = id ? await updatePdf(w, id) : { status: 0 };
+		const sweep = await w.mine.runReceiptPagesSweep();
+		check("T17 pressed again, nothing to change; a sweep changes nothing",
+			[again.status, again.body && again.body.changed, sweep && sweep.withdrawn, id ? stored(w, id).equals(fileUp) : false], [200, false, 0, true]);
+		const off = await markPage(w, 1, 2, { mark: "office", reason: "other" });
+		const fileOff = id ? stored(w, id) : Buffer.alloc(0);
+		const split2 = await splitPages(fileOff);
+		check("T17 page 2 marked \"office only\": it leaves the end at once, page 1 stays, the invoice pages as before",
+			[off.status, await has(fileOff, "MARKER-D2-6e1b"), await has(fileOff, "MARKER-D1-3a9c"), JSON.stringify(split2.invoice) === JSON.stringify(split0.texts)], [200, false, true, true]);
+		w.cleanup();
+	}
+
+	section("races: a page that stops being released while the pages-only path runs is never written");
+	{
+		const w = world();
+		putPdf(w, 1, statement());
+		await markPersonal(w, 1);
+		await detail(w, 1);
+		await markPage(w, 1, 3, { mark: "released", reason: "only_his_lines" });
+		const g = await w.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		const before = id ? stored(w, id) : Buffer.alloc(0);
+		check("race (update): first, page 3 alone in the stored invoice", [await has(before, "MARKER-P1-7c41"), await has(before, "MARKER-P3-2b88")], [false, true]);
+		await markPage(w, 1, 1, { mark: "released", reason: "only_his_lines" });
+		const svc = w.mine.receiptPdfService();
+		const real = svc.rebuild;
+		let landed = 0;
+		// A driver whose name is on page 1 joins the roster while the child rebuilds.
+		svc.rebuild = async (pdf, plan) => {
+			if (!landed++) addRosterName(w, "Casey Rivera");
+			return real.call(svc, pdf, plan);
+		};
+		const up = id ? await updatePdf(w, id) : { status: 0 };
+		svc.rebuild = real;
+		const after = id ? stored(w, id) : Buffer.alloc(0);
+		check("race (update): \"Update invoice PDF\" writes no page withheld while it ran: page 1 not in the stored invoice, the file as it was",
+			[landed > 0, await has(after, "MARKER-P1-7c41"), after.equals(before), up.status === 200 && Boolean(up.body && up.body.added)], [true, false, true, false]);
+		const d = await detail(w, 1);
+		check("race (update): page 1 reads OTHER_PERSON now, its mark lapsed", [d.body?.pages?.[0]?.code, d.body?.pages?.[0]?.released], ["OTHER_PERSON", false]);
+		w.cleanup();
+	}
+	{
+		const w = world();
+		const { id } = await statementInvoice(w);
+		const before = id ? stored(w, id) : Buffer.alloc(0);
+		check("race (sweep): first, pages 1 and 3 in the stored invoice", [await has(before, "MARKER-P1-7c41"), await has(before, "MARKER-P3-2b88")], [true, true]);
+		// Page 3 "office only", written straight to its row so that the sweep takes it out.
+		w.db.prepare("UPDATE receipt_pdf_pages SET mark = 'office' WHERE expense_id = 1 AND page = 3").run();
+		const svc = w.mine.receiptPdfService();
+		const real = svc.rebuild;
+		let landed = 0;
+		svc.rebuild = async (pdf, plan) => {
+			if (!landed++) addRosterName(w, "Casey Rivera");
+			return real.call(svc, pdf, plan);
+		};
+		await w.mine.runReceiptPagesSweep();
+		svc.rebuild = real;
+		const after = id ? stored(w, id) : Buffer.alloc(0);
+		check("race (sweep): the rebuild taking page 3 out writes no page withheld while it ran: neither page 1 nor page 3 in the stored invoice",
+			[landed > 0, await has(after, "MARKER-P1-7c41"), await has(after, "MARKER-P3-2b88")], [true, false, false]);
+		w.cleanup();
+	}
+
+	section("an unverifiable receipt is withdrawn once, then left alone (4 sweeps)");
+	{
+		const twoPages = () => receiptPdf([
+			["FLEET TOLL STATEMENT", "MARKER-L1-4d2e", "10/12/2026 PILOT #123 $200.00", "10/13/2026 PLAZA 4 $4.50"],
+			["MARKER-L2-8b1f", "10/14/2026 PLAZA 2 $3.00", "10/15/2026 PLAZA 2 $3.00"],
+		]);
+		const variants = [
+			["its file gone from disk", (w) => fs.rmSync(path.join(w.dataDir, "uploads", "expense-receipts", receiptFile(1)), { force: true })],
+			["an image now", (w) => w.db.prepare("UPDATE expenses SET photo_data = ? WHERE id = 1").run(`/uploads/expense-receipts/${receiptFile(1).replace(/\.pdf$/, ".jpg")}`)],
+			["another driver's expense now", (w) => w.db.prepare("UPDATE expenses SET driver = ? WHERE id = 1").run("Test Driver B")],
+			["a reader that keeps failing after a roster change", (w) => {
+				w.mine.receiptPdfService().pageTexts = async () => ({ status: "on_file", reason: "timeout" });
+				addRosterName(w, "Avery Stone");
+			}],
+		];
+		for (const [label, breakIt] of variants) {
+			const w = world();
+			putPdf(w, 1, twoPages());
+			await markPersonal(w, 1);
+			await detail(w, 1);
+			await markPage(w, 1, 1, { mark: "released", reason: "only_his_lines" });
+			const g = await w.generate(DRIVER_A);
+			const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+			if (id) w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(id);
+			const keptDir = path.join(w.dataDir, "storage", "invoice-pdf-originals");
+			const state = () => ({
+				file: id ? sha(stored(w, id)) : "",
+				originals: fs.existsSync(keptDir) ? fs.readdirSync(keptDir).length : 0,
+				renders: renderCount(w),
+				audits: audits(w, "invoice_receipt_pages").length,
+			});
+			const start = state();
+			const held = id ? await has(stored(w, id), "MARKER-L1-4d2e") : false;
+			breakIt(w);
+			const withdrawn = [];
+			const states = [];
+			for (let i = 0; i < 4; i++) {
+				const s = await w.mine.runReceiptPagesSweep();
+				withdrawn.push(s && s.withdrawn);
+				states.push(state());
+			}
+			check(`loop (${label}): first page 1 in the stored invoice; 4 sweeps take it out once`,
+				[held, withdrawn, id ? await has(stored(w, id), "MARKER-L1-4d2e") : true], [true, [1, 0, 0, 0], false]);
+			check(`loop (${label}): after the first, no more kept copies, render records or audit rows, and the file stays the same`,
+				[states[0].originals - start.originals, states[3].originals - states[0].originals, states[3].renders - states[0].renders, states[3].audits - states[0].audits, states[3].file === states[0].file],
+				[1, 0, 0, 0, true]);
+			w.cleanup();
+		}
+	}
+
+	section("the 15-page cap holds for \"Update invoice PDF\"");
+	{
+		const w = world();
+		const six = (eid) => receiptPdf(Array.from({ length: 6 }, (_, p) => [`MARKER-R${eid}-P${p + 1}`, "FLEET TOLL STATEMENT"]));
+		for (const eid of [1, 5, 2]) {
+			putPdf(w, eid, six(eid));
+			await markPersonal(w, eid);
+			for (const p of [1, 2]) await markPage(w, eid, p, { mark: "released", reason: "only_his_lines" });
+		}
+		const g = await w.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		const before = id ? stored(w, id) : Buffer.alloc(0);
+		check("cap: first, two pages of each of three statements in the stored invoice (6 copied pages)", (await splitPages(before)).receipt.length, 6);
+		for (const eid of [1, 5, 2]) for (const p of [3, 4, 5, 6]) await markPage(w, eid, p, { mark: "released", reason: "only_his_lines" });
+		const up = id ? await updatePdf(w, id) : { status: 0 };
+		check("cap: every page released, 18 would cross the 15-page cap: refused (409 PAGE_CAP), the stored file as it was",
+			[up.status, up.body && up.body.code, id ? stored(w, id).equals(before) : false], [409, "PAGE_CAP", true]);
+		w.cleanup();
+	}
+
 	section("the locked-invoice text check, on its own (lib/receipt-page-privacy.js invoicePagesUnchanged)");
 	{
 		let lib = null;
@@ -350,7 +615,8 @@ async function statementInvoice(w, opts = {}) {
 	for (const kind of ["Approved", "closed month"]) {
 	section(`the locked-invoice text check on an ${kind === "Approved" ? "Approved invoice" : "invoice whose week is in a closed month"}`);
 	{
-		const w = world();
+		const emits = [];
+		const w = world(ON, { io: recorderIo(emits) });
 		const { id } = await statementInvoice(w);
 		w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(id);
 		if (kind === "closed month") {
@@ -379,6 +645,12 @@ async function statementInvoice(w, opts = {}) {
 		check(`the check (${kind}): the refusal is audited with its code, and alerted`,
 			[refused.length, /TEXT_MISMATCH/.test(refused[0] && refused[0].details), w.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'receipt-pages'").get().n],
 			[1, true, 1]);
+		const listed = (role) => {
+			const scope = w.mine.noticeTypeScope({ role });
+			return w.db.prepare(`SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'receipt-pages' AND ${scope.sql}`).get(...scope.params).n;
+		};
+		check(`the check (${kind}): the alert names the invoice, so only Super Admins get it: a Dispatcher's notice list leaves it out, and it is sent live to the super-admin room only`,
+			[listed("Super Admin"), listed("Dispatcher"), emits.filter((e) => e.event === "dispatch-notification").map((e) => e.room)], [1, 0, ["super-admin"]]);
 		if (real) svc.rebuild = real;
 		const retry = await w.mine.runReceiptPagesSweep();
 		check(`the check (${kind}): with an honest rebuild the next sweep withdraws the page`, [retry && retry.withdrawn, await has(stored(w, id), "MARKER-P1-7c41")], [1, false]);

@@ -29,7 +29,7 @@ const PAGE_ROUTE_HEADS = {
 	update: 'app.post("/api/invoices/:id/receipt-pages/update", requireRole("Super Admin"), refuseCrossOrigin, receiptPagesLimiter, async (req, res) => {',
 	invoicePdf: 'app.get("/api/invoices/:id/pdf", requireAuth, (req, res) => {',
 };
-const PAGE_ROOTS = ["runReceiptPagesSweep", "rewriteInvoiceReceiptPages", "receiptPageVerdictsFor", "receiptPdfService", "currentReceiptRoster"];
+const PAGE_ROOTS = ["runReceiptPagesSweep", "rewriteInvoiceReceiptPages", "receiptPageVerdictsFor", "receiptPdfService", "currentReceiptRoster", "noticeTypeScope"];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "app", "notifyChange",
 	"getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs", "DATA_DIR",
 	"fetch", "io", "sendEmail", "fuelAnalyticsLimiter", "personalReceiptLimiter", "personalRouteLimiter", "personalListLimiter",
@@ -65,7 +65,8 @@ class Res {
 const SAME_ORIGIN = { "x-requested-with": "XMLHttpRequest", "sec-fetch-site": "same-origin", host: "app.test" };
 const CROSS_SITE = { "x-requested-with": "XMLHttpRequest", "sec-fetch-site": "cross-site", origin: "https://elsewhere.example", host: "app.test" };
 
-// opts: { env, render(templateName, data, record) }
+// opts: { env, render(templateName, data, record), io (a socket server stand-in
+// for PR B's half; none by default) }
 function buildPrivacyWorld(opts = {}) {
 	const env = opts.env || {};
 	const base = pw.buildPersonalWorld({ env, receipts: true, receiptPdfProbes: opts.receiptPdfProbes });
@@ -102,7 +103,7 @@ function buildPrivacyWorld(opts = {}) {
 		fs,
 		DATA_DIR: base.dataDir,
 		fetch: () => { throw new Error("no network in a test"); },
-		io: null,
+		io: opts.io || null,
 		sendEmail: async () => undefined,
 		fuelAnalyticsLimiter: (req, res, next) => next(),
 		personalReceiptLimiter: (req, res, next) => next(),
