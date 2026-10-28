@@ -27386,7 +27386,31 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 // UNDO before approval voids the line (the row stays, as history); after
 // approval, or once its cost month is finalized, a REVERSE row credits it back
 // on the week the reversal is made in, by the same rules.
+//
+// THE RECEIPT'S WEEK — PERSONAL_RECEIPT_WEEK_ENABLED (off unless exactly
+// "true"). With it on, a line belongs to the week of its receipt date
+// (personalLineWeek(): with no valid date, or one after today, the week it is
+// marked in), and the table above becomes:
+//   that week's invoice not generated yet and    waits; the week's generation takes it
+//   its sweep not due
+//   Draft / Submitted / Rejected, in an open     attached now, the PDF redrawn
+//   month, with render data and room
+//   anything else: Approved/Processing/Paid, a   CARRIED (needs_correction_since now
+//   finalized month, no room, two weekly         reads "carried since"): it goes on
+//   invoices, no render data, or the sweep due   the driver's oldest open weekly
+//   with no invoice                              invoice after its week, in an open
+//                                                month, with room; with none yet, on
+//                                                the next one generated
+// Oldest line first, never below $0, never split. No correction invoice is made
+// (the corrections route answers 410) and the sweep sends no notice. A line on
+// an approved invoice is final: no Undo, no Reverse (409 PERSONAL_LOCKED).
+// Reverse stays for a line on no approved invoice whose Undo is blocked; when
+// that line is on no invoice, neither it nor its reversal ever goes on one
+// (PERSONAL_COLLECTABLE_SQL: the books net out across the two months). A week
+// touching a finalized month takes no new line at its generation. Switched off
+// again, carried lines read as flagged and the table above applies.
 const PERSONAL_EXPENSE_DEDUCTIONS_ENABLED = process.env.PERSONAL_EXPENSE_DEDUCTIONS_ENABLED === "true";
+const PERSONAL_RECEIPT_WEEK_ENABLED = process.env.PERSONAL_RECEIPT_WEEK_ENABLED === "true";
 // An invoice whose Personal lines may still change.
 const PERSONAL_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
 // Each ledger row with the type and driver of its receipt.
@@ -27423,15 +27447,26 @@ function personalRowsOnInvoice(invoiceId) {
 	return db.prepare(`${PERSONAL_ROW_SELECT} WHERE ep.invoice_id = ? AND ep.voided_at = '' ORDER BY ep.id`).all(invoiceId);
 }
 
+// The rows `ep` an invoice may still take, with the receipt's week on: a
+// reversed line on no invoice, and its reversal, never go on one (their books
+// net out across the two months).
+const PERSONAL_COLLECTABLE_SQL = "NOT (ep.kind = 'deduct' AND ep.reversed_by_id IS NOT NULL)"
+	+ " AND NOT (ep.kind = 'reverse' AND NOT EXISTS (SELECT 1 FROM expense_personal d JOIN invoices di ON di.id = d.invoice_id WHERE d.id = ep.reverses_id AND di.deleted_at = ''))";
+
 // One driver's lines for a week that no live invoice carries: never attached,
 // or left on an invoice that was soft-deleted. Matched on the receipt's driver
-// in any spelling (normalizeDriverName()), never on another driver's.
+// in any spelling (normalizeDriverName()), never on another driver's. With the
+// receipt's week on, also the earlier weeks' lines that are carried or were left
+// on a deleted invoice; never one its own week's invoice may still take.
 function personalWaitingRows(driverName, weekStart) {
 	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
 	if (!key || !personalLedgerPresent()) return [];
+	const weeks = PERSONAL_RECEIPT_WEEK_ENABLED
+		? `(ep.week_start = ? OR (ep.week_start < ? AND (ep.needs_correction_since != '' OR ep.invoice_id IS NOT NULL))) AND ${PERSONAL_COLLECTABLE_SQL}`
+		: "ep.week_start = ?";
 	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
-		WHERE ep.voided_at = '' AND ep.week_start = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
-		.all(weekStart).filter((r) => normalizeDriverName(r.receipt_driver || "") === key);
+		WHERE ep.voided_at = '' AND ${weeks} AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
+		.all(...(PERSONAL_RECEIPT_WEEK_ENABLED ? [weekStart, weekStart] : [weekStart])).filter((r) => normalizeDriverName(r.receipt_driver || "") === key);
 }
 
 // An invoice's stored render data, or null when it predates render snapshots.
@@ -27840,6 +27875,139 @@ function personalPlacement(driverName, weekStart) {
 	return { kind: "correction", weekly: inv, correction: openPersonalCorrection(driverName, weekStart) };
 }
 
+// THE RECEIPT'S WEEK (PERSONAL_RECEIPT_WEEK_ENABLED; the table at the top of the
+// section). The week a new line is keyed to: its receipt date's; with no valid
+// date, or one after today, the week it is marked in (a future week would hold
+// the line off every invoice until then). `why` names that case for the audit.
+function personalLineWeek(receiptDay) {
+	const marked = getWeekRange().weekStart;
+	if (!PERSONAL_RECEIPT_WEEK_ENABLED) return { weekStart: marked, why: "" };
+	const day = String(receiptDay || "").slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !personalExpense.formatDay(day)) return { weekStart: marked, why: "no receipt date: the week it was marked in" };
+	if (day > appTodayKey()) return { weekStart: marked, why: "dated after today: this week" };
+	return { weekStart: getWeekRange(day).weekStart, why: "" };
+}
+
+// What a weekly invoice can still take, in cents: its pay and adjustment, net of
+// the Personal lines it carries (the base rewriteInvoicePersonalLines() fits on).
+function personalRoomCents(inv) {
+	return Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100)
+		+ personalRowsOnInvoice(inv.id).reduce((s, r) => s + personalExpense.netCents(r), 0);
+}
+
+// One driver-week as the receipt's-week rules see it: unreadable, closed (it
+// touches a finalized month), two (weekly invoices), none (sweepDue), approved,
+// nosnapshot or open (roomCents). `label` is the week's.
+function personalWeekState(driverName, weekStart) {
+	const weekEnd = getWeekRange(weekStart).weekEnd;
+	const label = personalWeekLabel(weekStart, weekEnd);
+	const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: weekEnd });
+	if (lock.unreadable) return { kind: "unreadable", label };
+	if (lock.blockers.length) return { kind: "closed", label, periods: lock.blockers.flatMap((b) => b.periods || []).filter(Boolean) };
+	const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
+	if (weekly.length > 1) return { kind: "two", label };
+	const inv = weekly[0] || null;
+	if (!inv) return { kind: "none", label, sweepDue: personalSweepDueMs(weekStart) <= Date.now() };
+	if (!PERSONAL_OPEN_STATUSES.has(inv.status)) return { kind: "approved", label, invoice: inv };
+	if (!inv.pdf_file_name || !personalSnapshotOf(inv)) return { kind: "nosnapshot", label, invoice: inv };
+	return { kind: "open", label, invoice: inv, roomCents: personalRoomCents(inv) };
+}
+
+const PERSONAL_MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// Why a line cannot go on its own week's invoice, in the screens' words:
+// { reason, text }, text = "<reason>; it goes on the next weekly invoice".
+function personalCarryReason(own, row) {
+	let reason;
+	let withRoom = false;
+	switch (own.kind) {
+		case "unreadable": reason = "no month can be confirmed open (the period lock table could not be read)"; break;
+		case "closed": {
+			const months = [...new Set(own.periods)].sort().map((p) => PERSONAL_MONTH_NAMES[Number(p.slice(5, 7)) - 1]).filter(Boolean);
+			reason = `the week of ${own.label} touches closed ${months.join(" and ") || "month"}`;
+			break;
+		}
+		case "two": reason = `the week of ${own.label} has two weekly invoices`; break;
+		case "approved": reason = `the ${own.label} invoice is ${String(own.invoice.status || "").toLowerCase()}`; break;
+		case "nosnapshot": reason = `the ${own.label} invoice predates stored render data`; break;
+		case "open":
+			if (row && own.roomCents + personalExpense.netCents(row) >= 0) {
+				reason = `the ${own.label} invoice could not take it when it was carried`;
+			} else {
+				reason = `more than the ${own.label} invoice can take`;
+				withRoom = true;
+			}
+			break;
+		default: reason = `the week of ${own.label} has no weekly invoice`;
+	}
+	return { reason, text: `${reason}; it goes on the next weekly invoice${withRoom ? " with room" : ""}` };
+}
+
+// The driver's live weekly invoices a carried line of `weekStart` may go on,
+// oldest week first: from that week on, open, in an open month, with render
+// data, alone in their week.
+function personalOpenInvoicesFrom(driverName, weekStart) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key) return [];
+	const perWeek = new Map();
+	for (const r of db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE week_start >= ? AND deleted_at = '' AND is_manual = 0 ORDER BY week_start ASC, id ASC").all(weekStart)) {
+		if (normalizeDriverName(r.driver) !== key) continue;
+		if (!perWeek.has(r.week_start)) perWeek.set(r.week_start, []);
+		perWeek.get(r.week_start).push(r);
+	}
+	return [...perWeek.values()].filter((list) => list.length === 1).map((list) => list[0]).filter((inv) => {
+		if (!PERSONAL_OPEN_STATUSES.has(inv.status) || !inv.pdf_file_name || !personalSnapshotOf(inv)) return false;
+		const lock = invoiceMonthLockBlockers(inv);
+		return !lock.unreadable && !lock.blockers.length;
+	});
+}
+
+// Whether a line's own week's invoice can take it now. A later invoice never
+// takes a line its own week still can.
+function personalOwnWeekCanTake(driverName, row) {
+	const own = personalWeekState(driverName, row.week_start);
+	return own.kind === "open" && own.roomCents + personalExpense.netCents(row) >= 0;
+}
+
+// Where a new line goes with the receipt's week on: unreadable; pending (its
+// week's invoice not generated, the sweep not due); attach (its week's open
+// invoice); carry { why, target }: target is the oldest open later invoice with
+// room, null when there is none yet. `row` carries week_start, kind, cents and
+// share_cents.
+function personalWeekPlacement(driverName, row) {
+	const own = personalWeekState(driverName, row.week_start);
+	if (own.kind === "unreadable") return { kind: "unreadable" };
+	if (own.kind === "none" && !own.sweepDue) return { kind: "pending" };
+	const net = personalExpense.netCents(row);
+	if (own.kind === "open" && own.roomCents + net >= 0) return { kind: "attach", invoice: own.invoice };
+	const target = personalOpenInvoicesFrom(driverName, row.week_start)
+		.find((inv) => inv.week_start > row.week_start && personalRoomCents(inv) + net >= 0) || null;
+	return { kind: "carry", why: personalCarryReason(own, row).text, target };
+}
+
+// Where a new line goes, by the rules the flag selects (the dry run asks this too).
+function personalPlacementFor(driverName, row) {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? personalWeekPlacement(driverName, row) : personalPlacement(driverName, row.week_start);
+}
+
+// Whether a line may go on this invoice by its week: its own week's always; with
+// the receipt's week on, an earlier week's line that is carried or was left on a
+// deleted invoice.
+function personalMayGoOn(row, inv) {
+	if (row.week_start === inv.week_start) return true;
+	if (!PERSONAL_RECEIPT_WEEK_ENABLED || !(String(row.week_start) < String(inv.week_start))) return false;
+	if (row.invoice_id != null) {
+		const on = db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(row.invoice_id);
+		return !on || !!on.deleted_at;
+	}
+	return !!row.needs_correction_since;
+}
+
+// The end of an audit row for a line an invoice cannot take without going below $0.
+function personalUnfitTail() {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? "goes on the next weekly invoice" : "waiting for the week's correction";
+}
+
 // Change the Personal lines a live, open invoice carries and redraw its PDF:
 // render first (its receipts, then the PDF: the only awaits), then ONE immediate transaction re-checks that
 // neither the invoice nor its lines moved and writes the rows, the invoice's
@@ -27875,7 +28043,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 		: [];
 	const invKey = normalizeDriverName(inv.driver);
 	for (const r of attachRows) {
-		if (r.voided_at || r.week_start !== inv.week_start || normalizeDriverName(r.receipt_driver || "") !== invKey) {
+		if (r.voided_at || !personalMayGoOn(r, inv) || normalizeDriverName(r.receipt_driver || "") !== invKey) {
 			throw personalRefusal(409, "PERSONAL_DRIVER_MISMATCH", `A Personal line of another driver or week cannot go on ${label}.`);
 		}
 	}
@@ -27919,6 +28087,8 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 			// The invoice's week may have come to touch a finalized month meanwhile.
 			const weekLock = invoiceMonthLockBlockers(now || inv);
 			if (moved || !sameLines || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
+			// An earlier week's line goes on only while its own week still cannot take it.
+			if (PERSONAL_RECEIPT_WEEK_ENABLED && incoming.some((r) => String(r.week_start) < String(inv.week_start) && personalOwnWeekCanTake(inv.driver, r))) throw changed();
 			if (voidId != null) assertPersonalCostMonthOpen(current.find((r) => r.id === voidId));
 			const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
 			for (const r of attachRows) {
@@ -28052,8 +28222,10 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 }
 
 // Place a new line (a mark's deduction or a reversal) by the week rules and
-// write it. Returns { lineId, state, invoice, created }.
+// write it. Returns { lineId, state, invoice, created }, plus `carried` (the
+// reason it is off its week's invoice) with the receipt's week on.
 async function placePersonalLine({ row, receiptType, driverName, actor, onCommit }) {
+	if (PERSONAL_RECEIPT_WEEK_ENABLED) return placePersonalLineByWeek({ row, receiptType, driverName, actor, onCommit });
 	const place = personalPlacement(driverName, row.week_start);
 	if (place.kind === "unreadable") {
 		throw personalRefusal(409, "PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. The Personal line is held until that is fixed.");
@@ -28081,6 +28253,32 @@ async function placePersonalLine({ row, receiptType, driverName, actor, onCommit
 		return id;
 	}).immediate();
 	return { lineId, state: stamp ? "needs_correction" : "pending", invoice: null };
+}
+
+// placePersonalLine() with the receipt's week on: its week's open invoice, else
+// carried to the oldest open later one with room, else written waiting (carried
+// when its week can never take it). A line the invoice turns out not to fit at
+// the write is carried, for the sweep or the next generation.
+async function placePersonalLineByWeek({ row, receiptType, driverName, actor, onCommit }) {
+	const place = personalWeekPlacement(driverName, row);
+	if (place.kind === "unreadable") {
+		throw personalRefusal(409, "PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. The Personal line is held until that is fixed.");
+	}
+	const actorName = (actor && actor.session && actor.session.user && actor.session.user.username) || "";
+	const target = place.kind === "attach" ? place.invoice : place.kind === "carry" ? place.target : null;
+	const carried = place.kind === "carry" ? place.why : "";
+	if (target) {
+		const out = await rewriteInvoicePersonalLines(target, { insert: row, insertType: receiptType, fit: true, onCommit, actorName });
+		if (out.insertFlagged) return { lineId: out.insertedId, state: "carried", invoice: null, carried: carried || `it does not fit ${target.invoice_number} without taking it below $0` };
+		return { lineId: out.insertedId, state: "invoiced", invoice: out.invoice, carried };
+	}
+	const stamp = carried ? new Date().toISOString() : "";
+	const lineId = db.transaction(() => {
+		const id = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: stamp });
+		if (onCommit) onCommit(id);
+		return id;
+	}).immediate();
+	return { lineId, state: stamp ? "carried" : "pending", invoice: null, carried };
 }
 
 // Why a live deduction can no longer be undone (then it is reversed), or null.
@@ -28129,7 +28327,10 @@ function personalReverseShare(line) {
 // Each receipt's live Personal deduction, for the screens: { [expenseId]:
 // { line_id, cents, share_cents, week_start, state, invoice_id, invoice_number,
 // in_place, cost_period } }, state one of pending, invoiced, correction,
-// needs_correction, reversed. A null-prototype object.
+// needs_correction, reversed. With the receipt's week on, needs_correction reads
+// carried, and each summary adds wait_text (why a carried line is off its week's
+// invoice), invoice_week_label (the week of the invoice carrying it) and final
+// (that invoice is approved). A null-prototype object.
 function personalSummaryByExpense(ids) {
 	const out = Object.create(null);
 	const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
@@ -28137,15 +28338,16 @@ function personalSummaryByExpense(ids) {
 	for (let i = 0; i < list.length; i += 500) {
 		const chunk = list.slice(i, i + 500);
 		const rows = db.prepare(
-			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at
-			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id
+			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at,
+			 i.status AS inv_status, i.week_start AS inv_week_start, i.week_end AS inv_week_end, e.driver AS receipt_driver
+			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id LEFT JOIN expenses e ON e.id = ep.expense_id
 			 WHERE ep.expense_id IN (${chunk.map(() => "?").join(",")}) AND ep.kind = 'deduct' AND ep.voided_at = '' ORDER BY ep.id`
 		).all(...chunk);
 		for (const r of rows) {
 			const onInvoice = r.invoice_id != null && r.inv_number != null && !r.inv_deleted_at;
 			const state = r.reversed_by_id != null ? "reversed"
 				: onInvoice ? (r.inv_is_correction ? "correction" : "invoiced")
-					: r.needs_correction_since ? "needs_correction" : "pending";
+					: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending";
 			out[r.expense_id] = {
 				line_id: r.id, cents: r.cents, share_cents: r.share_cents, week_start: r.week_start, state,
 				invoice_id: onInvoice ? r.invoice_id : null, invoice_number: onInvoice ? r.inv_number : "",
@@ -28153,6 +28355,14 @@ function personalSummaryByExpense(ids) {
 				amount_text: personalExpense.formatMoney(r.cents),
 				week_label: /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || "")) ? personalWeekLabel(r.week_start, getWeekRange(r.week_start).weekEnd) : "",
 			};
+			if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+				Object.assign(out[r.expense_id], {
+					wait_text: state === "carried" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || ""))
+						? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text : "",
+					invoice_week_label: onInvoice && r.inv_week_start && r.inv_week_end ? personalWeekLabel(r.inv_week_start, r.inv_week_end) : "",
+					final: onInvoice && state !== "reversed" && !PERSONAL_OPEN_STATUSES.has(r.inv_status),
+				});
+			}
 			// The row itself, for personalSummaryForRole()'s Undo test; not enumerable,
 			// so it never reaches a response.
 			Object.defineProperty(out[r.expense_id], "row", { value: r, enumerable: false });
@@ -28165,15 +28375,24 @@ function personalSummaryByExpense(ids) {
 // plus can_undo (personalUndoBlocker(): Undo while it applies, Reverse after).
 // A Dispatcher: the state, the amount and the week — no share, invoice or books.
 // A Driver (his own receipts): the same, plus which of his invoices carries it.
+// With the receipt's week on, Super Admin also gets can_reverse (Undo blocked,
+// but not by an approved invoice, which is final) and a Driver the week of the
+// invoice carrying it.
 function personalSummaryForRole(summary, role) {
 	if (!summary) return null;
 	if (role === "Super Admin") {
 		const live = summary.state !== "reversed";
-		return { ...summary, can_undo: live && summary.row ? !personalUndoBlocker(summary.row) : false };
+		const block = live && summary.row ? personalUndoBlocker(summary.row) : null;
+		const out = { ...summary, can_undo: live && summary.row ? !block : false };
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) out.can_reverse = live && !!block && block.code !== "PERSONAL_INVOICE_APPROVED";
+		return out;
 	}
 	const { line_id, state, cents, amount_text, week_start, week_label } = summary;
 	const shown = { line_id, state, cents, amount_text, week_start, week_label };
-	return role === "Driver" ? { ...shown, invoice_number: summary.invoice_number || "" } : shown;
+	if (role !== "Driver") return shown;
+	const driver = { ...shown, invoice_number: summary.invoice_number || "" };
+	if (PERSONAL_RECEIPT_WEEK_ENABLED) driver.invoice_week_label = summary.invoice_week_label || "";
+	return driver;
 }
 
 // The receipts among `ids` with a live (unreversed) Personal deduction.
@@ -28564,11 +28783,12 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 		const inPlace = /^\d{4}-\d{2}$/.test(month) && !periodWriteLocked(month);
 		const receiptDay = String(expense.date || "").slice(0, 10);
 		const today = appTodayKey();
+		const lineWeek = personalLineWeek(receiptDay);
 		const row = {
 			expense_id: id, kind: "deduct", cents: amount.cents, receipt_cents: receiptCents,
 			merchant: personalExpense.merchantOf(expense), receipt_date: receiptDay,
 			cost_period: inPlace ? month : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? (receiptDay || today) : today,
-			week_start: getWeekRange().weekStart, share_cents: personalShareForReceipt(expense, amount.cents), reason,
+			week_start: lineWeek.weekStart, share_cents: personalShareForReceipt(expense, amount.cents), reason,
 			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
 		};
 		const approve = inPlace && String(expense.status || "") === "Pending";
@@ -28585,10 +28805,12 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 			if (won) return personalAlreadyMarked(res, won, amount.cents, user);
 			throw err;
 		}
-		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}${placed.carried ? ` (carried: ${placed.carried})` : ""}`
+			: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
+				: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
 		const books = row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period} for finalized ${month || "unknown month"}`;
 		logAudit(req, "mark_expense_personal", "expense", id,
-			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}; ${where}; ${books}` +
+			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}${lineWeek.why ? ` (${lineWeek.why})` : ""}; ${where}; ${books}` +
 			(row.share_cents ? `; share returned ${personalExpense.formatMoney(row.share_cents)}` : "") + (reason ? `; reason: ${reason}` : ""));
 		if (approve) logAudit(req, "update_expense_status", "expense", id, `status Pending -> Approved (marked Personal; period ${row.cost_period})`);
 		if (placed.invoice && !placed.created) {
