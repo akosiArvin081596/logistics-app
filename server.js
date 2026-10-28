@@ -22027,6 +22027,9 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const billed = new Set();   // normalized names successfully billed OR already legitimately invoiced
 	const errors = [];
 	const zeroPay = [];         // generated but $0 (bad data) — left as Draft, never auto-submitted
+	// Drivers who worked a week touching a closed month (INVOICE_CLOSED_MONTH_GUARD_ENABLED):
+	// no weekly invoice can bill it and no retry changes that, so each is skipped and named.
+	const closedWeek = [];
 	// Completed loads the handler could NOT bill because they carry no completion
 	// date, yet are scheduled inside this week — probably unpaid work. The handler
 	// reports them on both a 200 and a 400 (a driver whose ONLY load is undated gets
@@ -22040,9 +22043,6 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// of those a delivered channel actually showed.
 	const undatedInWeek = [];
 	const undatedInWeekIds = [];
-	// Drivers who worked a week touching a closed month (INVOICE_CLOSED_MONTH_GUARD_ENABLED):
-	// no weekly invoice can bill it and no retry changes that, so each is skipped and named.
-	const closedWeek = [];
 	// The week's Personal receipt images, cached before any invoice renders
 	await warmPersonalReceiptsForWeek(range.weekStart);
 	for (const driver of rosterDrivers) {
