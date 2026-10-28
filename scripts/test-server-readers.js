@@ -122,6 +122,7 @@ const BEFORE_FIRST_MOVE = new Map([
 	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
 	["scripts/test-no-production-defaults.js", "scans server.js and lib/; changed by open work on feat/ratecon-pdf-viewer-gate, whose owner adds routes/ or the helper"],
 	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
+	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
 ]);
 
 // ── the detector ──────────────────────────────────────────────────────────────

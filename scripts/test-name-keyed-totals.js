@@ -56,6 +56,11 @@
  *      driverName that reads as a built-in property name (400
  *      DRIVER_NAME_RESERVED, field driverName) and one that is not text (400,
  *      never a throw), with nothing written; an ordinary name is saved.
+ *   §3d THE RATINGS ROUTES AS REGISTERED — every /api/load-ratings route,
+ *      lifted in server.js's order onto a real Express app on 127.0.0.1:
+ *      GET /api/load-ratings/averages answers the averages (a "/:loadId"
+ *      registered before it would take "averages" as a load ID), and
+ *      GET /api/load-ratings/:loadId still answers one load's rating.
  *   §4 SOURCE PINS — every name-keyed and unit-keyed map this covers, per
  *      function or route, is declared null-prototype at each of its
  *      declarations, including the three §3 cannot run (the ELD poll, the HOS
@@ -66,8 +71,9 @@
  *      time, and each load-rating refusal removed; each must fail an
  *      assertion in §1–§3c.
  *
- * Pure: no server, no app.db, no network, no Sheets.
+ * Pure: no app.db, no network beyond §3d's loopback listener, no Sheets.
  * Run: node scripts/test-name-keyed-totals.js     # exits 1 on failure
+ *      SERVER_JS=/path/to/server.js node scripts/test-name-keyed-totals.js   # judge another copy
  */
 "use strict";
 
@@ -1034,6 +1040,39 @@ async function battery3c(src) {
 	return out;
 }
 
+// ═════════════════════════════════════════════════════ §3d the ratings routes, as registered
+// Express answers with the first route whose path matches, so the order matters:
+// the routes go onto a real Express app in server.js's own order, not by name.
+const RATINGS_ROUTE_RE = /^app\.(?:get|put|post|patch|delete)\("\/api\/load-ratings[^"\n]*",[^\n]*$/gm;
+async function battery3d(src) {
+	const out = [];
+	const t = (label, actual, expected) => out.push([label, actual, expected]);
+	const express = require("express");
+	const heads = src.match(RATINGS_ROUTE_RE) || [];
+	t("§3d both GET ratings routes are among those registered",
+		[ROUTES.ratings, 'app.get("/api/load-ratings/:loadId",'].map((h) => heads.some((x) => x.startsWith(h))), [true, true]);
+	const w = buildWorld(NONE, { src });
+	const app = express();
+	app.use(express.json());
+	const asSuper = () => (req, res, next) => { req.session = { user: SUPER }; next(); };
+	new Function("app", "requireRole", "db", "loadIdFor", "isBuiltInPropertyName", "reservedDriverNameRefusal",
+		heads.map((h) => liftRoute(src, h)).join("\n"))(app, asSuper, w.db, (req, id) => id, w.isBuiltInPropertyName, w.reservedDriverNameRefusal);
+	const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+	try {
+		const base = `http://127.0.0.1:${server.address().port}`;
+		const get = async (p) => { const r = await fetch(base + p); return { status: r.status, body: await r.json().catch(() => null) }; };
+		const avg = await get("/api/load-ratings/averages");
+		t("§3d GET /api/load-ratings/averages over Express answers the averages, not one load's rating",
+			[avg.status, canon(avg.body)],
+			[200, canon({ averages: { "pat percent": { average: 5, count: 1 }, "dee dayrate": { average: 4, count: 1 } } })]);
+		const one = await get("/api/load-ratings/1003");
+		t("§3d GET /api/load-ratings/:loadId over Express still answers that load's rating", [one.status, one.body], [200, { rating: 4 }]);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+	return out;
+}
+
 // ═════════════════════════════════════════════════════ §4 source pins
 // Every name-keyed map, per function or route, declared null-prototype — the
 // three §3 cannot run (the ELD poll, the HOS matchers and the stale-location
@@ -1165,6 +1204,8 @@ const BATTERIES = [["§1", battery1], ["§2", battery2], ["§3", battery3], ["§
 		report(await battery3b());
 		section("§3c THE LOAD-RATING SAVE");
 		report(await battery3c());
+		section("§3d THE RATINGS ROUTES AS REGISTERED");
+		report(await battery3d(SHIPPED));
 		section("§4 SOURCE PINS");
 		report(battery4(SHIPPED));
 
