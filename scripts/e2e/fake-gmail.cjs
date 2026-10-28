@@ -1,17 +1,23 @@
 // A fake Gmail for the browser harness: the server's invoice draft lands in a
 // directory instead of a mailbox, and no mail the server tries to send leaves
-// the machine. Harness-only: the root install, CI and the deploy never load it,
-// and scripts/run-unit-tests.js never runs it.
+// the machine. Harness-only: the root install and the deploy never load it; of
+// the unit runners only scripts/test-imap-draft.js (§5) preloads it, into a
+// child process of its own with a temp capture folder.
 //
 // PRELOAD, in the server under test:
 //   E2E_FAKE_GMAIL_DIR=<absolute dir> node --require <abs>/scripts/e2e/fake-gmail.cjs server.js
 //   - imap.gmail.com through tls.connect(), in any of its argument forms, reaches
 //     a fake IMAP server on 127.0.0.1 inside the same process: LOGIN (any
-//     credentials), APPEND and LOGOUT; any other command is answered BAD. Each
-//     APPEND is saved as <dir>/append-<ms>-<n>.eml, the raw MIME byte for byte,
-//     beside <dir>/append-<ms>-<n>.json: { mailbox, flags: [...], bytes }. The
-//     .json is written last, so a draft is complete once its .json exists, and
-//     both exist before the APPEND is answered OK.
+//     credentials), APPEND, SELECT or EXAMINE, SEARCH HEADER Message-ID and
+//     LOGOUT; any other command is answered BAD. Each APPEND is saved as
+//     <dir>/append-<ms>-<n>.eml, the raw MIME byte for byte, beside
+//     <dir>/append-<ms>-<n>.json: { mailbox, flags: [...], bytes }. The .json is
+//     written last, so a draft is complete once its .json exists, and both exist
+//     before the APPEND is answered OK. SELECT and EXAMINE count the captured
+//     drafts in that mailbox (EXISTS); SEARCH HEADER Message-ID "<id>" answers
+//     the positions (1-based, oldest first) of the captured drafts in the
+//     selected mailbox whose Message-ID is exactly <id>, so the automatic
+//     drafts' "is it already in Gmail?" search can be exercised.
 //   - smtp.gmail.com on any port, through tls.connect(), net.connect() or
 //     net.createConnection() (STARTTLS on 587 starts as a plain connection): the
 //     socket errors on the next tick and no connection is opened. The name is
@@ -35,9 +41,10 @@
 // MODULE, in the harness:
 //   const { readCapturedDrafts } = require("<abs>/scripts/e2e/fake-gmail.cjs");
 //   readCapturedDrafts(dir) returns the drafts in <dir>, oldest first:
-//     [{ file, mailbox, flags, to, subject, html, attachments: [{ filename, contentType, size }] }]
+//     [{ file, mailbox, flags, to, subject, messageId, html, attachments: [{ filename, contentType, size }] }]
 //   file is the .eml's absolute path; to and subject are the decoded headers
-//   (RFC 2047); html is the text/html part with its transfer encoding
+//   (RFC 2047); messageId is the Message-ID header as written ("" when there is
+//   none); html is the text/html part with its transfer encoding
 //   (quoted-printable or base64) and charset undone, "" when there is none;
 //   filename is decoded (RFC 2231 or RFC 2047) and size is the decoded byte count.
 //
@@ -255,6 +262,7 @@ function readMessage(bytes) {
 	return {
 		to: decodeWords(top.headers.to || ""),
 		subject: decodeWords(top.headers.subject || ""),
+		messageId: (top.headers["message-id"] || "").trim(),
 		html: html === null ? "" : html,
 		attachments,
 	};
@@ -391,11 +399,23 @@ function saveAppend(dir, literal, meta) {
 // APPEND <mailbox> [(<flags>)] [<date-time>] {<size>}: a quoted or atom
 // mailbox and a synchronizing literal.
 const APPEND_ARGS = /^(?:"((?:[^"\\]|\\.){0,1000})"|([^\s"(){}]{1,1000}))(?: \(([^)]{0,1000})\))?(?: "[^"]{0,64}")? \{(\d{1,10})\}$/;
+// SELECT / EXAMINE <mailbox>: a quoted or atom mailbox.
+const MAILBOX_ARG = /^(?:"((?:[^"\\]|\\.){0,1000})"|([^\s"(){}]{1,1000}))$/;
+// SEARCH HEADER Message-ID "<id>": the one search the app makes.
+const SEARCH_MESSAGE_ID = /^HEADER Message-ID "((?:[^"\\]|\\.){1,400})"$/i;
+
+const mailboxOf = (m) => (m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2]);
+
+// The captured drafts in one mailbox, oldest first (their IMAP positions).
+function draftsIn(dir, mailbox) {
+	return readCapturedDrafts(dir).filter((d) => d.mailbox === mailbox);
+}
 
 function serveImap(sock, dir) {
 	let chunks = [];
 	let held = 0; // bytes in chunks
 	let authenticated = false;
+	let selected = null; // the mailbox SELECTed or EXAMINEd
 	let pending = null; // an APPEND waiting for its literal: { tag, mailbox, flags, size }
 	const reply = (line) => {
 		if (!sock.destroyed) sock.write(line + "\r\n");
@@ -456,9 +476,43 @@ function serveImap(sock, dir) {
 					reply(`${tag} BAD fake-gmail reads APPEND <mailbox> [(<flags>)] {<size>}`);
 					continue;
 				}
-				const mailbox = m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2];
+				const mailbox = mailboxOf(m);
 				pending = { tag, mailbox, flags: (m[3] || "").split(" ").filter(Boolean), size: Number(m[4]) };
 				reply("+ go ahead");
+			} else if ((verb === "SELECT" || verb === "EXAMINE") && !authenticated) {
+				reply(`${tag} BAD not authenticated`);
+			} else if (verb === "SELECT" || verb === "EXAMINE") {
+				const m = MAILBOX_ARG.exec(args);
+				if (!m) {
+					reply(`${tag} BAD fake-gmail reads ${verb} <mailbox>`);
+					continue;
+				}
+				selected = mailboxOf(m);
+				try {
+					reply(`* ${draftsIn(dir, selected).length} EXISTS`);
+					reply("* 0 RECENT");
+					reply(`${tag} OK [${verb === "EXAMINE" ? "READ-ONLY" : "READ-WRITE"}] ${verb} completed`);
+				} catch (e) {
+					console.error(`${TAG}: could not read the captures for ${verb}: ${e.message}`);
+					reply(`${tag} NO [SERVERBUG] fake-gmail could not read its captures`);
+				}
+			} else if (verb === "SEARCH" && selected === null) {
+				reply(`${tag} BAD no mailbox selected`);
+			} else if (verb === "SEARCH") {
+				const m = SEARCH_MESSAGE_ID.exec(args);
+				if (!m) {
+					reply(`${tag} BAD fake-gmail reads SEARCH HEADER Message-ID "<id>" only`);
+					continue;
+				}
+				const want = m[1].replace(/\\(.)/g, "$1");
+				try {
+					const hits = draftsIn(dir, selected).map((d, i) => (d.messageId === want ? i + 1 : 0)).filter(Boolean);
+					reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
+					reply(`${tag} OK SEARCH completed`);
+				} catch (e) {
+					console.error(`${TAG}: could not read the captures for SEARCH: ${e.message}`);
+					reply(`${tag} NO [SERVERBUG] fake-gmail could not read its captures`);
+				}
 			} else if (verb === "LOGOUT") {
 				reply("* BYE fake-gmail logging out");
 				reply(`${tag} OK LOGOUT completed`);
