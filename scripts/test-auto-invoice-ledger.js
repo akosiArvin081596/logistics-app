@@ -189,7 +189,22 @@ eq(L.readSettings(bare), { optOutDomains: [] }, "§6 no app_settings table: noth
 
 // ------------------------------------------------------------------ §7
 section("§7  local records");
-eq(L.readRecords(bare), { documents: [], drafts: [], advanceLines: [], deletedLoads: [] }, "§7 a database without the tables reads empty");
+eq(L.readRecords(bare), { documents: [], drafts: [], deletedLoads: [] }, "§7 a database without the tables reads empty");
+eq(L.activeAdvanceLines(bare, "ld-test-0001"), 0, "§7 no advance-lines table (its flag never on): no lines");
+{
+	const lines = new Database(":memory:");
+	lines.exec("CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL)");
+	const invoiceLines = require(path.join(ROOT, "lib", "broker-invoice.js")).invoiceLines;
+	invoiceLines.ensureSchema(lines);
+	const add = lines.prepare(`INSERT INTO ${invoiceLines.TABLE} (load_id, load_key, kind, label, amount_cents) VALUES (?, ?, 'advance', 'Fuel advance', 65000)`);
+	add.run("#LD-TEST-0001", "ld-test-0001");
+	add.run("LD-TEST-0001", "ld-test-0001");
+	lines.prepare(`UPDATE ${invoiceLines.TABLE} SET voided_at = '2026-10-20T12:00:00Z', voided_by = 'made-up', void_reason = 'made-up' WHERE id = 2`).run();
+	eq([L.activeAdvanceLines(lines, "ld-test-0001"), L.activeAdvanceLines(lines, "ld-test-0002")], [1, 0], "§7 active advance lines through their own module: a voided one doesn't count");
+	lines.close();
+}
+const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
+ok(!/broker_invoice_lines|broker-invoice-lines/.test(LEDGER_SRC), "§7 the ledger never names the lines table or module (lib/broker-invoice.js hands it over)");
 bare.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY, load_id TEXT, type TEXT, file_name TEXT, drive_file_id TEXT, drive_url TEXT, uploaded_at TEXT)");
 bare.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES (?, ?, ?, ?)").run("LD-TEST-0001", "POD", "pod.pdf", "2026-10-01 12:00:00");
 bare.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES (?, ?, ?, ?)").run("LD-TEST-0001", "Receipt", "r.jpg", "2026-10-01 12:00:00");

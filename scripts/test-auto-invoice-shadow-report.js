@@ -242,7 +242,8 @@ eq(requires, [
 ].sort(), "§5 it loads only fs, path, the rules, the ledger, app-time, server-lift and better-sqlite3");
 ok(!/\bfetch\s*\(|googleapis|https?:\/\/|\.env\b/.test(SRC), "§5 no fetch, Google client, URL or settings file");
 const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
-eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]), ["\"./auto-invoice-rules\""], "§5 the ledger it reads with loads only the rules");
+eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]).sort(), ["\"./auto-invoice-rules\"", "\"./broker-invoice\""],
+	"§5 the ledger it reads with loads only the rules and lib/broker-invoice.js (for the advance lines)");
 
 // ------------------------------------------------------------------ §6
 section("§6  the shadow-week report (no --retro)");

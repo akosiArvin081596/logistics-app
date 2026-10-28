@@ -237,7 +237,9 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		if (!key) continue;
 		rowByKey.set(key, row);
 		const rec = records.get(key);
-		const facts = rules.loadFacts({ row, cols, records: rec, bisonRecipientConfigured: true, podReadable });
+		const completed = rules.isCompletedStatus(row[cols.statusCol]);
+		const facts = rules.loadFacts({ row, cols, records: rec, bisonRecipientConfigured: true, podReadable,
+			activeAdvanceLines: completed ? ledger.activeAdvanceLines(db, key) : 0 });
 		if (!facts.completed || !facts.live) continue;
 		let day = helpers.sheetDayKey(cols.completionCol ? row[cols.completionCol] : "");
 		let dayFrom = day ? "completion" : "";

@@ -137,14 +137,13 @@ const DOCS = [
 const index = R.indexRecords({
 	documents: DOCS,
 	drafts: [{ id: 1, load_id: "#LD-TEST-0002" }],
-	advanceLines: [{ load_key: "ld-test-0003" }, { load_key: "LD-TEST-0003" }],
 	deletedLoads: [{ load_id: "#LD-TEST-0004" }],
 });
 const one = index.get("ld-test-0001");
 eq(one.pods.map((d) => d.id), [3, 1], "§5 both spellings of a load's POD rows are one load");
 eq(one.rateCons.map((d) => d.id), [5], "§5 a rate-con row is filed as a rate con; a BOL is neither");
 eq(index.get("ld-test-0002").drafts.length, 1, "§5 a draft row by '#id' belongs to the load");
-eq(index.get("ld-test-0003").activeLines, 2, "§5 active advance lines are counted");
+ok(!index.has("ld-test-0003"), "§5 advance lines are not read here (they come through their own module)");
 eq(index.get("ld-test-0004").deleted, true, "§5 a soft-deleted load is marked");
 ok(!index.has(""), "§5 a row with no load id is never filed");
 const UP = path.join(path.sep, "srv", "example", "uploads");
@@ -166,6 +165,7 @@ eq(R.loadFacts({ row: null, cols, records: one }).live, false, "§5 a load gone 
 eq(R.loadFacts({ row: { ...ROW, "Job Status": "Cancelled" }, cols }).live, false, "§5 a cancelled load is not live");
 eq(R.loadFacts({ row: ROW, cols, records: index.get("ld-test-0004") }).live, false, "§5 a soft-deleted load is not live");
 eq(R.loadFacts({ row: ROW, cols, records: one, optOutDomains: ["example-broker.test"] }).optedOut, true, "§5 the broker's domain is opted out");
+eq([R.loadFacts({ row: ROW, cols, records: one, activeAdvanceLines: 2 }).activeAdvanceLines, R.loadFacts({ row: ROW, cols, records: one }).activeAdvanceLines], [2, 0], "§5 the advance lines given, none by default");
 
 // ------------------------------------------------------------------ §6
 section("§6  the free checks");
