@@ -1027,6 +1027,16 @@ async function section7() {
 					[out.created, out.submitted, out.skipped, out.unbilled, rows.map((x) => x.status)], [1, 1, 1, 0, ["Submitted"]]);
 			}
 		}
+		// A driver who already submitted W39 is billed: skipped as INVOICE_EXISTS is, never
+		// named for a correction, and the run asks for no action.
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		insertInvoice(w.db, { status: "Submitted" });
+		const out = await w.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const marker = w.db.prepare("SELECT skipped, failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		check("7h ON: a driver who already submitted W39 is not named; nothing failed, nothing asks for action",
+			[out.created, out.skipped, out.unbilled, marker.failed, /closed month/i.test(String(marker.summary)),
+				w.db.prepare("SELECT title FROM dispatch_notifications WHERE type = 'invoices-autogen'").all().length],
+			[0, 2, 0, 0, false, 0]);
 	});
 
 	// 7i. A Personal line waiting on a closed-month week.

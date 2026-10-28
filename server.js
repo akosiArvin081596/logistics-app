@@ -5657,6 +5657,10 @@ const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PA
 // Dormant until the user's word (true/1/yes/on); before switching it on run
 // scripts/mark-paid-closed-month-report.js.
 const MARK_PAID_CLOSED_MONTH_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MARK_PAID_CLOSED_MONTH_ENABLED ?? "").trim());
+// Closed months are never changed: on, a weekly or manual invoice whose span touches one is not
+// generated, regenerated, created, deleted or restored (409 PERIOD_FINALIZED, audited;
+// invoiceClosedMonthBlock()). A money change, so dormant: on only when exactly "true".
+const INVOICE_CLOSED_MONTH_GUARD_ENABLED = process.env.INVOICE_CLOSED_MONTH_GUARD_ENABLED === "true";
 // The owner's trip-timestamp work-day rule for daily-rate drivers (B12,
 // lib/trip-work-days.js), dormant until the owner approves its dry run
 // (scripts/work-days-dry-run.js): TRIP_WORK_DAYS_ENABLED (true/1/yes/on; off by
@@ -18463,6 +18467,15 @@ function invoiceWriteRefusal(code, message) {
 	return err;
 }
 
+// commitInvoiceWithPdf()'s refusal when a month of the invoice's span closed during
+// the request; the route answers it with invoiceClosedMonthRefusal(), audited.
+function invoiceClosedMonthWriteRefusal(block, guard) {
+	const err = invoiceWriteRefusal(block.unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED",
+		"A month this invoice covers closed while it was being made. Nothing was saved.");
+	err.closedMonth = { block, guard };
+	return err;
+}
+
 // ============================================================
 // THE DAYS AN INVOICE PAYS — invoice_paid_days (B12, the trip work-day rule)
 // ============================================================
@@ -18599,6 +18612,9 @@ function backfillInvoicePaidDays({ write = false } = {}) {
 //                               planned (its row object), or null
 //   slot                        { driverName, weekStart } for a weekly invoice —
 //                               the driver-week it claims; null for a manual one
+//   monthGuard                  the route's closed-month guard (invoiceClosedMonthBlock()),
+//                               asked again first in the transaction: a month can
+//                               close during the request's awaits; or null
 //   insert()                    runs the INSERT; its return value is returned
 //
 // The order is the point:
@@ -18616,7 +18632,7 @@ function backfillInvoicePaidDays({ write = false } = {}) {
 // file was taken meanwhile, INVOICE_WEEK_CHANGED when the driver-week was. Both
 // mean "generate it again"; the retry mints the next free number and re-reads the
 // week.
-function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, insert }) {
+function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, monthGuard = null, insert }) {
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, pdfFileName);
@@ -18625,6 +18641,8 @@ function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing
 	try {
 		fs.writeFileSync(tmpPath, pdfBuffer);
 		return db.transaction(() => {
+			const closed = monthGuard ? invoiceClosedMonthBlock(monthGuard.span) : null;
+			if (closed) throw invoiceClosedMonthWriteRefusal(closed, monthGuard);
 			if (invoiceNumberHolders(invoiceNumber, pdfFileName, replacingId).length) {
 				throw invoiceWriteRefusal("INVOICE_NUMBER_TAKEN",
 					`Invoice number ${invoiceNumber} was given to another invoice while this one was being generated. Nothing was saved; generate it again.`);
@@ -21353,6 +21371,19 @@ async function generateInvoiceHandler(req, res) {
 		const { weekEnd } = req.body;
 		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
 		const { weekStart, weekEnd: computedWeekEnd } = range;
+		// A week touching a closed month is neither generated nor regenerated
+		// (INVOICE_CLOSED_MONTH_GUARD_ENABLED); the write asks again (monthGuard below).
+		const weekGuard = {
+			span: { invoice_number: `the invoice for the week of ${weekStart}`, week_start: weekStart, week_end: computedWeekEnd },
+			doing: "Generating this invoice",
+			cannot: `Cannot generate the invoice for the week of ${weekStart}`,
+			refused: `the invoice for the week of ${weekStart} to ${computedWeekEnd} can't be generated`,
+			remedy: INVOICE_CLOSED_WEEK_REMEDY,
+			auditAction: "generate_invoice_blocked", entityId: "",
+			subject: `generate the weekly invoice of ${driverName} for ${weekStart} — ${computedWeekEnd}`,
+		};
+		const weekBlock = invoiceClosedMonthBlock(weekGuard.span);
+		if (weekBlock) return invoiceClosedMonthRefusal(req, res, weekBlock, weekGuard);
 
 		// Job Tracking, read at most once for this request.
 		let jobTrackingValues = null;
@@ -21745,6 +21776,7 @@ async function generateInvoiceHandler(req, res) {
 			invoiceNumber, pdfFileName, pdfBuffer,
 			replacing: existing,
 			slot: { driverName, weekStart },
+			monthGuard: weekGuard,
 			insert: () => {
 				const inserted = db.prepare(
 					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
@@ -21793,6 +21825,8 @@ async function generateInvoiceHandler(req, res) {
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek, ...(lateWork ? { lateWorkDays: lateWork.report } : {}) });
 	} catch (err) {
+		// A month closed during the request: refused like the guard above, audited.
+		if (err && err.closedMonth) return invoiceClosedMonthRefusal(req, res, err.closedMonth.block, err.closedMonth.guard);
 		// A write the re-check refused: nothing was saved, and generating again
 		// is the remedy. The Friday batch reports it as an error, never as billed.
 		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
@@ -22006,6 +22040,9 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// of those a delivered channel actually showed.
 	const undatedInWeek = [];
 	const undatedInWeekIds = [];
+	// Drivers who worked a week touching a closed month (INVOICE_CLOSED_MONTH_GUARD_ENABLED):
+	// no weekly invoice can bill it and no retry changes that, so each is skipped and named.
+	const closedWeek = [];
 	// The week's Personal receipt images, cached before any invoice renders
 	await warmPersonalReceiptsForWeek(range.weekStart);
 	for (const driver of rosterDrivers) {
@@ -22038,6 +22075,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 				// saved nothing, so they fall through to `errors` and the driver stays
 				// in `unbilled`, which is what retries and alerts.
 				skipped++; billed.add(norm);
+			} else if (statusCode === 409 && body.code === "PERIOD_FINALIZED" && INVOICE_CLOSED_MONTH_GUARD_ENABLED) {
+				// Named only when it worked the week and holds no settled invoice for it
+				// (the handler's INVOICE_EXISTS rule, which the closed month now answers first).
+				skipped++; billed.add(norm);
+				const settledAlready = liveWeeklyInvoicesForDriverWeek(driver, range.weekStart).some((r) => r.status !== "Draft");
+				if (expected.has(norm) && !settledAlready) closedWeek.push(driver);
 			} else if (statusCode === 400) {
 				skipped++;                     // handler found no completed loads for this driver
 			} else {
@@ -22077,14 +22120,15 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// silently skipped. `unbilled` is the retry signal (stored in the marker).
 	const unbilled = [...expected].filter((n) => !billed.has(n));
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
-	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0;
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || closedWeek.length > 0;
 	// How many undatedInWeek entries each channel prints: the in-app line (this
 	// summary) and the email cap them differently. The undated-load ledger reads
 	// the same two numbers, so a load counts as told only if it was printed.
 	const undatedEntriesInApp = 6;
 	const undatedEntriesByEmail = 20;
 	const summary =
-		`${submitted} generated & submitted · ${skipped} skipped (no loads)` +
+		`${submitted} generated & submitted · ${skipped - closedWeek.length} skipped (no loads)` +
+		(closedWeek.length ? ` · ${closedWeek.length} NOT BILLED, the week touches a closed month (${closedWeek.slice(0, 8).join(", ")}): pay their days on a correction invoice dated in the current month` : "") +
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
 		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, undatedEntriesInApp).join("; ")})` : "") +
@@ -22122,10 +22166,11 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Automatic weekly run for <b>${range.weekStart} — ${range.weekEnd}</b>. Review and approve on the dashboard.</p>
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Generated &amp; submitted</span><b>${submitted}</b></div>
-						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Skipped (no loads)</span><b>${skipped}</b></div>
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Skipped (no loads)</span><b>${skipped - closedWeek.length}</b></div>
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${zeroPay.length ? "#b45309" : "#64748b"}">$0 — left as Draft</span><b style="color:${zeroPay.length ? "#b45309" : "#0f172a"}">${zeroPay.length}</b></div>
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${unbilled.length ? "#b91c1c" : "#64748b"}">Worked but NOT billed</span><b style="color:${unbilled.length ? "#b91c1c" : "#0f172a"}">${unbilled.length}</b></div>
 					</div>
+					${closedWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Not billed, the week touches a closed month:</b> ${escHtml(closedWeek.slice(0, 20).join(", "))}. Pay their days on a correction invoice dated in the current month.</p>` : ""}
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
 					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
@@ -22696,6 +22741,8 @@ if (INVOICE_AUTOGEN_ENABLED && startsJob("weekly invoice batch")) {
 	}
 	console.log(`[invoice-autogen] enabled — Fridays 7:00 PM ${APP_TIMEZONE} (after the 6:30 PM driver cutoff)`);
 }
+// Once per start, the two closed-month invoice flags' on/off states, and no other setting.
+console.log(`[invoice-month-lock] INVOICE_CLOSED_MONTH_GUARD_ENABLED ${INVOICE_CLOSED_MONTH_GUARD_ENABLED ? "on" : "off"}; MARK_PAID_CLOSED_MONTH_ENABLED ${MARK_PAID_CLOSED_MONTH_ENABLED ? "on" : "off"}`);
 
 // ============================================================
 // RATE-CON RECONCILIATION — "did every emailed load reach the sheet?"
@@ -26211,6 +26258,19 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		if (periodEnd < periodStart) {
 			return res.status(400).json({ error: "periodEnd must be on or after periodStart" });
 		}
+		// A period touching a closed month is refused (INVOICE_CLOSED_MONTH_GUARD_ENABLED);
+		// the write asks again (monthGuard below), after the render.
+		const periodGuard = {
+			span: { invoice_number: `the manual invoice for ${periodStart} to ${periodEnd}`, week_start: periodStart, week_end: periodEnd },
+			doing: "Creating a manual invoice",
+			cannot: `Cannot create a manual invoice for ${periodStart} to ${periodEnd}`,
+			refused: `a manual invoice for ${periodStart} to ${periodEnd} can't be created`,
+			remedy: INVOICE_LOCK_REMEDY,
+			auditAction: "create_manual_invoice_blocked", entityId: "",
+			subject: `create a manual invoice for ${payee} (${periodStart} — ${periodEnd})`,
+		};
+		const periodBlock = invoiceClosedMonthBlock(periodGuard.span);
+		if (periodBlock) return invoiceClosedMonthRefusal(req, res, periodBlock, periodGuard);
 		const itemsRes = sanitizeManualInvoiceRows(body.lineItems, "lineItems");
 		if (itemsRes.error) return res.status(400).json({ error: itemsRes.error });
 		if (!itemsRes.items.length) return res.status(400).json({ error: "At least one line item is required" });
@@ -26304,6 +26364,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// invoice sits outside the one-per-driver-week rule.
 		const result = commitInvoiceWithPdf({
 			invoiceNumber, pdfFileName, pdfBuffer,
+			monthGuard: periodGuard,
 			insert: () => {
 				const inserted = db.prepare(
 					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
@@ -26333,6 +26394,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// With its total_due: the Invoices screen opens the new invoice from this row.
 		res.json({ success: true, invoice: { ...invoice, total_due: invoiceTotalDue(invoice) } });
 	} catch (err) {
+		if (err && err.closedMonth) return invoiceClosedMonthRefusal(req, res, err.closedMonth.block, err.closedMonth.guard);
 		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
 		console.error("Manual invoice error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -26922,8 +26984,8 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 		// marked Paid and the closed months are named in the pay_invoice audit row;
 		// off, it is refused as before. Either way an unreadable lock table or week
 		// date refuses: the month a payment lands against must be knowable.
-		// submit / delete / restore are workflow state, not money, and each has its
-		// own state-machine check.
+		// submit is workflow state, not money, with its own state-machine check;
+		// delete and restore refuse a closed month under INVOICE_CLOSED_MONTH_GUARD_ENABLED.
 		let closedMonths = [];
 		if (action === "paid") {
 			const invoicePaidAudit = {
@@ -27186,9 +27248,10 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 // criterion is the COLUMN rather than the status. An Approved / Processing /
 // Rejected invoice already carries `paid_at = ''`, so this route's `paid_at = ''`
 // is a no-op on it and the revert is pure workflow state — which is exactly what
-// approve / reject / processing are, and exactly why submit / delete / restore are
-// left alone. Guarding those as well would strand invoices in closed months over a
-// write that changes no money column.
+// approve / reject / processing are, and exactly why submit is left alone (delete and
+// restore refuse a closed month under INVOICE_CLOSED_MONTH_GUARD_ENABLED). Guarding
+// those as well would strand invoices in closed months over a write that changes no
+// money column.
 app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
@@ -27274,6 +27337,17 @@ app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+		// An invoice whose week touches a closed month stays (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
+		const label = invoice.invoice_number || `invoice #${invoice.id}`;
+		const deleteBlock = invoiceClosedMonthBlock(invoice);
+		if (deleteBlock) {
+			return invoiceClosedMonthRefusal(req, res, deleteBlock, {
+				doing: "Deleting an invoice", cannot: `Cannot delete ${label}`, refused: `${label} can't be deleted`, remedy: INVOICE_LOCK_REMEDY,
+				auditAction: "delete_invoice_blocked", entityId: String(invoice.id),
+				subject: `delete ${label} (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"}, status ${invoice.status || "unknown"})`,
+				note: auditReasonNote(req.query, "reason"),
+			});
+		}
 		const reason = ((req.query && req.query.reason) || "").toString().trim().slice(0, 500);
 		const now = new Date().toISOString();
 		const adminName = req.session.user.username || "";
@@ -27307,6 +27381,16 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
 		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
+		// One whose week touches a closed month stays deleted (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
+		const label = invoice.invoice_number || `invoice #${invoice.id}`;
+		const restoreBlock = invoiceClosedMonthBlock(invoice);
+		if (restoreBlock) {
+			return invoiceClosedMonthRefusal(req, res, restoreBlock, {
+				doing: "Restoring an invoice", cannot: `Cannot restore ${label}`, refused: `${label} can't be restored`, remedy: INVOICE_LOCK_REMEDY,
+				auditAction: "restore_invoice_blocked", entityId: String(invoice.id),
+				subject: `restore ${label} (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"}, status ${invoice.status || "unknown"})`,
+			});
+		}
 		if (!invoice.is_manual) {
 			// The driver in ANY stored spelling — liveWeeklyInvoicesForDriverWeek(),
 			// the same question generateInvoiceHandler() and its write ask.
@@ -36672,6 +36756,10 @@ const INVOICE_PAID_LOCK_REMEDY =
 	"The app can't record a payment on an invoice in a closed month yet; its amount stays as recorded. Nothing was changed.";
 const INVOICE_REVERT_LOCK_REMEDY =
 	"A paid invoice in a closed month can't go back for review. If its amount was wrong, create a manual invoice (New Manual Invoice) dated in the current month for the difference. Nothing was changed.";
+// A weekly invoice refused for a closed month (generate, the Friday batch): a day it
+// would have paid goes on an open-month correction draft.
+const INVOICE_CLOSED_WEEK_REMEDY =
+	"A day of that week that no invoice paid goes on a correction invoice dated in the current month.";
 
 // Ceiling on the months one invoice may claim to bill. A weekly invoice spans 1
 // or 2; the widest legitimate manual invoice anyone has described is a catch-up
@@ -36836,6 +36924,29 @@ function invoiceMonthLockBlockers(inv) {
 				`${locked.map(periodLabel).join(", ")}`,
 		}],
 	};
+}
+
+// INVOICE_CLOSED_MONTH_GUARD_ENABLED's question for an invoice span ({ invoice_number,
+// id, week_start, week_end }): null while the flag is off or every month in it is open;
+// else invoiceMonthLockBlockers()'s answer (unreadable lock table, or the blockers).
+function invoiceClosedMonthBlock(span) {
+	if (!INVOICE_CLOSED_MONTH_GUARD_ENABLED) return null;
+	const lock = invoiceMonthLockBlockers(span);
+	return lock.unreadable || lock.blockers.length ? lock : null;
+}
+
+// The refusal for a block invoiceClosedMonthBlock() found, audited as guard.auditAction:
+// 409 PERIOD_LOCK_UNREADABLE, or 409 PERIOD_FINALIZED whose error names the closed
+// months in plain words (an unresolved week date keeps the composed text).
+//   guard: { span, doing, cannot, refused, remedy, auditAction, entityId, subject, note }
+function invoiceClosedMonthRefusal(req, res, block, guard) {
+	if (block.unreadable) {
+		return periodLockUnreadableResponse(req, res, guard.doing,
+			{ action: guard.auditAction, entity: "invoice", entityId: guard.entityId, subject: guard.subject, note: guard.note });
+	}
+	return periodBlockedResponse(req, res, guard.cannot, block.blockers, block.remedy || guard.remedy,
+		{ action: guard.auditAction, entity: "invoice", entityId: guard.entityId, subject: guard.subject, note: guard.note },
+		(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} closed, so ${guard.refused}; nothing was changed. ${guard.remedy}`);
 }
 
 // When a closed month was locked: its period_locks.finalized_at as stored ("" when
