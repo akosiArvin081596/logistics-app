@@ -28036,6 +28036,12 @@ function personalWeekClosed(weekStart) {
 	return lock.unreadable || lock.blockers.length > 0;
 }
 
+// Which rows an invoice takes without going below $0, by the flag's rules: with
+// the receipt's week on, a reversal and its charge are taken, or left, together.
+function personalFit(baseCents, rows) {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? personalExpense.fitLinePairs(baseCents, rows) : personalExpense.fitLines(baseCents, rows);
+}
+
 // The end of an audit row for a line an invoice cannot take without going below $0.
 function personalUnfitTail() {
 	return PERSONAL_RECEIPT_WEEK_ENABLED ? "goes on the next weekly invoice" : "waiting for the week's correction";
@@ -28087,7 +28093,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	let flagged = [];
 	if (plan.fit && !inv.is_correction) {
 		const base = Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100) + kept.reduce((s, r) => s + personalExpense.netCents(r), 0);
-		const f = personalExpense.fitLines(base, incoming);
+		const f = personalFit(base, incoming);
 		incoming = f.fit;
 		flagged = f.flagged;
 	}
@@ -28555,7 +28561,7 @@ function personalFitForGeneration(plan, baseCents) {
 		...r,
 		share_cents: resets.has(r.id) ? 0 : plan.shareRefresh.has(r.id) ? plan.shareRefresh.get(r.id) : (Number(r.share_cents) || 0),
 	}));
-	const { fit, flagged } = personalExpense.fitLines(baseCents, effective);
+	const { fit, flagged } = personalFit(baseCents, effective);
 	const { lines, personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
 	return {
 		fit, flagged,
@@ -28632,7 +28638,7 @@ function personalDetachUnfit(invoiceId) {
 	if (!inv || inv.deleted_at || inv.is_correction || !PERSONAL_OPEN_STATUSES.has(inv.status)) return [];
 	const rows = personalRowsOnInvoice(invoiceId);
 	if (!rows.length) return [];
-	const { fit, flagged } = personalExpense.fitLines(Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100), rows);
+	const { fit, flagged } = personalFit(Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100), rows);
 	if (!flagged.length) return [];
 	const stamp = new Date().toISOString();
 	const { personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
@@ -28787,7 +28793,7 @@ async function personalSweepByWeek() {
 		for (const inv of personalOpenInvoicesFrom(String(lines[0].receipt_driver || ""), earliest)) {
 			const eligible = left.filter((l) => l.week_start <= inv.week_start);
 			// Only an invoice with room for one of them is redrawn.
-			if (!eligible.length || !personalExpense.fitLines(personalRoomCents(inv), eligible).fit.length) continue;
+			if (!eligible.length || !personalFit(personalRoomCents(inv), eligible).fit.length) continue;
 			try {
 				const res = await rewriteInvoicePersonalLines(inv, { attach: eligible.map((l) => l.id), fit: true });
 				const attached = new Set(res.attached);

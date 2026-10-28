@@ -267,7 +267,7 @@ async function skipFixture() {
 				has(/^   on an approved invoice, final with the flag on \(no Reverse\): 2 \(\$180\.00\)$/m)],
 			[true, true]);
 		check("6: the reversal rows: one credit and one reversed charge waiting for an invoice, no pair kept off",
-			has(/^6\. Reversal rows: 1 reversal credit\(s\) waiting for an invoice \(\+\$45\.50\); 1 reversed charge\(s\) waiting for an invoice \(-\$45\.50\); 0 pair\(s\) kept off every invoice, no share \(\$0\.00\)$/m),
+			has(/^6\. Reversal rows: 1 reversal credit\(s\) waiting for an invoice \(\+\$45\.50\); 1 reversed charge\(s\) waiting for an invoice \(-\$45\.50\); 0 pair\(s\) kept off every invoice, no live base \(\$0\.00\)$/m),
 			true);
 	}
 

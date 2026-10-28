@@ -19,8 +19,9 @@
 //                 5. lines that offer Reverse today, by why; those on an approved
 //                    invoice lose it
 //                 6. reversal rows waiting for an invoice (credits, and reversed
-//                    charges whose credit is on one or returns a share), and
-//                    the pairs kept off every invoice
+//                    charges whose credit is on one or whose percentage base is
+//                    on a live invoice), and the pairs kept off every invoice
+//                    (no live base: any share they carry was never paid)
 //               then what --apply would do.
 //   --dry-run   read-only: what --apply would write, and what it would skip.
 //   --apply --expect-lines=<n>
@@ -281,7 +282,7 @@ function reportText(db, api) {
 	const keptOff = offRows.filter((r) => r.kind === "deduct" && !collectable.has(r.id));
 	out.push(`6. Reversal rows: ${creditsWaiting.length} reversal credit(s) waiting for an invoice (${signed(sumNet(creditsWaiting))}); `
 		+ `${chargesWaiting.length} reversed charge(s) waiting for an invoice (${signed(sumNet(chargesWaiting))}); `
-		+ `${keptOff.length} pair(s) kept off every invoice, no share (${money(keptOff.reduce((s, r) => s + r.cents, 0))})`);
+		+ `${keptOff.length} pair(s) kept off every invoice, no live base (${money(keptOff.reduce((s, r) => s + r.cents, 0))})`);
 	return out;
 }
 
