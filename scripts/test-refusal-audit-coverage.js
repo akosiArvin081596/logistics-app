@@ -36,7 +36,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -594,6 +594,10 @@ const PURGE = (() => {
 	return (body.match(/"[a-z_]+"/g) || []).map((s) => s.slice(1, -1));
 })();
 const MUST_NOT_BE_PURGEABLE = [
+	// Sign-ins, sign-outs and refused sign-ins (SIGN_IN_AUDIT_ENABLED): who used
+	// which account, kept forever like setup_refused; refusals are coalesced, so
+	// they cannot flood. Only their IP and browser (sign_in_network) are deleted.
+	"login", "logout", "login_refused",
 	"update_driver_pay_blocked", "create_driver_pay_blocked", "delete_driver_blocked",
 	"update_user_blocked", "delete_user_blocked",
 	"create_truck_blocked", "update_truck_blocked", "delete_truck_blocked",

@@ -42,6 +42,7 @@
  * Pure: no server, no app.db, no network.
  *   node scripts/test-investor-company-lock.js
  *   SERVER_JS=/tmp/base.js node scripts/test-investor-company-lock.js   # a base commit: fails
+ *   NAMED_LOGINS_ENABLED=true node scripts/test-investor-company-lock.js   # POST /api/users with the named-login rules on
  */
 "use strict";
 
@@ -156,7 +157,8 @@ const DDL = [
 		carrier_name TEXT DEFAULT '', email TEXT DEFAULT '', status TEXT DEFAULT 'active',
 		pay_type TEXT DEFAULT 'fixed', pay_percentage REAL DEFAULT 0, pay_daily REAL DEFAULT 0)`,
 	`CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT, role TEXT,
-		driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT DEFAULT '', company_name TEXT NOT NULL DEFAULT '')`,
+		driver_name TEXT DEFAULT '', email TEXT DEFAULT '', full_name TEXT DEFAULT '', company_name TEXT NOT NULL DEFAULT '',
+		must_change_password INTEGER DEFAULT 0)`,
 	"CREATE TABLE trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT UNIQUE, assigned_driver TEXT DEFAULT '', driver_pay_daily REAL DEFAULT 0, owner_id INTEGER DEFAULT 0)",
 	"CREATE TABLE truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER, driver_name TEXT, start_date TEXT, end_date TEXT DEFAULT '')",
 	"CREATE TABLE carrier_driver_history (id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_name TEXT, driver_name TEXT, started_at TEXT, ended_at TEXT)",
@@ -230,7 +232,12 @@ function makeApp() {
 	const env = {
 		db, ...m,
 		requireRole: () => (req, res, next) => next(),
-		bcrypt: { hash: async () => "hash" },
+		// No account here has a real hash: the own-password check never matches.
+		bcrypt: { hash: async () => "hash", compare: async () => false },
+		// POST /api/users's named-login rules (scripts/test-account-directory-row-lock.js
+		// §7): off unless this run sets NAMED_LOGINS_ENABLED=true.
+		NAMED_LOGINS_ENABLED: process.env.NAMED_LOGINS_ENABLED === "true",
+		passwordRules: require("../lib/password-rules"),
 		getJobTrackingCached: readJt,
 		driverHistoryFloorMonth: historyFloor,
 		syncDriverToCarrierSheet: () => { S.syncs++; },
