@@ -17,7 +17,10 @@
  *       pages share. T9c: nor through a soft mask's group, a tiling pattern or a
  *       Type3 font a released page uses whose /Resources is that dictionary (page
  *       2's image and its form's text absent); an object only page 2 draws,
- *       reached from page 1 any other way, refuses the copy (page_isolation)
+ *       reached from page 1 any other way, refuses the copy (page_isolation);
+ *       a single-page receipt (released with no human step) and a file with
+ *       every page released carry no image or form their resources list but no
+ *       page draws; a copy cached under version v1 is not read back
  *   T10 the Super Admin mark: one page per call, a reason code, audited; a
  *       Driver, a Dispatcher and an Investor get 403, a cross-site request is
  *       refused; a page with an OTHER_* code answers 409 with the codes until
@@ -171,6 +174,31 @@ function sharedStatement(mode) {
 	return rp.rawPdf(objs);
 }
 
+// A made-up PDF whose pages share one /Resources dictionary (4 0 R) that also
+// lists an image and a form no page draws, the form's text naming Test Driver B
+// (as a page split out of such a statement can carry). One page is receipt 1
+// (Pilot, 10/12/2026, $200.00); more are toll statement pages.
+// 1 Catalog, 2 Pages, 3 Helvetica, 4 the resources, 5 the undrawn image, 6 the
+// undrawn form, 7.. one image per page, then page and content pairs.
+function undrawnExtras(pageCount) {
+	const image = (mark) => rp.streamObject("/Type /XObject /Subtype /Image /Width 16 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", Buffer.from(mark.padEnd(16, "-"), "latin1"));
+	const first = 7 + pageCount;
+	const objs = [];
+	objs.push("<< /Type /Catalog /Pages 2 0 R >>");
+	objs.push(`<< /Type /Pages /Kids [${Array.from({ length: pageCount }, (_, i) => `${first + 2 * i} 0 R`).join(" ")}] /Count ${pageCount} >>`);
+	objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+	objs.push(`<< /Font << /F1 3 0 R >> /XObject << ${Array.from({ length: pageCount }, (_, i) => `/Im${i + 1} ${7 + i} 0 R`).join(" ")} /ImU 5 0 R /FmU 6 0 R >> >>`);
+	objs.push(image("IMGMARK-UNDRAWN"));
+	objs.push(rp.streamObject("/Type /XObject /Subtype /Form /BBox [0 0 300 400] /Resources << /Font << /F1 3 0 R >> >>", "BT /F1 10 Tf 20 300 Td (FORMTEXT-UNDRAWN TEST DRIVER B) Tj ET"));
+	for (let i = 1; i <= pageCount; i++) objs.push(image(`IMGMARK-OWN${i}`));
+	for (let i = 1; i <= pageCount; i++) {
+		const text = pageCount === 1 ? "(PILOT TRAVEL CENTER #123) Tj 0 -14 Td (10/12/2026 08:14) Tj 0 -14 Td (TOTAL $200.00) Tj" : `(MARKER-P${i} TOLL STATEMENT) Tj`;
+		objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents ${first + 2 * i - 1} 0 R /Resources 4 0 R >>`);
+		objs.push(rp.streamObject("", `BT /F1 10 Tf 20 380 Td ${text} ET q 64 0 0 4 20 10 cm /Im${i} Do Q`));
+	}
+	return rp.rawPdf(objs);
+}
+
 // A made-up toll statement of Test Driver A's (3 pages, each with dated money
 // lines). Page 1 also prints "CASEY RIVERA" (on no roster until a runner adds
 // her); page 2 names Test Driver B (on the roster: an account and the directory);
@@ -262,7 +290,45 @@ async function statementInvoice(w, opts = {}) {
 		const junk = await prep("junk", 2);
 		check("T9c an image only page 2 draws, reached from page 1 by another path: the copy is refused (page_isolation), the receipt keeps its note",
 			[junk && junk.status, junk && junk.reason, Boolean(junk && junk.pdf)], ["on_file", "page_isolation", false]);
+
+		const dataUri = (bytes) => `data:application/pdf;base64,${bytes.toString("base64")}`;
+		const all = await svc.prepare({ expenseId: 903, photoData: dataUri(undrawnExtras(2)), allowPages: [1, 2], rosterHash: "0123456789abcdef" });
+		const allPdf = all && all.pdf ? Buffer.from(all.pdf) : Buffer.alloc(0);
+		check("T9c every page released: control first: both pages copied with their images",
+			[all && all.status, all && all.pages, allPdf.includes("IMGMARK-OWN1"), allPdf.includes("IMGMARK-OWN2")], ["pages", 2, true, true]);
+		check("T9c every page released: the image and the form (naming Test Driver B) the shared resources list but no page draws are absent",
+			[allPdf.includes("IMGMARK-UNDRAWN"), await has(allPdf, "IMGMARK-UNDRAWN"), await has(allPdf, "FORMTEXT-UNDRAWN"), await has(allPdf, "TEST DRIVER B")], [false, false, false, false]);
+
+		// A copy cached under another copier version (v1) for the same file, pages
+		// and roster is never read back: the receipt is prepared again.
+		const one = undrawnExtras(1);
+		const old = path.join(w.dataDir, "storage", "receipt-pdfs", rp.receiptPdfCacheName(904, sha(one), "v1", [1], "0123456789abcdef"));
+		const planted = Buffer.from("%PDF-1.7\n% PLANTED-OLD-COPY\n%%EOF\n", "latin1");
+		fs.mkdirSync(path.dirname(old), { recursive: true });
+		fs.writeFileSync(`${old}.pdf`, planted);
+		fs.writeFileSync(`${old}.json`, JSON.stringify({ pages: 1, sha256: sha(planted) }));
+		const again = await svc.prepare({ expenseId: 904, photoData: dataUri(one), allowPages: [1], rosterHash: "0123456789abcdef" });
+		const againPdf = again && again.pdf ? Buffer.from(again.pdf) : Buffer.alloc(0);
+		check("T9c a copy cached under version v1 (same file, pages and roster) is not read back: the receipt is prepared again, pruned",
+			[again && again.status, again && again.cached, againPdf.includes("PLANTED-OLD-COPY"), againPdf.includes("IMGMARK-OWN1"), againPdf.includes("IMGMARK-UNDRAWN")],
+			["pages", false, false, true, false]);
 		w.cleanup();
+
+		// A single-page receipt is released with no human step: the same pruning holds.
+		const s = world();
+		putPdf(s, 1, undrawnExtras(1));
+		await markPersonal(s, 1);
+		const d = await detail(s, 1);
+		const g = await s.generate(DRIVER_A);
+		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
+		const file = id ? stored(s, id) : Buffer.alloc(0);
+		check("T9c single page: AUTO_RELEASED (the reader reads only what the page draws), the invoice generated",
+			[pageCodes(d), d.body?.pages?.[0]?.released, g.status], [["AUTO_RELEASED"], true, 200]);
+		check("T9c single page: control first: its text and its image are in the stored invoice",
+			[await has(file, "PILOT TRAVEL CENTER #123"), file.includes("IMGMARK-OWN1")], [true, true]);
+		check("T9c single page: the image and the form (naming Test Driver B) its resources list but it never draws are in neither the stored bytes nor any inflated stream",
+			[file.includes("IMGMARK-UNDRAWN"), await has(file, "IMGMARK-UNDRAWN"), await has(file, "FORMTEXT-UNDRAWN"), await has(file, "TEST DRIVER B")], [false, false, false, false]);
+		s.cleanup();
 	}
 
 	section("T10 the Super Admin mark");
