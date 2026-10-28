@@ -191,7 +191,7 @@ Updated investor API to include all expense sources in totalExpenses:
 | ID | Username | Password | Role | Full Name | Company |
 |----|----------|----------|------|-----------|---------|
 | 1 | super_admin | *(set during setup)* | Super Admin | — | — |
-| 2 | kevin | investor123 | Investor | Kevin Canunayon | KC Trucking LLC |
+| 2 | kevin | investor123 | Investor | Kevin Testinvestor | Example Test Trucking LLC |
 | 3 | desoren | investor123 | Investor | Desoren King | ABC Inc |
 | 4 | leonora | driver123 | Driver | Leonora Johnson | — |
 | 5 | kendall | driver123 | Driver | Kendall Davis | — |
@@ -203,8 +203,8 @@ Updated investor API to include all expense sources in totalExpenses:
 
 | Truck | Make/Model | Year | Driver | Owner | Purchase Price |
 |-------|-----------|------|--------|-------|---------------|
-| TRK-101 | Freightliner Cascadia | 2022 | Leonora Johnson | Kevin (KC Trucking) | $58,000 |
-| TRK-102 | Kenworth T680 | 2023 | Kendall Davis | Kevin (KC Trucking) | $65,000 |
+| TRK-101 | Freightliner Cascadia | 2022 | Leonora Johnson | Kevin (Example Test Trucking) | $58,000 |
+| TRK-102 | Kenworth T680 | 2023 | Kendall Davis | Kevin (Example Test Trucking) | $65,000 |
 | TRK-201 | Peterbilt 579 | 2021 | Andrew Rutherford | Desoren (ABC Inc) | $52,000 |
 | TRK-202 | Volvo VNL 760 | 2024 | Milton Williams | Desoren (ABC Inc) | $72,000 |
 
