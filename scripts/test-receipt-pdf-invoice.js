@@ -8,7 +8,10 @@
  * scripts/lib/personal-world.js (made-up data; week W41 = Sat 10-10 .. Fri
  * 10-16). The "rendered invoice" is a made-up PDF standing in for Chrome's: one
  * page for the invoice and one per receipt sheet, the sheets' anchors as named
- * destinations. Every receipt PDF is made up and built here.
+ * destinations. Every receipt PDF is made up and built here. Since driver
+ * privacy PR B a page is copied only once released to the driver: these
+ * receipts' pages (no text, so UNREADABLE) are released by the Super Admin's
+ * mark (releaseAll()); scripts/test-receipt-pdf-page-privacy.js covers the rule.
  *
  *   T1  a 1-page PDF receipt: "Receipt 1 of 1, attached after this invoice", a
  *       sheet saying its page follows, the page copied in after the sheet and
@@ -38,7 +41,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { buildPersonalWorld, makeChecker, DRIVER_A, ROOT, SRC } = require("./lib/personal-world");
+const { makeChecker, DRIVER_A, ROOT, SRC } = require("./lib/personal-world");
+const { buildPrivacyWorld } = require("./lib/receipt-privacy-world");
 const { check, section, finish } = makeChecker();
 const { PDFDocument, PDFName, PDFArray, PDFRawStream, PDFString, StandardFonts, decodePDFRawStream } = require(path.join(ROOT, "node_modules", "pdf-lib"));
 const { Jimp } = require(path.join(ROOT, "node_modules", "jimp"));
@@ -74,7 +78,7 @@ async function fakeChrome(templateName, data, { openAction = false } = {}) {
 }
 
 function world(env = ON, { chrome = {} } = {}) {
-	const w = buildPersonalWorld({ env, receipts: true, receiptPdfProbes: PROBES });
+	const w = buildPrivacyWorld({ env, receiptPdfProbes: PROBES });
 	w.chrome = { ...chrome };
 	w.outputs = [];
 	w.hooks.render = async (templateName, data, record) => {
@@ -86,6 +90,13 @@ function world(env = ON, { chrome = {} } = {}) {
 	return w;
 }
 const mark = (w, id) => w.call("POST", `/api/expenses/${id}/personal`, { as: "admin", body: {} });
+// Every page of a PDF receipt released by the Super Admin, one mark per page.
+async function releaseAll(w, id) {
+	const d = await w.call("GET", `/api/expenses/${id}/receipt-pages`, { as: "admin" });
+	for (const p of (d.body && d.body.pages) || []) {
+		await w.call("POST", `/api/expenses/${id}/receipt-pages/${p.page}`, { as: "admin", body: { mark: "released", reason: "checked_receipt" } });
+	}
+}
 const adjust = (w, id, amount) => w.call("PUT", `/api/invoices/${id}/adjust`, { body: { adjustment: amount, adjustmentNote: "Detention" } });
 const lastRender = (w) => w.rendered[w.rendered.length - 1] || { data: {} };
 const notes = (d) => (d.personalLines || []).map((l) => l.receiptNote);
@@ -149,6 +160,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world();
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const g = await w.generate(DRIVER_A);
 		const d = lastRender(w).data;
 		const line = (d.personalLines || [])[0] || {};
@@ -185,6 +197,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world({ ...ON, RECEIPT_PDF_PAGES_ENABLED: "false" });
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const g = await w.generate(DRIVER_A);
 		const d = lastRender(w).data;
 		check("T14 RECEIPT_PDF_PAGES_ENABLED=false: \"PDF receipt on file\", no sheet, the rendered file as it came, nothing prepared",
@@ -211,6 +224,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world();
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const g = await w.generate(DRIVER_A);
 		const id = g.body && g.body.invoice ? g.body.invoice.id : 0;
 		check("T15 first, with the drivers matching: attached and cached", [notes(lastRender(w).data), cached(w, 1).length], [["Receipt 1 of 1, attached after this invoice"], 1]);
@@ -239,6 +253,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world(ON, { chrome: { stub: true } });
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const g = await w.generate(DRIVER_A);
 		const [first, second] = w.rendered.map((r) => r.data);
 		check("T17 a rendered invoice the merge cannot read: two renders, the first with the sheet, the second with the note; the second is stored",
@@ -251,6 +266,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		for (const id of [1, 5, 2]) {
 			putPdf(big, id, receiptPdf(6));
 			await mark(big, id);
+			await releaseAll(big, id);
 		}
 		const g2 = await big.generate(DRIVER_A);
 		const d2 = lastRender(big).data;
@@ -272,8 +288,10 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		}
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		putPdf(w, 5);
 		await mark(w, 5);
+		await releaseAll(w, 5);
 		const g = await w.generate(DRIVER_A);
 		const d = lastRender(w).data;
 		const n = notes(d);
@@ -308,6 +326,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world(ON, { chrome: { openAction: true } });
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const g = await w.generate(DRIVER_A);
 		check("T38 an /OpenAction in the rendered invoice: two renders, the stored one with the note and no copied page",
 			[w.rendered.length, notes(lastRender(w).data), g.body && g.body.invoice ? await pagesOf(storedFile(w, g.body.invoice.id)) : null],
@@ -317,6 +336,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const t = world();
 		putPdf(t, 1);
 		await mark(t, 1);
+		await releaseAll(t, 1);
 		const g2 = await t.generate(DRIVER_A);
 		const [name] = cached(t, 1);
 		const base = name ? path.join(cacheDir(t), name.replace(/\.pdf$/, "")) : "";
@@ -343,6 +363,7 @@ fs.promises.readFile = function readFile(file, ...rest) {
 		const w = world();
 		putPdf(w, 1);
 		await mark(w, 1);
+		await releaseAll(w, 1);
 		const warmed = await w.api.warmPersonalReceiptsForWeek("2026-10-10");
 		check("the Friday warm-up prepares the week's PDF receipts too", [warmed, cached(w, 1).length], [{ receipts: 1, prepared: 1 }, 1]);
 		w.cleanup();
