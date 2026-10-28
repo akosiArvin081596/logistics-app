@@ -45,9 +45,7 @@ const ROOT = path.join(__dirname, "..");
 // Files that still read server.js directly, each with why. Remove an entry
 // when its file moves to the helper; a stale entry fails §3.
 const owned = (branch) => `changed by open work on ${branch}: its owner moves it to the helper when that lands`;
-const ADMIN = "admin or operator script run on production data: moves to the helper with ledger-world, in its own change";
-const CHANGED_ON_MAIN = "changed on main after this branch's base: moves to the helper once the branch is updated";
-const ALLOW = new Map([
+const ADMIN = "admin or operator script run on production data: moves to the helper with ledger-world, in its own change";const ALLOW = new Map([
 	["scripts/audit-job-tracking-damage.js", ADMIN],
 	["scripts/correct-weekly-invoice.js", ADMIN],
 	["scripts/count-load-closeout.js", ADMIN],
@@ -91,8 +89,6 @@ const ALLOW = new Map([
 	["scripts/test-invoice-draft-bol.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-notes.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-overrides.js", owned("feat/broker-invoice-engine")],
-	["scripts/test-invoice-period-guard.js", CHANGED_ON_MAIN],
-	["scripts/test-invoices-screen-totals.js", CHANGED_ON_MAIN],
 ]);
 
 // Files the detector flags that read no server.js text, each with why. They
