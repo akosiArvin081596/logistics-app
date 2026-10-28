@@ -3,9 +3,9 @@
  * scripts/test-route-snapshot.js: every request path the app answers, what runs
  * in front of each, in what order, and what importing the server starts.
  *
- * It imports server.js in a child (scripts/lib/route-snapshot-child.js) with a
- * scrubbed environment (PATH plus the made-up values in
- * scripts/fixtures/route-snapshot-import.json; the database, temp and home
+ * It imports server.js in a child (scripts/lib/route-snapshot-child.js) with
+ * LOGISX_IMPORT_ONLY=1 and a scrubbed environment (PATH plus the made-up values
+ * in scripts/fixtures/route-snapshot-import.json; the database, temp and home
  * folders inside a fresh scratch folder that is also the working folder, so no
  * settings file loads), with recorders that keep the import from listening,
  * scheduling, connecting or writing outside that folder. The child walks the
@@ -21,7 +21,15 @@
  *      are shown by runtime name only, marked "(lib mount)".
  *   §3 middleware that sees every path (no mount path, or a "*" route) sits
  *      before every route it can meet, or after all of them.
- *   §4 the fixture matches.
+ *   §4 importing starts nothing: require() returns { app, server, io } (the
+ *      app and server the import built), and every recorded side effect is on
+ *      the fixture JSON's importAllowlist: no listener, signal handler, job
+ *      timer, connection, process launch or outside write. Every allowlist
+ *      entry must still be needed.
+ *   §5 an import is refused without DATABASE_PATH (before any database opens)
+ *      and with NODE_ENV=production. Both run on a scratch copy of server.js,
+ *      so an older copy that ignores the flag opens a scratch database only.
+ *   §6 the fixture matches.
  *
  * The fixture, one line per registration:
  *   [routes] routes and path-scoped middleware, sorted by path then method, so
@@ -46,7 +54,7 @@
  *     A package's timers are listed once per kind, with no delay or count (a
  *     rate limiter's store starts one per limiter): they say nothing of the app.
  *
- *   --update        rewrite the fixture (only when §1-§3 pass).
+ *   --update        rewrite the fixture (only when §1-§5 pass).
  *   --print-order   print the registrations in stack order, with their lines.
  *   SERVER_JS=<file> import another copy of server.js (its lib/ folder and
  *                   node_modules beside it), e.g. a base copy, to see it fail.
@@ -77,29 +85,51 @@ function ok(name, cond, detail) {
 	if (cond) { passed++; console.log(`ok    ${name}`); }
 	else { failed++; console.log(`FAIL  ${name}${detail === undefined ? "" : `  (${typeof detail === "string" ? detail : JSON.stringify(detail)})`}`); }
 }
+function eq(name, got, want) { ok(name, JSON.stringify(got) === JSON.stringify(want), `got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); }
 function fatal(msg) { console.error(`FAIL  ${msg}`); process.exit(1); }
 const section = (title) => console.log(`\n§ ${title}`);
 
 // --- the import, in a child ------------------------------------------------------
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "route-snapshot-"));
 process.on("exit", () => fs.rmSync(scratch, { recursive: true, force: true }));
-for (const d of ["tmp", "home"]) fs.mkdirSync(path.join(scratch, d));
 const setup = JSON.parse(fs.readFileSync(IMPORT_SETUP, "utf8"));
 const libFiles = fs.readdirSync(LIB).filter((f) => f.endsWith(".js")).sort().map((f) => path.join(LIB, f));
-const inputFile = path.join(scratch, "input.json");
-const reportFile = path.join(scratch, "report.json");
-fs.writeFileSync(inputFile, JSON.stringify({ server: TARGET, sources: [TARGET, ...libFiles], out: reportFile }));
-const env = {
-	PATH: process.env.PATH || "/usr/bin:/bin",
-	...setup.env,
-	DATABASE_PATH: path.join(scratch, "import.db"),
-	TMPDIR: path.join(scratch, "tmp"),
-	HOME: path.join(scratch, "home"),
-};
-const run = spawnSync(process.execPath, [CHILD, inputFile], { cwd: scratch, env, encoding: "utf8", timeout: 50000, maxBuffer: 64 * 1024 * 1024 });
-const childOutput = `${run.stdout || ""}${run.stderr || ""}`.trim().split("\n").slice(-30).join("\n");
-let report = null;
-try { report = JSON.parse(fs.readFileSync(reportFile, "utf8")); } catch { /* reported below */ }
+
+// One import of `target` in its own run folder; `changes` sets (or, with
+// undefined, removes) variables.
+function importServer(target, changes = {}) {
+	const dir = fs.mkdtempSync(path.join(scratch, "run-"));
+	for (const d of ["tmp", "home"]) fs.mkdirSync(path.join(dir, d));
+	const inputFile = path.join(dir, "input.json");
+	const reportFile = path.join(dir, "report.json");
+	fs.writeFileSync(inputFile, JSON.stringify({ server: target, sources: [target, ...libFiles], out: reportFile }));
+	const env = {
+		PATH: process.env.PATH || "/usr/bin:/bin",
+		...setup.env,
+		LOGISX_IMPORT_ONLY: "1",
+		DATABASE_PATH: path.join(dir, "import.db"),
+		TMPDIR: path.join(dir, "tmp"),
+		HOME: path.join(dir, "home"),
+		...changes,
+	};
+	for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
+	const run = spawnSync(process.execPath, [CHILD, inputFile], { cwd: dir, env, encoding: "utf8", timeout: 50000, maxBuffer: 64 * 1024 * 1024 });
+	const output = `${run.stdout || ""}${run.stderr || ""}`.trim().split("\n").slice(-30).join("\n");
+	let report = null;
+	try { report = JSON.parse(fs.readFileSync(reportFile, "utf8")); } catch { /* the caller reports it */ }
+	return { run, report, output };
+}
+// server.js copied into a scratch folder, with lib/ and node_modules linked
+// beside it: its own folder is the scratch one.
+function scratchCopy() {
+	const dir = fs.mkdtempSync(path.join(scratch, "copy-"));
+	fs.copyFileSync(TARGET, path.join(dir, "server.js"));
+	fs.symlinkSync(LIB, path.join(dir, "lib"));
+	fs.symlinkSync(path.join(BASE, "node_modules"), path.join(dir, "node_modules"));
+	return path.join(dir, "server.js");
+}
+
+const { run, report, output: childOutput } = importServer(TARGET);
 
 section("1. the import");
 if (!report) fatal(`the child wrote no report (exit ${run.status}${run.signal ? `, ${run.signal}` : ""}${run.error ? `, ${run.error.message}` : ""}). Its last output:\n${childOutput}`);
@@ -177,6 +207,42 @@ const HEADER = [
 const current = [...HEADER, "", "[routes]", ...routeLines, "", "[middleware]", ...middlewareLines, "", "[import]", ...effectLines, ""].join("\n");
 console.log(`      ${routeLines.length} route line(s), ${middlewareLines.length} middleware line(s), ${effectLines.length} import side effect(s)`);
 
+section("4. importing starts nothing");
+eq("require() returns { app, server, io }", [...report.exportKeys].sort(), ["app", "io", "server"]);
+ok("...the app and the server the import built", report.exportsMatch);
+const allowlist = setup.importAllowlist || [];
+const onList = (x) => allowlist.some((a) => a.kind === x.kind && a.site === x.site);
+const unlisted = report.effects.filter((x) => !onList(x));
+const shownEffect = (x) => `${x.kind}${x.detail ? ` ${x.detail}` : ""} · ${x.site}`;
+const EFFECT_KINDS = [
+	["no listener", /^listen$/],
+	["no signal handler", /^process\./],
+	["no timer beyond the allowlist", /^set(Timeout|Interval|Immediate)$/],
+	["no connection, DNS lookup or fetch", /^(connect$|dns\.|fetch$)/],
+	["no process launch", /^child_process\./],
+	["no write outside the scratch folder", /^fs\.(?!readdir)/],
+	["no temp-folder listing beyond the allowlist", /^fs\.readdir/],
+];
+for (const [label, re] of EFFECT_KINDS) {
+	const found = unlisted.filter((x) => re.test(x.kind));
+	ok(`import-only: ${label}`, found.length === 0, found.slice(0, 8).map(shownEffect).join("; "));
+}
+const otherKinds = unlisted.filter((x) => !EFFECT_KINDS.some(([, re]) => re.test(x.kind)));
+ok("import-only: no other kind of side effect", otherKinds.length === 0, otherKinds.slice(0, 8).map(shownEffect).join("; "));
+const unused = allowlist.filter((a) => !report.effects.some((x) => x.kind === a.kind && x.site === a.site));
+ok("every allowlist entry is still needed (drop the ones a gate made unused)", unused.length === 0, unused.map((a) => `${a.kind} · ${a.site}`).join("; "));
+
+section("5. refused without a scratch database, and in production");
+{
+	const copy = scratchCopy();
+	const why = (r) => (r.report ? r.report.error || "it imported" : `no report: ${r.output.slice(-300)}`);
+	const noDatabase = importServer(copy, { DATABASE_PATH: undefined });
+	ok("without DATABASE_PATH the import stops, naming it", Boolean(noDatabase.report && /needs DATABASE_PATH/.test(noDatabase.report.error || "")), why(noDatabase));
+	ok("...before a database opens beside the server file", !fs.existsSync(path.join(path.dirname(copy), "app.db")));
+	const production = importServer(copy, { NODE_ENV: "production" });
+	ok("with NODE_ENV=production the import is refused", Boolean(production.report && /refused with NODE_ENV=production/.test(production.report.error || "")), why(production));
+}
+
 if (UPDATE) {
 	if (failed) fatal(`not writing the fixture: ${failed} check(s) above failed`);
 	fs.writeFileSync(FIXTURE, current);
@@ -184,7 +250,7 @@ if (UPDATE) {
 	process.exit(0);
 }
 
-section("4. the fixture");
+section("6. the fixture");
 const stored = fs.existsSync(FIXTURE) ? fs.readFileSync(FIXTURE, "utf8") : null;
 ok("the fixture exists", stored !== null, "run with --update to write it");
 if (stored !== null) {

@@ -49,12 +49,17 @@ const REPLICA = require("./lib/replica-mode").boot({ appDir: __dirname });
 // replica (refused before any connection, the way an unreachable service
 // fails); otherwise it is the global fetch.
 const fetch = REPLICA ? REPLICA.fetch : globalThis.fetch;
-// Every interval and boot-time job this file starts asks first. Outside replica
-// mode the answer is always yes, so each starts exactly as before; in a replica
-// none starts, and each is named in the log.
+// Every interval and boot-time job this file starts asks first. Outside a replica
+// and an import the answer is always yes, so each starts exactly as before; in a
+// replica none starts, and each is named in the log.
 function startsJob(name) {
+	if (IMPORT_ONLY) return false;
 	return REPLICA ? REPLICA.jobNotStarted(name) : true;
 }
+// LOGISX_IMPORT_ONLY=1: this file is required for its app (a test or a tool), so
+// no job starts, nothing listens and no signal handler is installed. Read before
+// dotenv: only the importer's own environment can set it, never a .env file.
+const IMPORT_ONLY = process.env.LOGISX_IMPORT_ONLY === "1";
 
 require("dotenv").config();
 // A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
@@ -67,6 +72,10 @@ const SHEET_TARGET = require("./lib/sheet-id").resolveServerSpreadsheetId(proces
 if (!SHEET_TARGET.id) {
 	console.error(`Refusing to start: ${SHEET_TARGET.error}`);
 	process.exit(1);
+}
+// After dotenv, because production's NODE_ENV comes from its .env file.
+if (IMPORT_ONLY && process.env.NODE_ENV === "production") {
+	throw new Error("LOGISX_IMPORT_ONLY=1 imports server.js for a test or a tool; it is refused with NODE_ENV=production");
 }
 const express = require("express");
 const http = require("http");
@@ -496,6 +505,11 @@ app.use(express.json({ limit: "50mb" }));
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
 // ============================================================
+// An import still runs the schema, the migrations and their boot writes, so it
+// must name its own scratch database rather than open the app folder's.
+if (IMPORT_ONLY && !process.env.DATABASE_PATH) {
+	throw new Error("importing server.js (LOGISX_IMPORT_ONLY=1) needs DATABASE_PATH: a scratch database");
+}
 const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, "app.db"));
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -48756,7 +48770,7 @@ if (startsJob("voice note retention sweep")) {
 // the URL path. Old base64-in-DB rows still work because the frontend img tag
 // accepts both data URIs and URL paths.
 const RECEIPTS_DIR = path.join(DATA_DIR, "uploads", "expense-receipts");
-try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+if (!IMPORT_ONLY) try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
 // Image formats we are prepared to STORE AND SERVE as a receipt. Deliberately
 // narrower than isValidImageMagic (which also allows GIF, because imageToPdf can
 // render one): every other receipt consumer already agrees on exactly this set —
@@ -71668,7 +71682,7 @@ const PORT = process.env.PORT || 3000;
 // an environment that forgets to set it gets the safe behaviour, not the
 // exposed one.
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
-server.listen(PORT, BIND_HOST, async () => {
+if (!IMPORT_ONLY) server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
 	if (REPLICA) REPLICA.listening(server.address());
 	// Tripwire for the umask set at the top of this file — the create-time half
@@ -71806,5 +71820,8 @@ async function gracefulShutdown(signal) {
 	try { await shutdownBrowser(); } catch { /* ignore */ }
 	process.exit(0);
 }
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+if (!IMPORT_ONLY) process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+if (!IMPORT_ONLY) process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// What an import (LOGISX_IMPORT_ONLY=1) reads; running the file ignores it.
+module.exports = { app, server, io };

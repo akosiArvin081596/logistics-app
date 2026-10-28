@@ -1,9 +1,31 @@
 {
-  "about": "Made-up settings for scripts/test-route-snapshot.js's import of server.js. The runner adds PATH, and DATABASE_PATH, TMPDIR and HOME inside a fresh scratch folder; nothing else from the parent environment reaches the import. Kept here, not in the runner, because several of these names are server.js declarations, and a runner whose text names one is picked by the pre-push hook only when that declaration changes (scripts/lib/test-selection.js).",
+  "about": "Made-up settings for scripts/test-route-snapshot.js's import of server.js, and what that import may still start. The runner adds PATH, LOGISX_IMPORT_ONLY=1, and DATABASE_PATH, TMPDIR and HOME inside a fresh scratch folder; nothing else from the parent environment reaches the import. Kept here, not in the runner, because these names are server.js declarations, and a runner whose text names one is picked by the pre-push hook only when that declaration changes (scripts/lib/test-selection.js).",
   "env": {
     "SPREADSHEET_ID": "made-up-route-snapshot-sheet",
     "SESSION_SECRET": "made-up-route-snapshot-value-not-a-secret",
     "PORT": "0",
     "BIND_HOST": "127.0.0.1"
-  }
+  },
+  "importAllowlist": [
+    {
+      "kind": "setInterval",
+      "site": "node_modules/better-sqlite3-session-store",
+      "why": "The session store always starts its hourly expired-session sweep: it reads `clear || true`, so `clear: !REPLICA` cannot turn it off. Library internal."
+    },
+    {
+      "kind": "setInterval",
+      "site": "node_modules/express-rate-limit",
+      "why": "Each rate limiter's memory store starts an unref'd expiry timer when the limiter is built at module level. Library internal."
+    },
+    {
+      "kind": "setInterval",
+      "site": "server.js: const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);",
+      "why": "The unref'd live-update socket sweep. Gated by stage 1b, after #570 (scripts/test-session-sockets.js pins this line)."
+    },
+    {
+      "kind": "fs.readdirSync",
+      "site": "server.js purgeOrphanedDbExports()",
+      "why": "The database-export temp-file sweep reads the temp folder at import. Gated by stage 1b, after #585."
+    }
+  ]
 }
