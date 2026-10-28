@@ -21786,7 +21786,7 @@ async function generateInvoiceHandler(req, res) {
 			logAudit(req, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: generated with ${personalFit.fit.length} Personal line(s), repays ${personalExpense.formatMoney(Math.round(personalFit.personalTotal * 100))}`);
 		}
 		for (const r of personalFit.flagged) {
-			logAudit(req, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+			logAudit(req, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
 		}
 		// A line marked while this was rendering goes on through the attach path.
 		invoice = await attachLatePersonalLines(invoice, req);
@@ -27690,8 +27690,13 @@ async function warmPersonalReceiptsForWeek(weekStart) {
 	try {
 		if (!personalLedgerPresent()) return out;
 		const pdfPages = receiptPdfPagesOn();
+		// With the receipt's week on, the week's invoice may also take a line carried
+		// from an earlier week.
+		const carried = PERSONAL_RECEIPT_WEEK_ENABLED
+			? " OR (ep.week_start < ? AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ep.invoice_id AND i.deleted_at = '')))"
+			: "";
 		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
-			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
+			WHERE ep.voided_at = '' AND (ep.week_start = ?${carried}) ORDER BY e.id`).all(...(carried ? [weekStart, weekStart] : [weekStart]))
 			.map((e) => ({ ...e, kind: receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) }))
 			.filter((e) => e.kind === "image" || (pdfPages && e.kind === "pdf"));
 		out.receipts = list.length;
@@ -28001,6 +28006,12 @@ function personalMayGoOn(row, inv) {
 		return !on || !!on.deleted_at;
 	}
 	return !!row.needs_correction_since;
+}
+
+// Whether a week touches a finalized month (or none can be confirmed open).
+function personalWeekClosed(weekStart) {
+	const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: getWeekRange(weekStart).weekEnd });
+	return lock.unreadable || lock.blockers.length > 0;
 }
 
 // The end of an audit row for a line an invoice cannot take without going below $0.
@@ -28415,10 +28426,13 @@ function personalLiveExpenseIds(ids) {
 //   read         each line's invoice_id as read, for the write's re-check
 // A base leaves a live deduction's cents out unless its share is frozen on
 // another live invoice (a returned share there stands for the cents in this base).
+// With the receipt's week on, a week touching a finalized month takes no new
+// line; the lines on the Draft it replaces stay.
 function personalGenerationPlan({ driverName, weekStart, existing, expenses, percentage }) {
 	const plan = { candidates: [], leftOut: {}, shareResets: [], baseRows: [], shareRefresh: new Map(), read: new Map() };
 	if (!personalLedgerPresent()) return plan;
-	const waiting = personalWaitingRows(driverName, weekStart);
+	const closed = PERSONAL_RECEIPT_WEEK_ENABLED && personalWeekClosed(weekStart);
+	const waiting = closed ? [] : personalWaitingRows(driverName, weekStart);
 	const onDraft = existing ? personalRowsOnInvoice(existing.id) : [];
 	const seen = new Set(waiting.map((r) => r.id));
 	plan.candidates = [...waiting, ...onDraft.filter((r) => !seen.has(r.id))].sort((a, b) => a.id - b.id);
@@ -28510,16 +28524,19 @@ function personalCommitGeneration(invoiceId, plan, fitted) {
 }
 
 // After a generation commits: a line marked during its render goes on through
-// the attach path. A failure leaves it waiting for the weekly sweep.
+// the attach path. A failure leaves it waiting for the weekly sweep. With the
+// receipt's week on, a week touching a finalized month takes none, and carried
+// lines are left to the sweep (the generation already weighed them).
 async function attachLatePersonalLines(invoice, actor) {
-	const waiting = personalWaitingRows(invoice.driver, invoice.week_start);
+	if (PERSONAL_RECEIPT_WEEK_ENABLED && personalWeekClosed(invoice.week_start)) return invoice;
+	const waiting = personalWaitingRows(invoice.driver, invoice.week_start).filter((r) => !PERSONAL_RECEIPT_WEEK_ENABLED || !r.needs_correction_since);
 	if (!waiting.length) return invoice;
 	try {
 		const out = await rewriteInvoicePersonalLines(invoice, { attach: waiting.map((r) => r.id), fit: true });
 		if (out.attached.length) {
 			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${out.attached.length} Personal line(s) marked during generation attached`);
 		}
-		for (const id of out.flagged) logAudit(actor, "flag_personal_expense", "expense", String(waiting.find((r) => r.id === id).expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+		for (const id of out.flagged) logAudit(actor, "flag_personal_expense", "expense", String(waiting.find((r) => r.id === id).expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
 		return out.invoice;
 	} catch (err) {
 		console.error(`[personal] ${invoice.invoice_number}: a Personal line marked during generation was not attached (${err.message}); the weekly sweep will place it.`);
@@ -28588,6 +28605,108 @@ function personalSweepDueMs(weekStart) {
 	return appTime.wallClockToMs(APP_TIMEZONE, sat.getUTCFullYear(), sat.getUTCMonth() + 1, sat.getUTCDate(), 6, 0, 0);
 }
 
+// THE WEEKLY SWEEP with the receipt's week on:
+//   1. a finished week's own lines not yet carried go on the week's open invoice
+//      (the attach path) or are carried, each carry audited once;
+//   2. every carried line goes on the driver's oldest open invoice from its week
+//      on with room: oldest line first, never below $0, never split.
+// No notice is sent. An attach that fails is retried on the next tick, and that
+// driver's other lines wait with it, so none skips ahead to a later invoice.
+// Each week touched is recorded in personal_sweep_runs ("N attached · N carried
+// · N failed"; the carried count in its flagged column).
+async function personalSweepByWeek() {
+	const nowMs = Date.now();
+	const tally = new Map();
+	const count = (weekStart, key, n = 1) => {
+		if (!n) return;
+		if (!tally.has(weekStart)) tally.set(weekStart, { weekStart, attached: 0, carried: 0, failed: 0 });
+		tally.get(weekStart)[key] += n;
+	};
+	const waiting = `${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+		WHERE ep.voided_at = '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') AND ${PERSONAL_COLLECTABLE_SQL}`;
+	// Still waiting as the write runs: a line a live invoice took meanwhile (a
+	// generation or an attach during an earlier await) is left alone.
+	const stampCarried = db.prepare(`UPDATE expense_personal SET needs_correction_since = ? WHERE id = ? AND needs_correction_since = '' AND voided_at = ''
+		AND (invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = expense_personal.invoice_id AND COALESCE(i.deleted_at, '') = ''))`);
+	const carry = (lines, why) => {
+		const stamp = new Date().toISOString();
+		const done = db.transaction(() => lines.filter((r) => stampCarried.run(stamp, r.id).changes === 1))();
+		for (const r of done) {
+			logAudit(PERSONAL_SYSTEM_ACTOR, "carry_personal_expense", "expense", r.expense_id, `line ${r.id} (${personalExpense.formatMoney(r.cents)}, week ${r.week_start}) carried: ${why}`);
+			count(r.week_start, "carried");
+		}
+	};
+
+	const groups = new Map();
+	for (const r of db.prepare(`${waiting} AND ep.needs_correction_since = '' ORDER BY ep.week_start, ep.id`).all()) {
+		if (personalSweepDueMs(r.week_start) > nowMs) continue;
+		const k = `${r.week_start}|${normalizeDriverName(r.receipt_driver || "")}`;
+		if (!groups.has(k)) groups.set(k, []);
+		groups.get(k).push(r);
+	}
+	for (const lines of groups.values()) {
+		const weekStart = lines[0].week_start;
+		const driver = String(lines[0].receipt_driver || "");
+		if (!normalizeDriverName(driver)) { carry(lines, "the receipt names no driver"); continue; }
+		const own = personalWeekState(driver, weekStart);
+		if (own.kind === "unreadable") { count(weekStart, "failed", lines.length); continue; }
+		if (own.kind !== "open") { carry(lines, personalCarryReason(own).text); continue; }
+		try {
+			const res = await rewriteInvoicePersonalLines(own.invoice, { attach: lines.map((l) => l.id), fit: true });
+			count(weekStart, "attached", res.attached.length);
+			if (res.attached.length) {
+				logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", own.invoice.id, `${own.invoice.invoice_number}: ${res.attached.length} waiting Personal line(s) attached by the weekly sweep`);
+			}
+			for (const l of lines.filter((x) => res.flagged.includes(x.id))) {
+				logAudit(PERSONAL_SYSTEM_ACTOR, "carry_personal_expense", "expense", l.expense_id, `line ${l.id} (${personalExpense.formatMoney(l.cents)}, week ${l.week_start}) carried: it does not fit ${own.invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
+				count(weekStart, "carried");
+			}
+		} catch (err) {
+			count(weekStart, "failed", lines.length);
+			console.error(`[personal-sweep] week ${weekStart}: ${lines.length} line(s) not attached to ${own.invoice.invoice_number} (${err.message}); retried next run`);
+		}
+	}
+
+	const byDriver = new Map();
+	for (const r of db.prepare(`${waiting} AND ep.needs_correction_since != '' ORDER BY ep.id`).all()) {
+		const k = normalizeDriverName(r.receipt_driver || "");
+		if (!k) continue;
+		if (!byDriver.has(k)) byDriver.set(k, []);
+		byDriver.get(k).push(r);
+	}
+	for (const lines of byDriver.values()) {
+		let left = lines;
+		const earliest = left.reduce((m, l) => (l.week_start < m ? l.week_start : m), left[0].week_start);
+		for (const inv of personalOpenInvoicesFrom(String(lines[0].receipt_driver || ""), earliest)) {
+			const eligible = left.filter((l) => l.week_start <= inv.week_start);
+			// Only an invoice with room for one of them is redrawn.
+			if (!eligible.length || !personalExpense.fitLines(personalRoomCents(inv), eligible).fit.length) continue;
+			try {
+				const res = await rewriteInvoicePersonalLines(inv, { attach: eligible.map((l) => l.id), fit: true });
+				const attached = new Set(res.attached);
+				for (const l of eligible) if (attached.has(l.id)) count(l.week_start, "attached");
+				if (attached.size) {
+					logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", inv.id, `${inv.invoice_number}: ${attached.size} carried Personal line(s) attached by the weekly sweep`);
+				}
+				left = left.filter((l) => !attached.has(l.id));
+				if (!left.length) break;
+			} catch (err) {
+				for (const l of eligible) count(l.week_start, "failed");
+				console.error(`[personal-sweep] ${eligible.length} carried line(s) not attached to ${inv.invoice_number} (${err.message}); retried next run`);
+				break;
+			}
+		}
+	}
+
+	const out = { weeks: [...tally.values()] };
+	const ranAt = new Date().toISOString();
+	const record = db.prepare("INSERT OR REPLACE INTO personal_sweep_runs (week_start, ran_at, attached, flagged, failed, summary) VALUES (?, ?, ?, ?, ?, ?)");
+	for (const t of out.weeks) record.run(t.weekStart, ranAt, t.attached, t.carried, t.failed, `${t.attached} attached · ${t.carried} carried · ${t.failed} failed`);
+	if (out.weeks.some((t) => t.attached > 0)) notifyChange("invoices");
+	if (out.weeks.some((t) => t.attached > 0 || t.carried > 0)) notifyChange("expenses");
+	return out;
+}
+
 // THE WEEKLY SWEEP — its own job, independent of INVOICE_AUTOGEN_ENABLED and of
 // the flag. For every week whose sweep is due, every line still waiting (never
 // attached, or left on a soft-deleted invoice) and not yet flagged:
@@ -28598,12 +28717,14 @@ function personalSweepDueMs(weekStart) {
 //                                                                Super Admins told
 //                                                                in the app
 // It creates no invoice. An attach that fails is left as it was and retried on
-// the next tick. Each swept week is recorded in personal_sweep_runs.
+// the next tick. Each swept week is recorded in personal_sweep_runs. With the
+// receipt's week on it runs personalSweepByWeek() instead.
 async function runPersonalSweep() {
 	const out = { weeks: [] };
 	if (runPersonalSweep.running || !personalLedgerPresent()) return out;
 	runPersonalSweep.running = true;
 	try {
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) return await personalSweepByWeek();
 		const nowMs = Date.now();
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 			WHERE ep.voided_at = '' AND ep.needs_correction_since = '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
