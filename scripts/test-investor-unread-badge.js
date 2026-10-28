@@ -52,7 +52,7 @@ try {
 	die(`better-sqlite3 did not load (${e.message}); run npm ci under the .nvmrc Node`);
 }
 
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ---------------------------------------------------------------------------
 // Fixtures (made up)

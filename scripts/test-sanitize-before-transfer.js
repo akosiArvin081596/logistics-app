@@ -92,7 +92,6 @@ const { execFileSync, spawnSync } = require("child_process");
 const crypto = require("crypto");
 
 const SCRIPT = path.join(__dirname, "refresh-env.js");
-const SERVER = path.join(__dirname, "..", "server.js");
 const KEEP = process.argv.includes("--keep");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-sanitize-test."));
 
@@ -1118,7 +1117,7 @@ function extractFn(src, name) {
 			// quiet twenty thousand lines away.
 			let parser = null, parseErr = "";
 			try {
-				const src = fs.readFileSync(SERVER, "utf8");
+				const src = require("./lib/server-source").serverSource();
 				parser = new Function(`${extractFn(src, "parsePeriodRefusalDetail")}\nreturn parsePeriodRefusalDetail;`)();
 			} catch (e) { parseErr = e.message; }
 			check("server.js's own parsePeriodRefusalDetail() was extracted", !!parser, parseErr);

@@ -44,7 +44,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const SERVER = path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // SHA-256 of the folder ID production's .env names. Only the digest is kept,
 // so this runner can find the ID without carrying it.
 const PROD_FOLDER_SHA256 = "8d4eb17c3cff0b3ebe5d92ca6d56a18cda1b7059e6ae3932f89c4267f47157a2";
@@ -74,7 +74,10 @@ function check(label, cond) {
 	failures.push(redact(label));
 	console.log(`  FAIL  ${redact(label)}`);
 }
-const readSource = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; } };
+const readSource = (rel) => {
+	if (rel === "server.js") return SRC;
+	try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; }
+};
 const QUIET = { log() {}, warn() {}, error() {}, info() {} };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -143,7 +146,9 @@ async function bootServer(extra) {
 	child.stdout.on("data", (d) => { out += d; });
 	child.stderr.on("data", (d) => { out += d; });
 	const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
-	const deadline = Date.now() + 20_000;
+	// 40 s: a loaded CI machine running several booting runners at once.
+	const startedAt = Date.now();
+	const deadline = startedAt + 40_000;
 	while (!/Server running at/.test(out) && child.exitCode === null && Date.now() < deadline) await delay(25);
 	const stop = async () => {
 		if (child.exitCode !== null || child.signalCode !== null) return;
@@ -151,7 +156,14 @@ async function bootServer(extra) {
 		const done = await Promise.race([exited.then(() => true), delay(5000).then(() => false)]);
 		if (!done) child.kill("SIGKILL");
 	};
-	return { port, up: /Server running at/.test(out), output: () => out, stop };
+	const up = /Server running at/.test(out);
+	if (!up) {
+		// The boot's own words, so a CI failure shows why (made-up settings only).
+		const why = child.exitCode !== null ? `exited ${child.exitCode}` : child.signalCode ? `killed by ${child.signalCode}` : "still starting";
+		console.log(`  server.js did not start after ${Date.now() - startedAt} ms (${why}); its last output:`);
+		for (const line of redact(out).split("\n").slice(-40)) console.log(`    | ${line}`);
+	}
+	return { port, up, output: () => out, stop };
 }
 async function request(port, method, url, { cookie, body } = {}) {
 	const headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
@@ -263,9 +275,10 @@ function liftArchive(folder) {
 			};
 			walk(path.join(ROOT, "scripts"));
 			walk(path.join(ROOT, "lib"));
+			if (fs.existsSync(path.join(ROOT, "routes"))) walk(path.join(ROOT, "routes"));
 			files.push("server.js");
 			const naming = files.filter((f) => prodFolderAt(readSource(f)).length > 0);
-			check(`§1 production's rate-con folder ID is in no file of server.js, lib/ or scripts/ (${naming.join(", ") || "none"})`, naming.length === 0);
+			check(`§1 production's rate-con folder ID is in no file of server.js, routes/, lib/ or scripts/ (${naming.join(", ") || "none"})`, naming.length === 0);
 			const fallback = /RATECON_DRIVE_FOLDER_ID\b[^\n;]{0,40}(\|\||\?\?)\s*["'`][^"'`\s]{8,}/;
 			// This file holds the pattern itself.
 			const withFallback = files.filter((f) => f !== "scripts/test-ratecon-drive-folder-required.js" && fallback.test(readSource(f)));
@@ -300,8 +313,10 @@ function liftArchive(folder) {
 				// (scripts/test-ratecon-pdf-route.js §5 checks that).
 				/^require\("\.\/lib\/ratecon-pdf-route"\)\.mount\(app, \{ [^}]*\bfolderId: RATECON_DRIVE_FOLDER_ID, [^}]*\}\);$/,
 			];
+			// The ROUTE_CONTEXT block only lists the names route modules receive.
+			const rc = require("./lib/server-source").routeContextLines(SRC);
 			const refs = SRC.split("\n").map((l, i) => ({ n: i + 1, l: l.trim() }))
-				.filter((x) => /RATECON_DRIVE_FOLDER_ID/.test(x.l) && !/^(\/\/|\*)/.test(x.l) && !/^"/.test(x.l));
+				.filter((x) => /RATECON_DRIVE_FOLDER_ID/.test(x.l) && !/^(\/\/|\*)/.test(x.l) && !/^"/.test(x.l) && !(rc && x.n >= rc.first && x.n <= rc.last));
 			const unknown = refs.filter((x) => !SHAPES.some((re) => re.test(x.l)));
 			check(`§1 every server.js reference to the setting is a known shape (${unknown.map((x) => `${x.n}: ${redact(x.l).slice(0, 70)}`).join(" | ") || "none unknown"})`, unknown.length === 0);
 		}

@@ -36,7 +36,7 @@ const geolib = require("geolib");
 
 const LIB_PATH = path.join(__dirname, "..", "lib", "linxup-push.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
-const SRV_SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRV_SRC = require("./lib/server-source").serverSource();
 
 let failed = 0;
 function ok(name, cond) {

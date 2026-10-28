@@ -40,7 +40,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 
 let failures = 0;
@@ -133,7 +133,7 @@ const LATER = { ...FIRST, pickup_appointment: "", payment: "$950.00", assigned_d
 }
 
 // ── §2 the column list ────────────────────────────────────────────────────────
-if (!process.env.SERVER_JS) {
+if (!require("./lib/server-source").serverOverride()) {
 	const lifted = closure(SRC, { roots: ["n8nJobUpdates"], provided: [], denied: [] });
 	const { N8N_JOB_COLUMNS, n8nJobUpdates } = new Function(`${lifted.text}\nreturn { N8N_JOB_COLUMNS, n8nJobUpdates };`)();
 	const route = SRC.slice(SRC.indexOf(HEAD), SRC.indexOf("\n});\n", SRC.indexOf(HEAD)));

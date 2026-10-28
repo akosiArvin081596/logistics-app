@@ -64,7 +64,7 @@ try {
 	process.exit(1);
 }
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const LINES = SRC.split("\n");
 
 // ───────────────────────────────────────────────────────────────── lifting

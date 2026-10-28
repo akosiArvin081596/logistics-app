@@ -297,7 +297,7 @@ console.log("§3 the settings export copies business settings only");
 	const written = r.status === 0 ? dotenv.parse(fs.readFileSync(path.join(out, "settings.env"))) : {};
 	eq("...with its value exactly", Object.keys(wanted).map((n) => written[n]), Object.values(wanted));
 	for (const n of Object.keys(withheld)) ok(`${n} is never copied`, !cli.copied.includes(n) && !(n in written) && cli.skipped.some((x) => x.name === n));
-	const serverSrc = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const serverSrc = require("./lib/server-source").serverSource();
 	for (const n of ["ADMIN_NOTIFY_EMAIL", "RATECON_DRIVE_FOLDER_ID"]) {
 		ok(`${n} is never copied, though server.js reads it as plain process.env.${n}`, new RegExp(`process\\.env\\.${n}\\b`).test(serverSrc)
 			&& (cli.skipped.find((x) => x.name === n) || {}).rule === "production only: names a production target", (cli.skipped.find((x) => x.name === n) || {}).rule);
@@ -306,7 +306,7 @@ console.log("§3 the settings export copies business settings only");
 	// Every flag the replica rules know (and each one's first month) is one the
 	// export finds read, without counting replica-rules.js's own lists.
 	const sources = ["server.js", ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join("lib", f))]
-		.map((f) => fs.readFileSync(path.join(ROOT, f), "utf8"));
+		.map((f) => (f === "server.js" ? serverSrc : fs.readFileSync(path.join(ROOT, f), "utf8")));
 	const read = rules.namesReadBy(sources);
 	const known = [...rules.ENABLE_ALLOWED, ...Object.keys(rules.ENABLE_REFUSED), ...Object.values(rules.ENABLE_FROM)];
 	eq("every flag the replica rules know is found read by server.js or lib/", known.filter((n) => !read.has(n)), []);

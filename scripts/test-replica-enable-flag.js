@@ -121,7 +121,7 @@ for (const [name, why] of [["GMAIL_APP_PASSWORD", /secret|_ENABLED/i], ["WEBHOOK
 }
 
 // Every flag the app reads is decided: allowed or refused, never both, never neither.
-const sources = [fs.readFileSync(path.join(ROOT, "server.js"), "utf8"),
+const sources = [require("./lib/server-source").serverSource(),
 	...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))];
 const readNames = new Set();
 for (const src of sources) for (const m of src.matchAll(/\benv\.([A-Z][A-Z0-9_]*_ENABLED)\b/g)) readNames.add(m[1]);

@@ -55,7 +55,7 @@ process.env.DEFAULT_INVOICE_EMAIL = DEFAULT_TO;
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const engineModule = require(ENGINE);
 const { closure } = require(path.join(__dirname, "lib", "server-lift.js"));
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

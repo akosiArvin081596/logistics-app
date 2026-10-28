@@ -54,7 +54,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const POLICY_FIELD_MAPS = require("../lib/policy-field-maps");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ───────────────────────────────────────────────────────────────── lifting
 // Anchored on a newline and counted, so a mention in a comment is never taken

@@ -148,7 +148,7 @@ function readValues({ valuesJson, sheetsJson }) {
 
 // parseSheet(), deduplicateLoads() and sheetDayKey() as server.js runs them.
 function liftSheetHelpers(root = ROOT) {
-	const src = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const src = require("./lib/server-source").serverSource({ root });
 	const lifted = closure(src, { roots: LIFT_ROOTS, provided: ["require", "console"], denied: LIFT_DENIED });
 	const allowed = { "./lib/app-time": appTime };
 	const liftedRequire = (m) => {

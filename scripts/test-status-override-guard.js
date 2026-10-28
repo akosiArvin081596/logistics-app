@@ -49,8 +49,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ---------------------------------------------------------------- extraction
 function extract(name) {
