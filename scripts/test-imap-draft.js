@@ -20,20 +20,40 @@
  *   §3 FAILURES. A NO to the APPEND rejects "IMAP APPEND failed"; a NO to the
  *      LOGIN rejects "IMAP LOGIN failed" and sends no APPEND; no credentials
  *      rejects before any connection.
+ *   §4 THE AUTOMATIC DRAFTS' ADDITIONS. A messageId given becomes the draft's
+ *      Message-ID; none given leaves MailComposer's own (the button's call is
+ *      unchanged). Every rejection names its stage, and says when the server
+ *      answered: only a timeout after the message was streamed ("literal", no
+ *      answer) leaves the draft possibly made. findDraftByMessageId() opens the
+ *      Drafts read-only (EXAMINE), searches the header and finds a draft by its
+ *      Message-ID, or not; its failures name their stage too.
+ *   §5 THE HARNESS'S FAKE GMAIL (scripts/e2e/fake-gmail.cjs), preloaded into a
+ *      child process as the browser harness preloads it into the server: drafts
+ *      APPENDed through the library are found by their Message-ID with EXAMINE
+ *      or SELECT and SEARCH HEADER Message-ID, an unknown one is not, SEARCH
+ *      before a mailbox or of another kind is BAD, and readCapturedDrafts()
+ *      reports each draft's Message-ID.
  *
  * HOW: tls.connect is replaced for the duration of the run by a stub that
  * returns a plain socket to a fake IMAP server on 127.0.0.1:0, which speaks
- * just enough IMAP for appendGmailDraft(). Nothing leaves the machine.
+ * just enough IMAP for appendGmailDraft() and findDraftByMessageId(). §5 runs
+ * this file again as a child with the harness fake preloaded and a private
+ * temp folder for its captures. Nothing leaves the machine.
  *
  * Plain node, no server, no fixtures, no network, never touches app.db.
  * Run: node scripts/test-imap-draft.js
  */
 "use strict";
+const fs = require("fs");
 const net = require("net");
+const os = require("os");
 const path = require("path");
 const tls = require("tls");
+const { spawnSync } = require("child_process");
 
-const { appendGmailDraft } = require(path.join(__dirname, "..", "lib", "imap-draft.js"));
+const { appendGmailDraft, findDraftByMessageId } = require(path.join(__dirname, "..", "lib", "imap-draft.js"));
+const FAKE_GMAIL = path.join(__dirname, "e2e", "fake-gmail.cjs");
+const CHILD_FLAG = "--fake-gmail-child";
 
 // -------------------------------------------------------------------- runner
 let pass = 0;
@@ -71,19 +91,32 @@ const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer 
 
 // ---------------------------------------------------------------- fake IMAP
 // Greeting, LOGIN, APPEND with a synchronizing literal, LOGOUT; anything else
-// is BAD. `answer` picks OK or NO for LOGIN and APPEND. Every connection is
-// recorded in `sessions`: the commands in order, the LOGIN arguments, the
-// APPEND with its literal, and the raw bytes received.
+// is BAD (§4 adds EXAMINE and SEARCH HEADER Message-ID, answered from the
+// Message-IDs of the drafts APPENDed so far). `answer` picks OK or NO for LOGIN,
+// APPEND and SEARCH; "HANG" for the greeting or the APPEND sends nothing. Every
+// connection is recorded in `sessions`: the commands in order, the LOGIN
+// arguments, the APPEND with its literal, the EXAMINE mailbox, the SEARCH
+// arguments and the raw bytes received.
 function unquote(q) { return q.slice(1, -1).replace(/\\(.)/g, "$1"); }
 const QUOTED = '"(?:[^"\\\\]|\\\\.)*"';
 const LOGIN_ARGS = new RegExp(`^(${QUOTED}) (${QUOTED})$`);
 const APPEND_ARGS = new RegExp(`^(${QUOTED}) \\(([^)]*)\\) \\{(\\d+)\\}$`);
+const EXAMINE_ARGS = new RegExp(`^(${QUOTED})$`);
+const SEARCH_ARGS = new RegExp(`^HEADER Message-ID (${QUOTED})$`, "i");
+// The top-level Message-ID header of a composed message.
+function messageIdOf(literal) {
+	const raw = literal.toString("latin1");
+	const head = raw.slice(0, Math.max(0, raw.indexOf("\r\n\r\n")));
+	const m = /(?:^|\r\n)Message-ID:\s*(<[^>\r\n]{1,300}>)/i.exec(head);
+	return m ? m[1] : null;
+}
 
 function fakeImap() {
 	const sessions = [];
-	const answer = { login: "OK", append: "OK" };
+	const answer = { login: "OK", append: "OK", greeting: "OK", search: "OK" };
+	const stored = []; // Message-IDs of the drafts appended, in order
 	const server = net.createServer((sock) => {
-		const s = { commands: [], login: null, append: null, received: [], appendLineEnd: null };
+		const s = { commands: [], login: null, append: null, examine: null, search: null, received: [], appendLineEnd: null };
 		s.closed = new Promise((resolve) => sock.on("close", resolve));
 		sessions.push(s);
 		let buf = Buffer.alloc(0);
@@ -91,7 +124,7 @@ function fakeImap() {
 		let pending = null; // an APPEND waiting for its literal
 		const reply = (line) => sock.write(line + "\r\n");
 		sock.on("error", () => {});
-		reply("* OK [CAPABILITY IMAP4rev1] fake IMAP ready");
+		if (answer.greeting === "OK") reply("* OK [CAPABILITY IMAP4rev1] fake IMAP ready");
 		sock.on("data", (chunk) => {
 			s.received.push(chunk);
 			bytesIn += chunk.length;
@@ -105,8 +138,11 @@ function fakeImap() {
 					const t = pending.tag;
 					pending = null;
 					if (!terminated) reply(`${t} BAD literal not followed by CRLF`);
-					else if (answer.append === "OK") reply(`${t} OK [APPENDUID 1 1] APPEND completed`);
-					else reply(`${t} NO [OVERQUOTA] mailbox full`);
+					else if (answer.append === "HANG") continue;
+					else if (answer.append === "OK") {
+						stored.push(messageIdOf(s.append.literal));
+						reply(`${t} OK [APPENDUID 1 1] APPEND completed`);
+					} else reply(`${t} NO [OVERQUOTA] mailbox full`);
 					continue;
 				}
 				const eol = buf.indexOf("\r\n");
@@ -126,6 +162,20 @@ function fakeImap() {
 					pending = { tag, mailbox: unquote(m[1]), flags: m[2].split(" ").filter(Boolean), size: Number(m[3]) };
 					s.appendLineEnd = bytesIn - buf.length;
 					reply("+ go ahead");
+				} else if (/^EXAMINE$/i.test(verb)) {
+					const m = EXAMINE_ARGS.exec(args);
+					if (!m) { reply(`${tag} BAD malformed EXAMINE`); continue; }
+					s.examine = unquote(m[1]);
+					reply(`* ${stored.length} EXISTS`);
+					reply(`${tag} OK [READ-ONLY] EXAMINE completed`);
+				} else if (/^SEARCH$/i.test(verb)) {
+					const m = SEARCH_ARGS.exec(args);
+					s.search = m ? unquote(m[1]) : { unparsed: args };
+					if (!m) { reply(`${tag} BAD malformed SEARCH`); continue; }
+					if (answer.search !== "OK") { reply(`${tag} NO [UNAVAILABLE] search failed`); continue; }
+					const hits = stored.map((id, i) => (id === s.search ? i + 1 : 0)).filter(Boolean);
+					reply(`* SEARCH${hits.map((n) => ` ${n}`).join("")}`);
+					reply(`${tag} OK SEARCH completed`);
 				} else if (/^LOGOUT$/i.test(verb)) {
 					reply("* BYE logging out");
 					reply(`${tag} OK LOGOUT completed`);
@@ -137,7 +187,7 @@ function fakeImap() {
 			}
 		});
 	});
-	return { server, sessions, answer };
+	return { server, sessions, answer, stored };
 }
 
 // The bytes the client sent for the APPEND literal, counted from the raw stream
@@ -269,14 +319,173 @@ async function main() {
 		const noCreds = await draft({ pass: "" });
 		eq(noCreds.error && noCreds.error.message, "appendGmailDraft: user/pass required", "§3 no credentials rejects");
 		eq(dials.length, dialsBefore, "§3 no credentials opens no connection");
+
+		section("§4  Message-ID, stages and the search");
+		const ID = "<made-up-0001.auto-invoice@example.com>";
+		const withId = await draft({ messageId: ID });
+		const idSession = sessions[sessions.length - 1];
+		await within(idSession.closed, 3000);
+		eq(withId.error ? withId.error.message : null, null, "§4 a draft with a messageId resolves");
+		eq(idSession.append && messageIdOf(idSession.append.literal), ID, "§4 the messageId given is the draft's Message-ID");
+		eq(idSession.commands, ["LOGIN", "APPEND", "LOGOUT"], "§4 with a messageId the session is still LOGIN, APPEND, LOGOUT");
+		const own = messageIdOf((sessions[0].append || {}).literal || Buffer.alloc(0));
+		ok(own && own !== ID && /^<[^<>@\s]+@example\.com>$/.test(own), "§4 without one (the button) the Message-ID is MailComposer's own");
+		const dialsBeforeBadId = dials.length;
+		const badId = await draft({ messageId: 'x" BYE' });
+		eq([badId.error && badId.error.stage, dials.length], ["credentials", dialsBeforeBadId], "§4 a malformed messageId is refused before any connection");
+
+		eq([noCreds.error.stage, noCreds.error.answered], ["credentials", undefined], "§4 no credentials: stage credentials");
+		eq([noLogin.error.stage, noLogin.error.answered], ["login", true], "§4 a NO to the LOGIN: stage login, answered");
+		eq([noAppend.error.stage, noAppend.error.answered], ["literal", true], "§4 a NO to the APPEND: stage literal, answered (no draft was made)");
+
+		answer.append = "HANG";
+		const hung = await draft({ messageId: ID, timeoutMs: 300 });
+		eq(hung.error && [hung.error.message, hung.error.stage, hung.error.answered], ["IMAP timeout at stage 3", "literal", undefined],
+			"§4 no answer after the message was streamed: stage literal, unanswered (the draft may exist)");
+		const hungSession = sessions[sessions.length - 1];
+		await within(hungSession.closed, 3000);
+		eq(hungSession.commands, ["LOGIN", "APPEND"], "§4 then the connection is dropped (destroy), not ended with a LOGOUT that flushes the rest");
+		answer.append = "OK";
+		answer.greeting = "HANG";
+		const silent = await draft({ timeoutMs: 300 });
+		eq(silent.error && [silent.error.message, silent.error.stage], ["IMAP timeout at stage 0", "greeting"], "§4 no greeting: stage greeting");
+		answer.greeting = "OK";
+
+		const find = (over = {}) => settle(findDraftByMessageId({ user: USER, pass: PASS, messageId: ID, timeoutMs: 3000, ...over }));
+		const found = await find();
+		const findSession = sessions[sessions.length - 1];
+		await within(findSession.closed, 3000);
+		eq(found.value, { found: true, count: 1 }, "§4 the draft appended with that Message-ID is found");
+		eq(findSession.commands, ["LOGIN", "EXAMINE", "SEARCH", "LOGOUT"], "§4 the search is LOGIN, EXAMINE (read-only), SEARCH, LOGOUT");
+		eq([findSession.login && findSession.login.user, findSession.examine, findSession.search], [USER, "[Gmail]/Drafts", ID], "§4 it opens the Drafts and searches the Message-ID header");
+		eq((await find({ messageId: "<made-up-9999.auto-invoice@example.com>" })).value, { found: false, count: 0 }, "§4 an unknown Message-ID is not found");
+		answer.search = "NO";
+		const searchNo = await find();
+		eq(searchNo.error && [searchNo.error.stage, searchNo.error.answered], ["search", true], "§4 a NO to the SEARCH rejects: stage search");
+		answer.search = "OK";
+		answer.login = "NO";
+		const findNoLogin = await find();
+		eq(findNoLogin.error && [findNoLogin.error.message, findNoLogin.error.stage], ["IMAP LOGIN failed", "login"], "§4 a NO to the search's LOGIN: stage login");
+		answer.login = "OK";
+		answer.greeting = "HANG";
+		const findSilent = await find({ timeoutMs: 300 });
+		eq(findSilent.error && findSilent.error.stage, "greeting", "§4 no greeting to the search: stage greeting");
+		answer.greeting = "OK";
+		const dialsBeforeFind = dials.length;
+		const findBad = await find({ messageId: "not an id" });
+		const findNoPass = await find({ pass: "" });
+		eq([findBad.error && findBad.error.stage, findNoPass.error && findNoPass.error.stage, dials.length], ["credentials", "credentials", dialsBeforeFind],
+			"§4 a malformed Message-ID or no credentials is refused before any connection");
 	} finally {
 		tls.connect = realConnect;
 		server.close();
 	}
+
+	section("§5  the harness's fake Gmail answers EXAMINE, SELECT and SEARCH");
+	const captures = fs.mkdtempSync(path.join(os.tmpdir(), "imap-draft-fake-gmail-"));
+	try {
+		const child = spawnSync(process.execPath, ["--require", FAKE_GMAIL, __filename, CHILD_FLAG], {
+			encoding: "utf8",
+			timeout: 20_000,
+			env: { ...process.env, E2E_FAKE_GMAIL_DIR: captures },
+		});
+		let got = null;
+		try { got = JSON.parse(child.stdout); } catch { /* asserted below */ }
+		eq(child.status, 0, `§5 the child ran (stderr: ${String(child.stderr || "").trim().split("\n").slice(-1)[0] || "none"})`);
+		const g = got || {};
+		eq(g.appended, [true, true, true], "§5 three drafts appended through the library");
+		eq(g.findA, { found: true, count: 1 }, "§5 findDraftByMessageId() finds the first draft by its Message-ID");
+		eq(g.findB, { found: true, count: 1 }, "§5 and the second");
+		eq(g.findUnknown, { found: false, count: 0 }, "§5 an unknown Message-ID is not found");
+		eq(g.raw, [
+			"a1 OK", "a2 BAD", "* 3 EXISTS", "a3 OK", "* SEARCH 2", "a4 OK", "* SEARCH", "a5 OK", "a6 BAD", "a7 OK",
+		], "§5 raw: LOGIN; SEARCH before a mailbox BAD; SELECT counts 3; SEARCH finds #2; an unknown id finds none; SEARCH ALL is BAD");
+		const drafts = readDrafts(captures);
+		eq(drafts.map((dr) => dr.messageId).slice(0, 2), [CHILD_IDS.a, CHILD_IDS.b], "§5 readCapturedDrafts() reports each draft's Message-ID");
+		ok(drafts[2] && /^<[^<>@\s]+@example\.com>$/.test(drafts[2].messageId), "§5 a draft appended without one has MailComposer's");
+	} finally {
+		fs.rmSync(captures, { recursive: true, force: true });
+	}
+}
+
+function readDrafts(dir) {
+	try {
+		return require(FAKE_GMAIL).readCapturedDrafts(dir);
+	} catch (e) {
+		failures.push(`§5 readCapturedDrafts threw: ${e.message}`);
+		return [];
+	}
+}
+
+// ------------------------------------------------------- the §5 child process
+// Runs with fake-gmail.cjs preloaded: imap.gmail.com is its fake IMAP server.
+const CHILD_IDS = { a: "<made-up-a.auto-invoice@example.com>", b: "<made-up-b.auto-invoice@example.com>" };
+async function fakeGmailChild() {
+	const common = {
+		user: USER, pass: "made-up", to: TO, subject: SUBJECT, html: HTML, timeoutMs: 5000,
+		attachments: [{ filename: PDF_NAME, content: PDF, contentType: "application/pdf" }],
+	};
+	const appended = [];
+	for (const messageId of [CHILD_IDS.a, CHILD_IDS.b, undefined]) {
+		appended.push(Boolean((await appendGmailDraft({ ...common, messageId })).ok));
+	}
+	const search = (messageId) => findDraftByMessageId({ user: USER, pass: "made-up", messageId, timeoutMs: 5000 });
+	const out = {
+		appended,
+		findA: await search(CHILD_IDS.a),
+		findB: await search(CHILD_IDS.b),
+		findUnknown: await search("<made-up-none.auto-invoice@example.com>"),
+	};
+	out.raw = await rawSession([
+		'a1 LOGIN "u" "p"',
+		`a2 SEARCH HEADER Message-ID "${CHILD_IDS.b}"`,
+		'a3 SELECT "[Gmail]/Drafts"',
+		`a4 SEARCH HEADER Message-ID "${CHILD_IDS.b}"`,
+		'a5 SEARCH HEADER Message-ID "<made-up-none@example.com>"',
+		"a6 SEARCH ALL",
+		"a7 LOGOUT",
+	]);
+	process.stdout.write(JSON.stringify(out));
+}
+
+// One IMAP session, a command at a time: each waits for its tagged answer. The
+// result is the tagged answers' tag and status, with the untagged EXISTS and
+// SEARCH lines between them.
+function rawSession(commands) {
+	return new Promise((resolve, reject) => {
+		const sock = tls.connect(993, "imap.gmail.com", { servername: "imap.gmail.com" });
+		const seen = [];
+		let acc = "";
+		let next = 0;
+		const send = () => sock.write(commands[next] + "\r\n");
+		const timer = setTimeout(() => reject(new Error(`raw session stalled at ${commands[next]}`)), 5000);
+		sock.on("error", reject);
+		sock.on("data", (d) => {
+			acc += d.toString("latin1");
+			let eol;
+			while ((eol = acc.indexOf("\r\n")) >= 0) {
+				const line = acc.slice(0, eol);
+				acc = acc.slice(eol + 2);
+				if (/^\* OK /.test(line) && next === 0 && !seen.length) { send(); continue; }
+				if (/^\* (\d+ EXISTS|SEARCH\b)/.test(line)) { seen.push(line.trim()); continue; }
+				const t = /^(a\d+) (OK|NO|BAD)\b/.exec(line);
+				if (!t) continue;
+				seen.push(`${t[1]} ${t[2]}`);
+				next++;
+				if (next < commands.length) send();
+				else { clearTimeout(timer); sock.end(); resolve(seen); }
+			}
+		});
+	});
 }
 
 // -------------------------------------------------------------------- report
-main()
+if (process.argv.includes(CHILD_FLAG)) {
+	fakeGmailChild().then(
+		() => process.exit(0),
+		(e) => { console.error(e && e.stack); process.exit(1); },
+	);
+} else main()
 	.catch((e) => failures.push(`the run threw: ${e && e.stack}`))
 	.then(() => {
 		console.log(`\n${"=".repeat(64)}`);

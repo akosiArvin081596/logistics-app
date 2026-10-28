@@ -300,7 +300,7 @@ USE /uploads · requireAuth@2f5c61384511 · inline@2f3241547ecf | after: USE /up
 USE /uploads · requireAuth@2f5c61384511 · uploadMissLimiter@8f0251d68f52 · uploadsPathGuard@e828a36f5055 | after: USE /uploads/rate-cons
 USE /uploads/rate-cons · requireRole("Super Admin")=anon@12b84c4b0134
 GET ["/api/driver/position","/api/driver/me/position"] · requireRole("Driver", "Super Admin")=anon@12b84c4b0134 · driverPositionLimiter=limiter · inline@c90bcab9d57f
-POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@a1f1588c2772
+POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@8f1d04f2fd48
 
 [middleware]
 USE / · inline@0b6a9c7a9ce3 | first
