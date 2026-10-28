@@ -73,6 +73,8 @@ const SERVER = [
 	"let fxHits = 0;",
 	"function fxGate(req, res, next) { next(); }",
 	"",
+	"app.use((req, res, next) => next());",
+	"",
 	"// GET /fx/alpha: the first made-up route.",
 	'app.get("/fx/alpha", fxGate, async (req, res) => {',
 	"\tconst made = fetch && crypto ? FX_LIMIT : 0;",
@@ -87,8 +89,6 @@ const SERVER = [
 	'app.get("/fx/gamma", (req, res) => res.json({ gamma: fxHelper() }));',
 	"",
 	'app.get("/fx/counter", (req, res) => res.json({ n: ++fxHits }));',
-	"",
-	"app.use((req, res, next) => next());",
 	"",
 	"function fxHelper() { return FX_LIMIT; }",
 	"",
@@ -143,11 +143,25 @@ section("2 the scanner");
 	], "spans end where their own parenthesis closes (not at the next \"});\"), with the comment block directly above");
 	eq(rc.topLevelDeclarations(src).decls.map((d) => `${d.kind} ${d.name}`), ["const later", "const tpl"],
 		"a column-0 line inside a template literal is no top-level declaration");
-	eq(rc.usedNames("// ends with a stop.\nfxHelper();\n// x.\n\tother.prop;").sort(), ["fxHelper", "other"],
-		"a name on the line after a comment that ends in \".\" is a use, not a property");
 	let threw = "";
 	try { rc.registrations('app.get("/fx/x", (req, res) => {\n});\nfoo(\n'); } catch (e) { threw = e.message; }
 	ok(/never closes|source scan/.test(threw), "an unbalanced text stops the scanner instead of cutting a guess", threw);
+	eq(rc.usedNames("// ends with a stop.\nfxHelper();\n// x.\n\tother.prop;").sort(), ["fxHelper", "other"],
+		"a name on the line after a comment that ends in \".\" is a use, not a property");
+	const after = (names) => names.filter((n) => /^(fx[A-Z]\w*|fetch|crypto|this)$/.test(n));
+	eq(after(rc.usedNames("const q = `'${String(s).replace(/'/g, \"''\")}'`;\nfxA(fetch, crypto.randomUUID(), fxHits++, this);")), ["fxA", "fetch", "crypto", "fxHits", "this"],
+		"a quote in a regex inside ${…} opens no string: the names after it are read");
+	eq(after(rc.usedNames("const q = `${s.replace(/}/g, \"\")}`;\nfxB(fetch);")), ["fxB", "fetch"], "a } in a regex inside ${…} doesn't end the expression");
+	eq(after(rc.usedNames("const q = `${s.replace(/`/g, \"\")}`;\nfxC(crypto);")), ["fxC", "crypto"], "a backtick in a regex inside ${…} opens no template");
+	eq(after(rc.usedNames("fxD(...fxE, a?.fxF, b\n\t.fxG, 1.5, .5);")), ["fxD", "fxE"], "spread names are uses; names after \".\" or \"?.\" are properties");
+	threw = "";
+	try { rc.usedNames("const s = 'open\nfxH();"); } catch (e) { threw = e.message; }
+	ok(/runs past the end of its line/.test(threw), "a string that crosses a line stops the reader instead of swallowing code", threw);
+	eq(rc.registrations('const FX_ON = 1;\nif (FX_ON)\napp.get("/fx/a", h);\napp.get("/fx/b", h);\n').map((r) => [r.key, r.standalone, r.after]),
+		[["GET /fx/a", false, ")"], ["GET /fx/b", true, ";"]], "a registration after \")\" is the body of an if, not a statement of its own");
+	ok(rc.pathsOverlap("/fx/report.:format", "/fx/report.csv"), "a segment holding a :param can take a literal segment");
+	ok(rc.pathsOverlap("/fx", "/fx/alpha", true) && rc.pathsOverlap("/", "/fx/alpha", true), "a layer matches its own path and everything below it");
+	ok(!rc.pathsOverlap("/fx/al", "/fx/alpha", true) && !rc.pathsOverlap("/fx", "/fx/alpha"), "a layer matches whole segments; a route matches its own length only");
 	eq(rc.pathKey(' [ "/fx/a",\n "/fx/b" ] '), '["/fx/a", "/fx/b"]', "an array path keys as written, whitespace folded");
 	eq(rc.resolvePaths("`${BASE}/x`", { consts: (n) => (n === "BASE" ? "/fx" : null) }), ["/fx/x"], "a template path resolves through a const");
 }
@@ -172,6 +186,7 @@ const block = rc.mountBlock(moved.serverSrc);
 	eq(moved.spec["fx-one"].moved, true, "the spec marks the module moved");
 	ok(rc.checkTree({ serverSrc: SERVER, modules: {}, spec: SPEC }).notes.some((n) => n.includes("nothing to check")), "no modules and no block: nothing to check");
 }
+let threwRegen = "";
 const sigOf = (text) => text.split("\n").find((l) => l.startsWith("module.exports"));
 const replaceSig = (names) => modText.replace(sigOf(modText), `module.exports = function mount({ ${names.join(", ")} }) {`);
 const without = (name) => rc.parseModule(modText).names.filter((n) => n !== name);
@@ -210,6 +225,17 @@ const without = (name) => rc.parseModule(modText).names.filter((n) => n !== name
 	ok(hasError(check({ spec: { "fx-two": SPEC["fx-two"] } }), "is not in the spec"), "a module missing from the spec fails");
 	const dup = moved.serverSrc.replace("// The SPA catch-all.", 'app.get("/fx/alpha", (req, res) => res.end());\n\n// The SPA catch-all.');
 	ok(hasError(check({ serverSrc: dup }), "GET /fx/alpha is registered 2 times"), "a route registered in server.js and in its module fails");
+	const quoted = replaceSig(without("fetch")).replace("\tconst made = fetch", "\tconst q = `'${String(req.query.s).replace(/'/g, \"''\")}'`;\n\tconst made = fetch");
+	ok(hasError(check(withModule(quoted)), "uses server.js's fetch without taking it"), "a forgotten fetch after a quote in a regex inside ${…} still fails");
+	ok(hasError(check(withModule(modText.replace("\n};\n", "\nif (fxGate)\napp.get(\"/fx/zz\", (req, res) => res.end());\n};\n"))), "GET /fx/zz is not a statement of its own"), "a registration that is the body of an if fails");
+	ok(hasError(check({ spec: { ...moved.spec, "fx-one": { ...moved.spec["fx-one"], routes: [...moved.spec["fx-one"].routes, "GET /fx/gamma"] } } }), "GET /fx/gamma is listed for fx-one, but routes/fx-one.js does not register it"),
+		"a moved module that lacks one of its spec routes fails");
+	const touching = moved.serverSrc.replace("// Route modules (routes/)", "// A note someone wrote.\n// Route modules (routes/)");
+	ok(hasError(check({ serverSrc: touching }), "a comment touches the mount block"), "a comment touching the mount block fails");
+	threwRegen = "";
+	try { regenerateContext(touching); } catch (e) { threwRegen = e.message; }
+	ok(/a comment touches the mount block/.test(threwRegen), "--context stops on it instead of deleting the comment", threwRegen);
+	ok(hasError(check({ serverSrc: moved.serverSrc.replace("so each route keeps its place", "so each route keeps a place") }), "is not the generated one"), "an edited mount comment fails");
 }
 
 // ------------------------------------------------------------------- §4 tool
@@ -225,7 +251,7 @@ section("4 the move tool on made-up trees");
 	ok(!/\n\n\n/.test(both.serverSrc) && !SERVER.includes("\n\n\n"), "a cut never leaves two blank lines together");
 	const map = moved.moveMap.find((m) => m.route === "POST /fx/:id");
 	eq(modText.split("\n")[map.to.head - 1], SERVER.split("\n")[map.from.head - 1], "the move map points at the head line in the module");
-	eq(map.from.lines, [15, 16], "the move map's old span holds the comment block above the head");
+	eq(map.from.lines, [17, 18], "the move map's old span holds the comment block above the head");
 
 	const refused = (res) => (res.refusals || []).join(" | ");
 	ok(/touches the let fxHits/.test(refused(move(SERVER, [target("fx-x", ["GET /fx/counter"])]))), "a route touching a let is refused");
@@ -249,14 +275,38 @@ section("4 the move tool on made-up trees");
 	ok(/GET \/fx\/alpha and GET `\$\{BASE\}\/:any`/.test(refused(move(lib, [target("fx-one")], { readLib }))), "a route moved past a lib-mounted route it overlaps is refused");
 	ok(/can match the same request/.test(refused(move(lib, [target("fx-one")], { readLib: () => null }))), "an unreadable lib mount is taken to overlap everything");
 
-	const first = move(SERVER, [target("fx-one", ["GET /fx/alpha"])]);
-	ok(!first.refusals, "a module can move part of its spec routes", refused(first));
+	const layer = (line) => SERVER.replace("function fxHelper()", `${line}\n\nfunction fxHelper()`);
+	const runsFirst = /can match the same request; this move would change which runs first/;
+	ok(runsFirst.test(refused(move(layer('app.use("/fx", fxGate);'), [target("fx-one")]))), "a route moved past a layer on its path prefix is refused");
+	ok(!move(layer('app.use("/fx/alpha/deep", fxGate);'), [target("fx-one")]).refusals, "...a layer deeper than every moved path is not in the way");
+	ok(runsFirst.test(refused(move(layer('app.use("/fx/al", fxGate);'), [target("fx-one")]))), "...a layer that a :param segment can reach is (POST /fx/al meets both)");
+	ok(!move(layer('app.use("/other", fxGate);'), [target("fx-one")]).refusals, "...nor a layer on another path");
+	ok(runsFirst.test(refused(move(layer("app.use(fxGate);"), [target("fx-one")]))), "a route moved past a path-less layer is refused");
+	ok(!move(layer('app.use(express.static("dist"));'), [target("fx-x", ["POST /fx/:id", "POST /fx/special"])]).refusals, "POST routes may pass a static layer (it answers GET and HEAD only)");
+	ok(runsFirst.test(refused(move(layer('app.use(express.static("dist"));'), [target("fx-x", ["GET /fx/alpha"])]))), "...a GET route may not");
+	ok(/inside the statement at server\.js:\d+ can match the same request/.test(refused(move(layer("if (fxGate) app.use(fxGate);"), [target("fx-one")]))),
+		"a layer inside another statement can't be read, so moving past it is refused");
+	const braceless = SERVER.replace("function fxHelper()", 'if (FX_LIMIT)\napp.get("/fx/debug", (req, res) => res.json({ debug: true }));\n\nfunction fxHelper()');
+	ok(/not a statement of its own \(it follows "\)"\)/.test(refused(move(braceless, [target("fx-x", ["GET /fx/debug"])]))), "a registration that is the body of a brace-less if is refused");
+	const blind = SERVER.replace("\tconst made = fetch", "\tconst q = `'${String(req.query.s).replace(/'/g, \"''\")}'`;\n\tconst made = fetch");
+	const blindMoved = move(blind, [target("fx-one")]);
+	eq(blindMoved.modules && rc.parseModule(blindMoved.modules["fx-one"]).names, ["FX_LIMIT", "app", "crypto", "fetch", "fxGate", "fxHelper"],
+		"after a quote in a regex inside ${…}, the module still takes fetch and crypto");
+	const blindState = blind.replace("\tres.json({ made });", "\tfxHits++;\n\tres.json({ made, self: this === undefined });");
+	const blindRefusals = refused(move(blindState, [target("fx-one")]));
+	ok(/touches the let fxHits/.test(blindRefusals) && /reads `this`/.test(blindRefusals), "...and a let and `this` after it are still refused", blindRefusals);
+
+	ok(/the spec lists POST \/fx\/:id for it, which this move leaves behind/.test(refused(move(SERVER, [target("fx-one", ["GET /fx/alpha"])]))), "a move that leaves one of the module's spec routes in server.js is refused");
+	const specAlpha = { ...SPEC, "fx-one": { ...SPEC["fx-one"], routes: ["GET /fx/alpha"] } };
+	const first = move(SERVER, [target("fx-one", ["GET /fx/alpha"], specAlpha)], { spec: specAlpha });
+	ok(!first.refusals, "a module can move part of the plan when its spec lists only that part", refused(first));
 	const appended = move(first.serverSrc, [target("fx-one", ["POST /fx/:id", "POST /fx/special"], first.spec)], { modules: first.modules, spec: first.spec });
 	const regs = rc.registrations(rc.parseModule(appended.modules["fx-one"]).body).map((r) => r.key);
 	eq(regs, ["GET /fx/alpha", "POST /fx/:id", "POST /fx/special"], "a second move appends to the module in order");
 	ok(rc.checkTree({ serverSrc: appended.serverSrc, modules: appended.modules, spec: appended.spec }).errors.length === 0, "...and the tree still checks clean");
 	eq(appended.serverSrc, moved.serverSrc, "...and gives the same server.js as moving them together");
 	eq(appended.modules["fx-one"], modText, "...and the same module");
+	eq(appended.spec["fx-one"].routes, SPEC["fx-one"].routes, "...and the spec lists all three");
 
 	const stale = moved.serverSrc.replace("function fxHelper()", "function fxNew() {}\nfunction fxHelper()");
 	const regen = regenerateContext(stale);

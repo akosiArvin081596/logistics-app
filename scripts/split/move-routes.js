@@ -21,8 +21,11 @@
 //
 // It refuses (exit 1, writes nothing) a route that touches a top-level let, a
 // const declared below the mount block, a timer or job, this, arguments,
-// __dirname, __filename, module or exports; a middleware (`use`) layer; and a
-// move that changes the order of two routes that can match one request.
+// __dirname, __filename, module or exports; a middleware (`use`) layer; a
+// registration that is not a statement of its own (the body of a brace-less
+// if, else or loop); a move that changes the order of two routes, or of a
+// route and a middleware layer, that can match one request; and a move that
+// leaves one of the module's spec routes behind.
 // Exit 2: usage, or a tree it can't read.
 
 "use strict";
@@ -78,8 +81,29 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 	};
 	const pathsOf = (argText, consts) => rc.resolvePaths(argText, { consts: (n) => consts.get(n) || null, member });
 
+	// A middleware layer matches every method, or GET and HEAD when its only
+	// handler is express.static; path-less, it matches every path.
+	const layerMethod = (r, paths) => {
+		const args = rc.splitTopLevelCommas(r.inner.replace(/\s+/g, " "));
+		const handlers = paths ? args.slice(1) : args;
+		return handlers.length === 1 && /^express\.static\(/.test(handlers[0]) ? "get" : "use";
+	};
 	const entries = [];
-	for (const r of regs) entries.push({ id: `s:${r.line}`, method: r.method, key: r.key, paths: pathsOf(r.argText, serverConsts), anchor: r.line, sub: 0, reg: r });
+	for (const r of regs) {
+		const paths = pathsOf(r.argText, serverConsts);
+		if (r.method === "use") entries.push({ id: `s:${r.line}`, method: layerMethod(r, paths), prefix: true, key: r.key.length > 80 ? `${r.key.slice(0, 77)}…` : r.key, paths, anchor: r.line, sub: 0, reg: r });
+		else entries.push({ id: `s:${r.line}`, method: r.method, key: r.key, paths, anchor: r.line, sub: 0, reg: r });
+	}
+	// An `app.<method>(` call that is no line-start registration (say
+	// `if (X) app.use(…)`) is an unread layer: every method, every path.
+	const spans = regs.map((r) => [r.startOff, r.closeOff]);
+	for (const t of scan.ids) {
+		if (t.name !== "app") continue;
+		const m = /^app\s*\.\s*(use|get|post|put|patch|delete|all)\s*\(/.exec(serverSrc.slice(t.at, t.at + 40));
+		if (!m || spans.some(([a, b]) => t.at >= a && t.at <= b)) continue;
+		const line = rc.lineOfOffset(scan, t.at) + 1;
+		entries.push({ id: `x:${line}:${t.at}`, method: "use", prefix: true, key: `app.${m[1]}(…) inside the statement at server.js:${line}`, paths: null, anchor: line, sub: t.at });
+	}
 	lines.forEach((l, k) => {
 		if (!scan.lineTop[k]) return;
 		const m = LIB_MOUNT_RE.exec(l);
@@ -126,6 +150,11 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 			if (keyHome.get(head) === t.name) continue;
 			refusals.push(keyHome.has(head) ? `${head}: already in routes/${keyHome.get(head)}.js` : `${head}: no such registration in server.js`);
 		}
+		// After the move the module must hold every route the spec lists for it.
+		const listed = new Set(t.routes);
+		for (const head of (spec[t.name] && spec[t.name].routes) || []) {
+			if (!listed.has(head) && keyHome.get(head) !== t.name) refusals.push(`${t.name}: the spec lists ${head} for it, which this move leaves behind (move it too, or take it out of the spec)`);
+		}
 		moves.set(t.name, list.sort((a, b) => a.line - b.line));
 	}
 
@@ -133,8 +162,8 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 		for (const r of list) {
 			const where = `${name}: ${r.key} (server.js:${r.line})`;
 			if (r.method === "use") { refusals.push(`${where}: a middleware layer; layers stay in server.js`); continue; }
-			const text = lines.slice(r.line - 1, r.end).join("\n");
-			const ids = new Set(rc.usedNames(text));
+			if (!r.standalone) { refusals.push(`${where}: not a statement of its own (it follows "${r.after}"), so it belongs to an if, else, loop or expression`); continue; }
+			const ids = new Set(rc.usedNames(serverSrc.slice(r.startOff, r.closeOff + 1)));
 			for (const id of [...ids].sort(rc.byCodeUnit)) {
 				if (rc.MOVE_FORBIDDEN.has(id)) refusals.push(`${where}: ${rc.MOVE_FORBIDDEN.get(id)}`);
 				else if (lets.has(id)) refusals.push(`${where}: touches the let ${id} (a module would hold a copy, not the binding)`);
@@ -163,9 +192,10 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 		...entries.filter((e) => !(e.id.startsWith("s:") && movedLines.has(e.reg.line))),
 		...moduleEntries(finalNames, true),
 	];
-	const routes = beforeEntries.map((e) => ({ id: e.id, method: e.method, key: e.key, paths: e.paths }));
+	const routes = beforeEntries.map((e) => ({ id: e.id, method: e.method, key: e.key, paths: e.paths, prefix: e.prefix }));
 	for (const [a, b] of rc.brokenPairs(routes, orderOf(beforeEntries), orderOf(afterEntries))) {
-		refusals.push(`${a.key} and ${b.key} can match the same request; this move would change which is registered first`);
+		const what = a.prefix || b.prefix ? "which runs first" : "which is registered first";
+		refusals.push(`${a.key} and ${b.key} can match the same request; this move would change ${what}`);
 	}
 	if (refusals.length) return { refusals };
 
@@ -191,7 +221,9 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 			at += r.end - r.from + 2;
 		}
 		const body = bodyParts.join("\n\n");
-		const ids = new Set(rc.usedNames(body));
+		// Read per registration, so one piece the scanner stops on can't hide the rest.
+		const ids = new Set();
+		for (const r of rc.registrations(body)) for (const n of rc.usedNames(body.slice(r.startOff, r.closeOff + 1))) ids.add(n);
 		const names = [...ids].filter((id) => contextAfter.has(id) || id === "require").sort(rc.byCodeUnit);
 		outModules[name] = rc.renderModule({ header, names, body });
 	}

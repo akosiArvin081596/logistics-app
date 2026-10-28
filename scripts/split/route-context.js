@@ -6,14 +6,14 @@
 // Pure: text in, facts out; it reads no file. A `readLib(rel)` callback, where
 // one is taken, returns a lib/ file's text or null.
 //
-// Spans come from a scanner that knows strings, templates, comments and regex
-// literals; the JS parser then re-checks every registration it cuts (compiled,
-// never called): the call must parse as one expression and close on its last
-// line, so a scanner slip stops the tool instead of cutting the wrong text.
+// Spans and names come from one scanner that knows strings, templates (regex
+// literals inside `${…}` included), comments and regex literals, and stops on a
+// string that crosses a line; the JS parser then re-checks every registration
+// it cuts (compiled, never called): the call must parse as one expression and
+// close on its last line, so a scanner slip stops the tool instead of cutting
+// the wrong text or missing a name.
 
 "use strict";
-
-const { codeIdentifiers } = require("../lib/server-lift");
 
 const CONTEXT = "ROUTE_CONTEXT";
 const ROUTE_DIR = "routes";
@@ -79,18 +79,23 @@ const REGEX = 5;
 const PAIR = { ")": "(", "]": "[", "}": "{" };
 // After these a "/" starts a regex literal; after a name, a number, ")" or "]"
 // it divides.
-const REGEX_AFTER = new Set(["", "kw", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+const REGEX_AFTER = new Set(["", "kw", "...", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
 const WORDS_BEFORE_EXPRESSION = new Set(["return", "typeof", "case", "in", "of", "new", "delete", "void", "throw", "else", "do", "instanceof", "yield", "await"]);
+// The code tokens after which a line can start a statement of its own: after
+// ")" or "else" it would be the body of an if, else or loop.
+const STATEMENT_AFTER = new Set(["", ";", "}"]);
 
-// For every line: its start offset and whether it starts in code at bracket
-// depth 0 (a top-level statement can start there). For every bracket opened at
-// depth 0: where it closes and where its first depth-1 comma is. Every
-// comment's [start, end) offsets.
+// For every line: its start offset, whether it starts in code at bracket depth
+// 0 (a top-level statement can start there) and the code token before it. For
+// every bracket opened at depth 0: where it closes and where its first depth-1
+// comma is. Every name used in code ({ name, at }; property names after "."
+// are not uses).
 function scanSource(src) {
 	const lineStart = [0];
 	const lineTop = [true];
+	const prevAtLine = [""];
 	const opens = new Map();
-	const comments = [];
+	const ids = [];
 	const stack = [];
 	let mode = CODE;
 	let quote = "";
@@ -100,16 +105,17 @@ function scanSource(src) {
 	const newline = (i) => {
 		lineStart.push(i + 1);
 		lineTop.push(mode === CODE && stack.length === 0);
+		prevAtLine.push(prev);
 	};
 	for (let i = 0; i < src.length; i++) {
 		const ch = src[i];
 		if (mode === LINE_COMMENT) {
-			if (ch === "\n") { comments[comments.length - 1][1] = i; mode = CODE; newline(i); }
+			if (ch === "\n") { mode = CODE; newline(i); }
 			continue;
 		}
 		if (mode === BLOCK_COMMENT) {
 			if (ch === "\n") newline(i);
-			else if (ch === "*" && src[i + 1] === "/") { mode = CODE; i++; comments[comments.length - 1][1] = i + 1; }
+			else if (ch === "*" && src[i + 1] === "/") { mode = CODE; i++; }
 			continue;
 		}
 		if (mode === STRING) {
@@ -140,8 +146,8 @@ function scanSource(src) {
 		if (ch === "\n") { newline(i); continue; }
 		if (ch === " " || ch === "\t" || ch === "\r") continue;
 		if (ch === "/") {
-			if (src[i + 1] === "/") { comments.push([i, src.length]); mode = LINE_COMMENT; i++; continue; }
-			if (src[i + 1] === "*") { comments.push([i, src.length]); mode = BLOCK_COMMENT; i++; continue; }
+			if (src[i + 1] === "/") { mode = LINE_COMMENT; i++; continue; }
+			if (src[i + 1] === "*") { mode = BLOCK_COMMENT; i++; continue; }
 			if (REGEX_AFTER.has(prev)) { mode = REGEX; inClass = false; continue; }
 			prev = "/";
 			continue;
@@ -178,36 +184,33 @@ function scanSource(src) {
 		if (/[A-Za-z_$]/.test(ch)) {
 			let j = i + 1;
 			while (j < src.length && /[\w$]/.test(src[j])) j++;
-			prev = WORDS_BEFORE_EXPRESSION.has(src.slice(i, j)) ? "kw" : "w";
+			const word = src.slice(i, j);
+			if (prev === ".") prev = "w";
+			else {
+				ids.push({ name: word, at: i });
+				prev = WORDS_BEFORE_EXPRESSION.has(word) ? "kw" : "w";
+			}
 			i = j - 1;
 			continue;
 		}
-		if (/[0-9]/.test(ch)) {
+		if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(src[i + 1] || ""))) {
 			let j = i + 1;
 			while (j < src.length && /[\w.]/.test(src[j])) j++;
 			prev = "w";
 			i = j - 1;
 			continue;
 		}
+		if (ch === "." && src[i + 1] === "." && src[i + 2] === ".") { prev = "..."; i += 2; continue; }
 		prev = ch;
 	}
 	if (mode !== CODE && mode !== LINE_COMMENT) fail("the text ends inside a string, template, regex or comment");
 	if (stack.length) fail(`"${stack[stack.length - 1].ch}" never closes`);
-	return { lineStart, lineTop, opens, comments };
+	return { lineStart, lineTop, prevAtLine, opens, ids };
 }
 
-// The names a piece of code uses (server-lift's codeIdentifiers), read with
-// every comment blanked first: codeIdentifiers looks back across a comment, so
-// a name on the line after "// … ends here." would read as a property.
+// The names a piece of code uses, in order (with repeats).
 function usedNames(text) {
-	const { comments } = scanSource(text);
-	let out = "";
-	let at = 0;
-	for (const [a, b] of comments) {
-		out += text.slice(at, a) + text.slice(a, b).replace(/[^\n]/g, " ");
-		at = b;
-	}
-	return codeIdentifiers(out + text.slice(at));
+	return scanSource(text).ids.map((t) => t.name);
 }
 
 function lineOfOffset(scan, off) {
@@ -299,7 +302,9 @@ function stringConsts(text) {
 
 // ------------------------------------------------------------ registrations
 // Every top-level `app.<method>(` registration: its head line, the line its own
-// parenthesis closes on, and the contiguous column-0 comment block above it.
+// parenthesis closes on, the contiguous column-0 comment block above it, and
+// `after`, the code token before it (a statement of its own follows "", ";" or
+// "}"; anything else makes it part of an if, else, loop or expression).
 // Lines are 1-based.
 function registrations(src, scan = scanSource(src), { headRe = HEAD_RE } = {}) {
 	const lines = src.split("\n");
@@ -321,7 +326,9 @@ function registrations(src, scan = scanSource(src), { headRe = HEAD_RE } = {}) {
 		const argText = src.slice(open + 1, o.firstComma === -1 ? o.close : o.firstComma);
 		const method = m[1];
 		const key = `${method.toUpperCase()} ${pathKey(argText)}`;
-		out.push({ method, key, argText, from: from + 1, line: k + 1, end: endK + 1 });
+		const after = scan.prevAtLine[k];
+		const inner = src.slice(open + 1, o.close);
+		out.push({ method, key, argText, inner, from: from + 1, line: k + 1, end: endK + 1, startOff, closeOff: o.close, after, standalone: STATEMENT_AFTER.has(after) });
 	}
 	return out;
 }
@@ -385,8 +392,11 @@ function mountBlock(src, scan = scanSource(src)) {
 	if (at.length > 1) return { error: `${CONTEXT} is declared ${at.length} times` };
 	const c = at[0];
 	if (!scan.lineTop[c]) return { error: `${CONTEXT} is not a top-level declaration` };
-	let from = c;
-	while (from > 0 && lines[from - 1].startsWith("//")) from--;
+	// The block starts at its generated comment; any other comment touching it
+	// is refused rather than rewritten away by --context.
+	const from = c - MOUNT_COMMENT.length;
+	if (from < 0 || lines.slice(from, c).join("\n") !== MOUNT_COMMENT.join("\n")) return { error: `the comment directly above ${CONTEXT} (line ${c + 1}) is not the generated one; restore it, keeping other comments apart with a blank line` };
+	if (from > 0 && lines[from - 1].startsWith("//")) return { error: `a comment touches the mount block (line ${from}); keep it apart with a blank line` };
 	const names = [];
 	let k = c + 1;
 	for (; k < lines.length && lines[k] !== "};"; k++) {
@@ -435,39 +445,46 @@ function parseModule(text) {
 }
 
 // ---------------------------------------------------------- overlap order
+// Order entries are { id, method, paths, prefix }: method "use" for a
+// middleware layer (every method), paths null when they can't be read (every
+// path), prefix true for a layer (it matches its path and everything below).
 const isMethodRoute = (r) => r.method !== "use";
 const METHOD_SET = (m) => (m === "get" ? ["get", "head"] : [m]);
 function methodsOverlap(a, b) {
-	if (a === "all" || b === "all") return true;
+	if (a === "all" || b === "all" || a === "use" || b === "use") return true;
 	const s = new Set(METHOD_SET(a));
 	return METHOD_SET(b).some((m) => s.has(m));
 }
-// Express 4 (path-to-regexp 0.1): case-insensitive, trailing slash optional,
-// ":param" takes one whole segment, "*" takes anything. A path it can't read
-// statically (null) is taken to match everything.
-function pathsOverlap(a, b) {
+// Express 4 (path-to-regexp 0.1): case-insensitive, trailing slash optional, a
+// segment holding a ":param" can take any segment, "*" takes anything; a layer
+// matches its own path as a prefix.
+function pathsOverlap(a, b, aPrefix = false, bPrefix = false) {
 	const wild = (p) => p === null || /[*?()+]/.test(p);
 	if (wild(a) || wild(b)) return true;
 	const sa = a.replace(/\/+$/, "").split("/");
 	const sb = b.replace(/\/+$/, "").split("/");
-	if (sa.length !== sb.length) return false;
-	return sa.every((s, i) => s.startsWith(":") || sb[i].startsWith(":") || s.toLowerCase() === sb[i].toLowerCase());
+	if (sa.length !== sb.length && !(sa.length < sb.length ? aPrefix : bPrefix)) return false;
+	const n = Math.min(sa.length, sb.length);
+	for (let i = 0; i < n; i++) {
+		if (!(sa[i].includes(":") || sb[i].includes(":") || sa[i].toLowerCase() === sb[i].toLowerCase())) return false;
+	}
+	return true;
 }
 function routesOverlap(a, b) {
 	if (!methodsOverlap(a.method, b.method)) return false;
 	const pa = a.paths || [null];
 	const pb = b.paths || [null];
-	return pa.some((x) => pb.some((y) => pathsOverlap(x, y)));
+	return pa.some((x) => pb.some((y) => pathsOverlap(x, y, Boolean(a.prefix), Boolean(b.prefix))));
 }
 
 // Pairs (by id) whose relative order differs between two orders of the same
-// routes, among the pairs that can match one request.
+// entries, among the pairs that can match one request.
 function brokenPairs(routes, before, after) {
 	const pos = (order) => new Map(order.map((id, i) => [id, i]));
 	const pb = pos(before);
 	const pa = pos(after);
 	const out = [];
-	const list = routes.filter(isMethodRoute);
+	const list = routes;
 	for (let i = 0; i < list.length; i++) {
 		for (let j = i + 1; j < list.length; j++) {
 			const a = list[i];
@@ -586,8 +603,13 @@ function checkTree({ serverSrc, modules = {}, spec = null }) {
 			errors.push(`${file}:${mod.bodyLine + i}: only route registrations (app.get/post/put/patch/delete/all) sit in a module body`);
 		});
 		if (!regs.length) errors.push(`${file}: registers no route`);
-		for (const r of regs) addKey(r.key, `${file}:${mod.bodyLine + r.line - 1}`);
-		const ids = new Set(usedNames(mod.body));
+		for (const r of regs) {
+			addKey(r.key, `${file}:${mod.bodyLine + r.line - 1}`);
+			if (!r.standalone) errors.push(`${file}:${mod.bodyLine + r.line - 1}: ${r.key} is not a statement of its own (it follows "${r.after}")`);
+		}
+		// Read per registration, so one piece the scanner stops on can't hide the rest.
+		const ids = new Set();
+		for (const r of regs) for (const n of usedNames(mod.body.slice(r.startOff, r.closeOff + 1))) ids.add(n);
 		const given = new Set(mod.names);
 		if (given.size !== mod.names.length) errors.push(`${file}: a parameter is listed twice`);
 		const sorted = [...mod.names].sort(byCodeUnit);
@@ -613,6 +635,12 @@ function checkTree({ serverSrc, modules = {}, spec = null }) {
 			const has = Object.prototype.hasOwnProperty.call(modules, name);
 			if (entry.moved && !has) errors.push(`spec: ${name} is marked moved, but routes/${name}.js does not exist`);
 			if (!entry.moved && has) errors.push(`spec: routes/${name}.js exists, but ${name} is not marked moved`);
+			// A moved module owns every route the spec lists for it (it may hold more).
+			if (entry.moved && has) {
+				for (const head of entry.routes || []) {
+					if (!(keysAt.get(head) || []).some((w) => w.startsWith(`${ROUTE_DIR}/${name}.js:`))) errors.push(`spec: ${head} is listed for ${name}, but routes/${name}.js does not register it`);
+				}
+			}
 		}
 		for (const name of moduleNames) if (!spec[name]) errors.push(`routes/${name}.js is not in the spec (scripts/split/modules.json)`);
 	}
@@ -634,6 +662,7 @@ module.exports = {
 	pathKey,
 	resolvePaths,
 	stringConsts,
+	splitTopLevelCommas,
 	registrations,
 	topLevelDeclarations,
 	contextNames,
@@ -643,6 +672,7 @@ module.exports = {
 	moduleHeader,
 	renderModule,
 	parseModule,
+	pathsOverlap,
 	routesOverlap,
 	brokenPairs,
 	overlappingPairs,
