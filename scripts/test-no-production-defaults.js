@@ -68,6 +68,15 @@
  *      DIAG_PASS) and docs/capture-screenshots.js (--base=<url>) exit 2 with a
  *      line naming what is missing and their usage, before any command,
  *      connection or write; with it, they go on against what was named.
+ *   §9 the archive sheet: server.js's ARCHIVE_SPREADSHEET_ID, evaluated in
+ *      each environment, is production's archive only for production's own
+ *      process (lib/sheet-id.js) and nothing anywhere else (a local run, a
+ *      replica, staging, a look-alike pm2 name or folder); the setting wins,
+ *      trimmed. No literal fallback in server.js, lib/ or scripts/. Booted
+ *      without it: one [archive] warning; GET /api/archive and
+ *      /api/archive/tabs answer 503 ARCHIVE_UNCONFIGURED and the rate-con
+ *      sweep's archive read returns nothing, none of them calling Google;
+ *      with it, each reads the named sheet only.
  *
  * Hermetic: every child runs in a fresh mkdtemp folder (no .env) with
  * googleapis and nodemailer replaced by recording stubs, fetch replaced by one
@@ -1253,6 +1262,143 @@ const isRunner = (f) => /^(test|check)-/.test(path.basename(f)) || f.split(path.
 			check(`§8 capture-screenshots.js, --base=<a server>: not refused for it (${redact(c.stderr.split("\n")[0] || "").slice(0, 120)})`, !/--base=<url> is required/.test(c.out));
 			check(`§8 …every call goes to the named server (${cf.join("; ") || "none"})`,
 				cf.length >= 1 && cf.every((u) => u.startsWith(`${CAPTURE_URL}/api/`)) && c.calls.length === cf.length);
+		});
+
+		await section("§9 the archive sheet", async () => {
+			// Production's archive is lib/sheet-id.js's own constant, read at run time,
+			// so this file carries none of it.
+			let lib = {};
+			try { lib = require(path.join(ROOT, "lib", "sheet-id.js")); } catch { lib = {}; }
+			const PROD_ARCHIVE = String(lib.PRODUCTION_ARCHIVE_SPREADSHEET_ID || "");
+			const NAMED_ARCHIVE = "archive-under-test-nopd";
+			const PROD_ENV = { name: lib.PRODUCTION_PM2_NAME || "logistics-app", pm_cwd: PROD_DIR };
+			check(`§9 production's archive ID is readable from lib/sheet-id.js (${PROD_ARCHIVE ? "yes" : "no"})`, !!PROD_ARCHIVE);
+			// Never prints an ID: only what it is.
+			const shown = (id) => (id === "" ? "none" : id === null ? "no declaration" : /^threw /.test(id) ? id
+				: id === PROD_ARCHIVE ? "production's archive" : id === NAMED_ARCHIVE ? "the named one" : "another value");
+
+			// server.js's own declaration, evaluated for each environment and folder,
+			// with its require of lib/sheet-id.js the real one.
+			const decl = [...SRC.matchAll(/\nconst ARCHIVE_SPREADSHEET_ID = ([^\n]+?);(?:[ \t]*\/\/[^\n]*)?\n/g)];
+			check(`§9 server.js declares ARCHIVE_SPREADSHEET_ID once (found ${decl.length})`, decl.length === 1);
+			const serverArchive = (env, cwd) => {
+				if (decl.length !== 1) return null;
+				const req = (m) => (m === "./lib/sheet-id" ? require(path.join(ROOT, "lib", "sheet-id.js")) : require(m));
+				try { return String(new Function("process", "require", `return ${decl[0][1]};`)({ env, cwd: () => cwd }, req)); } catch (e) { return `threw ${e.message}`; }
+			};
+			for (const [label, env, cwd] of [
+				["no environment at all", {}, tmp],
+				["a blank ARCHIVE_SPREADSHEET_ID", { ARCHIVE_SPREADSHEET_ID: " \t" }, tmp],
+				["a replica", { LOCAL_REPLICA: "1" }, tmp],
+				["staging's pm2 process", { name: "logisx-staging", pm_cwd: "/var/www/logisx-staging" }, "/var/www/logisx-staging"],
+				["pm2 name logistics-app in another folder", { name: PROD_ENV.name, pm_cwd: tmp }, tmp],
+				["production's folder without pm2", {}, PROD_DIR],
+				["production's pm2 identity, started from another folder", PROD_ENV, tmp],
+			]) {
+				const got = serverArchive(env, cwd);
+				check(`§9 ${label}: no archive default (got ${shown(got)})`, got === "");
+			}
+			const own = serverArchive(PROD_ENV, PROD_DIR);
+			check(`§9 production's own process without ARCHIVE_SPREADSHEET_ID: production's archive, as before (got ${shown(own)})`, !!PROD_ARCHIVE && own === PROD_ARCHIVE);
+			const trimmed = serverArchive({ ARCHIVE_SPREADSHEET_ID: ` ${NAMED_ARCHIVE}\n` }, tmp);
+			check(`§9 ARCHIVE_SPREADSHEET_ID wins, trimmed (got ${shown(trimmed)})`, trimmed === NAMED_ARCHIVE);
+			const ownNamed = serverArchive({ ...PROD_ENV, ARCHIVE_SPREADSHEET_ID: NAMED_ARCHIVE }, PROD_DIR);
+			check(`§9 …in production's own process too (got ${shown(ownNamed)})`, ownNamed === NAMED_ARCHIVE);
+			check("§9 server.js reads ARCHIVE_SPREADSHEET_ID only through lib/sheet-id.js",
+				decl.length === 1 && /^require\("\.\/lib\/sheet-id"\)\.resolveArchiveSpreadsheetId\(process\.env, process\.cwd\(\)\)\.id$/.test(decl[0][1]) &&
+				!SRC.includes("process.env.ARCHIVE_SPREADSHEET_ID"));
+
+			// No literal fallback anywhere (a runner's fixture may carry an old line).
+			const LITERAL_FALLBACK = /ARCHIVE_SPREADSHEET_ID\b[^\n;]{0,40}(?:\|\||\?\?|:-|:=)\s*["'`]?[A-Za-z0-9_-]{20,}/;
+			const fallbackIn = [...APP_FILES, ...SCRIPT_FILES.filter((f) => /\.(?:js|mjs|cjs|sh)$/.test(f) && !isRunner(f))]
+				.filter((f) => LITERAL_FALLBACK.test(readSource(f)));
+			check(`§9 no ARCHIVE_SPREADSHEET_ID falls back to a literal ID in server.js, lib/ or scripts/ (${fallbackIn.join(", ") || "none"})`, fallbackIn.length === 0);
+			const archiveLits = [];
+			for (const f of [...APP_FILES, ...SCRIPT_JS]) {
+				const text = readSource(f);
+				if (!PROD_ARCHIVE || !text.includes(PROD_ARCHIVE)) continue;
+				let l = { literals: [], code: text };
+				try { l = lex(text); } catch { l = { literals: [], code: text }; }
+				for (const lit of l.literals) {
+					if (!lit.content.includes(PROD_ARCHIVE)) continue;
+					archiveLits.push({ f, line: lineOf(text, lit.start), bare: lit.content.trim() === PROD_ARCHIVE, before: before(l.code, lit.start), app: APP_FILES.includes(f) });
+				}
+			}
+			const where = (list) => [...new Set(list.map((x) => `${x.f}:${x.line}`))].join(", ") || "none";
+			const archiveInApp = archiveLits.filter((x) => x.app && !(x.f === path.join("lib", "sheet-id.js") && /\bconst PRODUCTION_ARCHIVE_SPREADSHEET_ID\s*=\s*$/.test(x.before)));
+			check(`§9 server.js and lib/: production's archive only as lib/sheet-id.js's PRODUCTION_ARCHIVE_SPREADSHEET_ID (${where(archiveInApp)})`,
+				!!PROD_ARCHIVE && archiveInApp.length === 0);
+			const archiveDefaults = archiveLits.filter((x) => !x.app && x.bare &&
+				["fallback", "default parameter", "argument default", "environment assignment"].some((s) => SHAPES[s].test(x.before)));
+			check(`§9 scripts/: production's archive is never a fallback, default parameter, argument default or environment assignment (${where(archiveDefaults)})`,
+				!!PROD_ARCHIVE && archiveDefaults.length === 0);
+
+			// Booted: one warning per start without the setting, none with it.
+			const ARCHIVE_WARNING = /\[archive\][^\n]*ARCHIVE_SPREADSHEET_ID is not set/;
+			const off = await bootServer({});
+			try {
+				check("§9 no ARCHIVE_SPREADSHEET_ID: the server starts", off.up);
+				check(`§9 …with one [archive] warning at start (got ${count(off.output(), ARCHIVE_WARNING)})`, count(off.output(), ARCHIVE_WARNING) === 1);
+			} finally {
+				await off.stop();
+			}
+			const on = await bootServer({ ARCHIVE_SPREADSHEET_ID: NAMED_ARCHIVE });
+			try {
+				check("§9 ARCHIVE_SPREADSHEET_ID set: the server starts, with no [archive] warning", on.up && !/\[archive\]/.test(on.output()));
+			} finally {
+				await on.stop();
+			}
+
+			// The two archive routes and the rate-con sweep's archive read, lifted
+			// from server.js and run with a Sheets client that records each sheet.
+			const sheetsFor = (calls) => async () => ({ spreadsheets: {
+				get: async (p) => { calls.push(p.spreadsheetId); return { data: { sheets: [{ properties: { title: "Job Tracking" } }] } }; },
+				values: { get: async (p) => { calls.push(p.spreadsheetId); return { data: { values: [["Load ID"], ["L-1"]] } }; } },
+			} });
+			const liftRoute = (needle) => {
+				const lines = SRC.split("\n");
+				const s = lines.findIndex((l) => l.startsWith(needle));
+				if (s < 0) throw new Error(`no ${needle}`);
+				let e = s;
+				while (e < lines.length && lines[e] !== "});") e++;
+				return lines.slice(s, e + 1).join("\n");
+			};
+			const runRoute = async (text, archiveId) => {
+				const calls = [];
+				const handlers = [];
+				new Function("app", "requireRole", "getSheets", "ARCHIVE_SPREADSHEET_ID", "console", text)(
+					{ get: (...a) => handlers.push(a[a.length - 1]) }, () => () => {}, sheetsFor(calls), archiveId, QUIET);
+				let out = { status: 0, body: null };
+				const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { out = { status: this.statusCode, body: b }; return this; } };
+				await handlers[0]({ query: {} }, res);
+				return { ...out, calls };
+			};
+			for (const [route, needle] of [["GET /api/archive", 'app.get("/api/archive", '], ["GET /api/archive/tabs", 'app.get("/api/archive/tabs", ']]) {
+				const text = liftRoute(needle);
+				const r = await runRoute(text, "");
+				check(`§9 ${route} without an archive: 503 ARCHIVE_UNCONFIGURED (got ${r.status} ${r.body && r.body.code})`,
+					r.status === 503 && !!r.body && r.body.code === "ARCHIVE_UNCONFIGURED");
+				check(`§9 …and no Google call (${r.calls.length})`, r.calls.length === 0);
+				const n = await runRoute(text, NAMED_ARCHIVE);
+				check(`§9 ${route} with ARCHIVE_SPREADSHEET_ID: 200, reading the named sheet only (got ${n.status}, ${n.calls.map(shown).join(", ") || "no call"})`,
+					n.status === 200 && n.calls.length === 1 && n.calls[0] === NAMED_ARCHIVE);
+			}
+			const helperAt = SRC.indexOf("\nlet archiveIdCache = ");
+			const fnAt = SRC.indexOf("\nasync function getArchiveLoadIdsCached() {");
+			const fnEnd = SRC.indexOf("\n}\n", fnAt);
+			if (helperAt < 0 || fnAt < helperAt || fnEnd < 0) throw new Error("getArchiveLoadIdsCached() not found");
+			const helperText = SRC.slice(helperAt, fnEnd + 2);
+			const runHelper = async (archiveId) => {
+				const calls = [];
+				const fn = new Function("getSheets", "ARCHIVE_SPREADSHEET_ID", `${helperText}\nreturn getArchiveLoadIdsCached;`)(sheetsFor(calls), archiveId);
+				return { ids: await fn(), calls };
+			};
+			const h = await runHelper("");
+			check(`§9 the rate-con sweep's archive read, without an archive: no load IDs and no Google call (${h.ids.length} IDs, ${h.calls.length} calls)`,
+				h.ids.length === 0 && h.calls.length === 0);
+			const hn = await runHelper(NAMED_ARCHIVE);
+			check(`§9 …with ARCHIVE_SPREADSHEET_ID: the named sheet's load IDs (${hn.calls.map(shown).join(", ") || "no call"}; ${hn.ids.join(", ") || "no IDs"})`,
+				hn.calls.length === 1 && hn.calls[0] === NAMED_ARCHIVE && hn.ids.join(",") === "L-1");
 		});
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });

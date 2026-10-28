@@ -20,7 +20,8 @@
  *      scripts/, and the production ID appears in scripts/ only where a script
  *      compares against it to refuse production.
  *   §6 the readers of production's own resolution: the replica's Sheets export
- *      and ensure-automation-user.js read lib/sheet-id.js; replica:start hands
+ *      (the archive's default too) and ensure-automation-user.js read
+ *      lib/sheet-id.js; replica:start hands
  *      the server the IDs its own Sheets copy holds.
  *
  * Hermetic: every child runs in a fresh mkdtemp folder (no .env, no service
@@ -232,6 +233,13 @@ try {
 		check("§6 …and an older server.js's literal is no default outside production's folder", !!exp && ids(older).exitCode === 2);
 		check("§6 …an app's own SPREADSHEET_ID comes first, and an unnamed archive gets no default",
 			!!exp && ids(named).main === TEST_ID && ids(named).archive === "");
+		// A server.js with no archive literal: production's folder takes the
+		// archive's default from lib/sheet-id.js, as it does the main sheet's.
+		const libArchive = String((requireOrNull(path.join(ROOT, "lib", "sheet-id.js")) || {}).PRODUCTION_ARCHIVE_SPREADSHEET_ID || "");
+		const productionLibOnly = productionApp("");
+		fs.writeFileSync(path.join(productionLibOnly, "server.js"), "const ARCHIVE_SPREADSHEET_ID = resolvedByTheLib();\n");
+		check("§6 …in production's folder, with no archive literal in server.js, the archive comes from lib/sheet-id.js",
+			!!exp && !!libArchive && ids(productionLibOnly).archive === libArchive && ids(productionLibOnly).main === PROD_ID);
 		fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(other, "node_modules"));
 		const out = path.join(tmp, "sheets-refused.json");
 		const refused = run(path.join("scripts", "replica", "remote", "sheets-export.js"), [`--app=${other}`, `--out=${out}`]);
