@@ -20,11 +20,12 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
-const SRC = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
+const SRC = serverSource()
 const CLIENT_SRC = path.join(ROOT, 'client', 'src')
 const HELPER = path.join(CLIENT_SRC, 'lib', 'driverName.js')
 const { normDriver } = await import(pathToFileURL(HELPER).href)

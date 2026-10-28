@@ -39,7 +39,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const GOLDEN = path.join(__dirname, "fixtures", "ledger-golden.json");
 
 function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }

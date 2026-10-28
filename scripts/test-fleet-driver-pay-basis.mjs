@@ -23,6 +23,7 @@
 //   LOGISX_ROOT=/tmp/base node scripts/test-fleet-driver-pay-basis.mjs   # a base checkout: fails
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -77,7 +78,7 @@ for (const [label, pay, want] of [
 
 console.log('§2 GET /api/investor sends the pay type with each driver\'s pay')
 {
-  const server = read('server.js')
+  const server = serverSource({ root: ROOT })
   const at = server.indexOf('driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(')
   const entry = at < 0 ? '' : server.slice(at, server.indexOf('}]))', at))
   ok('§2 the production.driverPayDetails map is found', at > 0)

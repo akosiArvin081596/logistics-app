@@ -31,7 +31,7 @@ const geolib = require("geolib");
 
 const ROOT = path.join(__dirname, "..");
 const fix = require("./data-fix-haul-row-remeasure");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let failures = 0;
 let passes = 0;

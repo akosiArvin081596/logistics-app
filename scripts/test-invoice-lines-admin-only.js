@@ -35,7 +35,7 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let passed = 0;
 let failed = 0;

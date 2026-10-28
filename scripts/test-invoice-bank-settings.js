@@ -166,7 +166,7 @@ function sourceSection() {
 	eq(missing(TEST), "", "§2 missingInvoiceBankSettings: both set names none");
 	eq(withBankEnv(TEST, () => missing(undefined)), "", "§2 missingInvoiceBankSettings: defaults to the process environment");
 
-	const srv = readSource("server.js");
+	const srv = require("./lib/server-source").serverSource();
 	const warnDecl = "\nconst MISSING_INVOICE_BANK_SETTINGS = brokerInvoice.missingInvoiceBankSettings();\n";
 	eq(srv.split(warnDecl).length - 1, 1, "§2 server.js computes the missing settings once, at module scope");
 	eq(srv.split("missingInvoiceBankSettings").length - 1, 1, "§2 …and nowhere else, so no route refuses a draft for them");

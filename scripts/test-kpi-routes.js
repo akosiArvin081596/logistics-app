@@ -56,7 +56,7 @@ const http = require("http");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 function die(msg) { console.error(`FAILED: ${msg}`); process.exit(1); }
 

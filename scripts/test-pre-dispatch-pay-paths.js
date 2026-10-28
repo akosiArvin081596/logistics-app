@@ -47,7 +47,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }
 let Database;

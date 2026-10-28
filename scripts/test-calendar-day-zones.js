@@ -38,7 +38,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const ZONES = ["America/New_York", "America/Chicago", "Asia/Manila", "UTC"];
 const CHILD = process.env.CALENDAR_ZONES_CHILD === "1";
 

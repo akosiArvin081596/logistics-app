@@ -38,6 +38,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -183,7 +184,7 @@ eq('…and 40 × U+0958 (80 after NFC) is accepted', orderNumberError(QA.repeat(
 
 // ══ §2 — PARITY with server.js ═════════════════════════════════════════════════
 console.log('\n§2  PARITY — server.js INVOICE_ORDER_RE')
-const SERVER_SRC = read('server.js')
+const SERVER_SRC = serverSource()
 
 // A one-line `const NAME = …;`, anchored on a newline and counted, so a mention
 // in a comment cannot be taken for the definition and a second copy fails the

@@ -54,7 +54,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // server.js's own require, so a lifted `require("./lib/...")` finds this checkout's lib/.
 const rootRequire = createRequire(path.join(ROOT, "server.js"));
 

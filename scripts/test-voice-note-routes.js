@@ -63,7 +63,7 @@ const { closure } = require("./lib/server-lift");
 const fx = require("./lib/voice-note-fixtures");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource({ file: process.argv[2] });
 const appRequire = (p) => (/^\.\/lib\//.test(p) ? require(path.join(ROOT, p)) : require(p));
 
 let failed = 0;

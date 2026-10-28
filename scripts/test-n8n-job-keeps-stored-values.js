@@ -40,7 +40,7 @@ const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
 
 let failures = 0;

@@ -30,6 +30,7 @@
 //   LOGISX_ROOT=/tmp/base node scripts/test-fleet-breakdown-truck-pay.mjs   # a base checkout: fails
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -47,7 +48,7 @@ function ok(name, cond) {
 
 // ══ §1 — the server sends the per-truck figures ══════════════════════════════
 {
-  const server = read('server.js')
+  const server = serverSource({ root: ROOT })
   const at = server.indexOf('perTruckData[truck.unit_number] = {')
   const block = at < 0 ? '' : server.slice(at, server.indexOf('};', at))
   ok('§1 perTruckData is still built per owned truck', at > 0)

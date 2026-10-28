@@ -40,7 +40,7 @@ const ok = (name, cond) => {
 	else { failed++; console.error(`FAIL  ${name}`); }
 };
 
-const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const src = require("./lib/server-source").serverSource();
 
 function liftFn(name) {
 	const a = src.indexOf(`function ${name}(`);

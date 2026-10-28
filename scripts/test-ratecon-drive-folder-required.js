@@ -44,7 +44,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const SERVER = path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // SHA-256 of the folder ID production's .env names. Only the digest is kept,
 // so this runner can find the ID without carrying it.
 const PROD_FOLDER_SHA256 = "8d4eb17c3cff0b3ebe5d92ca6d56a18cda1b7059e6ae3932f89c4267f47157a2";

@@ -34,6 +34,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { createRequire } from 'module'
@@ -75,7 +76,7 @@ function easternWeekAt(ms) {
 // lifted function reads), so the driver tab's week can be compared with the week
 // the server itself counts in.
 function serverGetWeekRange() {
-  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
+  const src = serverSource()
   const at = src.indexOf('function getWeekRange(referenceDate)')
   if (at < 0 || src.indexOf('function getWeekRange(', at + 1) >= 0) throw new Error('server.js must define getWeekRange() exactly once')
   let i = src.indexOf('{', at)

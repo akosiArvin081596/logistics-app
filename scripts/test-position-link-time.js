@@ -54,7 +54,7 @@ const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
 const SERVER_JS = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER_JS, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const { closure } = require("./lib/server-lift");
 // The lifted code's own require()s ("./lib/…") resolve from the server.js under test.
 const appRequire = require("module").createRequire(SERVER_JS);

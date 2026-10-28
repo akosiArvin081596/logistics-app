@@ -49,7 +49,7 @@ const MODE = path.join(ROOT, "lib", "replica-mode.js");
 const replica = require(MODE);
 const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
 const settingsExport = require(path.join(ROOT, "scripts", "replica", "remote", "settings.js"));
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let failures = 0;
 const ok = (name, cond, detail) => {

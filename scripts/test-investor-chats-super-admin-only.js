@@ -67,7 +67,7 @@ try {
 } catch (e) {
 	die(`a server dependency did not load (${e.message}); run npm ci under the .nvmrc Node`);
 }
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ---------------------------------------------------------------------------
 // Fixtures (made up)

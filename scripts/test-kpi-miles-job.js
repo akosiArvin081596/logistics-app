@@ -51,7 +51,7 @@ const PASS = require(path.join(ROOT, "lib", "kpi-ratecon-pass.js"));
 const ROUTES = require(path.join(ROOT, "lib", "kpi-deadhead-routes.js"));
 const DATA = require(path.join(ROOT, "lib", "kpi-miles-data.js"));
 const DEADHEAD = require(path.join(ROOT, "lib", "kpi-deadhead.js"));
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

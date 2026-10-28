@@ -44,7 +44,7 @@ const Module = require("module");
 const ROOT = path.join(__dirname, "..");
 const LIB = path.join(ROOT, "lib", "kpi-digest.js");
 const SRC = fs.readFileSync(LIB, "utf8");
-const SERVER = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SERVER = require("./lib/server-source").serverSource();
 
 function die(msg) { console.error(`FAILED: ${msg}`); process.exit(1); }
 function loadFrom(src) {

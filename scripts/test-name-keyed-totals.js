@@ -84,7 +84,7 @@ const eldFeedHealth = require("../lib/eld-feed-health");
 // The per-load miles index both handlers read (scripts/test-load-miles.js covers it).
 const loadMilesLib = require("../lib/load-miles");
 
-const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SHIPPED);
 
 // The built-in names, read before any lifted code runs, for an oracle written

@@ -151,7 +151,7 @@ const counts = (file) => ({
 // The server's own reader and recorder, lifted and bound to a database.
 let LIFT = null;
 function serverRates(file) {
-	if (!LIFT) LIFT = closure(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), { roots: ["loadPayRateIndex", "recordPayRateChanges"], provided: ["db", "require", "console", "process"], denied: ["server", "io", "getSheets", "sendEmail"] });
+	if (!LIFT) LIFT = closure(require("./lib/server-source").serverSource(), { roots: ["loadPayRateIndex", "recordPayRateChanges"], provided: ["db", "require", "console", "process"], denied: ["server", "io", "getSheets", "sendEmail"] });
 	const db = new Database(file);
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const api = new Function("db", "require", "console", "process", `"use strict";\n${LIFT.text}\nreturn { loadPayRateIndex, recordPayRateChanges };`)(
