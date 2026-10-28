@@ -329,11 +329,33 @@ async function statementInvoice(w, opts = {}) {
 		w.cleanup();
 	}
 
-	section("the locked-invoice text check");
+	section("the locked-invoice text check, on its own (lib/receipt-page-privacy.js invoicePagesUnchanged)");
+	{
+		let lib = null;
+		try { lib = require(path.join(__dirname, "..", "lib", "receipt-page-privacy.js")); } catch { lib = null; }
+		const same = (before, after) => (lib && typeof lib.invoicePagesUnchanged === "function" ? lib.invoicePagesUnchanged(before, after) : { missing: true });
+		const page = (text, extra = {}) => ({ text, unmapped: false, truncated: false, ...extra });
+		const before = { texts: [page("INVOICE"), page("SHEET receipt-1"), page("Receipt 1 of 1 - page 1 of 2"), page("Receipt 1 of 1 - page 2 of 2")], receipt: [2, 3] };
+		check("the same invoice pages with other receipt pages: unchanged",
+			same(before, { texts: [page("INVOICE"), page("SHEET receipt-1"), page("Receipt 1 of 1 - page 1 of 1 - 1 page of this statement is kept by the office")], receipt: [2] }), { ok: true });
+		check("an amount changed on an invoice page: TEXT_MISMATCH, naming the page",
+			same(before, { texts: [page("INVOICE TOTAL DUE 1.00"), page("SHEET receipt-1"), page("x")], receipt: [2] }), { ok: false, code: "TEXT_MISMATCH", page: 1 });
+		check("an invoice page lost, or one read only in part, or a font now unmapped: refused",
+			[same(before, { texts: [page("INVOICE"), page("x")], receipt: [1] }).code, same(before, { texts: [page("INVOICE", { truncated: true }), page("SHEET receipt-1")], receipt: [] }).code,
+				same(before, { texts: [page("INVOICE", { unmapped: true }), page("SHEET receipt-1")], receipt: [] }).code],
+			["PAGE_COUNT", "TEXT_UNREADABLE", "TEXT_MISMATCH"]);
+		check("no invoice page at all: refused", same({ texts: [page("x")], receipt: [0] }, { texts: [page("y")], receipt: [0] }).code, "NO_INVOICE_PAGES");
+	}
+
+	for (const kind of ["Approved", "closed month"]) {
+	section(`the locked-invoice text check on an ${kind === "Approved" ? "Approved invoice" : "invoice whose week is in a closed month"}`);
 	{
 		const w = world();
 		const { id } = await statementInvoice(w);
 		w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(id);
+		if (kind === "closed month") {
+			w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-10', 'locked', '2026-10-20T04:00:00.000Z', 'test')").run();
+		}
 		const svc = w.mine.receiptPdfService();
 		const real = svc && svc.rebuild;
 		if (typeof real === "function") {
@@ -352,13 +374,16 @@ async function statementInvoice(w, opts = {}) {
 		w.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_percentage, pay_daily) VALUES ('Casey Rivera', '', 'fixed', 0, 250)").run();
 		const sweep = await w.mine.runReceiptPagesSweep();
 		const refused = audits(w, "invoice_receipt_pages_refused").filter((r) => Number(r.entity_id) === id);
-		check("the check: a rebuild that changes an invoice page's text is refused, the stored file stays as it was, no render record",
+		check(`the check (${kind}): a rebuild that changes an invoice page's text is refused, the stored file stays as it was, no render record`,
 			[sweep && sweep.refused, stored(w, id).equals(fileBefore), renderCount(w) === rendersBefore && rendersBefore > 0], [1, true, true]);
-		check("the check: the refusal is audited with its code", [refused.length, /TEXT_MISMATCH/.test(refused[0] && refused[0].details)], [1, true]);
+		check(`the check (${kind}): the refusal is audited with its code, and alerted`,
+			[refused.length, /TEXT_MISMATCH/.test(refused[0] && refused[0].details), w.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'receipt-pages'").get().n],
+			[1, true, 1]);
 		if (real) svc.rebuild = real;
 		const retry = await w.mine.runReceiptPagesSweep();
-		check("the check: with an honest rebuild the next sweep withdraws the page", [retry && retry.withdrawn, await has(stored(w, id), "MARKER-P1-7c41")], [1, false]);
+		check(`the check (${kind}): with an honest rebuild the next sweep withdraws the page`, [retry && retry.withdrawn, await has(stored(w, id), "MARKER-P1-7c41")], [1, false]);
 		w.cleanup();
+	}
 	}
 
 	section("off: RECEIPT_PDF_PAGES_ENABLED unset");
