@@ -102,7 +102,7 @@ const lastRender = (w) => w.rendered[w.rendered.length - 1] || { data: {} };
 const notes = (d) => (d.personalLines || []).map((l) => l.receiptNote);
 const receiptPath = (w, id, ext) => path.join(w.dataDir, "uploads", "expense-receipts", `${1760000000000 + id}-abcdefabcdef.${ext}`);
 const cacheDir = (w) => path.join(w.dataDir, "storage", "receipt-pdfs");
-const cached = (w, id) => (fs.existsSync(cacheDir(w)) ? fs.readdirSync(cacheDir(w)) : []).filter((f) => f.startsWith(`v1-${id}-`) && f.endsWith(".pdf"));
+const cached = (w, id) => (fs.existsSync(cacheDir(w)) ? fs.readdirSync(cacheDir(w)) : []).filter((f) => f.startsWith(`${rp.RECEIPT_PDF_SANITIZER_VERSION}-${id}-`) && f.endsWith(".pdf"));
 const storedFile = (w, invoiceId) => fs.readFileSync(path.join(w.dataDir, "uploads", "invoices", w.invoice(invoiceId).pdf_file_name));
 
 // A made-up receipt of n pages.
