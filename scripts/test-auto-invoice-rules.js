@@ -311,12 +311,14 @@ ok(/\nconst normLoadKey = \(id\) => String\(id \|\| ""\)\.trim\(\)\.toLowerCase\
 for (const id of ["#LD-TEST-0001", " X ", "##9", "", null]) {
 	eq(R.loadKey(id), String(id || "").trim().toLowerCase().replace(/^#/, ""), `§10 loadKey(${JSON.stringify(id)}) is normLoadKey()`);
 }
+// The draft route's reads live in the shared draft engine.
+const DRAFT_SRC = fs.readFileSync(path.join(ROOT, "lib", "broker-invoice-draft.js"), "utf8");
 for (const text of [
 	"const emailCol = findCol(headers, /^email$/i) || findCol(headers, /broker.*email|email/i);",
 	"headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||",
 	"headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));",
 	"\"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL ORDER BY uploaded_at ASC, id ASC\"",
-]) ok(SRC.includes(text), `§10 the draft route still reads ${text.slice(0, 60)}…`);
+]) ok(DRAFT_SRC.includes(text), `§10 the draft engine still reads ${text.slice(0, 60)}…`);
 
 // ------------------------------------------------------------------ §11
 section("§11 the module stays pure");

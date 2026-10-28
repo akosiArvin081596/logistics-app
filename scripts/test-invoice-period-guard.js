@@ -31,6 +31,12 @@
 // Every property is checked in BOTH directions, and section 5 runs mutants of the
 // shipped source: a mutant that passes means the assertion above it is decorative.
 //
+// Section 7: with INVOICE_CLOSED_MONTH_GUARD_ENABLED exactly "true", no weekly or
+// manual invoice is generated, regenerated, created, deleted or restored in a span
+// touching a closed month, and the Friday batch counts such a driver skipped; flag
+// off, each case is pinned to today's behaviour. Its handlers run lifted from
+// server.js on an in-memory SQLite, with the server's own audit writer.
+//
 // The guard is EXTRACTED from server.js rather than reimplemented — a
 // reimplementation tests the test. No network, no sheet. Section 4 uses an
 // in-memory SQLite seeded from a COPY of app.db (never the live file, and never
@@ -683,6 +689,563 @@ async function section6() {
 		[SRC.split(PLAIN_TAIL).length - 1, ADJUST.includes(PLAIN_TAIL)], [1, true]);
 }
 
+// ── 7. closed months: generate, regenerate, manual, delete, restore, batch ──
+// Closed months are never changed. The routes run lifted from server.js
+// (scripts/lib/server-lift.js) on scripts/lib/work-days-world.js's schema, with
+// the server's own logAudit, so each refusal's audit row is read back. A world
+// is one start: env, locks and the clock are its own. Made-up data only.
+const CM_FLAG = "INVOICE_CLOSED_MONTH_GUARD_ENABLED";
+const CM_A = "Test Driver A";
+const CM_B = "Test Driver B";
+// Fri 2026-11-13 12:00 Eastern. W38 Sat 09-19..Fri 09-25 (September), W39
+// 09-26..10-02 (September and October), W41 10-10..10-16 (October).
+const CM_NOW = Date.parse("2026-11-13T17:00:00Z");
+
+async function section7() {
+	section("7. closed months: generate, regenerate, manual, delete, restore and the Friday batch");
+	// Production's clock zone.
+	process.env.TZ = "UTC";
+	const { createRequire } = require("module");
+	const W7 = require(path.join(ROOT, "scripts", "lib", "work-days-world.js"));
+	const { closure, codeIdentifiers } = require(path.join(ROOT, "scripts", "lib", "server-lift.js"));
+	const personalExpense = require(path.join(ROOT, "lib", "personal-expense.js"));
+
+	const LINES = SRC.split("\n");
+	const head = (method, p) => {
+		const heads = LINES.filter((l) => l.startsWith(`app.${method}(${JSON.stringify(p)},`));
+		if (heads.length !== 1) throw new Error(`expected one registration of ${method.toUpperCase()} ${p}, found ${heads.length}`);
+		return heads[0];
+	};
+	// The two names work-days-world lifts by hand (a call after a comment ending in
+	// "." is missed by the closure walk).
+	const named = [
+		...["assertInvoiceFileStillOwn"].filter((n) => SRC.includes(`\nfunction ${n}(`)),
+		...["_jtInflight"].filter((n) => SRC.includes(`\nlet ${n} =`)),
+	];
+	const L7 = closure(SRC, {
+		roots: ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "parseSheet", "deduplicateLoads", ...named],
+		routes: [head("post", "/api/invoices/manual"), head("delete", "/api/invoices/:id"), head("put", "/api/invoices/:id/restore")],
+		provided: ["db", "require", "console", "process", "__dirname", "Date", "app", "requireRole", "requireAuth", "refuseCrossOrigin",
+			"notifyChange", "getJobTrackingCached", "getSheets", "SPREADSHEET_ID", "REPLICA", "SHEET_TARGET", "renderPolicy", "fs",
+			"DATA_DIR", "fetch", "io", "sendEmail", "setTimeout"],
+		denied: ["server", "transporter", "getDrive", "KEY_FILE"],
+	});
+
+	const ROWS = [
+		W7.loadRow({ id: "CM38", driver: CM_A, pickup: "2026-09-21 8:00", dropoff: "2026-09-22 18:00", assigned: "2026-09-21", done: "2026-09-22", truck: "T1" }),
+		W7.loadRow({ id: "CM39", driver: CM_A, pickup: "2026-09-30 8:00", dropoff: "2026-10-01 18:00", assigned: "2026-09-30", done: "2026-10-01", truck: "T1" }),
+		W7.loadRow({ id: "CM41", driver: CM_A, pickup: "2026-10-12 8:00", dropoff: "2026-10-13 18:00", assigned: "2026-10-12", done: "2026-10-13", truck: "T1" }),
+	];
+	const lockMonths = (wdb, periods) => {
+		const ins = wdb.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', '2026-11-08T05:00:00.000Z', 'test')");
+		for (const p of periods) ins.run(p);
+	};
+	// The break periodLocksReadable() exists for: the table without its `status`.
+	const breakLockTable = (wdb) => wdb.exec("DROP TABLE period_locks; CREATE TABLE period_locks (period TEXT PRIMARY KEY)");
+
+	// One server start. flag: the flag's raw value (undefined = unset); rows: Job Tracking.
+	function world({ flag, locks = [], personal = false, rows = ROWS } = {}) {
+		const wdb = W7.schemaDb();
+		if (personal) wdb.exec(personalExpense.SCHEMA_SQL);
+		const user = wdb.prepare("INSERT INTO users (id, username, password_hash, role, company_name, driver_name) VALUES (?, ?, 'x', ?, ?, ?)");
+		user.run(1, "super_admin", "Super Admin", "", "");
+		user.run(4, "drivera", "Driver", "Acme Carrier", CM_A);
+		user.run(5, "inv5", "Investor", "Acme Carrier", "");
+		wdb.prepare("INSERT INTO investors (user_id, full_name, carrier_name) VALUES (5, 'Ivy Investor', 'Acme Carrier')").run();
+		wdb.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
+		const dir = wdb.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily, pay_percentage) VALUES (?, 'Acme Carrier', 'fixed', ?, 0)");
+		dir.run(CM_A, 300);
+		dir.run(CM_B, 250);
+		const truck = wdb.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, assigned_driver, driver_pay_daily)
+			VALUES (?, ?, 5, 'Active', '2026-08-01', '2026-08-01 00:00:00', ?, 0)`);
+		truck.run(1, "T1", CM_A);
+		truck.run(2, "T2", CM_B);
+		const assign = wdb.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, '2026-08-01T17:00:00.000Z')");
+		assign.run(1, CM_A);
+		assign.run(2, CM_B);
+		lockMonths(wdb, locks);
+
+		const w = { db: wdb, dataDir: W7.tempDir(), routes: {}, rendered: [], onRender: null, emails: [], clock: { ms: CM_NOW } };
+		class FixedDate extends Date {
+			constructor(...args) { super(...(args.length ? args : [w.clock.ms])); }
+			static now() { return w.clock.ms; }
+		}
+		const register = (method) => (p, ...h) => { w.routes[`${method} ${p}`] = h[h.length - 1]; };
+		const pass = () => (req, res, next) => (next ? next() : undefined);
+		const sheet = () => W7.sheetValues(rows);
+		const deps = {
+			db: wdb,
+			require: createRequire(path.join(ROOT, "server.js")),
+			console: { log() {}, info() {}, warn() {}, error() {} },
+			process: { env: { INVOICE_UNDATED_ALERT_ENABLED: "false", ...(flag === undefined ? {} : { [CM_FLAG]: flag }) }, argv: [], cwd: () => ROOT, pid: 4245 },
+			__dirname: ROOT,
+			Date: FixedDate,
+			app: { get: register("GET"), put: register("PUT"), post: register("POST"), delete: register("DELETE"), use() {} },
+			requireRole: pass,
+			requireAuth: pass(),
+			refuseCrossOrigin: pass(),
+			notifyChange: () => {},
+			getJobTrackingCached: null,
+			getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet() } }) } } }),
+			SPREADSHEET_ID: "test-sheet",
+			REPLICA: null,
+			SHEET_TARGET: null,
+			renderPolicy: async (templateName) => {
+				if (w.onRender) await w.onRender();
+				w.rendered.push(templateName);
+				return Buffer.from("%PDF-stub");
+			},
+			fs,
+			DATA_DIR: w.dataDir,
+			fetch: () => { throw new Error("no network in a test"); },
+			io: null,
+			sendEmail: async (to, subject, html) => { w.emails.push({ subject, html: String(html || "") }); },
+			// The batch's 90 s per-driver race timers must not hold the run open.
+			setTimeout: (fn, ms, ...a) => { const t = setTimeout(fn, ms, ...a); if (t && t.unref) t.unref(); return t; },
+		};
+		const body = [
+			'"use strict";',
+			L7.text,
+			"getJobTrackingCached = async () => { const p = parseSheet({ values: __sheet() }); p.data = deduplicateLoads(p.data, p.headers); return p; };",
+			"return { generateInvoiceHandler, runWeeklyInvoiceBatch };",
+		].join("\n");
+		w.api = new Function(...Object.keys(deps), "__sheet", body)(...Object.values(deps), sheet);
+		return w;
+	}
+
+	const ADMIN = { id: 1, role: "Super Admin", username: "super_admin" };
+	const DRIVER = { id: 4, role: "Driver", username: "drivera", driverName: CM_A };
+	const gen = (w, user, weekEnd) => W7.call(w.api.generateInvoiceHandler,
+		{ session: { user: { ...user } }, headers: {}, query: {}, params: {}, body: { driver: CM_A, weekEnd } });
+	const route = (w, key, { params = {}, query = {}, body = {} } = {}) => {
+		if (!w.routes[key]) throw new Error(`${key} is not registered`);
+		return W7.call(w.routes[key], { session: { user: { ...ADMIN } }, headers: {}, query, params, body });
+	};
+	const weekRows = (w, weekStart) => w.db.prepare("SELECT * FROM invoices WHERE week_start = ? AND is_manual = 0 ORDER BY id").all(weekStart);
+	const manualRows = (w) => w.db.prepare("SELECT id, week_start, week_end FROM invoices WHERE is_manual = 1 ORDER BY id").all();
+	const pdfFiles = (w) => {
+		const d = path.join(w.dataDir, "uploads", "invoices");
+		return fs.existsSync(d) ? fs.readdirSync(d).sort() : [];
+	};
+	const blocked = (w, action) => w.db.prepare("SELECT username, role, entity, entity_id, details FROM audit_trail WHERE action = ? ORDER BY id").all(action)
+		.map((a) => ({
+			username: a.username, role: a.role, entity: a.entity, entityId: a.entity_id,
+			code: (/\[(PERIOD_[A-Z_]+)\]/.exec(a.details) || [])[1] || "",
+			periods: (/\] periods=([0-9,-]+)/.exec(a.details) || [])[1] || "",
+		}));
+	const insertInvoice = (wdb, o) => {
+		const row = {
+			invoice_number: "INV-TDA-2026W39-01", driver: "test driver a", week_start: "2026-09-26", week_end: "2026-10-02",
+			loads_count: 2, rate_per_load: 300, total_earnings: 600, expenses_total: 0, status: "Approved", pdf_file_name: "",
+			load_ids: "[]", expense_ids: "[]", render_data: "{}", adjustment: 0, is_manual: 0, deleted_at: "", ...o,
+		};
+		const cols = Object.keys(row);
+		return Number(wdb.prepare(`INSERT INTO invoices (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c])).lastInsertRowid);
+	};
+	const errorOf = (r) => (r.body && r.body.error) || "";
+	const run = async (label, fn) => {
+		try { await fn(); } catch (err) { fail++; failures.push(`  ${label}\n      threw: ${err.message}`); }
+	};
+
+	// 7a. A week wholly in a closed month, from the driver app and from a Super Admin.
+	await run("7a (generate in a closed month)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const r = await gen(w, DRIVER, "2026-09-25");
+		check("7a ON: a Driver generating W38 (September closed) is refused: 409 PERIOD_FINALIZED naming September",
+			[r.status, r.body && r.body.code, r.body && r.body.periods, r.body && r.body.unresolved], [409, "PERIOD_FINALIZED", ["2026-09"], false]);
+		check("...in plain words: the month is closed, nothing changed, the office pays a missed day on a correction dated in the current month",
+			[/^September 2026 is closed, so /.test(errorOf(r)), /nothing was changed/i.test(errorOf(r)),
+				/The office pays .* on a correction invoice dated in the current month/.test(errorOf(r)), /\/api\//.test(errorOf(r))], [true, true, true, false]);
+		check("...refused before any work: nothing rendered, no invoice row, no PDF",
+			[w.rendered.length, weekRows(w, "2026-09-19").length, pdfFiles(w)], [0, 0, []]);
+		check("...audited as the driver: generate_invoice_blocked [PERIOD_FINALIZED] periods=2026-09",
+			blocked(w, "generate_invoice_blocked").map((a) => [a.username, a.role, a.entity, a.code, a.periods]),
+			[["drivera", "Driver", "invoice", "PERIOD_FINALIZED", "2026-09"]]);
+		const s = await gen(w, ADMIN, "2026-09-25");
+		check("7a ON: a Super Admin generating W38 is refused the same way",
+			[s.status, s.body && s.body.code, s.body && s.body.periods, weekRows(w, "2026-09-19").length], [409, "PERIOD_FINALIZED", ["2026-09"], 0]);
+		check("...audited as the Super Admin", blocked(w, "generate_invoice_blocked").map((a) => a.username), ["drivera", "super_admin"]);
+		const open = await gen(w, ADMIN, "2026-10-16");
+		check("7a ON: a week in an open month (W41) still generates",
+			[open.status, open.body && open.body.invoice && open.body.invoice.week_start, open.body && open.body.invoice && open.body.invoice.status],
+			[200, "2026-10-10", "Draft"]);
+		const off = world({ locks: ["2026-09"] });
+		const o = await gen(off, DRIVER, "2026-09-25");
+		check("7a OFF (pin, today): the Driver's W38 invoice is generated in the closed month",
+			[o.status, weekRows(off, "2026-09-19").map((x) => x.status)], [200, ["Draft"]]);
+	});
+
+	// 7b. A Saturday-Friday week straddling a closed and an open month.
+	await run("7b (straddling week)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const r = await gen(w, ADMIN, "2026-10-02");
+		check("7b ON: W39 (September closed, October open) is refused, naming September",
+			[r.status, r.body && r.body.periods, weekRows(w, "2026-09-26").length], [409, ["2026-09"], 0]);
+		const w2 = world({ flag: "true", locks: ["2026-10"] });
+		const r2 = await gen(w2, ADMIN, "2026-10-02");
+		check("...and with only October closed, refused naming October",
+			[r2.status, r2.body && r2.body.periods, weekRows(w2, "2026-09-26").length], [409, ["2026-10"], 0]);
+		const off = world({ locks: ["2026-09"] });
+		const o = await gen(off, ADMIN, "2026-10-02");
+		check("7b OFF (pin, today): W39 is generated", [o.status, weekRows(off, "2026-09-26").length], [200, 1]);
+	});
+
+	// 7c. A Draft made while its month was open, regenerated after the month closed.
+	await run("7c (Draft regenerate)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag });
+			const first = await gen(w, ADMIN, "2026-10-02");
+			const before = weekRows(w, "2026-09-26");
+			lockMonths(w.db, ["2026-09"]);
+			const again = await gen(w, ADMIN, "2026-10-02");
+			const byDriver = await gen(w, DRIVER, "2026-10-02");
+			const after = weekRows(w, "2026-09-26");
+			if (flag === "true") {
+				check("7c ON: a Draft regenerated after September closed is refused, by the Super Admin and by the Driver",
+					[first.status, before.length, again.status, again.body && again.body.periods, byDriver.status], [200, 1, 409, ["2026-09"], 409]);
+				check("...and the Draft stays exactly as it was (row, number, PDF name, render)", after, before);
+			} else {
+				check("7c OFF (pin, today): the regenerate re-mints the Draft: a new row under the same number",
+					[first.status, again.status, byDriver.status, after.length, after[0] && after[0].id !== before[0].id, after[0] && after[0].invoice_number === before[0].invoice_number],
+					[200, 200, 200, 1, true, true]);
+			}
+		}
+	});
+
+	// 7d. The month closes during the request's awaits (here, its render): the
+	// guard passed at the start, so only the write's own check can refuse.
+	await run("7d (re-check at the write)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag });
+			w.onRender = async () => { lockMonths(w.db, ["2026-10"]); };
+			const r = await gen(w, ADMIN, "2026-10-16");
+			if (flag === "true") {
+				check("7d ON: October closing while W41 renders refuses the write: 409 naming October",
+					[w.rendered.length, r.status, r.body && r.body.code, r.body && r.body.periods], [1, 409, "PERIOD_FINALIZED", ["2026-10"]]);
+				check("...nothing saved: no row, no PDF, no temporary file", [weekRows(w, "2026-10-10").length, pdfFiles(w)], [0, []]);
+				check("...audited once, naming October",
+					blocked(w, "generate_invoice_blocked").map((a) => [a.username, a.code, a.periods]), [["super_admin", "PERIOD_FINALIZED", "2026-10"]]);
+			} else {
+				check("7d OFF (pin, today): the write does not look again; the invoice is saved",
+					[r.status, weekRows(w, "2026-10-10").length, pdfFiles(w).length], [200, 1, 1]);
+			}
+		}
+	});
+
+	// 7e. POST /api/invoices/manual.
+	await run("7e (manual invoice)", async () => {
+		const manual = (start, end) => ({ payee: CM_A, payeeAddress: "", payeePhone: "", periodStart: start, periodEnd: end,
+			lineItems: [{ description: "Made-up correction line", amount: 300 }], deductions: [] });
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const r = await route(w, "POST /api/invoices/manual", { body: manual("2026-09-01", "2026-09-30") });
+		check("7e ON: a manual invoice dated in closed September is refused: 409 naming September, no row, nothing rendered",
+			[r.status, r.body && r.body.code, r.body && r.body.periods, manualRows(w).length, w.rendered.length], [409, "PERIOD_FINALIZED", ["2026-09"], 0, 0]);
+		check("...in plain words, pointing at the current month",
+			[/^September 2026 is closed, so /.test(errorOf(r)), /dated in the current month/.test(errorOf(r)), /\/api\//.test(errorOf(r))], [true, true, false]);
+		check("...audited create_manual_invoice_blocked",
+			blocked(w, "create_manual_invoice_blocked").map((a) => [a.username, a.entity, a.code, a.periods]), [["super_admin", "invoice", "PERIOD_FINALIZED", "2026-09"]]);
+		const span = await route(w, "POST /api/invoices/manual", { body: manual("2026-08-01", "2026-10-31") });
+		check("...a period with the closed month inside it (both ends open) is refused too",
+			[span.status, span.body && span.body.periods, manualRows(w).length], [409, ["2026-09"], 0]);
+		const open = await route(w, "POST /api/invoices/manual", { body: manual("2026-10-01", "2026-10-31") });
+		check("7e ON: a manual invoice dated in the open month is created (the remedy works)", [open.status, manualRows(w).length], [200, 1]);
+		const late = world({ flag: "true" });
+		late.onRender = async () => { lockMonths(late.db, ["2026-10"]); };
+		const l = await route(late, "POST /api/invoices/manual", { body: manual("2026-10-01", "2026-10-31") });
+		check("7e ON: October closing while a manual invoice renders refuses its write: 409, no row, no PDF",
+			[late.rendered.length, l.status, l.body && l.body.periods, manualRows(late).length, pdfFiles(late)], [1, 409, ["2026-10"], 0, []]);
+		const off = world({ locks: ["2026-09"] });
+		const o = await route(off, "POST /api/invoices/manual", { body: manual("2026-09-01", "2026-09-30") });
+		check("7e OFF (pin, today): the manual invoice dated in September is created", [o.status, manualRows(off).length], [200, 1]);
+	});
+
+	// 7f. DELETE /api/invoices/:id.
+	await run("7f (delete)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"] });
+			const closedId = insertInvoice(w.db, {});
+			w.db.prepare("INSERT INTO invoice_paid_days (driver_norm, day, invoice_id) VALUES ('test driver a', '2026-09-30', ?)").run(closedId);
+			const openId = insertInvoice(w.db, { invoice_number: "INV-TDA-2026W41-01", week_start: "2026-10-10", week_end: "2026-10-16", status: "Draft" });
+			const r = await route(w, "DELETE /api/invoices/:id", { params: { id: String(closedId) }, query: { reason: "made-up reason" } });
+			const deletedAt = w.db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(closedId).deleted_at;
+			const days = w.db.prepare("SELECT COUNT(*) AS n FROM invoice_paid_days WHERE invoice_id = ?").get(closedId).n;
+			if (flag === "true") {
+				check("7f ON: deleting an invoice whose week touches closed September is refused: 409, the row and its paid day stay",
+					[r.status, r.body && r.body.code, r.body && r.body.periods, deletedAt, days], [409, "PERIOD_FINALIZED", ["2026-09"], "", 1]);
+				check("...in plain words", [/^September 2026 is closed, so INV-TDA-2026W39-01 can't be deleted/.test(errorOf(r))], [true]);
+				check("...audited delete_invoice_blocked on that invoice",
+					blocked(w, "delete_invoice_blocked").map((a) => [a.entityId, a.code, a.periods]), [[String(closedId), "PERIOD_FINALIZED", "2026-09"]]);
+				const o = await route(w, "DELETE /api/invoices/:id", { params: { id: String(openId) } });
+				check("7f ON: an open month's invoice still deletes",
+					[o.status, !!w.db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(openId).deleted_at], [200, true]);
+			} else {
+				check("7f OFF (pin, today): the delete goes through and frees its paid day", [r.status, !!deletedAt, days], [200, true, 0]);
+			}
+		}
+	});
+
+	// 7g. PUT /api/invoices/:id/restore.
+	await run("7g (restore)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"] });
+			const gone = { deleted_at: "2026-11-01T12:00:00.000Z", deleted_by: "super_admin" };
+			const closedId = insertInvoice(w.db, gone);
+			const openId = insertInvoice(w.db, { ...gone, invoice_number: "INV-TDA-2026W41-01", week_start: "2026-10-10", week_end: "2026-10-16", status: "Draft" });
+			const r = await route(w, "PUT /api/invoices/:id/restore", { params: { id: String(closedId) } });
+			const deletedAt = w.db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(closedId).deleted_at;
+			if (flag === "true") {
+				check("7g ON: restoring a deleted invoice whose week touches closed September is refused: 409, it stays deleted",
+					[r.status, r.body && r.body.code, r.body && r.body.periods, deletedAt], [409, "PERIOD_FINALIZED", ["2026-09"], gone.deleted_at]);
+				check("...audited restore_invoice_blocked on that invoice",
+					blocked(w, "restore_invoice_blocked").map((a) => [a.entityId, a.code, a.periods]), [[String(closedId), "PERIOD_FINALIZED", "2026-09"]]);
+				const o = await route(w, "PUT /api/invoices/:id/restore", { params: { id: String(openId) } });
+				check("7g ON: an open month's invoice still restores",
+					[o.status, w.db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(openId).deleted_at], [200, ""]);
+			} else {
+				check("7g OFF (pin, today): the restore goes through", [r.status, deletedAt], [200, ""]);
+			}
+		}
+	});
+
+	// 7h. The Friday batch on a week touching a closed month (a late catch-up).
+	await run("7h (Friday batch)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"] });
+			const out = await w.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+			const marker = w.db.prepare("SELECT created, submitted, skipped, failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+			const rows = weekRows(w, "2026-09-26");
+			if (flag === "true") {
+				check("7h ON: the batch bills nobody in W39 and counts both drivers skipped, none failed (no retry)",
+					[out.created, out.submitted, out.skipped, out.unbilled, out.problem, marker.skipped, marker.failed, rows.length],
+					[0, 0, 2, 0, false, 2, 0, 0]);
+				check("...its summary names the driver who worked that week, for a correction in the current month",
+					[/closed month/i.test(String(marker.summary)), String(marker.summary).includes(CM_A), String(marker.summary).includes(CM_B)], [true, true, false]);
+				check("...counts only the driver with no loads as \"skipped (no loads)\"",
+					String(marker.summary).startsWith("0 generated & submitted · 1 skipped (no loads) · 1 NOT BILLED"), true);
+				check("...and the run's notification asks for action",
+					w.db.prepare("SELECT title FROM dispatch_notifications WHERE type = 'invoices-autogen'").all().map((n) => /ACTION NEEDED/.test(n.title)), [true]);
+				const html = (w.emails[0] || {}).html || "";
+				check("...the email names the driver for a correction, says 1 skipped (no loads), and never says to generate it",
+					[/Not billed, the week touches a closed month:<\/b> Test Driver A\. Pay their days on a correction invoice dated in the current month\./.test(html),
+						/Skipped \(no loads\)<\/span><b>1</.test(html), html.includes("Generate these from the Invoices page")],
+					[true, true, false]);
+			} else {
+				check("7h OFF (pin, today): the batch generates and submits W39 in the closed month",
+					[out.created, out.submitted, out.skipped, out.unbilled, rows.map((x) => x.status)], [1, 1, 1, 0, ["Submitted"]]);
+			}
+		}
+		// A driver who already submitted W39 is billed: skipped as INVOICE_EXISTS is, never
+		// named for a correction, and the run asks for no action.
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		insertInvoice(w.db, { status: "Submitted" });
+		const out = await w.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const marker = w.db.prepare("SELECT skipped, failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		check("7h ON: a driver who already submitted W39 is not named; nothing failed, nothing asks for action",
+			[out.created, out.skipped, out.unbilled, marker.failed, /closed month/i.test(String(marker.summary)),
+				w.db.prepare("SELECT title FROM dispatch_notifications WHERE type = 'invoices-autogen'").all().length],
+			[0, 2, 0, 0, false, 0]);
+
+		// A live Draft for the week can still be submitted as is: named for that, not for a
+		// correction (a correction beside it would pay its days twice).
+		const d = world({ flag: "true", locks: ["2026-09"] });
+		const draftId = insertInvoice(d.db, { status: "Draft" });
+		const dOut = await d.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const dMarker = d.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		const dHtml = (d.emails[0] || {}).html || "";
+		check("7h ON: a driver with a live Draft for W39 is named to submit it as is, not for a correction; nothing failed",
+			[dOut.skipped, dOut.problem, dMarker.failed, /NOT BILLED/.test(String(dMarker.summary)),
+				/1 with an unsubmitted Draft for this week, which touches a closed month \(Test Driver A\): submit it as is; only days it misses go on a correction invoice/.test(String(dMarker.summary)),
+				String(dMarker.summary).startsWith("0 generated & submitted · 1 skipped (no loads)")],
+			[2, false, 0, false, true, true]);
+		check("...the Draft stays a Draft, and the email says to submit it",
+			[d.db.prepare("SELECT status FROM invoices WHERE id = ?").get(draftId).status,
+				/Unsubmitted Draft for this week, which touches a closed month:<\/b> Test Driver A\. Submit it as is/.test(dHtml), /Not billed/.test(dHtml)],
+			["Draft", true, false]);
+
+		// A driver missing from the roster who worked the week: no weekly invoice can bill him
+		// either, so he is named for a correction too, and nothing retries.
+		const offRows = [...ROWS, W7.loadRow({ id: "CM39C", driver: "Test Driver C", pickup: "2026-09-29 8:00", dropoff: "2026-09-30 18:00", assigned: "2026-09-29", done: "2026-09-30", truck: "T9" })];
+		const o = world({ flag: "true", locks: ["2026-09"], rows: offRows });
+		const oOut = await o.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const oMarker = o.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		const oHtml = (o.emails[0] || {}).html || "";
+		check("7h ON: an off-roster driver who worked W39 is named with the rest for a correction, not WORKED-BUT-UNBILLED, and not retried",
+			[oOut.unbilled, oOut.problem, oMarker.failed, /2 NOT BILLED, the week touches a closed month \(Test Driver A, test driver c\)/.test(String(oMarker.summary)),
+				/WORKED-BUT-UNBILLED/.test(String(oMarker.summary)), oHtml.includes("Generate these from the Invoices page")],
+			[0, false, 0, true, false, false]);
+
+		// A lock table that can't be read is not a closed month: the batch errors and retries.
+		const u = world({ flag: "true" });
+		breakLockTable(u.db);
+		const uOut = await u.api.runWeeklyInvoiceBatch("2026-10-02", 1);
+		const uMarker = u.db.prepare("SELECT failed, summary FROM invoice_autogen_runs WHERE week_end = '2026-10-02'").get() || {};
+		check("7h ON: an unreadable lock table errors the run and leaves the driver who worked for the retry",
+			[uOut.created, uOut.unbilled, uOut.problem, uMarker.failed, /2 errored/.test(String(uMarker.summary)),
+				/WORKED-BUT-UNBILLED \(test driver a\)/.test(String(uMarker.summary)), /closed month/i.test(String(uMarker.summary)), weekRows(u, "2026-09-26").length],
+			[0, 1, true, 1, true, true, false, 0]);
+	});
+
+	// 7i. A Personal line waiting on a closed-month week.
+	await run("7i (waiting Personal line)", async () => {
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"], personal: true });
+			w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, gallons, date, status, vendor, truck_unit, owner_id, created_at, description, photo_data)
+				VALUES (501, '2026-09-22T15:00:00.000Z', ?, 'Other', 40, 0, '2026-09-22', 'Approved', 'Made-up Diner', 'T1', 5, '2026-09-22 15:00:00', '', '')`).run(CM_A);
+			w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start,
+				invoice_id, created_at, created_by, created_by_id, created_role)
+				VALUES (501, 'deduct', 4000, 4000, 'Made-up Diner', '2026-09-22', '2026-09', 1, '2026-09-22', '2026-09-19', NULL, '2026-09-23T15:00:00.000Z', 'super_admin', 1, 'Super Admin')`).run();
+			const r = await gen(w, DRIVER, "2026-09-25");
+			const line = w.db.prepare("SELECT invoice_id FROM expense_personal WHERE expense_id = 501").get();
+			if (flag === "true") {
+				check("7i ON: a Personal line waiting on W38 (closed) is not attached: the generate is refused and the line keeps waiting",
+					[r.status, line.invoice_id, weekRows(w, "2026-09-19").length], [409, null, 0]);
+			} else {
+				const inv = weekRows(w, "2026-09-19")[0];
+				check("7i OFF (pin, today): generating W38 attaches the waiting line to the closed month's new invoice",
+					[r.status, !!inv, line.invoice_id === (inv && inv.id)], [200, true, true]);
+			}
+		}
+	});
+
+	// 7j. A lock table that cannot be read refuses every one of the four writes.
+	await run("7j (unreadable lock table)", async () => {
+		const w = world({ flag: "true" });
+		// Weeks apart from W41's generate, so no case touches another's row.
+		const liveId = insertInvoice(w.db, { invoice_number: "INV-TDA-2026W40-01", week_start: "2026-10-03", week_end: "2026-10-09", status: "Draft" });
+		const goneId = insertInvoice(w.db, { invoice_number: "INV-TDA-2026W42-01", week_start: "2026-10-17", week_end: "2026-10-23", status: "Draft", deleted_at: "2026-11-01T12:00:00.000Z" });
+		breakLockTable(w.db);
+		const g = await gen(w, ADMIN, "2026-10-16");
+		const m = await route(w, "POST /api/invoices/manual", { body: { payee: CM_A, payeeAddress: "", payeePhone: "", periodStart: "2026-10-01", periodEnd: "2026-10-31", lineItems: [{ description: "Made-up line", amount: 10 }] } });
+		const d = await route(w, "DELETE /api/invoices/:id", { params: { id: String(liveId) } });
+		const s = await route(w, "PUT /api/invoices/:id/restore", { params: { id: String(goneId) } });
+		check("7j ON: unreadable lock table: generate, manual, delete and restore each answer 409 PERIOD_LOCK_UNREADABLE",
+			[g, m, d, s].map((x) => [x.status, x.body && x.body.code]), Array(4).fill([409, "PERIOD_LOCK_UNREADABLE"]));
+		check("...and nothing was written",
+			[weekRows(w, "2026-10-10").length, weekRows(w, "2026-10-03").map((x) => [x.id, x.deleted_at]), manualRows(w).length,
+				w.db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(goneId).deleted_at],
+			[0, [[liveId, ""]], 0, "2026-11-01T12:00:00.000Z"]);
+		check("...each audited [PERIOD_LOCK_UNREADABLE]",
+			["generate_invoice_blocked", "create_manual_invoice_blocked", "delete_invoice_blocked", "restore_invoice_blocked"].map((a) => blocked(w, a).map((x) => x.code)),
+			Array(4).fill(["PERIOD_LOCK_UNREADABLE"]));
+		const off = world({});
+		breakLockTable(off.db);
+		const o = await gen(off, ADMIN, "2026-10-16");
+		check("7j OFF (pin, today): generate does not read the lock table", [o.status, weekRows(off, "2026-10-10").length], [200, 1]);
+	});
+
+	// 7k. On only when exactly "true".
+	await run("7k (flag values)", async () => {
+		const statuses = [];
+		for (const v of ["1", "TRUE", "on", "yes", " true", ""]) {
+			const w = world({ flag: v, locks: ["2026-09"] });
+			statuses.push((await gen(w, ADMIN, "2026-09-25")).status);
+		}
+		check("7k: any value but exactly \"true\" leaves the flag off (W38 generates as today)", statuses, Array(6).fill(200));
+	});
+
+	// 7n. A Driver's repeated refusals: answered every time, recorded once per week a day,
+	// and for at most 10 weeks a day; a Super Admin's are recorded every time.
+	await run("7n (a Driver's repeated refusals)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const taps = [];
+		for (let i = 0; i < 3; i++) taps.push(await gen(w, DRIVER, "2026-09-25"));
+		check("7n ON: a Driver tapping W38 three times is refused three times, the same way",
+			taps.map((t) => [t.status, t.body && t.body.code, errorOf(t) === errorOf(taps[0])]), Array(3).fill([409, "PERIOD_FINALIZED", true]));
+		check("...and recorded once", blocked(w, "generate_invoice_blocked").map((a) => a.username), ["drivera"]);
+		await gen(w, ADMIN, "2026-09-25");
+		await gen(w, ADMIN, "2026-09-25");
+		check("...while a Super Admin's refusals are each recorded",
+			blocked(w, "generate_invoice_blocked").map((a) => a.username), ["drivera", "super_admin", "super_admin"]);
+		w.clock.ms += 24 * 3600 * 1000 + 60 * 1000;
+		await gen(w, DRIVER, "2026-09-25");
+		check("...and 24 h later the Driver's next refusal of W38 is recorded again",
+			blocked(w, "generate_invoice_blocked").filter((a) => a.username === "drivera").length, 2);
+		const many = world({ flag: "true", locks: ["2026-05", "2026-06", "2026-07"] });
+		const fridays = ["2026-05-01", "2026-05-08", "2026-05-15", "2026-05-22", "2026-05-29", "2026-06-05",
+			"2026-06-12", "2026-06-19", "2026-06-26", "2026-07-03", "2026-07-10", "2026-07-17"];
+		const answers = [];
+		for (const f of fridays) answers.push((await gen(many, DRIVER, f)).status);
+		check("7n ON: 12 closed weeks in a day are all refused, and 10 of them recorded",
+			[answers.every((s) => s === 409), blocked(many, "generate_invoice_blocked").length], [true, 10]);
+	});
+
+	// 7o. With the flag on, a weekEnd that is not a real day is a bad request, before the guard.
+	await run("7o (weekEnd)", async () => {
+		const w = world({ flag: "true", locks: ["2026-09"] });
+		const bad = [];
+		for (const v of ["2026-13-01", "2026-02-30", "not-a-date", "2026-10-02T12:00:00Z", 12345]) {
+			const r = await gen(w, DRIVER, v);
+			bad.push([r.status, r.body && r.body.code]);
+		}
+		check("7o ON: a weekEnd that is not a real YYYY-MM-DD day answers 400 INVOICE_WEEK_END_INVALID",
+			bad, Array(5).fill([400, "INVOICE_WEEK_END_INVALID"]));
+		check("...with no refusal recorded and nothing rendered", [blocked(w, "generate_invoice_blocked").length, w.rendered.length], [0, 0]);
+		const none = await W7.call(w.api.generateInvoiceHandler, { session: { user: { ...DRIVER } }, headers: {}, query: {}, params: {}, body: { driver: CM_A } });
+		check("...while no weekEnd is still this week (no loads here: today's plain 400)",
+			[none.status, none.body && none.body.code], [400, undefined]);
+		const off = world({ locks: ["2026-09"] });
+		const o = [];
+		for (const v of ["2026-13-01", "not-a-date"]) {
+			const r = await gen(off, DRIVER, v);
+			o.push([r.status, r.body && r.body.code, /No completed loads/.test(errorOf(r))]);
+		}
+		check("7o OFF (pin, today): such a weekEnd finds no loads (400, no code)", o, Array(2).fill([400, undefined, true]));
+	});
+
+	// 7p. A closed week whose settled invoice exists answers with that invoice, as today.
+	await run("7p (settled invoice in a closed week)", async () => {
+		const answers = [];
+		for (const flag of ["true", undefined]) {
+			const w = world({ flag, locks: ["2026-09"] });
+			insertInvoice(w.db, { invoice_number: "INV-TDA-2026W38-01", week_start: "2026-09-19", week_end: "2026-09-25", status: "Approved" });
+			const r = await gen(w, DRIVER, "2026-09-25");
+			answers.push([r.status, r.body && r.body.code, errorOf(r), r.body && r.body.invoice && r.body.invoice.invoice_number,
+				blocked(w, "generate_invoice_blocked").length]);
+		}
+		const expectedAnswer = [409, "INVOICE_EXISTS", "Invoice already exists for this week (INV-TDA-2026W38-01, status: Approved). Contact admin if this needs to be regenerated.", "INV-TDA-2026W38-01", 0];
+		check("7p ON: a Driver generating a closed week with an approved invoice is told that invoice, unaudited", answers[0], expectedAnswer);
+		check("7p OFF (pin, today): the same answer", answers[1], expectedAnswer);
+	});
+
+	// 7l. The flag, declared once beside its neighbour, on only when exactly "true".
+	check("7l: the flag is declared once, on only when exactly \"true\"",
+		SRC.split(`\nconst ${CM_FLAG} = process.env.${CM_FLAG} === "true";\n`).length - 1, 1);
+
+	// 7m. One start-up line with the two closed-month invoice flags' states and
+	// nothing else, printed once per start (column 0: no block or function).
+	{
+		const at = LINES.map((l, i) => [l, i]).filter(([l]) => l.includes("[invoice-month-lock]"));
+		check("7m: exactly one [invoice-month-lock] line in server.js, a top-level console.log",
+			at.map(([l]) => l.startsWith("console.log(`[invoice-month-lock] ")), [true]);
+		const line = at.length === 1 ? at[0][0] : "";
+		check("...naming only the two flags (no other setting, no process.env)",
+			[...new Set(codeIdentifiers(line))].sort(), ["INVOICE_CLOSED_MONTH_GUARD_ENABLED", "MARK_PAID_CLOSED_MONTH_ENABLED", "console"]);
+		const decl = (name) => LINES.find((l) => l.startsWith(`const ${name} = `)) || "";
+		const printed = (env) => {
+			const out = [];
+			const fake = { log: (...a) => out.push(a.join(" ")), info() {}, warn() {}, error() {} };
+			new Function("process", "console", [decl(CM_FLAG), decl("MARK_PAID_CLOSED_MONTH_ENABLED"), line].join("\n"))({ env }, fake);
+			return out;
+		};
+		// Other settings set to made-up values, so a line that printed one would show it.
+		const others = { SESSION_SECRET: "made-up-session-secret", INVOICE_BANK_ACCOUNT: "000111222", PERIOD_FINALIZE_ENABLED: "true", GMAIL_USER: "nobody@example.com" };
+		const cases = [
+			[{ [CM_FLAG]: "true", MARK_PAID_CLOSED_MONTH_ENABLED: "true" }, "on", "on"],
+			[{ [CM_FLAG]: "true" }, "on", "off"],
+			[{ MARK_PAID_CLOSED_MONTH_ENABLED: "yes" }, "off", "on"],
+			[{ [CM_FLAG]: "1", MARK_PAID_CLOSED_MONTH_ENABLED: "false" }, "off", "off"],
+		];
+		guarded("7m (the line, printed)", () => {
+			for (const [env, mine, paid] of cases) {
+				const out = printed({ ...others, ...env });
+				check(`...prints exactly the two states (${CM_FLAG} ${mine}, MARK_PAID_CLOSED_MONTH_ENABLED ${paid})`, out,
+					[`[invoice-month-lock] ${CM_FLAG} ${mine}; MARK_PAID_CLOSED_MONTH_ENABLED ${paid}`]);
+				check("...and no other setting's name or value", Object.entries(others).filter(([k, v]) => out.join("\n").includes(k) || out.join("\n").includes(v)), []);
+			}
+		});
+	}
+}
+
 // The read-side predicate, built separately so the paired assertion above can
 // compare the two without the mutant harness reaching it.
 function buildGuardRow() {
@@ -693,9 +1256,11 @@ function buildGuardRow() {
 	return new Function("db", `${body}\n return invoiceRowPeriodLocked;`)(db);
 }
 
-// Section 6 awaits the route handler, so the summary waits for it.
+// Sections 6 and 7 await route handlers, so the summary waits for them.
 section6()
 	.catch((err) => { fail++; failures.push(`  section 6 (adjust refusal wording) ran\n      threw: ${err.message}`); })
+	.then(() => section7())
+	.catch((err) => { fail++; failures.push(`  section 7 (closed-month invoice guard) ran\n      threw: ${err.message}`); })
 	.then(() => {
 		db.close();
 		console.log(`\n${pass} passed, ${fail} failed`);
