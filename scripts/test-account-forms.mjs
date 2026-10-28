@@ -19,15 +19,30 @@
 //      and shows a refusal in place; the store's create no longer reloads the
 //      list itself; the sign-in page shows the tip and keeps its username and
 //      current-password fields
+//   §6 Add User, the Users page and the sign-in page compile (vue/compiler-sfc)
 //
 // Pure: no DOM, no server.
 //   node scripts/test-account-forms.mjs
 import fs from 'fs'
 import path from 'path'
+import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
+const { parse, compileScript } = createRequire(path.join(ROOT, 'client', 'package.json'))('vue/compiler-sfc')
+// Whether a component's script and template compile; the error text otherwise.
+function compiles(rel) {
+  try {
+    const file = path.join(ROOT, 'client', 'src', rel)
+    const { descriptor, errors } = parse(fs.readFileSync(file, 'utf8'), { filename: path.basename(file) })
+    if (errors.length) return String(errors[0].message || errors[0])
+    compileScript(descriptor, { id: path.basename(file), inlineTemplate: true })
+    return ''
+  } catch (err) {
+    return err.message
+  }
+}
 
 let pass = 0
 const failures = []
@@ -122,6 +137,12 @@ console.log('§5 the screens')
   ok('§5 the sign-in page shows the tip from signInTip() after a refusal',
     /loginTip\.value = signInTip\(err && err\.status, loginForm\.username\)/.test(login) && /<p v-if="loginTip"[^>]*>\{\{ loginTip \}\}<\/p>/.test(login))
   ok('§5 ...and keeps its username and current-password fields', /autocomplete="username"/.test(login) && /autocomplete="current-password"/.test(login))
+}
+
+console.log('§6 the components compile')
+for (const rel of ['components/users/AddUserForm.vue', 'views/UsersView.vue', 'views/LoginView.vue']) {
+  const err = compiles(rel)
+  ok(`§6 ${rel} compiles${err ? ` (${err})` : ''}`, err === '')
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)

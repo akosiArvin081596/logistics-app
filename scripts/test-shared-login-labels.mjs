@@ -20,6 +20,7 @@
 //   §5 ChatBubble's side: in a driver's thread a named staff member's message
 //      is sent and the driver's is not; with no party only the desk names are
 //      sent; MessagingPanel hands ChatBubble the thread's party
+//   §6 every component this changes compiles (vue/compiler-sfc)
 //
 // Pure: no server, no network, no app.db (in-memory SQLite). Made-up accounts.
 //   node scripts/test-shared-login-labels.mjs
@@ -192,6 +193,24 @@ if (client && typeof client.isStaffMessage === 'function') {
   ok('§5 ...with no literal list of its own', !/from === 'dispatch'/.test(bubble))
   const panel = readClient('components/dashboard/MessagingPanel.vue')
   ok('§5 MessagingPanel hands it the thread\'s party', /<ChatBubble [^>]*:party="store\.selectedDriver"/.test(panel))
+}
+
+// ─────────────────────────────── §6 the components compile
+console.log('§6 the components compile')
+{
+  const { parse, compileScript } = createRequire(path.join(ROOT, 'client', 'package.json'))('vue/compiler-sfc')
+  for (const rel of ['views/DataIssuesView.vue', 'views/InvoicesView.vue', 'components/investors/PayoutBasisPanel.vue',
+    'components/users/UserTable.vue', 'components/dashboard/ChatBubble.vue', 'components/dashboard/MessagingPanel.vue']) {
+    let err = ''
+    try {
+      const { descriptor, errors } = parse(readClient(rel), { filename: path.basename(rel) })
+      if (errors.length) err = String(errors[0].message || errors[0])
+      else compileScript(descriptor, { id: path.basename(rel), inlineTemplate: true })
+    } catch (e) {
+      err = e.message
+    }
+    ok(`§6 ${rel} compiles${err ? ` (${err})` : ''}`, err === '')
+  }
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`)
