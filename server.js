@@ -33043,9 +33043,12 @@ app.post("/api/users/:id/enable", requireRole("Super Admin"), refuseCrossOrigin,
 		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
 	}
 	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	// A session the disable missed (a failed purge, a disable made outside this route) would sign in
+	// again with the account, so its stored sessions end here too. Normally there are none.
+	const sessionsEnded = purgeUserSessions(id, null);
 	logAudit(req, "enable_user", "user", id,
 		`Enabled ${was.role} ${auditText(was.username, 120)}; it was disabled at ${auditText(was.disabled_at, 40)} by account #${Number(was.disabled_by) || "unknown"}` +
-		`${was.disabled_reason ? `; its reason was: ${auditText(was.disabled_reason, accountDisable.REASON_MAX)}` : ""}`);
+		`${was.disabled_reason ? `; its reason was: ${auditText(was.disabled_reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
 	notifyAccountSwitch("enable", { target: was, actor: req.session.user, reason: null });
 	notifyChange("users");
 	res.json({ success: true });
