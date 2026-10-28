@@ -6727,6 +6727,11 @@ db.exec(`
 	)
 `);
 
+// EXPENSE_BACKFILL_APP_DAY_ENABLED, off unless exactly "true": it changes which truck and
+// owner a legacy receipt is stamped with. On, the backfill below reads an assignment's start
+// and end as business days (appDay()), so an evening one covers its own day, not the next.
+const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_ENABLED === "true";
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (see expOwnerId at the
 // POST /api/expenses INSERT). Pass 1 resolves truck_unit + owner_id from
@@ -6880,8 +6885,30 @@ function backfillLegacyExpenseTrucks(health) {
 		// assignments, not only on evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
-		const coversExpenseDay = (day) => `(substr(ta.start_date, 1, 10) <= ${day}
-				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`;
+		// The first 10 characters are the UTC day, already the next one from 8 PM EDT
+		// (7 PM EST); with EXPENSE_BACKFILL_APP_DAY_ENABLED on, each bound is the
+		// business day its stamp falls on (stampDay() below).
+		const coversExpenseDay = (day) => (EXPENSE_BACKFILL_APP_DAY_ENABLED
+			? `(assignment_stamp_day(ta.start_date) <= ${day}
+				  AND (ta.end_date = '' OR assignment_stamp_day(ta.end_date) >= ${day}))`
+			: `(substr(ta.start_date, 1, 10) <= ${day}
+				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`);
+
+		// The business day (appDay(), APP_TIMEZONE) an assignment stamp falls on. Only the
+		// instant the app writes (toISOString()) is converted; anything else keeps its first
+		// 10 characters, as before. Memoized: step 2 reads every assignment for each receipt.
+		const stampDays = new Map();
+		const stampDay = (v) => {
+			if (v === null || v === undefined) return null;
+			const s = String(v);
+			if (!stampDays.has(s)) {
+				const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
+				const exact = Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19);
+				stampDays.set(s, exact ? appDay(new Date(ms)) : s.slice(0, 10));
+			}
+			return stampDays.get(s);
+		};
+		if (EXPENSE_BACKFILL_APP_DAY_ENABLED) db.function("assignment_stamp_day", stampDay);
 
 		// Step 1's match, ONE definition for both of its uses: the SET takes the
 		// newest covering assignment's truck, and the EXISTS writes a row only when
