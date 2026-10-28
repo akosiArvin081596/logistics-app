@@ -49,7 +49,9 @@ const MODE = path.join(ROOT, "lib", "replica-mode.js");
 const replica = require(MODE);
 const rules = require(path.join(ROOT, "lib", "replica-rules.js"));
 const settingsExport = require(path.join(ROOT, "scripts", "replica", "remote", "settings.js"));
-const SRC = fs.readFileSync(SERVER, "utf8");
+// The draft invoice route's steps (its Gemini extraction among them) live in
+// lib/broker-invoice-draft.js: read with server.js as one text.
+const SRC = require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js")).withEngine(fs.readFileSync(SERVER, "utf8"), ROOT);
 
 let failures = 0;
 const ok = (name, cond, detail) => {
