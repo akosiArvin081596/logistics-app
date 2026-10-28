@@ -83,7 +83,7 @@
       <!-- The export endpoint only understands driver + date range, so a live
            load-number search or the Needs Review toggle would make the file
            wider than the table. Say so rather than surprise them. -->
-      <p v-if="exportWiderThanTable" class="cl-note">Search, Needs Review and Needs attention aren’t applied to the downloaded file.</p>
+      <p v-if="exportWiderThanTable" class="cl-note">{{ auth.isSuperAdmin && autoMode !== 'off' ? 'Search, Needs Review and Needs attention aren’t applied to the downloaded file.' : 'Search and Needs Review aren’t applied to the downloaded file.' }}</p>
     </div>
     <div class="overflow-x-auto">
       <Table v-if="filteredJobs.length > 0">
