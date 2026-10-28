@@ -9579,7 +9579,17 @@ app.use(express.static(clientDistPath));
 // The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
 // SPREADSHEET_ID; production's own process alone runs without one.
 const SPREADSHEET_ID = SHEET_TARGET.id;
-const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
+// The read-only archive of closed months: ARCHIVE_SPREADSHEET_ID, else production's
+// archive for production's own process only (lib/sheet-id.js), so a local, replica
+// or staging run never reads production's archive.
+const ARCHIVE_SPREADSHEET_ID = require("./lib/sheet-id").resolveArchiveSpreadsheetId(process.env, process.cwd()).id;
+// Module scope, so it is logged once per process start and never per request.
+if (!ARCHIVE_SPREADSHEET_ID) {
+	console.warn(
+		"[archive] ⚠️ ARCHIVE_SPREADSHEET_ID is not set — the archive is off: GET /api/archive and " +
+		"/api/archive/tabs answer 503 ARCHIVE_UNCONFIGURED, and the rate-con sweep checks Job Tracking without it.",
+	);
+}
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -23220,6 +23230,8 @@ db.exec(`
 let archiveIdCache = { at: 0, ids: [] };
 const ARCHIVE_ID_CACHE_MS = 60 * 60 * 1000;
 async function getArchiveLoadIdsCached() {
+	// No archive is configured: nothing to read, and no Google call.
+	if (!ARCHIVE_SPREADSHEET_ID) return [];
 	if (archiveIdCache.ids.length && Date.now() - archiveIdCache.at < ARCHIVE_ID_CACHE_MS) return archiveIdCache.ids;
 	const sheets = await getSheets();
 	const resp = await sheets.spreadsheets.values.get({
@@ -38773,6 +38785,7 @@ app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) 
 
 // GET /api/archive — Read-only access to old/archived spreadsheet data
 app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const sheetName = req.query.sheet || "Job Tracking";
@@ -38807,6 +38820,7 @@ app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
 
 // GET /api/archive/tabs — List available tabs in the archive spreadsheet
 app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const meta = await sheets.spreadsheets.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, fields: "sheets.properties.title" });

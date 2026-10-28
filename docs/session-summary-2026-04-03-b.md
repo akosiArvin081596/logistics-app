@@ -172,7 +172,7 @@ Updated investor API to include all expense sources in totalExpenses:
 | **Branch** | `development` |
 | **Port** | 3003 |
 | **PM2 process** | logisx-staging (id: 8) |
-| **Google Sheet** | logisx-staging (ID: `1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8`) |
+| **Google Sheet** | logisx-staging (staging's `SPREADSHEET_ID`) |
 | **SSL** | Let's Encrypt via Certbot |
 
 ### Setup Steps
@@ -186,25 +186,25 @@ Updated investor API to include all expense sources in totalExpenses:
 
 ### Test Data (staging)
 
-**Users** (all passwords shown):
+**Users:**
 
-| ID | Username | Password | Role | Full Name | Company |
-|----|----------|----------|------|-----------|---------|
-| 1 | super_admin | *(set during setup)* | Super Admin | — | — |
-| 2 | kevin | investor123 | Investor | Kevin Canunayon | KC Trucking LLC |
-| 3 | desoren | investor123 | Investor | Desoren King | ABC Inc |
-| 4 | leonora | driver123 | Driver | Leonora Johnson | — |
-| 5 | kendall | driver123 | Driver | Kendall Davis | — |
-| 6 | andrew | driver123 | Driver | Andrew Rutherford | — |
-| 7 | marcus | driver123 | Driver | Milton Williams | — |
-| 8 | dispatch1 | dispatcher123 | Dispatcher | Azure Estelle | — |
+| ID | Username | Role | Full Name | Company |
+|----|----------|------|-----------|---------|
+| 1 | super_admin | Super Admin | — | — |
+| 2 | kevin | Investor | Kevin Testinvestor | Example Test Trucking LLC |
+| 3 | desoren | Investor | Desoren King | ABC Inc |
+| 4 | leonora | Driver | Leonora Johnson | — |
+| 5 | kendall | Driver | Kendall Davis | — |
+| 6 | andrew | Driver | Andrew Rutherford | — |
+| 7 | marcus | Driver | Milton Williams | — |
+| 8 | dispatch1 | Dispatcher | Azure Estelle | — |
 
 **Trucks:**
 
 | Truck | Make/Model | Year | Driver | Owner | Purchase Price |
 |-------|-----------|------|--------|-------|---------------|
-| TRK-101 | Freightliner Cascadia | 2022 | Leonora Johnson | Kevin (KC Trucking) | $58,000 |
-| TRK-102 | Kenworth T680 | 2023 | Kendall Davis | Kevin (KC Trucking) | $65,000 |
+| TRK-101 | Freightliner Cascadia | 2022 | Leonora Johnson | Kevin (Example Test Trucking) | $58,000 |
+| TRK-102 | Kenworth T680 | 2023 | Kendall Davis | Kevin (Example Test Trucking) | $65,000 |
 | TRK-201 | Peterbilt 579 | 2021 | Andrew Rutherford | Desoren (ABC Inc) | $52,000 |
 | TRK-202 | Volvo VNL 760 | 2024 | Milton Williams | Desoren (ABC Inc) | $72,000 |
 
@@ -365,7 +365,7 @@ This fixes the driver app not showing pickup/drop-off route details when sheet u
 - **Branch**: `development`
 - **VPS path**: `/var/www/logisx-staging`
 - **PM2**: logisx-staging (id: 8, port 3003)
-- **Google Sheet**: logisx-staging (`1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8`)
+- **Google Sheet**: logisx-staging (staging's `SPREADSHEET_ID`)
 
 ### Deploy Commands
 ```bash
