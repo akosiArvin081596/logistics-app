@@ -38,7 +38,10 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+// The draft record (recordDraft(), its INSERT) lives in lib/broker-invoice-draft.js:
+// read with server.js as one text.
+const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
+const SRC = draftLift.withEngine(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), ROOT);
 const brokerInvoice = require(path.join(ROOT, "lib", "broker-invoice.js"));
 const { buildMime } = require(path.join(ROOT, "lib", "imap-draft.js"));
 

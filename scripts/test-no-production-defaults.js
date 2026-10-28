@@ -470,6 +470,8 @@ function liftDraftRoute(src) {
 	return {
 		route,
 		helpers,
+		// The steps the route calls (prepare, render, record), from lib/broker-invoice-draft.js.
+		engine: require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js")).readEngine(ROOT),
 		createSql: src.slice(createAt, src.indexOf("`", createAt)),
 		alters: [...src.matchAll(/db\.exec\("(ALTER TABLE load_invoice_drafts ADD COLUMN [^"]+)"\)/g)].map((m) => m[1]),
 	};
@@ -512,6 +514,7 @@ function draftHarness(L) {
 		fetch: async (url) => { seen.posts.push(String(url)); throw new Error("test: no network"); },
 		console: QUIET,
 	};
+	scope.brokerInvoiceDraft = require(path.join(ROOT, "scripts", "lib", "broker-invoice-draft-lift.js")).loadEngine(L.engine, { ...scope, env: scope.process.env });
 	const registered = [];
 	new Function("app", ...Object.keys(scope), L.route)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
 	if (registered.length !== 1) throw new Error(`expected 1 registration, got ${registered.length}`);
