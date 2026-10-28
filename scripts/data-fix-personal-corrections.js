@@ -10,13 +10,17 @@
 //               their ids):
 //                 1. waiting lines keyed to another week than their receipt's
 //                    (they keep it), by the state of their receipt week's invoice
-//                 2. flagged lines (carried, once the flag is on), and the lines
-//                    --apply re-queues, with the open invoice each would go on
-//                    and its total due before and after
+//                 2. flagged rows (carried, once the flag is on: charges and
+//                    reversal credits), and the lines --apply re-queues, with the
+//                    open invoice each would go on and its total due before and
+//                    after
 //                 3. live correction invoices by status
 //                 4. lines with no receipt date, or one after today
 //                 5. lines that offer Reverse today, by why; those on an approved
 //                    invoice lose it
+//                 6. reversal rows waiting for an invoice (credits, and reversed
+//                    charges whose credit is on one or returns a share), and
+//                    the pairs kept off every invoice
 //               then what --apply would do.
 //   --dry-run   read-only: what --apply would write, and what it would skip.
 //   --apply --expect-lines=<n>
@@ -33,6 +37,10 @@
 // match its lines, one holding a voided or reversed line or a reversal, one
 // whose week touches a finalized month (or when no month can be confirmed open),
 // one with no line. A second run finds nothing to re-queue.
+//
+// Run --apply once PERSONAL_RECEIPT_WEEK_ENABLED is on: with it off, the
+// re-queued lines read as flagged for a correction, and "Create correction
+// invoice" would build the corrections again.
 //
 // Usage (on the server, from the app directory, with the Node pm2 runs it with,
 // APP_TIMEZONE as the server has it: Eastern unless set):
@@ -62,7 +70,7 @@ const OPEN = new Set(["Draft", "Submitted", "Rejected"]);
 const FINAL = new Set(["Approved", "Processing", "Paid"]);
 const DELETE_REASON = "Personal correction invoices are retired: its lines wait for the driver's next weekly invoice";
 const ROOTS = ["invoiceMonthLockBlockers", "personalUndoBlocker", "personalWeekState", "personalOpenInvoicesFrom", "personalRoomCents",
-	"getWeekRange", "appTodayKey", "invoiceTotalDue", "normalizeDriverName"];
+	"getWeekRange", "appTodayKey", "invoiceTotalDue", "normalizeDriverName", "PERSONAL_COLLECTABLE_SQL"];
 const PROVIDED = ["db", "require", "console", "process", "Date"];
 const DENIED = ["getSheets", "sheets", "SPREADSHEET_ID", "KEY_FILE", "server", "transporter", "getDrive", "sendEmail", "fetch", "io", "app"];
 const appRequire = createRequire(path.join(ROOT, "server.js"));
@@ -208,11 +216,15 @@ function reportText(db, api) {
 		return own.invoice ? `${own.kind} (${own.invoice.status})` : own.kind;
 	})}`);
 
-	const flagged = db.prepare(`${offInvoice} AND ep.needs_correction_since != '' AND ep.kind = 'deduct' AND ep.reversed_by_id IS NULL ORDER BY ep.id`).all();
-	// The lines --apply re-queues go the same way as the flagged ones.
+	// Every flagged row the flag's rules carry: charges and reversal credits alike
+	// (a pair kept off every invoice stays off). The lines --apply re-queues go
+	// the same way.
+	const flagged = db.prepare(`${offInvoice} AND ep.needs_correction_since != '' AND ${api.PERSONAL_COLLECTABLE_SQL} ORDER BY ep.id`).all();
 	const driverOf = db.prepare("SELECT driver FROM expenses WHERE id = ?");
 	const requeued = planFix(db, api).requeue.flatMap((c) => c.rows.map((r) => ({ ...r, receipt_driver: (driverOf.get(r.expense_id) || {}).driver || "", from: c.invoiceId })));
-	out.push(`2. Flagged lines, carried once the flag is on: ${flagged.length} (${money(flagged.reduce((s, r) => s + r.cents, 0))}); with the ${requeued.length} line(s) --apply re-queues:`);
+	const charges = flagged.filter((r) => r.kind === "deduct");
+	const credits = flagged.filter((r) => r.kind !== "deduct");
+	out.push(`2. Flagged rows, carried once the flag is on: ${flagged.length}: ${charges.length} charge(s) ${signed(sumNet(charges))}, ${credits.length} credit(s) ${signed(sumNet(credits))}; with the ${requeued.length} line(s) --apply re-queues:`);
 	const byDriver = new Map();
 	for (const r of [...flagged, ...requeued].sort((a, b) => a.id - b.id)) {
 		const k = api.normalizeDriverName(String(r.receipt_driver || ""));
@@ -260,6 +272,16 @@ function reportText(db, api) {
 	const lose = reversible.filter((x) => x.block.code === "PERSONAL_INVOICE_APPROVED");
 	out.push(`5. Lines offering Reverse today: ${reversible.length} (${money(reversible.reduce((s, x) => s + x.r.cents, 0))}), by why: ${histogram(reversible.map((x) => ({ ...x.r, why: x.block.code })), (r) => r.why)}`);
 	out.push(`   on an approved invoice, final with the flag on (no Reverse): ${lose.length} (${money(lose.reduce((s, x) => s + x.r.cents, 0))})`);
+
+	// Reversal rows on no invoice, by what the flag's rules do with them.
+	const offRows = db.prepare(`${offInvoice} AND (ep.kind = 'reverse' OR ep.reversed_by_id IS NOT NULL) ORDER BY ep.id`).all();
+	const collectable = new Set(db.prepare(`${offInvoice} AND ${api.PERSONAL_COLLECTABLE_SQL}`).all().map((r) => r.id));
+	const creditsWaiting = offRows.filter((r) => r.kind === "reverse" && collectable.has(r.id));
+	const chargesWaiting = offRows.filter((r) => r.kind === "deduct" && collectable.has(r.id));
+	const keptOff = offRows.filter((r) => r.kind === "deduct" && !collectable.has(r.id));
+	out.push(`6. Reversal rows: ${creditsWaiting.length} reversal credit(s) waiting for an invoice (${signed(sumNet(creditsWaiting))}); `
+		+ `${chargesWaiting.length} reversed charge(s) waiting for an invoice (${signed(sumNet(chargesWaiting))}); `
+		+ `${keptOff.length} pair(s) kept off every invoice, no share (${money(keptOff.reduce((s, r) => s + r.cents, 0))})`);
 	return out;
 }
 

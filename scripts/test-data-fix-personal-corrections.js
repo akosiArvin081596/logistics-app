@@ -21,6 +21,9 @@
  *   §5 skipped and logged, untouched: a correction whose total does not match
  *      its lines, one holding a reversed line, one in a week touching a closed
  *      month; the run still re-queues the plain one beside them
+ *   §6 --report's figures: the flagged rows the flag carries (charges and
+ *      reversal credits) with each one's invoice and its totals, the lines
+ *      offering Reverse today, the reversal rows waiting
  *
  * Pure: a temp directory and child processes of the script itself; no server,
  * no app.db, no network.
@@ -73,9 +76,16 @@ const mark = (w, id) => w.call("POST", `/api/expenses/${id}/personal`, { body: {
 const approve = (w, id) => w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = 't', approved_by = 'super_admin' WHERE id = ?").run(id);
 const setStatus = (w, id, status) => w.db.prepare("UPDATE invoices SET status = ? WHERE id = ?").run(status, id);
 const correctionOf = (w, weeklyId) => (w.db.prepare("SELECT id FROM invoices WHERE is_correction = 1 AND correction_of = ? AND deleted_at = ''").get(weeklyId) || {}).id || null;
-// A load delivered in W42, copied from Driver A's row.
-const addW42Load = (w, loadId) => w.sheet.rows.push(w.sheet.rows[1].map((v, i) =>
+// A load delivered in W42, copied from a driver's row (1 Driver A, 5 Driver B).
+const addW42Load = (w, loadId, fromRow = 1) => w.sheet.rows.push(w.sheet.rows[fromRow].map((v, i) =>
 	({ 1: loadId, 6: "10/19/2026 8:00", 9: "10/20/2026 10:00", 20: "10/19/2026", 21: "10/20/2026", 22: "10/20/2026" })[i] ?? v));
+// A Personal row written as stored, for what the flows here cannot make.
+function insertLine(w, row) {
+	const full = { reverses_id: null, receipt_cents: row.cents, merchant: "", receipt_date: "", cost_period: "2026-10", in_place: 1, book_date: row.receipt_date || "2026-10-15",
+		invoice_id: null, share_cents: 0, needs_correction_since: "", created_at: "t", created_by: "super_admin", created_by_id: 1, created_role: "Super Admin", ...row };
+	const cols = Object.keys(full);
+	return Number(w.db.prepare(`INSERT INTO expense_personal (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => full[c])).lastInsertRowid);
+}
 // An approved weekly invoice, marked: the flag-off code makes that week's correction.
 async function correctionFor(w, driver, weekEnd, expenseIds) {
 	const g = await w.generate(driver, weekEnd);
@@ -92,8 +102,11 @@ function save(w, name) {
 }
 
 // Six corrections, one per status: Draft (two lines), Submitted, Rejected
-// re-queued (four lines in all); Approved, Processing, Paid final.
-async function mainFixture() {
+// re-queued (four lines in all); Approved, Processing, Paid final. Beside them,
+// for the report: Driver B's W42 invoice, Submitted by the batch; a reversed
+// charge of his waiting while its credit is on that invoice (a pair the flag-off
+// Reverse can leave); and a flagged credit reversing R2's line on the Paid one.
+async function mainFixture(name = "main.db") {
 	const w = buildPersonalWorld({ env: ON });
 	const ids = {};
 	w.setNow(edt("2026-10-08", 12));
@@ -109,7 +122,24 @@ async function mainFixture() {
 	for (const [key, status] of [["submitted", "Submitted"], ["rejected", "Rejected"], ["approved", "Approved"], ["processing", "Processing"], ["paid", "Paid"]]) {
 		if (ids[key]) setStatus(w, ids[key], status);
 	}
-	return { file: save(w, "main.db"), ids };
+	addW42Load(w, "L8", 5);
+	const g = await w.generate(DRIVER_B, "2026-10-23");
+	const b42 = g.body && g.body.invoice ? g.body.invoice.id : null;
+	if (b42) {
+		setStatus(w, b42, "Submitted");
+		w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description)
+			VALUES (12, '2026-10-20T15:00:00.000Z', ?, 'Fuel', 45.5, '2026-10-20', 'Approved', 'EXAMPLE FUEL #12', 'T-3', 0, '2026-10-20 15:00:00', '')`).run(DRIVER_B);
+		const charge = insertLine(w, { expense_id: 12, kind: "deduct", cents: 4550, merchant: "EXAMPLE FUEL #12", receipt_date: "2026-10-20", week_start: "2026-10-17", needs_correction_since: "2026-10-24T10:30:00.000Z" });
+		const credit = insertLine(w, { expense_id: 12, kind: "reverse", reverses_id: charge, cents: 4550, merchant: "EXAMPLE FUEL #12", receipt_date: "2026-10-20", week_start: "2026-10-17", invoice_id: b42 });
+		w.db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ?").run(credit, charge);
+		w.db.prepare("UPDATE invoices SET personal_total = -45.5 WHERE id = ?").run(b42);
+	}
+	const r2 = w.lines("expense_id = 2 AND kind = 'deduct'")[0];
+	if (r2) {
+		const credit = insertLine(w, { expense_id: 2, kind: "reverse", reverses_id: r2.id, cents: r2.cents, merchant: r2.merchant, receipt_date: r2.receipt_date, week_start: "2026-10-17", needs_correction_since: "2026-10-24T10:30:00.000Z" });
+		w.db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ?").run(credit, r2.id);
+	}
+	return { file: save(w, name), ids, b42 };
 }
 
 // Three Draft corrections the fix cannot be sure of, and a plain one.
@@ -215,6 +245,30 @@ async function skipFixture() {
 		check("…while the plain correction beside them is re-queued and soft-deleted",
 			[!!(sAfter.invoices.get(s.ids.plain) || {}).deleted_at, sameLines(sAfter, plain).map((l) => l && [l.invoice_id, !!l.needs_correction_since])],
 			[true, plain.map(() => [null, true])]);
+	}
+
+	section("§6 --report: what switching the flag on would change, in ids and amounts");
+	{
+		const { file, ids, b42 } = await mainFixture("report.db");
+		const r = run(`--db=${file}`, "--report");
+		const has = (re) => re.test(r.stdout || "");
+		check(`--report: exit 0${hint(r, r.status === 0)}`, r.status, 0);
+		check("2: every flagged row the flag carries, charges and reversal credits, and the four lines --apply re-queues",
+			has(/^2\. Flagged rows, carried once the flag is on: 2: 1 charge\(s\) -\$45\.50, 1 credit\(s\) \+\$45\.50; with the 4 line\(s\) --apply re-queues:$/m), true);
+		check("…B's re-queued line and his waiting reversed charge go on his open W42: total due $545.50 -> $470.00",
+			[has(new RegExp(`^   line \\d+ -\\$30\\.00 \\(week 2026-10-10, from correction invoice ${ids.submitted}\\) -> invoice ${b42} \\(week 2026-10-17, Submitted\\)$`, "m")),
+				has(new RegExp(`^   line \\d+ -\\$45\\.50 \\(week 2026-10-17\\) -> invoice ${b42} \\(week 2026-10-17, Submitted\\)$`, "m")),
+				has(new RegExp(`^   invoice ${b42}: total due \\$545\\.50 -> \\$470\\.00$`, "m"))],
+			[true, true, true]);
+		check("…the credit reversing R2's line waits: Driver A has no open invoice",
+			has(/^   line \d+ \+\$45\.50 \(week 2026-10-17\): no open invoice with room yet; it goes on the next weekly invoice generated$/m), true);
+		check("5: the lines offering Reverse today, both on approved invoices, so final with the flag on",
+			[has(/^5\. Lines offering Reverse today: 2 \(\$180\.00\), by why: PERSONAL_INVOICE_APPROVED 2 \(\$180\.00\)$/m),
+				has(/^   on an approved invoice, final with the flag on \(no Reverse\): 2 \(\$180\.00\)$/m)],
+			[true, true]);
+		check("6: the reversal rows: one credit and one reversed charge waiting for an invoice, no pair kept off",
+			has(/^6\. Reversal rows: 1 reversal credit\(s\) waiting for an invoice \(\+\$45\.50\); 1 reversed charge\(s\) waiting for an invoice \(-\$45\.50\); 0 pair\(s\) kept off every invoice, no share \(\$0\.00\)$/m),
+			true);
 	}
 
 	fs.rmSync(tmp, { recursive: true, force: true });
