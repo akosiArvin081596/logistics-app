@@ -77,8 +77,7 @@ const Database = require("better-sqlite3");
 const tempDirs = [];
 process.on("exit", () => { for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

@@ -51,8 +51,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SERVER = path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ---------------------------------------------------------------- extraction
 // The route body, sliced out first so the gate below is anchored INSIDE it. The

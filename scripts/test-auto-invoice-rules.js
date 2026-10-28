@@ -297,7 +297,7 @@ eq(R.fingerprintDiff(null, fp), [], "§9 no saved fingerprint: nothing to compar
 
 // ------------------------------------------------------------------ §10
 section("§10 server.js parity");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const regexIn = (name) => {
 	const m = new RegExp(`\\nconst ${name} = (/[^\\n]{1,200}/[a-z]*);`).exec(SRC);
 	return m ? m[1] : null;

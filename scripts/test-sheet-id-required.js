@@ -46,7 +46,10 @@ function check(label, cond) {
 	failures.push(label);
 	console.log(`  FAIL  ${label}`);
 }
-const readSource = (...parts) => { try { return fs.readFileSync(path.join(ROOT, ...parts), "utf8"); } catch { return ""; } };
+const readSource = (...parts) => {
+	if (parts.join("/") === "server.js") return require("./lib/server-source").serverSource();
+	try { return fs.readFileSync(path.join(ROOT, ...parts), "utf8"); } catch { return ""; }
+};
 const requireOrNull = (p) => { try { return require(p); } catch { return null; } };
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-sheet-id-"));

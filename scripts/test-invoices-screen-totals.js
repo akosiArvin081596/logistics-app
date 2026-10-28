@@ -53,7 +53,7 @@ const Database = require("better-sqlite3");
 const appTime = require("../lib/app-time");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const CLIENT_FILES = {
 	view: "client/src/views/InvoicesView.vue",
 	store: "client/src/stores/invoices.js",

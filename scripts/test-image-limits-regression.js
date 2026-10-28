@@ -17,7 +17,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const REPO = path.join(__dirname, "..");
-const SERVER_SRC = fs.readFileSync(path.join(REPO, "server.js"), "utf8");
+const SERVER_SRC = require("./lib/server-source").serverSource();
 const LIB_PATH = path.join(REPO, "lib", "image-size.js");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "image-limits-regression-"));
 process.on("exit", () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });

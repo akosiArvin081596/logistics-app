@@ -68,7 +68,7 @@ const express = require("express");
 
 const ROOT = path.join(__dirname, "..");
 const LIB_PATH = path.join(ROOT, "lib", "investor-rfi.js");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 const rfi = require(LIB_PATH);
 

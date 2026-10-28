@@ -20,7 +20,7 @@
 
     <details class="form-accordion">
       <summary class="form-toggle">+ Add User</summary>
-      <AddUserForm :driver-names="store.availableDriverNames" @submit="handleAddUser" />
+      <AddUserForm :driver-names="store.availableDriverNames" :create-user="createUser" :staff-must-change-password="store.newStaffMustChangePassword" />
     </details>
 
     <template v-if="store.isLoading">
@@ -67,13 +67,14 @@ const kpiCards = computed(() => {
   ]
 })
 
-async function handleAddUser(userData) {
-  try {
-    await store.addUser(userData)
-    toast('User created')
-  } catch (err) {
-    toast(err.message || 'Failed to create user', 'error')
-  }
+// Add User waits on this: a refusal rejects, and the form shows the server's
+// message and keeps what was typed. Once the server has created the account, a
+// failed list reload is a toast, not a failed create (a retry would only find
+// the username taken).
+async function createUser(data) {
+  await store.addUser(data)
+  toast('User created')
+  store.loadUsers().catch((err) => toast(err.message || 'Failed to reload users', 'error'))
 }
 
 // The Edit User dialog waits on this (UserTable's saveUser): a refusal rejects,

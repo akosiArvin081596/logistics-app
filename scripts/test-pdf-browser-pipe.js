@@ -159,7 +159,7 @@ const codeLines = (src) =>
 	const LAUNCH_RE = /\bpuppeteer\s*\.\s*launch\s*\(/g;
 	const sites = [];
 	for (const file of listSourceFiles()) {
-		const src = fs.readFileSync(file, "utf8");
+		const src = path.relative(ROOT, file) === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(file, "utf8");
 		let m;
 		LAUNCH_RE.lastIndex = 0;
 		while ((m = LAUNCH_RE.exec(src))) {
@@ -180,7 +180,7 @@ const codeLines = (src) =>
 
 	// ─────────────────────────── §3 no debugging port/address argument anywhere
 	for (const file of listSourceFiles()) {
-		const code = codeLines(fs.readFileSync(file, "utf8"));
+		const code = codeLines(path.relative(ROOT, file) === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(file, "utf8"));
 		ok(!PORT_ARG_RE.test(code), `§3 ${path.relative(ROOT, file)}: passes a remote debugging port/address argument`);
 	}
 

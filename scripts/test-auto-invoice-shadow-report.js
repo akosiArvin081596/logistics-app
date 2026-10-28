@@ -255,9 +255,9 @@ section("§5  no network");
 const SRC = fs.readFileSync(SCRIPT, "utf8");
 const requires = [...SRC.matchAll(/require\(((?:[^()]|\([^()]{0,100}\)){1,160})\)/g)].map((m) => m[1].trim()).sort();
 eq(requires, [
-	"\"../lib/app-time\"", "\"../lib/auto-invoice-ledger\"", "\"../lib/auto-invoice-rules\"", "\"./lib/server-lift\"", "\"fs\"", "\"path\"",
+	"\"../lib/app-time\"", "\"../lib/auto-invoice-ledger\"", "\"../lib/auto-invoice-rules\"", "\"./lib/server-lift\"", "\"./lib/server-source\"", "\"fs\"", "\"path\"",
 	"path.join(ROOT, \"node_modules\", \"better-sqlite3\")",
-].sort(), "§5 it loads only fs, path, the rules, the ledger, app-time, server-lift and better-sqlite3");
+].sort(), "§5 it loads only fs, path, the rules, the ledger, app-time, server-lift, server-source and better-sqlite3");
 ok(!/\bfetch\s*\(|googleapis|https?:\/\/|\.env\b/.test(SRC), "§5 no fetch, Google client, URL or settings file");
 const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
 eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]).sort(), ["\"./auto-invoice-rules\"", "\"./broker-invoice\""],

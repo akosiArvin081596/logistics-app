@@ -184,8 +184,10 @@ const R = M.createRunner("B20: advance lines on a broker invoice are invoice-onl
 		const NAMES = /broker_invoice_lines|brokerInvoice\.invoiceLines|(?<![\w.])invoiceLines\b|brokerInvoiceLinesGate|lines_json|gross_total|BROKER_INVOICE_LINES_ENABLED/;
 		ok("(control) the pattern skips another object's invoiceLines()", !NAMES.test("const { lines } = personalExpense.invoiceLines(rows);"));
 		ok("(control) …and catches this module's", NAMES.test("const invoiceLines = brokerInvoice.invoiceLines;") && NAMES.test("invoiceLines.resolveInvoiceLines(db, {"));
+		// The ROUTE_CONTEXT block only lists the names route modules receive.
+		const rc = require("./lib/server-source").routeContextLines(SRC);
 		const stray = lines.map((l, i) => [i, l]).filter(([i, l]) => NAMES.test(l))
-			.filter(([i, l]) => !/^\s*\/\//.test(l) && l !== BOOT && !regions.some(([s, e]) => i >= s && i <= e))
+			.filter(([i, l]) => !/^\s*\/\//.test(l) && l !== BOOT && !regions.some(([s, e]) => i >= s && i <= e) && !(rc && i + 1 >= rc.first && i + 1 <= rc.last))
 			.map(([i, l]) => `${i + 1}: ${l.trim().slice(0, 100)}`);
 		eq("no reference outside them", stray, []);
 		eq("the boot line, once", lines.filter((l) => l === BOOT).length, 1);

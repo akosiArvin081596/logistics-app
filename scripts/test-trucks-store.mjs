@@ -27,6 +27,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { serverSource } from './lib/server-source.js'
 import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -208,7 +209,7 @@ eq('bodyForFields skips a key that is not a field', bodyForFields({ id: 7, notes
 // Every key the dialog sends is one PUT /api/trucks/:id reads. A key the server
 // does not read would be dropped there, and the change it carries never saved.
 {
-  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')
+  const src = serverSource()
   const start = src.indexOf('\napp.put("/api/trucks/:id"')
   const end = start < 0 ? -1 : src.indexOf('\napp.', start + 1)
   const route = start < 0 || end < 0 ? '' : src.slice(start, end)

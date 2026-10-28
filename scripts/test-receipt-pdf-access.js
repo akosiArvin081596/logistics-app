@@ -68,7 +68,7 @@ const die = (msg) => { console.error(`FAIL  ${msg}`); process.exit(1); };
 // Lifting (the scanner test-receipt-image-access.js uses)
 // ---------------------------------------------------------------------------
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 function skipString(i) {
 	const q = SRC[i];
 	for (i++; i < SRC.length && SRC[i] !== q; i++) if (SRC[i] === "\\") i++;

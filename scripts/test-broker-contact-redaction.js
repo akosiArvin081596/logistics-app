@@ -86,7 +86,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
 
 let pass = 0, fail = 0;

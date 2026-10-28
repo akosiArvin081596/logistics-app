@@ -32,7 +32,7 @@ const path = require("path");
 const rateLimit = require("express-rate-limit");
 const { ipKeyGenerator } = require("express-rate-limit");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let mutantsCaught = 0;

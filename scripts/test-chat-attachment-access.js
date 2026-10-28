@@ -174,7 +174,7 @@ const refused = (r) => r.status === 404 && r.body.length === 0;
 // ---------------------------------------------------------------------------
 // Lifting server.js (same scanner as test-receipt-image-access.js)
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 function skipString(i) {
 	const q = SRC[i];
 	for (i++; i < SRC.length && SRC[i] !== q; i++) if (SRC[i] === "\\") i++;

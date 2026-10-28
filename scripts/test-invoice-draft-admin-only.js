@@ -47,7 +47,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const TAB_PATH = path.join(ROOT, "client", "src", "components", "dashboard", "CompletedLoadsTab.vue");
 const TAB = fs.readFileSync(TAB_PATH, "utf8");
 

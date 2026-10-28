@@ -222,7 +222,7 @@ const OPTS = { corrected: [{ id: 537, weekday: "Sunday" }], removed: REMOVED, ow
 
 // ── §4 the lift ───────────────────────────────────────────────────────────────
 {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = require("./lib/server-source").serverSource();
 	let lifted = null;
 	try {
 		lifted = closure(SRC, { roots: fix.ROOTS, routes: [fix.REOPEN_HEAD, fix.EXCLUDE_HEAD], provided: fix.PROVIDED, denied: fix.DENIED });

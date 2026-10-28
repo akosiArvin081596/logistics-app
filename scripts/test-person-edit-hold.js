@@ -45,7 +45,7 @@ try {
 	console.error(`\n${passes} passed, ${failures} failed`);
 	process.exit(1);
 }
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 const row = (id, source, value, extra = {}) => ({ id, source, value, actor: "", at: `2026-10-0${Math.min(id, 9)}T14:00:00.000Z`, ...extra });
 

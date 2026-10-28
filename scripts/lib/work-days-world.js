@@ -40,7 +40,7 @@ function findRoot(start) {
 	}
 }
 const ROOT = findRoot(__dirname);
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./server-source").serverSource();
 const { closure } = require(path.join(ROOT, "scripts", "lib", "server-lift"));
 
 function die(msg) { console.error(`SETUP FAILED: ${msg}`); process.exit(1); }
