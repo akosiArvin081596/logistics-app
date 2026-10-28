@@ -6727,6 +6727,11 @@ db.exec(`
 	)
 `);
 
+// EXPENSE_BACKFILL_APP_DAY_ENABLED, off unless exactly "true": it changes which truck and
+// owner a legacy receipt is stamped with. On, the backfill below reads an assignment's start
+// and end as business days (appDay()), so an evening one covers its own day, not the next.
+const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_ENABLED === "true";
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (see expOwnerId at the
 // POST /api/expenses INSERT). Pass 1 resolves truck_unit + owner_id from
@@ -6880,8 +6885,30 @@ function backfillLegacyExpenseTrucks(health) {
 		// assignments, not only on evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
-		const coversExpenseDay = (day) => `(substr(ta.start_date, 1, 10) <= ${day}
-				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`;
+		// The first 10 characters are the UTC day, already the next one from 8 PM EDT
+		// (7 PM EST); with EXPENSE_BACKFILL_APP_DAY_ENABLED on, each bound is the
+		// business day its stamp falls on (stampDay() below).
+		const coversExpenseDay = (day) => (EXPENSE_BACKFILL_APP_DAY_ENABLED
+			? `(assignment_stamp_day(ta.start_date) <= ${day}
+				  AND (ta.end_date = '' OR assignment_stamp_day(ta.end_date) >= ${day}))`
+			: `(substr(ta.start_date, 1, 10) <= ${day}
+				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`);
+
+		// The business day (appDay(), APP_TIMEZONE) an assignment stamp falls on. Only the
+		// instant the app writes (toISOString()) is converted; anything else keeps its first
+		// 10 characters, as before. Memoized: step 2 reads every assignment for each receipt.
+		const stampDays = new Map();
+		const stampDay = (v) => {
+			if (v === null || v === undefined) return null;
+			const s = String(v);
+			if (!stampDays.has(s)) {
+				const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
+				const exact = Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19);
+				stampDays.set(s, exact ? appDay(new Date(ms)) : s.slice(0, 10));
+			}
+			return stampDays.get(s);
+		};
+		if (EXPENSE_BACKFILL_APP_DAY_ENABLED) db.function("assignment_stamp_day", stampDay);
 
 		// Step 1's match, ONE definition for both of its uses: the SET takes the
 		// newest covering assignment's truck, and the EXISTS writes a row only when
@@ -9579,7 +9606,17 @@ app.use(express.static(clientDistPath));
 // The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
 // SPREADSHEET_ID; production's own process alone runs without one.
 const SPREADSHEET_ID = SHEET_TARGET.id;
-const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
+// The read-only archive of closed months: ARCHIVE_SPREADSHEET_ID, else production's
+// archive for production's own process only (lib/sheet-id.js), so a local, replica
+// or staging run never reads production's archive.
+const ARCHIVE_SPREADSHEET_ID = require("./lib/sheet-id").resolveArchiveSpreadsheetId(process.env, process.cwd()).id;
+// Module scope, so it is logged once per process start and never per request.
+if (!ARCHIVE_SPREADSHEET_ID) {
+	console.warn(
+		"[archive] ⚠️ ARCHIVE_SPREADSHEET_ID is not set — the archive is off: GET /api/archive and " +
+		"/api/archive/tabs answer 503 ARCHIVE_UNCONFIGURED, and the rate-con sweep checks Job Tracking without it.",
+	);
+}
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -23220,6 +23257,8 @@ db.exec(`
 let archiveIdCache = { at: 0, ids: [] };
 const ARCHIVE_ID_CACHE_MS = 60 * 60 * 1000;
 async function getArchiveLoadIdsCached() {
+	// No archive is configured: nothing to read, and no Google call.
+	if (!ARCHIVE_SPREADSHEET_ID) return [];
 	if (archiveIdCache.ids.length && Date.now() - archiveIdCache.at < ARCHIVE_ID_CACHE_MS) return archiveIdCache.ids;
 	const sheets = await getSheets();
 	const resp = await sheets.spreadsheets.values.get({
@@ -38773,6 +38812,7 @@ app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) 
 
 // GET /api/archive — Read-only access to old/archived spreadsheet data
 app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const sheetName = req.query.sheet || "Job Tracking";
@@ -38807,6 +38847,7 @@ app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
 
 // GET /api/archive/tabs — List available tabs in the archive spreadsheet
 app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const meta = await sheets.spreadsheets.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, fields: "sheets.properties.title" });

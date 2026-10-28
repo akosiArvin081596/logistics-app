@@ -208,15 +208,13 @@
           "__rl": true,
           "value": "My Drive",
           "mode": "list",
-          "cachedResultName": "My Drive",
-          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+          "cachedResultName": "My Drive"
         },
         "folderId": {
           "__rl": true,
-          "value": "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL",
+          "value": "RATECON_DRIVE_FOLDER_ID",
           "mode": "list",
-          "cachedResultName": "Rate Confirmations",
-          "cachedResultUrl": "https://drive.google.com/drive/folders/1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL"
+          "cachedResultName": "Rate Confirmations"
         },
         "options": {}
       },
@@ -451,17 +449,15 @@
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "value": "SPREADSHEET_ID",
           "mode": "list",
-          "cachedResultName": "Dispatch Management",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+          "cachedResultName": "Dispatch Management"
         },
         "sheetName": {
           "__rl": true,
           "value": 1036643096,
           "mode": "list",
-          "cachedResultName": "Job Tracking",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+          "cachedResultName": "Job Tracking"
         },
         "columns": {
           "mappingMode": "defineBelow",
@@ -757,17 +753,15 @@
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "value": "SPREADSHEET_ID",
           "mode": "list",
-          "cachedResultName": "Dispatch Management",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+          "cachedResultName": "Dispatch Management"
         },
         "sheetName": {
           "__rl": true,
           "value": 1772996665,
           "mode": "list",
-          "cachedResultName": "Job Details",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1772996665"
+          "cachedResultName": "Job Details"
         },
         "columns": {
           "mappingMode": "autoMapInputData",
@@ -984,17 +978,15 @@
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "value": "SPREADSHEET_ID",
           "mode": "list",
-          "cachedResultName": "Dispatch Management",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+          "cachedResultName": "Dispatch Management"
         },
         "sheetName": {
           "__rl": true,
           "value": 1036643096,
           "mode": "list",
-          "cachedResultName": "Job Tracking",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+          "cachedResultName": "Job Tracking"
         },
         "columns": {
           "mappingMode": "defineBelow",
@@ -1627,15 +1619,13 @@
           "__rl": true,
           "value": "My Drive",
           "mode": "list",
-          "cachedResultName": "My Drive",
-          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+          "cachedResultName": "My Drive"
         },
         "folderId": {
           "__rl": true,
-          "value": "1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL",
+          "value": "RATECON_DRIVE_FOLDER_ID",
           "mode": "list",
-          "cachedResultName": "Rate Confirmations",
-          "cachedResultUrl": "https://drive.google.com/drive/folders/1VAMgB8xQe50xs-PuX-WW3yL6Hom2xetL"
+          "cachedResultName": "Rate Confirmations"
         },
         "options": {}
       },
@@ -1677,7 +1667,7 @@
             {
               "id": "37e72cb4-4f0d-4eca-9864-fd194fa40c5a",
               "leftValue": "={{ ((($json.from || {}).text) || (($json.headers || {}).from) || '').toLowerCase() }}",
-              "rightValue": "loadupdate@bisontransport.com",
+              "rightValue": "tracking-updates@example.test",
               "operator": {
                 "type": "string",
                 "operation": "contains"
@@ -1733,17 +1723,15 @@
         "operation": "read",
         "documentId": {
           "__rl": true,
-          "value": "1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo",
+          "value": "SPREADSHEET_ID",
           "mode": "list",
-          "cachedResultName": "Dispatch Management",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit?usp=drivesdk"
+          "cachedResultName": "Dispatch Management"
         },
         "sheetName": {
           "__rl": true,
           "value": 1036643096,
           "mode": "list",
-          "cachedResultName": "Job Tracking",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo/edit#gid=1036643096"
+          "cachedResultName": "Job Tracking"
         },
         "filtersUI": {
           "values": [
