@@ -13,7 +13,8 @@
  *      shape it refuses
  *   §2 the reader detector, on made-up snippets
  *   §3 every file under scripts/ that reads server.js reads it through the
- *      helper, or ALLOW names it with its reason; no list entry is stale
+ *      helper, or ALLOW (until the first move) or REAL_FILE (for good) names
+ *      it with its reason; no list entry is stale
  *   §4 a folder scanner that takes server.js and lib/ as code roots covers
  *      routes/ too: it names routes/ or reads server.js only through the
  *      helper (allowlisted files included; BEFORE_FIRST_MOVE names the ones
@@ -90,6 +91,13 @@ const ADMIN = "admin or operator script run on production data: moves to the hel
 	["scripts/test-invoice-draft-bol.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-notes.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-overrides.js", owned("feat/broker-invoice-engine")],
+]);
+
+// Files that must read server.js's own file for good, each with why: they
+// rewrite it, or check it beside the routes/ files the virtual source splices in.
+const REAL_FILE = new Map([
+	["scripts/split/move-routes.js", "the move tool: it rewrites server.js's own file and writes routes/"],
+	["scripts/test-route-modules.js", "checks server.js's mount lines and ROUTE_CONTEXT beside the routes/ files, which the virtual source replaces; it follows SERVER_ROOT itself"],
 ]);
 
 // Files the detector flags that read no server.js text, each with why. They
@@ -664,18 +672,18 @@ console.log("\n§3 every scripts/ reader of server.js goes through scripts/lib/s
 		if (c.reads.length) reading.add(f);
 		if (c.labelled) labelled.add(f);
 		if (scansWithoutRoutes(c)) scanning.add(f);
-		if (c.reads.length && !ALLOW.has(f) && !NOT_READERS.has(f)) direct.push(`${f} (${classOf(text, c).how})`);
+		if (c.reads.length && !ALLOW.has(f) && !REAL_FILE.has(f) && !NOT_READERS.has(f)) direct.push(`${f} (${classOf(text, c).how})`);
 		if (scanning.has(f) && !BEFORE_FIRST_MOVE.has(f)) scanners.push(f);
 	}
 	ok(`§3 no script reads server.js but through the helper (${ALLOW.size} on ALLOW still do)`, !direct.length,
 		`read server.js directly; use serverSource() from scripts/lib/server-source.js:\n      ${direct.join("\n      ")}`);
 	const stale = [
-		...[...ALLOW.keys(), ...NOT_READERS.keys()].filter((f) => !reading.has(f)),
+		...[...ALLOW.keys(), ...REAL_FILE.keys(), ...NOT_READERS.keys()].filter((f) => !reading.has(f)),
 		...[...LABELS.keys()].filter((f) => !labelled.has(f)),
 		...[...BEFORE_FIRST_MOVE.keys()].filter((f) => !scanning.has(f)),
 	];
-	ok("§3 every ALLOW, NOT_READERS, LABELS and BEFORE_FIRST_MOVE entry is still needed (remove the ones that aren't)", !stale.length, stale.join(", "));
-	ok("§3 every entry has its reason", [ALLOW, NOT_READERS, LABELS, BEFORE_FIRST_MOVE].every((m) => [...m.values()].every((r) => typeof r === "string" && r.length > 10)));
+	ok("§3 every ALLOW, REAL_FILE, NOT_READERS, LABELS and BEFORE_FIRST_MOVE entry is still needed (remove the ones that aren't)", !stale.length, stale.join(", "));
+	ok("§3 every entry has its reason", [ALLOW, REAL_FILE, NOT_READERS, LABELS, BEFORE_FIRST_MOVE].every((m) => [...m.values()].every((r) => typeof r === "string" && r.length > 10)));
 	console.log("\n§4 folder scanners of server.js and lib/ cover routes/");
 	ok("§4 every scanner that takes server.js and lib/ as code roots names routes/ or reads only through the helper", !scanners.length,
 		`add routes/ to its roots or read server.js through serverSource():\n      ${scanners.join("\n      ")}`);
