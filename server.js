@@ -27448,13 +27448,15 @@ function personalRowsOnInvoice(invoiceId) {
 }
 
 // The rows `ep` an invoice may still take, with the receipt's week on. A
-// reversed line and its reversal both on no invoice, the reversal returning no
-// share, never go on one: the driver was never charged, and the books net out
-// across the two months. Any other pair goes on invoices by the usual rules, so a
-// credit that already landed is met by its charge and a returned share comes back.
-const PERSONAL_COLLECTABLE_SQL = "NOT (ep.kind = 'deduct' AND ep.reversed_by_id IS NOT NULL AND EXISTS (SELECT 1 FROM expense_personal r WHERE r.id = ep.reversed_by_id"
-	+ " AND r.share_cents = 0 AND NOT EXISTS (SELECT 1 FROM invoices ri WHERE ri.id = r.invoice_id AND ri.deleted_at = '')))"
-	+ " AND NOT (ep.kind = 'reverse' AND ep.share_cents = 0 AND NOT EXISTS (SELECT 1 FROM expense_personal d JOIN invoices di ON di.id = d.invoice_id WHERE d.id = ep.reverses_id AND di.deleted_at = ''))";
+// reversed charge on no invoice stays off while its reversal is on none, unless
+// a live invoice's percentage base already left it out (that pay was raised for
+// it): then the charge goes on an invoice first. A reversal goes on one only
+// once its charge is on one, so a credit never lands before its charge; a pair
+// of which neither ever lands nets out across the two months in the books.
+const PERSONAL_COLLECTABLE_SQL = "NOT (ep.kind = 'deduct' AND ep.reversed_by_id IS NOT NULL"
+	+ " AND NOT EXISTS (SELECT 1 FROM expense_personal r JOIN invoices ri ON ri.id = r.invoice_id WHERE r.id = ep.reversed_by_id AND ri.deleted_at = '')"
+	+ " AND NOT EXISTS (SELECT 1 FROM invoices bi WHERE bi.id = ep.base_invoice_id AND bi.deleted_at = ''))"
+	+ " AND NOT (ep.kind = 'reverse' AND NOT EXISTS (SELECT 1 FROM expense_personal d JOIN invoices di ON di.id = d.invoice_id WHERE d.id = ep.reverses_id AND di.deleted_at = ''))";
 
 // One driver's lines for a week that no live invoice carries: never attached,
 // or left on an invoice that was soft-deleted. Matched on the receipt's driver
@@ -27467,7 +27469,7 @@ function personalWaitingRows(driverName, weekStart) {
 	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
 	if (!key || !personalLedgerPresent()) return [];
 	const weeks = PERSONAL_RECEIPT_WEEK_ENABLED
-		? `(ep.week_start = ? OR (ep.week_start < ? AND (ep.needs_correction_since != '' OR (ep.invoice_id IS NOT NULL AND i.week_start != ep.week_start)))) AND ${PERSONAL_COLLECTABLE_SQL}`
+		? `(ep.week_start = ? OR (ep.week_start < ? AND (ep.needs_correction_since != '' OR (ep.invoice_id IS NOT NULL AND COALESCE(i.week_start, '') != ep.week_start)))) AND ${PERSONAL_COLLECTABLE_SQL}`
 		: "ep.week_start = ?";
 	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 		WHERE ep.voided_at = '' AND ${weeks} AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
@@ -28005,9 +28007,10 @@ function personalPlacementFor(driverName, row) {
 
 // Whether a line may go on this invoice by its week: its own week's always; with
 // the receipt's week on, an earlier week's line that is carried or was left on a
-// deleted invoice.
+// deleted invoice, and a reversal following its charge onto it.
 function personalMayGoOn(row, inv) {
 	if (row.week_start === inv.week_start) return true;
+	if (PERSONAL_RECEIPT_WEEK_ENABLED && personalFollowsCharge(row, inv)) return true;
 	if (!PERSONAL_RECEIPT_WEEK_ENABLED || !(String(row.week_start) < String(inv.week_start))) return false;
 	if (row.invoice_id != null) {
 		const on = db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(row.invoice_id);
@@ -28117,8 +28120,10 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 			// The invoice's week may have come to touch a finalized month meanwhile.
 			const weekLock = invoiceMonthLockBlockers(now || inv);
 			if (moved || !sameLines || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
-			// An earlier week's line goes on only while its own week still cannot take it.
-			if (PERSONAL_RECEIPT_WEEK_ENABLED && incoming.some((r) => String(r.week_start) < String(inv.week_start) && personalOwnWeekCanTake(inv.driver, r))) throw changed();
+			// An earlier week's line goes on only while its own week still cannot take
+			// it; a reversal following its charge goes where the charge is.
+			if (PERSONAL_RECEIPT_WEEK_ENABLED && incoming.some((r) => String(r.week_start) < String(inv.week_start)
+				&& !personalFollowsCharge(r, inv) && personalOwnWeekCanTake(inv.driver, r))) throw changed();
 			if (voidId != null) assertPersonalCostMonthOpen(current.find((r) => r.id === voidId));
 			const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
 			for (const r of attachRows) {
@@ -28355,14 +28360,43 @@ function personalReverseShare(line) {
 }
 
 // With the receipt's week on, how a Reverse of this live line is written:
-// "off" (on no invoice, and neither row ever goes on one: the line is on no
-// invoice and its reversal returns no share), "place" (by the week rules, so a
-// returned share comes back) or "none" (it would have to go on an invoice, and
-// its receipt names no driver to carry it).
+//   off    the line is on no invoice and no pay was raised for it: neither row
+//          ever goes on one (a share it carries was never paid either);
+//   wait   the line is on no invoice, but a live invoice's percentage base left
+//          it out: the line still goes on an invoice and the reversal waits to
+//          follow it there, so the raised pay comes back and never the credit
+//          alone (PERSONAL_COLLECTABLE_SQL);
+//   place  the line is on an invoice: the reversal is placed by the week rules;
+//   none   it would have to go on an invoice, and the receipt names no driver.
 function personalReverseMode(line, receiptDriver) {
-	const onInvoice = line.invoice_id != null && !!db.prepare("SELECT 1 FROM invoices WHERE id = ? AND deleted_at = ''").get(line.invoice_id);
-	if (!onInvoice && personalReverseShare(line) === 0) return "off";
-	return normalizeDriverName(String(receiptDriver || "")) ? "place" : "none";
+	const live = (id) => id != null && !!db.prepare("SELECT 1 FROM invoices WHERE id = ? AND deleted_at = ''").get(id);
+	const mode = live(line.invoice_id) ? "place" : live(line.base_invoice_id) ? "wait" : "off";
+	return mode === "off" || normalizeDriverName(String(receiptDriver || "")) ? mode : "none";
+}
+
+// A reversed line on no invoice that still goes on one (PERSONAL_COLLECTABLE_SQL),
+// in the screens' words; "" when it never will.
+function personalReversedWait(row) {
+	if (!db.prepare(`SELECT 1 FROM expense_personal ep WHERE ep.id = ? AND ${PERSONAL_COLLECTABLE_SQL}`).get(row.id)) return "";
+	const credit = db.prepare("SELECT i.invoice_number FROM expense_personal r JOIN invoices i ON i.id = r.invoice_id WHERE r.id = ? AND i.deleted_at = ''").get(row.reversed_by_id);
+	return credit
+		? `its credit is on ${credit.invoice_number}; the line still goes on the next weekly invoice`
+		: "the line still goes on the next weekly invoice, and its credit with it";
+}
+
+// The reversals waiting to follow their charge onto this invoice.
+function personalFollowersOf(invoiceId) {
+	if (!personalLedgerPresent()) return [];
+	return db.prepare(`SELECT r.id FROM expense_personal r JOIN expense_personal d ON d.id = r.reverses_id LEFT JOIN invoices ri ON ri.id = r.invoice_id
+		WHERE r.kind = 'reverse' AND r.voided_at = '' AND d.invoice_id = ? AND (r.invoice_id IS NULL OR ri.id IS NULL OR ri.deleted_at != '') ORDER BY r.id`)
+		.all(invoiceId).map((r) => r.id);
+}
+
+// Whether a reversal goes on this invoice to follow its charge there.
+function personalFollowsCharge(row, inv) {
+	if (row.kind !== "reverse" || row.reverses_id == null) return false;
+	const charge = db.prepare("SELECT invoice_id FROM expense_personal WHERE id = ?").get(row.reverses_id);
+	return !!charge && charge.invoice_id === inv.id;
 }
 
 // Each receipt's live Personal deduction, for the screens: { [expenseId]:
@@ -28399,7 +28433,8 @@ function personalSummaryByExpense(ids) {
 			if (PERSONAL_RECEIPT_WEEK_ENABLED) {
 				Object.assign(out[r.expense_id], {
 					wait_text: state === "carried" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || ""))
-						? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text : "",
+						? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text
+						: state === "reversed" && !onInvoice ? personalReversedWait(r) : "",
 					invoice_week_label: onInvoice && r.inv_week_start && r.inv_week_end ? personalWeekLabel(r.inv_week_start, r.inv_week_end) : "",
 					final: onInvoice && state !== "reversed" && !PERSONAL_OPEN_STATUSES.has(r.inv_status),
 				});
@@ -28562,13 +28597,24 @@ function personalCommitGeneration(invoiceId, plan, fitted) {
 async function attachLatePersonalLines(invoice, actor) {
 	if (PERSONAL_RECEIPT_WEEK_ENABLED && personalWeekClosed(invoice.week_start)) return invoice;
 	const waiting = personalWaitingRows(invoice.driver, invoice.week_start).filter((r) => !PERSONAL_RECEIPT_WEEK_ENABLED || !r.needs_correction_since);
-	if (!waiting.length) return invoice;
+	// With the receipt's week on, a reversal waiting for its charge follows it onto this invoice.
+	const followers = PERSONAL_RECEIPT_WEEK_ENABLED ? personalFollowersOf(invoice.id) : [];
+	const ids = [...new Set([...waiting.map((r) => r.id), ...followers])];
+	if (!ids.length) return invoice;
 	try {
-		const out = await rewriteInvoicePersonalLines(invoice, { attach: waiting.map((r) => r.id), fit: true });
-		if (out.attached.length) {
-			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${out.attached.length} Personal line(s) marked during generation attached`);
+		const out = await rewriteInvoicePersonalLines(invoice, { attach: ids, fit: true });
+		const late = out.attached.filter((id) => !followers.includes(id));
+		const followed = out.attached.filter((id) => followers.includes(id));
+		if (late.length) {
+			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${late.length} Personal line(s) marked during generation attached`);
 		}
-		for (const id of out.flagged) logAudit(actor, "flag_personal_expense", "expense", String(waiting.find((r) => r.id === id).expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
+		if (followed.length) {
+			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${followed.length} Personal reversal(s) following their line attached`);
+		}
+		for (const id of out.flagged) {
+			const row = waiting.find((r) => r.id === id);
+			if (row) logAudit(actor, "flag_personal_expense", "expense", String(row.expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
+		}
 		return out.invoice;
 	} catch (err) {
 		console.error(`[personal] ${invoice.invoice_number}: a Personal line marked during generation was not attached (${err.message}); the weekly sweep will place it.`);
@@ -28668,6 +28714,35 @@ async function personalSweepByWeek() {
 			count(r.week_start, "carried");
 		}
 	};
+	// A reversal waiting for its line follows it onto the open invoice it is on;
+	// run before the steps below and after them (a line they place brings its
+	// reversal along). Where that invoice cannot be redrawn, the steps below place
+	// the reversal by the week rules instead.
+	const follow = async () => {
+		const byInvoice = new Map();
+		for (const r of db.prepare(`SELECT r.id, r.week_start, d.invoice_id FROM expense_personal r JOIN expense_personal d ON d.id = r.reverses_id
+			JOIN invoices di ON di.id = d.invoice_id LEFT JOIN invoices ri ON ri.id = r.invoice_id
+			WHERE r.kind = 'reverse' AND r.voided_at = '' AND di.deleted_at = '' AND di.status IN ('Draft', 'Submitted', 'Rejected')
+			AND (r.invoice_id IS NULL OR ri.id IS NULL OR ri.deleted_at != '') ORDER BY r.id`).all()) {
+			if (!byInvoice.has(r.invoice_id)) byInvoice.set(r.invoice_id, []);
+			byInvoice.get(r.invoice_id).push(r);
+		}
+		for (const [invoiceId, rows] of byInvoice) {
+			const inv = db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(invoiceId);
+			if (!inv || !inv.pdf_file_name || !personalSnapshotOf(inv) || personalWeekClosed(inv.week_start)) continue;
+			try {
+				const res = await rewriteInvoicePersonalLines(inv, { attach: rows.map((r) => r.id), fit: true });
+				for (const r of rows) if (res.attached.includes(r.id)) count(r.week_start, "attached");
+				if (res.attached.length) {
+					logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", inv.id, `${inv.invoice_number}: ${res.attached.length} Personal reversal(s) following their line attached by the weekly sweep`);
+				}
+			} catch (err) {
+				for (const r of rows) count(r.week_start, "failed");
+				console.error(`[personal-sweep] ${rows.length} reversal(s) not attached to ${inv.invoice_number} (${err.message}); retried next run`);
+			}
+		}
+	};
+	await follow();
 
 	const groups = new Map();
 	for (const r of db.prepare(`${waiting} AND ep.needs_correction_since = '' ORDER BY ep.week_start, ep.id`).all()) {
@@ -28729,6 +28804,8 @@ async function personalSweepByWeek() {
 			}
 		}
 	}
+
+	await follow();
 
 	const out = { weeks: [...tally.values()] };
 	const ranAt = new Date().toISOString();
@@ -29032,10 +29109,11 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 // the same placement rules; the original line stays on its invoice. Its cost
 // month is the line's own while that month is open, else the open month (a
 // credit row). After a reversal the receipt can be marked again. With the
-// receipt's week on: a line on an approved invoice is final (409
-// PERSONAL_LOCKED); a line on no invoice whose reversal returns no share is
-// reversed on none, and neither row ever goes on one; otherwise the reversal is
-// placed by the line's own week (a returned share comes back with it).
+// receipt's week on (personalReverseMode()): a line on an approved invoice is
+// final (409 PERSONAL_LOCKED); a line on no invoice is reversed on none, and
+// neither row goes on one, unless a percentage base already raised the pay for
+// it: then the line still goes on an invoice and the reversal follows it there;
+// a line on an open invoice is reversed by the line's own week's rules.
 app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const expense = personalExpenseById(req);
@@ -29085,22 +29163,23 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 			return res.status(409).json({ error: "This reversal has to go on a weekly invoice, and the receipt names no driver whose invoice could carry it. Nothing was written.", code: "PERSONAL_REVERSE_UNPLACEABLE" });
 		}
 		let placed;
-		if (mode === "off") {
-			// The driver was never charged and no share comes back: the reversal
-			// stays off every invoice too.
+		if (mode === "off" || mode === "wait") {
+			// On no invoice for now: for good when no pay was raised for the line
+			// (neither row goes on one), else until the line it reverses is on one.
 			const lineId = db.transaction(() => {
 				const newId = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: "" });
 				onCommit(newId);
 				return newId;
 			}).immediate();
-			placed = { lineId, state: "reversed", invoice: null, offInvoices: true };
+			placed = { lineId, state: "reversed", invoice: null, offInvoices: mode === "off", followsCharge: mode === "wait" };
 		} else {
 			placed = await placePersonalLine({ row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req, onCommit });
 		}
 		const where = placed.invoice ? `on ${placed.invoice.invoice_number}`
 			: placed.offInvoices ? "on no invoice (the line it reverses is on none, so neither goes on one)"
-				: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
-					: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
+				: placed.followsCharge ? "on no invoice until the line it reverses is on one: it follows it there"
+					: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
+						: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
 		logAudit(req, "reverse_expense_personal", "expense", id,
 			`Personal ${personalExpense.formatMoney(line.cents)} reversed (line ${line.id} -> ${placed.lineId}); week ${row.week_start}; ${where}; ` +
 			(row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period}`) +

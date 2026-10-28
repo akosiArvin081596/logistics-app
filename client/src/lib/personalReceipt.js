@@ -69,7 +69,8 @@ export function personalPillText(personal) {
     case 'correction': return number ? `${amount} · on correction ${number}, ${weekWords(personal)}` : `${amount} · on a correction invoice, ${weekWords(personal)}`
     case 'needs_correction': return `${amount} · needs a correction invoice for ${weekWords(personal)}`
     case 'carried': return personal.wait_text ? `${amount} · waiting: ${personal.wait_text}` : `${amount} · waiting for the next weekly invoice`
-    case 'reversed': return `${amount} · reversed`
+    // A reversed line can still be on its way to an invoice (wait_text says so).
+    case 'reversed': return personal.wait_text ? `${amount} · reversed; ${personal.wait_text}` : `${amount} · reversed`
     default: return ''
   }
 }
@@ -103,7 +104,7 @@ export function personalMarkDialogText(receiptWeek) {
 // a line its closed month (or another invoice's pay) keeps from being undone.
 export function personalReverseDialogText(receiptWeek) {
   return receiptWeek === true
-    ? "This line can no longer be undone. A reversing line credits the amount back in the open month; if no invoice has taken the line, neither line goes on one."
+    ? "This line can no longer be undone. A reversing line credits the amount back in the open month. A line no invoice has taken stays off every invoice with its credit, unless the driver's percentage pay was already raised for it: then the line still goes on his next weekly invoice, and its credit follows it there."
     : "The line is on an approved invoice, so it stays there. A reversing line credits the amount back on this week's invoice, or on its correction invoice."
 }
 

@@ -23,7 +23,9 @@
 //      invoice reads "(approved, final)"; the driver sees the week of the invoice
 //      that carries his line (invoice_week_label) or "coming off your next weekly
 //      invoice"; Reverse follows the server's can_reverse when it sends one.
-//      The Mark dialog's text follows the list's personalReceiptWeek (W18).
+//      The Mark dialog's text follows the list's personalReceiptWeek (W18); a
+//      reversed line still on its way to an invoice says so, and the Reverse
+//      dialog says when a reversal follows its line (W27).
 //
 // No network, no DOM, no database.
 //   node scripts/test-personal-expense-client.mjs      # exits 1 on any failure
@@ -228,6 +230,17 @@ section('§7 W18 the Mark dialog\'s text follows personalReceiptWeek')
   const tab = read('client/src/components/dashboard/ExpensesTab.vue')
   check('ExpensesTab passes personalReceiptWeek in all three places and reads it in both loads',
     [(tab.match(/:enabled="personalEnabled" :receipt-week="personalReceiptWeek"/g) || []).length, (tab.match(/personalReceiptWeek\.value = data\.personalReceiptWeek === true/g) || []).length], [3, 2])
+}
+
+section('§8 W27 a reversed line still on its way to an invoice, and the Reverse dialog')
+{
+  check('pill: a reversed line that still goes on an invoice says so, in the server\'s words',
+    personalPillText(line('reversed', { amount_text: '$100.00', wait_text: 'the line still goes on the next weekly invoice, and its credit with it' })),
+    'Personal -$100.00 · reversed; the line still goes on the next weekly invoice, and its credit with it')
+  const fn = personalReceiptLib.personalReverseDialogText
+  check('the Reverse dialog with personalReceiptWeek on: a line no invoice took stays off with its credit, unless the pay was raised for it',
+    typeof fn === 'function' ? fn(true) : null,
+    "This line can no longer be undone. A reversing line credits the amount back in the open month. A line no invoice has taken stays off every invoice with its credit, unless the driver's percentage pay was already raised for it: then the line still goes on his next weekly invoice, and its credit follows it there.")
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
