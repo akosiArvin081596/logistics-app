@@ -207,6 +207,8 @@ function makeApp({ server = null, createLimit = null } = {}) {
 	for (const sql of DDL) db.exec(sql);
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
 	db.prepare("INSERT INTO users (id, username, role, company_name) VALUES (7, 'acme', 'Investor', 'Acme Leasing')").run();
+	// The acting admin's own row: PUT /api/users/:id re-reads it after its awaits.
+	db.prepare("INSERT INTO users (id, username, role) VALUES (1, 'super_admin', 'Super Admin')").run();
 	const m = new Function("db", "appTodayKey", "periodLocksReadable", "bcrypt", "sendEmail", "insertNotification", "notifyChange",
 		"getJobTrackingCached", "driverHistoryFloorMonth", "recordPeriodRefusal", "path", "fs", "__dirname", "console", "ADMIN_NOTIFY_EMAIL",
 		`"use strict";\n${MODULE_SRC}\nreturn { ${MODULE_EXPORTS.join(", ")} };`)(
