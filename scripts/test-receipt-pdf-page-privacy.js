@@ -97,20 +97,22 @@ async function has(pdf, needle) {
 	return (await streamTexts(pdf)).some((t) => t.includes(needle));
 }
 // The stored invoice's pages split: copied receipt pages carry the label
-// "Receipt N of M - page x of y" in their own content; every other page is an
-// invoice page.
+// "Receipt N of M - page x of y" in their own content (a notice page "Receipt N
+// of M - K pages of this statement ..."); every other page, the sheets
+// included, is an invoice page.
 async function splitPages(pdf) {
 	const texts = await pageTexts(pdf);
-	const receipt = texts.map((t, i) => (/(^|\|)Receipt \d+ of \d+ - /.test(t) ? i : -1)).filter((i) => i >= 0);
+	const receipt = texts.map((t, i) => (/(^|\|)Receipt \d+ of \d+ - (page \d+ of \d+|\d+ pages? of this statement)/.test(t) ? i : -1)).filter((i) => i >= 0);
 	return { texts, receipt, invoice: texts.filter((_, i) => !receipt.includes(i)) };
 }
 
 // A made-up toll statement of Test Driver A's (3 pages, each with dated money
 // lines). Page 1 also prints "CASEY RIVERA" (on no roster until a runner adds
-// her); page 2 names Test Driver B (on the roster: an account and the directory).
+// her); page 2 names Test Driver B (on the roster: an account and the directory);
+// page 3 holds neither receipt 1's amount and date nor its vendor (UNREADABLE).
 function statement({ page1Extra = [], page2 = null, sharedImages = false } = {}) {
 	return receiptPdf([
-		["FLEET TOLL STATEMENT", "MARKER-P1-7c41", "ACCOUNT HOLDER TEST DRIVER A", "10/12/2026 PILOT #123 $200.00", "10/13/2026 PLAZA 4 $4.50", ...page1Extra],
+		["FLEET TOLL STATEMENT", "MARKER-P1-7c41", "ACCOUNT HOLDER TEST DRIVER A", "BILLED TO CASEY RIVERA", "10/12/2026 PILOT #123 $200.00", "10/13/2026 PLAZA 4 $4.50", ...page1Extra],
 		page2 || ["MARKER-P2-9e03", "ACCOUNT HOLDER TEST DRIVER B", "10/05/2026 PLAZA 9 $6.25", "10/06/2026 PLAZA 9 $6.25"],
 		["MARKER-P3-2b88", "10/14/2026 PLAZA 2 $3.00", "10/15/2026 PLAZA 2 $3.00", "STATEMENT TOTAL $213.50"],
 	], { sharedImages });
@@ -138,7 +140,8 @@ async function statementInvoice(w, opts = {}) {
 		const { m, d, r1, r3, id } = await statementInvoice(w);
 		check("T9 the Personal mark answers the receipt's page counts (codes only)",
 			[m.status, m.body && m.body.receipt_pages && m.body.receipt_pages.pages, m.body && m.body.receipt_pages && m.body.receipt_pages.released], [201, 3, 0]);
-		check("T9 the staff detail: three STATEMENT pages, page 2 also OTHER_PERSON", [d.status, pageCodes(d)], [200, ["STATEMENT", "OTHER_PERSON", "STATEMENT"]]);
+		check("T9 the staff detail: page 1 STATEMENT, page 2 OTHER_PERSON, page 3 UNREADABLE (no amount and date, no vendor)",
+			[d.status, pageCodes(d)], [200, ["STATEMENT", "OTHER_PERSON", "UNREADABLE"]]);
 		check("T9 pages 1 and 3 released by the Super Admin", [r1.status, r3.status], [200, 200]);
 		const file = id ? stored(w, id) : Buffer.alloc(0);
 		check("T9 control first: the same inflate-and-search finds page 1's and page 3's markers in the stored invoice",
@@ -218,7 +221,7 @@ async function statementInvoice(w, opts = {}) {
 			[added.length, cacheBefore.every((f) => cacheAfter.includes(f)), added.every((f) => /-p3-r[0-9a-f]{16}\.pdf$/.test(f)), cacheBefore.every((f) => /-p1_3-r[0-9a-f]{16}\.pdf$/.test(f))],
 			[1, true, true, true]);
 		const d = await detail(w, 1);
-		check("T11 page 1 now reads OTHER_PERSON and its mark lapsed", [pageCodes(d), d.body?.pages?.[0]?.released], [["OTHER_PERSON", "OTHER_PERSON", "STATEMENT"], false]);
+		check("T11 page 1 now reads OTHER_PERSON and its mark lapsed", [pageCodes(d), d.body?.pages?.[0]?.released], [["OTHER_PERSON", "OTHER_PERSON", "UNREADABLE"], false]);
 		const again = await w.mine.runReceiptPagesSweep();
 		check("T11 a second sweep changes nothing", [again && again.withdrawn, stored(w, id).equals(after)], [0, true]);
 		w.cleanup();
