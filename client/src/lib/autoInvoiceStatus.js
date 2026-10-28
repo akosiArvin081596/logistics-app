@@ -34,6 +34,7 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   RECIPIENT_DOMAIN_MISMATCH: { short: 'billing email on another domain', text: "The rate con's billing email is not on the broker's own domain. Draft it by hand and check the recipient." },
   RATECON_BY_CONTENT: { short: 'rate con found by content', text: 'The rate con was found only by reading Drive files. Draft it by hand and check it is the right one.' },
   TOTAL_MISMATCH: { short: 'totals differ', text: "The rate con's total differs from the Payment on Job Tracking. Draft it by hand." },
+  RATECON_TOTAL_UNREAD: { short: "rate con total couldn't be read", text: "The rate con's total couldn't be read, so it can't be checked against the Payment on Job Tracking. Draft it by hand." },
   POD_PAGE_UNREADABLE: { short: 'POD page unreadable', text: "A POD page couldn't be read. Upload the POD again, then Try again." },
   INVOICE_REFS_REQUIRED: { short: 'Bison Order # or PO # missing', text: "Bison's Order # or PO # couldn't be read. Draft it by hand and type them." },
   INVOICE_TOTAL_UNKNOWN: { short: 'total unknown', text: 'No invoice total could be found. Draft it by hand.' },

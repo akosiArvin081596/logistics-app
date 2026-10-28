@@ -75,10 +75,20 @@ const EMAILS = [
 	"two@@example.test", "", null, "a@b", "x@sub.example-broker.test;", "Name <ops@example-broker.test>",
 	"ops@bisontransport.com", "OPS@BISONTRANSPORT.COM", "ops@notbisontransport.com", "ops@bisontransport.com.example.test",
 ];
+// isBisonEmail() is isBisonLoad() on a readable address, except that a lookalike
+// domain (notbisontransport.com) is not Bison for automatic drafts.
+const BISON_LOOKALIKES = ["ops@notbisontransport.com"];
 for (const e of EMAILS) {
 	eq(R.normalizeEmail(e), brokerInvoice.normalizeEmail(e), `§2 normalizeEmail(${JSON.stringify(e)}) matches lib/broker-invoice.js`);
-	eq(R.isBisonEmail(e), brokerInvoice.isBisonLoad({ email: e }), `§2 isBisonEmail(${JSON.stringify(e)}) matches isBisonLoad()`);
+	const want = BISON_LOOKALIKES.includes(e) ? false : brokerInvoice.isBisonLoad({ email: e }) && Boolean(R.emailDomain(e));
+	eq(R.isBisonEmail(e), want, `§2 isBisonEmail(${JSON.stringify(e)})`);
 }
+for (const [e, want] of [["ops@bisontransport.com", true], ["ops@ap.bisontransport.com", true], ["OPS@BisonTransport.COM", true],
+	["ops@notbisontransport.com", false], ["ops@bisontransport.com.example.test", false], ["ops@bison-transport.com", false], ["bisontransport.com", false]]) {
+	eq(R.isBisonEmail(e), want, `§2 Bison is the real domain or its subdomains only: ${e} -> ${want}`);
+}
+eq(R.recipientRule({ brokerEmail: "ops@notbisontransport.com", bisonRecipient: "ap@example-bison-ap.test", documentsEmail: "billing@notbisontransport.com" }).code,
+	"BROKER_DOMAIN_UNCONFIRMED", "§2 a Bison lookalike needs a confirmed domain like any broker, never Bison's inbox");
 eq(R.emailDomain(" Billing@Example-Broker.Test> "), "example-broker.test", "§2 the domain is the part after '@', lower case");
 eq(R.emailDomain("x@sub.example-broker.test;"), "sub.example-broker.test", "§2 a subdomain is kept as written");
 eq(R.emailDomain("no-at-sign.example.test"), "", "§2 no '@': no domain");
@@ -249,6 +259,10 @@ eq(R.classifyRefusal({ code: "NO_BILLING_EMAIL", http: 422 }), { kind: "attentio
 eq(R.classifyRefusal({ code: "RECIPIENT_DOMAIN_MISMATCH", http: 422 }).kind, "attention", "§8 RECIPIENT_DOMAIN_MISMATCH: a person");
 eq(R.classifyRefusal({ code: "TOTAL_MISMATCH", http: 422, geminiUnavailable: true }), { kind: "temporary", code: "GEMINI_DOWN", countsAttempt: false }, "§8 any refusal while Gemini is down: temporary, no attempt used");
 eq(R.classifyRefusal({ code: "RATECON_MISSING", http: 422 }).kind, "ratecon_missing", "§8 no rate con: the 2-hour re-check");
+eq(R.classifyRefusal({ code: "RATECON_TOTAL_UNREAD", http: 422 }), { kind: "attention", code: "RATECON_TOTAL_UNREAD", countsAttempt: false }, "§8 no rate-con total read: a person");
+eq(R.classifyRefusal({ code: "RATECON_TOTAL_UNREAD", http: 503, geminiUnavailable: true }), { kind: "attention", code: "RATECON_TOTAL_UNREAD", countsAttempt: false },
+	"§8 no rate-con total read while Gemini failed or timed out: still a person, never a retry");
+ok(R.ATTENTION_REFUSALS.includes("RATECON_TOTAL_UNREAD") && R.REASON_CODES.includes("RATECON_TOTAL_UNREAD"), "§8 RATECON_TOTAL_UNREAD is an attention refusal and a reason code");
 eq(R.classifyRefusal({ code: "POD_NOT_FOUND", http: 400 }), { kind: "wait", code: "WAITING_POD", countsAttempt: false }, "§8 the POD went away: waiting");
 eq(R.classifyRefusal({ code: "NOT_COMPLETED", http: 400 }).code, "NOT_COMPLETED", "§8 no longer delivered: waiting");
 eq(R.classifyRefusal({ code: "RENDERER_BUSY", http: 503 }), { kind: "temporary", code: "RENDERER_BUSY", countsAttempt: false }, "§8 the renderer busy: temporary, no attempt used");
@@ -308,7 +322,7 @@ for (const text of [
 section("§11 the module stays pure");
 const MOD = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-rules.js"), "utf8");
 const requires = [...MOD.matchAll(/require\(\s*["']([^"']{1,80})["']\s*\)/g)].map((m) => m[1]).sort();
-eq(requires, ["./cell-compare", "path"], "§11 it requires only path and lib/cell-compare.js");
+eq(requires, ["./cell-compare", "./free-mail-domains", "path"], "§11 it requires only path, lib/cell-compare.js and lib/free-mail-domains.js");
 ok(!/\bfs\.|process\.env|\bfetch\(|Date\.now\(\)|new Date\(\)/.test(MOD), "§11 no files, environment, network or clock");
 eq(R.REASON_CODES.length, new Set(R.REASON_CODES).size, "§11 every reason code once");
 for (const c of [...R.ATTENTION_REFUSALS]) ok(R.REASON_CODES.includes(c), `§11 refusal ${c} is a reason code`);

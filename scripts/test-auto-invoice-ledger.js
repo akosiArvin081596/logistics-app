@@ -193,22 +193,30 @@ L.setMeta(db, "baseline_at", T0);
 L.setMeta(db, "baseline_at", at(5));
 L.setMeta(db, "off_gap_since", "");
 eq(L.getMeta(db), { baseline_at: at(5), off_gap_since: "" }, "§6 meta is one value per key");
-eq(L.readSettings(db), { optOutDomains: [], confirmedBrokerDomains: [], unreadable: false }, "§6 no settings row: nothing opted out, nothing confirmed");
+const S = (optOutDomains, confirmedBrokerDomains, unreadable = false, dropped = []) => ({ optOutDomains, confirmedBrokerDomains, unreadable, dropped });
+eq(L.readSettings(db), S([], []), "§6 no settings row: nothing opted out, nothing confirmed");
 L.writeSettings(db, { optOutDomains: ["example-broker.test"] }, { by: "made-up-admin", nowIso: T0 });
-eq(L.readSettings(db), { optOutDomains: ["example-broker.test"], confirmedBrokerDomains: [], unreadable: false }, "§6 settings round-trip");
+eq(L.readSettings(db), S(["example-broker.test"], []), "§6 settings round-trip");
 eq(db.prepare("SELECT updated_by, updated_at FROM app_settings WHERE key = ?").get(L.SETTINGS_KEY), { updated_by: "made-up-admin", updated_at: T0 }, "§6 who changed them and when");
 db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run("{not json", L.SETTINGS_KEY);
-eq(L.readSettings(db), { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true }, "§6 an unreadable value fails closed (unreadable)");
+eq(L.readSettings(db), S([], [], true), "§6 a value that isn't JSON fails closed (unreadable)");
+db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: "example-optout.test", confirmedBrokerDomains: [] }), L.SETTINGS_KEY);
+eq(L.readSettings(db), S([], [], true), "§6 a list that isn't a list fails closed (unreadable)");
+db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify([]), L.SETTINGS_KEY);
+eq(L.readSettings(db).unreadable, true, "§6 a value that isn't an object fails closed");
 db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: ["ok.example.test", "not a domain"] }), L.SETTINGS_KEY);
-eq(L.readSettings(db), { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true }, "§6 a list with a bad entry fails closed too");
+eq(L.readSettings(db), S(["ok.example.test"], [], false, [{ list: "optOutDomains", domain: "not a domain", code: "OPT_OUT_INVALID" }]),
+	"§6 each list is read on its own: a bad entry is dropped and reported, the rest kept");
 L.writeSettings(db, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"] }, { by: "made-up-admin", nowIso: T0 });
-eq(L.readSettings(db), { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false }, "§6 both lists round-trip");
-db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: [], confirmedBrokerDomains: ["gmail.com"] }), L.SETTINGS_KEY);
-eq(L.readSettings(db).unreadable, true, "§6 a stored free-mail confirmation fails closed");
+eq(L.readSettings(db), S(["example-optout.test"], ["example-broker.test"]), "§6 both lists round-trip");
+// The review's case: a confirmed domain a newer free-mail list refuses.
+db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test", "comcast.net"] }), L.SETTINGS_KEY);
+eq(L.readSettings(db), S(["example-optout.test"], ["example-broker.test"], false, [{ list: "confirmedBrokerDomains", domain: "comcast.net", code: "CONFIRMED_DOMAIN_FREEMAIL" }]),
+	"§6 a stored confirmation a newer rule refuses: only that entry is dropped, the opt-outs and other confirmations stand");
 db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: ["example-optout.test"] }), L.SETTINGS_KEY);
-eq(L.readSettings(db), { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: [], unreadable: false }, "§6 a row from before the confirmed list: nothing confirmed");
+eq(L.readSettings(db), S(["example-optout.test"], []), "§6 a row from before the confirmed list: nothing confirmed");
 const bare = new Database(":memory:");
-eq(L.readSettings(bare), { optOutDomains: [], confirmedBrokerDomains: [], unreadable: false }, "§6 no app_settings table: nothing opted out");
+eq(L.readSettings(bare), S([], []), "§6 no app_settings table: nothing opted out");
 
 // ------------------------------------------------------------------ §7
 section("§7  local records");
