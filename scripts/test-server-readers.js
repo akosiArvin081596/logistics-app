@@ -13,15 +13,18 @@
  *      shape it refuses
  *   §2 the reader detector, on made-up snippets
  *   §3 every file under scripts/ that reads server.js reads it through the
- *      helper, or ALLOW names it with its reason; no ALLOW entry is stale
+ *      helper, or ALLOW names it with its reason; no list entry is stale
  *   §4 a folder scanner that takes server.js and lib/ as code roots covers
- *      routes/ too: it names routes/ or reads server.js through the helper
+ *      routes/ too: it names routes/ or reads server.js only through the
+ *      helper (allowlisted files included; BEFORE_FIRST_MOVE names the ones
+ *      this change may not edit)
+ *   §5 ALLOW and BEFORE_FIRST_MOVE are empty before server.js mounts a module
  *
  * The detector is a heuristic over source text (comments dropped, literals
  * tokenized). A read is readFileSync() of a server.js path, directly, through
  * a variable or a list holding one, or through a local function that reads.
- * In a file that takes the text from the helper, a server.js name left in a
- * list or handed to a local function is a label, not a read.
+ * A file on LABELS that takes the text from the helper may keep a server.js
+ * name in a list or a local reader's call as a label.
  *
  * --list prints every scripts/ file that names server.js: file, class, how.
  *
@@ -43,6 +46,7 @@ const ROOT = path.join(__dirname, "..");
 // when its file moves to the helper; a stale entry fails §3.
 const owned = (branch) => `changed by open work on ${branch}: its owner moves it to the helper when that lands`;
 const ADMIN = "admin or operator script run on production data: moves to the helper with ledger-world, in its own change";
+const CHANGED_ON_MAIN = "changed on main after this branch's base: moves to the helper once the branch is updated";
 const ALLOW = new Map([
 	["scripts/audit-job-tracking-damage.js", ADMIN],
 	["scripts/correct-weekly-invoice.js", ADMIN],
@@ -87,14 +91,37 @@ const ALLOW = new Map([
 	["scripts/test-invoice-draft-bol.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-notes.js", owned("feat/broker-invoice-engine")],
 	["scripts/test-invoice-overrides.js", owned("feat/broker-invoice-engine")],
-	["scripts/test-invoice-period-guard.js", owned("fix/invoice-closed-month")],
-	["scripts/test-invoices-screen-totals.js", owned("fix/invoice-closed-month")],
+	["scripts/test-invoice-period-guard.js", CHANGED_ON_MAIN],
+	["scripts/test-invoices-screen-totals.js", CHANGED_ON_MAIN],
 ]);
 
-// Files the detector flags that read no server.js text, each with why.
+// Files the detector flags that read no server.js text, each with why. They
+// still run §4.
 const NOT_READERS = new Map([
 	["scripts/test-release-gate.js", "its lint path list names server.js; it reads package.json, not server.js"],
 	["scripts/test-test-selection.js", "its server.js lists and fixture runners are made-up trees for test-selection"],
+]);
+
+// Files that take server.js's text from the helper and also keep a server.js
+// name in a list or a call to a local reader: each reason says why that name
+// is only a label (the reader hands back the helper's text for it).
+const LABELS = new Map([
+	["scripts/test-closed-month-refusal-wording.js", "its file list keeps server.js as a path; the loop reads that entry through the helper"],
+	["scripts/test-kpi-schedule.js", "its two-file list keeps server.js as a name; the filter reads that entry through the helper"],
+	["scripts/test-pdf-browser-pipe.js", "its source-file list keeps server.js as a path; both sweeps read that entry through the helper"],
+	["scripts/test-ratecon-drive-folder-required.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it"],
+	["scripts/test-replica-snapshot.js", "its source list keeps server.js as a name; the map reads that entry through the helper"],
+	["scripts/test-sheet-id-required.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it, and run() boots the file"],
+	["scripts/test-truck-cost-amounts.js", "a [label, text] pair names server.js beside the helper's text"],
+]);
+
+// Folder scanners that would miss routes/ and that this change may not edit,
+// each with what it waits for. §5 fails while any is left once a module is mounted.
+const BEFORE_FIRST_MOVE = new Map([
+	["scripts/replica/remote/settings.js", "replica tool that scans a deployed app's server.js and lib/: covers routes/ with the admin scripts' change"],
+	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
+	["scripts/test-no-production-defaults.js", "scans server.js and lib/; changed by open work on feat/ratecon-pdf-viewer-gate, whose owner adds routes/ or the helper"],
+	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
 ]);
 
 // ── the detector ──────────────────────────────────────────────────────────────
@@ -282,7 +309,9 @@ function joinedPaths(code, lits) {
 	return out;
 }
 
-function classify(text) {
+// `labels`: the file is on LABELS, so where it takes the text from the helper,
+// a server.js name in a list or handed to a local function is a label.
+function classify(text, { labels = false } = {}) {
 	const { code, lits } = tokenize(text);
 	const readers = localReaders(code);
 	const uses = [];
@@ -303,11 +332,12 @@ function classify(text) {
 	}
 	const readsFiles = /\b(?:readFileSync|readFile)\s*\(/.test(code);
 	const helper = lits.some((l) => l.kind === "string" && HELPER_RE.test(l.value));
-	// Where the helper supplies server.js's text, a server.js name left in a list
-	// or handed to a local function is a label; a path read by readFileSync is not.
-	const reads = uses.filter((u) => (u.read === true || (u.read === null && readsFiles)) && !(helper && (u.by === "list" || u.by === "local")));
+	const raw = uses.filter((u) => u.read === true || (u.read === null && readsFiles));
+	const isLabel = (u) => labels && helper && (u.by === "list" || u.by === "local");
+	const reads = raw.filter((u) => !isLabel(u));
 	const folders = joinedPaths(code, lits);
-	const strs = lits.filter((l) => l.kind !== "regex").map((l) => l.value.replace(/^\.\//, ""));
+	// A quoted glob ("'lib/*.js'", a shell argument) names the folder too.
+	const strs = lits.filter((l) => l.kind !== "regex").map((l) => l.value.replace(/^(['"])(.*)\1$/, "$2").replace(/^\.\//, ""));
 	const res = lits.filter((l) => l.kind === "regex").map((l) => l.value);
 	// lib/ as a folder (path.join(ROOT, "lib"), "lib/", "lib/*.js", /^lib\//),
 	// not one file in it; routes/ named in any form.
@@ -315,6 +345,7 @@ function classify(text) {
 	const namesRoutes = folders.some((f) => f === "routes" || f.startsWith("routes/")) || strs.some((v) => v.startsWith("routes/")) || res.some((r) => /routes\\?\//.test(r));
 	return {
 		reads,
+		labelled: raw.length - reads.length,
 		uses,
 		helper,
 		worlds: [...new Set(lits.filter((l) => l.kind === "string" && WORLD_RE.test(l.value)).map((l) => path.posix.basename(l.value).replace(/\.js$/, "")))],
@@ -323,6 +354,17 @@ function classify(text) {
 		namesRoutes,
 		codeNamesServer: uses.length > 0 || res.some((r) => /server\\\.js/.test(r)),
 	};
+}
+
+// A folder scanner that takes server.js and lib/ as code roots but would miss
+// routes/: it names no routes/ and reads server.js other than only through the helper.
+const scansWithoutRoutes = (c) => c.scanner && c.namesLib && c.codeNamesServer && !c.namesRoutes && (!c.helper || c.reads.length > 0);
+
+// The lists (name, Map) that still hold entries once `serverText` mounts a route
+// module: each waits for "nothing mounted yet".
+function mountGate(serverText, lists) {
+	if (!source.mountLines(serverText.split("\n")).length) return [];
+	return lists.filter(([, m]) => m.size).map(([name, m]) => `${name} (${m.size})`);
 }
 
 // The class of a file for --list and §3: how it reaches server.js's text.
@@ -352,7 +394,7 @@ function list() {
 	const rows = [];
 	for (const f of scriptFiles()) {
 		const text = fs.readFileSync(path.join(ROOT, f), "utf8");
-		const c = classify(text);
+		const c = classify(text, { labels: LABELS.has(f) });
 		if (!/server\.js/.test(text) && !c.worlds.length && !c.helper) continue;
 		const { cls, how } = NOT_READERS.has(f) ? { cls: "boot-or-path", how: NOT_READERS.get(f) } : classOf(text, c);
 		rows.push(`${f}\t${cls}\t${how}${ALLOW.has(f) ? `\tallowed: ${ALLOW.get(f)}` : ""}`);
@@ -481,9 +523,27 @@ console.log("§1 server-source");
 	const lifted = closure(v.text, { routes: ['app.get("/api/beta", (req, res) => {'], provided: ["app"] });
 	ok("§1.3 server-lift lifts a moved route and what it uses from the virtual source", lifted.names.includes("shout") && lifted.text.includes('app.get("/api/beta"'));
 	eq("§1.3 the virtual source declares nothing twice", [...indexDeclarations(v.text).dupes], []);
+	eq("§1.3 routeContextLines: a one-line ROUTE_CONTEXT", source.routeContextLines(v.text), { first: 11, last: 11 });
+	eq("§1.3 routeContextLines: one over lines, through its \"};\"", source.routeContextLines("a;\nconst ROUTE_CONTEXT = {\n\tapp,\n\trequire,\n};\nb;\n"), { first: 2, last: 5 });
+	eq("§1.3 routeContextLines: none", source.routeContextLines("const a = 1;\n"), null);
+	throwsLike("§1.3 routeContextLines: one that never closes is an error", () => source.routeContextLines("const ROUTE_CONTEXT = {\n\tapp,\n"), /never closes/);
 
+	eq("§1.4 serverOverride: none set", source.serverOverride(), null);
 	process.env.SERVER_ROOT = path.join(tmp, "base");
-	eq("§1.4 SERVER_ROOT names a base folder", source.serverSource(), v.text);
+	const notes = [];
+	const stderrWrite = process.stderr.write;
+	process.stderr.write = (s) => { notes.push(String(s)); return true; };
+	let fromRoot;
+	try {
+		fromRoot = source.serverSource();
+		source.serverSource();
+	} finally {
+		process.stderr.write = stderrWrite;
+	}
+	eq("§1.4 SERVER_ROOT names a base folder", fromRoot, v.text);
+	eq("§1.4 serverOverride: SERVER_ROOT", source.serverOverride(), "SERVER_ROOT");
+	ok("§1.4 following an override prints one stderr line per process, naming it and the file",
+		notes.length === 1 && /^server-source: SERVER_ROOT is set; reading .*server\.js/.test(notes[0]), notes);
 	delete process.env.SERVER_ROOT;
 	process.env.SERVER_JS = path.join(tmp, "base", "server.js");
 	eq("§1.4 SERVER_JS names one file; its routes/ beside it splice in", source.serverSource(), v.text);
@@ -565,18 +625,30 @@ console.log("\n§2 the reader detector");
 		["a world helper", 'const W = require("./lib/work-days-world");', "world-helper"],
 		["a made-up tree's file", 'const tree = { "server.js": "process.exit(3)\\n", ".env": "" };\nfs.readFileSync(f);', "boot-or-path"],
 		["another machine's copy", 'const rec = { pm_exec_path: `/var/www/${name}/server.js` };\nfs.readFileSync(f);', "mention"],
-		["a list label beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nfor (const f of files) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }', "server-source"],
-		["a local read helper beside the helper", 'const read = (rel) => (rel === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(path.join(ROOT, rel), "utf8"));\nconst s = read("server.js");', "server-source"],
+		["a raw local read beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst SRC = serverSource();\nconst read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");\nconst raw = read("server.js");', "local-read-helper"],
+		["a raw pushed list beside the helper", 'const SRC = require("./lib/server-source").serverSource();\nconst files = [];\nfiles.push("server.js");\nfor (const f of files) fs.readFileSync(path.join(ROOT, f), "utf8");', "list"],
+		["a list label beside the helper, not on LABELS", 'const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nfor (const f of files) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }', "list"],
 		["a direct read beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst raw = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");', "direct"],
 		["a path variable beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst SERVER = path.join(ROOT, "server.js");\nconst raw = fs.readFileSync(SERVER, "utf8");', "path-variable"],
 	];
 	for (const [name, text, want] of cases) eq(`§2 ${name}: ${want}`, cls(text), want);
-	const scan = (text) => { const c = classify(text); return c.scanner && c.namesLib && c.codeNamesServer && !c.helper && !c.namesRoutes; };
+	const labelled = (text) => classOf(text, classify(text, { labels: true })).cls;
+	eq("§2 on LABELS, a list label beside the helper: server-source", labelled('const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nfor (const f of files) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }'), "server-source");
+	eq("§2 on LABELS, a local reader that routes server.js to the helper: server-source", labelled('const read = (rel) => (rel === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(path.join(ROOT, rel), "utf8"));\nconst s = read("server.js");'), "server-source");
+	eq("§2 on LABELS, a direct read beside the helper is still a read: direct", labelled('const { serverSource } = require("./lib/server-source");\nconst raw = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");'), "direct");
+	eq("§2 on LABELS without the helper, a pushed list is still a read: list", labelled('const files = [];\nfiles.push("server.js");\nfor (const f of files) fs.readFileSync(path.join(ROOT, f), "utf8");'), "list");
+	const scan = (text) => scansWithoutRoutes(classify(text));
 	ok("§2 a scanner of server.js and lib/ only is caught", scan('const files = execFileSync("git", ["ls-files"]).toString().split("\\n").filter((f) => f === "server.js" || f.startsWith("lib/"));'));
 	ok("§2 the same scanner naming routes/ passes", !scan('const files = execFileSync("git", ["ls-files"]).toString().split("\\n").filter((f) => f === "server.js" || f.startsWith("lib/") || f.startsWith("routes/"));'));
 	ok("§2 a readdir scanner of lib/ that reads server.js through the helper passes", !scan('const { serverSource } = require("./lib/server-source");\nconst texts = [serverSource(), ...fs.readdirSync(path.join(ROOT, "lib")).map((f) => fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))];'));
 	ok("§2 scripts/lib and one lib/ file are not the lib/ folder", !classify('const x = require(path.join(ROOT, "scripts", "lib", "server-lift"));\nconst y = require(path.join(ROOT, "lib", "app-time.js"));\nfs.readdirSync(path.join(ROOT, "docs"));\nfs.existsSync(path.join(ROOT, "server.js"));').namesLib);
 	ok("§2 a lib/ glob and a /^lib\\// filter are the lib/ folder", classify('const a = ["lib/*.js"];').namesLib && classify("const b = files.filter((f) => /^lib\\//.test(f));").namesLib);
+	ok("§2 a quoted glob (a shell argument) is the lib/ folder", classify("const LINT = [\"server.js\", \"'lib/*.js'\"];").namesLib);
+	ok("§2 a scanner that reads server.js raw beside the helper is caught",
+		scan('const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", ...fs.readdirSync(path.join(ROOT, "lib"))];\nfor (const f of files) fs.readFileSync(path.join(ROOT, f), "utf8");'));
+	const MOUNTED = 'require("./routes/alpha")(ROUTE_CONTEXT);\napp.get("*", (req, res) => {\n});\n';
+	eq("§2 the mount gate: nothing mounted, every list may hold entries", mountGate("const a = 1;\n", [["ALLOW", new Map([["x", "y"]])]]), []);
+	eq("§2 the mount gate: a module mounted, a list with entries fails", mountGate(MOUNTED, [["ALLOW", new Map([["x", "y"]])], ["EMPTY", new Map()]]), ["ALLOW (1)"]);
 }
 
 // ── §3 and §4 the tree ────────────────────────────────────────────────────────
@@ -584,25 +656,35 @@ console.log("\n§3 every scripts/ reader of server.js goes through scripts/lib/s
 {
 	const direct = [];
 	const scanners = [];
-	const found = new Set();
+	const reading = new Set();
+	const scanning = new Set();
+	const labelled = new Set();
 	for (const f of scriptFiles()) {
 		if (f === "scripts/lib/server-source.js" || f === "scripts/test-server-readers.js") continue;
 		const text = fs.readFileSync(path.join(ROOT, f), "utf8");
-		const c = classify(text);
-		const scansLib = c.scanner && c.namesLib && c.codeNamesServer && !c.helper && !c.namesRoutes;
-		if (c.reads.length || scansLib) found.add(f);
-		if (ALLOW.has(f) || NOT_READERS.has(f)) continue;
-		if (c.reads.length) direct.push(`${f} (${classOf(text, c).how})`);
-		if (scansLib) scanners.push(f);
+		const c = classify(text, { labels: LABELS.has(f) });
+		if (c.reads.length) reading.add(f);
+		if (c.labelled) labelled.add(f);
+		if (scansWithoutRoutes(c)) scanning.add(f);
+		if (c.reads.length && !ALLOW.has(f) && !NOT_READERS.has(f)) direct.push(`${f} (${classOf(text, c).how})`);
+		if (scanning.has(f) && !BEFORE_FIRST_MOVE.has(f)) scanners.push(f);
 	}
 	ok(`§3 no script reads server.js but through the helper (${ALLOW.size} on ALLOW still do)`, !direct.length,
 		`read server.js directly; use serverSource() from scripts/lib/server-source.js:\n      ${direct.join("\n      ")}`);
-	const stale = [...ALLOW.keys(), ...NOT_READERS.keys()].filter((f) => !found.has(f));
-	ok("§3 every ALLOW and NOT_READERS entry is still flagged (remove the ones that aren't)", !stale.length, stale.join(", "));
-	ok("§3 every entry has its reason", [...ALLOW.values(), ...NOT_READERS.values()].every((r) => typeof r === "string" && r.length > 10));
+	const stale = [
+		...[...ALLOW.keys(), ...NOT_READERS.keys()].filter((f) => !reading.has(f)),
+		...[...LABELS.keys()].filter((f) => !labelled.has(f)),
+		...[...BEFORE_FIRST_MOVE.keys()].filter((f) => !scanning.has(f)),
+	];
+	ok("§3 every ALLOW, NOT_READERS, LABELS and BEFORE_FIRST_MOVE entry is still needed (remove the ones that aren't)", !stale.length, stale.join(", "));
+	ok("§3 every entry has its reason", [ALLOW, NOT_READERS, LABELS, BEFORE_FIRST_MOVE].every((m) => [...m.values()].every((r) => typeof r === "string" && r.length > 10)));
 	console.log("\n§4 folder scanners of server.js and lib/ cover routes/");
-	ok("§4 every scanner that takes server.js and lib/ as code roots names routes/ or reads through the helper", !scanners.length,
+	ok("§4 every scanner that takes server.js and lib/ as code roots names routes/ or reads only through the helper", !scanners.length,
 		`add routes/ to its roots or read server.js through serverSource():\n      ${scanners.join("\n      ")}`);
+	console.log("\n§5 the lists wait for nothing mounted");
+	const waiting = mountGate(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), [["ALLOW", ALLOW], ["BEFORE_FIRST_MOVE", BEFORE_FIRST_MOVE]]);
+	ok("§5 server.js mounts no route module while ALLOW or BEFORE_FIRST_MOVE holds an entry", !waiting.length,
+		`a module is mounted; move these files to the helper (or routes/) first: ${waiting.join(", ")}`);
 }
 
 console.log(failed ? `\ntest-server-readers: ${failed} failed` : "\ntest-server-readers: all passed");
