@@ -47,7 +47,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "auto-invoice-report-"));
 const DB_FILE = path.join(TMP, "app.db");
 const UPLOADS = path.join(TMP, "uploads");
 fs.mkdirSync(UPLOADS);
-for (const f of ["pod-0001.pdf", "pod-0002.pdf", "pod-0003-none.pdf", "pod-0004.pdf", "pod-0005.pdf", "pod-0006.pdf", "pod-0007.pdf", "pod-0014.pdf", "pod-0015.pdf"]) {
+for (const f of ["pod-0001.pdf", "pod-0002.pdf", "pod-0003-none.pdf", "pod-0004.pdf", "pod-0005.pdf", "pod-0006.pdf", "pod-0007.pdf", "pod-0014.pdf", "pod-0015.pdf", "pod-0016.pdf"]) {
 	fs.writeFileSync(path.join(UPLOADS, f), "%PDF-1.4 made-up\n");
 }
 
@@ -74,6 +74,7 @@ const ROWS = [
 	["LD-TEST-0013", "In Transit", BROKER, "", ""],
 	["LD-TEST-0014", "Delivered", OTHER, "", ""],
 	["LD-TEST-0015", "Delivered", "not an email", "10/15/2026 9:00:00", "10/15/2026 9:00:00"],
+	["LD-TEST-0016", "Delivered", "made-up-dispatch@gmail.com", "10/16/2026 9:00:00", "10/16/2026 9:00:00"],
 ];
 const VALUES = [HEADERS, ...ROWS.map(([id, status, email, upd, comp]) => [id, "TR-1", "Made-up Driver", "", status, "Made-up Agent", email, upd, comp, "$1,000.00"])];
 
@@ -86,6 +87,7 @@ function makeDb() {
 			total TEXT, broker_name TEXT, order_number TEXT, via TEXT, created_at TEXT, created_by TEXT, edited INTEGER DEFAULT 0, edited_fields TEXT DEFAULT '');
 		CREATE TABLE deleted_loads (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, row_index INTEGER DEFAULT 0, deleted_at DATETIME, deleted_by TEXT DEFAULT '');
 		CREATE TABLE broker_invoice_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, load_key TEXT NOT NULL, voided_at TEXT);
+		CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
 	`);
 	const doc = db.prepare("INSERT INTO documents (load_id, type, file_name, drive_file_id, drive_url, uploaded_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
 	doc.run("LD-TEST-0001", "POD", "pod-0001.pdf", "", "/uploads/pod-0001.pdf", "2026-10-01 14:00:00", null);
@@ -101,6 +103,10 @@ function makeDb() {
 	doc.run("LD-TEST-0014", "POD", "pod-0014.pdf", "", "", "2026-10-14 14:00:00", null);
 	doc.run("LD-TEST-0015", "POD", "pod-0015.pdf", "", "", "2026-10-15 14:00:00", null);
 	doc.run("LD-TEST-0015", "BOL", "bol-0015.pdf", "", "", "2026-10-15 14:00:00", null);
+	doc.run("LD-TEST-0016", "POD", "pod-0016.pdf", "", "", "2026-10-16 14:00:00", null);
+	// The copy's settings confirm one broker domain; example-broker.test is not confirmed.
+	db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)")
+		.run(JSON.stringify({ optOutDomains: [], confirmedBrokerDomains: ["example-carrier-ops.test"] }));
 	const draft = db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_at, edited, edited_fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
 	draft.run("LD-TEST-0001", "10032026-1", "billing@example-broker.test", "ratecon", "imap", "2026-10-03T15:00:00Z", 0, "");
 	draft.run("LD-TEST-0004", "10052026-1", "ap@example-bison-ap.test", "default", "imap", "2026-10-05T15:00:00Z", 1, "orderNumber,poNumber");
@@ -141,29 +147,41 @@ const db = new Database(DB_FILE, { readonly: true, fileMustExist: true });
 const zone = "America/New_York";
 const r = report.buildRetro({ values: VALUES, db, uploadsDir: UPLOADS, zone, helpers, today: "2026-10-20" });
 eq(r.window, { since: "2026-08-22", until: "2026-10-20", zone }, "§1 the default window is the 60 days ending today");
-eq(r.delivered, { inWindow: 10, byCompletionDate: 8, byPodUpload: 2, dateUnknown: 1 }, "§1 delivered: by Completion Date, else the POD upload; one can't be placed");
+eq(r.delivered, { inWindow: 11, byCompletionDate: 9, byPodUpload: 2, dateUnknown: 1 }, "§1 delivered: by Completion Date, else the POD upload; one can't be placed");
 eq(r.buttonDrafts, { inWindow: 5, loads: 5, deliveredLoadsWithOne: 4 }, "§1 button drafts made in the window, and delivered loads with one (any time)");
 const byLoad = Object.fromEntries(r.loads.map((l) => [l.load, l]));
-eq(Object.keys(byLoad).sort(), ["...0001", "...0002", "...0003", "...0004", "...0005", "...0006", "...0007", "...0008", "...0014", "...0015"],
+eq(Object.keys(byLoad).sort(), ["...0001", "...0002", "...0003", "...0004", "...0005", "...0006", "...0007", "...0008", "...0014", "...0015", "...0016"],
 	"§1 the loads in the window, by their last four characters (the duplicate row is one load)");
 eq(byLoad["...0005"] && [byLoad["...0005"].day, byLoad["...0005"].dayFrom], ["2026-10-05", "pod"], "§1 no Completion Date: the POD's upload time, as a business day");
 eq(byLoad["...0007"] && byLoad["...0007"].day, "2026-10-07", "§1 an ISO Completion Date is read too");
-eq(r.verdicts.WOULD_ATTEMPT, { count: 4, reasons: {} }, "§1 WOULD_ATTEMPT: 0001, 0002, 0004 (Bison), 0005");
-eq(r.verdicts.WOULD_WAIT, { count: 1, reasons: { WAITING_POD: 1 } }, "§1 WOULD_WAIT: 0003 (its only POD row was deleted)");
-eq(r.verdicts.WOULD_NEED_ATTENTION, { count: 5, reasons: { NO_BROKER_EMAIL: 2, ADVANCE_LINES: 1, POD_UNREADABLE: 1, NO_DELIVERY_DATE: 1 } },
-	"§1 WOULD_NEED_ATTENTION: 0006 and 0015 no broker Email, 0007 an advance line, 0008 its POD file gone, 0014 no delivery date");
-eq(r.verdicts.WOULD_SKIP, { count: 0, reasons: {} }, "§1 nothing skipped: no opt-outs yet, and a hand draft doesn't count");
+eq(r.settings, { confirmedBrokerDomains: 1, optOutDomains: 0, unreadable: false }, "§1 the copy's own settings: one confirmed broker domain");
+// With the copy's settings: only example-carrier-ops.test is confirmed.
+eq(r.verdicts.WOULD_ATTEMPT, { count: 1, reasons: {} }, "§1 WOULD_ATTEMPT: 0004 (Bison) only");
+eq(r.verdicts.WOULD_WAIT, { count: 1, reasons: { WAITING_POD: 1 } }, "§1 WOULD_WAIT: 0003 (confirmed domain; its only POD row was deleted)");
+eq(r.verdicts.WOULD_NEED_ATTENTION, { count: 9, reasons: { BROKER_DOMAIN_UNCONFIRMED: 3, NO_BROKER_EMAIL: 2, ADVANCE_LINES: 1, POD_UNREADABLE: 1, NO_DELIVERY_DATE: 1, BROKER_EMAIL_FREEMAIL: 1 } },
+	"§1 WOULD_NEED_ATTENTION: 0001, 0002 and 0005 on an unconfirmed domain, 0016 free mail, and the rest as before");
+eq(r.verdicts.WOULD_SKIP, { count: 0, reasons: {} }, "§1 nothing skipped: no opt-outs, and a hand draft doesn't count");
+// If every domain that isn't free mail were confirmed.
+eq(r.verdictsIfConfirmed.WOULD_ATTEMPT, { count: 4, reasons: {} }, "§1 if confirmed, WOULD_ATTEMPT: 0001, 0002, 0004 (Bison), 0005");
+eq(r.verdictsIfConfirmed.WOULD_NEED_ATTENTION, { count: 6, reasons: { NO_BROKER_EMAIL: 2, ADVANCE_LINES: 1, POD_UNREADABLE: 1, NO_DELIVERY_DATE: 1, BROKER_EMAIL_FREEMAIL: 1 } },
+	"§1 if confirmed, WOULD_NEED_ATTENTION: free mail is never assumed confirmed");
+eq([byLoad["...0001"].verdict, byLoad["...0001"].code, byLoad["...0001"].ifConfirmed], ["WOULD_NEED_ATTENTION", "BROKER_DOMAIN_UNCONFIRMED", { verdict: "WOULD_ATTEMPT", code: "" }], "§1 per load: both verdicts");
+eq([byLoad["...0016"].freemail, byLoad["...0016"].domain, byLoad["...0003"].confirmed], [true, "gmail.com", true], "§1 per load: free mail and confirmed are marked");
 eq(r.attemptDetail, { bison: 1, otherWithRateConOnFile: 1, otherRateConFromDriveOrNone: 2 }, "§1 WOULD_ATTEMPT detail");
 eq(r.handDraftCompare, { drafted: 3, A: 1, B: 1, C: 1, editedFields: { orderNumber: 1, poNumber: 1 } }, "§1 (A) 0001 same; (B) 0005 went to the default inbox; (C) 0004 edited");
 eq([byLoad["...0001"].compare, byLoad["...0004"].compare, byLoad["...0005"].compare, byLoad["...0002"].compare], ["A", "C", "B", null], "§1 the comparison per load");
 eq(r.medianDaysToHandDraft, 1, "§1 median days from delivered to the first button draft");
 const dom = Object.fromEntries(r.perDomain.map((d) => [d.domain, d]));
-eq(dom["example-broker.test"], { domain: "example-broker.test", delivered: 3, wouldAttempt: 3, withButtonDraft: 2, buttonDraftsInWindow: 3 }, "§1 per domain: the broker's delivered loads and drafts");
-eq(dom["example-carrier-ops.test"], { domain: "example-carrier-ops.test", delivered: 4, wouldAttempt: 0, withButtonDraft: 1, buttonDraftsInWindow: 0 }, "§1 per domain: a draft before the window counts for the load, not the window");
-eq(dom["bisontransport.com"], { domain: "bisontransport.com", delivered: 1, wouldAttempt: 1, withButtonDraft: 1, buttonDraftsInWindow: 1 }, "§1 per domain: Bison");
-eq(dom["(no broker email)"], { domain: "(no broker email)", delivered: 2, wouldAttempt: 0, withButtonDraft: 0, buttonDraftsInWindow: 0 }, "§1 per domain: loads with no readable broker Email");
-eq(dom["(not on the sheet)"], { domain: "(not on the sheet)", delivered: 0, wouldAttempt: 0, withButtonDraft: 0, buttonDraftsInWindow: 1 }, "§1 per domain: a draft for a load not on the sheet");
-eq(r.dateUnknown, { count: 1, verdicts: { WOULD_ATTEMPT: { count: 0, reasons: {} }, WOULD_WAIT: { count: 1, reasons: { WAITING_POD: 1 } }, WOULD_NEED_ATTENTION: { count: 0, reasons: {} }, WOULD_SKIP: { count: 0, reasons: {} } } }, "§1 date unknown: 0009, counted on its own");
+const D = (domain, freemail, confirmed, delivered, wouldAttempt, wouldAttemptIfConfirmed, withButtonDraft, buttonDraftsInWindow) =>
+	({ domain, freemail, confirmed, delivered, wouldAttempt, wouldAttemptIfConfirmed, withButtonDraft, buttonDraftsInWindow });
+eq(dom["example-broker.test"], D("example-broker.test", false, false, 3, 0, 3, 2, 3), "§1 per domain: an unconfirmed broker would draft 3 once confirmed");
+eq(dom["example-carrier-ops.test"], D("example-carrier-ops.test", false, true, 4, 0, 0, 1, 0), "§1 per domain: a confirmed broker; a draft before the window counts for the load, not the window");
+eq(dom["bisontransport.com"], D("bisontransport.com", false, false, 1, 1, 1, 1, 1), "§1 per domain: Bison needs no confirmation");
+eq(dom["gmail.com"], D("gmail.com", true, false, 1, 0, 0, 0, 0), "§1 per domain: free mail never drafts");
+eq(dom["(no broker email)"], D("(no broker email)", false, false, 2, 0, 0, 0, 0), "§1 per domain: loads with no readable broker Email");
+eq(dom["(not on the sheet)"], D("(not on the sheet)", false, false, 0, 0, 0, 0, 1), "§1 per domain: a draft for a load not on the sheet");
+eq(r.dateUnknown, { count: 1, verdicts: { WOULD_ATTEMPT: { count: 0, reasons: {} }, WOULD_WAIT: { count: 0, reasons: {} }, WOULD_NEED_ATTENTION: { count: 1, reasons: { BROKER_DOMAIN_UNCONFIRMED: 1 } }, WOULD_SKIP: { count: 0, reasons: {} } } }, "§1 date unknown: 0009, counted on its own");
+ok(/\* example-carrier-ops\.test/.test(r.text) && /! gmail\.com/.test(r.text) && /If every broker domain that isn't free mail were confirmed/.test(r.text), "§1 the text marks confirmed and free-mail domains and prints both splits");
 ok(!byLoad["...0010"] && !byLoad["...0011"] && !byLoad["...0012"] && !byLoad["...0013"], "§1 out of window, cancelled, soft-deleted and in transit loads are not counted");
 const narrow = report.buildRetro({ values: VALUES, db, uploadsDir: UPLOADS, zone, helpers, since: "2026-10-04", until: "2026-10-05", today: "2026-10-20" });
 eq(narrow.loads.map((l) => l.load).sort(), ["...0004", "...0005"], "§1 --since/--until bound the window, both days included");

@@ -21,6 +21,8 @@ export const AUTO_INVOICE_REASONS = Object.freeze({
   DRAFTED_BY_HAND: { short: 'drafted by hand', text: 'Someone drafted this invoice by hand.' },
   BROKER_OPTED_OUT: { short: 'broker opted out', text: 'This broker is opted out of automatic drafts.' },
   NO_BROKER_EMAIL: { short: 'no broker email', text: 'Job Tracking has no broker Email for this load. Draft it by hand.' },
+  BROKER_EMAIL_FREEMAIL: { short: 'broker email is free mail', text: "The broker Email on Job Tracking is a free-mail address, so it can't vouch for a billing email. Draft it by hand." },
+  BROKER_DOMAIN_UNCONFIRMED: { short: 'broker domain not confirmed', text: "This broker's email domain isn't on the confirmed list. Confirm it in the automatic-draft settings, then Try again, or draft it by hand." },
   CLOSED_MONTH: { short: 'closed month', text: 'The load is in a closed month. Draft it by hand if it still needs an invoice.' },
   MONTH_UNKNOWN: { short: "month can't be told", text: "The load's month can't be told from its dates. Check its dates, then draft it by hand." },
   NO_DELIVERY_DATE: { short: 'no delivery date', text: 'The load has no delivery date. Set it on Job Tracking, then Try again, or draft it by hand.' },

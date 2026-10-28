@@ -25,16 +25,18 @@
 //   - delivered loads in the window, and the button drafts made in it;
 //   - the WOULD_ATTEMPT / WOULD_WAIT / WOULD_NEED_ATTENTION / WOULD_SKIP split,
 //     with reason codes;
-//   - for WOULD_ATTEMPT loads drafted by hand: (A) the hand draft went where the
-//     job would send it and nothing was edited, (B) the recipient rule would hand
-//     it to a person, (C) fields were edited (named, never their values);
-//   - per broker domain: delivered loads, WOULD_ATTEMPT, loads with a button
-//     draft, button drafts made in the window.
+//   - the same split again as if every broker domain that isn't free mail were
+//     confirmed (BROKER_DOMAIN_UNCONFIRMED otherwise hides the other reasons);
+//   - for those WOULD_ATTEMPT loads drafted by hand: (A) the hand draft went where
+//     the job would send it and nothing was edited, (B) the recipient rule would
+//     hand it to a person, (C) fields were edited (named, never their values);
+//   - per broker domain: confirmed or free mail, delivered loads, WOULD_ATTEMPT
+//     now and if confirmed, loads with a button draft, button drafts in the window.
 // The delivered day is the sheet's Completion Date, else the upload time of the
 // load's first live POD row, else "date unknown" (counted on their own). The
 // closed-month check is not applied: a month closed today was open when the load
-// was delivered. Opt-outs are none (none are set yet) and Bison's recipient is
-// taken as configured (production sets it).
+// was delivered. Opt-outs and confirmed domains are the copy's own settings (none
+// until set) and Bison's recipient is taken as configured (production sets it).
 //
 //   node scripts/auto-invoice-shadow-report.js --retro --db=<app.db>
 //     (--sheets-json=<sheets.json> | --values-json=<values.json>)
@@ -221,6 +223,8 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 	const cols = rules.jobColumns(parsed.headers);
 	if (!cols.loadIdCol || !cols.statusCol) throw refused("the Job Tracking copy has no Load ID or status column");
 	const records = rules.indexRecords(ledger.readRecords(db));
+	// The copy's own automatic-draft settings (none until a Super Admin sets them).
+	const settings = ledger.readSettings(db);
 	const podReadable = uploadsDir
 		? (doc) => {
 			if (String(doc.drive_file_id || "")) return true;
@@ -239,6 +243,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		const rec = records.get(key);
 		const completed = rules.isCompletedStatus(row[cols.statusCol]);
 		const facts = rules.loadFacts({ row, cols, records: rec, bisonRecipientConfigured: true, podReadable,
+			optOutDomains: settings.optOutDomains, confirmedDomains: settings.confirmedBrokerDomains,
 			activeAdvanceLines: completed ? ledger.activeAdvanceLines(db, key) : 0 });
 		if (!facts.completed || !facts.live) continue;
 		let day = helpers.sheetDayKey(cols.completionCol ? row[cols.completionCol] : "");
@@ -248,6 +253,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 			dayFrom = day ? "pod" : "";
 		}
 		const verdict = rules.freeVerdict(facts, { checkMonth: false, checkDrafted: false });
+		const ifConfirmed = rules.freeVerdict(facts, { checkMonth: false, checkDrafted: false, assumeConfirmed: true });
 		const latestDraft = rec && rec.drafts.length ? rec.drafts[rec.drafts.length - 1] : null;
 		const entry = {
 			load: suffix(row[cols.loadIdCol]),
@@ -255,15 +261,20 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 			dayFrom,
 			verdict: rules.shadowVerdictOf(verdict.state),
 			code: verdict.code,
+			ifConfirmed: { verdict: rules.shadowVerdictOf(ifConfirmed.state), code: ifConfirmed.code },
 			domain: facts.brokerDomain || NO_DOMAIN,
 			bison: facts.isBison,
+			freemail: facts.brokerEmailFreemail,
+			confirmed: facts.brokerDomainConfirmed,
 			rateConOnFile: facts.rateConIds.length > 0,
 			handDrafted: Boolean(latestDraft),
 			compare: null,
 			editedFields: [],
 			daysToHandDraft: null,
 		};
-		if (latestDraft && entry.verdict === "WOULD_ATTEMPT") {
+		// Compared on the "if confirmed" verdict: the question is whether the domain
+		// is worth confirming.
+		if (latestDraft && entry.ifConfirmed.verdict === "WOULD_ATTEMPT") {
 			entry.compare = compareHandDraft(facts, latestDraft);
 			if (entry.compare === "C") entry.editedFields = String(latestDraft.edited_fields || "").split(",").map((f) => f.trim()).filter((f) => /^[A-Za-z]{1,40}$/.test(f));
 		}
@@ -277,9 +288,11 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 
 	const verdicts = emptyVerdicts();
 	loads.forEach((e) => tally(verdicts, e));
+	const verdictsIfConfirmed = emptyVerdicts();
+	loads.forEach((e) => tally(verdictsIfConfirmed, e.ifConfirmed));
 	const unknownVerdicts = emptyVerdicts();
 	unknown.forEach((e) => tally(unknownVerdicts, e));
-	const attempts = loads.filter((e) => e.verdict === "WOULD_ATTEMPT");
+	const attempts = loads.filter((e) => e.ifConfirmed.verdict === "WOULD_ATTEMPT");
 	const attemptDetail = {
 		bison: attempts.filter((e) => e.bison).length,
 		otherWithRateConOnFile: attempts.filter((e) => !e.bison && e.rateConOnFile).length,
@@ -310,7 +323,8 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 	const dom = (d) => {
 		let x = byDomain.get(d);
 		if (!x) {
-			x = { domain: d, delivered: 0, wouldAttempt: 0, withButtonDraft: 0, buttonDraftsInWindow: 0 };
+			x = { domain: d, freemail: rules.isFreemailDomain(d), confirmed: settings.confirmedBrokerDomains.includes(d), delivered: 0,
+				wouldAttempt: 0, wouldAttemptIfConfirmed: 0, withButtonDraft: 0, buttonDraftsInWindow: 0 };
 			byDomain.set(d, x);
 		}
 		return x;
@@ -319,6 +333,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 		const x = dom(e.domain);
 		x.delivered++;
 		if (e.verdict === "WOULD_ATTEMPT") x.wouldAttempt++;
+		if (e.ifConfirmed.verdict === "WOULD_ATTEMPT") x.wouldAttemptIfConfirmed++;
 		if (e.handDrafted) x.withButtonDraft++;
 	}
 	for (const d of draftsInWindow) dom(d.domain).buttonDraftsInWindow++;
@@ -340,7 +355,9 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 			loads: new Set(draftsInWindow.map((d) => d.key)).size,
 			deliveredLoadsWithOne: loads.filter((e) => e.handDrafted).length,
 		},
+		settings: { confirmedBrokerDomains: settings.confirmedBrokerDomains.length, optOutDomains: settings.optOutDomains.length, unreadable: settings.unreadable },
 		verdicts,
+		verdictsIfConfirmed,
 		attemptDetail,
 		handDraftCompare,
 		medianDaysToHandDraft: median(daysToDraft),
@@ -363,13 +380,15 @@ function textOf(r) {
 		`Automatic invoice drafts, retro sizing: loads delivered ${w.since} to ${w.until} (${w.zone})`,
 		`Delivered loads in the window: ${r.delivered.inWindow} (Completion Date ${r.delivered.byCompletionDate}, POD upload time ${r.delivered.byPodUpload}); date unknown: ${r.delivered.dateUnknown}, counted separately below`,
 		`Button drafts made in the window: ${r.buttonDrafts.inWindow}, on ${r.buttonDrafts.loads} loads; delivered loads in the window with a button draft: ${r.buttonDrafts.deliveredLoadsWithOne}`,
-		"What the job would have done (as if nobody had drafted them; the month check is not applied):",
+		`What the job would have done (as if nobody had drafted them; the month check is not applied), with this copy's ${r.settings.confirmedBrokerDomains} confirmed broker domain(s) and ${r.settings.optOutDomains} opt-out(s)${r.settings.unreadable ? " (its settings row is unreadable: read as none)" : ""}:`,
 		...VERDICT_ORDER.map((v) => `  ${v.padEnd(21)} ${String(r.verdicts[v].count).padStart(4)}${reasonText(r.verdicts[v].reasons)}`),
+		"If every broker domain that isn't free mail were confirmed:",
+		...VERDICT_ORDER.map((v) => `  ${v.padEnd(21)} ${String(r.verdictsIfConfirmed[v].count).padStart(4)}${reasonText(r.verdictsIfConfirmed[v].reasons)}`),
 		`  WOULD_ATTEMPT detail: Bison ${r.attemptDetail.bison}; other brokers with a rate con on file ${r.attemptDetail.otherWithRateConOnFile}; other brokers whose rate con would come from Drive, or is missing ${r.attemptDetail.otherRateConFromDriveOrNone}`,
-		`Of the WOULD_ATTEMPT loads, ${r.handDraftCompare.drafted} have a button draft: (A) likely the same draft ${r.handDraftCompare.A}; (B) the recipient rule hands it to a person ${r.handDraftCompare.B}; (C) edited by hand ${r.handDraftCompare.C}${reasonText(r.handDraftCompare.editedFields)}`,
+		`Of those WOULD_ATTEMPT loads, ${r.handDraftCompare.drafted} have a button draft: (A) likely the same draft ${r.handDraftCompare.A}; (B) the recipient rule hands it to a person ${r.handDraftCompare.B}; (C) edited by hand ${r.handDraftCompare.C}${reasonText(r.handDraftCompare.editedFields)}`,
 		`Median days from delivered to the first button draft: ${r.medianDaysToHandDraft === null ? "none" : r.medianDaysToHandDraft}`,
-		"Per broker domain: delivered / WOULD_ATTEMPT / with a button draft / button drafts made in the window",
-		...r.perDomain.map((d) => `  ${d.domain.padEnd(40)} ${String(d.delivered).padStart(4)} ${String(d.wouldAttempt).padStart(4)} ${String(d.withButtonDraft).padStart(4)} ${String(d.buttonDraftsInWindow).padStart(4)}`),
+		"Per broker domain (* confirmed, ! free mail): delivered / WOULD_ATTEMPT / WOULD_ATTEMPT if confirmed / with a button draft / button drafts made in the window",
+		...r.perDomain.map((d) => `  ${`${d.confirmed ? "*" : d.freemail ? "!" : " "} ${d.domain}`.padEnd(42)} ${[d.delivered, d.wouldAttempt, d.wouldAttemptIfConfirmed, d.withButtonDraft, d.buttonDraftsInWindow].map((n) => String(n).padStart(4)).join(" ")}`),
 		`Date unknown (completed, no Completion Date and no POD upload): ${r.dateUnknown.count}`,
 		...VERDICT_ORDER.filter((v) => r.dateUnknown.verdicts[v].count).map((v) => `  ${v.padEnd(21)} ${String(r.dateUnknown.verdicts[v].count).padStart(4)}${reasonText(r.dateUnknown.verdicts[v].reasons)}`),
 		r.podFilesChecked

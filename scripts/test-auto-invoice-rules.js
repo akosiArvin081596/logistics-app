@@ -7,7 +7,9 @@
 //   §2  load keys, statuses, addresses and domains; Bison and normalizeEmail()
 //       read as lib/broker-invoice.js reads them; opt-outs
 //   §3  the recipient rule: Bison's setting, or a documents email on exactly the
-//       sheet broker Email's domain; everything else goes to a person
+//       sheet broker Email's domain, which a person confirmed and isn't free
+//       mail; everything else goes to a person. The free-mail list; the
+//       confirmed list refuses free mail
 //   §4  Job Tracking columns, on a production-shaped header row
 //   §5  local records by load key, and the facts the free checks read
 //   §6  the free checks, in order
@@ -99,18 +101,35 @@ eq(R.normalizeOptOutDomains([]), { ok: true, domains: [] }, "§2 opt-outs: an em
 // ------------------------------------------------------------------ §3
 section("§3  the recipient rule");
 const sheet = "ops@example-broker.test";
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "billing@example-broker.test" }),
-	{ ok: true, to: "billing@example-broker.test", source: "ratecon" }, "§3 a documents email on the broker's own domain drafts");
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "Billing@EXAMPLE-BROKER.test." }).ok, true, "§3 the domain is compared in lower case");
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "ap@example-factor.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 another domain: a person");
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "billing@ap.example-broker.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 a subdomain: a person");
-eq(R.recipientRule({ brokerEmail: "ops@ap.example-broker.test", documentsEmail: "billing@example-broker.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 a parent domain: a person");
-eq(R.recipientRule({ brokerEmail: "Ops desk", documentsEmail: "billing@example-broker.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 a sheet Email with no domain: a person");
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "" }), { ok: false, code: "NO_BILLING_EMAIL" }, "§3 no documents email (the default inbox would be used): a person");
-eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "see attached" }), { ok: false, code: "NO_BILLING_EMAIL" }, "§3 a documents 'email' that isn't one: a person");
+const CONFIRMED = ["example-broker.test", "ap.example-broker.test"];
+const rr = (o) => R.recipientRule({ confirmedDomains: CONFIRMED, ...o });
+eq(rr({ brokerEmail: sheet, documentsEmail: "billing@example-broker.test" }),
+	{ ok: true, to: "billing@example-broker.test", source: "ratecon" }, "§3 a documents email on the broker's own confirmed domain drafts");
+eq(rr({ brokerEmail: sheet, documentsEmail: "Billing@EXAMPLE-BROKER.test." }).ok, true, "§3 the domain is compared in lower case");
+eq(rr({ brokerEmail: sheet, documentsEmail: "ap@example-factor.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 another domain: a person");
+eq(rr({ brokerEmail: sheet, documentsEmail: "billing@ap.example-broker.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 a subdomain: a person");
+eq(rr({ brokerEmail: "ops@ap.example-broker.test", documentsEmail: "billing@example-broker.test" }), { ok: false, code: "RECIPIENT_DOMAIN_MISMATCH" }, "§3 a parent domain: a person");
+eq(rr({ brokerEmail: "Ops desk", documentsEmail: "billing@example-broker.test" }), { ok: false, code: "NO_BROKER_EMAIL" }, "§3 a sheet Email with no domain: a person (NO_BROKER_EMAIL)");
+eq(rr({ brokerEmail: sheet, documentsEmail: "" }), { ok: false, code: "NO_BILLING_EMAIL" }, "§3 no documents email (the default inbox would be used): a person");
+eq(rr({ brokerEmail: sheet, documentsEmail: "see attached" }), { ok: false, code: "NO_BILLING_EMAIL" }, "§3 a documents 'email' that isn't one: a person");
+eq(R.recipientRule({ brokerEmail: sheet, documentsEmail: "billing@example-broker.test" }), { ok: false, code: "BROKER_DOMAIN_UNCONFIRMED" },
+	"§3 the domains match but nobody confirmed it: a person (rate-con text never chooses alone)");
+eq(rr({ brokerEmail: "ops@example-other.test", documentsEmail: "billing@example-other.test" }), { ok: false, code: "BROKER_DOMAIN_UNCONFIRMED" }, "§3 a domain not on the confirmed list: a person");
+eq(R.recipientRule({ brokerEmail: "ops@sub.example-broker.test", documentsEmail: "billing@sub.example-broker.test", confirmedDomains: ["example-broker.test"] }),
+	{ ok: false, code: "BROKER_DOMAIN_UNCONFIRMED" }, "§3 confirming a domain confirms no subdomain of it");
+eq(R.recipientRule({ brokerEmail: "made-up-dispatch@gmail.com", documentsEmail: "made-up-billing@gmail.com", confirmedDomains: ["gmail.com"] }),
+	{ ok: false, code: "BROKER_EMAIL_FREEMAIL" }, "§3 a free-mail broker Email: a person, even if somehow on the list");
+eq(rr({ brokerEmail: "made-up-ops@Outlook.com", documentsEmail: "billing@example-broker.test" }), { ok: false, code: "BROKER_EMAIL_FREEMAIL" }, "§3 free mail is matched in lower case");
 eq(R.recipientRule({ brokerEmail: "ops@bisontransport.com", bisonRecipient: "" }), { ok: false, code: "RECIPIENT_UNCONFIGURED" }, "§3 Bison with no recipient setting: a person");
 eq(R.recipientRule({ brokerEmail: "ops@bisontransport.com", bisonRecipient: "ap@example-bison-ap.test", documentsEmail: "billing@example-factor.test" }),
-	{ ok: true, to: "ap@example-bison-ap.test", source: "bison" }, "§3 Bison: only the setting, never the rate con's address");
+	{ ok: true, to: "ap@example-bison-ap.test", source: "bison" }, "§3 Bison: only the setting, never the rate con's address, and no confirmation needed");
+for (const d of ["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com", "aol.com", "icloud.com",
+	"me.com", "mac.com", "proton.me", "protonmail.com", "gmx.com", "mail.com", "zoho.com", "yandex.com", "mail.yahoo.com"]) ok(R.isFreemailDomain(d), `§3 ${d} is free mail`);
+for (const d of ["example-broker.test", "bisontransport.com", "notgmail.com", "gmail.com.example.test", ""]) ok(!R.isFreemailDomain(d), `§3 ${JSON.stringify(d)} is not free mail`);
+eq(R.normalizeConfirmedDomains([" Example-Broker.TEST", "@example-other.test", "example-broker.test"]), { ok: true, domains: ["example-broker.test", "example-other.test"] }, "§3 the confirmed list: lower case, each once, sorted");
+eq(R.normalizeConfirmedDomains(["example-broker.test", "Gmail.com"]).code, "CONFIRMED_DOMAIN_FREEMAIL", "§3 a free-mail domain is refused from the confirmed list");
+eq(R.normalizeConfirmedDomains(["mail.yahoo.com"]).code, "CONFIRMED_DOMAIN_FREEMAIL", "§3 and so is a free-mail subdomain");
+eq([R.normalizeConfirmedDomains("example-broker.test").code, R.normalizeConfirmedDomains(["not a domain"]).code], ["CONFIRMED_DOMAINS_INVALID", "CONFIRMED_DOMAINS_INVALID"], "§3 a list that isn't one is refused whole");
 
 // ------------------------------------------------------------------ §4
 section("§4  Job Tracking columns");
@@ -169,9 +188,20 @@ eq([R.loadFacts({ row: ROW, cols, records: one, activeAdvanceLines: 2 }).activeA
 
 // ------------------------------------------------------------------ §6
 section("§6  the free checks");
-const ready = { live: true, completed: true, drafts: 0, optedOut: false, brokerDomain: "example-broker.test", closedMonths: [],
-	hasDeliveryDate: true, activeAdvanceLines: 0, isBison: false, bisonRecipientConfigured: false, pods: 1, podsUnreadable: 0 };
+const ready = { live: true, completed: true, drafts: 0, optedOut: false, brokerDomain: "example-broker.test", brokerEmailFreemail: false, brokerDomainConfirmed: true,
+	closedMonths: [], hasDeliveryDate: true, activeAdvanceLines: 0, isBison: false, bisonRecipientConfigured: false, pods: 1, podsUnreadable: 0 };
 const fv = (over, opts) => R.freeVerdict({ ...ready, ...over }, opts);
+eq(fv({ brokerDomainConfirmed: false, pods: 0 }), { state: "needs_attention", code: "BROKER_DOMAIN_UNCONFIRMED" }, "§6 a broker domain nobody confirmed: a person, before anything is spent");
+eq(fv({ brokerEmailFreemail: true, brokerDomainConfirmed: false }), { state: "needs_attention", code: "BROKER_EMAIL_FREEMAIL" }, "§6 a free-mail broker Email: a person");
+eq(fv({ brokerDomainConfirmed: false }, { assumeConfirmed: true }), { state: "queued", code: "" }, "§6 assumeConfirmed (the retro report's second split)");
+eq(fv({ brokerEmailFreemail: true }, { assumeConfirmed: true }).code, "BROKER_EMAIL_FREEMAIL", "§6 free mail is never assumed confirmed");
+eq(fv({ isBison: true, bisonRecipientConfigured: true, brokerDomainConfirmed: false }), { state: "queued", code: "" }, "§6 Bison needs no confirmed domain");
+eq(fv({ optedOut: true, brokerDomainConfirmed: false }).code, "BROKER_OPTED_OUT", "§6 opted out outranks unconfirmed");
+eq(fv({ brokerDomain: "", brokerDomainConfirmed: false }).code, "NO_BROKER_EMAIL", "§6 no broker Email outranks unconfirmed");
+eq(R.loadFacts({ row: { "Load ID": "LD-TEST-0001", "Job Status": "Delivered", Email: "ops@example-broker.test" }, cols: R.jobColumns(["Load ID", "Job Status", "Email"]),
+	confirmedDomains: ["example-broker.test"] }).brokerDomainConfirmed, true, "§5 facts: the confirmed list confirms the broker's exact domain");
+eq(R.loadFacts({ row: { "Load ID": "LD-TEST-0001", "Job Status": "Delivered", Email: "made-up@yahoo.com" }, cols: R.jobColumns(["Load ID", "Job Status", "Email"]) }).brokerEmailFreemail,
+	true, "§5 facts: a free-mail broker Email");
 eq(fv({}), { state: "queued", code: "" }, "§6 every check passes: queued");
 eq(fv({ live: false, completed: false }), { state: "waiting", code: "LOAD_DROPPED" }, "§6 cancelled or deleted: waiting LOAD_DROPPED");
 eq(fv({ completed: false }), { state: "waiting", code: "NOT_COMPLETED" }, "§6 not completed: waiting");

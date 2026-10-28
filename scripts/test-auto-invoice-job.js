@@ -30,6 +30,11 @@
 //       caps; a sheet outage uses no attempt; the cache is never written
 //   §11 what Super Admins see: _autoInvoice in on mode only, never for a
 //       Dispatcher; the routes (status, settings, checked, retry)
+//   §12 the first review's fixes: endless engine waits, numbers, recovery,
+//       timeouts, unreadable settings, logs
+//   §13 the recipient anchor: a non-Bison draft only to a broker domain a person
+//       confirmed (never free mail, refused by the settings); the job's own
+//       re-checks use the same rule
 //
 // No network, no files outside a temp folder, never reads app.db.
 //   node scripts/test-auto-invoice-job.js      # exits 1 on any failure
@@ -42,6 +47,7 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const jobLib = require(path.join(ROOT, "lib", "auto-invoice-job.js"));
 const rules = require(path.join(ROOT, "lib", "auto-invoice-rules.js"));
+const ledgerLib = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
 const appTime = require(path.join(ROOT, "lib", "app-time.js"));
 const { liftSheetHelpers } = require(path.join(ROOT, "scripts", "auto-invoice-shadow-report.js"));
 const Database = require(path.join(ROOT, "node_modules", "better-sqlite3"));
@@ -83,6 +89,13 @@ function serverTables(db) {
 		CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '');
 		CREATE TABLE bison_invoice_seq (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
 	`);
+	// The made-up broker's domain is confirmed by a person, as a switch-on would.
+	setSettings(db, { optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] });
+}
+
+function setSettings(db, value) {
+	db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+		.run(typeof value === "string" ? value : JSON.stringify(value));
 }
 
 const never = () => new Promise(() => {});
@@ -163,7 +176,8 @@ function makeWorld({ dbFile = null } = {}) {
 			const row = w.rows.find((r) => rules.loadKey(r["Load ID"]) === key);
 			if (!row) return { ok: false, http: 404, code: "LOAD_NOT_FOUND" };
 			if (!w.rateCons.has(key)) return { ok: false, http: 422, code: "RATECON_MISSING" };
-			const rule = rules.recipientRule({ brokerEmail: row.Email, bisonRecipient: w.bisonRecipient, documentsEmail: w.rateCons.get(key) });
+			const rule = rules.recipientRule({ brokerEmail: row.Email, bisonRecipient: w.bisonRecipient, documentsEmail: w.rateCons.get(key),
+				confirmedDomains: ledgerLib.readSettings(w.db).confirmedBrokerDomains });
 			if (!rule.ok) return { ok: false, http: 422, code: rule.code };
 			return { ok: true, ctx: { loadId: row["Load ID"], to: w.overrideTo || rule.to } };
 		},
@@ -602,7 +616,7 @@ async function main() {
 		w.ready("LD-TEST-0104");
 		w.ready("LD-TEST-0105");
 		w.ready("LD-TEST-0106", { Email: "ap@example-optout.test" }, "billing@example-optout.test");
-		w.db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)").run(JSON.stringify({ optOutDomains: ["example-optout.test"] }));
+		setSettings(w.db, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test", "example-optout.test"] });
 		w.ready("LD-TEST-0107");
 		w.handDraft("LD-TEST-0107");
 		w.ready("LD-TEST-0108");
@@ -753,9 +767,11 @@ async function main() {
 		const bad = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["not a domain"] } });
 		eq([bad.status, bad.body.code], [400, "OPT_OUT_INVALID"], "§11 a bad opt-out list is refused");
 		const put = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["Example-Factor.test"] } });
-		eq([put.status, put.body], [200, { optOutDomains: ["example-factor.test"] }], "§11 opt-outs saved");
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], unreadable: false }, "§11 and read back");
-		eq(w.actions("update_auto_invoice_settings").map((a) => [a.who, a.details]), [["made-up-admin", "opted out: example-factor.test (was: none)"]], "§11 audited as the Super Admin");
+		eq([put.status, put.body], [200, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"] }], "§11 opt-outs saved; the confirmed list left out is kept");
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false }, "§11 and read back");
+		eq(w.actions("update_auto_invoice_settings").map((a) => [a.who, a.details]),
+			[["made-up-admin", "opted out: example-factor.test (was: none); confirmed: example-broker.test (was: example-broker.test)"]], "§11 audited as the Super Admin");
+		eq((await call("PUT", "/api/auto-invoice/settings", { body: {} })).body.code, "SETTINGS_INVALID", "§11 a body with neither list is refused");
 
 		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00" });
 		await job.tick();
@@ -883,14 +899,15 @@ async function main() {
 		// L6: an unreadable opt-out list drafts nothing until it is saved again.
 		const w = makeWorld();
 		const job = await w.started();
-		w.db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', '{broken')").run();
+		setSettings(w.db, "{broken");
 		w.ready("LD-TEST-0167");
 		const out = await job.tick();
-		eq([out.work.paused, w.state("LD-TEST-0167"), w.calls.prepare.length, w.calls.mint.length], ["SETTINGS_UNREADABLE", ["queued", ""], 0, 0], "§12 L6: the opt-out list can't be read: nothing drafted (fails closed)");
+		eq([out.sweep.paused, out.work.paused, w.state("LD-TEST-0167"), w.calls.prepare.length, w.calls.mint.length], ["SETTINGS_UNREADABLE", "SETTINGS_UNREADABLE", null, 0, 0],
+			"§12 L6: the settings can't be read: nothing claimed or drafted (fails closed, and nothing is stuck at a verdict made without them)");
 		const { app, requireRole, call } = fakeApp();
 		job.mount(app, { requireRole });
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], unreadable: true }, "§12 L6: the settings route says so");
-		eq((await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: [] } })).status, 200, "§12 L6: saving the list again");
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true }, "§12 L6: the settings route says so");
+		eq((await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] } })).status, 200, "§12 L6: saving the lists again");
 		await job.tick();
 		eq(w.state("LD-TEST-0167"), ["drafted", ""], "§12 L6: then it drafts");
 		w.setRow("LD-TEST-50%");
@@ -909,6 +926,56 @@ async function main() {
 		eq(w.state("LD-TEST-0168"), ["needs_attention", "IN_GMAIL_UNRECORDED"], "§12 logs: a record that throws leaves the draft for a person");
 		ok(w.logs.some((l) => /recording the draft failed: SQLITE_BUSY$/.test(l)), "§12 logs: the failure is logged by its code");
 		ok(!w.logs.some((l) => /@|made-up failure/.test(l)), "§12 logs: never by its message");
+	}
+
+	// ---------------------------------------------------------------- §13
+	section("§13 the recipient anchor: a domain a person confirmed, never free mail");
+	{
+		const w = makeWorld();
+		const job = await w.started();
+		const { app, requireRole, call } = fakeApp();
+		job.mount(app, { requireRole });
+		w.ready("LD-TEST-0170", { Email: "ops@example-other.test" }, "billing@example-other.test");
+		w.ready("LD-TEST-0171", { Email: "made-up-dispatch@gmail.com" }, "made-up-billing@gmail.com");
+		w.ready("LD-TEST-0172", { Email: "" }, "billing@example-other.test");
+		w.ready("LD-TEST-0173", { Email: BISON }, "");
+		w.ready("LD-TEST-0174");
+		await job.tick();
+		eq(w.state("LD-TEST-0170"), ["needs_attention", "BROKER_DOMAIN_UNCONFIRMED"], "§13 the rate con's billing email matches the broker's domain, but nobody confirmed it: a person");
+		eq(w.state("LD-TEST-0171"), ["needs_attention", "BROKER_EMAIL_FREEMAIL"], "§13 a free-mail broker Email: a person");
+		eq(w.state("LD-TEST-0172"), ["needs_attention", "NO_BROKER_EMAIL"], "§13 no broker Email: a person");
+		eq([w.state("LD-TEST-0173"), w.state("LD-TEST-0174")], [["drafted", ""], ["drafted", ""]], "§13 Bison (its setting) and a confirmed domain: drafted");
+		eq(w.calls.prepare.map((p) => p.loadId).sort(), ["LD-TEST-0173", "LD-TEST-0174"], "§13 nothing is spent on the others (no engine call, no number)");
+		const refused = await call("PUT", "/api/auto-invoice/settings", { body: { confirmedBrokerDomains: ["example-broker.test", "gmail.com"] } });
+		eq([refused.status, refused.body.code], [400, "CONFIRMED_DOMAIN_FREEMAIL"], "§13 the settings refuse to confirm a free-mail domain");
+		eq(ledgerLib.readSettings(w.db).confirmedBrokerDomains, ["example-broker.test"], "§13 and nothing is saved");
+		const ok200 = await call("PUT", "/api/auto-invoice/settings", { body: { confirmedBrokerDomains: ["example-broker.test", "Example-Other.test"] } });
+		eq([ok200.status, ok200.body.confirmedBrokerDomains], [200, ["example-broker.test", "example-other.test"]], "§13 a Super Admin confirms the domain");
+		ok(/confirmed: example-broker\.test, example-other\.test \(was: example-broker\.test\)$/.test(w.actions("update_auto_invoice_settings").slice(-1)[0].details), "§13 audited with the list before and after");
+		eq((await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-0170" } })).status, 200, "§13 then Try again");
+		await job.tick();
+		eq(w.state("LD-TEST-0170"), ["drafted", ""], "§13 drafted to the confirmed domain's billing email");
+		eq(w.calls.append.find((a) => a.subject.includes(w.claim("LD-TEST-0170").invoice_id)).to, "billing@example-other.test", "§13 the recipient is the rate con's documents email on that domain");
+		w.ready("LD-TEST-0175", { Email: "ops@example-other.test" }, "billing@sub.example-other.test");
+		await job.tick();
+		eq(w.state("LD-TEST-0175"), ["needs_attention", "RECIPIENT_DOMAIN_MISMATCH"], "§13 a confirmed domain still needs the billing email on exactly that domain");
+	}
+	{
+		// The job's own re-check uses the same rule: a draft recovered after the
+		// domain was taken off the list is not recorded on the engine's word.
+		const w = makeWorld();
+		const before = await w.started({ workerId: "before-crash" });
+		w.ready("LD-TEST-0176");
+		w.recordHang = "before";
+		before.tick();
+		await until(() => (w.claim("LD-TEST-0176") || {}).stage === "appended", "§13 the claim reaches appended");
+		w.recordHang = "";
+		setSettings(w.db, { optOutDomains: [], confirmedBrokerDomains: [] });
+		w.now += 16 * MIN;
+		w.prepareHook = (id) => ({ ok: true, ctx: { loadId: id, to: "billing@example-broker.test" } });
+		await w.job({ workerId: "after-restart" }).tick();
+		const c = w.claim("LD-TEST-0176");
+		eq([c.state, c.reason_code, w.draftRows("LD-TEST-0176").length], ["needs_attention", "IN_GMAIL_UNRECORDED", 0], "§13 recovery re-checks the confirmed list: nothing recorded, a person checks Gmail");
 	}
 }
 

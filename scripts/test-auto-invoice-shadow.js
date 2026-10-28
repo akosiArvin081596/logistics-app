@@ -113,7 +113,10 @@ async function main() {
 		setRow("LD-TEST-0302");
 		setRow("LD-TEST-0303"); addPod("LD-TEST-0303");
 		setRow("LD-TEST-0304", { Email: "ops@example-optout.test" }); addPod("LD-TEST-0304");
-		db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)").run(JSON.stringify({ optOutDomains: ["example-optout.test"] }));
+		db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', ?)")
+			.run(JSON.stringify({ optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"] }));
+		setRow("LD-TEST-0310", { Email: "ops@example-other.test" }); addPod("LD-TEST-0310");
+		setRow("LD-TEST-0311", { Email: "made-up-dispatch@yahoo.com" }); addPod("LD-TEST-0311");
 		setRow("LD-TEST-0305"); addPod("LD-TEST-0305"); handDraft("LD-TEST-0305", now - MIN);
 		setRow("LD-TEST-0306", { Email: "ops-test@bisontransport.com" }); addPod("LD-TEST-0306");
 		setRow("LD-TEST-0307", { "Completion Date": "10/01/2026 9:00:00" });
@@ -128,10 +131,13 @@ async function main() {
 		eq(verdict("LD-TEST-0306"), ["WOULD_NEED_ATTENTION", "RECIPIENT_UNCONFIGURED"], "§2 Bison with no recipient setting: WOULD_NEED_ATTENTION");
 		eq(verdict("LD-TEST-0307"), ["BASELINE", ""], "§2 completed before the shadow baseline: BASELINE");
 		eq(verdict("LD-TEST-0309"), null, "§2 a load not completed is not logged");
+		eq(verdict("LD-TEST-0310"), ["WOULD_NEED_ATTENTION", "BROKER_DOMAIN_UNCONFIRMED"], "§2 a broker domain nobody confirmed: WOULD_NEED_ATTENTION");
+		eq(verdict("LD-TEST-0311"), ["WOULD_NEED_ATTENTION", "BROKER_EMAIL_FREEMAIL"], "§2 a free-mail broker Email: WOULD_NEED_ATTENTION");
 		const r301 = shadowRow("LD-TEST-0301");
 		eq([r301.first_seen_at, r301.ready_at], [new Date(now).toISOString(), new Date(now).toISOString()], "§2 first seen and ready at this sweep");
 		eq(JSON.parse(r301.facts_json), { bison: false, domain: "example-broker.test", optedOut: false, month: "open", deliveryDate: true, pods: 1, podsUnreadable: 0,
-			rateConRows: 0, advanceLines: 0, drafted: false, bisonRecipient: false }, "§2 the local facts logged");
+			rateConRows: 0, advanceLines: 0, drafted: false, bisonRecipient: false, freemail: false, confirmed: true }, "§2 the local facts logged");
+		eq([JSON.parse(shadowRow("LD-TEST-0310").facts_json).confirmed, JSON.parse(shadowRow("LD-TEST-0311").facts_json).freemail], [false, true], "§2 confirmed and free mail are logged");
 		ok(!db.prepare("SELECT group_concat(load_id || facts_json || reason_code, '|') AS t FROM auto_invoice_shadow").get().t.includes("@"), "§2 no email address in the shadow log");
 
 		// ---------------------------------------------------------------- §3
@@ -167,8 +173,9 @@ async function main() {
 		// ---------------------------------------------------------------- §4
 		section("§4  the shadow-week report reads the log");
 		const s = report.buildShadow({ db, since: "2026-10-20", until: "2026-10-20", zone: ET, today: "2026-10-20" });
-		eq([s.firstSeen, s.verdicts.WOULD_ATTEMPT.count, s.verdicts.WOULD_SKIP.reasons], [7, 2, { BROKER_OPTED_OUT: 1, ALREADY_DRAFTED: 1, DRAFTED_BY_HAND: 1 }], "§4 the verdicts");
+		eq([s.firstSeen, s.verdicts.WOULD_ATTEMPT.count, s.verdicts.WOULD_SKIP.reasons], [9, 2, { BROKER_OPTED_OUT: 1, ALREADY_DRAFTED: 1, DRAFTED_BY_HAND: 1 }], "§4 the verdicts");
 		eq([s.handDraftCompare.A, s.handDraftCompare.D], [1, 1], "§4 0301 drafted by hand where the job would have (A); 0302 not drafted (D)");
+		eq([s.verdicts.WOULD_NEED_ATTENTION.reasons.BROKER_DOMAIN_UNCONFIRMED, s.verdicts.WOULD_NEED_ATTENTION.reasons.BROKER_EMAIL_FREEMAIL], [1, 1], "§4 the report counts the anchor's codes");
 	} finally {
 		globalThis.fetch = realFetch;
 		db.close();
