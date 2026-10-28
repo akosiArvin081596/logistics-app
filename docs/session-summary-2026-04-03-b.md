@@ -186,18 +186,18 @@ Updated investor API to include all expense sources in totalExpenses:
 
 ### Test Data (staging)
 
-**Users** (all passwords shown):
+**Users:**
 
-| ID | Username | Password | Role | Full Name | Company |
-|----|----------|----------|------|-----------|---------|
-| 1 | super_admin | *(set during setup)* | Super Admin | — | — |
-| 2 | kevin | investor123 | Investor | Kevin Testinvestor | Example Test Trucking LLC |
-| 3 | desoren | investor123 | Investor | Desoren King | ABC Inc |
-| 4 | leonora | driver123 | Driver | Leonora Johnson | — |
-| 5 | kendall | driver123 | Driver | Kendall Davis | — |
-| 6 | andrew | driver123 | Driver | Andrew Rutherford | — |
-| 7 | marcus | driver123 | Driver | Milton Williams | — |
-| 8 | dispatch1 | dispatcher123 | Dispatcher | Azure Estelle | — |
+| ID | Username | Role | Full Name | Company |
+|----|----------|------|-----------|---------|
+| 1 | super_admin | Super Admin | — | — |
+| 2 | kevin | Investor | Kevin Testinvestor | Example Test Trucking LLC |
+| 3 | desoren | Investor | Desoren King | ABC Inc |
+| 4 | leonora | Driver | Leonora Johnson | — |
+| 5 | kendall | Driver | Kendall Davis | — |
+| 6 | andrew | Driver | Andrew Rutherford | — |
+| 7 | marcus | Driver | Milton Williams | — |
+| 8 | dispatch1 | Dispatcher | Azure Estelle | — |
 
 **Trucks:**
 

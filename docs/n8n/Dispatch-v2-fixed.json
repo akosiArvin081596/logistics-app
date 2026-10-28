@@ -1667,7 +1667,7 @@
             {
               "id": "37e72cb4-4f0d-4eca-9864-fd194fa40c5a",
               "leftValue": "={{ ((($json.from || {}).text) || (($json.headers || {}).from) || '').toLowerCase() }}",
-              "rightValue": "loadupdate@bisontransport.com",
+              "rightValue": "tracking-updates@example.test",
               "operator": {
                 "type": "string",
                 "operation": "contains"
