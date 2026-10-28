@@ -75,10 +75,20 @@ const EMAILS = [
 	"two@@example.test", "", null, "a@b", "x@sub.example-broker.test;", "Name <ops@example-broker.test>",
 	"ops@bisontransport.com", "OPS@BISONTRANSPORT.COM", "ops@notbisontransport.com", "ops@bisontransport.com.example.test",
 ];
+// isBisonEmail() is isBisonLoad() on a readable address, except that a lookalike
+// domain (notbisontransport.com) is not Bison for automatic drafts.
+const BISON_LOOKALIKES = ["ops@notbisontransport.com"];
 for (const e of EMAILS) {
 	eq(R.normalizeEmail(e), brokerInvoice.normalizeEmail(e), `§2 normalizeEmail(${JSON.stringify(e)}) matches lib/broker-invoice.js`);
-	eq(R.isBisonEmail(e), brokerInvoice.isBisonLoad({ email: e }), `§2 isBisonEmail(${JSON.stringify(e)}) matches isBisonLoad()`);
+	const want = BISON_LOOKALIKES.includes(e) ? false : brokerInvoice.isBisonLoad({ email: e }) && Boolean(R.emailDomain(e));
+	eq(R.isBisonEmail(e), want, `§2 isBisonEmail(${JSON.stringify(e)})`);
 }
+for (const [e, want] of [["ops@bisontransport.com", true], ["ops@ap.bisontransport.com", true], ["OPS@BisonTransport.COM", true],
+	["ops@notbisontransport.com", false], ["ops@bisontransport.com.example.test", false], ["ops@bison-transport.com", false], ["bisontransport.com", false]]) {
+	eq(R.isBisonEmail(e), want, `§2 Bison is the real domain or its subdomains only: ${e} -> ${want}`);
+}
+eq(R.recipientRule({ brokerEmail: "ops@notbisontransport.com", bisonRecipient: "ap@example-bison-ap.test", documentsEmail: "billing@notbisontransport.com" }).code,
+	"BROKER_DOMAIN_UNCONFIRMED", "§2 a Bison lookalike needs a confirmed domain like any broker, never Bison's inbox");
 eq(R.emailDomain(" Billing@Example-Broker.Test> "), "example-broker.test", "§2 the domain is the part after '@', lower case");
 eq(R.emailDomain("x@sub.example-broker.test;"), "sub.example-broker.test", "§2 a subdomain is kept as written");
 eq(R.emailDomain("no-at-sign.example.test"), "", "§2 no '@': no domain");
@@ -308,7 +318,7 @@ for (const text of [
 section("§11 the module stays pure");
 const MOD = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-rules.js"), "utf8");
 const requires = [...MOD.matchAll(/require\(\s*["']([^"']{1,80})["']\s*\)/g)].map((m) => m[1]).sort();
-eq(requires, ["./cell-compare", "path"], "§11 it requires only path and lib/cell-compare.js");
+eq(requires, ["./cell-compare", "./free-mail-domains", "path"], "§11 it requires only path, lib/cell-compare.js and lib/free-mail-domains.js");
 ok(!/\bfs\.|process\.env|\bfetch\(|Date\.now\(\)|new Date\(\)/.test(MOD), "§11 no files, environment, network or clock");
 eq(R.REASON_CODES.length, new Set(R.REASON_CODES).size, "§11 every reason code once");
 for (const c of [...R.ATTENTION_REFUSALS]) ok(R.REASON_CODES.includes(c), `§11 refusal ${c} is a reason code`);

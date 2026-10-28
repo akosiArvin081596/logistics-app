@@ -768,7 +768,7 @@ async function main() {
 		eq([bad.status, bad.body.code], [400, "OPT_OUT_INVALID"], "§11 a bad opt-out list is refused");
 		const put = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["Example-Factor.test"] } });
 		eq([put.status, put.body], [200, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"] }], "§11 opt-outs saved; the confirmed list left out is kept");
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false }, "§11 and read back");
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false, dropped: [] }, "§11 and read back");
 		eq(w.actions("update_auto_invoice_settings").map((a) => [a.who, a.details]),
 			[["made-up-admin", "opted out: example-factor.test (was: none); confirmed: example-broker.test (was: example-broker.test)"]], "§11 audited as the Super Admin");
 		eq((await call("PUT", "/api/auto-invoice/settings", { body: {} })).body.code, "SETTINGS_INVALID", "§11 a body with neither list is refused");
@@ -906,7 +906,7 @@ async function main() {
 			"§12 L6: the settings can't be read: nothing claimed or drafted (fails closed, and nothing is stuck at a verdict made without them)");
 		const { app, requireRole, call } = fakeApp();
 		job.mount(app, { requireRole });
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true }, "§12 L6: the settings route says so");
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], confirmedBrokerDomains: [], unreadable: true, dropped: [] }, "§12 L6: the settings route says so");
 		eq((await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] } })).status, 200, "§12 L6: saving the lists again");
 		await job.tick();
 		eq(w.state("LD-TEST-0167"), ["drafted", ""], "§12 L6: then it drafts");
@@ -976,6 +976,80 @@ async function main() {
 		await w.job({ workerId: "after-restart" }).tick();
 		const c = w.claim("LD-TEST-0176");
 		eq([c.state, c.reason_code, w.draftRows("LD-TEST-0176").length], ["needs_attention", "IN_GMAIL_UNRECORDED", 0], "§13 recovery re-checks the confirmed list: nothing recorded, a person checks Gmail");
+	}
+
+	// ---------------------------------------------------------------- §14
+	section("§14 settings robustness: a stored entry a newer rule refuses, an unreadable row; Bison lookalikes");
+	{
+		// The review's PoC: an opt-out, and a confirmed domain since listed as free mail.
+		const w = makeWorld();
+		const job = await w.started();
+		setSettings(w.db, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test", "comcast.net"] });
+		const { app, requireRole, call } = fakeApp();
+		job.mount(app, { requireRole });
+		const got = (await call("GET", "/api/auto-invoice/settings")).body;
+		eq(got, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"], unreadable: false,
+			dropped: [{ list: "confirmedBrokerDomains", domain: "comcast.net", code: "CONFIRMED_DOMAIN_FREEMAIL" }] }, "§14 GET: each list read on its own; only the refused entry is dropped, and reported");
+		w.ready("LD-TEST-0180");
+		w.ready("LD-TEST-0181", { Email: "ops@example-optout.test" }, "billing@example-optout.test");
+		await job.tick();
+		await job.tick();
+		eq([w.state("LD-TEST-0180"), w.state("LD-TEST-0181")], [["drafted", ""], ["skipped", "BROKER_OPTED_OUT"]], "§14 drafting goes on with what is readable; the opt-out still holds");
+		const st = job.status();
+		eq([st.settings.problem, st.settings.unreadable, st.settings.dropped.map((x) => x.domain), st.paused], ["SETTINGS_ENTRIES_DROPPED", false, ["comcast.net"], null], "§14 status() shows the dropped entry");
+		eq(w.notices.filter((n) => /settings/.test(n.title)).map((n) => n.body), [
+			"Some automatic-draft settings no longer pass the rules and are ignored: comcast.net (confirmed, CONFIRMED_DOMAIN_FREEMAIL). Save the lists again to remove them.",
+		], "§14 one Super Admin notice, however many sweeps");
+		const put = await call("PUT", "/api/auto-invoice/settings", { body: { confirmedBrokerDomains: ["example-broker.test"] } });
+		eq([put.status, put.body], [200, { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"] }], "§14 saving only the confirmed list keeps the opt-outs");
+		eq(JSON.parse(w.db.prepare("SELECT value FROM app_settings WHERE key = 'auto_invoice.settings'").get().value).optOutDomains, ["example-optout.test"], "§14 and stores them");
+		eq(w.actions("update_auto_invoice_settings").slice(-1)[0].details,
+			"opted out: example-optout.test (was: example-optout.test); confirmed: example-broker.test (was: example-broker.test); ignored before: comcast.net (confirmed)", "§14 the audit names what was ignored");
+		await job.tick();
+		eq(job.status().settings.problem, "", "§14 once saved, the problem is gone");
+
+		// An unreadable row: everything stops, visibly, and nothing is lost on save.
+		setSettings(w.db, "{broken");
+		for (let i = 0; i < 3; i++) { w.now += 5 * MIN; await job.tick(); }
+		const st2 = job.status();
+		eq([st2.settings.problem, st2.paused && st2.paused.reason], ["SETTINGS_UNREADABLE", "SETTINGS_UNREADABLE"], "§14 status() shows SETTINGS_UNREADABLE");
+		eq(w.notices.filter((n) => /settings/.test(n.title)).length, 2, "§14 one more notice for it, not one a sweep");
+		const partial = await call("PUT", "/api/auto-invoice/settings", { body: { confirmedBrokerDomains: ["example-broker.test"] } });
+		eq([partial.status, partial.body.code], [409, "SETTINGS_UNREADABLE"], "§14 a one-list save while the row is unreadable is refused (the other list would be lost)");
+		eq(w.db.prepare("SELECT value FROM app_settings WHERE key = 'auto_invoice.settings'").get().value, "{broken", "§14 and nothing is written");
+		const both = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["example-optout.test"], confirmedBrokerDomains: ["example-broker.test"] } });
+		eq(both.status, 200, "§14 saving both lists works");
+		eq(w.actions("update_auto_invoice_settings").slice(-1)[0].details,
+			"opted out: example-optout.test (was: unreadable); confirmed: example-broker.test (was: unreadable)", "§14 audited as replacing an unreadable row");
+	}
+	{
+		// Recovery waits for readable settings instead of recording without them.
+		const w = makeWorld();
+		const before = await w.started({ workerId: "before-crash" });
+		w.ready("LD-TEST-0182");
+		w.recordHang = "before";
+		before.tick();
+		await until(() => (w.claim("LD-TEST-0182") || {}).stage === "appended", "§14 the claim reaches appended");
+		w.recordHang = "";
+		setSettings(w.db, "{broken");
+		w.now += 16 * MIN;
+		const after = w.job({ workerId: "after-restart" });
+		const out = await after.tick();
+		const held = w.claim("LD-TEST-0182");
+		eq([out.recover.paused, held.state, held.stage, held.reason_code], ["SETTINGS_UNREADABLE", "working", "appended", ""], "§14 recovery is held while the settings can't be read (no IN_GMAIL_UNRECORDED)");
+		setSettings(w.db, { optOutDomains: [], confirmedBrokerDomains: ["example-broker.test"] });
+		w.now += 5 * MIN;
+		await after.tick();
+		eq([w.state("LD-TEST-0182"), w.draftRows("LD-TEST-0182").length, w.gmail.length], [["drafted", ""], 1, 1], "§14 then it is recorded, once");
+	}
+	{
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0183", { Email: "ops@notbisontransport.com" }, "billing@notbisontransport.com");
+		w.ready("LD-TEST-0184", { Email: "ops@ap.bisontransport.com" }, "");
+		await job.tick();
+		eq(w.state("LD-TEST-0183"), ["needs_attention", "BROKER_DOMAIN_UNCONFIRMED"], "§14 a Bison lookalike is not Bison: it needs a confirmed domain");
+		eq([w.state("LD-TEST-0184"), w.calls.append.map((a) => a.to)], [["drafted", ""], [BISON_AP]], "§14 a Bison subdomain is Bison: its configured inbox");
 	}
 }
 
