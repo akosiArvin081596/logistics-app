@@ -288,7 +288,7 @@ PUT /api/trucks/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b013
 DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b793c4400242
 POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b3f9ec796fd0
 GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5f80b4e969d9
-POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@9506e347135b
+POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@04c1f9c10be8
 PUT /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · userPasswordResetLimiter=limiter · inline@c887c122ecd1
 PUT /api/users/:id/rating · requireRole("Super Admin")=anon@12b84c4b0134 · inline@afdcf7a41d18

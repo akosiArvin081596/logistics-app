@@ -126,7 +126,7 @@ const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriv
 const OWNS_SRC = liftFunction("driverOwnsInvoice");
 const ESCAPE_SRC = liftFunction("escapeHtml");
 const ACCEPT_SRC = liftRoute('app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
-const USERS_SRC = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {');
+const USERS_SRC = liftRoute('app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {');
 const DIRECTORY_SRC = liftRoute('app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 // What that route asks of a new row before its month-end lock: does it differ
 // from the defaults? The rows below carry a name only, so the lock is not reached.
@@ -613,8 +613,11 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 	const log = { synced: [] };
 	let handler = null;
 	const env = {
-		app: { post: (p, guard, h) => { handler = h; } },
+		// The handler is the last argument (POST /api/users mounts its password
+		// budget before it, scripts/test-account-directory-row-lock.js §8).
+		app: { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
 		requireRole: () => (req, res, next) => next(),
+		userCreatePasswordLimit: (req, res, next) => next(),
 		db,
 		bcrypt: { hash: (pw) => bcrypt.hash(pw, 4), compare: (pw, h) => bcrypt.compare(pw, h) },
 		// POST /api/users's named-login rules (scripts/test-account-directory-row-lock.js

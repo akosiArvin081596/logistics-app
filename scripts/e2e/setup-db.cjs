@@ -17,7 +17,8 @@
 // 1. Takes a PRIVATE copy of SOURCE_DB with SQLite's online backup API, the
 //    source opened READ-ONLY (never cp a WAL database).
 // 2. Resets the super_admin password on the COPY via the repo's own script
-//    (scripts/reset-super-admin-password.js, which also clears the copy's sessions).
+//    (scripts/reset-super-admin-password.js, which also ends super_admin's
+//    sessions on the copy and writes its system audit row there).
 // 3. Picks a Driver user whose driver_name matches (case-insensitive) the
 //    assigned_driver of exactly one truck with an image photo, who is fully
 //    onboarded (so the Kit tab renders) and whose application has an IMAGE

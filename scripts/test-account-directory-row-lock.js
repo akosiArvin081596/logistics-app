@@ -49,15 +49,23 @@
  *      create_user adds the new id and the forced change; the new staff
  *      account's first request is refused PASSWORD_CHANGE_REQUIRED. Flag off:
  *      all as before.
+ *   §8 POST /api/users with NAMED_LOGINS_ENABLED spends PUT /api/users/:id's
+ *      password budget (userPasswordResetLimiter, 5 per 15 minutes per acting
+ *      admin): five guesses that write nothing, then the sixth, the admin's own
+ *      password, is 429, never PASSWORD_IS_YOURS; resets and creates share one
+ *      budget. Flag off: creates are not limited, as before.
  *
- * Pure: no server, no app.db, no network.
+ * No app.db, no network: §8 runs Express on 127.0.0.1:0, the rest calls the
+ * lifted handlers directly.
  *   node scripts/test-account-directory-row-lock.js
  *   SERVER_JS=/tmp/base.js node scripts/test-account-directory-row-lock.js   # a base commit: fails
  */
 "use strict";
 
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
+const { once } = require("events");
 
 const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
@@ -99,7 +107,11 @@ function liftRoute(head, what) {
 	const a = findOnce(`\n${head}`, `registration of ${what}`);
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
 }
-const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
+// POST /api/users mounts the password budget it shares with PUT after its role
+// check (§8); a server.js before that mounts none.
+const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {';
+const USERS_HEAD_BEFORE = 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {';
+const USERS_ROUTE = liftRoute(SRC.includes(`\n${USERS_HEAD}`) ? USERS_HEAD : USERS_HEAD_BEFORE, "POST /api/users");
 const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {', "PUT /api/users/:id");
 
 const MODULE_SRC = [
@@ -187,7 +199,10 @@ const DDL = [
 const S = { floors: {}, jtReads: 0, refusals: [], recorded: [] };
 const JT = { headers: ["Load ID", "Driver", "Assigned Date"], data: [] };
 
-function makeApp() {
+// `server`: §8 mounts POST /api/users on a real Express app, whose requireRole
+// stub signs the request in as SUPER, with `createLimit` as its password budget.
+// Every other section calls the handler directly.
+function makeApp({ server = null, createLimit = null } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) db.exec(sql);
 	for (const p of LOCKED) db.prepare("INSERT INTO period_locks (period, status) VALUES (?, 'locked')").run(p);
@@ -204,8 +219,10 @@ function makeApp() {
 		path, { existsSync: () => false }, "/nonexistent", { error() {}, log() {}, warn() {} }, "admin@example.test");
 	let handler = null;
 	const env = {
-		app: { post: (p, guard, h) => { handler = h; } },
-		requireRole: () => (req, res, next) => next(),
+		app: server || { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
+		requireRole: server ? () => (req, res, next) => { req.session = { user: SUPER }; next(); } : () => (req, res, next) => next(),
+		// The password budget mounted before the handler (§8); a pass-through elsewhere.
+		userCreatePasswordLimit: createLimit || ((req, res, next) => next()),
 		db, ...m,
 		// The hash is not this runner's subject; the own-password check (§7) is
 		// the real comparison against a real hash.
@@ -229,7 +246,7 @@ function makeApp() {
 	};
 	const names = Object.keys(env);
 	new Function(...names, USERS_ROUTE)(...names.map((k) => env[k]));
-	if (typeof handler !== "function") die("the lifted route did not register a handler");
+	if (!server && typeof handler !== "function") die("the lifted route did not register a handler");
 	// PUT /api/users/:id with the same month-end lock and directory sync. Its
 	// rename machinery (the sheet count, the cascade, the merge scan) and its own
 	// lock guard are stubbed to "nothing blocks": §5 edits no driver name.
@@ -277,9 +294,9 @@ function makeApp() {
 	return { db, m, createUser, updateUser, onboarding, complete };
 }
 
-function reset(over = {}) {
+function reset(over = {}, appOpts = {}) {
 	Object.assign(S, { floors: { "cara carrier": { floor: "2026-06", unbounded: false } }, jtReads: 0, jtFails: false, refusals: [], recorded: [], namedLogins: false }, over);
-	return makeApp();
+	return makeApp(appOpts);
 }
 const dirRow = (db, name) => db.prepare("SELECT * FROM drivers_directory WHERE driver_name = ?").get(name);
 const user = (db, name) => db.prepare("SELECT * FROM users WHERE driver_name = ?").get(name);
@@ -632,6 +649,82 @@ const blockedAudit = (a) => a && a.action === "create_driver_pay_blocked" && a.e
 			check(`§7 flag off: a weak password and the admin's own are accepted, as before (${got(weak)}, ${got(own)})`, weak.status === 200 && own.status === 200);
 			check("§7 …a new Dispatcher need not change it", created(db, "weak_disp").must_change_password === 0 && created(db, "own_disp").must_change_password === 0);
 			check("§7 …and create_user reads as before", (createAudit(db)[0] || {}).details === 'Created user "weak_disp" with role Dispatcher');
+		}
+	}
+
+	console.log("§8 POST /api/users with NAMED_LOGINS_ENABLED: PUT /api/users/:id's password budget");
+	{
+		const express = require("express");
+		const rateLimitLib = require("express-rate-limit");
+		const ADMIN_OWN = "Admin-Own-Pass-1!";
+		// The limiter PUT /api/users/:id mounts, and the function POST /api/users
+		// spends it through (absent before that change).
+		const LIMITER_SRC = liftConst("const userPasswordResetLimiter = rateLimit({", "\n});");
+		const CREATE_LIMIT_SRC = liftNew("userCreatePasswordLimit");
+		check("§8 POST /api/users mounts userCreatePasswordLimit after its role check", USERS_ROUTE.startsWith(USERS_HEAD));
+		check("§8 …and PUT /api/users/:id mounts userPasswordResetLimiter after its role check",
+			USER_PUT_ROUTE.startsWith('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, '));
+		// One app: the lifted POST /api/users, and a PUT through the same limiter
+		// instance (the reset handler is not this case's subject).
+		const world = async (named) => {
+			const server = express();
+			server.use(express.json());
+			const resetLimiter = new Function("rateLimit", "ipKeyGenerator", `${LIMITER_SRC}\nreturn userPasswordResetLimiter;`)(rateLimitLib, rateLimitLib.ipKeyGenerator);
+			const createLimit = CREATE_LIMIT_SRC
+				? new Function("NAMED_LOGINS_ENABLED", "userPasswordResetLimiter", `${CREATE_LIMIT_SRC}\nreturn userCreatePasswordLimit;`)(named, resetLimiter)
+				: null;
+			const { db } = reset({ namedLogins: named }, { server, createLimit });
+			db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES (1, 'super_admin', ?, 'Super Admin')").run(bcryptjs.hashSync(ADMIN_OWN, 4));
+			server.put("/api/users/:id", (req, res, next) => { req.session = { user: SUPER }; next(); }, resetLimiter, (req, res) => res.json({ success: true }));
+			const listener = server.listen(0, "127.0.0.1");
+			await once(listener, "listening");
+			const send = (method, urlPath, body) => new Promise((resolve, reject) => {
+				const data = JSON.stringify(body);
+				const r = http.request({ host: "127.0.0.1", port: listener.address().port, method, path: urlPath, agent: false,
+					headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+					let buf = "";
+					res.setEncoding("utf8");
+					res.on("data", (c) => { buf += c; });
+					res.on("end", () => { let json = null; try { json = JSON.parse(buf); } catch { json = null; } resolve({ status: res.statusCode, json }); });
+				});
+				r.on("error", reject);
+				r.end(data);
+			});
+			const close = () => new Promise((resolve) => { if (listener.closeAllConnections) listener.closeAllConnections(); listener.close(resolve); });
+			return { db, send, close };
+		};
+		// A guess that writes nothing either way: a reserved username is refused
+		// after the own-password check, so only that check's answer differs.
+		const guess = (send, password) => send("POST", "/api/users", { username: "dispatch", password, role: "Dispatcher" });
+		const got = (r) => `${r.status} ${(r.json || {}).code || ""}`.trim();
+		{
+			const w = await world(true);
+			const answers = [];
+			for (let i = 1; i <= 5; i++) answers.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 five wrong guesses each write nothing (${answers.map(got).join(", ")})`,
+				answers.every((r) => r.status === 409 && r.json.code === "USERNAME_RESERVED"));
+			const sixth = await guess(w.send, ADMIN_OWN);
+			check(`§8 …and the sixth, the admin's own password, is 429, not PASSWORD_IS_YOURS (got ${got(sixth)})`, sixth.status === 429);
+			check("§8 …with nothing created", w.db.prepare("SELECT COUNT(*) AS n FROM users WHERE username = 'dispatch'").get().n === 0);
+			await w.close();
+		}
+		{
+			const w = await world(true);
+			const resets = [];
+			for (let i = 1; i <= 3; i++) resets.push(await w.send("PUT", "/api/users/7", { password: `Reset-Guess-${i}!` }));
+			const creates = [];
+			for (let i = 1; i <= 3; i++) creates.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 resets and creates share one budget: three resets, then the third create is 429 (resets ${resets.map(got).join(", ")}; creates ${creates.map(got).join(", ")})`,
+				resets.every((r) => r.status === 200) && creates[0].status === 409 && creates[1].status === 409 && creates[2].status === 429);
+			await w.close();
+		}
+		{
+			const w = await world(false);
+			const answers = [];
+			for (let i = 1; i <= 6; i++) answers.push(await guess(w.send, `Wrong-Guess-${i}!`));
+			check(`§8 flag off: six creates in a row are not limited, as before (${answers.map(got).join(", ")})`,
+				answers.every((r) => r.status === 409 && r.json.code === "USERNAME_RESERVED"));
+			await w.close();
 		}
 	}
 

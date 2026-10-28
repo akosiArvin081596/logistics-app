@@ -360,7 +360,7 @@ async function section1() {
 // ---------------------------------------------------------------------------
 // §2 desk names are reserved
 // ---------------------------------------------------------------------------
-const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {';
+const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {';
 const USERS_STUBS = {
 	requireRole: () => () => {},
 	syncDriverToCarrierSheet: () => {},
@@ -374,6 +374,9 @@ const USERS_STUBS = {
 	investorCompanyMoves: () => [],
 	investorCompanyLockBlockers: () => null,
 	getJobTrackingCached: async () => ({ headers: [], data: [] }),
+	// The password budget the route mounts (scripts/test-account-directory-row-lock.js
+	// §8's subject); the handler is called directly here.
+	userCreatePasswordLimit: (req, res, next) => next(),
 	periodLockUnreadableResponse: (req, res) => res.status(503).json({ code: "PERIOD_LOCK_UNREADABLE" }),
 	periodBlockedResponse: (req, res) => res.status(409).json({ code: "PERIOD_FINALIZED" }),
 };

@@ -29806,8 +29806,11 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 // WRONG_PASSWORD, CHANGED_MEANWHILE, AMBIGUOUS_EMAIL) is an audit row naming the
 // account, kept forever; refusals are coalesced (logAuditRefusal()). A Super
 // Admin's or Dispatcher's IP and browser go in sign_in_network, deleted after
-// 90 days and read only by GET /api/admin/sign-ins. A name no account has
-// writes no row, only a log line a minute. Off: no row and no record.
+// 90 days and read by GET /api/admin/sign-ins and, like every table, by the
+// Super Admin database browser and download (POST /api/db/download, GET
+// /api/db/tables, GET /api/db/query/:table); a refreshed or replica copy holds
+// none (refresh-env.js, replica/remote/scrub.js). A name no account has writes
+// no row, only a log line a minute. Off: no row and no record.
 const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
 // NAMED_LOGINS_ENABLED: off unless set to exactly "true". On, POST /api/users
 // applies the password rules to every role (400 PASSWORD_WEAK), refuses the
@@ -30145,8 +30148,17 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 	}
 });
 
+// With NAMED_LOGINS_ENABLED a create answers whether the password is the acting
+// admin's own (PASSWORD_IS_YOURS), as PUT /api/users/:id's reset does, so it
+// spends that reset's budget: userPasswordResetLimiter, one store for both routes,
+// 5 password-bearing requests per 15 minutes per acting admin. Off: no limit.
+function userCreatePasswordLimit(req, res, next) {
+	if (!NAMED_LOGINS_ENABLED) return next();
+	return userPasswordResetLimiter(req, res, next);
+}
+
 // Admin: create a new user
-app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
+app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {
 	try {
 		const { username, password, role, driverName, email, fullName, companyName } = req.body;
 		if (!username || !password || !role) {
@@ -30775,7 +30787,9 @@ function userUpdateLockBlockers(user, next) {
 // field counts, whatever the route then answers, and this runs before any
 // validation or comparison. Edits without a password field never count.
 // Mounted after requireRole, so only a Super Admin spends the budget; keyed on
-// the session user, else the IP, like the other per-feature limiters.
+// the session user, else the IP, like the other per-feature limiters. POST
+// /api/users spends the same budget while NAMED_LOGINS_ENABLED is on
+// (userCreatePasswordLimit()).
 const userPasswordResetLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 5,
@@ -37093,7 +37107,8 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 // GET /api/admin/sign-ins — sign-ins, sign-outs and refused sign-ins
 // (SIGN_IN_AUDIT_ENABLED), newest first, each with the IP and browser kept for a
 // Super Admin's or Dispatcher's row (sign_in_network, 90 days; null after or
-// for any other role). Super Admin only: no other route reads sign_in_network.
+// for any other role). Super Admin only, as is every other route that reaches
+// sign_in_network: the database browser and download, which reach every table.
 // ?userId=<account id>, ?limit=<1-500, default 100>.
 app.get("/api/admin/sign-ins", requireRole("Super Admin"), (req, res) => {
 	try {

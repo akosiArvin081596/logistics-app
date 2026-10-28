@@ -88,7 +88,11 @@ function liftRoute(head, what) {
 	const a = findOnce(`\n${head}`, `registration of ${what}`);
 	return SRC.slice(a, SRC.indexOf("\n});", a) + "\n});".length);
 }
-const USERS_ROUTE = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
+// POST /api/users mounts its password budget after the role check (a server.js
+// before that mounts none); the budget is scripts/test-account-directory-row-lock.js
+// §8's subject, a pass-through here.
+const USERS_HEAD = 'app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {';
+const USERS_ROUTE = liftRoute(SRC.includes(`\n${USERS_HEAD}`) ? USERS_HEAD : 'app.post("/api/users", requireRole("Super Admin"), async (req, res) => {', "POST /api/users");
 const USER_PUT_ROUTE = liftRoute('app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, async (req, res) => {', "PUT /api/users/:id");
 
 const NEW_HELPERS = ["investorAccountState", "investorCompanyMoves", "investorCompanyLockBlockers"];
@@ -238,6 +242,7 @@ function makeApp() {
 		// §7): off unless this run sets NAMED_LOGINS_ENABLED=true.
 		NAMED_LOGINS_ENABLED: process.env.NAMED_LOGINS_ENABLED === "true",
 		passwordRules: require("../lib/password-rules"),
+		userCreatePasswordLimit: (req, res, next) => next(),
 		getJobTrackingCached: readJt,
 		driverHistoryFloorMonth: historyFloor,
 		syncDriverToCarrierSheet: () => { S.syncs++; },
