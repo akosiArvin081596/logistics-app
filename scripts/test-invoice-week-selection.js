@@ -228,6 +228,9 @@ function buildWorld(db, opts = {}) {
 		// runs the pay paths with them on).
 		INVOICE_BLANK_PICKUP_FALLBACK_FROM: null,
 		LEDGER_BLANK_DROPOFF_FALLBACK_FROM: null,
+		// The closed-month invoice guard is off here (scripts/test-invoice-period-guard.js
+		// §7 runs it on).
+		INVOICE_CLOSED_MONTH_GUARD_ENABLED: false,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		renderPolicy: async (templateName, data) => { rendered.push({ templateName, data }); return Buffer.from("%PDF-stub"); },

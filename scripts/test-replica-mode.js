@@ -188,7 +188,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 		ok("a LOCAL_REPLICA that only a .env file set is checked right after dotenv", SRC.includes('require("dotenv").config();\n// A LOCAL_REPLICA that only a .env file set is refused here: replica mode was\n// decided above, before dotenv (lib/replica-mode.js checkDotenvFlag()).\nrequire("./lib/replica-mode").checkDotenvFlag(process.env);\n'));
 		ok("...and before every other module", bootAt < SRC.search(/^const express = require\("express"\);/m));
 		ok("server.js's fetch is the replica's in replica mode", /^const fetch = REPLICA \? REPLICA\.fetch : globalThis\.fetch;$/m.test(SRC));
-		ok("startsJob() always says yes outside replica mode", /function startsJob\(name\) \{\n\treturn REPLICA \? REPLICA\.jobNotStarted\(name\) : true;\n\}/.test(SRC));
+		ok("startsJob() always says yes outside replica mode (and an import, LOGISX_IMPORT_ONLY=1)", /function startsJob\(name\) \{\n\tif \(IMPORT_ONLY\) return false;\n\treturn REPLICA \? REPLICA\.jobNotStarted\(name\) : true;\n\}/.test(SRC));
 		ok("DATA_DIR is the app directory outside replica mode", /^const DATA_DIR = REPLICA \? REPLICA\.dataDir : __dirname;$/m.test(SRC));
 		const dirnameJoins = [...SRC.matchAll(/path\.join\(__dirname, ([^)]{0,40})/g)].map((m) => m[1]).filter((a) => !/^"(client|public|lib|onboarding-templates|\.cache|app\.db)"/.test(a));
 		eq("every runtime data path (uploads/, storage/, evidence-archive/, stored /uploads paths) goes through DATA_DIR", dirnameJoins, []);
@@ -576,7 +576,7 @@ function replicaHome({ settings = "", task = "t1", sheetsId = "replica-test-main
 			const pre = dotenvRun("1", { LOCAL_REPLICA: "false" });
 			ok("...and only when the environment did not already set the flag (dotenv does not override it)", pre.status === 0 && /CONTINUED/.test(pre.stdout), { status: pre.status, err: pre.stderr.slice(0, 200) });
 		}
-		eq("startsJob() evaluates to true when REPLICA is null", new Function("REPLICA", `${SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0]}\nreturn startsJob("x");`)(null), true);
+		eq("startsJob() evaluates to true when REPLICA is null", new Function("REPLICA", "IMPORT_ONLY", `${SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0]}\nreturn startsJob("x");`)(null, false), true);
 	}
 
 	console.log(failures ? `\n${failures} FAILED` : "\nall passed");
