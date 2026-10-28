@@ -30,11 +30,10 @@
  */
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

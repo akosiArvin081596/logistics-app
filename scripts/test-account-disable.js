@@ -56,14 +56,13 @@
  */
 "use strict";
 
-const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
 const { once } = require("events");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
