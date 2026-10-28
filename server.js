@@ -32948,9 +32948,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 // "true". It gates the disable alone; enabling always works, so an account disabled while it was on
 // can be enabled after it goes off. A disabled account is refused at sign-in whatever it says.
 const ACCOUNT_DISABLE_ENABLED = accountDisable.accountDisableEnabled();
-// The protected-account list the switch is judged against. RATECON_PDF_VIEWER_IDS is not read for it,
-// so it counts as unset: nobody is protected, and disabling a Super Admin is refused.
-const ACCOUNT_DISABLE_LIST = accountDisable.UNSET_LIST;
+// The protected-account list the switch is judged against. This build reads none (RATECON_PDF_VIEWER_IDS
+// is not read for it): disabling a Super Admin is refused, saying so, and enabling one is allowed.
+const ACCOUNT_DISABLE_LIST = accountDisable.UNREAD_LIST;
 
 // What a switch decides on, read in one synchronous step with its write.
 function accountSwitchFacts(req, id) {
