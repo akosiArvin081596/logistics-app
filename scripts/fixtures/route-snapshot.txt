@@ -185,16 +185,16 @@ GET /api/investors/:id/payout-basis · requireRole("Super Admin")=anon@12b84c4b0
 PUT /api/investors/:id/payout-basis · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@d96c74a2640f
 POST /api/investors/:id/profile-picture · requireAuth@2f5c61384511 · inline@34f6cec5224b
 GET /api/invoices · requireAuth@2f5c61384511 · inline@f6013fd8f71e
-DELETE /api/invoices/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@47487ab81275
+DELETE /api/invoices/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@cf8e66a8fd87
 PUT /api/invoices/:id/adjust · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@a16cd7b6a4ba
 PUT /api/invoices/:id/approve · requireRole("Super Admin")=anon@12b84c4b0134 · inline@200a31d86f91
 GET /api/invoices/:id/pdf · requireAuth@2f5c61384511 · inline@1507fb41e75d | after: GET /api/invoices/report/pdf
 GET /api/invoices/:id/personal-receipts/:lineId · requireAuth@2f5c61384511 · personalReceiptLimiter=limiter · inline@6a7f184e69df
-PUT /api/invoices/:id/restore · requireRole("Super Admin")=anon@12b84c4b0134 · inline@1b78a812a09a
+PUT /api/invoices/:id/restore · requireRole("Super Admin")=anon@12b84c4b0134 · inline@76e1b8b8ae90
 PUT /api/invoices/:id/revert · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2796581f6689
 PUT /api/invoices/:id/submit · requireAuth@2f5c61384511 · inline@091c2e50c503
-POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@5e9409baadf2
-POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@298f068ba51d
+POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@88eda6af748b
+POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e059be016674
 POST /api/invoices/manual/totals · requireRole("Super Admin")=anon@12b84c4b0134 · inline@19a163742032
 GET /api/invoices/payees · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4189f2fbaec6
 POST /api/invoices/personal-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@83b0b3a402a8
@@ -204,9 +204,9 @@ GET /api/legal-documents · requireRole("Super Admin", "Investor")=anon@12b84c4b
 DELETE /api/legal-documents/:id · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@518011e0e502
 PATCH /api/legal-documents/:id/visibility · requireRole("Super Admin")=anon@12b84c4b0134 · inline@6145f0979c9a
 POST /api/legal-documents/upload · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@097cac94dbf2
-GET /api/load-ratings/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@a0bd1f26ca33
+GET /api/load-ratings/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@a0bd1f26ca33 | after: GET /api/load-ratings/averages
 PUT /api/load-ratings/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@861f1c41096d
-GET /api/load-ratings/averages · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@0ac489d76517 | after: GET /api/load-ratings/:loadId
+GET /api/load-ratings/averages · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@0ac489d76517
 GET /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@e0784ab4343c
 PUT /api/load/:loadId · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@b6ea8fdcdd26
 DELETE /api/loads/:loadId · requireRole("Super Admin")=anon@12b84c4b0134 · inline@210395ff3283
