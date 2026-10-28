@@ -18,6 +18,11 @@
 //   4. No money is computed in the browser: every amount the new files print is
 //      a server string (amount_text, a line's amount); none of them divides,
 //      multiplies or adds a money figure.
+//   5. The receipt's week (PERSONAL_RECEIPT_WEEK_ENABLED on, W11): a carried line
+//      is live and its pill quotes the server's wait_text; a line on an approved
+//      invoice reads "(approved, final)"; the driver sees the week of the invoice
+//      that carries his line (invoice_week_label) or "coming off your next weekly
+//      invoice"; Reverse follows the server's can_reverse when it sends one.
 //
 // No network, no DOM, no database.
 //   node scripts/test-personal-expense-client.mjs      # exits 1 on any failure
@@ -175,6 +180,34 @@ section('§5 no money computed in the browser')
   }
   const lib = read('client/src/lib/personalReceipt.js')
   check('the one number the client formats is the dialog\'s default (the receipt amount, as sent)', (lib.match(/toFixed\(/g) || []).length, 1)
+}
+
+section('§6 W11 the receipt\'s week: carried, final and the invoice\'s week')
+{
+  const carried = (extra = {}) => line('carried', { amount_text: '$45.50', can_undo: true, can_reverse: false, ...extra })
+  const r = receipt('Approved', carried())
+  check('a carried line is live: Undo, no Personal button, the status buttons step aside',
+    [personalLive(r), canMarkPersonal(r, SA), canUndoPersonal(r, { isSuperAdmin: true }), canReversePersonal(r, { isSuperAdmin: true }), personalBlocksStatus(r)],
+    [true, false, true, false, true])
+  check('pill: carried off an approved week, in the server\'s words',
+    personalPillText(carried({ wait_text: 'the Oct 17-23, 2026 invoice is approved; it goes on the next weekly invoice' })),
+    'Personal -$45.50 · waiting: the Oct 17-23, 2026 invoice is approved; it goes on the next weekly invoice')
+  check('pill: carried, more than the invoice can take',
+    personalPillText(carried({ amount_text: '$500.00', wait_text: 'more than the Oct 17-23, 2026 invoice can take; it goes on the next weekly invoice with room' })),
+    'Personal -$500.00 · waiting: more than the Oct 17-23, 2026 invoice can take; it goes on the next weekly invoice with room')
+  check('pill: carried off a week touching a closed month',
+    personalPillText(carried({ amount_text: '$80.00', wait_text: 'the week of Sep 26 - Oct 2, 2026 touches closed September; it goes on the next weekly invoice' })),
+    'Personal -$80.00 · waiting: the week of Sep 26 - Oct 2, 2026 touches closed September; it goes on the next weekly invoice')
+  const final = line('invoiced', { amount_text: '$45.50', invoice_number: 'INV-XX-2026W44-01', final: true, can_undo: false, can_reverse: false })
+  check('pill: on an approved invoice, final', personalPillText(final), 'Personal -$45.50 · on INV-XX-2026W44-01 (approved, final)')
+  check('Reverse from can_reverse: an approved, final line offers neither Undo nor Reverse',
+    [canUndoPersonal(receipt('Approved', final), { isSuperAdmin: true }), canReversePersonal(receipt('Approved', final), { isSuperAdmin: true })], [false, false])
+  check('…and can_reverse true offers Reverse (a line whose month closed while it waited)',
+    canReversePersonal(receipt('Approved', line('pending', { can_undo: false, can_reverse: true })), { isSuperAdmin: true }), true)
+  check('driver: on a later week\'s invoice, that invoice\'s week',
+    personalDriverText(line('invoiced', { amount_text: '$45.50', week_label: 'Oct 17-23, 2026', invoice_week_label: 'Oct 24-30, 2026' })),
+    'Personal: -$45.50 on your Oct 24-30, 2026 invoice')
+  check('driver: carried', personalDriverText(carried()), 'Personal: -$45.50, coming off your next weekly invoice')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

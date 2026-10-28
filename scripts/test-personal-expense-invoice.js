@@ -49,6 +49,24 @@
  *            the share and re-checks the week's month inside its write; L3 the
  *            sweep never flags a line attached meanwhile; L4 a Dispatcher's list
  *            carries no share or invoice; L5 a detach updates the stored render data
+ * The receipt's week (PERSONAL_RECEIPT_WEEK_ENABLED, on only when exactly "true"):
+ * a line belongs to the week of its receipt date; when that week's invoice can't
+ * take it, it is carried to the driver's next open weekly invoice with room.
+ *   §17 W2   W40 Submitted takes an Oct 7 receipt marked Thu Oct 15 at once
+ *   §18 W3   W41 Approved: the mark is carried (no correction); W42's
+ *            generation takes it
+ *   §19 W4   W41 Approved, W42 Submitted: the mark lands on W42 keyed to W41;
+ *            the driver sees the invoice's week
+ *   §20 W5   a line W41 can't take, at generation or after an adjustment, goes
+ *            on W42
+ *   §21 W6   a receipt week touching closed September: carried to W40, past the
+ *            open Sep 26 - Oct 2 invoice
+ *   §22 W7   a receipt several weeks old lands on the oldest open invoice
+ *   §23 W8   the sweep carries and attaches, never notifies; a mark and the
+ *            sweep redrawing one invoice: one write refuses, no line doubled;
+ *            pin: a line a generation took meanwhile is never carried
+ *   §24 W9   a line flagged before the switch goes on W42
+ *   §25 pin  an owner-operator's carried line keeps its share
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-invoice.js    # exits 1 on failure
@@ -69,6 +87,20 @@ const submit = (w, id) => w.db.prepare("UPDATE invoices SET status = 'Submitted'
 const approve = (w, id) => w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = 't', approved_by = 'super_admin' WHERE id = ?").run(id);
 const lastRender = (w) => w.rendered[w.rendered.length - 1] || null;
 const SAT_0630 = edt("2026-10-17", 6, 30);
+
+const WEEK_ON = { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
+// A receipt of the runner's own, beyond the world's eleven (made up, Approved).
+const addReceipt = (w, { id, driver = DRIVER_A, type = "Food", amount = 45.5, date, vendor = "EXAMPLE DINER #3", truck = "T-1", owner = 7 }) =>
+	w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description)
+		VALUES (?, ?, ?, ?, ?, ?, 'Approved', ?, ?, ?, ?, '')`).run(id, `${date}T15:00:00.000Z`, driver, type, amount, date, vendor, truck, owner, `${date} 15:00:00`);
+// A load delivered in W42 (Mon 10-19 to Tue 10-20), copied from one of the
+// driver's own rows: 1 Driver A ($600), 2 the owner-operator ($2,500), 5 Driver B.
+const addW42Load = (w, fromRow, loadId) => w.sheet.rows.push(w.sheet.rows[fromRow].map((v, i) =>
+	({ 1: loadId, 6: "10/19/2026 8:00", 9: "10/20/2026 10:00", 20: "10/19/2026", 21: "10/20/2026", 22: "10/20/2026" })[i] ?? v));
+const deductOf = (w, expenseId) => w.lines("expense_id = ? AND kind = 'deduct'", expenseId)[0] || {};
+const summaryOf = (w, expenseId, role = "Super Admin") => w.api.personalSummaryForRole(w.api.personalSummaryByExpense([expenseId])[expenseId], role) || {};
+const notices = (w) => w.db.prepare("SELECT COUNT(*) AS n FROM dispatch_notifications WHERE type = 'personal-expenses'").get().n;
+const printed = (w) => ((lastRender(w) || { data: {} }).data.personalLines || []).map((l) => l.text);
 
 (async () => {
 	section("§1 T5 company driver, marked before generation");
@@ -657,6 +689,300 @@ const SAT_0630 = edt("2026-10-17", 6, 30);
 		const adj = await w.call("PUT", `/api/invoices/${g.body.invoice.id}/adjust`, { body: { adjustment: -150, adjustmentNote: "Advance" } });
 		check("…the adjustment detaches the line: the stored render data no longer lists it",
 			[adj.status, w.lines("expense_id = 12")[0].invoice_id, (stored().personalLines || []).length, stored().personalTotal || 0], [200, null, 0, 0]);
+		w.cleanup();
+	}
+
+	section("§17 W2 the receipt's own week first: W40 Submitted, an Oct 7 receipt marked Thu Oct 15");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 20, date: "2026-10-07" });
+		const g40 = await w.generate(DRIVER_A, "2026-10-09");
+		const w40 = g40.body.invoice.id;
+		submit(w, w40);
+		const r = await mark(w, 20);
+		check("201, on W40 at once", [r.status, r.body.personal && r.body.personal.state, r.body.personal && r.body.personal.invoice_number],
+			[201, "invoiced", g40.body.invoice.invoice_number]);
+		check("…keyed to W40", [deductOf(w, 20).week_start, deductOf(w, 20).invoice_id === w40], ["2026-10-03", true]);
+		check("…W40: $600 - $45.50 = $554.50, still Submitted", [due(w, w40), w.invoice(w40).status], [554.5, "Submitted"]);
+		check("…redrawn, the line printed with its receipt date", printed(w), ["Personal expense, EXAMPLE DINER #3, Oct 7, 2026: -$45.50"]);
+		w.cleanup();
+	}
+
+	section("§18 W3 W41 Approved: the mark is carried, never a correction");
+	{
+		const w = world(WEEK_ON);
+		const g = await w.generate(DRIVER_A);
+		const w41 = g.body.invoice.id;
+		approve(w, w41);
+		const r = await mark(w, 1);
+		check("201, and no invoice row is created", [r.status, w.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE is_correction = 1").get().n], [201, 0]);
+		check("…the line on no invoice, carried, keyed to its own week",
+			[deductOf(w, 1).invoice_id, !!deductOf(w, 1).needs_correction_since, deductOf(w, 1).week_start], [null, true, "2026-10-10"]);
+		check("…the response says carried, and why", [r.body.personal && r.body.personal.state, r.body.personal && r.body.personal.wait_text],
+			["carried", "the Oct 10-16, 2026 invoice is approved; it goes on the next weekly invoice"]);
+		check("…W41 untouched (Approved, $900)", [w.invoice(w41).status, w.invoice(w41).personal_total, due(w, w41)], ["Approved", 0, 900]);
+		w.setNow(edt("2026-10-22", 12));
+		addW42Load(w, 1, "L7");
+		const g42 = await w.generate(DRIVER_A, "2026-10-23");
+		const w42 = g42.body.invoice && g42.body.invoice.id;
+		check("W42's generation takes it: $600 - $200 = $400, no longer carried",
+			[g42.status, deductOf(w, 1).invoice_id === w42, deductOf(w, 1).needs_correction_since, w42 && due(w, w42)], [200, true, "", 400]);
+		check("…printed with its receipt date", printed(w), ["Personal expense, Pilot #123, Oct 12, 2026: -$200.00"]);
+		w.cleanup();
+	}
+
+	section("§19 W4 W41 Approved, W42 Submitted, clock Thu Oct 22: R1 goes on W42");
+	{
+		const w = world(WEEK_ON);
+		const g = await w.generate(DRIVER_A);
+		approve(w, g.body.invoice.id);
+		w.setNow(edt("2026-10-22", 12));
+		addW42Load(w, 1, "L7");
+		const g42 = await w.generate(DRIVER_A, "2026-10-23");
+		const w42 = g42.body.invoice.id;
+		submit(w, w42);
+		const r = await mark(w, 1);
+		check("201, on W42 at once: $600 - $200 = $400", [r.status, deductOf(w, 1).invoice_id === w42, due(w, w42)], [201, true, 400]);
+		check("…keyed to its own week (2026-10-10), not the mark's (2026-10-17)", deductOf(w, 1).week_start, "2026-10-10");
+		check("…printed with its receipt date", printed(w), ["Personal expense, Pilot #123, Oct 12, 2026: -$200.00"]);
+		const d = summaryOf(w, 1, "Driver");
+		check("the driver's summary: the line's week, and the week of the invoice that carries it",
+			[d.state, d.invoice_number, d.week_label, d.invoice_week_label], ["invoiced", g42.body.invoice.invoice_number, "Oct 10-16, 2026", "Oct 17-23, 2026"]);
+		check("W41 untouched", [w.invoice(g.body.invoice.id).personal_total, due(w, g.body.invoice.id)], [0, 900]);
+		w.cleanup();
+	}
+
+	section("§20 W5 a line its week's invoice can't take goes on the next weekly invoice with room");
+	{
+		const w = world(WEEK_ON);
+		w.db.prepare("UPDATE drivers_directory SET pay_daily = 150 WHERE driver_name = ?").run(DRIVER_B);
+		addReceipt(w, { id: 12, driver: DRIVER_B, amount: 200, date: "2026-10-13", vendor: "EXAMPLE DINER #2", truck: "T-3", owner: 0 });
+		addReceipt(w, { id: 13, driver: DRIVER_B, amount: 150, date: "2026-10-14", vendor: "EXAMPLE DINER #3", truck: "T-3", owner: 0 });
+		await mark(w, 12);
+		await mark(w, 13);
+		const g = await w.generate(DRIVER_B);
+		check("$300 of pay: W41 takes the $200 line (older), total $100", [deductOf(w, 12).invoice_id === g.body.invoice.id, due(w, g.body.invoice.id)], [true, 100]);
+		const s = summaryOf(w, 13);
+		check("…the $150 line is carried, and says why", [deductOf(w, 13).invoice_id, s.state, s.wait_text],
+			[null, "carried", "more than the Oct 10-16, 2026 invoice can take; it goes on the next weekly invoice with room"]);
+		w.setNow(edt("2026-10-22", 12));
+		addW42Load(w, 5, "L8");
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		const w42 = g42.body.invoice && g42.body.invoice.id;
+		check("W42 ($300) takes it: total $150", [deductOf(w, 13).invoice_id === w42, deductOf(w, 13).needs_correction_since, w42 && due(w, w42)], [true, "", 150]);
+		check("…printed with its receipt date", printed(w), ["Personal expense, EXAMPLE DINER #3, Oct 14, 2026: -$150.00"]);
+		w.cleanup();
+	}
+	{
+		const w = world(WEEK_ON);
+		w.db.prepare("UPDATE drivers_directory SET pay_daily = 150 WHERE driver_name = ?").run(DRIVER_B);
+		addReceipt(w, { id: 12, driver: DRIVER_B, amount: 200, date: "2026-10-13", vendor: "EXAMPLE DINER #2", truck: "T-3", owner: 0 });
+		await mark(w, 12);
+		const g = await w.generate(DRIVER_B);
+		submit(w, g.body.invoice.id);
+		const adj = await w.call("PUT", `/api/invoices/${g.body.invoice.id}/adjust`, { body: { adjustment: -150, adjustmentNote: "Advance" } });
+		const s = summaryOf(w, 12);
+		check("a -$150 adjustment on W41 takes the $200 line off: carried, and says why", [adj.status, deductOf(w, 12).invoice_id, s.state, s.wait_text],
+			[200, null, "carried", "more than the Oct 10-16, 2026 invoice can take; it goes on the next weekly invoice with room"]);
+		w.setNow(edt("2026-10-22", 12));
+		addW42Load(w, 5, "L8");
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		const w42 = g42.body.invoice && g42.body.invoice.id;
+		check("…W42 ($300) takes it: total $100", [deductOf(w, 12).invoice_id === w42, w42 && due(w, w42)], [true, 100]);
+		w.cleanup();
+	}
+
+	section("§21 W6 a receipt week touching closed September");
+	{
+		const w = world(WEEK_ON);
+		// The Sep 26 - Oct 2 weekly invoice, open and with its render data: only
+		// the closed month keeps a line off it.
+		const w39 = Number(w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, status, pdf_file_name, render_data)
+			VALUES ('INV-TDA-2026W39-01', 'test driver a', '2026-09-26', '2026-10-02', 2, 300, 600, 'Submitted', 'INV-TDA-2026W39-01.pdf', ?)`)
+			.run(JSON.stringify({ __templateName: "service_invoice", totalEarnings: 600, totalDue: 600 })).lastInsertRowid);
+		const r = await mark(w, 6);
+		const s = summaryOf(w, 6);
+		check("R6 (Sep 28): 201, keyed to its own week, carried, on no invoice", [r.status, deductOf(w, 6).week_start, deductOf(w, 6).invoice_id, s.state],
+			[201, "2026-09-26", null, "carried"]);
+		check("…and says why", s.wait_text, "the week of Sep 26 - Oct 2, 2026 touches closed September; it goes on the next weekly invoice");
+		const g40 = await w.generate(DRIVER_A, "2026-10-09");
+		const w40 = g40.body.invoice.id;
+		check("W40's generation takes it: $600 - $80 = $520", [g40.status, deductOf(w, 6).invoice_id === w40, due(w, w40)], [200, true, 520]);
+		addReceipt(w, { id: 23, type: "Fuel", date: "2026-09-22", vendor: "EXAMPLE FUEL #12" });
+		const r23 = await mark(w, 23);
+		check("a Sep 22 receipt skips the open Sep 26 - Oct 2 invoice and lands on W40: $520 - $45.50 = $474.50",
+			[r23.status, deductOf(w, 23).invoice_id === w40, due(w, w40)], [201, true, 474.5]);
+		check("…the Sep 26 - Oct 2 invoice untouched", [w.invoice(w39).personal_total, w.invoice(w39).status], [0, "Submitted"]);
+		w.cleanup();
+	}
+
+	section("§22 W7 a receipt several weeks old, clock Thu Oct 29: W40 and W41 Approved, W42 Submitted");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 20, date: "2026-10-07" });
+		const g40 = await w.generate(DRIVER_A, "2026-10-09");
+		approve(w, g40.body.invoice.id);
+		const g41 = await w.generate(DRIVER_A);
+		approve(w, g41.body.invoice.id);
+		addW42Load(w, 1, "L7");
+		w.setNow(edt("2026-10-29", 12));
+		const g42 = await w.generate(DRIVER_A, "2026-10-23");
+		const w42 = g42.body.invoice.id;
+		submit(w, w42);
+		const r = await mark(w, 20);
+		check("the Oct 7 receipt lands on W42 at once, keyed to W40: $600 - $45.50 = $554.50",
+			[r.status, deductOf(w, 20).week_start, deductOf(w, 20).invoice_id === w42, due(w, w42)], [201, "2026-10-03", true, 554.5]);
+		check("…printed with its receipt date", printed(w), ["Personal expense, EXAMPLE DINER #3, Oct 7, 2026: -$45.50"]);
+		check("…W40 and W41 untouched", [due(w, g40.body.invoice.id), due(w, g41.body.invoice.id)], [600, 900]);
+		w.cleanup();
+	}
+
+	section("§23 W8 the weekly sweep carries and attaches, and never asks for a correction");
+	const sweepSummary = (w, weekStart) => (w.db.prepare("SELECT summary FROM personal_sweep_runs WHERE week_start = ?").get(weekStart) || {}).summary || "";
+	const audited = (w, expenseId) => w.db.prepare("SELECT COUNT(*) AS n FROM audit_trail WHERE entity = 'expense' AND entity_id = ?").get(String(expenseId)).n;
+	{
+		const w = world(WEEK_ON);
+		await mark(w, 11);
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		check("W41 over with no invoice and no later one: B's line is carried, on no invoice",
+			[deductOf(w, 11).invoice_id, !!deductOf(w, 11).needs_correction_since, summaryOf(w, 11).state], [null, true, "carried"]);
+		check("…no notice to Super Admins", notices(w), 0);
+		check("…the run's summary counts attached, carried, failed", /^\d+ attached · \d+ carried · \d+ failed$/.test(sweepSummary(w, "2026-10-10")), true);
+		const before = audited(w, 11);
+		w.setNow(SAT_0630 + 15 * 60 * 1000);
+		await w.api.runPersonalSweep();
+		check("…the next tick audits the carry no second time", audited(w, 11), before);
+		w.cleanup();
+	}
+	{
+		const w = world(WEEK_ON);
+		await mark(w, 11);
+		addW42Load(w, 5, "L8");
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		const w42 = g42.body.invoice.id;
+		submit(w, w42);
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		check("B's W42 invoice open: the sweep carries the W41 line onto it, $500 - $30 = $470",
+			[deductOf(w, 11).invoice_id === w42, deductOf(w, 11).needs_correction_since, due(w, w42)], [true, "", 470]);
+		check("…redrawn with the line", printed(w), ["Personal expense, Diner #2, Oct 13, 2026: -$30.00"]);
+		check("…no notice", notices(w), 0);
+		w.cleanup();
+	}
+	// A W42 receipt of Driver B's, and his W42 invoice Submitted by the Friday
+	// batch; B's W41 line still waits (W41 has no invoice).
+	const raceWorld = async () => {
+		const w = world(WEEK_ON);
+		await mark(w, 11);
+		addReceipt(w, { id: 12, driver: DRIVER_B, type: "Fuel", date: "2026-10-20", vendor: "EXAMPLE FUEL #12", truck: "T-3", owner: 0 });
+		addW42Load(w, 5, "L8");
+		w.setNow(edt("2026-10-23", 20));
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		submit(w, g42.body.invoice.id);
+		w.setNow(edt("2026-10-24", 6, 30));
+		const onW42 = () => w.lines("invoice_id = ?", g42.body.invoice.id).map((l) => l.expense_id).sort((a, b) => a - b);
+		return { w, w42: g42.body.invoice.id, onW42 };
+	};
+	{
+		const { w, w42, onW42 } = await raceWorld();
+		let fired = false;
+		let marked = null;
+		w.hooks.render = async (t, d, def) => {
+			if (!fired) { fired = true; marked = await mark(w, 12); }
+			return def(t, d);
+		};
+		await w.api.runPersonalSweep();
+		check("a mark made while the sweep redraws W42: 201, its line on W42 and not carried",
+			[marked && marked.status, onW42().includes(12), deductOf(w, 12).needs_correction_since], [201, true, ""]);
+		const ids = onW42();
+		const linesCents = w.lines("invoice_id = ?", w42).reduce((s, l) => s + l.cents, 0);
+		check("…no line doubled: each line once on W42, and its Personal column their sum",
+			[ids.length === new Set(ids).size, Math.round((w.invoice(w42).personal_total || 0) * 100) === linesCents], [true, true]);
+		w.hooks.render = null;
+		w.setNow(edt("2026-10-24", 6, 45));
+		await w.api.runPersonalSweep();
+		check("…the next tick: both lines on W42 once, $500 - $45.50 - $30 = $424.50", [onW42(), due(w, w42)], [[11, 12], 424.5]);
+		w.cleanup();
+	}
+	{
+		const { w, w42, onW42 } = await raceWorld();
+		let fired = false;
+		let swept = null;
+		w.hooks.render = async (t, d, def) => {
+			if (!fired) { fired = true; swept = await w.api.runPersonalSweep(); }
+			return def(t, d);
+		};
+		const r = await mark(w, 12);
+		check("a sweep run while a mark redraws W42: the sweep's line lands; the mark answers 409 PERSONAL_CHANGED and writes nothing",
+			[!!swept, onW42(), r.status, r.body && r.body.code, w.lines("expense_id = 12").length], [true, [11], 409, "PERSONAL_CHANGED", 0]);
+		w.hooks.render = null;
+		const again = await mark(w, 12);
+		check("…marked again: 201, both lines on W42 once, $424.50", [again.status, onW42(), due(w, w42)], [201, [11, 12], 424.5]);
+		w.cleanup();
+	}
+	{
+		// Pin: as L3, with a generation: B's W41 invoice, generated while the sweep
+		// awaits A's render, takes B's line; the sweep never carries it.
+		const w = world(WEEK_ON);
+		const g = await w.generate(DRIVER_A);
+		await mark(w, 1);
+		w.db.prepare("UPDATE expense_personal SET invoice_id = NULL WHERE expense_id = 1").run();
+		w.db.prepare("UPDATE invoices SET personal_total = 0 WHERE id = ?").run(g.body.invoice.id);
+		await mark(w, 11);
+		let fired = false;
+		let gb = null;
+		w.hooks.render = async (t, d, def) => {
+			if (!fired) { fired = true; gb = await w.generate(DRIVER_B); }
+			return def(t, d);
+		};
+		w.setNow(SAT_0630);
+		await w.api.runPersonalSweep();
+		const wb = gb && gb.body && gb.body.invoice ? gb.body.invoice.id : null;
+		check("pin: a line a generation took during the sweep's render is never carried",
+			[wb !== null, deductOf(w, 11).invoice_id === wb, deductOf(w, 11).needs_correction_since, notices(w)], [true, true, "", 0]);
+		w.cleanup();
+	}
+
+	section("§24 W9 a line flagged before the switch (week of Oct 10, no invoice) goes on W42");
+	const flaggedBefore = (w) => w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, needs_correction_since, created_at, created_by, created_by_id, created_role)
+		VALUES (11, 'deduct', 3000, 3000, 'Diner #2', '2026-10-13', '2026-10', 1, '2026-10-13', '2026-10-10', '2026-10-17T10:30:00.000Z', 't', 'super_admin', 1, 'Super Admin')`).run();
+	{
+		const w = world(WEEK_ON);
+		flaggedBefore(w);
+		addW42Load(w, 5, "L8");
+		w.setNow(edt("2026-10-23", 20));
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		const w42 = g42.body.invoice.id;
+		check("W42's generation takes it: $500 - $30 = $470, no longer flagged", [deductOf(w, 11).invoice_id === w42, deductOf(w, 11).needs_correction_since, due(w, w42)], [true, "", 470]);
+		w.cleanup();
+	}
+	{
+		const w = world(WEEK_ON);
+		addW42Load(w, 5, "L8");
+		w.setNow(edt("2026-10-23", 20));
+		const g42 = await w.generate(DRIVER_B, "2026-10-23");
+		const w42 = g42.body.invoice.id;
+		submit(w, w42);
+		flaggedBefore(w);
+		w.setNow(edt("2026-10-26", 10));
+		await w.api.runPersonalSweep();
+		check("W42 already Submitted: the first sweep tick puts it on W42 ($470), no notice", [deductOf(w, 11).invoice_id === w42, due(w, w42), notices(w)], [true, 470, 0]);
+		w.cleanup();
+	}
+
+	section("§25 pin: an owner-operator's line carried off his approved week keeps its share");
+	{
+		const w = world(WEEK_ON);
+		const g = await w.generate(OWNER_OP);
+		approve(w, g.body.invoice.id);
+		await mark(w, 8);
+		check("the line carries the $25 share W41 counted", deductOf(w, 8).share_cents, 2500);
+		w.setNow(edt("2026-10-22", 12));
+		addW42Load(w, 2, "L9");
+		await w.generate(OWNER_OP, "2026-10-23");
+		const carrier = w.invoice(deductOf(w, 8).invoice_id) || {};
+		check("…the invoice that carries it: +$25.00 share returned, -$100.00 Personal", [carrier.personal_share_total, carrier.personal_total], [25, 100]);
 		w.cleanup();
 	}
 
