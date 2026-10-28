@@ -169,11 +169,13 @@ function makeWorld({ dbFile = null } = {}) {
 		},
 		async render(ctx, opts) {
 			w.calls.render.push({ loadId: ctx.loadId, ...opts });
+			if (w.renderHook) w.renderHook(ctx);
 			if (w.renderHang) return never();
-			return { to: ctx.to, subject: `Made-up invoice ${opts.invoiceId}`, html: "<p>made-up</p>", attachments: [] };
+			return { to: ctx.to, subject: `Made-up invoice ${opts.invoiceId}`, html: "<p>made-up</p>", attachments: [], total: w.total || "$1,000.00" };
 		},
 		async record(ctx, rendered, opts) {
 			w.calls.record.push({ loadId: ctx && ctx.loadId, via: opts.via, invoiceId: opts.invoiceId, actor: opts.actor.username });
+			if (w.recordThrows) throw Object.assign(new Error(`made-up failure for ${BROKER}`), { code: "SQLITE_BUSY" });
 			if (w.recordHang === "before") return never();
 			const r = w.db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_by) VALUES (?, ?, ?, 'ratecon', ?, ?)")
 				.run(ctx.loadId, opts.invoiceId, rendered.to, opts.via, opts.actor.username);
@@ -207,6 +209,8 @@ function makeWorld({ dbFile = null } = {}) {
 			if (b === "LOGIN") throw imapError("IMAP LOGIN failed", "login", true);
 			if (b === "BEFORE_LITERAL") throw imapError("IMAP timeout at stage 2", "append", false);
 			if (b === "SENT_NO_ANSWER") { w.gmail.push(o.messageId); throw imapError("IMAP timeout at stage 3", "literal", false); }
+			// The answer is lost and the message lands only after the next search.
+			if (b === "LANDS_LATE") { w.pendingLanding = o.messageId; throw imapError("IMAP timeout at stage 3", "literal", false); }
 			if (b === "LOST") throw imapError("IMAP timeout at stage 3", "literal", false);
 			if (b === "CRASH_AFTER") { w.gmail.push(o.messageId); return never(); }
 			if (b === "CRASH_BEFORE") return never();
@@ -216,6 +220,7 @@ function makeWorld({ dbFile = null } = {}) {
 			w.calls.search.push(messageId);
 			if (w.searchFails) throw imapError("IMAP SEARCH failed: made-up", "search", true);
 			const n = w.gmail.filter((id) => id === messageId).length;
+			if (w.pendingLanding) { w.gmail.push(w.pendingLanding); w.pendingLanding = null; }
 			return { found: n > 0, count: n };
 		},
 		newMessageId: () => `<made-up-${++w.ids}.auto-invoice@example.com>`,
@@ -423,12 +428,34 @@ async function main() {
 		w.appendBehaviors = ["LOST"];
 		await job.tick();
 		const lost = w.claim("LD-TEST-0062");
-		eq([lost.state, lost.stage, lost.attempts], ["queued", "reserved", 1], "§6 not found: queued again, number kept");
+		eq([lost.state, lost.stage, lost.attempts], ["queued", "appending", 1], "§6 not found yet: queued again at stage appending (it may still land), number kept");
+		const searches62 = w.calls.search.length;
 		w.now += 15 * MIN;
 		await job.tick();
-		eq(w.state("LD-TEST-0062"), ["drafted", ""], "§6 the retry drafts it");
+		eq(w.calls.search.length - searches62, 1, "§6 the retry searches Gmail before appending again");
+		eq(w.state("LD-TEST-0062"), ["drafted", ""], "§6 still absent: the retry drafts it");
 		const tries = w.calls.render.filter((r) => r.loadId === "LD-TEST-0062").map((r) => r.invoiceId);
 		eq([tries.length, new Set(tries).size, w.draftRows("LD-TEST-0062").length], [2, 1, 1], "§6 with the same number, one draft row");
+
+		// The review's reproduction: the message lands just after the first search.
+		w.ready("LD-TEST-0064");
+		w.appendBehaviors = ["LANDS_LATE", "OK"];
+		const gmailBefore = w.gmail.length;
+		const appendsBefore64 = w.calls.append.length;
+		await job.tick();
+		eq([w.claim("LD-TEST-0064").stage, w.gmail.length - gmailBefore], ["appending", 1], "§6 late landing: missed by the first search, the draft is in Gmail anyway");
+		w.now += 16 * MIN;
+		await job.tick();
+		eq(w.state("LD-TEST-0064"), ["drafted", ""], "§6 late landing: the retry finds it and records it");
+		eq([w.calls.append.length - appendsBefore64, w.gmail.length - gmailBefore, w.draftRows("LD-TEST-0064").length], [1, 1, 1], "§6 late landing: one append, one Gmail draft, one draft row");
+
+		w.ready("LD-TEST-0065");
+		w.appendBehaviors = ["LANDS_LATE"];
+		await job.tick();
+		w.handDraft("LD-TEST-0065");
+		await job.tick();
+		eq(w.state("LD-TEST-0065"), ["skipped", "DRAFTED_BY_HAND"], "§6 a hand draft after a lost answer: skipped");
+		eq(w.actions("auto_invoice_number_void").filter((a) => a.id === "LD-TEST-0065").length, 0, "§6 and its number is not called unused: it may be in Gmail");
 
 		w.ready("LD-TEST-0063");
 		w.appendBehaviors = ["LOST"];
@@ -727,7 +754,7 @@ async function main() {
 		eq([bad.status, bad.body.code], [400, "OPT_OUT_INVALID"], "§11 a bad opt-out list is refused");
 		const put = await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: ["Example-Factor.test"] } });
 		eq([put.status, put.body], [200, { optOutDomains: ["example-factor.test"] }], "§11 opt-outs saved");
-		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"] }, "§11 and read back");
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: ["example-factor.test"], unreadable: false }, "§11 and read back");
 		eq(w.actions("update_auto_invoice_settings").map((a) => [a.who, a.details]), [["made-up-admin", "opted out: example-factor.test (was: none)"]], "§11 audited as the Super Admin");
 
 		w.setRow("LD-TEST-0150", { "  Payment  ": "$1,100.00" });
@@ -737,8 +764,8 @@ async function main() {
 		eq([notDrafted.status, notDrafted.body.code], [409, "AUTO_INVOICE_NOT_DRAFTED"], "§11 Mark checked needs a draft");
 		const missing = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "LD-TEST-9999" } });
 		eq([missing.status, missing.body.code], [404, "AUTO_INVOICE_NOT_FOUND"], "§11 an unknown load: 404");
-		const checked = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "%23LD-TEST-0150" } });
-		eq(checked.status, 200, "§11 Mark checked ('#id' works too)");
+		const checked = await call("POST", "/api/auto-invoice/loads/:loadKey/checked", { params: { loadKey: "#LD-TEST-0150" } });
+		eq(checked.status, 200, "§11 Mark checked ('#id', as Express decodes it, works too)");
 		const cc = w.claim("LD-TEST-0150");
 		eq([cc.changed_fields, cc.changed_at, cc.checked_by], ["", "", "made-up-admin"], "§11 the flag clears");
 		await job.tick();
@@ -752,12 +779,136 @@ async function main() {
 		eq(w.actions("auto_invoice_retry").map((a) => a.details), ["try again (was: RECIPIENT_DOMAIN_MISMATCH)"], "§11 audited with what it was");
 		await job.tick();
 		eq(w.state("LD-TEST-0152"), ["drafted", ""], "§11 and it drafts");
-		const badKey = await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "%E0%A4%A" } });
-		eq([badKey.status, badKey.body.code], [400, "LOAD_KEY_INVALID"], "§11 an undecodable key is refused");
+		const badKey = await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "x".repeat(101) } });
+		eq([badKey.status, badKey.body.code], [400, "LOAD_KEY_INVALID"], "§11 an over-long key is refused");
+		const encoded = await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "%23LD-TEST-0152" } });
+		eq(encoded.status, 404, "§11 the key is not decoded a second time");
 		const shadowApp = fakeApp();
 		shadowJob.mount(shadowApp.app, { requireRole: shadowApp.requireRole });
 		eq((await shadowApp.call("GET", "/api/auto-invoice/status")).body.mode, "shadow", "§11 shadow: status answers");
 		eq((await shadowApp.call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-0152" } })).status, 404, "§11 shadow: the load routes are off");
+	}
+
+	// ---------------------------------------------------------------- §12
+	section("§12 review fixes: endless waits, numbers, recovery, timeouts, settings, logs");
+	{
+		// The review's pod-loop: a POD only in Drive that the engine can't fetch.
+		const w = makeWorld();
+		const job = await w.started();
+		w.setRow("LD-TEST-0160");
+		w.db.prepare("INSERT INTO documents (load_id, type, file_name, drive_file_id) VALUES (?, 'POD', 'pod-drive.pdf', 'drv-made-up')").run("LD-TEST-0160");
+		w.rateCons.set("ld-test-0160", "billing@example-broker.test");
+		w.prepareHook = () => ({ ok: false, http: 400, code: "POD_NOT_FOUND" });
+		const seen = [];
+		for (let i = 0; i < 12; i++) { await job.tick(); seen.push(w.state("LD-TEST-0160").join("/")); w.now += 5 * MIN; }
+		eq(w.state("LD-TEST-0160"), ["needs_attention", "POD_UNREADABLE"], "§12 M1: the engine can't find the POD the free check sees: a person after 3 tries");
+		eq([w.calls.prepare.length, w.claim("LD-TEST-0160").attempts, w.calls.mint.length], [3, 3, 0], "§12 M1: three engine calls in 12 sweeps, counted as attempts, no number");
+		ok(seen.slice(-8).every((s) => s === "needs_attention/POD_UNREADABLE"), "§12 M1: and it stays there");
+	}
+	{
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0161");
+		w.prepareHook = (id) => (id === "LD-TEST-0161" ? { ok: true, ctx: { loadId: id } } : null);
+		await job.tick();
+		eq([w.state("LD-TEST-0161"), w.calls.mint.length, w.calls.render.length], [["needs_attention", "NO_BILLING_EMAIL"], 0, 0], "§12 L1: an engine answer with no recipient: a person, no number minted");
+		w.prepareHook = null;
+
+		w.ready("LD-TEST-0162");
+		w.renderHook = (ctx) => { if (ctx.loadId === "LD-TEST-0162") w.handDraft("LD-TEST-0162", "10202026-77"); };
+		await job.tick();
+		w.renderHook = null;
+		eq(w.state("LD-TEST-0162"), ["skipped", "DRAFTED_BY_HAND"], "§12 L3: a hand draft made during the render: skipped before Gmail");
+		eq([w.gmail.length, w.actions("auto_invoice_number_void").map((a) => a.id)], [0, ["LD-TEST-0162"]], "§12 L3: no Gmail draft, and the number it reserved is void");
+	}
+	{
+		// L2: a crash after the append; on restart the engine rebuilds a different draft.
+		for (const [label, change] of [["recipient", (w) => { w.rateCons.set("ld-test-0163", "ap@example-factor.test"); }], ["total", (w) => { w.total = "$1,100.00"; }]]) {
+			const w = makeWorld();
+			const before = await w.started({ workerId: "before-crash" });
+			w.ready("LD-TEST-0163");
+			w.recordHang = "before";
+			before.tick();
+			await until(() => (w.claim("LD-TEST-0163") || {}).stage === "appended", `§12 L2 ${label}: the claim reaches appended`);
+			w.recordHang = "";
+			const recordsBefore = w.calls.record.length;
+			change(w);
+			w.now += 16 * MIN;
+			await w.job({ workerId: "after-restart" }).tick();
+			const c = w.claim("LD-TEST-0163");
+			eq([c.state, c.reason_code, c.stage], ["needs_attention", "IN_GMAIL_UNRECORDED", "appended"], `§12 L2: the rebuilt ${label} differs from what went to Gmail: a person, nothing recorded`);
+			eq([w.calls.record.length - recordsBefore, w.draftRows("LD-TEST-0163").length, w.gmail.length], [0, 0, 1], `§12 L2 ${label}: no draft row with a ${label} that isn't in Gmail`);
+		}
+	}
+	{
+		const w = makeWorld();
+		const job = await w.started({ engineTimeoutMs: 30 });
+		w.ready("LD-TEST-0164");
+		w.prepareHook = () => never();
+		const out = await job.tick();
+		eq([out.work.started, w.claim("LD-TEST-0164").state, w.claim("LD-TEST-0164").reason_code, w.claim("LD-TEST-0164").attempts], [1, "queued", "RETRY_LATER", 1], "§12 L4: a hung engine call times out as a counted failure");
+		w.prepareHook = null;
+		w.now += 15 * MIN;
+		await job.tick();
+		eq(w.state("LD-TEST-0164"), ["drafted", ""], "§12 L4: and drafting goes on (nothing left in flight)");
+	}
+	{
+		// L5: Try again on a number reserved more than a day ago.
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0165");
+		w.appendBehaviors = ["NO", "NO", "NO", "NO"];
+		for (const wait of [0, 15 * MIN, HOUR, 4 * HOUR]) { w.now += wait; await job.tick(); }
+		const failed = w.claim("LD-TEST-0165");
+		eq([failed.state, failed.reason_code, failed.invoice_id, failed.invoice_date], ["needs_attention", "DRAFT_FAILED", "10202026-1", "2026-10-20"], "§12 L5: given up, number reserved on Oct 20");
+		w.now += 2 * 24 * HOUR;
+		const { app, requireRole, call } = fakeApp();
+		job.mount(app, { requireRole });
+		eq((await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-0165" } })).status, 200, "§12 L5: Try again two days later");
+		await job.tick();
+		const fresh = w.claim("LD-TEST-0165");
+		eq([fresh.state, fresh.invoice_id, fresh.invoice_date], ["drafted", "10222026-1", "2026-10-22"], "§12 L5: drafted with a fresh number and today's date");
+		eq(w.actions("auto_invoice_number_void").map((a) => a.details), ["10202026-1 was reserved on 2026-10-20 and never used (a fresh number replaces it)"], "§12 L5: the old number is audited void");
+
+		w.ready("LD-TEST-0166");
+		w.appendBehaviors = ["LOST"];
+		w.searchFails = true;
+		await job.tick();
+		w.db.prepare("UPDATE auto_invoice_claims SET attempts = 3 WHERE load_key = 'ld-test-0166'").run();
+		w.searchFails = false;
+		await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-0166" } });
+		eq([w.claim("LD-TEST-0166").state, w.claim("LD-TEST-0166").attempts], ["working", 0], "§12 L5: Try again on a draft that may be in Gmail resets its attempts too");
+	}
+	{
+		// L6: an unreadable opt-out list drafts nothing until it is saved again.
+		const w = makeWorld();
+		const job = await w.started();
+		w.db.prepare("INSERT INTO app_settings (key, value) VALUES ('auto_invoice.settings', '{broken')").run();
+		w.ready("LD-TEST-0167");
+		const out = await job.tick();
+		eq([out.work.paused, w.state("LD-TEST-0167"), w.calls.prepare.length, w.calls.mint.length], ["SETTINGS_UNREADABLE", ["queued", ""], 0, 0], "§12 L6: the opt-out list can't be read: nothing drafted (fails closed)");
+		const { app, requireRole, call } = fakeApp();
+		job.mount(app, { requireRole });
+		eq((await call("GET", "/api/auto-invoice/settings")).body, { optOutDomains: [], unreadable: true }, "§12 L6: the settings route says so");
+		eq((await call("PUT", "/api/auto-invoice/settings", { body: { optOutDomains: [] } })).status, 200, "§12 L6: saving the list again");
+		await job.tick();
+		eq(w.state("LD-TEST-0167"), ["drafted", ""], "§12 L6: then it drafts");
+		w.setRow("LD-TEST-50%");
+		w.addPod("LD-TEST-50%");
+		w.rateCons.set("ld-test-50%", "billing@example-broker.test");
+		w.appendBehaviors = ["NO", "NO", "NO", "NO"];
+		for (const wait of [0, 15 * MIN, HOUR, 4 * HOUR]) { w.now += wait; await job.tick(); }
+		eq((await call("POST", "/api/auto-invoice/loads/:loadKey/retry", { params: { loadKey: "LD-TEST-50%" } })).status, 200, "§12 L6: a Load ID with '%' (already decoded by Express) is found");
+	}
+	{
+		const w = makeWorld();
+		const job = await w.started();
+		w.ready("LD-TEST-0168");
+		w.recordThrows = true;
+		await job.tick();
+		eq(w.state("LD-TEST-0168"), ["needs_attention", "IN_GMAIL_UNRECORDED"], "§12 logs: a record that throws leaves the draft for a person");
+		ok(w.logs.some((l) => /recording the draft failed: SQLITE_BUSY$/.test(l)), "§12 logs: the failure is logged by its code");
+		ok(!w.logs.some((l) => /@|made-up failure/.test(l)), "§12 logs: never by its message");
 	}
 }
 
@@ -771,9 +922,21 @@ async function makeWorldShadowThenOn(w) {
 	eq(w.state("LD-TEST-0094"), ["needs_attention", "OFF_GAP"], "§9 back from shadow after 3 hours: OFF_GAP (shadow counts as off)");
 }
 
+// A case awaiting something that never settles empties the event loop and would
+// end the run as a silent pass.
+let finished = false;
+process.on("beforeExit", () => {
+	if (finished) return;
+	console.log("\n✗ the run stopped before its last case (a promise never settled)");
+	failures.forEach((f) => console.log(`  ✗ ${f}`));
+	console.log(`\n${pass} passed, ${failures.length + 1} failed`);
+	process.exit(1);
+});
+
 main()
 	.catch((e) => failures.push(`the run threw: ${e && e.stack}`))
 	.then(() => {
+		finished = true;
 		console.log(`\n${"=".repeat(64)}`);
 		if (failures.length) {
 			console.log(`FAILURES (${failures.length}):`);

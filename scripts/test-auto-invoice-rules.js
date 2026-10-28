@@ -226,6 +226,10 @@ eq(R.classifyRefusal({ code: "", http: 500 }), { kind: "temporary", code: "RETRY
 eq(R.classifyRefusal({}), { kind: "temporary", code: "RETRY_LATER", countsAttempt: true }, "§8 no answer at all: temporary");
 eq(R.classifyRefusal({ code: "SOMETHING_NEW", http: 409 }), { kind: "attention", code: "DRAFT_REFUSED", countsAttempt: false }, "§8 an unknown refusal: a person, never a retry loop");
 eq([1, 2, 3, 4, 0].map(R.retryDelayMs), [15 * MIN, HOUR, 4 * HOUR, null, null], "§8 backoff 15 min, 1 h, 4 h, then a person");
+eq([R.ENGINE_WAIT_MAX, R.STALE_RESERVATION_MS], [3, 24 * HOUR], "§8 three engine waits, then a person; a reservation is stale after a day");
+eq(["WAITING_POD", "NOT_COMPLETED", "LOAD_DROPPED", ""].map(R.waitAttentionCode), ["POD_UNREADABLE", "NOT_COMPLETED", "LOAD_DROPPED", "DRAFT_REFUSED"],
+	"§8 a wait the engine keeps refusing goes to a person: a POD it can't read is POD_UNREADABLE");
+for (const c of ["POD_UNREADABLE", "NOT_COMPLETED", "LOAD_DROPPED", "DRAFT_REFUSED", "SETTINGS_UNREADABLE"]) ok(R.REASON_CODES.includes(c), `§8 ${c} is a reason code`);
 eq([0, HOUR, 2 * HOUR, 4 * HOUR, 6 * HOUR].map(R.loginPauseMs), [HOUR, 2 * HOUR, 4 * HOUR, 6 * HOUR, 6 * HOUR], "§8 login pause 1 h, doubling, at most 6 h");
 const caps = R.readCaps({});
 ok(R.capsAllow({ caps }), "§8 caps: nothing in flight");

@@ -342,6 +342,9 @@ async function main() {
 		const hung = await draft({ messageId: ID, timeoutMs: 300 });
 		eq(hung.error && [hung.error.message, hung.error.stage, hung.error.answered], ["IMAP timeout at stage 3", "literal", undefined],
 			"§4 no answer after the message was streamed: stage literal, unanswered (the draft may exist)");
+		const hungSession = sessions[sessions.length - 1];
+		await within(hungSession.closed, 3000);
+		eq(hungSession.commands, ["LOGIN", "APPEND"], "§4 then the connection is dropped (destroy), not ended with a LOGOUT that flushes the rest");
 		answer.append = "OK";
 		answer.greeting = "HANG";
 		const silent = await draft({ timeoutMs: 300 });

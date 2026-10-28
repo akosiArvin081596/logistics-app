@@ -118,10 +118,27 @@ const reserve = (owner, minutes) => L.reserveNumber(db, "ld-test-0002", owner, {
 eq(reserve("worker-a", 47), { ok: false, reason: "lost" }, "§4 a worker that lost the claim mints nothing");
 eq(m.calls.length, 0, "§4 no number was minted for it");
 const first = reserve("worker-b", 47);
-eq(first, { ok: true, invoiceId: "10202026-1", invoiceDate: "2026-10-20", messageId: "<made-up-47.auto-invoice@example.com>", reused: false }, "§4 the owner mints once");
+eq(first, { ok: true, invoiceId: "10202026-1", invoiceDate: "2026-10-20", messageId: "<made-up-47.auto-invoice@example.com>", reused: false, voided: null }, "§4 the owner mints once");
 const again = reserve("worker-b", 120);
-eq(again, { ok: true, invoiceId: "10202026-1", invoiceDate: "2026-10-20", messageId: "<made-up-47.auto-invoice@example.com>", reused: true }, "§4 a retry reuses the number, its date and its Message-ID");
+eq(again, { ok: true, invoiceId: "10202026-1", invoiceDate: "2026-10-20", messageId: "<made-up-47.auto-invoice@example.com>", reused: true, voided: null }, "§4 a retry reuses the number, its date and its Message-ID");
 eq(m.calls.length, 1, "§4 the sequence was called once");
+{
+	const s = new Database(":memory:");
+	serverTables(s);
+	L.ensureSchema(s);
+	const ms = minter(s);
+	L.insertClaim(s, { key: "ld-test-0004", loadId: "LD-TEST-0004", state: "queued", nowIso: T0 });
+	L.lease(s, "ld-test-0004", "w", { nowIso: T0, untilIso: at(15) });
+	const opts = (minutes, stale) => ({ mint: ms.mint, now: new Date(at(minutes)), dayKey: "2026-10-20", messageId: `<m${minutes}@example.com>`, nowIso: at(minutes), staleBeforeIso: stale });
+	const r1 = L.reserveNumber(s, "ld-test-0004", "w", opts(0, at(-1440)));
+	eq([r1.invoiceId, L.getClaim(s, "ld-test-0004").reserved_at], ["10202026-1", T0], "§4 the reservation's time is kept");
+	eq(L.reserveNumber(s, "ld-test-0004", "w", opts(1439, at(-1))).reused, true, "§4 a reservation not yet stale is reused");
+	const r2 = L.reserveNumber(s, "ld-test-0004", "w", { ...opts(1441, at(1)), dayKey: "2026-10-21" });
+	eq([r2.reused, r2.invoiceId, r2.invoiceDate, r2.voided], [false, "10202026-2", "2026-10-21", { invoiceId: "10202026-1", invoiceDate: "2026-10-20" }], "§4 a stale reservation is given up and a fresh number minted");
+	L.transition(s, "ld-test-0004", { from: ["working"], owner: "w", patch: { stage: "appending" }, nowIso: at(1442) });
+	eq(L.reserveNumber(s, "ld-test-0004", "w", opts(4000, at(3999))).reused, true, "§4 a number that may be in Gmail (appending) is never replaced");
+	s.close();
+}
 eq([L.getClaim(db, "ld-test-0002").stage, L.getClaim(db, "ld-test-0002").invoice_id], ["reserved", "10202026-1"], "§4 the claim holds the number at stage reserved");
 db.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, via, created_at) VALUES (?, ?, ?, ?)").run("LD-TEST-0002", "10202026-1", "auto-imap", at(50));
 eq(L.otherDraftRows(db, L.getClaim(db, "ld-test-0002")).length, 0, "§4 the claim's own automatic row is not somebody else's draft");
@@ -176,16 +193,16 @@ L.setMeta(db, "baseline_at", T0);
 L.setMeta(db, "baseline_at", at(5));
 L.setMeta(db, "off_gap_since", "");
 eq(L.getMeta(db), { baseline_at: at(5), off_gap_since: "" }, "§6 meta is one value per key");
-eq(L.readSettings(db), { optOutDomains: [] }, "§6 no settings row: nothing opted out");
+eq(L.readSettings(db), { optOutDomains: [], unreadable: false }, "§6 no settings row: nothing opted out");
 L.writeSettings(db, { optOutDomains: ["example-broker.test"] }, { by: "made-up-admin", nowIso: T0 });
-eq(L.readSettings(db), { optOutDomains: ["example-broker.test"] }, "§6 settings round-trip");
+eq(L.readSettings(db), { optOutDomains: ["example-broker.test"], unreadable: false }, "§6 settings round-trip");
 eq(db.prepare("SELECT updated_by, updated_at FROM app_settings WHERE key = ?").get(L.SETTINGS_KEY), { updated_by: "made-up-admin", updated_at: T0 }, "§6 who changed them and when");
 db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run("{not json", L.SETTINGS_KEY);
-eq(L.readSettings(db), { optOutDomains: [] }, "§6 an unreadable value opts nothing out");
+eq(L.readSettings(db), { optOutDomains: [], unreadable: true }, "§6 an unreadable value fails closed (unreadable)");
 db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(JSON.stringify({ optOutDomains: ["ok.example.test", "not a domain"] }), L.SETTINGS_KEY);
-eq(L.readSettings(db), { optOutDomains: [] }, "§6 a list with a bad entry opts nothing out");
+eq(L.readSettings(db), { optOutDomains: [], unreadable: true }, "§6 a list with a bad entry fails closed too");
 const bare = new Database(":memory:");
-eq(L.readSettings(bare), { optOutDomains: [] }, "§6 no app_settings table: nothing opted out");
+eq(L.readSettings(bare), { optOutDomains: [], unreadable: false }, "§6 no app_settings table: nothing opted out");
 
 // ------------------------------------------------------------------ §7
 section("§7  local records");
