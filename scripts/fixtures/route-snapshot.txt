@@ -3,7 +3,7 @@
 # in front of it, or in what importing the server starts: say why in the PR.
 
 [routes]
-GET /api/admin/audit-trail · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c22577142f85
+GET /api/admin/audit-trail · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b16a8d9621f5
 POST /api/admin/backfill-road-distances · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b785924d31dc
 GET /api/admin/deleted-loads · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7949de498106
 GET /api/admin/driver-day-overrides · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d9dcec3b11da
@@ -44,6 +44,7 @@ GET /api/admin/scan-driver-mismatches · requireRole("Super Admin")=anon@12b84c4
 GET /api/admin/scan-duplicates · requireRole("Super Admin")=anon@12b84c4b0134 · inline@1ce063deeda2
 GET /api/admin/scan-orphans · requireRole("Super Admin")=anon@12b84c4b0134 · inline@1eba1a062cc3
 GET /api/admin/scan-stale-locations · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e2230c306e1a
+GET /api/admin/sign-ins · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a5a2fd445d84
 GET /api/admin/work-days/dry-run · requireRole("Super Admin")=anon@12b84c4b0134 · inline@d22af87e67b2
 GET /api/analytics/mileage · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@2397256707c5
 GET /api/analytics/mileage/detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · mileageAnalyticsLimiter=limiter · inline@d225cc03cbc1
@@ -57,8 +58,8 @@ PUT /api/applications/:id/status · requireRole("Super Admin")=anon@12b84c4b0134
 GET /api/archive · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4c96e185c6df
 GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@84e479dbd8a4
 POST /api/auth/change-password · requireAuth@2f5c61384511 · changePasswordLimiter=limiter · inline@37627b4fe4bc
-POST /api/auth/login · loginLimiter=limiter · inline@265ebb7af6a6
-POST /api/auth/logout · inline@b0c32c66763b
+POST /api/auth/login · loginLimiter=limiter · inline@3ace7acc66ec
+POST /api/auth/logout · inline@a546bfc2c18f
 GET /api/auth/session · inline@c685a5e5d4e9
 POST /api/auth/setup · setupLimiter=limiter · inline@b5ab1ff117ac
 GET /api/auth/setup-check · inline@9aeadec8551c
@@ -120,15 +121,15 @@ POST /api/eld/linxup/webhook · inline@82555ec16ec3
 POST /api/expenses · requireAuth@2f5c61384511 · driverWriteLimiter=limiter · inline@c4573b014106
 POST /api/expenses/:id/extract-details · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseOcrLimiter=limiter · inline@937a224600bf
 PATCH /api/expenses/:id/location · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@59a266c035f1
-DELETE /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@bb69475882c7
-POST /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@d3bcddd4043c
-POST /api/expenses/:id/personal/reverse · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@ed2affe9515c
+DELETE /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@137ee876c16b
+POST /api/expenses/:id/personal · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@9aeace215963
+POST /api/expenses/:id/personal/reverse · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@6eb1fe73329a
 GET /api/expenses/:id/receipt-thumbnail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@35a780e954fc
-PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@5337249ce2a1
+PUT /api/expenses/:id/status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3230683f4e26
 PATCH /api/expenses/:id/vendor · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@2f6b7ed0bc20
 GET /api/expenses/ai/insights · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · insightsCacheGate@9f2abb4009f7 · expenseAiLimiter=limiter · inline@f4a9780b3065
 POST /api/expenses/ai/query · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · expenseAiLimiter=limiter · inline@6a4671ec31e4
-GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f7b755761072
+GET /api/expenses/all · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@3fc1ffc22de0
 GET /api/expenses/analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@9a36473ed670
 DELETE /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@b0ffc7c60693
 GET /api/expenses/bulk-draft · requireAuth@2f5c61384511 · inline@cf7e89f29561
@@ -136,7 +137,7 @@ PUT /api/expenses/bulk-draft · requireAuth@2f5c61384511 · bulkDraftLimiter=lim
 PUT /api/expenses/bulk-status · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@d193560440a6
 GET /api/expenses/fuel-analytics · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · fuelAnalyticsLimiter=limiter · inline@42166b2c8a68
 POST /api/expenses/ocr · requireAuth@2f5c61384511 · expenseOcrLimiter=limiter · inline@ea8104cc4944
-GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@743028532806
+GET /api/expenses/personal/waiting-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · personalListLimiter=limiter · inline@4b6c8887fc49
 GET /api/expenses/receipts-download · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2b3a3d1e254c
 GET /api/financials · requireRole("Super Admin")=anon@12b84c4b0134 · inline@aa6b0c7fb53d
 GET /api/financials/report · requireRole("Super Admin")=anon@12b84c4b0134 · inline@a7dd6284b3d1
@@ -186,18 +187,18 @@ PUT /api/investors/:id/payout-basis · requireRole("Super Admin")=anon@12b84c4b0
 POST /api/investors/:id/profile-picture · requireAuth@2f5c61384511 · inline@34f6cec5224b
 GET /api/invoices · requireAuth@2f5c61384511 · inline@f6013fd8f71e
 DELETE /api/invoices/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@cf8e66a8fd87
-PUT /api/invoices/:id/adjust · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@a16cd7b6a4ba
+PUT /api/invoices/:id/adjust · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@19861a001fc6
 PUT /api/invoices/:id/approve · requireRole("Super Admin")=anon@12b84c4b0134 · inline@200a31d86f91
 GET /api/invoices/:id/pdf · requireAuth@2f5c61384511 · inline@1507fb41e75d | after: GET /api/invoices/report/pdf
 GET /api/invoices/:id/personal-receipts/:lineId · requireAuth@2f5c61384511 · personalReceiptLimiter=limiter · inline@6a7f184e69df
 PUT /api/invoices/:id/restore · requireRole("Super Admin")=anon@12b84c4b0134 · inline@76e1b8b8ae90
 PUT /api/invoices/:id/revert · requireRole("Super Admin")=anon@12b84c4b0134 · inline@2796581f6689
 PUT /api/invoices/:id/submit · requireAuth@2f5c61384511 · inline@091c2e50c503
-POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@88eda6af748b
+POST /api/invoices/generate · requireAuth@2f5c61384511 · generateInvoiceHandler@8e15e38c88f2
 POST /api/invoices/manual · requireRole("Super Admin")=anon@12b84c4b0134 · inline@e059be016674
 POST /api/invoices/manual/totals · requireRole("Super Admin")=anon@12b84c4b0134 · inline@19a163742032
 GET /api/invoices/payees · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4189f2fbaec6
-POST /api/invoices/personal-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@83b0b3a402a8
+POST /api/invoices/personal-corrections · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · personalRouteLimiter=limiter · inline@f1feebac333f
 GET /api/invoices/report · requireRole("Super Admin")=anon@12b84c4b0134 · inline@72b71ad36e68
 GET /api/invoices/report/pdf · requireRole("Super Admin")=anon@12b84c4b0134 · inline@c92db544da8c
 GET /api/legal-documents · requireRole("Super Admin", "Investor")=anon@12b84c4b0134 · inline@33abba640276
@@ -286,8 +287,8 @@ DELETE /api/trucks/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline
 PUT /api/trucks/:id · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@f2aac1b52220
 DELETE /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b793c4400242
 POST /api/trucks/:truckId/link-routemate · requireRole("Super Admin")=anon@12b84c4b0134 · inline@b3f9ec796fd0
-GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@91875c001e81
-POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4f138af8c13b
+GET /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5f80b4e969d9
+POST /api/users · requireRole("Super Admin")=anon@12b84c4b0134 · userCreatePasswordLimit@98a604b6bcf2 · inline@9506e347135b
 DELETE /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@04c1f9c10be8
 PUT /api/users/:id · requireRole("Super Admin")=anon@12b84c4b0134 · userPasswordResetLimiter=limiter · inline@c887c122ecd1
 PUT /api/users/:id/rating · requireRole("Super Admin")=anon@12b84c4b0134 · inline@afdcf7a41d18
@@ -299,7 +300,7 @@ USE /uploads · requireAuth@2f5c61384511 · inline@2f3241547ecf | after: USE /up
 USE /uploads · requireAuth@2f5c61384511 · uploadMissLimiter@8f0251d68f52 · uploadsPathGuard@e828a36f5055 | after: USE /uploads/rate-cons
 USE /uploads/rate-cons · requireRole("Super Admin")=anon@12b84c4b0134
 GET ["/api/driver/position","/api/driver/me/position"] · requireRole("Driver", "Super Admin")=anon@12b84c4b0134 · driverPositionLimiter=limiter · inline@c90bcab9d57f
-POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@a1f1588c2772
+POST ["/api/loads/:loadId/draft-invoice","/api/loads/:loadId/draft-bison-invoice"] · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossSite=crossSiteGuardMiddleware@aa37960cca47 · draftInvoiceLimiter=limiter · inline@8f1d04f2fd48
 
 [middleware]
 USE / · inline@0b6a9c7a9ce3 | first
@@ -314,55 +315,7 @@ USE / · inline@adbfc3fa9d44 | last
 USE / · inline@cf4b230f13b8 | last
 
 [import]
-setInterval 604800000 · server.js: setInterval(purgeOldAuditRefusals, 7 * 24 * 60 * 60 * 1000);
-setImmediate · server.js: setImmediate(async () => {
-setInterval 604800000 · server.js: setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000);
-setInterval 604800000 · server.js: setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000);
-setInterval 3600000 · server.js: setInterval(eldFeedTick, ELD_STALE_SWEEP_MS);
-setTimeout 300000 · server.js: setTimeout(eldFeedTick, 5 * 60 * 1000);
-setInterval 86400000 · server.js: if (startsJob("Routemate 24 h error-counter reset")) setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
-setTimeout 300000 · server.js: setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
-setImmediate · server.js: if (startsJob("ELD device-history reconcile (at boot)")) setImmediate(() => {
-setTimeout 360000 · server.js: setTimeout(() => { runEldMilesDailyRollup(); }, 6 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { runEldMilesDailyRollup(); }, 6 * 60 * 60 * 1000);
-setTimeout 540000 · server.js: setTimeout(() => { runEldStateMilesRollup(); }, 9 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
-setTimeout 420000 · server.js: setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
-setInterval 300000 · server.js: setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
-setTimeout 480000 · server.js: setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
-setInterval 60000 · server.js: if (startsJob("Routemate live telemetry poll")) setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
-setInterval 86400000 · server.js: if (startsJob("Routemate vehicle sync (daily)")) setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
-setTimeout 5000 · server.js: if (startsJob("Routemate vehicle sync (at boot)")) setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
 setInterval · node_modules/better-sqlite3-session-store
 setInterval · node_modules/express-rate-limit
-setInterval 86400000 · server.js: const timer = setInterval(() => purgeOldLoadCellWrites(), 24 * 60 * 60 * 1000);
-setInterval 900000 · server.js startRateConReissueSweep()
-setInterval 86400000 · server.js: if (startsJob("ScanKit 24 h counter reset")) setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { ok: 0, failed: 0 }; }, 24 * 60 * 60 * 1000);
-setTimeout 8000 · server.js: setTimeout(warmEldTravelMemo, 8000);
-setInterval 240000 · server.js: setInterval(warmEldTravelMemo, 4 * 60 * 1000);
-setInterval 900000 · server.js startAlertChannelRetrySweep()
-setInterval 21600000 · server.js: setInterval(expenseDuplicateTick, EXPENSE_DUPLICATE_SWEEP_MS);
-setTimeout 240000 · server.js: setTimeout(expenseDuplicateTick, 4 * 60 * 1000);
-setTimeout 120000 · server.js: const first = setTimeout(personalSweepTick, 2 * 60 * 1000);
-setInterval 900000 · server.js: const every = setInterval(personalSweepTick, 15 * 60 * 1000);
 fs.readdirSync the temp folder · server.js purgeOrphanedDbExports()
-setTimeout 360000 · server.js: setTimeout(sweepVoiceNotesNow, 6 * 60 * 1000);
-setInterval 86400000 · server.js: setInterval(sweepVoiceNotesNow, 24 * 60 * 60 * 1000);
-fs.mkdirSync uploads/expense-receipts · server.js: try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
-setTimeout 300000 · server.js: setTimeout(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 5 * 60 * 1000);
-setInterval 86400000 · server.js: setInterval(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 24 * 60 * 60 * 1000);
-setTimeout 600000 · server.js: setTimeout(() => { sweepLoadEldMiles(); }, 10 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { sweepLoadEldMiles(); }, 6 * 60 * 60 * 1000);
-setTimeout 660000 · server.js: setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
-setTimeout 20000 · server.js: if (startsJob("pay-rate history recorder (at boot)")) setTimeout(recordPayRateChanges, 20 * 1000);
-setInterval 60000 · server.js: setInterval(integrityCheckTick, 60 * 1000);
-setTimeout 100000 · server.js: setTimeout(integrityCheckTick, 100 * 1000);
-setTimeout 600000 · server.js: setTimeout(() => {
 setInterval 60000 · server.js: const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);
-setTimeout 500 · server.js: if (startsJob("reload notice to open browsers (at boot)")) setTimeout(() => io.emit("reload"), 500);
-listen 0 127.0.0.1 · server.js: server.listen(PORT, BIND_HOST, async () => {
-process.on SIGTERM · server.js: process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on SIGINT · server.js: process.on("SIGINT", () => gracefulShutdown("SIGINT"));

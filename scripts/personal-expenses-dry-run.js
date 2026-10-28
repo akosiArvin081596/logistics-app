@@ -13,7 +13,9 @@
 //   unpaid invoice's total due is what it was. All zero differences is the
 //   proof that the readers change nothing until a receipt is marked.
 //   Part B (hypotheticals): for each --mark=<expenseId>[:<dollars>], the receipt,
-//   where its line would land (the week, that week's invoice and its status),
+//   where its line would land (the week, that week's invoice and its status; with
+//   PERSONAL_RECEIPT_WEEK_ENABLED in the settings it runs with, the receipt's
+//   week and, when that week's invoice can't take it, where it is carried),
 //   the driver's total due before and after, the month it costs (in place or a
 //   credit in the open month), and each affected month's company trip expenses,
 //   driver pay and investor payout, before and after.
@@ -44,7 +46,7 @@ const ROOT = path.join(__dirname, "..");
 const ROOTS = [
 	"computeInvestorMonthlyEarnings", "getCarrierDBFromSQLite", "getInvestorDriverSet", "parseSheet", "deduplicateLoads", "findCol",
 	"getDeductibleExpensesByDriverMonth", "kpiGatherDbInputs", "fuelCpgBandFromFleet", "invoiceTotalDue",
-	"personalPlacement", "personalShareForReceipt", "payoutRules", "futureAwarePeriodExpr", "periodWriteLocked", "periodLocksReadable",
+	"personalPlacementFor", "personalLineWeek", "personalShareForReceipt", "payoutRules", "futureAwarePeriodExpr", "periodWriteLocked", "periodLocksReadable",
 	"appMonthKey", "appTodayKey", "getWeekRange", "invoiceMonthLockBlockers", "EXPENSE_PERIOD_EXPR",
 ];
 const PROVIDED = ["db", "require", "console", "process", "__dirname", "Date", "getJobTrackingCached", "fetch", "expenseFrom", "notifyChange", "io"];
@@ -178,22 +180,27 @@ function planMark(w, spec, names, dataDir) {
 	const periodExpr = api.payoutRules().futureReceipts ? api.futureAwarePeriodExpr() : api.EXPENSE_PERIOD_EXPR;
 	const month = (db.prepare(`SELECT ${periodExpr} AS m FROM expenses WHERE id = ?`).get(spec.id) || {}).m || "";
 	const inPlace = /^\d{4}-\d{2}$/.test(month) && !api.periodWriteLocked(month);
-	const week = api.getWeekRange().weekStart;
+	// The week as the mark would key it (the receipt's, with PERSONAL_RECEIPT_WEEK_ENABLED on).
+	const week = api.personalLineWeek(String(expense.date || "").slice(0, 10)).weekStart;
 	const share = api.personalShareForReceipt(expense, amount.cents);
 	const row = {
 		expense_id: expense.id, kind: "deduct", cents: amount.cents, receipt_cents: receiptCents, merchant: personalExpense.merchantOf(expense),
 		receipt_date: String(expense.date || "").slice(0, 10), cost_period: inPlace ? month : api.appMonthKey(), in_place: inPlace ? 1 : 0,
 		book_date: inPlace ? String(expense.date || "").slice(0, 10) : api.appTodayKey(), week_start: week, share_cents: share,
 	};
-	const place = api.personalPlacement(String(expense.driver || ""), week);
+	const place = api.personalPlacementFor(String(expense.driver || ""), row);
 	const net = (share - amount.cents) / 100;
+	const target = place.kind === "attach" ? place.invoice : place.kind === "carry" ? place.target : null;
 	let landing;
-	if (place.kind === "attach") {
-		const before = api.invoiceTotalDue(place.invoice);
+	if (target) {
+		const before = api.invoiceTotalDue(target);
 		const after = round2(before + net);
+		const carried = place.kind === "carry" ? ` (carried: ${place.why})` : "";
 		landing = after < 0
-			? { where: `waits for the week's correction invoice: it would take ${place.invoice.invoice_number} (${place.invoice.status}) below $0`, totalDueBefore: before, totalDueAfter: before }
-			: { where: `${place.invoice.invoice_number} (${place.invoice.status}), attached now`, totalDueBefore: before, totalDueAfter: after };
+			? { where: `waits for the week's correction invoice: it would take ${target.invoice_number} (${target.status}) below $0`, totalDueBefore: before, totalDueAfter: before }
+			: { where: `${target.invoice_number} (${target.status}), attached now${carried}`, totalDueBefore: before, totalDueAfter: after };
+	} else if (place.kind === "carry") {
+		landing = { where: `carried: ${place.why}; it waits for the driver's next weekly invoice`, lineAmount: net };
 	} else if (place.kind === "correction") {
 		const before = place.correction ? api.invoiceTotalDue(place.correction) : 0;
 		landing = { where: place.correction ? `the week's open correction ${place.correction.invoice_number}` : `a new correction Draft for the week (${place.weekly.invoice_number} is ${place.weekly.status})`,

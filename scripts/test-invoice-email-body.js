@@ -50,7 +50,10 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+// The draft route's steps live in lib/broker-invoice-draft.js: read with
+// server.js as one text (liftRoutes() splits them again).
+const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
+const SRC = draftLift.withEngine(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), ROOT);
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 // The broker AP inboxes have no default in code; resolveInvoiceTo() reads them
@@ -423,8 +426,14 @@ const N8N_ENV = Object.freeze({ N8N_INVOICE_WEBHOOK_URL: "https://n8n.example.in
 function liftRoutes(src) {
 	const createAt = src.indexOf("CREATE TABLE IF NOT EXISTS load_invoice_drafts (");
 	if (createAt < 0) throw new Error("no CREATE TABLE for load_invoice_drafts");
+	const engine = draftLift.engineOf(src);
+	const approveRoute = extractRouteByLines(src, APPROVE_NEEDLE);
 	return {
-		approve: extractRouteByLines(src, APPROVE_NEEDLE),
+		// The text the checks read (the route with its engine steps inlined), and
+		// the registration and engine the harness runs.
+		approve: draftLift.inlineSteps(approveRoute, engine),
+		approveRoute,
+		engine,
 		preview: extractRouteByLines(src, PREVIEW_NEEDLE),
 		fns: Object.fromEntries(["parseSheet", "deduplicateLoads", "findCol", "latestDraftNotes", "invoiceIdAlreadyUsed"].map((n) => [n, extractFn(src, n)])),
 		createSql: src.slice(createAt, src.indexOf("`", createAt)),
@@ -491,6 +500,8 @@ function harness(L, env = {}, { imapFails = false } = {}) {
 		INVOICE_PREVIEW_MAX_INFLIGHT: 2,
 		invoicePreviewInflight: 0,
 	};
+	// The engine the route calls, built from the (possibly mutated) text over the same stubs.
+	scope.brokerInvoiceDraft = draftLift.loadEngine(L.engine, { ...scope, env: scope.process.env });
 	const handlerOf = (text) => {
 		const registered = [];
 		new Function("app", ...Object.keys(scope), text)({ post: (...args) => registered.push(args) }, ...Object.values(scope));
@@ -510,7 +521,7 @@ function harness(L, env = {}, { imapFails = false } = {}) {
 		// failure label says why, e.g. a stub this harness does not provide.
 		return out ? { ...out, errors: seen.errors.slice() } : { status: 0, body: null, errors: seen.errors.slice() };
 	};
-	const approve = handlerOf(L.approve);
+	const approve = handlerOf(L.approveRoute);
 	const preview = handlerOf(L.preview);
 	return {
 		seen,

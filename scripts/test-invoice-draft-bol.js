@@ -40,7 +40,11 @@ const Database = require("better-sqlite3");
 
 const SERVER = path.join(__dirname, "..", "server.js");
 const LIB = path.join(__dirname, "..", "lib", "broker-invoice.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+// The draft route's steps live in lib/broker-invoice-draft.js: read with
+// server.js as one text, and inlined into the route's (extractRoute()).
+const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
+const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), path.join(__dirname, ".."));
+const DRAFT_ROUTE_NEEDLE = '["/api/loads/:loadId/draft-invoice", "/api/loads/:loadId/draft-bison-invoice"],';
 const LIB_SRC = fs.readFileSync(LIB, "utf8");
 // The default AP inbox has no default in code (DEFAULT_INVOICE_EMAIL); the runner
 // names an example.test one, read by resolveInvoiceTo() at each call.
@@ -85,7 +89,9 @@ function extractRoute(src, needle) {
 	let e = s;
 	while (e < lines.length && lines[e] !== ");" && lines[e] !== "});") e++;
 	if (e >= lines.length) throw new Error(`unterminated route registration for ${needle}`);
-	return lines.slice(s, e + 1).join("\n");
+	const text = lines.slice(s, e + 1).join("\n");
+	// The draft route's text includes the engine steps it calls, where it calls them.
+	return needle === DRAFT_ROUTE_NEEDLE ? draftLift.inlineSteps(text, draftLift.engineOf(src)) : text;
 }
 // The shipped documents schema, not a hand-written copy of it.
 function documentsSchema(src) {

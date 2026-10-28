@@ -419,7 +419,8 @@ its screenshots and results out of the repo.
 
 - The source is opened **read-only** (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API.
   The copy must be inside the work dir.
-- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also clears the copy's sessions.
+- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also ends `super_admin`'s sessions on the copy
+  (no other account's) and writes its system audit row there.
 - Driver: a Driver whose `driver_name` matches (case-insensitively) the `assigned_driver` of exactly one truck with an
   image photo. The Driver must be `fully_onboarded` (or have no onboarding status), so the Kit tab renders, and their
   application's `cdl_front` must be an image. The logins file's existing driver is kept while they still qualify;

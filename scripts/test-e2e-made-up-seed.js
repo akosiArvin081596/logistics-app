@@ -133,6 +133,9 @@ function madeUpSourceDb(file, marker) {
 		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT, driver_name TEXT DEFAULT '',
 			email TEXT DEFAULT '', must_change_password INTEGER DEFAULT 0);
 		CREATE TABLE sessions (sid TEXT PRIMARY KEY, sess TEXT, expire INTEGER);
+		-- reset-super-admin-password.js leaves its audit row here, or resets nothing.
+		CREATE TABLE audit_trail (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, user_id INTEGER NOT NULL, username TEXT NOT NULL,
+			role TEXT NOT NULL, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT DEFAULT '', details TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 		CREATE TABLE trucks (id INTEGER PRIMARY KEY, assigned_driver TEXT, photo TEXT);
 		CREATE TABLE driver_onboarding (user_id INTEGER, application_id INTEGER, status TEXT);
 		CREATE TABLE job_applications (id INTEGER PRIMARY KEY, cdl_front TEXT);

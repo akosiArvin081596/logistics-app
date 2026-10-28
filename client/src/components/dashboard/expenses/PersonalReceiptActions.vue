@@ -11,7 +11,7 @@
     <ConfirmModal
       :open="dialog === 'mark'"
       title="Mark this receipt Personal"
-      message="The driver repays this amount on the weekly invoice for the week it is marked in, and it leaves the company's costs. Any rest of the receipt stays a company cost."
+      :message="markDialogText"
       confirm-text="Mark Personal"
       :confirm-disabled="busy || !amount.trim()"
       @confirm="submit"
@@ -32,7 +32,7 @@
       :title="dialog === 'undo' ? 'Undo the Personal line' : 'Reverse the Personal line'"
       :message="dialog === 'undo'
         ? 'The line comes off the receipt and off its invoice, and the receipt is a company cost again.'
-        : 'The line is on an approved invoice, so it stays there. A reversing line credits the amount back on this week\'s invoice, or on its correction invoice.'"
+        : reverseDialogText"
       :confirm-text="dialog === 'undo' ? 'Undo Personal' : 'Reverse'"
       :confirm-disabled="busy"
       danger
@@ -58,13 +58,17 @@ import {
   canReversePersonal,
   canUndoPersonal,
   personalDefaultAmount,
+  personalMarkDialogText,
   personalPillText,
+  personalReverseDialogText,
 } from '../../../lib/personalReceipt'
 
 const props = defineProps({
   expense: { type: Object, required: true },
   // GET /api/expenses/all's personalEnabled: the server accepts new marks.
   enabled: { type: Boolean, default: false },
+  // GET /api/expenses/all's personalReceiptWeek: a line takes its receipt's week.
+  receiptWeek: { type: Boolean, default: false },
 })
 // changed(personal | null): the server's summary after the write; the list
 // reloads on expenses:changed as well.
@@ -84,6 +88,8 @@ const showMark = computed(() => canMarkPersonal(props.expense, who.value))
 const showUndo = computed(() => canUndoPersonal(props.expense, who.value))
 const showReverse = computed(() => canReversePersonal(props.expense, who.value))
 const pill = computed(() => personalPillText(props.expense.personal))
+const markDialogText = computed(() => personalMarkDialogText(props.receiptWeek))
+const reverseDialogText = computed(() => personalReverseDialogText(props.receiptWeek))
 
 function openDialog(kind) {
   dialog.value = kind
@@ -148,6 +154,7 @@ async function submit() {
   color: #92400e;
 }
 .personal-pill.personal-needs_correction { background: #fee2e2; color: #991b1b; }
+.personal-pill.personal-carried { background: #e0e7ff; color: #3730a3; }
 .personal-pill.personal-reversed { background: #e5e7eb; color: #374151; }
 .btn-personal,
 .btn-personal-undo {

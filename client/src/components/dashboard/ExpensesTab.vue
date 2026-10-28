@@ -347,7 +347,7 @@
               <button v-else-if="e.status !== 'Pending'" class="btn-undo mobile-exp-btn" @click="setStatus(e.id, 'Pending')">Undo</button>
             </div>
             <div class="mobile-exp-personal" @click.stop>
-              <PersonalReceiptActions :expense="e" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(e.id, p)" />
+              <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(e.id, p)" />
             </div>
           </div>
         </div>
@@ -447,7 +447,7 @@
                   </template>
                   <button v-else-if="e.status !== 'Pending'" class="btn-undo" @click="setStatus(e.id, 'Pending')">Undo</button>
                 </template>
-                <PersonalReceiptActions :expense="e" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(e.id, p)" />
+                <PersonalReceiptActions :expense="e" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(e.id, p)" />
               </td>
             </tr>
           </tbody>
@@ -621,7 +621,7 @@
                   <button v-else class="exp-btn-undo" :disabled="approveLoading" @click="undoCurrent">{{ approveLoading ? '…' : 'Undo' }}</button>
                 </div>
                 <div class="exp-personal">
-                  <PersonalReceiptActions :expense="selectedExpense" :enabled="personalEnabled" @changed="(p) => onPersonalChanged(selectedExpense.id, p)" />
+                  <PersonalReceiptActions :expense="selectedExpense" :enabled="personalEnabled" :receipt-week="personalReceiptWeek" @changed="(p) => onPersonalChanged(selectedExpense.id, p)" />
                 </div>
               </div>
               <!-- RIGHT column — receipt, large + contained so the whole thing is readable -->
@@ -1724,6 +1724,8 @@ const activeSubTab = ref('all')
 const allExpenses = ref([])
 // GET /api/expenses/all's personalEnabled: the server accepts new Personal marks.
 const personalEnabled = ref(false)
+// Its personalReceiptWeek: a Personal line takes its receipt's week (the Mark dialog's text).
+const personalReceiptWeek = ref(false)
 // Client-side pagination for the expenses list — render one page of rows at a
 // time (default 25) instead of all rows at once. Server-side filtering already
 // scopes `allExpenses`; this only pages the render (and limits how many receipt
@@ -2590,6 +2592,7 @@ async function loadAll() {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
     personalEnabled.value = data.personalEnabled === true
+    personalReceiptWeek.value = data.personalReceiptWeek === true
     // Build driver list from drivers directory (not from expenses — new drivers with no expenses would be missing)
     if (allDrivers.value.length === 0) {
       try {
@@ -2615,6 +2618,7 @@ async function quietReload() {
     const data = await api.get(`/api/expenses/all${buildAllExpensesQuery()}`)
     allExpenses.value = data.expenses || []
     personalEnabled.value = data.personalEnabled === true
+    personalReceiptWeek.value = data.personalReceiptWeek === true
     pruneSelection()
   } catch { /* empty — leave existing data in place */ }
 }
