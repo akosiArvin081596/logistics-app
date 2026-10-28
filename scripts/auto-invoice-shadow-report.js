@@ -1,6 +1,23 @@
 #!/usr/bin/env node
 // Read-only report for automatic broker invoice drafts (AUTO_INVOICE_DRAFTS_ENABLED).
 //
+// Without --retro: the shadow-week report, the "what would change" report before
+// real drafts are switched on. It reads the shadow log the job keeps in shadow mode
+// (auto_invoice_shadow) for loads first seen completed in a window, beside the
+// drafts people made (load_invoice_drafts):
+//   - the verdict split with reasons;
+//   - WOULD_ATTEMPT loads drafted by hand, compared as below (A / B / C), and (D)
+//     those nobody drafted in the window;
+//   - hand drafts on loads the job would have waited on, skipped or handed to a
+//     person, by verdict;
+//   - the median hours from first seen completed to the first hand draft;
+//   - per broker domain: first seen, WOULD_ATTEMPT, drafted by hand;
+//   - from the claims (once real drafts ran, e.g. after a rollback), every claim
+//     whose draft may be in Gmail unrecorded and every reserved number not used:
+//     load suffix and invoice number, so a person can check Gmail.
+//
+//   node scripts/auto-invoice-shadow-report.js --db=<app.db> [--since=YYYY-MM-DD] [--until=YYYY-MM-DD] [--json]
+//
 // --retro: the sizing run, on a copy of production (the replica). For every load
 // delivered in a window it asks what the automatic job would have done, by the
 // job's own rules (lib/auto-invoice-rules.js), as if no hand draft existed, and
@@ -29,19 +46,21 @@
 // values.get of Job Tracking ({ values: [...] }). --uploads: the folder the POD
 // files live in; without it a POD row counts as readable and the report says so.
 // --since/--until: calendar days in APP_TIMEZONE (US Eastern unless set),
-// inclusive; the default is the 60 days ending today.
+// inclusive; the default is the 60 days ending today (both modes).
 //
 // Writes nothing, opens no connection, reads no settings file: the sheet comes from
 // the file given, parsed by server.js's own parseSheet(), deduplicateLoads() and
 // sheetDayKey(), lifted at run time (scripts/lib/server-lift.js). Load IDs are
 // shown as their last four characters; broker domains only, never an address, a
-// name or an amount. Exit 0; 2 on a refused argument; 1 on any other failure.
+// name or an amount (the shadow-week report's Gmail check list shows invoice
+// numbers). Exit 0; 2 on a refused argument; 1 on any other failure.
 
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 const rules = require("../lib/auto-invoice-rules");
+const ledger = require("../lib/auto-invoice-ledger");
 const appTime = require("../lib/app-time");
 const { closure } = require("./lib/server-lift");
 
@@ -49,6 +68,7 @@ const ROOT = path.join(__dirname, "..");
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DEFAULT_WINDOW_DAYS = 60;
 const KNOWN_ARGS = new Set(["retro", "db", "sheets-json", "values-json", "uploads", "since", "until", "json"]);
+const SHADOW_ONLY_REFUSED = ["sheets-json", "values-json", "uploads"];
 const VERDICT_ORDER = ["WOULD_ATTEMPT", "WOULD_WAIT", "WOULD_NEED_ATTENTION", "WOULD_SKIP"];
 const NO_DOMAIN = "(no broker email)";
 const NOT_ON_SHEET = "(not on the sheet)";
@@ -151,33 +171,9 @@ function openReadOnly(dbPath) {
 	return db;
 }
 
-function hasTable(db, name) {
-	return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
-}
-
-function columnsOf(db, table) {
-	return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
-}
-
-// The local records the rules read, by the rules' own queries.
-function readRecords(db) {
-	const sql = rules.RECORD_SQL;
-	return {
-		documents: hasTable(db, "documents")
-			? db.prepare(columnsOf(db, "documents").has("deleted_at") ? sql.documents : sql.documentsNoSoftDelete).all()
-			: [],
-		drafts: hasTable(db, "load_invoice_drafts") ? db.prepare(sql.drafts).all() : [],
-		advanceLines: hasTable(db, "broker_invoice_lines") ? db.prepare(sql.advanceLines).all() : [],
-		deletedLoads: hasTable(db, "deleted_loads") ? db.prepare(sql.deletedLoads).all() : [],
-	};
-}
-
 // A SQLite UTC stamp ("YYYY-MM-DD HH:MM:SS", or ISO with Z) as a business day.
 function stampDay(stamp, zone) {
-	const s = String(stamp || "").trim();
-	if (!s) return "";
-	const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(s) ? `${s.replace(" ", "T")}Z` : s;
-	const ms = Date.parse(iso);
+	const ms = Date.parse(stampIso(stamp));
 	return Number.isFinite(ms) ? appTime.dayInZone(new Date(ms), zone) : "";
 }
 
@@ -224,7 +220,7 @@ function buildRetro({ values, db, uploadsDir = "", since, until, zone = appTime.
 	const rows = helpers.deduplicateLoads(parsed.data, parsed.headers);
 	const cols = rules.jobColumns(parsed.headers);
 	if (!cols.loadIdCol || !cols.statusCol) throw refused("the Job Tracking copy has no Load ID or status column");
-	const records = rules.indexRecords(readRecords(db));
+	const records = rules.indexRecords(ledger.readRecords(db));
 	const podReadable = uploadsDir
 		? (doc) => {
 			if (String(doc.drive_file_id || "")) return true;
@@ -381,12 +377,134 @@ function textOf(r) {
 	return lines.join("\n");
 }
 
+// ── the shadow-week report ──────────────────────────────────────────────────
+
+function parseFacts(json) {
+	try {
+		const f = JSON.parse(json || "{}");
+		return f && typeof f === "object" ? f : {};
+	} catch {
+		return {};
+	}
+}
+
+function buildShadow({ db, since, until, zone = appTime.appTimeZone(), today = appTime.dayInZone(new Date(), zone) }) {
+	const win = windowOf({ since, until, today });
+	const inWindow = (day) => Boolean(day) && day >= win.since && day <= win.until;
+	const out = { mode: "shadow", window: { ...win, zone }, shadowLog: ledger.hasTable(db, ledger.SHADOW) };
+	const records = rules.indexRecords(ledger.readRecords(db));
+	const rows = out.shadowLog
+		? ledger.listShadow(db).filter((r) => r.verdict !== "BASELINE" && inWindow(stampDay(r.first_seen_at, zone)))
+		: [];
+	const verdicts = emptyVerdicts();
+	const loads = [];
+	for (const r of rows) {
+		const facts = parseFacts(r.facts_json);
+		const rec = records.get(r.load_key);
+		const firstMs = Date.parse(r.first_seen_at);
+		const later = rec ? rec.drafts.filter((d) => Date.parse(stampIso(d.created_at)) >= firstMs) : [];
+		const draft = later[0] || null;
+		const entry = {
+			load: suffix(r.load_id || r.load_key),
+			firstSeen: stampDay(r.first_seen_at, zone),
+			verdict: r.verdict,
+			code: r.reason_code,
+			domain: String(facts.domain || "") || NO_DOMAIN,
+			bison: Boolean(facts.bison),
+			handDrafted: Boolean(draft),
+			compare: null,
+			editedFields: [],
+			hoursToHandDraft: draft ? Math.round((Date.parse(stampIso(draft.created_at)) - firstMs) / 360000) / 10 : null,
+		};
+		if (draft && r.verdict === "WOULD_ATTEMPT") {
+			entry.compare = compareHandDraft({ isBison: entry.bison, brokerDomain: String(facts.domain || "") }, draft);
+			if (entry.compare === "C") entry.editedFields = String(draft.edited_fields || "").split(",").map((f) => f.trim()).filter((f) => /^[A-Za-z]{1,40}$/.test(f));
+		}
+		tally(verdicts, entry);
+		loads.push(entry);
+	}
+	const attempts = loads.filter((e) => e.verdict === "WOULD_ATTEMPT");
+	const compared = attempts.filter((e) => e.compare);
+	const editedFields = {};
+	for (const e of compared) for (const f of e.editedFields) editedFields[f] = (editedFields[f] || 0) + 1;
+	out.firstSeen = loads.length;
+	out.verdicts = verdicts;
+	out.handDraftCompare = {
+		drafted: compared.length,
+		A: compared.filter((e) => e.compare === "A").length,
+		B: compared.filter((e) => e.compare === "B").length,
+		C: compared.filter((e) => e.compare === "C").length,
+		D: attempts.length - compared.length,
+		editedFields,
+	};
+	out.handDraftsOnOtherVerdicts = Object.fromEntries(VERDICT_ORDER.filter((v) => v !== "WOULD_ATTEMPT").map((v) => [v, loads.filter((e) => e.verdict === v && e.handDrafted).length]));
+	out.medianHoursToHandDraft = median(loads.map((e) => e.hoursToHandDraft).filter((n) => Number.isFinite(n)));
+	const byDomain = new Map();
+	for (const e of loads) {
+		const x = byDomain.get(e.domain) || { domain: e.domain, firstSeen: 0, wouldAttempt: 0, handDrafted: 0 };
+		x.firstSeen++;
+		if (e.verdict === "WOULD_ATTEMPT") x.wouldAttempt++;
+		if (e.handDrafted) x.handDrafted++;
+		byDomain.set(e.domain, x);
+	}
+	out.perDomain = [...byDomain.values()].sort((a, b) => b.firstSeen - a.firstSeen || a.domain.localeCompare(b.domain));
+	// Claims a person should check in Gmail: a draft that may be there unrecorded,
+	// or a number reserved and not used.
+	out.checkGmail = ledger.hasTable(db, ledger.CLAIMS)
+		? ledger.listClaims(db).filter((c) => c.state !== "drafted" && c.invoice_id && !c.number_voided_at).map((c) => ({
+			load: suffix(c.load_id || c.load_key),
+			invoiceId: c.invoice_id,
+			state: c.state,
+			code: c.reason_code,
+			mayBeInGmail: c.stage === "appending" || c.stage === "appended",
+		}))
+		: [];
+	out.loads = loads;
+	out.text = shadowText(out);
+	return out;
+}
+
+// A SQLite stamp as an ISO instant (UTC when it carries no zone).
+function stampIso(stamp) {
+	const s = String(stamp || "").trim();
+	return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(s) ? `${s.replace(" ", "T")}Z` : s;
+}
+
+function shadowText(r) {
+	const w = r.window;
+	if (!r.shadowLog) return `Automatic invoice drafts, shadow report ${w.since} to ${w.until} (${w.zone}): no shadow log in this database (shadow mode never ran).`;
+	const c = r.handDraftCompare;
+	return [
+		`Automatic invoice drafts, shadow report: loads first seen completed ${w.since} to ${w.until} (${w.zone})`,
+		`Loads first seen in the window: ${r.firstSeen}`,
+		...VERDICT_ORDER.map((v) => `  ${v.padEnd(21)} ${String(r.verdicts[v].count).padStart(4)}${reasonText(r.verdicts[v].reasons)}`),
+		`WOULD_ATTEMPT drafted by hand: ${c.drafted}: (A) likely the same draft ${c.A}; (B) the recipient rule hands it to a person ${c.B}; (C) edited by hand ${c.C}${reasonText(c.editedFields)}; (D) not drafted by hand ${c.D}`,
+		`Hand drafts on loads the job would not have drafted: ${VERDICT_ORDER.filter((v) => v !== "WOULD_ATTEMPT").map((v) => `${v} ${r.handDraftsOnOtherVerdicts[v]}`).join(", ")}`,
+		`Median hours from first seen completed to the hand draft: ${r.medianHoursToHandDraft === null ? "none" : r.medianHoursToHandDraft}`,
+		"Per broker domain: first seen / WOULD_ATTEMPT / drafted by hand",
+		...r.perDomain.map((d) => `  ${d.domain.padEnd(40)} ${String(d.firstSeen).padStart(4)} ${String(d.wouldAttempt).padStart(4)} ${String(d.handDrafted).padStart(4)}`),
+		r.checkGmail.length
+			? `Check in Gmail (${r.checkGmail.length}): ${r.checkGmail.map((x) => `load ${x.load} invoice ${x.invoiceId} (${x.state}${x.code ? ` ${x.code}` : ""}${x.mayBeInGmail ? ", may be in Gmail" : ", number not used"})`).join("; ")}`
+			: "Check in Gmail: nothing (no draft may be there unrecorded, no reserved number unused).",
+	].join("\n");
+}
+
 function run(argv) {
 	const args = parseArgs(argv);
-	if (!args.retro) throw refused("only --retro is available: the sizing run on a copy of production");
 	if (typeof args.db !== "string" || !args.db) throw refused("--db=<app.db> is required");
 	for (const k of ["sheets-json", "values-json", "uploads", "since", "until"]) {
 		if (args[k] === true) throw refused(`--${k} needs a value`);
+	}
+	if (!args.retro) {
+		const given = SHADOW_ONLY_REFUSED.filter((k) => args[k] !== undefined);
+		if (given.length) throw refused(`--${given[0]} is for --retro only; the shadow-week report reads the database alone`);
+		windowOf({ since: args.since, until: args.until, today: appTime.dayInZone(new Date(), appTime.appTimeZone()) });
+		const shadowDb = openReadOnly(path.resolve(args.db));
+		try {
+			return { args, out: buildShadow({ db: shadowDb, since: args.since, until: args.until }) };
+		} finally {
+			shadowDb.close();
+		}
 	}
 	const values = readValues({ valuesJson: args["values-json"], sheetsJson: args["sheets-json"] });
 	const uploadsDir = args.uploads ? path.resolve(args.uploads) : "";
@@ -422,4 +540,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { buildRetro, readValues, liftSheetHelpers, readRecords, windowOf, compareHandDraft, run };
+module.exports = { buildRetro, buildShadow, readValues, liftSheetHelpers, windowOf, compareHandDraft, run };

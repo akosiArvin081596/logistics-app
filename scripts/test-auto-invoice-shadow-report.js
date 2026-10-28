@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // scripts/auto-invoice-shadow-report.js: the read-only report for automatic
-// invoice drafts. This runner covers --retro, the sizing run on a copy.
+// invoice drafts: --retro, the sizing run on a copy (§1-§5), and the shadow-week
+// report (§6).
 //
 //   §1  the retro sizing on made-up loads: delivered in the window (Completion
 //       Date, else the POD upload, else "date unknown"), button drafts, the
@@ -11,6 +12,10 @@
 //   §4  the command line: --sheets-json and --values-json read the same sheet;
 //       every bad argument is refused with exit 2 and touches nothing
 //   §5  no network: the script loads no network module
+//   §6  the shadow-week report on a made-up shadow log: loads first seen in the
+//       window, the verdicts, A / B / C / D against the hand drafts, hand drafts
+//       on loads the job would not have drafted, the median hours, per domain,
+//       and the Gmail check list from the claims; read-only
 //
 // Made-up data only, in a fresh temp folder. Never reads app.db.
 //   node scripts/test-auto-invoice-shadow-report.js      # exits 1 on any failure
@@ -203,8 +208,12 @@ ok(a && !("text" in a), "§4 --json carries no text field");
 const textRun = cli("--retro", `--db=${DB_FILE}`, `--values-json=${VALUES_FILE}`, "--since=2026-08-22", "--until=2026-10-20");
 ok(textRun.status === 0 && /retro sizing/.test(textRun.stdout), "§4 the text form runs");
 const refusals = [
-	[[], "only --retro"],
+	[[], "--db=<app.db> is required"],
 	[["--retro"], "--db"],
+	[[`--db=${DB_FILE}`, `--values-json=${VALUES_FILE}`], "--values-json is for --retro only"],
+	[[`--db=${DB_FILE}`, `--uploads=${UPLOADS}`], "--uploads is for --retro only"],
+	[[`--db=${DB_FILE}`, "--until=2026-13-01"], "calendar day"],
+	[[`--db=${path.join(TMP, "missing.db")}`], "read-only"],
 	[["--retro", `--db=${DB_FILE}`], "--sheets-json=<file> or --values-json"],
 	[["--retro", `--db=${DB_FILE}`, `--sheets-json=${SHEETS_FILE}`, `--values-json=${VALUES_FILE}`], "not both"],
 	[["--retro", `--db=${DB_FILE}`, `--sheets-json=${TWO_MAINS}`], "exactly one main"],
@@ -228,10 +237,75 @@ section("§5  no network");
 const SRC = fs.readFileSync(SCRIPT, "utf8");
 const requires = [...SRC.matchAll(/require\(((?:[^()]|\([^()]{0,100}\)){1,160})\)/g)].map((m) => m[1].trim()).sort();
 eq(requires, [
-	"\"../lib/app-time\"", "\"../lib/auto-invoice-rules\"", "\"./lib/server-lift\"", "\"fs\"", "\"path\"",
+	"\"../lib/app-time\"", "\"../lib/auto-invoice-ledger\"", "\"../lib/auto-invoice-rules\"", "\"./lib/server-lift\"", "\"fs\"", "\"path\"",
 	"path.join(ROOT, \"node_modules\", \"better-sqlite3\")",
-].sort(), "§5 it loads only fs, path, the rules, app-time, server-lift and better-sqlite3");
+].sort(), "§5 it loads only fs, path, the rules, the ledger, app-time, server-lift and better-sqlite3");
 ok(!/\bfetch\s*\(|googleapis|https?:\/\/|\.env\b/.test(SRC), "§5 no fetch, Google client, URL or settings file");
+const LEDGER_SRC = fs.readFileSync(path.join(ROOT, "lib", "auto-invoice-ledger.js"), "utf8");
+eq([...LEDGER_SRC.matchAll(/require\(([^)]{1,80})\)/g)].map((m) => m[1]), ["\"./auto-invoice-rules\""], "§5 the ledger it reads with loads only the rules");
+
+// ------------------------------------------------------------------ §6
+section("§6  the shadow-week report (no --retro)");
+{
+	const L = require(path.join(ROOT, "lib", "auto-invoice-ledger.js"));
+	const SHADOW_DB = path.join(TMP, "shadow.db");
+	const sdb = new Database(SHADOW_DB);
+	sdb.exec(`
+		CREATE TABLE load_invoice_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT NOT NULL, invoice_id TEXT, recipient TEXT, recipient_source TEXT,
+			via TEXT, created_at TEXT, created_by TEXT, edited INTEGER DEFAULT 0, edited_fields TEXT DEFAULT '');
+	`);
+	L.ensureSchema(sdb);
+	const facts = (domain, bison = false) => JSON.stringify({ bison, domain });
+	const shadow = (id, verdict, code, firstSeen, f) => L.upsertShadow(sdb, { key: id.toLowerCase(), loadId: id, verdict, code, factsJson: f, readyAt: verdict === "WOULD_ATTEMPT" ? firstSeen : "", nowIso: firstSeen });
+	shadow("LD-TEST-0200", "BASELINE", "", "2026-10-19T12:00:00.000Z", "");
+	shadow("LD-TEST-0201", "WOULD_ATTEMPT", "", "2026-10-20T14:00:00.000Z", facts("example-broker.test"));
+	shadow("LD-TEST-0202", "WOULD_ATTEMPT", "", "2026-10-20T15:00:00.000Z", facts("example-broker.test"));
+	shadow("LD-TEST-0203", "WOULD_ATTEMPT", "", "2026-10-21T14:00:00.000Z", facts("example-broker.test"));
+	shadow("LD-TEST-0204", "WOULD_ATTEMPT", "", "2026-10-21T15:00:00.000Z", facts("bisontransport.com", true));
+	shadow("LD-TEST-0205", "WOULD_NEED_ATTENTION", "CLOSED_MONTH", "2026-10-22T14:00:00.000Z", facts("example-carrier-ops.test"));
+	shadow("LD-TEST-0206", "WOULD_WAIT", "WAITING_POD", "2026-10-22T15:00:00.000Z", facts("example-carrier-ops.test"));
+	shadow("LD-TEST-0207", "WOULD_SKIP", "BROKER_OPTED_OUT", "2026-10-23T14:00:00.000Z", facts("example-optout.test"));
+	shadow("LD-TEST-0208", "WOULD_ATTEMPT", "", "2026-09-01T14:00:00.000Z", facts("example-broker.test"));
+	const draft = sdb.prepare("INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, via, created_at, edited, edited_fields) VALUES (?, ?, ?, ?, 'imap', ?, ?, ?)");
+	draft.run("LD-TEST-0201", "10202026-1", "billing@example-broker.test", "ratecon", "2026-10-20T16:00:00Z", 0, "");
+	draft.run("LD-TEST-0202", "10202026-2", "quickpay@example-ap-inbox.test", "default", "2026-10-20T19:00:00Z", 0, "");
+	draft.run("LD-TEST-0204", "10212026-1", "ap@example-bison-ap.test", "default", "2026-10-21 19:00:00", 1, "total");
+	draft.run("LD-TEST-0205", "10222026-1", "billing@example-carrier-ops.test", "ratecon", "2026-10-22T18:00:00Z", 0, "");
+	draft.run("LD-TEST-0203", "10012026-1", "billing@example-broker.test", "ratecon", "2026-10-01T18:00:00Z", 0, "");
+	L.insertClaim(sdb, { key: "ld-test-0209", loadId: "LD-TEST-0209", state: "needs_attention", code: "MAYBE_IN_GMAIL", nowIso: "2026-10-23T14:00:00.000Z" });
+	sdb.prepare("UPDATE auto_invoice_claims SET invoice_id = '10232026-1', stage = 'appending' WHERE load_key = 'ld-test-0209'").run();
+	L.insertClaim(sdb, { key: "ld-test-0210", loadId: "LD-TEST-0210", state: "needs_attention", code: "DRAFT_FAILED", nowIso: "2026-10-23T14:00:00.000Z" });
+	sdb.prepare("UPDATE auto_invoice_claims SET invoice_id = '10232026-2', stage = 'reserved' WHERE load_key = 'ld-test-0210'").run();
+	L.insertClaim(sdb, { key: "ld-test-0211", loadId: "LD-TEST-0211", state: "skipped", code: "DRAFTED_BY_HAND", nowIso: "2026-10-23T14:00:00.000Z" });
+	sdb.prepare("UPDATE auto_invoice_claims SET invoice_id = '10232026-3', stage = 'reserved', number_voided_at = '2026-10-23T15:00:00.000Z' WHERE load_key = 'ld-test-0211'").run();
+	sdb.close();
+	const before6 = listing();
+	const ro = new Database(SHADOW_DB, { readonly: true, fileMustExist: true });
+	const s = report.buildShadow({ db: ro, since: "2026-10-20", until: "2026-10-26", zone, today: "2026-10-26" });
+	ro.close();
+	eq(s.firstSeen, 7, "§6 loads first seen in the window, baseline and older ones left out");
+	eq(s.verdicts.WOULD_ATTEMPT.count, 4, "§6 WOULD_ATTEMPT");
+	eq([s.verdicts.WOULD_NEED_ATTENTION.reasons, s.verdicts.WOULD_WAIT.reasons, s.verdicts.WOULD_SKIP.reasons],
+		[{ CLOSED_MONTH: 1 }, { WAITING_POD: 1 }, { BROKER_OPTED_OUT: 1 }], "§6 the other verdicts with their reasons");
+	eq(s.handDraftCompare, { drafted: 3, A: 1, B: 1, C: 1, D: 1, editedFields: { total: 1 } }, "§6 (A) 0201, (B) 0202 to the default inbox, (C) 0204 edited, (D) 0203 drafted only before it was seen");
+	eq(s.handDraftsOnOtherVerdicts, { WOULD_WAIT: 0, WOULD_NEED_ATTENTION: 1, WOULD_SKIP: 0 }, "§6 a hand draft on a load the job would have handed to a person");
+	eq(s.medianHoursToHandDraft, 4, "§6 median hours from first seen to the hand draft (2, 4, 4, 4)");
+	eq(s.perDomain.map((d) => [d.domain, d.firstSeen, d.wouldAttempt, d.handDrafted]),
+		[["example-broker.test", 3, 3, 2], ["example-carrier-ops.test", 2, 0, 1], ["bisontransport.com", 1, 1, 1], ["example-optout.test", 1, 0, 0]], "§6 per domain");
+	eq(s.checkGmail, [
+		{ load: "...0209", invoiceId: "10232026-1", state: "needs_attention", code: "MAYBE_IN_GMAIL", mayBeInGmail: true },
+		{ load: "...0210", invoiceId: "10232026-2", state: "needs_attention", code: "DRAFT_FAILED", mayBeInGmail: false },
+	], "§6 the Gmail check list: a draft that may be there, a number not used (a voided one is done)");
+	ok(!/@/.test(s.text) && !/@/.test(JSON.stringify({ ...s, text: "" })), "§6 no email address");
+	ok(!/LD-TEST-0\d{3}/.test(s.text), "§6 no full load ID");
+	const cliShadow = cli(`--db=${SHADOW_DB}`, "--since=2026-10-20", "--until=2026-10-26", "--json");
+	let parsedShadow = null;
+	try { parsedShadow = JSON.parse(cliShadow.stdout); } catch { /* asserted below */ }
+	eq([cliShadow.status, parsedShadow && parsedShadow.handDraftCompare], [0, s.handDraftCompare], "§6 the command line gives the same report");
+	const empty = cli(`--db=${DB_FILE}`, "--since=2026-10-20", "--until=2026-10-26");
+	ok(empty.status === 0 && /no shadow log/.test(empty.stdout), "§6 a database with no shadow log says so");
+	eq(listing(), before6, "§6 nothing written");
+}
 
 fs.rmSync(TMP, { recursive: true, force: true });
 
