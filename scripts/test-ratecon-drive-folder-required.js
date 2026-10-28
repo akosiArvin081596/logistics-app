@@ -146,7 +146,9 @@ async function bootServer(extra) {
 	child.stdout.on("data", (d) => { out += d; });
 	child.stderr.on("data", (d) => { out += d; });
 	const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
-	const deadline = Date.now() + 20_000;
+	// 40 s: a loaded CI machine running several booting runners at once.
+	const startedAt = Date.now();
+	const deadline = startedAt + 40_000;
 	while (!/Server running at/.test(out) && child.exitCode === null && Date.now() < deadline) await delay(25);
 	const stop = async () => {
 		if (child.exitCode !== null || child.signalCode !== null) return;
@@ -154,7 +156,14 @@ async function bootServer(extra) {
 		const done = await Promise.race([exited.then(() => true), delay(5000).then(() => false)]);
 		if (!done) child.kill("SIGKILL");
 	};
-	return { port, up: /Server running at/.test(out), output: () => out, stop };
+	const up = /Server running at/.test(out);
+	if (!up) {
+		// The boot's own words, so a CI failure shows why (made-up settings only).
+		const why = child.exitCode !== null ? `exited ${child.exitCode}` : child.signalCode ? `killed by ${child.signalCode}` : "still starting";
+		console.log(`  server.js did not start after ${Date.now() - startedAt} ms (${why}); its last output:`);
+		for (const line of redact(out).split("\n").slice(-40)) console.log(`    | ${line}`);
+	}
+	return { port, up, output: () => out, stop };
 }
 async function request(port, method, url, { cookie, body } = {}) {
 	const headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
