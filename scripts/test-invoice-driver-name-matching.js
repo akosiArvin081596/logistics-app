@@ -111,6 +111,8 @@ const SHARED_CONSTS = [
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
 	"DAY_PAY_DRAFT_LINE_RE", "INVOICE_GRID_DAYS",
+	// The Personal lines' receipt-week rule (off in these fixtures).
+	"PERSONAL_RECEIPT_WEEK_ENABLED",
 ];
 const SHARED_FNS = [
 	"appDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
@@ -134,7 +136,7 @@ const SHARED_FNS = [
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
-	"personalSnapshotOf", "personalLinesForInvoices", "invoiceExpensesRefTotals",
+	"personalSnapshotOf", "personalLinesForInvoices", "invoiceExpensesRefTotals", "personalUnfitTail", "personalFit",
 	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
 	// the paid-days release a regenerated Draft runs.
 	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
