@@ -107,6 +107,7 @@ const LOADS = [
 	load("LD-TEST-0021", { email: "dispatch.one@gmail.com" }),
 	load("LD-TEST-0022", { email: "Ops.Desk@Yahoo.co.uk" }),
 	load("LD-TEST-0023", { email: "desk@proton.me" }),
+	load("LD-TEST-0024"),
 ];
 const SHEET = [HEADERS, ...LOADS.map((l) => [l.id, l.status, l.email, l.contact, "QA Driver", l.trailer, l.done, l.pay])];
 const cand = (buffer, source) => ({ buffer, source, label: source, fileName: "rc.pdf" });
@@ -132,6 +133,8 @@ const RATECONS = {
 	"LD-TEST-0021": [cand(rateCon({ docs: "someone.else@gmail.com" }), "documents")],
 	"LD-TEST-0022": [cand(rateCon({ docs: "billing@yahoo.co.uk" }), "documents")],
 	"LD-TEST-0023": [cand(rateCon({ docs: "billing@proton.me" }), "documents")],
+	// The documents email on the broker's domain, no billing block: the total is Gemini's to read.
+	"LD-TEST-0024": [cand(plainRateCon(BILLING), "documents")],
 };
 // POD rows: [load_id as stored, file name]; the 0011 page and 0014's spelling are the cases.
 const PODS = [
@@ -184,10 +187,13 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 			const candidates = ratecons[String(loadId).replace(/^#/, "").toUpperCase()] || [];
 			return { buffer: candidates[0] ? candidates[0].buffer : null, candidates };
 		},
-		GEMINI_API_KEY: "made-up-key",
+		// gemini: null (answers without fields), "down" (unavailable), "transient"
+		// (a 5xx or timeout), "nokey" (no key on this server).
+		GEMINI_API_KEY: gemini === "nokey" ? "" : "made-up-key",
 		runRateConGemini: async () => {
 			seen.gemini++;
 			if (gemini === "down") throw Object.assign(new Error("made-up outage"), { kind: "unavailable", status: 503 });
+			if (gemini === "transient") throw Object.assign(new Error("made-up overload"), { kind: "transient", status: 503 });
 			return null;
 		},
 		renderHtmlToPdf: async () => {
@@ -230,6 +236,7 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			["LD-TEST-0022", "BROKER_EMAIL_FREEMAIL", "a broker Email on a free-mail provider's country domain (yahoo.co.uk)"],
 			["LD-TEST-0023", "BROKER_EMAIL_FREEMAIL", "a broker Email on proton.me"],
 			["LD-TEST-0010", "TOTAL_MISMATCH", "a rate con total that is not Job Tracking's Payment"],
+			["LD-TEST-0024", "RATECON_TOTAL_UNREAD", "no total read off the rate con (Gemini answered without one)"],
 			["LD-TEST-0013", "NO_DELIVERY_DATE", "no delivery date in Job Tracking"],
 		];
 		for (const [id, want, what] of CASES) {
@@ -289,6 +296,13 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		eq((await world().auto("LD-TEST-0016")).geminiUnavailable, false, "§2 …and false when it was up");
 		const up = await world({ gemini: "down" }).manual("LD-TEST-0016", {}, true);
 		eq([code(up), up.ctx.geminiUnavailable], ["ok", true], "§2 a prepared draft reports geminiUnavailable too");
+
+		for (const [gem, down, what] of [["transient", false, "a Gemini error or timeout"], ["down", true, "Gemini down"], ["nokey", false, "no Gemini key"]]) {
+			const r = await world({ gemini: gem }).auto("LD-TEST-0024");
+			eq([code(r), r.geminiUnavailable], ["RATECON_TOTAL_UNREAD", down], `§2 ${what}: RATECON_TOTAL_UNREAD, geminiUnavailable ${down}`);
+			const m = await world({ gemini: gem }).manual("LD-TEST-0024");
+			eq([code(m), m.ctx.totalSource, m.ctx.total], ["ok", "sheet", "$1,500.00"], `§2 …the button still bills Job Tracking's Payment (${what})`);
+		}
 
 		const spell = await world().auto("LD-TEST-0014");
 		eq([code(spell), spell.ok && spell.ctx.podAttachments.map((a) => a.filename)], ["ok", ["LD-TEST-0014_POD.pdf"]],
