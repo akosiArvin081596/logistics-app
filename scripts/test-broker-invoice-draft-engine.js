@@ -101,6 +101,12 @@ const LOADS = [
 	load("LD-TEST-0014"),
 	load("LD-TEST-0015"),
 	load("LD-TEST-0016"),
+	load("LD-TEST-0018", { status: "In Transit" }),
+	load("LD-TEST-0019"),
+	load("LD-TEST-0020", { email: "" }),
+	load("LD-TEST-0021", { email: "dispatch.one@gmail.com" }),
+	load("LD-TEST-0022", { email: "Ops.Desk@Yahoo.co.uk" }),
+	load("LD-TEST-0023", { email: "desk@proton.me" }),
 ];
 const SHEET = [HEADERS, ...LOADS.map((l) => [l.id, l.status, l.email, l.contact, "QA Driver", l.trailer, l.done, l.pay])];
 const cand = (buffer, source) => ({ buffer, source, label: source, fileName: "rc.pdf" });
@@ -120,10 +126,16 @@ const RATECONS = {
 	"LD-TEST-0014": [cand(rateCon({ docs: BILLING }), "documents")],
 	"LD-TEST-0015": [cand(rateCon(), "documents"), cand(plainRateCon(BILLING), "drive")],
 	"LD-TEST-0016": [cand(plainRateCon(""), "documents")],
+	// Each names a documents email on the broker's own domain: only the broker
+	// Email rule stands between them and a draft.
+	"LD-TEST-0020": [cand(rateCon({ docs: BILLING }), "documents")],
+	"LD-TEST-0021": [cand(rateCon({ docs: "someone.else@gmail.com" }), "documents")],
+	"LD-TEST-0022": [cand(rateCon({ docs: "billing@yahoo.co.uk" }), "documents")],
+	"LD-TEST-0023": [cand(rateCon({ docs: "billing@proton.me" }), "documents")],
 };
 // POD rows: [load_id as stored, file name]; the 0011 page and 0014's spelling are the cases.
 const PODS = [
-	...LOADS.filter((l) => !["LD-TEST-0014"].includes(l.id)).map((l) => [l.id, `${l.id}_POD.pdf`]),
+	...LOADS.filter((l) => !["LD-TEST-0014", "LD-TEST-0019"].includes(l.id)).map((l) => [l.id, `${l.id}_POD.pdf`]),
 	["LD-TEST-0011", "LD-TEST-0011_POD_2.pdf"],
 	["#ld-test-0014", "LD-TEST-0014_POD.pdf"],
 ];
@@ -140,18 +152,21 @@ const DRAFTS_SQL = SRC.slice(createAt, SRC.indexOf("`", createAt));
 const DRAFTS_ALTERS = [...SRC.matchAll(/db\.exec\("(ALTER TABLE load_invoice_drafts ADD COLUMN [^"]+)"\)/g)].map((m) => m[1]);
 const auditAt = SRC.indexOf("CREATE TABLE IF NOT EXISTS audit_trail (");
 const AUDIT_SQL = SRC.slice(auditAt, SRC.indexOf("`", auditAt));
+const DOCUMENTS_SQL = (SRC.match(/CREATE TABLE IF NOT EXISTS documents \([\s\S]*?\n\t\)/) || [""])[0];
 const QUIET = { log() {}, warn() {}, error() {} };
 
 const AUTO_ACTOR = { session: { user: { id: 0, username: "auto-invoice", role: "system" } } };
 const ADMIN = { session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } };
 
-function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false } = {}) {
+// `sheet` and `ratecons` replace the fixtures for one world (a load that changed).
+function world({ env = {}, gemini = null, rendererBusy = false, linesTable = false, sheet = SHEET, ratecons = RATECONS } = {}) {
 	const db = new Database(":memory:");
 	db.exec(DRAFTS_SQL);
 	for (const a of DRAFTS_ALTERS) db.exec(a);
 	db.exec(AUDIT_SQL);
-	db.exec("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, load_id TEXT, type TEXT, file_name TEXT, uploaded_at TEXT, deleted_at TEXT)");
-	const addPod = db.prepare("INSERT INTO documents (load_id, type, file_name, uploaded_at) VALUES (?, 'POD', ?, '2026-10-14T15:00:00Z')");
+	db.exec(DOCUMENTS_SQL);
+	db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL");
+	const addPod = db.prepare("INSERT INTO documents (load_id, driver, type, file_name, uploaded_at) VALUES (?, 'QA Driver', 'POD', ?, '2026-10-14T15:00:00Z')");
 	for (const [id, file] of PODS) addPod.run(id, file);
 	if (linesTable || env.BROKER_INVOICE_LINES_ENABLED) brokerInvoice.invoiceLines.ensureSchema(db);
 	const helpers = new Function("db", "brokerInvoice", "console", `${lifted.text}\nreturn { ${lifted.names.join(", ")} };`)(db, brokerInvoice, QUIET);
@@ -160,13 +175,13 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 		...helpers,
 		db,
 		brokerInvoice,
-		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: SHEET } }) } } }),
+		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet } }) } } }),
 		SPREADSHEET_ID: "made-up-sheet",
 		fetchDocumentBytes: async (d) => (UNREADABLE.has(d.file_name) ? null : Buffer.from(`%PDF-1.4 ${d.file_name}`)),
 		buildRateConLoadCtx: (row, headers, loadId) => ({ loadId, facts: "made-up" }),
 		getRateConBytes: async (loadId, body, loadCtx, opts) => {
 			seen.rateconCalls.push({ loadId, body, loadCtx, opts: { ...opts, req: opts && opts.req ? "req" : undefined } });
-			const candidates = RATECONS[String(loadId).replace(/^#/, "").toUpperCase()] || [];
+			const candidates = ratecons[String(loadId).replace(/^#/, "").toUpperCase()] || [];
 			return { buffer: candidates[0] ? candidates[0].buffer : null, candidates };
 		},
 		GEMINI_API_KEY: "made-up-key",
@@ -209,7 +224,11 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			["LD-TEST-0003", "NO_BILLING_EMAIL", "a rate con with no documents email (the default inbox)"],
 			["LD-TEST-0004", "RECIPIENT_DOMAIN_MISMATCH", "a documents email on another domain"],
 			["LD-TEST-0005", "RECIPIENT_DOMAIN_MISMATCH", "a documents email on a subdomain of the broker's"],
-			["LD-TEST-0006", "RECIPIENT_DOMAIN_MISMATCH", "a sheet Email with no domain"],
+			["LD-TEST-0020", "NO_BROKER_EMAIL", "no broker Email on the sheet"],
+			["LD-TEST-0006", "NO_BROKER_EMAIL", "a sheet Email that is not an address"],
+			["LD-TEST-0021", "BROKER_EMAIL_FREEMAIL", "a broker Email on gmail.com (the rate con naming another gmail address)"],
+			["LD-TEST-0022", "BROKER_EMAIL_FREEMAIL", "a broker Email on a free-mail provider's country domain (yahoo.co.uk)"],
+			["LD-TEST-0023", "BROKER_EMAIL_FREEMAIL", "a broker Email on proton.me"],
 			["LD-TEST-0010", "TOTAL_MISMATCH", "a rate con total that is not Job Tracking's Payment"],
 			["LD-TEST-0013", "NO_DELIVERY_DATE", "no delivery date in Job Tracking"],
 		];
@@ -283,7 +302,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 	// ===================================================================== §3
 	section("3. mode \"manual\" — the button, unchanged");
 	{
-		for (const id of ["LD-TEST-0003", "LD-TEST-0004", "LD-TEST-0005", "LD-TEST-0006", "LD-TEST-0007", "LD-TEST-0008", "LD-TEST-0009", "LD-TEST-0010", "LD-TEST-0011", "LD-TEST-0013"]) {
+		for (const id of ["LD-TEST-0003", "LD-TEST-0004", "LD-TEST-0005", "LD-TEST-0006", "LD-TEST-0007", "LD-TEST-0008", "LD-TEST-0009", "LD-TEST-0010", "LD-TEST-0011", "LD-TEST-0013",
+			"LD-TEST-0020", "LD-TEST-0021", "LD-TEST-0022", "LD-TEST-0023"]) {
 			eq(code(await world().manual(id)), "ok", `§3 ${id}: the approve prepares (no automatic refusal)`);
 		}
 		const lw = world({ linesTable: true });
@@ -311,8 +331,8 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		const alt = world();
 		await alt.manual("LD-TEST-0015");
 		eq(alt.seen.gemini, 1, "§3 an alternate rate con is still read with Gemini on the button");
-		eq([code(await world().manual("LD-TEST-0014")), (await world().manual("LD-TEST-0014")).json],
-			["400", { error: "POD not found for this load" }], "§3 the POD's load ID still matches exactly on the button");
+		const exact = await world().manual("LD-TEST-0014");
+		eq([exact.ok, exact.http, exact.json], [false, 400, { error: "POD not found for this load" }], "§3 the POD's load ID still matches exactly on the button");
 		eq(code(await world().engine.prepare({ loadId: "LD-TEST-0001", ov: world().ov({}) })), "ok", "§3 mode defaults to manual");
 		let threw = "";
 		try { await world().engine.prepare({ loadId: "LD-TEST-0001", mode: "manual" }); } catch (e) { threw = e.message; }
@@ -367,6 +387,79 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		eq(rule({ isBison: false, recipientEmail: "billing@sub.example-broker.test", documentsEmail: "billing@sub.example-broker.test", brokerEmail: BROKER }), "RECIPIENT_DOMAIN_MISMATCH", "§5 a subdomain");
 		eq(rule({ isBison: false, recipientEmail: "billing@example-broker.test", documentsEmail: "billing@example-broker.test", brokerEmail: "ops@sub.example-broker.test" }), "RECIPIENT_DOMAIN_MISMATCH", "§5 the broker on a subdomain");
 		eq(rule({ isBison: false, recipientEmail: BILLING, documentsEmail: BILLING, brokerEmail: "" }), "RECIPIENT_DOMAIN_MISMATCH", "§5 no broker Email on the sheet");
+
+		const free = engineModule.isFreeMailDomain;
+		const FREE = ["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com", "aol.com",
+			"icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com", "gmx.com", "mail.com", "zoho.com", "yandex.com",
+			"yahoo.co.uk", "hotmail.fr", "gmx.de", "mail.yahoo.com", "outlook.com.au"];
+		eq(FREE.filter((d) => !free(d)), [], "§5 isFreeMailDomain(): every named provider, its country domains and its subdomains");
+		const OWN = ["example-broker.test", "bisontransport.com", "acme.me", "mail.acme-freight.example.test", "livestock-freight.example.test", "gmailer.example.test", ""];
+		eq(OWN.filter((d) => free(d)), [], "§5 …and not a company's own domain that merely contains a provider's letters");
+	}
+
+	// ===================================================================== §6
+	// The automatic job's own calls (lib/auto-invoice-job.js): its actor is the
+	// bare user, it reads render()'s to/subject/total, it rebuilds a draft to
+	// compare with what reached Gmail, and it sorts refusals by code.
+	section("6. The automatic job's calls, as it makes them");
+	{
+		const JOB_ACTOR = Object.freeze({ id: 0, username: "auto-invoice", role: "system" });
+		const recipientOf = (ctx, rendered) => String((rendered ? rendered.to : ctx && (ctx.to || (ctx.invoiceTo && ctx.invoiceTo.email))) || "");
+		const sentOf = (to, rendered) => ({ to: String(to || "").toLowerCase(), subject: String((rendered && rendered.subject) || ""), total: String((rendered && rendered.total) ?? "") });
+		const draftOnce = async (w, loadId, invoiceId) => {
+			const prep = await w.engine.prepare({ loadId, body: {}, dryRun: false, mode: "auto" });
+			if (!prep.ok) return { prep };
+			const rendered = await w.engine.render(prep.ctx, { invoiceId, invoiceDate: "10/28/2026", emailBody: null });
+			return { prep, rendered, sent: sentOf(recipientOf(prep.ctx, rendered), rendered) };
+		};
+
+		const w = world();
+		const first = await draftOnce(w, "LD-TEST-0001", "10282026-9");
+		eq([recipientOf(first.prep.ctx, null), first.sent], [BILLING, { to: BILLING, subject: "Example Broker Order #LD-TEST-0001", total: "$1,500.00" }],
+			"§6 the recipient before a number is reserved, and the draft's to, subject and billed total");
+		const rec = await w.engine.record(first.prep.ctx, first.rendered, { via: "auto-imap", actor: JOB_ACTOR, invoiceId: "10282026-9", mintedInvoiceId: "10282026-9", editDiffs: [] });
+		const row = w.db.prepare("SELECT id, invoice_id, via, created_by, total FROM load_invoice_drafts").all();
+		eq([rec, row], [{ recorded: true, draftRowId: 1 }, [{ id: 1, invoice_id: "10282026-9", via: "auto-imap", created_by: "auto-invoice", total: "$1,500.00" }]],
+			"§6 record() with the bare actor writes the row and answers { recorded, draftRowId }");
+		eq(w.db.prepare("SELECT user_id, username, role, action FROM audit_trail").all(), [{ user_id: 0, username: "auto-invoice", role: "system", action: "invoice_draft_created" }],
+			"§6 …and its audit row names the system actor (no invoice_draft_record_failed)");
+
+		const again = await draftOnce(world(), "LD-TEST-0001", "10282026-9");
+		eq(again.sent, first.sent, "§6 recovery: the load unchanged, the rebuilt draft matches what reached Gmail");
+		const moved = SHEET.map((r) => (r[0] === "LD-TEST-0001" ? r.map((c, i) => (HEADERS[i] === "  Payment  " ? "1600" : c)) : r));
+		const movedRc = { ...RATECONS, "LD-TEST-0001": [cand(rateCon({ docs: BILLING, total: "$1,600.00" }), "documents")] };
+		const changed = await draftOnce(world({ sheet: moved, ratecons: movedRc }), "LD-TEST-0001", "10282026-9");
+		eq([changed.prep.ok, changed.sent.total, JSON.stringify(changed.sent) === JSON.stringify(first.sent)], [true, "$1,600.00", false],
+			"§6 recovery: a total that moved since the draft no longer matches (the comparison sees the total)");
+
+		const failing = world();
+		failing.db.exec("CREATE TEMP TRIGGER test_fail_record BEFORE INSERT ON load_invoice_drafts BEGIN SELECT RAISE(ABORT, 'made-up disk error'); END");
+		const ok1 = await draftOnce(failing, "LD-TEST-0001", "10282026-9");
+		eq(await failing.engine.record(ok1.prep.ctx, ok1.rendered, { via: "auto-imap", actor: JOB_ACTOR, invoiceId: "10282026-9", mintedInvoiceId: "10282026-9", editDiffs: [] }),
+			{ recorded: false, draftRowId: null }, "§6 a row that cannot be written: { recorded: false }, no throw");
+
+		for (const [id, want, http, json] of [
+			["LD-TEST-9999", "LOAD_NOT_FOUND", 404, { error: "Load not found" }],
+			["LD-TEST-0018", "NOT_COMPLETED", 400, { error: "Load must be delivered/completed to draft an invoice (current status: \"In Transit\")." }],
+			["LD-TEST-0019", "POD_NOT_FOUND", 400, { error: "POD not found for this load" }],
+		]) {
+			const a = await world().engine.prepare({ loadId: id, body: {}, dryRun: false, mode: "auto" });
+			eq([a.code, a.http, a.json], [want, http, json], `§6 ${want}: the code the job sorts on, the answer unchanged`);
+			const m = await world().manual(id);
+			eq([m.code, m.http, m.json], [want, http, json], `§6 ${want} on the button: the same JSON the route answers`);
+		}
+
+		const stored = world();
+		stored.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url) VALUES ('LD-TEST-0001', '', 'RATECON', 'matched.pdf', 'made-up-drive-id', '')").run();
+		eq(code(await stored.auto("LD-TEST-0001")), "RATECON_BY_CONTENT", "§6 a rate con an earlier by-content match linked to the load → RATECON_BY_CONTENT");
+		eq(code(await stored.manual("LD-TEST-0001")), "ok", "§6 …while the button reads it as before");
+		const local = world();
+		local.db.prepare("INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url) VALUES ('LD-TEST-0001', '', 'RATECON', 'upload.pdf', 'made-up-drive-id', '/uploads/rate-cons/LD-TEST-0001.pdf')").run();
+		eq(code(await local.auto("LD-TEST-0001")), "ok", "§6 a rate con stored with its own file (drag and drop, an upload) is not a content match");
+
+		let threw = "";
+		try { await world().engine.prepare({ loadId: "LD-TEST-0001", body: {}, dryRun: true, mode: "auto" }); } catch (e) { threw = e.message; }
+		ok(/never dry-runs/.test(threw), "§6 mode \"auto\" refuses a dry run (it would skip the approve's refusals)");
 	}
 })().catch((e) => failures.push(`threw: ${e && e.stack}`)).then(() => {
 	console.log(`\n${"=".repeat(64)}`);
