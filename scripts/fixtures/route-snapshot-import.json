@@ -1,0 +1,9 @@
+{
+  "about": "Made-up settings for scripts/test-route-snapshot.js's import of server.js. The runner adds PATH, and DATABASE_PATH, TMPDIR and HOME inside a fresh scratch folder; nothing else from the parent environment reaches the import. Kept here, not in the runner, because several of these names are server.js declarations, and a runner whose text names one is picked by the pre-push hook only when that declaration changes (scripts/lib/test-selection.js).",
+  "env": {
+    "SPREADSHEET_ID": "made-up-route-snapshot-sheet",
+    "SESSION_SECRET": "made-up-route-snapshot-value-not-a-secret",
+    "PORT": "0",
+    "BIND_HOST": "127.0.0.1"
+  }
+}
