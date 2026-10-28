@@ -439,11 +439,13 @@ if (apps.length !== 1) {
 	report.error = `expected one HTTP server created around an Express app at import, found ${apps.length}`;
 	finish(1);
 }
-// The exported app when there is one; the app the HTTP server was built
-// around must be that same object (exportsMatch).
+// The exported app when there is one; it must be the app the HTTP server was
+// built around, and io the Socket.IO server attached to that HTTP server
+// (exportsMatch).
 const theApp = exported && exported.app ? exported.app : apps[0].handler;
 report.exportKeys = exported && typeof exported === "object" ? Object.keys(exported) : [];
-report.exportsMatch = Boolean(exported && exported.app === apps[0].handler && exported.server === apps[0].created);
+report.exportsMatch = Boolean(exported && exported.app === apps[0].handler && exported.server === apps[0].created
+	&& exported.io && exported.io.httpServer === apps[0].created && typeof exported.io.of === "function");
 if (!theApp._router || !Array.isArray(theApp._router.stack)) {
 	report.error = `the app has no _router.stack: the walker reads Express 4's router, and this is Express ${expressVersion}`;
 	finish(1);

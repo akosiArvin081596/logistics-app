@@ -49,6 +49,11 @@ const REPLICA = require("./lib/replica-mode").boot({ appDir: __dirname });
 // replica (refused before any connection, the way an unreachable service
 // fails); otherwise it is the global fetch.
 const fetch = REPLICA ? REPLICA.fetch : globalThis.fetch;
+// LOGISX_IMPORT_ONLY=1: this file is required for its app (a test or a tool), so
+// no job starts, nothing listens and no signal handler is installed. Both read
+// before dotenv: only the importer's own environment counts, never a .env file.
+const IMPORT_ONLY = process.env.LOGISX_IMPORT_ONLY === "1";
+const IMPORT_DATABASE_PATH = process.env.DATABASE_PATH || "";
 // Every interval and boot-time job this file starts asks first. Outside a replica
 // and an import the answer is always yes, so each starts exactly as before; in a
 // replica none starts, and each is named in the log.
@@ -56,10 +61,6 @@ function startsJob(name) {
 	if (IMPORT_ONLY) return false;
 	return REPLICA ? REPLICA.jobNotStarted(name) : true;
 }
-// LOGISX_IMPORT_ONLY=1: this file is required for its app (a test or a tool), so
-// no job starts, nothing listens and no signal handler is installed. Read before
-// dotenv: only the importer's own environment can set it, never a .env file.
-const IMPORT_ONLY = process.env.LOGISX_IMPORT_ONLY === "1";
 
 require("dotenv").config();
 // A LOCAL_REPLICA that only a .env file set is refused here: replica mode was
@@ -505,9 +506,9 @@ app.use(express.json({ limit: "50mb" }));
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
 // ============================================================
-// An import still runs the schema, the migrations and their boot writes, so it
-// must name its own scratch database rather than open the app folder's.
-if (IMPORT_ONLY && !process.env.DATABASE_PATH) {
+// An import still runs the schema, the migrations and their boot writes, so its
+// own environment must name a scratch database (a .env file's does not count).
+if (IMPORT_ONLY && !IMPORT_DATABASE_PATH) {
 	throw new Error("importing server.js (LOGISX_IMPORT_ONLY=1) needs DATABASE_PATH: a scratch database");
 }
 const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, "app.db"));

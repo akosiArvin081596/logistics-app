@@ -96,10 +96,12 @@ const setup = JSON.parse(fs.readFileSync(IMPORT_SETUP, "utf8"));
 const libFiles = fs.readdirSync(LIB).filter((f) => f.endsWith(".js")).sort().map((f) => path.join(LIB, f));
 
 // One import of `target` in its own run folder; `changes` sets (or, with
-// undefined, removes) variables.
-function importServer(target, changes = {}) {
+// undefined, removes) variables, and `settingsFile` is written as that folder's
+// .env, the file dotenv reads from the working folder.
+function importServer(target, changes = {}, settingsFile = null) {
 	const dir = fs.mkdtempSync(path.join(scratch, "run-"));
 	for (const d of ["tmp", "home"]) fs.mkdirSync(path.join(dir, d));
+	if (settingsFile !== null) fs.writeFileSync(path.join(dir, ".env"), settingsFile(dir));
 	const inputFile = path.join(dir, "input.json");
 	const reportFile = path.join(dir, "report.json");
 	fs.writeFileSync(inputFile, JSON.stringify({ server: target, sources: [target, ...libFiles], out: reportFile }));
@@ -209,7 +211,7 @@ console.log(`      ${routeLines.length} route line(s), ${middlewareLines.length}
 
 section("4. importing starts nothing");
 eq("require() returns { app, server, io }", [...report.exportKeys].sort(), ["app", "io", "server"]);
-ok("...the app and the server the import built", report.exportsMatch);
+ok("...the app, the HTTP server and the Socket.IO server attached to it, as the import built them", report.exportsMatch);
 const allowlist = setup.importAllowlist || [];
 const onList = (x) => allowlist.some((a) => a.kind === x.kind && a.site === x.site);
 const unlisted = report.effects.filter((x) => !onList(x));
@@ -239,6 +241,11 @@ section("5. refused without a scratch database, and in production");
 	const noDatabase = importServer(copy, { DATABASE_PATH: undefined });
 	ok("without DATABASE_PATH the import stops, naming it", Boolean(noDatabase.report && /needs DATABASE_PATH/.test(noDatabase.report.error || "")), why(noDatabase));
 	ok("...before a database opens beside the server file", !fs.existsSync(path.join(path.dirname(copy), "app.db")));
+	// A settings file in the folder the import runs from names a database: only
+	// the importer's own environment may, so the import still refuses.
+	const named = importServer(copy, { DATABASE_PATH: undefined }, (dir) => `DATABASE_PATH=${path.join(dir, "named-by-settings.db")}\n`);
+	ok("a DATABASE_PATH from a settings file in the working folder does not count: refused", Boolean(named.report && /needs DATABASE_PATH/.test(named.report.error || "")), why(named));
+	ok("...and that database is never opened", !fs.readdirSync(scratch).some((d) => d.startsWith("run-") && fs.existsSync(path.join(scratch, d, "named-by-settings.db"))));
 	const production = importServer(copy, { NODE_ENV: "production" });
 	ok("with NODE_ENV=production the import is refused", Boolean(production.report && /refused with NODE_ENV=production/.test(production.report.error || "")), why(production));
 }

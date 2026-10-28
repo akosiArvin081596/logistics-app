@@ -20,12 +20,12 @@
     {
       "kind": "setInterval",
       "site": "server.js: const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);",
-      "why": "The unref'd live-update socket sweep. Gated by stage 1b, after #570 (scripts/test-session-sockets.js pins this line)."
+      "why": "The unref'd live-update socket sweep. Gated by stage 1b (scripts/test-session-sockets.js pins this line)."
     },
     {
       "kind": "fs.readdirSync",
       "site": "server.js purgeOrphanedDbExports()",
-      "why": "The database-export temp-file sweep reads the temp folder at import. Gated by stage 1b, after #585."
+      "why": "The database-export temp-file sweep reads the temp folder at import. Gated by stage 1b."
     }
   ]
 }
