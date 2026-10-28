@@ -88,6 +88,9 @@
  *            same invoice
  *   §35 W26  a carried line put on a Draft while it is regenerated goes on the
  *            new invoice at once
+ *   §36 W28  a later shrink never splits a reversed pair: an adjustment or a
+ *            regenerate keeps the line and its credit together, or takes both
+ *            off, and they land together later
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-invoice.js    # exits 1 on failure
@@ -1303,6 +1306,46 @@ const printed = (w) => ((lastRender(w) || { data: {} }).data.personalLines || []
 		const again = await w.generate(DRIVER_B, "2026-10-23");
 		const id = again.body.invoice ? again.body.invoice.id : null;
 		check("the regenerated W42 takes the line right after its write ($500 - $30)", [again.status, deductOf(w, 11).invoice_id === id, id && due(w, id)], [200, true, 470]);
+		w.cleanup();
+	}
+
+	section("§36 W28 a later shrink never splits a reversed pair");
+	// §28's pair, together on W42 ($625 - $100 + $75 = $600).
+	const pairOnW42 = async () => {
+		const { w, w41 } = await baseElsewhere();
+		await w.call("POST", "/api/expenses/8/personal/reverse", { body: { reason: "not personal after all" } });
+		w.setNow(edt("2026-10-22", 12));
+		addOwnerLoad(w, "L9", "10/19/2026", "10/20/2026", "$2,500.00");
+		const g42 = await w.generate(OWNER_OP, "2026-10-23");
+		return { w, w41, w42: g42.body.invoice.id };
+	};
+	const pairOn = (w) => [deductOf(w, 8).invoice_id, (w.lines("kind = 'reverse'")[0] || {}).invoice_id];
+	{
+		const { w, w42 } = await pairOnW42();
+		const adj = await w.call("PUT", `/api/invoices/${w42}/adjust`, { body: { adjustment: -600, adjustmentNote: "Advance" } });
+		check("a -$600 adjustment on W42: the line and its credit (net -$25) still fit together, so both stay: due $0",
+			[adj.status, pairOn(w), due(w, w42)], [200, [w42, w42], 0]);
+		w.cleanup();
+	}
+	{
+		const { w, w41, w42 } = await pairOnW42();
+		await w.call("PUT", `/api/invoices/${w42}/adjust`, { body: { adjustment: -620, adjustmentNote: "Advance" } });
+		check("a -$620 adjustment: the pair no longer fits, so both come off together: due $5", [pairOn(w), due(w, w42)], [[null, null], 5]);
+		addOwnerLoad(w, "L11", "10/26/2026", "10/27/2026", "$2,500.00");
+		w.setNow(edt("2026-10-30", 20));
+		const g43 = await w.generate(OWNER_OP, "2026-10-30");
+		const w43 = g43.body.invoice.id;
+		check("…and land together on W43 ($625 - $100 + $75): the three weeks come to what no mark gives ($0 + $5 + $625)",
+			[pairOn(w), due(w, w43), due(w, w41) + due(w, w42) + due(w, w43)], [[w43, w43], 600, 630]);
+		w.cleanup();
+	}
+	{
+		const { w } = await pairOnW42();
+		const row = w.sheet.rows.find((r) => r[1] === "L9");
+		row[14] = "$200.00";
+		const again = await w.generate(OWNER_OP, "2026-10-23");
+		const id = again.body.invoice ? again.body.invoice.id : null;
+		check("W42 regenerated at $50 of pay: the pair (net -$25) stays together on it: due $25", [again.status, pairOn(w), id && due(w, id)], [200, [id, id], 25]);
 		w.cleanup();
 	}
 

@@ -141,7 +141,7 @@ const SHARED_FNS = [
 	"findDriverNameClashes", "canonicalDriverName",
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
-	"personalWaitingRows", "personalUnfitTail",
+	"personalWaitingRows", "personalUnfitTail", "personalFit",
 	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
 	// the paid-days release a regenerated Draft runs.
 	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
