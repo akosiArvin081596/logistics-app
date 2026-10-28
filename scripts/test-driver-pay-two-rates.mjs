@@ -71,7 +71,7 @@ console.log('§2 the statement says the same')
   ok('§2 ...for a row with more than one segment', statement.includes('Array.isArray(r.rates) && r.rates.length > 1'))
   ok('§2 its one-rate basis is unchanged',
     statement.includes(': `${esc(String(num(r.activeDays)))} day${num(r.activeDays) === 1 ? "" : "s"} &times; ${esc(money(r.dailyRate))}/day`'))
-  const server = require('./lib/server-source.js').serverSource({ root: ROOT })
+  const server = require('./lib/server-source.js').serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined)
   const list = server.slice(server.indexOf('const STATEMENT_TEMPLATE_FILES = ['), server.indexOf('];', server.indexOf('const STATEMENT_TEMPLATE_FILES = [')))
   ok('§2 lib/driver-pay-text.js is part of the statement template (a change to it re-renders statements)', list.includes('"./lib/driver-pay-text.js"'))
 }

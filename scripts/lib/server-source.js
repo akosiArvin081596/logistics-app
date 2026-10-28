@@ -11,6 +11,7 @@
 // existed); SERVER_ROOT names a folder holding a base's server.js and routes/
 // (for instance `git archive <base> server.js routes | tar -x -C <dir>`). A
 // caller's own { file } or { root } wins over both; setting both is an error.
+// Following either prints one line on stderr per process.
 //
 // A module is found by its mount line only (no folder scan) and is spliced only
 // in the shape the move tool writes; any other shape throws, so a script never
@@ -33,22 +34,35 @@ const CATCH_ALL_HEAD = 'app.get("*", ';
 const MODULE_HEAD = "module.exports = function mount({";
 const MODULE_HEAD_END = "}) {";
 const MODULE_END = "};";
+const ROUTE_CONTEXT_HEAD = "const ROUTE_CONTEXT = {";
 const REGISTRATION_RE = /^app\.(?:get|post|put|patch|delete|use|all)\(/;
 const CLOSER_RE = /^[\]})`]/;
 const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
 const USE_STRICT_RE = /^\s*(["'])use strict\1/;
 const isComment = (l) => /^\s*\/\//.test(l);
 
+// The base override in the environment: "SERVER_JS", "SERVER_ROOT" or null.
+function serverOverride() {
+	const envFile = process.env.SERVER_JS;
+	const envRoot = process.env.SERVER_ROOT;
+	if (envFile && envRoot) throw new Error("server-source: set SERVER_JS or SERVER_ROOT, not both");
+	return envRoot ? "SERVER_ROOT" : envFile ? "SERVER_JS" : null;
+}
+
+// One line per process, so a run that follows an exported override says so.
+let overrideNoticed = false;
 function resolveServerFile({ file, root } = {}) {
 	if (file && root) throw new Error("server-source: pass { file } or { root }, not both");
 	if (file) return path.resolve(file);
 	if (root) return path.join(path.resolve(root), SERVER_FILE);
-	const envFile = process.env.SERVER_JS;
-	const envRoot = process.env.SERVER_ROOT;
-	if (envFile && envRoot) throw new Error("server-source: set SERVER_JS or SERVER_ROOT, not both");
-	if (envRoot) return path.join(path.resolve(envRoot), SERVER_FILE);
-	if (envFile) return path.resolve(envFile);
-	return path.join(REPO_ROOT, SERVER_FILE);
+	const override = serverOverride();
+	if (!override) return path.join(REPO_ROOT, SERVER_FILE);
+	const resolved = override === "SERVER_ROOT" ? path.join(path.resolve(process.env.SERVER_ROOT), SERVER_FILE) : path.resolve(process.env.SERVER_JS);
+	if (!overrideNoticed) {
+		overrideNoticed = true;
+		process.stderr.write(`server-source: ${override} is set; reading ${resolved} and the route modules beside it\n`);
+	}
+	return resolved;
 }
 
 // A route module in the one shape the move tool writes:
@@ -175,4 +189,19 @@ function serverSource(opts) {
 	return virtualServer(opts).text;
 }
 
-module.exports = { serverSource, virtualServer, checkModule, mountLines, resolveServerFile, MOUNT_RE };
+// The 1-based lines { first, last } of the ROUTE_CONTEXT block in `text` (its
+// `const ROUTE_CONTEXT = {` line through the `};` closing it), or null. The
+// block only lists names, so an inventory of where a name is used skips it.
+function routeContextLines(text) {
+	const lines = text.split("\n");
+	const heads = lines.reduce((out, l, i) => (l.startsWith(ROUTE_CONTEXT_HEAD) ? [...out, i] : out), []);
+	if (!heads.length) return null;
+	if (heads.length > 1) throw new Error("server-source: ROUTE_CONTEXT is declared twice");
+	const head = heads[0];
+	if (lines[head].endsWith(MODULE_END)) return { first: head + 1, last: head + 1 };
+	const end = lines.indexOf(MODULE_END, head + 1);
+	if (end < 0) throw new Error("server-source: the ROUTE_CONTEXT block never closes");
+	return { first: head + 1, last: end + 1 };
+}
+
+module.exports = { serverSource, virtualServer, checkModule, mountLines, resolveServerFile, serverOverride, routeContextLines, MOUNT_RE };

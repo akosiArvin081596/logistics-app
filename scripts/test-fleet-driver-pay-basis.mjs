@@ -78,7 +78,7 @@ for (const [label, pay, want] of [
 
 console.log('§2 GET /api/investor sends the pay type with each driver\'s pay')
 {
-  const server = serverSource({ root: ROOT })
+  const server = serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined)
   const at = server.indexOf('driverPayDetails: Object.fromEntries(Object.entries(driverPayDetails).map(')
   const entry = at < 0 ? '' : server.slice(at, server.indexOf('}]))', at))
   ok('§2 the production.driverPayDetails map is found', at > 0)

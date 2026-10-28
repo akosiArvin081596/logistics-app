@@ -96,11 +96,18 @@ try {
 const BANNER = "// ============================================================\n";
 const START_MARK = `${BANNER}// KPI BOT —`;
 const END_MARK = `${BANNER}// SPA Catch-All`;
+// The KPI block: its banner to the next banner, or to the route modules'
+// ROUTE_CONTEXT if that comes first (a route that moved to a module is not
+// this runner's to run).
 const BLOCK = (() => {
 	const a = SRC.indexOf(START_MARK);
-	const b = SRC.indexOf(END_MARK);
-	if (a < 0 || b < a || SRC.split(START_MARK).length !== 2) die("could not locate the KPI block above the SPA catch-all");
-	return SRC.slice(a, b);
+	if (a < 0 || SRC.split(START_MARK).length !== 2) die("could not locate the KPI block (its banner, once)");
+	const after = SRC.indexOf(BANNER, SRC.indexOf("\n", a + START_MARK.length) + 1) + BANNER.length;
+	let b = SRC.indexOf(`\n${BANNER}`, after);
+	const rc = SRC.indexOf("\nconst ROUTE_CONTEXT = {", after);
+	if (rc >= 0 && (b < 0 || rc < b)) b = rc;
+	if (b < 0) die("could not locate the end of the KPI block");
+	return SRC.slice(a, b + 1);
 })();
 function liftFrom(text, name) {
 	const needle = `\nfunction ${name}(`;

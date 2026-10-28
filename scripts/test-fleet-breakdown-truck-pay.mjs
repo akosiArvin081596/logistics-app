@@ -48,7 +48,7 @@ function ok(name, cond) {
 
 // ══ §1 — the server sends the per-truck figures ══════════════════════════════
 {
-  const server = serverSource({ root: ROOT })
+  const server = serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined)
   const at = server.indexOf('perTruckData[truck.unit_number] = {')
   const block = at < 0 ? '' : server.slice(at, server.indexOf('};', at))
   ok('§1 perTruckData is still built per owned truck', at > 0)

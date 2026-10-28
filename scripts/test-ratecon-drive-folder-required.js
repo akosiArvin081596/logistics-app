@@ -74,7 +74,10 @@ function check(label, cond) {
 	failures.push(redact(label));
 	console.log(`  FAIL  ${redact(label)}`);
 }
-const readSource = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; } };
+const readSource = (rel) => {
+	if (rel === "server.js") return SRC;
+	try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; }
+};
 const QUIET = { log() {}, warn() {}, error() {}, info() {} };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -263,9 +266,10 @@ function liftArchive(folder) {
 			};
 			walk(path.join(ROOT, "scripts"));
 			walk(path.join(ROOT, "lib"));
+			if (fs.existsSync(path.join(ROOT, "routes"))) walk(path.join(ROOT, "routes"));
 			files.push("server.js");
 			const naming = files.filter((f) => prodFolderAt(readSource(f)).length > 0);
-			check(`§1 production's rate-con folder ID is in no file of server.js, lib/ or scripts/ (${naming.join(", ") || "none"})`, naming.length === 0);
+			check(`§1 production's rate-con folder ID is in no file of server.js, routes/, lib/ or scripts/ (${naming.join(", ") || "none"})`, naming.length === 0);
 			const fallback = /RATECON_DRIVE_FOLDER_ID\b[^\n;]{0,40}(\|\||\?\?)\s*["'`][^"'`\s]{8,}/;
 			// This file holds the pattern itself.
 			const withFallback = files.filter((f) => f !== "scripts/test-ratecon-drive-folder-required.js" && fallback.test(readSource(f)));
@@ -300,8 +304,10 @@ function liftArchive(folder) {
 				// (scripts/test-ratecon-pdf-route.js §5 checks that).
 				/^require\("\.\/lib\/ratecon-pdf-route"\)\.mount\(app, \{ [^}]*\bfolderId: RATECON_DRIVE_FOLDER_ID, [^}]*\}\);$/,
 			];
+			// The ROUTE_CONTEXT block only lists the names route modules receive.
+			const rc = require("./lib/server-source").routeContextLines(SRC);
 			const refs = SRC.split("\n").map((l, i) => ({ n: i + 1, l: l.trim() }))
-				.filter((x) => /RATECON_DRIVE_FOLDER_ID/.test(x.l) && !/^(\/\/|\*)/.test(x.l) && !/^"/.test(x.l));
+				.filter((x) => /RATECON_DRIVE_FOLDER_ID/.test(x.l) && !/^(\/\/|\*)/.test(x.l) && !/^"/.test(x.l) && !(rc && x.n >= rc.first && x.n <= rc.last));
 			const unknown = refs.filter((x) => !SHAPES.some((re) => re.test(x.l)));
 			check(`§1 every server.js reference to the setting is a known shape (${unknown.map((x) => `${x.n}: ${redact(x.l).slice(0, 70)}`).join(" | ") || "none unknown"})`, unknown.length === 0);
 		}
