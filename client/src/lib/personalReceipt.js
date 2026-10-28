@@ -6,10 +6,14 @@
 // personal (GET /api/expenses/all rows, the driver payload's expenses):
 //   { line_id, state, amount_text, week_label, invoice_number, can_undo }
 //   state: pending | needs_correction | invoiced | correction | reversed
+// With the receipt's week on (the list's personalReceiptWeek) the server also
+// sends: state carried (off its week's invoice, waiting for the next one) with
+// wait_text (why, in its words), final (on an approved invoice), can_reverse,
+// and for a driver invoice_week_label (the week of the invoice carrying it).
 // An invoice's personal_lines (GET /api/invoices, the driver payload):
 //   { line_id, label, amount, receipt: { kind: image | pdf | none, url, expense_id } }
 
-const LIVE_STATES = new Set(['pending', 'needs_correction', 'invoiced', 'correction'])
+const LIVE_STATES = new Set(['pending', 'needs_correction', 'carried', 'invoiced', 'correction'])
 const RECEIPT_URL_RE = /^\/api\/invoices\/\d{1,12}\/personal-receipts\/\d{1,12}$/
 
 export const PERSONAL_PDF_TEXT = 'PDF receipt on file'
@@ -30,12 +34,16 @@ export function canMarkPersonal(expense, { isSuperAdmin = false, enabled = false
 }
 
 // Undo while the server says the line can still be undone; Reverse once it
-// cannot. Both stay available with new marks switched off.
+// cannot, or exactly as the server's can_reverse says when it sends one (a line
+// on an approved invoice is final). Both stay available with new marks
+// switched off.
 export function canUndoPersonal(expense, { isSuperAdmin = false } = {}) {
   return !!isSuperAdmin && personalLive(expense) && expense.personal.can_undo === true
 }
 export function canReversePersonal(expense, { isSuperAdmin = false } = {}) {
-  return !!isSuperAdmin && personalLive(expense) && expense.personal.can_undo === false
+  if (!isSuperAdmin || !personalLive(expense)) return false
+  const p = expense.personal
+  return typeof p.can_reverse === 'boolean' ? p.can_reverse : p.can_undo === false
 }
 
 // The server refuses Rejected and Pending on a receipt with a live line, so the
@@ -55,26 +63,48 @@ export function personalPillText(personal) {
   const number = personal.invoice_number || ''
   switch (personal.state) {
     case 'pending': return `${amount} · waiting for ${weekWords(personal)}'s invoice`
-    case 'invoiced': return number ? `${amount} · on ${number}` : `${amount} · on ${weekWords(personal)}'s invoice`
+    case 'invoiced':
+      if (!number) return `${amount} · on ${weekWords(personal)}'s invoice`
+      return personal.final === true ? `${amount} · on ${number} (approved, final)` : `${amount} · on ${number}`
     case 'correction': return number ? `${amount} · on correction ${number}, ${weekWords(personal)}` : `${amount} · on a correction invoice, ${weekWords(personal)}`
     case 'needs_correction': return `${amount} · needs a correction invoice for ${weekWords(personal)}`
+    case 'carried': return personal.wait_text ? `${amount} · waiting: ${personal.wait_text}` : `${amount} · waiting for the next weekly invoice`
     case 'reversed': return `${amount} · reversed`
     default: return ''
   }
 }
 
-// The driver's receipt card.
+// The driver's receipt card: the week of the invoice that carries the line when
+// the server names it (a line carried to a later week's invoice).
 export function personalDriverText(personal) {
   if (!personal || !personal.amount_text) return ''
   const amount = `Personal: -${personal.amount_text}`
+  const week = personal.invoice_week_label || personal.week_label
   switch (personal.state) {
     case 'pending':
-    case 'invoiced': return personal.week_label ? `${amount} on your ${personal.week_label} invoice` : `${amount} on your weekly invoice`
+    case 'invoiced': return week ? `${amount} on your ${week} invoice` : `${amount} on your weekly invoice`
     case 'correction': return `${amount} on correction ${personal.invoice_number}`
     case 'needs_correction': return `${amount} on a correction invoice for ${weekWords(personal)}`
+    case 'carried': return `${amount}, coming off your next weekly invoice`
     case 'reversed': return `${amount}, reversed`
     default: return ''
   }
+}
+
+// The Mark dialog's sentence: the receipt's week with personalReceiptWeek on,
+// else the week it is marked in.
+export function personalMarkDialogText(receiptWeek) {
+  return receiptWeek === true
+    ? "The driver repays this amount on the invoice for the week of the receipt date. If that invoice is approved, in a closed month or too small, it goes on the driver's next weekly invoice. It leaves the company's costs now; any rest of the receipt stays a company cost."
+    : "The driver repays this amount on the weekly invoice for the week it is marked in, and it leaves the company's costs. Any rest of the receipt stays a company cost."
+}
+
+// The Reverse dialog's sentence. With personalReceiptWeek on, Reverse is only for
+// a line its closed month (or another invoice's pay) keeps from being undone.
+export function personalReverseDialogText(receiptWeek) {
+  return receiptWeek === true
+    ? "This line can no longer be undone. A reversing line credits the amount back in the open month; if no invoice has taken the line, neither line goes on one."
+    : "The line is on an approved invoice, so it stays there. A reversing line credits the amount back on this week's invoice, or on its correction invoice."
 }
 
 // Where an invoice's Personal line points for its receipt:
