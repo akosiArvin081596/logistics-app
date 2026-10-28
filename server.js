@@ -31279,15 +31279,10 @@ app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, loadRating: rating, averageRating: avg?.avg || rating });
 });
 
-// Per-load rating: get single
-app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
-	// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
-	const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim();
-	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
-	res.json({ rating: row ? row.rating : null });
-});
-
 // Per-load rating: bulk averages for all drivers
+//
+// Registered above GET /api/load-ratings/:loadId: Express takes the first match,
+// and that route would read "averages" as a load ID.
 app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	const rows = db.prepare("SELECT LOWER(driver_name) as driver, AVG(rating) as average, COUNT(*) as count FROM load_ratings GROUP BY LOWER(driver_name)").all();
 	// Driver-keyed, so a null-prototype object; a name that reads as a built-in
@@ -31298,6 +31293,14 @@ app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), 
 		averages[r.driver] = { average: Math.round(r.average * 10) / 10, count: r.count };
 	});
 	res.json({ averages });
+});
+
+// Per-load rating: get single
+app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+	const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim();
+	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
+	res.json({ rating: row ? row.rating : null });
 });
 
 // ============================================================
