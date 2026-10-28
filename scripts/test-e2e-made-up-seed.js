@@ -22,6 +22,14 @@
  *   §3 a SOURCE_DB under ~/LogisX-replica/ is copied (a made-up database stands
  *      in for one there: HOME points into this test's sandbox).
  *   §4 payout-parity.mjs has no SOURCE_DB default and refuses one by the same rule.
+ *   §5 the seed's truck assignment starts at the first instant of the business
+ *      day (America/New_York) the route made it on, so plant-before-boot.cjs
+ *      plants B1 dated that business day at any hour: an assignment made in the
+ *      evening Eastern (already tomorrow in UTC), on a month's last day and on
+ *      both DST switch days, planted just before and after midnight Eastern and
+ *      across the fall-back switch, under TZ America/New_York, America/Chicago,
+ *      UTC and Asia/Manila (a faked "now" for setup-db.cjs and the plant; the
+ *      stub stamps the assignment at a given instant, as the server's clock would).
  *
  * Hermetic: a mkdtemp sandbox for HOME, the work dir, the checkouts and the
  * Keychain (a stand-in `security`, E2E_SECURITY_BIN). No real database, no real
@@ -162,7 +170,13 @@ db.exec(\`
 		must_change_password INTEGER DEFAULT 1);
 	CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, sess TEXT, expire INTEGER);
 	CREATE TABLE IF NOT EXISTS trucks (id INTEGER PRIMARY KEY AUTOINCREMENT, unit_number TEXT NOT NULL, make TEXT, model TEXT,
-		assigned_driver TEXT DEFAULT '', photo TEXT DEFAULT '', notes TEXT DEFAULT '');
+		assigned_driver TEXT DEFAULT '', photo TEXT DEFAULT '', notes TEXT DEFAULT '', owner_id INTEGER DEFAULT 0);
+	CREATE TABLE IF NOT EXISTS truck_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, truck_id INTEGER NOT NULL,
+		driver_name TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT DEFAULT '');
+	CREATE TABLE IF NOT EXISTS drivers_directory (id INTEGER PRIMARY KEY AUTOINCREMENT, driver_name TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS period_locks (period TEXT PRIMARY KEY, status TEXT);
+	CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, driver TEXT, load_id TEXT, type TEXT,
+		amount REAL, description TEXT, date TEXT, status TEXT, truck_unit TEXT DEFAULT '', owner_id INTEGER DEFAULT 0);
 	CREATE TABLE IF NOT EXISTS job_applications (id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT NOT NULL, email TEXT NOT NULL,
 		phone TEXT NOT NULL, dob TEXT NOT NULL, address TEXT NOT NULL, ssn TEXT NOT NULL, drivers_license TEXT NOT NULL,
 		position TEXT NOT NULL, experience TEXT NOT NULL, has_cdl TEXT NOT NULL, work_authorized TEXT NOT NULL,
@@ -206,6 +220,12 @@ http.createServer((req, res) => {
 			if (!/^data:image\\/(png|jpeg);base64,/.test(body.photo || "")) return send(res, 415, { error: "UNSUPPORTED_IMAGE_TYPE" });
 			const id = db.prepare("INSERT INTO trucks (unit_number, make, model, assigned_driver, photo, notes) VALUES (?, ?, ?, ?, ?, ?)")
 				.run(body.unitNumber, body.make || "", body.model || "", body.assignedDriver || "", body.photo, body.notes || "").lastInsertRowid;
+			// As assignDriverToTruck() does: the assignment starts at the server's UTC
+			// instant (STUB_ASSIGNED_AT stands in for the server's clock).
+			if (body.assignedDriver) {
+				db.prepare("INSERT INTO truck_assignments (truck_id, driver_name, start_date) VALUES (?, ?, ?)")
+					.run(id, body.assignedDriver.trim(), process.env.STUB_ASSIGNED_AT || new Date().toISOString());
+			}
 			return send(res, 200, { success: true, id: Number(id) });
 		}
 		send(res, 404, { error: "no such route in the stub" });
@@ -225,7 +245,17 @@ const ENV = {
 	E2E_OPEN_LOG: OPEN_LOG,
 	NODE_OPTIONS: `--require ${SPY}`,
 };
-for (const k of ["SOURCE_DB", "LOGINS_FILE", "E2E_KEYCHAIN_SERVICE", "CREDS_FILE", "E2E_MAINTENANCE_NOTICE", "E2E_FAKE_GMAIL", "E2E_DRIVER_INSTRUCTIONS_DENY"]) delete ENV[k];
+for (const k of ["SOURCE_DB", "LOGINS_FILE", "E2E_KEYCHAIN_SERVICE", "CREDS_FILE", "E2E_MAINTENANCE_NOTICE", "E2E_FAKE_GMAIL", "E2E_DRIVER_INSTRUCTIONS_DENY", "APP_TIMEZONE", "STUB_ASSIGNED_AT"]) delete ENV[k];
+
+// The business day and its first instant in the harness's zone (boot-server.sh's
+// APP_TIMEZONE), from lib/app-time.js alone: what the seed's assignment should start at.
+const { wallClockToMs } = require(path.join(ROOT, "lib", "app-time.js"));
+const APP_ZONE = "America/New_York";
+const appDayOf = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: APP_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
+const appDayStart = (day) => {
+	const [y, m, d] = day.split("-").map(Number);
+	return new Date(wallClockToMs(APP_ZONE, y, m, d, 0, 0, 0)).toISOString();
+};
 // SETUP_DB_JS runs another setup-db.cjs (beside this one in scripts/e2e/), e.g. the base branch's.
 const scriptPath = (script) => (script === "setup-db.cjs" && process.env.SETUP_DB_JS) || path.join(ROOT, "scripts", "e2e", script);
 const node = (script, args, extra = {}) => spawnSync(process.execPath, [scriptPath(script), ...args],
@@ -295,6 +325,10 @@ if (fs.existsSync(dest)) try {
 	eq("one truck, QA-E2E-T1, assigned to the made-up driver", truck.map((t) => [t.unit_number, t.assigned_driver]), [["QA-E2E-T1", drv.driver_name]]);
 	ok(truck.length === 1 && jpegOk(truck[0].photo), "…with a JPEG photo drawn at run time (step 9 expects image/jpeg)", "");
 	eq("logins.json's driver names that truck", (logins.driver || {}).truckId, truck[0] && truck[0].id);
+	const asg = db.prepare("SELECT driver_name, start_date, end_date FROM truck_assignments WHERE truck_id = ?").all(truck[0] && truck[0].id);
+	const asgDay = asg.length === 1 ? appDayOf(asg[0].start_date) : "";
+	ok(asg.length === 1 && asg[0].driver_name === drv.driver_name && asg[0].end_date === "" && asg[0].start_date === appDayStart(asgDay),
+		"…its one open assignment starts at the first instant of a business day (America/New_York), not at the route's UTC instant", JSON.stringify(asg));
 	const onb = db.prepare("SELECT o.status, o.onboarded_at, a.cdl_front, a.email, a.ssn, a.id AS app FROM driver_onboarding o JOIN job_applications a ON a.id = o.application_id WHERE o.user_id = ?").get(drv.id) || {};
 	eq("the driver is fully onboarded on an application", onb.status, "fully_onboarded");
 	ok(Date.now() - Date.parse(onb.onboarded_at) > 14 * 86_400_000,
@@ -388,6 +422,71 @@ for (const [label, src, want] of parityCases) {
 	const r = node("payout-parity.mjs", [], extra);
 	ok(r.status === 2 && want.test(r.stderr), `payout-parity refuses: ${label}`, `${r.status} ${(r.stderr || r.stdout || "").slice(0, 300)}`);
 }
+
+console.log("§5 B1 plants on the made-up seed at any hour: the seed's assignment and B1's expense name one business day");
+// "Now" for a child process: FAKE_NOW, running on from there.
+const FAKE_NOW_JS = path.join(SANDBOX, "fake-now.cjs");
+fs.writeFileSync(FAKE_NOW_JS, `
+const Real = Date;
+const start = Real.parse(process.env.FAKE_NOW);
+const t0 = Real.now();
+const now = () => start + (Real.now() - t0);
+class FakeDate extends Real {
+	constructor(...a) { if (a.length === 0) super(now()); else super(...a); }
+	static now() { return now(); }
+}
+globalThis.Date = FakeDate;
+`);
+// The route stamps the assignment at `assignedAt` (STUB_ASSIGNED_AT); setup-db.cjs runs
+// under `seedTz`, each plant under every zone in PLANT_TZS, and each [instant, day]
+// is a plant's "now" and the business day its expense must carry.
+const PLANT_TZS = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"];
+const EVENINGS = [
+	{ label: "made 20:05 EDT (already tomorrow in UTC)", seedTz: "America/New_York", assignedAt: "2026-10-28T00:05:00.000Z",
+		plants: [["2026-10-28T03:59:00.000Z", "2026-10-27"], ["2026-10-28T04:01:00.000Z", "2026-10-28"]] },
+	{ label: "made 21:00 EDT on a month's last day", seedTz: "Asia/Manila", assignedAt: "2026-11-01T01:00:00.000Z",
+		plants: [["2026-11-01T03:59:00.000Z", "2026-10-31"], ["2026-11-02T04:30:00.000Z", "2026-11-01"]] },
+	{ label: "made 20:30 EST on the day clocks fall back", seedTz: "America/Chicago", assignedAt: "2026-11-02T01:30:00.000Z",
+		plants: [["2026-11-02T04:59:00.000Z", "2026-11-01"]] },
+	{ label: "made 20:30 EDT on the day clocks spring forward", seedTz: "UTC", assignedAt: "2027-03-15T00:30:00.000Z",
+		plants: [["2027-03-15T03:59:00.000Z", "2027-03-14"]] },
+];
+const b1PlantFile = path.join(WORK, "b1-plant.json");
+EVENINGS.forEach((c, i) => {
+	const seeded = path.join(WORK, `evening-${i}.db`);
+	const s = node("setup-db.cjs", [seeded], {
+		TZ: c.seedTz, STUB_ASSIGNED_AT: c.assignedAt, FAKE_NOW: c.assignedAt, NODE_OPTIONS: `--require ${SPY} --require ${FAKE_NOW_JS}`,
+	});
+	ok(s.status === 0, `${c.label}: setup-db.cjs (TZ ${c.seedTz}) succeeds`, `${s.status} ${(s.stderr || "").slice(0, 300)}`);
+	if (s.status !== 0) return;
+	const madeDay = appDayOf(c.assignedAt);
+	let start = "";
+	try {
+		const db = new Database(seeded, { readonly: true });
+		start = (db.prepare("SELECT start_date FROM truck_assignments WHERE end_date = ''").get() || {}).start_date || "";
+		db.close();
+	} catch (e) { start = `error: ${e.message}`; }
+	eq(`${c.label}: the assignment starts at the first instant of ${madeDay} in America/New_York`, start, appDayStart(madeDay));
+	for (const [at, day] of c.plants) {
+		for (const tz of PLANT_TZS) {
+			const copy = path.join(WORK, `evening-${i}-plant.db`);
+			fs.copyFileSync(seeded, copy);
+			fs.rmSync(b1PlantFile, { force: true });
+			const p = node("plant-before-boot.cjs", [copy], { TZ: tz, FAKE_NOW: at, NODE_OPTIONS: `--require ${FAKE_NOW_JS}` });
+			let row = null;
+			try {
+				const db = new Database(copy, { readonly: true });
+				row = db.prepare("SELECT date FROM expenses WHERE load_id = 'QA-TEST-B1'").get() || null;
+				db.close();
+			} catch { /* no row */ }
+			ok(p.status === 0 && new RegExp(`dated ${day}\\b`).test(p.stdout) && row && row.date === day,
+				`${c.label}: planted at ${at} under TZ ${tz}, B1's expense is dated ${day}`,
+				`exit ${p.status}, row ${JSON.stringify(row)}: ${(p.stderr || p.stdout || "").trim().slice(0, 300)}`);
+			fs.rmSync(copy, { force: true });
+		}
+	}
+	fs.rmSync(b1PlantFile, { force: true });
+});
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
