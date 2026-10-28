@@ -29,11 +29,12 @@ import fs from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { serverSource } from './lib/server-source.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const require = createRequire(import.meta.url)
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, 'server.js'), 'utf8')
+const SRC = serverSource()
 
 let pass = 0
 const failures = []

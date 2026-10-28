@@ -32,7 +32,7 @@ const { spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const SCRIPT = path.join(ROOT, "scripts", "shared-login-report.js");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const Database = require("better-sqlite3");
 
 let pass = 0;
