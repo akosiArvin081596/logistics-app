@@ -67,6 +67,10 @@
  *            pin: a line a generation took meanwhile is never carried
  *   §24 W9   a line flagged before the switch goes on W42
  *   §25 pin  an owner-operator's carried line keeps its share
+ *   §26 W14  Reverse of a waiting line whose month closed: offered (can_reverse),
+ *            and neither row ever goes on an invoice
+ *   §27 W16  a generation of a week touching a closed month takes no new line;
+ *            the lines on the Draft it replaces stay
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-invoice.js    # exits 1 on failure
@@ -983,6 +987,54 @@ const printed = (w) => ((lastRender(w) || { data: {} }).data.personalLines || []
 		await w.generate(OWNER_OP, "2026-10-23");
 		const carrier = w.invoice(deductOf(w, 8).invoice_id) || {};
 		check("…the invoice that carries it: +$25.00 share returned, -$100.00 Personal", [carrier.personal_share_total, carrier.personal_total], [25, 100]);
+		w.cleanup();
+	}
+
+	section("§26 W14 Reverse of a waiting line whose month closed: neither row goes on an invoice");
+	{
+		const w = world(WEEK_ON, { nowMs: edt("2026-10-05", 12) });
+		w.db.prepare("DELETE FROM period_locks WHERE period = '2026-09'").run();
+		await mark(w, 6);
+		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-09', 'locked', '2026-10-08T04:00:00.000Z', 'test')").run();
+		w.setNow(edt("2026-10-15", 12));
+		const s = summaryOf(w, 6);
+		check("R6, in place in September and on no invoice when September closed: no Undo, Reverse offered",
+			[deductOf(w, 6).invoice_id, deductOf(w, 6).in_place, s.can_undo, s.can_reverse], [null, 1, false, true]);
+		const u = await w.call("DELETE", "/api/expenses/6/personal", { body: {} });
+		check("…Undo: 409 PERIOD_FINALIZED, use Reverse", [u.status, u.body && u.body.code, /Use Reverse/.test((u.body && u.body.error) || "")], [409, "PERIOD_FINALIZED", true]);
+		const rv = await w.call("POST", "/api/expenses/6/personal/reverse", { body: { reason: "not personal after all" } });
+		const rev = w.lines("kind = 'reverse'")[0] || {};
+		check("…Reverse: 201, a +$80 credit booked in October (the books net out across the two months), on no invoice",
+			[rv.status, rev.cents, rev.in_place, rev.cost_period, rev.invoice_id], [201, 8000, 0, "2026-10", null]);
+		const g40 = await w.generate(DRIVER_A, "2026-10-09");
+		const g41 = await w.generate(DRIVER_A);
+		w.setNow(edt("2026-10-17", 6, 30));
+		await w.api.runPersonalSweep();
+		check("…neither row ever goes on an invoice: W40 and W41 generated, the sweep run, no notice",
+			[w.invoice(g40.body.invoice.id).personal_total, w.invoice(g41.body.invoice.id).personal_total, deductOf(w, 6).invoice_id, (w.lines("kind = 'reverse'")[0] || {}).invoice_id, notices(w)],
+			[0, 0, null, null, 0]);
+		w.cleanup();
+	}
+
+	section("§27 W16 a generation of a week touching a closed month takes no new line");
+	{
+		const w = world(WEEK_ON, { nowMs: edt("2026-10-01", 12) });
+		w.db.prepare("DELETE FROM period_locks WHERE period = '2026-09'").run();
+		// Driver A's load in the week of Sep 26 - Oct 2 (2 days, $600).
+		w.sheet.rows.push(w.sheet.rows[1].map((v, i) => ({ 1: "L10", 6: "9/28/2026 8:00", 9: "9/29/2026 10:00", 20: "9/28/2026", 21: "9/29/2026", 22: "9/29/2026" })[i] ?? v));
+		const first = await w.generate(DRIVER_A, "2026-10-02");
+		await mark(w, 6);
+		check("setup: R6 (Sep 28) on the W39 Draft while September is open", [first.status, deductOf(w, 6).invoice_id === (first.body.invoice && first.body.invoice.id)], [200, true]);
+		// A line of the week its Draft never took (an attach that failed).
+		addReceipt(w, { id: 24, type: "Fuel", date: "2026-09-30", vendor: "EXAMPLE FUEL #12" });
+		w.db.prepare(`INSERT INTO expense_personal (expense_id, kind, cents, receipt_cents, merchant, receipt_date, cost_period, in_place, book_date, week_start, created_at, created_by, created_by_id, created_role)
+			VALUES (24, 'deduct', 4550, 4550, 'EXAMPLE FUEL #12', '2026-09-30', '2026-09', 1, '2026-09-30', '2026-09-26', 't', 'super_admin', 1, 'Super Admin')`).run();
+		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-09', 'locked', '2026-10-08T04:00:00.000Z', 'test')").run();
+		w.setNow(edt("2026-10-15", 12));
+		const again = await w.generate(DRIVER_A, "2026-10-02");
+		const id = again.body.invoice ? again.body.invoice.id : null;
+		check("September closed, W39 regenerated: R6 stays on the new Draft ($600 - $80 = $520), the waiting line is not taken",
+			[again.status, deductOf(w, 6).invoice_id === id, deductOf(w, 24).invoice_id, id && due(w, id)], [200, true, null, 520]);
 		w.cleanup();
 	}
 

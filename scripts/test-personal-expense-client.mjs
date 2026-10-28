@@ -23,6 +23,7 @@
 //      invoice reads "(approved, final)"; the driver sees the week of the invoice
 //      that carries his line (invoice_week_label) or "coming off your next weekly
 //      invoice"; Reverse follows the server's can_reverse when it sends one.
+//      The Mark dialog's text follows the list's personalReceiptWeek (W18).
 //
 // No network, no DOM, no database.
 //   node scripts/test-personal-expense-client.mjs      # exits 1 on any failure
@@ -36,6 +37,9 @@ import {
   personalPillText, personalDriverText, personalLineReceipt, personalDefaultAmount,
   PERSONAL_PDF_TEXT, PERSONAL_NO_IMAGE_TEXT,
 } from '../client/src/lib/personalReceipt.js'
+// Read through the namespace, so a helper the module lacks fails its check
+// instead of the whole runner.
+import * as personalReceiptLib from '../client/src/lib/personalReceipt.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -208,6 +212,22 @@ section('§6 W11 the receipt\'s week: carried, final and the invoice\'s week')
     personalDriverText(line('invoiced', { amount_text: '$45.50', week_label: 'Oct 17-23, 2026', invoice_week_label: 'Oct 24-30, 2026' })),
     'Personal: -$45.50 on your Oct 24-30, 2026 invoice')
   check('driver: carried', personalDriverText(carried()), 'Personal: -$45.50, coming off your next weekly invoice')
+}
+
+section('§7 W18 the Mark dialog\'s text follows personalReceiptWeek')
+{
+  const fn = personalReceiptLib.personalMarkDialogText
+  const text = (on) => (typeof fn === 'function' ? fn(on) : null)
+  const before = "The driver repays this amount on the weekly invoice for the week it is marked in, and it leaves the company's costs. Any rest of the receipt stays a company cost."
+  check('personalReceiptWeek on: the week of the receipt date, else the next weekly invoice', text(true),
+    "The driver repays this amount on the invoice for the week of the receipt date. If that invoice is approved, in a closed month or too small, it goes on the driver's next weekly invoice. It leaves the company's costs now; any rest of the receipt stays a company cost.")
+  check('…off, or not sent: the text it had before', [text(false), text(undefined)], [before, before])
+  const actions = read('client/src/components/dashboard/expenses/PersonalReceiptActions.vue')
+  check('the dialog takes its text from lib/personalReceipt.js, by its receiptWeek prop',
+    [actions.includes('personalMarkDialogText(props.receiptWeek)'), /receiptWeek: \{ type: Boolean, default: false \}/.test(actions)], [true, true])
+  const tab = read('client/src/components/dashboard/ExpensesTab.vue')
+  check('ExpensesTab passes personalReceiptWeek in all three places and reads it in both loads',
+    [(tab.match(/:enabled="personalEnabled" :receipt-week="personalReceiptWeek"/g) || []).length, (tab.match(/personalReceiptWeek\.value = data\.personalReceiptWeek === true/g) || []).length], [3, 2])
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

@@ -37,6 +37,10 @@
  *      "Use Reverse", Reverse 409 PERSONAL_LOCKED, the corrections route 410,
  *      the status refusal offers no reversal; pin: Undo of a line carried off
  *      its approved week voids it
+ *   §14 W17 the mark's audit row says why the week is the one it is marked in:
+ *      no receipt date, or a date after today
+ *   §15 W18 GET /api/expenses/all carries personalReceiptWeek (the flag), for
+ *      the Mark dialog's text
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-routes.js    # exits 1 on failure
@@ -355,6 +359,32 @@ function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 4
 		check("pin: a line marked on an approved week, still on no approved invoice: Undo 200, voided, on no invoice",
 			[undo.status, w.lines().map((l) => [!!l.voided_at, l.invoice_id])], [200, [[true, null]]]);
 		w.cleanup();
+	}
+
+	section("§14 W17 the mark's audit row says why it keeps the week it is marked in");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 21, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "" });
+		addReceipt(w, { id: 22, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-11-20" });
+		await w.call("POST", "/api/expenses/21/personal", { body: {} });
+		await w.call("POST", "/api/expenses/22/personal", { body: {} });
+		const details = (id) => (w.audits("mark_expense_personal").find((a) => a.entity_id === String(id)) || {}).details || "";
+		check("no receipt date: \"week 2026-10-10 (no receipt date: the week it was marked in)\"",
+			/week 2026-10-10 \(no receipt date: the week it was marked in\)/.test(details(21)), true);
+		check("dated 2026-11-20: \"week 2026-10-10 (dated after today: this week)\"",
+			/week 2026-10-10 \(dated after today: this week\)/.test(details(22)), true);
+		w.cleanup();
+	}
+
+	section("§15 W18 personalReceiptWeek follows the flag, for the Mark dialog");
+	{
+		const got = [];
+		for (const env of [WEEK_ON, ON, { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "1" }]) {
+			const w = world(env);
+			got.push((await w.call("GET", "/api/expenses/all")).body.personalReceiptWeek);
+			w.cleanup();
+		}
+		check("GET /api/expenses/all: personalReceiptWeek true only when the flag is exactly \"true\"", got, [true, false, false]);
 	}
 
 	finish();

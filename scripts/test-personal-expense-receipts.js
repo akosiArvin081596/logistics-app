@@ -28,6 +28,8 @@
  *   §8 W12 with PERSONAL_RECEIPT_WEEK_ENABLED on: the week's warm-up also
  *      prepares the receipt of a line carried from an earlier week, which that
  *      week's generation takes
+ *   §9 W15 with the flag on, GET /api/expenses/personal/waiting-corrections
+ *      lists the carried lines only, one row each, in the server's words
  *
  * Pure apart from the re-encode's child process: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-receipts.js    # exits 1 on failure
@@ -285,6 +287,20 @@ const rowFor = (list, id) => (list || []).find((r) => r.id === id) || {};
 		const line = w.lines("expense_id = 20")[0] || {};
 		check("…and W41's render, which takes the line, prints its page",
 			[g.status, line.invoice_id === (g.body.invoice && g.body.invoice.id), (lastRender(w).data.receiptPages || []).length], [200, true, 1]);
+		w.cleanup();
+	}
+
+	section("§9 W15 the waiting list shows the carried lines only");
+	{
+		const w = world({ ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" });
+		const g = await w.generate(DRIVER_A);
+		approve(w, g.body.invoice.id);
+		await mark(w, 1);
+		await mark(w, 11);
+		const r = await w.call("GET", "/api/expenses/personal/waiting-corrections", { as: "admin" });
+		check("one row per carried line, in the server's words; B's line, still waiting for its own week, is not listed",
+			[r.status, ((r.body && r.body.carried) || []).map((x) => [x.expense_id, x.driver, x.amount_text, x.since_label, x.reason]), ((r.body && r.body.groups) || []).length],
+			[200, [[1, DRIVER_A, "-$200.00", "Oct 15, 2026", "the Oct 10-16, 2026 invoice is approved"]], 0]);
 		w.cleanup();
 	}
 
