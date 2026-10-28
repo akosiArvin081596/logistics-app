@@ -162,7 +162,9 @@ function liftHandler(head, stubs) {
 	let handler = null;
 	const register = (...args) => { handler = args[args.length - 1]; };
 	const driverInstructions = { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } };
-	const scope = makeScope({ app: { get: register, put: register, post: register, delete: register }, require: realRequire, driverInstructions, ...stubs });
+	// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
+	const autoInvoice = { mode: "off", annotateCompletedRows: ({ rows }) => rows };
+	const scope = makeScope({ app: { get: register, put: register, post: register, delete: register }, require: realRequire, driverInstructions, autoInvoice, ...stubs });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return handler;

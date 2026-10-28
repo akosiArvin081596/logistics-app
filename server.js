@@ -42927,6 +42927,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Driver-instructions review codes on the open loads (codes only; inert while
 		// the flag is off).
 		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
+		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
+		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
+		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -42958,6 +42961,8 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			...(offUntilByName
 				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
 				: {}),
+			// Which automatic-draft mode is on, for a Super Admin's settings dialog; absent while off.
+			...(autoInvoice.mode !== "off" && req.session.user.role === "Super Admin" ? { autoInvoice: { mode: autoInvoice.mode } } : {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -48192,7 +48197,9 @@ const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
-	return { sql: types.length ? `type NOT IN (${types.map(() => "?").join(",")})` : "1 = 1", params: [...types] };
+	// The automatic invoice drafts' notices too (the <auto-invoice-wiring> block).
+	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE] : types;
+	return { sql: hidden.length ? `type NOT IN (${hidden.map(() => "?").join(",")})` : "1 = 1", params: [...hidden] };
 }
 
 // GET /api/dispatch-notifications — Fetch dispatch notifications
@@ -51164,6 +51171,71 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
 }
 // </driver-instructions-wiring>
+
+// <auto-invoice-wiring>
+// AUTOMATIC BROKER INVOICE DRAFTS. Every 5 minutes a sweep of the cached Job Tracking
+// finds the loads that became Delivered and drafts each one's broker invoice into Gmail
+// Drafts with the Draft Invoice button's own engine (brokerInvoiceDraft: prepare,
+// render, record); nothing is ever sent, and what a reviewer would have fixed becomes
+// "Needs attention" (lib/auto-invoice-job.js, -ledger.js, -rules.js). Super Admin
+// only: the /api/auto-invoice/ routes (status, settings, a load's Mark checked and Try
+// again), `_autoInvoice` on /api/dashboard's completed rows, and the notices
+// (AUTO_INVOICE_NOTICE_TYPE, left out for every other role by noticeTypeScope()).
+// The settings, read once at start:
+//   AUTO_INVOICE_DRAFTS_ENABLED  on only when exactly "true". Off: no timer, no table,
+//     no route, and /api/dashboard answers as before.
+//   AUTO_INVOICE_DRAFTS_SHADOW   with the flag on, shadow unless exactly "false": the
+//     sweep only records what it would do, with no engine, invoice number, Drive,
+//     Gemini or Gmail call, so ENABLED=true alone can never make a draft.
+//   AUTO_INVOICE_MAX_PER_HOUR (12, at most 1000) and AUTO_INVOICE_MAX_PER_DAY (60, at
+//     most 10000): a burst of deliveries drains over hours, not into Gmail at once.
+// Real drafts also need GMAIL_USER and its app password (without them the job pauses
+// and logs it once). A replica or an import starts no timer (startsJob()).
+// scripts/test-auto-invoice-wiring.js lifts this block.
+const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
+const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
+const autoInvoiceImap = require("./lib/imap-draft");
+const autoInvoice = require("./lib/auto-invoice-job").create({
+	db,
+	env: process.env,
+	readJobTracking: getJobTrackingCached,
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	uploadsRoot: path.join(DATA_DIR, "uploads"),
+	// The engine is created further down, beside the Draft Invoice route.
+	engine: {
+		prepare: (args) => brokerInvoiceDraft.prepare(args),
+		render: (ctx, opts) => brokerInvoiceDraft.render(ctx, opts),
+		record: (ctx, rendered, opts) => brokerInvoiceDraft.record(ctx, rendered, opts),
+	},
+	nextInvoiceNumber,
+	appendGmailDraft,
+	findDraftByMessageId: autoInvoiceImap.findDraftByMessageId,
+	newMessageId: autoInvoiceImap.newMessageId,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
+	bisonRecipient: () => process.env.BISON_INVOICE_EMAIL || "",
+	logAudit,
+	notify: ({ title, body }) => {
+		const notice = { type: AUTO_INVOICE_NOTICE_TYPE, title, body, metadata: {} };
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, "{}");
+		io.to("super-admin").emit("dispatch-notification", notice);
+	},
+	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	log: console,
+});
+if (autoInvoice.mode !== "off") autoInvoice.mount(app, { requireRole, refuseCrossSite });
+if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
+	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
+	let autoInvoiceTicking = false;
+	setInterval(() => {
+		if (autoInvoiceTicking) return;
+		autoInvoiceTicking = true;
+		autoInvoice.tick()
+			.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
+			.finally(() => { autoInvoiceTicking = false; });
+	}, AUTO_INVOICE_TICK_MS);
+}
+// </auto-invoice-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
