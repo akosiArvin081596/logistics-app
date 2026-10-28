@@ -123,6 +123,9 @@ function harness(src) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
+		// The closed-month invoice guard is off here (scripts/test-invoice-period-guard.js
+		// §7 runs it on).
+		INVOICE_CLOSED_MONTH_GUARD_ENABLED: false,
 		reservedDriverNameRefusal: () => null,
 		findInvoicePayee: () => null,
 		generateInvoiceNumber: (payee, start) => `INV-M-TEST-${start}-${rendered.length + 1}`,
