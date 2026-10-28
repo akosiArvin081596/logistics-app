@@ -55,8 +55,8 @@ GET /api/applications/:id/pdf · requireRole("Super Admin")=anon@12b84c4b0134 ·
 POST /api/applications/:id/restore · requireRole("Super Admin")=anon@12b84c4b0134 · inline@09560daefb04
 GET /api/applications/:id/sensitive · requireRole("Super Admin")=anon@12b84c4b0134 · piiRevealLimiter=limiter · inline@e26fce47159e
 PUT /api/applications/:id/status · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bfbecbcb36d4
-GET /api/archive · requireRole("Super Admin")=anon@12b84c4b0134 · inline@4c96e185c6df
-GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@84e479dbd8a4
+GET /api/archive · requireRole("Super Admin")=anon@12b84c4b0134 · inline@5d41efca67b7
+GET /api/archive/tabs · requireRole("Super Admin")=anon@12b84c4b0134 · inline@20cafb2753cb
 POST /api/auth/change-password · requireAuth@2f5c61384511 · changePasswordLimiter=limiter · inline@37627b4fe4bc
 POST /api/auth/login · loginLimiter=limiter · inline@3ace7acc66ec
 POST /api/auth/logout · inline@a546bfc2c18f

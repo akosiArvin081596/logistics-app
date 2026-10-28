@@ -155,7 +155,7 @@ The response from `/api/locations/latest` includes `source: 'routemate' | 'phone
 SQLite file at `/var/www/logistics-app/app.db` on the production VPS (76.13.22.110).
 
 **Q. Where is the production Google Sheet?**
-Spreadsheet ID `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` (NOT the archive at `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`).
+The sheet `SPREADSHEET_ID` names; production's own process falls back to the production sheet in `lib/sheet-id.js` (NOT the archive, which `ARCHIVE_SPREADSHEET_ID` names).
 
 **Q. Can I run scripts against production?**
 Direct SSH to the VPS lets you run scripts. Be careful. The scripts directory includes utilities for password resets, geocode backfill, etc. Document any production script runs.

@@ -29,7 +29,7 @@ const { spawnSync } = require("child_process");
 const REFRESH = path.join(__dirname, "refresh-env.js");
 const KEEP = process.argv.includes("--keep");
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "logisx-automation-refresh.")));
-const STAGING_SHEET = "1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y";
+const STAGING_SHEET = "made-up-staging-sheet-id-0123456789";
 const NAME = "e2e_playwright";
 
 const BASE_ENV = { ...process.env };

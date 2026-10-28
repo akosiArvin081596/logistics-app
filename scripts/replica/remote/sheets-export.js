@@ -33,8 +33,9 @@ function arg(name) {
 // The IDs the app resolves, the way lib/sheet-id.js resolves the server's
 // sheet: the .env value, else production's own default, but only for
 // production's own folder, the PRODUCTION_DIR its lib/sheet-id.js names. The
-// main sheet's default is lib/sheet-id.js's PRODUCTION_SPREADSHEET_ID; the
-// archive's is still in server.js. Any other folder gets no default: an
+// defaults are lib/sheet-id.js's PRODUCTION_SPREADSHEET_ID and
+// PRODUCTION_ARCHIVE_SPREADSHEET_ID; an older server.js carries either as a
+// literal, read first. Any other folder gets no default: an
 // unnamed main sheet is refused (exit 2) and an unnamed archive is skipped.
 function spreadsheetIds(appDir, dotenv) {
 	const envFile = path.join(appDir, ".env");
@@ -48,7 +49,7 @@ function spreadsheetIds(appDir, dotenv) {
 		if (!isProductionDir) return "";
 		const m = src.match(new RegExp(`const ${name} = process\\.env\\.${name} \\|\\| "([A-Za-z0-9_-]+)"`));
 		if (m) return m[1];
-		const l = name === "SPREADSHEET_ID" ? lib.match(/^const PRODUCTION_SPREADSHEET_ID = "([A-Za-z0-9_-]+)";$/m) : null;
+		const l = lib.match(new RegExp(`^const PRODUCTION_${name} = "([A-Za-z0-9_-]+)";$`, "m"));
 		return l ? l[1] : "";
 	};
 	const ids = {
