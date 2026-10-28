@@ -26,17 +26,36 @@
  *   §7 POST /api/auth/setup, the other route that establishes a session,
  *      rotates too
  *   §8 SOURCE pins (comment-stripped), and §9 DISCRIMINATION: a handler that
- *      does not rotate, and four near-miss mutants, must each be caught
+ *      does not rotate, and five near-miss mutants, must each be caught
+ *   §10 SIGN-IN ROWS (SIGN_IN_AUDIT_ENABLED): one `login` row per sign-in,
+ *      naming the account and "by username" or "by email" and none of the
+ *      typed text, written only once the session is saved; `login_refused`
+ *      WRONG_PASSWORD and CHANGED_MEANWHILE under the account; 30 wrong
+ *      passwords in a minute write one row and the next window's row says +29;
+ *      a name no account has writes none (one log line); flag off writes none
+ *   §11 THE LOOKUP (NAMED_LOGINS_ENABLED): a username beats another account's
+ *      email; a unique email signs in; an email on two accounts answers 401 to
+ *      both passwords, starts no session and writes one AMBIGUOUS_EMAIL row
+ *      (actor id 0, the candidate ids, not the email); flag off keeps the
+ *      first matching row, as before
+ *   §12 THE IP AND BROWSER (N19): kept for a Super Admin's or Dispatcher's
+ *      row only, in sign_in_network keyed to the audit row (never in it),
+ *      deleted after 90 days with the audit row kept, and listed by
+ *      GET /api/admin/sign-ins to a Super Admin only
  *
  * Runs the SHIPPED code: the session config, the login and setup handlers,
  * GET /api/auth/session, requireAuth, the must_change_password refresh
- * middleware, stampLastLogin() and purgeUserSessions() are all lifted out of
- * server.js, and wired to the real express-session and the real
- * better-sqlite3-session-store over an in-memory SQLite whose users table is
- * built from server.js's own CREATE and ALTER statements. Real Express on
- * 127.0.0.1:0: no fixed port, no app.db, no network beyond loopback.
+ * middleware, stampLastLogin(), purgeUserSessions(), logAudit(),
+ * logAuditRefusal() and signerNetworkEvidence() are all lifted out of
+ * server.js, with lib/sign-in.js, and wired to the real express-session and
+ * the real better-sqlite3-session-store over an in-memory SQLite whose users
+ * and audit_trail tables are built from server.js's own CREATE and ALTER
+ * statements. Real Express on 127.0.0.1:0: no fixed port, no app.db, no
+ * network beyond loopback. Made-up accounts, example.test emails and a
+ * 203.0.113.x address.
  *
  * Run: node scripts/test-login-session-rotation.js    # exits 1 on failure
+ *      SERVER_JS=/tmp/base.js node scripts/test-login-session-rotation.js   # a base commit: fails
  */
 "use strict";
 
@@ -46,7 +65,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { once } = require("events");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
 
 let pass = 0;
 const failures = [];
@@ -128,8 +147,46 @@ const SESSION_ROUTE_SRC = liftRoute('app.get("/api/auth/session", (req, res) => 
 const STAMP_SRC = liftFunction("function stampLastLogin(userId) {");
 const PURGE_SRC = liftFunction("function purgeUserSessions(userId, exceptSid) {");
 const REQUIRE_AUTH_SRC = liftFunction("function requireAuth(req, res, next) {");
+const REQUIRE_ROLE_SRC = liftFunction("function requireRole(...roles) {");
 const CURRENT_FLAG_SRC = liftFunction("function currentMustChangePassword(sessionUser) {");
 const REFRESH_FLAG_SRC = liftFunction("function refreshPasswordChangeFlag(req, res, next) {");
+// A one-line `const NAME = …;`, or a block from its head to `close`.
+function liftConst(head, close = null) {
+	const needle = `\n${head}`;
+	const hits = SRC.split(needle).length - 1;
+	if (hits !== 1) die(`expected exactly 1 statement starting ${JSON.stringify(head)}, found ${hits}`);
+	const a = SRC.indexOf(needle) + 1;
+	const end = close ? SRC.indexOf(close, a) : SRC.indexOf(";\n", a);
+	return SRC.slice(a, end + (close ? close.length : 1));
+}
+// The audit writers the sign-in rows go through, as shipped: logAudit() and
+// the refusal coalescer, with its window and its never-coalesced codes.
+const AUDIT_WRITERS_SRC = [
+	liftConst("const REFUSAL_AUDIT_WINDOW_MS = "),
+	liftConst("const UNCOALESCED_REFUSAL_CODES = new Set([", "\n]);"),
+	liftFunction("function logAudit(req, action, entity, entityId, details) {"),
+	liftFunction("function logAuditRefusal(req, action, entity, entityId, details, code) {"),
+].join("\n");
+// "Who, and from where": the helper the signing routes record a signer with.
+const signerNetworkEvidence = new Function([
+	liftConst("const USER_AGENT_MAX = "),
+	liftConst("const EVIDENCE_TEXT_STRIP = "),
+	liftFunction("function sanitizeEvidenceText(v, max) {"),
+	liftFunction("function isLoopbackAddr(a) {"),
+	liftFunction("function signerNetworkEvidence(req) {"),
+	"return signerNetworkEvidence;",
+].join("\n"))();
+// A route that may be absent (a server.js before this change): null, and the
+// sections that need it report that instead of stopping the run.
+function liftOptionalRoute(head) {
+	return SRC.split(head).length - 1 === 1 ? liftRoute(head) : null;
+}
+const SIGN_INS_HEAD = 'app.get("/api/admin/sign-ins", requireRole("Super Admin"), (req, res) => {';
+const SIGN_INS_SRC = liftOptionalRoute(SIGN_INS_HEAD);
+// lib/sign-in.js, the account lookup and the rows' writer the login route is
+// handed as `signIn`. Absent before this change, when the route never asks.
+let signInLib = null;
+try { signInLib = require("../lib/sign-in.js"); } catch (e) { if (!e || e.code !== "MODULE_NOT_FOUND") throw e; }
 
 // The session middleware exactly as server.js configures it, minus nothing:
 // from `const sessionMiddleware = session({` to the line that mounts it.
@@ -154,6 +211,11 @@ const USERS_ALTERS = ["full_name", "company_name", "must_change_password", "last
 	if (!m) die(`could not locate the users.${col} migration`);
 	return m[0];
 });
+const AUDIT_CREATE = (() => {
+	const m = SRC.match(/CREATE TABLE IF NOT EXISTS audit_trail \(([\s\S]*?)\n\t\)/);
+	if (!m) die("could not locate CREATE TABLE audit_trail");
+	return `CREATE TABLE audit_trail (${m[1]}\n)`;
+})();
 
 // ── builders ────────────────────────────────────────────────────────────────
 const SECRET = "authfu-test-secret-not-a-real-one";
@@ -165,7 +227,23 @@ function makeDb({ withLastLogin = true } = {}) {
 		if (!withLastLogin && alter.includes("last_login_at")) continue;
 		db.exec(alter);
 	}
+	db.exec(AUDIT_CREATE);
 	return db;
+}
+
+// The `signIn` object the login route is handed: lib/sign-in.js over the
+// shipped audit writers (a fresh refusal window per world), each flag as the
+// scenario sets it. Without the library (a checkout before this change) the
+// route never asks for it, so there is nothing to hand it.
+function buildSignIn(db, { audit = false, unique = false } = {}) {
+	if (!signInLib) return null;
+	const writers = new Function("db", "console", "refusalAuditWindows",
+		`${AUDIT_WRITERS_SRC}\nreturn { logAudit, logAuditRefusal };`)(db, console, new Map());
+	signInLib.ensureSignInNetworkTable(db);
+	return signInLib.createSignIn({
+		db, logAudit: writers.logAudit, logAuditRefusal: writers.logAuditRefusal,
+		networkEvidence: signerNetworkEvidence, auditEnabled: audit, uniqueEmail: unique,
+	});
 }
 
 const PW = {
@@ -237,17 +315,25 @@ const buildFlagRefresh = (db) =>
 // Bare, nothing injected, the way the other guard runners lift it.
 const buildRequireAuth = () => new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
 
-async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSetup = false }) {
+async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSetup = false, signIn = {} }) {
 	const holder = {};
 	const app = express();
+	// As server.js sets it: behind the local proxy, so X-Forwarded-For is the
+	// caller's address on a loopback connection.
+	app.set("trust proxy", 1);
 	app.use(express.json());
 	app.use(buildSessionMiddleware(db, makeStoreClass(holder)));
 	// Mounted where server.js mounts it: directly below the session middleware.
 	app.use(buildFlagRefresh(db));
 	const stampLastLogin = buildStamp(db);
 	const passThrough = (req, res, next) => next();
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", loginSrc)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub, "America/New_York");
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", loginSrc)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, disconnectSessionSocketsStub, "America/New_York", buildSignIn(db, signIn));
+	// GET /api/admin/sign-ins on the real role guard, when this server.js has it.
+	if (SIGN_INS_SRC) {
+		const requireRole = new Function(`${REQUIRE_ROLE_SRC}\nreturn requireRole;`)();
+		new Function("app", "requireRole", "signInLib", "db", "console", SIGN_INS_SRC)(app, requireRole, signInLib, db, console);
+	}
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js) and the
 	// voice-note flag (its features).
 	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
@@ -269,10 +355,10 @@ async function startApp({ db, loginSrc = LOGIN_SRC, bcryptImpl = bcrypt, withSet
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
-function request(port, method, urlPath, { cookie, body } = {}) {
+function request(port, method, urlPath, { cookie, body, headers: extra = {} } = {}) {
 	return new Promise((resolve, reject) => {
 		const data = body === undefined ? null : JSON.stringify(body);
-		const headers = {};
+		const headers = { ...extra };
 		if (cookie) headers.cookie = cookie;
 		if (data !== null) {
 			headers["content-type"] = "application/json";
@@ -294,8 +380,8 @@ function request(port, method, urlPath, { cookie, body } = {}) {
 		r.end();
 	});
 }
-const login = (app, username, password, cookie) =>
-	request(app.port, "POST", "/api/auth/login", { cookie, body: { username, password } });
+const login = (app, username, password, cookie, headers) =>
+	request(app.port, "POST", "/api/auth/login", { cookie, body: { username, password }, headers });
 const probeSession = (app, cookie) => request(app.port, "GET", "/api/auth/session", { cookie });
 
 // connect.sid=s%3A<sid>.<signature>
@@ -383,16 +469,18 @@ async function probe(loginSrc) {
 		await app.close();
 	}
 
-	// A save that fails: 500, no cookie, no stored identity, no stamp — even
-	// though express-session tries the save again when the response ends.
+	// A save that fails: 500, no cookie, no stored identity, no stamp and no
+	// sign-in row — even though express-session tries the save again when the
+	// response ends.
 	{
 		const db = makeDb(); seedUsers(db);
-		const app = await startApp({ db, loginSrc });
+		const app = await startApp({ db, loginSrc, signIn: { audit: true } });
 		app.store.failSet = 1;
 		const r = await login(app, "alice", PW.alice);
 		p.saveFailureIs500 = r.status === 500 && !r.cookie;
 		p.saveFailureLeavesNoSession = sessionsFor(db, 1).length === 0;
 		p.saveFailureNotStamped = lastLogin(db, 1) === "";
+		p.saveFailureWritesNoLoginRow = auditRows(db, "login").length === 0;
 		await app.close();
 	}
 
@@ -599,6 +687,281 @@ async function sectionSetup() {
 	await app.close();
 }
 
+// ─────────────────────────────── §10 sign-in rows (SIGN_IN_AUDIT_ENABLED)
+const auditRows = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE action = ? ORDER BY id").all(action);
+const allAuditRows = (db) => db.prepare("SELECT * FROM audit_trail ORDER BY id").all();
+function networkRows(db) {
+	const present = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sign_in_network'").get();
+	return present ? db.prepare("SELECT * FROM sign_in_network ORDER BY id").all() : [];
+}
+// A browser behind the local proxy: a made-up documentation address and agent.
+const FROM = { "x-forwarded-for": "203.0.113.7", "user-agent": "NamedLoginsTest/1.0 (made-up)" };
+const holds = (text, needle) => String(text || "").toLowerCase().includes(String(needle).toLowerCase());
+
+async function sectionSignInRows() {
+	ok(!!signInLib, "§10 lib/sign-in.js must exist: the sign-in rows' writer and the account lookup the login route is handed");
+	{
+		const db = makeDb(); seedUsers(db);
+		const app = await startApp({ db, signIn: { audit: true } });
+
+		// A Dispatcher by username.
+		const a = await login(app, "alice", PW.alice, null, FROM);
+		ok(a.status === 200, `§10 a sign-in must still succeed with the rows on (got ${a.status})`);
+		const rowsA = auditRows(db, "login");
+		const ra = rowsA[0] || {};
+		ok(rowsA.length === 1, `§10 one sign-in must write exactly one \`login\` row (got ${rowsA.length})`);
+		ok(ra.user_id === 1 && ra.username === "alice" && ra.role === "Dispatcher" && ra.entity === "user" && ra.entity_id === "1",
+			`§10 ...naming the account signed in to, as actor and entity: ${JSON.stringify(ra)}`);
+		ok(ra.details === "Signed in by username", `§10 ...saying it was by username: ${JSON.stringify(ra.details)}`);
+		ok(!holds(ra.details, "alice") && !holds(ra.details, PW.alice) && !holds(ra.details, sidOf(a.cookie) || "no-sid"),
+			"§10 ...and holding none of the typed text, the password or the session id");
+
+		// An Investor by email, typed in another case.
+		const c = await login(app, "CAROL@example.test", PW.carol, null, FROM);
+		const rc = auditRows(db, "login").find((r) => r.user_id === 3) || {};
+		ok(c.status === 200 && rc.details === "Signed in by email", `§10 a sign-in by email must say so: ${JSON.stringify(rc.details)}`);
+		ok(!holds(rc.details, "carol@example.test"), "§10 ...without the email typed");
+
+		// A Driver by username.
+		const b = await login(app, "LogisX-2609", PW.bob, null, FROM);
+		ok(b.status === 200 && auditRows(db, "login").filter((r) => r.user_id === 2).length === 1, "§10 a driver's sign-in is a `login` row too");
+
+		// A wrong password for an account that exists.
+		const w = await login(app, "LogisX-2609", "Not-The-Pass-9!", null, FROM);
+		const refused = auditRows(db, "login_refused");
+		const rw = refused[0] || {};
+		ok(w.status === 401 && refused.length === 1, `§10 a wrong password must write one \`login_refused\` row (got ${w.status}, ${refused.length} rows)`);
+		ok(rw.user_id === 2 && rw.username === "LogisX-2609" && rw.role === "Driver" && rw.entity_id === "2",
+			`§10 ...under the account it tried: ${JSON.stringify(rw)}`);
+		ok(holds(rw.details, "[WRONG_PASSWORD]") && holds(rw.details, "by username") && !holds(rw.details, "Not-The-Pass-9!"),
+			`§10 ...coded WRONG_PASSWORD, by username, without the password typed: ${JSON.stringify(rw.details)}`);
+		ok(!/_failed$/.test(rw.action || ""), "§10 ...named a refusal, never `*_failed` (that names a write that started)");
+
+		// A name no account has: no row, one log line with a count.
+		const beforeRows = allAuditRows(db).length;
+		const beforeLogs = logs.length;
+		for (let i = 0; i < 3; i++) {
+			const u = await login(app, "nobody-here", "Whatever-Pass-1!", null, FROM);
+			ok(u.status === 401, `§10 a name no account has still answers 401 (got ${u.status})`);
+		}
+		ok(allAuditRows(db).length === beforeRows, "§10 a name no account has writes no audit row (no one to attribute it to)");
+		const lines = logs.slice(beforeLogs).filter((l) => /sign-in attempt/.test(l));
+		ok(lines.length === 1 && /\b1\b/.test(lines[0]) && !lines.some((l) => holds(l, "nobody-here")),
+			`§10 ...and one log line a minute with the count, never the typed name: ${JSON.stringify(lines)}`);
+		await app.close();
+	}
+
+	// 30 wrong passwords in a minute against one account: one row, and the
+	// next window's row carries the other 29.
+	{
+		const db = makeDb(); seedUsers(db);
+		const app = await startApp({ db, signIn: { audit: true } });
+		for (let i = 0; i < 30; i++) await login(app, "root", `Wrong-Pass-${i}!`, null, FROM);
+		ok(auditRows(db, "login_refused").length === 1, `§10 30 wrong passwords in a minute must write one row (got ${auditRows(db, "login_refused").length})`);
+		const realNow = Date.now;
+		Date.now = () => realNow() + 61 * 1000;
+		try {
+			await login(app, "root", "Wrong-Pass-31!", null, FROM);
+		} finally {
+			Date.now = realNow;
+		}
+		const rows = auditRows(db, "login_refused");
+		ok(rows.length === 2 && holds(rows[1].details, "+29 more identical refusal(s) suppressed"),
+			`§10 ...and the next window's row must say +29: ${JSON.stringify(rows.map((r) => r.details))}`);
+		ok(rows.every((r) => r.user_id === 4 && r.username === "root"), "§10 ...both under the account, so the coalescing key is the account");
+		await app.close();
+	}
+
+	// The account re-passworded while its password was checked.
+	{
+		const db = makeDb(); seedUsers(db);
+		const hooked = {
+			compare: async (pw, hash) => {
+				const r = await bcrypt.compare(pw, hash);
+				db.prepare("UPDATE users SET password_hash = ? WHERE id = 1").run(bcrypt.hashSync("Changed-Pass-9!", 4));
+				return r;
+			},
+			hash: bcrypt.hash,
+		};
+		const app = await startApp({ db, bcryptImpl: hooked, signIn: { audit: true } });
+		const r = await login(app, "alice", PW.alice, null, FROM);
+		const rows = auditRows(db, "login_refused");
+		ok(r.status === 401 && rows.length === 1 && rows[0].user_id === 1 && holds(rows[0].details, "[CHANGED_MEANWHILE]"),
+			`§10 a password changed during the check must write CHANGED_MEANWHILE under the account (got ${r.status}, ${JSON.stringify(rows)})`);
+		ok(auditRows(db, "login").length === 0, "§10 ...and no `login` row");
+		await app.close();
+	}
+
+	// No `login` row for a sign-in that could not start a session.
+	{
+		const db = makeDb(); seedUsers(db);
+		const app = await startApp({ db, signIn: { audit: true } });
+		app.store.failSet = 1;
+		const r = await login(app, "alice", PW.alice, null, FROM);
+		ok(r.status === 500 && auditRows(db, "login").length === 0, "§10 a sign-in whose session was not saved must write no `login` row");
+		await app.close();
+	}
+
+	// Flag off: nothing at all.
+	{
+		const db = makeDb(); seedUsers(db);
+		const app = await startApp({ db, signIn: { audit: false } });
+		await login(app, "alice", PW.alice, null, FROM);
+		await login(app, "LogisX-2609", "Not-The-Pass-9!", null, FROM);
+		await login(app, "nobody-here", "Whatever-Pass-1!", null, FROM);
+		ok(allAuditRows(db).length === 0 && networkRows(db).length === 0, "§10 SIGN_IN_AUDIT_ENABLED off: no audit row and no network record");
+		await app.close();
+	}
+}
+
+// ─────────────────────────────── §11 the lookup (NAMED_LOGINS_ENABLED)
+const PWL = {
+	q: "Sam-Q-Pass-1!", p: "Pat-P-Pass-2!", rae: "Rae-Pass-3!", owner: "Owner-Named-4!", shared: "Shared-Login-5!",
+};
+function seedLookup(db) {
+	const ins = db.prepare(
+		"INSERT INTO users (id, username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, '', ?, '', '', 0)",
+	);
+	// #12's email is #13's username, and #12 comes first in the table.
+	ins.run(12, "sam.q", bcrypt.hashSync(PWL.q, 4), "Dispatcher", "pat@example.test");
+	ins.run(13, "pat@example.test", bcrypt.hashSync(PWL.p, 4), "Super Admin", "pat.p@example.test");
+	ins.run(14, "rae", bcrypt.hashSync(PWL.rae, 4), "Dispatcher", "rae@example.test");
+	// One email on two accounts, in two cases: a named account and the shared login.
+	ins.run(15, "owner_named", bcrypt.hashSync(PWL.owner, 4), "Super Admin", "boss@example.test");
+	ins.run(16, "super_admin", bcrypt.hashSync(PWL.shared, 4), "Super Admin", "Boss@Example.test");
+}
+const signedInAs = async (app, r) => {
+	if (r.status !== 200 || !r.cookie) return null;
+	const s = await probeSession(app, r.cookie);
+	return s.json && s.json.authenticated ? s.json.user.id : null;
+};
+
+async function sectionLookup() {
+	{
+		const db = makeDb(); seedLookup(db);
+		const app = await startApp({ db, signIn: { audit: true, unique: true } });
+		const p = await login(app, "pat@example.test", PWL.p, null, FROM);
+		ok(await signedInAs(app, p) === 13, `§11 a username must beat another account's email (got ${p.status})`);
+		ok((auditRows(db, "login").find((r) => r.user_id === 13) || {}).details === "Signed in by username", "§11 ...and its row says by username");
+		const q = await login(app, "pat@example.test", PWL.q, null, FROM);
+		ok(q.status === 401 && !q.cookie, `§11 ...so the email's account is not reached by that name (got ${q.status})`);
+
+		const r = await login(app, "RAE@example.test", PWL.rae, null, FROM);
+		ok(await signedInAs(app, r) === 14, `§11 an email on one account signs in to it, in any case (got ${r.status})`);
+		ok((auditRows(db, "login").find((x) => x.user_id === 14) || {}).details === "Signed in by email", "§11 ...and its row says by email");
+
+		const before = db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n;
+		const o = await login(app, "boss@example.test", PWL.owner, null, FROM);
+		const s = await login(app, "boss@example.test", PWL.shared, null, FROM);
+		ok(o.status === 401 && !o.cookie && s.status === 401 && !s.cookie,
+			`§11 an email on two accounts must answer 401 to either account's password (got ${o.status}, ${s.status})`);
+		ok(db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n === before && sessionsFor(db, 15).length === 0 && sessionsFor(db, 16).length === 0,
+			"§11 ...and start no session");
+		ok(o.json && s.json && o.json.error === "Invalid credentials" && s.json.error === "Invalid credentials" && !o.json.code,
+			"§11 ...with the usual answer, which says nothing about the email");
+		const amb = auditRows(db, "login_refused").filter((x) => holds(x.details, "[AMBIGUOUS_EMAIL]"));
+		const ra = amb[0] || {};
+		ok(amb.length === 1, `§11 ...one AMBIGUOUS_EMAIL row for the two attempts in a minute (got ${amb.length})`);
+		ok(ra.user_id === 0 && ra.username === "(several accounts)" && ra.entity_id === "", `§11 ...under no account: ${JSON.stringify(ra)}`);
+		ok(/\b15\b/.test(ra.details || "") && /\b16\b/.test(ra.details || "") && !holds(ra.details, "boss@"),
+			`§11 ...naming the candidate ids, not the email: ${JSON.stringify(ra.details)}`);
+		ok(networkRows(db).every((n) => n.audit_id !== ra.id), "§11 ...and no IP or browser kept for it (no single account)");
+		const byName = await login(app, "owner_named", PWL.owner, null, FROM);
+		ok(await signedInAs(app, byName) === 15, "§11 either account still signs in by its username");
+		const blank = await login(app, "   ", PWL.owner, null, FROM);
+		ok(blank.status === 401 && !blank.cookie, `§11 a name of spaces is no account's, never a blank email's (got ${blank.status})`);
+		await app.close();
+	}
+	// Flag off: the first matching row, as before.
+	{
+		const db = makeDb(); seedLookup(db);
+		const app = await startApp({ db, signIn: { audit: true, unique: false } });
+		const q = await login(app, "pat@example.test", PWL.q, null, FROM);
+		ok(await signedInAs(app, q) === 12, `§11 NAMED_LOGINS_ENABLED off: the first matching row wins, here #12 by email (got ${q.status})`);
+		ok((auditRows(db, "login").find((r) => r.user_id === 12) || {}).details === "Signed in by email", "§11 ...and its row says by email");
+		const p = await login(app, "pat@example.test", PWL.p, null, FROM);
+		ok(p.status === 401, `§11 ...so #13's password fails there, as before (got ${p.status})`);
+		const o = await login(app, "boss@example.test", PWL.owner, null, FROM);
+		ok(await signedInAs(app, o) === 15, `§11 ...and a shared email signs in to its first account (got ${o.status})`);
+		const s = await login(app, "boss@example.test", PWL.shared, null, FROM);
+		ok(s.status === 401, `§11 ...the other one's password failing (got ${s.status})`);
+		ok(auditRows(db, "login_refused").every((r) => !holds(r.details, "AMBIGUOUS_EMAIL")), "§11 ...with no AMBIGUOUS_EMAIL row");
+		await app.close();
+	}
+}
+
+// ─────────────────────────────── §12 the IP and browser (N19)
+async function sectionNetwork() {
+	{
+		const db = makeDb(); seedUsers(db);
+		const app = await startApp({ db, signIn: { audit: true } });
+		await login(app, "alice", PW.alice, null, FROM); // Dispatcher
+		await login(app, "root", PW.root, null, FROM); // Super Admin
+		await login(app, "LogisX-2609", PW.bob, null, FROM); // Driver
+		await login(app, "carol.co", PW.carol, null, FROM); // Investor
+		await login(app, "root", "Wrong-Pass-0!", null, FROM); // a staff refusal
+		const logins = auditRows(db, "login");
+		const net = networkRows(db);
+		const byAudit = new Map(net.map((n) => [n.audit_id, n]));
+		const staffIds = logins.filter((r) => r.role === "Super Admin" || r.role === "Dispatcher").map((r) => r.id);
+		const otherIds = logins.filter((r) => r.role === "Driver" || r.role === "Investor").map((r) => r.id);
+		ok(staffIds.length === 2 && staffIds.every((id) => byAudit.has(id)), "§12 a Super Admin's and a Dispatcher's sign-in each keep a network record, keyed to the audit row");
+		ok(otherIds.length === 2 && otherIds.every((id) => !byAudit.has(id)), "§12 ...a Driver's and an Investor's keep none");
+		const refusedRow = auditRows(db, "login_refused")[0] || {};
+		ok(byAudit.has(refusedRow.id), "§12 ...nor is a staff account's refused sign-in left without one");
+		const n = byAudit.get(staffIds[0]) || {};
+		ok(n.ip === "203.0.113.7" && n.ip_source === "proxy" && n.user_agent === "NamedLoginsTest/1.0 (made-up)" && n.user_id === 1,
+			`§12 ...holding the forwarded address, its source and the browser, as signerNetworkEvidence() reads them: ${JSON.stringify(n)}`);
+		ok(allAuditRows(db).every((r) => !holds(r.details, "203.0.113.7") && !holds(r.details, "NamedLoginsTest")),
+			"§12 the audit rows themselves hold no IP and no browser");
+
+		// GET /api/admin/sign-ins: a Super Admin only.
+		ok(!!SIGN_INS_SRC, "§12 GET /api/admin/sign-ins must exist, mounted with requireRole(\"Super Admin\")");
+		if (SIGN_INS_SRC) {
+			const xrw = { "x-requested-with": "XMLHttpRequest" };
+			const admin = await login(app, "root", PW.root, null, FROM);
+			const disp = await login(app, "alice", PW.alice, null, FROM);
+			const asAdmin = await request(app.port, "GET", "/api/admin/sign-ins?limit=50", { cookie: admin.cookie, headers: xrw });
+			const asDisp = await request(app.port, "GET", "/api/admin/sign-ins", { cookie: disp.cookie, headers: xrw });
+			const anon = await request(app.port, "GET", "/api/admin/sign-ins");
+			ok(asDisp.status === 403 && anon.status === 401, `§12 ...refused to a Dispatcher (403) and to no session (401) (got ${asDisp.status}, ${anon.status})`);
+			const rows = (asAdmin.json && asAdmin.json.rows) || [];
+			const withNet = rows.filter((r) => r.network);
+			ok(asAdmin.status === 200 && rows.length >= 7 && withNet.length >= 3 && withNet.every((r) => r.role === "Super Admin" || r.role === "Dispatcher"),
+				`§12 ...and a Super Admin gets the sign-in rows with the staff ones' IP and browser (got ${asAdmin.status}, ${rows.length} rows, ${withNet.length} with network)`);
+			ok(asAdmin.json && asAdmin.json.retentionDays === 90, "§12 ...saying how long those are kept");
+			const one = await request(app.port, "GET", "/api/admin/sign-ins?userId=2", { cookie: admin.cookie, headers: xrw });
+			ok(one.status === 200 && one.json.rows.length > 0 && one.json.rows.every((r) => r.userId === 2 && r.network === null),
+				"§12 ...filtered by account, a driver's rows with no network record");
+			const bad = await request(app.port, "GET", "/api/admin/sign-ins?userId=abc", { cookie: admin.cookie, headers: xrw });
+			ok(bad.status === 400, `§12 ...and a userId that is no account id is 400 (got ${bad.status})`);
+		}
+		await app.close();
+
+		// Deleted after 90 days; the audit rows are kept.
+		if (signInLib) {
+			const auditBefore = allAuditRows(db).length;
+			const old = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString();
+			const recent = new Date(Date.now() - 89 * 24 * 60 * 60 * 1000).toISOString();
+			db.prepare("UPDATE sign_in_network SET at = ? WHERE id = (SELECT MIN(id) FROM sign_in_network)").run(old);
+			db.prepare("UPDATE sign_in_network SET at = ? WHERE id = (SELECT MAX(id) FROM sign_in_network)").run(recent);
+			const count = networkRows(db).length;
+			const purged = signInLib.purgeSignInNetwork(db);
+			ok(purged === 1 && networkRows(db).length === count - 1 && networkRows(db).every((r) => r.at !== old),
+				`§12 the purge deletes the network records older than 90 days, and only those (purged ${purged})`);
+			ok(allAuditRows(db).length === auditBefore, "§12 ...and never an audit row");
+		} else {
+			ok(false, "§12 the 90-day purge must exist (lib/sign-in.js purgeSignInNetwork())");
+		}
+	}
+	// Wired at boot: the purge runs through startsJob(), at boot and daily.
+	const code = stripComments(SRC);
+	ok(/if \(startsJob\("sign-in network record purge \(at boot, then daily\)"\)\) \{\s*purgeOldSignInNetwork\(\);\s*const timer = setInterval\(purgeOldSignInNetwork, 24 \* 60 \* 60 \* 1000\);/.test(code),
+		"§12 server.js must run the sign_in_network purge at boot and then daily, through startsJob()");
+	ok(/function purgeOldSignInNetwork\(\) \{\s*try \{\s*const n = signInLib\.purgeSignInNetwork\(db\);/.test(code),
+		"§12 ...through lib/sign-in.js purgeSignInNetwork()");
+}
+
 // ─────────────────────────────── §8 the source
 function sectionSource() {
 	const code = stripComments(LOGIN_SRC);
@@ -622,6 +985,12 @@ function sectionSource() {
 	const outerCatch = code.lastIndexOf("} catch (error) {");
 	ok(outerCatch > stamp && /refuse\(500, /.test(code.slice(outerCatch)) && !/error\.message \}/.test(code.slice(outerCatch)),
 		"§8 the outer catch must answer through refuse() and not echo error.message");
+	const loginRow = at('signIn.record(req, "login", current,');
+	ok(loginRow > stamp && loginRow < at("res.json({"), "§8 the `login` row must be written after the session is saved and stamped, before the answer");
+	ok((code.match(/signIn\.record\(/g) || []).length === 1, "§8 login must write exactly one `login` row");
+	ok(at("signIn.find(username.trim())") > 0 && at("signIn.find(username.trim())") < compare,
+		"§8 the account must come from lib/sign-in.js's lookup, before the password check");
+	ok(!/LOWER\(email\)/.test(code), "§8 ...and the route must keep no email query of its own");
 
 	const setup = stripComments(SETUP_SRC);
 	const sRegen = setup.indexOf("req.session.regenerate(");
@@ -640,9 +1009,11 @@ async function sectionMutants(shipped) {
 	const REGEN_CALL = "req.session.regenerate((err) => (err ? reject(err) : resolve()))";
 	const REREAD = 'db.prepare("SELECT * FROM users WHERE id = ?").get(user.id)';
 	const STAMP_LINE = "\t\tstampLastLogin(current.id);\n";
-	const COMPARE_REFUSAL = "\t\tif (!valid) {\n\t\t\treturn res.status(401).json({ error: \"Invalid credentials\" });\n\t\t}\n";
+	const COMPARE_LINE = "\t\tconst valid = await bcrypt.compare(password, user.password_hash);\n";
 	const CLEANUP = "if (rotating && req.session) req.session.destroy(() => {});";
 	const OUTER_REFUSE = 'refuse(500, "Could not sign in. Please try again.");';
+	const LOGIN_ROW = '\t\tsignIn.record(req, "login", current, `Signed in by ${found.by}`);\n';
+	const ASSIGN = "\t\treq.session.user = {\n";
 	const MUTANTS = [
 		{
 			name: "a handler that does not rotate",
@@ -656,8 +1027,13 @@ async function sectionMutants(shipped) {
 		},
 		{
 			name: "stamped before the session exists",
-			src: code.replace(STAMP_LINE, "").replace(COMPARE_REFUSAL, COMPARE_REFUSAL + "\t\tstampLastLogin(user.id);\n"),
+			src: code.replace(STAMP_LINE, "").replace(COMPARE_LINE, COMPARE_LINE + "\t\tstampLastLogin(user.id);\n"),
 			caughtBy: ["rotateFailureNotStamped", "saveFailureNotStamped"],
+		},
+		{
+			name: "the `login` row written before the session is saved",
+			src: code.includes(LOGIN_ROW) ? code.replace(LOGIN_ROW, "").replace(ASSIGN, LOGIN_ROW + ASSIGN) : code,
+			caughtBy: ["saveFailureWritesNoLoginRow"],
 		},
 		{
 			name: "a failed save not cleaned up",
@@ -701,6 +1077,9 @@ function finish() {
 	await sectionFailedAttempts();
 	await sectionStampCannotBreakLogin();
 	await sectionSetup();
+	await sectionSignInRows();
+	await sectionLookup();
+	await sectionNetwork();
 	sectionSource();
 
 	const shipped = await probe(LOGIN_SRC);

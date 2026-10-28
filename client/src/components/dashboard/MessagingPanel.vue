@@ -64,7 +64,7 @@
       </div>
       <div ref="messagesEl" class="msg-chat-messages">
         <template v-if="store.selectedDriver && store.currentMessages.length > 0">
-          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" @open-photo="openPhoto" />
+          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" :party="store.selectedDriver" @open-photo="openPhoto" />
         </template>
         <EmptyState v-else-if="store.selectedDriver">No messages yet.</EmptyState>
         <EmptyState v-else>Select a conversation from the left to view messages.</EmptyState>
