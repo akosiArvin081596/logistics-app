@@ -164,7 +164,7 @@ test("formatCents prints dollars with commas, a minus for a deduction", ({ eq })
 // copy (it requires nothing), and a copy that drifts is how two fields of one
 // invoice come to be cleaned two ways.
 function liftServerCleaners() {
-	const src = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const src = require("./lib/server-source").serverSource();
 	const fnText = (name) => {
 		const at = src.indexOf(`\nfunction ${name}(`);
 		if (at < 0) throw new Error(`no ${name}() in server.js`);

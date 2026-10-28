@@ -60,7 +60,7 @@ const die = (msg) => { console.error(`FAIL  ${msg}`); process.exit(1); };
 // ---------------------------------------------------------------------------
 // Lifting (same scanner as test-uploads-root-guard.js)
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 function skipString(i) {
 	const q = SRC[i];
 	for (i++; i < SRC.length && SRC[i] !== q; i++) if (SRC[i] === "\\") i++;

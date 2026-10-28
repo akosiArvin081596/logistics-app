@@ -1,8 +1,19 @@
 <template>
   <!-- Personal lines waiting for a correction invoice (R3 v1), Super Admin only:
-       one row per driver and week, as the server groups them, with Create. Hidden
+       one row per driver and week, as the server groups them, with Create. With
+       the receipt's week on the server sends `carried` instead: one row per line
+       waiting for the driver's next weekly invoice, nothing to create. Hidden
        when nothing waits. Every figure is the server's text. -->
-  <div v-if="groups.length" class="personal-corrections" role="region" aria-label="Personal lines waiting for a correction invoice">
+  <div v-if="carried.length" class="personal-corrections personal-carried" role="region" aria-label="Personal lines waiting for the next weekly invoice">
+    <div class="pc-title">Personal lines waiting for the next weekly invoice</div>
+    <p class="pc-note">Each goes on the driver's next weekly invoice with room, oldest first.</p>
+    <ul class="pc-list">
+      <li v-for="c in carried" :key="c.line_id" class="pc-row">
+        <span class="pc-what">{{ c.driver }} · since {{ c.since_label }} · {{ c.amount_text }} · {{ c.reason }}</span>
+      </li>
+    </ul>
+  </div>
+  <div v-else-if="groups.length" class="personal-corrections" role="region" aria-label="Personal lines waiting for a correction invoice">
     <div class="pc-title">Personal lines waiting for a correction invoice</div>
     <p class="pc-note">These weeks had no weekly invoice that could still take the line. Create the week's correction invoice; it opens as a Draft for approval.</p>
     <ul class="pc-list">
@@ -25,14 +36,17 @@ import { useSocketRefresh } from '../../../composables/useSocketRefresh'
 const api = useApi()
 const { show: toast } = useToast()
 const groups = ref([])
+const carried = ref([])
 const busyKey = ref('')
 
 async function load() {
   try {
     const data = await api.get('/api/expenses/personal/waiting-corrections')
     groups.value = Array.isArray(data.groups) ? data.groups : []
+    carried.value = Array.isArray(data.carried) ? data.carried : []
   } catch {
     groups.value = []
+    carried.value = []
   }
 }
 
@@ -78,4 +92,7 @@ useSocketRefresh('invoices:changed', load)
   cursor: pointer;
 }
 .pc-create:disabled { opacity: 0.5; cursor: default; }
+.personal-carried { border-color: #c7d2fe; background: #eef2ff; }
+.personal-carried .pc-title,
+.personal-carried .pc-note { color: #3730a3; }
 </style>

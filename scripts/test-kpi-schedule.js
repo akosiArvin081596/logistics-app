@@ -208,7 +208,7 @@ console.log("\n§8 the schedule in words: Eastern only");
 	t(hits.length === 0, `§8 no Central schedule time in lib/, client/src or docs/manual (found in: ${hits.join(", ") || "none"})`);
 	// server.js and .env.example describe the same schedule; neither adds the
 	// Central hour (other server.js comments name Central for unrelated history).
-	const usCentral = ["server.js", ".env.example"].filter((f) => /US\s+Central/.test(fs.readFileSync(path.join(ROOT, f), "utf8").replace(/\n#\s*/g, " ")));
+	const usCentral = ["server.js", ".env.example"].filter((f) => /US\s+Central/.test((f === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8")).replace(/\n#\s*/g, " ")));
 	t(usCentral.length === 0, `§8 server.js and .env.example name no US Central schedule time (found in: ${usCentral.join(", ") || "none"})`);
 	record(out);
 }

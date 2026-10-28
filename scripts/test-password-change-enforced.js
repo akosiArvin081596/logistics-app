@@ -47,7 +47,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const failures = [];
 const skipped = [];
 let pass = 0;

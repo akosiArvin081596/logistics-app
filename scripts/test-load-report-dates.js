@@ -28,8 +28,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", msg); } };
@@ -127,7 +126,7 @@ const CORPUS = [
 ];
 const probe = (tz) => execFileSync(process.execPath, ["-e", `
 const fs=require("fs");
-const SRC=fs.readFileSync(${JSON.stringify(SERVER)},"utf8");
+const SRC=require(${JSON.stringify(require.resolve("./lib/server-source"))}).serverSource();
 function extract(n){const nd="\\nfunction "+n+"(";const s=SRC.indexOf(nd)+1;let d=0;
 for(let j=SRC.indexOf("{",s);j<SRC.length;j++){if(SRC[j]==="{")d++;else if(SRC[j]==="}"){d--;if(!d)return SRC.slice(s,j+1);}}}
 const M=["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];

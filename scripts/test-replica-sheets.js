@@ -73,9 +73,7 @@ const onDisk = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 (async () => {
 	// ---- §1 coverage -------------------------------------------------------
 	console.log("§1 every call the app makes is implemented");
-	const sources = [path.join(ROOT, "server.js"), ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js")).map((f) => path.join(ROOT, "lib", f))]
-		.filter((f) => !/replica-/.test(path.basename(f)))
-		.map((f) => fs.readFileSync(f, "utf8"))
+	const sources = [require("./lib/server-source").serverSource(), ...fs.readdirSync(path.join(ROOT, "lib")).filter((f) => f.endsWith(".js") && !/replica-/.test(f)).map((f) => fs.readFileSync(path.join(ROOT, "lib", f), "utf8"))]
 		.join("\n");
 	const used = new Set([...sources.matchAll(/\bspreadsheets\.((?:values\.)?[a-zA-Z]+)\(/g)].map((m) => m[1]));
 	const { file: f0 } = workingCopy();

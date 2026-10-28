@@ -54,8 +54,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const alertChannels = require(path.join(__dirname, "..", "lib", "alert-channels.js"));
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];

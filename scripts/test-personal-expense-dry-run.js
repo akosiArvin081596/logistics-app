@@ -15,6 +15,8 @@
  *      lands on it, $800 -> $725 with the $25 share returned
  *   §5 a mark the route would refuse is reported as refused
  *   §6 Part A is skipped once the ledger holds a row
+ *   §7 W12 Part B with PERSONAL_RECEIPT_WEEK_ENABLED on: an Oct 7 receipt marked
+ *      Thu Oct 15 is planned in the week of Oct 3, on W40's Submitted invoice
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-dry-run.js    # exits 1 on failure
@@ -23,7 +25,7 @@
 process.env.TZ = "UTC";
 
 const crypto = require("crypto");
-const { buildPersonalWorld, makeChecker, NOW_MS, OWNER_OP } = require("./lib/personal-world");
+const { buildPersonalWorld, makeChecker, NOW_MS, DRIVER_A, OWNER_OP } = require("./lib/personal-world");
 const { buildDryRunWorld, personalDryRun } = require("./personal-expenses-dry-run");
 const { check, section, finish } = makeChecker();
 
@@ -105,6 +107,24 @@ const find = (changes, figure) => changes.find((c) => c.figure === figure) || nu
 		await w.call("POST", "/api/expenses/5/personal", { body: { amount: 10 } });
 		const r = await personalDryRun(dryWorld(w));
 		check("Part A says why it did not run", /already holds 1 row/.test(r.partA.skipped || ""), true);
+		w.cleanup();
+	}
+
+	section("§7 W12 Part B with the receipt's week on");
+	{
+		const env = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true", PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
+		const w = buildPersonalWorld({ env });
+		w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description)
+			VALUES (20, '2026-10-07T15:00:00.000Z', ?, 'Food', 45.5, '2026-10-07', 'Approved', 'EXAMPLE DINER #3', 'T-1', 7, '2026-10-07 15:00:00', '')`).run(DRIVER_A);
+		const g40 = await w.generate(DRIVER_A, "2026-10-09");
+		w.db.prepare("UPDATE invoices SET status = 'Submitted' WHERE id = ?").run(g40.body.invoice.id);
+		// The dry run reads the flag from the settings it is given, as on the server.
+		const dw = buildDryRunWorld({ db: w.db, sheetData: { values: w.sheet.rows.map((r) => [...r]) }, env, DateImpl: FixedDate });
+		const r = await personalDryRun(dw, { marks: [{ id: 20 }] });
+		const m = (r.partB && r.partB.marks[0]) || { personal: {}, landing: {} };
+		check("an Oct 7 receipt marked Thu Oct 15: the week of 2026-10-03, on the Submitted W40 now, $600 -> $554.50",
+			[m.personal.week, new RegExp(g40.body.invoice.invoice_number).test(m.landing.where || ""), m.landing.totalDueBefore, m.landing.totalDueAfter],
+			["2026-10-03", true, 600, 554.5]);
 		w.cleanup();
 	}
 

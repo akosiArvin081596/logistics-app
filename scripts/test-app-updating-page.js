@@ -56,8 +56,7 @@ const path = require("path");
 const http = require("http");
 
 const ROOT = path.join(__dirname, "..");
-const SERVER = process.env.SERVER_JS || path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const express = require(path.join(ROOT, "node_modules", "express"));
 const rateLimit = require(path.join(ROOT, "node_modules", "express-rate-limit"));
 const { APP_UPDATING_HTML, APP_UPDATING_RETRY_AFTER_S, sendAppUpdating } = require(path.join(ROOT, "lib", "app-updating-page"));

@@ -26,7 +26,7 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const SHIPPED = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let fail = 0;

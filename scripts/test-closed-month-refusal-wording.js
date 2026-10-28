@@ -257,7 +257,7 @@ const files = [
 ];
 for (const abs of files) {
 	const rel = path.relative(ROOT, abs).split(path.sep).join("/");
-	const text = fs.readFileSync(abs, "utf8");
+	const text = rel === "server.js" ? require("./lib/server-source").serverSource() : fs.readFileSync(abs, "utf8");
 	scanned += rel.endsWith(".vue") ? scanVue(rel, text) : scanJs(rel, text);
 	if (rel === "server.js") desynced = literals(text).filter((l) => /\n\s*\/\/ /.test(l.text)).length;
 }

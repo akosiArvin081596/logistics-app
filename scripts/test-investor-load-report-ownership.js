@@ -41,7 +41,7 @@ const { csvRows } = require("../lib/csv");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
 const leasePayoutText = require("../lib/lease-payout-text");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let mutantsCaught = 0;
