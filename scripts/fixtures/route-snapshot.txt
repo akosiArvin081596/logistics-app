@@ -314,55 +314,7 @@ USE / · inline@adbfc3fa9d44 | last
 USE / · inline@cf4b230f13b8 | last
 
 [import]
-setInterval 604800000 · server.js: setInterval(purgeOldAuditRefusals, 7 * 24 * 60 * 60 * 1000);
-setImmediate · server.js: setImmediate(async () => {
-setInterval 604800000 · server.js: setInterval(purgeOldDriverLocations, 7 * 24 * 60 * 60 * 1000);
-setInterval 604800000 · server.js: setInterval(purgeOldRoutemateTelemetry, 7 * 24 * 60 * 60 * 1000);
-setInterval 3600000 · server.js: setInterval(eldFeedTick, ELD_STALE_SWEEP_MS);
-setTimeout 300000 · server.js: setTimeout(eldFeedTick, 5 * 60 * 1000);
-setInterval 86400000 · server.js: if (startsJob("Routemate 24 h error-counter reset")) setInterval(() => { routemateHealth.errorsLast24h = 0; }, 24 * 60 * 60 * 1000);
-setTimeout 300000 · server.js: setTimeout(() => routemateRollupFuelDaily(7), 5 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => routemateRollupFuelDaily(7), 6 * 60 * 60 * 1000);
-setImmediate · server.js: if (startsJob("ELD device-history reconcile (at boot)")) setImmediate(() => {
-setTimeout 360000 · server.js: setTimeout(() => { runEldMilesDailyRollup(); }, 6 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { runEldMilesDailyRollup(); }, 6 * 60 * 60 * 1000);
-setTimeout 540000 · server.js: setTimeout(() => { runEldStateMilesRollup(); }, 9 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { runEldStateMilesRollup(); }, 6 * 60 * 60 * 1000);
-setTimeout 420000 · server.js: setTimeout(() => routemateSyncFaultCodes(), 7 * 60 * 1000);
-setInterval 300000 · server.js: setInterval(routemateSyncFaultCodes, ROUTEMATE_POLL_FAULTS_MS);
-setTimeout 480000 · server.js: setTimeout(() => routemateSyncDvirs(), 8 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(routemateSyncDvirs, 6 * 60 * 60 * 1000);
-setInterval 60000 · server.js: if (startsJob("Routemate live telemetry poll")) setInterval(routemateSyncTelemetry, ROUTEMATE_POLL_LIVE_MS);
-setInterval 86400000 · server.js: if (startsJob("Routemate vehicle sync (daily)")) setInterval(() => { routemateSyncVehicles().catch(() => {}); }, 24 * 60 * 60 * 1000);
-setTimeout 5000 · server.js: if (startsJob("Routemate vehicle sync (at boot)")) setTimeout(() => { routemateSyncVehicles().catch(() => {}); }, 5000);
 setInterval · node_modules/better-sqlite3-session-store
 setInterval · node_modules/express-rate-limit
-setInterval 86400000 · server.js: const timer = setInterval(() => purgeOldLoadCellWrites(), 24 * 60 * 60 * 1000);
-setInterval 900000 · server.js startRateConReissueSweep()
-setInterval 86400000 · server.js: if (startsJob("ScanKit 24 h counter reset")) setInterval(() => { scanKitHealth.errorsLast24h = 0; scanKitHealth.scans24h = { ok: 0, failed: 0 }; }, 24 * 60 * 60 * 1000);
-setTimeout 8000 · server.js: setTimeout(warmEldTravelMemo, 8000);
-setInterval 240000 · server.js: setInterval(warmEldTravelMemo, 4 * 60 * 1000);
-setInterval 900000 · server.js startAlertChannelRetrySweep()
-setInterval 21600000 · server.js: setInterval(expenseDuplicateTick, EXPENSE_DUPLICATE_SWEEP_MS);
-setTimeout 240000 · server.js: setTimeout(expenseDuplicateTick, 4 * 60 * 1000);
-setTimeout 120000 · server.js: const first = setTimeout(personalSweepTick, 2 * 60 * 1000);
-setInterval 900000 · server.js: const every = setInterval(personalSweepTick, 15 * 60 * 1000);
 fs.readdirSync the temp folder · server.js purgeOrphanedDbExports()
-setTimeout 360000 · server.js: setTimeout(sweepVoiceNotesNow, 6 * 60 * 1000);
-setInterval 86400000 · server.js: setInterval(sweepVoiceNotesNow, 24 * 60 * 60 * 1000);
-fs.mkdirSync uploads/expense-receipts · server.js: try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
-setTimeout 300000 · server.js: setTimeout(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 5 * 60 * 1000);
-setInterval 86400000 · server.js: setInterval(() => sweepOrphanedChatAttachments({ apply: CHAT_ORPHAN_SWEEP_ENABLED }), 24 * 60 * 60 * 1000);
-setTimeout 600000 · server.js: setTimeout(() => { sweepLoadEldMiles(); }, 10 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { sweepLoadEldMiles(); }, 6 * 60 * 60 * 1000);
-setTimeout 660000 · server.js: setTimeout(() => { syncLoadRateconMiles(); }, 11 * 60 * 1000);
-setInterval 21600000 · server.js: setInterval(() => { syncLoadRateconMiles(); }, 6 * 60 * 60 * 1000);
-setTimeout 20000 · server.js: if (startsJob("pay-rate history recorder (at boot)")) setTimeout(recordPayRateChanges, 20 * 1000);
-setInterval 60000 · server.js: setInterval(integrityCheckTick, 60 * 1000);
-setTimeout 100000 · server.js: setTimeout(integrityCheckTick, 100 * 1000);
-setTimeout 600000 · server.js: setTimeout(() => {
 setInterval 60000 · server.js: const socketSessionSweepTimer = setInterval(sweepSessionlessSockets, SOCKET_SESSION_SWEEP_MS);
-setTimeout 500 · server.js: if (startsJob("reload notice to open browsers (at boot)")) setTimeout(() => io.emit("reload"), 500);
-listen 0 127.0.0.1 · server.js: server.listen(PORT, BIND_HOST, async () => {
-process.on SIGTERM · server.js: process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on SIGINT · server.js: process.on("SIGINT", () => gracefulShutdown("SIGINT"));
