@@ -6,13 +6,16 @@
  *   §1 mode "auto": every refusal the automatic drafts add, each on a load that
  *      has only that problem: POD_PAGE_UNREADABLE, RATECON_MISSING (none, a BOL
  *      only), RATECON_BY_CONTENT, RECIPIENT_UNCONFIGURED, NO_BILLING_EMAIL,
- *      RECIPIENT_DOMAIN_MISMATCH (another domain, a subdomain, a sheet Email
- *      with no domain), TOTAL_MISMATCH, ADVANCE_LINES (lines flag on and off),
+ *      RECIPIENT_DOMAIN_MISMATCH (another domain, a subdomain), NO_BROKER_EMAIL,
+ *      BROKER_EMAIL_FREEMAIL, TOTAL_MISMATCH, RATECON_TOTAL_UNREAD (a Bison rate
+ *      con with no Total Rate too), ADVANCE_LINES (lines flag on and off),
  *      NO_DELIVERY_DATE; and a clean load, Bison and not, prepared.
  *   §2 mode "auto" limits: no request body, no load facts (no by-content
  *      scan), persist:false, overrides ignored, alternate rate cons read with
  *      the free scan only, geminiUnavailable reported, the POD found under
- *      either spelling of the load ID.
+ *      either spelling of the load ID; RATECON_TOTAL_UNREAD after a Gemini error,
+ *      Gemini down and no Gemini key (the button bills the sheet), while a Bison
+ *      load whose free scan reads the total prepares with no key.
  *   §3 mode "manual" is the button: on every load above it refuses nothing new,
  *      hands getRateConBytes() the body, the load facts and persist:!dryRun,
  *      reads alternates with Gemini, matches the POD's load ID exactly, and a
@@ -20,7 +23,10 @@
  *   §4 render() and record() for an automatic draft: the Gmail draft's fields,
  *      RENDERER_BUSY, and the row and audit line written as auto-imap by the
  *      system actor.
- *   §5 autoRecipientRefusal(), the recipient rule on its own.
+ *   §5 autoRecipientRefusal(), the recipient rule on its own, and the shared
+ *      free-mail list (lib/free-mail-domains.js) the engine reads.
+ *   §6 the automatic job's calls as it makes them: the bare actor, record()'s
+ *      answer, recovery's to/subject/total comparison, the refusal codes.
  *
  * server.js helpers (sheet parsing, the override validator, latestDraftNotes,
  * logAudit, …) are lifted from its text with scripts/lib/server-lift.js;
@@ -72,7 +78,7 @@ function pdfWith(contentStream) {
 }
 // The free scan reads the block only with a numeric Order # (its anchor).
 const rateCon = ({ order = "1001001", total = "$1,500.00", docs = "" } = {}) => pdfWith(
-	`BT (Billing Information: Order #: ${order} PO #: PO-77 Move #: 5501) Tj (Total Rate: ${total}) Tj ` +
+	`BT (Billing Information: Order #: ${order} PO #: PO-77 Move #: 5501) Tj ${total ? `(Total Rate: ${total}) Tj ` : ""}` +
 	(docs ? `(Email the signed POD and all billing documents to ${docs}) Tj ` : "") + "ET",
 );
 // No "Order #" anchor: the free scan reads only the documents email, so the
@@ -108,6 +114,7 @@ const LOADS = [
 	load("LD-TEST-0022", { email: "Ops.Desk@Yahoo.co.uk" }),
 	load("LD-TEST-0023", { email: "desk@proton.me" }),
 	load("LD-TEST-0024"),
+	load("LD-TEST-0025", { email: "qa-desk@bisontransport.com", pay: "2400" }),
 ];
 const SHEET = [HEADERS, ...LOADS.map((l) => [l.id, l.status, l.email, l.contact, "QA Driver", l.trailer, l.done, l.pay])];
 const cand = (buffer, source) => ({ buffer, source, label: source, fileName: "rc.pdf" });
@@ -135,6 +142,9 @@ const RATECONS = {
 	"LD-TEST-0023": [cand(rateCon({ docs: "billing@proton.me" }), "documents")],
 	// The documents email on the broker's domain, no billing block: the total is Gemini's to read.
 	"LD-TEST-0024": [cand(plainRateCon(BILLING), "documents")],
+	// A Bison billing block with its Order # and no Total Rate: the free scan
+	// stops at the Order #, so Gemini is never asked for the total.
+	"LD-TEST-0025": [cand(rateCon({ order: "7101853", total: "" }), "drive")],
 };
 // POD rows: [load_id as stored, file name]; the 0011 page and 0014's spelling are the cases.
 const PODS = [
@@ -194,7 +204,8 @@ function world({ env = {}, gemini = null, rendererBusy = false, linesTable = fal
 			seen.gemini++;
 			if (gemini === "down") throw Object.assign(new Error("made-up outage"), { kind: "unavailable", status: 503 });
 			if (gemini === "transient") throw Object.assign(new Error("made-up overload"), { kind: "transient", status: 503 });
-			return null;
+			// An answer that found nothing, in runRateConGemini()'s own shape.
+			return { "Total Rate": null, Rate: null, "Order Number": null, "PO Number": null, "Documents Email": null };
 		},
 		renderHtmlToPdf: async () => {
 			seen.renders++;
@@ -303,6 +314,14 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 			const m = await world({ gemini: gem }).manual("LD-TEST-0024");
 			eq([code(m), m.ctx.totalSource, m.ctx.total], ["ok", "sheet", "$1,500.00"], `§2 …the button still bills Job Tracking's Payment (${what})`);
 		}
+		const bw = world();
+		eq([code(await bw.auto("LD-TEST-0025")), bw.seen.gemini], ["RATECON_TOTAL_UNREAD", 0],
+			"§2 a Bison rate con with its Order # and no Total Rate: RATECON_TOTAL_UNREAD, Gemini never asked");
+		const bm = await world().manual("LD-TEST-0025", { orderNumber: "7101853", poNumber: "" });
+		eq([code(bm), bm.ctx.totalSource, bm.ctx.total], ["ok", "sheet", "$2,400.00"], "§2 …the button bills that load's Job Tracking Payment, as before");
+		const keyless = await world({ gemini: "nokey" }).auto("LD-TEST-0002");
+		eq([code(keyless), keyless.ok && keyless.ctx.totalSource, keyless.ok && keyless.ctx.total], ["ok", "ratecon", "$2,400.00"],
+			"§2 a Bison load with no Gemini key, its total read by the free scan: prepares");
 
 		const spell = await world().auto("LD-TEST-0014");
 		eq([code(spell), spell.ok && spell.ctx.podAttachments.map((a) => a.filename)], ["ok", ["LD-TEST-0014_POD.pdf"]],
@@ -402,11 +421,12 @@ const code = (r) => (r.ok ? "ok" : r.code || `${r.http}`);
 		eq(rule({ isBison: false, recipientEmail: "billing@example-broker.test", documentsEmail: "billing@example-broker.test", brokerEmail: "ops@sub.example-broker.test" }), "RECIPIENT_DOMAIN_MISMATCH", "§5 the broker on a subdomain");
 		eq(rule({ isBison: false, recipientEmail: BILLING, documentsEmail: BILLING, brokerEmail: "" }), "RECIPIENT_DOMAIN_MISMATCH", "§5 no broker Email on the sheet");
 
-		const free = engineModule.isFreeMailDomain;
+		const free = require(path.join(ROOT, "lib", "free-mail-domains.js")).isFreeMailDomain;
 		const FREE = ["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com", "aol.com",
 			"icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com", "gmx.com", "mail.com", "zoho.com", "yandex.com",
 			"yahoo.co.uk", "hotmail.fr", "gmx.de", "mail.yahoo.com", "outlook.com.au"];
-		eq(FREE.filter((d) => !free(d)), [], "§5 isFreeMailDomain(): every named provider, its country domains and its subdomains");
+		eq(FREE.filter((d) => !free(d)), [], "§5 the shared list: every named provider, its country domains and its subdomains");
+		ok(!/\bFREE_MAIL_(DOMAINS|PROVIDERS)\b/.test(fs.readFileSync(ENGINE, "utf8")), "§5 the engine keeps no list of its own");
 		const OWN = ["example-broker.test", "bisontransport.com", "acme.me", "mail.acme-freight.example.test", "livestock-freight.example.test", "gmailer.example.test", ""];
 		eq(OWN.filter((d) => free(d)), [], "§5 …and not a company's own domain that merely contains a provider's letters");
 	}
