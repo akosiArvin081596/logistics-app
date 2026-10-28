@@ -33,11 +33,11 @@ The system has three storage backends serving different needs.
 
 ### Google Sheets (system of record for loads)
 
-The "Job Tracking" tab in spreadsheet `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` is the canonical source for every load that ever moved through LogisX. Columns include Load ID, Driver, Status, Pickup / Drop-off Appointment, Payment, Owner ID, and many more — the exact schema is determined by header row 1 and discovered by regex at query time, not by a fixed type definition.
+The "Job Tracking" tab in the spreadsheet `SPREADSHEET_ID` names (production's own process falls back to the production sheet in `lib/sheet-id.js`) is the canonical source for every load that ever moved through LogisX. Columns include Load ID, Driver, Status, Pickup / Drop-off Appointment, Payment, Owner ID, and many more — the exact schema is determined by header row 1 and discovered by regex at query time, not by a fixed type definition.
 
 Why Sheets and not a database? History: clients started in Sheets and want to keep the same interface. n8n also reads/writes the sheet directly when ingesting broker emails, so the sheet is the integration point. Sheets imposes a 300 req/min quota, which is the reason for the 60-second in-memory read cache.
 
-A separate archive spreadsheet (`1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI`) holds historical data accessed only via `/archive`.
+A separate archive spreadsheet (`ARCHIVE_SPREADSHEET_ID`; production's own process falls back to the production archive in `lib/sheet-id.js`, and anything else without it has no archive) holds historical data accessed only via `/archive`.
 
 ### SQLite (`app.db`, WAL mode)
 

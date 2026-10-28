@@ -172,7 +172,7 @@ Updated investor API to include all expense sources in totalExpenses:
 | **Branch** | `development` |
 | **Port** | 3003 |
 | **PM2 process** | logisx-staging (id: 8) |
-| **Google Sheet** | logisx-staging (ID: `1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8`) |
+| **Google Sheet** | logisx-staging (staging's `SPREADSHEET_ID`) |
 | **SSL** | Let's Encrypt via Certbot |
 
 ### Setup Steps
@@ -365,7 +365,7 @@ This fixes the driver app not showing pickup/drop-off route details when sheet u
 - **Branch**: `development`
 - **VPS path**: `/var/www/logisx-staging`
 - **PM2**: logisx-staging (id: 8, port 3003)
-- **Google Sheet**: logisx-staging (`1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8`)
+- **Google Sheet**: logisx-staging (staging's `SPREADSHEET_ID`)
 
 ### Deploy Commands
 ```bash

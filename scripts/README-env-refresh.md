@@ -120,7 +120,7 @@ Measured 2026-08-08:
 | | Local | Staging (`logisx-staging`) | Production (`logistics-app`) |
 |---|---|---|---|
 | git | `main`, current | **`develop` @ `e3efd78` (2026-07-24), 89+ commits behind** | `main` @ `83ab986` |
-| `SPREADSHEET_ID` | `156Y5-…` (LOCAL) | `1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y` | **unset → hardcoded production default** |
+| `SPREADSHEET_ID` | `156Y5-…` (LOCAL) | staging's own sheet | **unset → hardcoded production default** |
 | `app.db` | 313 MB | **639 KB**, last written 2026-07-24 | 313 MB + 93 MB WAL |
 | `routemate_telemetry` | 933k rows | **0** | 933,893 rows |
 | feature flags | most off | **none set** | all 9 on |
@@ -534,8 +534,8 @@ Recommended non-production `.env` (staging shown; local is the same with the LOC
 
 ```
 PORT=3003
-SPREADSHEET_ID=1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y
-ARCHIVE_SPREADSHEET_ID=1IG3yTknz91EesmyMog-d63UT5LkmpBYxHFEWSuDlgn8
+SPREADSHEET_ID=<staging's own sheet>
+ARCHIVE_SPREADSHEET_ID=<staging's archive copy; unset, the archive is off>
 NODE_ENV=development        # required, or every auth smoke test 401s
 SESSION_SECRET=<anything non-production>
 # deliberately absent: GMAIL_USER, GMAIL_APP_PASSWORD, N8N_WEBHOOK_SECRET,
