@@ -62,9 +62,11 @@ function inlineSteps(routeText, engineText) {
 	return route.concat(engine.filter((l, i) => !inSteps(i))).join("\n");
 }
 
+// Its relative requires resolve from lib/, where the engine lives.
 function loadEngine(engineText, deps) {
 	const mod = { exports: {} };
-	new Function("module", "exports", "require", engineText)(mod, mod.exports, require);
+	const engineRequire = require("module").createRequire(path.join(__dirname, "..", "..", ENGINE_FILE));
+	new Function("module", "exports", "require", engineText)(mod, mod.exports, engineRequire);
 	return mod.exports.create(deps);
 }
 
