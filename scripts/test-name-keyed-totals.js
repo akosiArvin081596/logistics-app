@@ -487,6 +487,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		payoutBasisContext: () => null,
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
 		// The Needs Confirmation pickup codes (their own runner covers them): inert here,
 		// as with their flag off.
 		annotateDashboardPickupReview: () => 0,
