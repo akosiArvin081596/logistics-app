@@ -163,6 +163,14 @@ section("2 the scanner");
 	ok(rc.pathsOverlap("/fx", "/fx/alpha", true) && rc.pathsOverlap("/", "/fx/alpha", true), "a layer matches its own path and everything below it");
 	ok(!rc.pathsOverlap("/fx/al", "/fx/alpha", true) && !rc.pathsOverlap("/fx", "/fx/alpha"), "a layer matches whole segments; a route matches its own length only");
 	eq(rc.pathKey(' [ "/fx/a",\n "/fx/b" ] '), '["/fx/a", "/fx/b"]', "an array path keys as written, whitespace folded");
+	eq([
+		String.raw`'/fx/it\'s'`, String.raw`'/fx/say\"hi'`, String.raw`"/fx/back\\slash"`, String.raw`'/fx/\x41B\u{43}\t'`,
+		String.raw`'/fx/^$.*+?()[]{}|\q'`, String.raw`"/fx/\0"`,
+	].map(rc.pathKey), ["/fx/it's", '/fx/say"hi', "/fx/back\\slash", "/fx/ABC\t", "/fx/^$.*+?()[]{}|q", "/fx/\0"],
+	"quoted paths decode every escape (backslash, quotes, \\x, \\u, \\u{}) and keep regex specials as text");
+	eq([String.raw`'/fx/\1'`, String.raw`'/fx/\x4'`].map(rc.pathKey), [String.raw`'/fx/\1'`, String.raw`'/fx/\x4'`],
+		"an escape it can't read leaves the argument as written instead of guessing");
+	eq(rc.pathKey(String.raw`[ "/fx/a\\b", '/fx/c"d' ]`), String.raw`["/fx/a\\b", "/fx/c\"d"]`, "an array of such paths keys as JSON-style text");
 	eq(rc.resolvePaths("`${BASE}/x`", { consts: (n) => (n === "BASE" ? "/fx" : null) }), ["/fx/x"], "a template path resolves through a const");
 }
 
@@ -274,6 +282,8 @@ section("4 the move tool on made-up trees");
 	const readLib = (rel) => (rel === "lib/fx-mounted.js" ? libText : null);
 	ok(/GET \/fx\/alpha and GET `\$\{BASE\}\/:any`/.test(refused(move(lib, [target("fx-one")], { readLib }))), "a route moved past a lib-mounted route it overlaps is refused");
 	ok(/can match the same request/.test(refused(move(lib, [target("fx-one")], { readLib: () => null }))), "an unreadable lib mount is taken to overlap everything");
+	const libByName = SERVER.replace("function fxHelper()", 'const fx$lib = require("./lib/fx-mounted");\nfx$lib.mount(app);\n\nfunction fxHelper()');
+	ok(/GET \/fx\/alpha and GET `\$\{BASE\}\/:any`/.test(refused(move(libByName, [target("fx-one")], { readLib }))), "a lib mounted through a const whose name holds a $ is found by its require line");
 
 	const layer = (line) => SERVER.replace("function fxHelper()", `${line}\n\nfunction fxHelper()`);
 	const runsFirst = /can match the same request; this move would change which runs first/;

@@ -224,9 +224,39 @@ function lineOfOffset(scan, off) {
 }
 
 // --------------------------------------------------------- path expressions
+const SIMPLE_ESCAPES = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v" };
+
+// A quoted literal's value from the text between its quotes, decoding
+// JavaScript's escapes one by one (never by re-escaping into another format);
+// null for an escape it can't read (a legacy octal, a bad \x or \u).
+function unescapeLiteral(body) {
+	let out = "";
+	for (let i = 0; i < body.length; i++) {
+		if (body[i] !== "\\") { out += body[i]; continue; }
+		const e = body[++i];
+		if (e === undefined) return null;
+		if (e === "x" || (e === "u" && body[i + 1] !== "{")) {
+			const n = e === "x" ? 2 : 4;
+			const hex = body.slice(i + 1, i + 1 + n);
+			if (hex.length !== n || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+			out += String.fromCharCode(parseInt(hex, 16));
+			i += n;
+		} else if (e === "u") {
+			const close = body.indexOf("}", i);
+			const hex = close === -1 ? "" : body.slice(i + 2, close);
+			if (!/^[0-9a-fA-F]{1,6}$/.test(hex) || parseInt(hex, 16) > 0x10ffff) return null;
+			out += String.fromCodePoint(parseInt(hex, 16));
+			i = close;
+		} else if (e === "0" && !/[0-9]/.test(body[i + 1] || "")) out += "\0";
+		else if (/[0-9]/.test(e)) return null;
+		else if (e === "\n") continue;
+		else out += Object.prototype.hasOwnProperty.call(SIMPLE_ESCAPES, e) ? SIMPLE_ESCAPES[e] : e;
+	}
+	return out;
+}
+
 function stringLiteral(t) {
-	if (/^"(?:[^"\\\n]|\\.)*"$/.test(t)) return JSON.parse(t);
-	if (/^'(?:[^'\\\n]|\\.)*'$/.test(t)) return JSON.parse(`"${t.slice(1, -1).replace(/\\'/g, "'").replace(/"/g, '\\"')}"`);
+	if (/^"(?:[^"\\\n]|\\.)*"$/.test(t) || /^'(?:[^'\\\n]|\\.)*'$/.test(t)) return unescapeLiteral(t.slice(1, -1));
 	if (/^`[^`\\$]*`$/.test(t)) return t.slice(1, -1);
 	return null;
 }

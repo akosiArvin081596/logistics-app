@@ -70,9 +70,15 @@ function planMove({ serverSrc, modules = {}, spec = {}, targets, readLib = () =>
 		if (!libConsts.has(rel)) { const t = readLib(rel); libConsts.set(rel, t === null ? null : rc.stringConsts(t)); }
 		return libConsts.get(rel);
 	};
+	// The lib/ file behind `const <name> = require("./lib/…")`, found by plain
+	// text so no name is ever read as a pattern.
 	const requireOf = (name) => {
-		const m = new RegExp(`^const ${name.replace(/\$/g, "\\$")} = require\\("(\\./lib/[^"]+)"\\)`, "m").exec(serverSrc);
-		return m ? libRel(m[1]) : null;
+		const head = `const ${name} = require("./lib/`;
+		const line = lines.find((l) => l.startsWith(head));
+		if (!line) return null;
+		const end = line.indexOf('")', head.length);
+		const rest = end === -1 ? "" : line.slice(head.length, end);
+		return rest && !rest.includes('"') ? libRel(`./lib/${rest}`) : null;
 	};
 	const member = (obj, prop) => {
 		const rel = requireOf(obj);
