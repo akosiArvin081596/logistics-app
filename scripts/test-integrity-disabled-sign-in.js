@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 /**
  * Check 11 of the daily integrity check (lib/integrity-check.js
- * disabledAccountSignIns()): an account whose last sign-in is later than its
- * disable is reported once. Only code that ignores the disable lets a disabled
- * account sign in, so a finding means such code ran (a rollback). Report only.
+ * disabledAccountSignIns()): a disabled account whose last sign-in is later than
+ * its disable is reported by the first run after that sign-in. Only code that
+ * ignores the disable lets a disabled account sign in, so a finding means such
+ * code ran (a rollback). Report only.
  *
  * WHAT IS ASSERTED:
  *   §1 the check: named, a disabled account signed in after its disable; not
  *      named, one signed in before it, one never signed in, an enabled one
  *   §2 the email and the log line name the account by id and role, never by
  *      username, with both instants on the business clock
- *   §3 once: a recorded run names it once (integrity_check_disabled_sign_ins,
- *      created when the first is named); the next run counts it in one note; a
- *      disable after a re-enable is a new finding; the print run writes nothing
+ *   §3 once per sign-in: the next recorded run does not name it again; a later
+ *      sign-in is named again; a run whose email failed is repeated and names
+ *      it; the lib writes no table of its own for it
  *   §4 a users table with no disabled_at column: nothing named, nothing said,
- *      and a clean run's log line is the same as before the check existed
+ *      and a clean run's log line does not mention the check
  *
- * Hermetic: in-memory SQLite, made-up accounts.
+ * Hermetic: in-memory SQLite, made-up accounts and one made-up load.
  *   node scripts/test-integrity-disabled-sign-in.js    # exits 1 on failure
  */
 "use strict";
@@ -48,6 +49,10 @@ const periodDef = SRC.match(/\nconst EXPENSE_PERIOD_EXPR =\s*("(?:[^"\\]|\\.)*")
 if (!periodDef) { console.error("FAILED: EXPENSE_PERIOD_EXPR not found in server.js"); process.exit(1); }
 const EXPENSE_PERIOD_EXPR = JSON.parse(periodDef[1]);
 const ADMIN = "admin@example.test";
+const JT = Object.freeze({
+	headers: ["Load ID", "Pickup Appointment", "Assigned Date"],
+	data: [{ _rowIndex: 2, "Load ID": "QA-LOAD-1", "Pickup Appointment": "10/20/2026 8:00 AM", "Assigned Date": "10/19/2026 9:00:00" }],
+});
 
 function makeDb({ disableColumns = true } = {}) {
 	const db = new Database(":memory:");
@@ -88,17 +93,18 @@ async function run(db, { now = "2026-10-22T12:00:30Z", sendEmail = mailSpy(), wr
 	const log = quietLog();
 	const result = await ic.runIntegrityCheck({
 		db, now: new Date(now), write, sendEmail, to: ADMIN, log,
-		readJobTracking: async () => ({ headers: ["Load ID", "Assigned Date"], data: [] }),
+		readJobTracking: async () => JT,
 		expensePeriodExpr: EXPENSE_PERIOD_EXPR,
 		appZone: "America/New_York",
 	});
 	return { result, log, sendEmail };
 }
-const tableExists = (db) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(ic.DISABLED_SIGN_INS_TABLE);
+const tables = (db) => db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name);
+const named = (r) => ((r.result.report || {}).disabledSignIns || { accounts: [] }).accounts.map((a) => a.id);
 
 (async () => {
-	const present = typeof ic.disabledAccountSignIns === "function" && typeof ic.DISABLED_SIGN_INS_TABLE === "string";
-	ok("§1 disabledAccountSignIns() and DISABLED_SIGN_INS_TABLE are exported", present);
+	const present = typeof ic.disabledAccountSignIns === "function";
+	ok("§1 disabledAccountSignIns() is exported", present);
 	if (!present) return;
 
 	console.log("§1 the check");
@@ -109,6 +115,9 @@ const tableExists = (db) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type
 			JSON.stringify(r.accounts.map((a) => [a.id, a.role, a.disabledAt, a.lastLoginAt])) ===
 				JSON.stringify([[7, "Super Admin", "2026-10-20T14:00:00.000Z", "2026-10-21T16:30:00.000Z"]]), r.accounts);
 		ok("§1 not named: signed in before its disable, never signed in, or enabled", !r.accounts.some((a) => [8, 9, 20].includes(a.id)));
+		ok("§1 a sign-in no later than `since` is not named again",
+			ic.disabledAccountSignIns(db, { since: "2026-10-21T16:30:00.000Z" }).accounts.length === 0 &&
+			ic.disabledAccountSignIns(db, { since: "2026-10-21T16:29:59.999Z" }).accounts.length === 1);
 	}
 
 	console.log("§2 the email and the log line");
@@ -126,33 +135,34 @@ const tableExists = (db) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type
 		ok("§2 the log line names the account by id", /disabled account signed in after its disable: account #7/.test(line), line);
 	}
 
-	console.log("§3 once");
+	console.log("§3 once per sign-in");
 	{
 		const db = makeDb();
-		ok("§3 no table before the first finding", !tableExists(db));
-		await run(db);
-		ok("§3 the recorded run created the table and named the account once",
-			tableExists(db) && db.prepare(`SELECT COUNT(*) AS n FROM ${ic.DISABLED_SIGN_INS_TABLE}`).get().n === 1);
+		const before = tables(db);
+		const first = await run(db);
+		ok("§3 the first run names it", JSON.stringify(named(first)) === JSON.stringify([7]), named(first));
+		ok("§3 the lib writes no table of its own for this check",
+			tables(db).filter((t) => !before.includes(t)).every((t) => /^integrity_check_(loads|receipts|invoiced_payments|reissue_gave_up|invoice_rates)$/.test(t)), tables(db));
 		const second = await run(db, { now: "2026-10-23T12:00:30Z" });
-		const text = second.result.mail ? second.result.mail.text : "";
-		ok("§3 the next run does not name it again", !/Account #7/.test(text) && !(second.result.report.disabledSignIns || { accounts: [1] }).accounts.length, text);
-		ok("§3 ...and counts it as reported earlier", (second.result.report.disabledSignIns || {}).reportedOpen === 1, second.result.report.disabledSignIns);
-		db.prepare("UPDATE users SET disabled_at = ?, last_login_at = ? WHERE id = 7").run("2026-10-22T15:00:00.000Z", "2026-10-22T18:00:00.000Z");
+		ok("§3 the next recorded run does not name it again", named(second).length === 0 && !/Account #7/.test(second.result.mail ? second.result.mail.text : ""), named(second));
+		db.prepare("UPDATE users SET last_login_at = ? WHERE id = 7").run("2026-10-23T18:00:00.000Z");
 		const third = await run(db, { now: "2026-10-24T12:00:30Z" });
-		ok("§3 a later disable that is signed into again is a new finding",
-			/Account #7/.test(third.result.mail ? third.result.mail.text : ""), third.result.report.disabledSignIns);
-		const failedSend = await run(makeDb(), { sendEmail: mailSpy(false) });
-		ok("§3 a failed send records nothing", failedSend.result.ok === false);
-		const printDb = makeDb();
-		await run(printDb, { write: false });
-		ok("§3 the print run writes nothing", !tableExists(printDb));
+		ok("§3 a later sign-in is named again", JSON.stringify(named(third)) === JSON.stringify([7]), named(third));
+
+		const retryDb = makeDb();
+		await run(retryDb);
+		retryDb.prepare("UPDATE users SET last_login_at = ? WHERE id = 7").run("2026-10-22T18:00:00.000Z");
+		const failed = await run(retryDb, { now: "2026-10-23T12:00:30Z", sendEmail: mailSpy(false) });
+		const retried = await run(retryDb, { now: "2026-10-23T12:15:30Z" });
+		ok("§3 a run whose email failed is not recorded, and its retry names the sign-in",
+			failed.result.ok === false && JSON.stringify(named(retried)) === JSON.stringify([7]) && retried.sendEmail.calls.length === 1, named(retried));
 	}
 
 	console.log("§4 an older users table");
 	{
 		const db = makeDb({ disableColumns: false });
 		const r = ic.disabledAccountSignIns(db);
-		ok("§4 no disabled_at column: nothing named", r.accounts.length === 0 && r.reportedOpen === 0, r);
+		ok("§4 no disabled_at column: nothing named", r.accounts.length === 0, r);
 		const clean = await run(db);
 		const line = clean.log.lines.join("\n");
 		ok("§4 ...nothing said, in the email or the log line", clean.sendEmail.calls.length === 0 && !/disabled account/i.test(line), line);
