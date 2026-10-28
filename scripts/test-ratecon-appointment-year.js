@@ -231,7 +231,7 @@ ok(`selfTest(): ${st.passed}/${st.total}`, st.failed === 0 && st.total > 0);
 
 // ------------------------------------------------------------------
 console.log("\n§10 both ingestion routes anchor every pass");
-const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const src = require("./lib/server-source").serverSource();
 const calls = src.match(/rateconNormalize\.normalizeRateConFields\(([^()]|\([^()]*\))*\)/g) || [];
 ok("server.js normalizes in four places", calls.length === 4, `found ${calls.length}`);
 ok("every normalize call passes normalizeOpts", calls.length > 0 && calls.every((c) => /,\s*normalizeOpts\)$/.test(c)), calls.join(" | "));

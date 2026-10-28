@@ -61,7 +61,7 @@ const Module = require("module");
 const { closure } = require("./lib/server-lift");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const rootRequire = Module.createRequire(path.join(ROOT, "server.js"));
 let Database;
 try {

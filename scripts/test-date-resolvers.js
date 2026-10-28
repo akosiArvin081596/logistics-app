@@ -54,8 +54,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // The TZ-invariance children require() this file, which re-runs everything. They
 // only need `probe`, so keep their stdout clean for the parent's comparison.

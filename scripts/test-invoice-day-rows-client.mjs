@@ -79,7 +79,7 @@ if (lib) {
 // §2
 let server = null
 try {
-  const SRC = read('server.js')
+  const SRC = require('./lib/server-source.js').serverSource()
   const lift = closure(SRC, { roots: ['invoiceCountRows'] })
   server = new Function(`"use strict";\n${lift.text}\nreturn invoiceCountRows;`)()
 } catch (e) {

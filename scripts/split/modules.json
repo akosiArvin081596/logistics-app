@@ -1,0 +1,454 @@
+{
+	"admin-data": {
+		"about": "Admin data routes: the audit trail, sheet scans and fixes, the archive, debug views.",
+		"moved": false,
+		"routes": [
+			"GET /api/admin/audit-trail",
+			"PUT /api/admin/fix-driver-name",
+			"GET /api/admin/scan-duplicates",
+			"GET /api/admin/scan-driver-mismatches",
+			"GET /api/admin/scan-orphans",
+			"GET /api/archive",
+			"GET /api/archive/tabs",
+			"POST /api/admin/remove-rows",
+			"GET /api/admin/scan-stale-locations",
+			"POST /api/admin/fix-stale-locations",
+			"POST /api/admin/backfill-road-distances",
+			"GET /api/debug/driver-view/:driverName",
+			"GET /api/debug/driver-empty/:driverName",
+			"GET /api/debug/sample-row",
+			"GET /api/debug/driver-loads/:driverName",
+			"GET /api/debug/user/:username"
+		]
+	},
+	"applications": {
+		"about": "Driver job application routes.",
+		"moved": false,
+		"routes": [
+			"GET /api/applications",
+			"DELETE /api/applications/:id",
+			"POST /api/applications/:id/restore",
+			"GET /api/applications/:id",
+			"GET /api/applications/:id/sensitive",
+			"PUT /api/applications/:id/status",
+			"GET /api/applications/:id/pdf"
+		]
+	},
+	"auth": {
+		"about": "Auth routes: first-run setup, login, logout, session, password change.",
+		"moved": false,
+		"routes": [
+			"GET /api/auth/setup-check",
+			"POST /api/auth/setup",
+			"POST /api/auth/login",
+			"POST /api/auth/logout",
+			"GET /api/auth/session",
+			"POST /api/auth/change-password"
+		]
+	},
+	"broker-invoices": {
+		"about": "Broker invoice routes: drafts, preview, invoice lines.",
+		"moved": false,
+		"routes": [
+			"POST [\"/api/loads/:loadId/draft-invoice\", \"/api/loads/:loadId/draft-bison-invoice\"]",
+			"GET /api/loads/:loadId/invoice-draft",
+			"GET /api/loads/:loadId/invoice-lines",
+			"POST /api/loads/:loadId/invoice-lines",
+			"POST /api/loads/:loadId/invoice-lines/:id/void"
+		]
+	},
+	"db-admin": {
+		"about": "Database admin routes: download, tables, query.",
+		"moved": false,
+		"routes": [
+			"ALL /api/db/download",
+			"POST /api/db/download",
+			"GET /api/db/tables",
+			"GET /api/db/query/:table"
+		]
+	},
+	"dispatch": {
+		"about": "Dispatch routes: dispatch, load delete and status, the dashboard, load detail.",
+		"moved": false,
+		"routes": [
+			"POST /api/dispatch",
+			"POST /api/dispatch/reassign",
+			"POST /api/dispatch/cancel",
+			"DELETE /api/loads/:loadId",
+			"GET /api/admin/deleted-loads",
+			"POST /api/driver/respond",
+			"GET /api/dashboard",
+			"PUT /api/loads/:loadId/status-override",
+			"GET /api/loads/:loadId/status-history",
+			"GET /api/loads/completed/export",
+			"GET /api/load/:loadId",
+			"PUT /api/load/:loadId"
+		]
+	},
+	"documents": {
+		"about": "Document routes: load documents and legal documents.",
+		"moved": false,
+		"routes": [
+			"POST /api/documents/scan",
+			"GET /api/documents/:loadId",
+			"DELETE /api/documents/:id",
+			"GET /api/legal-documents",
+			"POST /api/legal-documents/upload",
+			"PATCH /api/legal-documents/:id/visibility",
+			"DELETE /api/legal-documents/:id",
+			"POST /api/documents/upload"
+		]
+	},
+	"driver-app": {
+		"about": "Driver app routes: position, the driver's view, files, status, location.",
+		"moved": false,
+		"routes": [
+			"GET [\"/api/driver/position\", \"/api/driver/me/position\"]",
+			"GET /api/driver/:driverName",
+			"GET /api/driver/me/identity-file/:fileType",
+			"GET /api/driver/me/truck-photo",
+			"GET /api/driver/shared-documents/:id/download",
+			"GET /api/driver/truck-documents/:id/view",
+			"PUT /api/driver/status",
+			"POST /api/location"
+		]
+	},
+	"drivers": {
+		"about": "Driver directory routes: the directory, availability, profile pictures.",
+		"moved": false,
+		"routes": [
+			"GET /api/drivers-directory",
+			"POST /api/drivers-directory",
+			"PUT /api/drivers-directory/:id",
+			"GET /api/drivers-directory/:id/documents",
+			"DELETE /api/drivers-directory/:id",
+			"GET /api/drivers-directory/:id/availability",
+			"POST /api/drivers-directory/:id/availability",
+			"PUT /api/driver-availability/:id",
+			"POST /api/driver-availability/:id/cancel",
+			"GET /api/driver/me/availability",
+			"GET /api/driver-availability",
+			"POST /api/drivers-directory/:id/profile-picture"
+		]
+	},
+	"eld": {
+		"about": "ELD routes: Routemate, Linxup, ScanKit, live locations, haul.",
+		"moved": false,
+		"routes": [
+			"ALL /api/admin/routemate/sync-now",
+			"POST /api/admin/routemate/sync-now",
+			"GET /api/routemate/health",
+			"POST /api/eld/linxup/webhook",
+			"GET /api/eld/linxup/health",
+			"GET /api/scankit/health",
+			"GET /api/routemate/vehicles",
+			"GET /api/routemate/vehicles/unlinked",
+			"POST /api/trucks/:truckId/link-routemate",
+			"DELETE /api/trucks/:truckId/link-routemate",
+			"GET /api/admin/fleet-health",
+			"GET /api/routemate/fuel/summary",
+			"GET /api/routemate/fault-codes",
+			"GET /api/routemate/fault-codes/summary",
+			"POST /api/routemate/fault-codes/:id/ack",
+			"GET /api/locations/latest",
+			"GET /api/locations/trail",
+			"GET /api/loads/:loadId/haul"
+		]
+	},
+	"expenses": {
+		"about": "Expense routes: expenses, OCR, receipts, analytics.",
+		"moved": false,
+		"routes": [
+			"POST /api/expenses",
+			"GET /api/expenses/bulk-draft",
+			"PUT /api/expenses/bulk-draft",
+			"DELETE /api/expenses/bulk-draft",
+			"POST /api/expenses/ocr",
+			"POST /api/expenses/:id/extract-details",
+			"GET /api/expenses/:id/receipt-thumbnail",
+			"GET /api/expenses/all",
+			"GET /api/expenses/receipts-download",
+			"PUT /api/expenses/:id/status",
+			"PATCH /api/expenses/:id/location",
+			"PATCH /api/expenses/:id/vendor",
+			"PUT /api/expenses/bulk-status",
+			"GET /api/expenses/fuel-analytics",
+			"GET /api/expenses/analytics",
+			"POST /api/expenses/ai/query"
+		]
+	},
+	"financials": {
+		"about": "Financials routes: the financials report, maintenance fund, compliance fees, mileage, IFTA.",
+		"moved": false,
+		"routes": [
+			"GET /api/financials/report",
+			"GET /api/financials/report.csv",
+			"GET /api/financials/state-miles",
+			"GET /api/financials/settings",
+			"PUT /api/financials/settings",
+			"GET /api/financials",
+			"GET /api/maintenance-fund",
+			"POST /api/maintenance-fund",
+			"GET /api/compliance/fees",
+			"POST /api/compliance/fees",
+			"PUT /api/compliance/fees/:id",
+			"GET /api/analytics/mileage",
+			"GET /api/analytics/mileage/detail",
+			"GET /api/compliance/ifta",
+			"GET /api/compliance/ifta/state-detail"
+		]
+	},
+	"fleet": {
+		"about": "Fleet routes: trucks, trailers, assignments.",
+		"moved": false,
+		"routes": [
+			"GET /api/trucks",
+			"GET /api/truck-assignments",
+			"POST /api/trucks",
+			"PUT /api/trucks/:id",
+			"DELETE /api/trucks/:id",
+			"GET /api/trailers",
+			"POST /api/trailers",
+			"PUT /api/trailers/:id",
+			"DELETE /api/trailers/:id"
+		]
+	},
+	"fuel": {
+		"about": "Fuel routes: fuel events, gallons recovery, range, trip plan, fuel stops.",
+		"moved": false,
+		"routes": [
+			"GET /api/admin/fuel-events",
+			"GET /api/admin/fuel-gallons-recovery",
+			"GET /api/fuel/range",
+			"GET /api/fuel/verify",
+			"GET /api/fuel/trip-plan",
+			"GET /api/poi/fuel-stops"
+		]
+	},
+	"ingest": {
+		"about": "Load ingestion routes: n8n webhooks, rate-con intake, reconcile, the Drive index.",
+		"moved": false,
+		"routes": [
+			"POST /api/n8n/job",
+			"POST /api/n8n/extract-pdf-via-gemini",
+			"GET /api/admin/ratecon-reconcile",
+			"POST /api/admin/ratecon-reconcile/run",
+			"POST /api/webhook/new-load",
+			"POST /api/loads/ratecon/extract",
+			"POST /api/loads/from-ratecon",
+			"POST /api/loads/pickup-confirmed"
+		]
+	},
+	"investor-onboarding": {
+		"about": "Investor onboarding routes: applications, invites, outreach, onboarding evidence.",
+		"moved": false,
+		"routes": [
+			"GET /api/admin/onboarding-doc-failures",
+			"GET /api/admin/onboarding-evidence/:scope/:ownerId",
+			"POST /api/admin/investor-onboarding/:id/documents/:docKey/regenerate",
+			"GET /api/admin/investor-invites",
+			"POST /api/admin/investor-invites",
+			"PUT /api/admin/investor-invites/:id",
+			"POST /api/admin/investor-invites/:id/reissue",
+			"POST /api/admin/investor-invites/:id/revoke",
+			"POST /api/admin/investor-invites/:id/preview/:docKey",
+			"GET /api/investor-applications",
+			"GET /api/investor-applications/:id",
+			"GET /api/investor-applications/:id/sensitive",
+			"DELETE /api/investor-applications/:id",
+			"POST /api/investor-applications/:id/restore",
+			"GET /api/admin/orphaned-signed-artifacts",
+			"PUT /api/investor-applications/:id/status",
+			"POST /api/investor-outreach/send",
+			"GET /api/investor-outreach/log"
+		]
+	},
+	"investor-portal": {
+		"about": "Investor portal routes: dashboard, reports, documents, payout views, config.",
+		"moved": false,
+		"routes": [
+			"GET /api/investor/onboarding-documents",
+			"GET /api/investor/documents",
+			"GET /api/investor/tax-csv",
+			"GET /api/investor/load-report",
+			"GET /api/investor/report",
+			"GET /api/investor",
+			"GET /api/investor/expenses",
+			"GET /api/investor/payouts",
+			"GET /api/investor/payouts/:period/history",
+			"GET /api/investor/payouts/:period/detail",
+			"GET /api/investor/payouts/:period/statement",
+			"GET /api/investor/config",
+			"PUT /api/investor/config"
+		]
+	},
+	"investor-terms": {
+		"about": "Investor terms routes: payment terms and payout basis.",
+		"moved": false,
+		"routes": [
+			"GET /api/investors/:id/payment-terms",
+			"GET /api/investor-payout-settings",
+			"GET /api/investors/:id/payout-basis",
+			"PUT /api/investors/:id/payout-basis"
+		]
+	},
+	"investors": {
+		"about": "Investor account routes (admin).",
+		"moved": false,
+		"routes": [
+			"POST /api/investors/:id/profile-picture",
+			"GET /api/users/investors",
+			"GET /api/investors",
+			"POST /api/investors",
+			"PUT /api/investors/:id",
+			"DELETE /api/investors/:id"
+		]
+	},
+	"invoices": {
+		"about": "Weekly driver invoice routes.",
+		"moved": false,
+		"routes": [
+			"POST /api/invoices/generate",
+			"GET /api/invoices/payees",
+			"POST /api/invoices/manual",
+			"POST /api/invoices/manual/totals",
+			"GET /api/invoices",
+			"GET /api/invoices/report",
+			"GET /api/invoices/report/pdf",
+			"GET /api/invoices/:id/pdf",
+			"PUT /api/invoices/:id/submit",
+			"PUT /api/invoices/:id/approve",
+			"PUT /api/invoices/:id/adjust",
+			"PUT /api/invoices/:id/revert",
+			"DELETE /api/invoices/:id",
+			"PUT /api/invoices/:id/restore"
+		]
+	},
+	"kpi": {
+		"about": "KPI admin routes.",
+		"moved": false,
+		"routes": [
+			"GET /api/admin/kpis",
+			"PUT /api/admin/kpis/approvals/:key",
+			"PUT /api/admin/kpis/settings"
+		]
+	},
+	"maps": {
+		"about": "Maps routes: driving routes, geocoding, weather, maps key usage.",
+		"moved": false,
+		"routes": [
+			"GET /api/route",
+			"GET /api/admin/maps-key-usage",
+			"GET /api/geocode",
+			"GET /api/geocode/search",
+			"GET /api/geocode/load/:loadId",
+			"GET /api/geocode/bulk",
+			"GET /api/weather"
+		]
+	},
+	"messages": {
+		"about": "Message routes: chat, notifications, voice notes, chat attachments.",
+		"moved": false,
+		"routes": [
+			"POST /api/messages",
+			"PUT /api/messages/read",
+			"PUT /api/notifications/read",
+			"GET /api/dispatch-notifications",
+			"PUT /api/dispatch-notifications/read",
+			"GET /api/investor/messages",
+			"GET /api/messages",
+			"GET /api/messages/:driverName",
+			"POST /api/messages/voice",
+			"GET /api/messages/:id/voice",
+			"DELETE /api/messages/:id/voice",
+			"POST /api/chat/attachment"
+		]
+	},
+	"onboarding": {
+		"about": "Driver onboarding routes: documents, signing, drug test.",
+		"moved": false,
+		"routes": [
+			"GET /api/onboarding",
+			"GET /api/onboarding/:userId",
+			"POST /api/onboarding/:userId/documents/:docKey/sign",
+			"POST /api/onboarding/:userId/drug-test",
+			"GET /api/onboarding/documents/:docKey/pdf"
+		]
+	},
+	"pay-days": {
+		"about": "Pay day routes: the work-days dry run, excluded days, day overrides.",
+		"moved": false,
+		"routes": [
+			"GET /api/admin/work-days/dry-run",
+			"POST /api/admin/excluded-days",
+			"DELETE /api/admin/excluded-days/:id",
+			"GET /api/admin/driver-day-overrides"
+		]
+	},
+	"payouts": {
+		"about": "Payout routes: the payout ledger, periods, month close.",
+		"moved": false,
+		"routes": [
+			"GET /api/payouts",
+			"POST /api/investor/payouts/:id/status",
+			"PUT /api/investor/payouts/:id/adjust",
+			"GET /api/periods",
+			"POST /api/periods/:period/finalize",
+			"GET /api/admin/payout-rules/dry-run",
+			"POST /api/admin/financials/freeze-closed-months",
+			"POST /api/periods/:period/reopen",
+			"GET /api/admin/period-lock-issues"
+		]
+	},
+	"personal-expenses": {
+		"about": "Personal receipt routes.",
+		"moved": false,
+		"routes": [
+			"POST /api/expenses/:id/personal",
+			"DELETE /api/expenses/:id/personal",
+			"POST /api/expenses/:id/personal/reverse",
+			"POST /api/invoices/personal-corrections",
+			"GET /api/expenses/personal/waiting-corrections",
+			"GET /api/invoices/:id/personal-receipts/:lineId"
+		]
+	},
+	"public": {
+		"about": "Public routes: unauthenticated forms, the investor invite, the load tracker, public config.",
+		"moved": false,
+		"routes": [
+			"POST /api/public/apply",
+			"POST investorRfi.INVESTOR_RFI_PATH",
+			"POST /api/public/investor-w9-check",
+			"POST /api/public/investor-apply",
+			"GET /api/public/investor-invite",
+			"GET /api/public/track/:loadId",
+			"GET /api/config/maps-key",
+			"GET /api/config/maintenance"
+		]
+	},
+	"sheet-data": {
+		"about": "Sheet data routes: raw sheet rows.",
+		"moved": false,
+		"routes": [
+			"GET /api/tabs",
+			"GET /api/data",
+			"POST /api/data",
+			"PUT /api/data/:rowIndex",
+			"DELETE /api/data/:rowIndex"
+		]
+	},
+	"users": {
+		"about": "User routes: users, user ratings and load ratings.",
+		"moved": false,
+		"routes": [
+			"POST /api/users",
+			"GET /api/users",
+			"PUT /api/users/:id",
+			"PUT /api/users/:id/rating",
+			"PUT /api/load-ratings/:loadId",
+			"GET /api/load-ratings/:loadId",
+			"GET /api/load-ratings/averages",
+			"DELETE /api/users/:id"
+		]
+	}
+}

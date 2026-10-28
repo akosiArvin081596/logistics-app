@@ -168,7 +168,7 @@ test("A3 A date it can't read prints no weekday rather than a wrong one, and nei
 });
 
 test("A4 server.js builds every directory address with providerAddressLine(): the weekly generate route, the manual invoice's payee list and the Personal correction draft; no hand-rolled address/city/state/zip join is left. Base: three joins", ({ eq, ok }) => {
-	const src = read("server.js");
+	const src = require("./lib/server-source").serverSource();
 	const joins = src.match(/\[\s*\w+\.address,\s*\w+\.city,\s*\w+\.state,\s*\w+\.zip\s*\]\.filter\(Boolean\)\.join\(", "\)/g) || [];
 	eq("address/city/state/zip joins left in server.js", joins.length, 0);
 	ok("lib/invoice-header.js is required", /const \{[^}]*\bproviderAddressLine\b[^}]*\} = require\("\.\/lib\/invoice-header"\);/.test(src));

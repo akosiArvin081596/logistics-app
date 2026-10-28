@@ -88,7 +88,7 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 const { csvRows } = require("../lib/csv");
 const investorReportOptions = require("../lib/investor-report-options");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let mutantsCaught = 0;

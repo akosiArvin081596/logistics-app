@@ -649,6 +649,13 @@ async function main() {
 		const n = db.prepare("DELETE FROM sessions").run().changes;
 		summary.push(`sessions: cleared (${n}) — forces re-login`);
 	}
+	// The IP and browser kept for staff sign-ins (sign_in_network, lib/sign-in.js):
+	// personal data about who signed in, for production's own Super Admins only,
+	// like the signers' IP and browser blanked in 3f. Never on a copy.
+	if (tableExists("sign_in_network")) {
+		const n = db.prepare("DELETE FROM sign_in_network").run().changes;
+		summary.push(`sign_in_network: emptied (${n}) — staff sign-in IP and browser stay on production`);
+	}
 
 	// 3b. Passwords. Production hashes are bcrypt, so they are not reversible —
 	//     but they ARE the live credentials, and a copy of them on a laptop or a
@@ -1177,6 +1184,7 @@ const REDIRECTED_EMAIL = [
 const MUST_BE_EMPTY_TABLES = [
 	["sessions", "session row(s) survived — each caches a user record and authenticates against the pre-refresh hash"],
 	["driver_locations", "retired phone-GPS position row(s) survived"],
+	["sign_in_network", "staff sign-in IP and browser record(s) survived"],
 ];
 
 // A malformed hash (truncated, or a foreign format) makes bcryptjs throw rather

@@ -69,7 +69,7 @@ const Database = require("better-sqlite3");
 const investorReportOptions = require("../lib/investor-report-options");
 const investorPayoutBasis = require("../lib/investor-payout-basis");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

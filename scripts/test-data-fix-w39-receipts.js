@@ -52,7 +52,7 @@ function check(name, ok, detail) {
 	console.error(`FAIL ${name}${detail ? `: ${detail}` : ""}`);
 }
 
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // The server's own driver-name key and receipt filter, as plan() gets them.
 const real = new Function(`${closure(SRC, { roots: ["normalizeDriverName", "EXPENSE_PNL_FILTER"], provided: [], denied: [] }).text}\nreturn { normalizeDriverName, EXPENSE_PNL_FILTER };`)();
 

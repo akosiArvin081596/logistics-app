@@ -66,7 +66,7 @@ ok("§1 a driver named \"Investor\": (a) 1", withRow({ id: 12, role: "Driver", u
 
 // §2
 {
-	const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+	const src = require("./lib/server-source").serverSource();
 	const m = src.match(/\n\tconst RESERVED_NAMES = (\[[^\]\n]*\]);/);
 	const shipped = m ? JSON.parse(m[1]) : null;
 	ok("§2 the reserved names are findDriverNameClashes()'s", !!shipped && shipped.length === RESERVED.length && shipped.every((n) => RESERVED.includes(n)));

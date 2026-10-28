@@ -42,7 +42,7 @@ const { closure } = require("./server-lift");
 const { schemaDb, Database } = require("./work-days-world");
 
 const ROOT = path.join(__dirname, "..", "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./server-source").serverSource();
 const LINES = SRC.split("\n");
 
 const ROUTES = {

@@ -269,7 +269,7 @@ const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 
 	console.log("§6 server.js: Sign out ends the session a saved cookie names");
 	{
-		const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+		const SRC = require("./lib/server-source").serverSource();
 		const logout = (SRC.match(/app\.post\("\/api\/auth\/logout", \(req, res\) => \{[\s\S]*?\n\}\);/) || [""])[0];
 		ok("POST /api/auth/logout destroys the session", /req\.session\.destroy\(\)/.test(logout), logout.slice(0, 200));
 		const config = (SRC.match(/const sessionMiddleware = session\(\{[\s\S]*?\n\}\);/) || [""])[0];

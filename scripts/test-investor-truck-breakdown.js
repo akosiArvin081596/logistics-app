@@ -51,7 +51,7 @@ const geolib = require("geolib");
 const fuelModel = require("../lib/fuel-model");
 const { normalizeLoadId } = require("../lib/ratecon-load");
 
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

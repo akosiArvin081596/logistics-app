@@ -59,7 +59,7 @@ const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let Database;
 try {
@@ -577,7 +577,7 @@ async function section6() {
 	ok("the job is gated: INTEGRITY_CHECK_ENABLED && startsJob(\"daily integrity check\")", !!block);
 	if (!block) return;
 	const startsJobSrc = SRC.match(/function startsJob\(name\) \{[\s\S]*?\n\}/)[0];
-	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
+	const names = ["INTEGRITY_CHECK_ENABLED", "REPLICA", "IMPORT_ONLY", "setInterval", "setTimeout", "console", "integrityCheck", "db", "APP_TIMEZONE",
 		"getJobTrackingCached", "sendEmail", "ADMIN_NOTIFY_EMAIL", "EXPENSE_PERIOD_EXPR", "invoiceEmailHtml", "RATECON_RECONCILE_MAILBOX", "process",
 		"integrityClosedMonthsOf", "financialsCalc", "computeFleetLedger", "tripWorkDays", "TRIP_WORK_DAYS_FROM",
 		"DRIVER_RATE_ONLY_FROM", "driverRateOnlyDayRule", "excludeDroppedLoads"];
@@ -587,6 +587,7 @@ async function section6() {
 		const env = {
 			INTEGRITY_CHECK_ENABLED: true,
 			REPLICA: null,
+			IMPORT_ONLY: false,
 			setInterval: (fn, ms) => { timers.push({ kind: "interval", ms, fn }); return 0; },
 			setTimeout: (fn, ms) => { timers.push({ kind: "timeout", ms, fn }); return 0; },
 			console: { log: () => {}, error: () => {}, warn: () => {} },
@@ -628,6 +629,8 @@ async function section6() {
 	ok("...and the job is named in the replica's log", notStarted.join() === "daily integrity check", notStarted);
 	const off = exec({ INTEGRITY_CHECK_ENABLED: false });
 	ok("switched off: no timer starts", off.timers.length === 0);
+	const imported = exec({ IMPORT_ONLY: true });
+	ok("imported for its app (LOGISX_IMPORT_ONLY=1): no timer starts", imported.timers.length === 0 && !imported.seen.ticker);
 	const on = exec({});
 	ok("on: ticks every minute", on.timers.some((t) => t.kind === "interval" && t.ms === 60 * 1000));
 	ok("on: one catch-up after boot", on.timers.filter((t) => t.kind === "timeout").length === 1);

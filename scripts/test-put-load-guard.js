@@ -18,9 +18,8 @@ const path = require("path");
 // SERVER_JS / GEOCODE_JS override the paths so the whole suite can be pointed at
 // a BASE-commit copy (`git show <base>:server.js > /tmp/base.js`) to prove the
 // assertions actually fail before the fix rather than passing vacuously.
-const SERVER = process.env.SERVER_JS || path.join(__dirname, "..", "server.js");
 const GEOCODE = process.env.GEOCODE_JS || path.join(__dirname, "geocode-loads.js");
-const src = fs.readFileSync(SERVER, "utf8");
+const src = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];

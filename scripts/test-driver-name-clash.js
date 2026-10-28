@@ -57,6 +57,7 @@
  * Pure: no server, no app.db, no network, no mail (sendEmail is captured).
  *
  * Run: node scripts/test-driver-name-clash.js    # exits 1 on failure
+ *      NAMED_LOGINS_ENABLED=true node scripts/test-driver-name-clash.js   # POST /api/users with the named-login rules on
  */
 "use strict";
 
@@ -66,7 +67,7 @@ const crypto = require("crypto");
 const { pathToFileURL } = require("url");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -125,7 +126,7 @@ const CLASH_SRC = [liftFunction("findDriverNameClashes"), liftFunction("findDriv
 const OWNS_SRC = liftFunction("driverOwnsInvoice");
 const ESCAPE_SRC = liftFunction("escapeHtml");
 const ACCEPT_SRC = liftRoute('app.put("/api/applications/:id/status", requireRole("Super Admin"), async (req, res) => {');
-const USERS_SRC = liftRoute('app.post("/api/users", requireRole("Super Admin"), async (req, res) => {');
+const USERS_SRC = liftRoute('app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {');
 const DIRECTORY_SRC = liftRoute('app.post("/api/drivers-directory", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
 // What that route asks of a new row before its month-end lock: does it differ
 // from the defaults? The rows below carry a name only, so the lock is not reached.
@@ -612,10 +613,18 @@ function mountPost(routeSrc, db, clashSrc = CLASH_SRC) {
 	const log = { synced: [] };
 	let handler = null;
 	const env = {
-		app: { post: (p, guard, h) => { handler = h; } },
+		// The handler is the last argument (POST /api/users mounts its password
+		// budget before it, scripts/test-account-directory-row-lock.js §8).
+		app: { post: (p, ...handlers) => { handler = handlers[handlers.length - 1]; } },
 		requireRole: () => (req, res, next) => next(),
+		userCreatePasswordLimit: (req, res, next) => next(),
 		db,
-		bcrypt: { hash: (pw) => bcrypt.hash(pw, 4) },
+		bcrypt: { hash: (pw) => bcrypt.hash(pw, 4), compare: (pw, h) => bcrypt.compare(pw, h) },
+		// POST /api/users's named-login rules (scripts/test-account-directory-row-lock.js
+		// §7): off unless this run sets NAMED_LOGINS_ENABLED=true. The names below
+		// decide the cases either way.
+		NAMED_LOGINS_ENABLED: process.env.NAMED_LOGINS_ENABLED === "true",
+		passwordRules: require("../lib/password-rules"),
 		findDriverNameClash: buildClash(db, { clashSrc }),
 		isBuiltInPropertyName,
 		syncDriverToCarrierSheet: (name, opts) => log.synced.push({ name, opts }),
@@ -662,40 +671,40 @@ async function otherCreatePaths({ clashSrc = CLASH_SRC, directorySrc = DIRECTORY
 		addUser(db, 3, "kevin", "", "Dispatcher");
 		addDirectory(db, "Desoren King"); // in the directory, no account
 		const { call, log: usersLog } = mountPost(USERS_SRC, db, clashSrc);
-		const r1 = await call({ username: "sking2", password: "pw-123456", role: "Driver", driverName: "soren  KING" });
+		const r1 = await call({ username: "sking2", password: "Pw-123456!", role: "Driver", driverName: "soren  KING" });
 		t("POST /api/users: a case/spacing variant of an account's driver name is 409 DRIVER_NAME_TAKEN",
 			r1.status === 409 && r1.body && r1.body.code === "DRIVER_NAME_TAKEN" && r1.body.conflictUserId === 2);
 		t("...and creates no account", !db.prepare("SELECT 1 FROM users WHERE username = 'sking2'").get());
-		const r5 = await call({ username: "kev2", password: "pw-123456", role: "Driver", driverName: "KEVIN" });
+		const r5 = await call({ username: "kev2", password: "Pw-123456!", role: "Driver", driverName: "KEVIN" });
 		t("POST /api/users: another account's username is 409 DRIVER_NAME_TAKEN, and the message says it is a username",
 			r5.status === 409 && r5.body && r5.body.code === "DRIVER_NAME_TAKEN" && r5.body.conflictUserId === 3 &&
 			/username of kevin/.test(r5.body.error || ""));
-		const r6 = await call({ username: "desk", password: "pw-123456", role: "Driver", driverName: " Dispatch " });
+		const r6 = await call({ username: "desk", password: "Pw-123456!", role: "Driver", driverName: " Dispatch " });
 		t("POST /api/users: a reserved name is 409 DRIVER_NAME_TAKEN, \"that name is reserved\"",
 			r6.status === 409 && r6.body && r6.body.code === "DRIVER_NAME_TAKEN" && /reserved/.test(r6.body.error || "") &&
 			r6.body.conflictUserId === undefined);
 		t("...neither creates an account", !db.prepare("SELECT 1 FROM users WHERE username IN ('kev2', 'desk')").get());
-		const r2 = await call({ username: "dking", password: "pw-123456", role: "Driver", driverName: "Desoren King" });
+		const r2 = await call({ username: "dking", password: "Pw-123456!", role: "Driver", driverName: "Desoren King" });
 		t("POST /api/users: a driver already in the directory can be given a login (accounts only)",
 			r2.status === 200 && !!db.prepare("SELECT 1 FROM users WHERE username = 'dking' AND driver_name = 'Desoren King'").get());
-		const r3 = await call({ username: "abrooks", password: "pw-123456", role: "Driver", driverName: "Ava Brooks" });
+		const r3 = await call({ username: "abrooks", password: "Pw-123456!", role: "Driver", driverName: "Ava Brooks" });
 		t("POST /api/users: a free driver name is created", r3.status === 200);
-		const r4 = await call({ username: "dispatch2", password: "pw-123456", role: "Dispatcher", driverName: "" });
+		const r4 = await call({ username: "dispatch2", password: "Pw-123456!", role: "Dispatcher", driverName: "" });
 		t("POST /api/users: a blank driver name (a non-driver account) is no clash", r4.status === 200);
-		const r7 = await call({ username: "Lee Park", password: "pw-123456", role: "Driver", driverName: "Lee Park" });
+		const r7 = await call({ username: "Lee Park", password: "Pw-123456!", role: "Driver", driverName: "Lee Park" });
 		t("POST /api/users: a driver name equal to the new account's own username is no clash", r7.status === 200);
 		// A name that reads as a built-in property name is reserved.
 		for (const [i, name] of ["__proto__", " Constructor ", "toString"].entries()) {
 			const before = counts(db);
 			const syncedBefore = usersLog.synced.length;
-			const r = await call({ username: `builtin${i}`, password: "pw-123456", role: "Driver", driverName: name });
+			const r = await call({ username: `builtin${i}`, password: "Pw-123456!", role: "Driver", driverName: name });
 			t(`POST /api/users: the built-in property name ${show(name)} is 409 DRIVER_NAME_TAKEN, "that name is reserved", naming no account`,
 				r.status === 409 && r.body && r.body.code === "DRIVER_NAME_TAKEN" && /reserved/.test(r.body.error || "") &&
 				r.body.conflictUserId === undefined);
 			t(`...and ${show(name)} creates no account and syncs nothing`, counts(db) === before &&
 				!db.prepare("SELECT 1 FROM users WHERE username = ?").get(`builtin${i}`) && usersLog.synced.length === syncedBefore);
 		}
-		const r8 = await call({ username: "tsmith", password: "pw-123456", role: "Driver", driverName: "Tostring Smith" });
+		const r8 = await call({ username: "tsmith", password: "Pw-123456!", role: "Driver", driverName: "Tostring Smith" });
 		t("POST /api/users: a name containing a built-in property name (\"Tostring Smith\") is created",
 			r8.status === 200 && !!db.prepare("SELECT 1 FROM users WHERE username = 'tsmith' AND driver_name = 'Tostring Smith'").get());
 	}
