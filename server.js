@@ -29270,6 +29270,43 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 	}
 });
 
+// SIGN_IN_AUDIT_ENABLED: off unless set to exactly "true". On, every sign-in
+// (`login`), sign-out (`logout`) and refused sign-in (`login_refused`:
+// WRONG_PASSWORD, CHANGED_MEANWHILE, AMBIGUOUS_EMAIL) is an audit row naming the
+// account, kept forever; refusals are coalesced (logAuditRefusal()). A Super
+// Admin's or Dispatcher's IP and browser go in sign_in_network, deleted after
+// 90 days and read only by GET /api/admin/sign-ins. A name no account has
+// writes no row, only a log line a minute. Off: no row and no record.
+const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
+// NAMED_LOGINS_ENABLED: off unless set to exactly "true". On, POST /api/users
+// applies the password rules to every role (400 PASSWORD_WEAK), refuses the
+// acting admin's own password (400 PASSWORD_IS_YOURS) and makes a new Super
+// Admin or Dispatcher change the password at first sign-in; and sign-in takes
+// a username first, then an email only when one account has it. Off: the
+// create and the sign-in lookup as before.
+const NAMED_LOGINS_ENABLED = process.env.NAMED_LOGINS_ENABLED === "true";
+const signInLib = require("./lib/sign-in");
+try { signInLib.ensureSignInNetworkTable(db); } catch (err) { console.error("sign_in_network table setup failed:", err.message); }
+// The account lookup and the sign-in rows, for the login and logout routes.
+const signIn = signInLib.createSignIn({
+	db, logAudit, logAuditRefusal, networkEvidence: signerNetworkEvidence,
+	auditEnabled: SIGN_IN_AUDIT_ENABLED, uniqueEmail: NAMED_LOGINS_ENABLED,
+});
+// The 90-day limit on the sign-in IP and browser records; audit rows are kept.
+function purgeOldSignInNetwork() {
+	try {
+		const n = signInLib.purgeSignInNetwork(db);
+		if (n > 0) console.log(`[cleanup] Purged ${n} sign_in_network row(s) older than ${signInLib.SIGN_IN_NETWORK_RETENTION_DAYS} days`);
+	} catch (err) {
+		console.error("[cleanup] sign_in_network purge failed:", err.message);
+	}
+}
+if (startsJob("sign-in network record purge (at boot, then daily)")) {
+	purgeOldSignInNetwork();
+	const timer = setInterval(purgeOldSignInNetwork, 24 * 60 * 60 * 1000);
+	if (typeof timer.unref === "function") timer.unref();
+}
+
 // Login — rate limited to prevent brute-force
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many login attempts. Try again in 15 minutes." }, standardHeaders: true });
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
@@ -29291,16 +29328,26 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			return res.status(400).json({ error: "Username and password required" });
 		}
 
-		const user = db
-			.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)")
-			.get(username.trim(), username.trim());
+		// The account the typed name signs in to (lib/sign-in.js). With
+		// NAMED_LOGINS_ENABLED a username wins and an email counts only when one
+		// account has it; off, the first row matching either, as before. An email
+		// on several accounts signs in to none, with the usual answer.
+		const found = signIn.find(username.trim());
+		if (found.candidates) {
+			signIn.refuse(req, "login_refused", null, "AMBIGUOUS_EMAIL",
+				`Sign-in refused: the email is on ${found.candidates.length} accounts (ids ${found.candidates.slice(0, 20).join(", ")}); none was signed in`);
+			return res.status(401).json({ error: "Invalid credentials" });
+		}
+		const user = found.account;
 
 		if (!user) {
+			signIn.unknown();
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
 		const valid = await bcrypt.compare(password, user.password_hash);
 		if (!valid) {
+			signIn.refuse(req, "login_refused", user, "WRONG_PASSWORD", `Sign-in refused: wrong password (by ${found.by})`);
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
@@ -29333,6 +29380,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// Everything from this read to the session assignment is synchronous.
 		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
 		if (!current || current.password_hash !== user.password_hash) {
+			signIn.refuse(req, "login_refused", current || user, "CHANGED_MEANWHILE",
+				`Sign-in refused: the account was changed or removed while its password was checked (by ${found.by})`);
 			return refuse(401, "Invalid credentials");
 		}
 
@@ -29360,6 +29409,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// saved, so neither a failed attempt nor a sign-in that could not start a
 		// session looks like a sign-in. Never throws — see stampLastLogin().
 		stampLastLogin(current.id);
+		// The sign-in row (SIGN_IN_AUDIT_ENABLED), after the stamp for the same
+		// reason. Never throws (lib/sign-in.js).
+		signIn.record(req, "login", current, `Signed in by ${found.by}`);
 
 		res.json({
 			success: true,
@@ -29392,6 +29444,9 @@ app.post("/api/auth/logout", (req, res) => {
 	// while req.sessionID still names it. Only this session. The account's other
 	// devices stay signed in, over HTTP and over their sockets alike.
 	disconnectSessionSockets(req.sessionID);
+	// The sign-out row (SIGN_IN_AUDIT_ENABLED), only for a session with a user,
+	// before it ends. An expiry or a purge writes none.
+	if (req.session && req.session.user) signIn.record(req, "logout", req.session.user, "Signed out");
 	req.session.destroy();
 	res.json({ success: true });
 });
@@ -29596,6 +29651,14 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "Username required", code: "USERNAME_REQUIRED" });
 		}
 
+		// NAMED_LOGINS_ENABLED: the password meets the one rule for a new password
+		// (lib/password-rules.js, as the admin reset in PUT /api/users/:id), for
+		// every role, before anything awaits.
+		if (NAMED_LOGINS_ENABLED) {
+			const weakRefusal = passwordRules.newPasswordRefusal(password);
+			if (weakRefusal) return res.status(400).json(weakRefusal);
+		}
+
 		// ⚠️ HASHED ABOVE THE COLLISION CHECKS, AND IT MUST STAY THERE. This
 		// handler is async and `await bcrypt.hash` is its only yield point — ~100 ms
 		// of held event loop. Sitting between the checks and the INSERT it made
@@ -29604,7 +29667,23 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// happens anyway. `users.username` has a UNIQUE index to fall back on;
 		// `users.driver_name` has NOTHING, so that half of the race is silent.
 		// Same defect and same remedy as PUT /api/users/:id (#212 security round).
-		const hash = await bcrypt.hash(password, 10);
+		// NAMED_LOGINS_ENABLED: the acting admin's own password is refused beside
+		// the hash, in the same await, as PUT does (PASSWORD_IS_YOURS): that is a
+		// browser filling the admin's saved login into the new account's form.
+		let hash;
+		if (NAMED_LOGINS_ENABLED) {
+			const actor = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(Number(req.session?.user?.id));
+			const [newHash, isActorsOwn] = await Promise.all([
+				bcrypt.hash(password, 10),
+				actor && actor.password_hash ? bcrypt.compare(password, actor.password_hash).catch(() => false) : false,
+			]);
+			if (isActorsOwn) {
+				return res.status(400).json({ code: "PASSWORD_IS_YOURS", error: "This is your own password. Enter a new password for the new account." });
+			}
+			hash = newHash;
+		} else {
+			hash = await bcrypt.hash(password, 10);
+		}
 		// A Driver account adds the driver's drivers_directory row with this
 		// company name as its carrier (syncDriverToCarrierSheet(), below), and that
 		// row is held to the month-end lock (accountDirectoryRowLock()), which sizes
@@ -29724,16 +29803,21 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 				companyAudit);
 		}
 
-		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "");
+		// NAMED_LOGINS_ENABLED: a new Super Admin or Dispatcher changes the password
+		// at first sign-in (requireAuth/requireRole enforce must_change_password).
+		// Off, every account starts at 0, the column's default, as before.
+		const forceChange = NAMED_LOGINS_ENABLED && (role === "Super Admin" || role === "Dispatcher");
+		const created = db.prepare(
+			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "", forceChange ? 1 : 0);
 
 		// Auto-sync driver to Carrier Database sheet
 		if (role === "Driver" && newDriverName) {
 			syncDriverToCarrierSheet(newDriverName, { email, companyName, action: "add" });
 		}
 
-		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}`);
+		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}` +
+			(NAMED_LOGINS_ENABLED ? `; account id ${Number(created.lastInsertRowid)}${forceChange ? "; must change password at first sign-in" : ""}` : ""));
 		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
@@ -29743,11 +29827,16 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 });
 
 // Admin: list all users (without password hashes)
+// MustChangePassword, EmailShared (another account has the same email, compared
+// as the sign-in lookup compares it) and SharedLogin (lib/sign-in.js) are the
+// Users page's chips. newStaffMustChangePassword: whether a new Super Admin or
+// Dispatcher changes the password at first sign-in (NAMED_LOGINS_ENABLED).
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
 		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
-			u.last_login_at,
+			u.last_login_at, u.must_change_password,
+			EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND COALESCE(u.email, '') <> '' AND LOWER(o.email) = LOWER(u.email)) AS email_shared,
 			do2.status AS onboarding_status
 			FROM users u
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
@@ -29769,8 +29858,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			LastLoginAt: u.last_login_at || null,
 			Rating: u.rating || 0,
 			OnboardingStatus: u.onboarding_status || null,
+			MustChangePassword: !!u.must_change_password,
+			EmailShared: !!u.email_shared,
+			SharedLogin: signInLib.isSharedLoginName(u.username),
 		}));
-	res.json({ users });
+	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
 });
 
 // ============================================================
@@ -36460,8 +36552,34 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 	if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 	sql += " ORDER BY id DESC LIMIT ?";
 	params.push(parseInt(limit) || 100);
-	const logs = db.prepare(sql).all(...params);
+	// sharedLogin: the row's account is a login several people used, so it names
+	// the login, not the person (lib/sign-in.js). Matched on the username, so a
+	// row an old session wrote without an id is labelled too.
+	const logs = db.prepare(sql).all(...params).map((row) => ({ ...row, sharedLogin: signInLib.isSharedLoginName(row.username) }));
 	res.json({ logs });
+});
+
+// GET /api/admin/sign-ins — sign-ins, sign-outs and refused sign-ins
+// (SIGN_IN_AUDIT_ENABLED), newest first, each with the IP and browser kept for a
+// Super Admin's or Dispatcher's row (sign_in_network, 90 days; null after or
+// for any other role). Super Admin only: no other route reads sign_in_network.
+// ?userId=<account id>, ?limit=<1-500, default 100>.
+app.get("/api/admin/sign-ins", requireRole("Super Admin"), (req, res) => {
+	try {
+		const raw = req.query.userId;
+		const userId = raw === undefined || raw === "" ? null : Number(raw);
+		if (userId !== null && !(Number.isInteger(userId) && userId >= 0)) {
+			return res.status(400).json({ error: "userId must be an account id.", code: "INVALID_USER_ID" });
+		}
+		res.setHeader("Cache-Control", "no-store");
+		res.json({
+			retentionDays: signInLib.SIGN_IN_NETWORK_RETENTION_DAYS,
+			rows: signInLib.listSignIns(db, { userId, limit: req.query.limit }),
+		});
+	} catch (err) {
+		console.error("Sign-in list error:", err.message);
+		res.status(500).json({ error: "Could not load the sign-ins." });
+	}
 });
 
 // ============================================================

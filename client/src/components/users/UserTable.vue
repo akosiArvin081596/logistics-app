@@ -31,7 +31,11 @@
             <span :class="['user-avatar', avatarClass(user.Role)]">{{ initials(user.FullName || user.Username) }}</span>
             {{ user.FullName || user.Username || '' }}
           </td>
-          <td class="mono" style="font-size:0.8rem;color:var(--text-dim);">{{ user.Username || '' }}</td>
+          <td class="mono" style="font-size:0.8rem;color:var(--text-dim);">
+            {{ user.Username || '' }}
+            <span v-if="user.SharedLogin" class="account-chip" title="More than one person has used this login, so what it did names the login, not a person.">Shared login</span>
+            <span v-if="user.MustChangePassword" class="account-chip" title="This account must change its password at its next sign-in.">Password not changed yet</span>
+          </td>
           <td>
             <span :class="['role-badge', roleClass(user.Role)]">{{ user.Role || '' }}</span>
             <span v-if="user.OnboardingStatus && user.OnboardingStatus !== 'fully_onboarded'" class="onboarding-badge">Onboarding</span>
@@ -44,6 +48,7 @@
           </td>
           <td :style="{ color: user.Email ? 'var(--text)' : 'var(--text-dim)' }">
             {{ user.Email || '\u2014' }}
+            <span v-if="user.EmailShared" class="account-chip" title="Another account has this email. Sign in with the username.">Shared email</span>
           </td>
           <td class="created-at">
             {{ formatDate(user.CreatedAt) }}
@@ -447,6 +452,20 @@ function handleConfirmDelete() {
   font-weight: 600;
   background: #fef3c7;
   color: #92400e;
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
+/* Shared login, Password not changed yet, Shared email (GET /api/users). */
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: var(--amber-dim);
+  color: var(--amber);
   margin-left: 0.3rem;
   white-space: nowrap;
 }

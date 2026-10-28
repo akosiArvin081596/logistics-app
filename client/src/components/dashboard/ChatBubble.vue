@@ -34,10 +34,14 @@ import { computed } from 'vue'
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoAlt, isChatPhoto, isOwnUploadUrl } from '../../lib/chatPhotos'
 import { isServerVoiceNote, voiceNoteSrc } from '../../lib/voiceNotes'
+import { isStaffMessage } from '../../utils/sharedLogin'
 import VoiceNotePlayer from '../shared/VoiceNotePlayer.vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
+  // The thread's other side (a driver name or an investor username): a message
+  // not from it was sent by staff, under whatever name.
+  party: { type: String, default: '' },
 })
 const emit = defineEmits(['open-photo'])
 
@@ -46,10 +50,7 @@ const photo = computed(() => isChatPhoto(props.msg))
 const ownFile = computed(() => isOwnUploadUrl(props.msg.attachment_url))
 const photoAlt = computed(() => chatPhotoAlt(props.msg))
 
-const isSent = computed(() => {
-  const from = (props.msg.from || '').toLowerCase()
-  return from === 'dispatch' || from === 'admin' || from === 'super_admin'
-})
+const isSent = computed(() => isStaffMessage(props.msg.from, props.party))
 
 // Message times render in the app zone (APP_TIMEZONE, US Eastern) with a
 // visible zone label, never the viewer's zone. `msg.timestamp` is a true instant

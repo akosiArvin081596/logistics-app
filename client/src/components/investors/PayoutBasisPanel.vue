@@ -44,7 +44,7 @@
         <li v-for="row in schedule" :key="row.id" class="basis-row">
           <span class="basis-row-main">{{ describeBasis(row) }}</span>
           <span class="basis-row-meta">
-            {{ sourceLabel(row.source) }} · {{ row.updatedBy || row.createdBy }}, {{ fmtTimestamp(row.updatedAt || row.createdAt) }}
+            {{ sourceLabel(row.source) }} · {{ actorLabel(row.updatedBy || row.createdBy) }}, {{ fmtTimestamp(row.updatedAt || row.createdAt) }}
           </span>
           <span v-if="row.note" class="basis-row-note">{{ row.note }}</span>
         </li>
@@ -175,7 +175,7 @@
       <ol v-else class="basis-list basis-history" data-test="payout-basis-history">
         <li v-for="(h, i) in history" :key="`${h.at}-${i}`" class="basis-row">
           <span class="basis-row-main">{{ h.detail || h.action }}</span>
-          <span class="basis-row-meta">{{ h.actor }}, {{ fmtTimestamp(h.at) }}</span>
+          <span class="basis-row-meta">{{ actorLabel(h.actor) }}, {{ fmtTimestamp(h.at) }}</span>
         </li>
       </ol>
     </template>
@@ -189,6 +189,7 @@ import { replyLost } from '../../lib/saveOutcome'
 import { monthLabel } from '../../lib/monthLabel'
 import { LIMITS, MESSAGES } from '../../lib/paymentTerms'
 import { appToday, fmtTimestamp } from '../../utils/datetime'
+import { actorLabel } from '../../utils/sharedLogin'
 import {
   LEASE_LABEL,
   NOTE_MAX,

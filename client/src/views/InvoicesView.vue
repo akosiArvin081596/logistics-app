@@ -137,7 +137,7 @@
               <div class="meta-row"><span class="meta-label">Status</span><Badge :class="statusBadge(selectedInvoice.status)">{{ selectedInvoice.status }}</Badge></div>
               <div v-if="selectedInvoice.is_manual" class="meta-row">
                 <span class="meta-label">Type</span>
-                <span class="text-[12px]"><span class="manual-chip" style="margin-left:0;">Manual</span>{{ selectedInvoice.created_by ? ' by ' + selectedInvoice.created_by : '' }}</span>
+                <span class="text-[12px]"><span class="manual-chip" style="margin-left:0;">Manual</span>{{ selectedInvoice.created_by ? ' by ' + actorLabel(selectedInvoice.created_by) : '' }}</span>
               </div>
               <!-- What loads_count and rate_per_load hold, by the invoice's pay basis
                    (lib/invoiceCounts.js): Days paid / Daily rate / Loads, Loads / Pay %,
@@ -375,6 +375,7 @@ import { useAuthStore } from '../stores/auth'
 import { useToast } from '../composables/useToast'
 import { useSocketRefresh } from '../composables/useSocketRefresh'
 import { appToday, fmtAppDate, fmtAppInstant } from '../utils/datetime'
+import { actorLabel } from '../utils/sharedLogin'
 import { usePagination } from '../composables/usePagination'
 import { invoiceActionToast } from '../lib/invoiceActionToast'
 import { invoiceCountRows, invoiceLoadsCell } from '../lib/invoiceCounts'
