@@ -83,9 +83,10 @@ db.prepare("INSERT INTO trucks (id, routemate_vehicle_id) VALUES (?, ?)").run(33
 db.prepare("INSERT INTO trucks (id, routemate_vehicle_id) VALUES (?, ?)").run(356, "vid-356");
 db.prepare("INSERT INTO trucks (id, routemate_vehicle_id) VALUES (?, ?)").run(2, "");
 
-const api = new Function("db", "eldMiles", "usStates", "console", "Date",
+// APP_DAY_STAMPS_ENABLED off; scripts/test-eld-device-history.js §4 runs the device lookup with it on.
+const api = new Function("db", "eldMiles", "usStates", "console", "Date", "APP_DAY_STAMPS_ENABLED",
 	`${lifted}\nreturn { rollupEldStateMilesRange, runEldStateMilesRollup };`
-)(db, eldMiles, usStates, quietConsole, FakeDate);
+)(db, eldMiles, usStates, quietConsole, FakeDate, false);
 
 // One day's driving: 14:00Z-22:00Z (09:00-17:00 Central), a ping every 10 min,
 // north from Gainesville TX across the Red River to Ardmore OK.

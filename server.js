@@ -174,6 +174,10 @@ const { sendAppUpdating } = require("./lib/app-updating-page");
 // own UTC clock. lib/app-time.js
 const appTime = require("./lib/app-time");
 const APP_TIMEZONE = appTime.appTimeZone();
+// APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, a truck-assignment start and an ELD device
+// link's bounds count on their business day (appDay()) in the month-end guards' driver floor and the
+// miles rollups' day-to-truck lookup, not on their UTC day (already tomorrow from 8 PM EDT, 7 PM EST).
+const APP_DAY_STAMPS_ENABLED = process.env.APP_DAY_STAMPS_ENABLED === "true";
 // One reading of a cell's amount (cents) and moment, shared with the integrity
 // check: lib/cell-compare.js
 const cellCompare = require("./lib/cell-compare");
@@ -4952,7 +4956,11 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
+	return eldMiles.buildDeviceTruckResolver(rows, {
+		startMs: eldDeviceHistoryStartMs(), currentLinks,
+		// Off: each bound's UTC day, as before.
+		dayOf: APP_DAY_STAMPS_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+	});
 }
 
 // After every table exists (server_state is created further down this file).
@@ -18363,6 +18371,17 @@ function appDay(d = new Date()) {
 		timeZone: APP_TIMEZONE,
 		year: "numeric", month: "2-digit", day: "2-digit",
 	}).format(d);
+}
+
+// The business day of a stamp the app wrote with toISOString(), else null: callers keep their old
+// reading of any other shape (a bare day, zone-less text, an offset). The round trip refuses an
+// impossible day, which Date.parse would roll into the next month.
+function appStampDay(stamp) {
+	const s = String(stamp ?? "");
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) return null;
+	const ms = Date.parse(s);
+	if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return null;
+	return appDay(new Date(ms));
 }
 
 // The instant that stands for a business day ("YYYY-MM-DD") when a question is
@@ -33800,6 +33819,17 @@ function truckFeeLockedRows(unitNumber, locked) {
 	};
 }
 
+// The month a truck assignment's start puts under a month-end guard's driver floor: its first seven
+// characters (the UTC month), and under APP_DAY_STAMPS_ENABLED the earlier of that and its business
+// month, so the flag can widen a guard but never narrow one.
+function assignmentFloorMonth(startDate) {
+	const utc = String(startDate || "").slice(0, 7);
+	if (!APP_DAY_STAMPS_ENABLED) return utc;
+	const day = appStampDay(startDate);
+	const app = day ? day.slice(0, 7) : "";
+	return app && app < utc ? app : utc;
+}
+
 // The CLOSED months in which a driver's pay would be repriced by a change to
 // this truck's daily rate.
 //
@@ -33858,11 +33888,9 @@ function driverPayLockedMonths(driverName, locked, history) {
 	if (!rows.length) return locked.slice();
 	let earliest = "";
 	for (const r of rows) {
-		// start_date is an ISO string ('2026-05-13T10:47:01.338Z'), so a bare slice
-		// is the month. Never round-trip through Date(): a bare or UTC-midnight
-		// value reads back one month early in every US zone, the same off-by-one-month
-		// that truckChargeFromMonth documents.
-		const from = String(r.start_date || "").slice(0, 7);
+		// start_date is an ISO instant ('2026-05-13T10:47:01.338Z'); never read it on
+		// the server's clock (see assignmentFloorMonth()).
+		const from = assignmentFloorMonth(r.start_date);
 		if (!/^\d{4}-\d{2}$/.test(from)) return locked.slice(); // unreadable → cannot bound it
 		if (!earliest || from < earliest) earliest = from;
 	}
@@ -33892,7 +33920,8 @@ function driverPayLockedMonths(driverName, locked, history) {
 //   • excluded_driver_days — added and removed days alike.
 //   • expenses — the earlier of the month a receipt is dated and the month it is
 //     booked to (EXPENSE_PERIOD_EXPR, where posted_period wins).
-//   • truck_assignments — start_date sliced, as driverPayLockedMonths() reads it.
+//   • truck_assignments — start_date's month as driverPayLockedMonths() reads it
+//     (assignmentFloorMonth()).
 // A row whose month cannot be read is unbounded, as an unreadable start_date
 // always was.
 //
@@ -33943,7 +33972,7 @@ function driverHistoryFloorMonth(driverName, jt) {
 
 	for (const r of db.prepare("SELECT driver_name, start_date FROM truck_assignments").all()) {
 		if (normalizeDriverName(r.driver_name) !== lc) continue;
-		const m = String(r.start_date || "").slice(0, 7);
+		const m = assignmentFloorMonth(r.start_date);
 		if (!isMonth(m)) return UNBOUNDED;
 		see(m);
 	}
