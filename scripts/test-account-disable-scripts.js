@@ -8,9 +8,11 @@
  *      account and writes one system audit row; a replay refuses; it refuses a
  *      non-Super Admin, an account that is not disabled, and any run while a
  *      Super Admin is enabled; its output names ids, never usernames
- *   §2 scripts/session-account-check.js, the read-only check on a local copy:
- *      every session the per-request check would sign out, counted by role and
- *      reason only; exit 1 when any would be, 0 when none; the file untouched
+ *   §2 scripts/session-account-check.js, the read-only check: every live
+ *      (unexpired, signed-in) session the per-request check would sign out,
+ *      counted by role and reason only; exit 1 when any would be, 0 when none,
+ *      2 when it reads no live session (no evidence, never a pass); expired
+ *      rows not counted; the file untouched
  *   §3 scripts/prepare-test-fixtures.js skips a disabled account
  *   §4 scripts/reset-super-admin-password.js says a reset does not enable a
  *      disabled account, and leaves it disabled
@@ -142,12 +144,16 @@ try {
 		sess.run("s5", user({ username: "desk_one", role: "Dispatcher" }), later);
 		sess.run("s6", JSON.stringify({ cookie: {} }), later);
 		sess.run("s7", "{not json", later);
+		// Expired rows are not counted, whatever they hold.
+		const earlier = new Date(Date.now() - 86400000).toISOString();
+		sess.run("s8", user({ id: 20, username: "desk_one", role: "Super Admin" }), earlier);
+		sess.run("s9", user({ id: 7, username: "owner_named", role: "Super Admin" }), earlier);
 		db.close();
 		const hash = sha(file);
 		const r = run("session-account-check.js", [`--db=${file}`]);
 		ok("§2 some would be signed out: exit 1", r.code === 1, r);
-		ok("§2 the counts, by role and reason",
-			/sessions read: 7 \(7 unexpired now; 1 signed out already; 1 unreadable\)/.test(r.out) &&
+		ok("§2 the counts, by role and reason, of live sessions only",
+			/sessions read: 9 \(live: 5; not counted: 2 expired, 1 signed out, 1 unreadable\)/.test(r.out) &&
 			/would stay signed in: 1 \(Super Admin 1\)/.test(r.out) &&
 			/would be signed out: 4 \(Dispatcher: account not found 1, Dispatcher: no account id 1, Super Admin: disabled 1, Super Admin: role changed 1\)/.test(r.out), r.out);
 		ok("§2 no usernames and no account ids in its output", !/owner_named|arvin_named|ghost_user|desk_one|#\d|\b99\b/.test(r.out), r.out);
@@ -155,9 +161,26 @@ try {
 		const fine = makeDb("fine");
 		fine.db.prepare("INSERT INTO users (id, username, role) VALUES (7, 'owner_named', 'Super Admin')").run();
 		fine.db.prepare("INSERT INTO sessions (sid, sess, expire) VALUES ('s1', ?, ?)").run(user({ id: 7, username: "owner_named", role: "Super Admin" }), later);
+		fine.db.prepare("INSERT INTO sessions (sid, sess, expire) VALUES ('s2', ?, ?)").run(user({ id: 99, username: "ghost_user", role: "Dispatcher" }), earlier);
 		fine.db.close();
 		const f = run("session-account-check.js", [`--db=${fine.file}`]);
-		ok("§2 every session survives: exit 0", f.code === 0 && /would be signed out: 0 \(none\)/.test(f.out), f);
+		ok("§2 every live session survives (an expired one that would not is left out): exit 0",
+			f.code === 0 && /would be signed out: 0 \(none\)/.test(f.out), f);
+		// A copy made by replica:pull or a refresh holds no session: that is no evidence, never a pass.
+		const empty = makeDb("empty");
+		empty.db.prepare("INSERT INTO users (id, username, role) VALUES (7, 'owner_named', 'Super Admin')").run();
+		empty.db.close();
+		const e = run("session-account-check.js", [`--db=${empty.file}`]);
+		ok("§2 no session at all: exit 2, \"no evidence: 0 live sessions\", and no verdict line",
+			e.code === 2 && /no evidence: 0 live sessions/.test(e.out) && !/would (stay|be)/.test(e.out), e);
+		const stale = makeDb("stale");
+		stale.db.prepare("INSERT INTO users (id, username, role) VALUES (7, 'owner_named', 'Super Admin')").run();
+		stale.db.prepare("INSERT INTO sessions (sid, sess, expire) VALUES ('s1', ?, ?)").run(user({ id: 99, username: "ghost_user", role: "Dispatcher" }), earlier);
+		stale.db.prepare("INSERT INTO sessions (sid, sess, expire) VALUES ('s2', ?, ?)").run(JSON.stringify({ cookie: {} }), later);
+		stale.db.close();
+		const s = run("session-account-check.js", [`--db=${stale.file}`]);
+		ok("§2 only expired or signed-out sessions: exit 2, no evidence (not 1 for the expired one)",
+			s.code === 2 && /no evidence: 0 live sessions/.test(s.out) && /live: 0; not counted: 1 expired, 1 signed out, 0 unreadable/.test(s.out), s);
 		const noDb = run("session-account-check.js", []);
 		ok("§2 no --db: refused (exit 2)", noDb.code === 2, noDb);
 	}

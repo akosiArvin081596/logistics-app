@@ -11,7 +11,8 @@
  *      characters, text only
  *   §4 disableDecision(): the switch, self (id or username), the role, the
  *      protected list, the last enabled Super Admin, the acting account, then
- *      "unchanged", in that order; a refused actor never learns the state
+ *      "unchanged", in that order; a refused actor never learns the state; with
+ *      no list read, a Super Admin is refused with a message that says so
  *   §5 enableDecision(): never gated by the switch; the protected list, the
  *      acting account, then "unchanged"
  *   §6 otherEnabledSuperAdmins() counts enabled Super Admins only
@@ -160,6 +161,15 @@ const STAMP = "2026-10-20T14:00:00.000Z";
 	const dispatcher = { id: 20, username: "desk_one", role: "Dispatcher", disabled_at: null };
 	eq(code({ ...base, target: dispatcher, listed: list("unset") }), "ok", "§4 a Dispatcher with the list unset");
 	eq(code({ ...base, listed: list("unset") }), "403 PROTECTED_ACCOUNT", "§4 any Super Admin with the list unset");
+	const unsetRefusal = lib.disableDecision({ ...base, listed: list("unset") }).refusal;
+	ok(!!unsetRefusal && /until the server's protected-account list is set/.test(unsetRefusal.error), "§4 ...saying the list waits to be set");
+	const unread = lib.UNREAD_LIST;
+	ok(!!unread && Object.isFrozen(unread) && unread.state === "unread" && unread.ids.length === 0 && unread.isListedId(1) === false,
+		"§4 UNREAD_LIST: the list a build that reads no protected-account setting hands the routes");
+	const notRead = lib.disableDecision({ ...base, listed: unread }).refusal;
+	ok(!!notRead && notRead.code === "PROTECTED_ACCOUNT" && /doesn't read/.test(notRead.error) && !/is set/.test(notRead.error),
+		`§4 with no list read, a Super Admin disable is refused, saying the server doesn't read the list, never that it isn't set (got ${JSON.stringify(notRead && notRead.error)})`);
+	eq(code({ ...base, target: dispatcher, listed: unread }), "ok", "§4 ...and a Dispatcher is disabled");
 	eq(code({ ...base, target: SA(1, "root_admin"), actor: { id: 9, username: "desk_sa", role: "Super Admin" }, actorRow: SA(9, "desk_sa"), listed: list("valid", [1, 7]) }),
 		"403 PROTECTED_ACCOUNT", "§4 an unlisted Super Admin disabling a listed one");
 	eq(code({ ...base, target: SA(1, "root_admin"), actor: { id: 7, username: "owner_named", role: "Super Admin" }, actorRow: SA(7, "owner_named"), listed: list("valid", [1, 7]) }),
@@ -200,6 +210,7 @@ const STAMP = "2026-10-20T14:00:00.000Z";
 	eq(code(base), "ok", "§5 enabling a disabled account");
 	eq(code({ ...base, flagOn: false }), "ok", "§5 the switch is never consulted");
 	eq(code({ ...base, listed: list("unset") }), "ok", "§5 the list unset: a Super Admin is enabled");
+	eq(code({ ...base, listed: lib.UNREAD_LIST }), "ok", "§5 no list read: a Super Admin is enabled, as with the list unset");
 	eq(code({ ...base, target: SA(1, "root_admin", { disabled_at: STAMP }), actor: { id: 9, username: "desk_sa", role: "Super Admin" }, actorRow: SA(9, "desk_sa"), listed: list("valid", [1, 7]) }),
 		"403 PROTECTED_ACCOUNT", "§5 an unlisted Super Admin enabling a listed one");
 	eq(code({ ...base, target: SA(1, "root_admin", { disabled_at: STAMP }), actor: { id: 7, username: "owner_named", role: "Super Admin" }, actorRow: SA(7, "owner_named"), listed: list("valid", [1, 7]) }),
@@ -387,6 +398,8 @@ const SESSION_CASES = [
 	const reset = liftFunction("function refreshOwnSession(req) {");
 	ok(!!reset && /if \(!row \|\| String\(row\.disabled_at \?\? ""\) !== ""\) \{/.test(reset), "§9 refreshOwnSession() ends a disabled account's session instead of rebuilding it");
 	ok(/\nconst ACCOUNT_DISABLE_ENABLED = accountDisable\.accountDisableEnabled\(\);\n/.test(SRC), "§9 the switch is read once, through accountDisableEnabled()");
+	ok(/\nconst ACCOUNT_DISABLE_LIST = accountDisable\.UNREAD_LIST;\n/.test(SRC),
+		"§9 server.js hands the switch routes UNREAD_LIST: it reads no protected-account list, and its refusal says so");
 }
 
 finish();

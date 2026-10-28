@@ -15,11 +15,13 @@
  *   §3 the backstop, disabled_at set with no purge: the old cookie gets 401, a
  *      new socket is refused, register joins no room, one sweep closes the rest
  *   §4 refusals, each audited with nothing written: CANNOT_DISABLE_SELF,
- *      ROLE_NOT_DISABLEABLE, PROTECTED_ACCOUNT (the list unset, valid, invalid)
+ *      ROLE_NOT_DISABLEABLE, PROTECTED_ACCOUNT (the list as server.js hands it,
+ *      not read, saying so; valid; invalid)
  *   §5 the last enabled Super Admin: a self-demotion through PUT and a DELETE by
  *      a stale admin session are refused, nothing written
  *   §6 enable: sign-in works again, the columns clear, enable_user is audited;
- *      switching to the state an account is already in writes nothing
+ *      switching to the state an account is already in writes nothing; a
+ *      session the disable missed is ended, never revived
  *   §7 change-password: a disabled account's cookie gets 401, and a disable in
  *      its bcrypt window ends it with nothing written
  *   §8 PUT on a disabled account: the role is locked (409 ACCOUNT_DISABLED); a
@@ -154,6 +156,11 @@ function liftHandler(head, prefix) {
 	return stmt.slice(prefix.length, -2);
 }
 
+// The protected-account list server.js hands the switch routes, by its name in lib/account-disable.js.
+const SHIPPED_LIST = (() => {
+	const m = SRC.match(/\nconst ACCOUNT_DISABLE_LIST = accountDisable\.([A-Z_]+);\n/);
+	return m && lib ? lib[m[1]] || null : null;
+})();
 const DISABLE_HEAD = 'app.post("/api/users/:id/disable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const ENABLE_HEAD = 'app.post("/api/users/:id/enable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const SRCS = {
@@ -301,7 +308,8 @@ const passThrough = (req, res, next) => next();
 
 // One complete app: HTTP routes and Socket.IO on one loopback server.
 //   flagOn   ACCOUNT_DISABLE_ENABLED as the switch routes see it
-//   list     the protected-account list (the shape of a parsed RATECON_PDF_VIEWER_IDS)
+//   list     the protected-account list (the shape of a parsed RATECON_PDF_VIEWER_IDS); by default
+//            the one server.js hands the routes
 //   signOut  false leaves signOutEndedAccount() unmounted, to reach a route's own check
 //   replica  the real sendEmail() with REPLICA set, and a mail transport that records
 //   holdMail every send stays pending forever
@@ -434,7 +442,7 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 			`${SRCS.notify}\nreturn notifyAccountSwitch;`)(adminEmail, lib, TZ, sendEmail, invoiceEmailHtml);
 		const env = {
 			app, requireRole, refuseCrossOrigin: passThrough, db, accountDisable: lib, ACCOUNT_DISABLE_ENABLED: flagOn,
-			ACCOUNT_DISABLE_LIST: list || lib.UNSET_LIST, accountSwitchFacts, recordPeriodRefusal: audit.recordPeriodRefusal,
+			ACCOUNT_DISABLE_LIST: list || SHIPPED_LIST || lib.UNSET_LIST, accountSwitchFacts, recordPeriodRefusal: audit.recordPeriodRefusal,
 			purgeUserSessions, logAudit: audit.logAudit, auditText: audit.auditText, notifyAccountSwitch, notifyChange,
 		};
 		mount(SRCS.disable, env);
@@ -684,7 +692,9 @@ const SECTIONS = {
 					ok(code(r) === "409 ROLE_NOT_DISABLEABLE", `§4 a ${role}: 409 ROLE_NOT_DISABLEABLE (got ${code(r)})`);
 				}
 				const sa = await disableUser(w, root.cookie, 7);
-				ok(code(sa) === "403 PROTECTED_ACCOUNT", `§4 any Super Admin while the protected-account list is unset: 403 PROTECTED_ACCOUNT (got ${code(sa)})`);
+				ok(code(sa) === "403 PROTECTED_ACCOUNT", `§4 any Super Admin with the list this build hands the routes: 403 PROTECTED_ACCOUNT (got ${code(sa)})`);
+				ok(!!sa.json && /doesn't read/.test(sa.json.error) && !/is set/.test(sa.json.error),
+					`§4 ...saying the server doesn't read the protected-account list, never that the list isn't set (got ${JSON.stringify(sa.json && sa.json.error)})`);
 				ok(fingerprint(w.db) === before, "§4 ...each refusal writes nothing");
 				const blocked = auditsOf(w.db, "disable_user_blocked").map((r) => (r.details.match(/\[([A-Z_]+)\]/) || [])[1]);
 				ok(JSON.stringify(blocked.sort()) === JSON.stringify(["CANNOT_DISABLE_SELF", "PROTECTED_ACCOUNT", "ROLE_NOT_DISABLEABLE"]),
@@ -785,6 +795,23 @@ const SECTIONS = {
 			const twice = await enableUser(w, root.cookie, 20);
 			ok(twice.status === 200 && twice.json && twice.json.unchanged === true && auditsOf(w.db, "enable_user").length === 1 && w.mail.sends.length === sends + 1,
 				"§6 enabling an enabled account: 200 unchanged, nothing audited or sent");
+		} finally { await w.close(); }
+	},
+
+	async enableEndsMissedSessions() {
+		const w = await startWorld();
+		try {
+			const root = await login(w, "root_admin");
+			const a = await login(w, "desk_one");
+			// Disabled with no purge, and the cookie makes no request while the account is disabled.
+			disableDirect(w.db, 20);
+			const r = await enableUser(w, root.cookie, 20);
+			ok(r.status === 200 && sessionsOf(w.db, 20).length === 0,
+				`§6 enable ends the stored sessions a disable missed (got ${code(r)}, ${sessionsOf(w.db, 20).length} left)`);
+			ok((await probe(w, a.cookie)).status === 401, "§6 ...so the old cookie gets 401: enabling never revives it");
+			const rows = auditsOf(w.db, "enable_user");
+			ok(rows.length === 1 && /sessions ended: 1/.test(rows[0].details), `§6 ...and enable_user counts it (got ${JSON.stringify(rows.map((x) => x.details))})`);
+			ok((await login(w, "desk_one")).status === 200, "§6 ...while the account signs in again with its password");
 		} finally { await w.close(); }
 	},
 
