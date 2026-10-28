@@ -29928,7 +29928,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// A disabled account is told so only after the right password, and before the session the
 		// request arrived with is rotated, so that session is left as it was.
 		if (String(user.disabled_at ?? "") !== "") {
-			return res.status(403).json(disabledSignInRefusal(user));
+			return res.status(403).json(disabledSignInRefusal(req, user));
 		}
 
 		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
@@ -29967,7 +29967,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// A disable that landed while this sign-in yielded: the half-built session goes, as in refuse().
 		if (String(current.disabled_at ?? "") !== "") {
 			req.session.destroy(() => {});
-			return res.status(403).json(disabledSignInRefusal(current));
+			return res.status(403).json(disabledSignInRefusal(req, current));
 		}
 
 		req.session.user = {
@@ -30025,15 +30025,18 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
 // The right password on a disabled account: one audit row a minute per account (logAuditRefusal's
 // window, keyed on the account) and at most one admin email an hour per account. Returns the 403 body.
-function disabledSignInRefusal(account) {
-	auditDisabledSignIn(account);
+function disabledSignInRefusal(req, account) {
+	auditDisabledSignIn(req, account);
 	noticeDisabledSignIn(account);
 	return { code: "ACCOUNT_DISABLED", error: accountDisable.DISABLED_MESSAGE };
 }
-// The row's actor is the account signed in to: its id and username, never the text that was typed.
-function auditDisabledSignIn(account) {
+// The row names the account signed in to, never the text that was typed. It is written whatever
+// SIGN_IN_AUDIT_ENABLED says; with it on, through the sign-in writer, which keeps a staff IP and browser.
+function auditDisabledSignIn(req, account) {
+	const details = "Sign-in refused: the account is disabled";
+	if (signIn.auditEnabled) return signIn.refuse(req, "login_refused_disabled", account, "ACCOUNT_DISABLED", details);
 	logAuditRefusal({ session: { user: { id: account.id, username: account.username, role: account.role } } },
-		"login_refused_disabled", "user", String(account.id), "Sign-in refused: the account is disabled [ACCOUNT_DISABLED]", "ACCOUNT_DISABLED");
+		"login_refused_disabled", "user", String(account.id), `${details} [ACCOUNT_DISABLED]`, "ACCOUNT_DISABLED");
 }
 const disabledSignInNotices = accountDisable.noticeWindow(60 * 60 * 1000);
 function noticeDisabledSignIn(account) {

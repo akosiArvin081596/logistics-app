@@ -110,6 +110,9 @@ let lib = null;
 try { lib = require(path.join(ROOT, "lib", "account-disable.js")); } catch { lib = null; }
 ok(!!lib, "lib/account-disable.js exists and loads");
 const passwordRules = require(path.join(ROOT, "lib", "password-rules.js"));
+// The sign-in lookup and rows the login route goes through (absent on an older base).
+let signInLib = null;
+try { signInLib = require(path.join(ROOT, "lib", "sign-in.js")); } catch { signInLib = null; }
 
 // ── lift the shipped code ───────────────────────────────────────────────────
 const count = (needle) => SRC.split(needle).length - 1;
@@ -166,8 +169,8 @@ const SRCS = {
 	enable: liftRoute(ENABLE_HEAD, { optional: true }),
 	facts: liftFunction("function accountSwitchFacts(req, id) {", { optional: true }),
 	notify: liftFunction("function notifyAccountSwitch(kind, { target, actor, reason }) {", { optional: true }),
-	signInRefusal: liftFunction("function disabledSignInRefusal(account) {", { optional: true }),
-	signInAudit: liftFunction("function auditDisabledSignIn(account) {", { optional: true }),
+	signInRefusal: liftFunction("function disabledSignInRefusal(req, account) {", { optional: true }),
+	signInAudit: liftFunction("function auditDisabledSignIn(req, account) {", { optional: true }),
 	signInNotice: liftFunction("function noticeDisabledSignIn(account) {", { optional: true }),
 	signOut: liftFunction("function signOutEndedAccount(req, res, next) {", { optional: true }),
 	purge: liftFunction("function purgeUserSessions(userId, exceptSid) {"),
@@ -303,7 +306,8 @@ const passThrough = (req, res, next) => next();
 //   signOut  false leaves signOutEndedAccount() unmounted, to reach a route's own check
 //   replica  the real sendEmail() with REPLICA set, and a mail transport that records
 //   holdMail every send stays pending forever
-async function startWorld({ flagOn = true, list = null, signOut = true, replica = false, holdMail = false, adminEmail = ADMIN } = {}) {
+//   signInAudit  SIGN_IN_AUDIT_ENABLED as the sign-in writer sees it
+async function startWorld({ flagOn = true, list = null, signOut = true, replica = false, holdMail = false, adminEmail = ADMIN, signInAudit = false } = {}) {
 	const db = makeDb();
 	const holder = {};
 	class TestStore extends SqliteStoreBase {
@@ -330,6 +334,15 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 	const refusalAuditWindows = new Map();
 	const audit = new Function("db", "refusalAuditWindows",
 		`${AUDIT_SRC}\nreturn { logAudit, logAuditRefusal, auditText, recordPeriodRefusal };`)(db, refusalAuditWindows);
+	let signIn = null;
+	if (signInLib) {
+		signInLib.ensureSignInNetworkTable(db);
+		signIn = signInLib.createSignIn({
+			db, logAudit: audit.logAudit, logAuditRefusal: audit.logAuditRefusal,
+			networkEvidence: () => ({ ip: "203.0.113.7", ipSource: "peer", userAgent: "account-disable-test" }),
+			auditEnabled: signInAudit, uniqueEmail: false, logger: { error() {}, warn() {}, log() {} },
+		});
+	}
 	const purgeUserSessions = new Function("db", "disconnectUserSockets", `${SRCS.purge}\nreturn purgeUserSessions;`)(db, helpers.disconnectUserSockets);
 	const requireAuth = new Function(`${SRCS.requireAuth}\nreturn requireAuth;`)();
 	const requireRole = new Function(`${SRCS.requireRole}\nreturn requireRole;`)();
@@ -370,22 +383,22 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		return helpers.disconnectSessionSockets(sid);
 	};
 	const disabledSignInRefusal = SRCS.signInRefusal && SRCS.signInAudit && SRCS.signInNotice && lib
-		? new Function("logAuditRefusal", "ADMIN_NOTIFY_EMAIL", "disabledSignInNotices", "accountDisable", "APP_TIMEZONE", "sendEmail", "invoiceEmailHtml",
+		? new Function("logAuditRefusal", "signIn", "ADMIN_NOTIFY_EMAIL", "disabledSignInNotices", "accountDisable", "APP_TIMEZONE", "sendEmail", "invoiceEmailHtml",
 			`${SRCS.signInRefusal}\n${SRCS.signInAudit}\n${SRCS.signInNotice}\nreturn disabledSignInRefusal;`)(
-			audit.logAuditRefusal, adminEmail, lib.noticeWindow(60 * 60 * 1000), lib, TZ, sendEmail, invoiceEmailHtml)
+			audit.logAuditRefusal, signIn, adminEmail, lib.noticeWindow(60 * 60 * 1000), lib, TZ, sendEmail, invoiceEmailHtml)
 		: () => ({ error: "server.js has no disabledSignInRefusal()" });
 	mount(SRCS.login, {
 		app, loginLimiter: passThrough, db, bcrypt: hookedBcrypt, stampLastLogin, disconnectSessionSockets: loginDisconnect,
-		APP_TIMEZONE: TZ, disabledSignInRefusal,
+		APP_TIMEZONE: TZ, disabledSignInRefusal, signIn,
 	});
-	mount(SRCS.logout, { app, disconnectSessionSockets: helpers.disconnectSessionSockets });
+	mount(SRCS.logout, { app, disconnectSessionSockets: helpers.disconnectSessionSockets, signIn });
 	mount(SRCS.session, { app, APP_TIMEZONE: TZ, MESSAGE_VOICE_NOTES_ENABLED: false });
 	mount(SRCS.change, {
 		app, requireAuth, changePasswordLimiter: passThrough, db, bcrypt: hookedBcrypt, purgeUserSessions, logAudit: audit.logAudit,
 		liveSessionIds: helpers.liveSessionIds, disconnectSessionSockets: helpers.disconnectSessionSockets,
 		notifyPasswordChanged: () => Promise.resolve({ recipients: 0, sent: 0 }), passwordRules,
 	});
-	mount(SRCS.users, { app, requireRole, db });
+	mount(SRCS.users, { app, requireRole, db, signInLib, NAMED_LOGINS_ENABLED: false });
 	const changes = [];
 	const notifyChange = (domain) => changes.push(domain);
 	// PUT's machinery, stubbed to "nothing blocks". The Job Tracking read is one of
@@ -500,6 +513,7 @@ const auditsOf = (db, action) => db.prepare("SELECT * FROM audit_trail WHERE act
 const sessionsOf = (db, id) => db.prepare("SELECT sid FROM sessions WHERE json_extract(sess, '$.user.id') = ?").all(id).map((r) => r.sid);
 const disableDirect = (db, id, by = 1) => db.prepare("UPDATE users SET disabled_at = ?, disabled_by = ? WHERE id = ?").run(STAMP, by, id);
 const fingerprint = (db) => JSON.stringify(db.prepare("SELECT id, role, full_name, password_hash, disabled_at, disabled_by, disabled_reason FROM users ORDER BY id").all());
+const networkRows = (db) => { try { return db.prepare("SELECT * FROM sign_in_network ORDER BY id").all(); } catch { return []; } };
 const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 // ── sockets ─────────────────────────────────────────────────────────────────
@@ -576,6 +590,7 @@ const SECTIONS = {
 			ok(rows.length === 1 && rows[0].user_id === 20 && rows[0].username === "desk_one" && rows[0].entity_id === "20" && /\[ACCOUNT_DISABLED\]/.test(rows[0].details),
 				`§1 one login_refused_disabled row naming the account's id and username (got ${JSON.stringify(rows)})`);
 			ok(rows.length === 1 && !/example\.test/.test(JSON.stringify(rows[0])), "§1 ...never the identifier that was typed (an email here)");
+			ok(rows.length === 1 && networkRows(w.db).length === 0, "§1 ...written with SIGN_IN_AUDIT_ENABLED off too, and with it off no IP or browser is kept");
 			ok(w.mail.sends.length === 1 && w.mail.sends[0].to === ADMIN && /disabled/i.test(w.mail.sends[0].subject),
 				`§1 one email to ADMIN_NOTIFY_EMAIL (got ${w.mail.sends.length})`);
 			const again = await loginAs(w, "desk_one", PW.desk_one);
@@ -595,6 +610,21 @@ const SECTIONS = {
 				!userRow(w.db, 7).last_login_at, `§1 a disable landing while the sign-in rotates its session still refuses, with no session left (got ${code(mid)})`);
 			const fine = await login(w, "root_admin");
 			ok(fine.status === 200 && !!fine.cookie, "§1 an enabled account signs in as before");
+		} finally { await w.close(); }
+	},
+
+	async signInWriter() {
+		const w = await startWorld({ signInAudit: true });
+		try {
+			disableDirect(w.db, 20);
+			const r = await loginAs(w, "desk_one", PW.desk_one);
+			const rows = auditsOf(w.db, "login_refused_disabled");
+			ok(r.status === 403 && rows.length === 1 && rows[0].user_id === 20 && rows[0].username === "desk_one" &&
+				rows[0].details === "Sign-in refused: the account is disabled [ACCOUNT_DISABLED]",
+				`§1 with SIGN_IN_AUDIT_ENABLED on, the same row goes through the sign-in writer (got ${code(r)} ${JSON.stringify(rows)})`);
+			const net = rows.length ? networkRows(w.db).filter((n) => n.audit_id === rows[0].id) : [];
+			ok(net.length === 1 && net[0].user_id === 20 && net[0].ip === "203.0.113.7", "§1 ...which keeps the staff account's IP and browser beside it");
+			ok(auditsOf(w.db, "login_refused").length === 0, "§1 ...and no login_refused row besides it");
 		} finally { await w.close(); }
 	},
 
