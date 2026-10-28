@@ -652,6 +652,16 @@ async function main() {
 		w.now += 30 * MIN;
 		await job.tick();
 		eq(w.state("LD-TEST-0110"), ["drafted", ""], "§10 then drafted");
+
+		// No rate-con total read (Gemini failed or timed out): a person, never a retry.
+		w.ready("LD-TEST-0112");
+		w.prepareHook = (id) => (id === "LD-TEST-0112" ? { ok: false, http: 503, code: "RATECON_TOTAL_UNREAD", geminiUnavailable: true } : null);
+		await job.tick();
+		w.now += 60 * MIN;
+		await job.tick();
+		eq([w.state("LD-TEST-0112"), w.calls.prepare.filter((p) => p.loadId === "LD-TEST-0112").length, w.calls.mint.length],
+			[["needs_attention", "RATECON_TOTAL_UNREAD"], 1, 2], "§10 RATECON_TOTAL_UNREAD, even with Gemini down: a person after one engine call, no number, no retry");
+		w.prepareHook = null;
 	}
 	{
 		const w = makeWorld();

@@ -259,6 +259,10 @@ eq(R.classifyRefusal({ code: "NO_BILLING_EMAIL", http: 422 }), { kind: "attentio
 eq(R.classifyRefusal({ code: "RECIPIENT_DOMAIN_MISMATCH", http: 422 }).kind, "attention", "§8 RECIPIENT_DOMAIN_MISMATCH: a person");
 eq(R.classifyRefusal({ code: "TOTAL_MISMATCH", http: 422, geminiUnavailable: true }), { kind: "temporary", code: "GEMINI_DOWN", countsAttempt: false }, "§8 any refusal while Gemini is down: temporary, no attempt used");
 eq(R.classifyRefusal({ code: "RATECON_MISSING", http: 422 }).kind, "ratecon_missing", "§8 no rate con: the 2-hour re-check");
+eq(R.classifyRefusal({ code: "RATECON_TOTAL_UNREAD", http: 422 }), { kind: "attention", code: "RATECON_TOTAL_UNREAD", countsAttempt: false }, "§8 no rate-con total read: a person");
+eq(R.classifyRefusal({ code: "RATECON_TOTAL_UNREAD", http: 503, geminiUnavailable: true }), { kind: "attention", code: "RATECON_TOTAL_UNREAD", countsAttempt: false },
+	"§8 no rate-con total read while Gemini failed or timed out: still a person, never a retry");
+ok(R.ATTENTION_REFUSALS.includes("RATECON_TOTAL_UNREAD") && R.REASON_CODES.includes("RATECON_TOTAL_UNREAD"), "§8 RATECON_TOTAL_UNREAD is an attention refusal and a reason code");
 eq(R.classifyRefusal({ code: "POD_NOT_FOUND", http: 400 }), { kind: "wait", code: "WAITING_POD", countsAttempt: false }, "§8 the POD went away: waiting");
 eq(R.classifyRefusal({ code: "NOT_COMPLETED", http: 400 }).code, "NOT_COMPLETED", "§8 no longer delivered: waiting");
 eq(R.classifyRefusal({ code: "RENDERER_BUSY", http: 503 }), { kind: "temporary", code: "RENDERER_BUSY", countsAttempt: false }, "§8 the renderer busy: temporary, no attempt used");
