@@ -53151,6 +53151,30 @@ const draftInvoiceLimiter = rateLimit({
 	standardHeaders: true,
 });
 
+// The draft route's steps (prepare, render, record) live in
+// lib/broker-invoice-draft.js, so the automatic drafts run the same code.
+const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
+	db,
+	brokerInvoice,
+	getSheets,
+	SPREADSHEET_ID,
+	parseSheet,
+	deduplicateLoads,
+	findCol,
+	parseInvoiceOverrides,
+	fetchDocumentBytes,
+	buildRateConLoadCtx,
+	getRateConBytes,
+	GEMINI_API_KEY,
+	runRateConGemini,
+	latestDraftNotes,
+	renderHtmlToPdf,
+	safeAttachmentName,
+	logAudit,
+	sanitizeEvidenceText,
+	env: process.env,
+});
+
 // POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // SUPER ADMIN ONLY (owner, 2026-09-26), like every invoice-draft route —
 // invoice-preview and GET …/invoice-draft below as well. A draft is addressed
@@ -53204,445 +53228,24 @@ app.post(
 			const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
 			if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
 
-			// 1) Look up the load in the Job Tracking sheet by loadId.
-			const sheets = await getSheets();
-			const resp = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Job Tracking",
-			});
-			const parsed = parseSheet({ values: resp.data.values });
-			const rows = deduplicateLoads(parsed.data, parsed.headers);
-			const headers = parsed.headers;
-			const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-			if (!loadIdCol) return res.status(500).json({ error: "Sheet misconfigured" });
-			const target = loadId.toLowerCase().replace(/^#/, "");
-			const load = rows.find(
-				(r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === target,
-			);
-			if (!load) return res.status(404).json({ error: "Load not found" });
-
-			// Resolve the columns we need from the sheet.
-			const emailCol = findCol(headers, /^email$/i) || findCol(headers, /broker.*email|email/i);
-			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
-			const trailerCol = findCol(headers, /trailer/i);
-			const deliveryDateCol =
-				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
-				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
-			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
-			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
-			// The money column is literally "  Payment  " (real surrounding
-			// spaces) — matched on the trimmed header inside the helper.
-			const paymentCol = brokerInvoice.findPaymentColumn(headers);
-
-			const brokerEmail = emailCol ? (load[emailCol] || "").toString().trim() : "";
-			const brokerContactName = brokerNameCol ? (load[brokerNameCol] || "").toString().trim() : "";
-			const status = statusCol ? (load[statusCol] || "").toString().trim() : "";
-			const sheetTrailer = trailerCol ? (load[trailerCol] || "").toString().trim() : "";
-
-			// 2) Broker identity. Every broker can be invoiced now — the Bison
-			//    check is a BRANCH (it picks the AP inbox), no longer a gate.
-			//    The sheet has no brokerage-company column, so the name is
-			//    resolved from the email domain; see lib/broker-invoice.js.
-			const brokerCtx = { brokerEmail, brokerContactName };
-			const isBison = brokerInvoice.isBisonLoad({ email: brokerEmail });
-			const brokerName = brokerInvoice.resolveBrokerName(brokerCtx);
-			let invoiceTo = brokerInvoice.resolveInvoiceTo(brokerCtx);
-
-			//    The delivered/completed gate is unchanged.
-			if (!/delivered|completed|pod received/i.test(status)) {
-				return res.status(400).json({
-					error: `Load must be delivered/completed to draft an invoice (current status: "${status || "unknown"}").`,
-				});
-			}
-
-			// 3) Get the POD + rate-con bytes (server-side).
-			//
-			// EVERY POD, not just the newest. A proof packet routinely arrives as
-			// several files (driver photographs the signed BOL page by page), and
-			// this used to be `ORDER BY uploaded_at DESC LIMIT 1` — which silently
-			// billed brokers with a one-page fragment of a three-page proof and got
-			// invoices rejected. 14 of 85 loads with a POD have more than one.
-			//
-			// ASC = upload order = page order (id breaks ties: uploaded_at only has
-			// second granularity and a burst of page uploads can share a second).
-			const podDocs = db
-				.prepare(
-					"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL ORDER BY uploaded_at ASC, id ASC",
-				)
-				.all(loadId);
-			if (!podDocs.length) return res.status(400).json({ error: "POD not found for this load" });
-
-			// Fetch sequentially — these are local /uploads reads in the common case,
-			// and the Drive fallback is rate-limited enough that a parallel fan-out
-			// buys nothing. A row whose bytes are unreadable is dropped rather than
-			// failing the whole draft, but it IS surfaced to the caller (below), so a
-			// missing page is never silently omitted a second time.
-			const podFiles = [];
-			const podMissing = [];
-			for (const d of podDocs) {
-				const buf = await fetchDocumentBytes(d);
-				if (buf && buf.length) podFiles.push({ doc: d, buffer: buf });
-				else podMissing.push(d.file_name || String(d.id));
-			}
-			if (!podFiles.length) return res.status(400).json({ error: "POD not found for this load" });
-			if (podMissing.length) {
-				console.warn(
-					`Draft invoice ${loadId}: ${podMissing.length} of ${podDocs.length} POD file(s) unreadable, attaching ${podFiles.length} — ${podMissing.join(", ")}`,
-				);
-			}
-
-			// Attachment names. A single POD keeps its EXACT historical name — the
-			// overwhelming majority of loads, and "1 of 1" would be noise a broker
-			// has to parse. Multi-POD gets "POD_2_of_3_<loadId>.pdf" so an AP clerk
-			// can see at a glance whether the packet is complete.
-			const podSafeLoadId = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
-			const podAttachments = podFiles.map((f, i) => ({
-				filename:
-					podFiles.length === 1
-						? f.doc.file_name || `${podSafeLoadId}_POD.pdf`
-						: `POD_${i + 1}_of_${podFiles.length}_${podSafeLoadId}.pdf`,
-				content: f.buffer,
-				contentType: "application/pdf",
-			}));
-			// Back-compat aliases for the single-POD consumers further down.
-			const podDoc = podFiles[0].doc;
-			const podBuffer = podFiles[0].buffer;
-
-			// Facts about this load from a source OTHER than the rate-con, so the
-			// by-content fallback has something independent to check a match
-			// against. Built by the shared helper so this route and the bulk
-			// backfill cannot disagree about which facts the matcher gets.
-			const rateconLoadCtx = buildRateConLoadCtx(load, headers, loadId);
-			// ⚠️ persist:false ON A PREVIEW. This route is documented as previewing
-			// "without burning an invoice number or creating a draft", and a preview
-			// that permanently links a guessed document to a load breaks that
-			// promise: a dispatcher who opens the modal, sees the wrong rate-con and
-			// CANCELS has already written the link, and every later draft is then
-			// served from `documents` with no rescan and no second look.
-			const { buffer: rateconBuffer, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body, rateconLoadCtx, { persist: !dryRun, req });
-			// Say so plainly. The invoice still drafts without one (POD + the
-			// sheet's Payment column carry it), but brokers generally require the
-			// rate-con alongside the invoice, so an unattached one is the reason a
-			// payment later stalls. The preview modal warns the reviewer too.
-			if (!rateconBuffer || !rateconBuffer.length) {
-				console.warn(
-					`Draft invoice ${loadId}: no rate-con found (Drive folder by name, documents table, request body and Drive folder by content all empty) — drafting without it.`,
-				);
-			}
-
-			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
-			//    The Gemini fallback reuses the shared runRateConGemini() helper.
-			//    NOTE: only the Bison rate-con has the "Billing Information" block
-			//    the deterministic scan understands — every OTHER broker takes the
-			//    Gemini path, so it is the primary path now, not an edge case
-			//    (verified against real C.H. Robinson / Navisphere rate-cons).
-			const geminiExtract = GEMINI_API_KEY
-				? async (buf) => {
-						// Defensive: extractRateConFields already skips the call when
-						// there are no bytes, but this wrapper is the seam a future
-						// caller reaches for, and Buffer.from(null) throws.
-						if (!buf || !buf.length) return null;
-						const b64 = Buffer.from(buf).toString("base64");
-						if (!/^JVBERi/.test(b64)) return null;
-						return runRateConGemini(b64);
-				  }
-				: null;
-			// This route already degrades correctly on a Gemini failure —
-			// extractRateConFields returns empty fields, the total falls back to the
-			// sheet's Payment column and the order number to the load ID — so there is
-			// no status to change here. Two things are free, and only those:
-			// (a) NAME the failure in the log. "Gemini fallback failed" on a dead key
-			//     reads as a parsing problem, which is what sent 2026-08-05's outage to
-			//     the wrong diagnosis for a day.
-			// (b) latch it, so the alternate-rate-con loop below stops re-calling a
-			//     scanner that is refusing everything.
-			let geminiUnavailable = null;
-			const onGeminiError = (e) => {
-				if (e && e.kind === "unavailable") {
-					geminiUnavailable = e;
-					console.error(`Draft invoice: Gemini fallback unavailable (Gemini ${e.status}${e.reason ? " " + e.reason : ""}):`, e.message);
-					return;
-				}
-				console.error("Draft invoice: Gemini fallback failed:", e.message);
-			};
-			// ⚠️ WHAT A CANDIDATE MAY SUPPLY IS DECIDED BY ITS SOURCE, IN ONE PLACE.
-			// brokerInvoice.readRateConCandidates() applies rateconSourceTrust() to the
-			// primary AND to the alternate-recipient loop below it, so the two cannot
-			// drift. Do not call extractRateConFields() on a candidate directly here.
-			//
-			// A load can have MULTIPLE rate-con files (the original + a "Re:" reply, or
-			// a signed scan). getRateConBytes returns the newest as the primary, but the
-			// billing / "send documents to" email may live on ANOTHER file — so if the
-			// primary yielded none, the reader checks the other candidates and takes the
-			// first that does. Prevents defaulting the invoice to the wrong inbox (client
-			// 2026-07-30: Steam Logistics load 2214407 — carrierdocs@steamlogistics.com
-			// was only on the original file, not the newer "Re:" scan).
-			//
-			// ⚠️ A DOCUMENT WE FOUND BY INFERENCE MAY NOT CHOOSE WHERE MONEY IS SENT.
-			// For every non-Bison broker `documentsEmail` becomes the Gmail To:, so a
-			// content-matched file that turned out to belong to someone else would
-			// mail this invoice — and that customer's rate — to an address lifted off
-			// THEIR paperwork. 'drive-content' may therefore fill in fields but never
-			// the recipient. Bison is pinned regardless, so this only ever affects the
-			// brokers where it matters.
-			//
-			// ⚠️ ONLY RATE-CON ROWS in `documents` are trusted, and the trust is in who
-			// writes them: POST /api/loads/from-ratecon (a Super Admin or Dispatcher
-			// creating the load FROM that PDF), rememberRateConMatch() (a Super
-			// Admin's non-preview request on this route found the file by content —
-			// normally the approve after the review modal showed it — or a Super
-			// Admin applied the backfill), and an upload typed as a rate-con,
-			// which POST /api/documents/upload's type list keeps to Super Admin
-			// (uploadDocTypeFor()). A BOL row is
-			// not a rate-con: getRateConBytes() tags it 'documents-bol', and nothing —
-			// no total, no order/PO/move #, no trailer, no recipient — is read from
-			// it. It is only attached, as a supporting document, when no rate-con
-			// exists at all.
-			const rcRead = await brokerInvoice.readRateConCandidates(
-				rateconCandidates,
-				(buf, { alternate } = {}) =>
-					brokerInvoice.extractRateConFields(buf, {
-						brokerEmail, // exclude the booking agent's own email from documents-email detection
-						// On an ALTERNATE read, drop only the GEMINI half once the key is
-						// refusing — the documents email that loop hunts for comes from the
-						// deterministic text scan, so skipping the read would throw away a
-						// recovery that never needed Gemini. null keeps the free scan.
-						geminiExtract: alternate && geminiUnavailable ? null : geminiExtract,
-						onGeminiError,
-					}),
-				{ onAlternateError: (e) => console.error("Draft invoice: alternate rate-con extract failed:", e.message) },
-			);
-			const rcFields = rcRead.fields;
-			if (rcRead.primarySource && !rcRead.primaryRead) {
-				console.warn(
-					`Draft invoice ${loadId}: no rate-con on file, only a ${rcRead.primarySource} document — attaching it as supporting paperwork and reading nothing from it.`,
-				);
-			}
-			if (rcRead.recipientIgnored) {
-				console.warn(
-					`Draft invoice ${loadId}: ignoring the documents email on a ${rcRead.primarySource} rate-con — recipient falls back to the broker default.`,
-				);
-			}
-			if (rcRead.recipientFrom > 0) {
-				console.log(`Draft invoice ${loadId}: documents email recovered from an alternate rate-con file (of ${rateconCandidates.length} candidates).`);
-			}
-
-			// Recipient: the rate-con's "email documents to" address wins over the
-			// configured default (drives both the Gmail To: and the printed
-			// "Invoice To" block); falls back to BISON_INVOICE_EMAIL /
-			// DEFAULT_INVOICE_EMAIL when absent, and to "" when that setting is
-			// missing (refused below, step 6a-2, before anything is minted).
-			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
-
-			// The review-before-approve preview sends the recipient the dispatcher SAW
-			// back on approve, pinning it — so a nondeterministic Gemini re-run on the
-			// commit can't silently re-route the draft to a different address than the
-			// one that was reviewed. Classify "manual" only when the override actually
-			// DIFFERS from what extraction resolved (an unchanged confirm keeps the
-			// ratecon/default badge). An invalid/empty override is ignored.
-			const resolvedEmail = invoiceTo.email;
-			const resolvedInvoiceToName = invoiceTo.name;
-			const recipientOverride = ov.has.recipientEmail ? ov.values.recipientEmail : "";
-			let recipientSource = rcFields.documentsEmail ? "ratecon" : "default";
-			if (recipientOverride) {
-				if (recipientOverride.toLowerCase() !== String(resolvedEmail).toLowerCase()) recipientSource = "manual";
-				invoiceTo = { name: invoiceTo.name, email: recipientOverride };
-			}
-			// The "Invoice To" NAME is separately overridable now. It is a different
-			// fact from the address — resolveInvoiceTo() labels the block from the
-			// RECIPIENT's domain, so the two legitimately diverge — which is exactly
-			// why recipient_source above is left alone and keeps meaning "provenance
-			// of the email address" and nothing else.
-			if (ov.has.billToName) invoiceTo = { name: ov.values.billToName, email: invoiceTo.email };
-
-			// 4b) Invoice reference number. Per client (2026-07-30): ONLY Bison
-			//     invoices carry the broker's rate-con Order # (Bison AP matches on
-			//     it). EVERY other broker is invoiced by our Load Number, so a
-			//     non-Bison rate-con Order # is deliberately ignored here. Bison
-			//     still falls back to the load ID when its rate-con had no Order #.
-			const loadRef = loadId.replace(/^#/, "").trim();
-			const derivedOrderNumber = isBison ? (rcFields.orderNumber || loadRef) : loadRef;
-			// The dispatcher's correction wins — this is the field Gemini most often
-			// gets one digit wrong on, and it is what broker AP matches against.
-			const orderNumber = ov.has.orderNumber ? ov.values.orderNumber : derivedOrderNumber;
-			// ⚠️ REPORTED, not just logged. A console.log was the ONLY signal that
-			// the Order # had silently become our load id, so the review modal
-			// rendered a populated, entirely normal-looking field and the wrong
-			// number shipped. The reviewer cannot catch what nothing tells them.
-			// 'load-number' is NOT a failure — it is the designed behaviour for every
-			// non-Bison broker (PR #132), which is invoiced by OUR load number. It
-			// gets its own value because reporting it as 'ratecon' was simply untrue:
-			// the number never came from the document, and this field is the one
-			// thing a reviewer is meant to be able to trust about provenance.
-			const orderNumberSource = ov.has.orderNumber
-				? "override"
-				: !isBison
-					? "load-number"
-					: (rcFields.orderNumber ? "ratecon" : "load-id-fallback");
-			if (isBison && !rcFields.orderNumber) {
-				console.log(
-					`Draft invoice ${loadId}: no order # from the Bison rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
-				);
-			}
-
-			// 5) Validation: rate-con trailer must match the load's stored trailer.
-			//    On mismatch, do NOT call n8n — return 409 so the frontend can alert.
-			//    Only compare when the extracted trailer actually looks like a
-			//    trailer id (contains a digit): a guard that blocks on garbage is
-			//    worse than no guard, and prose like "Trailer Required" has been
-			//    seen leaking out of loosely-labelled rate-cons.
-			const normTrailer = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-			const rcTrailerUsable = /\d/.test(String(rcFields.trailerNumber || ""));
-			if (sheetTrailer && rcTrailerUsable && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
-				return res.status(409).json({
-					error: `Trailer mismatch: rate-con says ${rcFields.trailerNumber} but the load is on trailer ${sheetTrailer}. Invoice not drafted.`,
-					code: "TRAILER_MISMATCH",
-					details: { rateconTrailer: rcFields.trailerNumber, loadTrailer: sheetTrailer },
-				});
-			}
-
-			// 6) Invoice total: the rate-con's Total Rate, else the load's
-			//    "  Payment  " cell from the sheet. HARD STOP when neither
-			//    yields a positive number — this endpoint moves money, and a
-			//    $0.00 invoice mailed to a broker is worse than an error.
-			const rcTotal = brokerInvoice.parseMoney(rcFields.totalRate);
-			const sheetTotal = paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0;
-			const derivedTotal = rcTotal > 0 ? rcTotal : sheetTotal;
-			// A SUPPLIED total satisfying this guard IS the feature: extraction
-			// fails, the dispatcher types 2100.00, the invoice drafts. But the
-			// guarantee shifts from "the server proved a number exists" to "a human
-			// typed a number", so the number is RE-DERIVED through the same format
-			// gate / >= $0.01 floor / $1,000,000 ceiling in parseInvoiceOverrides()
-			// rather than trusted. It is never skipped.
-			//
-			// ⚠️ An overridden total is INVOICE-ONLY. Nothing here writes back to the
-			// Job Tracking "  Payment  " column, so revenue, driver pay, investor
-			// payouts and the P&L keep reading the sheet exactly as they do today and
-			// no closed month can be restated by an invoice correction. The
-			// divergence is RECORDED instead (total_source / sheet_total /
-			// ratecon_total below). Owner decision — do not "helpfully" sync it.
-			const totalAmount = ov.has.total ? ov.values.total : derivedTotal;
-			const totalSource = ov.has.total ? "manual" : (rcTotal > 0 ? "ratecon" : (derivedTotal > 0 ? "sheet" : "unknown"));
-			const needsTotal = !(totalAmount > 0);
-			// ⚠️ RELAXED FOR dryRun ONLY, and that relaxation is the blocker fix.
-			// The review modal opens exclusively via ?dryRun=1, so while this 422
-			// fired ahead of the preview response the dispatcher never saw a form to
-			// type the missing total INTO — precisely in the case this feature exists
-			// for. The preview instead returns 200 with needsTotal:true and skips the
-			// render entirely, so no $0.00 LogisX PDF is ever produced. The real
-			// approve keeps the hard 422 unchanged, and the delivered gate, both POD
-			// gates and the trailer 409 above are all untouched.
-			if (needsTotal && !dryRun) {
-				return res.status(422).json({
-					error:
-						`Invoice total is unknown for load ${loadId} — the rate-con had no readable Total Rate` +
-						(paymentCol ? ` and the sheet's ${paymentCol.trim()} column is empty` : " and the sheet has no payment column") +
-						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
-						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
-					code: "INVOICE_TOTAL_UNKNOWN",
-				});
-			}
-
-			// 6a) REFERENCE NUMBERS ON A BISON INVOICE — the same shape as the
-			//     total guard above, for the same reason, and it must live HERE:
-			//     nextInvoiceNumber() is called a few lines below, so a refusal
-			//     placed after it would burn an invoice number on every attempt.
-			//
-			//     ⚠️ WHY THIS IS A HARD STOP AND NOT A WARNING. Bison AP matches
-			//     payment to their Order #. When the rate-con cannot be read, the
-			//     order number silently becomes OUR load id — a number that looks
-			//     entirely valid to the clerk reading it and matches nothing on
-			//     their side, while the "…& PO #…" sentence vanishes from the body
-			//     because buildInvoiceEmailHtml() omits refs it does not have.
-			//     That is exactly what shipped on load 30080873 on 2026-08-18, and
-			//     a modal warning did not stop it. Owner's call: require a human to
-			//     type both rather than mail a plausible wrong number.
-			//
-			//     Bison ONLY. Every other broker is invoiced by our load number by
-			//     design (PR #132) and its cover note carries no PO language at all
-			//     (PR #133), so there is nothing to be wrong about.
-			//
-			//     An explicitly-sent EMPTY poNumber satisfies this — clearing a
-			//     field is a decision, omitting it is not. Same OMITTED-vs-EMPTY
-			//     rule parseInvoiceOverrides() already enforces.
-			//     ⚠️ THE SEED IS HALF THE GUARD, and without it the guard is
-			//     decorative. `buildOverrideBody()` sends `orderNumber` on EVERY
-			//     request ("always sent"), seeded from this route's own dryRun
-			//     echo — so if that echo carries the load-id fallback, the modal
-			//     hands it straight back, `ov.has.orderNumber` is true, and the
-			//     422 below can never fire on the one path every dispatcher uses.
-			//     Blanking the echo (further down, beside `totalAmount`) is what
-			//     makes the block real: an empty Order # fails the modal's own
-			//     required-field validation AND parseInvoiceOverrides' non-empty
-			//     rule, so nothing reaches the 422 by accident. This mirrors
-			//     `needsTotal`, which has always blanked `totalAmount` for exactly
-			//     this reason — the refs guard originally copied the flag and not
-			//     the seed, which is the whole difference between the two.
-			const refsUnreadable = isBison && !rcFields.orderNumber;
-			const needsOrderNumber = refsUnreadable && !ov.has.orderNumber;
-			const needsPoNumber = refsUnreadable && !ov.has.poNumber;
-			if ((needsOrderNumber || needsPoNumber) && !dryRun) {
-				return res.status(422).json({
-					error:
-						`Could not read the Order # from the rate-con for load ${loadId}, so this Bison invoice ` +
-						`would go out referencing our load id instead — Bison AP matches on their Order #, not ours. ` +
-						`Enter the Order # and PO # from the rate-con, then approve.` +
-						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
-					code: "INVOICE_REFS_REQUIRED",
-					details: { needsOrderNumber, needsPoNumber, rateconFound: !!(rateconBuffer && rateconBuffer.length) },
-				});
-			}
-
-			// 6a-1) ADVANCE LINES (B20). Below the refs guard and above
-			//     nextInvoiceNumber(), for the guards' own reason: a refusal after
-			//     the mint would burn an invoice number. The line haul is this route's
-			//     own base (the rate con's Total Rate, else the sheet's Payment); a
-			//     typed total that differs from it is refused beside a line, since it
-			//     would take the advance off twice. On ?dryRun=1 a refusal is reported
-			//     in the answer's invoiceLines.error and nothing is rendered, so the
-			//     editor still opens and the lines can be unticked. INVOICE-ONLY: the
-			//     balance due is billed; Job Tracking's Payment and every settlement
-			//     figure keep the line haul.
-			let lineResolved = null;
-			if (linesOn) {
-				lineResolved = invoiceLines.resolveInvoiceLines(db, {
-					loadId,
-					selection: lineSel,
-					derivedLineHaul: derivedTotal,
-					lineHaulSource: rcTotal > 0 ? "ratecon" : "sheet",
-					typedTotal: ov.has.total ? ov.values.total : null,
-				});
-				if (!lineResolved.ok && !dryRun) {
-					return res.status(lineResolved.status).json({
-						error: lineResolved.error, code: lineResolved.code, ...(lineResolved.lineId ? { lineId: lineResolved.lineId } : {}),
-					});
-				}
-			}
-			const lineSummary = lineResolved && lineResolved.ok ? lineResolved.summary : null;
-			const lineRefused = !!(lineResolved && !lineResolved.ok);
-
-			// 6a-2) A RECIPIENT. The default AP inboxes are settings with no default
-			//     in code (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL), so on a server
-			//     without the one this load needs, and with no rate-con address or
-			//     reviewer-typed recipient, To is empty. No draft is created with an
-			//     empty To: refused HERE, before nextInvoiceNumber() below, so nothing
-			//     is minted, rendered, drafted or recorded. The dryRun still answers
-			//     (with an empty recipient) so the review can collect one, exactly as
-			//     it collects a missing total.
-			if (!invoiceTo.email && !dryRun) {
-				const setting = isBison ? "BISON_INVOICE_EMAIL" : "DEFAULT_INVOICE_EMAIL";
-				return res.status(503).json({
-					error:
-						`No recipient for the invoice on load ${loadId}: this server has no ${isBison ? "Bison" : "default"} ` +
-						`invoice address configured (${setting}). Enter the recipient's email in the review, then approve.`,
-					code: "INVOICE_RECIPIENT_UNCONFIGURED",
-				});
-			}
+			// 1)-6a-2) The load, its PODs and rate cons, every printed field, and
+			//    every refusal that must come before the invoice number:
+			//    lib/broker-invoice-draft.js prepare(). A refusal is this route's
+			//    answer as it always was.
+			const prepared = await brokerInvoiceDraft.prepare({ loadId, body: req.body, dryRun, mode: "manual", ov, lineSel, req });
+			if (!prepared.ok) return res.status(prepared.http).json(prepared.json);
+			const draft = prepared.ctx;
+			const {
+				isBison, brokerName, effBrokerName, invoiceTo, resolvedEmail, resolvedInvoiceToName, recipientSource,
+				podAttachments, podMissing, podBuffer, rateconBuffer, rateconCandidates, rcFields, sheetTrailer, rcTrailerUsable, normTrailer,
+				orderNumber, derivedOrderNumber, orderNumberSource, needsOrderNumber, needsPoNumber,
+				derivedTotal, totalAmount, totalSource, needsTotal, total,
+				lineResolved, lineSummary, deliveryDate, derivedDeliveryDate, poNumber, derivedPoNumber, moveNumber, derivedMoveNumber,
+				notes, derivedNotes,
+			} = draft;
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
-			//    button-click date (today, printed as the business date). deliveryDate is the
-			//    load's ACTUAL delivery/completion date from the sheet — never
-			//    today, never the rate-con scheduled date.
+			//    button-click date (today, printed as the business date).
 			const today = new Date();
 			// dryRun previews the next number without consuming it; a real draft commits it.
 			//
@@ -53655,112 +53258,10 @@ app.post(
 			const invoiceId = ov.has.invoiceId ? ov.values.invoiceId : mintedInvoiceId;
 			const derivedInvoiceDate = brokerInvoice.formatDate(today);
 			const invoiceDate = ov.has.invoiceDate ? ov.values.invoiceDate : derivedInvoiceDate;
-			const rawDeliveryDate = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
-			const derivedDeliveryDate = brokerInvoice.formatDate(rawDeliveryDate);
-			const deliveryDate = ov.has.deliveryDate ? ov.values.deliveryDate : derivedDeliveryDate;
-			// ⚠️ isBison is NOT recomputed from an edited broker name. It derives from
-			// the broker EMAIL above and drives the AP inbox, the Bison-vs-generic
-			// cover letter and the Bison filename — editing a display name must never
-			// flip the email template or the routing.
-			const effBrokerName = ov.has.brokerName ? ov.values.brokerName : brokerName;
-			const derivedPoNumber = rcFields.poNumber || "";
-			const poNumber = ov.has.poNumber ? ov.values.poNumber : derivedPoNumber;
-			const derivedMoveNumber = rcFields.moveNumber || "";
-			const moveNumber = ov.has.moveNumber ? ov.values.moveNumber : derivedMoveNumber;
-			// Notes: omitted → the last APPROVED note for this load; "" → cleared.
-			// The same omitted-vs-empty rule as every field above. PDF only — the
-			// cover email is untouched, and nothing here reaches Job Tracking.
-			const derivedNotes = latestDraftNotes(loadId);
-			const notes = ov.has.notes ? ov.values.notes : derivedNotes;
-			// "" on the needsTotal dryRun — never "$0.00", which reads as a real
-			// figure the reviewer might approve.
-			const total = needsTotal ? "" : brokerInvoice.formatMoney(totalAmount);
-			// What the draft bills: the balance due when advance lines print (B20),
-			// else the total. `total` above stays the line haul.
-			const billedTotal = lineSummary ? invoiceLines.formatCents(lineSummary.balanceCents) : total;
 
-			// 7) Render the invoice PDF. Skipped entirely when no total could be
-			//    derived AND none was supplied (dryRun only — see the guard above):
-			//    there is nothing honest to print, and a rendered $0.00 invoice is
-			//    the one artifact this route has always refused to create. Skipped
-			//    too on a dryRun whose advance lines were refused (6a-1).
-			let invoicePdf = null;
-			let invoicePdfBase64 = "";
-			if (!needsTotal && !lineRefused) {
-				const invoiceHtml = brokerInvoice.buildInvoiceHtml({
-					invoiceId,
-					invoiceDate,
-					brokerName: effBrokerName,
-					invoiceTo,
-					orderNumber,
-					poNumber,
-					deliveryDate,
-					invoiceLines: lineSummary,
-					total,
-					notes,
-				});
-				invoicePdf = await renderHtmlToPdf(invoiceHtml);
-				invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
-			}
-
-			// 7b) Build the standard invoice email (body + signature) — the same
-			//     content the draft carries. For a Bison load brokerName is
-			//     "Bison Transport", so the subject renders exactly as before.
-			//     One builder for this route and the preview — see
-			//     buildInvoiceSubject() for why it is plain text, never esc()'d.
-			//     The message is the dispatcher's edit when one was sent, else the
-			//     generated one; emailBodyDefault is that generated one, which the
-			//     editor shows until somebody types and the audit judges an edit
-			//     against. The signature is never editable.
-			//     ⚠️ Its Order # is BLANKED exactly as the dryRun's `orderNumber` seed
-			//     is (step 6a), for the same reason: with the refs unreadable,
-			//     orderNumber is our load id, and the message the editor starts from
-			//     must not offer it as Bison's Order #. Only a dryRun reaches here
-			//     with needsOrderNumber set — the approve refused above.
-			const draftSubject = brokerInvoice.buildInvoiceSubject({ brokerName: effBrokerName, orderNumber });
-			const emailFields = {
-				brokerName: effBrokerName,
-				isBison,
-				loadNumber: loadRef,
-				orderNumber: needsOrderNumber ? "" : orderNumber,
-				moveNumber,
-				poNumber,
-			};
-			// B20: the balance in its own paragraph when advance lines print.
-			if (lineSummary) emailFields.balanceLine = invoiceLines.emailBalanceLine(lineSummary);
-			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
-			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
-			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
-			// Bison's attachment name is left byte-identical; other brokers get
-			// their own name (a broker filing "Bison Invoice ..." would be odd).
-			//
-			// Both halves now go through safeAttachmentName(): orderNumber is
-			// dispatcher-supplied and was never sanitized at all. The broker half
-			// passes fallback "" on purpose — an empty broker name legitimately
-			// yields the bare "Invoice Order #…" form.
-			//
-			// 80, matching INVOICE_ORDER_RE, so the file name carries the Order #
-			// at its full length (up to 80) rather than a silently shorter one. It
-			// is not a verbatim copy: the Windows-reserved characters
-			// \ / : * ? " < > | are still turned into spaces (and runs of spaces
-			// collapsed) by safeAttachmentName().
-			const safeName = safeAttachmentName(effBrokerName, 40, "");
-			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
-			const invoiceFileName = isBison
-				? `Bison Invoice Order #${safeOrderNumber}.pdf`
-				: `${safeName ? safeName + " " : ""}Invoice Order #${safeOrderNumber}.pdf`;
-			// invoicePdf is null only on the needsTotal dryRun, which returns below
-			// and never reads this array.
-			const draftAttachments = invoicePdf
-				? [
-						{ filename: invoiceFileName, content: invoicePdf, contentType: "application/pdf" },
-						// ALL PODs, in page order — see step 3.
-						...podAttachments,
-				  ]
-				: [];
-			if (invoicePdf && rateconBuffer && rateconBuffer.length) {
-				draftAttachments.push({ filename: `${safeOrderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
-			}
+			// 7)-7b) The invoice PDF, the email and the attachments: render().
+			const rendered = await brokerInvoiceDraft.render(draft, { invoiceId, invoiceDate, emailBody: ov.has.emailBody ? ov.values.emailBody : null });
+			const { invoicePdfBase64, draftSubject, emailBodyDefault, emailBody, draftHtml, safeOrderNumber, invoiceFileName, draftAttachments } = rendered;
 
 			// Dry-run / preview: generate everything but create no draft. Echo
 			// the resolved routing so a reviewer can verify recipient/subject/
@@ -53900,7 +53401,6 @@ app.post(
 			// The common path is confirming the peeked values verbatim, so keying on
 			// presence would mark every draft edited and the distinction would be
 			// worth nothing six months later.
-			const fmtMoney = (n) => brokerInvoice.formatMoney(n || 0);
 			const editDiffs = [
 				["invoiceId", mintedInvoiceId, invoiceId],
 				["invoiceDate", derivedInvoiceDate, invoiceDate],
@@ -53921,98 +53421,19 @@ app.post(
 				["notes", derivedNotes, notes],
 			].filter(([, from, to]) => String(from == null ? "" : from) !== String(to == null ? "" : to));
 			const editedFields = editDiffs.map(([f]) => f);
-			// Names the divergence explicitly, and names the RULE with it — an
-			// auditor reading this row months later must not have to go and check
-			// whether the sheet moved too. It did not, and that is owner decision #2.
-			// The email message is the one field logged WITHOUT its text: only that
-			// it was edited, its length, and — when the n8n fallback wrote the draft
-			// with the generated message instead — that the edit was not applied.
-			// An applied edit's words are in the Gmail draft itself.
-			// B20: notes on the lines' part of the audit line that are only known later
-			// (a line voided while the draft was made, recordDraft(); the balance
-			// sentence the n8n fallback's own email leaves out). editEmailApplied keeps
-			// the n8n path's answer for the message when the line is rebuilt for them.
+			// What record()'s audit line must say the n8n fallback left out: an edited
+			// message it did not apply (editEmailApplied), and B20 notes on the lines'
+			// part (the balance sentence its own email leaves out).
 			const lineAuditNotes = [];
 			let editEmailApplied = true;
-			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
-				f === "total"
-					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
-					: f === "emailBody"
-						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
-						: f === "lines"
-							// Rebuilt here so the notes sit right after the figures, where
-							// the 1000-character cap below cannot reach them.
-							? invoiceLines.auditDraftDetail(lineSummary, lineAuditNotes)
-							: `${f}: "${from}" → "${to}"`,
-			).join("; ");
-			// Replaced on the n8n path only, before recordDraft() logs it.
-			let editDetail = describeEdits(true);
 
 			// Persist that an official draft was created for this load so the load
-			// modal can show "approved draft → recipient / invoice #". Best-effort —
-			// never fails the draft. Only called on a real (non-dryRun) success.
-			const recordDraft = (via) => {
-				let draftRecorded = false;
-				try {
-					// The draft row and, with B20 advance lines, its printed lines are ONE
-					// write: a line record that fails takes the row with it, so no draft
-					// row ever stands without the audit rows that follow.
-					const lineRecord = db.transaction(() => {
-						const draftRow = db.prepare(
-							"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-						).run(
-							loadId, invoiceId, invoiceTo.email, recipientSource, billedTotal, effBrokerName, orderNumber, via,
-							(req.session.user && req.session.user.username) || "",
-							editedFields.length ? 1 : 0,
-							editedFields.join(","),
-							// Without the email message, by the audit line's rule: edited_fields
-							// records that it changed, and the text is not kept here.
-							editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
-							totalSource,
-							sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
-							rcTotal > 0 ? fmtMoney(rcTotal) : "",
-							invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
-							notes,
-						);
-						// B20: the printed lines and the line haul on this row, and each
-						// line still active stamped with the first invoice # that printed it.
-						return lineSummary ? invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId }) : null;
-					})();
-					draftRecorded = true;
-					// A line voided after this draft resolved its lines is in the Gmail
-					// draft but carries no invoice #: the answer and the audit line say so.
-					if (lineRecord && lineRecord.voidedIds.length) {
-						for (const id of lineRecord.voidedIds) {
-							draftWarnings.push(`Advance line #${id} was voided while this draft was made; check the Gmail draft.`);
-							lineAuditNotes.push(`line #${id} was voided while this draft was made; check the Gmail draft`);
-						}
-						editDetail = describeEdits(editEmailApplied);
-					}
-					// ⚠️ BYTE-IDENTICAL for the unedited case, deliberately — historical
-					// queries over invoice_draft_created must not change shape. The edit
-					// is a SEPARATE action, per the naming discipline beside logAudit():
-					// "which invoices did somebody hand-correct, and to what?" is then a
-					// one-line query instead of a string scan.
-					logAudit(req, "invoice_draft_created", "load", loadId, `${invoiceId} → ${invoiceTo.email} (${via})`);
-					if (editedFields.length) {
-						logAudit(req, "invoice_draft_edited", "load", loadId, sanitizeEvidenceText(editDetail, 1000));
-					}
-				} catch (e) {
-					console.error("Draft invoice: draft record persist failed:", e.message);
-					// The Gmail draft exists but this app has no record of it (no row, no
-					// stamp, no created/edited audit): the answer says so FIRST, so the
-					// warning stands whatever the audit write below does, then a *_failed
-					// row records the attempt.
-					if (!draftRecorded) {
-						draftWarnings.push(`The Gmail draft was created as invoice #${invoiceId} but LogisX could not record it; check before sending.`);
-						try {
-							logAudit(req, "invoice_draft_record_failed", "load", loadId, `${invoiceId} (${via}): ${sanitizeEvidenceText(e && e.message, 200)}`);
-						} catch (auditErr) {
-							console.error("Draft invoice: the record-failed audit row could not be written:", auditErr.message);
-						}
-					}
-				}
-			};
+			// modal can show "approved draft → recipient / invoice #": record() in
+			// lib/broker-invoice-draft.js. Best-effort — never fails the draft. Only
+			// called on a real (non-dryRun) success.
+			const recordDraft = (via) => brokerInvoiceDraft.record(draft, rendered, {
+				via, actor: req, invoiceId, mintedInvoiceId, editDiffs, emailApplied: editEmailApplied, lineAuditNotes, draftWarnings,
+			});
 
 			const gmailUser = process.env.GMAIL_USER;
 			const gmailPass = REPLICA ? "" : process.env.GMAIL_APP_PASSWORD; // none in a replica: no mail leaves it
@@ -54048,7 +53469,6 @@ app.post(
 				if (editedFields.includes("emailBody")) {
 					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
 					editEmailApplied = false;
-					editDetail = describeEdits(false);
 				}
 				// B20: for the same reason the balance due sentence of an invoice with
 				// advance lines is not in this path's email. The PDF it attaches prints
@@ -54056,7 +53476,6 @@ app.post(
 				if (lineSummary) {
 					draftWarnings.push("The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.");
 					lineAuditNotes.push("email balance sentence NOT APPLIED (the fallback service used its own message)");
-					editDetail = describeEdits(editEmailApplied);
 				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
