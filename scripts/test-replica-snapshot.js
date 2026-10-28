@@ -8,7 +8,8 @@
 //      write (SQLITE_READONLY), and it keeps the shape the production-write
 //      guard allows (readonly: true, VACUUM INTO, one folder under
 //      /root/logisx-replica-tmp, app.db)
-//   §2 scrub.js clears sessions and every credential column (snake_case or
+//   §2 scrub.js clears sessions, the staff sign-in IP and browser records
+//      (sign_in_network) and every credential column (snake_case or
 //      camelCase) in the COPY, keeps every other value, refuses the live
 //      database, and leaves none of the removed values anywhere in the file's
 //      bytes: planted values are searched for, a plain DELETE is shown to leave
@@ -118,7 +119,7 @@ console.log("§2 the scrub clears tokens and sessions in the copy, out of its by
 {
 	// Distinctive values, so a search of the file's bytes can only find these.
 	const P = (tag) => `PLANTED-${tag}-${crypto.randomBytes(8).toString("hex")}`;
-	const planted = { sid1: P("sid1"), sid2: P("sid2"), tok: P("access"), inv1: P("invite1"), inv2: P("invite2"), oauth: P("oauth"), api: P("apikey"), reset: P("resetcode") };
+	const planted = { sid1: P("sid1"), sid2: P("sid2"), tok: P("access"), inv1: P("invite1"), inv2: P("invite2"), oauth: P("oauth"), api: P("apikey"), reset: P("resetcode"), browser: P("browser") };
 	const fixture = (file) => {
 		const db = new Database(file);
 		db.exec(`
@@ -130,10 +131,15 @@ console.log("§2 the scrub clears tokens and sessions in the copy, out of its by
 			CREATE TABLE integrations (id INTEGER PRIMARY KEY, name TEXT, apiKey TEXT, login_nonce TEXT);
 			CREATE TABLE server_state (key TEXT PRIMARY KEY, value TEXT);
 			CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT);
+			CREATE TABLE sign_in_network (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, user_id INTEGER NOT NULL, at TEXT NOT NULL,
+				ip TEXT NOT NULL DEFAULT '', ip_source TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '');
 			CREATE TABLE filler (id INTEGER PRIMARY KEY, body TEXT);
 		`);
 		const ins = (sql, ...a) => db.prepare(sql).run(...a);
 		ins("INSERT INTO sessions VALUES (?, '{}', '2026-12-01'), (?, '{}', '2026-12-01')", planted.sid1, planted.sid2);
+		// A staff sign-in's IP and browser (lib/sign-in.js); the browser string is
+		// the planted value the byte search looks for.
+		ins("INSERT INTO sign_in_network (audit_id, user_id, at, ip, ip_source, user_agent) VALUES (1, 1, '2026-10-28T12:00:00.000Z', '203.0.113.90', 'proxy', ?)", planted.browser);
 		ins("INSERT INTO investor_applications VALUES (1, 'Quill Harbor LLC', ?, '12-3456789'), (2, 'Moss Lane LLC', NULL, NULL)", planted.tok);
 		ins("INSERT INTO investor_invites VALUES (1, ?, 'quill@example.test'), (2, ?, 'moss@example.test')", planted.inv1, planted.inv2);
 		ins("INSERT INTO users VALUES (1, 'super_admin', '$2a$10$abcdefghijklmnopqrstuv', ?)", planted.reset);
@@ -166,6 +172,8 @@ console.log("§2 the scrub clears tokens and sessions in the copy, out of its by
 	const find = (t, c) => cleared.find((x) => x.table === t && x.column === c);
 	eq("every session is gone", db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n, 0);
 	eq("...and reported", find("sessions", "*").rows, 2);
+	eq("every staff sign-in IP and browser record is gone (sign_in_network)", db.prepare("SELECT COUNT(*) AS n FROM sign_in_network").get().n, 0);
+	eq("...and reported", (find("sign_in_network", "*") || {}).rows, 1);
 	eq("access_token is cleared", db.prepare("SELECT access_token FROM investor_applications WHERE id = 1").get().access_token, null);
 	eq("...the rest of the row is as it was", db.prepare("SELECT legal_name, ein_ssn FROM investor_applications WHERE id = 1").get(), { legal_name: "Quill Harbor LLC", ein_ssn: "12-3456789" });
 	const tokens = db.prepare("SELECT token_sha256 FROM investor_invites ORDER BY id").all().map((r) => r.token_sha256);

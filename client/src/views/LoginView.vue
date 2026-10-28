@@ -88,6 +88,7 @@
               {{ loginLoading ? 'SIGNING IN...' : 'SIGN IN' }}
             </button>
             <p v-if="loginError" class="error-text">{{ loginError }}</p>
+            <p v-if="loginTip" class="tip-text">{{ loginTip }}</p>
           </form>
         </template>
 
@@ -104,6 +105,7 @@ import { ref, reactive, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { Eye, EyeOff } from 'lucide-vue-next'
 import { isLeavingPage, useAuthStore } from '../stores/auth'
+import { signInTip } from '../lib/accountForms.js'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -114,6 +116,9 @@ const setupLoading = ref(false)
 const loginLoading = ref(false)
 const setupError = ref('')
 const loginError = ref('')
+// "Tip: sign in with your username." after a refused sign-in by email
+// (lib/accountForms.js signInTip()).
+const loginTip = ref('')
 
 const setupForm = reactive({ username: '', password: '', email: '' })
 const loginForm = reactive({ username: '', password: '' })
@@ -178,6 +183,7 @@ async function doSetup() {
 
 async function doLogin() {
   loginError.value = ''
+  loginTip.value = ''
   if (!loginForm.username || !loginForm.password) {
     loginError.value = 'Enter username and password.'
     return
@@ -193,6 +199,7 @@ async function doLogin() {
     router.push(auth.roleHome)
   } catch (err) {
     loginError.value = err.message || 'Connection failed.'
+    loginTip.value = signInTip(err && err.status, loginForm.username)
   } finally {
     if (!freshPageComing) loginLoading.value = false
   }
@@ -447,6 +454,13 @@ async function doLogin() {
 .error-text {
   font-size: 0.82rem;
   color: #dc2626;
+  text-align: center;
+}
+
+.tip-text {
+  margin-top: -0.75rem;
+  font-size: 0.8rem;
+  color: #4b5563;
   text-align: center;
 }
 

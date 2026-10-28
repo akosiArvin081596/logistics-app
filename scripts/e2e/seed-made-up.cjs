@@ -21,6 +21,9 @@
 //   driver_onboarding      the driver, fully onboarded on that application 60 days ago
 //                          (the Kit tab renders; the welcome card, shown for 14 days, does not)
 //
+// and the truck's assignment is moved to start at the first instant of the business
+// day (APP_TIMEZONE, app-day.cjs) the route made it on, so it covers that day.
+//
 // Every name, address and number is invented (QA-/qa-e2e- names, example.test
 // mail, no SSN or licence number), and the two images (the photo a JPEG, the CDL a
 // PNG) are drawn here at run time. The truck's unit number is not QA-TEST-: e2e.mjs deletes QA-TEST-
@@ -39,6 +42,7 @@ const zlib = require("zlib");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const paths = require("./paths.cjs");
+const { appDayKey, appDayStartIso } = require("./app-day.cjs");
 
 const DRIVER_NAME = "QA E2E Driver One";
 const TRUCK_UNIT = "QA-E2E-T1";
@@ -255,7 +259,17 @@ async function seedMadeUp({ destAbs, passwords, log, Database }) {
 		if (!truck || truck.assigned_driver !== DRIVER_NAME || !/^data:image\//.test(truck.head || "")) {
 			throw new Error(`truck ${TRUCK_UNIT} was not stored assigned to the made-up driver with an image photo`);
 		}
-		log(`seed: application ${applicationId} (image cdl_front) and the driver fully onboarded, written with the server stopped`);
+		// The server stamps the assignment with its UTC instant, whose first ten
+		// characters (the day the backfill and B1 read) are tomorrow from 8 PM Eastern.
+		// Starting it at its business day's first instant makes it cover that day.
+		const open = db.prepare("SELECT id, start_date FROM truck_assignments WHERE truck_id = ? AND driver_name = ? AND COALESCE(end_date, '') = ''").all(truckId, DRIVER_NAME);
+		const madeAt = open.length === 1 ? new Date(open[0].start_date) : null;
+		if (!madeAt || Number.isNaN(madeAt.getTime())) {
+			throw new Error(`truck ${TRUCK_UNIT} has ${open.length} open assignment(s) to the made-up driver with an instant, not one`);
+		}
+		const assignedDay = appDayKey(madeAt);
+		db.prepare("UPDATE truck_assignments SET start_date = ? WHERE id = ?").run(appDayStartIso(assignedDay), open[0].id);
+		log(`seed: application ${applicationId} (image cdl_front) and the driver fully onboarded, written with the server stopped; the truck's assignment starts at the start of business day ${assignedDay}`);
 		return {
 			superAdmin: { username: ACCOUNTS.superAdmin.username, userId: ids.superAdmin },
 			driver: { username: ACCOUNTS.driver.username, userId: ids.driver, truckId, applicationId },

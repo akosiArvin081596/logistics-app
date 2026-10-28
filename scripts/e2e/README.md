@@ -232,6 +232,7 @@ npm --prefix scripts/e2e ci      # playwright-core only, pinned; the root and cl
 | `source-db.cjs` | The one rule for a real `SOURCE_DB` (`setup-db.cjs`, `payout-parity.mjs`): only under `~/LogisX-replica/`, never inside a checkout or worktree (symlinks resolved, any folder holding `.git`). |
 | `seed-made-up.cjs` | The made-up database: the app's own schema (server.js booted once on an empty file), the five logins and the driver's truck, application and onboarding, all invented. |
 | `plant-before-boot.cjs` | Plants what B1 needs in a copy BEFORE a server boots on it (one expense), or removes it (`--remove`). |
+| `app-day.cjs` | The business day (`APP_TIMEZONE`, via `lib/app-time.js`) the made-up seed's assignment and B1's expense both take their day from, and that day's first instant. |
 | `verify-creds.cjs` | Confirms the logins file matches a copy. Prints booleans and ids only. |
 | `prep-worktree.sh` | Makes a worktree bootable: links the main checkout's `node_modules` and `client/node_modules` (nothing else), then builds `client/dist`. With `E2E_LINK_PODS=1` it also links the main checkout's POD files into `uploads/`, for the invoice section. |
 | `fake-google.cjs` | The Google stand-in `boot-server.sh` preloads into every server it boots: `googleapis` answers Sheets from the run's copy of `fixtures/e2e-sheets.json` and refuses Drive; dotenv loads nothing; a read of a `.env` or a Google key is refused and logged. |
@@ -405,6 +406,7 @@ new install. It then makes the records through the app's own routes and stops th
 | Truck | `POST /api/trucks` | `QA-E2E-T1` (the fixture's truck), assigned to that driver, with a JPEG photo drawn at run time (the app's jimp) |
 | Application | SQL, server stopped | the driver's accepted application, a PNG `cdl_front` drawn at run time, `example.test` mail, no SSN or licence number |
 | Onboarding | SQL, server stopped | the driver `fully_onboarded` on that application 60 days ago (the Kit tab renders; the driver app's welcome card, shown for 14 days after onboarding, does not cover the run's taps) |
+| Assignment start | SQL, server stopped | the truck's assignment starts at the first instant of the business day (`APP_TIMEZONE`, `app-day.cjs`) the route made it on. The route stores its UTC instant, which from 8 PM Eastern names tomorrow, and B1's plant would find no assignment covering today |
 
 Every login gets `must_change_password = 0` and no session is left. The seed server's log, pid file and Sheets copy are
 removed, so the run's first boot starts a fresh copy of the fixture. The truck is not `QA-TEST-`: the run deletes
@@ -417,7 +419,8 @@ its screenshots and results out of the repo.
 
 - The source is opened **read-only** (`{ readonly: true, fileMustExist: true }`) and copied with SQLite's backup API.
   The copy must be inside the work dir.
-- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also clears the copy's sessions.
+- Super Admin: `scripts/reset-super-admin-password.js` runs on the copy. It also ends `super_admin`'s sessions on the copy
+  (no other account's) and writes its system audit row there.
 - Driver: a Driver whose `driver_name` matches (case-insensitively) the `assigned_driver` of exactly one truck with an
   image photo. The Driver must be `fully_onboarded` (or have no onboarding status), so the Kit tab renders, and their
   application's `cdl_front` must be an image. The logins file's existing driver is kept while they still qualify;
@@ -446,7 +449,8 @@ account spelling, while the truck assignment covering its date stores the name w
   Driver account that qualifies. No other account's name reads as the same driver, and no account, directory row or
   assignment holds the name with its space doubled. The account has a truck assignment stored under exactly its own
   spelling that covers today.
-- **The row:** the expense is filed under the account's own spelling, dated today (US Central), in a month that is not
+- **The row:** the expense is filed under the account's own spelling, dated today in `APP_TIMEZONE` (US Eastern unless
+  set; `app-day.cjs`, the day the made-up seed's assignment starts on too), in a month that is not
   finalized. The truck is blank and the owner 0; type Other, $0.01. `load_id` is `QA-TEST-B1` and the description
   `QA-TEST-B1-<timestamp>`, and `timestamp` records when it was planted.
 - **The assignment:** re-spelled in the copy with its space doubled. `b1-plant.json` (`0600`, in the work dir) records

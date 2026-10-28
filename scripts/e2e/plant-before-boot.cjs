@@ -12,9 +12,9 @@
 // filed under a driver's OWN account spelling, while the truck assignment covering
 // its date stores that name with a different spacing.
 //   - expense: driver = the Driver account's own name, exactly as the account
-//     stores it (what the driver's own session files under); date = today in US
-//     Central, a month that is not finalized (period_locks); truck_unit blank,
-//     owner_id 0, type Other, $0.01, load_id QA-TEST-B1, description
+//     stores it (what the driver's own session files under); date = today in
+//     APP_TIMEZONE (app-day.cjs), a month that is not finalized (period_locks);
+//     truck_unit blank, owner_id 0, type Other, $0.01, load_id QA-TEST-B1, description
 //     QA-TEST-B1-<timestamp>, timestamp = when it was planted.
 //   - the assignment covering that date, stored under exactly the account's
 //     spelling, is RE-SPELLED in this copy with its first whitespace run doubled.
@@ -79,7 +79,8 @@ if (holders) {
 }
 
 const norm = (s) => String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-const dayApp = new Intl.DateTimeFormat("en-CA", { timeZone: require("../../lib/app-time.js").appTimeZone(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+// The seed's assignment takes its day from the same helper (app-day.cjs).
+const dayApp = require("./app-day.cjs").appDayKey();
 const db = new Database(dbAbs, { fileMustExist: true });
 db.pragma("busy_timeout = 5000");
 let outcome = { code: 0, msg: "" };
