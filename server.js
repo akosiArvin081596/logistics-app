@@ -27754,9 +27754,12 @@ function warmReceiptImage(expense) {
 // in print order, and one that would cross either keeps the note. { data (a new
 // object), inserts: the PDF pages to put after their sheets (lib/receipt-pdf.js
 // merge()), each with the receipt file's sha256, the pages copied and how many
-// were withheld (its render record) }.
+// were withheld (its render record), pdfReceipts: every PDF receipt of the
+// invoice's driver this render could attach, in print order, with its file's
+// sha256 and page count when its verdicts were read and its line's label (the
+// render record lists those with no page copied too: rule D) }.
 async function personalReceiptRenderData(data, rows, opts = {}) {
-	if (!rows || !rows.length) return { data, inserts: [] };
+	if (!rows || !rows.length) return { data, inserts: [], pdfReceipts: [] };
 	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
 	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
 	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
@@ -27769,17 +27772,20 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 	const roster = pdfPages ? currentReceiptRoster() : null;
 	const service = receiptImageService();
 	let sheets = 0;
+	const pdfOwn = new Map();
 	const prepared = new Map(await Promise.all(order.map(async (id) => {
 		const e = expenseOf.get(id) || {};
 		const kind = receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR);
 		if (kind === "pdf") {
 			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
 			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
+			pdfOwn.set(id, { sha256: "", pageCount: 0 });
 			sheets += 1;
 			// Past the sheet cap a PDF keeps its own note: the app does not open a
 			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
 			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
 			const rel = await receiptPagesReleased(e, { roster });
+			if (rel) pdfOwn.set(id, { sha256: rel.sha256, pageCount: rel.pageCount });
 			if (!rel || !rel.pages.length) return [id, { status: "pdf" }];
 			const res = await receiptPdfService().prepare(
 				{ expenseId: id, photoData: e.photo_data, allowPages: rel.pages, rosterHash: rel.rosterHash, expectSha256: rel.sha256 },
@@ -27821,7 +27827,9 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 	} else {
 		out.personalLines = layout.entries;
 	}
-	return { data: out, inserts };
+	const lineOf = (id) => lines.find((l) => (l.kind === "personal" || l.kind === "personal_reversed") && expenseOfRow.get(l.rowId) === id) || {};
+	const pdfReceipts = [...pdfOwn.entries()].map(([expenseId, f]) => ({ expenseId, sha256: f.sha256, pageCount: f.pageCount, label: lineOf(expenseId).label || "" }));
+	return { data: out, inserts, pdfReceipts };
 }
 
 // Every weekly or correction invoice render that carries Personal lines: the
@@ -27832,27 +27840,36 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 // longer all released after its last await, or whose render record cannot be
 // written. invoiceDriver: the invoice's own driver, for the PDF driver check;
 // pdfFileName: the file this render is written to (no name, no PDF pages: a
-// stored file with copied pages always has its render record). Resolves the
-// PDF bytes to write.
+// stored file with copied pages always has its render record). A file holding
+// a PDF receipt of his with no page copied ("PDF receipt on file") is recorded
+// too (rule D), so that a later release reaches it through "Update invoice
+// PDF". Resolves the PDF bytes to write.
 async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver, pdfFileName) {
 	if (!rows || !rows.length) return renderPolicy(templateName, data);
 	const pdfPages = receiptPdfPagesOn() && typeof pdfFileName === "string" && pdfFileName !== "";
 	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages });
 	const pdf = await renderPolicy(templateName, first.data);
-	if (!first.inserts.length) return pdf;
+	if (!first.inserts.length) {
+		await recordReceiptsOnFile(pdf, pdfFileName, first.pdfReceipts);
+		return pdf;
+	}
 	const merged = await receiptPdfService().merge(pdf, first.inserts);
 	const ids = first.inserts.map((x) => x.expenseId).join(", ");
 	if (merged.status === "merged") {
+		const attached = new Set(first.inserts.map((x) => x.expenseId));
+		const ends = onFileReceipts(first.pdfReceipts.filter((x) => !attached.has(x.expenseId)));
 		if (receiptInsertsWithheldNow(first.inserts).length) {
 			console.warn(`[receipt-pdfs] receipt pages for expense ${ids} were withheld while the invoice was drawn; it prints "PDF receipt on file" instead`);
-		} else if (recordInvoicePdfRender({ pdf: merged.pdf, pdfFileName, invoiceDriver, inserts: first.inserts, positions: merged.positions, pages: merged.pages, cause: "render" })) {
+		} else if (recordInvoicePdfRender({ pdf: merged.pdf, pdfFileName, inserts: first.inserts, ends, positions: merged.positions, pages: merged.pages, cause: "render" })) {
 			return merged.pdf;
 		}
 	} else {
 		console.warn(`[receipt-pdfs] receipt pages for expense ${ids} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
 	}
 	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
-	return renderPolicy(templateName, again.data);
+	const fallback = await renderPolicy(templateName, again.data);
+	await recordReceiptsOnFile(fallback, pdfFileName, first.pdfReceipts);
+	return fallback;
 }
 
 // Before the Friday batch renders: every image receipt behind a Personal line of
@@ -27910,17 +27927,20 @@ async function warmPersonalReceiptsForWeek(weekStart) {
 // Friday batch and at every render, and again by the sweep when the roster or
 // the file changes; a page without a current verdict is withheld.
 //
-// Every invoice PDF written with copied receipt pages leaves a render record
-// (invoice_pdf_renders). A page withheld later (a new roster name, a changed
-// file, an "office only" mark) comes out of every stored invoice holding it at
-// once, by the pages-only path (rewriteInvoiceReceiptPages()): the invoice's
-// own pages stay the same objects, only its receipt pages are rebuilt, the text
-// of its own pages is compared before and after and the rewrite refused if it
-// differs, the original file is kept under storage/ (never deleted, never
-// served), one audit row is written, and the invoices row is never touched
-// (approved and closed-month invoices too: 10b). A released page goes in only
-// when a Super Admin presses "Update invoice PDF" (D10). With the flag off none
-// of this runs and the routes answer 404 FEATURE_OFF.
+// Every invoice PDF written holding a PDF receipt of its driver's leaves a
+// render record (invoice_pdf_renders), its pages copied or not yet (rule D: a
+// statement drawn before any page was released). A page withheld later (a new
+// roster name, a changed file, an "office only" mark) comes out of every stored
+// invoice holding it, by the pages-only path (rewriteInvoiceReceiptPages()): the
+// invoice's own pages stay the same objects, only its receipt pages are rebuilt
+// (after their sheet, or at the end for a receipt drawn with no sheet), the
+// text of its own pages is compared before and after and the rewrite refused
+// if it differs, every page written is checked once more as released in the
+// transaction that writes it, the original file is kept under storage/ (never
+// deleted, never served), one audit row is written, and the invoices row is
+// never touched (approved and closed-month invoices too: 10b). A released page
+// goes in only when a Super Admin presses "Update invoice PDF" (D10). With the
+// flag off none of this runs and the routes answer 404 FEATURE_OFF.
 const RECEIPT_PAGES_ACTOR = { session: { user: { id: 0, username: "receipt-pages", role: "system" } } };
 const RECEIPT_PAGE_NOTE_MAX = 300;
 const RECEIPT_PAGES_SWEEP_MS = 5 * 60 * 1000;
@@ -27946,18 +27966,20 @@ function receiptPageRows(expenseId, sha256) {
 }
 
 // One PDF receipt's verdicts for its file as it is now, made when missing or
-// made under another roster (one run at a time per receipt): { sha256,
-// pageCount, rosterHash, rows }, or { sha256: "", reason } when the file
-// cannot be read (missing, refused by the reader, more pages than are ever
+// made under another roster (one run at a time per receipt and roster): {
+// sha256, pageCount, rosterHash, rows }, or { sha256: "", reason } when the
+// file cannot be read (missing, refused by the reader, more pages than are ever
 // copied) and every page is withheld. Marks are kept; a released mark lapses
-// when a new verdict finds an OTHER_* code it did not acknowledge.
+// when a new verdict finds an OTHER_* code it did not acknowledge. A run made
+// under another roster is never joined: its answer would be stale.
 function receiptPageVerdictsFor(expense, { roster = null } = {}) {
 	if (!expense || !expense.id || !receiptPagesTablesPresent()) return Promise.resolve({ sha256: "", reason: "unavailable" });
 	if (receiptImagesLib.receiptImageKind(expense.photo_data, RECEIPTS_DIR) !== "pdf") return Promise.resolve({ sha256: "", reason: "not_pdf" });
+	const r = roster || currentReceiptRoster();
 	const running = receiptPageVerdictsFor.running || (receiptPageVerdictsFor.running = new Map());
-	if (running.has(expense.id)) return running.get(expense.id);
+	const key = `${expense.id}|${r.hash}`;
+	if (running.has(key)) return running.get(key);
 	const job = (async () => {
-		const r = roster || currentReceiptRoster();
 		const svc = receiptPdfService();
 		const src = await svc.sourceInfo({ photoData: expense.photo_data });
 		if (src.status !== "source") return { sha256: "", reason: src.reason || src.status };
@@ -27990,8 +28012,8 @@ function receiptPageVerdictsFor(expense, { roster = null } = {}) {
 	})().catch((err) => {
 		console.warn(`[receipt-pages] expense ${expense.id}: verdicts not made (${err.message})`);
 		return { sha256: "", reason: "error" };
-	}).finally(() => running.delete(expense.id));
-	running.set(expense.id, job);
+	}).finally(() => running.delete(key));
+	running.set(key, job);
 	return job;
 }
 
@@ -28021,19 +28043,27 @@ function receiptInsertsWithheldNow(inserts) {
 	});
 }
 
-// The render record's columns for a PDF holding copied receipt pages.
-function invoiceRenderRow({ pdf, pdfFileName, invoiceDriver, inserts, positions, pages, cause, invoiceId = null, originalFile = "" }) {
+// The render record's columns. inserts: the receipts with a sheet (their pages
+// follow it); ends: those with no sheet ("end-K", rule D), their pages at the
+// end of the file when any were added, each with its invoice line's label.
+function invoiceRenderRow({ pdf, pdfFileName, inserts, ends = [], positions, pages, cause, invoiceId = null, originalFile = "" }) {
+	const placed = (anchor) => (positions || []).find((q) => q.anchor === anchor);
 	const receipts = inserts.map((x) => {
-		const p = (positions || []).find((q) => q.anchor === x.anchor);
+		const p = placed(x.anchor);
 		if (!p) throw new Error("a receipt without its position");
 		return { expense_id: x.expenseId, file_sha256: x.sha256 || "", pages: x.allow || [], withheld: Number(x.withheld) || 0, anchor: x.anchor, index: x.index, total: x.total, sheet: p.sheet, at: p.at };
 	});
+	ends.forEach((x, i) => {
+		const anchor = x.anchor || `end-${i + 1}`;
+		const p = placed(anchor);
+		receipts.push({ expense_id: x.expenseId, file_sha256: x.sha256 || "", pages: x.allow || [], withheld: Number(x.withheld) || 0, anchor, index: 0, total: 0, sheet: -1, at: p ? p.at : [], label: x.label || "" });
+	});
 	const copied = receipts.reduce((n, r) => n + r.at.length, 0);
-	return [pdfFileName, sha256Hex(pdf), invoiceId, normalizeDriverName(invoiceDriver || ""), pages, pages - copied, JSON.stringify(receipts),
-		(inserts.find((x) => x.rosterHash) || {}).rosterHash || "", cause, originalFile, new Date().toISOString()];
+	return [pdfFileName, sha256Hex(pdf), invoiceId, pages, pages - copied, JSON.stringify(receipts),
+		([...inserts, ...ends].find((x) => x.rosterHash) || {}).rosterHash || "", cause, originalFile, new Date().toISOString()];
 }
-const INVOICE_RENDER_INSERT = `INSERT INTO invoice_pdf_renders (pdf_file_name, pdf_sha256, invoice_id, driver_key, total_pages, invoice_pages, receipts, roster_hash, cause, original_file, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+const INVOICE_RENDER_INSERT = `INSERT INTO invoice_pdf_renders (pdf_file_name, pdf_sha256, invoice_id, total_pages, invoice_pages, receipts, roster_hash, cause, original_file, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 // Records a render that copied receipt pages. false when it cannot: the
 // caller then prints every PDF receipt on its note instead.
@@ -28042,6 +28072,32 @@ function recordInvoicePdfRender(args) {
 		if (!receiptPagesTablesPresent() || !args.pdfFileName) return false;
 		db.prepare(INVOICE_RENDER_INSERT).run(...invoiceRenderRow(args));
 		return true;
+	} catch (err) {
+		console.warn(`[receipt-pages] render record not written (${err.message})`);
+		return false;
+	}
+}
+
+// pdfReceipts (personalReceiptRenderData()) as a render record's receipts with
+// no sheet and no page: every page withheld, the line's label as printable text.
+function onFileReceipts(list) {
+	return (list || []).map((x) => ({
+		expenseId: x.expenseId, sha256: x.sha256 || "", allow: [], withheld: Number(x.pageCount) || 0,
+		label: String(x.label || "").slice(0, 400).normalize("NFKD").replace(/[^\x20-\x7e]/g, "").trim().slice(0, 160),
+	}));
+}
+
+// Rule D: a stored invoice file holding none of its PDF receipts' pages (none
+// released when it was drawn, or an insert that failed) is recorded with each
+// of them and no page, so that a later release reaches the file through
+// "Update invoice PDF" (the pages go in at the end, its own pages untouched).
+// Its pages are counted here: Chrome's output, this server's own file. Never
+// throws; false when nothing was recorded.
+async function recordReceiptsOnFile(pdf, pdfFileName, pdfReceipts) {
+	if (!pdfReceipts || !pdfReceipts.length || !pdfFileName || !receiptPagesTablesPresent()) return false;
+	try {
+		const pages = (await PdfLibDocument.load(pdf, { updateMetadata: false })).getPageCount();
+		return recordInvoicePdfRender({ pdf, pdfFileName, inserts: [], ends: onFileReceipts(pdfReceipts), positions: [], pages, cause: "render" });
 	} catch (err) {
 		console.warn(`[receipt-pages] render record not written (${err.message})`);
 		return false;
@@ -28091,8 +28147,9 @@ function invoicesHoldingReceipt(expenseId) {
 // THE PAGES-ONLY PATH (D10, 10b). mode "withhold": a page no longer released
 // comes out and nothing comes in (every page of a changed file comes out);
 // mode "update" ("Update invoice PDF"): the receipt pages become exactly the
-// released ones. One run at a time per invoice. Resolves { invoiceId, changed,
-// withdrawn, added, refused } and never rejects.
+// released ones, at most RECEIPT_PDF_INVOICE_MAX_PAGES of them (409 PAGE_CAP).
+// One run at a time per invoice. Resolves { invoiceId, changed, withdrawn,
+// added, refused } and never rejects.
 function rewriteInvoiceReceiptPages(invoiceId, opts = {}) {
 	const chain = rewriteInvoiceReceiptPages.chain || (rewriteInvoiceReceiptPages.chain = new Map());
 	const run = (chain.get(invoiceId) || Promise.resolve()).catch(() => {}).then(() => receiptPagesRewriteOnce(invoiceId, opts));
@@ -28101,7 +28158,15 @@ function rewriteInvoiceReceiptPages(invoiceId, opts = {}) {
 	return run;
 }
 
-async function receiptPagesRewriteOnce(invoiceId, { mode = "update", actor = RECEIPT_PAGES_ACTOR } = {}) {
+// A pass that wrote nothing because a page it copied stopped being released
+// while it ran (RELEASE_CHANGED) is followed by one more, from the verdicts and
+// marks as they are now, which leaves that page out.
+async function receiptPagesRewriteOnce(invoiceId, opts = {}) {
+	const first = await receiptPagesRewritePass(invoiceId, opts);
+	return first.refused === "RELEASE_CHANGED" ? receiptPagesRewritePass(invoiceId, opts) : first;
+}
+
+async function receiptPagesRewritePass(invoiceId, { mode = "update", actor = RECEIPT_PAGES_ACTOR } = {}) {
 	const out = { invoiceId, changed: false, withdrawn: 0, added: 0, refused: "" };
 	let inv = null;
 	let beforeSha = "";
@@ -28110,19 +28175,21 @@ async function receiptPagesRewriteOnce(invoiceId, { mode = "update", actor = REC
 		const label = (inv && inv.invoice_number) || `Invoice #${invoiceId}`;
 		// One audit row and one alert per invoice file and code in this process;
 		// the sweep tries again every few minutes.
-		const seen = receiptPagesRewriteOnce.refusals || (receiptPagesRewriteOnce.refusals = new Set());
+		const seen = receiptPagesRewritePass.refusals || (receiptPagesRewritePass.refusals = new Set());
 		const key = `${invoiceId}|${beforeSha}|${code}`;
 		if (seen.has(key)) return out;
 		if (seen.size >= 1000) seen.clear();
 		seen.add(key);
 		console.warn(`[receipt-pages] ${label}: receipt pages not rebuilt (${code})`);
 		logAudit(actor, "invoice_receipt_pages_refused", "invoice", invoiceId, `${label}: receipt pages not rebuilt (${mode}): ${code}${detail ? `; ${detail}` : ""}`);
-		if (mode === "withhold" && code !== "CHANGED") {
+		if (mode === "withhold" && code !== "CHANGED" && code !== "RELEASE_CHANGED") {
 			const title = "A receipt page could not be taken out of an invoice PDF";
 			const body = `${label} still holds a PDF receipt page that is no longer released to the driver (${code}). Open the receipt's pages on the Expenses screen.`;
+			// It names the invoice, which Dispatchers are not shown: Super Admins
+			// only, stored (SUPER_ADMIN_ONLY_NOTICE_TYPES) and live.
 			try {
 				insertDispatchNotification.run("receipt-pages", title, body, JSON.stringify({ invoice: invoiceId, code }));
-				if (io) emitDispatchNotice({ type: "receipt-pages", title, body });
+				if (io) io.to("super-admin").emit("dispatch-notification", { type: "receipt-pages", title, body });
 			} catch (err) { console.error("[receipt-pages] notification failed:", err.message); }
 		}
 		return out;
@@ -28145,22 +28212,38 @@ async function receiptPagesRewriteOnce(invoiceId, { mode = "update", actor = REC
 		for (const r of kept) {
 			const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get(r.expense_id) || null;
 			const own = !!expense && !!invoiceKey && normalizeDriverName(expense.driver || "") === invoiceKey;
-			const rel = own ? await receiptPagesReleased(expense, { roster }) : null;
+			const v = own ? await receiptPageVerdictsFor(expense, { roster }) : null;
+			const rel = v && v.sha256
+				? { sha256: v.sha256, pageCount: v.pageCount, pages: receiptPageVerdict.releasedPages(v.rows, { sha256: v.sha256, rosterHash: v.rosterHash }) }
+				: null;
+			// Why its pages cannot be checked now, as a code for the audit row.
+			const unverified = rel ? "" : !expense ? "expense_missing" : !own ? "driver_changed"
+				: String((v && v.reason) || "unreadable").replace(/[^a-z0-9_]+/gi, "_").slice(0, 40);
 			const sameFile = !!rel && rel.sha256 === r.file_sha256;
 			const allow = !rel ? [] : mode === "withhold" ? (sameFile ? r.pages.filter((p) => rel.pages.includes(p)) : []) : rel.pages;
-			next.push({ r, expense, rel, sameFile, allow, sha256: rel ? rel.sha256 : r.file_sha256, pageCount: rel ? rel.pageCount : r.pages.length + r.withheld });
+			next.push({ r, expense, rel, unverified, sameFile, allow, sha256: rel ? rel.sha256 : r.file_sha256, pageCount: rel ? rel.pageCount : r.pages.length + r.withheld });
 		}
-		if (next.every((n) => n.sameFile && sameNumberList(n.allow, n.r.pages))) return out;
+		// A receipt is settled when its pages stay as they are. One whose record
+		// holds no page is settled whatever its file is now, so a receipt that can
+		// no longer be checked is taken out once, not again on every sweep.
+		if (next.every((n) => sameNumberList(n.allow, n.r.pages) && (n.sameFile || !n.r.pages.length))) return out;
+		if (mode === "update" && next.reduce((s, n) => s + n.allow.length, 0) > receiptPdfLib.RECEIPT_PDF_INVOICE_MAX_PAGES) return refuse("PAGE_CAP");
 		const svc = receiptPdfService();
 		for (const n of next) {
 			n.pdf = null;
+			n.pdfPages = 0;
 			if (n.allow.length) {
 				const res = await svc.prepare({ expenseId: n.r.expense_id, photoData: n.expense.photo_data, allowPages: n.allow, rosterHash: roster.hash, expectSha256: n.sha256 },
 					{ waitMs: PERSONAL_RECEIPT_WAIT_MS });
-				if (res.status === "pages") n.pdf = res.pdf;
-				// A withdrawal never waits on a copy: its pages leave and the notice takes their place.
-				else if (mode === "withhold") n.allow = [];
-				else return refuse("RECEIPT_NOT_PREPARED", `expense ${n.r.expense_id}: ${res.reason || res.status}`);
+				if (res.status === "pages") {
+					n.pdf = res.pdf;
+					n.pdfPages = res.pages;
+				} else if (mode === "withhold") {
+					// A withdrawal never waits on a copy: its pages leave and the notice takes their place.
+					n.allow = [];
+				} else {
+					return refuse("RECEIPT_NOT_PREPARED", `expense ${n.r.expense_id}: ${res.reason || res.status}`);
+				}
 			}
 			n.withheld = Math.max(0, n.pageCount - n.allow.length);
 		}
@@ -28170,7 +28253,7 @@ async function receiptPagesRewriteOnce(invoiceId, { mode = "update", actor = REC
 		if (textBefore.pages.length !== record.total_pages) return refuse("PAGE_COUNT");
 		const rebuilt = await svc.rebuild(before, {
 			remove: removed,
-			receipts: next.map((n) => ({ anchor: n.r.anchor, index: n.r.index, total: n.r.total, sheet: n.r.sheet, pdf: n.pdf, withheld: n.withheld })),
+			receipts: next.map((n) => ({ anchor: n.r.anchor, index: n.r.index, total: n.r.total, sheet: n.r.sheet, pdf: n.pdf, pages: n.pdfPages, withheld: n.withheld, label: n.r.label })),
 		});
 		if (rebuilt.status !== "rebuilt") return refuse("REBUILD_FAILED", rebuilt.reason);
 		const textAfter = await svc.invoiceTexts(rebuilt.pdf);
@@ -28187,26 +28270,36 @@ async function receiptPagesRewriteOnce(invoiceId, { mode = "update", actor = REC
 		if (!now || now.pdf_file_name !== inv.pdf_file_name || !current || sha256Hex(current) !== beforeSha) return refuse("CHANGED");
 		const keptDir = path.join(DATA_DIR, "storage", "invoice-pdf-originals");
 		const keptName = `${invoiceId}-${beforeSha.slice(0, 16)}.pdf`;
-		if (!fs.existsSync(keptDir)) fs.mkdirSync(keptDir, { recursive: true });
-		if (!fs.existsSync(path.join(keptDir, keptName))) writeInvoiceFileAtomically(path.join(keptDir, keptName), before);
-		const inserts = next.map((n) => ({ expenseId: n.r.expense_id, anchor: n.r.anchor, index: n.r.index, total: n.r.total, sha256: n.sha256, allow: n.allow, withheld: n.withheld, rosterHash: roster.hash }));
+		const row = (n) => ({ expenseId: n.r.expense_id, anchor: n.r.anchor, index: n.r.index, total: n.r.total, sha256: n.sha256, allow: n.allow, withheld: n.withheld, rosterHash: roster.hash, label: n.r.label });
+		const inserts = next.filter((n) => n.r.sheet !== -1).map(row);
+		const ends = next.filter((n) => n.r.sheet === -1).map(row);
+		let stillReleased = false;
 		db.transaction(() => {
+			// Every page written is still released, read in the transaction that
+			// writes it (a roster change or a mark may have landed during the
+			// awaits above); otherwise nothing is written.
+			if (receiptInsertsWithheldNow([...inserts, ...ends].filter((x) => x.allow.length)).length) return;
+			stillReleased = true;
+			if (!fs.existsSync(keptDir)) fs.mkdirSync(keptDir, { recursive: true });
+			if (!fs.existsSync(path.join(keptDir, keptName))) writeInvoiceFileAtomically(path.join(keptDir, keptName), before);
 			db.prepare(INVOICE_RENDER_INSERT).run(...invoiceRenderRow({
-				pdf: rebuilt.pdf, pdfFileName: inv.pdf_file_name, invoiceDriver: inv.driver, inserts, positions: rebuilt.positions, pages: rebuilt.pages,
+				pdf: rebuilt.pdf, pdfFileName: inv.pdf_file_name, inserts, ends, positions: rebuilt.positions, pages: rebuilt.pages,
 				cause: mode, invoiceId, originalFile: keptName,
 			}));
 			writeInvoiceFileAtomically(file, rebuilt.pdf);
 		})();
+		if (!stillReleased) return refuse("RELEASE_CHANGED");
 		const parts = next.map((n) => {
 			const gone = n.r.pages.filter((p) => !n.sameFile || !n.allow.includes(p));
 			const came = n.allow.filter((p) => !n.sameFile || !n.r.pages.includes(p));
 			out.withdrawn += gone.length;
 			out.added += came.length;
 			const rows = n.rel && n.sameFile ? receiptPageRows(n.r.expense_id, n.sha256) : [];
-			const why = !n.sameFile ? "receipt file changed"
+			const why = n.unverified ? `receipt not verifiable: ${n.unverified}`
 				: mode === "update" ? "Update invoice PDF"
-					: gone.some((p) => (rows.find((row) => row.page === p) || {}).mark === "office") ? "office mark" : "roster_change";
-			return `expense ${n.r.expense_id}: pages ${n.r.pages.join(",") || "none"} -> ${n.allow.join(",") || "none"} (${why})`;
+					: !n.sameFile ? "receipt file changed"
+						: gone.some((p) => (rows.find((x) => x.page === p) || {}).mark === "office") ? "office mark" : "roster_change";
+			return `expense ${n.r.expense_id}: pages ${n.r.pages.join(",") || "none"} -> ${n.allow.join(",") || "none"} (${why}${n.r.sheet === -1 ? ", at the end" : ""})`;
 		});
 		out.changed = true;
 		logAudit(actor, "invoice_receipt_pages", "invoice", invoiceId,
@@ -29969,7 +30062,7 @@ function receiptPagesView(expense, v) {
 		const held = invoiceReceiptPagesNow(inv).find((x) => x.expense_id === expense.id);
 		return held ? {
 			id: inv.id, invoice_number: inv.invoice_number, status: inv.status, pages_in_pdf: held.pages,
-			can_update: held.file_sha256 !== v.sha256 || !sameNumberList(held.pages, released),
+			can_update: !sameNumberList(held.pages, released) || (held.pages.length > 0 && held.file_sha256 !== v.sha256),
 		} : null;
 	}).filter(Boolean);
 	return {
@@ -49454,9 +49547,11 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 
 // Dispatch notices only Super Admins see: the driver-instructions edit lock
 // (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
-// sent to the super-admin room only). For every other role GET
+// sent to the super-admin room only), and a receipt page the pages-only path
+// could not take out of an invoice PDF (it names the invoice, and Dispatchers
+// are shown no invoices; sent live the same way). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
