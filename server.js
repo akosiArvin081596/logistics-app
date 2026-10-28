@@ -21373,7 +21373,8 @@ async function generateInvoiceHandler(req, res) {
 		const { weekStart, weekEnd: computedWeekEnd } = range;
 		// A week touching a closed month is neither generated nor regenerated
 		// (INVOICE_CLOSED_MONTH_GUARD_ENABLED); the write asks again (monthGuard below).
-		const weekGuard = {
+		// Off, nothing here runs but the flag test.
+		const weekGuard = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? {
 			span: { invoice_number: `the invoice for the week of ${weekStart}`, week_start: weekStart, week_end: computedWeekEnd },
 			doing: "Generating this invoice",
 			cannot: `Cannot generate the invoice for the week of ${weekStart}`,
@@ -21381,8 +21382,8 @@ async function generateInvoiceHandler(req, res) {
 			remedy: INVOICE_CLOSED_WEEK_REMEDY,
 			auditAction: "generate_invoice_blocked", entityId: "",
 			subject: `generate the weekly invoice of ${driverName} for ${weekStart} — ${computedWeekEnd}`,
-		};
-		const weekBlock = invoiceClosedMonthBlock(weekGuard.span);
+		} : null;
+		const weekBlock = weekGuard ? invoiceClosedMonthBlock(weekGuard.span) : null;
 		if (weekBlock) return invoiceClosedMonthRefusal(req, res, weekBlock, weekGuard);
 
 		// Job Tracking, read at most once for this request.
@@ -26259,8 +26260,8 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			return res.status(400).json({ error: "periodEnd must be on or after periodStart" });
 		}
 		// A period touching a closed month is refused (INVOICE_CLOSED_MONTH_GUARD_ENABLED);
-		// the write asks again (monthGuard below), after the render.
-		const periodGuard = {
+		// the write asks again (monthGuard below), after the render. Off, only the flag is read.
+		const periodGuard = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? {
 			span: { invoice_number: `the manual invoice for ${periodStart} to ${periodEnd}`, week_start: periodStart, week_end: periodEnd },
 			doing: "Creating a manual invoice",
 			cannot: `Cannot create a manual invoice for ${periodStart} to ${periodEnd}`,
@@ -26268,8 +26269,8 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 			remedy: INVOICE_LOCK_REMEDY,
 			auditAction: "create_manual_invoice_blocked", entityId: "",
 			subject: `create a manual invoice for ${payee} (${periodStart} — ${periodEnd})`,
-		};
-		const periodBlock = invoiceClosedMonthBlock(periodGuard.span);
+		} : null;
+		const periodBlock = periodGuard ? invoiceClosedMonthBlock(periodGuard.span) : null;
 		if (periodBlock) return invoiceClosedMonthRefusal(req, res, periodBlock, periodGuard);
 		const itemsRes = sanitizeManualInvoiceRows(body.lineItems, "lineItems");
 		if (itemsRes.error) return res.status(400).json({ error: itemsRes.error });
@@ -27338,9 +27339,9 @@ app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
 		// An invoice whose week touches a closed month stays (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
-		const label = invoice.invoice_number || `invoice #${invoice.id}`;
-		const deleteBlock = invoiceClosedMonthBlock(invoice);
+		const deleteBlock = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? invoiceClosedMonthBlock(invoice) : null;
 		if (deleteBlock) {
+			const label = invoice.invoice_number || `invoice #${invoice.id}`;
 			return invoiceClosedMonthRefusal(req, res, deleteBlock, {
 				doing: "Deleting an invoice", cannot: `Cannot delete ${label}`, refused: `${label} can't be deleted`, remedy: INVOICE_LOCK_REMEDY,
 				auditAction: "delete_invoice_blocked", entityId: String(invoice.id),
@@ -27382,9 +27383,9 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
 		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
 		// One whose week touches a closed month stays deleted (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
-		const label = invoice.invoice_number || `invoice #${invoice.id}`;
-		const restoreBlock = invoiceClosedMonthBlock(invoice);
+		const restoreBlock = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? invoiceClosedMonthBlock(invoice) : null;
 		if (restoreBlock) {
+			const label = invoice.invoice_number || `invoice #${invoice.id}`;
 			return invoiceClosedMonthRefusal(req, res, restoreBlock, {
 				doing: "Restoring an invoice", cannot: `Cannot restore ${label}`, refused: `${label} can't be restored`, remedy: INVOICE_LOCK_REMEDY,
 				auditAction: "restore_invoice_blocked", entityId: String(invoice.id),
@@ -36927,10 +36928,9 @@ function invoiceMonthLockBlockers(inv) {
 }
 
 // INVOICE_CLOSED_MONTH_GUARD_ENABLED's question for an invoice span ({ invoice_number,
-// id, week_start, week_end }): null while the flag is off or every month in it is open;
-// else invoiceMonthLockBlockers()'s answer (unreadable lock table, or the blockers).
+// id, week_start, week_end }), asked only while the flag is on: null when every month in
+// it is open, else invoiceMonthLockBlockers()'s answer (unreadable lock table, or the blockers).
 function invoiceClosedMonthBlock(span) {
-	if (!INVOICE_CLOSED_MONTH_GUARD_ENABLED) return null;
 	const lock = invoiceMonthLockBlockers(span);
 	return lock.unreadable || lock.blockers.length ? lock : null;
 }
