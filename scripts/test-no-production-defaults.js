@@ -2,11 +2,11 @@
 /**
  * A local run never reaches production by default: no production inbox,
  * broker AP inbox, n8n instance or workflow, or sheet is a default in
- * server.js, lib/ or scripts/. Each is a setting with no default, and a run
- * without it does less, says so, and reaches nothing.
+ * server.js, routes/, lib/ or scripts/. Each is a setting with no default, and
+ * a run without it does less, says so, and reaches nothing.
  *
  *   §1 source: production's values (found by their SHA-256, so this file
- *      carries none of them) appear in server.js and lib/ only as email
+ *      carries none of them) appear in server.js, routes/ and lib/ only as email
  *      content (mailto links, contact text, the seller block printed on an
  *      invoice) and as lib/sheet-id.js's production-process sheet; nowhere
  *      as a fallback (`|| "…"`, `?? "…"`), a constant holding a recipient,
@@ -100,8 +100,11 @@ const { spawn, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const SERVER = path.join(ROOT, "server.js");
-const readSource = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; } };
-const SRC = readSource("server.js");
+const SRC = require("./lib/server-source").serverSource();
+const readSource = (rel) => {
+	if (rel === "server.js") return SRC;
+	try { return fs.readFileSync(path.join(ROOT, rel), "utf8"); } catch { return ""; }
+};
 
 const ADMIN = "admin@example.test";
 const BISON_TO = "bison-ap@example.test";
@@ -306,7 +309,9 @@ function walk(dir, out) {
 	return out;
 }
 const JS_RE = /\.(?:js|mjs|cjs)$/;
-const APP_FILES = ["server.js", ...walk(path.join(ROOT, "lib"), []).filter((f) => JS_RE.test(f))];
+// routes/ holds the route modules moved out of server.js (absent until the first move).
+const APP_FILES = ["server.js", ...walk(path.join(ROOT, "lib"), []).filter((f) => JS_RE.test(f)),
+	...walk(path.join(ROOT, "routes"), []).filter((f) => JS_RE.test(f))];
 const SCRIPT_FILES = walk(path.join(ROOT, "scripts"), []);
 const SCRIPT_JS = SCRIPT_FILES.filter((f) => JS_RE.test(f));
 const SCRIPT_SH = SCRIPT_FILES.filter((f) => /\.sh$/.test(f));
@@ -510,6 +515,8 @@ function draftHarness(L) {
 		fetchDocumentBytes: async () => Buffer.from("%PDF-1.4 pod"),
 		buildRateConLoadCtx: () => ({}),
 		getRateConBytes: async () => ({ buffer: null, candidates: [] }),
+		// The rate-con viewer gate with RATECON_PDF_VIEWER_IDS unset (shipped lib code).
+		rateconViewGate: require("../lib/ratecon-pdf-route.js").viewerGate(require("../lib/listed-accounts.js").parseListedAccountIds(undefined)),
 		GEMINI_API_KEY: "",
 		runRateConGemini: async () => null,
 		peekInvoiceNumber: () => "10092026-1",
