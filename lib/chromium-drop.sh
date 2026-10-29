@@ -6,10 +6,9 @@
 # reach Chromium; sudo would close those fds. Every check runs before anything
 # changes, and a failed one exits 1 (scripts/test-chromium-drop.js).
 #
-# --remove-profile <folder>: the app's removal of that folder afterwards. Once
-# handed over, it is removed as the account, through the same setpriv line, so
-# what the account changes inside it can never steer the removal; a folder never
-# handed over is removed only when empty, and a link in its place is left.
+# --remove-profile <folder>: the app's removal of that folder afterwards. A
+# folder handed over is removed as the account, through the same setpriv line;
+# one never handed over is removed only when empty; a link in its place is left.
 set -u
 
 SETPRIV=/usr/bin/setpriv
