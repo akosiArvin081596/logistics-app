@@ -65748,22 +65748,10 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // direction: the fix looks deployed and every investor keeps the old document
 // forever.
 //
-// So the bytes of the template decide. STATEMENT_TEMPLATE_FILES is the closure
-// of everything that can change the printed page:
-//   • lib/payout-statement.js — buildPayoutStatementHtml, the layout itself.
-//   • lib/broker-invoice.js — payout-statement.js reuses its formatMoney /
-//     formatDate / SELLER, so a change to the seller block or to how money is
-//     formatted changes the printed page WITHOUT touching payout-statement.js.
-//     This is the edge a future engineer would never suspect, which is exactly
-//     why it must be enforced rather than documented.
-//   • lib/pdf-browser.js — renderHtmlToPdf's page format, margins,
-//     preferCSSPageSize, the fonts.ready wait, and the Chromium launch args
-//     (--font-render-hinting, and the darwin --disable-gpu branch). Every one
-//     of those changes the rendered bytes, so rendering counts as template.
-//   • lib/lease-payout-text.js — the lease sentences a lease month's statement
-//     prints, which payout-statement.js takes from there.
-//   • lib/driver-pay-text.js — the Driver Pay basis of a driver paid at more
-//     than one daily rate, which payout-statement.js takes from there.
+// So the bytes of the template decide: lib/statement-template-hash.js hashes the
+// five files that can change the printed page (STATEMENT_TEMPLATE_FILES there),
+// and a reviewed PINS entry there keeps the stored statements across an edit
+// proven to render the same.
 //
 // ⚠️ WHAT THIS HASH CANNOT SEE, which is what STATEMENT_TEMPLATE_VERSION is
 // still for: anything outside these five files. A Puppeteer/Chromium upgrade
@@ -65773,27 +65761,9 @@ app.get("/api/investor/payouts/:period/detail", requireRole("Super Admin", "Inve
 // it churns on every unrelated dependency bump (busting every statement for
 // nothing) and, per the deploy notes, npm 10.8.2 leaves it permanently modified
 // on the VPS, so it is not even stable across machines.
-const STATEMENT_TEMPLATE_FILES = [
-	"./lib/payout-statement.js",
-	"./lib/broker-invoice.js",
-	"./lib/pdf-browser.js",
-	"./lib/lease-payout-text.js",
-	"./lib/driver-pay-text.js",
-];
-
-// Computed ONCE, here, at module load — never per request. require.resolve so a
-// moved file is a loud MODULE_NOT_FOUND rather than a silently-skipped input,
-// and the specifier list is sorted so the value is deterministic across
-// machines. Each file contributes its specifier and byte length as well as its
-// bytes, so swapping two files' contents cannot produce the same digest.
-function computeStatementTemplateHash() {
-	const h = crypto.createHash("sha256");
-	for (const spec of [...STATEMENT_TEMPLATE_FILES].sort()) {
-		const buf = fs.readFileSync(require.resolve(spec));
-		h.update(spec).update("\0").update(String(buf.length)).update("\0").update(buf).update("\0");
-	}
-	return h.digest("hex").slice(0, 12);
-}
+//
+// The hash is computed ONCE, below, at module load — never per request.
+const statementTemplate = require("./lib/statement-template-hash");
 
 // ⚠️ FAIL LOUD, AND FAIL TOWARDS SLOW-BUT-CORRECT — never towards the old
 // hand-maintained behaviour, which is the bug being removed here.
@@ -65811,12 +65781,12 @@ function computeStatementTemplateHash() {
 // periodLocksReadable() — degrade in the direction that cannot be wrong.
 let statementTemplateHash = null;
 try {
-	statementTemplateHash = computeStatementTemplateHash();
+	statementTemplateHash = statementTemplate.effectiveStatementTemplateHash();
 } catch (err) {
 	console.error(
 		"⚠️  PAYOUT STATEMENT CACHE DISABLED — could not hash the statement template:",
 		err.message,
-		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES.",
+		"\n    Every statement will re-render (correct, but ~3-5 s each). Fix the file permissions/paths in STATEMENT_TEMPLATE_FILES (lib/statement-template-hash.js).",
 	);
 }
 const STATEMENT_TEMPLATE_HASH = statementTemplateHash;
@@ -65891,9 +65861,10 @@ const STATEMENT_FILE_RE = /^payout-\d+-\d{4}-\d{2}-[0-9a-f]{10}\.pdf$/;
 function statementFingerprint(row, who) {
 	return crypto.createHash("sha256").update(JSON.stringify([
 		STATEMENT_TEMPLATE_VERSION,
-		// The template's own bytes — see computeStatementTemplateHash(). This is
-		// what makes a template edit self-invalidating instead of relying on
-		// someone remembering to bump the integer above it.
+		// The template's own bytes, or the hash a reviewed PINS entry maps them to
+		// (lib/statement-template-hash.js). This is what makes a template edit
+		// self-invalidating instead of relying on someone remembering to bump the
+		// integer above it.
 		STATEMENT_TEMPLATE_HASH,
 		row.owner_id, row.period, row.status,
 		row.paid_at || "", row.paid_by || "",
