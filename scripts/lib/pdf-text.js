@@ -8,15 +8,23 @@
 // guess would add noise. Two renders that print the same glyphs in the same
 // order give the same text.
 //
-//   const { pdfReport } = require("./lib/pdf-text");
-//   const { pages, fonts } = await pdfReport(bytes);   // pages: [text], fonts: [BaseFont]
+// A font is named by its subtype, its name and a digest of its glyph program.
+// Chromium writes web fonts as Type3 fonts, which carry no BaseFont, so the
+// name falls back to the descriptor's FontName, then its FontFamily and
+// weight; the digest (the embedded font file, or a Type3 font's glyph
+// procedures) tells two fonts of one name apart.
+//
+//   const { pdfReport, compareRenders } = require("./lib/pdf-text");
+//   const a = await pdfReport(bytes);   // { pages: [text], fonts: ["Type3 Open Sans 700 #…"], drawing }
+//   compareRenders(a, b);               // { pages, text, fonts, drawing }: null where it holds
 //
 // Pure apart from parsing the bytes it is given (pdf-lib, already a
 // dependency of the app).
 
 "use strict";
 
-const { PDFDocument, PDFName, PDFDict, PDFArray, PDFRawStream, PDFRef, decodePDFRawStream } = require("pdf-lib");
+const crypto = require("crypto");
+const { PDFDocument, PDFName, PDFDict, PDFArray, PDFNumber, PDFRawStream, PDFRef, decodePDFRawStream } = require("pdf-lib");
 
 const latin1 = (bytes) => Buffer.from(bytes).toString("latin1");
 
@@ -136,17 +144,59 @@ function streamBytes(context, obj) {
 	return new Uint8Array();
 }
 
+const digest = (parts) => {
+	const h = crypto.createHash("sha256");
+	for (const p of parts) h.update(p).update("\0");
+	return h.digest("hex").slice(0, 12);
+};
+const withoutSubsetTag = (s) => s.replace(/^[A-Z]{6}\+/, "");
+// A PDF name, byte string or number as text ("" when absent).
+function textOfValue(v) {
+	if (!v) return "";
+	if (v instanceof PDFNumber) return String(v.asNumber());
+	return typeof v.decodeText === "function" ? v.decodeText() : String(v);
+}
+
+// "<Subtype> <name> #<digest>" for one font dictionary.
+function fontIdentity(context, font) {
+	const subtype = textOfValue(font.lookupMaybe(PDFName.of("Subtype"), PDFName)) || "(no subtype)";
+	// A Type0 font's descriptor sits on its descendant font.
+	let described = font;
+	const descendants = font.lookupMaybe(PDFName.of("DescendantFonts"), PDFArray);
+	if (descendants && descendants.size()) described = context.lookup(descendants.get(0), PDFDict) || font;
+	const descriptor = described.lookupMaybe(PDFName.of("FontDescriptor"), PDFDict);
+	const fromDescriptor = (key) => (descriptor ? textOfValue(descriptor.lookup(PDFName.of(key))) : "");
+	let name = withoutSubsetTag(textOfValue(font.lookupMaybe(PDFName.of("BaseFont"), PDFName)));
+	if (!name) name = withoutSubsetTag(fromDescriptor("FontName"));
+	if (!name && fromDescriptor("FontFamily")) {
+		const angle = Number(fromDescriptor("ItalicAngle") || 0);
+		name = [fromDescriptor("FontFamily"), fromDescriptor("FontWeight"), angle ? "italic" : ""].filter(Boolean).join(" ");
+	}
+	if (!name) name = textOfValue(font.lookupMaybe(PDFName.of("Name"), PDFName)) || "(unnamed)";
+	const program = [];
+	for (const key of ["FontFile", "FontFile2", "FontFile3"]) {
+		const file = descriptor && descriptor.get(PDFName.of(key));
+		if (file) program.push(key, Buffer.from(streamBytes(context, file)));
+	}
+	const procs = font.lookupMaybe(PDFName.of("CharProcs"), PDFDict);
+	if (procs) {
+		for (const [glyph, ref] of [...procs.entries()].sort(([a], [b]) => (a.decodeText() < b.decodeText() ? -1 : 1))) {
+			program.push(glyph.decodeText(), Buffer.from(streamBytes(context, ref)));
+		}
+	}
+	return `${subtype} ${name} #${program.length ? digest(program) : "no-program"}`;
+}
+
 function fontsOf(context, resources) {
 	const out = new Map();
 	const dict = resources && resources.lookupMaybe(PDFName.of("Font"), PDFDict);
 	if (!dict) return out;
 	for (const [name, ref] of dict.entries()) {
 		const font = context.lookup(ref, PDFDict);
-		const base = font.lookupMaybe(PDFName.of("BaseFont"), PDFName);
 		const subtype = font.lookupMaybe(PDFName.of("Subtype"), PDFName);
 		const toUnicode = font.get(PDFName.of("ToUnicode"));
 		out.set(name.decodeText(), {
-			base: base ? base.decodeText() : "",
+			id: fontIdentity(context, font),
 			twoByte: subtype ? subtype.decodeText() === "Type0" : false,
 			map: toUnicode ? parseCMap(latin1(streamBytes(context, toUnicode))) : new Map(),
 		});
@@ -166,9 +216,12 @@ function decodeString(font, raw) {
 	return out;
 }
 
-function textOf(context, contentBytes, resources, fonts, depth) {
-	const ownFonts = fontsOf(context, resources);
-	for (const [k, v] of ownFonts) fonts.set(k, v);
+// `seen` collects every font met, and `drawing` hashes every content stream
+// drawn, form XObjects included. A form XObject can use its parent's fonts.
+function textOf(context, contentBytes, resources, seen, drawing, depth, inherited = new Map()) {
+	const ownFonts = new Map([...inherited, ...fontsOf(context, resources)]);
+	for (const v of ownFonts.values()) seen.add(v.id);
+	drawing.update(Buffer.from(contentBytes)).update("\0");
 	const tokens = tokenize(latin1(contentBytes));
 	let current = null;
 	let out = "";
@@ -178,7 +231,7 @@ function textOf(context, contentBytes, resources, fonts, depth) {
 		const op = t.op;
 		if (op === "Tf") {
 			const name = operands.find((o) => o.name !== undefined);
-			current = name ? ownFonts.get(name.name) || fonts.get(name.name) || null : null;
+			current = name ? ownFonts.get(name.name) || null : null;
 		} else if (op === "Tj" || op === "'" || op === "\"") {
 			const s = [...operands].reverse().find((o) => o.str !== undefined || o.hex !== undefined);
 			if (s) out += decodeString(current, s);
@@ -194,7 +247,7 @@ function textOf(context, contentBytes, resources, fonts, depth) {
 				const sub = xo.dict.lookupMaybe(PDFName.of("Subtype"), PDFName);
 				if (sub && sub.decodeText() === "Form") {
 					const xoResources = xo.dict.lookupMaybe(PDFName.of("Resources"), PDFDict) || resources;
-					out += textOf(context, decodePDFRawStream(xo).decode(), xoResources, fonts, depth + 1);
+					out += textOf(context, decodePDFRawStream(xo).decode(), xoResources, seen, drawing, depth + 1, ownFonts);
 				}
 			}
 		}
@@ -207,7 +260,8 @@ async function pdfReport(bytes) {
 	const doc = await PDFDocument.load(bytes, { updateMetadata: false });
 	const context = doc.context;
 	const pages = [];
-	const fontNames = new Set();
+	const seen = new Set();
+	const drawing = crypto.createHash("sha256");
 	for (const page of doc.getPages()) {
 		const node = page.node;
 		const resources = node.Resources();
@@ -216,12 +270,30 @@ async function pdfReport(bytes) {
 		const resolved = contents instanceof PDFRef ? context.lookup(contents) : contents;
 		if (resolved instanceof PDFArray) for (let k = 0; k < resolved.size(); k++) parts.push(streamBytes(context, resolved.get(k)));
 		else if (resolved) parts.push(streamBytes(context, resolved));
-		const fonts = new Map();
-		const text = parts.map((b) => textOf(context, b, resources, fonts, 0)).join("");
-		for (const f of fonts.values()) if (f.base) fontNames.add(f.base.replace(/^[A-Z]{6}\+/, ""));
+		const text = parts.map((b) => textOf(context, b, resources, seen, drawing, 0)).join("");
+		drawing.update("\f");
 		pages.push(text.replace(/\s+/g, ""));
 	}
-	return { pages, fonts: [...fontNames].sort() };
+	return { pages, fonts: [...seen].sort(), drawing: drawing.digest("hex").slice(0, 16) };
 }
 
-module.exports = { pdfReport, parseCMap, tokenize };
+// Whether two renders of one document read the same. Each field is null when
+// it holds, or says why not. Nothing holds by being empty: no page fails, text
+// read with no font read fails (the reader missed one), and fonts with no text
+// read fail (the text reader missed it). Only a document with neither text nor
+// fonts is compared by what its pages draw instead.
+function compareRenders(a, b) {
+	const out = { pages: null, text: null, fonts: null, drawing: null };
+	if (!a.pages.length || a.pages.length !== b.pages.length) out.pages = `${a.pages.length} page(s) against ${b.pages.length}`;
+	const anyText = [...a.pages, ...b.pages].some((t) => t.length > 0);
+	const anyFont = a.fonts.length > 0 || b.fonts.length > 0;
+	const differs = a.pages.findIndex((t, i) => t !== b.pages[i]);
+	if (differs >= 0) out.text = `page ${differs + 1} differs`;
+	else if (!anyText && anyFont) out.text = "fonts were read but no text: the text reader missed it";
+	if (JSON.stringify(a.fonts) !== JSON.stringify(b.fonts)) out.fonts = `${a.fonts.join(", ") || "none"} against ${b.fonts.join(", ") || "none"}`;
+	else if (anyText && !anyFont) out.fonts = "text was read but no font: the font reader missed one";
+	if (!anyText && !anyFont && a.drawing !== b.drawing) out.drawing = "neither text nor fonts, and the pages draw differently";
+	return out;
+}
+
+module.exports = { pdfReport, compareRenders, fontIdentity, parseCMap, tokenize };

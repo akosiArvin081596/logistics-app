@@ -345,7 +345,7 @@ function renderIn(mode, outDir, childFile, controlPort, extraEnv) {
 }
 
 async function controlsSections() {
-	const { pdfReport } = require("./lib/pdf-text");
+	const { pdfReport, compareRenders } = require("./lib/pdf-text");
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "logisx-pdf-controls-"));
 	const childFile = path.join(tmp, "render-child.js");
 	fs.writeFileSync(childFile, CHILD_SRC);
@@ -391,10 +391,13 @@ async function controlsSections() {
 				ok(false, `${name}: both PDFs read`, e.message);
 				continue;
 			}
-			ok(a.pages.length === b.pages.length && a.pages.length > 0, `${name}: the same number of pages`, `${a.pages.length} against ${b.pages.length}`);
-			const firstDiff = a.pages.findIndex((t, i) => t !== b.pages[i]);
-			ok(firstDiff < 0, `${name}: the same text on every page`, firstDiff < 0 ? `${a.pages.length} page(s)` : `page ${firstDiff + 1} differs`);
-			ok(JSON.stringify(a.fonts) === JSON.stringify(b.fonts) && a.fonts.length > 0, `${name}: the same embedded fonts`, `${a.fonts.join(", ")} against ${b.fonts.join(", ")}`);
+			// scripts/lib/pdf-text.js's comparison: nothing holds by being empty
+			// (scripts/test-pdf-text.js pins it on made-up PDFs).
+			const diff = compareRenders(a, b);
+			ok(diff.pages === null, `${name}: the same number of pages`, diff.pages || `${a.pages.length} page(s)`);
+			ok(diff.text === null, `${name}: the same text on every page`, diff.text || `${a.pages.reduce((n, t) => n + t.length, 0)} glyphs`);
+			ok(diff.fonts === null, `${name}: the same embedded fonts, by name and glyph program`, diff.fonts || `${a.fonts.length}: ${a.fonts.map((f) => f.replace(/ #[0-9a-f]{12}$/, "")).join(", ")}`);
+			ok(diff.drawing === null, `${name}: neither text nor fonts would mean comparing what the pages draw`, diff.drawing || "not needed");
 		}
 	} finally {
 		await new Promise((r) => control.close(r));
