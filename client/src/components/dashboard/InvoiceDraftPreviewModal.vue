@@ -194,7 +194,14 @@
           <!-- No rate-con on file. Previously this only showed as a MISSING tab,
                which reads as nothing at all — so an invoice could be approved and
                sent without the rate confirmation the broker needs to pay it. -->
-          <div v-if="!ratecons.length" class="idp-warn" role="status">
+          <!-- The server withheld the rate-con files from this account (viewing is
+               limited to the accounts the server lists), but the draft still
+               attaches them: "No rate confirmation attached" would be false here. -->
+          <div v-if="rateconRestricted" class="idp-info" role="status" data-testid="idp-ratecon-restricted">
+            <strong>{{ RATECON_RESTRICTED_TEXT }}</strong>
+            The draft attaches {{ rateconRestrictedCount === 1 ? 'it' : `all ${rateconRestrictedCount}` }} as usual.
+          </div>
+          <div v-else-if="!ratecons.length" class="idp-warn" role="status">
             <strong>No rate confirmation attached.</strong>
             This load has no rate-con on file, so the draft will go out with only the
             invoice and POD. Most brokers need the rate-con to process payment — attach
@@ -208,8 +215,10 @@
           <div v-if="rateconInferred" class="idp-warn" role="status">
             <strong>This rate confirmation was matched by its contents.</strong>
             Its file name does not carry this load number, so it was identified by
-            reading the document. Check the Rate-con tab shows the right load before
-            approving — it is attached to the email.
+            reading the document.
+            <template v-if="rateconRestricted">Ask the owner to check it shows the right load before approving — it is attached to the email.</template>
+            <template v-else>Check the Rate-con tab shows the right load before
+            approving — it is attached to the email.</template>
           </div>
 
           <!-- The Order # silently became our own load id. This used to be a
@@ -635,6 +644,7 @@ import {
   INVOICE_EMAIL_BODY_MAX, emailBodyLength, validateInvoiceEmailBody,
 } from '../../lib/invoiceFields'
 import { footnoteDefaultFor } from '../../lib/invoiceLines'
+import { RATECON_RESTRICTED_TEXT } from '../../lib/rateConView'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -1048,6 +1058,15 @@ const ratecons = computed(() => {
   if (list.length) return list
   return pv.value.rateconPdfBase64 ? [{ base64: pv.value.rateconPdfBase64, label: 'Rate-con', source: '' }] : []
 })
+// The server sends no rate-con bytes to an account outside its viewer list,
+// only rateconRestricted and how many files the draft attaches (rateconCount).
+// No tabs then, and the restricted note instead of "No rate confirmation
+// attached" — unless there is truly none (count 0), when that warning is right.
+const rateconRestrictedCount = computed(() => {
+  const n = Number(pv.value.rateconCount)
+  return Number.isInteger(n) && n > 0 ? n : 0
+})
+const rateconRestricted = computed(() => pv.value.rateconRestricted === true && rateconRestrictedCount.value > 0)
 // The tab shows whenever there is a generated message to start from. Its
 // baseline is only ever replaced by another non-empty message
 // (adoptEmailMessage), so the tab can never disappear under the cursor.
@@ -1881,6 +1900,24 @@ button.idp-badge:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
 .idp-warn strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+
+/* Neutral, not amber: a restricted rate-con is attached as usual; this only
+   says why its tab is missing. */
+.idp-info {
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.idp-info strong {
   display: block;
   font-weight: 600;
   margin-bottom: 0.15rem;

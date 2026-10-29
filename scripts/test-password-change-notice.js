@@ -70,7 +70,7 @@ const path = require("path");
 const { once } = require("events");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined);
 const LIB_PATH = path.join(ROOT, "lib", "password-change-notice.js");
 // lib/sign-in.js, which the login route is handed as `signIn` (absent before
 // that change, when the route never asks). Its flags stay off here: sign-in
@@ -332,13 +332,15 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "", limi
 		"notifyChange", "refreshOwnSession", "normalizeDriverName", "findDriverNameClash", "findDriverNameClashes",
 		"accountDirectorySync", "accountDirectorySyncLock", "getJobTrackingCached", "periodBlockedResponse", "periodLockUnreadableResponse",
 		"accountCompanyChange", "findDirectoryRowForDriver", "investorCompanyMoves", "investorCompanyLockBlockers", "notifyPasswordChanged", "passwordRules",
-		"userPasswordResetLimiter", SRCS.updateUser)(
+		"userPasswordResetLimiter", "RATECON_PDF_VIEWERS", SRCS.updateUser)(
 		app, requireRole, db, noSheetRows, "b21-not-a-sheet", auditText, () => {},
 		() => ({ unreadable: false, blockers: [] }), (period) => period, () => ({ mergeTargets: {}, mergeRows: 0 }), () => ({ counts: {} }),
 		() => {}, purgeUserSessions, logAudit, () => {}, refreshOwnSession, normalizeDriverName, () => null, () => [],
 		() => null, () => null, async () => ({ headers: [], data: [] }), () => {}, () => {},
 		new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
-		() => null, () => [], () => null, notifyPasswordChanged, passwordRules, userPasswordResetLimiter);
+		() => null, () => [], () => null, notifyPasswordChanged, passwordRules, userPasswordResetLimiter,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected.
+		require("../lib/listed-accounts.js").parseListedAccountIds(undefined));
 
 	server.listen(0, "127.0.0.1");
 	await once(server, "listening");
