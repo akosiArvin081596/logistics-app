@@ -70,7 +70,7 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 const eldMiles = require("../lib/eld-miles");
 const appTime = require("../lib/app-time");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 // ───────────────────────────────────────────────────────────────── lifting
 // Each lift is anchored on a newline and counted, so a mention in a comment is
