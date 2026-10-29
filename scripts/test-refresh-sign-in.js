@@ -82,7 +82,7 @@ const NODE_MODULES = (() => {
 const LOCAL_TEST_PASSWORD = "Password123!";          // what prepare-test-fixtures.js sets, LOCALLY
 const OPERATOR_PW = "op-Harbour-Kestrel-Quill-82";    // what these tests hand the wrappers
 const LOCAL_SHEET = "156Y5-OUUEZspiY7dRsJZ57iyKWLJAjdVP8a4yw0PMN0";
-const STAGING_SHEET = "1Ny1q0nY-sYxgjH_4KqzEdWXUNp8etfW7M-G7h_MNA9Y";
+const STAGING_SHEET = "made-up-staging-sheet-id-0123456789";
 
 // Never inherit an operator password, or a production NODE_ENV, from the shell
 // that runs this: every child below would pick it up.

@@ -446,8 +446,7 @@ function runTargetEnvGates() {
 
 	const effectiveArchive = process.env.ARCHIVE_SPREADSHEET_ID || env.ARCHIVE_SPREADSHEET_ID || "";
 	if (!effectiveArchive) {
-		warn("ARCHIVE_SPREADSHEET_ID is unset — the archive viewer will read the PRODUCTION archive.");
-		warn("  That sheet is read-only in this app, so it is a leak of scope, not a write risk.");
+		warn("ARCHIVE_SPREADSHEET_ID is unset — this copy has no archive (only production's own process falls back to the production archive).");
 	} else if (effectiveArchive === PROD_ARCHIVE_ID) {
 		warn("ARCHIVE_SPREADSHEET_ID is the production archive (read-only; scope leak, not a write risk).");
 	}

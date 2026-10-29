@@ -6734,6 +6734,11 @@ db.exec(`
 	)
 `);
 
+// EXPENSE_BACKFILL_APP_DAY_ENABLED, off unless exactly "true": it changes which truck and
+// owner a legacy receipt is stamped with. On, the backfill below reads an assignment's start
+// and end as business days (appDay()), so an evening one covers its own day, not the next.
+const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_ENABLED === "true";
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (see expOwnerId at the
 // POST /api/expenses INSERT). Pass 1 resolves truck_unit + owner_id from
@@ -6887,8 +6892,30 @@ function backfillLegacyExpenseTrucks(health) {
 		// assignments, not only on evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
-		const coversExpenseDay = (day) => `(substr(ta.start_date, 1, 10) <= ${day}
-				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`;
+		// The first 10 characters are the UTC day, already the next one from 8 PM EDT
+		// (7 PM EST); with EXPENSE_BACKFILL_APP_DAY_ENABLED on, each bound is the
+		// business day its stamp falls on (stampDay() below).
+		const coversExpenseDay = (day) => (EXPENSE_BACKFILL_APP_DAY_ENABLED
+			? `(assignment_stamp_day(ta.start_date) <= ${day}
+				  AND (ta.end_date = '' OR assignment_stamp_day(ta.end_date) >= ${day}))`
+			: `(substr(ta.start_date, 1, 10) <= ${day}
+				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`);
+
+		// The business day (appDay(), APP_TIMEZONE) an assignment stamp falls on. Only the
+		// instant the app writes (toISOString()) is converted; anything else keeps its first
+		// 10 characters, as before. Memoized: step 2 reads every assignment for each receipt.
+		const stampDays = new Map();
+		const stampDay = (v) => {
+			if (v === null || v === undefined) return null;
+			const s = String(v);
+			if (!stampDays.has(s)) {
+				const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
+				const exact = Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19);
+				stampDays.set(s, exact ? appDay(new Date(ms)) : s.slice(0, 10));
+			}
+			return stampDays.get(s);
+		};
+		if (EXPENSE_BACKFILL_APP_DAY_ENABLED) db.function("assignment_stamp_day", stampDay);
 
 		// Step 1's match, ONE definition for both of its uses: the SET takes the
 		// newest covering assignment's truck, and the EXISTS writes a row only when
@@ -9590,7 +9617,17 @@ app.use(express.static(clientDistPath));
 // The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
 // SPREADSHEET_ID; production's own process alone runs without one.
 const SPREADSHEET_ID = SHEET_TARGET.id;
-const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
+// The read-only archive of closed months: ARCHIVE_SPREADSHEET_ID, else production's
+// archive for production's own process only (lib/sheet-id.js), so a local, replica
+// or staging run never reads production's archive.
+const ARCHIVE_SPREADSHEET_ID = require("./lib/sheet-id").resolveArchiveSpreadsheetId(process.env, process.cwd()).id;
+// Module scope, so it is logged once per process start and never per request.
+if (!ARCHIVE_SPREADSHEET_ID) {
+	console.warn(
+		"[archive] ⚠️ ARCHIVE_SPREADSHEET_ID is not set — the archive is off: GET /api/archive and " +
+		"/api/archive/tabs answer 503 ARCHIVE_UNCONFIGURED, and the rate-con sweep checks Job Tracking without it.",
+	);
+}
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -23261,6 +23298,8 @@ db.exec(`
 let archiveIdCache = { at: 0, ids: [] };
 const ARCHIVE_ID_CACHE_MS = 60 * 60 * 1000;
 async function getArchiveLoadIdsCached() {
+	// No archive is configured: nothing to read, and no Google call.
+	if (!ARCHIVE_SPREADSHEET_ID) return [];
 	if (archiveIdCache.ids.length && Date.now() - archiveIdCache.at < ARCHIVE_ID_CACHE_MS) return archiveIdCache.ids;
 	const sheets = await getSheets();
 	const resp = await sheets.spreadsheets.values.get({
@@ -38991,6 +39030,7 @@ app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) 
 
 // GET /api/archive — Read-only access to old/archived spreadsheet data
 app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const sheetName = req.query.sheet || "Job Tracking";
@@ -39025,6 +39065,7 @@ app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
 
 // GET /api/archive/tabs — List available tabs in the archive spreadsheet
 app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const meta = await sheets.spreadsheets.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, fields: "sheets.properties.title" });
@@ -43983,6 +44024,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Driver-instructions review codes on the open loads (codes only; inert while
 		// the flag is off).
 		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
+		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
+		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
+		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -44014,6 +44058,8 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			...(offUntilByName
 				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
 				: {}),
+			// Which automatic-draft mode is on, for a Super Admin's settings dialog; absent while off.
+			...(autoInvoice.mode !== "off" && req.session.user.role === "Super Admin" ? { autoInvoice: { mode: autoInvoice.mode } } : {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -49248,7 +49294,9 @@ const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
-	return { sql: types.length ? `type NOT IN (${types.map(() => "?").join(",")})` : "1 = 1", params: [...types] };
+	// The automatic invoice drafts' notices too (the <auto-invoice-wiring> block).
+	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE] : types;
+	return { sql: hidden.length ? `type NOT IN (${hidden.map(() => "?").join(",")})` : "1 = 1", params: [...hidden] };
 }
 
 // GET /api/dispatch-notifications — Fetch dispatch notifications
@@ -52220,6 +52268,71 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 	setInterval(() => { driverInstructions.sweep().catch(() => {}); }, driverInstructions.sweepIntervalMs);
 }
 // </driver-instructions-wiring>
+
+// <auto-invoice-wiring>
+// AUTOMATIC BROKER INVOICE DRAFTS. Every 5 minutes a sweep of the cached Job Tracking
+// finds the loads that became Delivered and drafts each one's broker invoice into Gmail
+// Drafts with the Draft Invoice button's own engine (brokerInvoiceDraft: prepare,
+// render, record); nothing is ever sent, and what a reviewer would have fixed becomes
+// "Needs attention" (lib/auto-invoice-job.js, -ledger.js, -rules.js). Super Admin
+// only: the /api/auto-invoice/ routes (status, settings, a load's Mark checked and Try
+// again), `_autoInvoice` on /api/dashboard's completed rows, and the notices
+// (AUTO_INVOICE_NOTICE_TYPE, left out for every other role by noticeTypeScope()).
+// The settings, read once at start:
+//   AUTO_INVOICE_DRAFTS_ENABLED  on only when exactly "true". Off: no timer, no table,
+//     no route, and /api/dashboard answers as before.
+//   AUTO_INVOICE_DRAFTS_SHADOW   with the flag on, shadow unless exactly "false": the
+//     sweep only records what it would do, with no engine, invoice number, Drive,
+//     Gemini or Gmail call, so ENABLED=true alone can never make a draft.
+//   AUTO_INVOICE_MAX_PER_HOUR (12, at most 1000) and AUTO_INVOICE_MAX_PER_DAY (60, at
+//     most 10000): a burst of deliveries drains over hours, not into Gmail at once.
+// Real drafts also need GMAIL_USER and its app password (without them the job pauses
+// and logs it once). A replica or an import starts no timer (startsJob()).
+// scripts/test-auto-invoice-wiring.js lifts this block.
+const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
+const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
+const autoInvoiceImap = require("./lib/imap-draft");
+const autoInvoice = require("./lib/auto-invoice-job").create({
+	db,
+	env: process.env,
+	readJobTracking: getJobTrackingCached,
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	uploadsRoot: path.join(DATA_DIR, "uploads"),
+	// The engine is created further down, beside the Draft Invoice route.
+	engine: {
+		prepare: (args) => brokerInvoiceDraft.prepare(args),
+		render: (ctx, opts) => brokerInvoiceDraft.render(ctx, opts),
+		record: (ctx, rendered, opts) => brokerInvoiceDraft.record(ctx, rendered, opts),
+	},
+	nextInvoiceNumber,
+	appendGmailDraft,
+	findDraftByMessageId: autoInvoiceImap.findDraftByMessageId,
+	newMessageId: autoInvoiceImap.newMessageId,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
+	bisonRecipient: () => process.env.BISON_INVOICE_EMAIL || "",
+	logAudit,
+	notify: ({ title, body }) => {
+		const notice = { type: AUTO_INVOICE_NOTICE_TYPE, title, body, metadata: {} };
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, "{}");
+		io.to("super-admin").emit("dispatch-notification", notice);
+	},
+	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	log: console,
+});
+if (autoInvoice.mode !== "off") autoInvoice.mount(app, { requireRole, refuseCrossSite });
+if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
+	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
+	let autoInvoiceTicking = false;
+	setInterval(() => {
+		if (autoInvoiceTicking) return;
+		autoInvoiceTicking = true;
+		autoInvoice.tick()
+			.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
+			.finally(() => { autoInvoiceTicking = false; });
+	}, AUTO_INVOICE_TICK_MS);
+}
+// </auto-invoice-wiring>
 
 // POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
 // plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment

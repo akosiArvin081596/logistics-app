@@ -1,9 +1,9 @@
-> **Superseded — not the current architecture.** This is an April 2026 plan, kept for history only, to have n8n POST each load to a new `POST /webhook/n8n/load` route (gated by an `N8N_API_KEY`) so the app would do the sheet writes; neither the route nor the key was ever built. Its premise is out of date as well: `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI` is **not** the app's source but the read-only archive (`ARCHIVE_SPREADSHEET_ID`), and the app's live sheet is the production Dispatch Management sheet `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` (the `SPREADSHEET_ID` fallback in `server.js`), the same one n8n writes. Today n8n still writes each load's sheet rows itself and calls the app only for rate-con extraction and distance (`POST /api/n8n/extract-pdf-via-gemini`, `POST /api/n8n/load-distance`). See [`docs/manual/technical/03-integrations.md`](manual/technical/03-integrations.md) for rate-con ingestion, [`docs/manual/technical/01-backend.md`](manual/technical/01-backend.md) for the routes, and the root [`README.md`](../README.md) for the rest.
+> **Superseded — not the current architecture.** This is an April 2026 plan, kept for history only, to have n8n POST each load to a new `POST /webhook/n8n/load` route (gated by an `N8N_API_KEY`) so the app would do the sheet writes; neither the route nor the key was ever built. Its premise is out of date as well: the "copy" below is **not** the app's source but the read-only archive (`ARCHIVE_SPREADSHEET_ID`), and the app's live sheet is the production Dispatch Management sheet (`SPREADSHEET_ID`; production's own process falls back to it in `lib/sheet-id.js`), the same one n8n writes. Today n8n still writes each load's sheet rows itself and calls the app only for rate-con extraction and distance (`POST /api/n8n/extract-pdf-via-gemini`, `POST /api/n8n/load-distance`). See [`docs/manual/technical/03-integrations.md`](manual/technical/03-integrations.md) for rate-con ingestion, [`docs/manual/technical/01-backend.md`](manual/technical/01-backend.md) for the routes, and the root [`README.md`](../README.md) for the rest.
 
 # Plan: n8n → LogisX API Webhook Integration
 
 ## Context
-Currently n8n writes load data to the **original** Google Sheet (`1ey1n0AAG...` "Dispatch Management"), but the LogisX app reads from a **copy** (`1WCiMmcI7...` "Copy of Dispatch Management"). This causes data drift — 8 loads exist in the original but not the copy, and the copy has 252 extra duplicate rows.
+Currently n8n writes load data to the **original** Google Sheet ("Dispatch Management", today's `SPREADSHEET_ID`), but the LogisX app reads from a **copy** ("Copy of Dispatch Management", today's `ARCHIVE_SPREADSHEET_ID`). This causes data drift — 8 loads exist in the original but not the copy, and the copy has 252 extra duplicate rows.
 
 The fix: have n8n POST extracted load data to the LogisX app's API via a new webhook endpoint. The app then writes to Google Sheets AND stores coordinates in SQLite — single source of truth, no dual-sheet problem.
 
@@ -12,7 +12,7 @@ The fix: have n8n POST extracted load data to the LogisX app's API via a new web
 | Aspect | Current (app) | Original (n8n) |
 |--------|--------------|-----------------|
 | Title | Copy of Dispatch Management | Dispatch Management |
-| ID | `1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI` | `1ey1n0AAG0k8k-qwkWh2T_C8VqqY129OQQr7D5wNl7Mo` |
+| ID | today's `ARCHIVE_SPREADSHEET_ID` | today's `SPREADSHEET_ID` |
 | Job Tracking rows | 563 | 311 |
 | Unique Load IDs | 220 | 228 |
 | Extra columns | Contract ID, Origin Lat/Lng, Dest Lat/Lng | — |
