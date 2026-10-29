@@ -17,21 +17,34 @@
 //   3. after a re-point, the daily miles rollup and GET /api/analytics/mileage
 //      keep the device's earlier days on the truck that drove them, with that
 //      truck's driver;
-//   4. the per-load sweep measures a load off the device its truck held then.
+//   4. the per-load sweep measures a load off the device its truck held then;
+//   5. (§4) under ELD_APP_DAY_ENABLED a link's bounds are read on the
+//      business day, so an evening re-point day goes to the newer link as a
+//      daytime one does: the pure resolver with and without opts.dayOf, the
+//      shipped buildEldDeviceResolver() off and on, both rollups' rows, the
+//      unit GET /api/analytics/mileage shows, the flag's declaration, and the
+//      same values under four process zones.
 // Driver pay's ELD travel days are NOT moved by any of this (they read the
 // current link on purpose, and stay out of scope here).
 //
 // Server code is lifted verbatim and run against an in-memory SQLite.
 // SERVER_JS=<path> runs another copy of server.js.
 //
-// No network, no sheet, no app.db, no server.
+// No network, no sheet, no app.db, no server (§4 forks this file once per zone).
 //
 //   node scripts/test-eld-device-history.js      # exits 1 on any failure
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 const Database = require("better-sqlite3");
 const eldMiles = require("../lib/eld-miles");
+const appTime = require("../lib/app-time");
+
+// A §4 child reports one line of JSON on stdout and nothing else.
+const ZONE_CHILD = process.argv[2] === "--zone-child";
+if (ZONE_CHILD) { console.log = () => {}; console.error = () => {}; }
 
 const SHIPPED = require("./lib/server-source").serverSource();
 
@@ -109,6 +122,7 @@ const HISTORY_DDL = lift(/CREATE TABLE IF NOT EXISTS eld_device_assignments \([\
 const HISTORY_IDX = [...SHIPPED.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_eld_dev_asg_[a-z_]+ ON eld_device_assignments\([^)]*\)(?: WHERE assigned_until = '')?/g)].map((m) => m[0]);
 const STATE_DDL = lift(/CREATE TABLE IF NOT EXISTS server_state \([\s\S]*?\n\t\)/g, "server_state DDL");
 const MILES_DDL = lift(/CREATE TABLE IF NOT EXISTS eld_miles_daily \([\s\S]*?\n\t\)/g, "eld_miles_daily DDL");
+const STATE_MILES_DDL = lift(/CREATE TABLE IF NOT EXISTS eld_state_miles_daily \([\s\S]*?\n\t\)/g, "eld_state_miles_daily DDL");
 const HISTORY_SRC = [
 	decl("const", "ELD_DEVICE_HISTORY_START_KEY", { optional: true }),
 	fn("eldDeviceHistoryStartMs", { optional: true }),
@@ -126,14 +140,17 @@ function freshDb() {
 	db.exec(`CREATE TABLE routemate_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, routemate_vehicle_id TEXT NOT NULL,
 		latitude REAL, longitude REAL, odometer REAL, location_date_ms INTEGER, dropped_reason TEXT DEFAULT '')`);
 	db.exec(`CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, amount REAL, gallons REAL, date TEXT, status TEXT DEFAULT '', truck_unit TEXT DEFAULT '')`);
-	for (const sql of [STATE_DDL, MILES_DDL, HISTORY_DDL, ...HISTORY_IDX]) if (sql) db.exec(sql);
+	for (const sql of [STATE_DDL, MILES_DDL, STATE_MILES_DDL, HISTORY_DDL, ...HISTORY_IDX]) if (sql) db.exec(sql);
 	return db;
 }
-function build(db, src, expose) {
+// ELD_APP_DAY_ENABLED is off and APP_TIMEZONE US Eastern unless `extra` says otherwise.
+function build(db, src, expose, extra = {}) {
 	const deps = {
-		db, eldMiles, Date: FakeDate,
+		db, eldMiles, usStates: require("../lib/us-states"), Date: FakeDate,
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: () => {}, error: (...a) => { throw new Error(a.join(" ")); } },
+		ELD_APP_DAY_ENABLED: false, APP_TIMEZONE: "America/New_York",
+		...extra,
 	};
 	const names = Object.keys(deps);
 	return new Function(...names, `${src}\nreturn { ${expose.join(", ")} };`)(...names.map((n) => deps[n]));
@@ -204,7 +221,9 @@ const UTIL_SRC = [fn("getWeekRange"), fn("appDay"), fn("personalLedgerPresent"),
 check("§3.0 the per-load measurement reads the device the truck held then",
 	/deviceResolver\.vehicleForTruckAt\(truck\.truck_id, win\.endMs\)/.test(fn("measureLoadEldMiles")), true);
 
-(async () => {
+// §3's world: X re-pointed from A to B at T1 (8 PM EDT Sep 28), driving
+// 09:00-17:00 Houston every day.
+function mileageWorld() {
 	const db = freshDb();
 	const t = db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id) VALUES (?, ?, ?)");
 	t.run(A, "LogisX-#356", ""); t.run(B, "LogisX-#33", X);      // as it stands after the re-point
@@ -227,33 +246,212 @@ check("§3.0 the per-load measurement reads the device the truck held then",
 		// ping and the next day's first.
 		for (let i = 0; i <= 48; i++) { ping.run(X, 31.5, -95.4, odo, start + i * 10 * 60000); if (i < 48) odo += 2; }
 	}
-
-	const w = build(db, ROLLUP_SRC, ["runEldMilesDailyRollup", "rollupEldMilesDaily"].filter((n) => new RegExp(`function ${n}\\(`).test(ROLLUP_SRC)));
+	return db;
+}
+async function rollupRows(db, extra = {}) {
+	const src = `${ROLLUP_SRC}${fn("appDay")}`;
+	const w = build(db, src, ["runEldMilesDailyRollup", "rollupEldMilesDaily"].filter((n) => new RegExp(`function ${n}\\(`).test(src)), extra);
 	if (w.runEldMilesDailyRollup) await w.runEldMilesDailyRollup();
 	else w.rollupEldMilesDaily(10);
-	const daily = db.prepare("SELECT local_day, truck_id, driver_name, miles FROM eld_miles_daily ORDER BY local_day").all()
+	return db.prepare("SELECT local_day, truck_id, driver_name, miles FROM eld_miles_daily ORDER BY local_day").all()
 		.map((r) => [r.local_day, r.truck_id, r.driver_name, r.miles]);
-	check("§3.1 the rollup keeps the device's days before the re-point on the truck that drove them, with its driver", daily, [
-		["2026-09-26", A, "Alice Able", 96], ["2026-09-27", A, "Alice Able", 96], ["2026-09-28", A, "Alice Able", 96],
-		["2026-09-29", B, "Bob Baker", 96], ["2026-09-30", B, "Bob Baker", 96], ["2026-10-01", B, "Bob Baker", 96],
-	]);
-
+}
+// The state miles rollup reads the same device lookup, so it puts a day on the same truck.
+const STATE_ROLLUP_SRC = [
+	HISTORY_SRC,
+	decl("const", "ELD_STATE_MILES_BACKFILL_KEY"),
+	decl("const", "ELD_STATE_MILES_LAST_RUN_KEY"),
+	decl("const", "ELD_STATE_MILES_MAX_DAYS"),
+	decl("const", "ELD_STATE_MILES_BOUNDARY_MS"),
+	decl("let", "eldStateMilesRunning"),
+	fn("rollupEldStateMilesRange"),
+	fn("runEldStateMilesRollup"),
+	fn("appDay"),
+].join("");
+async function stateRollupRows(db, extra = {}) {
+	if (!/function runEldStateMilesRollup\(/.test(STATE_ROLLUP_SRC)) return "runEldStateMilesRollup() is missing";
+	const out = await build(db, STATE_ROLLUP_SRC, ["runEldStateMilesRollup"], extra).runEldStateMilesRollup();
+	if (out && out.error) return `the state rollup failed: ${out.error}`;
+	return db.prepare("SELECT local_day, truck_id, state, miles FROM eld_state_miles_daily ORDER BY local_day, state").all()
+		.map((r) => [r.local_day, r.truck_id, r.state, r.miles]);
+}
+// GET /api/analytics/mileage over `db` for Sep 26 - Oct 1, ELD_APP_DAY_ENABLED as `flag`: the response body.
+function mileageRoute(db, flag = false) {
 	let body = null;
 	const app = { get: (p, ...h) => { app.handler = h[h.length - 1]; } };
 	const routeDeps = {
 		app, db, eldMiles, Date: FakeDate, requireRole: () => null, mileageAnalyticsLimiter: null,
-		APP_TIMEZONE: require("../lib/app-time").appTimeZone(),
+		APP_TIMEZONE: appTime.appTimeZone(), ELD_APP_DAY_ENABLED: flag,
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: () => {}, error: (...a) => { throw new Error(a.join(" ")); } },
 	};
 	const names = Object.keys(routeDeps);
 	new Function(...names, `${HISTORY_SRC}${UTIL_SRC}${ROUTE_SRC}`)(...names.map((n) => routeDeps[n]));
 	app.handler({ query: { from: "2026-09-26", to: "2026-10-01" } }, { status() { return this; }, json(b) { body = b; return this; } });
-	const truckTotal = (id) => { const e = body && body.trucks.find((x) => x.truckId === id); return e && e.total ? e.total.miles : null; };
-	check("§3.2 GET /api/analytics/mileage: each truck keeps the miles it drove", [truckTotal(A), truckTotal(B)], [288, 288]);
-	check("§3.3 ...each driver on the truck they drove", (body && body.drivers || []).map((d) => [d.driver, d.truckUnits, d.total.miles]).sort(),
+	return body;
+}
+const truckTotalIn = (body, id) => { const e = body && body.trucks.find((x) => x.truckId === id); return e && e.total ? e.total.miles : null; };
+const driverUnitsIn = (body) => (body && body.drivers || []).map((d) => [d.driver, d.truckUnits, d.total.miles]).sort();
+
+// ===========================================================================
+// §4 a link's bounds on the business day (ELD_APP_DAY_ENABLED)
+// ===========================================================================
+// The resolver reads each bound's UTC day unless handed opts.dayOf; server.js
+// hands it appDay() under the flag. Expected days are US Eastern, APP_TIMEZONE's
+// default. Returns [{ name, ok, a, e }], so a child process can report it whole.
+const P = 21, Q = 22;                             // made-up trucks
+const Y = "VID-Y", Z = "VID-Z";
+const easternDay = (ms) => appTime.dayInZone(new Date(ms), "America/New_York");
+const shiftDay = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+async function appDaySection() {
+	const results = [];
+	const t = (name, a, e) => results.push({ name, a: JSON.stringify(a), e: JSON.stringify(e), ok: JSON.stringify(a) === JSON.stringify(e) });
+	const SINCE = "2026-01-05T12:00:00.000Z";
+	const pair = (rows, o) => [eldMiles.buildDeviceTruckResolver(rows, o), eldMiles.buildDeviceTruckResolver(rows, { ...o, dayOf: easternDay })];
+	// X moves from P to Q at `at`: [the UTC reading, the business-day reading].
+	const repoint = (at) => pair([
+		{ truck_id: P, routemate_vehicle_id: X, assigned_from: SINCE, assigned_until: at },
+		{ truck_id: Q, routemate_vehicle_id: X, assigned_from: at, assigned_until: "" },
+	], { startMs: Date.parse(SINCE), currentLinks: [{ id: Q, routemate_vehicle_id: X }] });
+
+	// [the re-point instant, its business day, that day's truck on the UTC reading, what it is]
+	for (const [at, day, utcTruck, why] of [
+		["2026-09-29T01:00:00.000Z", "2026-09-28", P, "9 PM EDT Sep 28"],
+		["2026-09-29T00:00:00.000Z", "2026-09-28", P, "8 PM EDT Sep 28, the EDT boundary"],
+		["2026-09-28T23:59:59.000Z", "2026-09-28", Q, "7:59:59 PM EDT Sep 28 (control)"],
+		["2026-09-28T19:00:00.000Z", "2026-09-28", Q, "3 PM EDT Sep 28 (control)"],
+		["2026-09-29T03:59:59.999Z", "2026-09-28", P, "11:59:59.999 PM EDT Sep 28"],
+		["2026-11-01T03:30:00.000Z", "2026-10-31", P, "11:30 PM EDT Oct 31, the night before daylight time ends"],
+		["2026-11-03T00:30:00.000Z", "2026-11-02", P, "7:30 PM EST Nov 2"],
+		["2026-03-08T00:30:00.000Z", "2026-03-07", P, "7:30 PM EST Mar 7, before the spring switch"],
+		["2026-03-08T23:30:00.000Z", "2026-03-08", Q, "7:30 PM EDT Mar 8, after it (no longer evening)"],
+		["2026-03-09T00:30:00.000Z", "2026-03-08", P, "8:30 PM EDT Mar 8"],
+	]) {
+		const [utc, biz] = repoint(at);
+		t(`§4 re-pointed ${why}: ${day} on the UTC reading, no dayOf (unchanged)`, utc.truckForVehicleOnDay(X, day), utcTruck);
+		t(`§4 re-pointed ${why}: with dayOf, the newer link takes ${day}`, biz.truckForVehicleOnDay(X, day), Q);
+		t(`§4 re-pointed ${why}: the day before stays on the older link and the day after is the newer's, either way`,
+			[utc.truckForVehicleOnDay(X, shiftDay(day, -1)), biz.truckForVehicleOnDay(X, shiftDay(day, -1)), utc.truckForVehicleOnDay(X, shiftDay(day, 1)), biz.truckForVehicleOnDay(X, shiftDay(day, 1))],
+			[P, P, Q, Q]);
+	}
+	{
+		const [utc, biz] = repoint("2026-09-29T01:00:00.000Z");
+		t("§4 the inverse on the 9 PM re-point day: Q held no device on the UTC reading, X with dayOf; P held X either way",
+			[utc.vehicleForTruckOnDay(Q, "2026-09-28"), biz.vehicleForTruckOnDay(Q, "2026-09-28"), utc.vehicleForTruckOnDay(P, "2026-09-28"), biz.vehicleForTruckOnDay(P, "2026-09-28")],
+			["", X, X, X]);
+	}
+	{
+		// Y unlinked from P at 9:30 PM EDT Sep 28 and never linked again.
+		const [utc, biz] = pair([{ truck_id: P, routemate_vehicle_id: Y, assigned_from: SINCE, assigned_until: "2026-09-29T01:30:00.000Z" }],
+			{ startMs: Date.parse(SINCE), currentLinks: [] });
+		t("§4 an evening unlink: the next day stays on the old truck on the UTC reading, on no truck with dayOf; the unlink day is P's either way",
+			[utc.truckForVehicleOnDay(Y, "2026-09-29"), biz.truckForVehicleOnDay(Y, "2026-09-29"), utc.truckForVehicleOnDay(Y, "2026-09-28"), biz.truckForVehicleOnDay(Y, "2026-09-28")],
+			[P, null, P, P]);
+	}
+	{
+		// Z, on no truck until it is linked to Q at 10 PM EDT Sep 28.
+		const [utc, biz] = pair([{ truck_id: Q, routemate_vehicle_id: Z, assigned_from: "2026-09-29T02:00:00.000Z", assigned_until: "" }],
+			{ startMs: Date.parse(SINCE), currentLinks: [{ id: Q, routemate_vehicle_id: Z }] });
+		t("§4 an evening link: its day is on no truck on the UTC reading, on Q with dayOf", [utc.truckForVehicleOnDay(Z, "2026-09-28"), biz.truckForVehicleOnDay(Z, "2026-09-28")], [null, Q]);
+	}
+	{
+		// Recording began at 9 PM EDT Sep 19 with X on P: the days around it read the same either way.
+		const start = "2026-09-20T01:00:00.000Z";
+		const [utc, biz] = pair([{ truck_id: P, routemate_vehicle_id: X, assigned_from: start, assigned_until: "" }],
+			{ startMs: Date.parse(start), currentLinks: [{ id: P, routemate_vehicle_id: X }] });
+		const days = ["2026-09-18", "2026-09-19", "2026-09-20"];
+		t("§4 recording began 9 PM EDT Sep 19: Sep 18-20 on P with or without dayOf", [days.map((d) => utc.truckForVehicleOnDay(X, d)), days.map((d) => biz.truckForVehicleOnDay(X, d))], [[P, P, P], [P, P, P]]);
+	}
+
+	// The shipped buildEldDeviceResolver(), off and on.
+	if (/function buildEldDeviceResolver/.test(HISTORY_SRC)) {
+		const db = freshDb();
+		db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id) VALUES (?, ?, ?)").run(P, "MADE-UP-21", "");
+		db.prepare("INSERT INTO trucks (id, unit_number, routemate_vehicle_id) VALUES (?, ?, ?)").run(Q, "MADE-UP-22", X);
+		const h = db.prepare("INSERT INTO eld_device_assignments (truck_id, routemate_vehicle_id, assigned_from, assigned_until, assigned_by) VALUES (?, ?, ?, ?, ?)");
+		h.run(P, X, SINCE, "2026-09-29T01:00:00.000Z", "system:seed");
+		h.run(Q, X, "2026-09-29T01:00:00.000Z", "", "super_admin");
+		db.prepare("INSERT INTO server_state (key, value) VALUES (?, ?)").run("eld_device_history_started", JSON.stringify({ at: SINCE, atMs: Date.parse(SINCE) }));
+		const shipped = (flag) => build(db, `${HISTORY_SRC}${fn("appDay")}`, ["buildEldDeviceResolver"], { ELD_APP_DAY_ENABLED: flag }).buildEldDeviceResolver();
+		t("§4 the shipped buildEldDeviceResolver(), flag off: the 9 PM EDT re-point day on the older link (unchanged)",
+			["2026-09-27", "2026-09-28", "2026-09-29"].map((d) => shipped(false).truckForVehicleOnDay(X, d)), [P, P, Q]);
+		t("§4 ...flag on: on the newer link", ["2026-09-27", "2026-09-28", "2026-09-29"].map((d) => shipped(true).truckForVehicleOnDay(X, d)), [P, Q, Q]);
+	} else {
+		t("§4 the shipped buildEldDeviceResolver() exists", false, true);
+	}
+
+	// The daily rollup over §3's world (re-pointed at 8 PM EDT Sep 28).
+	const before = [["2026-09-26", A, "Alice Able", 96], ["2026-09-27", A, "Alice Able", 96]];
+	const after = [["2026-09-29", B, "Bob Baker", 96], ["2026-09-30", B, "Bob Baker", 96], ["2026-10-01", B, "Bob Baker", 96]];
+	t("§4 the daily rollup, flag off: Sep 28 on A, the truck that drove it (unchanged)", await rollupRows(mileageWorld()),
+		[...before, ["2026-09-28", A, "Alice Able", 96], ...after]);
+	t("§4 ...flag on: Sep 28's row is B's, the link in force at the end of that business day; its driver stays the one at each ping's instant",
+		await rollupRows(mileageWorld(), { ELD_APP_DAY_ENABLED: true }), [...before, ["2026-09-28", B, "Alice Able", 96], ...after]);
+
+	// The state miles rollup over the same world (every mile in Texas).
+	const statesOn = (sep28) => [["2026-09-26", A, "TX", 96], ["2026-09-27", A, "TX", 96], ["2026-09-28", sep28, "TX", 96],
+		["2026-09-29", B, "TX", 96], ["2026-09-30", B, "TX", 96], ["2026-10-01", B, "TX", 96]];
+	t("§4 the state miles rollup, flag off: Sep 28 on A (unchanged)", await stateRollupRows(mileageWorld()), statesOn(A));
+	t("§4 ...flag on: Sep 28 on B, the same truck as the daily rollup's row", await stateRollupRows(mileageWorld(), { ELD_APP_DAY_ENABLED: true }), statesOn(B));
+
+	// What GET /api/analytics/mileage shows: it looks up each row's truck again, so it follows the flag
+	// even for a row the rollup wrote with the flag off.
+	{
+		const db = mileageWorld();
+		await rollupRows(db);
+		const off = mileageRoute(db, false);
+		const onOverOldRows = mileageRoute(db, true);
+		t("§4 GET /api/analytics/mileage, flag off: A and B keep 288 miles each (unchanged)", [truckTotalIn(off, A), truckTotalIn(off, B)], [288, 288]);
+		t("§4 ...flag on: Sep 28's 96 miles are shown on B, under Alice, who drove them on A",
+			[truckTotalIn(onOverOldRows, A), truckTotalIn(onOverOldRows, B), driverUnitsIn(onOverOldRows)],
+			[192, 384, [["Alice Able", ["LogisX-#33", "LogisX-#356"], 288], ["Bob Baker", ["LogisX-#33"], 288]]]);
+		t("§4 ...while the row the rollup wrote with the flag off still holds A until a rollup re-derives Sep 28",
+			db.prepare("SELECT truck_id FROM eld_miles_daily WHERE local_day = '2026-09-28'").all().map((r) => r.truck_id), [A]);
+	}
+	return results;
+}
+// §4 in a child of this file under process zone `zone`: { failed: [names], digest of every actual value }.
+function inZone(zone) {
+	try {
+		return JSON.parse(execFileSync(process.execPath, [__filename, "--zone-child"],
+			{ env: { ...process.env, TZ: zone }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+	} catch (e) {
+		const why = String(e.stderr || "").split("\n").find((l) => /^[A-Za-z]*Error:/.test(l)) || String(e.message).split("\n")[0];
+		return { failed: [`the child under TZ=${zone} did not finish: ${why}`], digest: "" };
+	}
+}
+
+(async () => {
+	if (ZONE_CHILD) {
+		const results = await appDaySection();
+		process.stdout.write(JSON.stringify({
+			failed: results.filter((r) => !r.ok).map((r) => r.name),
+			digest: crypto.createHash("sha256").update(results.map((r) => `${r.name}=${r.a}`).join("\n")).digest("hex"),
+		}));
+		process.exit(0);
+	}
+	const db = mileageWorld();
+	const daily = await rollupRows(db);
+	check("§3.1 the rollup keeps the device's days before the re-point on the truck that drove them, with its driver", daily, [
+		["2026-09-26", A, "Alice Able", 96], ["2026-09-27", A, "Alice Able", 96], ["2026-09-28", A, "Alice Able", 96],
+		["2026-09-29", B, "Bob Baker", 96], ["2026-09-30", B, "Bob Baker", 96], ["2026-10-01", B, "Bob Baker", 96],
+	]);
+
+	const body = mileageRoute(db);
+	check("§3.2 GET /api/analytics/mileage: each truck keeps the miles it drove", [truckTotalIn(body, A), truckTotalIn(body, B)], [288, 288]);
+	check("§3.3 ...each driver on the truck they drove", driverUnitsIn(body),
 		[["Alice Able", ["LogisX-#356"], 288], ["Bob Baker", ["LogisX-#33"], 288]]);
 	check("§3.4 ...and none of it reads as an unlinked device", body && body.coverage.unlinkedVehicles, []);
+
+	console.log("§4 a link's bounds on the business day (ELD_APP_DAY_ENABLED)");
+	check("§4 server.js declares ELD_APP_DAY_ENABLED once, at column 0, on only when exactly \"true\"",
+		[...SHIPPED.matchAll(/^const ELD_APP_DAY_ENABLED = process\.env\.ELD_APP_DAY_ENABLED === "true";$/gm)].length, 1);
+	for (const r of await appDaySection()) check(r.name, r.a, r.e);
+	const verdicts = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"].map((zone) => [zone, inZone(zone)]);
+	for (const [zone, v] of verdicts) {
+		check(`§4 TZ=${zone}: every check passes`, v.failed.length ? `${v.failed.length} failed, first: ${v.failed[0]}` : "all pass", "all pass");
+	}
+	check("§4 ...and every zone found the same values", new Set(verdicts.map(([, v]) => v.digest)).size, 1);
 
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

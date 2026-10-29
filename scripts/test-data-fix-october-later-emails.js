@@ -51,7 +51,7 @@ const BASE = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "oct-restore
 const APP = path.join(BASE, "app", "logistics-app");
 fs.mkdirSync(path.join(APP, "scripts", "lib"), { recursive: true });
 fs.mkdirSync(path.join(APP, "lib"));
-for (const f of ["scripts/data-fix-october-later-emails.js", "scripts/lib/ledger-world.js", "scripts/lib/server-lift.js", "lib/sheet-id.js"]) {
+for (const f of ["scripts/data-fix-october-later-emails.js", "scripts/lib/ledger-world.js", "scripts/lib/server-lift.js", "scripts/lib/server-source.js", "lib/sheet-id.js"]) {
 	fs.copyFileSync(path.join(ROOT, f), path.join(APP, f));
 }
 fs.writeFileSync(path.join(APP, "server.js"), "");

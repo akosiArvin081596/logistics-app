@@ -144,7 +144,9 @@ const FUNCTIONS = [
 	"earliestEditableBasisMonth", "signedPaymentTermsOf", "recordSignedPayoutBasis", "unrecordedLeaseNote",
 	"payoutBasisRowView", "buildPayoutBasisView", "payoutBasisContext",
 ].map(liftFunction).join("\n");
-const FLAG_CONSTS = [liftConst("INVESTOR_LEASE_PAYOUTS_ENABLED"), liftConst("INVESTOR_LEASE_SETTINGS"), liftConst("LEASE_SNAPSHOT_WARNED")].join("\n");
+const FLAG_CONSTS = [liftConst("INVESTOR_LEASE_PAYOUTS_ENABLED"), liftConst("INVESTOR_LEASE_SETTINGS"), liftConst("LEASE_SNAPSHOT_WARNED"),
+	// The truck charge rule (TRUCK_CHARGE_APP_DAY_*) is off here; its own runners cover it.
+	"const TRUCK_CHARGE_APP_DAY_RULE = null;"].join("\n");
 
 const DDL = [
 	tableDdl("users"), ...alters("users"),
@@ -668,9 +670,9 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		eq([settles(buildServer({ flag: false })), settles(buildServer({ flag: true }))], [4500, 2000], "§8 control: flag off pays the split, flag on the lease");
 		const openSrc = liftFunction("payoutBasisContext").replace("enabled: INVESTOR_LEASE_PAYOUTS_ENABLED,", "enabled: true,");
 		if (openSrc === liftFunction("payoutBasisContext")) die("the flag mutant did not apply");
-		const opened = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", `${openSrc}\nreturn payoutBasisContext;`);
+		const opened = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", "TRUCK_CHARGE_APP_DAY_RULE", `${openSrc}\nreturn payoutBasisContext;`);
 		const srvOff = buildServer({ flag: false });
-		srvOff.payoutBasisContext = opened(srvOff.db, investorPayoutBasis.DEFAULT_SETTINGS, false, investorPayoutBasis);
+		srvOff.payoutBasisContext = opened(srvOff.db, investorPayoutBasis.DEFAULT_SETTINGS, false, investorPayoutBasis, null);
 		ok(settles(srvOff) !== 4500, "§8 MUTANT the flag carried as always on: the lease pays with the flag off (caught)");
 
 		// The closed-month bound: without it a lease is dated into a closed month.
@@ -814,7 +816,7 @@ const LEASE_2000 = { type: "lease", leaseAmountCents: 200000, details: "" };
 		await O.fns.finalizePeriods(LEDGER_CLOSED, "qa");
 		ok(closedRows(O, 62).every((r) => { const b = JSON.parse(r.finalized_breakdown || "null"); return b && !b.payoutBasis && b.splitPct === 50; }),
 			"§10 flag off: a lease investor's close freezes the split it paid (no lease basis in the snapshot)");
-		const onCtx = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", `${liftFunction("payoutBasisContext")}\nreturn payoutBasisContext;`)(off.db, investorPayoutBasis.DEFAULT_SETTINGS, true, investorPayoutBasis);
+		const onCtx = new Function("db", "INVESTOR_LEASE_SETTINGS", "INVESTOR_LEASE_PAYOUTS_ENABLED", "investorPayoutBasis", "TRUCK_CHARGE_APP_DAY_RULE", `${liftFunction("payoutBasisContext")}\nreturn payoutBasisContext;`)(off.db, investorPayoutBasis.DEFAULT_SETTINGS, true, investorPayoutBasis, null);
 		eq(onCtx(62).settledSplitMonths, LEDGER_CLOSED, "§10 …and once the flag is on those months stay the split");
 
 		// MUTANT: the reconcile without its closed-month guard creates the rows.

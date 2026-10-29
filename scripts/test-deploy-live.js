@@ -301,7 +301,9 @@ const LIVE_CASES = {
 // staging and production jobs, the drift heal). Its steps are read from the
 // real file; the deploy step and the edge check are run for real against stubs.
 const ACTION = fs.readFileSync(path.join(__dirname, "..", ".github/actions/vps-deploy/action.yml"), "utf8");
-const SERVER = require("./lib/server-source").serverSource();
+// The deploy greps server.js's own file, so a needle only a route module holds
+// doesn't count: where() maps each hit back to its real file.
+const SERVER = require("./lib/server-source").virtualServer();
 // The composite action's steps in order, as { name, text }.
 function actionSteps(yaml) {
 	const steps = [];
@@ -805,10 +807,16 @@ const edgePins = (script, tag = "", names = Object.keys(EDGE_CASES)) => names.fl
 // What the deploy looks for is what server.js has: a rename there would make
 // every commit read as predating the check, and the foreign Origin would never
 // be asked again.
-function guardPins(deployText, serverText, tag = "") {
+function guardPins(deployText, server, tag = "") {
 	const needles = [...deployText.matchAll(/git grep -q '([^']+)' "\$(NEW|LIVE)" -- server\.js/g)].map((m) => m[1]);
-	return [[needles.length === 2 && needles[0] === needles[1] && serverText.includes(needles[0]),
-		`${tag}§14 the deploy looks for one text on both paths (${needles.length} found), and this repo's server.js has it (${JSON.stringify(needles[0] || "")})`]];
+	const inServerFile = (needle) => {
+		for (let at = server.text.indexOf(needle); needle && at >= 0; at = server.text.indexOf(needle, at + 1)) {
+			if (server.where(server.text.slice(0, at).split("\n").length).file === "server.js") return true;
+		}
+		return false;
+	};
+	return [[needles.length === 2 && needles[0] === needles[1] && inServerFile(needles[0]),
+		`${tag}§14 the deploy looks for one text on both paths (${needles.length} found), and this repo's server.js has it in its own file (${JSON.stringify(needles[0] || "")})`]];
 }
 
 // ──────────────────────────────────────────────────────────────── §8 mutants
@@ -858,6 +866,8 @@ function mutants() {
 		'"$NEW" -- server.js', '"$PREV" -- server.js'), M));
 	expectCaught("the deploy looks for text server.js does not have", guardPins(swap(REAL.deploy,
 		"'allowRequest: liveUpdateHandshakeAllowed'", "'allowRequest: liveUpdateOriginCheck'"), SERVER, M));
+	expectCaught("the text the deploy looks for is only in a route module, not server.js's own file", guardPins(REAL.deploy,
+		{ text: SERVER.text, where: (line) => ({ file: "routes/made-up.js", line }) }, M));
 
 	// §14: the action's record step, and what it hands the edge check and the rollback.
 	expectCaught("the action records without the smoke check", actionPins(swap(ACTION,
