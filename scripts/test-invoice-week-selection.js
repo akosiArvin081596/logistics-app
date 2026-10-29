@@ -142,6 +142,12 @@ const SHARED_FNS = [
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalUnfitTail", "personalFit",
+	// The correction lines a weekly invoice carries, and the days live day lines
+	// hold (none in these fixtures: their database has no invoice_correction_lines;
+	// scripts/test-approved-invoice-lock.js runs them).
+	"correctionLinesTablePresent", "correctionDayLineHolds", "correctionGenerationPlan", "correctionFitForGeneration",
+	"correctionCommitGeneration", "correctionGenerationAudit", "correctionLinesOnInvoice", "correctionWaitingLines",
+	"correctionDayPaidBy", "correctionSourceRow",
 	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
 	// the paid-days release a regenerated Draft runs.
 	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
@@ -157,6 +163,8 @@ const SHARED_CONSTS = [
 	"DAY_PAY_DRAFT_LINE_RE", "INVOICE_GRID_DAYS",
 	// The Personal lines' receipt-week rule (off in these fixtures).
 	"PERSONAL_RECEIPT_WEEK_ENABLED",
+	// The correction lines' reads and their system actor.
+	"CORRECTION_ROW_SELECT", "CORRECTION_WAITING_SQL", "CORRECTION_SYSTEM_ACTOR",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed", "attachLatePersonalLines",
 	// The batch caches the week's Personal receipt images first (none here).
@@ -218,6 +226,8 @@ function buildWorld(db, opts = {}) {
 		appTime, APP_TIMEZONE: appTime.resolveAppTimeZone(undefined),
 		// The invoice's Address line from the directory row (lib/invoice-header.js).
 		providerAddressLine: require("../lib/invoice-header").providerAddressLine,
+		// The correction lines' rules (lib/invoice-corrections.js): the print fields.
+		invoiceCorrections: require("../lib/invoice-corrections"),
 		// The trip work-day rule is off here (TRIP_WORK_DAYS_ENABLED unset).
 		TRIP_WORK_DAYS_FROM: null,
 		// The daily-rate rule is off here (DRIVER_RATE_ONLY_ENABLED unset;

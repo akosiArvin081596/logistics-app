@@ -352,8 +352,11 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // correction invoice): each charges a driver for a receipt or credits it back,
 // Super Admin only, from the SPA's Expenses screen. So is the account switch
 // (POST /api/users/:id/disable and /enable): it ends or restores a staff account's
-// sign-in, Super Admin only, from the SPA.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes, the Personal receipt writes and the account switch",
+// sign-in, Super Admin only, from the SPA. So are the two correction-line writes
+// (POST /api/invoices/:id/corrections and DELETE /api/invoices/corrections/:lineId):
+// each puts a dated line on a driver's next invoice or voids one, Super Admin
+// only, from the SPA's Invoices screen.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes, the Personal receipt writes, the account switch and the correction-line writes",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen", "/api/admin/financials/freeze-closed-months", "/api/financials/settings",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
@@ -364,8 +367,9 @@ eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, t
 	 "/api/investor/config", "/api/investors/:id/payout-basis",
 	 "/api/admin/kpis/approvals/:key", "/api/admin/kpis/settings", "/api/admin/kpis/recompute",
 	 "/api/users/:id/disable", "/api/users/:id/enable",
-	 "/api/expenses/:id/personal", "/api/expenses/:id/personal", "/api/expenses/:id/personal/reverse", "/api/invoices/personal-corrections"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 24);
+	 "/api/expenses/:id/personal", "/api/expenses/:id/personal", "/api/expenses/:id/personal/reverse", "/api/invoices/personal-corrections",
+	 "/api/invoices/:id/corrections", "/api/invoices/corrections/:lineId"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 26);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);
