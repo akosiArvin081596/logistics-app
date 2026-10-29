@@ -1165,6 +1165,8 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		},
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
 		// The Needs Confirmation pickup codes (test-ratecon-pickup-confirmation-routes.js
 		// covers them, a withheld Load ID included): inert here, as with their flag off.
 		annotateDashboardPickupReview: () => 0,

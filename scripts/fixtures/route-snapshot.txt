@@ -71,7 +71,7 @@ GET /api/compliance/ifta · requireRole("Super Admin", "Dispatcher")=anon@12b84c
 GET /api/compliance/ifta/state-detail · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@4e7fca560195
 GET /api/config/maintenance · inline@52e452699466
 GET /api/config/maps-key · mapsKeyLimiter=limiter · inline@65cbbd301ebe
-GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@cc70ebbe0143
+GET /api/dashboard · requireRole("Super Admin", "Dispatcher")=anon@12b84c4b0134 · inline@eff328dde760
 GET /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@7ba9d8e49ad5
 POST /api/data · requireRole("Super Admin")=anon@12b84c4b0134 · inline@bd7b03307cdd
 DELETE /api/data/:rowIndex · requireRole("Super Admin")=anon@12b84c4b0134 · inline@162c6fef6371
