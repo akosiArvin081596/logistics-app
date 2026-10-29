@@ -507,6 +507,8 @@ const brief = (r) => `status ${r.status}, body ${JSON.stringify(r.body)}, reads 
 		personalSummaryByExpense: () => Object.create(null),
 		personalSummaryForRole: () => null,
 		personalLinesForInvoices: () => new Map(),
+		// Nor a correction line (scripts/test-approved-invoice-lock.js).
+		correctionLinesForInvoices: () => new Map(),
 		ONBOARDING_DOCS: [],
 		// The driver's own time-off screen is off here (its subject is
 		// scripts/test-driver-page-role-gate.js §7).

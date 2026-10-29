@@ -306,6 +306,8 @@ const driverDeps = (over = {}) => ({
 	personalSummaryByExpense: () => Object.create(null),
 	personalSummaryForRole: () => null,
 	personalLinesForInvoices: () => new Map(),
+	// No invoice here carries a correction line (scripts/test-approved-invoice-lock.js).
+	correctionLinesForInvoices: () => new Map(),
 	invoicePayBasesOf,
 	ONBOARDING_DOCS: [],
 	DRIVER_TIME_OFF_SCREEN_ENABLED: false,
