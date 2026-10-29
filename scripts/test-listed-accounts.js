@@ -8,9 +8,10 @@
  *    blank, a username, "01", "+1", "1.0", a stray or doubled comma, another
  *    separator, a negative, more than MAX_IDS entries). The problem names the
  *    entry's position, never its text.
- * §2 who is listed: only the session's id, read as a positive whole number;
- *    a username never counts; no usable id is "no-id"; an unset list answers
- *    "unset" and an invalid one "invalid" for everyone.
+ * §2 who is listed: only the session's id, a positive whole number stored as
+ *    one (lib/account-disable.js's sessionAccountId(), the one reading); a
+ *    username or an id stored as text never counts; no usable id is "no-id";
+ *    an unset list answers "unset" and an invalid one "invalid" for everyone.
  * §3 protected changes: unset protects nobody; valid protects listed targets
  *    from anyone but themselves and another listed account; invalid protects
  *    every Super Admin from everyone, and nobody else.
@@ -70,8 +71,9 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	const valid = L.parseListedAccountIds("1,7");
 	const cases = [
 		[{ id: 1, username: "owner_admin" }, "listed"],
-		[{ id: "7", username: "second_admin" }, "listed"],
-		[{ id: " 7 " }, "listed"],
+		[{ id: 7, username: "second_admin" }, "listed"],
+		[{ id: "7", username: "second_admin" }, "no-id"],
+		[{ id: " 7 " }, "no-id"],
 		[{ id: 5, username: "owner_admin" }, "unlisted"],
 		[{ id: 5 }, "unlisted"],
 		[{ username: "owner_admin" }, "no-id"],
@@ -95,7 +97,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	ok("§2 an unset list answers \"unset\" for everyone", ["unset", "unset"].every((w, i) => L.parseListedAccountIds(undefined).verdict([{ id: 1 }, {}][i]) === w));
 	ok("§2 an invalid list answers \"invalid\" for everyone, a would-be listed id included",
 		L.parseListedAccountIds("owner_admin").verdict({ id: 1, username: "owner_admin" }) === "invalid");
-	ok("§2 sessionAccountId reads only plain account ids", L.sessionAccountId({ id: 3 }) === 3 && L.sessionAccountId({ id: "3" }) === 3 && L.sessionAccountId({ id: "x3" }) === null);
+	ok("§2 sessionAccountId reads only an account id stored as a number", L.sessionAccountId({ id: 3 }) === 3 && L.sessionAccountId({ id: "3" }) === null && L.sessionAccountId({ id: "x3" }) === null);
+	ok("§2 ...and is lib/account-disable.js's, the one the per-request sign-out applies", L.sessionAccountId === require(path.join(ROOT, "lib", "account-disable.js")).sessionAccountId);
 	ok("§2 isListedId", valid.isListedId(1) && valid.isListedId("7") && !valid.isListedId(5) && !L.parseListedAccountIds(undefined).isListedId(1));
 }
 
@@ -108,7 +111,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	ok("§3 valid: ...also under account 1's username", p(valid, { id: 5, username: "owner_admin" }, 1) === "listed");
 	ok("§3 valid: ...and a session with no id", p(valid, { username: "owner_admin" }, 1) === "listed");
 	ok("§3 valid: account 1 changing itself goes through", p(valid, { id: 1 }, 1) === null);
-	ok("§3 valid: listed account 7 changing account 1 goes through", p(valid, { id: "7" }, 1) === null);
+	ok("§3 valid: listed account 7 changing account 1 goes through", p(valid, { id: 7 }, 1) === null);
+	ok("§3 valid: ...but not with its id stored as text (no id: refused)", p(valid, { id: "7" }, 1) === "listed");
 	ok("§3 valid: an unlisted target is not protected", p(valid, { id: 5 }, 6) === null && p(valid, { id: 5 }, "6") === null);
 	ok("§3 valid: the target id as digits counts the same", p(valid, { id: 5 }, "1") === "listed");
 	ok("§3 valid: a listed target that is not a Super Admin is still protected", p(valid, { id: 5 }, 7, "Dispatcher") === "listed");

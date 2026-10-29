@@ -562,7 +562,7 @@ async function main() {
 		// Made-up accounts: 1 and 7 listed; 5 a Super Admin outside the list,
 		// once under the listed account's username (the id decides, never the name).
 		const OWNER = { id: 1, username: "owner_admin", role: "Super Admin" };
-		const SECOND = { id: "7", username: "second_admin", role: "Super Admin" };
+		const SECOND = { id: 7, username: "second_admin", role: "Super Admin" };
 		const STAFF = { id: 5, username: "staff_admin", role: "Super Admin" };
 		const STAFF_AS_OWNER_NAME = { id: 5, username: "owner_admin", role: "Super Admin" };
 		const NO_ID = { username: "owner_admin", role: "Super Admin" };
@@ -572,7 +572,7 @@ async function main() {
 		const owner = await w.call(url("7700500"), { user: OWNER });
 		t(owner.status === 200 && owner.body.equals(BYTES.local), `§11 list "1, 7": listed account 1 gets 200 and the file (${owner.status})`);
 		const second = await w.call(url("7700500"), { user: SECOND });
-		t(second.status === 200 && isPdfBody(second), `§11 ...listed account 7 (id as plain digits) gets 200 (${second.status})`);
+		t(second.status === 200 && isPdfBody(second), `§11 ...listed account 7 gets 200 (${second.status})`);
 		for (const [label, user] of [["Super Admin 5, not listed", STAFF], ["Super Admin 5 under the listed account's username", STAFF_AS_OWNER_NAME]]) {
 			reads.length = 0;
 			const before = w.log.lists + w.log.gets.length;
@@ -585,7 +585,7 @@ async function main() {
 		const noId = await w.call(url("7700500"), { user: NO_ID });
 		t(noId.status === 403 && noId.json && noId.json.code === "RATECON_VIEW_RESTRICTED" && /sign in again/i.test(noId.json.error || "") && !isPdfBody(noId),
 			`§11 a Super Admin session without an id: 403 RATECON_VIEW_RESTRICTED, "sign in again" (${noId.status} ${noId.json && noId.json.error})`);
-		for (const odd of [{ ...OWNER, id: "1.0" }, { ...OWNER, id: 0 }, { ...OWNER, id: true }, { ...OWNER, id: [1] }, { ...OWNER, id: "01" }]) {
+		for (const odd of [{ ...OWNER, id: "1" }, { ...OWNER, id: "1.0" }, { ...OWNER, id: 0 }, { ...OWNER, id: true }, { ...OWNER, id: [1] }, { ...OWNER, id: "01" }]) {
 			const r = await w.call(url("7700500"), { user: odd });
 			t(r.status === 403 && !isPdfBody(r), `§11 a session id that is not a plain account id (${JSON.stringify(odd.id)}) is refused (${r.status})`);
 		}

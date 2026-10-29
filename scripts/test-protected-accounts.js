@@ -242,7 +242,7 @@ async function main() {
 		ok(`listed account 7 resetting account 1's password: 200 (${r.status} ${code(r)})`, r.status === 200 && w.row(1).password_hash !== "old-hash");
 		ok("...with the usual notice", w.seen.notices.length === 1 && w.seen.notices[0] === 1);
 		const e = await world("1,7").put({ ...SECOND, id: "7" }, 1, { email: "new-owner@example.test" });
-		ok(`listed account 7 (id as plain digits) changing account 1's email: 200 (${e.status})`, e.status === 200);
+		ok(`listed account 7 with its session id stored as text changing account 1's email: 403 PROTECTED_ACCOUNT, no id counts (${e.status} ${code(e)})`, e.status === 403 && code(e) === "PROTECTED_ACCOUNT");
 	}
 	{
 		const w = world("1,7");
