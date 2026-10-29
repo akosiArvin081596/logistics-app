@@ -8,8 +8,8 @@
 //   const SRC = serverSource();
 //
 // Which server.js: SERVER_JS names one file (a base from before routes/
-// existed); SERVER_ROOT names a folder holding a base's server.js and routes/
-// (for instance `git archive <base> server.js routes | tar -x -C <dir>`). A
+// existed); SERVER_ROOT names a full checkout of a base (for instance
+// `git worktree add <dir> <base>`: runners read lib/ from it too). A
 // caller's own { file } or { root } wins over both; setting both is an error.
 // Following either prints one line on stderr per process.
 //
@@ -29,7 +29,10 @@ const { DECL_START_RE } = require("./server-lift");
 const REPO_ROOT = path.join(__dirname, "..", "..");
 const SERVER_FILE = "server.js";
 const MOUNT_RE = /^require\("\.\/routes\/([a-z0-9]+(?:-[a-z0-9]+)*)"\)\(ROUTE_CONTEXT\);$/;
-const ROUTE_REF_RE = /\brequire\s*\(\s*["'`]\.\/routes\b/;
+// A require of anything under routes/, as a literal or a built path, so a mount
+// in another form is refused rather than left out of the splice.
+const ROUTE_REF_RE = /\brequire\s*\(\s*(?:["'`]\.\/routes\b|path\.(?:join|resolve)\([^)]*["'`]\.?\/?routes\b)/;
+const CONTEXT_NAME_RE = /^\t[A-Za-z_$][\w$]*,$/;
 const CATCH_ALL_HEAD = 'app.get("*", ';
 const MODULE_HEAD = "module.exports = function mount({";
 const MODULE_HEAD_END = "}) {";
@@ -138,12 +141,27 @@ function mountLines(lines, rel = SERVER_FILE) {
 	return mounts;
 }
 
-// { text, file, modules, where(line) }: `where` takes a 1-based line of `text`
-// and answers { file, line } in the real files ("server.js" or
-// "routes/<name>.js", relative to the server.js folder).
+// { text, file, modules, where(line), toVirtual(file, line) }: `where` takes a
+// 1-based line of `text` and answers { file, line } in the real files
+// ("server.js" or "routes/<name>.js", relative to the server.js folder);
+// `toVirtual` goes the other way (null for a mount line, which the splice replaces).
 function virtualServer(opts) {
 	const file = resolveServerFile(opts);
 	const raw = fs.readFileSync(file, "utf8");
+	const readModule = (rel, mountLine) => {
+		try {
+			return fs.readFileSync(path.join(path.dirname(file), rel), "utf8");
+		} catch (err) {
+			throw new Error(`server-source: ${SERVER_FILE}:${mountLine} mounts ${rel}, which can't be read beside ${file} (${err.code || err.message}); a base with routes/ needs SERVER_ROOT, not SERVER_JS`);
+		}
+	};
+	return { ...spliceModules(raw, readModule), file };
+}
+
+// The splice on text alone: `readModule(rel, mountLine)` hands back a mounted
+// module's text or throws. It reads nothing itself, so the pre-push picker
+// (scripts/lib/test-selection.js) splices through the reader it is given.
+function spliceModules(raw, readModule) {
 	const lines = raw.split("\n");
 	const mounts = mountLines(lines);
 	const segments = [];
@@ -156,14 +174,7 @@ function virtualServer(opts) {
 	};
 	for (const m of mounts) {
 		const rel = `routes/${m.name}.js`;
-		const full = path.join(path.dirname(file), rel);
-		let text;
-		try {
-			text = fs.readFileSync(full, "utf8");
-		} catch (err) {
-			throw new Error(`server-source: ${SERVER_FILE}:${m.index + 1} mounts ${rel}, which can't be read beside ${file} (${err.code || err.message}); a base with routes/ needs SERVER_ROOT, not SERVER_JS`);
-		}
-		const mod = checkModule(text, rel);
+		const mod = checkModule(readModule(rel, m.index + 1), rel);
 		push(SERVER_FILE, at + 1, lines.slice(at, m.index));
 		push(rel, mod.bodyFrom, mod.body);
 		modules.push({ name: m.name, file: rel, mountLine: m.index + 1, names: mod.names });
@@ -171,10 +182,10 @@ function virtualServer(opts) {
 	}
 	if (!mounts.length) {
 		segments.push({ rel: SERVER_FILE, from: 1, virtualFrom: 1, count: lines.length });
-		return { text: raw, file, modules, where: whereIn(segments) };
+		return { text: raw, modules, where: whereIn(segments), toVirtual: toVirtualIn(segments) };
 	}
 	push(SERVER_FILE, at + 1, lines.slice(at));
-	return { text: out.join("\n"), file, modules, where: whereIn(segments) };
+	return { text: out.join("\n"), modules, where: whereIn(segments), toVirtual: toVirtualIn(segments) };
 }
 
 function whereIn(segments) {
@@ -185,23 +196,38 @@ function whereIn(segments) {
 	};
 }
 
+function toVirtualIn(segments) {
+	return (file, line) => {
+		const s = segments.find((g) => g.rel === file && line >= g.from && line < g.from + g.count);
+		return s ? s.virtualFrom + (line - s.from) : null;
+	};
+}
+
 function serverSource(opts) {
 	return virtualServer(opts).text;
 }
 
 // The 1-based lines { first, last } of the ROUTE_CONTEXT block in `text` (its
-// `const ROUTE_CONTEXT = {` line through the `};` closing it), or null. The
-// block only lists names, so an inventory of where a name is used skips it.
+// `const ROUTE_CONTEXT = {` line through the `};` closing it), or null. An
+// inventory of where a name is used skips the block, so it must list plain
+// names only (one per line, as generated): anything else throws.
 function routeContextLines(text) {
 	const lines = text.split("\n");
 	const heads = lines.reduce((out, l, i) => (l.startsWith(ROUTE_CONTEXT_HEAD) ? [...out, i] : out), []);
 	if (!heads.length) return null;
 	if (heads.length > 1) throw new Error("server-source: ROUTE_CONTEXT is declared twice");
 	const head = heads[0];
-	if (lines[head].endsWith(MODULE_END)) return { first: head + 1, last: head + 1 };
+	const notName = (i, l) => new Error(`server-source: ROUTE_CONTEXT line ${i + 1} is not a plain name (${JSON.stringify(l.slice(0, 80))}); the block lists names only`);
+	if (lines[head].endsWith(MODULE_END)) {
+		const inner = lines[head].slice(ROUTE_CONTEXT_HEAD.length, -MODULE_END.length);
+		const bad = inner.split(",").map((n) => n.trim()).find((n, k, all) => (n ? !IDENT_RE.test(n) : k < all.length - 1));
+		if (bad !== undefined) throw notName(head, lines[head]);
+		return { first: head + 1, last: head + 1 };
+	}
 	const end = lines.indexOf(MODULE_END, head + 1);
 	if (end < 0) throw new Error("server-source: the ROUTE_CONTEXT block never closes");
+	for (let i = head + 1; i < end; i++) if (!CONTEXT_NAME_RE.test(lines[i])) throw notName(i, lines[i]);
 	return { first: head + 1, last: end + 1 };
 }
 
-module.exports = { serverSource, virtualServer, checkModule, mountLines, resolveServerFile, serverOverride, routeContextLines, MOUNT_RE };
+module.exports = { serverSource, virtualServer, spliceModules, checkModule, mountLines, resolveServerFile, serverOverride, routeContextLines, MOUNT_RE };

@@ -16,7 +16,11 @@
 //      it emits
 //   §4 RateConPdfSection, mounted: nothing (and no request) for any role but
 //      Super Admin; the request; "No rate con on file" on 404, the plain
-//      "can't be loaded" on 503; the viewer on 200
+//      "can't be loaded" on 503; the viewer on 200; the server's own sentence
+//      on 403 RATECON_VIEW_RESTRICTED (RATECON_PDF_VIEWER_IDS)
+//   §4c InvoiceDraftPreviewModal, rendered: with rateconRestricted, the note
+//      "Rate con attached; viewing is limited to the owner" and no rate-con
+//      tab, never "No rate confirmation attached" unless the count is 0
 //   §5 RateConViewer: the controls (page X of Y, zoom in/out, fit to page, full
 //      screen), starting at fit to page; the zoom maths; phone height and
 //      touch (wheel, drag and pinch: scripts/test-ratecon-viewer-zoom.mjs)
@@ -385,6 +389,18 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
     await drain()
     ok(`§4 Drive down: "Rate con can't be loaded right now" (${down.text()})`, down.text() === "Rate Con Rate con can't be loaded right now")
     down.unmount()
+    // RATECON_PDF_VIEWER_IDS: a Super Admin outside the list is told why, in the
+    // server's own sentence, instead of "can't be loaded right now".
+    reply = jsonReply(403, { code: 'RATECON_VIEW_RESTRICTED', error: 'Viewing rate cons is limited to the owner.' })
+    const limited = mountInMemory(Section, { loadId: '7700123', open: true })
+    await drain()
+    ok(`§4 refused by the viewer list: "Viewing rate cons is limited to the owner." (${limited.text()})`, limited.text() === 'Rate Con Viewing rate cons is limited to the owner.')
+    limited.unmount()
+    reply = jsonReply(403, { code: 'RATECON_VIEW_RESTRICTED', error: 'Your session is out of date. Sign in again to view rate cons.' })
+    const stale = mountInMemory(Section, { loadId: '7700123', open: true })
+    await drain()
+    ok(`§4 a session without an id: "sign in again" (${stale.text()})`, /Sign in again to view rate cons\.$/.test(stale.text()))
+    stale.unmount()
     reply = () => { throw new TypeError('Failed to fetch') }
     const net = mountInMemory(Section, { loadId: '7700123', open: true })
     await drain()
@@ -409,6 +425,40 @@ ok('§4 client/src/lib/rateConView.js exists', !!view)
     ok('§4 503 reads "Rate con can\'t be loaded right now"', view.rateConFailureText(503, 'Drive down') === "Rate con can't be loaded right now")
     ok('§4 413/422 carry the server\'s sentence', view.rateConFailureText(422, 'The rate con on file isn\'t a PDF, so it can\'t be shown.') === "The rate con on file isn't a PDF, so it can't be shown.")
     ok('§4 a 403 never shows the server\'s wording', view.rateConFailureText(403, 'Forbidden') === "Rate con can't be loaded right now")
+    ok('§4 ...unless it is the viewer list\'s RATECON_VIEW_RESTRICTED, whose sentence is shown',
+      view.rateConFailureText(403, 'Viewing rate cons is limited to the owner.', 'RATECON_VIEW_RESTRICTED') === 'Viewing rate cons is limited to the owner.' &&
+      view.rateConFailureText(403, '', 'RATECON_VIEW_RESTRICTED') === view.RATECON_VIEW_RESTRICTED &&
+      view.rateConFailureText(403, 'Forbidden', 'SOMETHING_ELSE') === "Rate con can't be loaded right now")
+    ok('§4 the review screen\'s restricted note reads "Rate con attached; viewing is limited to the owner"',
+      view.RATECON_RESTRICTED_TEXT === 'Rate con attached; viewing is limited to the owner')
+  }
+}
+
+// ══ §4c the invoice review screen, restricted ════════════════════════════════
+// A Super Admin outside RATECON_PDF_VIEWER_IDS gets rateconRestricted and
+// rateconCount instead of the files: no rate-con tab, the restricted note, and
+// never "No rate confirmation attached" (the draft still attaches the rate con).
+{
+  const passthrough = (name) => Vue.defineComponent({ name, setup(_, { slots }) { return () => Vue.h('div', { 'data-ui': name }, slots.default ? slots.default() : []) } })
+  let Modal = null
+  try {
+    Modal = await compileComponent('client/src/components/dashboard/InvoiceDraftPreviewModal.vue', {
+      '@/components/ui/dialog': Object.fromEntries(['Dialog', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map((n) => [n, passthrough(n)])),
+      '../../composables/useApi': { useApi: () => ({ get: async () => ({}), post: async () => ({}) }) },
+    })
+  } catch (err) { ok(`§4c InvoiceDraftPreviewModal compiles in this harness (${err.message})`, false) }
+  if (Modal) {
+    const base = { dryRun: true, invoiceId: '10222026-1', to: 'ap@example.test', total: '$1,000.00', invoicePdfBase64: '' }
+    const restricted = await ssr(Modal, { open: true, loadId: '7700123', preview: { ...base, rateconRestricted: true, rateconCount: 2, rateconSource: 'documents' } })
+    ok('§4c restricted, two files: "Rate con attached; viewing is limited to the owner"', restricted.includes('Rate con attached; viewing is limited to the owner'))
+    ok('§4c ...says the draft attaches them', restricted.includes('The draft attaches all 2 as usual.'))
+    ok('§4c ...never "No rate confirmation attached", and no rate-con tab', !restricted.includes('No rate confirmation attached') && !/Rate-con\b/.test(restricted.replace(/Rate con attached/g, '')))
+    const inferred = await ssr(Modal, { open: true, loadId: '7700123', preview: { ...base, rateconRestricted: true, rateconCount: 1, rateconSource: 'drive-content' } })
+    ok('§4c restricted and matched by contents: asks the owner to check it, never "Check the Rate-con tab"', inferred.includes('Ask the owner to check it') && !inferred.includes('Check the Rate-con tab') && inferred.includes('The draft attaches it as usual.'))
+    const none = await ssr(Modal, { open: true, loadId: '7700123', preview: { ...base, rateconRestricted: true, rateconCount: 0 } })
+    ok('§4c restricted with nothing on file: the "No rate confirmation attached" warning stays (it is true)', none.includes('No rate confirmation attached') && !none.includes('viewing is limited'))
+    const listed = await ssr(Modal, { open: true, loadId: '7700123', preview: { ...base, rateconPdfBase64: Buffer.from('%PDF-1.4 made-up').toString('base64') } })
+    ok('§4c a listed account (files sent): no restricted note, no "no rate con" warning', !listed.includes('viewing is limited') && !listed.includes('No rate confirmation attached'))
   }
 }
 

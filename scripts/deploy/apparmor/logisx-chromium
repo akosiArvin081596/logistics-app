@@ -1,0 +1,11 @@
+# Chromium's own sandbox needs user namespaces, which a kernel with
+# apparmor_restrict_unprivileged_userns=1 grants only through a profile. This one grants
+# that to the PDF renderer's Chrome, by path, and changes nothing else about how it runs.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile logisx-chromium /{var/cache/logisx-puppeteer,home/logisx-prd/.cache/puppeteer,home/logisx-stg/.cache/puppeteer}/chrome/linux-*/chrome-linux64/chrome flags=(unconfined) {
+  userns,
+
+  include if exists <local/logisx-chromium>
+}

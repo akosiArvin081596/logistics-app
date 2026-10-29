@@ -67,7 +67,7 @@ const { normalizeLoadId } = require("../lib/ratecon-load");
 const eldMiles = require("../lib/eld-miles");
 const appTime = require("../lib/app-time");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // The batch and the undated-load digest email GMAIL_USER; without it and
 // GMAIL_APP_PASSWORD the digest's email is skipped (no_recipient), so a
 // made-up mailbox is named.

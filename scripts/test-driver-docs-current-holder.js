@@ -260,10 +260,13 @@ const LIST_SRC = routeSource("get", "/api/documents/:loadId");
 const buildList = (over, src = LIST_SRC) => buildRoute("get", "/api/documents/:loadId", listDeps(over), src);
 
 const GUARD_SRC = liftFn("guardRootLoadDocument");
+// The rate-con viewer gate as server.js builds it (shipped lib code), with
+// RATECON_PDF_VIEWER_IDS unset: every Super Admin passes, as before the list.
+const rateconViewGate = require("../lib/ratecon-pdf-route.js").viewerGate(require("../lib/listed-accounts.js").parseListedAccountIds(undefined));
 const buildGuard = (over = {}, src = GUARD_SRC) => {
 	const deps = {
 		db: docDb, RATECON_DOCUMENT_SQL, LOAD_PANEL_DOCUMENT_FILTER, driverOwnsAnyLoad, sentIfLoadOwnershipUnverified,
-		investorDocumentScope: () => null, documentFiledUnder, console: quiet, ...over,
+		investorDocumentScope: () => null, documentFiledUnder, rateconViewGate, console: quiet, ...over,
 	};
 	const names = Object.keys(deps);
 	return new Function(...names, `${src}\nreturn guardRootLoadDocument;`)(...names.map((n) => deps[n]));
@@ -510,7 +513,7 @@ const sorted = (...xs) => [...xs].sort().join();
 
 	const scope = { sql: `LOWER(driver) IN (?) AND deleted_at IS NULL AND NOT (${RATECON_DOCUMENT_SQL})`, params: ["driver b"] };
 	const inv = buildRoute("get", "/api/investor/documents", {
-		requireRole, requireAuth, db: docDb, console: quiet,
+		requireRole, requireAuth, db: docDb, console: quiet, LOAD_PANEL_DOCUMENT_FILTER,
 		resolvePreviewUser: (req) => ({ sessionUser: req.session.user, effectiveUserId: req.session.user.id, effectiveUsername: req.session.user.username, isPreview: false, targetMissing: false }),
 		investorDocumentScope: () => scope,
 	});
