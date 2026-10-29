@@ -134,6 +134,7 @@ function load(deps) {
 		const { db, computeInvestorMonthlyEarnings, isLocked, periodWriteLocked, appMonthKey,
 			recordPayoutChange, getInvestorDriverSet, findCol, settlementGraceDays, periodPhase, graceEndsAt,
 			investorReportOptions, payoutRules } = deps;
+		const TRUCK_CHARGE_APP_DAY_RULE = null; // the truck charge rule off
 		${NAMES.map((n) => SOURCES[n]).join("\n")}
 		return { ${NAMES.join(", ")} };
 	`)(deps, investorPayoutBasis);

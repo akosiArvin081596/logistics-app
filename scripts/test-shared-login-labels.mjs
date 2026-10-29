@@ -131,6 +131,8 @@ console.log('§3 GET /api/users')
     const db = new Database(':memory:')
     db.exec(tableDdl('users'))
     for (const col of ['full_name', 'company_name', 'rating', 'must_change_password', 'last_login_at']) db.exec(alterDdl(col))
+    // The account-disable columns the route reads, wherever this server.js migrates them.
+    for (const m of SRC.matchAll(/ALTER TABLE users ADD COLUMN disabled_(?:at|by|reason) [^"]*/g)) db.exec(m[0])
     db.exec(tableDdl('driver_onboarding'))
     const ins = db.prepare('INSERT INTO users (id, username, password_hash, role, email, must_change_password) VALUES (?, ?, ?, ?, ?, ?)')
     ins.run(1, 'super_admin', 'x', 'Super Admin', 'boss@example.test', 0)

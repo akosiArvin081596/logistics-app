@@ -96,9 +96,11 @@ if (!password) {
 const Database = require(path.join(REPO, "node_modules", "better-sqlite3"));
 const bcrypt = require(path.join(REPO, "node_modules", "bcryptjs"));
 const db = new Database(dbPath, { fileMustExist: true });
-const users = db.prepare("SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?)").all(username.trim());
+const users = db.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?)").all(username.trim());
 if (users.length !== 1) { db.close(); C.fail(users.length ? `${users.length} accounts are named ${username}` : `no account named ${username} in the working copy`); }
 const user = users[0];
+// A disabled account can't sign in, so say it here rather than fail at the login page.
+if (String(user.disabled_at ?? "") !== "") { db.close(); C.fail(`account #${user.id} is disabled in this copy`); }
 if (mcpUser) {
 	try { M.preflight({ task, user: user.username }); } catch (e) { db.close(); C.fail(e.message); }
 }

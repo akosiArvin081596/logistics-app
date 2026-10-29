@@ -152,8 +152,12 @@ const hash = bcrypt.hashSync(PASSWORD, 10);
 const setPw = db.prepare("UPDATE users SET password_hash = ? WHERE id = ?");
 const chosen = {};
 
+// A disabled account can't sign in, so the suite is never handed one.
+const hasDisabled = !!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'disabled_at'").get();
 for (const want of WANTED) {
-	const rows = db.prepare("SELECT id, username FROM users WHERE role = ? ORDER BY id").all(want.role);
+	const all = db.prepare(`SELECT id, username${hasDisabled ? ", disabled_at" : ""} FROM users WHERE role = ? ORDER BY id`).all(want.role);
+	const rows = all.filter((r) => String(r.disabled_at ?? "") === "");
+	if (rows.length < all.length) console.log(`  ${want.role.padEnd(12)} — ${all.length - rows.length} disabled account(s) skipped`);
 	if (!rows.length) {
 		console.log(`  ${want.role.padEnd(12)} — none in this database, skipping`);
 		continue;
