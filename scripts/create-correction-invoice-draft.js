@@ -94,6 +94,7 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs } = require("./lib/ledger-world");
 const { resolveDatabase, insideRoot, DatabaseRefusal } = require("./lib/app-database");
 const driverRateOnly = require("../lib/driver-rate-only");
@@ -210,7 +211,7 @@ function resolveTarget({ db, dataDir }, root, { env = process.env } = {}) {
 // `render` replaces renderPolicy() (tests pass a stub; the default is the
 // server's own).
 function buildWorld({ root = ROOT, db, dataDir, render = null }) {
-	const SRC = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const SRC = serverSource({ root });
 	const appRequire = createRequire(path.join(root, "server.js"));
 	const lifted = closure(SRC, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const liftedRequire = (m) => {

@@ -54,10 +54,10 @@
 
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor, dbScope } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
@@ -76,7 +76,7 @@ class Refusal extends Error {}
 // `root`'s server.js over `db`, with `loadHaul` (that checkout's lib/load-haul.js)
 // and the app's environment (the replay radius reads it).
 function liftChecks(root, db, loadHaul, env) {
-	const src = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const src = serverSource({ root });
 	const lifted = closure(src, { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const scriptProcess = { env: { ...(env || {}) } };
 	return new Function(...PROVIDED, `"use strict";\n${lifted.text}\nreturn { ${ROOTS.join(", ")}, loadHaul };`)(db, loadHaul, scriptProcess, console);

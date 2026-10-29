@@ -258,12 +258,13 @@ function world(opts = {}) {
 	return { db, readable: opts.readable !== false };
 }
 
-// The guard, the holds and their helpers, built over the case's database.
+// The guard, the holds and their helpers, built over the case's database. The
+// truck charge rule (TRUCK_CHARGE_APP_DAY_*) is off.
 function buildModule(w, holdsSrc) {
 	const holds = holdsSrc || "function truckDeleteOpenMonthHolds() { throw new Error(\"truckDeleteOpenMonthHolds() is not in server.js\"); }";
 	return new Function(
 		"db", "periodLocksReadable", "investorPayoutBasis", "driverRateOnlyApplies", "Date", "APP_TIMEZONE", "INVESTOR_LEASE_SETTINGS", "console",
-		`let lastPayStructShadowWarnMs = 0;\n${CONSTS_SRC}\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
+		`let lastPayStructShadowWarnMs = 0;\nconst TRUCK_CHARGE_APP_DAY_RULE = null;\n${CONSTS_SRC}\n${MODULE_SRC}\n${GUARD}\n${holds}\nreturn { truckDeleteLockBlockers, truckDeleteOpenMonthHolds };`,
 	)(w.db, () => w.readable, investorPayoutBasis, () => false, FixedDate, "America/New_York", LEASE_SETTINGS,
 		{ log() {}, warn() {}, error() {} });
 }

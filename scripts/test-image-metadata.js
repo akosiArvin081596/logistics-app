@@ -207,6 +207,8 @@ function scanData(jpeg) {
 		const DISP = { id: 2, role: "Dispatcher" };
 		const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
 		const servers = [];
+		// Requests that reached the test servers, by user id.
+		const arrivals = new Map();
 		// The test routes sit behind a rate limiter like every route in server.js;
 		// its ceiling is far above any burst below, so it never answers here.
 		const rateLimit = require("express-rate-limit");
@@ -214,7 +216,11 @@ function scanData(jpeg) {
 		async function serve(opts) {
 			const guard = receiptFiles.createExpenseReceiptGuard({ db, receiptsDir: dir, normalizeDriverName: norm, ...opts });
 			const app = express();
-			app.use((req, res, next) => { req.session = { user: JSON.parse(req.headers["x-test-user"]) }; next(); });
+			app.use((req, res, next) => {
+				req.session = { user: JSON.parse(req.headers["x-test-user"]) };
+				arrivals.set(req.session.user.id, (arrivals.get(req.session.user.id) || 0) + 1);
+				next();
+			});
 			app.use("/r/:file", testRouteLimiter(), (req, res, next) => guard(req, res, next, `/uploads/expense-receipts/${req.params.file}`, req.params.file));
 			const server = http.createServer(app);
 			await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -231,23 +237,56 @@ function scanData(jpeg) {
 			});
 		}
 		const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+		// Polls until cond() holds, for at most ms (then the assertions report it).
+		const until = async (cond, ms = 5000) => { for (let t = 0; !cond() && t < ms; t += 10) await sleep(10); };
+		// The responses of `sent` in the order they come back.
+		const answered = (sent) => { const done = []; sent.forEach((p) => p.then((r) => done.push(r), () => {})); return done; };
+		// Image reads held open until the test calls open(): which requests run,
+		// wait or are refused then follows from arrival alone, however slow the
+		// machine is, rather than from a fixed hold racing the requests' arrival.
+		const heldReads = () => {
+			let release;
+			const gate = new Promise((r) => { release = r; });
+			const h = { now: 0, max: 0, calls: 0, open: () => release() };
+			h.read = async (p) => {
+				h.calls++; h.now++; h.max = Math.max(h.max, h.now);
+				try { await gate; return await fs.promises.readFile(p); } finally { h.now--; }
+			};
+			return h;
+		};
 		const counter = { now: 0, max: 0, calls: 0 };
 		const slowRead = async (p) => {
 			counter.calls++; counter.now++; counter.max = Math.max(counter.max, counter.now);
 			try { await sleep(60); return await fs.promises.readFile(p); } finally { counter.now--; }
 		};
 
-		const get1 = await serve({ maxConcurrentReads: 2, maxQueuedReads: 2, readFile: slowRead });
-		const burst = await Promise.all(Array.from({ length: 6 }, () => get1("1-aa.jpg", SA)));
+		// Two refusals mean the queue was full, so 2 were reading and 2 waiting;
+		// the reads are released only then.
+		const held1 = heldReads();
+		const get1 = await serve({ maxConcurrentReads: 2, maxQueuedReads: 2, readFile: held1.read });
+		const sent1 = Array.from({ length: 6 }, () => get1("1-aa.jpg", SA));
+		const early1 = answered(sent1);
+		await until(() => early1.length >= 2 && held1.now >= 2);
+		held1.open();
+		const burst = await Promise.all(sent1);
 		const statuses = burst.map((r) => r.status).sort().join(",");
-		ok(`§7 six reads at once with a cap of 2 running and 2 waiting: never more than 2 read at once (saw ${counter.max})`, counter.max === 2);
+		ok(`§7 six reads at once with a cap of 2 running and 2 waiting: never more than 2 read at once (saw ${held1.max})`, held1.max === 2);
 		ok(`§7 ... four are served and two answer 503 (got ${statuses})`, statuses === "200,200,200,200,503,503");
 		const busy = burst.find((r) => r.status === 503);
 		ok("§7 ... the 503 says when to retry and is not cached", !!busy && Number(busy.headers["retry-after"]) > 0 && /RECEIPT_SERVER_BUSY/.test(busy.body.toString("utf8")));
 
-		const get2 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 5, queueWaitMs: 30, readFile: async (p) => { await sleep(250); return fs.promises.readFile(p); } });
-		const waited = await Promise.all([get2("1-aa.jpg", SA), get2("1-aa.jpg", SA)]);
-		ok("§7 a read that waits longer than the queue allows answers 503 instead of waiting on", waited.map((r) => r.status).sort().join(",") === "200,503");
+		// The first read is held until the second request has had its answer, so
+		// the second can only be served by waiting past queueWaitMs.
+		const held2 = heldReads();
+		const get2 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 5, queueWaitMs: 30, readFile: held2.read });
+		const sent2 = [get2("1-aa.jpg", SA)];
+		await until(() => held2.now === 1);
+		sent2.push(get2("1-aa.jpg", SA));
+		const early2 = answered(sent2.slice(1));
+		await until(() => early2.length === 1);
+		held2.open();
+		const waited = await Promise.all(sent2);
+		ok("§7 a read that waits longer than the queue allows answers 503 instead of waiting on", waited.map((r) => r.status).join(",") === "200,503");
 
 		const get3 = await serve({ perUserWindowMs: 60_000, perUserMax: 3 });
 		const seq = [];
@@ -270,11 +309,21 @@ function scanData(jpeg) {
 		ok(`§7 the serve cap is no larger than the largest receipt upload (20 MB; is ${receiptFiles.RECEIPT_SERVE_MAX_BYTES})`, receiptFiles.RECEIPT_SERVE_MAX_BYTES <= 20 * 1024 * 1024);
 
 		// One user's waiting requests are capped, so a busy user cannot fill the
-		// shared queue for everyone.
-		const get5 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 100, maxQueuedPerUser: 2, readFile: async (p) => { await sleep(120); return fs.promises.readFile(p); } });
+		// shared queue for everyone. The reads are held until this user's 2 refusals
+		// are in (1 reading, 2 waiting) and the other user's request has arrived.
+		const held5 = heldReads();
+		const get5 = await serve({ maxConcurrentReads: 1, maxQueuedReads: 100, maxQueuedPerUser: 2, readFile: held5.read });
 		const mine = Array.from({ length: 5 }, () => get5("1-aa.jpg", DRV));
-		await sleep(20);
+		const mineEarly = answered(mine);
+		await until(() => mineEarly.length >= 2 && held5.now === 1);
+		const theirsBefore = arrivals.get(DISP.id) || 0;
 		const theirs = get5("1-aa.jpg", DISP);
+		await until(() => (arrivals.get(DISP.id) || 0) > theirsBefore);
+		// From arrival to the queue is only the file's header read. Should this
+		// settle ever be too short, the request is served once the reads open, so
+		// it cannot fail the case, only skip the wait.
+		await sleep(50);
+		held5.open();
 		const mineDone = await Promise.all(mine);
 		const mineStatuses = mineDone.map((r) => r.status).sort().join(",");
 		ok(`§7 per user: one user's requests past 1 running + 2 waiting answer 503 (got ${mineStatuses})`, mineStatuses === "200,200,200,503,503");
@@ -322,10 +371,14 @@ function scanData(jpeg) {
 		servers.push(server6);
 		const port6 = server6.address().port;
 		const stalled = http.request({ host: "127.0.0.1", port: port6, path: "/r/3-cc.jpg", agent: false, headers: { "x-test-user": JSON.stringify(SA) } });
-		stalled.on("response", (res) => { res.pause(); res.on("error", () => {}); res.on("aborted", () => {}); });
+		// Its response has begun, so it holds the only read slot, before the next
+		// request is sent.
+		const stalledSending = new Promise((resolve) => {
+			stalled.on("response", (res) => { res.pause(); res.on("error", () => {}); res.on("aborted", () => {}); resolve(); });
+		});
 		stalled.on("error", () => {});
 		stalled.end();
-		await sleep(150);
+		await Promise.race([stalledSending, sleep(5000)]);
 		const started = Date.now();
 		const next = await new Promise((resolve, reject) => {
 			const req = http.request({ host: "127.0.0.1", port: port6, path: "/r/1-aa.jpg", agent: false, headers: { "x-test-user": JSON.stringify(DISP) } }, (res) => {

@@ -103,6 +103,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { envFor, openDb } = require("./lib/ledger-world");
 const driverRateOnly = require("../lib/driver-rate-only");
 
@@ -210,7 +211,7 @@ function readPlan(text) {
 // Their warnings are collected, not printed.
 let LIFTED = null;
 function liftWorld(db, env) {
-	if (!LIFTED) LIFTED = closure(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), { roots: ROOTS, provided: PROVIDED, denied: DENIED });
+	if (!LIFTED) LIFTED = closure(serverSource({ root: ROOT }), { roots: ROOTS, provided: PROVIDED, denied: DENIED });
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const warnings = [];
 	const quiet = { log() {}, info() {}, error: (...a) => warnings.push(a.join(" ")), warn: (...a) => warnings.push(a.join(" ")) };

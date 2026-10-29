@@ -485,6 +485,8 @@ function buildWorld(variant, { src = SHIPPED, twins = false } = {}) {
 		haulAssignmentsStmt: { all: () => [] },
 		eldFeedHealth,
 		payoutBasisContext: () => null,
+		// The truck charge rule off: a truck with no in-service date starts on created_at's UTC month.
+		TRUCK_CHARGE_APP_DAY_RULE: null,
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
 		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.

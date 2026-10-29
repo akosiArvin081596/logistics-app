@@ -61,7 +61,7 @@ Needed at the repo root, and never committed:
 No Jest/Vitest/ESLint. Instead, standalone runners plus a manual HTTP harness:
 
 ```bash
-npm run lint       # node --check over server.js and every .js/.mjs/.cjs in lib/ and scripts/ (about a second)
+npm run lint       # node --check over server.js, every .js/.mjs/.cjs in lib/ and scripts/, and routes/*.js (about a second)
 npm run test:unit  # every scripts/test-* and check-* runner (.js/.mjs), one per core — no server needed
 npm run check      # lint + test:unit: the whole suite (the pre-push hook runs lint and the runners a push reaches)
 npm run ci         # check + build:client — the same gate CI runs

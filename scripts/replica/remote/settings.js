@@ -14,8 +14,8 @@
 // also refused as a SECRET name, and its retired name CARRIER_ACCOUNT_NUMBERS_DENY;
 // the sheets, inboxes, the Gmail account and its reconcile label, the Drive folders
 // and n8n targets, PRODUCTION_TARGET_SETTINGS). It is an
-// allowlist too: only names the running app reads in <app dir>/server.js and
-// lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
+// allowlist too: only names the running app reads in <app dir>/server.js,
+// routes/ and lib/ (namesReadBy: process.env.NAME, env.NAME on the env a lib/ helper is
 // handed, and the names a helper reads through a table) are copied, so a name
 // nothing reads, whatever it holds, stays on the server. The rest is written, file mode 600, and only
 // names are printed: the copied keys, and each skipped key with the rule that
@@ -65,8 +65,11 @@ if (require.main === module) {
 		const envFile = path.join(appDir, ".env");
 		const parsed = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
 		// replica-rules.js only names settings to judge them (its lists and
-		// comments), so it never makes a name count as read.
-		const appSources = [path.join(appDir, "server.js"), ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join(appDir, "lib", f))]
+		// comments), so it never makes a name count as read. Route modules hold
+		// server.js's routes, so they are read as server.js is.
+		const routesDir = path.join(appDir, "routes");
+		const routeFiles = fs.existsSync(routesDir) ? fs.readdirSync(routesDir).filter((f) => f.endsWith(".js")).sort().map((f) => path.join(routesDir, f)) : [];
+		const appSources = [path.join(appDir, "server.js"), ...routeFiles, ...fs.readdirSync(path.join(appDir, "lib")).filter((f) => f.endsWith(".js") && f !== "replica-rules.js").map((f) => path.join(appDir, "lib", f))]
 			.map((f) => fs.readFileSync(f, "utf8"));
 		const { copied, skipped, text } = exportSettings(parsed, { readByApp: rules.namesReadBy(appSources) });
 		fs.writeFileSync(out, text, { mode: 0o600, flag: "wx" });
