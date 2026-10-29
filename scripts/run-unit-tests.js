@@ -594,6 +594,7 @@ async function prepushMain() {
 			say(`${changed.length} changed file(s) pick ${items.length} of ${all.length} runners (tier 0: ${perTier[0]}, 1: ${perTier[1]}, 2: ${perTier[2]}, 3: ${perTier[3]})` +
 				(s.runAll ? `; ${s.runAll} changed, so every runner is picked` : "") +
 				(s.server && s.server.top ? `; a top-level server.js change (${s.server.why[0] || "unread"}) picks every runner that names server.js` : ""));
+			if (s.noModel) say(`note: no server.js model (${s.noModel}); a server.js or routes/ change picks every runner that names server.js, and lib/ files behind lifted requires pick none`);
 		}
 		verdict.selection = "pass";
 	} catch (err) {

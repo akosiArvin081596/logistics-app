@@ -225,11 +225,14 @@ class Res {
 	end(b) { if (b !== undefined) this.body = b; this._done(); return this; }
 }
 
-// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer>, receipts }.
+// One server start. opts: { env, nowMs, render(templateName, data) -> Promise<Buffer>, receipts,
+// require (what the lifted code requires with; appRequire by default), dataDir (a
+// folder that must not exist yet, used instead of a fresh temp one) }.
 function buildPersonalWorld(opts = {}) {
 	const personalExpense = appRequire("./lib/personal-expense");
 	const db = buildDb(personalExpense.SCHEMA_SQL);
-	const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "personal-world-"));
+	// mkdirSync without recursive throws on a folder left by a world not cleaned up.
+	const dataDir = opts.dataDir ? (fs.mkdirSync(opts.dataDir), opts.dataDir) : fs.mkdtempSync(path.join(os.tmpdir(), "personal-world-"));
 	const clock = { now: opts.nowMs || NOW_MS };
 	class FixedDate extends Date {
 		constructor(...args) { super(...(args.length ? args : [clock.now])); }
@@ -250,7 +253,7 @@ function buildPersonalWorld(opts = {}) {
 	const quiet = { log() {}, info() {}, warn() {}, error: (...a) => { if (process.env.PERSONAL_WORLD_DEBUG) console.error(...a); } };
 	const deps = {
 		db,
-		require: appRequire,
+		require: opts.require || appRequire,
 		console: quiet,
 		process: { env: { CSRF_HEADER_REQUIRED: "", ...(opts.env || {}) }, argv: [], cwd: () => ROOT, pid: process.pid },
 		__dirname: ROOT,
