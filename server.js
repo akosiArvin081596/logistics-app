@@ -178,6 +178,10 @@ const { sendAppUpdating } = require("./lib/app-updating-page");
 // own UTC clock. lib/app-time.js
 const appTime = require("./lib/app-time");
 const APP_TIMEZONE = appTime.appTimeZone();
+// APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, the month-end guards' driver floor also reads
+// a truck-assignment start on its business day (appDay()), so an evening start on a month's last day
+// (already the next month in UTC from 8 PM EDT, 7 PM EST) keeps that month under the guard.
+const APP_DAY_STAMPS_ENABLED = process.env.APP_DAY_STAMPS_ENABLED === "true";
 // One reading of a cell's amount (cents) and moment, shared with the integrity
 // check: lib/cell-compare.js
 const cellCompare = require("./lib/cell-compare");
@@ -4956,6 +4960,11 @@ function eldDeviceLinkedSinceMs(truckId, vid) {
 	return eldPosition.linkedSinceMs(row);
 }
 
+// ELD_APP_DAY_ENABLED, off unless exactly "true": on, the day-to-truck lookup the miles rollups and
+// mileage routes read counts a device link's bounds on their business day (appDay()), not their UTC
+// day (already tomorrow from 8 PM EDT, 7 PM EST), so an evening re-point day goes to the newer truck.
+const ELD_APP_DAY_ENABLED = process.env.ELD_APP_DAY_ENABLED === "true";
+
 function buildEldDeviceResolver() {
 	const rows = db.prepare(
 		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments`
@@ -4963,7 +4972,11 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
+	return eldMiles.buildDeviceTruckResolver(rows, {
+		startMs: eldDeviceHistoryStartMs(), currentLinks,
+		// Off: each bound's UTC day, as before.
+		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+	});
 }
 
 // After every table exists (server_state is created further down this file).
@@ -5728,6 +5741,10 @@ function payoutRules(overrides = null) {
 // INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
+// A truck with a blank in-service date starts its fixed costs and its lease days on the business
+// day its row was created, not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED, exactly "true",
+// with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
+const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), (msg) => console.warn(`[truck-charge] ${msg}`));
 
 // Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
 // one warning per month per process, not one per page load.
@@ -5774,6 +5791,8 @@ function payoutBasisContext(ownerId) {
 			? finalized.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
 			: [],
 		settledLeaseMonths,
+		// A truck's first lease day reads created_at as truckChargeFromMonth() does.
+		createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 	};
 }
 
@@ -18413,6 +18432,17 @@ function appDay(d = new Date()) {
 	}).format(d);
 }
 
+// The business day of a stamp the app wrote with toISOString(), else null: callers keep their old
+// reading of any other shape (a bare day, zone-less text, an offset). The round trip refuses an
+// impossible day, which Date.parse would roll into the next month.
+function appStampDay(stamp) {
+	const s = String(stamp ?? "");
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) return null;
+	const ms = Date.parse(s);
+	if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return null;
+	return appDay(new Date(ms));
+}
+
 // The instant that stands for a business day ("YYYY-MM-DD") when a question is
 // asked "on a day": noon on the business clock, far from both of its midnights.
 // A day before the business clock moved to APP_TIMEZONE keeps the instant it was
@@ -18928,6 +18958,19 @@ function loadPayRateIndex() {
 	};
 }
 
+// The business day (APP_TIMEZONE) a receipt was submitted on, as SQL: SQLite reads the instant (created_at when
+// timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT (7 PM EST).
+// app_day_of_epoch() is registered on first use, so a script's own handle has it too.
+function receiptSubmittedDaySql() {
+	if (!receiptSubmittedDaySql.registered) {
+		db.function("app_day_of_epoch", { deterministic: true }, (seconds) => (/^-?\d{1,12}$/.test(String(seconds))
+			? appTime.dayInZone(new Date(Number(seconds) * 1000), APP_TIMEZONE)
+			: null));
+		receiptSubmittedDaySql.registered = true;
+	}
+	return "app_day_of_epoch(strftime('%s', COALESCE(NULLIF(timestamp, ''), created_at)))";
+}
+
 // The month a receipt counts in under the futureReceipts rule: posted_period
 // when set; a receipt dated after the day it was submitted counts in the month
 // it was submitted while that month is open and its date's month is not closed;
@@ -18938,7 +18981,7 @@ function loadPayRateIndex() {
 // settled it there: either way the receipt stays where it settled, and a
 // reopened submission month never pulls it back.
 function futureAwarePeriodExpr() {
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const closed = "(SELECT period FROM period_locks WHERE period_locks.status = 'locked')";
 	return `(CASE WHEN COALESCE(posted_period, '') != '' THEN posted_period
 		WHEN strftime('%Y-%m-%d', date) > ${submitted}
@@ -18954,7 +18997,7 @@ function futureAwarePeriodExpr() {
 // receipts booked, { id, period }.
 function stampFutureReceipts(periods) {
 	if (!periods.length) return [];
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const ph = periods.map(() => "?").join(",");
 	// The receipts the rule's own expression counts in a closing month for
 	// being dated after their submission day (not those booked by date).
@@ -34678,6 +34721,19 @@ function truckFeeLockedRows(unitNumber, locked) {
 	};
 }
 
+// The month a truck assignment's start puts under a month-end guard's driver floor: its first seven
+// characters (the UTC month), and under APP_DAY_STAMPS_ENABLED the earlier of that and its business
+// month, so the flag can widen a guard but never narrow one.
+function assignmentFloorMonth(startDate) {
+	const utc = String(startDate || "").slice(0, 7);
+	if (!APP_DAY_STAMPS_ENABLED) return utc;
+	const day = appStampDay(startDate);
+	// No local shares a top-level name: scripts lift this through closure() (scripts/lib/server-lift.js),
+	// which reads every name as server.js's own declaration.
+	const biz = day ? day.slice(0, 7) : "";
+	return biz && biz < utc ? biz : utc;
+}
+
 // The CLOSED months in which a driver's pay would be repriced by a change to
 // this truck's daily rate.
 //
@@ -34736,11 +34792,9 @@ function driverPayLockedMonths(driverName, locked, history) {
 	if (!rows.length) return locked.slice();
 	let earliest = "";
 	for (const r of rows) {
-		// start_date is an ISO string ('2026-05-13T10:47:01.338Z'), so a bare slice
-		// is the month. Never round-trip through Date(): a bare or UTC-midnight
-		// value reads back one month early in every US zone, the same off-by-one-month
-		// that truckChargeFromMonth documents.
-		const from = String(r.start_date || "").slice(0, 7);
+		// start_date is an ISO instant ('2026-05-13T10:47:01.338Z'); never read it on
+		// the server's clock (see assignmentFloorMonth()).
+		const from = assignmentFloorMonth(r.start_date);
 		if (!/^\d{4}-\d{2}$/.test(from)) return locked.slice(); // unreadable → cannot bound it
 		if (!earliest || from < earliest) earliest = from;
 	}
@@ -34770,7 +34824,8 @@ function driverPayLockedMonths(driverName, locked, history) {
 //   • excluded_driver_days — added and removed days alike.
 //   • expenses — the earlier of the month a receipt is dated and the month it is
 //     booked to (EXPENSE_PERIOD_EXPR, where posted_period wins).
-//   • truck_assignments — start_date sliced, as driverPayLockedMonths() reads it.
+//   • truck_assignments — start_date's month as driverPayLockedMonths() reads it
+//     (assignmentFloorMonth()).
 // A row whose month cannot be read is unbounded, as an unreadable start_date
 // always was.
 //
@@ -34821,7 +34876,7 @@ function driverHistoryFloorMonth(driverName, jt) {
 
 	for (const r of db.prepare("SELECT driver_name, start_date FROM truck_assignments").all()) {
 		if (normalizeDriverName(r.driver_name) !== lc) continue;
-		const m = String(r.start_date || "").slice(0, 7);
+		const m = assignmentFloorMonth(r.start_date);
 		if (!isMonth(m)) return UNBOUNDED;
 		see(m);
 	}
@@ -35817,6 +35872,7 @@ function truckDeleteOpenMonthHolds(truck) {
 		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
 		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
 			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+			createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 		}).coveredDays > 0;
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
@@ -45883,6 +45939,14 @@ function warnBlankWindowFallbackFromClosedMonth() {
 	}
 }
 warnBlankWindowFallbackFromClosedMonth();
+// One notice at boot when TRUCK_CHARGE_APP_DAY_FROM is at or before the latest closed month,
+// built like the ones above. The rule keeps running either way.
+function warnTruckChargeFromClosedMonth() {
+	if (!TRUCK_CHARGE_APP_DAY_RULE) return;
+	const msg = investorPayoutBasis.createdDayFromClosedWarning(TRUCK_CHARGE_APP_DAY_RULE, financialsCalc.ledgerDayOnce.latestClosedMonth(db));
+	if (msg) console.warn(`[truck-charge] ${msg}`);
+}
+warnTruckChargeFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -61880,14 +61944,15 @@ function truckMonthlyFixed(t) {
 // the same regex until 2026-09-30; the report now charges fixed costs through
 // truckChargedInMonth() like every other site, so there is no second reader of it.)
 //
-// The created_at branch deliberately keeps new Date(): created_at is
-// 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
-// reproduced byte-for-byte from the gate it replaces so nothing can regress for
-// the ~all rows that have no in_service_date yet.
+// created_at is SQLite's CURRENT_TIMESTAMP, a UTC wall clock, so local getters give the UTC
+// month: the next one from 8 PM EDT (7 PM EST) on a month's last day. Under TRUCK_CHARGE_APP_DAY_RULE
+// it is read on its business day (investorPayoutBasis.truckCreatedDay(), shared with the lease).
 function truckChargeFromMonth(t) {
 	const inService = String(t.in_service_date || "").trim();
 	if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService.slice(0, 7);
 	if (t.created_at) {
+		const createdDay = TRUCK_CHARGE_APP_DAY_RULE ? investorPayoutBasis.truckCreatedDay(t.created_at, TRUCK_CHARGE_APP_DAY_RULE) : null;
+		if (createdDay) return createdDay.slice(0, 7);
 		const td = new Date(t.created_at);
 		return `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 	}

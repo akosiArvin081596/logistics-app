@@ -84,6 +84,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor, dbScope } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
@@ -339,7 +340,7 @@ function driverPayIn(items, driver) {
 
 // The lifted server code, on its own handle (see the header).
 function buildWorld({ dbFile, sheetData, env, dataDir }) {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const Database = appRequire("better-sqlite3");
 	const db = new Database(dbFile, { fileMustExist: true });

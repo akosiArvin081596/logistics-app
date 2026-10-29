@@ -16,16 +16,23 @@
 //      "..", "lib", "x"))). Any file type: .vue, .json, .html, .sh, .yml, ...
 //      A named code file is followed like a required one.
 //   d. server.js, by declaration. No runner requires server.js; runners lift
-//      pieces of it as text (scripts/lib/server-lift.js). A runner's
-//      server.js world is the declarations it names and the routes whose path
-//      it names, closed over the declarations those pieces use (the walk
-//      closure() does), plus the lib/ file behind a lifted
-//      `const x = require("./lib/x")`. A changed line picks the runners whose
-//      world holds the piece it falls in; a comment or blank line belongs to
-//      what is directly below it.
+//      pieces of it as text (scripts/lib/server-lift.js) from the virtual
+//      source (scripts/lib/server-source.js: each mounted routes/<name>.js
+//      body spliced in at its mount line), and the model is built from the
+//      same splice. A runner's server.js world is the declarations it names
+//      and the routes whose path it names, closed over the declarations those
+//      pieces use (the walk closure() does), plus the lib/ file behind a lifted
+//      `const x = require("./lib/x")`. A changed server.js line (mapped onto
+//      the splice) picks the runners whose world holds the piece it falls in;
+//      a comment or blank line belongs to what is directly below it. A changed
+//      routes/<name>.js touches every piece of that module (file granularity).
 //   e. A changed top-level statement of server.js (anything outside a
-//      declaration or route, a removed declaration or route) picks every
-//      runner that names server.js (tier 3).
+//      declaration or route, a removed declaration or route, a mount line)
+//      picks every runner that names server.js (tier 3), as does a routes/
+//      file the splice doesn't hold, a module with a code line no piece owns,
+//      or a tree it can't splice (select() reports why in `noModel`).
+//   i. EVERY_SERVER_CHANGE runners check server.js and routes/ as a whole:
+//      any change to either picks them (tier 2).
 //   f. Folder scanners (readdirSync, git ls-files, a glob) run when a changed
 //      file sits under a folder they name, and on any change when the folder
 //      can't be read statically (tier 3).
@@ -46,11 +53,15 @@
 
 const path = require("path");
 const lift = require("./server-lift");
+const source = require("./server-source");
 
 const RUNNER_RE = /^scripts\/(?:test|check)-[^/]*\.(?:js|mjs)$/;
 const HARNESS = "scripts/run-unit-tests.js";
 const CODE_RE = /\.(?:js|mjs|cjs)$/;
 const SERVER = "server.js";
+const ROUTE_FILE_RE = /^routes\/[^/]+\.js$/;
+// They import the app or check the mount block as a whole, so no piece names them.
+const EVERY_SERVER_CHANGE = ["scripts/test-route-snapshot.js", "scripts/test-route-modules.js"];
 
 // A string as a literal inside a RegExp: every metacharacter escaped,
 // backslash included.
@@ -60,6 +71,7 @@ const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const RUN_ALL = [
 	/^scripts\/run-unit-tests\.js$/,
 	/^scripts\/lib\/test-selection\.js$/,
+	/^scripts\/lib\/server-source\.js$/,
 	/^package\.json$/,
 	/^package-lock\.json$/,
 	/^client\/package\.json$/,
@@ -215,23 +227,30 @@ function declNames(line) {
 
 // Which pieces of server.js a diff touches, and whether it touches anything
 // outside every piece (or removes a declaration or route the new file lacks).
-function touchedPieces(model, diffText) {
+// `toVirtual` maps a server.js line onto the model's lines (null: a mount line).
+function touchedPieces(model, diffText, toVirtual = (l) => l) {
 	const touched = new Set();
 	let top = false;
 	const why = [];
 	const hunks = parseUnifiedDiff(diffText);
 	const mark = (l) => {
-		const a = model.belongsTo(l);
+		const v = toVirtual(l);
+		if (v === null) { top = true; why.push(`mount line ${l}`); return; }
+		const a = model.belongsTo(v);
 		if (a.region !== null) touched.add(a.region);
 		else if (a.top) { top = true; why.push(`line ${l}`); }
+	};
+	const ownerAt = (l) => {
+		const v = toVirtual(l);
+		return v === null ? -1 : model.ownerOf(v);
 	};
 	for (const h of hunks) {
 		for (let k = 0; k < h.newCount; k++) mark(h.newStart + k);
 		if (h.newCount === 0 && h.removed.length) {
 			// A pure deletion sits between new lines newStart and newStart + 1:
 			// inside one piece when both neighbours are in it.
-			const above = model.ownerOf(h.newStart);
-			const below = model.ownerOf(h.newStart + 1);
+			const above = ownerAt(h.newStart);
+			const below = ownerAt(h.newStart + 1);
 			if (above !== -1 && above === below) touched.add(above);
 			else if (h.removed.every((l) => QUIET_RE.test(l))) mark(h.newStart + 1);
 			else { top = true; why.push(`deletion after line ${h.newStart}`); }
@@ -239,6 +258,7 @@ function touchedPieces(model, diffText) {
 		for (const l of h.removed) {
 			for (const n of declNames(l)) if (!model.declared.has(n)) { top = true; why.push(`removed declaration ${n}`); }
 			if (ROUTE_RE.test(l) && !model.routeHeads.has(l)) { top = true; why.push("removed route"); }
+			if (source.MOUNT_RE.test(l)) { top = true; why.push("removed mount line"); }
 		}
 	}
 	return { touched, top, why, hunks: hunks.length };
@@ -380,11 +400,26 @@ function buildMap({ files, read }) {
 		}
 	}
 
-	// server.js worlds.
+	// server.js worlds, on the splice the runners lift from. A tree it can't
+	// splice (an unreadable or misshapen module) has no model.
 	let server = null;
+	let splice = null;
+	let noModel = null;
 	const serverSrc = fileSet.has(SERVER) && serverRunners.size ? src(SERVER) : null;
 	if (serverSrc !== null) {
-		const model = serverModel(serverSrc);
+		try {
+			splice = source.spliceModules(serverSrc, (rel) => {
+				const t = src(rel);
+				if (t === null) throw new Error(`can't read ${rel}`);
+				return t;
+			});
+		} catch (err) {
+			splice = null;
+			noModel = String(err && err.message ? err.message : err);
+		}
+	}
+	if (splice !== null) {
+		const model = serverModel(splice.text);
 		const worlds = new Map();
 		const wholeFile = new Set();
 		for (const r of serverRunners) {
@@ -424,12 +459,34 @@ function buildMap({ files, read }) {
 				for (const next of e.code) if (next !== SERVER && !seen.has(next)) (seen.add(next), stack.push(next));
 			}
 		}
-		server = { model, worlds, wholeFile };
+		// Each route module's pieces, by the file they live in. A module with a
+		// code line no piece owns (a registration whose head isn't
+		// `app.<method>("<path>"` on one line: an array, a variable, a head over
+		// lines) is coarse: a change to it can't be placed, so it counts as
+		// top-level, as the same lines do in server.js.
+		const moduleRegions = new Map();
+		for (const reg of model.regions) {
+			const at = splice.where(reg.from).file;
+			if (at !== SERVER) addTo(moduleRegions, at, reg.id);
+		}
+		const vLines = splice.text.split("\n");
+		const coarse = new Set();
+		for (let v = 1; v <= vLines.length; v++) {
+			if (model.ownerOf(v) !== -1 || QUIET_RE.test(vLines[v - 1])) continue;
+			const at = splice.where(v).file;
+			if (at !== SERVER) coarse.add(at);
+		}
+		const modules = new Set(splice.modules.map((m) => m.file));
+		// A server.js line onto the splice: null for a mount line; a line past
+		// server.js's end stays past the model's end (outside every piece).
+		const rawCount = serverSrc.split("\n").length;
+		const toVirtual = (l) => (l < 1 ? l : l > rawCount ? model.nLines + (l - rawCount) : splice.toVirtual(SERVER, l));
+		server = { model, worlds, wholeFile, moduleRegions, coarse, modules, toVirtual };
 	}
 
 	const reverse = new Map();
 	for (const [r, files] of reach) for (const f of files) if (f !== r) addTo(reverse, f, r);
-	return { files: fileSet, runners, reach, reverse, unresolvedOf, scanners, serverRunners, server };
+	return { files: fileSet, runners, reach, reverse, unresolvedOf, scanners, serverRunners, server, noModel };
 }
 
 /**
@@ -465,11 +522,15 @@ function select(map, { changed, serverDiff = "", tierZero = [] }) {
 		}
 	}
 	let serverInfo = null;
+	const routeFiles = files.filter((f) => ROUTE_FILE_RE.test(f));
+	if (files.includes(SERVER) || routeFiles.length) {
+		for (const r of EVERY_SERVER_CHANGE) pick(r, 2, "server.js or routes/ changed");
+	}
 	if (files.includes(SERVER)) {
 		if (!map.server) {
 			for (const r of map.serverRunners) pick(r, 3, "server.js changed (no model)");
 		} else {
-			const t = touchedPieces(map.server.model, serverDiff);
+			const t = touchedPieces(map.server.model, serverDiff, map.server.toVirtual);
 			serverInfo = { pieces: t.touched.size, top: t.top, hunks: t.hunks, why: t.why };
 			if (t.top || t.hunks === 0) {
 				for (const r of map.serverRunners) pick(r, 3, `server.js top-level (${t.why[0] || "no hunk read"})`);
@@ -480,8 +541,24 @@ function select(map, { changed, serverDiff = "", tierZero = [] }) {
 			}
 		}
 	}
+	if (routeFiles.length) {
+		const stray = map.server ? routeFiles.find((f) => !map.server.modules.has(f)) : routeFiles[0];
+		const coarse = map.server ? routeFiles.find((f) => map.server.coarse.has(f)) : null;
+		if (stray) {
+			for (const r of map.serverRunners) pick(r, 3, map.server ? `${stray} is not a mounted module` : `${stray} changed (no model)`);
+		} else if (coarse) {
+			for (const r of map.serverRunners) pick(r, 3, `${coarse} holds code no piece owns`);
+		} else {
+			const touched = new Set();
+			for (const f of routeFiles) for (const k of map.server.moduleRegions.get(f) || []) touched.add(k);
+			for (const r of map.server.wholeFile) pick(r, 2, "routes/ changed (names no piece)");
+			for (const [r, world] of map.server.worlds) {
+				for (const k of touched) if (world.has(k)) { pick(r, 2, "routes/ piece it lifts"); break; }
+			}
+		}
+	}
 	for (const r of tierZero) if (picked.has(r)) pick(r, 0, `${why.get(r)}; timing-sensitive`);
-	return { picked, why, runAll, server: serverInfo };
+	return { picked, why, runAll, server: serverInfo, noModel: map.noModel || null };
 }
 
 // Workers for a pushed run: the cores less one, less the 1-minute load
@@ -584,7 +661,7 @@ function verdictLine({ lint, selection, runners }) {
 }
 
 module.exports = {
-	RUNNER_RE, RUN_ALL, HARNESS,
+	RUNNER_RE, RUN_ALL, HARNESS, EVERY_SERVER_CHANGE,
 	buildMap, select, serverModel, parseUnifiedDiff, touchedPieces,
 	workersFor, order, runTiered, tally, summaryLine, verdictLine, VERDICT_PREFIX,
 };
