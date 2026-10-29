@@ -43,14 +43,20 @@
  *   §11 route modules: the model is the splice of server.js and its mounted
  *      routes/ modules; a changed module picks the runners lifting its routes,
  *      tier 2; a server.js line below a mount line is read in server.js's own
- *      numbering; a changed or removed mount line, a routes/ file the splice
- *      doesn't hold, or a tree it can't splice picks every runner that names
- *      server.js (tier 3); the route snapshot and module checks run on every
- *      server.js or routes/ change
+ *      numbering, a pure deletion too, and a line past its end is outside
+ *      every piece; an added, removed or commented-out mount line, a routes/
+ *      file the splice doesn't hold, a module holding a registration the
+ *      picker can't read as a piece (array head, head over lines, variable
+ *      path), or a tree it can't splice (said in select() and in the pre-push
+ *      output, §10) picks every runner that names server.js (tier 3); the
+ *      route snapshot and module checks run on every server.js or routes/
+ *      change, and §9 checks both exist
  *   mutants of the selector, each caught above: the closure walk dropped,
  *      the comment rule dropped, scripts/lib helpers unmapped, text edges
  *      limited to code files, the model built from server.js alone, the line
- *      map dropped, routes/ changes ignored, mount lines read as ordinary lines
+ *      map dropped, routes/ changes ignored, mount lines read as ordinary
+ *      lines, the removed-mount rule dropped, a deletion's neighbours read
+ *      unmapped, the coarse-module rule dropped
  *
  * Hermetic: §1-§8 build trees in memory; §9 reads the repo; §10 works in a
  * mkdtemp git repository with its own TMPDIR. No network.
@@ -163,6 +169,14 @@ const SPLIT_TREE = {
 	"scripts/test-route-snapshot.js": "process.exitCode = 0;\n",
 	"scripts/test-route-modules.js": "process.exitCode = 0;\n",
 };
+// The module with one more registration of a kind the picker can't read as a
+// piece: its head is an array, runs over lines, or names its path by variable.
+const withExtra = (registration, params = "app, report") => REPORT_MODULE.replace("mount({ app, report })", `mount({ ${params} })`).replace(/\n};\n$/, `\n\n${registration}\n};\n`);
+const UNOWNED_HEADS = [
+	["an array head", withExtra('app.get(["/api/report/alt", "/api/report/other"], (req, res) => {\n\tres.json({});\n});')],
+	["a head over lines", withExtra('app.post(\n\t["/api/report/a", "/api/report/b"],\n\t(req, res) => {\n\t\tres.json({});\n\t},\n);')],
+	["a variable path", withExtra("app.post(investorRfi.INVESTOR_RFI_PATH, (req, res) => {\n\tres.json({});\n});", "app, investorRfi, report")],
+];
 const buildFrom = (sel, tree) => sel.buildMap({ files: Object.keys(tree), read: (f) => (f in tree ? tree[f] : null) });
 const S = (name) => `scripts/${name}`;
 const hunk = (line, from, to) => `@@ -${line} +${line} @@\n-${from}\n+${to}\n`;
@@ -261,6 +275,21 @@ function checks(sel, tag = "") {
 	r.push([!broken.server && ALL5.every((x) => bpick(["routes/report.js"]).get(S(x)) === 3 && bpick(["server.js"]).get(S(x)) === 3),
 		`${tag}§11 a tree it can't splice has no model: a routes/ or server.js change picks every runner that names server.js, tier 3`]);
 	r.push([spick(["docs/notes.md"]).size === 0, `${tag}§11 …and a change elsewhere picks no every-server-change runner`]);
+	r.push([/use strict/.test(sel.select(broken, { changed: ["routes/report.js"] }).noModel || ""), `${tag}§11 …and select() says why there is no model`]);
+	for (const [kind, text] of UNOWNED_HEADS) {
+		const t = buildFrom(sel, { ...SPLIT_TREE, "routes/report.js": text });
+		const p = sel.select(t, { changed: ["routes/report.js"], tierZero: TIER0 }).picked;
+		r.push([!!t.server && ALL5.every((x) => p.get(S(x)) === 3),
+			`${tag}§11 a module holding a registration with ${kind} picks every runner that names server.js, tier 3 (got ${[...p].map(([f, k]) => `${path.basename(f)}:${k}`).join(",")})`]);
+	}
+	const commented = buildFrom(sel, { ...SPLIT_TREE, "server.js": SPLIT_SERVER.replace('require("./routes/report")(ROUTE_CONTEXT);', '// require("./routes/report")(ROUTE_CONTEXT);') });
+	const unhooked = sel.select(commented, { changed: ["server.js"], serverDiff: hunk(mountLine, 'require("./routes/report")(ROUTE_CONTEXT);', '// require("./routes/report")(ROUTE_CONTEXT);'), tierZero: TIER0 }).picked;
+	r.push([ALL5.every((x) => unhooked.has(S(x))), `${tag}§11 a mount line turned into a comment picks every runner that names server.js (got ${names(unhooked)})`]);
+	const del = spick(["server.js"], `@@ -${SPLIT_LINE("function unrelated() {") + 1} +${SPLIT_LINE("function unrelated() {")},0 @@\n-\tconst y = 1;\n`);
+	r.push([same(del, ["test-unrelated.js", ...EVERY]), `${tag}§11 a pure deletion below the mount line is placed by server.js's own numbering (got ${names(del)})`]);
+	const end = SPLIT_SERVER.split("\n").length;
+	const tail = spick(["server.js"], `@@ -${end + 1},2 +${end},0 @@\n-// A made-up note.\n-// Another.\n`);
+	r.push([same(tail, EVERY), `${tag}§11 deleted comment lines past server.js's end are not top-level (got ${names(tail)})`]);
 	return r;
 }
 
@@ -345,13 +374,15 @@ const VUE_EDGES = {
 function realTreeChecks(sel) {
 	const r = [];
 	const ls = spawnSync("git", ["ls-files", "-z", "-c", "-o", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: 1 << 28 });
-	if (ls.status !== 0) return [[`§9 git ls-files in the repo (exit ${ls.status})`, false]];
+	if (ls.status !== 0) return [[false, `§9 git ls-files in the repo (exit ${ls.status})`]];
 	const started = Date.now();
 	const map = sel.buildMap({ files: ls.stdout.split("\0").filter(Boolean), read: (f) => { try { return fs.readFileSync(path.join(ROOT, f), "utf8"); } catch { return null; } } });
 	const ms = Date.now() - started;
 	r.push([map.runners.length > 300 && map.server && map.server.model.regions.length > 1000, `§9 the map builds on the real tree (${map.runners.length} runners, ${map.server ? map.server.model.regions.length : 0} server.js pieces, ${ms} ms)`]);
 	const lonely = map.runners.filter((x) => map.reach.get(x).size <= 1 && !map.serverRunners.has(x) && !(map.scanners.has(x) && map.scanners.get(x).dirs.size) && !SELF_CONTAINED.has(x));
 	r.push([lonely.length === 0, `§9 every runner reaches another file or a folder, apart from the self-contained ones (reach nothing: ${lonely.join(", ")})`]);
+	const every = Array.isArray(sel.EVERY_SERVER_CHANGE) ? sel.EVERY_SERVER_CHANGE : [];
+	r.push([every.length === 2 && every.every((f) => map.runners.includes(f)), `§9 every EVERY_SERVER_CHANGE entry is a runner in the tree (${every.join(", ") || "none"})`]);
 	for (const [runner, vues] of Object.entries(VUE_EDGES)) {
 		const reach = map.reach.get(S(runner));
 		const missing = reach ? vues.filter((v) => ![...reach].some((f) => f.endsWith(`/${v}`))) : vues;
@@ -447,6 +478,14 @@ function harnessChecks() {
 	const thrown = pre(thrower, ["scripts/test-pass.js"]);
 	r.push([thrown.code === 1 && thrown.last === "pre-push verdict: lint=pass selection=fail runners=skipped" && /selector boom/.test(thrown.out), `§10 a throwing selector fails selection (exit ${thrown.code}, last ${JSON.stringify(thrown.last)})`]);
 
+	const unspliced = harnessFixture(RUNNERS, { extra: {
+		"server.js": 'require("./routes/gone")(ROUTE_CONTEXT);\napp.get("*", (req, res) => {\n\tres.send("page");\n});\n',
+		"scripts/test-names-server.js": 'const file = "server.js";\nprocess.exitCode = file ? 0 : 1;\n',
+	} });
+	const noModel = pre(unspliced, ["scripts/test-pass.js"]);
+	r.push([noModel.code === 0 && noModel.last === PASS && /note: no server\.js model \(can't read routes\/gone\.js\)/.test(noModel.out),
+		`§10 a tree the picker can't splice is named in the output, and the push still runs (exit ${noModel.code}): ${noModel.out.slice(-300)}`]);
+
 	const linty = harnessFixture(RUNNERS, { extra: { "lib/broken.js": "module.exports = (;\n" } });
 	const lint = pre(linty, ["scripts/test-pass.js"]);
 	r.push([lint.code === 1 && lint.last === "pre-push verdict: lint=fail selection=skipped runners=skipped" && !/test-pass\.js/.test(lint.out.split("lint: FAILED")[1] || ""),
@@ -492,6 +531,9 @@ function harnessChecks() {
 			["the line map dropped", "const v = toVirtual(l);", "const v = l;"],
 			["routes/ changes ignored", "const routeFiles = files.filter((f) => ROUTE_FILE_RE.test(f));", "const routeFiles = [];"],
 			["mount lines read as ordinary lines", "if (v === null) { top = true; why.push(`mount line ${l}`); return; }", "if (v === null) return;"],
+			["the removed-mount rule dropped", 'if (source.MOUNT_RE.test(l)) { top = true; why.push("removed mount line"); }', ""],
+			["a deletion's neighbours read unmapped", "return v === null ? -1 : model.ownerOf(v);", "return model.ownerOf(l);"],
+			["the coarse-module rule dropped", "} else if (coarse) {", "} else if (false) {"],
 		]) {
 			const code = SELECTION_SRC.split(from).join(to);
 			ok(code !== SELECTION_SRC, `mutant '${name}' must change test-selection.js`);

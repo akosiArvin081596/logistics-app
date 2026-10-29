@@ -551,6 +551,13 @@ console.log("§1 server-source");
 	eq("§1.2 the line map: the blank line between the mounts", v.where(20), { file: "server.js", line: 13 });
 	throwsLike("§1.2 a line outside the source is an error", () => v.where(L.length + 1), /outside the source/);
 	eq("§1.2 a module records the names it destructures", v.modules.map((m) => m.names), [["app", "shout"], ["app", "shout"]]);
+	eq("§1.2 toVirtual: server.js and module lines onto the splice; a mount line has none",
+		[["server.js", 11], ["server.js", 12], ["server.js", 13], ["server.js", 15], ["routes/alpha.js", 3], ["routes/beta-two.js", 5], ["routes/alpha.js", 2]].map(([f, l]) => v.toVirtual(f, l)),
+		[11, null, 20, 24, 12, 21, null]);
+	const reads = [];
+	const spliced = source.spliceModules(SERVER, (rel, mountLine) => { reads.push([rel, mountLine]); return { "routes/alpha.js": ALPHA, "routes/beta-two.js": BETA }[rel]; });
+	eq("§1.2 spliceModules: the same splice from text and a reader, which it asks for each mounted module with its mount line", [spliced.text === v.text, reads], [true, [["routes/alpha.js", 12], ["routes/beta-two.js", 14]]]);
+	throwsLike("§1.2 spliceModules: a reader's failure is the splice's", () => source.spliceModules(SERVER, () => { throw new Error("made-up read failure"); }), /made-up read failure/);
 
 	const lifted = closure(v.text, { routes: ['app.get("/api/beta", (req, res) => {'], provided: ["app"] });
 	ok("§1.3 server-lift lifts a moved route and what it uses from the virtual source", lifted.names.includes("shout") && lifted.text.includes('app.get("/api/beta"'));

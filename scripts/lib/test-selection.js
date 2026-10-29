@@ -29,7 +29,8 @@
 //   e. A changed top-level statement of server.js (anything outside a
 //      declaration or route, a removed declaration or route, a mount line)
 //      picks every runner that names server.js (tier 3), as does a routes/
-//      file the splice doesn't hold, or a tree it can't splice.
+//      file the splice doesn't hold, a module with a code line no piece owns,
+//      or a tree it can't splice (select() reports why in `noModel`).
 //   i. EVERY_SERVER_CHANGE runners check server.js and routes/ as a whole:
 //      any change to either picks them (tier 2).
 //   f. Folder scanners (readdirSync, git ls-files, a glob) run when a changed
@@ -403,6 +404,7 @@ function buildMap({ files, read }) {
 	// splice (an unreadable or misshapen module) has no model.
 	let server = null;
 	let splice = null;
+	let noModel = null;
 	const serverSrc = fileSet.has(SERVER) && serverRunners.size ? src(SERVER) : null;
 	if (serverSrc !== null) {
 		try {
@@ -411,7 +413,10 @@ function buildMap({ files, read }) {
 				if (t === null) throw new Error(`can't read ${rel}`);
 				return t;
 			});
-		} catch { splice = null; }
+		} catch (err) {
+			splice = null;
+			noModel = String(err && err.message ? err.message : err);
+		}
 	}
 	if (splice !== null) {
 		const model = serverModel(splice.text);
@@ -454,19 +459,34 @@ function buildMap({ files, read }) {
 				for (const next of e.code) if (next !== SERVER && !seen.has(next)) (seen.add(next), stack.push(next));
 			}
 		}
-		// Each route module's pieces, by the file they live in.
+		// Each route module's pieces, by the file they live in. A module with a
+		// code line no piece owns (a registration whose head isn't
+		// `app.<method>("<path>"` on one line: an array, a variable, a head over
+		// lines) is coarse: a change to it can't be placed, so it counts as
+		// top-level, as the same lines do in server.js.
 		const moduleRegions = new Map();
 		for (const reg of model.regions) {
 			const at = splice.where(reg.from).file;
 			if (at !== SERVER) addTo(moduleRegions, at, reg.id);
 		}
+		const vLines = splice.text.split("\n");
+		const coarse = new Set();
+		for (let v = 1; v <= vLines.length; v++) {
+			if (model.ownerOf(v) !== -1 || QUIET_RE.test(vLines[v - 1])) continue;
+			const at = splice.where(v).file;
+			if (at !== SERVER) coarse.add(at);
+		}
 		const modules = new Set(splice.modules.map((m) => m.file));
-		server = { model, worlds, wholeFile, moduleRegions, modules, toVirtual: (l) => splice.toVirtual(SERVER, l) };
+		// A server.js line onto the splice: null for a mount line; a line past
+		// server.js's end stays past the model's end (outside every piece).
+		const rawCount = serverSrc.split("\n").length;
+		const toVirtual = (l) => (l < 1 ? l : l > rawCount ? model.nLines + (l - rawCount) : splice.toVirtual(SERVER, l));
+		server = { model, worlds, wholeFile, moduleRegions, coarse, modules, toVirtual };
 	}
 
 	const reverse = new Map();
 	for (const [r, files] of reach) for (const f of files) if (f !== r) addTo(reverse, f, r);
-	return { files: fileSet, runners, reach, reverse, unresolvedOf, scanners, serverRunners, server };
+	return { files: fileSet, runners, reach, reverse, unresolvedOf, scanners, serverRunners, server, noModel };
 }
 
 /**
@@ -523,8 +543,11 @@ function select(map, { changed, serverDiff = "", tierZero = [] }) {
 	}
 	if (routeFiles.length) {
 		const stray = map.server ? routeFiles.find((f) => !map.server.modules.has(f)) : routeFiles[0];
+		const coarse = map.server ? routeFiles.find((f) => map.server.coarse.has(f)) : null;
 		if (stray) {
 			for (const r of map.serverRunners) pick(r, 3, map.server ? `${stray} is not a mounted module` : `${stray} changed (no model)`);
+		} else if (coarse) {
+			for (const r of map.serverRunners) pick(r, 3, `${coarse} holds code no piece owns`);
 		} else {
 			const touched = new Set();
 			for (const f of routeFiles) for (const k of map.server.moduleRegions.get(f) || []) touched.add(k);
@@ -535,7 +558,7 @@ function select(map, { changed, serverDiff = "", tierZero = [] }) {
 		}
 	}
 	for (const r of tierZero) if (picked.has(r)) pick(r, 0, `${why.get(r)}; timing-sensitive`);
-	return { picked, why, runAll, server: serverInfo };
+	return { picked, why, runAll, server: serverInfo, noModel: map.noModel || null };
 }
 
 // Workers for a pushed run: the cores less one, less the 1-minute load
