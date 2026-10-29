@@ -57,6 +57,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { serverSource } = require("./lib/server-source");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
 const audit = require("./audit-job-tracking-damage.js");
@@ -105,7 +106,7 @@ const RATECON_DRIVE_FOLDER_ID = String(process.env.RATECON_DRIVE_FOLDER_ID ?? ""
 // data with an extractor that is not the one production uses. The slab spans
 // RATECON_PDF_SYSTEM_PROMPT .. end of runRateConGemini(), which is contiguous.
 function loadShippingExtractor() {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const startNeedle = "\nconst RATECON_PDF_SYSTEM_PROMPT = ";
 	const endNeedle = "\nasync function runRateConGemini(";
 	if (SRC.split(startNeedle).length - 1 !== 1) throw new Error("expected exactly 1 RATECON_PDF_SYSTEM_PROMPT in server.js");

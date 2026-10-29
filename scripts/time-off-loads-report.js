@@ -82,6 +82,7 @@ const path = require("path");
 const { createRequire } = require("module");
 const { parseArgs, sheetFor, openDb } = require("./lib/ledger-world");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const driverAvailability = require("../lib/driver-availability");
 const appTime = require("../lib/app-time");
 const { stampMs } = require("../lib/eld-feed-health");
@@ -117,7 +118,7 @@ function refuse(msg) {
 // given the database (as scripts/integrity-check.js does); getSheets() answers
 // getJobTrackingCached()'s one values.get with the tab already read.
 function liftFromServer(db, sheetData) {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const lifted = closure(SRC, {
 		roots: LIFT_ROOTS,
 		provided: ["getDeletedLoadIds", "getSheets", "SPREADSHEET_ID"],

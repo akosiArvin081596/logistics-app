@@ -29,6 +29,14 @@
  *     investor-month settled without a breakdown; a paid row's month
  *     re-closed after a reopen keeps the breakdown it settled at; and a failure
  *     in Financials' freeze never holds up the payout close.
+ *   - a truck with no in-service date added at 9:15 PM EDT on Jul 31
+ *     (created_at '2026-08-01 01:15:00', SQLite's UTC clock), under
+ *     TRUCK_CHARGE_APP_DAY_RULE as server.js declares it: with the flag off,
+ *     July carries none of its fixed costs (the UTC month, pinned as it is);
+ *     with it on and FROM 2026-07, July carries them, a July receipt joins
+ *     through the driver's month window, a lease month covers Jul 31, and the
+ *     Financials scope is the ledger to the cent; FROM 2026-08 leaves July as it
+ *     was; the boot notice for a FROM at or before the latest closed month.
  *
  * The shipped code runs, lifted out of server.js, on an in-memory SQLite built
  * from server.js's own DDL. Stubbed: the clock, the Job Tracking sheet read and
@@ -100,6 +108,12 @@ const CONSTS = ["INVOICE_GRID_DAYS", "PAYOUT_RULES_V2_ENABLED", "PAYOUT_RULE_KEY
 	"INVESTOR_LEASE_PAYOUTS_ENABLED", "INVESTOR_LEASE_SETTINGS", "LEASE_SNAPSHOT_WARNED", "LOCKABLE_MONTH_KEY",
 	"LOCK_PERIOD_MIN_YEAR", "LOCK_PERIOD_MAX_YEAR", "insertPayoutHistory", "FINANCIALS_GRANULARITIES", "FINANCIALS_GROUPINGS"];
 const LETS = ["lastPayStructShadowWarnMs", "driverRateOnlyStart", "_jtEpoch"];
+// The truck charge rule as server.js declares it, read off each world's stubbed
+// environment. A server.js from before the rule gets null, so the flag-on worlds
+// below show the UTC month there.
+const TRUCK_RULE_HEAD = "\nconst TRUCK_CHARGE_APP_DAY_RULE = ";
+const TRUCK_RULE_DECL = count(TRUCK_RULE_HEAD) === 1 ? liftDecl("const", "TRUCK_CHARGE_APP_DAY_RULE") : "const TRUCK_CHARGE_APP_DAY_RULE = null;";
+const TRUCK_NOTICE_FN = count("\nfunction warnTruckChargeFromClosedMonth(") === 1 ? liftFn("warnTruckChargeFromClosedMonth") : "function warnTruckChargeFromClosedMonth() {}";
 const FNS = [
 	// Under test.
 	"reconcileInvestorPayouts", "computeInvestorMonthlyEarnings", "gatherLedgerScopeFacts", "payoutRules", "ledgerLoadRows", "getInvestorDriverSet", "assignDriverToTruck",
@@ -127,12 +141,14 @@ const FINANCIALS_HEAD = 'app.get("/api/financials", requireRole("Super Admin"), 
 const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
 	...LETS.map((c) => liftDecl("let", c)),
+	TRUCK_RULE_DECL,
+	TRUCK_NOTICE_FN,
 	...FNS.map(liftFn),
 	liftRoute(REOPEN_HEAD),
 	liftRoute(ADJUST_HEAD),
 	liftRoute(FREEZE_HEAD),
 	liftRoute(FINANCIALS_HEAD),
-	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger };",
+	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, computeFleetLedger, buildFinancialsLedger, warnTruckChargeFromClosedMonth };",
 ].join("\n");
 
 const DDL = [
@@ -188,7 +204,7 @@ const SHEET = [
 ];
 
 const W_FAIL = { states: false };
-function buildWorld({ onSheetRead = null } = {}) {
+function buildWorld({ onSheetRead = null, env = {} } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) die(`DDL failed: ${e.message}\n${sql.slice(0, 120)}`); }
@@ -217,7 +233,7 @@ function buildWorld({ onSheetRead = null } = {}) {
 		getEldTravelDaysByVehicleCached: () => Object.create(null),
 		resolveCityState: () => { if (W_FAIL.states) throw new Error("address lookup failed"); return ""; },
 		insertDispatchNotification: { run: (type, title, body) => notices.push({ type, title, body }) },
-		process: { env: {} },
+		process: { env },
 		console: { log() {}, warn: (m) => warnings.push(String(m)), error: (...a) => errors.push(a.map(String).join(" ")) },
 		crypto: require("crypto"),
 	};
@@ -240,6 +256,77 @@ const FIGS = ["revenue", "driverPay", "fixedCosts", "tripExpenses", "maintFundCo
 const c = (v) => Math.round(Number(v || 0) * 100);
 const sameFigures = (a, b) => FIGS.every((k) => c(a && a[k]) === c(b && b[k]));
 const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none");
+
+// ── a truck with no in-service date, added on a month's last evening (ET) ───
+// T7 is owner 7's only truck, added at 9:15 PM EDT on Jul 31, so created_at is
+// '2026-08-01 01:15:00' (SQLite's UTC clock). Its driver's load is assigned Jul 31,
+// and his receipt from that day carries no truck.
+const G = "Gil Gray";
+async function eveningTruckWorld(env, { lease = false } = {}) {
+	const W = buildWorld({ env });
+	const { db, api } = W;
+	db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (1, 'super_admin', 'x', 'Super Admin', ''), (7, 'inv7', 'x', 'Investor', 'Gamma Fleet')").run();
+	db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
+	db.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, insurance_monthly, eld_monthly, driver_pay_daily)
+		VALUES (7, 'T7', 7, 'Active', '', '2026-08-01 01:15:00', 900, 50, 240)`).run();
+	db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily) VALUES (?, 'Gamma Fleet', 'fixed', 0)").run(G);
+	setClock("2026-08-01T01:15:00Z");
+	api.assignDriverToTruck(7, G);
+	db.prepare(`INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit, posted_period, load_id)
+		VALUES ('2026-08-01T02:00:00.000Z', ?, 'Fuel', 120, '2026-07-31', 'Approved', 0, '', '', '')`).run(G);
+	if (lease) {
+		db.prepare(`INSERT INTO investor_payout_basis (owner_id, effective_month, basis_type, lease_amount_cents, source, created_by, created_at)
+			VALUES (7, '2026-07', 'lease', 310000, 'admin', 'super_admin', '2026-07-01T12:00:00.000Z')`).run();
+	}
+	setClock("2026-08-20T17:00:00Z");
+	const carrier = api.getCarrierDBFromSQLite();
+	const set = api.getInvestorDriverSet(7, carrier.data, "Driver", "Carrier Name");
+	const ledger = await api.computeInvestorMonthlyEarnings({ user: { ...SUPER, id: 7 }, isSuperAdmin: false, investorDriverSet: set, investorOwnerId: 7, config: { investor_split_pct: "50" } });
+	const scope = (await api.computeFleetLedger()).scopes.find((s) => s.ownerId === 7);
+	const byMonth = Object.fromEntries(ledger.monthlyEarnings.map((m) => [m.month, m]));
+	return { W, july: byMonth["2026-07"] || null, byMonth, books: scope ? financialsCalc.monthFiguresFromItems(scope.items) : {} };
+}
+async function eveningTruckChecks() {
+	SHEET.push(load("8021", G, "7/31/2026", "7/31/2026 22:00", "8/1/2026 9:00", "$1,800.00", "T7", "7"));
+	const ON = { TRUCK_CHARGE_APP_DAY_ENABLED: "true", TRUCK_CHARGE_APP_DAY_FROM: "2026-07" };
+	const off = await eveningTruckWorld({});
+	const on = await eveningTruckWorld(ON);
+	const fromAug = await eveningTruckWorld({ ...ON, TRUCK_CHARGE_APP_DAY_FROM: "2026-08" });
+	const july = (w) => (w.july ? { fixed: c(w.july.exact.fixedCosts), receipts: c(w.july.exact.tripExpenses) } : null);
+	check(JSON.stringify(july(off)) === JSON.stringify({ fixed: 0, receipts: 0 }),
+		"truck added 9:15 PM EDT Jul 31, flag off: July carries none of its fixed costs and not its driver's July receipt (the UTC month, as today)", JSON.stringify(july(off)));
+	check(JSON.stringify(july(on)) === JSON.stringify({ fixed: 95000, receipts: 12000 }),
+		"…flag on, FROM 2026-07: July carries its $950 of fixed costs, and the $120 receipt joins through the driver's month window", JSON.stringify(july(on)));
+	check(JSON.stringify(july(fromAug)) === JSON.stringify({ fixed: 0, receipts: 0 }),
+		"…FROM 2026-08: July, a month before FROM, keeps its answer", JSON.stringify(july(fromAug)));
+	for (const [label, w] of [["off", off], ["on", on], ["FROM 2026-08", fromAug]]) {
+		const gaps = Object.keys(w.byMonth).filter((mk) => !sameFigures(w.books[mk] || {}, w.byMonth[mk].exact));
+		check(gaps.length === 0, `…${label}: owner 7's Financials scope is its payout ledger, month by month, to the cent`,
+			gaps.map((mk) => `${mk}: books ${show(w.books[mk])} / ledger ${show(w.byMonth[mk].exact)}`).join(" | "));
+	}
+	const leaseOff = await eveningTruckWorld({ INVESTOR_LEASE_PAYOUTS_ENABLED: "true" }, { lease: true });
+	const leaseOn = await eveningTruckWorld({ ...ON, INVESTOR_LEASE_PAYOUTS_ENABLED: "true" }, { lease: true });
+	const basis = (w) => (w.july && w.july.payoutBasis ? { days: w.july.payoutBasis.coveredDays, paid: w.july.payoutBasis.paidAmount, reason: w.july.payoutBasis.reason } : null);
+	check(JSON.stringify(basis(leaseOff)) === JSON.stringify({ days: 0, paid: 0, reason: "not_in_service" }),
+		"a $3,100 lease from 2026-07, flag off: the truck covers no July day (it reads Aug 1)", JSON.stringify(basis(leaseOff)));
+	check(JSON.stringify(basis(leaseOn)) === JSON.stringify({ days: 1, paid: 100, reason: "prorated" }),
+		"…flag on: it covers Jul 31, 1 of 31 days", JSON.stringify(basis(leaseOn)));
+	const errs = [off, on, fromAug, leaseOff, leaseOn].flatMap((w) => w.W.errors);
+	check(errs.length === 0, "…the lifted code logged no error in these worlds", errs.join(" | "));
+	// The boot notice: one while FROM is at or before the latest closed month.
+	const notices = (env, closed) => {
+		const w = buildWorld({ env });
+		w.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES (?, 'locked', '2026-08-08T05:00:00.000Z', 'test')").run(closed);
+		w.api.warnTruckChargeFromClosedMonth();
+		return w.warnings.filter((m) => m.startsWith("[truck-charge]")).length;
+	};
+	const noticeCounts = [notices(ON, "2026-07"), notices(ON, "2026-06"), notices({}, "2026-07")];
+	check(JSON.stringify(noticeCounts) === JSON.stringify([1, 0, 0]),
+		"boot: one notice when FROM (2026-07) is at or before the latest closed month; none when it is later, or with the flag off", JSON.stringify(noticeCounts));
+	check(count(`${TRUCK_RULE_HEAD}investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), `) === 1,
+		"server.js declares TRUCK_CHARGE_APP_DAY_RULE once, at column 0, from the environment with appDay() as its day reader", "");
+	SHEET.pop();
+}
 
 (async () => {
 	const W = buildWorld();
@@ -604,6 +691,8 @@ const show = (f) => (f ? FIGS.map((k) => `${k} ${c(f[k])}`).join(", ") : "none")
 		JSON.stringify({ revenue: julCents.summary.revenue, rows: julCents.drivers.map((d) => [d.name, d.revenue, d.pay, d.margin]) }));
 
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
+
+	await eveningTruckChecks();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => die(`crashed: ${e.stack || e.message}`));

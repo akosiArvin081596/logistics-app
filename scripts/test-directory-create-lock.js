@@ -121,6 +121,10 @@ const MODULE_SRC = [
 	liftConst("const DIRECTORY_LOCK_REMEDY =", "\";\n"),
 	liftFunction("lockedPeriodsDesc"),
 	liftFunction("driverPayLockedMonths"),
+	// A start's month, with APP_DAY_STAMPS_ENABLED off (the UTC month);
+	// scripts/test-truck-create-new-driver.js runs it with the flag on.
+	"const APP_DAY_STAMPS_ENABLED = false;",
+	liftNew("assignmentFloorMonth"),
 	liftFunction("truckDailyRateCandidates"),
 	// The daily-rate rule (DRIVER_RATE_ONLY_FROM) is off in this runner;
 	// scripts/test-driver-rate-only-guards.js runs the guards with it on.
