@@ -17,6 +17,12 @@
  *     the month it was submitted; a close under the rule books it there, so it
  *     is counted exactly once after the month closes; a month closed without
  *     the rule settled it by its date, and it stays there;
+ *   - futureReceipts reads the day a receipt was submitted on the business
+ *     clock (APP_TIMEZONE), not as its UTC date: one submitted at 9:30 PM on a
+ *     month's last day (EDT and EST; created_at when it has no timestamp) and
+ *     dated the next day counts in, and is booked to, the month it was
+ *     submitted in, whatever the server's clock zone; a submission month closed
+ *     without the rule never gains it; the dry run shows it;
  *   - frozenCarry: a closed month's loss is carried at what it settled, even
  *     when a recompute of that month now shows a profit, at the share it
  *     settled at (not today's split), and a closed month the recompute no
@@ -110,6 +116,9 @@ const FNS = [
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
 	"closingFingerprint", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "loadPayRateIndex", "currentPayRates", "recordPayRateChanges", "stampFutureReceipts", "futureAwarePeriodExpr", "payoutRulesDryRun", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 ];
+// The futureReceipts rule's submitted-day reader. Lifted when present, so a
+// server.js from before it still runs the cases below and shows the UTC day.
+const DAY_FNS = ["receiptSubmittedDaySql"].filter((n) => count(`\nfunction ${n}(`) === 1);
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const ADJUST_HEAD = 'app.put("/api/investor/payouts/:id/adjust", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const DRY_HEAD = 'app.get("/api/admin/payout-rules/dry-run", requireRole("Super Admin"), async (req, res) => {';
@@ -117,10 +126,11 @@ const BODY = [
 	...CONSTS.map((c) => liftDecl("const", c)),
 	...LETS.map((c) => liftDecl("let", c)),
 	...FNS.map(liftFn),
+	...DAY_FNS.map(liftFn),
 	liftRoute(REOPEN_HEAD),
 	liftRoute(ADJUST_HEAD),
 	liftRoute(DRY_HEAD),
-	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, computeLossCarryForward, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, recordPayRateChanges, loadPayRateIndex, computeFleetLedger, payoutRules };",
+	"return { reconcileInvestorPayouts, computeInvestorMonthlyEarnings, computeLossCarryForward, getInvestorDriverSet, assignDriverToTruck, finalizePeriods, getCarrierDBFromSQLite, installPeriodLockTriggers, recordPayRateChanges, loadPayRateIndex, computeFleetLedger, payoutRules, futureAwarePeriodExpr };",
 ].join("\n");
 
 const DDL = [
@@ -176,7 +186,8 @@ const SHEET = [
 	load("7105", E, "7/13/2026", "7/14/2026 8:00", "7/15/2026 10:00", "$6,000.00", "T5", "5"),
 ];
 
-function buildWorld({ onSheetRead = null, env = {} } = {}) {
+// `zone`: APP_TIMEZONE for this world (unset: lib/app-time.js's, US Eastern).
+function buildWorld({ onSheetRead = null, env = {}, zone = null } = {}) {
 	const db = new Database(":memory:");
 	for (const sql of DDL) {
 		try { db.exec(sql); } catch (e) { if (!/duplicate column name/.test(e.message)) die(`DDL failed: ${e.message}\n${sql.slice(0, 120)}`); }
@@ -187,7 +198,7 @@ function buildWorld({ onSheetRead = null, env = {} } = {}) {
 	const refusals = [];
 	const notices = [];
 	const deps = {
-		appTime: require("../lib/app-time.js"), APP_TIMEZONE: require("../lib/app-time.js").appTimeZone(),
+		appTime: require("../lib/app-time.js"), APP_TIMEZONE: zone || require("../lib/app-time.js").appTimeZone(),
 		db, investorPayoutBasis, normalizeLoadId, financialsCalc, financialsReport, Date: Clock,
 		app: {
 			post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; },
@@ -383,18 +394,23 @@ const c = (v) => Math.round(Number(v || 0) * 100);
 	const V = buildWorld({ env: { PAYOUT_RULES_V2_ENABLED: "true" } });
 	const ALL = Object.fromEntries(RULES.map((r) => [r, true]));
 	check(JSON.stringify(V.api.payoutRules()) === JSON.stringify(ALL), "on: PAYOUT_RULES_V2_ENABLED=true switches every rule on", JSON.stringify(V.api.payoutRules()));
-	const vUser = V.db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
-	vUser.run(1, "super_admin", "Super Admin", "");
-	vUser.run(5, "inv5", "Investor", "Acme Carrier");
-	V.db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
-	V.db.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, driver_pay_daily)
-		VALUES (1, 'T5', 5, 'Active', '2026-03-01', '2026-03-01 00:00:00', 1000, 50, 1500, 600, 1200, 250), (2, 'C1', 0, 'Active', '2025-06-01', '2025-06-01 00:00:00', 900, 50, 0, 0, 0, 200)`).run();
-	V.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily) VALUES (?, '', 'fixed', 0), (?, 'Acme Carrier', 'fixed', 0)").run(D, E);
-	setClock("2025-12-01T17:00:00Z");
-	V.api.assignDriverToTruck(2, D);
-	setClock("2026-03-01T17:00:00Z");
-	V.api.assignDriverToTruck(1, E);
-	V.api.recordPayRateChanges();
+	// Owner 5's fixture in a fresh world: T5 driven by E from March, D on
+	// company truck C1, the rates recorded.
+	const seedOwner5 = (X) => {
+		const xUser = X.db.prepare("INSERT INTO users (id, username, password_hash, role, company_name) VALUES (?, ?, 'x', ?, ?)");
+		xUser.run(1, "super_admin", "Super Admin", "");
+		xUser.run(5, "inv5", "Investor", "Acme Carrier");
+		X.db.prepare("INSERT INTO investor_config (owner_id, key, value) VALUES (0, 'investor_split_pct', '50')").run();
+		X.db.prepare(`INSERT INTO trucks (id, unit_number, owner_id, status, in_service_date, created_at, insurance_monthly, eld_monthly, truck_payment_monthly, hvut_annual, irp_annual, driver_pay_daily)
+			VALUES (1, 'T5', 5, 'Active', '2026-03-01', '2026-03-01 00:00:00', 1000, 50, 1500, 600, 1200, 250), (2, 'C1', 0, 'Active', '2025-06-01', '2025-06-01 00:00:00', 900, 50, 0, 0, 0, 200)`).run();
+		X.db.prepare("INSERT INTO drivers_directory (driver_name, carrier_name, pay_type, pay_daily) VALUES (?, '', 'fixed', 0), (?, 'Acme Carrier', 'fixed', 0)").run(D, E);
+		setClock("2025-12-01T17:00:00Z");
+		X.api.assignDriverToTruck(2, D);
+		setClock("2026-03-01T17:00:00Z");
+		X.api.assignDriverToTruck(1, E);
+		X.api.recordPayRateChanges();
+	};
+	seedOwner5(V);
 	const vReceipt = V.db.prepare("INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit, posted_period) VALUES (?, ?, 'Fuel', 500, ?, 'Approved', 5, 'T5', '')")
 		.run("2026-08-10T17:00:00.000Z", E, "2026-09-20").lastInsertRowid;
 	setClock("2026-09-10T17:00:00Z");
@@ -410,6 +426,76 @@ const c = (v) => Math.round(Number(v || 0) * 100);
 		"futureReceipts: after August closes, the receipt is counted once, in August, and in no later month",
 		JSON.stringify({ settledAug: augPaid.tripExpenses, months: ["2026-08", "2026-09", "2026-10"].map((mk) => trip(onLater, mk)) }));
 	check(V.errors.length === 0, "the lifted code logged no error (rules on)", V.errors.join(" | "));
+
+	// ── futureReceipts: the day a receipt was submitted is its business day ───
+	// From 8 PM EDT (7 PM EST) the UTC date is already the next day, so a receipt
+	// submitted that evening and dated the next day must still read as dated
+	// after its submission day. Made-up receipts on T5, none booked yet:
+	// [timestamp, created_at, date, amount, its month under the rule, what it is].
+	const EVENING = [
+		["2026-11-01T01:30:00.000Z", "2026-11-01 01:30:00", "2026-11-01", 120, "2026-10", "submitted 9:30 PM EDT Oct 31, dated Nov 1"],
+		["2026-12-01T02:30:00.000Z", "2026-12-01 02:30:00", "2026-12-01", 70, "2026-11", "submitted 9:30 PM EST Nov 30, dated Dec 1"],
+		["", "2027-01-01 02:30:00", "2027-01-01", 40, "2026-12", "no timestamp, created_at (zone-less, so UTC) 9:30 PM EST Dec 31, dated Jan 1"],
+		["2026-11-01T04:30:00.000Z", "2026-11-01 04:30:00", "2026-11-01", 9, "2026-11", "control: submitted 12:30 AM EDT Nov 1, dated Nov 1, so not dated after it"],
+	];
+	const plantEvening = (X) => EVENING.map(([ts, created, date, amount]) => X.db.prepare(
+		"INSERT INTO expenses (timestamp, driver, type, amount, date, status, owner_id, truck_unit, posted_period, created_at) VALUES (?, ?, 'Fuel', ?, ?, 'Approved', 5, 'T5', '', ?)",
+	).run(ts, E, amount, date, created).lastInsertRowid);
+	const ruleMonths = (X, ids) => ids.map((id) => X.db.prepare(`SELECT ${X.api.futureAwarePeriodExpr()} AS m FROM expenses WHERE id = ?`).get(id).m);
+	const F = buildWorld({ env: { PAYOUT_RULES_V2_ENABLED: "true" } });
+	seedOwner5(F);
+	const fIds = plantEvening(F);
+	const fMonths = ruleMonths(F, fIds);
+	EVENING.forEach(([, , , , month, why], i) => check(fMonths[i] === month, `futureReceipts: ${why}: counts in ${month}`, String(fMonths[i])));
+	const ZONES = ["America/New_York", "America/Chicago", "UTC", "Asia/Manila"];
+	const byZone = ZONES.map((tz) => {
+		process.env.TZ = tz;
+		return ruleMonths(F, fIds).join(" ");
+	});
+	process.env.TZ = "UTC";
+	check(byZone.every((m) => m === EVENING.map((x) => x[4]).join(" ")),
+		"futureReceipts: the same months whatever the server's clock zone (New York, Chicago, UTC, Manila)", JSON.stringify(Object.fromEntries(ZONES.map((tz, i) => [tz, byZone[i]]))));
+	const P = buildWorld({ zone: "America/Los_Angeles" });
+	const pMonths = ruleMonths(P, plantEvening(P));
+	check(JSON.stringify(pMonths) === JSON.stringify(["2026-10", "2026-11", "2026-12", "2026-10"]),
+		"futureReceipts: the day follows APP_TIMEZONE: in America/Los_Angeles 12:30 AM EDT Nov 1 is 9:30 PM Oct 31, so that receipt counts in October too", JSON.stringify(pMonths));
+	const Q = buildWorld();
+	const qIds = plantEvening(Q);
+	Q.db.prepare("INSERT INTO period_locks (period, status, finalized_at, finalized_by) VALUES ('2026-10', 'locked', '2026-11-05T05:00:00.000Z', 'system')").run();
+	const qMonths = ruleMonths(Q, qIds);
+	check(qMonths[0] === "2026-11",
+		"futureReceipts: October closed without the rule never gains the receipt submitted 9:30 PM EDT Oct 31; it stays in November, by its date", JSON.stringify(qMonths));
+
+	setClock("2027-01-10T17:00:00Z");
+	const MONTHS = ["2026-10", "2026-11", "2026-12", "2027-01"];
+	const trips = (l) => MONTHS.map((mk) => trip(l, mk));
+	const fOn = trips(await ledgerOf(F.api, only("futureReceipts")));
+	check(JSON.stringify(fOn) === JSON.stringify([12000, 7900, 4000, 0]),
+		"futureReceipts: owner 5's trip expenses October to January are $120, $79, $40, $0 (each receipt in the month it was submitted)", JSON.stringify(fOn));
+	const fOff = trips(await ledgerOf(F.api, NONE));
+	check(JSON.stringify(fOff) === JSON.stringify([0, 12900, 7000, 4000]),
+		"rule off: the same receipts count by their date, as before ($0, $129, $70, $40)", JSON.stringify(fOff));
+	const fDry = await F.call("GET /api/admin/payout-rules/dry-run", { session: { user: SUPER } });
+	const dryTrip = MONTHS.map((mk) => {
+		const x = (fDry.body.changes || []).find((y) => y.ownerId === 5 && y.period === mk);
+		return x ? x.figureChanges.tripExpenses || 0 : 0;
+	});
+	check(fDry.status === 200 && JSON.stringify(dryTrip) === JSON.stringify([120, -50, -30, -40]),
+		"dry run: lists the receipts' move in trip expenses (October +$120, November -$50, December -$30, January -$40)", JSON.stringify({ status: fDry.status, dryTrip }));
+
+	const fClosed = await F.api.finalizePeriods(["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10"], "system");
+	const fBooked = fIds.map((id) => F.db.prepare("SELECT posted_period AS p FROM expenses WHERE id = ?").get(id).p);
+	const fAudit = F.db.prepare("SELECT entity_id, details FROM audit_trail WHERE action = 'receipt_period_booked'").all();
+	check(fClosed.periods.includes("2026-10") && JSON.stringify(fBooked) === JSON.stringify(["2026-10", "", "", ""])
+		&& fAudit.length === 1 && fAudit[0].entity_id === "2026-10" && fAudit[0].details.endsWith(`: ${fIds[0]}`),
+		"futureReceipts: October's close books the receipt submitted 9:30 PM EDT Oct 31 to October, audited; the others stay unbooked",
+		JSON.stringify({ periods: fClosed.periods, fBooked, fAudit }));
+	const octRow = F.db.prepare("SELECT finalized_breakdown AS b FROM investor_payouts WHERE owner_id = 5 AND period = '2026-10'").get();
+	const octSettled = octRow ? c(JSON.parse(octRow.b).tripExpenses) : null;
+	const fAfter = trips(await ledgerOf(F.api, ALL));
+	check(octSettled === 12000 && JSON.stringify(fAfter) === JSON.stringify([12000, 7900, 4000, 0]),
+		"futureReceipts: once October closes, that receipt is counted once, in October's settled figure, and in no later month", JSON.stringify({ octSettled, fAfter }));
+	check(F.errors.length === 0 && P.errors.length === 0 && Q.errors.length === 0, "the lifted code logged no error (business-day cases)", [...F.errors, ...P.errors, ...Q.errors].join(" | "));
 
 	check(W.errors.length === 0, "the lifted code logged no error", W.errors.join(" | "));
 	console.log(`\n${pass} passed, ${fail} failed`);
