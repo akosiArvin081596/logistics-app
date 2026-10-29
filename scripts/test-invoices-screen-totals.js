@@ -95,7 +95,8 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	paid_by TEXT DEFAULT '', adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '',
 	adjusted_at TEXT DEFAULT '', render_data TEXT DEFAULT '{}', deleted_at TEXT DEFAULT '', deleted_by TEXT DEFAULT '',
 	delete_reason TEXT DEFAULT '', is_manual INTEGER DEFAULT 0, created_by TEXT DEFAULT '',
-	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0)`;
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_of INTEGER, is_correction INTEGER NOT NULL DEFAULT 0,
+	correction_lines_total REAL NOT NULL DEFAULT 0)`;
 
 function harness(src) {
 	const db = new Database(":memory:");
@@ -140,6 +141,8 @@ function harness(src) {
 		// Each row's Personal lines (none here; scripts/test-personal-expense-receipts.js
 		// covers them).
 		personalLinesForInvoices: () => new Map(),
+		// Each row's correction lines (none here; scripts/test-approved-invoice-lock.js covers them).
+		correctionLinesForInvoices: () => new Map(),
 		// Each row's Expenses figure: with no Personal line it is the stored one
 		// (scripts/test-personal-expense-expenses-ref.js covers the rest).
 		invoiceExpensesRefTotals: (rows) => new Map(rows.map((r) => [r.id, r.expenses_total])),
@@ -262,14 +265,14 @@ async function batterySummary(src) {
 	t("§2 invoiceListSummary() counts only rows that are not deleted, at invoiceTotalDue()",
 		typeof w.invoiceListSummary === "function"
 			? w.invoiceListSummary([
-				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "", personal_total: 0, personal_share_total: 0 },
-				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z", personal_total: 0, personal_share_total: 0 },
-				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "", personal_total: 0, personal_share_total: 0 },
+				{ status: "Paid", total_earnings: 10, adjustment: 5, deleted_at: "", personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
+				{ status: "Paid", total_earnings: 7, adjustment: 0, deleted_at: "2026-10-01T00:00:00.000Z", personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
+				{ status: "Unknown", total_earnings: 3, adjustment: 0, deleted_at: "", personal_total: 0, personal_share_total: 0, correction_lines_total: 0 },
 			]).Paid
 			: "no invoiceListSummary()", { count: 1, total_due: 15 });
 	t("§2 …and a card's total includes Personal lines (the share returned, less what the driver repays)",
 		typeof w.invoiceListSummary === "function"
-			? w.invoiceListSummary([{ status: "Submitted", total_earnings: 800, adjustment: 0, deleted_at: "", personal_total: 100, personal_share_total: 25 }]).Submitted
+			? w.invoiceListSummary([{ status: "Submitted", total_earnings: 800, adjustment: 0, deleted_at: "", personal_total: 100, personal_share_total: 25, correction_lines_total: 0 }]).Submitted
 			: "no invoiceListSummary()", { count: 1, total_due: 725 });
 
 	// The cards follow the list the route answers: the screen sends no filter, so

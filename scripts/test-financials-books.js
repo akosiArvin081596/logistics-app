@@ -118,7 +118,7 @@ const FNS = [
 	"noteLateItemInClosedMonth", "logAudit", "listSettlableInvestors", "installPeriodLockTriggers",
 	"closingFingerprint", "closedMonthFreezePlan", "closingLedgerItems", "financialsSettings", "financialsExtraItems", "closedMonthSettings", "computeFleetLedger", "settledMonthItems", "ambiguousBlankOwnerLoads", "buildHeldTruckIndex", "appNoonMs", "buildHaulTruckResolver", "frozenPeriodSet", "settledPayoutRows", "writeLedgerFreeze", "ledgerItemFromRow", "buildFinancialsLedger", "completedLoadCancelRefusal", "loadRowAccountingMonths", "sheetCellMonths", "sheetCellDate",
 	// GET /api/financials and the report it reads.
-	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex", "liveJobTrackingView",
+	"financialsReportQuery", "buildFinancialsReport", "financialsInvoiceShares", "invoicePaidDaysOf", "getLoadMilesIndex", "liveJobTrackingView", "correctionLinesTablePresent",
 ];
 const REOPEN_HEAD = 'app.post("/api/periods/:period/reopen", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {';
 const FREEZE_HEAD = 'app.post("/api/admin/financials/freeze-closed-months", requireRole("Super Admin"), refuseCrossOrigin, async (req, res) => {';

@@ -1040,7 +1040,7 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		const { req, res, db, calls, PERIOD_FINALIZE_ENABLED,
 			LOCKABLE_MONTH_KEY, isPlausibleLockPeriod, LOCK_PERIOD_MIN_YEAR, LOCK_PERIOD_MAX_YEAR,
 			appMonthKey, periodLabel, periodLockStmt, finalizePeriod, logAudit, pendingReceiptsInPeriod, personalWaitingInPeriod, receiptIdList,
-			forgetDriverRateOnlyMonths } = ctx;
+			forgetDriverRateOnlyMonths, correctionWaitingForClose } = ctx;
 		return (async () => ${bodySrc})();
 	`);
 	return fn({
@@ -1058,6 +1058,7 @@ function runRoute(bodySrc, { period, lockRow = undefined, enabled = true }) {
 		logAudit: (...a) => { calls.audited.push(a); },
 		pendingReceiptsInPeriod: () => [],
 		personalWaitingInPeriod: () => [],
+		correctionWaitingForClose: () => [],
 		receiptIdList: () => "",
 		// The daily-rate rule's per-month answers, cleared after a reopen (none kept here).
 		forgetDriverRateOnlyMonths: () => {},

@@ -83,7 +83,7 @@ const DDL = `CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoic
 	processed_at TEXT DEFAULT '', processed_by TEXT DEFAULT '', paid_at TEXT DEFAULT '', paid_by TEXT DEFAULT '',
 	adjustment REAL DEFAULT 0, adjustment_note TEXT DEFAULT '', adjusted_by TEXT DEFAULT '', adjusted_at TEXT DEFAULT '',
 	deleted_at TEXT DEFAULT '', is_manual INTEGER DEFAULT 0,
-	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0,
+	personal_total REAL NOT NULL DEFAULT 0, personal_share_total REAL NOT NULL DEFAULT 0, correction_lines_total REAL NOT NULL DEFAULT 0,
 	load_ids TEXT DEFAULT '[]', render_data TEXT DEFAULT '')`;
 
 const ROOTS = [];
@@ -115,6 +115,8 @@ function buildWorld(src) {
 		INVOICE_LOCK_REMEDY: "",
 		// Every Mark Paid writes a pay_invoice audit row; the audit is not under test here.
 		logAudit: () => {},
+		// The submit email's correction lines (none here; scripts/test-approved-invoice-lock.js covers them).
+		correctionLinesForInvoices: () => new Map(),
 		sendEmail: async (to, subject, html, attachments = []) => { emails.push({ to, subject, html, attachments }); return true; },
 		console: {
 			log: (...a) => logs.push(a.join(" ")),
