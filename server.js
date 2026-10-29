@@ -174,9 +174,9 @@ const { sendAppUpdating } = require("./lib/app-updating-page");
 // own UTC clock. lib/app-time.js
 const appTime = require("./lib/app-time");
 const APP_TIMEZONE = appTime.appTimeZone();
-// APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, a truck-assignment start and an ELD device
-// link's bounds count on their business day (appDay()) in the month-end guards' driver floor and the
-// miles rollups' day-to-truck lookup, not on their UTC day (already tomorrow from 8 PM EDT, 7 PM EST).
+// APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, the month-end guards' driver floor also reads
+// a truck-assignment start on its business day (appDay()), so an evening start on a month's last day
+// (already the next month in UTC from 8 PM EDT, 7 PM EST) keeps that month under the guard.
 const APP_DAY_STAMPS_ENABLED = process.env.APP_DAY_STAMPS_ENABLED === "true";
 // One reading of a cell's amount (cents) and moment, shared with the integrity
 // check: lib/cell-compare.js
@@ -4956,11 +4956,7 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, {
-		startMs: eldDeviceHistoryStartMs(), currentLinks,
-		// Off: each bound's UTC day, as before.
-		dayOf: APP_DAY_STAMPS_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
-	});
+	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
 }
 
 // After every table exists (server_state is created further down this file).
