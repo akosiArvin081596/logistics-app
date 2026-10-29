@@ -33822,8 +33822,10 @@ function assignmentFloorMonth(startDate) {
 	const utc = String(startDate || "").slice(0, 7);
 	if (!APP_DAY_STAMPS_ENABLED) return utc;
 	const day = appStampDay(startDate);
-	const app = day ? day.slice(0, 7) : "";
-	return app && app < utc ? app : utc;
+	// No local shares a top-level name: scripts lift this through closure() (scripts/lib/server-lift.js),
+	// which reads every name as server.js's own declaration.
+	const biz = day ? day.slice(0, 7) : "";
+	return biz && biz < utc ? biz : utc;
 }
 
 // The CLOSED months in which a driver's pay would be repriced by a change to
