@@ -60064,6 +60064,37 @@ const FUEL_RESERVE_FRACTION = (() => {
 })();
 const FUEL_RESERVE_OPTS = { minMiles: FUEL_RESERVE_MILES, fraction: FUEL_RESERVE_FRACTION };
 
+// The driverFuel block on both fuel answers (lib/fuel-model.js planDriverFuel()).
+// An enable switch, off unless true/1/yes/on: off, both answers are as before.
+const DRIVER_FUEL_GALLONS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.DRIVER_FUEL_GALLONS_ENABLED ?? "").trim());
+// A bad or negative value falls back to the lib's 10, so it can only add fuel.
+const DRIVER_FUEL_GALLONS_MARGIN_PCT = (() => {
+	const n = parseFloat(process.env.DRIVER_FUEL_GALLONS_MARGIN_PCT);
+	return Number.isFinite(n) && n >= 0 ? n : fuelModel.DRIVER_FUEL_MARGIN_PCT;
+})();
+// Fuel counts only the first pickup and the final delivery, so say when a load
+// has more: the rate-con stop list, else its Details. Only a yes/no leaves here.
+function loadHasExtraStops(loadId, jtRow, headers) {
+	const detailsCol = findCol(headers, /^details$/i);
+	if (jtRow && detailsCol && fuelModel.detailsMentionExtraStops(jtRow[detailsCol])) return true;
+	try {
+		const row = db.prepare("SELECT payload FROM load_driver_instructions WHERE load_key = ?").get(normalizeLoadId(loadId));
+		return fuelModel.stopListShowsExtraStops(row ? row.payload : null);
+	} catch { return false; }
+}
+// Another of the load's driver's loads is picked up and not delivered, so the run
+// to this pickup starts at that delivery, not where the truck is now.
+function driverHasLoadUnderway(jt, jtRow, loadId) {
+	const headers = jt.headers || [];
+	const idCol = findCol(headers, /load.?id|job.?id/i);
+	const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
+	const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
+	const driver = jtRow && driverCol ? normalizeDriverName(String(jtRow[driverCol] || "")) : "";
+	if (!driver || !idCol || !statusCol) return false;
+	return excludeDroppedLoads(jt.data || [], headers).some((r) => normalizeLoadId(r[idCol]) !== normalizeLoadId(loadId)
+		&& normalizeDriverName(String(r[driverCol] || "")) === driver && fuelModel.isPickedUp(r[statusCol]));
+}
+
 // How far back we may reach for the last CREDIBLE fuel reading when the live one
 // is a dropout. Bounding it in SQL (rather than by age in the model) keeps the
 // staleness limit next to the query that can actually use the index.
@@ -60471,7 +60502,14 @@ app.get("/api/fuel/range", requireRole("Super Admin", "Dispatcher", "Driver"), (
 			rangeEvidence: burn && burn.usable
 				? { legs: burn.n, miles: burn.miles, milesPerPointP10: burn.p10, milesPerPointP90: burn.p90 }
 				: null,
-			updatedAt });
+			updatedAt,
+			// Trip-plan's MPG chain, never the rollup, so the header chip and the load's
+			// Fuel section quote one figure.
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				reading: receiptMpg ? resolveCredibleFuelReading(vehicleId, rows, receiptMpg.mpg, preTank) : reading,
+				hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: estimate.tankSource, tankGallons: preTank,
+				mpg: receiptMpg ? receiptMpg.mpg : preMpg, burn, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+			}) } : {}) });
 	} catch (err) {
 		console.error("[fuel/range]", err.message);
 		res.status(500).json({ ok: false, error: "fuel range failed" });
@@ -60712,7 +60750,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 		const lc = db.prepare("SELECT origin_lat, origin_lng, dest_lat, dest_lng FROM load_coordinates WHERE load_id = ?")
 			.get(loadId.toLowerCase().replace(/^#/, ""));
 		if (!lc || ![lc.dest_lat, lc.dest_lng].every(Number.isFinite)) {
-			return res.status(400).json({ ok: false, error: "load has no geocoded destination" });
+			return res.status(400).json({ ok: false, error: "load has no geocoded destination", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_ROUTE" } : {}) });
 		}
 
 		// Live fuel + position. A newest row the device took before it was linked
@@ -60730,7 +60768,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			? { latitude: latest.latitude, longitude: latest.longitude }
 			: (Number.isFinite(lc.origin_lat) && Number.isFinite(lc.origin_lng)
 				? { latitude: lc.origin_lat, longitude: lc.origin_lng } : null);
-		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from" });
+		if (!from) return res.status(400).json({ ok: false, error: "no position to plan from", ...(DRIVER_FUEL_GALLONS_ENABLED ? { code: "NO_POSITION" } : {}) });
 
 		// ⚠️⚠️ THE RUN TO THE SHIPPER IS PART OF THE TRIP, AND IT USED TO BE FREE.
 		//
@@ -60839,6 +60877,14 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 			fuelStopsRecommended: plan.verdict === "tight" || plan.verdict === "insufficient",
 			updatedAt: latest && latest.location_date_ms
 				? new Date(latest.location_date_ms).toISOString() : null,
+			...(DRIVER_FUEL_GALLONS_ENABLED ? { driverFuel: fuelModel.planDriverFuel({
+				plan, leg: planApproach ? "to_pickup" : "to_delivery", approachMiles,
+				fromLivePosition: !!fixFresh, positionAgeMinutes: fixFresh ? Math.max(0, Math.round((Date.now() - latest.location_date_ms) / 60000)) : null,
+				reading, hasTruck: !!truck, hasDevice: !!vehicleId, tankSource: truck && truck.fuel_tank_gallons > 0 ? "truck" : "default",
+				tankGallons: tank, mpg, burn, routeSource, reserve: FUEL_RESERVE_OPTS, marginPct: DRIVER_FUEL_GALLONS_MARGIN_PCT,
+				loadDone: fuelModel.isLoadFinished(loadStatus), extraStops: loadHasExtraStops(loadId, jtRow, jtHeaders),
+				afterAnotherLoad: !pickedUp && driverHasLoadUnderway(jt, jtRow, loadId),
+			}) } : {}),
 		});
 	} catch (err) {
 		console.error("[fuel/trip-plan]", err.message);
