@@ -111,6 +111,9 @@ let lib = null;
 try { lib = require(path.join(ROOT, "lib", "account-disable.js")); } catch { lib = null; }
 ok(!!lib, "lib/account-disable.js exists and loads");
 const passwordRules = require(path.join(ROOT, "lib", "password-rules.js"));
+// RATECON_PDF_VIEWER_IDS unset, as PUT and DELETE /api/users/:id read it: no account is protected
+// there (scripts/test-protected-accounts.js covers a set list).
+const UNSET_VIEWERS = require(path.join(ROOT, "lib", "listed-accounts.js")).parseListedAccountIds(undefined);
 // The sign-in lookup and rows the login route goes through (absent on an older base).
 let signInLib = null;
 try { signInLib = require(path.join(ROOT, "lib", "sign-in.js")); } catch { signInLib = null; }
@@ -428,6 +431,7 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		accountCompanyChange: new Function(`${SRCS.companyChange}\nreturn accountCompanyChange;`)(),
 		findDirectoryRowForDriver: () => null, investorCompanyMoves: () => [], investorCompanyLockBlockers: () => null,
 		notifyPasswordChanged: () => Promise.resolve({ recipients: 0, sent: 0 }), passwordRules, userPasswordResetLimiter: passThrough,
+		RATECON_PDF_VIEWERS: UNSET_VIEWERS,
 	});
 	mount(SRCS.deleteUser, {
 		app, requireRole, db, recordPeriodRefusal: audit.recordPeriodRefusal, auditText: audit.auditText,
@@ -435,6 +439,7 @@ async function startWorld({ flagOn = true, list = null, signOut = true, replica 
 		archiveUserSignedArtifacts: () => ({ archived: [], skipped: [] }), logAudit: audit.logAudit, purgeUserSessions,
 		syncDriverToCarrierSheet: () => {}, findTruckForDriverAccount: () => null, normalizeDriverName, chatDeskKey: () => null,
 		notifyChange, recordPayRateChanges: () => {}, userVoiceNoteFiles: () => [], removeUserVoiceNotes: () => 0, accountDisable: lib,
+		RATECON_PDF_VIEWERS: UNSET_VIEWERS,
 	});
 	if (SRCS.disable && SRCS.enable && SRCS.facts && SRCS.notify && lib) {
 		const accountSwitchFacts = new Function("db", "liveSessionIds", `${SRCS.facts}\nreturn accountSwitchFacts;`)(db, helpers.liveSessionIds);
