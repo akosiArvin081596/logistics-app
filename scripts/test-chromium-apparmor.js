@@ -110,6 +110,9 @@ function parseProfile(text) {
 	};
 }
 
+// Every character a RegExp gives a meaning to, backslash first among them, as a literal.
+const reEscape = (s) => s.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+
 // apparmor_parser's globbing, as far as an attachment here uses it: * (within
 // one folder), ** (across folders), ? and {a,b}. Anything else is refused, so
 // this can't quietly read a pattern differently from the parser.
@@ -125,7 +128,7 @@ function aareToRegExp(glob) {
 		else if (c === "}" && depth > 0) { re += ")"; depth--; }
 		else if (c === "," && depth > 0) re += "|";
 		else if (/[[\]\\@$]/.test(c)) throw new Error(`unsupported in an attachment here: ${c}`);
-		else re += c.replace(/[.+^()|/]/g, "\\$&");
+		else re += reEscape(c);
 	}
 	if (depth !== 0) throw new Error("unbalanced {}");
 	return new RegExp(`^${re}$`);
@@ -536,6 +539,10 @@ if (require.main === module) (async () => {
 	let refusedOther = 0;
 	for (const g of ["/a/[bc]", "/a/@{HOME}", "/a/{b"]) { try { aareToRegExp(g); } catch { refusedOther++; } }
 	eq("§1 …and refuses what it doesn't model", refusedOther, 3);
+	const specials = "a\\d.b*c+?^$()[]{}|/";
+	ok(new RegExp(`^${reEscape(specials)}$`).test(specials) && !new RegExp(`^${reEscape(specials)}$`).test(specials.replace("\\d", "1"))
+		&& !new RegExp(`^${reEscape("a\\d")}$`).test("a1"),
+	"§1 the escaper takes every RegExp character literally, a backslash included");
 	let alternatives = [];
 	try { alternatives = p.attach ? expandBraces(p.attach).sort() : []; } catch (e) { ok(false, "§1 the attachment's alternatives read", e.message); }
 	eq("§1 it attaches to Chrome in exactly the three folders the renderer runs it from", alternatives,
@@ -633,9 +640,9 @@ if (require.main === module) (async () => {
 	const stepAt = (re) => runs.map((r, k) => (re.test(r) ? k : -1)).filter((k) => k >= 0);
 	const order = [
 		stepAt(/sysctl -w kernel\.apparmor_restrict_unprivileged_userns=1\b/),
-		stepAt(new RegExp(`apparmor_parser -r ${INSTALLED}`)),
+		stepAt(new RegExp(`apparmor_parser -r ${reEscape(INSTALLED)}`)),
 		stepAt(/scripts\/test-chromium-apparmor\.js --privileged loaded --account \S+/),
-		stepAt(new RegExp(`apparmor_parser -R ${INSTALLED}`)),
+		stepAt(new RegExp(`apparmor_parser -R ${reEscape(INSTALLED)}`)),
 		stepAt(/scripts\/test-chromium-apparmor\.js --privileged unloaded --account \S+/),
 	];
 	ok(order.every((o) => o.length === 1) && order.every((o, k) => k === 0 || o[0] > order[k - 1][0]),
