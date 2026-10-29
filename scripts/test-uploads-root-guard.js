@@ -67,7 +67,7 @@ const die = (msg) => { console.error(`FAIL  ${msg}`); process.exit(1); };
 // Lifting — a small scanner that skips strings, template literals and comments
 // while matching brackets, so a `{` or `;` inside either cannot end a lift early.
 // ---------------------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 function skipString(i) {
 	const q = SRC[i];

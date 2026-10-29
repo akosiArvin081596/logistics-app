@@ -101,13 +101,12 @@
  */
 "use strict";
 
-const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
 const { once } = require("events");
 
-const SRC = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 // lib/sign-in.js: the `signIn` object the login and logout routes are handed.
 // Absent before that change, when neither route asks for it.
 let signInLib = null;

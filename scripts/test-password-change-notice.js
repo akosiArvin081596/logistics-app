@@ -70,7 +70,7 @@ const path = require("path");
 const { once } = require("events");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined);
 const LIB_PATH = path.join(ROOT, "lib", "password-change-notice.js");
 // lib/sign-in.js, which the login route is handed as `signIn` (absent before
 // that change, when the route never asks). Its flags stay off here: sign-in

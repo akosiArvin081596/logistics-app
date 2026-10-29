@@ -264,6 +264,9 @@ function deleteRoute(w, rec, guardSrc = GUARD_SRC) {
 		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
 		userVoiceNoteFiles: () => [],
 		removeUserVoiceNotes: () => 0,
+		// RATECON_PDF_VIEWER_IDS unset (shipped lib code): no account is protected
+		// (scripts/test-protected-accounts.js covers a set list).
+		RATECON_PDF_VIEWERS: require("../lib/listed-accounts.js").parseListedAccountIds(undefined),
 		DATA_DIR: w.root,
 		fs, path, console: quiet,
 	};

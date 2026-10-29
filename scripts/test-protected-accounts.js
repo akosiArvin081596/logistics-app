@@ -39,11 +39,10 @@
  */
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let passed = 0;
 let failed = 0;
@@ -335,19 +334,21 @@ async function main() {
 	// ── §5 placement ─────────────────────────────────────────────────────────
 	console.log("\n§5 where the checks sit");
 	{
+		// Whole-line comments dropped: the routes' comments may name "await" (prose, not code).
+		const codeOnly = (s) => s.replace(/^[ \t]*\/\/.*$/gm, "");
 		const reRead = PUT_ROUTE.indexOf("\t\tuser = db.prepare(\"SELECT * FROM users WHERE id = ?\").get(id);");
 		const a0 = PUT_ROUTE.indexOf("RATECON_PDF_VIEWERS.protectedChangeRefusal(");
 		const guardA = PUT_ROUTE.indexOf("// (a) Demoting the last Super Admin");
 		const write = PUT_ROUTE.indexOf("db.prepare(`UPDATE users SET ${updates.join(\", \")} WHERE id = ?`)");
 		ok("PUT: the protected check runs on the account as re-read after the last await", reRead > 0 && a0 > reRead);
 		ok("PUT: ...before the last-Super-Admin guard and the write", a0 > 0 && guardA > a0 && write > a0);
-		ok("PUT: ...with no await between it and the write", !/\bawait\b/.test(PUT_ROUTE.slice(a0, write)));
+		ok("PUT: ...with no await between it and the write", !/\bawait\b/.test(codeOnly(PUT_ROUTE.slice(a0, write))));
 		const self = DELETE_ROUTE.indexOf("\"CANNOT_DELETE_SELF\", []);");
 		const a2 = DELETE_ROUTE.indexOf("RATECON_PDF_VIEWERS.protectedChangeRefusal(");
 		const last = DELETE_ROUTE.indexOf("\"LAST_SUPER_ADMIN\", []);");
 		const lock = DELETE_ROUTE.indexOf("userDeleteLockBlockers(user, name)");
 		ok("DELETE: the protected check runs after the self check, before the last-Super-Admin and month-end guards", self > 0 && a2 > self && last > a2 && lock > a2);
-		ok("DELETE: no await between the protected check and the cascade (the route stays synchronous)", !/\bawait\b/.test(DELETE_ROUTE.slice(a2)));
+		ok("DELETE: no await between the protected check and the cascade (the route stays synchronous)", !/\bawait\b/.test(codeOnly(DELETE_ROUTE.slice(a2))));
 	}
 
 	// ── §6 a listed id with no Super Admin account, at start (review L4) ─────

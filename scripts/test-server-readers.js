@@ -71,16 +71,6 @@ const ADMIN = "admin or operator script run on production data: moves to the hel
 	["scripts/personal-expenses-dry-run.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-driver-name-matching.js", owned("fix/personal-receipt-week")],
 	["scripts/test-invoice-week-selection.js", owned("fix/personal-receipt-week")],
-	["scripts/test-account-directory-row-lock.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-driver-rename-clash.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-investor-company-lock.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-invoice-email-body.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-invoice-lines-routes.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-no-production-defaults.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-password-change-notice.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-ratecon-pdf-route.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-session-sockets.js", owned("feat/ratecon-pdf-viewer-gate")],
-	["scripts/test-uploads-root-guard.js", owned("feat/ratecon-pdf-viewer-gate")],
 	["scripts/test-driver-instructions-routes.js", owned("feat/db-download-listed-only")],
 	["scripts/test-refusal-audit-coverage.js", owned("feat/db-download-listed-only")],
 	["scripts/test-broker-column-redaction.js", owned("feat/restore-deleted-loads")],
@@ -113,6 +103,7 @@ const NOT_READERS = new Map([
 const LABELS = new Map([
 	["scripts/test-closed-month-refusal-wording.js", "its file list keeps server.js as a path; the loop reads that entry through the helper"],
 	["scripts/test-kpi-schedule.js", "its two-file list keeps server.js as a name; the filter reads that entry through the helper"],
+	["scripts/test-no-production-defaults.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it"],
 	["scripts/test-pdf-browser-pipe.js", "its source-file list keeps server.js as a path; both sweeps read that entry through the helper"],
 	["scripts/test-ratecon-drive-folder-required.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it"],
 	["scripts/test-replica-snapshot.js", "its source list keeps server.js as a name; the map reads that entry through the helper"],
@@ -125,7 +116,6 @@ const LABELS = new Map([
 const BEFORE_FIRST_MOVE = new Map([
 	["scripts/replica/remote/settings.js", "replica tool that scans a deployed app's server.js and lib/: covers routes/ with the admin scripts' change"],
 	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
-	["scripts/test-no-production-defaults.js", "scans server.js and lib/; changed by open work on feat/ratecon-pdf-viewer-gate, whose owner adds routes/ or the helper"],
 	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
 	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
 ]);

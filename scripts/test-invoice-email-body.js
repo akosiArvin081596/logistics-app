@@ -59,7 +59,7 @@ const ROOT = path.join(__dirname, "..");
 // The draft route's steps live in lib/broker-invoice-draft.js: read with
 // server.js as one text (liftRoutes() splits them again).
 const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
-const SRC = draftLift.withEngine(fs.readFileSync(path.join(ROOT, "server.js"), "utf8"), ROOT);
+const SRC = draftLift.withEngine(require("./lib/server-source").serverSource(), ROOT);
 const LIB_PATH = path.join(ROOT, "lib", "broker-invoice.js");
 const LIB_SRC = fs.readFileSync(LIB_PATH, "utf8");
 // The broker AP inboxes have no default in code; resolveInvoiceTo() reads them
