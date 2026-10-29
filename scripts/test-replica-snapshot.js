@@ -267,11 +267,11 @@ console.log("§3 the settings export copies business settings only");
 	eq("...writing the file 0600", (fs.statSync(path.join(out, "settings.env")).mode & 0o777).toString(8), "600");
 }
 {
-	// This checkout's own server.js and lib/, read the way settings.js reads the
-	// app on the server. Made-up values only.
+	// This checkout's own server.js, routes/ and lib/, read the way settings.js
+	// reads the app on the server. Made-up values only.
 	const app = tmp("replica-settings-real-");
 	const out = tmp("replica-settings-real-out-");
-	for (const f of ["node_modules", "server.js", "lib"]) fs.symlinkSync(path.join(ROOT, f), path.join(app, f));
+	for (const f of ["node_modules", "server.js", "lib", "routes"]) if (fs.existsSync(path.join(ROOT, f))) fs.symlinkSync(path.join(ROOT, f), path.join(app, f));
 	const wanted = {
 		// read as env.NAME on the env a lib/ helper is handed
 		LEDGER_DAY_ONCE_ENABLED: "true", LEDGER_DAY_ONCE_FROM: "2030-01", BROKER_INVOICE_LINES_ENABLED: "true",
