@@ -32,7 +32,14 @@
 //      app's environment reaches neither the wrapper's arguments nor
 //      Chromium's arguments or environment, and nothing but the fixed
 //      environment reaches Chromium, as root (through a copy of the wrapper
-//      with a stand-in setpriv) and not
+//      with a stand-in setpriv) and not; as root the profile folder is then
+//      removed through setpriv as the account
+//   §10 on a local replica: the three flags may be switched on for one task;
+//      CHROMIUM_RUN_AS and CHROMIUM_LAUNCH_ALERT_SEND are never taken
+//   §11 the profile folder's removal: under the uid drop, at shutdown, when the
+//      browser exits and when the launch fails, it is handed to the wrapper as
+//      CHROMIUM_RUN_AS's account and the app never removes it itself; without
+//      the drop a failed launch's folder is removed by the app
 //
 // Every case that can send stubs both alert channels; nothing reaches a real
 // mailbox, notification or network. Temp folders only.
@@ -140,11 +147,12 @@ function fakePuppeteer({ fail = null, proc = null, binary = "/made-up/chrome" } 
 // ---- loading the module against the stand-ins ------------------------------
 // Keeps the stand-ins in place while `fn` runs (the module reads replica mode,
 // the uid and the platform at launch, not at load).
-async function withModule({ fake, replica = false, uid = null, gid = null, platform = null, env = {} }, fn) {
+async function withModule({ fake, replica = false, uid = null, gid = null, platform = null, env = {}, childProcess = null }, fn) {
 	const origRequire = Module.prototype.require;
 	Module.prototype.require = function (id) {
 		if (id === "puppeteer") return fake.puppeteer;
 		if (id === "./replica-mode") return { active: () => replica };
+		if (id === "child_process" && childProcess) return childProcess;
 		return origRequire.apply(this, arguments);
 	};
 	const saved = { getuid: process.getuid, getgid: process.getgid, platform: Object.getOwnPropertyDescriptor(process, "platform") };
@@ -334,14 +342,18 @@ const settle = () => delay(20);
 		{
 			const f = fakePuppeteer({ proc: { pid: 424246, spawnargs: [] }, binary: path.join(realDir, "missing-chrome") });
 			const tmpdir = privateTmp();
+			const removals = [];
+			const childProcess = { ...require("child_process"), execFile: (file, args, opts, cb) => { removals.push([file, ...args]); setImmediate(() => cb(null, "", "")); } };
 			let err = null;
-			await withModule({ fake: f, uid: 0, platform: "darwin", env: { CHROMIUM_UNPRIVILEGED_ENABLED: "true", CHROMIUM_RUN_AS: "made-up-account", TMPDIR: tmpdir } }, async (m) => {
+			await withModule({ fake: f, uid: 0, platform: "darwin", env: { CHROMIUM_UNPRIVILEGED_ENABLED: "true", CHROMIUM_RUN_AS: "made-up-account", TMPDIR: tmpdir }, childProcess }, async (m) => {
 				stubChannels(m);
 				err = await launchOnce(m);
 			});
 			eq("§3 a binary that isn't there: nothing starts", f.calls.length, 0);
 			eq("§3 ...and the launch fails with CHROMIUM_BINARY_MISSING", err && err.code, "CHROMIUM_BINARY_MISSING");
-			eq("§3 ...and its profile folder is removed", profilesIn(tmpdir), []);
+			const made = profilesIn(tmpdir);
+			eq("§3 ...and its profile folder's removal goes to the wrapper (the folder is the account's under the drop)",
+				removals, made.length === 1 ? [[WRAPPER, "--remove-profile", path.join(tmpdir, made[0])]] : ["one folder"]);
 		}
 	}
 
@@ -607,16 +619,15 @@ const fs = require("fs");
 fs.writeFileSync(${JSON.stringify(recordDir)} + "/chromium-" + process.pid + ".json", JSON.stringify({ argv: process.argv.slice(2), env: process.env }));
 process.exit(1);
 `, { mode: 0o755 });
+		// Records its arguments and replaces itself with what follows "--", as the
+		// real setpriv does (bash's own PWD and OLDPWD left out, as the wrapper does).
 		const fakeSetpriv = path.join(dir, "fake-setpriv");
-		fs.writeFileSync(fakeSetpriv, `#!${process.execPath}
-"use strict";
-const fs = require("fs");
-const { spawn } = require("child_process");
-const args = process.argv.slice(2);
-fs.writeFileSync(${JSON.stringify(recordDir)} + "/setpriv-" + process.pid + ".json", JSON.stringify({ argv: args, env: process.env }));
-const target = args.slice(args.indexOf("--") + 1);
-const c = spawn(target[0], target.slice(1), { stdio: ["inherit", "inherit", "inherit", 3, 4], env: process.env });
-c.on("exit", (code) => process.exit(code === null ? 1 : code));
+		fs.writeFileSync(fakeSetpriv, `#!/bin/bash
+printf '%s\\0' "$@" > ${JSON.stringify(recordDir)}/setpriv-$$.args
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+unset PWD OLDPWD
+exec "$@"
 `, { mode: 0o755 });
 		// A copy of lib/ whose wrapper runs the stand-in setpriv: the drop path,
 		// end to end, without root.
@@ -651,7 +662,10 @@ m.getBrowser().then(() => { console.log("LAUNCHED"); process.exit(3); }, (err) =
 				SESSION_SECRET: SECRET,
 			},
 		});
-		const records = (prefix) => fs.readdirSync(recordDir).filter((f) => f.startsWith(prefix)).map((f) => JSON.parse(fs.readFileSync(path.join(recordDir, f), "utf8")));
+		const records = (prefix) => fs.readdirSync(recordDir).filter((f) => f.startsWith(prefix)).map((f) => {
+			const text = fs.readFileSync(path.join(recordDir, f), "latin1");
+			return f.endsWith(".args") ? { argv: text.split("\0").slice(0, -1) } : JSON.parse(text);
+		});
 		const allowed = new Set(["PATH", "HOME", "LANG", "TZ", "SHLVL", "_", ...(process.platform === "darwin" ? ["__CF_USER_TEXT_ENCODING"] : [])]);
 
 		// Not root: Puppeteer starts the stand-in Chromium itself.
@@ -673,16 +687,87 @@ m.getBrowser().then(() => { console.log("LAUNCHED"); process.exit(3); }, (err) =
 		ok("§9 as root: the launch went through the wrapper and failed as the stand-in exits", /FAILED/.test(b.stdout || ""), `${b.stdout}${b.stderr}`);
 		const sp = records("setpriv-");
 		const chB = records("chromium-");
-		eq("§9 as root: setpriv ran once, and Chromium once", [sp.length, chB.length], [1, 1]);
-		if (sp[0]) {
-			const wrapperArgs = sp[0].argv.slice(sp[0].argv.indexOf("--") + 2);
+		// setpriv runs twice: Chromium, then the profile folder's removal as the account.
+		const launchRun = sp.find((r) => r.argv.some((x) => x.startsWith("--user-data-dir=")));
+		const removalRun = sp.find((r) => r.argv.includes("/bin/rm"));
+		eq("§9 as root: setpriv ran twice (Chromium, then the removal), and Chromium once", [sp.length, !!launchRun, !!removalRun, chB.length], [2, true, true, 1]);
+		if (launchRun) {
+			const wrapperArgs = launchRun.argv.slice(launchRun.argv.indexOf("--") + 2);
 			ok("§9 as root: the made-up secret is not in the wrapper's arguments", !JSON.stringify(wrapperArgs).includes(SECRET));
-			ok("§9 as root: setpriv's own arguments carry no secret either", !JSON.stringify(sp[0].argv).includes(SECRET));
+			ok("§9 as root: setpriv's own arguments carry no secret either", !JSON.stringify(sp.map((r) => r.argv)).includes(SECRET));
+			const profile = (launchRun.argv.find((x) => x.startsWith("--user-data-dir=")) || "").slice(16);
+			const me = os.userInfo();
+			eq("§9 as root: the profile folder is removed through setpriv as the account, recursively only there",
+				removalRun && removalRun.argv, [`--reuid=${me.uid}`, `--regid=${me.gid}`, "--clear-groups", "--no-new-privs", "--inh-caps=-all", "--", "/bin/rm", "-rf", "--", profile]);
+			ok("§9 as root: ...and it is gone", !!profile && !fs.existsSync(profile), profile);
 		}
 		if (chB[0]) {
 			ok("§9 as root: the made-up secret is in neither Chromium's arguments nor its environment", !JSON.stringify(chB[0]).includes(SECRET));
 			const names = Object.keys(chB[0].env);
 			ok("§9 as root: Chromium's environment is the fixed one, the hand-over variables gone", names.every((n) => allowed.has(n)) && !names.some((n) => n.startsWith("LOGISX_")), names.join(" "));
+		}
+	}
+
+	// ─────────────────────────────────────────────── §11 removing the profile folder
+	console.log("§11 removing the profile folder");
+	{
+		// Under the drop the folder is the account's: the app hands its removal to
+		// the wrapper, as that account, and never walks it itself. The stand-in
+		// child_process records the call and removes nothing, so a folder still
+		// there afterwards shows the app's own removal never ran.
+		const recordingChildProcess = (calls) => ({
+			...require("child_process"),
+			execFile: (file, args, opts, cb) => { calls.push({ file, args, env: opts && opts.env }); setImmediate(() => cb(null, "", "")); },
+		});
+		const removalAsAccount = (calls, dir) => calls.filter((c) => c.file === WRAPPER && JSON.stringify(c.args) === JSON.stringify(["--remove-profile", dir])
+			&& c.env && c.env.LOGISX_CHROMIUM_ACCOUNT === "made-up-account" && Object.keys(c.env).length === 1).length;
+		const dropEnv = (tmpdir) => ({ CHROMIUM_UNPRIVILEGED_ENABLED: "true", CHROMIUM_RUN_AS: "made-up-account", TMPDIR: tmpdir });
+		for (const [label, run] of [
+			["at shutdown", async (m) => { await launched(m); await m.shutdownBrowser(); }],
+			["when the browser exits", async (m, fake) => { await launched(m); fake.proc.emit("exit", 0, null); await delay(50); }],
+			["when the launch fails", async (m) => { await launchOnce(m); }],
+		]) {
+			const tmpdir = privateTmp();
+			const calls = [];
+			const failing = label === "when the launch fails";
+			const fake = fakePuppeteer({ fail: failing ? new Error("made-up launch failure") : null, binary: process.execPath });
+			if (!failing) {
+				fake.puppeteer.launch = (orig => async (opts) => {
+					const b = await orig(opts);
+					const proc = new (require("events"))();
+					proc.pid = 424250;
+					proc.spawnargs = [WRAPPER];
+					b.process = () => proc;
+					fake.proc = proc;
+					return b;
+				})(fake.puppeteer.launch);
+			}
+			await withModule({ fake, uid: 0, platform: "darwin", env: dropEnv(tmpdir), childProcess: recordingChildProcess(calls) }, async (m) => {
+				stubChannels(m);
+				await run(m, fake);
+				await settle();
+			});
+			const made = profilesIn(tmpdir);
+			eq(`§11 under the drop, ${label}: one profile folder was made`, made.length, 1);
+			const dir = path.join(tmpdir, made[0] || "");
+			ok(`§11 under the drop, ${label}: its removal is handed to the wrapper, as CHROMIUM_RUN_AS's account, with nothing else in its environment`,
+				removalAsAccount(calls, dir) >= 1, JSON.stringify(calls));
+			ok(`§11 under the drop, ${label}: the app never removes it itself`, made.length === 1 && fs.existsSync(dir));
+			fs.rmSync(tmpdir, { recursive: true, force: true });
+		}
+		// Without the drop the folder is the app's own: a failed launch removes it.
+		{
+			const tmpdir = privateTmp();
+			const calls = [];
+			const fake = fakePuppeteer({ fail: new Error("made-up launch failure") });
+			await withModule({ fake, uid: 1000, platform: "darwin", env: { CHROMIUM_UNPRIVILEGED_ENABLED: "true", TMPDIR: tmpdir }, childProcess: recordingChildProcess(calls) }, async (m) => {
+				stubChannels(m);
+				await launchOnce(m);
+				await settle();
+			});
+			eq("§11 not root, a launch that fails: its profile folder is removed", profilesIn(tmpdir), []);
+			eq("§11 ...by the app itself, with no wrapper", calls.filter((c) => c.file === WRAPPER).length, 0);
+			ok("§11 ...and the launch was tried with one", fake.calls.length === 1 && typeof (fake.calls[0] || {}).userDataDir === "string");
 		}
 	}
 

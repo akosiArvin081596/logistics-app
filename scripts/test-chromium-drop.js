@@ -15,7 +15,17 @@
 //   §4 the root case, as root on Linux only (CI runs it under sudo in its own
 //      workflow; this runner never calls sudo): the stand-in runs as the
 //      account with no groups, NoNewPrivs set and no capabilities, and a
-//      process-group SIGKILL reaches it and a child it started
+//      process-group SIGKILL reaches it and a child it started; a profile
+//      folder already owned by another account is refused; --remove-profile
+//      removes the account's folder as the account, and a link planted inside
+//      it leads nowhere outside
+//   §5 --remove-profile, with a stand-in setpriv: a handed-over folder is
+//      removed only through setpriv with the account's ids, and a link planted
+//      inside it leaves what it points at alone; a folder never handed over
+//      goes only when empty, never recursively; a link in the folder's place,
+//      a path that isn't a plain profile path, its parent a link, root or a
+//      missing account: each exits 1 and removes nothing; an absent folder is
+//      already done
 //
 // §2 and §3 run a copy of the wrapper whose setpriv path points at the
 // stand-in; the copy differs from lib/chromium-drop.sh in that one line only.
@@ -99,22 +109,17 @@ if (mode === "echo") {
 	return file;
 }
 
-// A stand-in setpriv: records its arguments and environment, then runs what
-// follows "--" with the same environment and fds 0-4 (the real one replaces
-// itself; for §2 and §3 only what reaches Chromium matters).
+// A stand-in setpriv: records its arguments, then replaces itself with what
+// follows "--", as the real one does, so the pid, the environment and any
+// open fds carry over (bash's own PWD and OLDPWD left out, as the wrapper does).
 function writeFakeSetpriv(dir) {
 	const file = path.join(dir, "fake-setpriv");
-	fs.writeFileSync(file, `#!${process.execPath}
-"use strict";
-const fs = require("fs");
-const path = require("path");
-const { spawn } = require("child_process");
-const args = process.argv.slice(2);
-fs.writeFileSync(path.join(${JSON.stringify(dir)}, "setpriv-record.json"), JSON.stringify({ argv: args, env: process.env }));
-const at = args.indexOf("--");
-const target = args.slice(at + 1);
-const c = spawn(target[0], target.slice(1), { stdio: ["inherit", "inherit", "inherit", 3, 4], env: process.env });
-c.on("exit", (code, signal) => process.exit(signal ? 1 : code));
+	fs.writeFileSync(file, `#!/bin/bash
+printf '%s\\0' "$@" > ${JSON.stringify(path.join(dir, "setpriv-args"))}
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+unset PWD OLDPWD
+exec "$@"
 `);
 	fs.chmodSync(file, 0o755);
 	return file;
@@ -164,9 +169,12 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 	ok("§1 setpriv is called by its absolute path, from one line", wrapperText.split(SETPRIV_LINE).length === 2);
 	const code = codeLines(wrapperText);
 	const execLines = code.filter((l) => /\bexec\b/.test(l));
-	eq("§1 one exec: setpriv in place, with the account's ids, no groups, no new privileges, no inheritable capabilities",
+	eq("§1 two execs, both setpriv in place with the account's ids, no groups, no new privileges, no inheritable capabilities: the removal, then the browser",
 		execLines.map((l) => l.trim()),
-		['exec "$SETPRIV" --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs --inh-caps=-all -- "$binary" "$@"']);
+		['exec "$SETPRIV" --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs --inh-caps=-all -- /bin/rm -rf -- "$profile"',
+			'exec "$SETPRIV" --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs --inh-caps=-all -- "$binary" "$@"']);
+	ok("§1 the only recursive removal is that one, run as the account; root removes only an empty folder (rmdir)",
+		code.filter((l) => /\brm\b/.test(l)).length === 1 && code.some((l) => /command -p rmdir -- "\$profile"/.test(l)));
 	ok("§1 never sudo (it closes the control pipe's fds 3 and 4)", !code.some((l) => /\bsudo\b/.test(l)));
 	ok("§1 the hand-over variables are removed before Chromium starts",
 		code.some((l) => l.trim() === "unset LOGISX_CHROMIUM_BINARY LOGISX_CHROMIUM_ACCOUNT"));
@@ -182,7 +190,11 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 	const changedLines = copyText.split("\n").filter((l, i) => l !== wrapperText.split("\n")[i]);
 	eq("§2 the copy differs from the wrapper in its setpriv line only", changedLines, copy ? [`SETPRIV=${fakeSetpriv}`] : []);
 
-	const setprivRecord = path.join(fakeDir, "setpriv-record.json");
+	const setprivRecord = path.join(fakeDir, "setpriv-args");
+	// The stand-in setpriv's arguments, NUL-separated as it wrote them.
+	const readSetpriv = () => {
+		try { return { argv: fs.readFileSync(setprivRecord, "latin1").split("\0").slice(0, -1) }; } catch { return null; }
+	};
 	const chromiumRecord = path.join(recordDir, "fake-chromium-record.json");
 	const clearRecords = () => { fs.rmSync(setprivRecord, { force: true }); fs.rmSync(chromiumRecord, { force: true }); };
 	const baseEnv = (profile, extra = {}) => ({
@@ -204,7 +216,7 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 		const profile = freshProfile();
 		const args = chromiumArgs(profile, ["--fake-mode=echo"]);
 		const r = await runWrapper(copy, { args, env: baseEnv(profile), echo: "ping-made-up-0001" });
-		const sp = readJson(setprivRecord);
+		const sp = readSetpriv();
 		const ch = readJson(chromiumRecord);
 		eq("§2 the run ends as the stand-in Chromium ends (exit 0)", [r.code, r.signal], [0, null]);
 		ok("§2 fds 3 and 4 arrive", !!ch && ch.fd3 === true && ch.fd4 === true, JSON.stringify(ch && { fd3: ch.fd3, fd4: ch.fd4 }));
@@ -339,8 +351,123 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8
 			}
 			ok("§4 ...and the child it started", gone);
 		}
-		fs.rmSync(profile, { recursive: true, force: true });
-		fs.rmSync(shared, { recursive: true, force: true });
+		// The removal, as the account: a link planted inside the folder must not
+		// lead the removal to what it points at (a root-owned made-up folder).
+		const outside = fs.mkdtempSync(path.join("/tmp", "logisx-chromium-drop-outside-"));
+		fs.writeFileSync(path.join(outside, "made-up-keep.txt"), "made-up");
+		try { fs.symlinkSync(outside, path.join(profile, "planted-link")); } catch { /* the folder is gone: reported below */ }
+		const removal = spawnSync(WRAPPER, ["--remove-profile", profile], { env: { LOGISX_CHROMIUM_ACCOUNT: account }, encoding: "utf8", timeout: 15000 });
+		eq("§4 --remove-profile removes the account's folder (exit 0)", removal.status, 0);
+		ok("§4 ...the folder is gone", !fs.existsSync(profile), removal.stderr);
+		ok("§4 ...and what a link planted inside pointed at is untouched", fs.existsSync(path.join(outside, "made-up-keep.txt")));
+		// Never handed over (still root's): removed only when empty.
+		const kept = freshProfile("/tmp");
+		fs.writeFileSync(path.join(kept, "made-up"), "x");
+		const keptRun = spawnSync(WRAPPER, ["--remove-profile", kept], { env: { LOGISX_CHROMIUM_ACCOUNT: account }, encoding: "utf8", timeout: 15000 });
+		ok("§4 a root-owned folder that isn't empty is left in place (exit 1)", keptRun.status === 1 && fs.existsSync(path.join(kept, "made-up")), keptRun.stderr);
+		const empty = freshProfile("/tmp");
+		const emptyRun = spawnSync(WRAPPER, ["--remove-profile", empty], { env: { LOGISX_CHROMIUM_ACCOUNT: account }, encoding: "utf8", timeout: 15000 });
+		ok("§4 ...an empty one is removed", emptyRun.status === 0 && !fs.existsSync(empty), emptyRun.stderr);
+		// The owner check: a folder another account already owns is refused.
+		const taken = freshProfile("/tmp");
+		fs.chownSync(taken, uid, gid);
+		const takenRun = spawnSync(WRAPPER, chromiumArgs(taken), { env: { PATH: "/usr/bin:/bin", HOME: taken, LOGISX_CHROMIUM_BINARY: rootFake, LOGISX_CHROMIUM_ACCOUNT: account }, encoding: "utf8", timeout: 15000 });
+		ok("§4 a profile folder another account already owns is refused (exit 1, said why)",
+			takenRun.status === 1 && /not owned by this user/.test(takenRun.stderr) && !fs.existsSync(path.join(taken, "fake-chromium-record.json")), takenRun.stderr);
+		for (const d of [profile, kept, empty, taken, outside, shared]) fs.rmSync(d, { recursive: true, force: true });
+	}
+
+	console.log("§5 --remove-profile, with a stand-in setpriv");
+	if (!copy) {
+		ok("§5 not run: the wrapper is missing", false);
+	} else {
+		const removeRun = (target, env) => spawnSync(copy, ["--remove-profile", ...(target === undefined ? [] : [target])], { env, encoding: "utf8", timeout: 15000 });
+		const asMe = { LOGISX_CHROMIUM_ACCOUNT: ME.username };
+		const nothingRan = () => !fs.existsSync(setprivRecord);
+		// Handed over (owned by the account; here, this user): removed through
+		// setpriv with the account's ids, the link inside left as a link.
+		{
+			clearRecords();
+			const profile = freshProfile();
+			const outside = fs.mkdtempSync(path.join(TMP, "outside-"));
+			fs.writeFileSync(path.join(outside, "made-up-keep.txt"), "made-up");
+			fs.mkdirSync(path.join(profile, "Default"));
+			fs.writeFileSync(path.join(profile, "Default", "made-up-state"), "x");
+			fs.symlinkSync(outside, path.join(profile, "planted-link"));
+			fs.symlinkSync(outside, path.join(profile, "Default", "planted-deeper"));
+			const r = removeRun(profile, asMe);
+			const sp = readSetpriv();
+			eq("§5 a handed-over folder: exit 0", r.status, 0);
+			eq("§5 ...removed only through setpriv, as the account, with no groups and no new privileges",
+				sp && sp.argv, [`--reuid=${ME.uid}`, `--regid=${ME.gid}`, "--clear-groups", "--no-new-privs", "--inh-caps=-all", "--", "/bin/rm", "-rf", "--", profile]);
+			ok("§5 ...the folder is gone", !fs.existsSync(profile));
+			ok("§5 ...and the links planted inside led nowhere: what they pointed at is untouched",
+				fs.existsSync(path.join(outside, "made-up-keep.txt")) && fs.readdirSync(outside).length === 1);
+		}
+		// Never handed over: the folder is this user's and the account another's.
+		{
+			clearRecords();
+			const profile = freshProfile();
+			fs.writeFileSync(path.join(profile, "made-up"), "x");
+			const r = removeRun(profile, { LOGISX_CHROMIUM_ACCOUNT: "nobody" });
+			ok("§5 never handed over and not empty: exit 1, left in place, never removed recursively",
+				r.status === 1 && /never handed over and is not empty/.test(r.stderr) && fs.existsSync(path.join(profile, "made-up")) && nothingRan(), r.stderr);
+			fs.rmSync(path.join(profile, "made-up"));
+			clearRecords();
+			const r2 = removeRun(profile, { LOGISX_CHROMIUM_ACCOUNT: "nobody" });
+			ok("§5 ...and once empty, removed, with no setpriv", r2.status === 0 && !fs.existsSync(profile) && nothingRan(), r2.stderr);
+		}
+		// Refusals: nothing removed, setpriv never runs.
+		const refuse = (label, why, setup) => {
+			clearRecords();
+			const s = setup();
+			const r = removeRun(s.target, s.env || asMe);
+			ok(`§5 ${label}: exit 1, saying why (${why})`, r.status === 1 && r.stderr.trim() === `chromium-drop: ${why}`, r.stderr.trim());
+			ok(`§5 ${label}: nothing removed, setpriv never ran`, nothingRan() && (!s.keep || s.keep.every((p) => fs.existsSync(p))));
+			if (s.cleanup) s.cleanup();
+		};
+		refuse("a link in the folder's place", "the profile folder is a link; it is left in place", () => {
+			const parent = fs.mkdtempSync(path.join(TMP, "linkplace-"));
+			const outside = fs.mkdtempSync(path.join(TMP, "outside-"));
+			fs.writeFileSync(path.join(outside, "made-up-keep.txt"), "made-up");
+			const link = path.join(parent, "puppeteer_dev_chrome_profile-Lnk123");
+			fs.symlinkSync(outside, link);
+			return { target: link, keep: [link, path.join(outside, "made-up-keep.txt")] };
+		});
+		refuse("a relative path", "the profile folder is not an absolute path", () => {
+			const p = freshProfile();
+			return { target: path.relative(process.cwd(), p), keep: [p], cleanup: () => fs.rmSync(p, { recursive: true, force: true }) };
+		});
+		refuse("a path with ..", "the profile folder is not a plain path", () => {
+			const p = freshProfile();
+			return { target: `${path.dirname(p)}/../${path.basename(path.dirname(p))}/${path.basename(p)}`, keep: [p], cleanup: () => fs.rmSync(p, { recursive: true, force: true }) };
+		});
+		refuse("a folder not named like Puppeteer's profile", "the profile folder is not a Puppeteer profile folder", () => {
+			const p = fs.mkdtempSync(path.join(TMP, "not-a-profile-"));
+			return { target: p, keep: [p] };
+		});
+		refuse("a folder whose parent is a link", "the profile folder's parent is a link", () => {
+			const p = freshProfile();
+			const linkParent = fs.mkdtempSync(path.join(TMP, "linkparent-"));
+			const link = path.join(linkParent, "parent");
+			fs.symlinkSync(path.dirname(p), link);
+			return { target: path.join(link, path.basename(p)), keep: [p], cleanup: () => fs.rmSync(p, { recursive: true, force: true }) };
+		});
+		refuse("root as the account", "the account is root", () => {
+			const p = freshProfile();
+			return { target: p, env: { LOGISX_CHROMIUM_ACCOUNT: "root" }, keep: [p], cleanup: () => fs.rmSync(p, { recursive: true, force: true }) };
+		});
+		refuse("no account", "the account is missing or is not a plain account name", () => {
+			const p = freshProfile();
+			return { target: p, env: {}, keep: [p], cleanup: () => fs.rmSync(p, { recursive: true, force: true }) };
+		});
+		refuse("no folder named", "--remove-profile takes one folder", () => ({ target: undefined }));
+		{
+			clearRecords();
+			const gone = path.join(os.tmpdir(), "puppeteer_dev_chrome_profile-Gone99");
+			const r = removeRun(gone, asMe);
+			ok("§5 a folder already gone: exit 0, nothing run", r.status === 0 && nothingRan(), r.stderr);
+		}
 	}
 
 	console.log(`\n${pass} passed, ${failures.length} failed`);
