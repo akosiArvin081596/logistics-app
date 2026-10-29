@@ -97,6 +97,7 @@ const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor, openDb } = require("./lib/ledger-world");
 const { isCalendarDay, weekdayOf, cents, usd, parseJson, INSERT_AUDIT } = require("./create-correction-invoice-draft");
 const driverRateOnly = require("../lib/driver-rate-only");
@@ -192,9 +193,9 @@ function readOptions(argv) {
 // reads (null: the real clock).
 const LIFTS = new Map();
 function liftFor(root) {
-	const file = path.join(root, "server.js");
-	if (!LIFTS.has(file)) LIFTS.set(file, closure(fs.readFileSync(file, "utf8"), { roots: ROOTS, provided: PROVIDED, denied: DENIED }));
-	return LIFTS.get(file);
+	const key = path.resolve(root);
+	if (!LIFTS.has(key)) LIFTS.set(key, closure(serverSource({ root }), { roots: ROOTS, provided: PROVIDED, denied: DENIED }));
+	return LIFTS.get(key);
 }
 function buildWorld({ root = ROOT, db, env = {}, dataDir, render = null, log = console, now = null }) {
 	const lifted = liftFor(root);

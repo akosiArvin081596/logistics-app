@@ -8,8 +8,8 @@
 //   const SRC = serverSource();
 //
 // Which server.js: SERVER_JS names one file (a base from before routes/
-// existed); SERVER_ROOT names a folder holding a base's server.js and routes/
-// (for instance `git archive <base> server.js routes | tar -x -C <dir>`). A
+// existed); SERVER_ROOT names a full checkout of a base (for instance
+// `git worktree add <dir> <base>`: runners read lib/ from it too). A
 // caller's own { file } or { root } wins over both; setting both is an error.
 // Following either prints one line on stderr per process.
 //
@@ -29,7 +29,10 @@ const { DECL_START_RE } = require("./server-lift");
 const REPO_ROOT = path.join(__dirname, "..", "..");
 const SERVER_FILE = "server.js";
 const MOUNT_RE = /^require\("\.\/routes\/([a-z0-9]+(?:-[a-z0-9]+)*)"\)\(ROUTE_CONTEXT\);$/;
-const ROUTE_REF_RE = /\brequire\s*\(\s*["'`]\.\/routes\b/;
+// A require of anything under routes/, as a literal or a built path, so a mount
+// in another form is refused rather than left out of the splice.
+const ROUTE_REF_RE = /\brequire\s*\(\s*(?:["'`]\.\/routes\b|path\.(?:join|resolve)\([^)]*["'`]\.?\/?routes\b)/;
+const CONTEXT_NAME_RE = /^\t[A-Za-z_$][\w$]*,$/;
 const CATCH_ALL_HEAD = 'app.get("*", ';
 const MODULE_HEAD = "module.exports = function mount({";
 const MODULE_HEAD_END = "}) {";
@@ -190,17 +193,25 @@ function serverSource(opts) {
 }
 
 // The 1-based lines { first, last } of the ROUTE_CONTEXT block in `text` (its
-// `const ROUTE_CONTEXT = {` line through the `};` closing it), or null. The
-// block only lists names, so an inventory of where a name is used skips it.
+// `const ROUTE_CONTEXT = {` line through the `};` closing it), or null. An
+// inventory of where a name is used skips the block, so it must list plain
+// names only (one per line, as generated): anything else throws.
 function routeContextLines(text) {
 	const lines = text.split("\n");
 	const heads = lines.reduce((out, l, i) => (l.startsWith(ROUTE_CONTEXT_HEAD) ? [...out, i] : out), []);
 	if (!heads.length) return null;
 	if (heads.length > 1) throw new Error("server-source: ROUTE_CONTEXT is declared twice");
 	const head = heads[0];
-	if (lines[head].endsWith(MODULE_END)) return { first: head + 1, last: head + 1 };
+	const notName = (i, l) => new Error(`server-source: ROUTE_CONTEXT line ${i + 1} is not a plain name (${JSON.stringify(l.slice(0, 80))}); the block lists names only`);
+	if (lines[head].endsWith(MODULE_END)) {
+		const inner = lines[head].slice(ROUTE_CONTEXT_HEAD.length, -MODULE_END.length);
+		const bad = inner.split(",").map((n) => n.trim()).find((n, k, all) => (n ? !IDENT_RE.test(n) : k < all.length - 1));
+		if (bad !== undefined) throw notName(head, lines[head]);
+		return { first: head + 1, last: head + 1 };
+	}
 	const end = lines.indexOf(MODULE_END, head + 1);
 	if (end < 0) throw new Error("server-source: the ROUTE_CONTEXT block never closes");
+	for (let i = head + 1; i < end; i++) if (!CONTEXT_NAME_RE.test(lines[i])) throw notName(i, lines[i]);
 	return { first: head + 1, last: end + 1 };
 }
 

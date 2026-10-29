@@ -40,6 +40,7 @@ const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { parseArgs, sheetFor, envFor } = require("./lib/ledger-world");
 
 const ROOT = path.join(__dirname, "..");
@@ -58,7 +59,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // table, "derived" the sources lib/personal-expense.js builds (over the TEMP
 // expense_personal of this connection).
 function buildDryRunWorld({ db, sheetData, env = {}, DateImpl = Date }) {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = serverSource({ root: ROOT });
 	const appRequire = createRequire(path.join(ROOT, "server.js"));
 	const personalExpense = appRequire("./lib/personal-expense");
 	const lifted = closure(SRC, { roots: ROOTS, provided: PROVIDED, denied: DENIED });

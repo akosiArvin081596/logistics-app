@@ -25,9 +25,11 @@
 
 const fs = require("fs");
 const path = require("path");
+const { serverSource } = require("./lib/server-source");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+// ROOT's server.js with its route modules spliced in (scripts/lib/server-source.js).
+const SRC = serverSource({ root: ROOT });
 const loadHaul = require(path.join(ROOT, "lib", "load-haul"));
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
 
