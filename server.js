@@ -4952,6 +4952,11 @@ function eldDeviceLinkedSinceMs(truckId, vid) {
 	return eldPosition.linkedSinceMs(row);
 }
 
+// ELD_APP_DAY_ENABLED, off unless exactly "true": on, the day-to-truck lookup the miles rollups and
+// mileage routes read counts a device link's bounds on their business day (appDay()), not their UTC
+// day (already tomorrow from 8 PM EDT, 7 PM EST), so an evening re-point day goes to the newer truck.
+const ELD_APP_DAY_ENABLED = process.env.ELD_APP_DAY_ENABLED === "true";
+
 function buildEldDeviceResolver() {
 	const rows = db.prepare(
 		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments`
@@ -4959,7 +4964,11 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
+	return eldMiles.buildDeviceTruckResolver(rows, {
+		startMs: eldDeviceHistoryStartMs(), currentLinks,
+		// Off: each bound's UTC day, as before.
+		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+	});
 }
 
 // After every table exists (server_state is created further down this file).
