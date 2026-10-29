@@ -194,7 +194,8 @@ case "$1" in
 esac
 `,
 	curl: `#!/bin/bash\n${LOG}\nlog curl "\${STUB_AS:--}" "$@"\nurl=\${@: -1}\nport=\${url#http://127.0.0.1:}\nport=\${port%%/*}\ncode=200\n[ ! -f "$STUB_STATE/curl-$port" ] || code=$(cat "$STUB_STATE/curl-$port")\nprintf '%s' "$code"\n`,
-	sleep: `#!/bin/bash\nexec ${REAL_SLEEP} 0.01\n`,
+	// Short, but long enough that the account lock's holder answers well inside the script's wait.
+	sleep: `#!/bin/bash\nexec ${REAL_SLEEP} 0.03\n`,
 	date: `#!/bin/bash
 now=$(cat "$STUB_STATE/now")
 fmt=+%c
