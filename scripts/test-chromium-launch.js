@@ -201,6 +201,12 @@ function stubChannels(m, { to = ADMIN } = {}) {
 async function launchOnce(m) {
 	try { await m.getBrowser(); return null; } catch (err) { return err; }
 }
+// A launch a case needs: a failure is reported as one, not a crash.
+async function launched(m) {
+	const err = await launchOnce(m);
+	ok("a launch the case needs goes ahead", err === null, err && (err.code || err.message));
+	return err === null;
+}
 const settle = () => delay(20);
 
 (async () => {
@@ -211,7 +217,7 @@ const settle = () => delay(20);
 			const fake = fakePuppeteer();
 			await withModule({ fake, replica, uid, env: { CHROMIUM_RUN_AS: "made-up-account" } }, async (m) => {
 				stubChannels(m);
-				await m.getBrowser();
+				await launched(m);
 				const page = await m.openPageWithContent("<p>x</p>");
 				await page.close();
 				await m.shutdownBrowser();
@@ -226,7 +232,7 @@ const settle = () => delay(20);
 		const fake = fakePuppeteer();
 		await withModule({ fake, uid: 0, env: { CHROMIUM_UNPRIVILEGED_ENABLED: value, CHROMIUM_REQUEST_ALLOWLIST_ENABLED: value, CHROMIUM_SANDBOX_ENABLED: value, CHROMIUM_RUN_AS: "made-up-account" } }, async (m) => {
 			stubChannels(m);
-			await m.getBrowser();
+			await launched(m);
 			await m.shutdownBrowser();
 		});
 		eq(`§1 the flags read ${JSON.stringify(value)} as off (the shape is === "true")`, fake.calls, [todaysOptions(false)]);
@@ -256,7 +262,7 @@ const settle = () => delay(20);
 				fake.proc = proc;
 				return b;
 			})(fake.puppeteer.launch);
-			await m.getBrowser();
+			await launched(m);
 			const opts = fake.calls[0] || {};
 			ok("§2 one launch", fake.calls.length === 1);
 			const dir = opts.userDataDir;
@@ -277,7 +283,7 @@ const settle = () => delay(20);
 		const fake = fakePuppeteer({ proc: { pid: 424243, spawnargs: [] } });
 		await withModule({ fake, uid: 1000, platform: "darwin", env: { CHROMIUM_UNPRIVILEGED_ENABLED: "true", LANG: undefined, TZ: undefined, TMPDIR: privateTmp() } }, async (m) => {
 			stubChannels(m);
-			await m.getBrowser();
+			await launched(m);
 			const opts = fake.calls[0] || {};
 			eq("§2 LANG and TZ are left out when the app has none", Object.keys(opts.env || {}).sort(), ["HOME", "PATH"]);
 			const dir = opts.userDataDir;
@@ -297,7 +303,7 @@ const settle = () => delay(20);
 		const fake = fakePuppeteer({ proc: { pid: 424244, spawnargs: [] }, binary: link });
 		await withModule({ fake, uid: 0, platform: "darwin", env: { CHROMIUM_UNPRIVILEGED_ENABLED: "true", CHROMIUM_RUN_AS: "made-up-account", LOGISX_MADE_UP_TOKEN: SECRET } }, async (m) => {
 			stubChannels(m);
-			await m.getBrowser();
+			await launched(m);
 			const opts = fake.calls[0] || {};
 			eq("§3 the browser Puppeteer starts is the wrapper", opts.executablePath, WRAPPER);
 			eq("§3 the wrapper gets the real binary, resolved through links", opts.env && opts.env.LOGISX_CHROMIUM_BINARY, fs.realpathSync(real));
@@ -349,7 +355,7 @@ const settle = () => delay(20);
 		await withModule({ fake, uid, platform: "darwin", env: { CHROMIUM_SANDBOX_ENABLED: "true", ...extraEnv } }, async (m) => {
 			stubChannels(m);
 			fake.puppeteer.executablePath = async () => process.execPath;
-			await m.getBrowser();
+			await launched(m);
 			await m.shutdownBrowser();
 		});
 		const opts = fake.calls[0] || {};
@@ -475,7 +481,7 @@ const settle = () => delay(20);
 		let line = null;
 		await withModule({ fake, uid: 0, env: { CHROMIUM_SANDBOX_ENABLED: "true" } }, async (m) => {
 			stubChannels(m);
-			await m.getBrowser();
+			await launched(m);
 			line = typeof m.describeChromiumControls === "function" ? m.describeChromiumControls() : null;
 			await m.shutdownBrowser();
 		});
