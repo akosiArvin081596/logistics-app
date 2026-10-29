@@ -467,8 +467,18 @@ passwd_of() {
 # The deploy scripts' lock layout: one folder per deploying account, and one file per app folder.
 lock_name() { printf 'logisx-deploy%s.lock' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
 lock_dir_ok() { real_dir "$1" && [ "$(uid_of "$1")" = "$2" ] && [ "$(mode_of "$1")" = 700 ]; }
-# Reads a pm2 daemon's pid file only: a missing daemon is never started to look.
-daemon_up() { local pid; pid=$(js pid "$1/pm2.pid"); [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }
+# Reads a pm2 daemon's pid file only: a missing daemon is never started to look. Root's own file is read
+# here; the account's through the helper, which never follows a link or waits on a pipe.
+daemon_up() {
+	local pid=""
+	[ -e "$1/pm2.pid" ] || [ -L "$1/pm2.pid" ] || return 1
+	if [ "$1" = "$ROOT_HOME/.pm2" ]; then
+		real_file "$1/pm2.pid" && IFS= read -r pid < "$1/pm2.pid"
+	else
+		pid=$(js pid "$1/pm2.pid")
+	fi
+	[[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
 # $1 the list file: prints "<entries> <times our app is listed> <id:status ...>", and fails on no list.
 root_list() { pm2_root jlist > "$TMPD/jlist.raw" 2>/dev/null; js list "$TMPD/jlist.raw" "$1" "$NAME"; }
 acct_list() { pm2_acct jlist > "$TMPD/jlist.raw" 2>/dev/null; js list "$TMPD/jlist.raw" "$1" "$NAME"; }
