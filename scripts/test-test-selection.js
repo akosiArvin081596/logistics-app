@@ -40,9 +40,17 @@
  *      for the runner allowed a retry); --full runs everything; tier 0
  *      finishes past the budget; a platform skip is reported as SKIP; --list
  *      is unchanged
+ *   §11 route modules: the model is the splice of server.js and its mounted
+ *      routes/ modules; a changed module picks the runners lifting its routes,
+ *      tier 2; a server.js line below a mount line is read in server.js's own
+ *      numbering; a changed or removed mount line, a routes/ file the splice
+ *      doesn't hold, or a tree it can't splice picks every runner that names
+ *      server.js (tier 3); the route snapshot and module checks run on every
+ *      server.js or routes/ change
  *   mutants of the selector, each caught above: the closure walk dropped,
  *      the comment rule dropped, scripts/lib helpers unmapped, text edges
- *      limited to code files
+ *      limited to code files, the model built from server.js alone, the line
+ *      map dropped, routes/ changes ignored, mount lines read as ordinary lines
  *
  * Hermetic: §1-§8 build trees in memory; §9 reads the repo; §10 works in a
  * mkdtemp git repository with its own TMPDIR. No network.
@@ -139,6 +147,22 @@ const TREE = {
 	"docs/n8n/flow.json": "{}\n",
 	"scripts/test-scan.js": 'const fs = require("fs");\nconst path = require("path");\nconst ROOT = path.join(__dirname, "..");\nfs.readdirSync(path.join(ROOT, "docs", "n8n"));\n',
 };
+// The same app once its route has moved to routes/report.js: the mount line
+// sits above unrelated() on purpose, so server.js lines below it number
+// differently in the splice the runners lift from.
+const SPLIT_SERVER = SERVER.replace('app.get("/api/report/week", (req, res) => {\n\tres.json({ t: report([]) });\n});\n\n', "")
+	.replace("function unrelated() {", 'const ROUTE_CONTEXT = { app, report, require };\nrequire("./routes/report")(ROUTE_CONTEXT);\n\nfunction unrelated() {')
+	.replace("app.use(express.json());\n", 'app.use(express.json());\napp.get("*", (req, res) => {\n\tres.send("page");\n});\n');
+const SPLIT_LINE = (text) => SPLIT_SERVER.split("\n").indexOf(text) + 1;
+const REPORT_MODULE = '// The weekly report route.\nmodule.exports = function mount({ app, report }) {\n// The week\'s total.\napp.get("/api/report/week", (req, res) => {\n\tres.json({ t: report([]) });\n});\n};\n';
+const SPLIT_TREE = {
+	...TREE,
+	"server.js": SPLIT_SERVER,
+	"routes/report.js": REPORT_MODULE,
+	"routes/stray.js": "// Not mounted.\n",
+	"scripts/test-route-snapshot.js": "process.exitCode = 0;\n",
+	"scripts/test-route-modules.js": "process.exitCode = 0;\n",
+};
 const buildFrom = (sel, tree) => sel.buildMap({ files: Object.keys(tree), read: (f) => (f in tree ? tree[f] : null) });
 const S = (name) => `scripts/${name}`;
 const hunk = (line, from, to) => `@@ -${line} +${line} @@\n-${from}\n+${to}\n`;
@@ -198,7 +222,7 @@ function checks(sel, tag = "") {
 	r.push([removed.size === 5, `${tag}§5 a removed declaration picks every runner that names server.js (got ${names(removed)})`]);
 
 	// §6
-	for (const f of ["scripts/run-unit-tests.js", "scripts/lib/test-selection.js", "package.json", "package-lock.json", "client/package.json", "client/package-lock.json", ".nvmrc", ".githooks/pre-push"]) {
+	for (const f of ["scripts/run-unit-tests.js", "scripts/lib/test-selection.js", "scripts/lib/server-source.js", "package.json", "package-lock.json", "client/package.json", "client/package-lock.json", ".nvmrc", ".githooks/pre-push"]) {
 		r.push([pick([f]).size === map.runners.length, `${tag}§6 ${f} picks every runner (${pick([f]).size} of ${map.runners.length})`]);
 	}
 
@@ -209,6 +233,34 @@ function checks(sel, tag = "") {
 	const dyn = buildFrom(sel, { ...TREE, "scripts/test-scan-dyn.js": 'const fs = require("fs");\nconst dir = process.argv[2];\nfs.readdirSync(dir);\n' });
 	r.push([sel.select(dyn, { changed: ["docs/notes.md"] }).picked.get(S("test-scan-dyn.js")) === 3, `${tag}§7 a scanner whose folder can't be read runs, tier 3, on any change`]);
 	r.push([sel.select(dyn, { changed: [] }).picked.size === 0, `${tag}§7 …and nothing runs when nothing changed`]);
+
+	// §11 route modules: the model is the splice the runners lift from.
+	const split = buildFrom(sel, SPLIT_TREE);
+	const spick = (changed, serverDiff = "") => sel.select(split, { changed, serverDiff, tierZero: TIER0 }).picked;
+	const EVERY = ["test-route-snapshot.js", "test-route-modules.js"];
+	const ALL5 = ["test-week.js", "test-report.js", "test-unrelated.js", "test-provided.js", "test-route.js"];
+	r.push([!!(split.server && split.server.modules && split.server.modules.has("routes/report.js")), `${tag}§11 the map splices the mounted module into its model`]);
+	const mod = spick(["routes/report.js"]);
+	r.push([same(mod, ["test-route.js", ...EVERY]) && [...mod.values()].every((t) => t === 2),
+		`${tag}§11 a changed module picks the runner lifting its route and the every-server-change runners, tier 2, and no others (got ${names(mod)})`]);
+	const sBody = spick(["server.js"], hunk(SPLIT_LINE("\treturn rows.reduce((a, r) => a + r.n, 0);"), "\treturn 0;", "\treturn rows.reduce((a, r) => a + r.n, 0);"));
+	r.push([same(sBody, ["test-week.js", "test-report.js", "test-route.js", ...EVERY]),
+		`${tag}§11 a change inside weekTotal still reaches the moved route that calls it, through report (got ${names(sBody)})`]);
+	const below = spick(["server.js"], hunk(SPLIT_LINE("\treturn helperX(1);"), "\treturn 1;", "\treturn helperX(1);"));
+	r.push([same(below, ["test-unrelated.js", ...EVERY]),
+		`${tag}§11 a server.js line below the mount line is read in server.js's own numbering (got ${names(below)})`]);
+	const mountLine = SPLIT_LINE('require("./routes/report")(ROUTE_CONTEXT);');
+	const mnt = spick(["server.js"], `@@ -${mountLine - 1},0 +${mountLine} @@\n+require("./routes/report")(ROUTE_CONTEXT);\n`);
+	r.push([ALL5.every((x) => mnt.get(S(x)) === 3), `${tag}§11 an added mount line picks every runner that names server.js, tier 3 (got ${names(mnt)})`]);
+	const unmount = spick(["server.js"], `@@ -${mountLine + 1} +${mountLine},0 @@\n-require("./routes/gone")(ROUTE_CONTEXT);\n`);
+	r.push([ALL5.every((x) => unmount.get(S(x)) === 3), `${tag}§11 a removed mount line picks every runner that names server.js, tier 3 (got ${names(unmount)})`]);
+	const stray = spick(["routes/stray.js"]);
+	r.push([ALL5.every((x) => stray.get(S(x)) === 3), `${tag}§11 a routes/ file the splice doesn't hold picks every runner that names server.js, tier 3 (got ${names(stray)})`]);
+	const broken = buildFrom(sel, { ...SPLIT_TREE, "routes/report.js": `"use strict";\n${REPORT_MODULE}` });
+	const bpick = (changed) => sel.select(broken, { changed, serverDiff: hunk(1, "x", '"use strict";'), tierZero: TIER0 }).picked;
+	r.push([!broken.server && ALL5.every((x) => bpick(["routes/report.js"]).get(S(x)) === 3 && bpick(["server.js"]).get(S(x)) === 3),
+		`${tag}§11 a tree it can't splice has no model: a routes/ or server.js change picks every runner that names server.js, tier 3`]);
+	r.push([spick(["docs/notes.md"]).size === 0, `${tag}§11 …and a change elsewhere picks no every-server-change runner`]);
 	return r;
 }
 
@@ -325,6 +377,7 @@ function harnessFixture(runners, { selection = SELECTION_SRC, extra = {} } = {})
 		"scripts/run-unit-tests.js": fs.readFileSync(path.join(__dirname, "run-unit-tests.js"), "utf8"),
 		"scripts/lib/test-selection.js": selection,
 		"scripts/lib/server-lift.js": fs.readFileSync(path.join(__dirname, "lib", "server-lift.js"), "utf8"),
+		"scripts/lib/server-source.js": fs.readFileSync(path.join(__dirname, "lib", "server-source.js"), "utf8"),
 		"lib/ok.js": "module.exports = 1;\n",
 		...runners,
 		...extra,
@@ -435,6 +488,10 @@ function harnessChecks() {
 			["the comment rule dropped", "while (k <= lines.length && owner[k] === -1 && quiet(k)) k++;", ""],
 			["scripts/lib helpers unmapped", "const next = [...e.code];", 'const next = [...e.code].filter((n) => !n.startsWith("scripts/lib/"));'],
 			["text edges limited to code files", "if (ownSide || f.startsWith(\"client/\")) next.push(...e.text);", "if (ownSide || f.startsWith(\"client/\")) next.push(...[...e.text].filter((t) => CODE_RE.test(t)));"],
+			["the model built from server.js alone", "const model = serverModel(splice.text);", "const model = serverModel(serverSrc);"],
+			["the line map dropped", "const v = toVirtual(l);", "const v = l;"],
+			["routes/ changes ignored", "const routeFiles = files.filter((f) => ROUTE_FILE_RE.test(f));", "const routeFiles = [];"],
+			["mount lines read as ordinary lines", "if (v === null) { top = true; why.push(`mount line ${l}`); return; }", "if (v === null) return;"],
 		]) {
 			const code = SELECTION_SRC.split(from).join(to);
 			ok(code !== SELECTION_SRC, `mutant '${name}' must change test-selection.js`);

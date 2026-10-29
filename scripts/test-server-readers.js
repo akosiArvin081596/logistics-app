@@ -20,6 +20,8 @@
  *      helper (allowlisted files included; BEFORE_FIRST_MOVE names the ones
  *      this change may not edit)
  *   §5 ALLOW and BEFORE_FIRST_MOVE are empty before server.js mounts a module
+ *   (§3 also: a file handed a server.js reader, on INJECTED, splices with the
+ *   helper; the pre-push picker is one, so it models what runners lift)
  *
  * The detector is a heuristic over source text (comments dropped, literals
  * tokenized). A read is readFileSync() (or readFile, a stream, or a name the
@@ -108,8 +110,13 @@ const LABELS = new Map([
 const BEFORE_FIRST_MOVE = new Map([
 	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
 	["scripts/test-no-production-defaults.js", "scans server.js and lib/; changed by open work on feat/ratecon-pdf-viewer-gate, whose owner adds routes/ or the helper"],
-	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
 	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
+]);
+
+// Files handed a reader for server.js (the detector can't follow it), each
+// with why: each must build its server.js text with the helper's splice.
+const INJECTED = new Map([
+	["scripts/lib/test-selection.js", "the pre-push picker: run-unit-tests.js hands it read(), and its server.js model must be the splice the runners lift from, or a change to a moved route picks the wrong runners"],
 ]);
 
 // ── the detector ──────────────────────────────────────────────────────────────
@@ -376,6 +383,14 @@ function classify(text, { labels = false } = {}) {
 // A folder scanner that takes server.js and lib/ as code roots but would miss
 // routes/: it names no routes/ and reads server.js other than only through the helper.
 const scansWithoutRoutes = (c) => c.scanner && c.namesLib && c.codeNamesServer && !c.namesRoutes && (!c.helper || c.reads.length > 0);
+
+// LABELS entries whose file holds another number of label uses than pinned
+// (`counts`: file -> label uses found).
+const labelDrift = (labels, counts) => [...labels].filter(([f, e]) => counts.has(f) && counts.get(f) !== e.uses).map(([f, e]) => `${f}: pins ${e.uses}, holds ${counts.get(f)}`);
+
+// A file handed a reader builds its text with the helper's splice: it names
+// the helper and calls spliceModules() in code (not only in a comment).
+const injectedSplices = (text) => classify(text).helper && /\bspliceModules\s*\(/.test(tokenize(text).code);
 
 // The lists (name, Map) that still hold entries once `serverText` mounts a route
 // module: each waits for "nothing mounted yet".
@@ -679,6 +694,15 @@ console.log("\n§2 the reader detector");
 	ok("§2 a quoted glob (a shell argument) is the lib/ folder", classify("const LINT = [\"server.js\", \"'lib/*.js'\"];").namesLib);
 	ok("§2 a scanner that reads server.js raw beside the helper is caught",
 		scan('const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", ...fs.readdirSync(path.join(ROOT, "lib"))];\nfor (const f of files) fs.readFileSync(path.join(ROOT, f), "utf8");'));
+	const TWO_LABELS = 'const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nconst more = ["server.js"];\nfor (const f of [...files, ...more]) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }';
+	const THREE_LABELS = TWO_LABELS.replace('const more = ["server.js"];', 'const more = ["server.js"];\nconst extra = ["server.js"];');
+	const counts = (text) => new Map([["scripts/made-up.js", classify(text, { labels: true }).labelled]]);
+	const PIN_TWO = new Map([["scripts/made-up.js", { uses: 2, why: "two list entries read through the helper" }]]);
+	eq("§2 the LABELS pin: two label uses where two are pinned", labelDrift(PIN_TWO, counts(TWO_LABELS)), []);
+	eq("§2 the LABELS pin: a third server.js name in a list is drift", labelDrift(PIN_TWO, counts(THREE_LABELS)), ["scripts/made-up.js: pins 2, holds 3"]);
+	ok("§2 INJECTED: a file that requires the helper and splices passes", injectedSplices('const source = require("./server-source");\nconst s = source.spliceModules(raw, readModule);'));
+	ok("§2 INJECTED: a file that requires the helper but builds its model from server.js alone fails", !injectedSplices('const source = require("./server-source");\n// spliceModules(raw) would be right\nconst model = serverModel(raw);'));
+	ok("§2 INJECTED: a file that splices without the helper fails", !injectedSplices("const s = spliceModules(raw, readModule);"));
 	const MOUNTED = 'require("./routes/alpha")(ROUTE_CONTEXT);\napp.get("*", (req, res) => {\n});\n';
 	eq("§2 the mount gate: nothing mounted, every list may hold entries", mountGate("const a = 1;\n", [["ALLOW", new Map([["x", "y"]])]]), []);
 	eq("§2 the mount gate: a module mounted, a list with entries fails", mountGate(MOUNTED, [["ALLOW", new Map([["x", "y"]])], ["EMPTY", new Map()]]), ["ALLOW (1)"]);
@@ -710,10 +734,13 @@ console.log("\n§3 every scripts/ reader of server.js goes through scripts/lib/s
 		...[...BEFORE_FIRST_MOVE.keys()].filter((f) => !scanning.has(f)),
 	];
 	ok("§3 every ALLOW, REAL_FILE, NOT_READERS, LABELS and BEFORE_FIRST_MOVE entry is still needed (remove the ones that aren't)", !stale.length, stale.join(", "));
-	const drift = [...LABELS].filter(([f, e]) => labelled.has(f) && labelled.get(f) !== e.uses).map(([f, e]) => `${f}: pins ${e.uses}, holds ${labelled.get(f)}`);
+	const drift = labelDrift(LABELS, labelled);
 	ok("§3 each LABELS file holds exactly the label uses it pins (a new one must be read through the helper, then pinned)", !drift.length, drift.join(", "));
+	const unspliced = [...INJECTED.keys()].filter((f) => !injectedSplices(fs.existsSync(path.join(ROOT, f)) ? fs.readFileSync(path.join(ROOT, f), "utf8") : ""));
+	ok("§3 every file handed a server.js reader (INJECTED) builds its text with the helper's splice", !unspliced.length,
+		`require scripts/lib/server-source.js and splice with spliceModules(): ${unspliced.join(", ")}`);
 	const reason = (r) => typeof r === "string" && r.length > 10;
-	ok("§3 every entry has its reason", [ALLOW, REAL_FILE, NOT_READERS, BEFORE_FIRST_MOVE].every((m) => [...m.values()].every(reason))
+	ok("§3 every entry has its reason", [ALLOW, REAL_FILE, NOT_READERS, BEFORE_FIRST_MOVE, INJECTED].every((m) => [...m.values()].every(reason))
 		&& [...LABELS.values()].every((e) => reason(e.why) && Number.isInteger(e.uses) && e.uses > 0));
 	console.log("\n§4 folder scanners of server.js and lib/ cover routes/");
 	ok("§4 every scanner that takes server.js and lib/ as code roots names routes/ or reads only through the helper", !scanners.length,
