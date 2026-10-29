@@ -20,12 +20,16 @@
  *      helper (allowlisted files included; BEFORE_FIRST_MOVE names the ones
  *      this change may not edit)
  *   §5 ALLOW and BEFORE_FIRST_MOVE are empty before server.js mounts a module
+ *   (§3 also: a file handed a server.js reader, on INJECTED, splices with the
+ *   helper; the pre-push picker is one, so it models what runners lift)
  *
  * The detector is a heuristic over source text (comments dropped, literals
- * tokenized). A read is readFileSync() of a server.js path, directly, through
- * a variable or a list holding one, or through a local function that reads.
+ * tokenized). A read is readFileSync() (or readFile, a stream, or a name the
+ * file gives one) of a server.js path, directly, through a variable (or a plain
+ * copy of it) or a list holding one, or through a local function that reads;
+ * or a <ref>:server.js handed to git.
  * A file on LABELS that takes the text from the helper may keep a server.js
- * name in a list or a local reader's call as a label.
+ * name in a list or a local reader's call as a label, as many as it pins.
  *
  * --list prints every scripts/ file that names server.js: file, class, how.
  *
@@ -46,31 +50,8 @@ const ROOT = path.join(__dirname, "..");
 // Files that still read server.js directly, each with why. Remove an entry
 // when its file moves to the helper; a stale entry fails §3.
 const owned = (branch) => `changed by open work on ${branch}: its owner moves it to the helper when that lands`;
-const ADMIN = "admin or operator script run on production data: moves to the helper with ledger-world, in its own change";const ALLOW = new Map([
-	["scripts/audit-job-tracking-damage.js", ADMIN],
-	["scripts/correct-weekly-invoice.js", ADMIN],
-	["scripts/count-load-closeout.js", ADMIN],
-	["scripts/create-correction-invoice-draft.js", ADMIN],
-	["scripts/create-missed-week-invoice-draft.js", ADMIN],
-	["scripts/data-fix-driver-rates.js", ADMIN],
-	["scripts/data-fix-haul-row-remeasure.js", ADMIN],
-	["scripts/data-fix-september-sunday-invoices.js", ADMIN],
-	["scripts/data-fix-sunday-pay-days.js", ADMIN],
-	["scripts/data-fix-w39-receipts.js", ADMIN],
-	["scripts/driver-instructions-backfill.js", ADMIN],
-	["scripts/integrity-check.js", ADMIN],
-	["scripts/october-flags-report.js", ADMIN],
-	["scripts/repair-job-tracking-addresses.js", ADMIN],
-	["scripts/set-settlement-grace-days.js", ADMIN],
-	["scripts/time-off-loads-report.js", ADMIN],
-	["scripts/lib/ledger-world.js", "the admin scripts' shared world: moves to the helper in its own change, with them"],
-	["scripts/replica/remote/settings.js", "replica tool that reads a deployed app's own files on its host: moves with the admin scripts"],
-	["scripts/replica/remote/sheets-export.js", "replica tool that reads a deployed app's own files on its host: moves with the admin scripts"],
-	["scripts/docs/_patch-indexes.js", "one-off tool that rewrites server.js's own file, so it reads the file itself"],
+const ALLOW = new Map([
 	["scripts/test-route-snapshot.js", "imports server.js in a child and maps its stack frames to the real file, which the virtual source can't stand in for; the first move gives it routes/"],
-	["scripts/personal-expenses-dry-run.js", owned("fix/personal-receipt-week")],
-	["scripts/test-invoice-driver-name-matching.js", owned("fix/personal-receipt-week")],
-	["scripts/test-invoice-week-selection.js", owned("fix/personal-receipt-week")],
 	["scripts/test-driver-instructions-routes.js", owned("feat/db-download-listed-only")],
 	["scripts/test-refusal-audit-coverage.js", owned("feat/db-download-listed-only")],
 	["scripts/test-broker-column-redaction.js", owned("feat/restore-deleted-loads")],
@@ -78,16 +59,18 @@ const ADMIN = "admin or operator script run on production data: moves to the hel
 	["scripts/test-deleted-loads-route.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-driver-availability-guards.js", owned("feat/restore-deleted-loads")],
 	["scripts/test-jt-cache-isolation.js", owned("feat/restore-deleted-loads")],
-	["scripts/test-invoice-draft-bol.js", owned("feat/broker-invoice-engine")],
-	["scripts/test-invoice-notes.js", owned("feat/broker-invoice-engine")],
-	["scripts/test-invoice-overrides.js", owned("feat/broker-invoice-engine")],
 ]);
 
 // Files that must read server.js's own file for good, each with why: they
-// rewrite it, or check it beside the routes/ files the virtual source splices in.
+// rewrite it, check it beside the routes/ files the virtual source splices in,
+// or run on the server alone, where scripts/lib/ is not.
+const REMOTE = "streamed alone to the server by replica:pull (pull.sh REMOTE_FILES), where scripts/lib/ is not";
 const REAL_FILE = new Map([
 	["scripts/split/move-routes.js", "the move tool: it rewrites server.js's own file and writes routes/"],
 	["scripts/test-route-modules.js", "checks server.js's mount lines and ROUTE_CONTEXT beside the routes/ files, which the virtual source replaces; it follows SERVER_ROOT itself"],
+	["scripts/docs/_patch-indexes.js", "a one-off tool that rewrites server.js's own file"],
+	["scripts/replica/remote/settings.js", `${REMOTE}; it reads the names server.js, routes/ and lib/ use, each file as it is`],
+	["scripts/replica/remote/sheets-export.js", `${REMOTE}; it reads only a top-level sheet-id literal an older server.js carries, which a route module never declares`],
 ]);
 
 // Files the detector flags that read no server.js text, each with why. They
@@ -99,32 +82,44 @@ const NOT_READERS = new Map([
 
 // Files that take server.js's text from the helper and also keep a server.js
 // name in a list or a call to a local reader: each reason says why that name
-// is only a label (the reader hands back the helper's text for it).
+// is only a label (the reader hands back the helper's text for it). `uses`
+// pins how many such names the file holds, so a raw read added later can't
+// pass as one more label.
 const LABELS = new Map([
-	["scripts/test-closed-month-refusal-wording.js", "its file list keeps server.js as a path; the loop reads that entry through the helper"],
-	["scripts/test-kpi-schedule.js", "its two-file list keeps server.js as a name; the filter reads that entry through the helper"],
-	["scripts/test-no-production-defaults.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it"],
-	["scripts/test-pdf-browser-pipe.js", "its source-file list keeps server.js as a path; both sweeps read that entry through the helper"],
-	["scripts/test-ratecon-drive-folder-required.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it"],
-	["scripts/test-replica-snapshot.js", "its source list keeps server.js as a name; the map reads that entry through the helper"],
-	["scripts/test-sheet-id-required.js", "its scan list keeps server.js as a name; readSource() hands back the helper's text for it, and run() boots the file"],
-	["scripts/test-truck-cost-amounts.js", "a [label, text] pair names server.js beside the helper's text"],
+	["scripts/test-closed-month-refusal-wording.js", { uses: 6, why: "its file list keeps server.js as a path; the loop reads that entry through the helper" }],
+	["scripts/test-kpi-schedule.js", { uses: 1, why: "its two-file list keeps server.js as a name; the filter reads that entry through the helper" }],
+	["scripts/test-no-production-defaults.js", { uses: 1, why: "its scan list keeps server.js as a name; readSource() hands back the helper's text for it" }],
+	["scripts/test-pdf-browser-pipe.js", { uses: 3, why: "its source-file list keeps server.js as a path; both sweeps read that entry through the helper" }],
+	["scripts/test-ratecon-drive-folder-required.js", { uses: 1, why: "its scan list keeps server.js as a name; readSource() hands back the helper's text for it" }],
+	["scripts/test-replica-snapshot.js", { uses: 1, why: "its source list keeps server.js as a name; the map reads that entry through the helper" }],
+	["scripts/test-sheet-id-required.js", { uses: 3, why: "its scan list keeps server.js as a name; readSource() hands back the helper's text for it, and run() boots the file" }],
+	["scripts/test-truck-cost-amounts.js", { uses: 1, why: "a [label, text] pair names server.js beside the helper's text" }],
 ]);
 
 // Folder scanners that would miss routes/ and that this change may not edit,
 // each with what it waits for. §5 fails while any is left once a module is mounted.
 const BEFORE_FIRST_MOVE = new Map([
-	["scripts/replica/remote/settings.js", "replica tool that scans a deployed app's server.js and lib/: covers routes/ with the admin scripts' change"],
 	["scripts/test-driver-instructions-routes.js", "scans server.js and lib/; changed by open work on feat/db-download-listed-only, whose owner adds routes/ or the helper"],
-	["scripts/test-release-gate.js", "pins the lint list, which gains routes/ with package.json's lint script"],
 	["scripts/test-route-snapshot.js", "maps the imported app's stack frames to server.js and lib/ files; its sources gain routes/ with the first move, which also decides how a moved route is shown"],
+]);
+
+// Files handed a reader for server.js (the detector can't follow it), each
+// with why: each must build its server.js text with the helper's splice.
+const INJECTED = new Map([
+	["scripts/lib/test-selection.js", "the pre-push picker: run-unit-tests.js hands it read(), and its server.js model must be the splice the runners lift from, or a change to a moved route picks the wrong runners"],
 ]);
 
 // ── the detector ──────────────────────────────────────────────────────────────
 // A literal naming server.js (":" for a git ref). An absolute one names some
 // other machine's copy, never this checkout's.
 const PATH_RE = /^(?!\/)(?:.*[/:])?server\.js$/;
-const READ_CALLEES = new Set(["readFileSync", "readFile"]);
+// "/server.js" appended to a folder (ROOT + "/server.js") names this checkout's too.
+const JOINED_PATH_RE = /^\/(?:[^/]+\/)*server\.js$/;
+// A git object name (<ref>:server.js): handed to git, it prints the file.
+const GIT_REF_RE = /(?:^|\s)[^\s:]+:(?:\.\/)?(?:[^\s:]+\/)?server\.js$/;
+const READ_CALLEES = new Set(["readFileSync", "readFile", "createReadStream"]);
+const READ_CALL_RE = /\b(?:readFileSync|readFile|createReadStream)\s*\(/;
+const EXEC_CALLEES = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"]);
 const NON_READ_CALLEES = new Set([
 	"createRequire", "existsSync", "statSync", "lstatSync", "writeFileSync", "copyFileSync", "appendFileSync",
 	"spawn", "spawnSync", "fork", "execFile", "execFileSync", "exec", "execSync",
@@ -244,23 +239,36 @@ function enclosing(code, at) {
 	return { chain, start: i + 1 };
 }
 
-// What a server.js path at `at` is used for.
-function contextOf(code, at, readers) {
+// What a server.js path at `at` is used for. `value`: the path literal's text;
+// `reads`: the read functions, by the names this file calls them.
+function contextOf(code, at, readers, value = "", reads = READ_CALLEES) {
 	// A key in an object literal ({ "server.js": text }) names a made-up tree's file.
 	if (/[{,]\s*$/.test(code.slice(Math.max(0, at - 40), at)) && /^\0\d+\0\s*:/.test(code.slice(at, at + 40))) return { kind: "object key", read: false, by: "boot" };
 	const { chain, start } = enclosing(code, at);
 	for (const b of chain) {
 		if (b.open !== "(" || !b.callee) continue;
-		if (READ_CALLEES.has(b.callee)) return { kind: "readFileSync", read: true, by: "direct" };
+		if (reads.has(b.callee)) return { kind: b.callee === "readFileSync" ? "readFileSync" : `${b.callee}()`, read: true, by: "direct" };
 		if (readers.has(b.callee)) return { kind: `local ${b.callee}()`, read: true, by: "local" };
+		if (EXEC_CALLEES.has(b.callee) && GIT_REF_RE.test(value)) return { kind: `git object via ${b.callee}()`, read: true, by: "direct" };
 		if (NON_READ_CALLEES.has(b.callee)) return { kind: `${b.callee}()`, read: false, by: "boot" };
 	}
 	if (chain.some((b) => b.open === "[" || b.open === "{" || (b.open === "(" && LIST_CALLEES.has(b.callee)))) return { kind: "list", read: null, by: "list" };
 	const head = code.slice(start, chain.length ? chain[chain.length - 1].at : at);
 	const m = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/.exec(head) || /^\s*([A-Za-z_$][\w$]*)\s*=(?![=>])/.exec(head);
-	if (m) return { kind: "assign", name: m[1], read: null, by: "assign" };
+	// bare: the value itself is assigned (B = A, B = x || A), not something built from it.
+	if (m) return { kind: "assign", name: m[1], read: null, by: "assign", bare: !chain.length };
 	return { kind: "other", read: false, by: "boot" };
 }
+
+// Names this file gives the read functions (const { readFileSync: rfs } = fs;
+// const read = fs.readFileSync): a call through one reads too.
+function readAliases(code) {
+	const out = new Set();
+	for (const m of code.matchAll(/\b(?:readFileSync|readFile|createReadStream)\s*:\s*([A-Za-z_$][\w$]*)/g)) out.add(m[1]);
+	for (const m of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\.)*(?:readFileSync|readFile|createReadStream)\b(?!\s*\()/g)) out.add(m[1]);
+	return out;
+}
+const callsAny = (body, names) => [...names].some((n) => new RegExp(`(?<![\\w$.])${reEscape(n)}\\s*\\(`).test(body));
 
 // Where the statement starting at `from` ends.
 function statementEnd(code, from) {
@@ -277,12 +285,12 @@ function statementEnd(code, from) {
 
 // Local functions whose body reads a file: called with a server.js path, they
 // read server.js.
-function localReaders(code) {
+function localReaders(code, aliases = new Set()) {
 	const out = new Set();
 	const defs = /(?:^|[^\w$.])(?:(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>))/g;
 	for (const m of code.matchAll(defs)) {
 		const body = code.slice(m.index, statementEnd(code, m.index + 1));
-		if (/\b(?:readFileSync|readFile)\s*\(/.test(body)) out.add(m[1] || m[2]);
+		if (READ_CALL_RE.test(body) || callsAny(body, aliases)) out.add(m[1] || m[2]);
 	}
 	return out;
 }
@@ -309,24 +317,34 @@ function joinedPaths(code, lits) {
 // a server.js name in a list or handed to a local function is a label.
 function classify(text, { labels = false } = {}) {
 	const { code, lits } = tokenize(text);
-	const readers = localReaders(code);
-	const uses = [];
-	for (const m of code.matchAll(/\0(\d+)\0/g)) {
-		const l = lits[Number(m[1])];
-		if (l.kind === "regex" || !PATH_RE.test(l.value)) continue;
-		const c = contextOf(code, m.index, readers);
-		if (c.kind !== "assign") { uses.push(c); continue; }
-		const re = new RegExp(`(?<![\\w$.\\0])${reEscape(c.name)}(?![\\w$])`, "g");
+	const aliases = readAliases(code);
+	const readCallees = new Set([...READ_CALLEES, ...aliases]);
+	const readers = localReaders(code, aliases);
+	// Where a variable holding the path goes, through up to three plain copies.
+	const follow = (name, value, seen) => {
+		const re = new RegExp(`(?<![\\w$.\\0])${reEscape(name)}(?![\\w$])`, "g");
 		const via = [];
 		for (const u of code.matchAll(re)) {
-			const v = contextOf(code, u.index, readers);
+			const v = contextOf(code, u.index, readers, value, readCallees);
+			if (v.kind === "assign" && v.bare && !seen.has(v.name) && seen.size < 4) { seen.add(v.name); via.push(...follow(v.name, value, seen)); continue; }
 			if (v.kind === "assign" || v.kind === "other") continue;
 			via.push(v);
 		}
+		return via;
+	};
+	const uses = [];
+	for (const m of code.matchAll(/\0(\d+)\0/g)) {
+		const l = lits[Number(m[1])];
+		if (l.kind === "regex") continue;
+		const appended = JOINED_PATH_RE.test(l.value) && /\+\s*$/.test(code.slice(Math.max(0, m.index - 20), m.index));
+		if (!PATH_RE.test(l.value) && !appended) continue;
+		const c = contextOf(code, m.index, readers, l.value, readCallees);
+		if (c.kind !== "assign") { uses.push(c); continue; }
+		const via = follow(c.name, l.value, new Set([c.name]));
 		const read = via.find((v) => v.read) || via.find((v) => v.by === "list");
 		uses.push(read ? { kind: `${c.name} -> ${read.kind}`, read: read.read, by: read.by === "direct" ? "variable" : read.by } : { kind: `${c.name} (not read)`, read: false, by: "boot" });
 	}
-	const readsFiles = /\b(?:readFileSync|readFile)\s*\(/.test(code);
+	const readsFiles = READ_CALL_RE.test(code) || callsAny(code, aliases);
 	const helper = lits.some((l) => l.kind === "string" && HELPER_RE.test(l.value));
 	const raw = uses.filter((u) => u.read === true || (u.read === null && readsFiles));
 	const isLabel = (u) => labels && helper && (u.by === "list" || u.by === "local");
@@ -355,6 +373,14 @@ function classify(text, { labels = false } = {}) {
 // A folder scanner that takes server.js and lib/ as code roots but would miss
 // routes/: it names no routes/ and reads server.js other than only through the helper.
 const scansWithoutRoutes = (c) => c.scanner && c.namesLib && c.codeNamesServer && !c.namesRoutes && (!c.helper || c.reads.length > 0);
+
+// LABELS entries whose file holds another number of label uses than pinned
+// (`counts`: file -> label uses found).
+const labelDrift = (labels, counts) => [...labels].filter(([f, e]) => counts.has(f) && counts.get(f) !== e.uses).map(([f, e]) => `${f}: pins ${e.uses}, holds ${counts.get(f)}`);
+
+// A file handed a reader builds its text with the helper's splice: it names
+// the helper and calls spliceModules() in code (not only in a comment).
+const injectedSplices = (text) => classify(text).helper && /\bspliceModules\s*\(/.test(tokenize(text).code);
 
 // The lists (name, Map) that still hold entries once `serverText` mounts a route
 // module: each waits for "nothing mounted yet".
@@ -515,6 +541,13 @@ console.log("§1 server-source");
 	eq("§1.2 the line map: the blank line between the mounts", v.where(20), { file: "server.js", line: 13 });
 	throwsLike("§1.2 a line outside the source is an error", () => v.where(L.length + 1), /outside the source/);
 	eq("§1.2 a module records the names it destructures", v.modules.map((m) => m.names), [["app", "shout"], ["app", "shout"]]);
+	eq("§1.2 toVirtual: server.js and module lines onto the splice; a mount line has none",
+		[["server.js", 11], ["server.js", 12], ["server.js", 13], ["server.js", 15], ["routes/alpha.js", 3], ["routes/beta-two.js", 5], ["routes/alpha.js", 2]].map(([f, l]) => v.toVirtual(f, l)),
+		[11, null, 20, 24, 12, 21, null]);
+	const reads = [];
+	const spliced = source.spliceModules(SERVER, (rel, mountLine) => { reads.push([rel, mountLine]); return { "routes/alpha.js": ALPHA, "routes/beta-two.js": BETA }[rel]; });
+	eq("§1.2 spliceModules: the same splice from text and a reader, which it asks for each mounted module with its mount line", [spliced.text === v.text, reads], [true, [["routes/alpha.js", 12], ["routes/beta-two.js", 14]]]);
+	throwsLike("§1.2 spliceModules: a reader's failure is the splice's", () => source.spliceModules(SERVER, () => { throw new Error("made-up read failure"); }), /made-up read failure/);
 
 	const lifted = closure(v.text, { routes: ['app.get("/api/beta", (req, res) => {'], provided: ["app"] });
 	ok("§1.3 server-lift lifts a moved route and what it uses from the virtual source", lifted.names.includes("shout") && lifted.text.includes('app.get("/api/beta"'));
@@ -523,6 +556,9 @@ console.log("§1 server-source");
 	eq("§1.3 routeContextLines: one over lines, through its \"};\"", source.routeContextLines("a;\nconst ROUTE_CONTEXT = {\n\tapp,\n\trequire,\n};\nb;\n"), { first: 2, last: 5 });
 	eq("§1.3 routeContextLines: none", source.routeContextLines("const a = 1;\n"), null);
 	throwsLike("§1.3 routeContextLines: one that never closes is an error", () => source.routeContextLines("const ROUTE_CONTEXT = {\n\tapp,\n"), /never closes/);
+	throwsLike("§1.3 routeContextLines: a line that is not a plain name is an error", () => source.routeContextLines("const ROUTE_CONTEXT = {\n\tapp,\n\tmapsKeyForPage: MADE_UP_KEY,\n\trequire,\n};\n"), /line 3 is not a plain name/);
+	throwsLike("§1.3 routeContextLines: a call in the block is an error", () => source.routeContextLines("const ROUTE_CONTEXT = {\n\tapp,\n\t...extraNames(),\n};\n"), /not a plain name/);
+	throwsLike("§1.3 routeContextLines: a one-line block with a renamed value is an error", () => source.routeContextLines("const ROUTE_CONTEXT = { app, key: MADE_UP_KEY, require };\n"), /line 1 is not a plain name/);
 
 	eq("§1.4 serverOverride: none set", source.serverOverride(), null);
 	process.env.SERVER_ROOT = path.join(tmp, "base");
@@ -580,6 +616,8 @@ console.log("§1 server-source");
 	refuses("a module that mounts another", SERVER, both(ALPHA.replace("\tres.json({ b: 2 });", '\trequire("./routes/beta-two")(ROUTE_CONTEXT);')), /mounts another route module/);
 	refuses("a mount line that is not at column 0", SERVER.replace('require("./routes/alpha")', '\trequire("./routes/alpha")'), both(ALPHA), /in any form but/);
 	refuses("a mount with another argument", SERVER.replace('require("./routes/alpha")(ROUTE_CONTEXT);', 'require("./routes/alpha")({ app });'), both(ALPHA), /in any form but/);
+	refuses("a mount through a built path", SERVER.replace('require("./routes/alpha")(ROUTE_CONTEXT);', 'require(path.join(__dirname, "routes", "alpha"))(ROUTE_CONTEXT);'), both(ALPHA), /in any form but/);
+	refuses("a module that mounts another through a built path", SERVER, both(ALPHA.replace("\tres.json({ b: 2 });", '\trequire(path.join(__dirname, "routes", "beta-two"))(ROUTE_CONTEXT);')), /mounts another route module/);
 	refuses("a module mounted twice", SERVER.replace('require("./routes/beta-two")', 'require("./routes/alpha")'), both(ALPHA), /a second time/);
 	refuses("code inside the mount block", SERVER.replace('\nrequire("./routes/beta-two")', '\nshout(1);\nrequire("./routes/beta-two")'), both(ALPHA), /inside the route-module mount block/);
 	refuses("a mount below the SPA catch-all", `${SERVER.replace(/^require\("\.\/routes\/.*\n/gm, "")}require("./routes/alpha")(ROUTE_CONTEXT);\n`, { alpha: ALPHA }, /below the SPA catch-all/);
@@ -626,6 +664,17 @@ console.log("\n§2 the reader detector");
 		["a list label beside the helper, not on LABELS", 'const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nfor (const f of files) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }', "list"],
 		["a direct read beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst raw = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");', "direct"],
 		["a path variable beside the helper", 'const { serverSource } = require("./lib/server-source");\nconst SERVER = path.join(ROOT, "server.js");\nconst raw = fs.readFileSync(SERVER, "utf8");', "path-variable"],
+		["a stream", 'const s = fs.createReadStream(path.join(ROOT, "server.js"));', "direct"],
+		["a renamed readFileSync", 'const { readFileSync: rfs } = require("fs");\nconst SRC = rfs(path.join(ROOT, "server.js"), "utf8");', "direct"],
+		["readFileSync held in a variable", 'const read = fs.readFileSync;\nconst SRC = read(path.join(ROOT, "server.js"), "utf8");', "direct"],
+		["a local function reading through a renamed readFileSync", 'const { readFileSync: rfs } = require("fs");\nconst load = (rel) => rfs(path.join(ROOT, rel), "utf8");\nconst SRC = load("server.js");', "local-read-helper"],
+		["a folder plus \"/server.js\"", 'const SRC = fs.readFileSync(ROOT + "/server.js", "utf8");', "direct"],
+		["git printing a ref's server.js", 'const SRC = execFileSync("git", ["show", `${BASE}:server.js`], { encoding: "utf8" });', "direct"],
+		["git printing a ref's server.js, one command", 'const SRC = execSync("git show HEAD:server.js").toString();', "direct"],
+		["a path copied into a second variable", 'const SERVER = path.join(ROOT, "server.js");\nconst FILE = SERVER;\nconst SRC = fs.readFileSync(FILE, "utf8");', "path-variable"],
+		["a path chosen into a second variable", 'const SERVER = path.join(ROOT, "server.js");\nconst FILE = process.env.MADE_UP_FILE || SERVER;\nconst SRC = fs.readFileSync(FILE, "utf8");', "path-variable"],
+		["a folder taken from the path is not the path", 'const SERVER = path.join(ROOT, "server.js");\nconst dir = path.dirname(SERVER);\nconst cfg = fs.readFileSync(path.join(dir, "made-up.json"), "utf8");', "boot-or-path"],
+		["a git diff names no object", 'execFileSync("git", ["diff", "--quiet", "HEAD", "--", "server.js"]);\nfs.readFileSync(f);', "boot-or-path"],
 	];
 	for (const [name, text, want] of cases) eq(`§2 ${name}: ${want}`, cls(text), want);
 	const labelled = (text) => classOf(text, classify(text, { labels: true })).cls;
@@ -642,6 +691,15 @@ console.log("\n§2 the reader detector");
 	ok("§2 a quoted glob (a shell argument) is the lib/ folder", classify("const LINT = [\"server.js\", \"'lib/*.js'\"];").namesLib);
 	ok("§2 a scanner that reads server.js raw beside the helper is caught",
 		scan('const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", ...fs.readdirSync(path.join(ROOT, "lib"))];\nfor (const f of files) fs.readFileSync(path.join(ROOT, f), "utf8");'));
+	const TWO_LABELS = 'const { serverSource } = require("./lib/server-source");\nconst files = ["server.js", "lib/a.js"];\nconst more = ["server.js"];\nfor (const f of [...files, ...more]) { const t = f === "server.js" ? serverSource() : fs.readFileSync(path.join(ROOT, f), "utf8"); }';
+	const THREE_LABELS = TWO_LABELS.replace('const more = ["server.js"];', 'const more = ["server.js"];\nconst extra = ["server.js"];');
+	const counts = (text) => new Map([["scripts/made-up.js", classify(text, { labels: true }).labelled]]);
+	const PIN_TWO = new Map([["scripts/made-up.js", { uses: 2, why: "two list entries read through the helper" }]]);
+	eq("§2 the LABELS pin: two label uses where two are pinned", labelDrift(PIN_TWO, counts(TWO_LABELS)), []);
+	eq("§2 the LABELS pin: a third server.js name in a list is drift", labelDrift(PIN_TWO, counts(THREE_LABELS)), ["scripts/made-up.js: pins 2, holds 3"]);
+	ok("§2 INJECTED: a file that requires the helper and splices passes", injectedSplices('const source = require("./server-source");\nconst s = source.spliceModules(raw, readModule);'));
+	ok("§2 INJECTED: a file that requires the helper but builds its model from server.js alone fails", !injectedSplices('const source = require("./server-source");\n// spliceModules(raw) would be right\nconst model = serverModel(raw);'));
+	ok("§2 INJECTED: a file that splices without the helper fails", !injectedSplices("const s = spliceModules(raw, readModule);"));
 	const MOUNTED = 'require("./routes/alpha")(ROUTE_CONTEXT);\napp.get("*", (req, res) => {\n});\n';
 	eq("§2 the mount gate: nothing mounted, every list may hold entries", mountGate("const a = 1;\n", [["ALLOW", new Map([["x", "y"]])]]), []);
 	eq("§2 the mount gate: a module mounted, a list with entries fails", mountGate(MOUNTED, [["ALLOW", new Map([["x", "y"]])], ["EMPTY", new Map()]]), ["ALLOW (1)"]);
@@ -654,13 +712,13 @@ console.log("\n§3 every scripts/ reader of server.js goes through scripts/lib/s
 	const scanners = [];
 	const reading = new Set();
 	const scanning = new Set();
-	const labelled = new Set();
+	const labelled = new Map();
 	for (const f of scriptFiles()) {
 		if (f === "scripts/lib/server-source.js" || f === "scripts/test-server-readers.js") continue;
 		const text = fs.readFileSync(path.join(ROOT, f), "utf8");
 		const c = classify(text, { labels: LABELS.has(f) });
 		if (c.reads.length) reading.add(f);
-		if (c.labelled) labelled.add(f);
+		if (c.labelled) labelled.set(f, c.labelled);
 		if (scansWithoutRoutes(c)) scanning.add(f);
 		if (c.reads.length && !ALLOW.has(f) && !REAL_FILE.has(f) && !NOT_READERS.has(f)) direct.push(`${f} (${classOf(text, c).how})`);
 		if (scanning.has(f) && !BEFORE_FIRST_MOVE.has(f)) scanners.push(f);
@@ -673,7 +731,14 @@ console.log("\n§3 every scripts/ reader of server.js goes through scripts/lib/s
 		...[...BEFORE_FIRST_MOVE.keys()].filter((f) => !scanning.has(f)),
 	];
 	ok("§3 every ALLOW, REAL_FILE, NOT_READERS, LABELS and BEFORE_FIRST_MOVE entry is still needed (remove the ones that aren't)", !stale.length, stale.join(", "));
-	ok("§3 every entry has its reason", [ALLOW, REAL_FILE, NOT_READERS, LABELS, BEFORE_FIRST_MOVE].every((m) => [...m.values()].every((r) => typeof r === "string" && r.length > 10)));
+	const drift = labelDrift(LABELS, labelled);
+	ok("§3 each LABELS file holds exactly the label uses it pins (a new one must be read through the helper, then pinned)", !drift.length, drift.join(", "));
+	const unspliced = [...INJECTED.keys()].filter((f) => !injectedSplices(fs.existsSync(path.join(ROOT, f)) ? fs.readFileSync(path.join(ROOT, f), "utf8") : ""));
+	ok("§3 every file handed a server.js reader (INJECTED) builds its text with the helper's splice", !unspliced.length,
+		`require scripts/lib/server-source.js and splice with spliceModules(): ${unspliced.join(", ")}`);
+	const reason = (r) => typeof r === "string" && r.length > 10;
+	ok("§3 every entry has its reason", [ALLOW, REAL_FILE, NOT_READERS, BEFORE_FIRST_MOVE, INJECTED].every((m) => [...m.values()].every(reason))
+		&& [...LABELS.values()].every((e) => reason(e.why) && Number.isInteger(e.uses) && e.uses > 0));
 	console.log("\n§4 folder scanners of server.js and lib/ cover routes/");
 	ok("§4 every scanner that takes server.js and lib/ as code roots names routes/ or reads only through the helper", !scanners.length,
 		`add routes/ to its roots or read server.js through serverSource():\n      ${scanners.join("\n      ")}`);

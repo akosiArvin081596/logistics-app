@@ -231,6 +231,8 @@ function makeDb() {
 	const db = new Database(":memory:");
 	db.exec(USERS_CREATE);
 	for (const alter of USERS_ALTERS) db.exec(alter);
+	// The account-disable columns, as server.js migrates them: liveSessionIds() reads disabled_at.
+	for (const m of SRC.matchAll(/ALTER TABLE users ADD COLUMN disabled_(?:at|by|reason) [^"]*/g)) db.exec(m[0]);
 	db.exec(AUDIT_CREATE);
 	const ins = db.prepare(
 		"INSERT INTO users (id, username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",

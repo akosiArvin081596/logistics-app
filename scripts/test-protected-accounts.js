@@ -13,6 +13,8 @@
  *     email, go through as before;
  *   - a set but invalid list refuses those changes to every Super Admin, from
  *     everyone; an unset list protects nobody (the behaviour before the list).
+ *   - on PUT, a session without an id is refused before the protected check,
+ *     by the acting-account re-check (401 SESSION_ENDED), nothing written.
  *
  * §1 PUT, list "1,7"   §1b a driver-name change (it ends every session of the
  *                      account, so it is a protected change too)
@@ -57,6 +59,7 @@ try { Database = require("better-sqlite3"); } catch (e) { die(`a server dependen
 let listedAccounts = null;
 try { listedAccounts = require(path.join(ROOT, "lib", "listed-accounts.js")); } catch (e) { ok(`lib/listed-accounts.js loads (${e.code || e.message})`, false); }
 const passwordRules = require(path.join(ROOT, "lib", "password-rules.js"));
+const accountDisable = require(path.join(ROOT, "lib", "account-disable.js"));
 
 function findOnce(needle, what) {
 	const hits = SRC.split(needle).length - 1;
@@ -103,7 +106,9 @@ function usersDdl() {
 		if (!a) die(`could not locate the users.${col} migration`);
 		return a[0];
 	});
-	return [`CREATE TABLE users (${m[1]}\n)`, ...alters];
+	// The account-disable columns, as server.js migrates them: DELETE's last-Super-Admin count reads disabled_at.
+	const disabled = [...SRC.matchAll(/ALTER TABLE users ADD COLUMN disabled_(?:at|by|reason) [^"]*/g)].map((d) => d[0]);
+	return [`CREATE TABLE users (${m[1]}\n)`, ...alters, ...disabled];
 }
 function auditDdl() {
 	const m = SRC.match(/CREATE TABLE IF NOT EXISTS audit_trail \(([\s\S]*?)\n\t\)/);
@@ -174,6 +179,8 @@ function world(viewers) {
 		notifyPasswordChanged: (id) => { seen.notices.push(id); },
 		// DELETE: its month-end lock, unreadable, so a request that reaches it stops there.
 		userDeleteLockBlockers: () => { seen.lockCalls++; return { unreadable: true, blockers: [] }; },
+		// DELETE's last-Super-Admin count (shipped lib code).
+		accountDisable,
 	};
 	const names = Object.keys(env);
 	new Function(...names, PUT_ROUTE)(...names.map((k) => env[k]));
@@ -206,8 +213,11 @@ async function main() {
 		for (const [who, actor] of [["unlisted Super Admin 5", STAFF], ["Super Admin 5 under account 1's username", STAFF_AS_OWNER_NAME], ["a session without an id", NO_ID]]) {
 			const w = world("1,7");
 			const r = await w.put(actor, 1, body);
-			ok(`${who} changing account 1's ${what}: 403 PROTECTED_ACCOUNT (${r.status} ${code(r)})`, r.status === 403 && code(r) === "PROTECTED_ACCOUNT");
+			// A session without an id is refused first, by the acting-account re-check.
+			const [status, want] = actor === NO_ID ? [401, "SESSION_ENDED"] : [403, "PROTECTED_ACCOUNT"];
+			ok(`${who} changing account 1's ${what}: ${status} ${want} (${r.status} ${code(r)})`, r.status === status && code(r) === want);
 			ok(`...nothing written (${col} still ${JSON.stringify(w.row(1)[col])}), no notice, no session purge`, w.row(1)[col] === before && w.seen.notices.length === 0 && w.seen.purges.length === 0);
+			if (actor === NO_ID) continue;
 			const a = w.audits("update_user_blocked");
 			ok(`...one update_user_blocked row with [PROTECTED_ACCOUNT] on user 1 (${a.length})`, a.length === 1 && a[0].entity === "user" && a[0].entity_id === "1" && a[0].details.includes("[PROTECTED_ACCOUNT]"));
 		}
@@ -257,8 +267,11 @@ async function main() {
 		for (const [who, actor] of [["unlisted Super Admin 5", STAFF], ["a session without an id", NO_ID]]) {
 			const w = world("1,7");
 			const r = await w.put(actor, 1, { driverName: "Made Up Name" });
-			ok(`${who} changing account 1's driver name: 403 PROTECTED_ACCOUNT (${r.status} ${code(r)})`, r.status === 403 && code(r) === "PROTECTED_ACCOUNT");
+			// A session without an id is refused first, by the acting-account re-check.
+			const [status, want] = actor === NO_ID ? [401, "SESSION_ENDED"] : [403, "PROTECTED_ACCOUNT"];
+			ok(`${who} changing account 1's driver name: ${status} ${want} (${r.status} ${code(r)})`, r.status === status && code(r) === want);
 			ok(`...nothing written (driver name ${JSON.stringify(driverNameOf(w, 1))}) and no session ended (${w.seen.purges.length})`, driverNameOf(w, 1) === "" && w.seen.purges.length === 0);
+			if (actor === NO_ID) continue;
 			const a = w.audits("update_user_blocked");
 			ok(`...one update_user_blocked row with [PROTECTED_ACCOUNT] naming the driver name (${a.length})`, a.length === 1 && a[0].details.includes("[PROTECTED_ACCOUNT]") && /driver name/.test(a[0].details));
 		}

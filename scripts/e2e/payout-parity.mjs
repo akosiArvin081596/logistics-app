@@ -223,6 +223,11 @@ async function makeDatabases() {
   const sa = a.prepare("SELECT id FROM users WHERE username = 'super_admin' AND role = 'Super Admin'").get()
   if (!sa) { a.close(); throw new Error('the copy has no super_admin with role Super Admin') }
   a.prepare('UPDATE users SET must_change_password = 0 WHERE id = ?').run(sa.id)
+  // A disabled super_admin can't sign in: enabled on these copies only, as its password is set here.
+  if (a.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'disabled_at'").get()) {
+    const enabled = a.prepare("UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ? AND NOT (COALESCE(disabled_at, '') = '')").run(sa.id).changes
+    if (enabled) log('  super_admin was disabled in the source; enabled on the copies only')
+  }
   a.pragma('wal_checkpoint(TRUNCATE)')
   await a.backup(sides.B.db)
   a.close()

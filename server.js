@@ -132,6 +132,10 @@ const personalExpense = require("./lib/personal-expense");
 const receiptImagesLib = require("./lib/receipt-images");
 const receiptPdfLib = require("./lib/receipt-pdf");
 const invoiceReceipts = require("./lib/invoice-receipts");
+// Driver privacy: which pages of a PDF receipt reach its driver, and the
+// tables recording the verdicts and every invoice PDF written with them.
+const receiptPageVerdict = require("./lib/receipt-page-verdict");
+const receiptPagePrivacy = require("./lib/receipt-page-privacy");
 // An invoice's Address line from a drivers_directory row, each part once.
 const { providerAddressLine } = require("./lib/invoice-header");
 // Stored receipt files: who may open one, and the copy (metadata stripped).
@@ -174,6 +178,10 @@ const { sendAppUpdating } = require("./lib/app-updating-page");
 // own UTC clock. lib/app-time.js
 const appTime = require("./lib/app-time");
 const APP_TIMEZONE = appTime.appTimeZone();
+// APP_DAY_STAMPS_ENABLED, off unless exactly "true": on, the month-end guards' driver floor also reads
+// a truck-assignment start on its business day (appDay()), so an evening start on a month's last day
+// (already the next month in UTC from 8 PM EDT, 7 PM EST) keeps that month under the guard.
+const APP_DAY_STAMPS_ENABLED = process.env.APP_DAY_STAMPS_ENABLED === "true";
 // One reading of a cell's amount (cents) and moment, shared with the integrity
 // check: lib/cell-compare.js
 const cellCompare = require("./lib/cell-compare");
@@ -1146,6 +1154,13 @@ try {
 } catch (e) {
 	console.error("last_login_at seed skipped:", e.message);
 }
+
+// Account disable (lib/account-disable.js): NULL disabled_at is an enabled account, otherwise an
+// ISO-8601 Z instant. disabled_by has no foreign key: the acting account may be deleted later.
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_at TEXT DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_by INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT NULL"); } catch {}
+const accountDisable = require("./lib/account-disable");
 
 // Per-load driver ratings (1-5 stars, one rating per load)
 db.exec(`
@@ -4945,6 +4960,11 @@ function eldDeviceLinkedSinceMs(truckId, vid) {
 	return eldPosition.linkedSinceMs(row);
 }
 
+// ELD_APP_DAY_ENABLED, off unless exactly "true": on, the day-to-truck lookup the miles rollups and
+// mileage routes read counts a device link's bounds on their business day (appDay()), not their UTC
+// day (already tomorrow from 8 PM EDT, 7 PM EST), so an evening re-point day goes to the newer truck.
+const ELD_APP_DAY_ENABLED = process.env.ELD_APP_DAY_ENABLED === "true";
+
 function buildEldDeviceResolver() {
 	const rows = db.prepare(
 		`SELECT truck_id, routemate_vehicle_id, assigned_from, assigned_until FROM eld_device_assignments`
@@ -4952,7 +4972,11 @@ function buildEldDeviceResolver() {
 	const currentLinks = db.prepare(
 		`SELECT id, routemate_vehicle_id FROM trucks WHERE COALESCE(routemate_vehicle_id, '') <> '' ORDER BY id`
 	).all();
-	return eldMiles.buildDeviceTruckResolver(rows, { startMs: eldDeviceHistoryStartMs(), currentLinks });
+	return eldMiles.buildDeviceTruckResolver(rows, {
+		startMs: eldDeviceHistoryStartMs(), currentLinks,
+		// Off: each bound's UTC day, as before.
+		dayOf: ELD_APP_DAY_ENABLED ? (ms) => appDay(new Date(ms)) : undefined,
+	});
 }
 
 // After every table exists (server_state is created further down this file).
@@ -5717,6 +5741,10 @@ function payoutRules(overrides = null) {
 // INVESTOR_LEASE_DOWNTIME / _PRORATE / _RETIREMENT, read once. A value that names
 // no setting falls back to the default with one warning here, at boot.
 const INVESTOR_LEASE_SETTINGS = investorPayoutBasis.readLeaseSettings(process.env, (msg) => console.warn(`[payout-basis] ${msg}`));
+// A truck with a blank in-service date starts its fixed costs and its lease days on the business
+// day its row was created, not on created_at's UTC day (TRUCK_CHARGE_APP_DAY_ENABLED, exactly "true",
+// with TRUCK_CHARGE_APP_DAY_FROM=YYYY-MM, the first creation month it covers; read once). null = off.
+const TRUCK_CHARGE_APP_DAY_RULE = investorPayoutBasis.createdDayRuleFromEnv(process.env, (ms) => appDay(new Date(ms)), (msg) => console.warn(`[truck-charge] ${msg}`));
 
 // Frozen lease snapshots already reported as not wholly readable, "<owner> <period>":
 // one warning per month per process, not one per page load.
@@ -5763,6 +5791,8 @@ function payoutBasisContext(ownerId) {
 			? finalized.filter((r) => !investorPayoutBasis.frozenBreakdownIsLease(r.finalized_breakdown)).map((r) => r.period)
 			: [],
 		settledLeaseMonths,
+		// A truck's first lease day reads created_at as truckChargeFromMonth() does.
+		createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 	};
 }
 
@@ -6183,6 +6213,9 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_invoice_paid_days_invoice ON invoi
 // The Personal ledger itself (lib/personal-expense.js SCHEMA_SQL): additive,
 // CREATE ... IF NOT EXISTS, one live mark per receipt by a unique partial index.
 db.exec(personalExpense.SCHEMA_SQL);
+// Driver privacy: page verdicts and marks, and invoice PDF render records
+// (lib/receipt-page-privacy.js SCHEMA_SQL; additive, empty until the flag is on).
+db.exec(receiptPagePrivacy.SCHEMA_SQL);
 // ---------------------------------------------------------------------------
 // idx_invoices_driver_week — the one-invoice-per-driver-week constraint.
 //
@@ -7241,6 +7274,10 @@ io.engine.use(sessionMiddleware);
 // would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
 // guards; scripts/test-password-change-enforced.js pins this position.
 app.use(refreshPasswordChangeFlag);
+// A disabled, removed or re-roled account's session is signed out before any route reads it, and
+// so is a live-update handshake's (signOutEndedAccount()).
+app.use(signOutEndedAccount);
+io.engine.use(signOutEndedAccount);
 // A Dispatcher's opaque load key, read before routing (WITHHELD LOAD KEYS, beside
 // shownLoadId()): inert unless WITHHELD_LOAD_REFS_ENABLED is on.
 app.use(withheldLoadKeyGate);
@@ -11476,6 +11513,36 @@ function refreshPasswordChangeFlag(req, res, next) {
 	if (user) {
 		const current = currentMustChangePassword(user);
 		if (user.mustChangePassword !== current) user.mustChangePassword = current;
+	}
+	next();
+}
+
+// The backstop for a disable whose session purge failed: a session whose account is disabled or
+// gone, whose id is not a positive whole number, or whose cached role the row no longer holds loses
+// its user. Same rules as refreshPasswordChangeFlag(): a declaration, no module-scope state, only `db`.
+function signOutEndedAccount(req, res, next) {
+	const user = req.session && req.session.user;
+	if (user) {
+		const id = Number.isSafeInteger(user.id) && user.id > 0 ? user.id : null;
+		let reason = id === null ? "no account id" : null;
+		if (id !== null) {
+			try {
+				const row = db.prepare("SELECT role, disabled_at FROM users WHERE id = ?").get(id);
+				if (!row) reason = "account not found";
+				else if (String(row.disabled_at ?? "") !== "") reason = "disabled";
+				else if (row.role !== user.role) reason = "role changed";
+			} catch (err) {
+				// An unreadable users table keeps the session, logged at most once a minute.
+				if (!globalThis.__accountCheckErrLoggedAt || Date.now() - globalThis.__accountCheckErrLoggedAt > 60000) {
+					globalThis.__accountCheckErrLoggedAt = Date.now();
+					console.error("account check failed; the session is kept:", err.message);
+				}
+			}
+		}
+		if (reason) {
+			delete req.session.user;
+			console.warn(`[account] a session was signed out: ${reason}${id === null ? "" : ` (account #${id})`}`);
+		}
 	}
 	next();
 }
@@ -18431,6 +18498,17 @@ function appDay(d = new Date()) {
 	}).format(d);
 }
 
+// The business day of a stamp the app wrote with toISOString(), else null: callers keep their old
+// reading of any other shape (a bare day, zone-less text, an offset). The round trip refuses an
+// impossible day, which Date.parse would roll into the next month.
+function appStampDay(stamp) {
+	const s = String(stamp ?? "");
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) return null;
+	const ms = Date.parse(s);
+	if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) return null;
+	return appDay(new Date(ms));
+}
+
 // The instant that stands for a business day ("YYYY-MM-DD") when a question is
 // asked "on a day": noon on the business clock, far from both of its midnights.
 // A day before the business clock moved to APP_TIMEZONE keeps the instant it was
@@ -18946,6 +19024,19 @@ function loadPayRateIndex() {
 	};
 }
 
+// The business day (APP_TIMEZONE) a receipt was submitted on, as SQL: SQLite reads the instant (created_at when
+// timestamp is blank; zone-less text is UTC), whose UTC date is already the next day from 8 PM EDT (7 PM EST).
+// app_day_of_epoch() is registered on first use, so a script's own handle has it too.
+function receiptSubmittedDaySql() {
+	if (!receiptSubmittedDaySql.registered) {
+		db.function("app_day_of_epoch", { deterministic: true }, (seconds) => (/^-?\d{1,12}$/.test(String(seconds))
+			? appTime.dayInZone(new Date(Number(seconds) * 1000), APP_TIMEZONE)
+			: null));
+		receiptSubmittedDaySql.registered = true;
+	}
+	return "app_day_of_epoch(strftime('%s', COALESCE(NULLIF(timestamp, ''), created_at)))";
+}
+
 // The month a receipt counts in under the futureReceipts rule: posted_period
 // when set; a receipt dated after the day it was submitted counts in the month
 // it was submitted while that month is open and its date's month is not closed;
@@ -18956,7 +19047,7 @@ function loadPayRateIndex() {
 // settled it there: either way the receipt stays where it settled, and a
 // reopened submission month never pulls it back.
 function futureAwarePeriodExpr() {
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const closed = "(SELECT period FROM period_locks WHERE period_locks.status = 'locked')";
 	return `(CASE WHEN COALESCE(posted_period, '') != '' THEN posted_period
 		WHEN strftime('%Y-%m-%d', date) > ${submitted}
@@ -18972,7 +19063,7 @@ function futureAwarePeriodExpr() {
 // receipts booked, { id, period }.
 function stampFutureReceipts(periods) {
 	if (!periods.length) return [];
-	const submitted = "strftime('%Y-%m-%d', COALESCE(NULLIF(timestamp, ''), created_at))";
+	const submitted = receiptSubmittedDaySql();
 	const ph = periods.map(() => "?").join(",");
 	// The receipts the rule's own expression counts in a closing month for
 	// being dated after their submission day (not those booked by date).
@@ -19671,7 +19762,7 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	// carries now (the snapshot is otherwise frozen): personalRenderData().
 	const personalRows = personalRowsOnInvoice(invoiceRow.id);
 	const { templateName, data } = personalRenderData(renderData, invoiceRow, personalRows);
-	const pdfBuffer = await renderInvoiceWithReceipts(templateName, data, personalRows, invoiceRow.driver);
+	const pdfBuffer = await renderInvoiceWithReceipts(templateName, data, personalRows, invoiceRow.driver, invoiceRow.pdf_file_name);
 	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
@@ -20500,7 +20591,7 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 	for (const e of added) for (const l of e.loads) if (!loadIds.includes(l)) loadIds.push(l);
 	const personalRows = personalRowsOnInvoice(inv.id);
 	const rendered = personalRenderData(next, { ...inv, total_earnings: total }, personalRows);
-	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, personalRows, inv.driver);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, personalRows, inv.driver, inv.pdf_file_name);
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, inv.pdf_file_name);
@@ -21891,7 +21982,7 @@ async function generateInvoiceHandler(req, res) {
 		// (renderInvoiceWithReceipts(); with no Personal line it is the plain render).
 		// The LAST await. Everything below runs synchronously, so what the write
 		// re-checks is what it writes against.
-		const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData, personalFit.fit, canonicalDriverName(driverName));
+		const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData, personalFit.fit, canonicalDriverName(driverName), pdfFileName);
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -27769,16 +27860,16 @@ function personalRenderData(snapshot, invoiceRow, rows) {
 // render only, so a snapshot never holds an image or a note that went stale.
 //
 // PDF receipts (R3 v2): only with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on AND
-// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set; it stays off until
-// the driver-privacy rule for multi-page statements ships), a PDF receipt's
-// pages are prepared in a locked-down child process (lib/receipt-pdf.js) and
-// inserted after its sheet once Chrome has rendered the invoice. Only the
-// invoice's own driver's receipt (both names non-empty, normalizeDriverName())
-// is ever read from the cache. Anything that fails keeps "PDF receipt on
-// file"; a failed insert renders the invoice once more with every PDF receipt
-// on that note, so an invoice never fails because of a receipt. The child's
-// self-test runs at every start whatever the flags; until it passes, every PDF
-// keeps the note.
+// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set), a PDF receipt's
+// RELEASED pages (driver privacy, the section after this one) are prepared in a
+// locked-down child process (lib/receipt-pdf.js) and inserted after its sheet
+// once Chrome has rendered the invoice. Only the invoice's own driver's receipt
+// (both names non-empty, normalizeDriverName()) is ever read from the cache,
+// and only for a render whose caller names the invoice's file (its render
+// record). Anything that fails keeps "PDF receipt on file"; a failed insert
+// renders the invoice once more with every PDF receipt on that note, so an
+// invoice never fails because of a receipt. The child's self-test runs at
+// every start whatever the flags; until it passes, every PDF keeps the note.
 const PERSONAL_RECEIPT_WAIT_MS = 15_000;
 const RECEIPT_PDF_PAGES_ENABLED = process.env.RECEIPT_PDF_PAGES_ENABLED === "true";
 function receiptPdfPagesOn() {
@@ -27820,6 +27911,10 @@ function receiptPdfService() {
 			receiptPdfService.instance = {
 				prepare: async () => ({ status: "on_file", reason: "disabled" }),
 				merge: async () => ({ status: "failed", reason: "disabled" }),
+				sourceInfo: async () => ({ status: "on_file", reason: "disabled" }),
+				pageTexts: async () => ({ status: "on_file", reason: "disabled" }),
+				invoiceTexts: async () => ({ status: "failed", reason: "disabled" }),
+				rebuild: async () => ({ status: "failed", reason: "disabled" }),
 				selfTest: async () => ({ passed: false, problems: ["setup"], report: null, line: "" }),
 				state: () => "failed",
 			};
@@ -27842,35 +27937,51 @@ function warmReceiptImage(expense) {
 // not ready by then prints "Receipt image not available", a PDF "PDF receipt
 // on file". A PDF receipt is attachable only with opts.pdfPages and when its
 // driver and opts.invoiceDriver are the same non-empty name, checked before
-// anything is read; its pages count toward RECEIPT_PDF_INVOICE_MAX_PAGES and
-// its bytes toward RECEIPT_PDF_INSERT_MAX_BYTES in print order, and one that
-// would cross either keeps the note. { data (a new object), inserts: the PDF
-// pages to put after their sheets (lib/receipt-pdf.js merge()) }.
+// anything is read, and then only its pages released to the driver (driver
+// privacy; none released: the note); its pages count toward
+// RECEIPT_PDF_INVOICE_MAX_PAGES and its bytes toward RECEIPT_PDF_INSERT_MAX_BYTES
+// in print order, and one that would cross either keeps the note. { data (a new
+// object), inserts: the PDF pages to put after their sheets (lib/receipt-pdf.js
+// merge()), each with the receipt file's sha256, the pages copied and how many
+// were withheld (its render record), pdfReceipts: every PDF receipt of the
+// invoice's driver this render could attach, in print order, with its file's
+// sha256 and page count when its verdicts were read and its line's label (the
+// render record lists those with no page copied too: rule D) }.
 async function personalReceiptRenderData(data, rows, opts = {}) {
-	if (!rows || !rows.length) return { data, inserts: [] };
+	if (!rows || !rows.length) return { data, inserts: [], pdfReceipts: [] };
 	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
 	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
 	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
 		.map((l) => expenseOfRow.get(l.rowId)).filter((n) => Number.isInteger(n) && n > 0))];
 	const expenseOf = new Map(order.length
-		? db.prepare(`SELECT id, photo_data, driver FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e])
+		? db.prepare(`SELECT id, photo_data, driver, amount, date, vendor, truck_unit FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e])
 		: []);
 	const invoiceDriver = normalizeDriverName(typeof opts.invoiceDriver === "string" ? opts.invoiceDriver : "");
-	const pdfPages = opts.pdfPages === true;
+	const pdfPages = opts.pdfPages === true && receiptPagesTablesPresent();
+	const roster = pdfPages ? currentReceiptRoster() : null;
 	const service = receiptImageService();
 	let sheets = 0;
+	const pdfOwn = new Map();
 	const prepared = new Map(await Promise.all(order.map(async (id) => {
 		const e = expenseOf.get(id) || {};
 		const kind = receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR);
 		if (kind === "pdf") {
 			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
 			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
+			pdfOwn.set(id, { sha256: "", pageCount: 0 });
 			sheets += 1;
 			// Past the sheet cap a PDF keeps its own note: the app does not open a
 			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
 			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
-			const res = await receiptPdfService().prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
-			return [id, res.status === "pages" ? { status: "pdf_pages", pages: res.pages, pdf: res.pdf } : { status: "pdf" }];
+			const rel = await receiptPagesReleased(e, { roster });
+			if (rel) pdfOwn.set(id, { sha256: rel.sha256, pageCount: rel.pageCount });
+			if (!rel || !rel.pages.length) return [id, { status: "pdf" }];
+			const res = await receiptPdfService().prepare(
+				{ expenseId: id, photoData: e.photo_data, allowPages: rel.pages, rosterHash: rel.rosterHash, expectSha256: rel.sha256 },
+				{ waitMs: PERSONAL_RECEIPT_WAIT_MS });
+			return [id, res.status === "pages"
+				? { status: "pdf_pages", pages: res.pages, pdf: res.pdf, withheld: rel.pageCount - rel.pages.length, sha256: res.sha256, allow: rel.pages, rosterHash: rel.rosterHash }
+				: { status: "pdf" }];
 		}
 		if (kind !== "image") return [id, { status: "unavailable", reason: "missing" }];
 		sheets += 1;
@@ -27891,7 +28002,10 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 		copiedBytes += p.pdf.length;
 	}
 	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
-	const inserts = layout.inserts.map((x) => ({ expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
+	const inserts = layout.inserts.map((x) => {
+		const p = prepared.get(x.expenseId);
+		return { expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: p.pdf, sha256: p.sha256, allow: p.allow, withheld: p.withheld, rosterHash: p.rosterHash };
+	});
 	const out = { ...data, receiptPages: layout.pages };
 	if (data.personalCorrection) {
 		// A correction's line items and deductions are its lines, in the same order.
@@ -27902,34 +28016,59 @@ async function personalReceiptRenderData(data, rows, opts = {}) {
 	} else {
 		out.personalLines = layout.entries;
 	}
-	return { data: out, inserts };
+	const lineOf = (id) => lines.find((l) => (l.kind === "personal" || l.kind === "personal_reversed") && expenseOfRow.get(l.rowId) === id) || {};
+	const pdfReceipts = [...pdfOwn.entries()].map(([expenseId, f]) => ({ expenseId, sha256: f.sha256, pageCount: f.pageCount, label: lineOf(expenseId).label || "" }));
+	return { data: out, inserts, pdfReceipts };
 }
 
 // Every weekly or correction invoice render that carries Personal lines: the
 // receipts join the data (personalReceiptRenderData()), Chrome renders it, and
-// each attachable PDF receipt's pages go in after its sheet (lib/receipt-pdf.js
-// merge(), in the child). A failed merge renders once more with every PDF
-// receipt on its note. invoiceDriver: the invoice's own driver, for the PDF
-// driver check. Resolves the PDF bytes to write.
-async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver) {
+// each attachable PDF receipt's released pages go in after its sheet
+// (lib/receipt-pdf.js merge(), in the child). A failed merge renders once more
+// with every PDF receipt on its note, and so does a merge whose pages are no
+// longer all released after its last await, or whose render record cannot be
+// written. invoiceDriver: the invoice's own driver, for the PDF driver check;
+// pdfFileName: the file this render is written to (no name, no PDF pages: a
+// stored file with copied pages always has its render record). A file holding
+// a PDF receipt of his with no page copied ("PDF receipt on file") is recorded
+// too (rule D), so that a later release reaches it through "Update invoice
+// PDF". Resolves the PDF bytes to write.
+async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver, pdfFileName) {
 	if (!rows || !rows.length) return renderPolicy(templateName, data);
-	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: receiptPdfPagesOn() });
+	const pdfPages = receiptPdfPagesOn() && typeof pdfFileName === "string" && pdfFileName !== "";
+	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages });
 	const pdf = await renderPolicy(templateName, first.data);
-	if (!first.inserts.length) return pdf;
+	if (!first.inserts.length) {
+		await recordReceiptsOnFile(pdf, pdfFileName, first.pdfReceipts);
+		return pdf;
+	}
 	const merged = await receiptPdfService().merge(pdf, first.inserts);
-	if (merged.status === "merged") return merged.pdf;
-	console.warn(`[receipt-pdfs] receipt pages for expense ${first.inserts.map((x) => x.expenseId).join(", ")} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	const ids = first.inserts.map((x) => x.expenseId).join(", ");
+	if (merged.status === "merged") {
+		const attached = new Set(first.inserts.map((x) => x.expenseId));
+		const ends = onFileReceipts(first.pdfReceipts.filter((x) => !attached.has(x.expenseId)));
+		if (receiptInsertsWithheldNow(first.inserts).length) {
+			console.warn(`[receipt-pdfs] receipt pages for expense ${ids} were withheld while the invoice was drawn; it prints "PDF receipt on file" instead`);
+		} else if (recordInvoicePdfRender({ pdf: merged.pdf, pdfFileName, inserts: first.inserts, ends, positions: merged.positions, pages: merged.pages, cause: "render" })) {
+			return merged.pdf;
+		}
+	} else {
+		console.warn(`[receipt-pdfs] receipt pages for expense ${ids} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	}
 	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
-	return renderPolicy(templateName, again.data);
+	const fallback = await renderPolicy(templateName, again.data);
+	await recordReceiptsOnFile(fallback, pdfFileName, first.pdfReceipts);
+	return fallback;
 }
 
 // Before the Friday batch renders: every image receipt behind a Personal line of
 // that week (waiting, or on one of its invoices) is re-encoded and cached first,
-// and, with PDF receipt pages on, every PDF receipt's pages are prepared, one at
-// a time, so the batch's renders read the caches instead of racing the
-// children; a receipt not ready within a render's wait would print its note on
-// an invoice nothing redraws. Bounded by PERSONAL_RECEIPT_WARM_MS overall (each
-// job by its own deadline); never throws. { receipts, prepared }.
+// and, with PDF receipt pages on, every PDF receipt's verdicts are made and its
+// released pages prepared, one at a time, so the batch's renders read the caches
+// instead of racing the children; a receipt not ready within a render's wait
+// would print its note on an invoice nothing redraws. Bounded by
+// PERSONAL_RECEIPT_WARM_MS overall (each job by its own deadline); never
+// throws. { receipts, prepared }.
 const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
 async function warmPersonalReceiptsForWeek(weekStart) {
 	const out = { receipts: 0, prepared: 0 };
@@ -27941,7 +28080,7 @@ async function warmPersonalReceiptsForWeek(weekStart) {
 		const carried = PERSONAL_RECEIPT_WEEK_ENABLED
 			? " OR (ep.week_start < ? AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ep.invoice_id AND i.deleted_at = '')))"
 			: "";
-		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
+		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data, e.driver, e.amount, e.date, e.vendor, e.truck_unit FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
 			WHERE ep.voided_at = '' AND (ep.week_start = ?${carried}) ORDER BY e.id`).all(...(carried ? [weekStart, weekStart] : [weekStart]))
 			.map((e) => ({ ...e, kind: receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) }))
 			.filter((e) => e.kind === "image" || (pdfPages && e.kind === "pdf"));
@@ -27949,14 +28088,469 @@ async function warmPersonalReceiptsForWeek(weekStart) {
 		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
 		for (const e of list) {
 			if (Date.now() > deadline) break;
-			const service = e.kind === "pdf" ? receiptPdfService() : receiptImageService();
-			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
+			let res;
+			if (e.kind === "pdf") {
+				const rel = await receiptPagesReleased(e);
+				res = rel && rel.pages.length
+					? await receiptPdfService().prepare({ expenseId: e.id, photoData: e.photo_data, allowPages: rel.pages, rosterHash: rel.rosterHash, expectSha256: rel.sha256 })
+					: { status: "on_file" };
+			} else {
+				res = await receiptImageService().prepare({ expenseId: e.id, photoData: e.photo_data });
+			}
 			if (res.status === "image" || res.status === "pages") out.prepared += 1;
 		}
 	} catch (err) {
 		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
 	}
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+// DRIVER PRIVACY: PDF RECEIPT PAGES (decisions DP1-DP10 and 10b).
+// With RECEIPT_PDF_PAGES_ENABLED on, a PDF receipt's page reaches its driver's
+// invoice only when it is released to him (lib/receipt-page-verdict.js
+// releasedPages()): a verdict for the file as it is now, made under the roster
+// as it is now, that is AUTO_RELEASED with no mark, or a Super Admin's
+// "released" mark that no later OTHER_* code lapsed. Verdicts are made when a
+// receipt is marked Personal (D9), when its page list is opened, before the
+// Friday batch and at every render, and again by the sweep when the roster or
+// the file changes; a page without a current verdict is withheld.
+//
+// Every invoice PDF written holding a PDF receipt of its driver's leaves a
+// render record (invoice_pdf_renders), its pages copied or not yet (rule D: a
+// statement drawn before any page was released). A page withheld later (a new
+// roster name, a changed file, an "office only" mark) comes out of every stored
+// invoice holding it, by the pages-only path (rewriteInvoiceReceiptPages()): the
+// invoice's own pages stay the same objects, only its receipt pages are rebuilt
+// (after their sheet, or at the end for a receipt drawn with no sheet), the
+// text of its own pages is compared before and after and the rewrite refused
+// if it differs, every page written is checked once more as released in the
+// transaction that writes it, the original file is kept under storage/ (never
+// deleted, never served), one audit row is written, and the invoices row is
+// never touched (approved and closed-month invoices too: 10b). A released page
+// goes in only when a Super Admin presses "Update invoice PDF" (D10). With the
+// flag off none of this runs and the routes answer 404 FEATURE_OFF.
+const RECEIPT_PAGES_ACTOR = { session: { user: { id: 0, username: "receipt-pages", role: "system" } } };
+const RECEIPT_PAGE_NOTE_MAX = 300;
+const RECEIPT_PAGES_SWEEP_MS = 5 * 60 * 1000;
+
+function receiptPagesTablesPresent() {
+	try {
+		return db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('receipt_pdf_pages', 'invoice_pdf_renders')").get().n === 2;
+	} catch {
+		return false;
+	}
+}
+
+const sameNumberList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+const sha256Hex = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
+
+// Every driver name, truck and card a page is compared against.
+function currentReceiptRoster() {
+	return receiptPageVerdict.buildRoster(receiptPagePrivacy.rosterSources(db));
+}
+
+function receiptPageRows(expenseId, sha256) {
+	return db.prepare("SELECT * FROM receipt_pdf_pages WHERE expense_id = ? AND file_sha256 = ? ORDER BY page").all(expenseId, sha256);
+}
+
+// One PDF receipt's verdicts for its file as it is now, made when missing or
+// made under another roster (one run at a time per receipt and roster): {
+// sha256, pageCount, rosterHash, rows }, or { sha256: "", reason } when the
+// file cannot be read (missing, refused by the reader, more pages than are ever
+// copied) and every page is withheld. Marks are kept; a released mark lapses
+// when a new verdict finds an OTHER_* code it did not acknowledge. A run made
+// under another roster is never joined: its answer would be stale.
+function receiptPageVerdictsFor(expense, { roster = null } = {}) {
+	if (!expense || !expense.id || !receiptPagesTablesPresent()) return Promise.resolve({ sha256: "", reason: "unavailable" });
+	if (receiptImagesLib.receiptImageKind(expense.photo_data, RECEIPTS_DIR) !== "pdf") return Promise.resolve({ sha256: "", reason: "not_pdf" });
+	const r = roster || currentReceiptRoster();
+	const running = receiptPageVerdictsFor.running || (receiptPageVerdictsFor.running = new Map());
+	const key = `${expense.id}|${r.hash}`;
+	if (running.has(key)) return running.get(key);
+	const job = (async () => {
+		const svc = receiptPdfService();
+		const src = await svc.sourceInfo({ photoData: expense.photo_data });
+		if (src.status !== "source") return { sha256: "", reason: src.reason || src.status };
+		const have = receiptPageRows(expense.id, src.sha256);
+		if (have.length && have.length === Number(have[0].page_count) && have.every((row) => row.roster_hash === r.hash)) {
+			return { sha256: src.sha256, pageCount: have.length, rosterHash: r.hash, rows: have };
+		}
+		const texts = await svc.pageTexts({ expenseId: expense.id, photoData: expense.photo_data });
+		if (texts.status !== "text") return { sha256: "", reason: texts.reason || texts.status };
+		const receipt = {
+			driver: expense.driver, truck: expense.truck_unit, amountCents: personalExpense.receiptCents(expense.amount),
+			date: expense.date, vendor: expense.vendor, pageCount: texts.pageCount,
+		};
+		const verdicts = texts.pages.map((page) => receiptPageVerdict.pageVerdict(page, r, receipt));
+		const stamp = new Date().toISOString();
+		db.transaction(() => {
+			const now = new Map(receiptPageRows(expense.id, texts.sha256).map((row) => [row.page, row]));
+			const update = db.prepare(`UPDATE receipt_pdf_pages SET page_count = ?, verdict_code = ?, reason_codes = ?, roster_hash = ?, decided_at = ?,
+				mark_lapsed_at = CASE WHEN ? = 1 THEN ? ELSE mark_lapsed_at END WHERE id = ?`);
+			const insert = db.prepare(`INSERT INTO receipt_pdf_pages (expense_id, file_sha256, page, page_count, verdict_code, reason_codes, roster_hash, decided_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+			verdicts.forEach((v, i) => {
+				const prev = now.get(i + 1);
+				const reasons = v.reasons.join(",");
+				if (prev) update.run(texts.pageCount, v.code, reasons, r.hash, stamp, receiptPageVerdict.markLapses(prev, v.reasons) ? 1 : 0, stamp, prev.id);
+				else insert.run(expense.id, texts.sha256, i + 1, texts.pageCount, v.code, reasons, r.hash, stamp);
+			});
+		})();
+		return { sha256: texts.sha256, pageCount: texts.pageCount, rosterHash: r.hash, rows: receiptPageRows(expense.id, texts.sha256) };
+	})().catch((err) => {
+		console.warn(`[receipt-pages] expense ${expense.id}: verdicts not made (${err.message})`);
+		return { sha256: "", reason: "error" };
+	}).finally(() => running.delete(key));
+	running.set(key, job);
+	return job;
+}
+
+// The pages of one PDF receipt released to its driver now: { sha256,
+// pageCount, rosterHash, pages } (pages may be empty), or null.
+async function receiptPagesReleased(expense, opts = {}) {
+	const v = await receiptPageVerdictsFor(expense, opts);
+	if (!v || !v.sha256) return null;
+	return { sha256: v.sha256, pageCount: v.pageCount, rosterHash: v.rosterHash, pages: receiptPageVerdict.releasedPages(v.rows, { sha256: v.sha256, rosterHash: v.rosterHash }) };
+}
+
+function receiptPagesCounts(v) {
+	if (!v || !v.sha256) return { pages: 0, released: 0, office: 0, readable: false };
+	const released = receiptPageVerdict.releasedPages(v.rows, { sha256: v.sha256, rosterHash: v.rosterHash }).length;
+	return { pages: v.pageCount, released, office: v.pageCount - released, readable: true };
+}
+
+// The inserts holding a page that is not released now: read after a render's
+// last await, just before its file is written.
+function receiptInsertsWithheldNow(inserts) {
+	if (!receiptPagesTablesPresent()) return inserts.slice();
+	const rosterHash = currentReceiptRoster().hash;
+	return inserts.filter((x) => {
+		if (!Array.isArray(x.allow) || !x.allow.length || !x.sha256) return true;
+		const released = receiptPageVerdict.releasedPages(receiptPageRows(x.expenseId, x.sha256), { sha256: x.sha256, rosterHash });
+		return x.allow.some((p) => !released.includes(p));
+	});
+}
+
+// The render record's columns. inserts: the receipts with a sheet (their pages
+// follow it); ends: those with no sheet ("end-K", rule D), their pages at the
+// end of the file when any were added, each with its invoice line's label.
+function invoiceRenderRow({ pdf, pdfFileName, inserts, ends = [], positions, pages, cause, invoiceId = null, originalFile = "" }) {
+	const placed = (anchor) => (positions || []).find((q) => q.anchor === anchor);
+	const receipts = inserts.map((x) => {
+		const p = placed(x.anchor);
+		if (!p) throw new Error("a receipt without its position");
+		return { expense_id: x.expenseId, file_sha256: x.sha256 || "", pages: x.allow || [], withheld: Number(x.withheld) || 0, anchor: x.anchor, index: x.index, total: x.total, sheet: p.sheet, at: p.at };
+	});
+	ends.forEach((x, i) => {
+		const anchor = x.anchor || `end-${i + 1}`;
+		const p = placed(anchor);
+		receipts.push({ expense_id: x.expenseId, file_sha256: x.sha256 || "", pages: x.allow || [], withheld: Number(x.withheld) || 0, anchor, index: 0, total: 0, sheet: -1, at: p ? p.at : [], label: x.label || "" });
+	});
+	const copied = receipts.reduce((n, r) => n + r.at.length, 0);
+	return [pdfFileName, sha256Hex(pdf), invoiceId, pages, pages - copied, JSON.stringify(receipts),
+		([...inserts, ...ends].find((x) => x.rosterHash) || {}).rosterHash || "", cause, originalFile, new Date().toISOString()];
+}
+const INVOICE_RENDER_INSERT = `INSERT INTO invoice_pdf_renders (pdf_file_name, pdf_sha256, invoice_id, total_pages, invoice_pages, receipts, roster_hash, cause, original_file, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+// Records a render that copied receipt pages. false when it cannot: the
+// caller then prints every PDF receipt on its note instead.
+function recordInvoicePdfRender(args) {
+	try {
+		if (!receiptPagesTablesPresent() || !args.pdfFileName) return false;
+		db.prepare(INVOICE_RENDER_INSERT).run(...invoiceRenderRow(args));
+		return true;
+	} catch (err) {
+		console.warn(`[receipt-pages] render record not written (${err.message})`);
+		return false;
+	}
+}
+
+// pdfReceipts (personalReceiptRenderData()) as a render record's receipts with
+// no sheet and no page: every page withheld, the line's label as printable text.
+function onFileReceipts(list) {
+	return (list || []).map((x) => ({
+		expenseId: x.expenseId, sha256: x.sha256 || "", allow: [], withheld: Number(x.pageCount) || 0,
+		label: String(x.label || "").slice(0, 400).normalize("NFKD").replace(/[^\x20-\x7e]/g, "").trim().slice(0, 160),
+	}));
+}
+
+// Rule D: a stored invoice file holding none of its PDF receipts' pages (none
+// released when it was drawn, or an insert that failed) is recorded with each
+// of them and no page, so that a later release reaches the file through
+// "Update invoice PDF" (the pages go in at the end, its own pages untouched).
+// Its pages are counted here: Chrome's output, this server's own file. Never
+// throws; false when nothing was recorded.
+async function recordReceiptsOnFile(pdf, pdfFileName, pdfReceipts) {
+	if (!pdfReceipts || !pdfReceipts.length || !pdfFileName || !receiptPagesTablesPresent()) return false;
+	try {
+		const pages = (await PdfLibDocument.load(pdf, { updateMetadata: false })).getPageCount();
+		return recordInvoicePdfRender({ pdf, pdfFileName, inserts: [], ends: onFileReceipts(pdfReceipts), positions: [], pages, cause: "render" });
+	} catch (err) {
+		console.warn(`[receipt-pages] render record not written (${err.message})`);
+		return false;
+	}
+}
+
+function invoiceRenderRecord(pdfFileName, pdfSha256) {
+	return db.prepare("SELECT * FROM invoice_pdf_renders WHERE pdf_file_name = ? AND pdf_sha256 = ? ORDER BY id DESC LIMIT 1").get(pdfFileName, pdfSha256) || null;
+}
+
+// A stored invoice file's sha256, remembered by size and modification time
+// (for the screens; the pages-only path always reads the file itself).
+function invoiceFileSha256(file) {
+	const st = fs.statSync(file);
+	const cache = invoiceFileSha256.cache || (invoiceFileSha256.cache = new Map());
+	const key = `${file}|${st.size}|${st.mtimeMs}`;
+	if (cache.has(key)) return cache.get(key);
+	const sha = sha256Hex(fs.readFileSync(file));
+	if (cache.size >= 500) cache.delete(cache.keys().next().value);
+	cache.set(key, sha);
+	return sha;
+}
+
+// The receipts a live invoice's stored file holds pages of, from its render record.
+function invoiceReceiptPagesNow(inv) {
+	try {
+		const rec = invoiceRenderRecord(inv.pdf_file_name, invoiceFileSha256(path.join(DATA_DIR, "uploads", "invoices", inv.pdf_file_name)));
+		return rec ? receiptPagePrivacy.renderReceipts(rec) : [];
+	} catch {
+		return [];
+	}
+}
+
+// The live invoices whose render records ever held pages of this receipt.
+function invoicesHoldingReceipt(expenseId) {
+	const names = db.prepare(`SELECT DISTINCT r.pdf_file_name AS name FROM invoice_pdf_renders r, json_each(r.receipts) j
+		WHERE json_extract(j.value, '$.expense_id') = ? ORDER BY name`).all(expenseId).map((x) => x.name);
+	const out = [];
+	for (const name of names) {
+		for (const inv of db.prepare("SELECT id, invoice_number, status, driver, pdf_file_name FROM invoices WHERE pdf_file_name = ? AND deleted_at = '' ORDER BY id").all(name)) {
+			if (!out.some((o) => o.id === inv.id)) out.push(inv);
+		}
+	}
+	return out;
+}
+
+// THE PAGES-ONLY PATH (D10, 10b). mode "withhold": a page no longer released
+// comes out and nothing comes in (every page of a changed file comes out);
+// mode "update" ("Update invoice PDF"): the receipt pages become exactly the
+// released ones, at most RECEIPT_PDF_INVOICE_MAX_PAGES of them (409 PAGE_CAP).
+// One run at a time per invoice. Resolves { invoiceId, changed, withdrawn,
+// added, refused } and never rejects.
+function rewriteInvoiceReceiptPages(invoiceId, opts = {}) {
+	const chain = rewriteInvoiceReceiptPages.chain || (rewriteInvoiceReceiptPages.chain = new Map());
+	const run = (chain.get(invoiceId) || Promise.resolve()).catch(() => {}).then(() => receiptPagesRewriteOnce(invoiceId, opts));
+	chain.set(invoiceId, run);
+	run.finally(() => { if (chain.get(invoiceId) === run) chain.delete(invoiceId); }).catch(() => {});
+	return run;
+}
+
+// A pass that wrote nothing because a page it copied stopped being released
+// while it ran (RELEASE_CHANGED) is followed by one more, from the verdicts and
+// marks as they are now, which leaves that page out.
+async function receiptPagesRewriteOnce(invoiceId, opts = {}) {
+	const first = await receiptPagesRewritePass(invoiceId, opts);
+	return first.refused === "RELEASE_CHANGED" ? receiptPagesRewritePass(invoiceId, opts) : first;
+}
+
+async function receiptPagesRewritePass(invoiceId, { mode = "update", actor = RECEIPT_PAGES_ACTOR } = {}) {
+	const out = { invoiceId, changed: false, withdrawn: 0, added: 0, refused: "" };
+	let inv = null;
+	let beforeSha = "";
+	const refuse = (code, detail = "") => {
+		out.refused = code;
+		const label = (inv && inv.invoice_number) || `Invoice #${invoiceId}`;
+		// One audit row and one alert per invoice file and code in this process;
+		// the sweep tries again every few minutes.
+		const seen = receiptPagesRewritePass.refusals || (receiptPagesRewritePass.refusals = new Set());
+		const key = `${invoiceId}|${beforeSha}|${code}`;
+		if (seen.has(key)) return out;
+		if (seen.size >= 1000) seen.clear();
+		seen.add(key);
+		console.warn(`[receipt-pages] ${label}: receipt pages not rebuilt (${code})`);
+		logAudit(actor, "invoice_receipt_pages_refused", "invoice", invoiceId, `${label}: receipt pages not rebuilt (${mode}): ${code}${detail ? `; ${detail}` : ""}`);
+		if (mode === "withhold" && code !== "CHANGED" && code !== "RELEASE_CHANGED") {
+			const title = "A receipt page could not be taken out of an invoice PDF";
+			const body = `${label} still holds a PDF receipt page that is no longer released to the driver (${code}). Open the receipt's pages on the Expenses screen.`;
+			// It names the invoice, which Dispatchers are not shown: Super Admins
+			// only, stored (SUPER_ADMIN_ONLY_NOTICE_TYPES) and live.
+			try {
+				insertDispatchNotification.run("receipt-pages", title, body, JSON.stringify({ invoice: invoiceId, code }));
+				if (io) io.to("super-admin").emit("dispatch-notification", { type: "receipt-pages", title, body });
+			} catch (err) { console.error("[receipt-pages] notification failed:", err.message); }
+		}
+		return out;
+	};
+	try {
+		inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId) || null;
+		if (!inv || !inv.pdf_file_name) return refuse("NO_INVOICE_FILE");
+		const file = path.join(DATA_DIR, "uploads", "invoices", inv.pdf_file_name);
+		let before;
+		try { before = fs.readFileSync(file); } catch { return refuse("PDF_MISSING"); }
+		beforeSha = sha256Hex(before);
+		const record = invoiceRenderRecord(inv.pdf_file_name, beforeSha);
+		// No record for this file: it holds no copied receipt page.
+		if (!record) return out;
+		const kept = receiptPagePrivacy.renderReceipts(record);
+		if (!kept.length) return out;
+		const roster = currentReceiptRoster();
+		const invoiceKey = normalizeDriverName(inv.driver || "");
+		const next = [];
+		for (const r of kept) {
+			const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get(r.expense_id) || null;
+			const own = !!expense && !!invoiceKey && normalizeDriverName(expense.driver || "") === invoiceKey;
+			const v = own ? await receiptPageVerdictsFor(expense, { roster }) : null;
+			const rel = v && v.sha256
+				? { sha256: v.sha256, pageCount: v.pageCount, pages: receiptPageVerdict.releasedPages(v.rows, { sha256: v.sha256, rosterHash: v.rosterHash }) }
+				: null;
+			// Why its pages cannot be checked now, as a code for the audit row.
+			const unverified = rel ? "" : !expense ? "expense_missing" : !own ? "driver_changed"
+				: String((v && v.reason) || "unreadable").replace(/[^a-z0-9_]+/gi, "_").slice(0, 40);
+			const sameFile = !!rel && rel.sha256 === r.file_sha256;
+			const allow = !rel ? [] : mode === "withhold" ? (sameFile ? r.pages.filter((p) => rel.pages.includes(p)) : []) : rel.pages;
+			next.push({ r, expense, rel, unverified, sameFile, allow, sha256: rel ? rel.sha256 : r.file_sha256, pageCount: rel ? rel.pageCount : r.pages.length + r.withheld });
+		}
+		// A receipt is settled when its pages stay as they are. One whose record
+		// holds no page is settled whatever its file is now, so a receipt that can
+		// no longer be checked is taken out once, not again on every sweep.
+		if (next.every((n) => sameNumberList(n.allow, n.r.pages) && (n.sameFile || !n.r.pages.length))) return out;
+		if (mode === "update" && next.reduce((s, n) => s + n.allow.length, 0) > receiptPdfLib.RECEIPT_PDF_INVOICE_MAX_PAGES) return refuse("PAGE_CAP");
+		const svc = receiptPdfService();
+		for (const n of next) {
+			n.pdf = null;
+			n.pdfPages = 0;
+			if (n.allow.length) {
+				const res = await svc.prepare({ expenseId: n.r.expense_id, photoData: n.expense.photo_data, allowPages: n.allow, rosterHash: roster.hash, expectSha256: n.sha256 },
+					{ waitMs: PERSONAL_RECEIPT_WAIT_MS });
+				if (res.status === "pages") {
+					n.pdf = res.pdf;
+					n.pdfPages = res.pages;
+				} else if (mode === "withhold") {
+					// A withdrawal never waits on a copy: its pages leave and the notice takes their place.
+					n.allow = [];
+				} else {
+					return refuse("RECEIPT_NOT_PREPARED", `expense ${n.r.expense_id}: ${res.reason || res.status}`);
+				}
+			}
+			n.withheld = Math.max(0, n.pageCount - n.allow.length);
+		}
+		const removed = kept.flatMap((r) => r.at);
+		const textBefore = await svc.invoiceTexts(before);
+		if (textBefore.status !== "text") return refuse("TEXT_UNREADABLE", textBefore.reason);
+		if (textBefore.pages.length !== record.total_pages) return refuse("PAGE_COUNT");
+		const rebuilt = await svc.rebuild(before, {
+			remove: removed,
+			receipts: next.map((n) => ({ anchor: n.r.anchor, index: n.r.index, total: n.r.total, sheet: n.r.sheet, pdf: n.pdf, pages: n.pdfPages, withheld: n.withheld, label: n.r.label })),
+		});
+		if (rebuilt.status !== "rebuilt") return refuse("REBUILD_FAILED", rebuilt.reason);
+		const textAfter = await svc.invoiceTexts(rebuilt.pdf);
+		if (textAfter.status !== "text") return refuse("TEXT_UNREADABLE", textAfter.reason);
+		const receiptAfter = rebuilt.positions.flatMap((p) => p.at);
+		// The locked-invoice check: the invoice's own pages read exactly as before.
+		const check = receiptPagePrivacy.invoicePagesUnchanged({ texts: textBefore.pages, receipt: removed }, { texts: textAfter.pages, receipt: receiptAfter });
+		if (!check.ok) return refuse(check.code, check.page ? `invoice page ${check.page}` : "");
+		if (textAfter.pages.length - receiptAfter.length !== record.invoice_pages) return refuse("PAGE_COUNT");
+		// From here no await: the file is checked, kept, replaced and recorded together.
+		const now = db.prepare("SELECT id, pdf_file_name FROM invoices WHERE id = ?").get(invoiceId);
+		let current = null;
+		try { current = fs.readFileSync(file); } catch { current = null; }
+		if (!now || now.pdf_file_name !== inv.pdf_file_name || !current || sha256Hex(current) !== beforeSha) return refuse("CHANGED");
+		const keptDir = path.join(DATA_DIR, "storage", "invoice-pdf-originals");
+		const keptName = `${invoiceId}-${beforeSha.slice(0, 16)}.pdf`;
+		const row = (n) => ({ expenseId: n.r.expense_id, anchor: n.r.anchor, index: n.r.index, total: n.r.total, sha256: n.sha256, allow: n.allow, withheld: n.withheld, rosterHash: roster.hash, label: n.r.label });
+		const inserts = next.filter((n) => n.r.sheet !== -1).map(row);
+		const ends = next.filter((n) => n.r.sheet === -1).map(row);
+		let stillReleased = false;
+		db.transaction(() => {
+			// Every page written is still released, read in the transaction that
+			// writes it (a roster change or a mark may have landed during the
+			// awaits above); otherwise nothing is written.
+			if (receiptInsertsWithheldNow([...inserts, ...ends].filter((x) => x.allow.length)).length) return;
+			stillReleased = true;
+			if (!fs.existsSync(keptDir)) fs.mkdirSync(keptDir, { recursive: true });
+			if (!fs.existsSync(path.join(keptDir, keptName))) writeInvoiceFileAtomically(path.join(keptDir, keptName), before);
+			db.prepare(INVOICE_RENDER_INSERT).run(...invoiceRenderRow({
+				pdf: rebuilt.pdf, pdfFileName: inv.pdf_file_name, inserts, ends, positions: rebuilt.positions, pages: rebuilt.pages,
+				cause: mode, invoiceId, originalFile: keptName,
+			}));
+			writeInvoiceFileAtomically(file, rebuilt.pdf);
+		})();
+		if (!stillReleased) return refuse("RELEASE_CHANGED");
+		const parts = next.map((n) => {
+			const gone = n.r.pages.filter((p) => !n.sameFile || !n.allow.includes(p));
+			const came = n.allow.filter((p) => !n.sameFile || !n.r.pages.includes(p));
+			out.withdrawn += gone.length;
+			out.added += came.length;
+			const rows = n.rel && n.sameFile ? receiptPageRows(n.r.expense_id, n.sha256) : [];
+			const why = n.unverified ? `receipt not verifiable: ${n.unverified}`
+				: mode === "update" ? "Update invoice PDF"
+					: !n.sameFile ? "receipt file changed"
+						: gone.some((p) => (rows.find((x) => x.page === p) || {}).mark === "office") ? "office mark" : "roster_change";
+			return `expense ${n.r.expense_id}: pages ${n.r.pages.join(",") || "none"} -> ${n.allow.join(",") || "none"} (${why}${n.r.sheet === -1 ? ", at the end" : ""})`;
+		});
+		out.changed = true;
+		logAudit(actor, "invoice_receipt_pages", "invoice", invoiceId,
+			`${inv.invoice_number || `Invoice #${invoiceId}`}: receipt pages rebuilt (${mode}); ${parts.join("; ")}; invoice pages unchanged (${record.invoice_pages}); original kept as ${keptName}`);
+		return out;
+	} catch (err) {
+		return refuse("ERROR", String(err && err.message || "").slice(0, 120));
+	}
+}
+
+// Every stored invoice holding pages of this receipt, rebuilt now without the
+// pages no longer released (an "office only" mark). Every refusal is named for
+// the mark's answer, also one whose audit row and alert are not repeated.
+async function withdrawReceiptFromInvoices(expenseId, actor) {
+	const out = { withdrawn: [], refused: [] };
+	for (const inv of invoicesHoldingReceipt(expenseId)) {
+		const r = await rewriteInvoiceReceiptPages(inv.id, { mode: "withhold", actor });
+		if (r.changed) out.withdrawn.push(inv.id);
+		else if (r.refused) out.refused.push({ id: inv.id, invoice_number: inv.invoice_number || "", code: r.refused });
+	}
+	return out;
+}
+
+// The sweep: every receipt with verdicts is checked against the roster and its
+// file as they are now, then every live invoice whose stored file holds copied
+// receipt pages loses the ones no longer released. { checked, withdrawn,
+// refused, invoices }.
+async function runReceiptPagesSweep() {
+	const out = { checked: 0, withdrawn: 0, refused: 0, invoices: [] };
+	if (!receiptPdfPagesOn() || !receiptPagesTablesPresent() || runReceiptPagesSweep.running) return out;
+	runReceiptPagesSweep.running = true;
+	try {
+		const roster = currentReceiptRoster();
+		for (const { expense_id: id } of db.prepare("SELECT DISTINCT expense_id FROM receipt_pdf_pages ORDER BY expense_id").all()) {
+			const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get(id);
+			if (!expense) continue;
+			await receiptPageVerdictsFor(expense, { roster });
+			out.checked += 1;
+		}
+		const seen = new Set();
+		for (const { name } of db.prepare("SELECT DISTINCT pdf_file_name AS name FROM invoice_pdf_renders ORDER BY name").all()) {
+			for (const inv of db.prepare("SELECT id FROM invoices WHERE pdf_file_name = ? AND deleted_at = '' ORDER BY id").all(name)) {
+				if (seen.has(inv.id)) continue;
+				seen.add(inv.id);
+				const r = await rewriteInvoiceReceiptPages(inv.id, { mode: "withhold" });
+				if (r.changed) { out.withdrawn += 1; out.invoices.push(inv.id); } else if (r.refused) out.refused += 1;
+			}
+		}
+		if (out.withdrawn) notifyChange("invoices");
+	} catch (err) {
+		console.error(`[receipt-pages] sweep failed: ${err.message}`);
+	} finally {
+		runReceiptPagesSweep.running = false;
+	}
+	return out;
+}
+if (receiptPdfPagesOn() && startsJob("receipt page sweep")) {
+	const receiptPagesTick = () => { runReceiptPagesSweep().catch((err) => console.error("[receipt-pages] sweep failed:", err.message)); };
+	const firstSweep = setTimeout(receiptPagesTick, 3 * 60 * 1000);
+	if (firstSweep && typeof firstSweep.unref === "function") firstSweep.unref();
+	const everySweep = setInterval(receiptPagesTick, RECEIPT_PAGES_SWEEP_MS);
+	if (everySweep && typeof everySweep.unref === "function") everySweep.unref();
 }
 
 // The Personal lines of each invoice, for the screens: { invoiceId: [{ line_id,
@@ -28349,7 +28943,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	const finalPath = path.join(dir, inv.pdf_file_name);
 	if (touchesInvoice && !softDelete) {
 		rendered = personalRenderData(snap, inv, next);
-		const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, next, inv.driver);
+		const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, next, inv.driver, inv.pdf_file_name);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
 		fs.writeFileSync(tmpPath, pdfBuffer);
@@ -28460,7 +29054,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		adjustmentNote: "",
 	};
 	const rendered = personalRenderData(snapshot, { adjustment: 0, adjustment_note: "" }, rows);
-	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, rows, display);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, rows, display, pdfFileName);
 	let insertedId = null;
 	const result = commitInvoiceWithPdf({
 		invoiceNumber, pdfFileName, pdfBuffer,
@@ -29269,6 +29863,9 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 		const approve = inPlace && String(expense.status || "") === "Pending";
 		// The receipt's page image starts now, and the invoice render below joins it
 		warmReceiptImage(expense);
+		// So do a PDF receipt's page verdicts (driver privacy D9); the answer carries their counts (D8).
+		const pagesJob = receiptPdfPagesOn() && receiptImagesLib.receiptImageKind(expense.photo_data, RECEIPTS_DIR) === "pdf"
+			? receiptPageVerdictsFor(expense) : null;
 		let placed;
 		try {
 			placed = await placePersonalLine({
@@ -29293,7 +29890,8 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 		}
 		notifyChange("expenses");
 		if (placed.invoice) notifyChange("invoices");
-		res.status(201).json({ success: true, personal: personalSummaryForRole(personalSummaryByExpense([id])[id], "Super Admin") });
+		const receiptPages = pagesJob ? receiptPagesCounts(await pagesJob) : null;
+		res.status(201).json({ success: true, personal: personalSummaryForRole(personalSummaryByExpense([id])[id], "Super Admin"), ...(receiptPages ? { receipt_pages: receiptPages } : {}) });
 	} catch (err) {
 		return personalErrorResponse(res, err, "Marking a receipt Personal");
 	}
@@ -29611,6 +30209,152 @@ app.get("/api/invoices/:id/personal-receipts/:lineId", requireAuth, personalRece
 	} catch (err) {
 		console.error("Personal receipt error:", err.message);
 		res.status(500).json({ error: "Failed to open the receipt" });
+	}
+});
+
+// Driver privacy: a PDF receipt's pages, the Super Admin's mark and "Update
+// invoice PDF" (the "DRIVER PRIVACY: PDF RECEIPT PAGES" section). A Super Admin
+// opens a few at a time, never hundreds; counted per signed-in user like the
+// Personal writes.
+const receiptPagesLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 300,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many receipt page requests. Try again in a few minutes." },
+	standardHeaders: true,
+});
+
+function receiptPagesOff(res) {
+	return res.status(404).json({ error: "PDF receipt pages are switched off on this server.", code: "FEATURE_OFF" });
+}
+
+// The page list a Super Admin sees: codes, marks and counts, never a page's text.
+function receiptPagesView(expense, v) {
+	const empty = { pages: 0, released: 0, office: 0 };
+	if (!v || !v.sha256) return { expense_id: expense.id, readable: false, reason: (v && v.reason) || "unreadable", file: null, pages: [], counts: empty, released_anyway: [], invoices: [] };
+	const released = receiptPageVerdict.releasedPages(v.rows, { sha256: v.sha256, rosterHash: v.rosterHash });
+	const pages = v.rows.map((row) => ({
+		page: row.page,
+		code: row.verdict_code,
+		reasons: receiptPageVerdict.codesOf(row.reason_codes),
+		mark: row.mark,
+		mark_reason: row.mark_reason,
+		marked_by: row.marked_by,
+		marked_at: row.marked_at,
+		lapsed: !!row.mark_lapsed_at,
+		released_anyway: row.mark === "released" && receiptPageVerdict.otherCodes(row.mark_codes).length > 0,
+		released: released.includes(row.page),
+	}));
+	const invoices = invoicesHoldingReceipt(expense.id).map((inv) => {
+		const held = invoiceReceiptPagesNow(inv).find((x) => x.expense_id === expense.id);
+		return held ? {
+			id: inv.id, invoice_number: inv.invoice_number, status: inv.status, pages_in_pdf: held.pages,
+			can_update: !sameNumberList(held.pages, released) || (held.pages.length > 0 && held.file_sha256 !== v.sha256),
+		} : null;
+	}).filter(Boolean);
+	return {
+		expense_id: expense.id, readable: true, file: { sha256: v.sha256.slice(0, 12), pages: v.pageCount }, pages,
+		counts: { pages: pages.length, released: released.length, office: pages.length - released.length },
+		released_anyway: pages.filter((p) => p.released_anyway).map((p) => p.page), invoices,
+	};
+}
+
+// GET /api/expenses/:id/receipt-pages — a PDF receipt's pages: each one's
+// verdict code, mark and whether it reaches the driver, and the invoices whose
+// stored PDF holds some of them. Super Admin.
+app.get("/api/expenses/:id/receipt-pages", requireRole("Super Admin"), receiptPagesLimiter, async (req, res) => {
+	try {
+		if (!receiptPdfPagesOn()) return receiptPagesOff(res);
+		const expense = personalExpenseById(req);
+		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
+		if (receiptImagesLib.receiptImageKind(expense.photo_data, RECEIPTS_DIR) !== "pdf") return res.status(404).json({ error: "This receipt is not a PDF.", code: "RECEIPT_NOT_PDF" });
+		res.json(receiptPagesView(expense, await receiptPageVerdictsFor(expense)));
+	} catch (err) {
+		console.error("Receipt pages error:", err.message);
+		res.status(500).json({ error: "Failed to read the receipt's pages" });
+	}
+});
+
+// POST /api/expenses/:id/receipt-pages/:page { mark: "released" | "office",
+// reason (a code), note?, releaseAnyway? } — one page per call (DP2: no
+// release-all). Releasing a page with an OTHER_* code answers 409
+// RECEIPT_PAGE_RELEASE_ANYWAY with its codes until releaseAnyway names every one
+// of them. Audited (page, file, mark, reason code; the note stays in the table).
+// "office" takes the page out of every stored invoice holding it at once, and
+// the answer's `withdrawal` { withdrawn: [id], refused: [{ id, invoice_number,
+// code }] } says which; a release reaches a stored invoice only through
+// "Update invoice PDF".
+app.post("/api/expenses/:id/receipt-pages/:page", requireRole("Super Admin"), refuseCrossOrigin, receiptPagesLimiter, async (req, res) => {
+	try {
+		if (!receiptPdfPagesOn()) return receiptPagesOff(res);
+		const expense = personalExpenseById(req);
+		if (!expense) return res.status(404).json({ error: "Receipt not found", code: "EXPENSE_NOT_FOUND" });
+		const page = /^[1-9]\d{0,2}$/.test(String(req.params.page)) ? Number(req.params.page) : 0;
+		const body = req.body || {};
+		const bad = (error) => res.status(400).json({ error, code: "RECEIPT_PAGE_BAD_REQUEST" });
+		if (!page) return bad("Mark one page at a time, by its number.");
+		if (!receiptPageVerdict.MARKS.includes(body.mark)) return bad("The mark is \"released\" or \"office\".");
+		if (!receiptPageVerdict.MARK_REASONS.includes(body.reason)) return bad("Choose a reason for the mark.");
+		const note = typeof body.note === "string" ? scrubPurgeMarker(body.note).replace(/[\r\n\t]+/g, " ").trim().slice(0, RECEIPT_PAGE_NOTE_MAX) : "";
+		if (receiptImagesLib.receiptImageKind(expense.photo_data, RECEIPTS_DIR) !== "pdf") return res.status(404).json({ error: "This receipt is not a PDF.", code: "RECEIPT_NOT_PDF" });
+		const v = await receiptPageVerdictsFor(expense);
+		if (!v || !v.sha256) {
+			return res.status(409).json({ error: "This receipt's pages could not be read, so they stay with the office.", code: "RECEIPT_PAGES_UNREADABLE" });
+		}
+		const row = v.rows.find((r) => r.page === page);
+		if (!row) return res.status(404).json({ error: "This receipt has no such page.", code: "RECEIPT_PAGE_NOT_FOUND" });
+		const others = receiptPageVerdict.otherCodes(row.reason_codes);
+		let acknowledged = [];
+		if (body.mark === "released" && others.length) {
+			const named = Array.isArray(body.releaseAnyway) ? body.releaseAnyway.filter((c) => others.includes(c)) : [];
+			if (!others.every((c) => named.includes(c))) {
+				return res.status(409).json({
+					error: "This page shows another driver, truck or card. Release it anyway only after reading the page.",
+					code: "RECEIPT_PAGE_RELEASE_ANYWAY", codes: others,
+				});
+			}
+			acknowledged = others;
+		}
+		// After the last await: the page is read again, then marked.
+		const now = db.prepare("SELECT * FROM receipt_pdf_pages WHERE id = ?").get(row.id);
+		if (!now || now.reason_codes !== row.reason_codes || now.roster_hash !== row.roster_hash) {
+			return res.status(409).json({ error: "This page's check changed while it was being marked. Reload and try again.", code: "RECEIPT_PAGES_CHANGED" });
+		}
+		const user = req.session.user;
+		db.prepare(`UPDATE receipt_pdf_pages SET mark = ?, mark_codes = ?, mark_reason = ?, mark_note = ?, marked_by = ?, marked_by_id = ?, marked_at = ?, mark_lapsed_at = ''
+			WHERE id = ?`).run(body.mark, acknowledged.join(","), body.reason, note, user.username || "", Number(user.id) || 0, new Date().toISOString(), row.id);
+		logAudit(req, "receipt_page_mark", "expense", expense.id,
+			`page ${page} of ${row.page_count} (file ${row.file_sha256.slice(0, 12)}): ${body.mark}; reason ${body.reason}${acknowledged.length ? `; released anyway over ${acknowledged.join(", ")}` : ""}`);
+		const withdrawal = body.mark === "office" ? await withdrawReceiptFromInvoices(expense.id, req) : { withdrawn: [], refused: [] };
+		notifyChange("expenses");
+		if (withdrawal.withdrawn.length) notifyChange("invoices");
+		// Its own key, after the view: the view has an `invoices` list of its own.
+		res.json({ success: true, ...receiptPagesView(expense, await receiptPageVerdictsFor(expense)), withdrawal });
+	} catch (err) {
+		console.error("Receipt page mark error:", err.message);
+		res.status(500).json({ error: "Failed to mark the page" });
+	}
+});
+
+// POST /api/invoices/:id/receipt-pages/update — "Update invoice PDF": the
+// invoice's stored PDF gets exactly the receipt pages released now, through the
+// pages-only path (its own pages, figures, lines, number and status unchanged).
+app.post("/api/invoices/:id/receipt-pages/update", requireRole("Super Admin"), refuseCrossOrigin, receiptPagesLimiter, async (req, res) => {
+	try {
+		if (!receiptPdfPagesOn()) return receiptPagesOff(res);
+		const id = /^\d{1,12}$/.test(String(req.params.id)) ? Number(req.params.id) : 0;
+		const inv = id ? db.prepare("SELECT id, deleted_at FROM invoices WHERE id = ?").get(id) : null;
+		if (!inv || inv.deleted_at) return res.status(404).json({ error: "Invoice not found", code: "INVOICE_NOT_FOUND" });
+		const r = await rewriteInvoiceReceiptPages(id, { mode: "update", actor: req });
+		if (r.refused) return res.status(409).json({ error: "The invoice PDF was not updated; it is as it was. Try again later.", code: r.refused });
+		if (r.changed) notifyChange("invoices");
+		res.json({ success: true, changed: r.changed, added: r.added, withdrawn: r.withdrawn });
+	} catch (err) {
+		console.error("Receipt pages update error:", err.message);
+		res.status(500).json({ error: "Failed to update the invoice PDF" });
 	}
 });
 
@@ -29989,6 +30733,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", user, "WRONG_PASSWORD", `Sign-in refused: wrong password (by ${found.by})`);
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
+		// A disabled account is told so only after the right password, and before the session the
+		// request arrived with is rotated, so that session is left as it was.
+		if (String(user.disabled_at ?? "") !== "") {
+			return res.status(403).json(disabledSignInRefusal(req, user));
+		}
 
 		// A NEW SESSION ID FOR EVERY SIGN-IN, as POST /api/auth/setup and
 		// POST /api/auth/change-password already do. regenerate() destroys the
@@ -30022,6 +30771,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			signIn.refuse(req, "login_refused", current || user, "CHANGED_MEANWHILE",
 				`Sign-in refused: the account was changed or removed while its password was checked (by ${found.by})`);
 			return refuse(401, "Invalid credentials");
+		}
+		// A disable that landed while this sign-in yielded: the half-built session goes, as in refuse().
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(403).json(disabledSignInRefusal(req, current));
 		}
 
 		req.session.user = {
@@ -30076,6 +30830,28 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		refuse(500, "Could not sign in. Please try again.");
 	}
 });
+
+// The right password on a disabled account: one audit row a minute per account (logAuditRefusal's
+// window, keyed on the account) and at most one admin email an hour per account. Returns the 403 body.
+function disabledSignInRefusal(req, account) {
+	auditDisabledSignIn(req, account);
+	noticeDisabledSignIn(account);
+	return { code: "ACCOUNT_DISABLED", error: accountDisable.DISABLED_MESSAGE };
+}
+// The row names the account signed in to, never the text that was typed. It is written whatever
+// SIGN_IN_AUDIT_ENABLED says; with it on, through the sign-in writer, which keeps a staff IP and browser.
+function auditDisabledSignIn(req, account) {
+	const details = "Sign-in refused: the account is disabled";
+	if (signIn.auditEnabled) return signIn.refuse(req, "login_refused_disabled", account, "ACCOUNT_DISABLED", details);
+	logAuditRefusal({ session: { user: { id: account.id, username: account.username, role: account.role } } },
+		"login_refused_disabled", "user", String(account.id), `${details} [ACCOUNT_DISABLED]`, "ACCOUNT_DISABLED");
+}
+const disabledSignInNotices = accountDisable.noticeWindow(60 * 60 * 1000);
+function noticeDisabledSignIn(account) {
+	if (!disabledSignInNotices.allow(account.id)) return;
+	const notice = accountDisable.disabledSignInNotice({ account, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
 
 // Logout
 app.post("/api/auth/logout", (req, res) => {
@@ -30192,6 +30968,11 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 		}
 		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 		if (!current) return res.status(404).json({ error: "User not found" });
+		// A disable that landed in the bcrypt window ends this session like a revocation.
+		if (String(current.disabled_at ?? "") !== "") {
+			req.session.destroy(() => {});
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 		if (current.password_hash !== row.password_hash) {
 			return res.status(409).json({
 				code: "PASSWORD_CHANGED_MEANWHILE",
@@ -30485,8 +31266,10 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
 			u.last_login_at, u.must_change_password,
 			EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND COALESCE(u.email, '') <> '' AND LOWER(o.email) = LOWER(u.email)) AS email_shared,
+			u.disabled_at, u.disabled_by, u.disabled_reason, dby.username AS disabled_by_username,
 			do2.status AS onboarding_status
 			FROM users u
+			LEFT JOIN users dby ON dby.id = u.disabled_by
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
 		.all()
 		.map((u) => ({
@@ -30509,6 +31292,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			MustChangePassword: !!u.must_change_password,
 			EmailShared: !!u.email_shared,
 			SharedLogin: signInLib.isSharedLoginName(u.username),
+			// Who turned the account off, when and why; all empty while it is enabled.
+			Disabled: String(u.disabled_at ?? "") !== "",
+			DisabledAt: String(u.disabled_at ?? "") || null,
+			DisabledBy: u.disabled_by ? { id: u.disabled_by, username: u.disabled_by_username || null } : null,
+			DisabledReason: u.disabled_reason || null,
 		}));
 	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
 });
@@ -30659,7 +31447,8 @@ function refreshOwnSession(req) {
 	}
 	// The old ID's sockets end first, while req.sessionID still names it.
 	disconnectSessionSockets(oldSid);
-	if (!row) {
+	// A disabled account's session is ended, never rebuilt.
+	if (!row || String(row.disabled_at ?? "") !== "") {
 		req.session.destroy((err) => {
 			if (err) console.error("session refresh: ending the session failed:", err.message);
 		});
@@ -31106,6 +31895,12 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 				code: "CONCURRENT_MODIFICATION",
 			});
 		}
+		// The acting account as it is now: one disabled, removed or demoted during the awaits above
+		// writes nothing. Its row only; a purged session is caught by the store on its next request.
+		const actorNow = db.prepare("SELECT * FROM users WHERE id = ?").get(Number(req.session?.user?.id));
+		if (!actorNow || String(actorNow.disabled_at ?? "") !== "" || actorNow.role !== "Super Admin") {
+			return res.status(401).json({ code: "SESSION_ENDED", error: "Your session has ended. Sign in again." });
+		}
 
 		const ROLES = ["Super Admin", "Dispatcher", "Driver", "Investor"];
 		// An unrecognised role used to fall through the `if (role && …)` below and
@@ -31214,8 +32009,10 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 		// Two write paths, two guards — so "zero Super Admins" is unreachable
 		// through the API. Re-run those two greps before adding a third path.
 		if (nextRole && nextRole !== user.role && user.role === "Super Admin") {
-			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-			if (others === 0) {
+			// Enabled accounts only: accountDisable.OTHER_ENABLED_SUPER_ADMINS_SQL, word for word (pinned by
+			// scripts/test-account-disable-rules.js). Demoting a disabled one takes no access away.
+			const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ? AND COALESCE(disabled_at, '') = ''").get(id).cnt;
+			if (others === 0 && String(user.disabled_at ?? "") === "") {
 				// Not a period cause, so it COALESCES (LAST_SUPER_ADMIN is absent from
 				// UNCOALESCED_REFUSAL_CODES) — which is right for a refusal a scripted
 				// client can repeat. `update_user_blocked` is off PURGEABLE_REFUSAL_ACTIONS,
@@ -31227,6 +32024,16 @@ app.put("/api/users/:id", requireRole("Super Admin"), userPasswordResetLimiter, 
 					code: "LAST_SUPER_ADMIN",
 				});
 			}
+		}
+
+		// (a1) A disabled account's role is locked until it is enabled. Other edits, a password reset
+		// included, go through and leave it disabled.
+		if (nextRole && nextRole !== user.role && String(user.disabled_at ?? "") !== "") {
+			recordPeriodRefusal({ req, ...userEditAudit, tail: "nothing was written — the account is disabled" }, "ACCOUNT_DISABLED", []);
+			return res.status(409).json({
+				error: `${user.username} is disabled. Enable the account to change its role. Nothing was changed.`,
+				code: "ACCOUNT_DISABLED",
+			});
 		}
 
 		// (b) Two accounts cannot share a driver_name. The cascade below matches on
@@ -32606,8 +33413,9 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	// DEMOTE the last one — without that twin this check is one PUT away from
 	// irrelevant (`PUT {"role":"Driver"}` then DELETE).
 	if (user.role === "Super Admin") {
-		const others = db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'Super Admin' AND id <> ?").get(id).cnt;
-		if (others === 0) {
+		// Enabled accounts only; deleting a disabled one takes no access away.
+		const others = accountDisable.otherEnabledSuperAdmins(db, id);
+		if (others === 0 && String(user.disabled_at ?? "") === "") {
 			// The twin of PUT /api/users/:id's LAST_SUPER_ADMIN row, under this route's
 			// own action — so one query over `audit_trail` returns every attempt to
 			// remove the last administrator, by either door.
@@ -32990,6 +33798,119 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		(tally(retained) ? `; retained (not deleted): ${tally(retained)}` : ""));
 	notifyChange("users");
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
+});
+
+// ============================================================
+// ACCOUNT DISABLE — POST /api/users/:id/disable and /enable (lib/account-disable.js)
+// ============================================================
+// ACCOUNT_DISABLE_ENABLED (default off): on only when the server's environment sets it to exactly
+// "true". It gates the disable alone; enabling always works, so an account disabled while it was on
+// can be enabled after it goes off. A disabled account is refused at sign-in whatever it says.
+const ACCOUNT_DISABLE_ENABLED = accountDisable.accountDisableEnabled();
+// The protected-account list the switch is judged against. This build reads none (RATECON_PDF_VIEWER_IDS
+// is not read for it): disabling a Super Admin is refused, saying so, and enabling one is allowed.
+const ACCOUNT_DISABLE_LIST = accountDisable.UNREAD_LIST;
+
+// What a switch decides on, read in one synchronous step with its write.
+function accountSwitchFacts(req, id) {
+	const actor = req.session.user;
+	const actorId = Number(actor && actor.id);
+	const live = liveSessionIds([req.sessionID]);
+	return {
+		actor,
+		actorLive: !!live && live.has(req.sessionID),
+		actorRow: Number.isSafeInteger(actorId) ? db.prepare("SELECT * FROM users WHERE id = ?").get(actorId) || null : null,
+		target: db.prepare("SELECT * FROM users WHERE id = ?").get(id) || null,
+	};
+}
+
+// The admin email for a disable or an enable, never awaited; nothing goes to the account itself.
+function notifyAccountSwitch(kind, { target, actor, reason }) {
+	const notice = accountDisable.switchNotice({ kind, target, actor, reason, at: new Date(), timeZone: APP_TIMEZONE });
+	if (ADMIN_NOTIFY_EMAIL) sendEmail(ADMIN_NOTIFY_EMAIL, notice.subject, invoiceEmailHtml({ heading: notice.heading, bodyHtml: notice.bodyHtml }));
+}
+
+// Every refusal writes nothing and is audited; an account already in the asked state answers
+// { unchanged: true } and writes nothing. Disable ends the account's sessions and sockets at once.
+app.post("/api/users/:id/disable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	const read = accountDisable.readReason(req.body && req.body.reason);
+	if (read.refusal) return res.status(read.refusal.status).json({ code: read.refusal.code, error: read.refusal.error });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.disableDecision({
+				flagOn: ACCOUNT_DISABLE_ENABLED, ...facts, otherEnabled: accountDisable.otherEnabledSuperAdmins(db, id), listed: ACCOUNT_DISABLE_LIST,
+			});
+			if (decision.ok) {
+				db.prepare("UPDATE users SET disabled_at = ?, disabled_by = ?, disabled_reason = ? WHERE id = ?")
+					.run(new Date().toISOString(), Number(facts.actor.id), read.reason, id);
+			}
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account disable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be disabled. Nothing was changed.", code: "DISABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "disable_user_blocked", entity: "user", entityId: String(id),
+			subject: `disable ${outcome.target.username} (role ${outcome.target.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "disable_user", "user", id,
+		`Disabled ${outcome.target.role} ${auditText(outcome.target.username, 120)}` +
+		`${read.reason ? `; reason: ${auditText(read.reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("disable", { target: outcome.target, actor: req.session.user, reason: read.reason });
+	notifyChange("users");
+	res.json({ success: true, sessionsEnded });
+});
+
+app.post("/api/users/:id/enable", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {
+	const id = /^[1-9][0-9]{0,8}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+	const target = id === null ? null : db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+	if (!target) return res.status(404).json({ error: "User not found" });
+	let outcome;
+	try {
+		outcome = db.transaction(() => {
+			const facts = accountSwitchFacts(req, id);
+			if (!facts.target) return { gone: true };
+			const decision = accountDisable.enableDecision({ ...facts, listed: ACCOUNT_DISABLE_LIST });
+			if (decision.ok) db.prepare("UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ?").run(id);
+			return { decision, target: facts.target };
+		})();
+	} catch (err) {
+		console.error("account enable failed, nothing written:", err.message);
+		return res.status(500).json({ error: "The account could not be enabled. Nothing was changed.", code: "ENABLE_FAILED" });
+	}
+	if (outcome.gone) return res.status(404).json({ error: "User not found" });
+	const { decision, target: was } = outcome;
+	if (decision.refusal) {
+		recordPeriodRefusal({
+			req, action: "enable_user_blocked", entity: "user", entityId: String(id),
+			subject: `enable ${was.username} (role ${was.role})`, tail: `nothing was written — ${decision.refusal.tail}`,
+		}, decision.refusal.code, []);
+		return res.status(decision.refusal.status).json({ code: decision.refusal.code, error: decision.refusal.error });
+	}
+	if (decision.unchanged) return res.json({ success: true, unchanged: true });
+	// A session the disable missed (a failed purge, a disable made outside this route) would sign in
+	// again with the account, so its stored sessions end here too. Normally there are none.
+	const sessionsEnded = purgeUserSessions(id, null);
+	logAudit(req, "enable_user", "user", id,
+		`Enabled ${was.role} ${auditText(was.username, 120)}; it was disabled at ${auditText(was.disabled_at, 40)} by account #${Number(was.disabled_by) || "unknown"}` +
+		`${was.disabled_reason ? `; its reason was: ${auditText(was.disabled_reason, accountDisable.REASON_MAX)}` : ""}; sessions ended: ${sessionsEnded}`);
+	notifyAccountSwitch("enable", { target: was, actor: req.session.user, reason: null });
+	notifyChange("users");
+	res.json({ success: true });
 });
 
 // List investor users (for owner dropdown). `username` is the investor's full
@@ -33917,6 +34838,19 @@ function truckFeeLockedRows(unitNumber, locked) {
 	};
 }
 
+// The month a truck assignment's start puts under a month-end guard's driver floor: its first seven
+// characters (the UTC month), and under APP_DAY_STAMPS_ENABLED the earlier of that and its business
+// month, so the flag can widen a guard but never narrow one.
+function assignmentFloorMonth(startDate) {
+	const utc = String(startDate || "").slice(0, 7);
+	if (!APP_DAY_STAMPS_ENABLED) return utc;
+	const day = appStampDay(startDate);
+	// No local shares a top-level name: scripts lift this through closure() (scripts/lib/server-lift.js),
+	// which reads every name as server.js's own declaration.
+	const biz = day ? day.slice(0, 7) : "";
+	return biz && biz < utc ? biz : utc;
+}
+
 // The CLOSED months in which a driver's pay would be repriced by a change to
 // this truck's daily rate.
 //
@@ -33975,11 +34909,9 @@ function driverPayLockedMonths(driverName, locked, history) {
 	if (!rows.length) return locked.slice();
 	let earliest = "";
 	for (const r of rows) {
-		// start_date is an ISO string ('2026-05-13T10:47:01.338Z'), so a bare slice
-		// is the month. Never round-trip through Date(): a bare or UTC-midnight
-		// value reads back one month early in every US zone, the same off-by-one-month
-		// that truckChargeFromMonth documents.
-		const from = String(r.start_date || "").slice(0, 7);
+		// start_date is an ISO instant ('2026-05-13T10:47:01.338Z'); never read it on
+		// the server's clock (see assignmentFloorMonth()).
+		const from = assignmentFloorMonth(r.start_date);
 		if (!/^\d{4}-\d{2}$/.test(from)) return locked.slice(); // unreadable → cannot bound it
 		if (!earliest || from < earliest) earliest = from;
 	}
@@ -34009,7 +34941,8 @@ function driverPayLockedMonths(driverName, locked, history) {
 //   • excluded_driver_days — added and removed days alike.
 //   • expenses — the earlier of the month a receipt is dated and the month it is
 //     booked to (EXPENSE_PERIOD_EXPR, where posted_period wins).
-//   • truck_assignments — start_date sliced, as driverPayLockedMonths() reads it.
+//   • truck_assignments — start_date's month as driverPayLockedMonths() reads it
+//     (assignmentFloorMonth()).
 // A row whose month cannot be read is unbounded, as an unreadable start_date
 // always was.
 //
@@ -34060,7 +34993,7 @@ function driverHistoryFloorMonth(driverName, jt) {
 
 	for (const r of db.prepare("SELECT driver_name, start_date FROM truck_assignments").all()) {
 		if (normalizeDriverName(r.driver_name) !== lc) continue;
-		const m = String(r.start_date || "").slice(0, 7);
+		const m = assignmentFloorMonth(r.start_date);
 		if (!isMonth(m)) return UNBOUNDED;
 		see(m);
 	}
@@ -35056,6 +35989,7 @@ function truckDeleteOpenMonthHolds(truck) {
 		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
 		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
 			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+			createdDayRule: TRUCK_CHARGE_APP_DAY_RULE,
 		}).coveredDays > 0;
 	};
 	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
@@ -45122,6 +46056,14 @@ function warnBlankWindowFallbackFromClosedMonth() {
 	}
 }
 warnBlankWindowFallbackFromClosedMonth();
+// One notice at boot when TRUCK_CHARGE_APP_DAY_FROM is at or before the latest closed month,
+// built like the ones above. The rule keeps running either way.
+function warnTruckChargeFromClosedMonth() {
+	if (!TRUCK_CHARGE_APP_DAY_RULE) return;
+	const msg = investorPayoutBasis.createdDayFromClosedWarning(TRUCK_CHARGE_APP_DAY_RULE, financialsCalc.ledgerDayOnce.latestClosedMonth(db));
+	if (msg) console.warn(`[truck-charge] ${msg}`);
+}
+warnTruckChargeFromClosedMonth();
 // While the rule is on, every start brings invoice_paid_days up to the live
 // invoices (backfillInvoicePaidDays(), idempotent), so an invoice made while the
 // rule was off is never paid twice. Review its dry run first
@@ -49187,9 +50129,11 @@ app.put("/api/notifications/read", requireAuth, driverWriteLimiter, (req, res) =
 
 // Dispatch notices only Super Admins see: the driver-instructions edit lock
 // (decision 37; lib/driver-instructions-runtime.js LOCK_NOTICE_TYPE, its live copy
-// sent to the super-admin room only). For every other role GET
+// sent to the super-admin room only), and a receipt page the pages-only path
+// could not take out of an invoice PDF (it names the invoice, and Dispatchers
+// are shown no invoices; sent live the same way). For every other role GET
 // /api/dispatch-notifications leaves them out and PUT .../read can't mark them.
-const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock"]);
+const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock", "receipt-pages"]);
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
@@ -61134,14 +62078,15 @@ function truckMonthlyFixed(t) {
 // the same regex until 2026-09-30; the report now charges fixed costs through
 // truckChargedInMonth() like every other site, so there is no second reader of it.)
 //
-// The created_at branch deliberately keeps new Date(): created_at is
-// 'YYYY-MM-DD HH:MM:SS', which parses as LOCAL time and has no such shift. It is
-// reproduced byte-for-byte from the gate it replaces so nothing can regress for
-// the ~all rows that have no in_service_date yet.
+// created_at is SQLite's CURRENT_TIMESTAMP, a UTC wall clock, so local getters give the UTC
+// month: the next one from 8 PM EDT (7 PM EST) on a month's last day. Under TRUCK_CHARGE_APP_DAY_RULE
+// it is read on its business day (investorPayoutBasis.truckCreatedDay(), shared with the lease).
 function truckChargeFromMonth(t) {
 	const inService = String(t.in_service_date || "").trim();
 	if (/^\d{4}-\d{2}-\d{2}$/.test(inService)) return inService.slice(0, 7);
 	if (t.created_at) {
+		const createdDay = TRUCK_CHARGE_APP_DAY_RULE ? investorPayoutBasis.truckCreatedDay(t.created_at, TRUCK_CHARGE_APP_DAY_RULE) : null;
+		if (createdDay) return createdDay.slice(0, 7);
 		const td = new Date(t.created_at);
 		return `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, "0")}`;
 	}
@@ -70213,21 +71158,26 @@ app.get("/api/analytics/mileage/detail",
 		};
 		if (drivers.length) {
 			const ph = drivers.map(() => "LOWER(?)").join(",");
+			// changed_at is a UTC stamp: read a day either side, then list each change
+			// under its business day. A truck west of Eastern can still see a late
+			// evening change one day after its own local day.
 			for (const h of db.prepare(
-				`SELECT substr(h.changed_at,1,10) AS day, h.load_id, h.new_status, h.changed_at, h.actor,
+				`SELECT h.load_id, h.new_status, h.changed_at, h.actor,
 				        c.pickup_address, c.dropoff_address
 				 FROM load_status_history h
 				 LEFT JOIN load_coordinates c ON c.load_id = h.load_id
 				 WHERE substr(h.changed_at,1,10) >= ? AND substr(h.changed_at,1,10) <= ?
 				   AND LOWER(h.actor) IN (${ph})
 				 ORDER BY h.changed_at ASC`
-			).all(from, to, ...drivers)) {
-				const list = loadsByDay.get(h.day) || [];
+			).all(shiftDayKey(from, -1), shiftDayKey(to, 1), ...drivers)) {
+				const day = kpiInstantDay(h.changed_at, APP_TIMEZONE);
+				if (!day || day < from || day > to) continue;
+				const list = loadsByDay.get(day) || [];
 				list.push({
 					loadId: h.load_id, status: h.new_status, at: h.changed_at, actor: h.actor,
 					pickup: shownAddress(h.pickup_address), dropoff: shownAddress(h.dropoff_address),
 				});
-				loadsByDay.set(h.day, list);
+				loadsByDay.set(day, list);
 			}
 		}
 
@@ -70317,10 +71267,19 @@ function coverageNoteFor(r) {
 	return parts.join("; ");
 }
 
+// The IFTA routes' default From: midnight on the business clock (APP_TIMEZONE) on
+// the 1st, two business months back. The server's own month and midnight are UTC's,
+// a month ahead from 8 PM Eastern on a month's last day.
+function iftaDefaultStartIso(now = new Date()) {
+	const [y, m] = appDay(now).split("-").map(Number);
+	const first = new Date(Date.UTC(y, m - 3, 1));
+	return new Date(appTime.wallClockToMs(APP_TIMEZONE, first.getUTCFullYear(), first.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString();
+}
+
 app.get("/api/compliance/ifta", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const { start, end } = req.query;
-		const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = start || iftaDefaultStartIso();
 		const endDate = end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70463,7 +71422,7 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			return res.status(404).json({ error: "Truck not found or not linked to Routemate" });
 		}
 
-		const startDate = req.query.start || new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1).toISOString();
+		const startDate = req.query.start || iftaDefaultStartIso();
 		const endDate = req.query.end || new Date().toISOString();
 		const startMs = new Date(startDate).getTime();
 		const endMs = new Date(endDate).getTime();
@@ -70497,7 +71456,9 @@ app.get("/api/compliance/ifta/state-detail", requireRole("Super Admin", "Dispatc
 			const midLng = (prev.longitude + curr.longitude) / 2;
 			if (getStateFromCoords(midLat, midLng) !== state) continue;
 
-			const day = new Date(curr.location_date_ms).toISOString().slice(0, 10);
+			// The business day, as the screen's From/To bounds and the load dates
+			// matched below are; the UTC day is already tomorrow from 8 PM Eastern.
+			const day = appTime.dayInZone(new Date(curr.location_date_ms), APP_TIMEZONE);
 			if (!days[day]) {
 				days[day] = { miles: 0, firstPing: curr.location_date_ms, lastPing: curr.location_date_ms };
 			}
@@ -71936,10 +72897,14 @@ function disconnectUserSockets(userId, { exceptSid = null } = {}) {
 // what an HTTP request on the same cookie is. One statement for any number of
 // IDs (json_each, so no bound-variable limit). null when the store cannot be
 // read: each caller picks its own direction for that.
+// A session also needs its account row, enabled, under the id it names (a whole number), so a
+// disabled or removed account's sockets are refused and swept even when its purge failed.
 function liveSessionIds(sids) {
 	try {
 		const rows = db.prepare(
-			"SELECT sid FROM sessions WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire)"
+			"SELECT sid FROM sessions JOIN users ON users.id = (CASE WHEN json_valid(sess) THEN" +
+			" (CASE WHEN json_type(sess, '$.user.id') = 'integer' THEN json_extract(sess, '$.user.id') END) END)" +
+			" WHERE sid IN (SELECT value FROM json_each(?)) AND datetime('now') < datetime(expire) AND COALESCE(users.disabled_at, '') = ''"
 		).all(JSON.stringify(sids));
 		return new Set(rows.map((r) => r.sid));
 	} catch (err) {
@@ -72064,6 +73029,9 @@ io.on("connection", (socket) => {
 		// on the new cookie, and its register joins as normal.
 		if (currentMustChangePassword(sessionUser)) return;
 		const requested = identityRoomKey(clientName);
+		// An account disabled or removed since the handshake joins no room.
+		const stillLive = liveSessionIds([sid]);
+		if (!stillLive || !stillLive.has(sid)) return;
 		// The client passes a name (their driver name, their username,
 		// "dispatch", "investor"). Rooms are derived from the session instead:
 		// the role's room, and this identity's own rooms, through driverRoom() /

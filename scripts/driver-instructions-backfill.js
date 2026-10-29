@@ -114,6 +114,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { createRequire } = require("module");
 const { closure } = require("./lib/server-lift");
+const { serverSource } = require("./lib/server-source");
 const { envFor, dbScope, openDb } = require("./lib/ledger-world");
 const runtime = require("../lib/driver-instructions-runtime");
 const di = require("../lib/driver-instructions");
@@ -269,7 +270,7 @@ function sheetIdFor(arg, { env, root, scope }) {
 // The server's own audit writer, sheet parser and Gemini settings, lifted from this
 // checkout's server.js. `env`: the app's settings, as the server reads them.
 function liftServer(root, db, env) {
-	const src = fs.readFileSync(path.join(root, "server.js"), "utf8");
+	const src = serverSource({ root });
 	const lifted = closure(src, { roots: LIFT_ROOTS, provided: ["db", "console", "process"], denied: LIFT_DENIED });
 	return new Function("db", "console", "process", `"use strict";\n${lifted.text}\nreturn { ${LIFT_ROOTS.join(", ")} };`)(db, console, { env: { ...env } });
 }

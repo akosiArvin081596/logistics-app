@@ -350,8 +350,14 @@ eq("refuseCrossSite mount count agrees with that list", mountCount("refuseCrossS
 // only, from the SPA's KPI page. So are the four Personal receipt writes (mark,
 // undo — POST and DELETE on /api/expenses/:id/personal — the reversal, and the
 // correction invoice): each charges a driver for a receipt or credits it back,
-// Super Admin only, from the SPA's Expenses screen.
-eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes and the Personal receipt writes",
+// Super Admin only, from the SPA's Expenses screen. So are the two receipt page
+// writes (POST /api/expenses/:id/receipt-pages/:page, the mark that releases a
+// PDF receipt's page to its driver or keeps it with the office, and POST
+// /api/invoices/:id/receipt-pages/update, "Update invoice PDF"): each decides
+// what a driver's invoice PDF shows, Super Admin only, from the Expenses screen.
+// So is the account switch (POST /api/users/:id/disable and /enable): it ends or
+// restores a staff account's sign-in, Super Admin only, from the SPA.
+eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, the invite writes, the investor config write, the payout basis write, the closed-month freeze, the Financials settings, the KPI writes, the Personal receipt writes, the receipt page writes and the account switch",
 	mountedOn("refuseCrossOrigin").join(" "),
 	["/api/periods/:period/finalize", "/api/periods/:period/reopen", "/api/admin/financials/freeze-closed-months", "/api/financials/settings",
 	 "/api/investor/payouts/:id/status", "/api/investor/payouts/:id/adjust",
@@ -361,8 +367,10 @@ eq("refuseCrossOrigin is on exactly the settlement writes, the reconcile pair, t
 	 "/api/admin/investor-invites/:id/reissue", "/api/admin/investor-invites/:id/revoke",
 	 "/api/investor/config", "/api/investors/:id/payout-basis",
 	 "/api/admin/kpis/approvals/:key", "/api/admin/kpis/settings", "/api/admin/kpis/recompute",
-	 "/api/expenses/:id/personal", "/api/expenses/:id/personal", "/api/expenses/:id/personal/reverse", "/api/invoices/personal-corrections"].sort().join(" "));
-eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 22);
+	 "/api/users/:id/disable", "/api/users/:id/enable",
+	 "/api/expenses/:id/personal", "/api/expenses/:id/personal", "/api/expenses/:id/personal/reverse", "/api/invoices/personal-corrections",
+	 "/api/expenses/:id/receipt-pages/:page", "/api/invoices/:id/receipt-pages/update"].sort().join(" "));
+eq("refuseCrossOrigin mount count agrees with that list", mountCount("refuseCrossOrigin"), 26);
 eq("refuseCrossOriginStrict is on exactly the full-database export",
 	mountedOn("refuseCrossOriginStrict").join(" "), "/api/db/download");
 eq("...and on nothing else", mountCount("refuseCrossOriginStrict"), 1);

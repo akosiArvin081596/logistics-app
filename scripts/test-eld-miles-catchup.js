@@ -96,6 +96,8 @@ function world() {
 		db, eldMiles, Date: FakeDate,
 		localDayInTz: eldMiles.localDayInTz, usTzForLongitude: eldMiles.usTzForLongitude,
 		console: { log: (s) => logs.push(String(s)), error: (s, e) => logs.push(`ERR ${s} ${e || ""}`) },
+		// Off; scripts/test-eld-device-history.js §4 runs the rollup with it on.
+		ELD_APP_DAY_ENABLED: false,
 	};
 	const names = Object.keys(deps);
 	const api = new Function(...names, `${SRC}\nreturn { ${["runEldMilesDailyRollup", "rollupEldMilesDaily"].filter((n) => new RegExp(`function ${n}\\(`).test(SRC)).join(", ")} };`)(
