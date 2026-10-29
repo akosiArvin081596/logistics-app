@@ -30371,6 +30371,7 @@ function correctionVoidedDayLines(driverNorm) {
 // day line; never an adjustment or a manual invoice naming the source, which
 // read no line (lateWorkWeekBlocker() stays the late-day settle's own).
 function correctionDayPaidBy(driverNorm, day, { source = null, exceptLineId = null, ignoreInvoiceId = null } = {}) {
+	if (source && !Number(source.is_manual) && !correctionSourceGridReadable(source)) return `${source.invoice_number} has no stored day grid, so whether it pays it can't be told`;
 	if (source && invoicePaidDaysOf(source).includes(day)) return `${source.invoice_number} pays it`;
 	const held = invoicePaidDayHolders(driverNorm, [day]).get(day);
 	if (held && held.invoiceId !== ignoreInvoiceId) return `${held.invoiceNumber} pays it`;
@@ -30444,6 +30445,15 @@ function correctionPayeeIsDriver(name) {
 	return driverAccountsNamed(name).some((u) => u.role === "Driver");
 }
 
+// Whether a weekly source's day grid can be read: an invoice stored before render
+// data (or without a daily grid) can't say which days it paid, so no day or rate
+// line is taken against it (as scripts/create-correction-invoice-draft.js refuses).
+function correctionSourceGridReadable(source) {
+	const snap = personalSnapshotOf(source);
+	return !!(snap && snap.__templateName === "service_invoice" && snap.days && typeof snap.days === "object"
+		&& invoiceCorrections.isDay(String((source && source.week_start) || "")));
+}
+
 // The daily rate a weekly source's grid paid `day` at, in cents, or null when its grid does not pay it.
 function correctionGridDayCents(source, day) {
 	const snap = personalSnapshotOf(source);
@@ -30501,6 +30511,10 @@ async function correctionLineFromRequest(source, body, user) {
 	if (manual && kind !== "amount") throw correctionRefusal(409, "CORRECTION_KIND_NOT_ALLOWED", `${label} is a manual invoice: a correction to it is an amount line. Nothing was changed.`);
 	if (!manual && kind !== "amount" && invoicePayBasis(source) !== "daily") {
 		throw correctionRefusal(400, "CORRECTION_KIND_NOT_ALLOWED", `${label} pays by percentage: a correction to it is an amount line. Nothing was changed.`);
+	}
+	if (!manual && kind !== "amount" && !correctionSourceGridReadable(source)) {
+		throw correctionRefusal(409, "CORRECTION_SOURCE_NO_GRID",
+			`${label} has no stored day grid, so which days it paid can't be told and no day or rate line is taken against it. Check its PDF; a difference owed goes as an amount line. Nothing was changed.`);
 	}
 	const date = typeof body.date === "string" ? body.date.trim() : "";
 	if (!invoiceCorrections.isDay(date)) throw correctionRefusal(400, "CORRECTION_DATE_INVALID", M.DATE_INVALID);
@@ -30629,6 +30643,10 @@ async function rewriteInvoiceCorrectionLines(invoiceRow, plan) {
 	try {
 		fs.writeFileSync(tmpPath, pdfBuffer);
 		return db.transaction(() => {
+			if (provisional) {
+				const same = correctionNewLineCheck(plan.insert);
+				if (same) throw correctionAlready(same);
+			}
 			const now = db.prepare("SELECT * FROM invoices WHERE id = ?").get(inv.id);
 			const moved = !now || !!now.deleted_at || !CORRECTION_OPEN_STATUSES.has(now.status) || !!Number(now.is_manual) || now.pdf_file_name !== inv.pdf_file_name
 				|| ["render_data", "adjustment", "adjustment_note", "adjusted_at", "total_earnings", "correction_lines_total", "personal_total", "personal_share_total"]
@@ -30638,8 +30656,14 @@ async function rewriteInvoiceCorrectionLines(invoiceRow, plan) {
 			const nowPersonal = personalRowsOnInvoice(inv.id).map((r) => r.id);
 			const samePersonal = nowPersonal.length === personalRows.length && nowPersonal.every((id, i) => id === personalRows[i].id);
 			const shared = db.prepare("SELECT 1 FROM invoices WHERE pdf_file_name = ? COLLATE NOCASE AND id != ?").get(inv.pdf_file_name, inv.id);
-			const weekLock = invoiceMonthLockBlockers(now || inv);
-			if (moved || !sameLines || !samePersonal || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
+			if (moved || !sameLines || !samePersonal || shared) throw changed();
+			// The invoice's week may have come to touch a closed month meanwhile: say so.
+			const weekLock = invoiceMonthLockBlockers(now);
+			if (weekLock.unreadable || weekLock.blockers.length) {
+				throw correctionRefusal(409, weekLock.unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED", weekLock.unreadable
+					? `No month of ${label}'s week can be confirmed open (the period lock table could not be read). Nothing was saved.`
+					: `${label}'s week touches a closed month, so its correction lines can't change. Nothing was saved.`);
+			}
 			const readLine = db.prepare("SELECT invoice_id, voided_at FROM invoice_correction_lines WHERE id = ?");
 			for (const l of attach) {
 				const cur = readLine.get(l.id);
@@ -30699,9 +30723,40 @@ async function rewriteInvoiceCorrectionLines(invoiceRow, plan) {
 	}
 }
 
-// A new line that goes on no invoice now: written waiting, after the same day re-check.
+// Inside a new line's write transaction, after the request's last await: its
+// source is still a live locked invoice, and this line was not written meanwhile
+// (the same request again, such as a second click while the PDF was drawn).
+// Returns the line already written for this request, or null; throws when the
+// source moved or another line holds the same day or rate.
+function correctionNewLineCheck(row) {
+	const src = db.prepare("SELECT status, deleted_at FROM invoices WHERE id = ?").get(row.source_invoice_id);
+	if (!src || src.deleted_at || !CORRECTION_LOCKED_STATUSES.has(src.status)) {
+		throw correctionRefusal(409, "CORRECTION_SOURCE_CHANGED", `${row.source_invoice_number} changed while the correction was being written. Nothing was saved.`);
+	}
+	if (row.kind !== "amount") {
+		const had = db.prepare("SELECT * FROM invoice_correction_lines WHERE source_invoice_id = ? AND kind = ? AND line_date = ? AND voided_at = ''")
+			.get(row.source_invoice_id, row.kind, row.line_date);
+		if (!had || had.cents === row.cents) return had || null;
+		throw correctionRefusal(409, "CORRECTION_EXISTS",
+			`${row.source_invoice_number} already has a ${row.kind} line for ${row.line_date} (${invoiceCorrections.signedMoney(had.cents)}). Void it first to change it. Nothing was saved.`);
+	}
+	const dup = db.prepare(`SELECT * FROM invoice_correction_lines WHERE source_invoice_id = ? AND kind = 'amount' AND line_date = ? AND cents = ? AND description = ?
+		AND created_by_id IS ? AND voided_at = '' ORDER BY id DESC`).get(row.source_invoice_id, row.line_date, row.cents, row.description, row.created_by_id ?? null);
+	return dup && Date.now() - Date.parse(dup.created_at) < CORRECTION_REPEAT_MS ? dup : null;
+}
+// The same request again, found inside a write: the route answers 200 alreadyAdded.
+function correctionAlready(line) {
+	const err = new Error("This correction line was already added.");
+	err.correctionAlready = line;
+	return err;
+}
+
+// A new line that goes on no invoice now: written waiting, after the same
+// checks. { id } or { already: the line this request already wrote }.
 function insertWaitingCorrectionLine(row) {
 	return db.transaction(() => {
+		const same = correctionNewLineCheck(row);
+		if (same) return { already: same };
 		if (row.kind === "day") {
 			const source = db.prepare("SELECT * FROM invoices WHERE id = ?").get(row.source_invoice_id);
 			const paid = correctionDayPaidBy(normalizeDriverName((source && source.driver) || ""), row.line_date, { source });
@@ -30710,8 +30765,8 @@ function insertWaitingCorrectionLine(row) {
 		const cols = ["source_invoice_id", "source_invoice_number", "source_week_start", "source_week_end", "kind", "line_date", "cents", "rate_from_cents", "rate_to_cents",
 			"description", "label", "reason", "invoice_id", "waiting_since", "created_at", "created_by", "created_by_id", "created_role"];
 		const full = { ...row, invoice_id: null, waiting_since: row.created_at };
-		return Number(db.prepare(`INSERT INTO invoice_correction_lines (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`)
-			.run(...cols.map((c) => (full[c] === undefined ? null : full[c]))).lastInsertRowid);
+		return { id: Number(db.prepare(`INSERT INTO invoice_correction_lines (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`)
+			.run(...cols.map((c) => (full[c] === undefined ? null : full[c]))).lastInsertRowid) };
 	}).immediate();
 }
 
@@ -30858,12 +30913,14 @@ async function runCorrectionSweep() {
 	runCorrectionSweep.running = true;
 	try {
 		for (const line of correctionWaitingLines(null)) {
-			const driverNorm = normalizeDriverName(line.source_driver || "");
-			if (!driverNorm) { out.waiting++; continue; }
-			if (line.kind === "day" && correctionDayPaidBy(driverNorm, line.line_date, { source: correctionSourceRow(line), exceptLineId: line.id })) { out.waiting++; continue; }
-			const target = correctionTargetFor(line);
-			if (!target) { out.waiting++; continue; }
+			// Every step of one line inside its own try: a line that fails waits for the next run, the others go on.
+			let target = null;
 			try {
+				const driverNorm = normalizeDriverName(line.source_driver || "");
+				if (!driverNorm) { out.waiting++; continue; }
+				if (line.kind === "day" && correctionDayPaidBy(driverNorm, line.line_date, { source: correctionSourceRow(line), exceptLineId: line.id })) { out.waiting++; continue; }
+				target = correctionTargetFor(line);
+				if (!target) { out.waiting++; continue; }
 				const res = await rewriteInvoiceCorrectionLines(target, { attach: [line] });
 				if (!res.attached.includes(line.id)) { out.waiting++; continue; }
 				out.placed++;
@@ -30873,7 +30930,7 @@ async function runCorrectionSweep() {
 					`${target.invoice_number}: correction line ${line.id} (to ${line.source_invoice_number}, ${invoiceCorrections.signedMoney(line.cents)}) linked by the sweep; total due $${invoiceTotalDue(res.invoice).toFixed(2)}`);
 			} catch (err) {
 				out.failed++;
-				console.error(`[correction-sweep] line ${line.id} not placed on ${target.invoice_number} (${err.message}); retried next run`);
+				console.error(`[correction-sweep] line ${line.id} not placed${target ? ` on ${target.invoice_number}` : ""} (${err.message}); retried next run`);
 			}
 		}
 		if (out.placed) notifyChange("invoices");
@@ -30944,17 +31001,23 @@ app.post("/api/invoices/:id/corrections", requireRole("Super Admin"), refuseCros
 		const row = { ...line, created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: user.id, created_role: user.role || "" };
 		let lineId = null;
 		let placedOn = null;
+		const alreadyAdded = (l) => res.status(200).json({ success: true, alreadyAdded: true, line: correctionPublicLine(l, false) });
 		if (target) {
 			try {
 				const out = await rewriteInvoiceCorrectionLines(target, { insert: row });
 				lineId = out.insertedId;
 				if (out.placed) placedOn = out.invoice;
 			} catch (err) {
-				// Anything that moved under the render: the line waits for the next tick.
-				if (!(err && err.correctionRefusal && err.code === "CORRECTION_CHANGED")) throw err;
+				if (err && err.correctionAlready) return alreadyAdded(err.correctionAlready);
+				// The target moved, or its month closed, under the render: the line waits for the next tick.
+				if (!(err && err.correctionRefusal && ["CORRECTION_CHANGED", "PERIOD_FINALIZED", "PERIOD_LOCK_UNREADABLE"].includes(err.code))) throw err;
 			}
 		}
-		if (lineId == null) lineId = insertWaitingCorrectionLine(row);
+		if (lineId == null) {
+			const waited = insertWaitingCorrectionLine(row);
+			if (waited.already) return alreadyAdded(waited.already);
+			lineId = waited.id;
+		}
 		const saved = db.prepare(`${CORRECTION_ROW_SELECT} WHERE c.id = ?`).get(lineId);
 		const waitWhy = placedOn ? null : correctionWaitWhy(saved);
 		const how = line.kind === "rate"
@@ -68971,8 +69034,10 @@ async function maybeCloseFinishedPeriods() {
 					`${periodLabel(period)} is closed`,
 					`Final settlement complete. Investor payouts for ${periodLabel(period)} are frozen at their final figure — statements are now available and payouts can be marked paid. Receipts dated in ${periodLabel(period)} that arrive from now on will be booked to the current open month.` +
 						(pending.length ? ` ${pending.length} receipt(s) booked to ${periodLabel(period)} were still Pending review when it closed; they count in its figures (receipt ${receiptIdList(pending)}).` : "") +
-						(personalWaiting.length ? ` ${personalWaiting.length} Personal line(s) booked to ${periodLabel(period)} are on no invoice yet; the driver has not been charged for them (receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}).` : ""),
-					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id), personalWaitingLineIds: personalWaiting.map((x) => x.id) }),
+						(personalWaiting.length ? ` ${personalWaiting.length} Personal line(s) booked to ${periodLabel(period)} are on no invoice yet; the driver has not been charged for them (receipt ${receiptIdList(personalWaiting.map((x) => ({ id: x.expense_id })))}).` : "") +
+						(correctionWaiting.length ? ` ${correctionWaiting.length} correction line(s) wait for a weekly invoice (line ${correctionWaiting.map((x) => x.id).join(", ")}).` : ""),
+					JSON.stringify({ period, stamped: result.stamped, investors: result.investors, pendingReceiptIds: pending.map((x) => x.id), personalWaitingLineIds: personalWaiting.map((x) => x.id),
+						...(correctionWaiting.length ? { correctionWaitingLineIds: correctionWaiting.map((x) => x.id) } : {}) }),
 				);
 			} catch {}
 		}

@@ -65,9 +65,28 @@ const col = (w, id, c) => (w.invoice(id) || {})[c];
 const lastRender = (w) => w.rendered[w.rendered.length - 1] || { data: {} };
 const audits = (w, action) => w.audits(action);
 
+const tryAsync = async (f) => { try { return await f(); } catch (err) { return `THREW: ${err.message.slice(0, 80)}`; } };
+const approveRow = (w, id) => w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = '2026-10-15T16:00:00.000Z', approved_by = 'super_admin' WHERE id = ?").run(id);
+const reopen = (w, id) => w.db.prepare("UPDATE invoices SET status = 'Submitted', approved_at = '', approved_by = '' WHERE id = ?").run(id);
+// A live manual Draft of Driver A with one line dated `day`: it may pay that day.
+function manualPaying(w, day, number = "INV-M-TDA-2026W41-09") {
+	w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, status, is_manual, render_data, pdf_file_name, total_earnings)
+		VALUES (?, 'test driver a', ?, ?, 'Draft', 1, ?, ?, 300)`)
+		.run(number, day, day, JSON.stringify({ __templateName: "service_invoice_manual", lineItems: [{ date: day, description: "day pay", amount: 300 }] }), `${number}.pdf`);
+}
+// A correction line written straight into the table (a world with the flag off can't add one).
+function insertLine(w, { source, kind, date, cents, invoiceId = null }) {
+	w.db.prepare(`INSERT INTO invoice_correction_lines (source_invoice_id, source_invoice_number, source_week_start, source_week_end, kind, line_date, cents, label,
+		invoice_id, waiting_since, created_at, created_by, created_by_id, created_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-10-15T12:00:00.000Z', 'super_admin', 1, 'Super Admin')`)
+		.run(source.id, source.invoice_number, source.week_start, source.week_end, kind, date, cents, `Correction to ${source.invoice_number}`,
+			invoiceId, invoiceId ? "" : "2026-10-15T12:00:00.000Z");
+}
+
 // W40 locked with Wed Oct 7 missing from its grid; W41 a Draft. { w, w40, w41 }.
+// opts.before(w) runs before the first generation (a rate history, say).
 async function setup(env = {}, opts = {}) {
 	const w = world(env, opts);
+	if (opts.before) opts.before(w);
 	const g40 = await w.generate(DRIVER_A, "2026-10-09");
 	const w40 = g40.body.invoice;
 	const snap = JSON.parse(w.invoice(w40.id).render_data);
@@ -263,21 +282,17 @@ const dayLine = (extra = {}) => ({ kind: "day", date: "2026-10-07", amount: "300
 		w.cleanup();
 	}
 
-	section("§7 D28: a source with live lines can't be deleted, flag on or off");
+	section("§7 D28: a source with live lines can't be deleted (flag on here; §17 runs it with the flag off)");
 	{
-		for (const flag of ["true", undefined]) {
-			const { w, w40 } = await setup();
-			await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
-			if (!flag) w.db.prepare("UPDATE invoices SET status = 'Approved' WHERE id = ?").run(w40.id);
-			const off = flag ? w : null;
-			const r = await call(off || w, "DELETE", `/api/invoices/${w40.id}`);
-			check(`flag ${flag ? "on" : "off (lines from before)"}: 409 CORRECTION_SOURCE_HAS_LINES, W40 stays`, [r.status, r.body.code, col(w, w40.id, "deleted_at")], [409, "CORRECTION_SOURCE_HAS_LINES", ""]);
-			w.cleanup();
-		}
-		const { w, w40 } = await setup({ APPROVED_INVOICE_LOCK_ENABLED: undefined });
+		const { w, w40 } = await setup();
+		await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
 		const r = await call(w, "DELETE", `/api/invoices/${w40.id}`);
-		check("a source with no line deletes as today (pin)", r.status, 200);
+		check("flag on: 409 CORRECTION_SOURCE_HAS_LINES, W40 stays", [r.status, r.body.code, col(w, w40.id, "deleted_at")], [409, "CORRECTION_SOURCE_HAS_LINES", ""]);
 		w.cleanup();
+		const off = await setup({ APPROVED_INVOICE_LOCK_ENABLED: undefined });
+		const r2 = await call(off.w, "DELETE", `/api/invoices/${off.w40.id}`);
+		check("a source with no line deletes as today (pin)", r2.status, 200);
+		off.w.cleanup();
 	}
 
 	section("§8 An approval during the render: nothing linked, the line waits");
@@ -366,8 +381,73 @@ const dayLine = (extra = {}) => ({ kind: "day", date: "2026-10-07", amount: "300
 		}
 	}
 
-	section("§14 Mutants of the shipped source: each must fail a case above");
+	section("§14 Mutants of the shipped source: each must fail a case above or below");
 	await mutants();
+
+	section("§15 The same amount request twice, the second during the first's render: one line (review M1)");
+	{
+		const r = await scenarioDoubleClick();
+		check("one line is written; the other request answers 200 alreadyAdded", [r.live, r.statuses, r.already], [1, [200, 201], true]);
+		check("after the sweep W41 carries it once: correction_lines_total 500, total due $1,400.00", [r.total, r.due], [500, 1400]);
+	}
+
+	section("§16 A locked weekly source with no stored day grid takes no day or rate line (review M2)");
+	{
+		const r = await scenarioNoGrid();
+		check("a day line: 409 CORRECTION_SOURCE_NO_GRID, nothing written", [r.day.status, r.day.code, r.linesAfterDay], [409, "CORRECTION_SOURCE_NO_GRID", 0]);
+		check("a rate line: the same refusal", [r.rate.status, r.rate.code], [409, "CORRECTION_SOURCE_NO_GRID"]);
+		check("the shared day test reads such a source as paying the day, in every re-check", r.paidText, true);
+		check("an amount line is still taken", r.amount, 201);
+	}
+
+	section("§17 Flag off, with lines from before: they hold their day, count, block the source's delete, and can be voided (D17, D26, D28)");
+	{
+		const r = await scenarioFlagOffLines();
+		check("deleting the source: 409 CORRECTION_SOURCE_HAS_LINES", r.del, [409, "CORRECTION_SOURCE_HAS_LINES"]);
+		check("the cover readers see the day line (manualInvoiceDayCover, the shared day test)", r.cover, [true, true]);
+		check("weeklyManualInvoiceHolds() holds Oct 7", r.holds, ["2026-10-07"]);
+		check("W41's total due counts the line", r.due, 1200);
+		check("void works with the flag off: the total is restored", r.void, [200, 0]);
+	}
+
+	section("§18 The sweep: it places a waiting line; one whose day is paid now waits and nothing is drawn; a day paid during the link's render is refused");
+	{
+		const a = await scenarioSweepPlaces();
+		check("the sweep links the waiting line to W41 and records it", a, [1, true, 1]);
+		const b = await scenarioSweepDayPaid();
+		check("its day paid meanwhile by a manual invoice: it waits, and nothing is drawn", b, [0, null, 0]);
+		const c = await scenarioLinkDayPaidMidRender();
+		check("its day paid during the link's render: the link refuses, the line waits", c, [null, 0]);
+	}
+
+	section("§19 The generation: it takes no waiting day line whose day is paid now, and its write re-checks the day");
+	{
+		const a = await scenarioGenerationSkipsPaidDay();
+		check("W42 generates without the line, which still waits", a, [200, null, 0]);
+		const b = await scenarioGenerationDayPaidMidRender();
+		check("its day paid during the generation's render: 409 CORRECTION_DAY_PAID, no W42 written", b, [409, "CORRECTION_DAY_PAID", 0]);
+	}
+
+	section("§20 Under the daily-rate rule (DRIVER_RATE_ONLY from 2026-10) the server prices day and rate lines");
+	{
+		const r = await scenarioRated();
+		check("a rate line for a day the grid paid at the rate in effect: 409 CORRECTION_RATE_SAME", r.same, [409, "CORRECTION_RATE_SAME"]);
+		check("a day line with no typed figure: 201 at the rate in effect that day ($280.00), priced by the rule in October", r.day, [201, 28000, "rule", "2026-10"]);
+		check("a rate line for a day the grid paid at $250.00: +$30.00, labelled $250.00 → $280.00", r.rate, [201, 3000, true]);
+	}
+
+	section("§21 A generation with a Personal line: the Personal line before negative correction lines (D11)");
+	{
+		const r = await scenarioPersonalOrder();
+		check("setup: the -$800 line and the $200 Personal mark both wait for W41", r.setup, [201, true, true]);
+		check("W41 ($900) takes the Personal line; the -$800 line no longer fits and waits", r.result, [200, 0, [-80000]]);
+	}
+
+	section("§22 A line whose invoice was approved is final: deleting that invoice later never makes it wait (R3-L3)");
+	{
+		const r = await scenarioApprovedCarrierDeleted();
+		check("the delete answers 200; the line is listed nowhere as waiting and the sweep moves nothing", r, [200, 0, 0, true]);
+	}
 
 	finish();
 })().catch((err) => {
@@ -455,7 +535,7 @@ async function mutants() {
 		},
 		{
 			name: "the link transaction's re-check removed (an approval mid-render)",
-			from: "\t\t\tif (moved || !sameLines || !samePersonal || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();",
+			from: "\t\t\tif (moved || !sameLines || !samePersonal || shared) throw changed();",
 			to: "",
 			probe: async () => {
 				let hook = null;
@@ -488,6 +568,79 @@ async function mutants() {
 				return r.body.placed && /W41/.test(r.body.placed.invoice_number);
 			},
 		},
+		// Added in the review's fix round (M1-M3): each probe is a scenario the sections above check.
+		{
+			name: "the in-transaction duplicate check removed (M1)",
+			from: "\treturn dup && Date.now() - Date.parse(dup.created_at) < CORRECTION_REPEAT_MS ? dup : null;",
+			to: "\treturn null;",
+			probe: async () => (await scenarioDoubleClick({ src: true })).live === 1,
+		},
+		{
+			name: "the add step's grid check removed (M2)",
+			from: "\tif (!manual && kind !== \"amount\" && !correctionSourceGridReadable(source)) {",
+			to: "\tif (false) {",
+			probe: async () => (await scenarioNoGrid({ src: true })).day.code === "CORRECTION_SOURCE_NO_GRID",
+		},
+		{
+			name: "the shared day test reading an unreadable grid as unpaid (M2)",
+			from: "\tif (source && !Number(source.is_manual) && !correctionSourceGridReadable(source)) return",
+			to: "\tif (false) return",
+			probe: async () => (await scenarioNoGrid({ src: true })).paidText === true,
+		},
+		{
+			name: "D28 gated on the flag",
+			from: "\t\tif (sourceLines.length) {",
+			to: "\t\tif (APPROVED_INVOICE_LOCK_ENABLED && sourceLines.length) {",
+			probe: async () => (await scenarioFlagOffLines({ src: true })).del[0] === 409,
+		},
+		{
+			name: "a cover reader gated on the flag (D26)",
+			from: "\tif (dayLines) for (const [d, h] of correctionDayLineHolds(driverNorm)) if (!cover.has(d)) cover.set(d, h.name);",
+			to: "\tif (dayLines && APPROVED_INVOICE_LOCK_ENABLED) for (const [d, h] of correctionDayLineHolds(driverNorm)) if (!cover.has(d)) cover.set(d, h.name);",
+			probe: async () => (await scenarioFlagOffLines({ src: true })).cover[0] === true,
+		},
+		{
+			name: "the sweep's day check removed",
+			from: "\t\t\t\tif (line.kind === \"day\" && correctionDayPaidBy(driverNorm, line.line_date, { source: correctionSourceRow(line), exceptLineId: line.id })) { out.waiting++; continue; }",
+			to: "",
+			probe: async () => (await scenarioSweepDayPaid({ src: true }))[2] === 0,
+		},
+		{
+			name: "the link transaction's day re-check removed",
+			from: "const paid = correctionDayPaidBy(driverNorm, l.line_date, { source: correctionSourceRow(l), exceptLineId: l === provisional ? null : l.id });",
+			to: "const paid = \"\";",
+			probe: async () => (await scenarioLinkDayPaidMidRender({ src: true }))[0] === null,
+		},
+		{
+			name: "the generation plan's day filter removed",
+			from: ".filter((l) => l.kind !== \"day\"\n\t\t|| !correctionDayPaidBy(key,",
+			to: ".filter((l) => true\n\t\t|| !correctionDayPaidBy(key,",
+			probe: async () => (await scenarioGenerationSkipsPaidDay({ src: true }))[0] === 200,
+		},
+		{
+			name: "the generation write's day re-check removed",
+			from: "\t\tif (paid) throw invoiceWriteRefusal(\"CORRECTION_DAY_PAID\", `${l.line_date} is already paid: ${paid}. Nothing was saved; generate it again.`);",
+			to: "",
+			probe: async () => (await scenarioGenerationDayPaidMidRender({ src: true }))[0] === 409,
+		},
+		{
+			name: "the daily-rate rule's price ignored",
+			from: "\t\tconst ruled = driverRateOnlyApplies(payMonth);",
+			to: "\t\tconst ruled = false;",
+			probe: async () => (await scenarioRated({ src: true })).day[0] === 201,
+		},
+		{
+			name: "the Personal room counting negative correction lines (D11 order)",
+			from: "personalFitForGeneration(personal, generationBaseCents + correctionPlan.positiveCents)",
+			to: "personalFitForGeneration(personal, generationBaseCents + invoiceCorrections.totalCents(correctionPlan.candidates))",
+			probe: async () => (await scenarioPersonalOrder({ src: true })).result[0] === 200,
+		},
+		{
+			name: "a deleted approved carrier's lines read as waiting (R3-L3)",
+			from: "(ci.deleted_at != '' AND ci.status IN ('Draft', 'Submitted', 'Rejected'))",
+			to: "(ci.deleted_at != '')",
+			probe: async () => (await scenarioApprovedCarrierDeleted({ src: true }))[1] === 0,
+		},
 	];
 	for (const m of cases) {
 		if (!SRC.includes(m.from)) { check(`mutant "${m.name}": its target is in server.js`, false, true); continue; }
@@ -500,4 +653,190 @@ async function mutants() {
 		const killed = !(await run(SRC.replace(m.from, m.to)));
 		check(`mutant "${m.name}": the real source passes its probe and the mutant fails it`, [held, killed], [true, true]);
 	}
+}
+
+// The review's fix round (M1-M3). Each scenario returns what its section checks;
+// a mutant's probe runs the same scenario on the mutated source ({ src: true }).
+
+// M1: a second identical amount request runs inside the first one's render.
+async function scenarioDoubleClick(opts = {}) {
+	const ctx = { armed: false, second: null, w: null, source: null };
+	const body = { kind: "amount", date: "2026-10-08", amount: "500.00", description: "wrong total", reason: "x" };
+	const render = async (t, d, def) => {
+		if (ctx.armed) {
+			ctx.armed = false;
+			ctx.second = await call(ctx.w, "POST", `/api/invoices/${ctx.source}/corrections`, { body });
+		}
+		return def(t, d);
+	};
+	const { w, w40, w41 } = await setup({}, { src: opts.src, render });
+	Object.assign(ctx, { w, source: w40.id, armed: true });
+	const first = await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body });
+	const second = ctx.second || { status: 0, body: {} };
+	const live = lines(w, "voided_at = ''").length;
+	await tryAsync(() => fn(w, "runCorrectionSweep")());
+	const out = {
+		live,
+		statuses: [first.status, second.status].sort((a, b) => a - b),
+		already: !!(first.body.alreadyAdded || second.body.alreadyAdded),
+		total: col(w, w41.id, "correction_lines_total"),
+		due: tryIt(() => w.api.invoiceTotalDue(w.invoice(w41.id))),
+	};
+	w.cleanup();
+	return out;
+}
+
+// M2: a Paid weekly source stored before render data (no day grid).
+async function scenarioNoGrid(opts = {}) {
+	const { w } = await setup({}, { src: opts.src });
+	w.db.prepare(`INSERT INTO invoices (invoice_number, driver, week_start, week_end, status, render_data, pdf_file_name, total_earnings, loads_count)
+		VALUES ('INV-TDA-2026W39-01', 'test driver a', '2026-09-26', '2026-10-02', 'Paid', '{}', 'INV-TDA-2026W39-01.pdf', 900, 3)`).run();
+	const old = w.db.prepare("SELECT * FROM invoices WHERE invoice_number = 'INV-TDA-2026W39-01'").get();
+	const day = await call(w, "POST", `/api/invoices/${old.id}/corrections`, { body: dayLine({ date: "2026-10-01" }) });
+	const linesAfterDay = lines(w).length;
+	const rate = await call(w, "POST", `/api/invoices/${old.id}/corrections`, { body: { kind: "rate", date: "2026-10-01", reason: "x" } });
+	const paidText = tryIt(() => /no stored day grid/.test(fn(w, "correctionDayPaidBy")("test driver a", "2026-10-01", { source: old })));
+	const amount = (await call(w, "POST", `/api/invoices/${old.id}/corrections`,
+		{ body: { kind: "amount", date: "2026-10-01", amount: "25.00", description: "lumper refund", reason: "x" } })).status;
+	w.cleanup();
+	return { day: { status: day.status, code: day.body.code }, linesAfterDay, rate: { status: rate.status, code: rate.body.code }, paidText, amount };
+}
+
+// M3: the flag off, with a day line on W41 written before the switch-off.
+async function scenarioFlagOffLines(opts = {}) {
+	const { w, w40, w41 } = await setup({ APPROVED_INVOICE_LOCK_ENABLED: undefined }, { src: opts.src });
+	insertLine(w, { source: w40, kind: "day", date: "2026-10-07", cents: 30000, invoiceId: w41.id });
+	w.db.prepare("UPDATE invoices SET correction_lines_total = 300 WHERE id = ?").run(w41.id);
+	const del = await call(w, "DELETE", `/api/invoices/${w40.id}`);
+	const cover = [tryIt(() => fn(w, "manualInvoiceDayCover")("test driver a").has("2026-10-07")),
+		tryIt(() => /correction line/.test(fn(w, "correctionDayPaidBy")("test driver a", "2026-10-07", {})))];
+	const h = tryIt(() => fn(w, "weeklyManualInvoiceHolds")({ driverNorm: "test driver a", days: new Set(["2026-10-07"]), weekStart: "2026-10-03", weekEnd: "2026-10-09", rateOf: () => 300 }));
+	const list = await call(w, "GET", "/api/invoices");
+	const row = ((list.body && list.body.invoices) || []).find((x) => x.id === w41.id) || {};
+	const id = (lines(w)[0] || {}).id;
+	const v = await call(w, "DELETE", `/api/invoices/corrections/${id}`, { body: { reason: "added by mistake" } });
+	const out = { del: [del.status, del.body.code], cover, holds: h && h.held ? [...h.held.keys()] : h, due: row.total_due, void: [v.status, col(w, w41.id, "correction_lines_total")] };
+	w.cleanup();
+	return out;
+}
+
+// The sweep: a day line waits while W41 is approved, then W41 is open again.
+async function scenarioSweepPlaces(opts = {}) {
+	const { w, w40, w41 } = await setup({}, { src: opts.src });
+	approveRow(w, w41.id);
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
+	reopen(w, w41.id);
+	const out = await tryAsync(() => fn(w, "runCorrectionSweep")());
+	const r = [out && out.placed, (lines(w)[0] || {}).invoice_id === w41.id, audits(w, "place_invoice_correction").length];
+	w.cleanup();
+	return r;
+}
+// ...and when a manual invoice paying its day was written while it waited.
+async function scenarioSweepDayPaid(opts = {}) {
+	const { w, w40, w41 } = await setup({}, { src: opts.src });
+	approveRow(w, w41.id);
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
+	manualPaying(w, "2026-10-07");
+	reopen(w, w41.id);
+	const before = w.rendered.length;
+	const out = await tryAsync(() => fn(w, "runCorrectionSweep")());
+	const r = [out && out.placed, (lines(w)[0] || {}).invoice_id ?? null, w.rendered.length - before];
+	w.cleanup();
+	return r;
+}
+// ...and when that manual invoice is written during the link's render.
+async function scenarioLinkDayPaidMidRender(opts = {}) {
+	const ctx = { hook: null };
+	const render = (t, d, def) => { if (ctx.hook) { const h = ctx.hook; ctx.hook = null; h(); } return def(t, d); };
+	const { w, w40, w41 } = await setup({}, { src: opts.src, render });
+	approveRow(w, w41.id);
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
+	reopen(w, w41.id);
+	ctx.hook = () => manualPaying(w, "2026-10-07");
+	await tryAsync(() => fn(w, "runCorrectionSweep")());
+	const r = [(lines(w)[0] || {}).invoice_id ?? null, col(w, w41.id, "correction_lines_total")];
+	w.cleanup();
+	return r;
+}
+
+// The next week's generation (W42, load L7) with the waiting day line's day paid
+// by a manual invoice: before the generation, or during its render.
+async function scenarioGenerationSkipsPaidDay(opts = {}) {
+	const { w, w40, w41 } = await setup({}, { src: opts.src });
+	approveRow(w, w41.id);
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
+	manualPaying(w, "2026-10-07");
+	w.sheet.rows.push(W_LOAD("L7", "10/19/2026 8:00", "10/20/2026 10:00", "10/19/2026", "10/20/2026"));
+	w.setNow(Date.UTC(2026, 9, 23, 16));
+	const g = await w.generate(DRIVER_A, "2026-10-23");
+	const w42 = g.body && g.body.invoice ? w.invoice(g.body.invoice.id) : {};
+	const r = [g.status, (lines(w)[0] || {}).invoice_id ?? null, w42.correction_lines_total ?? null];
+	w.cleanup();
+	return r;
+}
+async function scenarioGenerationDayPaidMidRender(opts = {}) {
+	const ctx = { hook: null };
+	const render = (t, d, def) => { if (ctx.hook) { const h = ctx.hook; ctx.hook = null; h(); } return def(t, d); };
+	const { w, w40, w41 } = await setup({}, { src: opts.src, render });
+	approveRow(w, w41.id);
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: dayLine() });
+	w.sheet.rows.push(W_LOAD("L7", "10/19/2026 8:00", "10/20/2026 10:00", "10/19/2026", "10/20/2026"));
+	w.setNow(Date.UTC(2026, 9, 23, 16));
+	ctx.hook = () => manualPaying(w, "2026-10-07");
+	const g = await w.generate(DRIVER_A, "2026-10-23");
+	const r = [g.status, g.body && g.body.code, w.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE week_start = '2026-10-17' AND is_manual = 0").get().n];
+	w.cleanup();
+	return r;
+}
+
+// The daily-rate rule on from October, Driver A's dated rate $280 from Sep 1.
+async function scenarioRated(opts = {}) {
+	const env = { DRIVER_RATE_ONLY_ENABLED: "true", DRIVER_RATE_ONLY_FROM: "2026-10" };
+	const before = (w) => w.db.prepare("INSERT INTO pay_rate_history (subject, subject_key, rate, effective_from, source) VALUES ('driver', 'test driver a', 280, '2026-09-01T04:00:00.000Z', 'change')").run();
+	const { w, w40 } = await setup(env, { src: opts.src, before });
+	const same = await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: { kind: "rate", date: "2026-10-06", reason: "x" } });
+	const day = await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: { kind: "day", date: "2026-10-07", reason: "worked, missed on the grid" } });
+	// W40's grid prices Tuesday at $250.00 by mistake (the fixture).
+	const snap = JSON.parse(w.invoice(w40.id).render_data);
+	snap.days.Tuesday = { ...snap.days.Tuesday, rate: 250, total: 250 };
+	w.db.prepare("UPDATE invoices SET render_data = ? WHERE id = ?").run(JSON.stringify(snap), w40.id);
+	const rate = await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: { kind: "rate", date: "2026-10-06", reason: "x" } });
+	const out = {
+		same: [same.status, same.body.code],
+		day: [day.status, day.body.line && day.body.line.cents, day.body.priced && day.body.priced.pricedBy, day.body.priced && day.body.priced.payMonth],
+		rate: [rate.status, rate.body.line && rate.body.line.cents, /\$250\.00 → \$280\.00/.test((rate.body.line && rate.body.line.label) || "")],
+	};
+	w.cleanup();
+	return out;
+}
+
+// W41's generation with a $200 Personal mark and a -$800 correction line waiting.
+async function scenarioPersonalOrder(opts = {}) {
+	const w = world({ PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" }, { src: opts.src });
+	const g40 = await w.generate(DRIVER_A, "2026-10-09");
+	approveRow(w, g40.body.invoice.id);
+	const neg = await call(w, "POST", `/api/invoices/${g40.body.invoice.id}/corrections`,
+		{ body: { kind: "amount", date: "2026-10-08", amount: "-800.00", description: "advance not deducted", reason: "x" } });
+	const m = await call(w, "POST", "/api/expenses/1/personal", { body: {} });
+	const g41 = await w.generate(DRIVER_A, "2026-10-16");
+	const w41 = g41.body && g41.body.invoice ? w.invoice(g41.body.invoice.id) : {};
+	const out = {
+		setup: [neg.status, !!(neg.body && neg.body.waiting), m.status >= 200 && m.status < 300],
+		result: [w41.personal_total, w41.correction_lines_total, lines(w, "invoice_id IS NULL AND voided_at = ''").map((l) => l.cents)],
+	};
+	w.cleanup();
+	return out;
+}
+
+// A line placed on W41, then W41 approved, then deleted.
+async function scenarioApprovedCarrierDeleted(opts = {}) {
+	const { w, w40, w41 } = await setup({}, { src: opts.src });
+	await call(w, "POST", `/api/invoices/${w40.id}/corrections`, { body: { kind: "amount", date: "2026-10-08", amount: "25.00", description: "lumper refund", reason: "x" } });
+	approveRow(w, w41.id);
+	const del = await call(w, "DELETE", `/api/invoices/${w41.id}`);
+	const list = await call(w, "GET", "/api/invoices/corrections/waiting");
+	const out = await tryAsync(() => fn(w, "runCorrectionSweep")());
+	const r = [del.status, ((list.body && list.body.lines) || []).length, out && out.placed, (lines(w)[0] || {}).invoice_id === w41.id];
+	w.cleanup();
+	return r;
 }

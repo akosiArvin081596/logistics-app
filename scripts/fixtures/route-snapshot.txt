@@ -191,7 +191,7 @@ GET /api/invoices · requireAuth@2f5c61384511 · inline@020b9b464aae
 DELETE /api/invoices/:id · requireRole("Super Admin")=anon@12b84c4b0134 · inline@900b8022103e
 PUT /api/invoices/:id/adjust · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · inline@b55c3e6f9f8b
 PUT /api/invoices/:id/approve · requireRole("Super Admin")=anon@12b84c4b0134 · inline@200a31d86f91
-POST /api/invoices/:id/corrections · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · correctionRouteLimiter=limiter · inline@b202f0c3bc33
+POST /api/invoices/:id/corrections · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · correctionRouteLimiter=limiter · inline@a508b7189faa
 GET /api/invoices/:id/pdf · requireAuth@2f5c61384511 · inline@1507fb41e75d | after: GET /api/invoices/report/pdf
 GET /api/invoices/:id/personal-receipts/:lineId · requireAuth@2f5c61384511 · personalReceiptLimiter=limiter · inline@6a7f184e69df
 POST /api/invoices/:id/receipt-pages/update · requireRole("Super Admin")=anon@12b84c4b0134 · refuseCrossOrigin=crossSiteGuardMiddleware@aa37960cca47 · receiptPagesLimiter=limiter · inline@276bdbf14bfa
