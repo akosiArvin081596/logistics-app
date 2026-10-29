@@ -15,6 +15,13 @@
 # DB, WAL included), verifies it with PRAGMA integrity_check BEFORE keeping it,
 # gzips it, and prunes >30 days. It exits non-zero on failure so failures land
 # in backups/backup.log instead of passing silently.
+#
+# Then scripts/backup-trees.sh copies uploads/, storage/ and evidence-archive/
+# into backups/trees/ (off unless backups/.trees-enabled exists; its header has
+# the details and the restore steps). It runs whatever the database step did,
+# since it needs no node, and its failure never discards the database snapshot.
+# This script exits with the database step's code if that failed, else with the
+# tree step's.
 set -uo pipefail
 
 APP_DIR="/var/www/logistics-app"
@@ -121,19 +128,31 @@ pick_node() {
   return 1
 }
 
-NODE_BIN="$(pick_node)" || {
+db_rc=0
+if NODE_BIN="$(pick_node)"; then
+  echo "[backup] node: $NODE_BIN ($("$NODE_BIN" -v))"
+
+  # cd above matters: backup-db.js requires better-sqlite3 from ./node_modules.
+  "$NODE_BIN" "$APP_DIR/scripts/backup-db.js" --db "$APP_DIR/app.db" --out "$APP_DIR/backups" --keep-days 30
+  db_rc=$?
+  if [ $db_rc -ne 0 ]; then
+    echo "[backup] backup FAILED with exit code $db_rc"
+  else
+    echo "[backup] completed: $(date)"
+  fi
+else
   echo "[backup] FAILED: no node on this box can load better-sqlite3 from $APP_DIR/node_modules."
   echo "[backup]   tried pm2 exec_interpreter, /opt/node22/bin/node, and \$PATH node."
   echo "[backup]   fix: npm rebuild better-sqlite3 (under the interpreter pm2 runs the app with)."
-  exit 1
-}
-echo "[backup] node: $NODE_BIN ($("$NODE_BIN" -v))"
-
-# cd above matters: backup-db.js requires better-sqlite3 from ./node_modules.
-"$NODE_BIN" "$APP_DIR/scripts/backup-db.js" --db "$APP_DIR/app.db" --out "$APP_DIR/backups" --keep-days 30
-rc=$?
-if [ $rc -ne 0 ]; then
-  echo "[backup] backup FAILED with exit code $rc"
-  exit $rc
+  db_rc=1
 fi
-echo "[backup] completed: $(date)"
+
+bash "$APP_DIR/scripts/backup-trees.sh" --app-dir="$APP_DIR"
+trees_rc=$?
+if [ $trees_rc -ne 0 ]; then
+  # Not "] FAILED": remote-backup-check.sh reads that as a failed database backup.
+  echo "[backup] tree copies FAILED with exit code $trees_rc (see the [backup-trees] lines; the database step is reported above)"
+fi
+
+if [ $db_rc -ne 0 ]; then exit $db_rc; fi
+exit $trees_rc
