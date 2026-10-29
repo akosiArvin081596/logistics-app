@@ -39,7 +39,7 @@ const path = require("path");
 
 const MODULE_PATH = path.join(__dirname, "..", "lib", "investor-report-options.js");
 const MODULE_SRC = fs.readFileSync(MODULE_PATH, "utf8");
-const SERVER_SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SERVER_SRC = require("./lib/server-source").serverSource();
 const O = require(MODULE_PATH);
 
 let pass = 0;

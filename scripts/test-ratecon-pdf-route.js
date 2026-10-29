@@ -52,7 +52,7 @@ const os = require("os");
 const path = require("path");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined);
 
 let Database, express;
 try {

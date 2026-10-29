@@ -50,7 +50,7 @@ ROUTEMATE_POLL_DAILY_HOUR=4
 
 ### `service-account-key.json`
 
-A standard Google Cloud service account JSON key for the account `sheets-bot@logistics-app-491014.iam.gserviceaccount.com`. Both the production spreadsheet and the Drive POD folder must be shared with this email as **Editor**.
+A standard Google Cloud service account JSON key for the app's Google service account. Both the production spreadsheet and the Drive POD folder must be shared with that account's email (the key's `client_email`) as **Editor**.
 
 ## Deploy workflow
 

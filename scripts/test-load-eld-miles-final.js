@@ -39,7 +39,7 @@ const Database = require("better-sqlite3");
 const loadHaul = require("../lib/load-haul");
 const { closure } = require("./lib/server-lift");
 
-const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let fail = 0;

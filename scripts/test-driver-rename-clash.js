@@ -98,10 +98,7 @@
  */
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -1229,6 +1226,9 @@ const LEFT = () => JSON.stringify({
 	history: ["Soren   King"],
 });
 
+// The staff desks (decision 30): the delete keeps a desk's messages
+// (scripts/test-user-delete-cascade.js covers that); the real check rides along.
+const chatDeskKey = new Function(`${liftConst("const CHAT_DESK_NAMES = ")}\n${liftFunction("chatDeskKey")}\nreturn chatDeskKey;`)();
 // DELETE /api/users/:id, lifted, with its period guard, archive and sessions stubbed.
 function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 	const m = buildModule(db, moduleSrc);
@@ -1247,8 +1247,12 @@ function mountUsersDelete(db, { moduleSrc = {} } = {}) {
 		syncDriverToCarrierSheet: m.syncDriverToCarrierSheet,
 		findTruckForDriverAccount: m.findTruckForDriverAccount,
 		normalizeDriverName: m.normalizeDriverName,
+		chatDeskKey,
 		notifyChange: () => {},
 		recordPayRateChanges: () => {},
+		// Voice notes' unlink (scripts/test-voice-note-routes.js §17 runs the real one).
+		userVoiceNoteFiles: () => [],
+		removeUserVoiceNotes: () => 0,
 	});
 	return { del: (id) => quiet(() => call({ params: { id: String(id) } })) };
 }

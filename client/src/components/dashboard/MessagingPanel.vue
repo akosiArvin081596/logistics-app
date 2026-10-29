@@ -12,17 +12,21 @@
         <select v-model="newDriver" class="new-msg-select" @change="newLoadId = ''">
           <option value="" disabled>Select recipient</option>
           <option v-for="d in props.driverNames" :key="d" :value="d">{{ d }}</option>
+          <!-- An investor shows by name and is written to by his sign-in username. -->
+          <optgroup v-if="props.investors.length" label="Investors">
+            <option v-for="inv in props.investors" :key="'investor:' + inv.to" :value="inv.to">{{ inv.label }}</option>
+          </optgroup>
         </select>
         <select v-model="newLoadId" class="new-msg-select" :disabled="!newDriver">
           <option value="">General</option>
-          <option v-for="id in loadsForDriver" :key="id" :value="id">Load {{ id }}</option>
+          <option v-for="l in loadsForDriver" :key="l.ref" :value="l.ref">Load {{ l.label }}</option>
         </select>
         <button class="new-msg-start" :disabled="!newDriver" @click="startConversation">Open Chat</button>
       </div>
       <div class="msg-driver-list">
         <div
-          v-for="c in store.conversations"
-          :key="c.driver + ':' + c.loadId"
+          v-for="(c, i) in store.conversations"
+          :key="conversationListKey(c, i)"
           :class="['msg-driver-item', { active: isActive(c) }]"
           @click="selectConversation(c)"
         >
@@ -30,6 +34,9 @@
             <div>{{ c.driver }}</div>
             <div v-if="c.loadId" class="msg-load-label">Load {{ c.loadId }}</div>
             <div v-else class="msg-load-label">General</div>
+            <!-- The last message: its text, "Photo", "File" or "Voice note (0:42)",
+                 from GET /api/messages's lastKind / lastText / lastVoiceMs. -->
+            <div v-if="conversationPreview(c)" class="msg-preview">{{ conversationPreview(c) }}</div>
             <div class="msg-time">{{ formatTime(c.lastTimestamp) }}</div>
           </div>
           <div v-if="c.unread > 0" class="msg-unread">{{ c.unread }}</div>
@@ -51,13 +58,13 @@
         >&#8592;</button>
         <template v-if="store.selectedDriver">
           {{ store.selectedDriver }}
-          <span v-if="store.selectedLoadId" class="msg-header-load">— Load {{ store.selectedLoadId }}</span>
+          <span v-if="store.selectedLoadShown" class="msg-header-load">— Load {{ store.selectedLoadShown }}</span>
         </template>
         <template v-else>Select a conversation</template>
       </div>
       <div ref="messagesEl" class="msg-chat-messages">
         <template v-if="store.selectedDriver && store.currentMessages.length > 0">
-          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" @open-photo="openPhoto" />
+          <ChatBubble v-for="(m, i) in store.currentMessages" :key="i" :msg="m" :party="store.selectedDriver" @open-photo="openPhoto" />
         </template>
         <EmptyState v-else-if="store.selectedDriver">No messages yet.</EmptyState>
         <EmptyState v-else>Select a conversation from the left to view messages.</EmptyState>
@@ -95,7 +102,7 @@
       <div
         v-if="store.selectedDriver"
         class="msg-chat-input"
-        :class="{ 'is-drop-active': dragActive }"
+        :class="{ 'is-drop-active': dragActive, 'is-recording': recording }"
         v-bind="dropzoneProps"
       >
         <span v-if="dragActive" class="msg-drop-hint" aria-hidden="true">Drop to attach</span>
@@ -115,6 +122,9 @@
           maxlength="500"
           @keydown.enter.prevent="sendMessage"
         />
+        <!-- Voice notes (MESSAGE_VOICE_NOTES_ENABLED), sent as Dispatch to this
+             conversation's driver or investor; recording takes the row. -->
+        <VoiceNoteRecorder v-if="voiceOn" :key="store.selectedDriver + ':' + store.selectedLoadId" :send="sendVoice" @active="recording = $event" />
         <button class="msg-send-btn" :disabled="!!preparing || sending" @click="sendMessage">&#10148;</button>
       </div>
     </div>
@@ -150,18 +160,38 @@ import {
 } from '../../lib/chatAttachment'
 import { fmtAppInstant } from '../../utils/datetime'
 import { chatPhotoStep, chatPhotoView, chatPhotos } from '../../lib/chatPhotos'
+import { conversationPreview } from '../../lib/voiceNotes'
+import { messageSendFailureText } from '../../lib/messageSendFailure'
+import { conversationListKey, conversationRef, loadIdShown, loadRef } from '../../lib/loadRef'
+import { useVoiceNotesFeature } from '../../composables/useVoiceNotesFeature'
 import ChatBubble from './ChatBubble.vue'
 import EmptyState from '../shared/EmptyState.vue'
 import ZoomableImage from '../shared/ZoomableImage.vue'
+import VoiceNoteRecorder from '../shared/VoiceNoteRecorder.vue'
 
 const props = defineProps({
   driverNames: { type: Array, default: () => [] },
+  // Super Admin only: [{ to: the account's sign-in username, label: the name shown }].
+  investors: { type: Array, default: () => [] },
 })
 
 const store = useMessagesStore()
 const dashStore = useDashboardStore()
 const { show: toast } = useToast()
 const api = useApi()
+
+// Voice notes: the record button only with the flag on; notes already sent
+// play either way. The recorder is keyed by the conversation, so a clip never
+// follows the dispatcher into another thread. A send names the conversation's
+// load by its reference (store.selectedLoadId: a Dispatcher's key for a
+// withheld Load ID, client/src/lib/loadRef.js), as the text send does.
+const voiceFeature = useVoiceNotesFeature(api)
+const voiceOn = computed(() => !!voiceFeature.value)
+const recording = ref(false)
+watch(() => [store.selectedDriver, store.selectedLoadId], () => { recording.value = false })
+function sendVoice(clip) {
+  return store.sendVoiceNote(store.selectedDriver, store.selectedLoadId, clip)
+}
 
 const messageInput = ref('')
 const messagesEl = ref(null)
@@ -232,23 +262,31 @@ const showNewMsg = ref(false)
 const newDriver = ref('')
 const newLoadId = ref('')
 
+// The driver's active loads, each by its reference (`ref`: a Dispatcher's key
+// for a withheld Load ID, else the ID as served) and the text it shows (`label`:
+// "[contact withheld]" for an ID served blank).
 const loadsForDriver = computed(() => {
   if (!newDriver.value) return []
   const name = newDriver.value.toLowerCase()
-  const ids = new Set()
+  const loads = new Map()
   for (const job of dashStore.activeJobs) {
     const driverKey = Object.keys(job).find((k) => /^driver$/i.test(k))
     if (driverKey && (job[driverKey] || '').toLowerCase() === name) {
-      const loadKey = Object.keys(job).find((k) => /load.?id|job.?id/i.test(k))
-      if (loadKey && job[loadKey]) ids.add(String(job[loadKey]))
+      const idCol = Object.keys(job).find((k) => /load.?id|job.?id/i.test(k))
+      const ref = idCol ? loadRef(job, idCol) : ''
+      if (ref && !loads.has(ref)) loads.set(ref, { ref, label: loadIdShown(job, idCol) })
     }
   }
-  return [...ids]
+  return [...loads.values()]
 })
 
+// "General" (no load) opens the recipient's general thread; an investor has no
+// loads, so it is his only choice.
 function startConversation() {
-  if (!newDriver.value || !newLoadId.value) return
-  store.selectConversation(newDriver.value, newLoadId.value)
+  if (!newDriver.value) return
+  // The header shows the picked load's text; never a key, even if the list moved on.
+  const picked = loadsForDriver.value.find((l) => l.ref === newLoadId.value)
+  store.selectConversation(newDriver.value, newLoadId.value, picked ? picked.label : '')
   showNewMsg.value = false
   newDriver.value = ''
   newLoadId.value = ''
@@ -257,7 +295,7 @@ function startConversation() {
 function isActive(c) {
   return store.selectedDriver &&
     c.driver.toLowerCase() === store.selectedDriver.toLowerCase() &&
-    c.loadId === store.selectedLoadId
+    conversationRef(c) === store.selectedLoadId
 }
 
 function deselectConversation() {
@@ -267,8 +305,9 @@ function deselectConversation() {
   if (store.selectConversation) store.selectConversation('', '')
 }
 
+// The thread is read by the conversation's reference; the header shows its text.
 function selectConversation(c) {
-  store.selectConversation(c.driver, c.loadId || '')
+  store.selectConversation(c.driver, conversationRef(c), c.loadId || '')
 }
 
 // Conversation-list "last message" time. Pinned to the app zone (APP_TIMEZONE,
@@ -303,12 +342,12 @@ async function sendMessage() {
     // request, so the user may already have attached the next file.
     if (attachment.value === pending) clearAttachment()
     scrollToBottom()
-  } catch {
+  } catch (err) {
     // The attachment stays on screen on purpose. It is the user's file, they
     // cannot get it back from us, and the upload result (if it got that far) is
     // memoized on it — so pressing send again reuses the uploaded file rather
-    // than orphaning another copy.
-    toast('Failed to send', 'error')
+    // than orphaning another copy. A refused recipient or sender says why.
+    toast(messageSendFailureText(err), 'error')
   } finally {
     sending.value = false
   }
@@ -426,9 +465,24 @@ watch(photoView, (view) => { if (!view && openPhotoUrl.value) closePhoto() })
    no position on this row, so nothing is being overridden. */
 .msg-chat-input {
   position: relative;
+  /* The voice-note controls match the send button (36 px). */
+  --vn-size: 36px;
 }
 .msg-chat-input.is-drop-active {
   background: var(--accent-dim);
+}
+/* While a voice note is recorded or reviewed it takes the row. */
+.msg-chat-input.is-recording .msg-attach-btn,
+.msg-chat-input.is-recording .msg-input,
+.msg-chat-input.is-recording .msg-send-btn { display: none; }
+
+.msg-preview {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* pointer-events:none is load-bearing, not polish. The hint appears UNDER the

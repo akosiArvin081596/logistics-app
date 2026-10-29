@@ -74,6 +74,9 @@
  *      helpers and both connection gates close the namespace, never the
  *      transport
  *   §9 DISCRIMINATION: one mutant per call site, and each must be caught
+ *   §1b THE SIGN-OUT ROW (SIGN_IN_AUDIT_ENABLED): a logout from a session with
+ *      a user writes one `logout` row naming that account; one without a user
+ *      writes none, and with the flag off nothing is written
  *
  * Runs the SHIPPED code: the session configuration, the login / setup / logout
  * / session / change-password routes, PUT /api/users/:id, PUT
@@ -94,16 +97,20 @@
  * its sheet, period and merge planning stubbed to "nothing blocks".
  *
  * Run: node scripts/test-session-sockets.js    # exits 1 on failure
+ *      SERVER_JS=/tmp/base.js node scripts/test-session-sockets.js   # a base commit: fails
  */
 "use strict";
 
-const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
 const { once } = require("events");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
+// lib/sign-in.js: the `signIn` object the login and logout routes are handed.
+// Absent before that change, when neither route asks for it.
+let signInLib = null;
+try { signInLib = require("../lib/sign-in.js"); } catch (e) { if (!e || e.code !== "MODULE_NOT_FOUND") throw e; }
 
 let pass = 0;
 const failures = [];
@@ -220,6 +227,7 @@ const SESSION_ROUTE_SRC = liftRoute('app.get("/api/auth/session", (req, res) => 
 const TRACKER_HANDLER_SRC = liftHandler('publicTrack.on("connection", (socket) => {', 'publicTrack.on("connection", ');
 const STAMP_SRC = liftFunction("function stampLastLogin(userId) {");
 const AUDIT_SRC = liftFunction("function logAudit(req, action, entity, entityId, details) {");
+const REFUSAL_AUDIT_SRC = liftFunction("function logAuditRefusal(req, action, entity, entityId, details, code) {");
 const REQUIRE_AUTH_SRC = liftFunction("function requireAuth(req, res, next) {");
 const REQUIRE_ROLE_SRC = liftFunction("function requireRole(...roles) {");
 // The driver-rename cascade fix-driver-name runs, exactly as server.js defines
@@ -354,7 +362,7 @@ const socketHandler = new Function(
 
 // One complete app: HTTP routes and Socket.IO on one loopback server, built
 // from `sources` (the shipped text, or a mutant of one piece of it).
-async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt } = {}) {
+async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt, signInAudit = false } = {}) {
 	const db = makeDb({ seed });
 	const holder = {};
 	class TestStore extends SqliteStoreBase {
@@ -380,18 +388,31 @@ async function startWorld({ sources = SRCS, seed = true, bcryptImpl = fastBcrypt
 
 	const stampLastLogin = new Function("db", `${STAMP_SRC}\nreturn stampLastLogin;`)(db);
 	const logAudit = new Function("db", `${AUDIT_SRC}\nreturn logAudit;`)(db);
+	// The sign-in rows' writer (lib/sign-in.js) over the shipped audit code, the
+	// flag as the scenario sets it. Without the library the routes never ask.
+	const signIn = signInLib ? signInLib.createSignIn({
+		db, logAudit,
+		logAuditRefusal: new Function("logAudit", "console", "refusalAuditWindows",
+			`${liftConst("const REFUSAL_AUDIT_WINDOW_MS = ")}\n${liftConst("const UNCOALESCED_REFUSAL_CODES = new Set([", "\n]);")}\n${REFUSAL_AUDIT_SRC}\nreturn logAuditRefusal;`)(
+			logAudit, console, new Map()),
+		networkEvidence: () => ({ ip: "203.0.113.9", ipSource: "proxy", userAgent: "made-up" }),
+		auditEnabled: signInAudit,
+	}) : null;
+	if (signIn) signInLib.ensureSignInNetworkTable(db);
 	const purgeUserSessions = new Function("db", "disconnectUserSockets", `${sources.purge}\nreturn purgeUserSessions;`)(db, helpers.disconnectUserSockets);
 	// Bare, nothing injected, the way the other guard runners lift it.
 	const requireAuth = new Function(`${REQUIRE_AUTH_SRC}\nreturn requireAuth;`)();
 	const passThrough = (req, res, next) => next();
 
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.login)(
-		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
-	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", sources.setup)(
-		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York");
-	new Function("app", "disconnectSessionSockets", sources.logout)(app, helpers.disconnectSessionSockets);
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", sources.login)(
+		app, passThrough, db, bcryptImpl, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", signIn);
+	// The setup's reserved-name check is scripts/test-messages-staff-only.js's
+	// subject; here no name is reserved.
+	new Function("app", "setupLimiter", "db", "bcrypt", "usersEverExisted", "SETUP_RECOVERY_TOKEN", "safeEqual", "logAudit", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "findDriverNameClash", sources.setup)(
+		app, passThrough, db, bcryptImpl, () => false, "", () => false, logAudit, stampLastLogin, helpers.disconnectSessionSockets, "America/New_York", () => null);
+	new Function("app", "disconnectSessionSockets", "signIn", sources.logout)(app, helpers.disconnectSessionSockets, signIn);
 	// The route also hands the browser APP_TIMEZONE (lib/app-time.js).
-	new Function("app", "APP_TIMEZONE", SESSION_ROUTE_SRC)(app, "America/New_York");
+	new Function("app", "APP_TIMEZONE", "MESSAGE_VOICE_NOTES_ENABLED", SESSION_ROUTE_SRC)(app, "America/New_York", false);
 	// Both password routes email the account afterwards (notifyPasswordChanged(),
 	// B21); that email is scripts/test-password-change-notice.js's subject, so here
 	// it is a no-op that sends nothing.
@@ -668,6 +689,30 @@ const SCENARIOS = {
 			p.logoutSparesOtherDevice = isOpen(w, o) &&
 				(await receives(o.s, "location-update", () => w.io.to("dispatch").emit("location-update", { lat: 1 })));
 		} finally { await w.close(); }
+	},
+
+	// §1b
+	async logoutRow(sources, p) {
+		const logoutRows = (w) => w.db.prepare("SELECT * FROM audit_trail WHERE action = 'logout' ORDER BY id").all();
+		const w = await startWorld({ sources, signInAudit: true });
+		try {
+			const a = await login(w, "alice", PW.alice);
+			const out = await request(w.port, "POST", "/api/auth/logout", { cookie: a.cookie });
+			const rows = logoutRows(w);
+			const r = rows[0] || {};
+			p.logoutRowNamesAccount = out.status === 200 && rows.length === 1 && r.user_id === 1 && r.username === "alice" &&
+				r.role === "Dispatcher" && r.entity === "user" && r.entity_id === "1" && r.details === "Signed out";
+			// The ended cookie again, and no cookie at all: no session user.
+			const again = await request(w.port, "POST", "/api/auth/logout", { cookie: a.cookie });
+			const bare = await request(w.port, "POST", "/api/auth/logout", {});
+			p.logoutWithoutUserWritesNoRow = again.status === 200 && bare.status === 200 && logoutRows(w).length === 1;
+		} finally { await w.close(); }
+		const off = await startWorld({ sources });
+		try {
+			const a = await login(off, "alice", PW.alice);
+			await request(off.port, "POST", "/api/auth/logout", { cookie: a.cookie });
+			p.logoutFlagOffWritesNothing = off.db.prepare("SELECT COUNT(*) AS n FROM audit_trail").get().n === 0;
+		} finally { await off.close(); }
 	},
 
 	// §2
@@ -1533,6 +1578,9 @@ const PROPS = {
 	logoutClosesSession: ["logout", "§1 logout must close the live-update sockets of the session it ends (the client sees a server disconnect)"],
 	logoutLeavesNoRoom: ["logout", "§1 ...leaving them in no room"],
 	logoutSparesOtherDevice: ["logout", "§1 ...and only that session's: the same account on another device stays connected and keeps receiving"],
+	logoutRowNamesAccount: ["logoutRow", "§1b SIGN_IN_AUDIT_ENABLED: a logout from a session with a user must write one `logout` row naming that account"],
+	logoutWithoutUserWritesNoRow: ["logoutRow", "§1b ...and a logout with no session user (an ended cookie, no cookie) none"],
+	logoutFlagOffWritesNothing: ["logoutRow", "§1b with the flag off a logout writes nothing"],
 	refusedLoginClosesNothing: ["login", "§2 a refused sign-in changed no session, so it must close no socket"],
 	loginClosesReplacedSession: ["login", "§2 a sign-in must close the sockets of the session it replaced, which may belong to a different person"],
 	loginSparesOtherSessions: ["login", "§2 ...and no other session's"],
@@ -1625,6 +1673,8 @@ function sectionSource() {
 	const logout = stripComments(SRCS.logout);
 	const lo = at(logout, "disconnectSessionSockets(req.sessionID)");
 	ok(lo > 0 && lo < at(logout, "req.session.destroy("), "§8 logout must close the session's sockets BEFORE destroy(), while req.sessionID still names it");
+	const loRow = at(logout, 'signIn.record(req, "logout", req.session.user,');
+	ok(loRow > 0 && loRow < at(logout, "req.session.destroy("), "§8 logout must write its sign-out row BEFORE destroy(), while the session still has its user");
 
 	const login = stripComments(SRCS.login);
 	const lDisc = at(login, "disconnectSessionSockets(req.sessionID)");
@@ -1765,6 +1815,16 @@ const MUTANTS = [
 		target: "logout",
 		mutate: dropLine(/^\s*disconnectSessionSockets\(req\.sessionID\);\n/m),
 		caughtBy: ["logoutClosesSession", "logoutLeavesNoRoom", "sharedLogoutClosesDefault"],
+	},
+	{
+		name: "logout writes its sign-out row after destroy()",
+		target: "logout",
+		mutate: (s) => {
+			const line = s.match(/^\s*if \(req\.session && req\.session\.user\) signIn\.record\(req, "logout"[^\n]*\n/m);
+			if (!line) return s;
+			return s.replace(line[0], "").replace("\treq.session.destroy();\n", "\treq.session.destroy();\n" + line[0]);
+		},
+		caughtBy: ["logoutRowNamesAccount"],
 	},
 	{
 		name: "login does not close the replaced session's sockets",

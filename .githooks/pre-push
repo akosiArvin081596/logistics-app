@@ -1,15 +1,44 @@
 #!/usr/bin/env bash
-# Pre-push: runs `npm run check` (syntax check + every unit runner, one per
-# core) and blocks the push when it fails.
+# Pre-push: lint, then the unit runners this push's changes reach, inside a
+# sandbox, in about two minutes. Blocks the push when anything fails.
 #
 # Turn it on once per clone:   git config core.hooksPath .githooks
-# Skip it for one push:        git push --no-verify
+# Every runner, no time budget: LOGISX_PREPUSH=full git push   (still sandboxed)
 #
-# It checks the WORKING TREE of the worktree being pushed (the one git runs
-# the hook in), which is what was just committed when the tree is clean. That
-# holds in a linked worktree too, where core.hooksPath may be an absolute path
-# to another checkout's .githooks. Run by hand, it checks the worktree around
-# the current directory. A push that only deletes remote branches runs nothing.
+# WHICH TREE. It checks the WORKING TREE of the worktree being pushed (the one
+# git runs the hook in), which is what was just committed when the tree is
+# clean. That holds in a linked worktree too, where core.hooksPath may be an
+# absolute path to another checkout's .githooks. Run by hand, it checks the
+# worktree around the current directory. A push that only deletes remote
+# branches runs nothing.
+#
+# WHAT RUNS. scripts/run-unit-tests.js --lint: package.json's lint, then the
+# runners the changed files reach (scripts/lib/test-selection.js), in tiers
+# inside a 115 s budget; whatever doesn't fit is listed "not run for time" and
+# CI runs it. Changed files: the branch against its merge-base with
+# origin/main (as last fetched; for every ref pushed), plus uncommitted and
+# untracked files. A worktree whose run-unit-tests.js predates that mode gets
+# lint and the whole suite instead, still sandboxed.
+#
+# THE SANDBOX. Every piece of the repository's code it runs (lint, the
+# selector, the runners, node_modules) runs in ONE child under
+# /usr/bin/sandbox-exec with the profile below, in an environment that
+# `env -i` empties down to an allowlist (PATH with this Node, HOME, TMPDIR,
+# LANG, USER, LOGNAME, SHELL, TERM, NODE_ENV=test, UNIT_TEST_TIMEOUT_MS and
+# UNIT_TEST_CONCURRENCY). Its stdin is /dev/null and its output goes through a
+# pipe, so it holds no terminal, and the profile won't open one. The hook's
+# own files (the changed list, the server.js diff, the log) live in a folder
+# under ~/Library/Caches that the child can read but not write. git and this
+# file run outside it: git connected to GitHub before the hook started and
+# sends the pack after it exits. The profile lives in this file, not in the
+# tree being checked, so a branch can't loosen it. On macOS (as
+# /usr/bin/uname says, never a uname on PATH) a sandbox that can't start
+# blocks the push (no variable turns it off); elsewhere the check runs
+# unsandboxed and says so.
+#
+# EXIT. 0 only when the child exits 0 AND its last line is exactly
+#   pre-push verdict: lint=pass selection=pass runners=pass
+# Anything else blocks the push with one line saying why.
 #
 # The runners load better-sqlite3, which is built for the Node in .nvmrc, so
 # the hook switches to that Node through fnm when fnm is installed.
@@ -33,10 +62,14 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX \
 zero=0000000000000000000000000000000000000000
 refs=0
 updates=0
+oids=()
 if [ ! -t 0 ]; then
 	while read -r _local_ref local_oid _remote_ref _remote_oid; do
 		refs=$((refs + 1))
-		[ "$local_oid" = "$zero" ] || updates=$((updates + 1))
+		if [ "$local_oid" != "$zero" ]; then
+			updates=$((updates + 1))
+			oids+=("$local_oid")
+		fi
 	done
 fi
 if [ "$refs" -gt 0 ] && [ "$updates" -eq 0 ]; then
@@ -50,6 +83,19 @@ if [ -z "$root" ]; then
 fi
 cd "$root" || exit 1
 
+block() {
+	echo "pre-push: $1"
+	echo "pre-push: the push was blocked."
+	exit 1
+}
+
+mode=selective
+case "${LOGISX_PREPUSH:-}" in
+	"") ;;
+	full) mode=full ;;
+	*) block "LOGISX_PREPUSH=${LOGISX_PREPUSH} is not a mode; the only one is full (every runner, still sandboxed)." ;;
+esac
+
 if command -v fnm >/dev/null 2>&1; then
 	eval "$(fnm env --shell bash)"
 	fnm use >/dev/null 2>&1 || echo "pre-push: fnm could not switch to the Node in .nvmrc ($(cat .nvmrc)); using $(node -v)."
@@ -59,11 +105,195 @@ have=$(node -v 2>/dev/null)
 if [ -n "$want" ] && [ "${have#v}" != "${want#v}" ]; then
 	echo "pre-push: Node $have is running, .nvmrc wants $want. Runners that load better-sqlite3 will fail with NODE_MODULE_VERSION errors until you switch (fnm use)."
 fi
+node_bin=$(command -v node)
+case "$node_bin" in
+	/*) ;;
+	*) block "no node on PATH." ;;
+esac
+node_dir=${node_bin%/*}
 
+platform=$(/usr/bin/uname -s)
+SANDBOX_EXEC=/usr/bin/sandbox-exec
+ENV_BIN=/usr/bin/env
+
+# The profile. Params: HOME and WORK, the real paths of home and the worktree;
+# HOME_RE and WORK_RE, the same paths quoted for a regex. Allow by default,
+# then: writes only in temp space; no read or write of secrets and token
+# stores anywhere in home or the worktree (temp space stays free, so runners
+# can plant fake ones in mkdtemp); no terminal (/dev/tty and the ptys);
+# network only to loopback; no Keychain, AppleScript, open, launchctl, ssh or
+# nested sandbox-exec. One rule a line: scripts/test-prepush-sandbox.js
+# deletes each deny line in turn and proves a probe notices.
+read -r -d '' PROFILE <<'SANDBOX_PROFILE' || true
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (subpath "/private/var/tmp")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/dtracehelper")
+  (regex #"^/dev/fd/")
+)
+(deny file-read* file-write*
+  (regex (string-append "^" (param "HOME_RE") "/(.+/)?\\.env(\\.[^/]*)?$"))
+  (regex (string-append "^" (param "HOME_RE") "/(.+/)?service-account-key[^/]*\\.json$"))
+  (regex (string-append "^" (param "HOME_RE") "/(.+/)?settings\\.env$"))
+  (regex (string-append "^" (param "WORK_RE") "/(.+/)?\\.env(\\.[^/]*)?$"))
+  (regex (string-append "^" (param "WORK_RE") "/(.+/)?service-account-key[^/]*\\.json$"))
+  (regex (string-append "^" (param "WORK_RE") "/(.+/)?settings\\.env$"))
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/Documents/Credentials"))
+  (subpath (string-append (param "HOME") "/LogisX-replica"))
+  (subpath (string-append (param "HOME") "/Library/Keychains"))
+  (subpath (string-append (param "HOME") "/.config/gh"))
+  (literal (string-append (param "HOME") "/.npmrc"))
+  (subpath (string-append (param "HOME") "/.aws"))
+  (subpath (string-append (param "HOME") "/.config/gcloud"))
+  (literal (string-append (param "HOME") "/.docker/config.json"))
+  (literal (string-append (param "HOME") "/.git-credentials"))
+  (literal (string-append (param "HOME") "/.netrc"))
+  (subpath (string-append (param "HOME") "/.claude"))
+  (literal (string-append (param "HOME") "/.claude.json"))
+  (literal (string-append (param "WORK") "/app.db"))
+  (literal (string-append (param "WORK") "/app.db-wal"))
+  (literal (string-append (param "WORK") "/app.db-shm"))
+  (subpath (string-append (param "WORK") "/uploads"))
+)
+(allow file-read*
+  (regex (string-append "^" (param "WORK_RE") "/(.+/)?\\.env\\.example$"))
+)
+(deny file-read* file-write* file-ioctl
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys")
+)
+(deny network-outbound)
+(allow network-outbound
+  (remote ip "localhost:*")
+)
+(deny process-exec
+  (literal "/usr/bin/osascript")
+  (literal "/usr/bin/open")
+  (literal "/bin/launchctl")
+  (literal "/usr/bin/security")
+  (literal "/usr/bin/sandbox-exec")
+  (literal "/usr/bin/ssh")
+)
+(deny appleevent-send)
+SANDBOX_PROFILE
+
+# A path as a literal inside a sandbox regex (AlchemyDev.io holds a ".").
+sbpl_quote() {
+	printf '%s' "$1" | sed -e 's/[][\\.*^$+?(){}|]/\\&/g'
+}
+
+# The hook's own files: the changed list, the server.js diff and the log. On
+# macOS they live in a folder under ~/Library/Caches, which the child can read
+# but not write.
+if [ "$platform" = Darwin ]; then
+	workroot="$HOME/Library/Caches"
+	hint=" (from inside another sandbox? Push with plain \`git push\` from the worktree)"
+else
+	workroot="${TMPDIR:-/tmp}"
+	hint=""
+fi
+tmp=$(mktemp -d "$workroot/logisx-prepush.XXXXXX") || block "can't make a temp directory in $workroot$hint."
+trap 'rm -rf "$tmp"' EXIT
+
+# Which harness: a worktree branched before the pre-push mode existed gets
+# lint and the whole suite instead (never nothing).
+if grep -q -F 'const PREPUSH_PROTOCOL = 1;' scripts/run-unit-tests.js 2>/dev/null; then
+	protocol=1
+else
+	protocol=0
+	echo "pre-push: this worktree's scripts/run-unit-tests.js predates the pre-push mode, so lint and the whole suite run instead (still sandboxed)."
+fi
+
+# What changed, read here (outside the sandbox) with optional locks off and
+# no external diff or textconv programs. The child gets the list as a file.
+gitr() { GIT_OPTIONAL_LOCKS=0 git "$@"; }
+list="$tmp/changed"
+sdiff="$tmp/server.diff"
+count=0
+if [ "$protocol" = 1 ] && [ "$mode" = selective ]; then
+	: > "$list" || block "can't write the list of changed files."
+	: > "$sdiff" || block "can't write the server.js diff."
+	# Run by hand, with no refs on stdin: the checked-out commit.
+	[ "$updates" -gt 0 ] || oids=(HEAD)
+	for oid in "${oids[@]}"; do
+		base=$(gitr merge-base "$oid" origin/main 2>/dev/null) ||
+			block "can't find where $oid leaves origin/main (git merge-base failed; fetch origin first)."
+		gitr diff -z --name-only --no-renames --no-ext-diff --no-textconv "$base" "$oid" -- >> "$list" ||
+			block "can't read what changed between $base and $oid."
+		gitr diff -U0 --no-renames --no-ext-diff --no-textconv --no-color "$base" -- server.js >> "$sdiff" ||
+			block "can't read the server.js diff against $base."
+	done
+	gitr diff -z --name-only --no-renames --no-ext-diff --no-textconv HEAD -- >> "$list" ||
+		block "can't read the uncommitted changes."
+	gitr ls-files -z -o --exclude-standard >> "$list" ||
+		block "can't read the untracked files."
+	count=$(tr -cd '\000' < "$list" | wc -c | tr -d ' ')
+fi
+
+envs=("PATH=$node_dir:/usr/bin:/bin" "NODE_ENV=test")
+for v in HOME TMPDIR LANG USER LOGNAME SHELL TERM UNIT_TEST_TIMEOUT_MS UNIT_TEST_CONCURRENCY; do
+	if val=$(printenv "$v"); then envs+=("$v=$val"); fi
+done
+
+if [ "$protocol" = 1 ]; then
+	child=("$node_bin" scripts/run-unit-tests.js --lint --budget-ms 115000)
+	if [ "$mode" = full ]; then
+		child+=(--full)
+	else
+		child+=(--changed-list "$list" --changed-count "$count" --server-diff "$sdiff")
+	fi
+else
+	child=("$node_dir/npm" run check)
+fi
+
+if [ "$platform" = Darwin ]; then
+	[ -x "$SANDBOX_EXEC" ] || block "can't start its sandbox: $SANDBOX_EXEC is missing."
+	home_real=$(cd "$HOME" 2>/dev/null && pwd -P) || block "can't resolve HOME ($HOME)."
+	work_real=$(pwd -P)
+	run=("$SANDBOX_EXEC" -p "$PROFILE"
+		-D "HOME=$home_real" -D "WORK=$work_real"
+		-D "HOME_RE=$(sbpl_quote "$home_real")" -D "WORK_RE=$(sbpl_quote "$work_real")"
+		"${child[@]}")
+else
+	echo "pre-push: no sandbox on ${platform:-this system}; the checks run with your full rights."
+	run=("${child[@]}")
+fi
+
+log="$tmp/out"
 start=$SECONDS
-if npm run check; then
-	echo "pre-push: npm run check passed in $((SECONDS - start)) s."
+"$ENV_BIN" -i "${envs[@]}" "${run[@]}" < /dev/null 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+took=$((SECONDS - start))
+last=$(tail -n 1 "$log")
+pass_line="pre-push verdict: lint=pass selection=pass runners=pass"
+
+if [ "$protocol" = 1 ] && [ "$status" -eq 0 ] && [ "$last" = "$pass_line" ]; then
+	echo "pre-push: passed in $took s."
 	exit 0
 fi
-echo "pre-push: npm run check FAILED, so the push was blocked. Fix it, or push with --no-verify to skip the check once."
-exit 1
+if [ "$protocol" = 0 ] && [ "$status" -eq 0 ]; then
+	echo "pre-push: lint and the whole suite passed in $took s."
+	exit 0
+fi
+if [ "$platform" = Darwin ] && [ "$status" -eq 71 ]; then
+	block "can't start its sandbox (already inside one?). Push with plain \`git push\` from the worktree."
+fi
+if [ "$platform" = Darwin ] && [ "$status" -eq 65 ]; then
+	block "its sandbox profile didn't parse (sandbox-exec exit 65)."
+fi
+if [ "$status" -gt 128 ]; then
+	block "the check was killed by signal $((status - 128))."
+fi
+case "$last" in
+	"pre-push verdict: "*) reason="the check reported ${last#pre-push verdict: } (exit $status)." ;;
+	*) reason="the check exited $status without its verdict line." ;;
+esac
+[ "$protocol" = 1 ] || reason="lint or the whole suite FAILED (exit $status)."
+block "$reason Fix it; LOGISX_PREPUSH=full git push runs every runner."

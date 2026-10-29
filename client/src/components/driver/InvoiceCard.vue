@@ -15,7 +15,9 @@
       </div>
     </div>
     <div class="inv-meta">
-      <span>{{ invoice.loads_count }} load{{ invoice.loads_count !== 1 ? 's' : '' }}</span>
+      <!-- Days on a daily-rate invoice, loads on a percentage one, line items on
+           a manual one (pay_basis, lib/invoiceCounts.js). -->
+      <span>{{ invoiceCardCount(invoice) }}</span>
       <!-- ⚠️ "Receipts filed", not "Expenses". This figure sat unlabelled next to
            the pay figure, and on a week like $600.00 pay / $1,140.17 of receipts
            it reads as though the driver owes the difference.
@@ -41,6 +43,7 @@
 <script setup>
 import { computed } from 'vue'
 import PersonalInvoiceLines from '../shared/PersonalInvoiceLines.vue'
+import { invoiceCardCount } from '../../lib/invoiceCounts'
 
 const props = defineProps({
   invoice: { type: Object, required: true },

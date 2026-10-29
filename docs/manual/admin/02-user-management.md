@@ -34,7 +34,7 @@ A user has exactly one role. Roles change via the Users page; the user gets logg
 Click **Add User** at the top of the Users page. The form:
 
 - **Username** — what they sign in with. Make it consistent (we use patterns like `LogisX-XXXX` for drivers, last names for dispatchers).
-- **Password** — initial temporary password. They change it on first sign-in.
+- **Password** and **Confirm Password** — the initial password, typed twice; Add User stays disabled until the two match. When the server's named-login rules are on (`NAMED_LOGINS_ENABLED`), the password must meet the same rules as a password change, it can't be your own password, and a new Super Admin or Dispatcher changes it at first sign-in (the form says so).
 - **Role** — pick from the four.
 - **Full name** — for display in the app.
 - **Email** — for notifications and password resets.
@@ -42,7 +42,9 @@ Click **Add User** at the top of the Users page. The form:
 - **Linked driver** (for Drivers) — pick the matching record from the drivers directory.
 - **Linked carrier / company** (for Investors) — pick the carrier name. This is what links them to the trucks and loads in their fleet.
 
-Save. The user can now sign in.
+Save. The user can now sign in. If the server refuses the account, the form keeps what you typed and says why.
+
+The table marks three things next to an account: **Shared login** (more than one person has used it, so what it did names the login, not a person; `super_admin` is one), **Password not changed yet** (it must change its password at its next sign-in) and **Shared email** (another account has the same email; with the named-login rules on, that email can't be used to sign in, only the username).
 
 **For Drivers:** the linked driver name must match what appears on Job Tracking loads (case-insensitive). Without this match, the driver will see no loads. If you're not sure of the exact spelling, look at the Carrier Database (Drivers page) before creating the account.
 
@@ -63,13 +65,11 @@ Common edits:
 
 Click **Delete** on the user's row (or in their detail view). Confirm.
 
-The user can no longer sign in. Their historical activity remains:
+The delete is refused, with the reason on screen and nothing changed, while the account still has records that must stay attributed to it: receipts (expenses) in any month, load documents such as PODs, invoices that are paid or in a closed month, or settled investor payouts. Such an account stays in place. A document filed in error can be removed from its load's Documents panel first.
 
-- Their authored messages, status updates, expense submissions, etc. are preserved.
-- Their name might still appear on old loads.
-- Their submitted applications (if a Driver who was hired) stay.
+When the delete goes through, the user can no longer sign in, and their messages, notifications and location history are removed. Kept: their invoices, their driver directory row, their submitted applications and their name on old loads.
 
-Deletion is reversible by recreating the user with the same username, but it's not seamless — the new user starts with no session history. Be deliberate.
+Recreating a user with the same username does not bring back removed messages. Be deliberate.
 
 ## Roles and permissions in detail
 

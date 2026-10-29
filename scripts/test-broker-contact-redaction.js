@@ -86,7 +86,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const { normalizeLoadId } = require(path.join(ROOT, "lib", "ratecon-load"));
 
 let pass = 0, fail = 0;
@@ -219,7 +219,9 @@ function lift(head, stubs) {
 	const kept = Object.fromEntries(Object.entries(stubs).filter(([, v]) => v !== SHIPPED));
 	// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 	const driverInstructions = { annotateDashboardRows() {}, annotateDriverLoads() {}, afterDropzone() { return null; } };
-	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, ...kept });
+	// The automatic invoice drafts (scripts/test-auto-invoice-wiring.js covers them): off here.
+	const autoInvoice = { mode: "off", annotateCompletedRows: ({ rows }) => rows };
+	const scope = makeScope({ app: { get: register, put: register, post: register }, require: realRequire, driverInstructions, autoInvoice, ...kept });
 	new Function("__scope", `with (__scope) { ${src} }`)(scope);
 	if (typeof handler !== "function") throw new Error(`no handler registered by ${head}`);
 	return async (req) => {
@@ -1198,7 +1200,9 @@ section("§8 GET /api/expenses/all, GET /api/messages: stored load ids", async (
 		{ id: 1, timestamp: "2030-01-14T10:00:00Z", from: HD, to: "Dispatch", message: "at the dock", loadId: "5550100163", read: 0, driver: HD, lastTimestamp: "2030-01-14T10:00:00Z", unread: 1 },
 		{ id: 2, timestamp: "2030-01-14T11:00:00Z", from: "Dispatch", to: HD, message: "ok", loadId: "QA-555-010-0162", read: 1, driver: HD, lastTimestamp: "2030-01-14T11:00:00Z", unread: 0 },
 	];
-	const msgDb = emptyDb([[/FROM messages/i, messageRows]]);
+	// The driver is no investor (the investor-conversation check, Super Admin
+	// only: scripts/test-investor-chats-super-admin-only.js).
+	const msgDb = emptyDb([[/AS investor_chat FROM \(SELECT/i, [{ investor_chat: 0 }]], [/FROM messages/i, messageRows]]);
 	const list = (role) => lift('app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {', {
 		requireRole: () => null, db: msgDb, currentShownLoadIdIndex: () => HIDX, console: quietConsole(errors),
 	})({ session: session(role) });

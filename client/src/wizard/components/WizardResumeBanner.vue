@@ -30,7 +30,7 @@ defineEmits(['resume', 'dismiss']);
 .wizard-resume {
   position: fixed;
   top: 24px;
-  right: 24px;
+  right: max(24px, env(safe-area-inset-right, 0px));
   max-width: 420px;
   background: #fff;
   border: 1px solid #e2e8f0;

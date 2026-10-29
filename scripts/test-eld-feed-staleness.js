@@ -74,8 +74,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
-const SERVER = path.join(ROOT, "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const feedLib = require(path.join(ROOT, "lib", "eld-feed-health.js"));
 const alertChannels = require(path.join(ROOT, "lib", "alert-channels.js"));
 

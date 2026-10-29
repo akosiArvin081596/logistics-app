@@ -70,8 +70,13 @@ const path = require("path");
 const { once } = require("events");
 
 const ROOT = process.env.LOGISX_ROOT || path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource(process.env.LOGISX_ROOT ? { root: ROOT } : undefined);
 const LIB_PATH = path.join(ROOT, "lib", "password-change-notice.js");
+// lib/sign-in.js, which the login route is handed as `signIn` (absent before
+// that change, when the route never asks). Its flags stay off here: sign-in
+// rows and the email rule are scripts/test-login-session-rotation.js's subject.
+const SIGN_IN_LIB_PATH = path.join(ROOT, "lib", "sign-in.js");
+const signInLib = fs.existsSync(SIGN_IN_LIB_PATH) ? require(SIGN_IN_LIB_PATH) : null;
 
 let pass = 0;
 const failures = [];
@@ -308,8 +313,11 @@ async function startWorld({ mailer = "ok", replica = null, adminEmail = "", limi
 			`${SRCS.notify}\nreturn notifyPasswordChanged;`)(lib, adminEmail, TZ, sendEmail, invoiceEmailHtml)
 		: () => Promise.resolve();
 
-	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", SRCS.login)(
-		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, TZ);
+	const signIn = signInLib
+		? signInLib.createSignIn({ db, logAudit, logAuditRefusal: () => 0, networkEvidence: () => ({}), auditEnabled: false, uniqueEmail: false })
+		: null;
+	new Function("app", "loginLimiter", "db", "bcrypt", "stampLastLogin", "disconnectSessionSockets", "APP_TIMEZONE", "signIn", SRCS.login)(
+		app, passThrough, db, fastBcrypt, stampLastLogin, noSockets, TZ, signIn);
 	new Function("app", "requireAuth", "changePasswordLimiter", "db", "bcrypt", "purgeUserSessions", "logAudit", "liveSessionIds",
 		"disconnectSessionSockets", "notifyPasswordChanged", "passwordRules", SRCS.change)(
 		app, requireAuth, passThrough, db, fastBcrypt, purgeUserSessions, logAudit, liveSessionIds, noSockets, notifyPasswordChanged, passwordRules);

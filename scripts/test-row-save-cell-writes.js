@@ -57,7 +57,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -148,6 +148,9 @@ const HELPERS = [
 const HELPER_SRC = Object.fromEntries(HELPERS.map((n) => [n, extract(n)]));
 // The load-id comparison key server.js imports, the shipped module.
 const { normalizeLoadId } = require("../lib/ratecon-load");
+// The WITHHELD LOAD KEYS helpers PUT /api/load/:loadId reads its load ID
+// through, as shipped (flag off, no key named: the ID as sent).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
 // The shipped helpers, with `overrides` swapping one source for a mutant.
 // The broker contact value rule the reader and both saves apply: the shipped
 // module and kill switch, handed to the routes with the helpers.
@@ -294,10 +297,14 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 	// Owner ID cell, and the changed guarded cells as [column, from, to].
 	const ownerSeen = [];
 	const guardCalls = [];
+	// PERSON EDIT HOLD: what each successful save handed recordPersonCellEdits()
+	// (its own runner, scripts/test-keep-stored-person-hold.js, covers what it records).
+	const personCalls = [];
 	let invalidations = 0;
 	let handler = null;
 	const env = {
 		...helpers,
+		...KEY_HELPERS,
 		normalizeLoadId,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
@@ -321,6 +328,9 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		logAudit: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
 		logAuditRefusal: (req, action, entity, entityId, details) => { audits.push({ action, entityId, details }); },
 		jtCacheInvalidate: () => { invalidations++; },
+		recordPersonCellEdits: (req, sheetName, hs, before, after) => {
+			personCalls.push({ role: req.session.user.role, sheetName, pickup: [before[IDX["Pickup Appointment"]] || "", after[IDX["Pickup Appointment"]] || ""], headers: hs.length });
+		},
 		console: { error() {}, log() {}, warn() {} },
 	};
 	const names = Object.keys(env);
@@ -332,7 +342,7 @@ function mount(routeSrc, helpers, stored, { guarded = true, title = "Job Trackin
 		await handler({ params, query, body, session: { user: { id: role === "Super Admin" ? 1 : 2, role, username: role === "Super Admin" ? "super_admin" : "kevin" } } }, res);
 		return out;
 	};
-	return { run, rows: sheet.rows, calls: sheet.calls, audits, ownerSeen, guardCalls, invalidations: () => invalidations };
+	return { run, rows: sheet.rows, calls: sheet.calls, audits, ownerSeen, guardCalls, personCalls, invalidations: () => invalidations };
 }
 // The columns the success audit line names as changed, from the shipped builder.
 function auditedColumns(app) {
@@ -380,7 +390,18 @@ async function dataSection(helpers, routeSrc = DATA_PUT_SRC) {
 		t("§1 a save that changes nothing: 200 { success, updatedCells: 0, unchanged: true }", [r.code, r.body], [200, { success: true, updatedCells: 0, unchanged: true }]);
 		t("§1 a save that changes nothing: no write, no audit line, no cache invalidation",
 			[app.calls.length, app.audits.length, app.invalidations()], [0, 0, 0]);
+		t("§1 a save that changes nothing: no person record", app.personCalls.length, 0);
 		t("§1 a save that changes nothing: the row is exactly as stored", app.rows[1], storedRow());
+	}
+	{
+		// PERSON EDIT HOLD: a Dispatcher's date edit is handed to the person record, after the write.
+		const app = mount(routeSrc, helpers, STORED());
+		const values = DISPLAYED().map((v, i) => (WITHHELD.includes(HEADERS[i]) ? "" : v));
+		values[IDX["Pickup Appointment"]] = "10/13/2026 09:00";
+		const r = await app.run("Dispatcher", P, { values });
+		t("§1 Dispatcher edits the Pickup Appointment: written, and handed to the person record once, with the row before and after",
+			[r.code, app.calls.map((c) => c.ranges), app.personCalls],
+			[200, [[R("H2")]], [{ role: "Dispatcher", sheetName: "Job Tracking", pickup: ["", "10/13/2026 09:00"], headers: HEADERS.length }]]);
 	}
 	{
 		// The Active Loads editor's save: the withheld columns come back blank.
@@ -691,6 +712,17 @@ async function loadSection(helpers, routeSrc = LOAD_PUT_SRC) {
 			[...FORMULAS_KEPT(app.rows), app.rows[1][IDX["Location Link"]]], [PAYMENT_F, DOCS_F, OUTPUT_F, TEXT_EQ]);
 		t("§2 Super Admin sends Details: the audit names the cell written, and only it", auditedColumns(app), ["Details"]);
 		t("§2 Super Admin sends Details: the answer carries the new value", ((r.body || {}).load || {}).Details, "Frozen - 2 pallets rolled");
+	}
+	{
+		// PERSON EDIT HOLD: a Dispatcher's date edit through this route is handed to the person record.
+		const app = mount(routeSrc, helpers, STORED());
+		const r = await app.run("Dispatcher", P, { "Pickup Appointment": "10/13/2026 09:00" });
+		t("§2 Dispatcher sends a Pickup Appointment: written, and handed to the person record once, on Job Tracking",
+			[r.code, app.calls.map((c) => c.ranges), app.personCalls],
+			[200, [[R("H2")]], [{ role: "Dispatcher", sheetName: "Job Tracking", pickup: ["", "10/13/2026 09:00"], headers: HEADERS.length }]]);
+		const none = mount(routeSrc, helpers, STORED());
+		await none.run("Super Admin", P, { Details: "Frozen" });
+		t("§2 a save that writes nothing: no person record", none.personCalls.length, 0);
 	}
 	{
 		// Every column as displayed, one edited.

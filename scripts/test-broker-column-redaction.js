@@ -177,6 +177,9 @@ function buildModule(overrides = {}, reSrc = reMatch[1]) {
 	)(BROKER_CONTACT);
 }
 const G = buildModule();
+// The WITHHELD LOAD KEYS helpers the load routes and the dashboard read a load ID
+// through, as shipped (flag off, no key named: the ID as sent, no key served).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC, { currentShownLoadIdIndex: G.currentShownLoadIdIndex });
 
 // The two PUT routes, lifted whole, and the two small pure helpers they call.
 const LOAD_PUT_SRC = extractRoute('app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {');
@@ -682,6 +685,7 @@ function mountPut(routeSrc, M, rows) {
 	const audits = [];
 	let handler = null;
 	const env = {
+		...KEY_HELPERS,
 		app: { put: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
@@ -1052,8 +1056,9 @@ async function getDataGate(routeSrc) {
 	} } });
 	let handler = null;
 	const app = { get: (p, gate, h) => { handler = h; } };
-	new Function("app", "requireRole", "getSheets", "SPREADSHEET_ID", "sanitizeBrokerColumns", "console", ROUTE)(
-		app, () => null, getSheets, "sheet-under-test", G.sanitizeBrokerColumns, { error() {} });
+	new Function("app", "requireRole", "getSheets", "SPREADSHEET_ID", "sanitizeBrokerColumns", "loadIdFor", "loadIdShownFor", "withLoadKeys", "console", ROUTE)(
+		app, () => null, getSheets, "sheet-under-test", G.sanitizeBrokerColumns,
+		KEY_HELPERS.loadIdFor, KEY_HELPERS.loadIdShownFor, KEY_HELPERS.withLoadKeys, { error() {} });
 	const run = async (role, loadId) => {
 		const res = { code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } };
 		await handler({ params: { loadId }, session: { user: { role, username: "u" } } }, res);
@@ -1072,9 +1077,10 @@ async function getDataGate(routeSrc) {
 		const miss = await run("Dispatcher", "999");
 		check("GET /api/load/:loadId, an unknown load: 404", miss.code, 404);
 	})());
-	// PUT /api/load/:loadId answers with the updated row too.
+	// PUT /api/load/:loadId answers with the updated row too: redacted, then (for
+	// a Dispatcher, flag on) a key beside a withheld Load ID (withLoadKeys()).
 	check("PUT /api/load/:loadId answers a non-Super-Admin with the row redacted",
-		/\n\t\tres\.json\(\{\n\t\t\tsuccess: true,\n\t\t\tload: req\.session\.user\.role !== "Super Admin" \? sanitizeBrokerColumns\(headers, \[result\]\)\[0\] : result,\n/.test(LOAD_PUT_SRC), true);
+		/\n\t\tres\.json\(\{\n\t\t\tsuccess: true,\n\t\t\tload: req\.session\.user\.role !== "Super Admin" \? withLoadKeys\(req, headers, \[result\], sanitizeBrokerColumns\(headers, \[result\]\)\)\[0\] : result,\n/.test(LOAD_PUT_SRC), true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1139,7 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 	let handler = null;
 	const errors = [];
 	const env = {
+		...KEY_HELPERS,
 		app: { get: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
@@ -1158,6 +1165,11 @@ function mountDashboard(routeSrc = DASH_SRC, cache = dashCache()) {
 		},
 		// The rate-con driver-instructions runtime (its own runner covers it): inert here.
 		driverInstructions: { annotateDashboardRows() {}, afterDropzone() { return null; } },
+		// The automatic invoice drafts (test-auto-invoice-wiring.js covers them): off here.
+		autoInvoice: { mode: "off", annotateCompletedRows: ({ rows }) => rows },
+		// The Needs Confirmation pickup codes (test-ratecon-pickup-confirmation-routes.js
+		// covers them, a withheld Load ID included): inert here, as with their flag off.
+		annotateDashboardPickupReview: () => 0,
 		console: { error: (...a) => errors.push(a.join(" ")), log() {}, warn() {} },
 	};
 	const names = Object.keys(env);

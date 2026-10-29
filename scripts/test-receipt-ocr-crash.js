@@ -46,7 +46,7 @@ const path = require("path");
 const { spawn, fork } = require("child_process");
 
 const REPO = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(REPO, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 const CHILD_PATH = path.join(REPO, "lib", "tesseract-ocr-child.js");
 const CHILD_SRC = fs.existsSync(CHILD_PATH) ? fs.readFileSync(CHILD_PATH, "utf8") : "";
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-isolation-"));

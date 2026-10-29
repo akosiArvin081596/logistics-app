@@ -36,7 +36,7 @@
           <div class="mobile-job-head">
             <div class="mobile-job-id">
               <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-              {{ cellValue(job, loadIdCol) || '—' }}
+              {{ cellValue(job, loadIdCol) || loadIdShown(job, loadIdCol) || '—' }}
               <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
             </div>
             <StatusBadge :status="statusValueOf(job) || 'Unassigned'" />
@@ -83,7 +83,7 @@
               </div>
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-                {{ cellValue(job, col) }}
+                {{ cellValue(job, col) || loadIdShown(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
@@ -108,13 +108,17 @@
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;">
             <div class="flex items-center gap-3" style="flex-wrap:wrap;">
-              <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+              <DialogTitle>{{ loadIdShownValue || 'Load Details' }}</DialogTitle>
               <StatusBadge v-if="statusValue" :status="statusValue" />
               <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             </div>
             <div style="display:flex;gap:0.5rem;align-items:center;">
+              <!-- The public tracking page is keyed on the Load ID itself, so a
+                   load whose ID this user is served withheld has no link to copy
+                   (decision 7, the Dispatcher Load ID plan). -->
+              <span v-if="selectedLoadIdWithheld" style="font-size:0.75rem;color:#6b7280;">Ask a Super Admin for this link</span>
               <button
-                v-if="loadIdValue"
+                v-else-if="loadIdValue"
                 type="button"
                 :style="copyBtnStyle"
                 title="Share tracking link with the customer"
@@ -137,7 +141,7 @@
               </button>
             </div>
           </div>
-          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+          <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
@@ -173,7 +177,7 @@
             <div class="dash-section-title">Route Map</div>
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" dispatch-mode />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
         </div>
       </DialogContent>
     </Dialog>
@@ -268,6 +272,7 @@ import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { offDutySuffix } from '../../lib/availabilityText'
+import { loadRef, loadIdShown, loadIdWithheld } from '../../lib/loadRef'
 
 const props = defineProps({ jobs: { type: Array, required: true }, drivers: { type: Array, required: true }, headers: { type: Array, required: true }, loading: { type: Boolean, default: false }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
@@ -332,7 +337,8 @@ async function openDetail(j) {
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol) {
     const lc = props.headers.find(h => /load.?id|job.?id/i.test(h))
-    const lid = lc ? (j[lc] || '').toString().trim() : ''
+    // The load's key when its Load ID is withheld from this user, else its ID (loadRef()).
+    const lid = lc ? loadRef(j, lc).trim() : ''
     if (lid) {
       try {
         const g = await api.get(`/api/geocode/load/${encodeURIComponent(lid)}`)
@@ -413,6 +419,11 @@ const sectionPatterns = [
 // single-line raw value in the Route section is redundant.
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+// The Dispatcher Load ID plan (PR 2): per-load calls name the load by loadRef(),
+// the screen shows loadIdShown(), and a withheld ID has no tracking link to copy.
+const loadRefValue = computed(() => (selectedJob.value ? loadRef(selectedJob.value, loadIdCol.value) : ''))
+const loadIdShownValue = computed(() => (selectedJob.value ? loadIdShown(selectedJob.value, loadIdCol.value) : ''))
+const selectedLoadIdWithheld = computed(() => !!selectedJob.value && loadIdWithheld(selectedJob.value, loadIdCol.value))
 const statusValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /^status$/i.test(h) || /load.*status/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
@@ -501,7 +512,7 @@ function runCancel() {
 }
 
 async function copyTrackingLink() {
-  if (!loadIdValue.value) return
+  if (!loadIdValue.value || selectedLoadIdWithheld.value) return
   const url = `${window.location.origin}/track/${encodeURIComponent(loadIdValue.value)}`
   try {
     await navigator.clipboard.writeText(url)

@@ -35,7 +35,9 @@
 #   6. uploads/, storage/ and evidence-archive/ are copied with rsync (only what
 #      changed, after the first time), with a progress line. They are updated in
 #      place, so a pull that fails from here on says they may be newer than the
-#      clean snapshot. The shared connection is closed after them;
+#      clean snapshot. storage/voice-notes/ is left out (and a copy an earlier
+#      pull left is removed) unless REPLICA_PULL_VOICE_NOTES=1 is set. The shared
+#      connection is closed after them;
 #   7. the new snapshot replaces the clean one, then its settings are written to
 #      ~/LogisX-replica/settings.env (mode 600). A pull interrupted between the
 #      two renames of that swap puts the previous clean snapshot back.
@@ -404,11 +406,23 @@ REMOTE_STARTED=0
 "$NODE_BIN" "$HERE/pull-local.js" verify "$INCOMING" 2>&1 | tee -a "$LOG"
 
 # --- 6: uploaded files, updated in place; then the shared connection closes ------------
+# Voice notes (storage/voice-notes/) are people's voices: they stay on the server unless
+# this pull is run with REPLICA_PULL_VOICE_NOTES=1 (decision 13). --delete-excluded also
+# removes a copy an earlier opt-in pull left here.
+STORAGE_EXCLUDES="--exclude=/voice-notes/ --delete-excluded"
+if [ "${REPLICA_PULL_VOICE_NOTES:-}" = "1" ]; then
+  STORAGE_EXCLUDES=""
+  log "storage/: voice notes are copied (REPLICA_PULL_VOICE_NOTES=1)"
+else
+  log "storage/: voice notes left out (set REPLICA_PULL_VOICE_NOTES=1 to copy them)"
+fi
 T0=$(date +%s)
 for d in uploads storage evidence-archive; do
   need_conn "copying $d/"
   FILES_STARTED=1
-  rsync -rlt --delete --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
+  EXCLUDES=""
+  if [ "$d" = storage ]; then EXCLUDES="$STORAGE_EXCLUDES"; fi
+  rsync -rlt --delete $EXCLUDES --stats --progress -e "$RSH" "$LOGISX_PROD_SSH:$APP/$d/" "$ROOT/$d/" 2>&1 | "$NODE_BIN" "$HERE/pull-local.js" progress "$d/" "$LOG"
   chmod -R go-rwx "$ROOT/$d"
 done
 log "files: $(( $(date +%s) - T0 )) s"

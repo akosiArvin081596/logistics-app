@@ -20,7 +20,7 @@ const path = require("path");
 const piiMask = require("../lib/pii-mask");
 
 const ROOT = path.join(__dirname, "..");
-const SERVER = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SERVER = require("./lib/server-source").serverSource();
 const VIEW = fs.readFileSync(path.join(ROOT, "client/src/views/ApplicationsView.vue"), "utf8");
 
 let pass = 0;

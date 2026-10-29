@@ -6,11 +6,11 @@
 // load before any install exists.
 //
 //   REPO            the checkout this harness lives in (<REPO>/scripts/e2e)
-//   mainCheckout()  the checkout that owns app.db, .env, the Google key and the
-//                   installs a worktree lacks: the parent of git's common dir
-//                   (MAIN_CHECKOUT overrides)
+//   mainCheckout()  the checkout that owns app.db and the installs a worktree
+//                   lacks: the parent of git's common dir (MAIN_CHECKOUT overrides).
+//                   Its settings file and Google key are never used by the harness
 //   appDir()        the checkout whose node_modules (better-sqlite3, bcryptjs,
-//                   puppeteer, dotenv) and scripts/ are used: APP_DIR, else REPO
+//                   puppeteer) and scripts/ are used: APP_DIR, else REPO
 //                   once it has installs (its own, or prep-worktree.sh's links),
 //                   else the main checkout
 //   workDir()       E2E_WORK_DIR, default $TMPDIR/logisx-e2e: the DB copies,
@@ -167,12 +167,28 @@ function workFile(p, { mustExist = true } = {}) {
   return real
 }
 
-// CHROME_PATH, else the Chrome for Testing the app's own puppeteer dependency
-// downloaded (to ~/.cache/puppeteer).
+// CHROME_PATH; else, with E2E_BROWSER=playwright, the Chromium build of this harness's
+// own playwright-core (installed with `npx --no-install playwright-core install chromium`
+// in scripts/e2e; CI does this, see ci-run.sh); else the Chrome for Testing the app's
+// own puppeteer dependency downloaded (to ~/.cache/puppeteer).
 async function chromePath() {
   if (process.env.CHROME_PATH) {
     if (!fs.existsSync(process.env.CHROME_PATH)) throw new Error(`CHROME_PATH does not exist: ${process.env.CHROME_PATH}`)
     return process.env.CHROME_PATH
+  }
+  const browser = process.env.E2E_BROWSER || ''
+  if (browser && browser !== 'playwright') throw new Error(`E2E_BROWSER takes only "playwright" (or unset), got "${browser}"`)
+  if (browser === 'playwright') {
+    let pw
+    try { pw = createRequire(path.join(__dirname, 'package.json'))('playwright-core') } catch (e) {
+      throw new Error(`E2E_BROWSER=playwright, but scripts/e2e's playwright-core could not be loaded (${e.message}): run \`npm --prefix scripts/e2e ci\``)
+    }
+    const exe = pw.chromium.executablePath()
+    if (!exe || !fs.existsSync(exe)) {
+      throw new Error(`E2E_BROWSER=playwright, but Playwright's Chromium is not installed (${exe || 'no path'}): ` +
+        'run `npx --no-install playwright-core install chromium` in scripts/e2e')
+    }
+    return exe
   }
   let puppeteer
   try { puppeteer = appRequire('puppeteer') } catch (e) {

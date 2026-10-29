@@ -64,7 +64,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let Database;
 try {
@@ -298,11 +298,15 @@ function helperSection(over = {}) {
 
 // ─────────────────────────────────────────────────────────────── §2 POST /api/expenses
 const EXPENSE_DATE = "2026-09-10";
+// The WITHHELD LOAD KEYS helper the route reads its load ID through, as shipped
+// (flag off, no key named: the ID as sent).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
 function mountExpense(db, routeSrc, helperOver) {
 	const helpers = buildHelpers(db, helperOver);
 	const audits = [];
 	let handler = null;
 	const env = {
+		loadIdFor: KEY_HELPERS.loadIdFor,
 		app: { post: (...args) => { handler = args[args.length - 1]; } },
 		requireAuth: null,
 		driverWriteLimiter: null,
@@ -448,12 +452,14 @@ function mountDispatch(db, routeSrc, helperOver) {
 	const sheet = fakeSheets({ "Job Tracking": [JT_HEADERS.slice(), jtRow("111", { Driver: "Old Driver", "Job Status": "Dispatched", Truck: "LogisX-#33", "Owner ID": "0" })] });
 	let handler = null;
 	const env = {
+		...KEY_HELPERS,
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
 		resolveSheetDataRow: H.resolveSheetDataRow,
 		db,
 		findTruckForDriverStamp: helpers.findTruckForDriverStamp,
+		normalizeDriverName: helpers.normalizeDriverName,
 		getSheets: sheet.getSheets,
 		readJobTrackingSnapshot,
 		sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked.code }),

@@ -50,7 +50,7 @@ const fs = require("fs");
 const path = require("path");
 const rateconLoad = require("../lib/ratecon-load");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -137,7 +137,7 @@ ${extract("a1SheetPrefix")}
 ${extract("a1ColumnLetter")}
 ${extract("sheetRowAfterUpdate")}
 ${extract("sheetRowCellWrites")}
-return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, reservedDriverNameRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
+return { ADDRESS_MAX_CHARS, boundAddressForStorage, parseSheet, findCol, formulaCellRefusal, normalizeDriverName, reservedDriverNameRefusal, colLetter, sheetRowToObject, resolveSheetDataRow,
 	a1SheetPrefix, sheetRowAfterUpdate, sheetRowCellWrites };
 `)();
 const RATECON_SHEET_FIELDS = new Function(`return ${extractConst("RATECON_SHEET_FIELDS")};`)();
@@ -155,7 +155,10 @@ ${extract("currentShownLoadIdIndex")}
 ${extract("shownLoadId")}
 return { loadIdWithheldFor, shownLoadId };
 `)(brokerContact, BROKER_WITHHELD_RE, BROKER_CONTACT_VALUE_REDACTION_ENABLED);
-const RATECON_GEMINI_FIELDS = new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
+// The WITHHELD LOAD KEYS helpers the dispatch routes read their load ID through,
+// as shipped (flag off, no key named: the ID as sent).
+const KEY_HELPERS = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+const RATECON_GEMINI_FIELDS =new Function(`return ${extractConst("RATECON_GEMINI_FIELDS")};`)();
 const QUIET = { error() {}, log() {}, warn() {} };
 const readJobTrackingSnapshot = new Function("SPREADSHEET_ID", "console",
 	`${extract("readJobTrackingSnapshot")}\nreturn readJobTrackingSnapshot;`)("sheet-under-test", QUIET);
@@ -648,6 +651,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 	const audits = [];
 	let handler = null;
 	const env = {
+		...KEY_HELPERS,
 		app: { post: (p, gate, h) => { handler = h; } },
 		requireRole: () => null,
 		DRIVER_AVAILABILITY_ENABLED: false,
@@ -660,6 +664,7 @@ function mountDispatch(routeSrc, { account = null } = {}) {
 		// The Truck / Owner ID lookup (its own subject is
 		// scripts/test-truck-stamp-spacing.js): the driver's truck, as before.
 		findTruckForDriverStamp: () => ({ unit_number: "LogisX-#91", owner_id: 5, matchedBy: "case" }),
+		normalizeDriverName: H.normalizeDriverName,
 		getSheets: sheet.getSheets,
 		readJobTrackingSnapshot,
 		sendDispatchRefusal: (req, res, blocked) => res.status(409).json({ code: blocked.code }),

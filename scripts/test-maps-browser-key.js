@@ -45,7 +45,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 const FAKE_SERVER = "fake-server-key-c3";
 const FAKE_BROWSER = "fake-browser-key-c3";
@@ -448,12 +448,14 @@ function inventory(src) {
 		const first = src.slice(0, s).split("\n").length;
 		return { first, last: first + keyBlockSource(src).split("\n").length - 1 };
 	})();
+	// The ROUTE_CONTEXT block only lists the names route modules receive.
+	const rc = require("./lib/server-source").routeContextLines(src);
 	const unknown = [];
 	const counts = {};
 	lines.forEach((raw, i) => {
 		const n = i + 1;
 		const trimmed = raw.trim();
-		if (/^(\/\/|\*|\/\*)/.test(trimmed)) return;
+		if (/^(\/\/|\*|\/\*)/.test(trimmed) || (rc && n >= rc.first && n <= rc.last)) return;
 		const code = stripStrings(raw);
 		if (!KEY_REF.test(code)) return;
 		const shape = n >= kb.first && n <= kb.last ? "the key declarations and startup warning" : classify(code);

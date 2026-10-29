@@ -56,7 +56,7 @@ const http = require("http");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 function die(msg) { console.error(`FAILED: ${msg}`); process.exit(1); }
 
@@ -74,13 +74,21 @@ try {
 const BANNER = "// ============================================================\n";
 const START_MARK = `${BANNER}// KPI BOT —`;
 const END_MARK = `${BANNER}// SPA Catch-All`;
+// The KPI block: its banner to the next banner, or to the route modules'
+// ROUTE_CONTEXT if that comes first, plus each KPI route a route module now
+// holds (lifted by its head), so the block registers the same four routes.
 function blockOf(src) {
 	const a = src.indexOf(START_MARK);
-	const b = src.indexOf(END_MARK);
-	if (a < 0 || b < 0 || src.split(START_MARK).length !== 2) die("could not locate the KPI block (its banner, once, and the SPA catch-all banner)");
-	return a < b ? src.slice(a, b) : src.slice(a, src.indexOf("\n// ====", a + START_MARK.length));
+	if (a < 0 || src.split(START_MARK).length !== 2) die("could not locate the KPI block (its banner, once)");
+	const after = src.indexOf(BANNER, src.indexOf("\n", a + START_MARK.length) + 1) + BANNER.length;
+	let b = src.indexOf(`\n${BANNER}`, after);
+	const rc = src.indexOf("\nconst ROUTE_CONTEXT = {", after);
+	if (rc >= 0 && (b < 0 || rc < b)) b = rc;
+	if (b < 0) die("could not locate the end of the KPI block");
+	let block = src.slice(a, b + 1);
+	for (const head of Object.values(HEADS)) if (!block.includes(`\n${head}`)) block += `\n${require("./lib/server-lift").liftRoute(src, head)}\n`;
+	return block;
 }
-const BLOCK = blockOf(SRC);
 function liftFunction(name) {
 	const needle = `\nfunction ${name}(`;
 	const hits = SRC.split(needle).length - 1;
@@ -294,6 +302,7 @@ const HEADS = {
 	settings: 'app.put("/api/admin/kpis/settings", requireRole("Super Admin"), refuseCrossOrigin, (req, res) => {',
 	recompute: 'app.post("/api/admin/kpis/recompute", requireRole("Super Admin"), refuseCrossOrigin, kpiRecomputeLimiter, (req, res) => {',
 };
+const BLOCK = blockOf(SRC);
 function orderSection(src) {
 	const r = [];
 	const t = (cond, name) => r.push({ ok: !!cond, name });

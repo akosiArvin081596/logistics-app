@@ -29,7 +29,7 @@
           <div class="mobile-load-head">
             <div class="mobile-load-id">
               <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-              {{ cellValue(job, loadIdCol) || '—' }}
+              {{ cellValue(job, loadIdCol) || loadIdShown(job, loadIdCol) || '—' }}
               <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
             </div>
             <StatusBadge v-if="getCurrentStatus(job)" :status="getCurrentStatus(job)" />
@@ -91,7 +91,7 @@
               </div>
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-                {{ cellValue(job, col) }}
+                {{ cellValue(job, col) || loadIdShown(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
@@ -130,12 +130,16 @@
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div class="detail-head" style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;">
             <div class="detail-title" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-              <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+              <DialogTitle>{{ loadIdShownValue || 'Load Details' }}</DialogTitle>
               <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             </div>
             <div class="detail-actions" style="display:flex;gap:0.5rem;align-items:center;">
+              <!-- The public tracking page is keyed on the Load ID itself, so a
+                   load whose ID this user is served withheld has no link to copy
+                   (decision 7, the Dispatcher Load ID plan). -->
+              <span v-if="selectedLoadIdWithheld" style="font-size:0.75rem;color:#6b7280;">Ask a Super Admin for this link</span>
               <button
-                v-if="loadIdValue"
+                v-else-if="loadIdValue"
                 type="button"
                 :style="copyBtnStyle"
                 :title="'Share tracking link with the customer'"
@@ -146,7 +150,7 @@
                 {{ linkCopied ? 'Link copied' : 'Copy tracking link' }}
               </button>
               <button
-                v-if="loadIdValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
+                v-if="loadRefValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
                 type="button"
                 :style="overrideBtnStyle"
                 title="Override load status (e.g. revert from Delivered) — requires a reason and is logged."
@@ -156,7 +160,7 @@
                 Override
               </button>
               <button
-                v-if="loadIdValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
+                v-if="loadRefValue && (auth.isSuperAdmin || auth.user?.role === 'Dispatcher')"
                 type="button"
                 :style="editBtnStyle"
                 title="Manually edit load fields the dispatch workflow couldn't extract"
@@ -178,7 +182,7 @@
               </button>
             </div>
           </div>
-          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+          <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
           <div v-if="selectedJob && (selectedJob._pickupStreet || selectedJob._pickupLocation || selectedJob._dropStreet || selectedJob._dropLocation)" style="margin-bottom:1rem;">
@@ -210,7 +214,7 @@
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Status Timeline</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
-              <StatusTimeline v-if="loadIdValue" :load-id="loadIdValue" />
+              <StatusTimeline v-if="loadRefValue" :load-id="loadRefValue" />
             </div>
           </div>
           <div style="margin-bottom:1rem;">
@@ -222,6 +226,15 @@
               <div v-if="docError" role="alert" :style="docErrorStyle">{{ docError }}</div>
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <!-- A load whose ID this user is served withheld: the server lists its
+                   documents by type and upload time only (documentsWithheld). -->
+              <div v-else-if="docsWithheldNote" style="display:flex;flex-direction:column;gap:0.5rem;">
+                <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;">
+                  <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;flex-shrink:0;">{{ doc.type }}</span>
+                  <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
+                </div>
+                <span style="font-size:0.75rem;color:#6b7280;">{{ docsWithheldNote }}</span>
+              </div>
               <!-- Filename over a muted upload time — same row shape the driver's
                    DocumentList uses, so a POD reads the same on both sides.
                    Dispatchers need "when did this land" to chase a missing POD. -->
@@ -260,9 +273,10 @@
             <!-- Admin upload: dispatcher / Super Admin can attach a doc on the
                  driver's behalf (e.g. POD they emailed in). Reuses the same
                  component the driver uses on /driver. -->
-            <div v-if="loadIdValue" style="margin-top:0.75rem;">
+            <div v-if="loadRefValue" style="margin-top:0.75rem;">
               <DocumentUpload
-                :load-id="loadIdValue"
+                :load-id="loadRefValue"
+                :load-label="loadIdShownValue"
                 :driver-name="selectedJobDriverName"
                 :row-index="selectedJob?._rowIndex || 0"
                 @uploaded="refreshDocs"
@@ -297,9 +311,9 @@
                  truck has a position, otherwise the planned pickup → drop-off
                  lane that LoadHaulSection reads from /haul. -->
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="mapDriverPosition" :fix-at="mapDriverPosition ? mapDriverPosition.fixAt : null" :planned-lane="plannedLane" dispatch-mode show-arrival />
-            <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
+            <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" :load-in-progress="!isSelectedLoadCompleted" @lane="onPlannedLane" />
           </div>
-          <DriverInstructionsSection :load-id="loadIdValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
+          <DriverInstructionsSection :load-id="loadRefValue" :open="!!selectedJob" @changed="onInstructionsChanged" />
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
       </DialogContent>
@@ -310,7 +324,7 @@
     <Dialog :open="showOverride" @update:open="v => { if (!v) closeOverride() }">
       <DialogContent class="max-w-[460px]" style="padding:0;">
         <DialogHeader style="padding:1rem 1.25rem;border-bottom:1px solid #f3f4f6;">
-          <DialogTitle>Override Status — {{ loadIdValue }}</DialogTitle>
+          <DialogTitle>Override Status — {{ loadIdShownValue }}</DialogTitle>
           <DialogDescription class="sr-only">Force a load to a different status, bypassing the POD requirement. Reason required.</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;">
@@ -354,7 +368,7 @@
     <Dialog :open="showEdit" @update:open="v => { if (!v) closeEdit() }">
       <DialogContent class="max-w-[640px] max-h-[85vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader style="padding:1rem 1.25rem;border-bottom:1px solid #f3f4f6;">
-          <DialogTitle>Edit Load — {{ loadIdValue }}</DialogTitle>
+          <DialogTitle>Edit Load — {{ loadIdShownValue }}</DialogTitle>
           <DialogDescription class="sr-only">Update load details that the dispatch workflow couldn't extract from the rate-con PDF. Driver, Truck, and Status are managed separately.</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.85rem;overflow-y:auto;flex:1;">
@@ -520,6 +534,7 @@ import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { contactReadOnlyCells, CONTACT_CELL_HINT } from '../../lib/brokerContactView'
+import { loadRef, loadIdShown, loadIdWithheld, loadMatches } from '../../lib/loadRef'
 import { normDriver } from '../../lib/driverName'
 import { fmtTimestamp } from '../../utils/datetime'
 
@@ -696,7 +711,7 @@ const deleteBtnStyle = computed(() => ({
   transition: 'all 0.15s',
 }))
 async function copyTrackingLink() {
-  if (!loadIdValue.value) return
+  if (!loadIdValue.value || selectedLoadIdWithheld.value) return
   const url = `${window.location.origin}/track/${encodeURIComponent(loadIdValue.value)}`
   try {
     await navigator.clipboard.writeText(url)
@@ -809,7 +824,7 @@ async function onInstructionsChanged() {
 }
 
 function openOverride() {
-  if (!loadIdValue.value) return
+  if (!loadRefValue.value) return
   // Pre-select the current status so it's a one-step change for the common case
   // of "fix the typo" rather than always defaulting to a fresh value.
   overrideStatus.value = (statusCol.value && selectedJob.value ? (selectedJob.value[statusCol.value] || '') : '') || statusOptions[0]
@@ -860,7 +875,9 @@ async function submitEdit() {
     // Same order as values: a cell equal to its baseline was not edited, and
     // the server leaves it as the sheet holds it now (see editBaseline).
     const baseline = props.headers.map(opened)
-    const body = { values, baseline }
+    // A load whose Load ID this user is served withheld: its key confirms the row
+    // (the served ID can't, when it is blank or another row reads the same).
+    const body = selectedJob.value._loadKey ? { values, baseline, loadId: selectedJob.value._loadKey } : { values, baseline }
     // A new driver recorded off on the load's days: "Assign anyway" re-sends
     // the same save confirmed; "Keep as is" leaves the editor open.
     const sent = await withOffDutyConfirm((confirmOffDuty) => api.put(
@@ -884,7 +901,7 @@ async function submitEdit() {
 }
 
 async function submitOverride() {
-  if (!loadIdValue.value || overriding.value) return
+  if (!loadRefValue.value || overriding.value) return
   if (overrideReason.value.trim().length < 5) {
     overrideError.value = 'Reason must be at least 5 characters.'
     return
@@ -892,7 +909,7 @@ async function submitOverride() {
   overriding.value = true
   overrideError.value = ''
   try {
-    await api.put(`/api/loads/${encodeURIComponent(loadIdValue.value)}/status-override`, {
+    await api.put(`/api/loads/${encodeURIComponent(loadRefValue.value)}/status-override`, {
       newStatus: overrideStatus.value,
       reason: overrideReason.value.trim(),
     })
@@ -941,28 +958,27 @@ async function runDelete() {
 
 // When the parent passes focusLoadId (e.g. /dashboard?load=LD-123 from a
 // notification click), auto-open that load's detail modal. Matches by Load
-// ID case-insensitively. Emits focus-consumed so the parent can clear the
+// ID case-insensitively, or by the load's key when the notice named it by one
+// (loadMatches()). Emits focus-consumed so the parent can clear the
 // query param and avoid re-triggering on refresh.
 watch([() => props.focusLoadId, () => props.jobs], ([focus, jobs]) => {
   if (!focus || !jobs || jobs.length === 0) return
-  if (selectedJob.value) {
-    const cur = loadIdValue.value
-    if (cur && cur.toString().trim().toLowerCase() === focus.trim().toLowerCase()) return
-  }
   const lc = props.headers.find(h => /load.?id|job.?id/i.test(h))
   if (!lc) return
-  const match = jobs.find(j => (j[lc] || '').toString().trim().toLowerCase() === focus.trim().toLowerCase())
+  if (selectedJob.value && loadMatches(selectedJob.value, focus, lc)) return
+  const match = jobs.find(j => loadMatches(j, focus, lc))
   if (match) {
     openDetail(match)
     emit('focus-consumed')
   }
 }, { immediate: true })
 async function openDetail(job) {
-  docError.value = ''; deletingDocId.value = null
+  docError.value = ''; deletingDocId.value = null; docsWithheldNote.value = ''
   selectedJob.value = { ...job }; selectedDriverPosition.value = null; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0
   plannedLane.value = { status: 'loading' }
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (job[dc] || '').trim() : ''
-  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
+  // The load's key when its Load ID is withheld from this user, else its ID (loadRef()).
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = loadRef(job, lc).trim()
   const p = []
   // The panel names each driver by the directory's spelling, the sheet's Driver
   // cell may space or case it otherwise: both are compared as the server's
@@ -970,7 +986,7 @@ async function openDetail(job) {
   // fix, so the map can say how old it is and drop a stale ETA (B11); a row
   // without a timestamp falls back to its age at this read.
   if (dn) p.push(api.get('/api/locations/latest').then(d => { const l = (d.locations||[]).find(x => normDriver(x.driver) === normDriver(dn) && x.latitude); if (l) selectedDriverPosition.value = { latitude: l.latitude, longitude: l.longitude, source: l.source || '', lastPingAge: l.lastPingAge != null ? l.lastPingAge : null, fixAt: l.timestamp || (Number.isFinite(l.lastPingAge) ? Date.now() - l.lastPingAge : null) } }).catch(() => {}))
-  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || []; docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : '' }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   const hasLatCol = props.headers.some(h => /origin.*lat|pickup.*lat|dest.*lat|drop.*lat/i.test(h))
   if (!hasLatCol && lid) p.push(api.get(`/api/geocode/load/${encodeURIComponent(lid)}`).then(g => {
@@ -1041,6 +1057,14 @@ const sectionPatterns = [
 // single-line raw value in the Route section is redundant.
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+// The Dispatcher Load ID plan (PR 2): every per-load call names the load by
+// loadRef() (its key when this user is served its Load ID withheld, else the ID);
+// the screen shows loadIdShown() ("[contact withheld]" for an ID that is only
+// contact, served blank); such a load has no tracking link to copy.
+const loadRefValue = computed(() => (selectedJob.value ? loadRef(selectedJob.value, loadIdCol.value) : ''))
+const loadIdShownValue = computed(() => (selectedJob.value ? loadIdShown(selectedJob.value, loadIdCol.value) : ''))
+const selectedLoadIdWithheld = computed(() => !!selectedJob.value && loadIdWithheld(selectedJob.value, loadIdCol.value))
+const docsWithheldNote = ref('')
 const selectedJobDriverName = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /driver/i.test(h)); return c ? (selectedJob.value[c] || '').toString().trim() : '' })
 
 // GET /api/documents/:loadId serves uploaded_at as ISO with 'Z'. Never swap this
@@ -1105,10 +1129,11 @@ async function confirmDeleteDoc(doc) {
 }
 
 async function refreshDocs() {
-  if (!loadIdValue.value) return
+  if (!loadRefValue.value) return
   try {
-    const r = await api.get(`/api/documents/${encodeURIComponent(loadIdValue.value)}`)
+    const r = await api.get(`/api/documents/${encodeURIComponent(loadRefValue.value)}`)
     loadDocs.value = r.documents || []
+    docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : ''
   } catch {
     // Keep existing list on transient failure; the upload itself already succeeded.
   }

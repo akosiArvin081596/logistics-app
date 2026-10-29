@@ -446,8 +446,7 @@ function runTargetEnvGates() {
 
 	const effectiveArchive = process.env.ARCHIVE_SPREADSHEET_ID || env.ARCHIVE_SPREADSHEET_ID || "";
 	if (!effectiveArchive) {
-		warn("ARCHIVE_SPREADSHEET_ID is unset — the archive viewer will read the PRODUCTION archive.");
-		warn("  That sheet is read-only in this app, so it is a leak of scope, not a write risk.");
+		warn("ARCHIVE_SPREADSHEET_ID is unset — this copy has no archive (only production's own process falls back to the production archive).");
 	} else if (effectiveArchive === PROD_ARCHIVE_ID) {
 		warn("ARCHIVE_SPREADSHEET_ID is the production archive (read-only; scope leak, not a write risk).");
 	}
@@ -649,6 +648,13 @@ async function main() {
 	if (tableExists("sessions")) {
 		const n = db.prepare("DELETE FROM sessions").run().changes;
 		summary.push(`sessions: cleared (${n}) — forces re-login`);
+	}
+	// The IP and browser kept for staff sign-ins (sign_in_network, lib/sign-in.js):
+	// personal data about who signed in, for production's own Super Admins only,
+	// like the signers' IP and browser blanked in 3f. Never on a copy.
+	if (tableExists("sign_in_network")) {
+		const n = db.prepare("DELETE FROM sign_in_network").run().changes;
+		summary.push(`sign_in_network: emptied (${n}) — staff sign-in IP and browser stay on production`);
 	}
 
 	// 3b. Passwords. Production hashes are bcrypt, so they are not reversible —
@@ -1178,6 +1184,7 @@ const REDIRECTED_EMAIL = [
 const MUST_BE_EMPTY_TABLES = [
 	["sessions", "session row(s) survived — each caches a user record and authenticates against the pre-refresh hash"],
 	["driver_locations", "retired phone-GPS position row(s) survived"],
+	["sign_in_network", "staff sign-in IP and browser record(s) survived"],
 ];
 
 // A malformed hash (truncated, or a foreign format) makes bcryptjs throw rather

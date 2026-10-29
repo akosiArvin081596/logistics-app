@@ -994,7 +994,10 @@ test("§9 the n8n extract route still writes nothing new and never calls the ins
 	const proc = { env: { N8N_EXTRACT_SECRET: "extract-secret-under-test" } };
 	let geminiRuns = 0;
 	const deps = {
-		app: fakeApp, db: w.db, process: proc, console: { log() {}, warn() {}, error() {}, info() {} }, require,
+		// server.js's "./lib/..." requires (the shared rate-con text read the DVIR and the
+		// Needs Confirmation pickup readings use) resolve from the checkout's root.
+		app: fakeApp, db: w.db, process: proc, console: { log() {}, warn() {}, error() {}, info() {} },
+		require: (p) => require(/^\.\/lib\//.test(p) ? path.join(ROOT, p) : p),
 		pdfOcrLimiter: (req, res, next) => next(),
 		runRateConGemini: async () => { geminiRuns++; return { "Load Number": LOAD_ID, "Pickup Address": "100 Test Park Dr, Springfield, IL 62701", "Drop-off Address": "55 Depot Ln, Riverton, WY 82501", Rate: OWN_AMOUNT }; },
 		alertUnusableRateConExtraction: async () => {}, noteRateConDvir: () => {}, GEMINI_API_KEY: "k", fetch: async () => { throw new Error("no network"); },
@@ -1699,7 +1702,8 @@ test("§13 37 the first deny-list refusal alerts at once: in-app and email name 
 });
 
 // GET /api/dispatch-notifications and PUT .../read, lifted from server.js over `db`
-// (broker-contact handling stubbed: its own runner covers it).
+// (broker-contact handling stubbed: its own runner covers it; the WITHHELD LOAD
+// KEYS helper as shipped, flag off: no key served).
 function dispatchNoticeRoutes(db) {
 	const handlers = {};
 	const app = { get: (p, ...h) => { handlers[`GET ${p}`] = h[h.length - 1]; }, put: (p, ...h) => { handlers[`PUT ${p}`] = h[h.length - 1]; } };
@@ -1708,8 +1712,9 @@ function dispatchNoticeRoutes(db) {
 		lift.liftRoute(SRC, 'app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
 		lift.liftRoute(SRC, 'app.put("/api/dispatch-notifications/read", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
 	].join("\n");
-	new Function("app", "db", "requireRole", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "staffDispatchNotice", "brokerContact", "currentShownLoadIdIndex", `${deps}\n${routes}`)(
-		app, db, () => null, true, (n) => n, { fullDispatchNotice: (n) => n }, () => null);
+	const { withNoticeLoadKey } = require("./lib/withheld-load-key-lift").withheldLoadKeyHelpers(SRC);
+	new Function("app", "db", "requireRole", "BROKER_CONTACT_VALUE_REDACTION_ENABLED", "staffDispatchNotice", "brokerContact", "currentShownLoadIdIndex", "withNoticeLoadKey", `${deps}\n${routes}`)(
+		app, db, () => null, true, (n) => n, { fullDispatchNotice: (n) => n }, () => null, withNoticeLoadKey);
 	const call = (key) => async (user, body = {}) => {
 		const out = { code: 200, body: null };
 		const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };

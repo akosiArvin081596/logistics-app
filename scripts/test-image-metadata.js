@@ -257,9 +257,10 @@ function scanData(jpeg) {
 
 		counter.calls = 0;
 		const get4 = await serve({ readFile: slowRead });
-		const ranged = await get4("2-bb.pdf", DRV, { headers: { range: "bytes=0-3" } });
+		// PDF receipts open for staff only (scripts/test-receipt-pdf-access.js).
+		const ranged = await get4("2-bb.pdf", DISP, { headers: { range: "bytes=0-3" } });
 		ok("§7 a PDF receipt streams from disk (a range request answers 206 with those bytes)", ranged.status === 206 && ranged.body.toString("latin1") === "%PDF");
-		const whole = await get4("2-bb.pdf", DRV);
+		const whole = await get4("2-bb.pdf", DISP);
 		ok("§7 ... and is never read whole into memory", whole.status === 200 && whole.body.equals(pdf) && counter.calls === 0 && /application\/pdf/.test(whole.headers["content-type"]));
 		ok("§7 ... and is not cached either", /no-store/.test(String(whole.headers["cache-control"])));
 		const image = await get4("1-aa.jpg", DRV);

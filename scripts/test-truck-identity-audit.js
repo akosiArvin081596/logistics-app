@@ -37,6 +37,16 @@
  *   §5 Trailers, the same VIN rule: POST /api/trailers stores a padded VIN
  *      trimmed; PUT /api/trailers/:id keeps the stored VIN as it is on a padded
  *      resend or a save that sends none, and stores a real change trimmed.
+ *   §6 Trailer audit lines: PUT /api/trailers/:id writes one update_trailer
+ *      line naming each field the save really changed, old -> new (the plate
+ *      and notes by name only); a resend, a refused save or an unknown trailer
+ *      writes none. DELETE /api/trailers/:id writes one delete_trailer line
+ *      naming the trailer, its truck and its VIN.
+ *   §7 PUT drivers (TD8-13): one update_truck_driver line when a save changes
+ *      the truck's driver (cleared, set or moved here), old -> new, under the
+ *      account that saved it; a resend (as stored, padded, in another case and
+ *      spacing, or in a whole-row body), a save that sends no driver and a
+ *      refused save write none.
  *
  * Pure: no server, no app.db, no network. Made-up trucks and names.
  *
@@ -47,7 +57,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0;
 const failures = [];
@@ -99,6 +109,7 @@ const ROUTES = {
 	del: liftRoute('app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {'),
 	trailerPost: liftRoute('app.post("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
 	trailerPut: liftRoute('app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res) => {'),
+	trailerDel: liftRoute('app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {'),
 };
 
 // Everything the three routes call from module scope, verbatim.
@@ -128,6 +139,7 @@ const MODULE_SRC = [
 	liftFunction("logAuditRefusal"),
 	liftFunction("scrubPurgeMarker"),
 	liftFunction("auditText"),
+	liftFunction("trailerTruckLabel"),
 	// names and the assignment a reassigning save writes
 	liftFunction("normalizeDriverName"),
 	liftFunction("isBuiltInPropertyName"),
@@ -146,7 +158,7 @@ const MODULE_SRC = [
 const MODULE_EXPORTS = [
 	"parseTruckAmount", "TRUCK_AMOUNT_FIELDS", "parseTruckAmounts", "parseUnitNumber", "isUnitNumberTaken",
 	"parseDriverPayDaily", "parseInServiceDate", "parseRetiredAt", "parseAdminFeePct", "truckMonthlyFixed",
-	"refusePayEdit", "logAudit", "auditText",
+	"refusePayEdit", "logAudit", "auditText", "trailerTruckLabel",
 	"normalizeDriverName", "reservedDriverNameRefusal", "canonicalDriverName",
 	"syncDriverToCarrierSheet", "assignDriverToTruck",
 ];
@@ -310,7 +322,9 @@ function mountAll(db, { blockEdit = false } = {}) {
 		...PHOTO_CHECK,
 		truckEditLockBlockers: () => ({ unreadable: false, blockers: blockEdit ? [{ field: "unit_number", month: "2026-09" }] : [] }),
 		truckCreateLockBlockers: () => ({ unreadable: false, blockers: [] }),
-		truckDeleteLockBlockers: () => ({ unreadable: false, blockers: [] }),
+		truckDeleteLockBlockers: () => ({ unreadable: false, blockers: [], openFees: { maintenance: 0, compliance: 0 }, legalDocuments: 0 }),
+		// No open-month item holds (test-truck-delete-open-month-figures.js has them).
+		truckDeleteOpenMonthHolds: () => ({ fixed_cost_months: 0, driver: 0, eld_link: 0, financials_line_months: 0, lease_months: 0 }),
 		periodBlockedResponse: refuse,
 		periodLockUnreadableResponse: refuse,
 		truckChargeFromMonth: () => "",
@@ -327,6 +341,7 @@ function mountAll(db, { blockEdit = false } = {}) {
 	const del = mountRoute(ROUTES.del, env);
 	const trailerPost = mountRoute(ROUTES.trailerPost, env);
 	const trailerPut = mountRoute(ROUTES.trailerPut, env);
+	const trailerDel = mountRoute(ROUTES.trailerDel, env);
 	const as = (user) => ({ session: { user } });
 	return {
 		put: (user, id, body) => quiet(() => put({ ...as(user), params: { id: String(id) }, body })),
@@ -334,6 +349,7 @@ function mountAll(db, { blockEdit = false } = {}) {
 		del: (user, id) => quiet(() => del({ ...as(user), params: { id: String(id) } })),
 		trailerPost: (user, body) => quiet(() => trailerPost({ ...as(user), body })),
 		trailerPut: (user, id, body) => quiet(() => trailerPut({ ...as(user), params: { id: String(id) }, body })),
+		trailerDel: (user, id) => quiet(() => trailerDel({ ...as(user), params: { id: String(id) } })),
 	};
 }
 
@@ -577,12 +593,144 @@ async function trailerSection() {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════ §6
+async function trailerAuditSection() {
+	section("§6 Trailers — an edit writes one update_trailer line, a delete one delete_trailer line");
+	const seed = (db) => {
+		db.prepare(`INSERT INTO trailers (id, trailer_number, type, length, year, vin, license_plate, status, truck_id, notes)
+			VALUES (7, 'TR-5301', 'Dry Van', '53', 2019, ?, 'MADE-UP-PL1', 'Available', NULL, 'old note')`).run(VIN_A);
+	};
+	const stored = (db) => db.prepare("SELECT * FROM trailers WHERE id = 7").get();
+	const wholeRow = (t) => ({
+		trailer_number: t.trailer_number, type: t.type, length: t.length, year: t.year, vin: t.vin,
+		license_plate: t.license_plate, status: t.status, truck_id: t.truck_id ?? "", notes: t.notes,
+	});
+	for (const [label, user, body, expected] of [
+		["status and truck changed", DISPATCHER, { status: "In Use", truck_id: 1 },
+			"Trailer TR-5301: status Available → In Use, truck none → LogisX-#41 (#1)"],
+		["number, type, length, year and VIN changed", SUPER,
+			{ trailer_number: "TR-5309", type: "Reefer", length: "48", year: 2022, vin: ` ${VIN_B} ` },
+			`Trailer TR-5301: trailer number TR-5301 → TR-5309, type Dry Van → Reefer, length 53 → 48, year 2019 → 2022, VIN ${VIN_A} → ${VIN_B}`],
+		["the VIN cleared", SUPER, { vin: "" }, `Trailer TR-5301: VIN ${VIN_A} → not set`],
+		["plate and notes changed: named, values not recorded", SUPER, { license_plate: "MADE-UP-PL2", notes: "new mud flaps" },
+			"Trailer TR-5301: license plate changed, notes changed"],
+	]) {
+		const db = makeDb();
+		seed(db);
+		const app = mountAll(db);
+		const r = await app.trailerPut(user, 7, body);
+		const rows = audits(db, "update_trailer");
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === expected,
+			`§6 PUT, ${label}: one update_trailer line ${JSON.stringify(expected)} (got ${r.status}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		ok(rows.length === 1 && rows[0].entity === "trailer" && rows[0].entity_id === "7" && rows[0].username === user.username,
+			`§6 PUT, ${label}: the line is on trailer 7 under ${user.username} (got ${JSON.stringify(rows.map((x) => [x.entity, x.entity_id, x.username]))})`);
+		ok(!rows.some((x) => /mud flaps|MADE-UP-PL2|old note|MADE-UP-PL1/.test(x.details)),
+			`§6 PUT, ${label}: no plate or notes text in the line`);
+	}
+	for (const [label, bodyOf] of [
+		["the whole row resent as stored", (t) => wholeRow(t)],
+		["the whole row resent with the VIN padded", (t) => ({ ...wholeRow(t), vin: `  ${t.vin}\t` })],
+		["an empty body", () => ({})],
+	]) {
+		const db = makeDb();
+		seed(db);
+		const app = mountAll(db);
+		const before = JSON.stringify(stored(db));
+		const r = await app.trailerPut(SUPER, 7, bodyOf(stored(db)));
+		ok(r.status === 200 && audits(db, "update_trailer").length === 0 && JSON.stringify(stored(db)) === before,
+			`§6 PUT, ${label}: 200, nothing changed and no update_trailer line (got ${r.status}, ${audits(db, "update_trailer").length} lines)`);
+	}
+	{
+		const db = makeDb();
+		seed(db);
+		db.prepare("INSERT INTO trailers (id, trailer_number, type, status, truck_id) VALUES (8, 'TR-5302', 'Reefer', 'In Use', 1)").run();
+		const app = mountAll(db);
+		const before = JSON.stringify(stored(db));
+		const r = await app.trailerPut(SUPER, 7, { truck_id: 1 });
+		ok(r.status === 409 && audits(db, "update_trailer").length === 0 && JSON.stringify(stored(db)) === before,
+			`§6 PUT refused (the truck already has a trailer): 409, nothing written, no line (got ${r.status}, ${audits(db, "update_trailer").length})`);
+		const r404 = await app.trailerPut(SUPER, 99, { status: "In Use" });
+		ok(r404.status === 404 && audits(db, "update_trailer").length === 0, `§6 PUT on an unknown trailer: 404, no line (got ${r404.status})`);
+	}
+	{
+		const db = makeDb();
+		seed(db);
+		db.prepare("UPDATE trailers SET truck_id = 1 WHERE id = 7").run();
+		const app = mountAll(db);
+		const r = await app.trailerDel(SUPER, 7);
+		const rows = audits(db, "delete_trailer");
+		const expected = `Trailer TR-5301 (Dry Van, Available, on LogisX-#41 (#1), VIN ${VIN_A}) deleted`;
+		ok(r.status === 200 && !db.prepare("SELECT 1 FROM trailers WHERE id = 7").get() && rows.length === 1 && rows[0].details === expected
+			&& rows[0].entity === "trailer" && rows[0].entity_id === "7" && rows[0].username === "super_admin",
+			`§6 DELETE an attached trailer with a VIN: one delete_trailer line ${JSON.stringify(expected)} (got ${r.status}, ${JSON.stringify(rows)})`);
+		ok(!rows.some((x) => /old note|MADE-UP-PL1/.test(x.details)), "§6 DELETE: no plate or notes text in the line");
+	}
+	{
+		const db = makeDb();
+		db.prepare("INSERT INTO trailers (id, trailer_number, type, status) VALUES (7, 'TR-5301', 'Flatbed', 'Out of Service')").run();
+		const app = mountAll(db);
+		const r = await app.trailerDel(SUPER, 7);
+		const rows = audits(db, "delete_trailer");
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === "Trailer TR-5301 (Flatbed, Out of Service, not on a truck) deleted",
+			`§6 DELETE an unattached trailer with no VIN (got ${r.status}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		const r404 = await app.trailerDel(SUPER, 99);
+		ok(r404.status === 404 && audits(db, "delete_trailer").length === 1, `§6 DELETE an unknown trailer: 404, no line (got ${r404.status})`);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════ §7
+// TD8-13 (2026-10-23): the truck's driver decides whose days the truck's rate
+// prices and which investor ledger the driver is on, and clearing it is one of
+// the edits a refused truck delete names. A change writes one
+// update_truck_driver line, before -> after; a resend writes none.
+async function driverSection() {
+	section("§7 PUT /api/trucks/:id — a driver change is audited, old -> new");
+	const driverRows = (db) => audits(db, "update_truck_driver");
+	for (const [label, user, id, body, details] of [
+		["the driver cleared", SUPER, 1, { assignedDriver: "" }, "Driver for LogisX-#41: Soren King → no driver"],
+		["the driver cleared with null", SUPER, 1, { assignedDriver: null }, "Driver for LogisX-#41: Soren King → no driver"],
+		["a driver set on a truck that had none", DISPATCHER, 2, { assignedDriver: "Made Up Driver" }, "Driver for LogisX-#91: no driver → Made Up Driver"],
+		["a driver moved here from another truck", SUPER, 2, { assignedDriver: "Soren King" }, "Driver for LogisX-#91: no driver → Soren King"],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(user, id, body);
+		const rows = driverRows(db);
+		ok(r.status === 200 && rows.length === 1 && rows[0].details === details,
+			`§7 ${label}: 200 and one update_truck_driver line ${JSON.stringify(details)} (got ${r.status} ${JSON.stringify(r.body)}, ${JSON.stringify(rows.map((x) => x.details))})`);
+		ok(rows.length === 1 && rows[0].entity === "truck" && rows[0].entity_id === String(id) && rows[0].username === user.username,
+			`§7 ${label}: on truck ${id}, under ${user.username} (got ${JSON.stringify(rows.map((x) => [x.entity, x.entity_id, x.username]))})`);
+	}
+	for (const [label, body] of [
+		["the driver resent as stored", () => ({ assignedDriver: "Soren King", notes: "new tires" })],
+		["the driver resent padded", () => ({ assignedDriver: "  Soren King  " })],
+		["the driver resent in another case and spacing", () => ({ assignedDriver: "soren  KING" })],
+		["a whole-row resend", (db) => truckFormBody(truckRow(db, 1))],
+		["a save that sends no driver", () => ({ notes: "new tires" })],
+	]) {
+		const db = makeDb();
+		const app = mountAll(db);
+		const r = await app.put(SUPER, 1, body(db));
+		ok(r.status === 200 && truckRow(db, 1).assigned_driver === "Soren King" && driverRows(db).length === 0,
+			`§7 ${label}: 200, the driver kept, no update_truck_driver line (got ${r.status}, ${JSON.stringify(truckRow(db, 1).assigned_driver)}, ${driverRows(db).length} lines)`);
+	}
+	{
+		const db = makeDb();
+		const app = mountAll(db, { blockEdit: true });
+		const r = await app.put(SUPER, 1, { assignedDriver: "" });
+		ok(r.status === 409 && truckRow(db, 1).assigned_driver === "Soren King" && driverRows(db).length === 0,
+			`§7 a driver change the month-end lock refuses: 409, the driver kept, no line (got ${r.status}, ${driverRows(db).length} lines)`);
+	}
+}
+
 (async () => {
 	await renameSection();
 	await vinSection();
 	await createSection();
 	await deleteSection();
 	await trailerSection();
+	await trailerAuditSection();
+	await driverSection();
 })().then(() => {
 	if (failures.length) {
 		for (const f of failures) console.error(`  FAIL  ${f}`);

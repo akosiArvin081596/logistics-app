@@ -29,7 +29,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const eldMiles = require("../lib/eld-miles");
 
-const SHIPPED = fs.readFileSync(process.env.SERVER_JS || path.join(__dirname, "..", "server.js"), "utf8");
+const SHIPPED = require("./lib/server-source").serverSource();
 
 let pass = 0;
 let fail = 0;

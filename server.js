@@ -49,10 +49,16 @@ const REPLICA = require("./lib/replica-mode").boot({ appDir: __dirname });
 // replica (refused before any connection, the way an unreachable service
 // fails); otherwise it is the global fetch.
 const fetch = REPLICA ? REPLICA.fetch : globalThis.fetch;
-// Every interval and boot-time job this file starts asks first. Outside replica
-// mode the answer is always yes, so each starts exactly as before; in a replica
-// none starts, and each is named in the log.
+// LOGISX_IMPORT_ONLY=1: this file is required for its app (a test or a tool), so
+// no job starts, nothing listens and no signal handler is installed. Both read
+// before dotenv: only the importer's own environment counts, never a .env file.
+const IMPORT_ONLY = process.env.LOGISX_IMPORT_ONLY === "1";
+const IMPORT_DATABASE_PATH = process.env.DATABASE_PATH || "";
+// Every interval and boot-time job this file starts asks first. Outside a replica
+// and an import the answer is always yes, so each starts exactly as before; in a
+// replica none starts, and each is named in the log.
 function startsJob(name) {
+	if (IMPORT_ONLY) return false;
 	return REPLICA ? REPLICA.jobNotStarted(name) : true;
 }
 
@@ -67,6 +73,10 @@ const SHEET_TARGET = require("./lib/sheet-id").resolveServerSpreadsheetId(proces
 if (!SHEET_TARGET.id) {
 	console.error(`Refusing to start: ${SHEET_TARGET.error}`);
 	process.exit(1);
+}
+// After dotenv, because production's NODE_ENV comes from its .env file.
+if (IMPORT_ONLY && process.env.NODE_ENV === "production") {
+	throw new Error("LOGISX_IMPORT_ONLY=1 imports server.js for a test or a tool; it is refused with NODE_ENV=production");
 }
 const express = require("express");
 const http = require("http");
@@ -117,8 +127,10 @@ const { EXPENSE_TYPES, resolveRegionToStates, normalizeVendor, normalizeVendorDe
 const expenseAi = require("./lib/expense-ai");
 // "Personal" receipts: the rules, the line text and the two expense sources.
 const personalExpense = require("./lib/personal-expense");
-// Their receipts on the invoice: the re-encode service and the page layout.
+// Their receipts on the invoice: the re-encode service, the PDF receipt pages
+// service and the page layout.
 const receiptImagesLib = require("./lib/receipt-images");
+const receiptPdfLib = require("./lib/receipt-pdf");
 const invoiceReceipts = require("./lib/invoice-receipts");
 // An invoice's Address line from a drivers_directory row, each part once.
 const { providerAddressLine } = require("./lib/invoice-header");
@@ -285,6 +297,40 @@ function emitDispatchByRole(event, full, redacted) {
 	io.to("super-admin").emit(event, full);
 	io.to("dispatch").except("super-admin").emit(event, redacted);
 }
+// THE STAFF DESKS (decision 30, 2026-10-21: drivers and investors message
+// staff only, never each other). Each role's app names one desk: the driver
+// app "Dispatch", the investor portal "admin" (resolveChatParties()). A desk is
+// never a person: no account may take its name (findDriverNameClashes()'s
+// reserved names, POST /api/users, POST /api/auth/setup), chatRooms() gives it
+// no identity room, and an account delete never removes its messages. Keyed by
+// the name as matched (trimmed and lower-cased, nothing else folded, so a
+// look-alike spelling is no desk), valued by the name as stored.
+const CHAT_DESK_NAMES = Object.freeze({ dispatch: "Dispatch", admin: "admin" });
+// The desk a name is ("dispatch" or "admin"), or "" for any other value.
+function chatDeskKey(name) {
+	const key = typeof name === "string" ? name.trim().toLowerCase() : "";
+	return Object.prototype.hasOwnProperty.call(CHAT_DESK_NAMES, key) ? key : "";
+}
+// INVESTOR CONVERSATIONS ARE SUPER ADMIN ONLY (P1, Arvin 2026-10-22). An
+// investor conversation is every message with the investor desk ("admin") or
+// an Investor account's username on either side, trimmed and in any letter case
+// (how every thread reads its names); a desk's name is never an investor's,
+// even on a legacy account that holds one. Super Admins read them, and the investor
+// reads his own (GET /api/investor/messages, by his username); a Dispatcher
+// reads none: not in the inbox list or its unread count (GET /api/messages), not
+// as a thread (GET /api/messages/:driverName, 404), not live (sendChatMessage():
+// the super-admin room, never the dispatch room), not a chat file or a voice note
+// (lib/chat-files.js, lib/voice-notes.js, 404), and he marks none read
+// (PUT /api/messages/read). The one rule, as SQL: 1 for a row of `messages` in an
+// investor conversation, else 0. The query names the row's table `messages`: a
+// stored row, or the two names of a message being sent (investorChatParties()).
+// One line: several runners lift a top-level const by its line.
+const INVESTOR_CHAT_SQL = `(LOWER(TRIM(messages."from")) = 'admin' OR LOWER(TRIM(messages."to")) = 'admin' OR LOWER(TRIM(messages."from")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')) OR LOWER(TRIM(messages."to")) IN (SELECT LOWER(TRIM(username)) FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) NOT IN ('', 'dispatch', 'admin')))`;
+// Whether `user` reads investor conversations among the staff threads: Super
+// Admin only. (Investors read their own through their own routes.)
+function readsInvestorChats(user) {
+	return !!user && user.role === "Super Admin";
+}
 // The rooms one chat message goes to: the dispatch room, which sees every
 // message whoever it is addressed to, plus the identity rooms of each party.
 // A party is a NAME ("Dispatch" for the dispatch desk, a driver name or a
@@ -292,7 +338,7 @@ function emitDispatchByRole(event, full, redacted) {
 // reader selects its thread by LOWER("from") / LOWER("to"). Each name reaches
 // only the driver room and the user room of that name, through the helpers,
 // so no value in a request can select a role room or another kind's room.
-// "Dispatch", the desk's own name, adds no identity room: the dispatch room
+// A desk's name ("Dispatch", "admin") adds no identity room: the dispatch room
 // already has the message. One list, deduplicated, so a socket in two of
 // these rooms receives the message once, and never empty: io.to([]) would
 // send to every socket.
@@ -300,7 +346,7 @@ function chatRooms(from, to) {
 	const rooms = new Set(["dispatch"]);
 	for (const party of [from, to]) {
 		const key = identityRoomKey(party);
-		if (!key || key === "dispatch") continue;
+		if (!key || chatDeskKey(key)) continue;
 		rooms.add(driverRoom(key));
 		rooms.add(userRoom(key));
 	}
@@ -460,6 +506,11 @@ app.use(express.json({ limit: "50mb" }));
 // ============================================================
 // SQLite — Local database for app data (messages, users, expenses)
 // ============================================================
+// An import still runs the schema, the migrations and their boot writes, so its
+// own environment must name a scratch database (a .env file's does not count).
+if (IMPORT_ONLY && !IMPORT_DATABASE_PATH) {
+	throw new Error("importing server.js (LOGISX_IMPORT_ONLY=1) needs DATABASE_PATH: a scratch database");
+}
 const db = new Database(process.env.DATABASE_PATH || path.join(__dirname, "app.db"));
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -1314,6 +1365,9 @@ const PURGEABLE_REFUSAL_ACTIONS = [
 	"status_override_blocked",
 	"create_sheet_row_blocked",
 	"update_sheet_row_blocked",
+	// POST /api/messages refusing a recipient or sender (decision 30): cheap, on
+	// demand, a Driver can repeat it, and it returns before any write.
+	"message_blocked",
 ];
 const REFUSAL_AUDIT_RETENTION_DAYS = 90;
 
@@ -2154,10 +2208,11 @@ function getInvestorDriverMonthWindows(userId) {
 // Build the WHERE fragment that scopes `expenses` to one investor, with the month
 // dimension the driver leg never had.
 //
-// ONE definition, EIGHT callers (/api/investor's monthly + category + all-time sums,
+// ONE definition, NINE callers (/api/investor's monthly + category + all-time sums,
 // computeInvestorMonthlyEarnings' monthly sum + drill-down items, /api/investor/expenses,
-// /api/investor/tax-csv, GET /api/investor/report's itemized P&L, and
-// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15). That is the
+// /api/investor/tax-csv, GET /api/investor/report's itemized P&L,
+// investorMaySeeReceipt(), the receipt-photo check, since 2026-10-15, and
+// truckDeleteOpenMonthHolds(), the truck delete's open-month check, since 2026-10-23). That is the
 // DRIVER_RENAME_TARGETS lesson applied here: the previous shape was the same SQL string
 // hand-copied at every site, so a fix to one is a fix to none. Add a leg here and every
 // investor expense surface gets it.
@@ -2363,6 +2418,31 @@ catch {
 	db.exec(`ALTER TABLE messages ADD COLUMN attachment_type TEXT DEFAULT ''`);
 }
 
+// Migration: voice notes (POST /api/messages/voice, lib/voice-notes.js). Each
+// column is added only when missing, so a second boot changes nothing.
+//   sender_user_id     the session account that sent it (staff all send as
+//                      "Dispatch", so the name cannot tell two people apart)
+//   client_key         the sender's Idempotency-Key; '' on every text message
+//   party_user_id      the Driver or Investor account the note belongs to: the
+//                      one id, besides staff, that may play it
+//   voice_file         vn_<id>_<16 hex>.m4a under storage/voice-notes; '' once
+//                      the sweep or a Super Admin removed it
+//   voice_duration_ms  the length the server measured
+//   voice_bytes        the stored size (the per-user daily cap sums it)
+// The duplicate-send index is PARTIAL: rows with client_key '' (every text
+// message, before and after this) are outside it, so it can neither fail to
+// build on existing data nor refuse a second text message.
+{
+	const messageColumns = new Set(db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name));
+	if (!messageColumns.has("sender_user_id")) db.exec("ALTER TABLE messages ADD COLUMN sender_user_id INTEGER");
+	if (!messageColumns.has("client_key")) db.exec("ALTER TABLE messages ADD COLUMN client_key TEXT DEFAULT ''");
+	if (!messageColumns.has("party_user_id")) db.exec("ALTER TABLE messages ADD COLUMN party_user_id INTEGER");
+	if (!messageColumns.has("voice_file")) db.exec("ALTER TABLE messages ADD COLUMN voice_file TEXT DEFAULT ''");
+	if (!messageColumns.has("voice_duration_ms")) db.exec("ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER DEFAULT 0");
+	if (!messageColumns.has("voice_bytes")) db.exec("ALTER TABLE messages ADD COLUMN voice_bytes INTEGER DEFAULT 0");
+	db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_key ON messages(sender_user_id, client_key) WHERE client_key <> ''");
+}
+
 db.exec(`
 	CREATE TABLE IF NOT EXISTS documents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2392,6 +2472,14 @@ try {
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_at DATETIME DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN deleted_by TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE documents ADD COLUMN delete_reason TEXT DEFAULT ''"); } catch {}
+// Who uploaded a row (2026-10-22): the uploader's user id and role, written by
+// POST /api/documents/upload. documents.driver is the FILED driver (whose load
+// document it is, documentFiledUnder()), not the uploader: an office upload is
+// filed under the load's driver. NULL = not recorded (rows written before this,
+// and rows other paths write, such as the rate-con archive). Office-only: the
+// load panel and the investor portal name their columns and send neither.
+try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_user_id INTEGER DEFAULT NULL"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN uploaded_by_role TEXT DEFAULT NULL"); } catch {}
 // The hot read is "live docs for this load" (POD gate, per-load list, invoice
 // attach) and the dashboard's load_id IN (...) POD-count fan-out.
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_documents_load_live ON documents(load_id, deleted_at)"); } catch {}
@@ -5584,6 +5672,10 @@ const PRE_DISPATCH_PAY_DAY_RULE_FROM = loadPayDays.ruleFromMonth(PRE_DISPATCH_PA
 // Dormant until the user's word (true/1/yes/on); before switching it on run
 // scripts/mark-paid-closed-month-report.js.
 const MARK_PAID_CLOSED_MONTH_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MARK_PAID_CLOSED_MONTH_ENABLED ?? "").trim());
+// Closed months are never changed: on, a weekly or manual invoice whose span touches one is not
+// generated, regenerated, created, deleted or restored (409 PERIOD_FINALIZED, audited;
+// invoiceClosedMonthBlock()). A money change, so dormant: on only when exactly "true".
+const INVOICE_CLOSED_MONTH_GUARD_ENABLED = process.env.INVOICE_CLOSED_MONTH_GUARD_ENABLED === "true";
 // The owner's trip-timestamp work-day rule for daily-rate drivers (B12,
 // lib/trip-work-days.js), dormant until the owner approves its dry run
 // (scripts/work-days-dry-run.js): TRIP_WORK_DAYS_ENABLED (true/1/yes/on; off by
@@ -6635,6 +6727,11 @@ db.exec(`
 	)
 `);
 
+// EXPENSE_BACKFILL_APP_DAY_ENABLED, off unless exactly "true": it changes which truck and
+// owner a legacy receipt is stamped with. On, the backfill below reads an assignment's start
+// and end as business days (appDay()), so an evening one covers its own day, not the next.
+const EXPENSE_BACKFILL_APP_DAY_ENABLED = process.env.EXPENSE_BACKFILL_APP_DAY_ENABLED === "true";
+
 // Backfill legacy expenses with truck_unit + owner_id. Older expense rows
 // pre-date the columns being stamped on insert (see expOwnerId at the
 // POST /api/expenses INSERT). Pass 1 resolves truck_unit + owner_id from
@@ -6788,8 +6885,30 @@ function backfillLegacyExpenseTrucks(health) {
 		// assignments, not only on evening ones.
 		// Comparing day-to-day makes both bounds inclusive of the boundary day.
 		// ta.end_date = '' (still active) short-circuits before the substr.
-		const coversExpenseDay = (day) => `(substr(ta.start_date, 1, 10) <= ${day}
-				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`;
+		// The first 10 characters are the UTC day, already the next one from 8 PM EDT
+		// (7 PM EST); with EXPENSE_BACKFILL_APP_DAY_ENABLED on, each bound is the
+		// business day its stamp falls on (stampDay() below).
+		const coversExpenseDay = (day) => (EXPENSE_BACKFILL_APP_DAY_ENABLED
+			? `(assignment_stamp_day(ta.start_date) <= ${day}
+				  AND (ta.end_date = '' OR assignment_stamp_day(ta.end_date) >= ${day}))`
+			: `(substr(ta.start_date, 1, 10) <= ${day}
+				  AND (ta.end_date = '' OR substr(ta.end_date, 1, 10) >= ${day}))`);
+
+		// The business day (appDay(), APP_TIMEZONE) an assignment stamp falls on. Only the
+		// instant the app writes (toISOString()) is converted; anything else keeps its first
+		// 10 characters, as before. Memoized: step 2 reads every assignment for each receipt.
+		const stampDays = new Map();
+		const stampDay = (v) => {
+			if (v === null || v === undefined) return null;
+			const s = String(v);
+			if (!stampDays.has(s)) {
+				const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s) ? Date.parse(s) : NaN;
+				const exact = Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === s.slice(0, 19);
+				stampDays.set(s, exact ? appDay(new Date(ms)) : s.slice(0, 10));
+			}
+			return stampDays.get(s);
+		};
+		if (EXPENSE_BACKFILL_APP_DAY_ENABLED) db.function("assignment_stamp_day", stampDay);
 
 		// Step 1's match, ONE definition for both of its uses: the SET takes the
 		// newest covering assignment's truck, and the EXISTS writes a row only when
@@ -7122,6 +7241,9 @@ io.engine.use(sessionMiddleware);
 // would enforce a stale session copy. See "FORCED PASSWORD CHANGE" beside the
 // guards; scripts/test-password-change-enforced.js pins this position.
 app.use(refreshPasswordChangeFlag);
+// A Dispatcher's opaque load key, read before routing (WITHHELD LOAD KEYS, beside
+// shownLoadId()): inert unless WITHHELD_LOAD_REFS_ENABLED is on.
+app.use(withheldLoadKeyGate);
 // ============================================================
 // n8n Webhook: Upsert job into sheet_job_tracking (replaces Google Sheets write)
 // ============================================================
@@ -7477,15 +7599,12 @@ const rateConDvirReadings = new Map();
 // Reads one rate con's DVIR lines (base64: the PDF the route was sent) and keeps
 // them under its load number. Never throws: the extraction must not fail because
 // of it.
-function noteRateConDvir(loadNumber, base64, now = Date.now()) {
+// read: the text already read for this PDF (rateConPdfTextOf()), or null to read it here.
+function noteRateConDvir(loadNumber, base64, now = Date.now(), read = null) {
 	try {
 		const key = normLoadKey(loadNumber).slice(0, 80);
 		if (!key || typeof base64 !== "string") return;
-		const size = Math.floor(base64.length * 3 / 4);
-		let text = "";
-		if (size <= rateconDvir.MAX_PDF_BYTES) {
-			text = rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES });
-		}
+		const { text, size } = read || rateConPdfTextOf(base64);
 		const reading = rateconDvir.readRateConDvir(text, size);
 		for (const [k, v] of rateConDvirReadings) {
 			if (now - v.at < RATECON_DVIR_TTL_MS) break;
@@ -7504,6 +7623,247 @@ function rateConDvirReading(loadId, now = Date.now()) {
 	const key = normLoadKey(loadId).slice(0, 80);
 	const hit = key ? rateConDvirReadings.get(key) : undefined;
 	return hit && now - hit.at < RATECON_DVIR_TTL_MS ? hit : null;
+}
+
+// A rate con's built-in text (rateconDvir.pdfText(), each stream once, its inflating
+// capped), "" for a PDF over rateconDvir.MAX_PDF_BYTES; size: the decoded bytes. Read once
+// for the DVIR reading and the pickup reading below. Throws on bytes it can't read.
+function rateConPdfTextOf(base64) {
+	const size = Math.floor(base64.length * 3 / 4);
+	const text = size <= rateconDvir.MAX_PDF_BYTES
+		? rateconDvir.pdfText(Buffer.from(base64, "base64"), { maxInflatedBytes: RATECON_DVIR_TEXT_MAX_BYTES })
+		: "";
+	return { text, size };
+}
+
+// "NEEDS CONFIRMATION" PICKUPS (Arvin, 2026-10-21; plan ~/LogisX-replica/reports/
+// 2026-10-21-needs-confirmation-pickup-plan.md, Revision 3, decisions N1-N12): when a rate
+// con marks the pickup date "Needs Confirmation" (lib/ratecon-pickup-confirmation.js), the
+// load gets a Needs Review reason on the dashboard instead of the date being treated as
+// firm. Display only: nothing that pays reads it, and the app never rewrites the date.
+// - RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED (defaults OFF, /^(true|1|yes|on)$/i). Off: no
+//   reading kept, no record written, no `_review` key, no modal line, and
+//   POST /api/loads/pickup-confirmed answers 404: today's behaviour.
+// - Email path: the extract route below reads the rate con's built-in text once after its
+//   response, for the DVIR line and for this reading (noteRateConReadings()): the phrase
+//   in the text or in Gemini's Pickup Notes/Instructions, kept in memory by load number
+//   with the DVIR reading's TTL and cap, two PDFs of one load OR-ed. The extract route
+//   still writes nothing. POST /api/n8n/keep-stored-values then writes the load's
+//   ratecon_pickup_readings row (recordKeepStoredPickupReading()), never for a Pickup
+//   Appointment a hold kept.
+// - Drag-and-drop: POST /api/loads/ratecon/extract keeps the reading and the extracted
+//   Pickup Appointment in rateConPickupStash for every role (rateConStash holds fields for
+//   non-Super-Admins only) and adds the modal line; POST /api/loads/from-ratecon writes the
+//   row, and records a Pickup Appointment the person changed in the modal as a person's
+//   date in load_cell_writes (a kept one stays the rate con's, as #576 records it).
+// - Who set the sheet's date is load_cell_writes' answer (lib/person-edit-hold.js
+//   personSet()); ratecon_pickup_readings only says what the rate con said.
+// - No reading, so no badge: a restart between the extract and keep-stored-values, a
+//   failed Gemini extraction (502/503 keep none), an email with no PDF.
+const pickupConfirmation = require("./lib/ratecon-pickup-confirmation");
+const loadReviewFlags = require("./lib/load-review-flags");
+const RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED ?? "").trim());
+const RATECON_PICKUP_COLUMN_RE = /pickup.*appo|pickup.*date/i;
+const RATECON_PICKUP_READINGS_MAX_ROWS = 5000;
+const rateConPickupReadings = pickupConfirmation.createPickupReadingStore({ ttlMs: RATECON_DVIR_TTL_MS, max: RATECON_DVIR_MAX_LOADS });
+// By rateConStashKey(), like rateConNumberStash (30 min, 200 PDFs). Required here because
+// `brokerContact` is declared further down.
+const rateConPickupStash = require("./lib/broker-contact").createRateConStash();
+
+// Both readings of an email's rate con from one read of its text. Never throws. With no
+// Load Number neither reading is kept, so the PDF isn't read at all; a PDF whose text
+// can't be read is read once (no DVIR reading; the pickup notes are still checked).
+function noteRateConReadings(loadNumber, base64, pickupNotes, now = Date.now()) {
+	if (!normLoadKey(loadNumber)) return;
+	let read = null;
+	let failed = false;
+	try {
+		if (typeof base64 === "string") read = rateConPdfTextOf(base64);
+	} catch (e) {
+		failed = true;
+		console.warn(`[ratecon-dvir] rate-con text not read (${e && e.message}); a re-issue alert for this load falls back to the Payment drop`);
+	}
+	if (!failed) noteRateConDvir(loadNumber, base64, now, read);
+	if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) noteRateConPickupReading(loadNumber, read ? read.text : "", pickupNotes, now);
+}
+
+// Keeps one email rate con's pickup reading (OR-ed into the load's). Never throws.
+function noteRateConPickupReading(loadNumber, text, notes, now = Date.now()) {
+	try {
+		const key = normLoadKey(loadNumber).slice(0, 80);
+		if (!key) return;
+		rateConPickupReadings.note(key, pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" }), now);
+	} catch (e) {
+		console.warn(`[ratecon-pickup] the pickup reading was not kept (${e && e.message}); this rate con raises no Needs Confirmation reason`);
+	}
+}
+
+// The pickup reading kept for a load, or null.
+function rateConPickupReading(loadId, now = Date.now()) {
+	return rateConPickupReadings.get(normLoadKey(loadId).slice(0, 80), now);
+}
+
+// A dropped rate con's pickup reading, read now (its built-in text and Gemini's notes).
+// Never throws: bytes that can't be read leave the notes alone.
+function rateConPickupReadingOfPdf(pdfBase64, notes) {
+	let text = "";
+	try {
+		const base64 = String(pdfBase64 == null ? "" : pdfBase64).replace(/^data:application\/pdf;base64,/, "").trim();
+		if (base64) text = rateConPdfTextOf(base64).text;
+	} catch (e) {
+		console.warn(`[ratecon-pickup] a dropped rate con's text was not read (${e && e.message}); its pickup notes alone are checked`);
+	}
+	return pickupConfirmation.detectNeedsConfirmation({ text, notes: typeof notes === "string" ? notes : "" });
+}
+
+// One row per load (created on first use): what the rate con said about the pickup.
+// needs_confirmation 1 once a rate con carried the phrase (never cleared by a later one,
+// decision 12 (a)); detected_by text | notes | text+notes; source email | dropzone. No
+// rate-con text is stored. B4 adds its drop/ready/outcome columns (plan section 6). At most
+// RATECON_PICKUP_READINGS_MAX_ROWS rows, the least recently seen dropped first.
+function rateConPickupReadingsTable() {
+	if (rateConPickupReadingsTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS ratecon_pickup_readings (
+			load_key TEXT PRIMARY KEY,
+			load_id TEXT NOT NULL,
+			needs_confirmation INTEGER NOT NULL DEFAULT 0,
+			detected_by TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL
+		)
+	`);
+	rateConPickupReadingsTable.ready = true;
+}
+
+// Applies one rate con's record decision (pickupConfirmation.recordDecision()) to the load's
+// row: pickupSent the Pickup Appointment the write sends ("" for none), held true when a
+// hold kept it. Answers the action taken. Throws on a database error (the callers catch).
+function writeRateConPickupReading(loadId, reading, pickupSent, held, source, at = new Date().toISOString()) {
+	rateConPickupReadingsTable();
+	const key = loadCellKey(loadId);
+	if (!key) return "none";
+	const existing = db.prepare("SELECT needs_confirmation, detected_by FROM ratecon_pickup_readings WHERE load_key = ?").get(key) || null;
+	const d = pickupConfirmation.recordDecision({ existing, reading, pickupSent, held });
+	if (d.action === "insert") {
+		db.prepare("INSERT INTO ratecon_pickup_readings (load_key, load_id, needs_confirmation, detected_by, source, first_seen, last_seen) VALUES (?, ?, 1, ?, ?, ?, ?)")
+			.run(key, String(loadId).trim().slice(0, 200), d.by, source, at, at);
+		db.prepare("DELETE FROM ratecon_pickup_readings WHERE load_key NOT IN (SELECT load_key FROM ratecon_pickup_readings ORDER BY last_seen DESC, load_key LIMIT ?)")
+			.run(RATECON_PICKUP_READINGS_MAX_ROWS);
+	} else if (d.action === "update") {
+		db.prepare("UPDATE ratecon_pickup_readings SET needs_confirmation = ?, detected_by = ?, last_seen = ? WHERE load_key = ?")
+			.run(d.needsConfirmation ? 1 : 0, d.by, at, key);
+	}
+	return d.action;
+}
+
+// keep-stored-values' part, once it has answered (flag on): the email's own Pickup
+// Appointment as the answer sends it, with the load's pickup reading; a hold that kept the
+// date (re-issue or person hold) leaves the record untouched. Never throws.
+function recordKeepStoredPickupReading(loadId, sentValues, answered, reissueHold, personHeld) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return "off";
+	try {
+		const col = Object.keys(sentValues || {}).find((c) => RATECON_PICKUP_COLUMN_RE.test(String(c).trim()));
+		if (col === undefined) return "none";
+		const own = sentValues[col] == null ? "" : String(sentValues[col]);
+		const out = answered && answered[col] != null ? String(answered[col]) : "";
+		const held = Boolean(reissueHold) || (personHeld || []).some((h) => h && h.column === col);
+		return writeRateConPickupReading(loadId, rateConPickupReading(loadId), own.trim() ? out : "", held, "email");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (ingestion unaffected): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// The actor a person row names: role and user id, no name (as recordPersonCellEdits()).
+function rateConPickupActor(req) {
+	const user = (req && req.session && req.session.user) || {};
+	return `${String(user.role || "").slice(0, 40)}#${user.id == null ? "" : String(user.id).slice(0, 20)}`;
+}
+
+// A drag-and-drop create's pickup (flag on): the reading kept by the extract for this PDF
+// (rateConPickupStash, every role), else the PDF's own text read now; and, when the
+// extract's Pickup Appointment is known and the person changed it in the review modal,
+// that column as a person's ({ columns, actor } for recordRateConCreateCellWrites()).
+// Answers { reading, person }, or null (the flag off, or a failure). Never throws.
+function rateConCreatePickup(req, pdfBase64, stashKey, headers, fields) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return null;
+	try {
+		const held = rateConPickupStash.get(stashKey);
+		const f = fields || {};
+		const sent = f["Pickup Appointment Time"] == null ? "" : String(f["Pickup Appointment Time"]);
+		const reading = held
+			? { needsConfirmation: Boolean(held.needsConfirmation), by: String(held.by || "") }
+			: rateConPickupReadingOfPdf(pdfBase64, f["Pickup Notes/Instructions"]);
+		const changed = Boolean(held) && sent.trim() !== "" && pickupConfirmation.pickupChangedInModal(held.pickup, sent);
+		const header = (headers || []).find((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		return { reading, person: changed && header !== undefined ? { columns: [String(header).trim()], actor: rateConPickupActor(req) } : null };
+	} catch (e) {
+		console.error(`[ratecon-pickup] the create's pickup reading failed (the load is created as usual): ${(e && e.message) || e}`);
+		return null;
+	}
+}
+
+// A drag-and-drop create's pickup record (source dropzone), for the Pickup Appointment the
+// row was written with. Never throws.
+function recordRateConCreatePickupReading(loadId, headers, values, reading) {
+	try {
+		const i = (headers || []).findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const written = i >= 0 && values && values[i] != null ? String(values[i]) : "";
+		return writeRateConPickupReading(loadId, reading, written, false, "dropzone");
+	} catch (e) {
+		console.error(`[ratecon-pickup] the pickup record failed (the load is created as usual): ${(e && e.message) || e}`);
+		return "failed";
+	}
+}
+
+// GET /api/dashboard's Needs Confirmation codes (lib/load-review-flags.js): on the
+// request-local raw rows, before sanitizing, so a Load ID withheld from a Dispatcher still
+// gets its code. One query per table. Flag off: nothing, no row gets the key. Never throws.
+function annotateDashboardPickupReview(headers, loadIdHeader, rows) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED || loadIdHeader == null || !Array.isArray(rows)) return 0;
+	try {
+		const pickupHeader = loadReviewFlags.pickupHeaderOf(headers);
+		if (pickupHeader === null) return 0;
+		rateConPickupReadingsTable();
+		loadCellWritesTable();
+		const onBoard = new Set(rows.map((r) => (r && typeof r === "object" ? loadCellKey(r[loadIdHeader]) : "")).filter(Boolean));
+		const flagged = db.prepare("SELECT load_key, needs_confirmation FROM ratecon_pickup_readings WHERE needs_confirmation = 1").all()
+			.filter((r) => onBoard.has(r.load_key));
+		if (!flagged.length) return 0;
+		const keys = flagged.map((r) => r.load_key);
+		const marks = keys.map(() => "?").join(", ");
+		const cellRows = new Map();
+		const column = String(pickupHeader).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+		for (const r of db.prepare(`SELECT load_key, id, source, value, actor, at FROM load_cell_writes WHERE column_name = ? AND load_key IN (${marks}) ORDER BY id`).all(column, ...keys)) {
+			if (!cellRows.has(r.load_key)) cellRows.set(r.load_key, []);
+			cellRows.get(r.load_key).push(r);
+		}
+		const events = new Map();
+		for (const r of db.prepare(`SELECT load_id, new_status, changed_at, source, actor FROM load_status_history WHERE LOWER(LTRIM(TRIM(load_id), '#')) IN (${marks})`).all(...keys)) {
+			const k = loadCellKey(r.load_id);
+			if (!events.has(k)) events.set(k, []);
+			events.get(k).push(r);
+		}
+		return loadReviewFlags.annotateLoadReview({
+			headers,
+			rows,
+			loadIdHeader,
+			keyOf: loadCellKey,
+			pickup: {
+				records: new Map(flagged.map((r) => [r.load_key, r])),
+				cellRows,
+				events,
+				accountingMonths: (cells) => loadRowAccountingMonths(headers, cells),
+				isClosed: (mk) => periodWriteLocked(mk),
+				zone: APP_TIMEZONE,
+			},
+		});
+	} catch (e) {
+		console.error(`[ratecon-pickup] the dashboard's Needs Confirmation codes were not computed: ${(e && e.message) || e}`);
+		return 0;
+	}
 }
 
 app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
@@ -7621,9 +7981,11 @@ app.post("/api/n8n/extract-pdf-via-gemini", pdfOcrLimiter, async (req, res) => {
 					loadId: fields["Load Number"], unusable, fields,
 				}).catch(() => {});
 			}
-			// Read for the re-issue alert once the response below is sent.
+			// Read for the re-issue alert (and, with its flag on, the Needs Confirmation
+			// pickup reading) once the response below is sent.
 			const loadNumber = fields["Load Number"];
-			setImmediate(() => noteRateConDvir(loadNumber, base64));
+			const pickupNotes = fields["Pickup Notes/Instructions"];
+			setImmediate(() => noteRateConReadings(loadNumber, base64, pickupNotes));
 
 			// Mirror the Information Extractor output shape so the n8n
 			// Normalize Load Fields node (which reads $json.output.X) works
@@ -8010,6 +8372,17 @@ function reissueHeldAssignedClosedReason(held, named = []) {
 	return months.size ? `the email's Assigned Date is in a closed month (${[...months].sort().join(", ")})` : "";
 }
 
+// A stored row's cell (the row by header, or null for a new load) for a column
+// named exactly as the sheet has it, or by its trimmed name in any case; "" when
+// there is none.
+function storedCellNamed(stored, col) {
+	if (!stored) return "";
+	if (Object.prototype.hasOwnProperty.call(stored, col)) return stored[col] == null ? "" : String(stored[col]);
+	const want = String(col).trim().toLowerCase();
+	const hit = Object.keys(stored).find((h) => String(h).trim().toLowerCase() === want);
+	return hit === undefined || stored[hit] == null ? "" : String(stored[hit]);
+}
+
 // The values a later email may write to a load already in Job Tracking, by
 // sheet column: a blank (missing, null or only spaces) never replaces a stored
 // value, and a stored Assigned Date (every column assignedDateColumn() names) is
@@ -8018,27 +8391,31 @@ function reissueHeldAssignedClosedReason(held, named = []) {
 // still blank takes its `fallbacks` value. `stored` is the row by header, or null
 // for a new load. `protect` (from reissueHoldFor(), for a stored load) keeps the
 // held columns and every Assigned Date column, a blank one included, or with
-// `all` every column, as stored. Returns { values, kept, held, changed } (kept: the
+// `all` every column, as stored. `personKeep` (from personEditHoldCheck(), for a
+// stored load no re-issue hold protects, with RATECON_PERSON_EDIT_HOLD_ENABLED on):
+// [{ column }], the dates a person set that the email would change, kept as stored
+// and listed as held. Returns { values, kept, held, changed } (kept: the
 // columns whose stored value won; held: { column, stored, sent } where a
 // protected column's sent value really differed; changed: the other columns a
 // protected load's values change).
-function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null) {
+function keepStoredSheetValues(stored, values, fallbacks = {}, protect = null, personKeep = null) {
 	const blank = (v) => v === undefined || v === null || String(v).trim() === "";
-	const storedOf = (col) => {
-		if (!stored) return "";
-		if (Object.prototype.hasOwnProperty.call(stored, col)) return stored[col] == null ? "" : String(stored[col]);
-		const want = String(col).trim().toLowerCase();
-		const hit = Object.keys(stored).find((h) => String(h).trim().toLowerCase() === want);
-		return hit === undefined || stored[hit] == null ? "" : String(stored[hit]);
-	};
+	const storedOf = (col) => storedCellNamed(stored, col);
 	const out = {};
 	const kept = [];
 	const held = [];
 	const changed = [];
 	const guarded = Boolean(protect && stored);
+	const personKept = new Set(stored && !guarded && Array.isArray(personKeep) ? personKeep.map((p) => p.column) : []);
 	for (const [col, val] of Object.entries(values)) {
 		const have = storedOf(col);
 		const assigned = assignedDateColumn(col);
+		if (personKept.has(col)) {
+			out[col] = have;
+			if (String(val == null ? "" : val) !== have) kept.push(col);
+			held.push({ column: col, stored: have, sent: String(val) });
+			continue;
+		}
 		if (guarded && (protect.all || reissueHeldColumn(col) || assigned)) {
 			out[col] = have;
 			if (String(val == null ? "" : val) !== have) kept.push(col);
@@ -8067,6 +8444,278 @@ function keepStoredColumnsOk(obj) {
 	const entries = Object.entries(obj);
 	return entries.length <= KEEP_STORED_MAX_COLUMNS
 		&& entries.every(([, v]) => v === null || v === undefined || ((typeof v !== "object") && String(v).length <= KEEP_STORED_MAX_VALUE));
+}
+
+// PERSON EDIT HOLD (2026-10-22, Arvin's rule of 2026-10-21): a Pickup or Drop-off
+// Appointment a person corrected on an open load is never overwritten by a later
+// rate-con email; the email raises the re-issue alert instead, with its own
+// wording. The rule is lib/person-edit-hold.js; this is its record and its wiring.
+//
+// - load_cell_writes records, for those two columns (personEditHold.personHoldColumn()),
+//   every value keep-stored-values tells n8n to write ("ratecon"; the first time it sees a
+//   column, the date already on the sheet is recorded first as the app's own,
+//   "baseline"), every value a
+//   drag-and-drop create writes ("ratecon_create"), and every date a person saves through
+//   POST /api/data, PUT /api/data/:rowIndex or PUT /api/load/:loadId on Job Tracking
+//   ("person", with role and user id, no name). A stored date matching none of them was
+//   set by a person in the Google Sheet. Data-fix scripts write the sheet directly and are
+//   not recorded, so a fixed date counts as a person's (intended: a fix is deliberate).
+// - The hold runs only where the re-issue hold isn't protecting the load (not delivered,
+//   not invoiced, status readable, no closed month), and only while
+//   RATECON_REISSUE_HOLD_ENABLED is on too: with it off, that hold can't tell an open load,
+//   so nothing is held and one warning per start says why (decision 8).
+// - RATECON_PERSON_EDIT_HOLD_ENABLED (defaults OFF, /^(true|1|yes|on)$/i): on, the stored
+//   date is answered, listed as held and alerted; off, the answer is today's and a
+//   "would_hold" row is recorded for the shadow report (scripts/person-edit-hold-report.js).
+//   A comparison that turns on a date form momentKey() can't read is never a hold: today's
+//   write, one log line and a "format" row. The record runs whatever the flags.
+// - The record only ever writes its own table, in a try/catch: a failed record never
+//   blocks ingestion or an edit, and is logged (once, then at most hourly). A missed
+//   "ratecon" row can only make a later value look like a person's, so it fails toward
+//   holding and asking. Rows: the last LOAD_CELL_WRITES_KEEP per load, column and kind
+//   (evidence or shadow); a load untouched for LOAD_CELL_WRITES_IDLE_DAYS is purged daily.
+const personEditHold = require("./lib/person-edit-hold");
+const RATECON_PERSON_EDIT_HOLD_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.RATECON_PERSON_EDIT_HOLD_ENABLED ?? "").trim());
+const LOAD_CELL_WRITES_KEEP = 20;
+const LOAD_CELL_WRITES_IDLE_DAYS = 180;
+const LOAD_CELL_KEY_MAX = 120;
+const LOAD_CELL_COLUMN_MAX = 200;
+const LOAD_CELL_VALUE_MAX = 20000;
+const LOAD_CELL_EVIDENCE_SOURCES = ["ratecon", "ratecon_create", "baseline", "person"];
+const LOAD_CELL_SHADOW_SOURCES = ["would_hold", "held", "format"];
+
+// The record (created on first use). stored_value: the stored cell a would_hold, held
+// or format row was judged against (the shadow report shows both dates); "" otherwise.
+function loadCellWritesTable() {
+	if (loadCellWritesTable.ready) return;
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS load_cell_writes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			load_key TEXT NOT NULL,
+			column_name TEXT NOT NULL,
+			value TEXT NOT NULL,
+			source TEXT NOT NULL,
+			actor TEXT NOT NULL DEFAULT '',
+			stored_value TEXT NOT NULL DEFAULT '',
+			at TEXT NOT NULL
+		)
+	`);
+	db.exec("CREATE INDEX IF NOT EXISTS idx_load_cell_writes ON load_cell_writes(load_key, column_name, id)");
+	loadCellWritesTable.ready = true;
+}
+
+let loadCellWritesFailures = 0;
+let loadCellWritesFailureLoggedAt = 0;
+function loadCellWritesFailed(what, e) {
+	loadCellWritesFailures++;
+	const now = Date.now();
+	if (loadCellWritesFailures === 1 || now - loadCellWritesFailureLoggedAt > 60 * 60 * 1000) {
+		loadCellWritesFailureLoggedAt = now;
+		console.error(`[person-edit-hold] the load_cell_writes ${what} failed (${loadCellWritesFailures} so far; ingestion and edits unaffected): ${(e && e.message) || e}`);
+	}
+}
+
+function loadCellKey(loadId) {
+	return normLoadKey(loadId).slice(0, LOAD_CELL_KEY_MAX);
+}
+
+// The column as the sheet names it (exactly, or by its trimmed name in any case), trimmed.
+function loadCellColumnName(headers, col) {
+	const want = String(col == null ? "" : col).trim().toLowerCase();
+	const hit = (headers || []).find((h) => h === col) ?? (headers || []).find((h) => String(h == null ? "" : h).trim().toLowerCase() === want);
+	return String(hit === undefined ? col : hit).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+}
+
+function loadCellWriteRows(key, column) {
+	loadCellWritesTable();
+	return db.prepare("SELECT id, source, value, actor, stored_value, at FROM load_cell_writes WHERE load_key = ? AND column_name = ? ORDER BY id")
+		.all(String(key).slice(0, LOAD_CELL_KEY_MAX), String(column).slice(0, LOAD_CELL_COLUMN_MAX));
+}
+
+// One row. A blank value is never recorded; a shadow row the same as one already
+// there is not recorded again. Keeps the newest LOAD_CELL_WRITES_KEEP of its kind.
+// Throws on a database error (the callers catch).
+function recordLoadCellWrite(key, column, value, source, { actor = "", stored = "", at = new Date().toISOString() } = {}) {
+	loadCellWritesTable();
+	const k = String(key == null ? "" : key).slice(0, LOAD_CELL_KEY_MAX);
+	const c = String(column == null ? "" : column).trim().slice(0, LOAD_CELL_COLUMN_MAX);
+	const v = String(value == null ? "" : value).slice(0, LOAD_CELL_VALUE_MAX);
+	const s = String(stored == null ? "" : stored).slice(0, LOAD_CELL_VALUE_MAX);
+	if (!k || !c || !v.trim()) return false;
+	const kind = LOAD_CELL_SHADOW_SOURCES.includes(source) ? LOAD_CELL_SHADOW_SOURCES : LOAD_CELL_EVIDENCE_SOURCES;
+	if (kind === LOAD_CELL_SHADOW_SOURCES && db.prepare("SELECT 1 FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source = ? AND value = ? AND stored_value = ? LIMIT 1").get(k, c, source, v, s)) return false;
+	db.prepare("INSERT INTO load_cell_writes (load_key, column_name, value, source, actor, stored_value, at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+		.run(k, c, v, source, String(actor || "").slice(0, 80), s, at);
+	const inKind = kind.map(() => "?").join(", ");
+	db.prepare(`DELETE FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source IN (${inKind}) AND id NOT IN (
+		SELECT id FROM load_cell_writes WHERE load_key = ? AND column_name = ? AND source IN (${inKind}) ORDER BY id DESC LIMIT ?)`)
+		.run(k, c, ...kind, k, c, ...kind, LOAD_CELL_WRITES_KEEP);
+	return true;
+}
+
+// A LogisX edit that an email write overwrote (R2, L7: keep-stored-values read the
+// sheet before the edit and n8n wrote after it), logged once per edit.
+const lostPersonEditsLogged = new Set();
+function noteLostPersonEdit(key, column, personRow) {
+	const id = `${key}|${column}|${personRow.id}`;
+	if (lostPersonEditsLogged.has(id)) return;
+	if (lostPersonEditsLogged.size > 1000) lostPersonEditsLogged.clear();
+	lostPersonEditsLogged.add(id);
+	console.warn(`[person-edit-hold] load ${key} ${column}: the LogisX edit of ${personRow.at} is not in the sheet, which holds an earlier rate con's date (an email written after a read made before the edit); check the load`);
+}
+
+// For a found load no re-issue hold protects: each held column's decision. Answers
+// { hold: [{ column, header, stored, sent, part }], format: [{ column, header, stored, sent }] };
+// nothing when the record can't be read (today's rule).
+function personEditHoldCheck(key, headers, stored, values) {
+	const out = { hold: [], format: [] };
+	try {
+		for (const [col, val] of Object.entries(values || {})) {
+			if (!personEditHold.personHoldColumn(col)) continue;
+			const header = loadCellColumnName(headers, col);
+			const have = storedCellNamed(stored, col);
+			const sent = val == null ? "" : String(val);
+			const rows = loadCellWriteRows(key, header);
+			const lost = personEditHold.lostEdit(have, rows);
+			if (lost) noteLostPersonEdit(key, header, lost);
+			const d = personEditHold.decideColumn({ stored: have, sent, rows });
+			if (d.action === "hold") {
+				out.hold.push({ column: col, header, stored: have, sent, part: personEditHold.reasonPart(d, APP_TIMEZONE) });
+			} else if (d.action === "format") {
+				out.format.push({ column: col, header, stored: have, sent });
+				console.warn(`[person-edit-hold] load ${key} ${header}: "${have.slice(0, 40)}" and "${sent.slice(0, 40)}" can't be compared (a date form that can't be read); written as the email gave it`);
+			}
+		}
+	} catch (e) {
+		loadCellWritesFailed("read", e);
+		return { hold: [], format: [] };
+	}
+	return out;
+}
+
+// What keep-stored-values records once it has answered, for each held column the
+// email carries: first, when the column has no record yet, the stored non-blank cell
+// as the app's own "baseline" (R2 review M1: the date already on the sheet before the
+// record began is never taken for a person's, so two overlapping rate cons or a
+// failed n8n write can't make it look like one); then a "ratecon" row for the value it
+// tells n8n to write (a new load, or a value that really differs from the stored one);
+// then the shadow rows: "held" for each date the person hold kept, "would_hold" for
+// each date it would have kept (flag off) that the answer writes, "format" for each
+// unknown comparison the answer writes. personHeld: the answer's held list when the
+// person hold stood.
+function recordKeepStoredCellWrites(key, headers, stored, sentValues, answered, check, personHeld) {
+	try {
+		const at = new Date().toISOString();
+		for (const [col, value] of Object.entries(answered || {})) {
+			if (!personEditHold.personHoldColumn(col)) continue;
+			const column = loadCellColumnName(headers, col);
+			const have = storedCellNamed(stored, col);
+			if (stored && have.trim() && !loadCellWriteRows(key, column).some((r) => LOAD_CELL_EVIDENCE_SOURCES.includes(r.source))) {
+				recordLoadCellWrite(key, column, have, "baseline", { at });
+			}
+			const out = value == null ? "" : String(value);
+			if (out.trim() && (!stored || personEditHold.sameCell(have, out) !== true)) recordLoadCellWrite(key, column, out, "ratecon", { at });
+		}
+		const keptByPerson = new Set((personHeld || []).map((h) => h.column));
+		const writes = (e) => String(answered[e.column] == null ? "" : answered[e.column]) === e.sent;
+		for (const h of check.hold) {
+			if (keptByPerson.has(h.column)) recordLoadCellWrite(key, h.header, h.sent, "held", { stored: h.stored, at });
+			else if (writes(h)) recordLoadCellWrite(key, h.header, h.sent, "would_hold", { stored: h.stored, at });
+		}
+		for (const f of check.format) {
+			if (writes(f)) recordLoadCellWrite(key, f.header, f.sent, "format", { stored: f.stored, at });
+		}
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+	}
+}
+
+// The dates a person's save changed on Job Tracking (POST /api/data with before [],
+// PUT /api/data/:rowIndex, PUT /api/load/:loadId), recorded as "person" rows with role
+// and user id, after the write succeeded. A date only, and only when the dates really
+// differ (reissueSameValue(); the audit's own list compares exact text). Any other
+// sheet records nothing. Never throws.
+function recordPersonCellEdits(req, sheetName, headers, before, after) {
+	try {
+		if (String(sheetName == null ? "" : sheetName).trim().toLowerCase() !== "job tracking") return 0;
+		const hs = Array.isArray(headers) ? headers : [];
+		const idIdx = hs.findIndex((h) => String(h == null ? "" : h).trim().toLowerCase() === "load id");
+		if (idIdx === -1) return 0;
+		const cell = (row, i) => (Array.isArray(row) && row[i] != null ? String(row[i]) : "");
+		const key = loadCellKey(cell(after, idIdx) || cell(before, idIdx));
+		if (!key) return 0;
+		const user = (req && req.session && req.session.user) || {};
+		const actor = `${String(user.role || "").slice(0, 40)}#${user.id == null ? "" : String(user.id).slice(0, 20)}`;
+		const at = new Date().toISOString();
+		let n = 0;
+		hs.forEach((h, i) => {
+			if (!personEditHold.personHoldColumn(h)) return;
+			const to = cell(after, i);
+			if (!to.trim() || reissueSameValue(h, cell(before, i), to)) return;
+			if (recordLoadCellWrite(key, String(h).trim(), to, "person", { actor, at })) n++;
+		});
+		return n;
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+		return 0;
+	}
+}
+
+// A drag-and-drop create's dates (POST /api/loads/from-ratecon), recorded as the rate
+// con's ("ratecon_create", decision 5). Never throws. person (the Needs Confirmation pickup
+// plan, Revision 3 item 5; only with RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED on):
+// { columns, actor }, the columns the person changed in the review modal, recorded as
+// "person" rows instead.
+function recordRateConCreateCellWrites(loadId, headers, values, person = null) {
+	try {
+		const key = loadCellKey(loadId);
+		if (!key) return 0;
+		const at = new Date().toISOString();
+		let n = 0;
+		(headers || []).forEach((h, i) => {
+			if (!personEditHold.personHoldColumn(h)) return;
+			const name = String(h).trim();
+			const byPerson = Boolean(person && Array.isArray(person.columns) && person.columns.includes(name));
+			const value = values && values[i] != null ? String(values[i]) : "";
+			if (recordLoadCellWrite(key, name, value, byPerson ? "person" : "ratecon_create", byPerson ? { actor: String(person.actor || ""), at } : { at })) n++;
+		});
+		return n;
+	} catch (e) {
+		loadCellWritesFailed("record", e);
+		return 0;
+	}
+}
+
+// Why the person hold holds nothing although its flag is on, or "".
+function personEditHoldInertReason() {
+	return RATECON_PERSON_EDIT_HOLD_ENABLED && !RATECON_REISSUE_HOLD_ENABLED
+		? "RATECON_PERSON_EDIT_HOLD_ENABLED is on but RATECON_REISSUE_HOLD_ENABLED is off, so no corrected date is held (the person hold runs only where the re-issue hold can tell an open load); the record is still kept"
+		: "";
+}
+function warnPersonEditHoldInert() {
+	const why = personEditHoldInertReason();
+	if (why) console.warn(`[person-edit-hold] ${why}`);
+	return why;
+}
+warnPersonEditHoldInert();
+
+// Rows of loads with no row newer than LOAD_CELL_WRITES_IDLE_DAYS.
+function purgeOldLoadCellWrites(now = new Date()) {
+	try {
+		loadCellWritesTable();
+		const before = new Date(now.getTime() - LOAD_CELL_WRITES_IDLE_DAYS * 86400000).toISOString();
+		const r = db.prepare("DELETE FROM load_cell_writes WHERE load_key IN (SELECT load_key FROM load_cell_writes GROUP BY load_key HAVING MAX(at) < ?)").run(before);
+		if (r.changes > 0) console.log(`[person-edit-hold] purged ${r.changes} load_cell_writes row(s) of loads untouched for ${LOAD_CELL_WRITES_IDLE_DAYS} days`);
+		return r.changes;
+	} catch (e) {
+		loadCellWritesFailed("purge", e);
+		return 0;
+	}
+}
+if (startsJob("load cell-write record purge (at boot, then daily)")) {
+	purgeOldLoadCellWrites();
+	const timer = setInterval(() => purgeOldLoadCellWrites(), 24 * 60 * 60 * 1000);
+	if (typeof timer.unref === "function") timer.unref();
 }
 
 app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) => {
@@ -8102,26 +8751,49 @@ app.post("/api/n8n/keep-stored-values", n8nKeepStoredLimiter, async (req, res) =
 			headers.forEach((h, i) => { stored[h] = match[i] == null ? "" : match[i]; });
 		}
 		let hold = match && RATECON_REISSUE_HOLD_ENABLED ? reissueHoldFor(headers, match, key) : null;
+		// PERSON EDIT HOLD: a date a person set, on a found load the re-issue hold isn't
+		// protecting (and only with that switch on). Kept only with the flag on; with it
+		// off the decisions are only recorded ("would_hold").
+		const person = match && RATECON_REISSUE_HOLD_ENABLED && !hold ? personEditHoldCheck(key, headers, stored, body.values) : { hold: [], format: [] };
+		const personKeep = RATECON_PERSON_EDIT_HOLD_ENABLED ? person.hold : [];
 		let out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 		// The values going out are held to the closed months too: a blank stored
-		// date filled with one in a closed month moves the load into it.
+		// date filled with one in a closed month moves the load into it. Checked on
+		// the answer WITHOUT the person hold first, so the person hold only ever adds
+		// holds: an email date it would keep out (a "TBD", a closed-month date) still
+		// holds every column, as it does with the flag off. Then, when the person hold
+		// keeps a date, on the answer it would really send. A person hold in the same
+		// answer as a hold of every column folds into it (R2, L3).
 		if (match && RATECON_REISSUE_HOLD_ENABLED && !(hold && hold.all)) {
-			const outgoing = reissueOutgoingHold(headers, match, out.values);
+			let outgoing = reissueOutgoingHold(headers, match, out.values);
+			if (!outgoing && !hold && personKeep.length) {
+				const kept = keepStoredSheetValues(stored, body.values, fallbacks, null, personKeep);
+				outgoing = reissueOutgoingHold(headers, match, kept.values);
+				if (!outgoing) out = kept;
+			}
 			if (outgoing) {
-				hold = { all: true, reasons: [...(hold ? hold.reasons : []), outgoing] };
+				const folded = personEditHold.foldReason(personKeep.map((p) => p.column));
+				hold = { all: true, reasons: [...(hold ? hold.reasons : []), outgoing, ...(folded ? [folded] : [])] };
 				out = keepStoredSheetValues(stored, body.values, fallbacks, hold);
 			}
 		}
+		const personHeld = !hold && personKeep.length ? out.held : [];
 		const assignedClosed = hold ? reissueHeldAssignedClosedReason(out.held, hold.all ? hold.reasons : []) : "";
-		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ") : "";
+		const holdReason = hold ? [...hold.reasons, ...(assignedClosed ? [assignedClosed] : [])].join(" and ")
+			: personHeld.length ? personEditHold.holdReason(personKeep.map((p) => ({ column: p.column, part: p.part }))) : "";
 		// storedLoadId: the stored row's Load ID cell as the sheet has it, so n8n can
 		// write to that row (its appendOrUpdate matches the exact text).
 		res.json({
 			loadId, ...(match ? { storedLoadId: match[idCol] == null ? "" : String(match[idCol]) } : {}),
 			found: Boolean(match), rows: matches.length, values: out.values, kept: out.kept, held: out.held, holdReason, alsoChanged: out.changed,
 		});
+		recordKeepStoredCellWrites(key, headers, stored, body.values, out.values, person, personHeld);
+		// NEEDS CONFIRMATION PICKUPS (flag on): the pickup record (untouched when a hold kept the date)
+		recordKeepStoredPickupReading(loadId, body.values, out.values, hold, personHeld);
 		if (hold && (out.held.length || out.changed.length)) {
 			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: out.held, changed: out.changed })).catch(() => {});
+		} else if (personHeld.length) {
+			Promise.resolve(alertRateConReissueHold({ loadId, reason: holdReason, held: personHeld, source: "person" })).catch(() => {});
 		}
 	} catch (err) {
 		console.error("n8n keep-stored-values:", err.message);
@@ -8172,8 +8844,11 @@ const REISSUE_TRACKED_SQL = "NOT (alerted_at IS NOT NULL AND emailed_at IS NULL 
 // row, so two overlapping calls never both send (a claim older than
 // REISSUE_CLAIM_STALE_MS, a call that died mid-send, can be retaken). note: the
 // DVIR line the first alert carried (rateconDvir.dvirAlertLine()), so a retry
-// says it too; it is no part of the dedupe key. Created on first use; the later
-// columns are added to a table made before them.
+// says it too; it is no part of the dedupe key. source: what held the value,
+// "reissue" (the re-issue hold) or "person" (PERSON EDIT HOLD: a date a person set);
+// it picks the alert's wording, and the first row for a load, column and value
+// decides it (a value alerted as a person hold isn't alerted again as a re-issue).
+// Created on first use; the later columns are added to a table made before them.
 function reissueHoldTable() {
 	if (reissueHoldTable.ready) return;
 	db.exec(`
@@ -8195,13 +8870,15 @@ function reissueHoldTable() {
 			attempts INTEGER,
 			last_try TEXT,
 			note TEXT,
+			source TEXT DEFAULT 'reissue',
 			PRIMARY KEY (load_id, column_name, sent_value)
 		)
 	`);
 	db.transaction(() => {
 		const have = new Set(db.prepare("PRAGMA table_info(ratecon_reissue_holds)").all().map((c) => c.name));
 		const later = [["claimed_at", "TEXT"], ["emailed_at", "TEXT"], ["notified_at", "TEXT"], ["email_skipped", "TEXT"],
-			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"], ["note", "TEXT"]];
+			["notify_skipped", "TEXT"], ["load_label", "TEXT"], ["attempts", "INTEGER"], ["last_try", "TEXT"], ["note", "TEXT"],
+			["source", "TEXT DEFAULT 'reissue'"]];
 		for (const [col, type] of later) {
 			if (!have.has(col)) db.exec(`ALTER TABLE ratecon_reissue_holds ADD COLUMN ${col} ${type}`);
 		}
@@ -8214,14 +8891,28 @@ function reissueHoldTable() {
 }
 
 // Claims a ledger row for one call (claimedAt) when it still owes a channel and
-// no live call holds it, and counts the try. Answers which channels it owes, or
-// null.
+// no live call holds it, and counts the try. Answers which channels it owes, with
+// the row's source and reason, or null.
 function claimReissueRow(key, column, sent, claimedAt, staleBefore) {
 	const owed = db.prepare(`UPDATE ratecon_reissue_holds SET claimed_at = ?, attempts = COALESCE(attempts, 0) + 1, last_try = ?
 		WHERE load_id = ? AND column_name = ? AND sent_value = ? AND ${REISSUE_OWES_SQL} AND ${REISSUE_TRACKED_SQL}
 		AND (claimed_at IS NULL OR claimed_at < ?)
-		RETURNING emailed_at, notified_at, email_skipped, notify_skipped`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
-	return owed ? { email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped } : null;
+		RETURNING emailed_at, notified_at, email_skipped, notify_skipped, source, reason`).get(claimedAt, claimedAt, key, column, sent, staleBefore);
+	return owed ? {
+		email: !owed.emailed_at && !owed.email_skipped, inApp: !owed.notified_at && !owed.notify_skipped,
+		source: owed.source === "person" ? "person" : "reissue", ledgerReason: owed.reason || "",
+	} : null;
+}
+
+// Rows grouped by source ("reissue" first), each group sent with its own wording.
+function reissueRowsBySource(rows) {
+	const groups = new Map();
+	for (const r of rows) {
+		const s = r.source === "person" ? "person" : "reissue";
+		if (!groups.has(s)) groups.set(s, []);
+		groups.get(s).push(r);
+	}
+	return [...groups.entries()].sort(([a], [b]) => (a === b ? 0 : a === "reissue" ? -1 : 1));
 }
 
 // Whether a ledger row's next retry slot has come at nowMs (REISSUE_RETRY_BACKOFF_MS
@@ -8241,11 +8932,14 @@ function reissueRetryDue(r, nowMs) {
 // the next sighting or retry sweep, on its own. rows: [{ column, stored, sent,
 // kind, email, inApp }]; firstSeen marks a retry, and the email says when the
 // change was first seen. note (the DVIR line, or "") goes in both channels.
-async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null }) {
+// source "person" (PERSON EDIT HOLD: the rows are dates a person set, kept) has its
+// own title, subject and text; "reissue" keeps the re-issue wording.
+async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt, now, firstSeen = null, source = "reissue" }) {
 	const row = "WHERE load_id = ? AND column_name = ? AND sent_value = ?";
 	const toEmail = rows.filter((e) => e.email);
 	const toNotify = rows.filter((e) => e.inApp);
-	const why = String(reason || "").slice(0, 160) || "protected";
+	const byPerson = source === "person";
+	const why = String(reason || "").slice(0, 160) || (byPerson ? "a person corrected this date" : "protected");
 	const fieldName = (e) => `${e.column}${e.kind === "held" ? " (held)" : ""}`;
 	let capped = false;
 	let skipped = null;
@@ -8269,7 +8963,8 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			}
 		}
 		if (toNotify.length) {
-			const title = toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
+			const title = byPerson ? `Load ${label}: corrected date kept`
+				: toNotify.some((e) => e.kind === "held") ? `Load ${label}: re-issued rate con held` : `Load ${label}: re-issued rate con changed fields`;
 			// Each listed column with its old and new value, so a change the email cap
 			// skipped still reaches a person. The dispatch room sees this, and Dispatchers
 			// get no broker contact data: a broker-withheld column (BROKER_WITHHELD_RE) is
@@ -8288,10 +8983,11 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 			};
 			const bodyOf = (view) => toNotify.map((e) => (BROKER_WITHHELD_RE.test(e.column)
 				? `${fieldName(e)}: broker contact, not shown`
-				: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
+				: byPerson ? `${e.column}: ${cut(view(e.stored))} kept; the rate con said ${cut(view(e.sent))}`
+					: `${fieldName(e)}: ${cut(view(e.stored))} → ${cut(view(e.sent))}`)).join("; ") + (note ? `. ${view(note)}` : "");
 			const body = bodyOf((v) => String(v));
 			const redactedBody = BROKER_CONTACT_VALUE_REDACTION_ENABLED ? bodyOf((v) => brokerContact.redactNoticeValue(v)) : null;
-			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })) };
+			const metadata = { loadId: label, reason: why, fields: toNotify.map((e) => ({ column: e.column, kind: e.kind })), ...(byPerson ? { source: "person" } : {}) };
 			const storedMetadata = redactedBody == null ? metadata : { ...metadata, redactedBody };
 			try {
 				insertDispatchNotification.run("ratecon-reissue-held", title, body, JSON.stringify(storedMetadata));
@@ -8310,26 +9006,43 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 		}
 		let mailing = null;
 		if (toEmail.length && !capped) {
-			const anyHeld = toEmail.some((e) => e.kind === "held");
-			const subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
 			const cell = (v) => `<td style="padding:6px 10px;border:1px solid #ddd;">${escHtml(v === "" ? "(blank)" : v)}</td>`;
-			const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
-			const lead = anyHeld
-				? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
-				: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
 			const retry = firstSeen
 				? `<p>This is a retry: the first try to send this email failed. The change was first seen ${escHtml(appTime.dateTextInZone(new Date(firstSeen), APP_TIMEZONE, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.</p>`
 				: "";
-			const html =
-				`<p><b>${lead}</b></p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
-				"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
-				"The held fields keep their stored values; the others were written as the email gave them.</p>" +
-				"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
-				"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
-				"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
-				tableRows + "</table>" +
-				"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
-				"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			let subject;
+			let html;
+			if (byPerson) {
+				const th = (t) => `<th style="padding:6px 10px;border:1px solid #ddd;">${t}</th>`;
+				const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell("kept: the person's date")}</tr>`).join("");
+				const columns = [...new Set(toEmail.map((e) => e.column))];
+				const named = columns.length > 1 ? `${columns.slice(0, -1).join(", ")} and ${columns[columns.length - 1]}` : columns[0];
+				subject = `Load ${label}: a later rate con did not replace a corrected date`;
+				html =
+					`<p><b>A later rate con for load ${escHtml(label)} carried a different ${escHtml(named)} from the one a person set. The person's date was kept.</b></p>` +
+					`<p>Kept because ${escHtml(why)}.</p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
+					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+					`<tr>${th("Field")}${th("Kept")}${th("In the email")}${th("Result")}</tr>` + tableRows + "</table>" +
+					"<p style=\"margin-top:14px;\">If the email's date is right (a real reschedule), change the load in LogisX. Nothing is applied for you.</p>" +
+					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			} else {
+				const anyHeld = toEmail.some((e) => e.kind === "held");
+				subject = anyHeld ? `Load ${label}: a re-issued rate con was held` : `Load ${label}: a re-issued rate con changed fields`;
+				const tableRows = toEmail.map((e) => `<tr>${cell(e.column)}${cell(e.stored)}${cell(e.sent)}${cell(e.kind === "held" ? "held: the stored value was kept" : "written")}</tr>`).join("");
+				const lead = anyHeld
+					? `A rate con for load ${escHtml(label)} came in again; it was held because: ${escHtml(why)}.`
+					: `A rate con for load ${escHtml(label)} came in again and changed fields on a load that is protected because: ${escHtml(why)}.`;
+				html =
+					`<p><b>${lead}</b></p>` + retry + (note ? `<p>${escHtml(note)}</p>` : "") +
+					"<p>Brokers re-send rate cons after delivery (C.H. Robinson's \"Booked Load #\" can carry DVIR deductions and an advance). " +
+					"The held fields keep their stored values; the others were written as the email gave them.</p>" +
+					"<table style=\"border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;\">" +
+					"<tr><th style=\"padding:6px 10px;border:1px solid #ddd;\">Field</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Stored</th>" +
+					"<th style=\"padding:6px 10px;border:1px solid #ddd;\">In the re-issue</th><th style=\"padding:6px 10px;border:1px solid #ddd;\">Result</th></tr>" +
+					tableRows + "</table>" +
+					"<p style=\"margin-top:14px;\">To decide: compare with the rate con, and change the load by hand in LogisX only if a held value is right. Nothing is applied for you.</p>" +
+					"<p style=\"color:#888;font-size:12px;\">Reported once per load, field and value.</p>";
+			}
 			if (ADMIN_NOTIFY_EMAIL) mailing = sendEmail(ADMIN_NOTIFY_EMAIL, subject, html);
 			else skipped = "no_recipient";
 		}
@@ -8367,9 +9080,12 @@ async function sendReissueAlert({ key, label, reason, note = "", rows, claimedAt
 // later sighting of the same change, whatever the retry slot). Both channels also
 // carry the DVIR line (rateconDvir.dvirAlertLine(), from the reading the extract
 // route kept for this load, rateConDvirReading()), which changes nothing held or
-// written and nothing in the ledger's key. Fire-and-forget: never throws, never
-// rejects.
-async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [] }) {
+// written and nothing in the ledger's key. source: "reissue", or "person" for a
+// date a person set (PERSON EDIT HOLD), recorded on each new ledger row; the rows a
+// call sends go out once per source, each with its own wording (a row first seen
+// under the other source keeps that source and its reason). Fire-and-forget:
+// never throws, never rejects.
+async function alertRateConReissueHold({ loadId, reason = "", held = [], changed = [], source = "reissue" }) {
 	if (!RATECON_REISSUE_HOLD_ENABLED) return { alerted: false, reason: "disabled" };
 	try {
 		reissueHoldTable();
@@ -8384,19 +9100,27 @@ async function alertRateConReissueHold({ loadId, reason = "", held = [], changed
 		const note = cap(rateconDvir.dvirAlertLine(rateConDvirReading(raw), held));
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+		const src = source === "person" ? "person" : "reissue";
+		const insert = db.prepare("INSERT OR IGNORE INTO ratecon_reissue_holds (load_id, column_name, sent_value, stored_value, kind, reason, first_seen, load_label, note, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 		const staleBefore = new Date(now.getTime() - REISSUE_CLAIM_STALE_MS).toISOString();
 		const fresh = [];
 		for (const e of entries) {
-			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label, note);
+			insert.run(key, e.column, e.sent, e.stored, e.kind, cap(reason), nowIso, label, note, src);
 			const owed = claimReissueRow(key, e.column, e.sent, nowIso, staleBefore);
 			if (owed) fresh.push({ ...e, ...owed });
 		}
 		if (!fresh.length) return { alerted: false, reason: "already_alerted", key };
-		const r = await sendReissueAlert({ key, label, reason: cap(reason), note, rows: fresh, claimedAt: nowIso, now });
-		console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
-			label, r.why, r.fields, r.emailState, r.inAppState);
-		return { alerted: r.emailed || r.notified, emailed: r.emailed, notified: r.notified, key, ...(r.capped ? { reason: "daily_cap" } : {}) };
+		const sent = [];
+		for (const [group, rows] of reissueRowsBySource(fresh)) {
+			const why = group === src ? cap(reason) : [...new Set(rows.map((x) => x.ledgerReason).filter(Boolean))].join("; ");
+			const r = await sendReissueAlert({ key, label, reason: why, note, rows, claimedAt: nowIso, now, source: group });
+			console.log("[ratecon-reissue] %s — load %s (%s): %s; email %s; in-app %s", r.emailed || r.notified ? "ALERT" : "ALERT UNDELIVERED",
+				label, r.why, r.fields, r.emailState, r.inAppState);
+			sent.push(r);
+		}
+		const emailed = sent.some((r) => r.emailed);
+		const notified = sent.some((r) => r.notified);
+		return { alerted: emailed || notified, emailed, notified, key, ...(sent.some((r) => r.capped) ? { reason: "daily_cap" } : {}) };
 	} catch (e) {
 		console.error("[ratecon-reissue] alert failed:", e && e.message);
 		return { alerted: false, reason: "error" };
@@ -8461,14 +9185,23 @@ async function sweepRateConReissueHolds({ now = new Date(), clock = () => new Da
 			if (owed) claimed.push({ column: r.column_name, stored: r.stored_value, sent: r.sent_value, kind: r.kind, ...owed });
 		}
 		if (!claimed.length) continue;
-		const reason = [...new Set(due.map((r) => r.reason).filter(Boolean))].join("; ");
 		const label = due[0].load_label || key;
-		// The newest alert's DVIR line (due is in first_seen order).
-		const noted = due.filter((r) => r.note);
-		const note = noted.length ? noted[noted.length - 1].note : "";
-		const res = await sendReissueAlert({ key, label, reason, note, rows: claimed, claimedAt, now: at, firstSeen: due[0].first_seen });
+		// Each source's rows go out with their own wording (a load's re-issue rows and
+		// person-hold rows are two alerts, as they were first sent).
+		let emailFailed = false;
+		let inAppFailed = false;
+		for (const [group, rows] of reissueRowsBySource(claimed)) {
+			const own = due.filter((r) => (r.source === "person" ? "person" : "reissue") === group);
+			const reason = [...new Set(own.map((r) => r.reason).filter(Boolean))].join("; ");
+			// The newest alert's DVIR line (due is in first_seen order).
+			const noted = own.filter((r) => r.note);
+			const note = noted.length ? noted[noted.length - 1].note : "";
+			const res = await sendReissueAlert({ key, label, reason, note, rows, claimedAt, now: at, firstSeen: own[0].first_seen, source: group });
+			emailFailed = emailFailed || res.emailFailed;
+			inAppFailed = inAppFailed || res.inAppFailed;
+		}
 		tried++;
-		if (res.emailFailed || res.inAppFailed) failing.push(`${label} (${[res.emailFailed ? "email" : "", res.inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
+		if (emailFailed || inAppFailed) failing.push(`${label} (${[emailFailed ? "email" : "", inAppFailed ? "in-app" : ""].filter(Boolean).join(", ")})`);
 		else delivered++;
 	}
 	if (tried) {
@@ -8873,7 +9606,17 @@ app.use(express.static(clientDistPath));
 // The Dispatch Management sheet (n8n writes here): resolved at boot, above, from
 // SPREADSHEET_ID; production's own process alone runs without one.
 const SPREADSHEET_ID = SHEET_TARGET.id;
-const ARCHIVE_SPREADSHEET_ID = process.env.ARCHIVE_SPREADSHEET_ID || "1WCiMmcI7GuS4eFaG9PAop5CFtMKKtfla1sOAKxcEduI"; // Old data (read-only archive)
+// The read-only archive of closed months: ARCHIVE_SPREADSHEET_ID, else production's
+// archive for production's own process only (lib/sheet-id.js), so a local, replica
+// or staging run never reads production's archive.
+const ARCHIVE_SPREADSHEET_ID = require("./lib/sheet-id").resolveArchiveSpreadsheetId(process.env, process.cwd()).id;
+// Module scope, so it is logged once per process start and never per request.
+if (!ARCHIVE_SPREADSHEET_ID) {
+	console.warn(
+		"[archive] ⚠️ ARCHIVE_SPREADSHEET_ID is not set — the archive is off: GET /api/archive and " +
+		"/api/archive/tabs answer 503 ARCHIVE_UNCONFIGURED, and the rate-con sweep checks Job Tracking without it.",
+	);
+}
 const DEFAULT_SHEET = "Job Tracking"; // Default tab name
 const KEY_FILE = "./service-account-key.json"; // Path to your service account JSON
 
@@ -11717,9 +12460,37 @@ function isRateConDocType(type) {
 }
 
 // The rows a load's Documents panel lists: live, and not a rate con. ONE copy,
-// read by GET /api/documents/:loadId and by guardRootLoadDocument's Driver rule,
-// so the files a driver may open cannot drift from the list they are shown.
+// read by GET /api/documents/:loadId, by guardRootLoadDocument's Driver rule and
+// by GET /api/driver/:driverName's per-load counts, so the files a driver may
+// open cannot drift from the list they are shown. For a Driver, all three also
+// keep only the rows filed under him (documentFiledUnder(), below).
 const LOAD_PANEL_DOCUMENT_FILTER = `deleted_at IS NULL AND NOT (${RATECON_DOCUMENT_SQL})`;
+
+// Is this load document filed under this driver? documents.driver is the FILED
+// driver: a Driver's upload is filed under his session name, an office upload
+// from the dashboard's load panel under the load's Job Tracking driver at the
+// time. A Driver sees a load document only when the load is his today
+// (loadBelongsToDriver(), unchanged) AND the row is filed under him, so after a
+// reassignment the earlier driver's documents stay with the office, and the new
+// driver sees his own and what the office files under him (2026-10-22). A row
+// filed under no one (an office upload to a load with no driver yet) is
+// office-only and never reaches a later driver. Names compare through
+// normalizeDriverName(), as loadBelongsToDriver() does; a blank name on either
+// side matches nothing. ONE copy, read by GET /api/documents/:loadId,
+// guardRootLoadDocument's Driver rule and GET /api/driver/:driverName's per-load
+// counts, so what a driver is shown, what he may open and what his app counts
+// cannot drift. Super Admin and Dispatcher are not narrowed by it. Pinned by
+// scripts/test-driver-docs-current-holder.js.
+//
+// To give the new driver of a relay load the earlier driver's paperwork, the
+// office attaches a copy from the load panel as BOL or Other, never as POD:
+// every live POD on a load goes on its broker invoice, so a second copy of a
+// POD prints twice.
+function documentFiledUnder(row, driverName) {
+	const want = normalizeDriverName(driverName == null ? "" : String(driverName));
+	if (!want) return false;
+	return normalizeDriverName(row && row.driver != null ? String(row.driver) : "") === want;
+}
 
 // The documents an Investor's Document Portal lists: live, not a rate con, and
 // on a driver of theirs. ONE copy, read by GET /api/investor/documents and by
@@ -11775,9 +12546,14 @@ async function guardRootLoadDocument(req, res, next, file) {
 		}
 
 		if (user.role === "Driver") {
-			const loadIds = db.prepare(
-				`SELECT DISTINCT load_id FROM documents WHERE file_name = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}`
-			).all(file).map((r) => r.load_id);
+			// The rows his Documents panel would list: filed under him
+			// (documentFiledUnder()), then whether any of THEIR loads is his
+			// today. Rows first, loads second, so one row must be both: a row
+			// filed under him on a load he does not hold, beside another
+			// driver's row on his load, opens nothing.
+			const loadIds = [...new Set(db.prepare(
+				`SELECT load_id, driver FROM documents WHERE file_name = ? AND ${LOAD_PANEL_DOCUMENT_FILTER}`
+			).all(file).filter((r) => documentFiledUnder(r, user.driverName)).map((r) => r.load_id))];
 			if (!loadIds.length) return res.status(404).end();
 			const owned = await driverOwnsAnyLoad(loadIds, user.driverName);
 			if (sentIfLoadOwnershipUnverified(res, owned)) return;
@@ -11807,7 +12583,8 @@ async function guardRootLoadDocument(req, res, next, file) {
 //
 // Opened by the receipt's own driver, Super Admin and the roles that review
 // receipts (approve / reject: Super Admin, Dispatcher), plus the Investor rule
-// below, and always sent without location or other metadata. The rule and the
+// below; a PDF receipt by those two roles only (2026-10-22, PDF_RECEIPT_ACCESS);
+// and always sent without location or other metadata. The rule and the
 // copy live in lib/receipt-files.js; this wires them to the database. The
 // guard serves the file itself, so express.static never sends a stored
 // receipt, and carries its own limits (RECEIPT_SERVE_LIMITS there: a few image
@@ -11885,16 +12662,17 @@ function guardExpenseReceipt(req, res, next, url, file) {
 }
 
 // uploads/chat/ (owner, 2026-10-22): a file opens only for the people who can
-// read the conversation it was sent in (Super Admin and Dispatcher every
-// thread; a Driver or Investor his own), decided by the first message that
-// names it; everyone else gets 404. Photos go out without their metadata (no
-// location). The rule and the copy live in lib/chat-files.js. chat_uploads
-// records who stored each file, so a message carries only its sender's own
-// upload (POST /api/messages).
+// read the conversation it was sent in (Super Admin every thread, a Dispatcher
+// every thread but an investor conversation's (INVESTOR_CHAT_SQL); a Driver or
+// Investor his own), decided by the first message that names it; everyone else
+// gets 404. Photos go out without their metadata (no location). The rule and
+// the copy live in lib/chat-files.js. chat_uploads records who stored each file,
+// so a message carries only its sender's own upload (POST /api/messages).
 db.exec(chatFiles.CHAT_UPLOADS_SCHEMA_SQL);
 const chatAttachmentGuard = chatFiles.createChatAttachmentGuard({
 	db,
 	chatDir: path.join(DATA_DIR, "uploads", "chat"),
+	investorChatSql: INVESTOR_CHAT_SQL,
 	logError: (msg) => console.error(msg),
 });
 function guardChatAttachment(req, res, next, url, file) {
@@ -17811,6 +18589,15 @@ function invoiceWriteRefusal(code, message) {
 	return err;
 }
 
+// commitInvoiceWithPdf()'s refusal when a month of the invoice's span closed during
+// the request; the route answers it with invoiceClosedMonthRefusal(), audited.
+function invoiceClosedMonthWriteRefusal(block, guard) {
+	const err = invoiceWriteRefusal(block.unreadable ? "PERIOD_LOCK_UNREADABLE" : "PERIOD_FINALIZED",
+		"A month this invoice covers closed while it was being made. Nothing was saved.");
+	err.closedMonth = { block, guard };
+	return err;
+}
+
 // ============================================================
 // THE DAYS AN INVOICE PAYS — invoice_paid_days (B12, the trip work-day rule)
 // ============================================================
@@ -17947,6 +18734,9 @@ function backfillInvoicePaidDays({ write = false } = {}) {
 //                               planned (its row object), or null
 //   slot                        { driverName, weekStart } for a weekly invoice —
 //                               the driver-week it claims; null for a manual one
+//   monthGuard                  the route's closed-month guard (invoiceClosedMonthBlock()),
+//                               asked again first in the transaction: a month can
+//                               close during the request's awaits; or null
 //   insert()                    runs the INSERT; its return value is returned
 //
 // The order is the point:
@@ -17964,7 +18754,7 @@ function backfillInvoicePaidDays({ write = false } = {}) {
 // file was taken meanwhile, INVOICE_WEEK_CHANGED when the driver-week was. Both
 // mean "generate it again"; the retry mints the next free number and re-reads the
 // week.
-function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, insert }) {
+function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing = null, slot = null, monthGuard = null, insert }) {
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, pdfFileName);
@@ -17973,6 +18763,8 @@ function commitInvoiceWithPdf({ invoiceNumber, pdfFileName, pdfBuffer, replacing
 	try {
 		fs.writeFileSync(tmpPath, pdfBuffer);
 		return db.transaction(() => {
+			const closed = monthGuard ? invoiceClosedMonthBlock(monthGuard.span) : null;
+			if (closed) throw invoiceClosedMonthWriteRefusal(closed, monthGuard);
 			if (invoiceNumberHolders(invoiceNumber, pdfFileName, replacingId).length) {
 				throw invoiceWriteRefusal("INVOICE_NUMBER_TAKEN",
 					`Invoice number ${invoiceNumber} was given to another invoice while this one was being generated. Nothing was saved; generate it again.`);
@@ -18883,8 +19675,7 @@ async function rerenderInvoicePdfFromStoredData(invoiceRow) {
 	// carries now (the snapshot is otherwise frozen): personalRenderData().
 	const personalRows = personalRowsOnInvoice(invoiceRow.id);
 	const { templateName, data } = personalRenderData(renderData, invoiceRow, personalRows);
-	const withReceipts = await personalReceiptRenderData(data, personalRows);
-	const pdfBuffer = await renderPolicy(templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(templateName, data, personalRows, invoiceRow.driver);
 	const uploadsDir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 	// After the render's await: checked, then written, with nothing in between.
@@ -19699,6 +20490,9 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 		// The Daily Rate column's figure for the day, as a generated invoice stores it.
 		cell.rate = e.rate;
 		cell.loadBol = e.loads.join(", ");
+		// The PDF names a late day's loads (trip days) as it names the grid's: a
+		// stored grid without `listed` prints loadBol, as before.
+		if (Array.isArray(cell.listed)) { cell.listed = [...e.loads]; cell.scheduled = []; }
 		added.push(e);
 	}
 	if (!added.length) return null;
@@ -19710,8 +20504,7 @@ async function addLateWorkDaysToInvoice(invoiceRow, entries, req) {
 	for (const e of added) for (const l of e.loads) if (!loadIds.includes(l)) loadIds.push(l);
 	const personalRows = personalRowsOnInvoice(inv.id);
 	const rendered = personalRenderData(next, { ...inv, total_earnings: total }, personalRows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, personalRows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, personalRows, inv.driver);
 	const dir = path.join(DATA_DIR, "uploads", "invoices");
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 	const finalPath = path.join(dir, inv.pdf_file_name);
@@ -20379,11 +21172,23 @@ function invoiceLoadWindow(load, { cols, headers, monthCols, blankPickupFrom = I
 // generateInvoiceHandler() and scripts/blank-pickup-dry-run.js both call it, so
 // the dry run computes exactly the days generate pays. `blankPickupFrom` is
 // INVOICE_BLANK_PICKUP_FALLBACK_FROM (null while off); only the dry run passes
-// another. Returns { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads }:
-// blankPickupLoads names each load whose window started at its Assigned Date
-// and that pays a day of the invoice no other load, trip rule or added day pays;
-// tripErrors each load the trip work-day rule could not read ({ loadId, error }:
-// its window paid it).
+// another. Returns { activeDaySet, dayLoadMap, dayListed, dayScheduled,
+// dayPayMonth, blankPickupLoads, tripErrors }: dayLoadMap the loads that pay
+// each day (the grid's loadBol; its readers take a day's pay month from them,
+// as dayPayMonth does); blankPickupLoads each load whose window started at its
+// Assigned Date and that pays a day of the invoice no other load, trip rule or
+// added day pays; tripErrors each load the trip work-day rule could not read
+// ({ loadId, error }: its window paid it).
+//
+// dayListed is the loads each paid day lists on the invoice (B23, 2026-10-23),
+// built once the overrides have set the paid days: a trip-rule load on its trip
+// days and an extraRuleLoads one on its days, as they pay; any other billed load
+// on each paid day of its span, from its window's first day (its Assigned Date
+// when that is later; a date that can't be read is not) to its completion day
+// (invoiceCompletionDay(), else the window's last day), in sheet order. A paid
+// day no load is listed on lists its paying loads, and dayScheduled names them
+// (the PDF prints each "<id> (scheduled)"). Neither changes which days are paid
+// or what they pay.
 function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRule = null, weekStart, weekEnd: computedWeekEnd, nameNorm, blankPickupFrom = INVOICE_BLANK_PICKUP_FALLBACK_FROM }) {
 	const { loadIdCol } = cols;
 	const tripErrors = [];
@@ -20429,6 +21234,13 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 	const fallbackPayers = {};
 	const paidOtherwise = new Set();
 	const fallbackLoads = [];
+	// For dayListed, built after the overrides: in sheet order, each load and the
+	// days it is listed on ({ id, days } for the trip rule and extraRuleLoads,
+	// { id, from, to } for a window's span). The Assigned Date column is found on
+	// its own: monthCols is null while no pay rule reads the Assigned month, and
+	// the pay rules read it.
+	const listings = [];
+	const assignedCol = findCol(headers, /assigned.*date|date.*assigned/i);
 
 	for (const load of loads) {
 		// The window (lib/load-pay-days.js payWindow(), invoiceLoadWindow()):
@@ -20456,6 +21268,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 					if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 					if (ruleLid && !dayLoadMap[ds].includes(ruleLid)) dayLoadMap[ds].push(ruleLid);
 				}
+				listings.push({ id: ruleLid, days: new Set(trip) });
 				continue;
 			}
 		}
@@ -20509,6 +21322,17 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (lid && !dayLoadMap[ds].includes(lid)) dayLoadMap[ds].push(lid);
 		}
+		// The load's span on the invoice: from the window's first day, or the
+		// Assigned Date when later (read as invoiceLoadWindow() reads it), to the
+		// completion day, else the window's last day.
+		const windowFrom = fmtLocalDate(start);
+		const assignedAt = assignedCol && load[assignedCol] ? moneySheetDate(load[assignedCol]) : null;
+		const assignedDay = assignedAt ? fmtLocalDate(assignedAt) : "";
+		listings.push({
+			id: lid,
+			from: assignedDay > windowFrom ? assignedDay : windowFrom,
+			to: invoiceCompletionDay(load, cols) || fmtLocalDate(end),
+		});
 	}
 	// The trip days in this week of the driver's other completed loads.
 	for (const x of extraRuleLoads) {
@@ -20519,6 +21343,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 			if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 			if (!dayLoadMap[ds].includes(x.loadId)) dayLoadMap[ds].push(x.loadId);
 		}
+		listings.push({ id: x.loadId, days: new Set(x.days) });
 	}
 
 	// Apply admin overrides — Super Admin's manual (driver, date) adjustments
@@ -20543,13 +21368,27 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 						paidOtherwise.add(ds);
 						// An added day pays in its own month, as the ledger buckets it.
 						notePayMonth(ds, "");
-						// Admin-added days aren't tied to a load row, so the
-						// BoL column on the invoice grid stays empty for them.
+						// Admin-added days aren't tied to a load row, so no load pays
+						// them (dayListed may still list one, below).
 						if (!dayLoadMap[ds]) dayLoadMap[ds] = [];
 					}
 				}
 			}
 		}
+	}
+	// The loads each paid day lists on the invoice (see above), once the
+	// overrides have set the paid days: an admin-added day the loads whose span
+	// covers it, else none; a day no span covers its paying loads, "(scheduled)".
+	const dayListed = {};
+	const dayScheduled = {};
+	for (const ds of activeDaySet) {
+		const ids = [];
+		for (const l of listings) {
+			if (l.id && !ids.includes(l.id) && (l.days ? l.days.has(ds) : ds >= l.from && ds <= l.to)) ids.push(l.id);
+		}
+		const paying = dayLoadMap[ds] || [];
+		dayListed[ds] = ids.length ? ids : [...paying];
+		dayScheduled[ds] = ids.length ? [] : [...paying];
 	}
 	// The blank-pickup loads that gained the invoice a day, in sheet order: a day
 	// still paid after the overrides that only such loads pay.
@@ -20558,7 +21397,7 @@ function invoiceWeekPaidDays({ headers, cols, loads, extraRuleLoads = [], weekRu
 		if (!paidOtherwise.has(ds)) for (const k of fallbackPayers[ds] || []) gained.add(k);
 	}
 	const blankPickupLoads = [...new Set(fallbackLoads)].filter((k) => gained.has(k));
-	return { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors };
+	return { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors };
 }
 
 // How a weekly invoice prices the days invoiceWeekPaidDays() returns, for a
@@ -20575,6 +21414,40 @@ function invoiceDayPricing({ dailyRate, nameNorm, payDaily, truckRate, weekRule 
 	const rateOf = dayRater ? (ds) => dayRater(ds, dayPayMonth[ds]) : null;
 	const totalOf = (days) => (rateOf ? [...days].reduce((c, ds) => c + Math.round(rateOf(ds) * 100), 0) / 100 : days.size * dailyRate);
 	return { rateOf, totalOf };
+}
+
+// The weekly invoice's Saturday-Friday day grid (render_data.days, the PDF's day
+// rows), from the days invoiceWeekPaidDays() returns, priced as
+// invoiceDayPricing() prices them (rateOf(ds), else dailyRate). Each of the 7
+// rows carries its `date`, the calendar day counted from weekStart (the week's
+// Saturday) by calendar arithmetic, never through a zone, worked or not. A paid
+// day adds its rate and total, `loadBol`, the loads that pay it (dayLoadMap, as
+// ever: the readers that take a day's pay month from them need exactly those),
+// `listed`, the loads the PDF names on it (dayListed), and `scheduled`, those of
+// them it names only as "(scheduled)" (dayScheduled); a day not worked keeps
+// both lists empty. Pure: generateInvoiceHandler() builds the grid with it.
+function invoiceDayGrid({ days, dayLoadMap = {}, dayListed = {}, dayScheduled = {}, rateOf = null, dailyRate, weekStart }) {
+	const startOk = /^\d{4}-\d{2}-\d{2}$/.test(String(weekStart || "")) && Number.isFinite(Date.parse(`${weekStart}T12:00:00Z`));
+	const grid = {};
+	INVOICE_GRID_DAYS.forEach((name, i) => {
+		grid[name] = { date: startOk ? dayKeyPlus(weekStart, i) : "", loadBol: "", total: 0, completed: false, listed: [], scheduled: [] };
+	});
+	for (const ds of days) {
+		const entry = grid[invoiceGridDayName(ds)];
+		const dayRate = rateOf ? rateOf(ds) : dailyRate;
+		entry.total += dayRate;
+		// The rate this day was priced at, printed in the PDF's Daily Rate column
+		// (one day per grid row, so it is the day's total).
+		entry.rate = dayRate;
+		entry.completed = true;
+		const bols = dayLoadMap[ds] || [];
+		entry.loadBol = entry.loadBol
+			? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
+			: bols.join(", ");
+		entry.listed = [...entry.listed, ...(dayListed[ds] || [])];
+		entry.scheduled = [...entry.scheduled, ...(dayScheduled[ds] || [])];
+	}
+	return grid;
 }
 
 // POST /api/invoices/generate — driver generates weekly invoice
@@ -20618,8 +21491,40 @@ async function generateInvoiceHandler(req, res) {
 		}
 
 		const { weekEnd } = req.body;
+		// With INVOICE_CLOSED_MONTH_GUARD_ENABLED on, a weekEnd is a real day or absent (this
+		// week): one the guard below can't place in a month is refused as a bad request.
+		if (INVOICE_CLOSED_MONTH_GUARD_ENABLED && weekEnd && !isCalendarDayKey(weekEnd)) {
+			return res.status(400).json({ error: "weekEnd must be a day, as YYYY-MM-DD.", code: "INVOICE_WEEK_END_INVALID" });
+		}
 		const range = weekEnd ? getWeekRange(weekEnd) : getWeekRange();
 		const { weekStart, weekEnd: computedWeekEnd } = range;
+		// A week touching a closed month is neither generated nor regenerated
+		// (INVOICE_CLOSED_MONTH_GUARD_ENABLED); the write asks again (monthGuard below).
+		// Off, nothing here runs but the flag test.
+		const weekGuard = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? {
+			span: { invoice_number: `the invoice for the week of ${weekStart}`, week_start: weekStart, week_end: computedWeekEnd },
+			doing: "Generating this invoice",
+			cannot: `Cannot generate the invoice for the week of ${weekStart}`,
+			refused: `the invoice for the week of ${weekStart} to ${computedWeekEnd} can't be generated`,
+			remedy: INVOICE_CLOSED_WEEK_REMEDY,
+			auditAction: "generate_invoice_blocked", entityId: "",
+			subject: `generate the weekly invoice of ${driverName} for ${weekStart} — ${computedWeekEnd}`,
+		} : null;
+		const weekBlock = weekGuard ? invoiceClosedMonthBlock(weekGuard.span) : null;
+		if (weekBlock) {
+			// A week whose settled invoice exists answers with it, as it always has.
+			const settledNow = liveWeeklyInvoicesForDriverWeek(driverName, weekStart).find((r) => r.status !== "Draft");
+			if (settledNow) {
+				return res.status(409).json({
+					error: `Invoice already exists for this week (${settledNow.invoice_number}, status: ${settledNow.status}). Contact admin if this needs to be regenerated.`,
+					code: "INVOICE_EXISTS",
+					invoice: settledNow,
+				});
+			}
+			// A Driver's repeats are recorded once a day (driverRefusalAuditDue()).
+			if (user.role === "Driver" && !driverRefusalAuditDue(user.id, weekStart)) weekGuard.unaudited = true;
+			return invoiceClosedMonthRefusal(req, res, weekBlock, weekGuard);
+		}
 
 		// Job Tracking, read at most once for this request.
 		let jobTrackingValues = null;
@@ -20774,7 +21679,7 @@ async function generateInvoiceHandler(req, res) {
 		// --- Active-day algorithm for driver pay ---
 		// invoiceWeekPaidDays() (above the route) is the one copy of the week's
 		// days; scripts/blank-pickup-dry-run.js runs it too.
-		const { activeDaySet, dayLoadMap, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
+		const { activeDaySet, dayLoadMap, dayListed, dayScheduled, dayPayMonth, blankPickupLoads, tripErrors } = invoiceWeekPaidDays({
 			headers, cols: week.cols, loads: uniqueLoads, extraRuleLoads, weekRule, weekStart, weekEnd: computedWeekEnd, nameNorm,
 		});
 		// A load paid from its Assigned Date (the blank-pickup fallback) is named
@@ -20847,26 +21752,8 @@ async function generateInvoiceHandler(req, res) {
 		// Generate PDF via HTML → Puppeteer pipeline (see lib/policy-renderer.js)
 		const pdfFileName = invoicePdfFileName(invoiceNumber);
 
-		// Bucket active days into the Sat–Fri template grid
-		const DAY_NAMES = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-		const daysMap = {};
-		for (const d of DAY_NAMES) daysMap[d] = { loadBol: "", total: 0, completed: false };
-		for (const ds of activeDaySet) {
-			const dt = new Date(ds + "T12:00:00");
-			const jsDay = dt.getDay(); // 0=Sun..6=Sat
-			const templateDay = DAY_NAMES[(jsDay + 1) % 7]; // shift so 6(Sat)→0, 0(Sun)→1, ...
-			const entry = daysMap[templateDay];
-			const dayRate = rateOf ? rateOf(ds) : dailyRate;
-			entry.total += dayRate;
-			// The rate this day was priced at, printed in the PDF's Daily Rate column
-			// (one day per grid row, so it is the day's total).
-			entry.rate = dayRate;
-			entry.completed = true;
-			const bols = dayLoadMap[ds] || [];
-			entry.loadBol = entry.loadBol
-				? `${entry.loadBol}, ${bols.join(", ")}`.replace(/, $/, "")
-				: bols.join(", ");
-		}
+		// The Sat–Fri template grid, each row dated (invoiceDayGrid(), above the route).
+		const daysMap = invoiceDayGrid({ days: activeDaySet, dayLoadMap, dayListed, dayScheduled, rateOf, dailyRate, weekStart });
 
 		// Lookup driver's contact info + payment info for the invoice header — this
 		// driver's account in any spelling. Only when exactly ONE account carries the
@@ -21005,11 +21892,10 @@ async function generateInvoiceHandler(req, res) {
 			Math.round((totalEarnings + (preservedAdjustment ? Number(preservedAdjustment.adjustment) || 0 : 0)) * 100));
 		if (personalFit.renderFields) Object.assign(renderData, personalFit.renderFields);
 		// Their receipts join the data for the render only, never the snapshot
-		const renderInput = personalFit.fit.length ? await personalReceiptRenderData(renderData, personalFit.fit) : renderData;
-
+		// (renderInvoiceWithReceipts(); with no Personal line it is the plain render).
 		// The LAST await. Everything below runs synchronously, so what the write
 		// re-checks is what it writes against.
-		const pdfBuffer = await renderPolicy(templateName, renderInput);
+		const pdfBuffer = await renderInvoiceWithReceipts(templateName, renderData, personalFit.fit, canonicalDriverName(driverName));
 
 		// Persist the render snapshot so /api/invoices/:id/adjust can re-render
 		// without re-fetching source data. Tag with __templateName so the helper
@@ -21031,6 +21917,7 @@ async function generateInvoiceHandler(req, res) {
 			invoiceNumber, pdfFileName, pdfBuffer,
 			replacing: existing,
 			slot: { driverName, weekStart },
+			monthGuard: weekGuard,
 			insert: () => {
 				const inserted = db.prepare(
 					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, adjustment, adjustment_note, adjusted_by, adjusted_at, render_data)
@@ -21072,13 +21959,15 @@ async function generateInvoiceHandler(req, res) {
 			logAudit(req, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: generated with ${personalFit.fit.length} Personal line(s), repays ${personalExpense.formatMoney(Math.round(personalFit.personalTotal * 100))}`);
 		}
 		for (const r of personalFit.flagged) {
-			logAudit(req, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+			logAudit(req, "flag_personal_expense", "expense", r.expense_id, `line ${r.id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
 		}
 		// A line marked while this was rendering goes on through the attach path.
 		invoice = await attachLatePersonalLines(invoice, req);
 		const late = isAfterDeadline(computedWeekEnd);
 		res.json({ success: true, invoice, isLate: late, warnings, undatedInWeek, ...(lateWork ? { lateWorkDays: lateWork.report } : {}) });
 	} catch (err) {
+		// A month closed during the request: refused like the guard above, audited.
+		if (err && err.closedMonth) return invoiceClosedMonthRefusal(req, res, err.closedMonth.block, err.closedMonth.guard);
 		// A write the re-check refused: nothing was saved, and generating again
 		// is the remedy. The Friday batch reports it as an error, never as billed.
 		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
@@ -21279,6 +22168,11 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	const billed = new Set();   // normalized names successfully billed OR already legitimately invoiced
 	const errors = [];
 	const zeroPay = [];         // generated but $0 (bad data) — left as Draft, never auto-submitted
+	// Drivers who worked a week touching a closed month (INVOICE_CLOSED_MONTH_GUARD_ENABLED):
+	// no weekly invoice can bill it and no retry changes that, so each is skipped and named,
+	// apart by whether a live Draft for the week can still be submitted as is.
+	const closedWeek = [];
+	const closedWeekDraft = [];
 	// Completed loads the handler could NOT bill because they carry no completion
 	// date, yet are scheduled inside this week — probably unpaid work. The handler
 	// reports them on both a 200 and a 400 (a driver whose ONLY load is undated gets
@@ -21319,11 +22213,21 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					zeroPay.push(driver);
 				}
 			} else if (statusCode === 409 && body.code === "INVOICE_EXISTS") {
-				// Already has a non-Draft invoice → legitimate. ONLY this 409: the
-				// handler's other 409s (a write it refused, two Drafts for one week)
-				// saved nothing, so they fall through to `errors` and the driver stays
+				// Already has a non-Draft invoice → legitimate. ONLY this 409 (and, with
+				// INVOICE_CLOSED_MONTH_GUARD_ENABLED on, a closed month's PERIOD_FINALIZED
+				// below): the handler's other 409s (a write it refused, two Drafts for one
+				// week) saved nothing, so they fall through to `errors` and the driver stays
 				// in `unbilled`, which is what retries and alerts.
 				skipped++; billed.add(norm);
+			} else if (statusCode === 409 && body.code === "PERIOD_FINALIZED" && INVOICE_CLOSED_MONTH_GUARD_ENABLED) {
+				// A driver who worked the week is named: with a live Draft (submit it as is),
+				// or with no invoice (a correction); a settled invoice stays silent.
+				skipped++; billed.add(norm);
+				const live = liveWeeklyInvoicesForDriverWeek(driver, range.weekStart);
+				if (expected.has(norm) && !live.some((r) => r.status !== "Draft")) {
+					if (live.length) closedWeekDraft.push(driver);
+					else closedWeek.push(driver);
+				}
 			} else if (statusCode === 400) {
 				skipped++;                     // handler found no completed loads for this driver
 			} else {
@@ -21361,16 +22265,26 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 	// had an invoice). Anyone left is a real gap — a transient per-driver read, a
 	// driver missing from the directory, or a name mismatch — surfaced, never
 	// silently skipped. `unbilled` is the retry signal (stored in the marker).
-	const unbilled = [...expected].filter((n) => !billed.has(n));
+	const unbilledAll = [...expected].filter((n) => !billed.has(n));
+	// In a week touching a closed month no weekly invoice can bill a driver missing from
+	// the roster either: named with the rest for a correction, never retried.
+	const weekShut = INVOICE_CLOSED_MONTH_GUARD_ENABLED
+		? invoiceClosedMonthBlock({ invoice_number: `the week of ${range.weekStart}`, week_start: range.weekStart, week_end: range.weekEnd })
+		: null;
+	const offRosterClosed = weekShut && !weekShut.unreadable ? unbilledAll : [];
+	const unbilled = offRosterClosed.length ? [] : unbilledAll;
+	const notBilled = [...closedWeek, ...offRosterClosed];
 	const problem = unbilled.length > 0;                 // retry signal (transient/coverage)
-	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0;
+	const needsAttention = problem || zeroPay.length > 0 || errors.length > 0 || undatedInWeek.length > 0 || notBilled.length > 0 || closedWeekDraft.length > 0;
 	// How many undatedInWeek entries each channel prints: the in-app line (this
 	// summary) and the email cap them differently. The undated-load ledger reads
 	// the same two numbers, so a load counts as told only if it was printed.
 	const undatedEntriesInApp = 6;
 	const undatedEntriesByEmail = 20;
 	const summary =
-		`${submitted} generated & submitted · ${skipped} skipped (no loads)` +
+		`${submitted} generated & submitted · ${skipped - closedWeek.length - closedWeekDraft.length} skipped (no loads)` +
+		(notBilled.length ? ` · ${notBilled.length} NOT BILLED, the week touches a closed month (${notBilled.slice(0, 8).join(", ")}): pay their days on a correction invoice dated in the current month` : "") +
+		(closedWeekDraft.length ? ` · ${closedWeekDraft.length} with an unsubmitted Draft for this week, which touches a closed month (${closedWeekDraft.slice(0, 8).join(", ")}): submit it as is; only days it misses go on a correction invoice dated in the current month` : "") +
 		(zeroPay.length ? ` · ${zeroPay.length} ZERO-PAY left as Draft (${zeroPay.slice(0, 6).join(", ")})` : "") +
 		(unbilled.length ? ` · ${unbilled.length} WORKED-BUT-UNBILLED (${unbilled.slice(0, 8).join(", ")})` : "") +
 		(undatedInWeek.length ? ` · UNDATED completed loads NOT billed (${undatedInWeek.slice(0, undatedEntriesInApp).join("; ")})` : "") +
@@ -21408,10 +22322,12 @@ async function runWeeklyInvoiceBatch(weekEnd, attemptNum) {
 					<p style="margin:0 0 12px;line-height:1.6;color:#334155">Automatic weekly run for <b>${range.weekStart} — ${range.weekEnd}</b>. Review and approve on the dashboard.</p>
 					<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;margin:16px 0">
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Generated &amp; submitted</span><b>${submitted}</b></div>
-						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Skipped (no loads)</span><b>${skipped}</b></div>
+						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Skipped (no loads)</span><b>${skipped - closedWeek.length - closedWeekDraft.length}</b></div>
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${zeroPay.length ? "#b45309" : "#64748b"}">$0 — left as Draft</span><b style="color:${zeroPay.length ? "#b45309" : "#0f172a"}">${zeroPay.length}</b></div>
 						<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:${unbilled.length ? "#b91c1c" : "#64748b"}">Worked but NOT billed</span><b style="color:${unbilled.length ? "#b91c1c" : "#0f172a"}">${unbilled.length}</b></div>
 					</div>
+					${notBilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Not billed, the week touches a closed month:</b> ${escHtml(notBilled.slice(0, 20).join(", "))}. Pay their days on a correction invoice dated in the current month.</p>` : ""}
+					${closedWeekDraft.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>Unsubmitted Draft for this week, which touches a closed month:</b> ${escHtml(closedWeekDraft.slice(0, 20).join(", "))}. Submit it as is; only days it misses go on a correction invoice dated in the current month.</p>` : ""}
 					${zeroPay.length ? `<p style="margin:0 0 12px;color:#b45309;font-size:13px"><b>$0 invoices (not submitted — check dates):</b> ${escHtml(zeroPay.slice(0, 20).join(", "))}.</p>` : ""}
 					${unbilled.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Needs manual review:</b> ${escHtml(unbilled.slice(0, 20).join(", "))}. Generate these from the Invoices page.</p>` : ""}
 					${undatedInWeek.length ? `<p style="margin:0 0 12px;color:#b91c1c;font-size:13px"><b>Completed loads NOT billed — no Status Update Date or Completion Date:</b> ${escHtml(undatedInWeek.slice(0, undatedEntriesByEmail).join("; "))}. They are scheduled in this week; set the date on Job Tracking, then regenerate or adjust the driver's invoice.</p>` : ""}
@@ -21982,6 +22898,8 @@ if (INVOICE_AUTOGEN_ENABLED && startsJob("weekly invoice batch")) {
 	}
 	console.log(`[invoice-autogen] enabled — Fridays 7:00 PM ${APP_TIMEZONE} (after the 6:30 PM driver cutoff)`);
 }
+// Once per start, the two closed-month invoice flags' on/off states, and no other setting.
+console.log(`[invoice-month-lock] INVOICE_CLOSED_MONTH_GUARD_ENABLED ${INVOICE_CLOSED_MONTH_GUARD_ENABLED ? "on" : "off"}; MARK_PAID_CLOSED_MONTH_ENABLED ${MARK_PAID_CLOSED_MONTH_ENABLED ? "on" : "off"}`);
 
 // ============================================================
 // RATE-CON RECONCILIATION — "did every emailed load reach the sheet?"
@@ -22409,6 +23327,8 @@ db.exec(`
 let archiveIdCache = { at: 0, ids: [] };
 const ARCHIVE_ID_CACHE_MS = 60 * 60 * 1000;
 async function getArchiveLoadIdsCached() {
+	// No archive is configured: nothing to read, and no Google call.
+	if (!ARCHIVE_SPREADSHEET_ID) return [];
 	if (archiveIdCache.ids.length && Date.now() - archiveIdCache.at < ARCHIVE_ID_CACHE_MS) return archiveIdCache.ids;
 	const sheets = await getSheets();
 	const resp = await sheets.spreadsheets.values.get({
@@ -25497,6 +26417,19 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		if (periodEnd < periodStart) {
 			return res.status(400).json({ error: "periodEnd must be on or after periodStart" });
 		}
+		// A period touching a closed month is refused (INVOICE_CLOSED_MONTH_GUARD_ENABLED);
+		// the write asks again (monthGuard below), after the render. Off, only the flag is read.
+		const periodGuard = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? {
+			span: { invoice_number: `the manual invoice for ${periodStart} to ${periodEnd}`, week_start: periodStart, week_end: periodEnd },
+			doing: "Creating a manual invoice",
+			cannot: `Cannot create a manual invoice for ${periodStart} to ${periodEnd}`,
+			refused: `a manual invoice for ${periodStart} to ${periodEnd} can't be created`,
+			remedy: INVOICE_LOCK_REMEDY,
+			auditAction: "create_manual_invoice_blocked", entityId: "",
+			subject: `create a manual invoice for ${payee} (${periodStart} — ${periodEnd})`,
+		} : null;
+		const periodBlock = periodGuard ? invoiceClosedMonthBlock(periodGuard.span) : null;
+		if (periodBlock) return invoiceClosedMonthRefusal(req, res, periodBlock, periodGuard);
 		const itemsRes = sanitizeManualInvoiceRows(body.lineItems, "lineItems");
 		if (itemsRes.error) return res.status(400).json({ error: itemsRes.error });
 		if (!itemsRes.items.length) return res.status(400).json({ error: "At least one line item is required" });
@@ -25590,6 +26523,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// invoice sits outside the one-per-driver-week rule.
 		const result = commitInvoiceWithPdf({
 			invoiceNumber, pdfFileName, pdfBuffer,
+			monthGuard: periodGuard,
 			insert: () => {
 				const inserted = db.prepare(
 					`INSERT INTO invoices (invoice_number, driver, week_start, week_end, loads_count, rate_per_load, total_earnings, expenses_total, status, pdf_file_name, load_ids, expense_ids, render_data, is_manual, created_by)
@@ -25619,6 +26553,7 @@ app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) =>
 		// With its total_due: the Invoices screen opens the new invoice from this row.
 		res.json({ success: true, invoice: { ...invoice, total_due: invoiceTotalDue(invoice) } });
 	} catch (err) {
+		if (err && err.closedMonth) return invoiceClosedMonthRefusal(req, res, err.closedMonth.block, err.closedMonth.guard);
 		if (err && err.invoiceWriteRefusal) return res.status(409).json({ error: err.message, code: err.code });
 		console.error("Manual invoice error:", err.message);
 		res.status(500).json({ error: err.message });
@@ -25689,9 +26624,11 @@ app.get("/api/invoices", requireAuth, (req, res) => {
 		// personal_lines: the Personal lines each carries, with their receipts
 		// (personalLinesForInvoices()); [] for none. expenses_ref_total: the
 		// Expenses figure the screen shows, a weekly invoice's receipts without
-		// their Personal parts (invoiceExpensesRefTotals()).
+		// their Personal parts (invoiceExpensesRefTotals()). pay_basis and
+		// load_count: what loads_count and rate_per_load hold, and the loads the
+		// row bills (invoicePayBasis(), invoiceLoadCount()).
 		const personalLines = personalLinesForInvoices(invoices.map((r) => r.id));
-		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [] }));
+		invoices = invoices.map((r) => ({ ...r, total_due: invoiceTotalDue(r), personal_lines: personalLines.get(r.id) || [], pay_basis: invoicePayBasis(r), load_count: invoiceLoadCount(r) }));
 		const expensesRef = invoiceExpensesRefTotals(invoices);
 		for (const r of invoices) r.expenses_ref_total = expensesRef.get(r.id);
 		res.json({ invoices, summary: invoiceListSummary(invoices) });
@@ -25758,6 +26695,46 @@ function invoiceListSummary(rows) {
 		};
 	}
 	return summary;
+}
+
+// What an invoice row's loads_count and rate_per_load hold (B23, 2026-10-23):
+// "manual" (line items, no rate), "percentage" (an owner-operator's weekly
+// invoice, render_data's __templateName service_invoice_owner_op: loads and his
+// pay %), else "daily" (paid days and the daily rate; a row stored before render
+// data reads as one). GET /api/invoices and GET /api/driver/:driverName send it
+// as pay_basis; the submit email labels by it (invoiceCountRows()).
+function invoicePayBasis(row) {
+	if (Number(row && row.is_manual)) return "manual";
+	let snap = null;
+	try { snap = JSON.parse((row && row.render_data) || "{}"); } catch { snap = null; }
+	return snap && snap.__templateName === "service_invoice_owner_op" ? "percentage" : "daily";
+}
+// The loads an invoice row bills: its load_ids' length, 0 when unreadable.
+function invoiceLoadCount(row) {
+	let ids = null;
+	try { ids = JSON.parse((row && row.load_ids) || "[]"); } catch { ids = null; }
+	return Array.isArray(ids) ? ids.length : 0;
+}
+// invoicePayBasis() of each invoice id, read for those rows only: id -> basis.
+function invoicePayBasesOf(ids) {
+	const out = new Map();
+	if (!ids.length) return out;
+	for (const r of db.prepare(`SELECT id, is_manual, render_data FROM invoices WHERE id IN (${ids.map(() => "?").join(", ")})`).all(...ids)) {
+		out.set(r.id, invoicePayBasis(r));
+	}
+	return out;
+}
+// The submit email's count rows, [label, text], labelled as the Invoices panel
+// labels them (client/src/lib/invoiceCounts.js): "Days paid / Daily rate /
+// Loads", "Loads / Pay %" or "Line items"; the daily rate printed as the panel
+// prints money ("$1,250.00").
+function invoiceCountRows(row) {
+	const count = String(Number(row.loads_count || 0));
+	const basis = invoicePayBasis(row);
+	if (basis === "manual") return [["Line items", count]];
+	if (basis === "percentage") return [["Loads", count], ["Pay %", `${Number(row.rate_per_load || 0)}%`]];
+	const rate = Number(row.rate_per_load || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	return [["Days paid", count], ["Daily rate", `$${rate}`], ["Loads", String(invoiceLoadCount(row))]];
 }
 
 // Aggregates every live (non-deleted) invoice for the payee whose billing
@@ -26099,6 +27076,10 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 				const adjustmentLine = Number.isFinite(adjustment) && adjustment !== 0
 					? `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Admin adjustment${invoice.adjustment_note ? ` <em>${escHtml(invoice.adjustment_note)}</em>` : ""}</span><b>${adjustment > 0 ? "+" : "-"}$${Math.abs(adjustment).toFixed(2)}</b></div>`
 					: "";
+				// What the invoice's counts hold, named as the Invoices panel names them.
+				const countLines = invoiceCountRows(invoice)
+					.map(([label, text]) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${escHtml(label)}</span><b>${escHtml(text)}</b></div>`)
+					.join("\n\t\t\t\t\t\t\t");
 				const html = invoiceEmailHtml({
 					heading: `New Invoice: ${escHtml(invoice.invoice_number)}`,
 					bodyHtml: `
@@ -26107,7 +27088,7 @@ app.put("/api/invoices/:id/submit", requireAuth, async (req, res) => {
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Invoice</span><b>${escHtml(invoice.invoice_number)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Payee" : "Driver"}</span><b>${escHtml(invoice.driver)}</b></div>
 							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">Week</span><b>${escHtml(invoice.week_start)} — ${escHtml(invoice.week_end)}</b></div>
-							<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span style="color:#64748b">${invoice.is_manual ? "Line items" : "Loads"}</span><b>${Number(invoice.loads_count || 0)}</b></div>${adjustmentLine}
+							${countLines}${adjustmentLine}
 							<div style="display:flex;justify-content:space-between;font-size:15px;padding:8px 0 0;border-top:1px solid #bae6fd;margin-top:6px"><span style="color:#64748b;font-weight:600">Total</span><b style="color:#0f172a">$${invoiceTotalDue(invoice).toFixed(2)}</b></div>
 						</div>
 						<p style="margin:0 0 12px;line-height:1.5;color:#334155;font-size:13px">The full invoice PDF is attached. Log in to the admin dashboard to approve, reject, or mark as paid.</p>
@@ -26162,8 +27143,8 @@ app.put("/api/invoices/:id/approve", requireRole("Super Admin"), async (req, res
 		// marked Paid and the closed months are named in the pay_invoice audit row;
 		// off, it is refused as before. Either way an unreadable lock table or week
 		// date refuses: the month a payment lands against must be knowable.
-		// submit / delete / restore are workflow state, not money, and each has its
-		// own state-machine check.
+		// submit is workflow state, not money, with its own state-machine check;
+		// delete and restore refuse a closed month under INVOICE_CLOSED_MONTH_GUARD_ENABLED.
 		let closedMonths = [];
 		if (action === "paid") {
 			const invoicePaidAudit = {
@@ -26379,7 +27360,7 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 		}
 		for (const d of personalDetached) {
 			logAudit(req, "detach_personal_expense", "expense", d.expenseId,
-				`line ${d.id} (${personalExpense.formatMoney(d.cents)}) taken off ${invoice.invoice_number}: the adjustment to ${adjustment.toFixed(2)} leaves too little to cover it; waiting for the week's correction`);
+				`line ${d.id} (${personalExpense.formatMoney(d.cents)}) taken off ${invoice.invoice_number}: the adjustment to ${adjustment.toFixed(2)} leaves too little to cover it; ${personalUnfitTail()}`);
 		}
 
 		logAudit(
@@ -26426,9 +27407,10 @@ app.put("/api/invoices/:id/adjust", requireRole("Super Admin"), refuseCrossOrigi
 // criterion is the COLUMN rather than the status. An Approved / Processing /
 // Rejected invoice already carries `paid_at = ''`, so this route's `paid_at = ''`
 // is a no-op on it and the revert is pure workflow state — which is exactly what
-// approve / reject / processing are, and exactly why submit / delete / restore are
-// left alone. Guarding those as well would strand invoices in closed months over a
-// write that changes no money column.
+// approve / reject / processing / submit are. Guarding those would strand invoices in
+// closed months over a write that changes no money column. Delete and restore differ:
+// they change which invoices a closed month shows and the days they claim, so they
+// refuse a closed month under INVOICE_CLOSED_MONTH_GUARD_ENABLED.
 app.put("/api/invoices/:id/revert", requireRole("Super Admin"), (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
@@ -26514,6 +27496,17 @@ app.delete("/api/invoices/:id", requireRole("Super Admin"), (req, res) => {
 	try {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice || invoice.deleted_at) return res.status(404).json({ error: "Invoice not found" });
+		// An invoice whose week touches a closed month stays (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
+		const deleteBlock = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? invoiceClosedMonthBlock(invoice) : null;
+		if (deleteBlock) {
+			const label = invoice.invoice_number || `invoice #${invoice.id}`;
+			return invoiceClosedMonthRefusal(req, res, deleteBlock, {
+				doing: "Deleting an invoice", cannot: `Cannot delete ${label}`, refused: `${label} can't be deleted`, remedy: INVOICE_LOCK_REMEDY,
+				auditAction: "delete_invoice_blocked", entityId: String(invoice.id),
+				subject: `delete ${label} (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"}, status ${invoice.status || "unknown"})`,
+				note: auditReasonNote(req.query, "reason"),
+			});
+		}
 		const reason = ((req.query && req.query.reason) || "").toString().trim().slice(0, 500);
 		const now = new Date().toISOString();
 		const adminName = req.session.user.username || "";
@@ -26547,6 +27540,16 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 		const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(parseInt(req.params.id, 10));
 		if (!invoice) return res.status(404).json({ error: "Invoice not found" });
 		if (!invoice.deleted_at) return res.status(400).json({ error: "Invoice is not deleted" });
+		// One whose week touches a closed month stays deleted (INVOICE_CLOSED_MONTH_GUARD_ENABLED).
+		const restoreBlock = INVOICE_CLOSED_MONTH_GUARD_ENABLED ? invoiceClosedMonthBlock(invoice) : null;
+		if (restoreBlock) {
+			const label = invoice.invoice_number || `invoice #${invoice.id}`;
+			return invoiceClosedMonthRefusal(req, res, restoreBlock, {
+				doing: "Restoring an invoice", cannot: `Cannot restore ${label}`, refused: `${label} can't be restored`, remedy: INVOICE_LOCK_REMEDY,
+				auditAction: "restore_invoice_blocked", entityId: String(invoice.id),
+				subject: `restore ${label} (${invoice.driver || "no driver"}, ${invoice.week_start || "?"} — ${invoice.week_end || "?"}, status ${invoice.status || "unknown"})`,
+			});
+		}
 		if (!invoice.is_manual) {
 			// The driver in ANY stored spelling — liveWeeklyInvoicesForDriverWeek(),
 			// the same question generateInvoiceHandler() and its write ask.
@@ -26626,7 +27629,31 @@ app.put("/api/invoices/:id/restore", requireRole("Super Admin"), (req, res) => {
 // UNDO before approval voids the line (the row stays, as history); after
 // approval, or once its cost month is finalized, a REVERSE row credits it back
 // on the week the reversal is made in, by the same rules.
+//
+// THE RECEIPT'S WEEK — PERSONAL_RECEIPT_WEEK_ENABLED (off unless exactly
+// "true"). With it on, a line belongs to the week of its receipt date
+// (personalLineWeek(): with no valid date, or one after today, the week it is
+// marked in), and the table above becomes:
+//   that week's invoice not generated yet and    waits; the week's generation takes it
+//   its sweep not due
+//   Draft / Submitted / Rejected, in an open     attached now, the PDF redrawn
+//   month, with render data and room
+//   anything else: Approved/Processing/Paid, a   CARRIED (needs_correction_since now
+//   finalized month, no room, two weekly         reads "carried since"): it goes on
+//   invoices, no render data, or the sweep due   the driver's oldest open weekly
+//   with no invoice                              invoice after its week, in an open
+//                                                month, with room; with none yet, on
+//                                                the next one generated
+// Oldest line first, never below $0, never split. No correction invoice is made
+// (the corrections route answers 410) and the sweep sends no notice. A line on
+// an approved invoice is final: no Undo, no Reverse (409 PERSONAL_LOCKED).
+// Reverse stays for a line on no approved invoice whose Undo is blocked; when
+// that line is on no invoice, neither it nor its reversal ever goes on one
+// (PERSONAL_COLLECTABLE_SQL: the books net out across the two months). A week
+// touching a finalized month takes no new line at its generation. Switched off
+// again, carried lines read as flagged and the table above applies.
 const PERSONAL_EXPENSE_DEDUCTIONS_ENABLED = process.env.PERSONAL_EXPENSE_DEDUCTIONS_ENABLED === "true";
+const PERSONAL_RECEIPT_WEEK_ENABLED = process.env.PERSONAL_RECEIPT_WEEK_ENABLED === "true";
 // An invoice whose Personal lines may still change.
 const PERSONAL_OPEN_STATUSES = new Set(["Draft", "Submitted", "Rejected"]);
 // Each ledger row with the type and driver of its receipt.
@@ -26663,15 +27690,33 @@ function personalRowsOnInvoice(invoiceId) {
 	return db.prepare(`${PERSONAL_ROW_SELECT} WHERE ep.invoice_id = ? AND ep.voided_at = '' ORDER BY ep.id`).all(invoiceId);
 }
 
+// The rows `ep` an invoice may still take, with the receipt's week on. A
+// reversed charge on no invoice stays off while its reversal is on none, unless
+// a live invoice's percentage base already left it out (that pay was raised for
+// it): then the charge goes on an invoice first. A reversal goes on one only
+// once its charge is on one, so a credit never lands before its charge; a pair
+// of which neither ever lands nets out across the two months in the books.
+const PERSONAL_COLLECTABLE_SQL = "NOT (ep.kind = 'deduct' AND ep.reversed_by_id IS NOT NULL"
+	+ " AND NOT EXISTS (SELECT 1 FROM expense_personal r JOIN invoices ri ON ri.id = r.invoice_id WHERE r.id = ep.reversed_by_id AND ri.deleted_at = '')"
+	+ " AND NOT EXISTS (SELECT 1 FROM invoices bi WHERE bi.id = ep.base_invoice_id AND bi.deleted_at = ''))"
+	+ " AND NOT (ep.kind = 'reverse' AND NOT EXISTS (SELECT 1 FROM expense_personal d JOIN invoices di ON di.id = d.invoice_id WHERE d.id = ep.reverses_id AND di.deleted_at = ''))";
+
 // One driver's lines for a week that no live invoice carries: never attached,
 // or left on an invoice that was soft-deleted. Matched on the receipt's driver
-// in any spelling (normalizeDriverName()), never on another driver's.
+// in any spelling (normalizeDriverName()), never on another driver's. With the
+// receipt's week on, also the earlier weeks' lines that are carried or were left
+// on a deleted later invoice; never one its own week's invoice may still take
+// (a line left on its own week's deleted invoice waits for that week's
+// regenerate until the sweep carries it).
 function personalWaitingRows(driverName, weekStart) {
 	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
 	if (!key || !personalLedgerPresent()) return [];
+	const weeks = PERSONAL_RECEIPT_WEEK_ENABLED
+		? `(ep.week_start = ? OR (ep.week_start < ? AND (ep.needs_correction_since != '' OR (ep.invoice_id IS NOT NULL AND COALESCE(i.week_start, '') != ep.week_start)))) AND ${PERSONAL_COLLECTABLE_SQL}`
+		: "ep.week_start = ?";
 	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
-		WHERE ep.voided_at = '' AND ep.week_start = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
-		.all(weekStart).filter((r) => normalizeDriverName(r.receipt_driver || "") === key);
+		WHERE ep.voided_at = '' AND ${weeks} AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') ORDER BY ep.id`)
+		.all(...(PERSONAL_RECEIPT_WEEK_ENABLED ? [weekStart, weekStart] : [weekStart])).filter((r) => normalizeDriverName(r.receipt_driver || "") === key);
 }
 
 // An invoice's stored render data, or null when it predates render snapshots.
@@ -26721,12 +27766,28 @@ function personalRenderData(snapshot, invoiceRow, rows) {
 }
 
 // RECEIPTS ON THE INVOICE. Each Personal line says where its receipt is, and
-// each image receipt prints on its own page after the invoice
+// each receipt prints on its own sheet after the invoice
 // (lib/invoice-receipts.js receiptLayout()). The images are re-encoded off the
 // event loop (lib/receipt-images.js) and cached under DATA_DIR/storage, outside
 // uploads/. None of it is stored in render_data: it joins the data for the
 // render only, so a snapshot never holds an image or a note that went stale.
+//
+// PDF receipts (R3 v2): only with PERSONAL_EXPENSE_DEDUCTIONS_ENABLED on AND
+// RECEIPT_PDF_PAGES_ENABLED exactly "true" (off unless set; it stays off until
+// the driver-privacy rule for multi-page statements ships), a PDF receipt's
+// pages are prepared in a locked-down child process (lib/receipt-pdf.js) and
+// inserted after its sheet once Chrome has rendered the invoice. Only the
+// invoice's own driver's receipt (both names non-empty, normalizeDriverName())
+// is ever read from the cache. Anything that fails keeps "PDF receipt on
+// file"; a failed insert renders the invoice once more with every PDF receipt
+// on that note, so an invoice never fails because of a receipt. The child's
+// self-test runs at every start whatever the flags; until it passes, every PDF
+// keeps the note.
 const PERSONAL_RECEIPT_WAIT_MS = 15_000;
+const RECEIPT_PDF_PAGES_ENABLED = process.env.RECEIPT_PDF_PAGES_ENABLED === "true";
+function receiptPdfPagesOn() {
+	return PERSONAL_EXPENSE_DEDUCTIONS_ENABLED && RECEIPT_PDF_PAGES_ENABLED;
+}
 function receiptImageService() {
 	if (!receiptImageService.instance) {
 		receiptImageService.instance = receiptImagesLib.createReceiptImageService({
@@ -26737,6 +27798,39 @@ function receiptImageService() {
 	}
 	return receiptImageService.instance;
 }
+// The files the self-test proves the child cannot read (yes/no only, never
+// opened): the settings file this process loaded (the repo .env dotenv reads,
+// or a replica's settings file) and the database.
+function receiptPdfProbePaths() {
+	return {
+		env: REPLICA ? REPLICA.settingsPath : path.resolve(process.cwd(), ".env"),
+		db: process.env.DATABASE_PATH || path.join(__dirname, "app.db"),
+	};
+}
+// Never throws: a service that cannot be set up (a cache folder it refuses) is
+// replaced by one that keeps every PDF receipt on its note, so no invoice
+// render fails because of it.
+function receiptPdfService() {
+	if (!receiptPdfService.instance) {
+		try {
+			receiptPdfService.instance = receiptPdfLib.createReceiptPdfService({
+				receiptsDir: RECEIPTS_DIR,
+				cacheDir: path.join(DATA_DIR, "storage", "receipt-pdfs"),
+				probes: receiptPdfProbePaths(),
+				log: (m) => console.warn(`[receipt-pdfs] ${m}`),
+			});
+		} catch (err) {
+			console.warn(`[receipt-pdfs] PDF receipt pages off: ${err.message}`);
+			receiptPdfService.instance = {
+				prepare: async () => ({ status: "on_file", reason: "disabled" }),
+				merge: async () => ({ status: "failed", reason: "disabled" }),
+				selfTest: async () => ({ passed: false, problems: ["setup"], report: null, line: "" }),
+				state: () => "failed",
+			};
+		}
+	}
+	return receiptPdfService.instance;
+}
 
 // Start (or join) one receipt's re-encode; never waits, never throws.
 function warmReceiptImage(expense) {
@@ -26746,30 +27840,62 @@ function warmReceiptImage(expense) {
 
 // The render data with its receipts: `data` from personalRenderData() (or the
 // generation's), `rows` the lines it prints (a provisional line carries its
-// expense_id). Only the image receipts that can have a page (the first
-// RECEIPT_PAGES_MAX in print order) are prepared, waiting at most
-// PERSONAL_RECEIPT_WAIT_MS; one not ready by then prints "Receipt image not
-// available". A new object.
-async function personalReceiptRenderData(data, rows) {
-	if (!rows || !rows.length) return data;
+// expense_id). Only the receipts that can have a sheet (the first
+// RECEIPT_SHEETS_MAX in print order, images and attachable PDFs counted
+// together) are prepared, waiting at most PERSONAL_RECEIPT_WAIT_MS; an image
+// not ready by then prints "Receipt image not available", a PDF "PDF receipt
+// on file". A PDF receipt is attachable only with opts.pdfPages and when its
+// driver and opts.invoiceDriver are the same non-empty name, checked before
+// anything is read; its pages count toward RECEIPT_PDF_INVOICE_MAX_PAGES and
+// its bytes toward RECEIPT_PDF_INSERT_MAX_BYTES in print order, and one that
+// would cross either keeps the note. { data (a new object), inserts: the PDF
+// pages to put after their sheets (lib/receipt-pdf.js merge()) }.
+async function personalReceiptRenderData(data, rows, opts = {}) {
+	if (!rows || !rows.length) return { data, inserts: [] };
 	const { lines } = personalExpense.invoiceLines(rows, (r) => r.receipt_type);
 	const expenseOfRow = new Map(rows.map((r) => [r.id, Number(r.expense_id)]));
 	const order = [...new Set(lines.filter((l) => l.kind === "personal" || l.kind === "personal_reversed")
 		.map((l) => expenseOfRow.get(l.rowId)).filter((n) => Number.isInteger(n) && n > 0))];
-	const photoOf = new Map(order.length
-		? db.prepare(`SELECT id, photo_data FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e.photo_data])
+	const expenseOf = new Map(order.length
+		? db.prepare(`SELECT id, photo_data, driver FROM expenses WHERE id IN (${order.map(() => "?").join(",")})`).all(...order).map((e) => [e.id, e])
 		: []);
+	const invoiceDriver = normalizeDriverName(typeof opts.invoiceDriver === "string" ? opts.invoiceDriver : "");
+	const pdfPages = opts.pdfPages === true;
 	const service = receiptImageService();
-	let images = 0;
+	let sheets = 0;
 	const prepared = new Map(await Promise.all(order.map(async (id) => {
-		const kind = receiptImagesLib.receiptImageKind(photoOf.get(id), RECEIPTS_DIR);
-		if (kind === "pdf") return [id, { status: "pdf" }];
+		const e = expenseOf.get(id) || {};
+		const kind = receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR);
+		if (kind === "pdf") {
+			const receiptDriver = normalizeDriverName(typeof e.driver === "string" ? e.driver : "");
+			if (!pdfPages || !invoiceDriver || receiptDriver !== invoiceDriver) return [id, { status: "pdf" }];
+			sheets += 1;
+			// Past the sheet cap a PDF keeps its own note: the app does not open a
+			// PDF receipt for a driver, so "open this receipt in the app" would not hold.
+			if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "pdf" }];
+			const res = await receiptPdfService().prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS });
+			return [id, res.status === "pages" ? { status: "pdf_pages", pages: res.pages, pdf: res.pdf } : { status: "pdf" }];
+		}
 		if (kind !== "image") return [id, { status: "unavailable", reason: "missing" }];
-		images += 1;
-		if (images > invoiceReceipts.RECEIPT_PAGES_MAX) return [id, { status: "over_cap" }];
-		return [id, await service.prepare({ expenseId: id, photoData: photoOf.get(id) }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
+		sheets += 1;
+		if (sheets > invoiceReceipts.RECEIPT_SHEETS_MAX) return [id, { status: "over_cap" }];
+		return [id, await service.prepare({ expenseId: id, photoData: e.photo_data }, { waitMs: PERSONAL_RECEIPT_WAIT_MS })];
 	})));
+	// The invoice-wide caps on copied pages, in print order.
+	let copiedPages = 0;
+	let copiedBytes = 0;
+	for (const id of order) {
+		const p = prepared.get(id);
+		if (!p || p.status !== "pdf_pages") continue;
+		if (copiedPages + p.pages > receiptPdfLib.RECEIPT_PDF_INVOICE_MAX_PAGES || copiedBytes + p.pdf.length > receiptPdfLib.RECEIPT_PDF_INSERT_MAX_BYTES) {
+			prepared.set(id, { status: "pdf" });
+			continue;
+		}
+		copiedPages += p.pages;
+		copiedBytes += p.pdf.length;
+	}
 	const layout = invoiceReceipts.receiptLayout(lines, rows, prepared);
+	const inserts = layout.inserts.map((x) => ({ expenseId: x.expenseId, anchor: x.anchor, index: x.index, total: x.total, pages: x.pages, pdf: prepared.get(x.expenseId).pdf }));
 	const out = { ...data, receiptPages: layout.pages };
 	if (data.personalCorrection) {
 		// A correction's line items and deductions are its lines, in the same order.
@@ -26780,31 +27906,56 @@ async function personalReceiptRenderData(data, rows) {
 	} else {
 		out.personalLines = layout.entries;
 	}
-	return out;
+	return { data: out, inserts };
+}
+
+// Every weekly or correction invoice render that carries Personal lines: the
+// receipts join the data (personalReceiptRenderData()), Chrome renders it, and
+// each attachable PDF receipt's pages go in after its sheet (lib/receipt-pdf.js
+// merge(), in the child). A failed merge renders once more with every PDF
+// receipt on its note. invoiceDriver: the invoice's own driver, for the PDF
+// driver check. Resolves the PDF bytes to write.
+async function renderInvoiceWithReceipts(templateName, data, rows, invoiceDriver) {
+	if (!rows || !rows.length) return renderPolicy(templateName, data);
+	const first = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: receiptPdfPagesOn() });
+	const pdf = await renderPolicy(templateName, first.data);
+	if (!first.inserts.length) return pdf;
+	const merged = await receiptPdfService().merge(pdf, first.inserts);
+	if (merged.status === "merged") return merged.pdf;
+	console.warn(`[receipt-pdfs] receipt pages for expense ${first.inserts.map((x) => x.expenseId).join(", ")} not inserted (${merged.reason}); the invoice prints "PDF receipt on file" instead`);
+	const again = await personalReceiptRenderData(data, rows, { invoiceDriver, pdfPages: false });
+	return renderPolicy(templateName, again.data);
 }
 
 // Before the Friday batch renders: every image receipt behind a Personal line of
 // that week (waiting, or on one of its invoices) is re-encoded and cached first,
-// one at a time, so the batch's renders read the cache instead of racing the
-// re-encode; an image not ready within a render's wait would print "Receipt image
-// not available" on an invoice nothing redraws. Bounded by
-// PERSONAL_RECEIPT_WARM_MS overall (each re-encode by its own deadline); never
-// throws. { receipts, prepared }.
+// and, with PDF receipt pages on, every PDF receipt's pages are prepared, one at
+// a time, so the batch's renders read the caches instead of racing the
+// children; a receipt not ready within a render's wait would print its note on
+// an invoice nothing redraws. Bounded by PERSONAL_RECEIPT_WARM_MS overall (each
+// job by its own deadline); never throws. { receipts, prepared }.
 const PERSONAL_RECEIPT_WARM_MS = 3 * 60 * 1000;
 async function warmPersonalReceiptsForWeek(weekStart) {
 	const out = { receipts: 0, prepared: 0 };
 	try {
 		if (!personalLedgerPresent()) return out;
+		const pdfPages = receiptPdfPagesOn();
+		// With the receipt's week on, the week's invoice may also take a line carried
+		// from an earlier week.
+		const carried = PERSONAL_RECEIPT_WEEK_ENABLED
+			? " OR (ep.week_start < ? AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ep.invoice_id AND i.deleted_at = '')))"
+			: "";
 		const list = db.prepare(`SELECT DISTINCT e.id, e.photo_data FROM expense_personal ep JOIN expenses e ON e.id = ep.expense_id
-			WHERE ep.voided_at = '' AND ep.week_start = ? ORDER BY e.id`).all(weekStart)
-			.filter((e) => receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) === "image");
+			WHERE ep.voided_at = '' AND (ep.week_start = ?${carried}) ORDER BY e.id`).all(...(carried ? [weekStart, weekStart] : [weekStart]))
+			.map((e) => ({ ...e, kind: receiptImagesLib.receiptImageKind(e.photo_data, RECEIPTS_DIR) }))
+			.filter((e) => e.kind === "image" || (pdfPages && e.kind === "pdf"));
 		out.receipts = list.length;
-		const service = receiptImageService();
 		const deadline = Date.now() + PERSONAL_RECEIPT_WARM_MS;
 		for (const e of list) {
 			if (Date.now() > deadline) break;
+			const service = e.kind === "pdf" ? receiptPdfService() : receiptImageService();
 			const res = await service.prepare({ expenseId: e.id, photoData: e.photo_data });
-			if (res.status === "image") out.prepared += 1;
+			if (res.status === "image" || res.status === "pages") out.prepared += 1;
 		}
 	} catch (err) {
 		console.warn(`[receipt-images] week ${weekStart}: receipts not prepared before the batch (${err.message})`);
@@ -26979,6 +28130,166 @@ function personalPlacement(driverName, weekStart) {
 	return { kind: "correction", weekly: inv, correction: openPersonalCorrection(driverName, weekStart) };
 }
 
+// THE RECEIPT'S WEEK (PERSONAL_RECEIPT_WEEK_ENABLED; the table at the top of the
+// section). The week a new line is keyed to: its receipt date's; with no valid
+// date, or one after today, the week it is marked in (a future week would hold
+// the line off every invoice until then). `why` names that case for the audit.
+function personalLineWeek(receiptDay) {
+	const marked = getWeekRange().weekStart;
+	if (!PERSONAL_RECEIPT_WEEK_ENABLED) return { weekStart: marked, why: "" };
+	const day = String(receiptDay || "").slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !personalExpense.formatDay(day)) return { weekStart: marked, why: "no receipt date: the week it was marked in" };
+	if (day > appTodayKey()) return { weekStart: marked, why: "dated after today: this week" };
+	return { weekStart: getWeekRange(day).weekStart, why: "" };
+}
+
+// What a weekly invoice can still take, in cents: its pay and adjustment, net of
+// the Personal lines it carries (the base rewriteInvoicePersonalLines() fits on).
+function personalRoomCents(inv) {
+	return Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100)
+		+ personalRowsOnInvoice(inv.id).reduce((s, r) => s + personalExpense.netCents(r), 0);
+}
+
+// One driver-week as the receipt's-week rules see it: unreadable, closed (it
+// touches a finalized month), two (weekly invoices), none (sweepDue), approved,
+// nosnapshot or open (roomCents). `label` is the week's.
+function personalWeekState(driverName, weekStart) {
+	const weekEnd = getWeekRange(weekStart).weekEnd;
+	const label = personalWeekLabel(weekStart, weekEnd);
+	const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: weekEnd });
+	if (lock.unreadable) return { kind: "unreadable", label };
+	if (lock.blockers.length) return { kind: "closed", label, periods: lock.blockers.flatMap((b) => b.periods || []).filter(Boolean) };
+	const weekly = liveWeeklyInvoicesForDriverWeek(driverName, weekStart);
+	if (weekly.length > 1) return { kind: "two", label };
+	const inv = weekly[0] || null;
+	if (!inv) return { kind: "none", label, sweepDue: personalSweepDueMs(weekStart) <= Date.now() };
+	if (!PERSONAL_OPEN_STATUSES.has(inv.status)) return { kind: "approved", label, invoice: inv };
+	if (!inv.pdf_file_name || !personalSnapshotOf(inv)) return { kind: "nosnapshot", label, invoice: inv };
+	return { kind: "open", label, invoice: inv, roomCents: personalRoomCents(inv) };
+}
+
+const PERSONAL_MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// Why a line cannot go on its own week's invoice, in the screens' words:
+// { reason, text }, text = "<reason>; it goes on the next weekly invoice". A
+// carried line its own week's invoice has room for again goes back on it at the
+// next sweep, and says so.
+function personalCarryReason(own, row) {
+	let reason;
+	let tail = "it goes on the next weekly invoice";
+	switch (own.kind) {
+		case "unreadable": reason = "no month can be confirmed open (the period lock table could not be read)"; break;
+		case "closed": {
+			const months = [...new Set(own.periods)].sort().map((p) => PERSONAL_MONTH_NAMES[Number(p.slice(5, 7)) - 1]).filter(Boolean);
+			reason = `the week of ${own.label} touches closed ${months.join(" and ") || "month"}`;
+			break;
+		}
+		case "two": reason = `the week of ${own.label} has two weekly invoices`; break;
+		case "approved": reason = `the ${own.label} invoice is ${String(own.invoice.status || "").toLowerCase()}`; break;
+		case "nosnapshot": reason = `the ${own.label} invoice can't be redrawn`; break;
+		case "open":
+			if (row && own.roomCents + personalExpense.netCents(row) >= 0) {
+				reason = `the ${own.label} invoice has room for it again`;
+				tail = "it goes back on it at the next sweep";
+			} else {
+				reason = `more than the ${own.label} invoice can take`;
+				tail = "it goes on the next weekly invoice with room";
+			}
+			break;
+		default: reason = `the week of ${own.label} has no weekly invoice`;
+	}
+	return { reason, text: `${reason}; ${tail}` };
+}
+
+// The driver's live weekly invoices a carried line of `weekStart` may go on,
+// oldest week first: from that week on, open, in an open month, with render
+// data, alone in their week.
+function personalOpenInvoicesFrom(driverName, weekStart) {
+	const key = normalizeDriverName(typeof driverName === "string" ? driverName : "");
+	if (!key) return [];
+	const perWeek = new Map();
+	for (const r of db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE week_start >= ? AND deleted_at = '' AND is_manual = 0 ORDER BY week_start ASC, id ASC").all(weekStart)) {
+		if (normalizeDriverName(r.driver) !== key) continue;
+		if (!perWeek.has(r.week_start)) perWeek.set(r.week_start, []);
+		perWeek.get(r.week_start).push(r);
+	}
+	return [...perWeek.values()].filter((list) => list.length === 1).map((list) => list[0]).filter((inv) => {
+		if (!PERSONAL_OPEN_STATUSES.has(inv.status) || !inv.pdf_file_name || !personalSnapshotOf(inv)) return false;
+		const lock = invoiceMonthLockBlockers(inv);
+		return !lock.unreadable && !lock.blockers.length;
+	});
+}
+
+// Whether a line's own week's invoice can take it now. A later invoice never
+// takes a line its own week still can.
+function personalOwnWeekCanTake(driverName, row) {
+	const own = personalWeekState(driverName, row.week_start);
+	return own.kind === "open" && own.roomCents + personalExpense.netCents(row) >= 0;
+}
+
+// Where a new line goes with the receipt's week on: unreadable; pending (its
+// week's invoice not generated, the sweep not due); attach (its week's open
+// invoice); carry { why, target }: target is the oldest open later invoice with
+// room, null when there is none yet. `row` carries week_start, kind, cents and
+// share_cents.
+function personalWeekPlacement(driverName, row) {
+	const own = personalWeekState(driverName, row.week_start);
+	if (own.kind === "unreadable") return { kind: "unreadable" };
+	if (own.kind === "none" && !own.sweepDue) return { kind: "pending" };
+	const net = personalExpense.netCents(row);
+	if (own.kind === "open" && own.roomCents + net >= 0) return { kind: "attach", invoice: own.invoice };
+	const target = personalOpenInvoicesFrom(driverName, row.week_start)
+		.find((inv) => inv.week_start > row.week_start && personalRoomCents(inv) + net >= 0) || null;
+	return { kind: "carry", why: personalCarryReason(own, row).text, target };
+}
+
+// Where a new line goes, by the rules the flag selects (the dry run asks this too).
+function personalPlacementFor(driverName, row) {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? personalWeekPlacement(driverName, row) : personalPlacement(driverName, row.week_start);
+}
+
+// Whether a line may go on this invoice by its week: its own week's always; with
+// the receipt's week on, an earlier week's line that is carried or was left on a
+// deleted invoice, and a reversal following its charge onto it.
+function personalMayGoOn(row, inv) {
+	if (row.week_start === inv.week_start) return true;
+	if (PERSONAL_RECEIPT_WEEK_ENABLED && personalFollowsCharge(row, inv)) return true;
+	if (!PERSONAL_RECEIPT_WEEK_ENABLED || !(String(row.week_start) < String(inv.week_start))) return false;
+	if (row.invoice_id != null) {
+		const on = db.prepare("SELECT deleted_at FROM invoices WHERE id = ?").get(row.invoice_id);
+		return !on || !!on.deleted_at;
+	}
+	return !!row.needs_correction_since;
+}
+
+// A line left on its own week's deleted invoice (a delete before a regenerate)
+// waits for that week's invoice until the sweep closing the week it was deleted
+// in is due; only then does the sweep carry it on.
+function personalLeftForRegenerate(row, nowMs) {
+	if (row.invoice_id == null) return false;
+	const left = db.prepare("SELECT week_start, deleted_at FROM invoices WHERE id = ?").get(row.invoice_id);
+	if (!left || !left.deleted_at || left.week_start !== row.week_start) return false;
+	const at = Date.parse(left.deleted_at);
+	return Number.isFinite(at) && nowMs < personalSweepDueMs(getWeekRange(appDay(new Date(at))).weekStart);
+}
+
+// Whether a week touches a finalized month (or none can be confirmed open).
+function personalWeekClosed(weekStart) {
+	const lock = invoiceMonthLockBlockers({ invoice_number: `the week of ${weekStart}`, week_start: weekStart, week_end: getWeekRange(weekStart).weekEnd });
+	return lock.unreadable || lock.blockers.length > 0;
+}
+
+// Which rows an invoice takes without going below $0, by the flag's rules: with
+// the receipt's week on, a reversal and its charge are taken, or left, together.
+function personalFit(baseCents, rows) {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? personalExpense.fitLinePairs(baseCents, rows) : personalExpense.fitLines(baseCents, rows);
+}
+
+// The end of an audit row for a line an invoice cannot take without going below $0.
+function personalUnfitTail() {
+	return PERSONAL_RECEIPT_WEEK_ENABLED ? "goes on the next weekly invoice" : "waiting for the week's correction";
+}
+
 // Change the Personal lines a live, open invoice carries and redraw its PDF:
 // render first (its receipts, then the PDF: the only awaits), then ONE immediate transaction re-checks that
 // neither the invoice nor its lines moved and writes the rows, the invoice's
@@ -27014,7 +28325,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 		: [];
 	const invKey = normalizeDriverName(inv.driver);
 	for (const r of attachRows) {
-		if (r.voided_at || r.week_start !== inv.week_start || normalizeDriverName(r.receipt_driver || "") !== invKey) {
+		if (r.voided_at || !personalMayGoOn(r, inv) || normalizeDriverName(r.receipt_driver || "") !== invKey) {
 			throw personalRefusal(409, "PERSONAL_DRIVER_MISMATCH", `A Personal line of another driver or week cannot go on ${label}.`);
 		}
 	}
@@ -27025,7 +28336,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	let flagged = [];
 	if (plan.fit && !inv.is_correction) {
 		const base = Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100) + kept.reduce((s, r) => s + personalExpense.netCents(r), 0);
-		const f = personalExpense.fitLines(base, incoming);
+		const f = personalFit(base, incoming);
 		incoming = f.fit;
 		flagged = f.flagged;
 	}
@@ -27042,8 +28353,7 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 	const finalPath = path.join(dir, inv.pdf_file_name);
 	if (touchesInvoice && !softDelete) {
 		rendered = personalRenderData(snap, inv, next);
-		const withReceipts = await personalReceiptRenderData(rendered.data, next);
-		const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+		const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, next, inv.driver);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		tmpPath = path.join(dir, `.${inv.pdf_file_name}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`);
 		fs.writeFileSync(tmpPath, pdfBuffer);
@@ -27059,6 +28369,10 @@ async function rewriteInvoicePersonalLines(invoiceRow, plan) {
 			// The invoice's week may have come to touch a finalized month meanwhile.
 			const weekLock = invoiceMonthLockBlockers(now || inv);
 			if (moved || !sameLines || shared || weekLock.unreadable || weekLock.blockers.length) throw changed();
+			// An earlier week's line goes on only while its own week still cannot take
+			// it; a reversal following its charge goes where the charge is.
+			if (PERSONAL_RECEIPT_WEEK_ENABLED && incoming.some((r) => String(r.week_start) < String(inv.week_start)
+				&& !personalFollowsCharge(r, inv) && personalOwnWeekCanTake(inv.driver, r))) throw changed();
 			if (voidId != null) assertPersonalCostMonthOpen(current.find((r) => r.id === voidId));
 			const readRow = db.prepare("SELECT invoice_id, voided_at FROM expense_personal WHERE id = ?");
 			for (const r of attachRows) {
@@ -27150,8 +28464,7 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 		adjustmentNote: "",
 	};
 	const rendered = personalRenderData(snapshot, { adjustment: 0, adjustment_note: "" }, rows);
-	const withReceipts = await personalReceiptRenderData(rendered.data, rows);
-	const pdfBuffer = await renderPolicy(rendered.templateName, withReceipts);
+	const pdfBuffer = await renderInvoiceWithReceipts(rendered.templateName, rendered.data, rows, display);
 	let insertedId = null;
 	const result = commitInvoiceWithPdf({
 		invoiceNumber, pdfFileName, pdfBuffer,
@@ -27193,8 +28506,10 @@ async function createPersonalCorrection({ driverName, weekStart, weekly, insert,
 }
 
 // Place a new line (a mark's deduction or a reversal) by the week rules and
-// write it. Returns { lineId, state, invoice, created }.
+// write it. Returns { lineId, state, invoice, created }, plus `carried` (the
+// reason it is off its week's invoice) with the receipt's week on.
 async function placePersonalLine({ row, receiptType, driverName, actor, onCommit }) {
+	if (PERSONAL_RECEIPT_WEEK_ENABLED) return placePersonalLineByWeek({ row, receiptType, driverName, actor, onCommit });
 	const place = personalPlacement(driverName, row.week_start);
 	if (place.kind === "unreadable") {
 		throw personalRefusal(409, "PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. The Personal line is held until that is fixed.");
@@ -27222,6 +28537,32 @@ async function placePersonalLine({ row, receiptType, driverName, actor, onCommit
 		return id;
 	}).immediate();
 	return { lineId, state: stamp ? "needs_correction" : "pending", invoice: null };
+}
+
+// placePersonalLine() with the receipt's week on: its week's open invoice, else
+// carried to the oldest open later one with room, else written waiting (carried
+// when its week can never take it). A line the invoice turns out not to fit at
+// the write is carried, for the sweep or the next generation.
+async function placePersonalLineByWeek({ row, receiptType, driverName, actor, onCommit }) {
+	const place = personalWeekPlacement(driverName, row);
+	if (place.kind === "unreadable") {
+		throw personalRefusal(409, "PERIOD_LOCK_UNREADABLE", "The period lock table could not be read, so no month can be confirmed open. The Personal line is held until that is fixed.");
+	}
+	const actorName = (actor && actor.session && actor.session.user && actor.session.user.username) || "";
+	const target = place.kind === "attach" ? place.invoice : place.kind === "carry" ? place.target : null;
+	const carried = place.kind === "carry" ? place.why : "";
+	if (target) {
+		const out = await rewriteInvoicePersonalLines(target, { insert: row, insertType: receiptType, fit: true, onCommit, actorName });
+		if (out.insertFlagged) return { lineId: out.insertedId, state: "carried", invoice: null, carried: carried || `it does not fit ${target.invoice_number} without taking it below $0` };
+		return { lineId: out.insertedId, state: "invoiced", invoice: out.invoice, carried };
+	}
+	const stamp = carried ? new Date().toISOString() : "";
+	const lineId = db.transaction(() => {
+		const id = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: stamp });
+		if (onCommit) onCommit(id);
+		return id;
+	}).immediate();
+	return { lineId, state: stamp ? "carried" : "pending", invoice: null, carried };
 }
 
 // Why a live deduction can no longer be undone (then it is reversed), or null.
@@ -27267,10 +28608,53 @@ function personalReverseShare(line) {
 	return personalExpense.shareCents(base.rate_per_load, Number(line.cents) || 0);
 }
 
+// With the receipt's week on, how a Reverse of this live line is written:
+//   off    the line is on no invoice and no pay was raised for it: neither row
+//          ever goes on one (a share it carries was never paid either);
+//   wait   the line is on no invoice, but a live invoice's percentage base left
+//          it out: the line still goes on an invoice and the reversal waits to
+//          follow it there, so the raised pay comes back and never the credit
+//          alone (PERSONAL_COLLECTABLE_SQL);
+//   place  the line is on an invoice: the reversal is placed by the week rules;
+//   none   it would have to go on an invoice, and the receipt names no driver.
+function personalReverseMode(line, receiptDriver) {
+	const live = (id) => id != null && !!db.prepare("SELECT 1 FROM invoices WHERE id = ? AND deleted_at = ''").get(id);
+	const mode = live(line.invoice_id) ? "place" : live(line.base_invoice_id) ? "wait" : "off";
+	return mode === "off" || normalizeDriverName(String(receiptDriver || "")) ? mode : "none";
+}
+
+// A reversed line on no invoice that still goes on one (PERSONAL_COLLECTABLE_SQL),
+// in the screens' words; "" when it never will.
+function personalReversedWait(row) {
+	if (!db.prepare(`SELECT 1 FROM expense_personal ep WHERE ep.id = ? AND ${PERSONAL_COLLECTABLE_SQL}`).get(row.id)) return "";
+	const credit = db.prepare("SELECT i.invoice_number FROM expense_personal r JOIN invoices i ON i.id = r.invoice_id WHERE r.id = ? AND i.deleted_at = ''").get(row.reversed_by_id);
+	return credit
+		? `its credit is on ${credit.invoice_number}; the line still goes on the next weekly invoice`
+		: "the line still goes on the next weekly invoice, and its credit with it";
+}
+
+// The reversals waiting to follow their charge onto this invoice.
+function personalFollowersOf(invoiceId) {
+	if (!personalLedgerPresent()) return [];
+	return db.prepare(`SELECT r.id FROM expense_personal r JOIN expense_personal d ON d.id = r.reverses_id LEFT JOIN invoices ri ON ri.id = r.invoice_id
+		WHERE r.kind = 'reverse' AND r.voided_at = '' AND d.invoice_id = ? AND (r.invoice_id IS NULL OR ri.id IS NULL OR ri.deleted_at != '') ORDER BY r.id`)
+		.all(invoiceId).map((r) => r.id);
+}
+
+// Whether a reversal goes on this invoice to follow its charge there.
+function personalFollowsCharge(row, inv) {
+	if (row.kind !== "reverse" || row.reverses_id == null) return false;
+	const charge = db.prepare("SELECT invoice_id FROM expense_personal WHERE id = ?").get(row.reverses_id);
+	return !!charge && charge.invoice_id === inv.id;
+}
+
 // Each receipt's live Personal deduction, for the screens: { [expenseId]:
 // { line_id, cents, share_cents, week_start, state, invoice_id, invoice_number,
 // in_place, cost_period } }, state one of pending, invoiced, correction,
-// needs_correction, reversed. A null-prototype object.
+// needs_correction, reversed. With the receipt's week on, needs_correction reads
+// carried, and each summary adds wait_text (why a carried line is off its week's
+// invoice), invoice_week_label (the week of the invoice carrying it) and final
+// (that invoice is approved). A null-prototype object.
 function personalSummaryByExpense(ids) {
 	const out = Object.create(null);
 	const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
@@ -27278,15 +28662,16 @@ function personalSummaryByExpense(ids) {
 	for (let i = 0; i < list.length; i += 500) {
 		const chunk = list.slice(i, i + 500);
 		const rows = db.prepare(
-			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at
-			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id
+			`SELECT ep.*, i.invoice_number AS inv_number, i.is_correction AS inv_is_correction, i.deleted_at AS inv_deleted_at,
+			 i.status AS inv_status, i.week_start AS inv_week_start, i.week_end AS inv_week_end, e.driver AS receipt_driver
+			 FROM expense_personal ep LEFT JOIN invoices i ON i.id = ep.invoice_id LEFT JOIN expenses e ON e.id = ep.expense_id
 			 WHERE ep.expense_id IN (${chunk.map(() => "?").join(",")}) AND ep.kind = 'deduct' AND ep.voided_at = '' ORDER BY ep.id`
 		).all(...chunk);
 		for (const r of rows) {
 			const onInvoice = r.invoice_id != null && r.inv_number != null && !r.inv_deleted_at;
 			const state = r.reversed_by_id != null ? "reversed"
 				: onInvoice ? (r.inv_is_correction ? "correction" : "invoiced")
-					: r.needs_correction_since ? "needs_correction" : "pending";
+					: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending";
 			out[r.expense_id] = {
 				line_id: r.id, cents: r.cents, share_cents: r.share_cents, week_start: r.week_start, state,
 				invoice_id: onInvoice ? r.invoice_id : null, invoice_number: onInvoice ? r.inv_number : "",
@@ -27294,6 +28679,15 @@ function personalSummaryByExpense(ids) {
 				amount_text: personalExpense.formatMoney(r.cents),
 				week_label: /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || "")) ? personalWeekLabel(r.week_start, getWeekRange(r.week_start).weekEnd) : "",
 			};
+			if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+				Object.assign(out[r.expense_id], {
+					wait_text: state === "carried" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.week_start || ""))
+						? personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r).text
+						: state === "reversed" && !onInvoice ? personalReversedWait(r) : "",
+					invoice_week_label: onInvoice && r.inv_week_start && r.inv_week_end ? personalWeekLabel(r.inv_week_start, r.inv_week_end) : "",
+					final: onInvoice && state !== "reversed" && !PERSONAL_OPEN_STATUSES.has(r.inv_status),
+				});
+			}
 			// The row itself, for personalSummaryForRole()'s Undo test; not enumerable,
 			// so it never reaches a response.
 			Object.defineProperty(out[r.expense_id], "row", { value: r, enumerable: false });
@@ -27306,15 +28700,26 @@ function personalSummaryByExpense(ids) {
 // plus can_undo (personalUndoBlocker(): Undo while it applies, Reverse after).
 // A Dispatcher: the state, the amount and the week — no share, invoice or books.
 // A Driver (his own receipts): the same, plus which of his invoices carries it.
+// With the receipt's week on, Super Admin also gets can_reverse (Undo blocked,
+// but not by an approved invoice, which is final) and a Driver the week of the
+// invoice carrying it.
 function personalSummaryForRole(summary, role) {
 	if (!summary) return null;
 	if (role === "Super Admin") {
 		const live = summary.state !== "reversed";
-		return { ...summary, can_undo: live && summary.row ? !personalUndoBlocker(summary.row) : false };
+		const block = live && summary.row ? personalUndoBlocker(summary.row) : null;
+		const out = { ...summary, can_undo: live && summary.row ? !block : false };
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+			out.can_reverse = live && !!block && block.code !== "PERSONAL_INVOICE_APPROVED" && personalReverseMode(summary.row, summary.row.receipt_driver) !== "none";
+		}
+		return out;
 	}
 	const { line_id, state, cents, amount_text, week_start, week_label } = summary;
 	const shown = { line_id, state, cents, amount_text, week_start, week_label };
-	return role === "Driver" ? { ...shown, invoice_number: summary.invoice_number || "" } : shown;
+	if (role !== "Driver") return shown;
+	const driver = { ...shown, invoice_number: summary.invoice_number || "" };
+	if (PERSONAL_RECEIPT_WEEK_ENABLED) driver.invoice_week_label = summary.invoice_week_label || "";
+	return driver;
 }
 
 // The receipts among `ids` with a live (unreversed) Personal deduction.
@@ -27337,10 +28742,13 @@ function personalLiveExpenseIds(ids) {
 //   read         each line's invoice_id as read, for the write's re-check
 // A base leaves a live deduction's cents out unless its share is frozen on
 // another live invoice (a returned share there stands for the cents in this base).
+// With the receipt's week on, a week touching a finalized month takes no new
+// line; the lines on the Draft it replaces stay.
 function personalGenerationPlan({ driverName, weekStart, existing, expenses, percentage }) {
 	const plan = { candidates: [], leftOut: {}, shareResets: [], baseRows: [], shareRefresh: new Map(), read: new Map() };
 	if (!personalLedgerPresent()) return plan;
-	const waiting = personalWaitingRows(driverName, weekStart);
+	const closed = PERSONAL_RECEIPT_WEEK_ENABLED && personalWeekClosed(weekStart);
+	const waiting = closed ? [] : personalWaitingRows(driverName, weekStart);
 	const onDraft = existing ? personalRowsOnInvoice(existing.id) : [];
 	const seen = new Set(waiting.map((r) => r.id));
 	plan.candidates = [...waiting, ...onDraft.filter((r) => !seen.has(r.id))].sort((a, b) => a.id - b.id);
@@ -27396,7 +28804,7 @@ function personalFitForGeneration(plan, baseCents) {
 		...r,
 		share_cents: resets.has(r.id) ? 0 : plan.shareRefresh.has(r.id) ? plan.shareRefresh.get(r.id) : (Number(r.share_cents) || 0),
 	}));
-	const { fit, flagged } = personalExpense.fitLines(baseCents, effective);
+	const { fit, flagged } = personalFit(baseCents, effective);
 	const { lines, personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
 	return {
 		fit, flagged,
@@ -27432,16 +28840,30 @@ function personalCommitGeneration(invoiceId, plan, fitted) {
 }
 
 // After a generation commits: a line marked during its render goes on through
-// the attach path. A failure leaves it waiting for the weekly sweep.
+// the attach path. A failure leaves it waiting for the weekly sweep. With the
+// receipt's week on, a week touching a finalized month takes none, and carried
+// lines are left to the sweep (the generation already weighed them).
 async function attachLatePersonalLines(invoice, actor) {
-	const waiting = personalWaitingRows(invoice.driver, invoice.week_start);
-	if (!waiting.length) return invoice;
+	if (PERSONAL_RECEIPT_WEEK_ENABLED && personalWeekClosed(invoice.week_start)) return invoice;
+	const waiting = personalWaitingRows(invoice.driver, invoice.week_start).filter((r) => !PERSONAL_RECEIPT_WEEK_ENABLED || !r.needs_correction_since);
+	// With the receipt's week on, a reversal waiting for its charge follows it onto this invoice.
+	const followers = PERSONAL_RECEIPT_WEEK_ENABLED ? personalFollowersOf(invoice.id) : [];
+	const ids = [...new Set([...waiting.map((r) => r.id), ...followers])];
+	if (!ids.length) return invoice;
 	try {
-		const out = await rewriteInvoicePersonalLines(invoice, { attach: waiting.map((r) => r.id), fit: true });
-		if (out.attached.length) {
-			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${out.attached.length} Personal line(s) marked during generation attached`);
+		const out = await rewriteInvoicePersonalLines(invoice, { attach: ids, fit: true });
+		const late = out.attached.filter((id) => !followers.includes(id));
+		const followed = out.attached.filter((id) => followers.includes(id));
+		if (late.length) {
+			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${late.length} Personal line(s) marked during generation attached`);
 		}
-		for (const id of out.flagged) logAudit(actor, "flag_personal_expense", "expense", String(waiting.find((r) => r.id === id).expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; waiting for the week's correction`);
+		if (followed.length) {
+			logAudit(actor, "invoice_personal_lines", "invoice", invoice.id, `${invoice.invoice_number}: ${followed.length} Personal reversal(s) following their line attached`);
+		}
+		for (const id of out.flagged) {
+			const row = waiting.find((r) => r.id === id);
+			if (row) logAudit(actor, "flag_personal_expense", "expense", String(row.expense_id), `line ${id} does not fit ${invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
+		}
 		return out.invoice;
 	} catch (err) {
 		console.error(`[personal] ${invoice.invoice_number}: a Personal line marked during generation was not attached (${err.message}); the weekly sweep will place it.`);
@@ -27459,7 +28881,7 @@ function personalDetachUnfit(invoiceId) {
 	if (!inv || inv.deleted_at || inv.is_correction || !PERSONAL_OPEN_STATUSES.has(inv.status)) return [];
 	const rows = personalRowsOnInvoice(invoiceId);
 	if (!rows.length) return [];
-	const { fit, flagged } = personalExpense.fitLines(Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100), rows);
+	const { fit, flagged } = personalFit(Math.round(((inv.total_earnings || 0) + (inv.adjustment || 0)) * 100), rows);
 	if (!flagged.length) return [];
 	const stamp = new Date().toISOString();
 	const { personalTotalCents, shareTotalCents } = personalExpense.invoiceLines(fit, (r) => r.receipt_type);
@@ -27510,6 +28932,139 @@ function personalSweepDueMs(weekStart) {
 	return appTime.wallClockToMs(APP_TIMEZONE, sat.getUTCFullYear(), sat.getUTCMonth() + 1, sat.getUTCDate(), 6, 0, 0);
 }
 
+// THE WEEKLY SWEEP with the receipt's week on:
+//   1. a finished week's own lines not yet carried go on the week's open invoice
+//      (the attach path) or are carried, each carry audited once;
+//   2. every carried line goes on the driver's oldest open invoice from its week
+//      on with room: oldest line first, never below $0, never split.
+// No notice is sent. An attach that fails is retried on the next tick, and that
+// driver's other lines wait with it, so none skips ahead to a later invoice.
+// Each week touched is recorded in personal_sweep_runs ("N attached · N carried
+// · N failed"; the carried count in its flagged column).
+async function personalSweepByWeek() {
+	const nowMs = Date.now();
+	const tally = new Map();
+	const count = (weekStart, key, n = 1) => {
+		if (!n) return;
+		if (!tally.has(weekStart)) tally.set(weekStart, { weekStart, attached: 0, carried: 0, failed: 0 });
+		tally.get(weekStart)[key] += n;
+	};
+	const waiting = `${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+		WHERE ep.voided_at = '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') AND ${PERSONAL_COLLECTABLE_SQL}`;
+	// Still waiting as the write runs: a line a live invoice took meanwhile (a
+	// generation or an attach during an earlier await) is left alone.
+	const stampCarried = db.prepare(`UPDATE expense_personal SET needs_correction_since = ? WHERE id = ? AND needs_correction_since = '' AND voided_at = ''
+		AND (invoice_id IS NULL OR NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = expense_personal.invoice_id AND COALESCE(i.deleted_at, '') = ''))`);
+	const carry = (lines, why) => {
+		const stamp = new Date().toISOString();
+		const done = db.transaction(() => lines.filter((r) => stampCarried.run(stamp, r.id).changes === 1))();
+		for (const r of done) {
+			logAudit(PERSONAL_SYSTEM_ACTOR, "carry_personal_expense", "expense", r.expense_id, `line ${r.id} (${personalExpense.formatMoney(r.cents)}, week ${r.week_start}) carried: ${why}`);
+			count(r.week_start, "carried");
+		}
+	};
+	// A reversal waiting for its line follows it onto the open invoice it is on;
+	// run before the steps below and after them (a line they place brings its
+	// reversal along). Where that invoice cannot be redrawn, the steps below place
+	// the reversal by the week rules instead.
+	const follow = async () => {
+		const byInvoice = new Map();
+		for (const r of db.prepare(`SELECT r.id, r.week_start, d.invoice_id FROM expense_personal r JOIN expense_personal d ON d.id = r.reverses_id
+			JOIN invoices di ON di.id = d.invoice_id LEFT JOIN invoices ri ON ri.id = r.invoice_id
+			WHERE r.kind = 'reverse' AND r.voided_at = '' AND di.deleted_at = '' AND di.status IN ('Draft', 'Submitted', 'Rejected')
+			AND (r.invoice_id IS NULL OR ri.id IS NULL OR ri.deleted_at != '') ORDER BY r.id`).all()) {
+			if (!byInvoice.has(r.invoice_id)) byInvoice.set(r.invoice_id, []);
+			byInvoice.get(r.invoice_id).push(r);
+		}
+		for (const [invoiceId, rows] of byInvoice) {
+			const inv = db.prepare("SELECT *, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at FROM invoices WHERE id = ?").get(invoiceId);
+			if (!inv || !inv.pdf_file_name || !personalSnapshotOf(inv) || personalWeekClosed(inv.week_start)) continue;
+			try {
+				const res = await rewriteInvoicePersonalLines(inv, { attach: rows.map((r) => r.id), fit: true });
+				for (const r of rows) if (res.attached.includes(r.id)) count(r.week_start, "attached");
+				if (res.attached.length) {
+					logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", inv.id, `${inv.invoice_number}: ${res.attached.length} Personal reversal(s) following their line attached by the weekly sweep`);
+				}
+			} catch (err) {
+				for (const r of rows) count(r.week_start, "failed");
+				console.error(`[personal-sweep] ${rows.length} reversal(s) not attached to ${inv.invoice_number} (${err.message}); retried next run`);
+			}
+		}
+	};
+	await follow();
+
+	const groups = new Map();
+	for (const r of db.prepare(`${waiting} AND ep.needs_correction_since = '' ORDER BY ep.week_start, ep.id`).all()) {
+		if (personalSweepDueMs(r.week_start) > nowMs || personalLeftForRegenerate(r, nowMs)) continue;
+		const k = `${r.week_start}|${normalizeDriverName(r.receipt_driver || "")}`;
+		if (!groups.has(k)) groups.set(k, []);
+		groups.get(k).push(r);
+	}
+	for (const lines of groups.values()) {
+		const weekStart = lines[0].week_start;
+		const driver = String(lines[0].receipt_driver || "");
+		if (!normalizeDriverName(driver)) { carry(lines, "the receipt names no driver"); continue; }
+		const own = personalWeekState(driver, weekStart);
+		if (own.kind === "unreadable") { count(weekStart, "failed", lines.length); continue; }
+		if (own.kind !== "open") { carry(lines, personalCarryReason(own).text); continue; }
+		try {
+			const res = await rewriteInvoicePersonalLines(own.invoice, { attach: lines.map((l) => l.id), fit: true });
+			count(weekStart, "attached", res.attached.length);
+			if (res.attached.length) {
+				logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", own.invoice.id, `${own.invoice.invoice_number}: ${res.attached.length} waiting Personal line(s) attached by the weekly sweep`);
+			}
+			for (const l of lines.filter((x) => res.flagged.includes(x.id))) {
+				logAudit(PERSONAL_SYSTEM_ACTOR, "carry_personal_expense", "expense", l.expense_id, `line ${l.id} (${personalExpense.formatMoney(l.cents)}, week ${l.week_start}) carried: it does not fit ${own.invoice.invoice_number} without taking it below $0; ${personalUnfitTail()}`);
+				count(weekStart, "carried");
+			}
+		} catch (err) {
+			count(weekStart, "failed", lines.length);
+			console.error(`[personal-sweep] week ${weekStart}: ${lines.length} line(s) not attached to ${own.invoice.invoice_number} (${err.message}); retried next run`);
+		}
+	}
+
+	const byDriver = new Map();
+	for (const r of db.prepare(`${waiting} AND ep.needs_correction_since != '' ORDER BY ep.id`).all()) {
+		const k = normalizeDriverName(r.receipt_driver || "");
+		if (!k) continue;
+		if (!byDriver.has(k)) byDriver.set(k, []);
+		byDriver.get(k).push(r);
+	}
+	for (const lines of byDriver.values()) {
+		let left = lines;
+		const earliest = left.reduce((m, l) => (l.week_start < m ? l.week_start : m), left[0].week_start);
+		for (const inv of personalOpenInvoicesFrom(String(lines[0].receipt_driver || ""), earliest)) {
+			const eligible = left.filter((l) => l.week_start <= inv.week_start);
+			// Only an invoice with room for one of them is redrawn.
+			if (!eligible.length || !personalFit(personalRoomCents(inv), eligible).fit.length) continue;
+			try {
+				const res = await rewriteInvoicePersonalLines(inv, { attach: eligible.map((l) => l.id), fit: true });
+				const attached = new Set(res.attached);
+				for (const l of eligible) if (attached.has(l.id)) count(l.week_start, "attached");
+				if (attached.size) {
+					logAudit(PERSONAL_SYSTEM_ACTOR, "invoice_personal_lines", "invoice", inv.id, `${inv.invoice_number}: ${attached.size} carried Personal line(s) attached by the weekly sweep`);
+				}
+				left = left.filter((l) => !attached.has(l.id));
+				if (!left.length) break;
+			} catch (err) {
+				for (const l of eligible) count(l.week_start, "failed");
+				console.error(`[personal-sweep] ${eligible.length} carried line(s) not attached to ${inv.invoice_number} (${err.message}); retried next run`);
+				break;
+			}
+		}
+	}
+
+	await follow();
+
+	const out = { weeks: [...tally.values()] };
+	const ranAt = new Date().toISOString();
+	const record = db.prepare("INSERT OR REPLACE INTO personal_sweep_runs (week_start, ran_at, attached, flagged, failed, summary) VALUES (?, ?, ?, ?, ?, ?)");
+	for (const t of out.weeks) record.run(t.weekStart, ranAt, t.attached, t.carried, t.failed, `${t.attached} attached · ${t.carried} carried · ${t.failed} failed`);
+	if (out.weeks.some((t) => t.attached > 0)) notifyChange("invoices");
+	if (out.weeks.some((t) => t.attached > 0 || t.carried > 0)) notifyChange("expenses");
+	return out;
+}
+
 // THE WEEKLY SWEEP — its own job, independent of INVOICE_AUTOGEN_ENABLED and of
 // the flag. For every week whose sweep is due, every line still waiting (never
 // attached, or left on a soft-deleted invoice) and not yet flagged:
@@ -27520,12 +29075,14 @@ function personalSweepDueMs(weekStart) {
 //                                                                Super Admins told
 //                                                                in the app
 // It creates no invoice. An attach that fails is left as it was and retried on
-// the next tick. Each swept week is recorded in personal_sweep_runs.
+// the next tick. Each swept week is recorded in personal_sweep_runs. With the
+// receipt's week on it runs personalSweepByWeek() instead.
 async function runPersonalSweep() {
 	const out = { weeks: [] };
 	if (runPersonalSweep.running || !personalLedgerPresent()) return out;
 	runPersonalSweep.running = true;
 	try {
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) return await personalSweepByWeek();
 		const nowMs = Date.now();
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 			WHERE ep.voided_at = '' AND ep.needs_correction_since = '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
@@ -27705,11 +29262,12 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 		const inPlace = /^\d{4}-\d{2}$/.test(month) && !periodWriteLocked(month);
 		const receiptDay = String(expense.date || "").slice(0, 10);
 		const today = appTodayKey();
+		const lineWeek = personalLineWeek(receiptDay);
 		const row = {
 			expense_id: id, kind: "deduct", cents: amount.cents, receipt_cents: receiptCents,
 			merchant: personalExpense.merchantOf(expense), receipt_date: receiptDay,
 			cost_period: inPlace ? month : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? (receiptDay || today) : today,
-			week_start: getWeekRange().weekStart, share_cents: personalShareForReceipt(expense, amount.cents), reason,
+			week_start: lineWeek.weekStart, share_cents: personalShareForReceipt(expense, amount.cents), reason,
 			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
 		};
 		const approve = inPlace && String(expense.status || "") === "Pending";
@@ -27726,10 +29284,12 @@ app.post("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCrossOr
 			if (won) return personalAlreadyMarked(res, won, amount.cents, user);
 			throw err;
 		}
-		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}${placed.carried ? ` (carried: ${placed.carried})` : ""}`
+			: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
+				: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
 		const books = row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period} for finalized ${month || "unknown month"}`;
 		logAudit(req, "mark_expense_personal", "expense", id,
-			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}; ${where}; ${books}` +
+			`Personal ${personalExpense.formatMoney(row.cents)} of ${personalExpense.formatMoney(receiptCents)}, ${row.merchant}, ${receiptDay || "no date"}; driver ${driverName}; week ${row.week_start}${lineWeek.why ? ` (${lineWeek.why})` : ""}; ${where}; ${books}` +
 			(row.share_cents ? `; share returned ${personalExpense.formatMoney(row.share_cents)}` : "") + (reason ? `; reason: ${reason}` : ""));
 		if (approve) logAudit(req, "update_expense_status", "expense", id, `status Pending -> Approved (marked Personal; period ${row.cost_period})`);
 		if (placed.invoice && !placed.created) {
@@ -27761,7 +29321,9 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 			logAuditRefusal(req, "undo_expense_personal_blocked", "expense", id,
 				`undo Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [${block.code}] — nothing was written` + (reason ? ` — reason: ${reason}` : ""),
 				block.code);
-			return res.status(409).json({ error: `${block.message} Use Reverse instead.`, code: block.code });
+			// With the receipt's week on, a line on an approved invoice is final.
+			const final = PERSONAL_RECEIPT_WEEK_ENABLED && block.code === "PERSONAL_INVOICE_APPROVED";
+			return res.status(409).json({ error: `${block.message} ${final ? "Approved invoices are locked." : "Use Reverse instead."}`, code: block.code });
 		}
 		const user = req.session.user;
 		const inv = line.invoice_id ? db.prepare("SELECT * FROM invoices WHERE id = ?").get(line.invoice_id) : null;
@@ -27795,7 +29357,12 @@ app.delete("/api/expenses/:id/personal", requireRole("Super Admin"), refuseCross
 // takes back an owner-operator's share) on the week the reversal is made in, by
 // the same placement rules; the original line stays on its invoice. Its cost
 // month is the line's own while that month is open, else the open month (a
-// credit row). After a reversal the receipt can be marked again.
+// credit row). After a reversal the receipt can be marked again. With the
+// receipt's week on (personalReverseMode()): a line on an approved invoice is
+// final (409 PERSONAL_LOCKED); a line on no invoice is reversed on none, and
+// neither row goes on one, unless a percentage base already raised the pay for
+// it: then the line still goes on an invoice and the reversal follows it there;
+// a line on an open invoice is reversed by the line's own week's rules.
 app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
 		const expense = personalExpenseById(req);
@@ -27813,6 +29380,12 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 		if (!block) {
 			return res.status(409).json({ error: "This Personal line is not on an approved invoice yet, so Undo removes it. A reversing line is only for a line that can no longer be undone.", code: "PERSONAL_USE_UNDO" });
 		}
+		if (PERSONAL_RECEIPT_WEEK_ENABLED && block.code === "PERSONAL_INVOICE_APPROVED") {
+			logAuditRefusal(req, "reverse_expense_personal_blocked", "expense", id,
+				`reverse Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [PERSONAL_LOCKED] — ${block.message} Nothing was written` + (reason ? ` — reason: ${reason}` : ""),
+				"PERSONAL_LOCKED");
+			return res.status(409).json({ error: "The invoice is approved, and approved invoices are locked.", code: "PERSONAL_LOCKED" });
+		}
 		if (block.code === "PERIOD_LOCK_UNREADABLE") {
 			return periodLockUnreadableResponse(req, res, "Reversing a Personal line",
 				{ action: "reverse_expense_personal_blocked", entity: "expense", entityId: String(id), subject: `reverse Personal line ${line.id}`, note: reason });
@@ -27824,17 +29397,38 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 			expense_id: id, kind: "reverse", reverses_id: line.id, cents: line.cents, receipt_cents: line.receipt_cents,
 			merchant: line.merchant, receipt_date: line.receipt_date,
 			cost_period: inPlace ? line.cost_period : appMonthKey(), in_place: inPlace ? 1 : 0, book_date: inPlace ? line.book_date : today,
-			week_start: getWeekRange().weekStart, share_cents: personalReverseShare(line), reason,
+			week_start: PERSONAL_RECEIPT_WEEK_ENABLED ? line.week_start : getWeekRange().weekStart, share_cents: personalReverseShare(line), reason,
 			created_at: new Date().toISOString(), created_by: user.username || "", created_by_id: Number(user.id) || 0, created_role: user.role || "",
 		};
-		const placed = await placePersonalLine({
-			row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req,
-			onCommit: (newId) => {
-				const r = db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ? AND reversed_by_id IS NULL AND voided_at = ''").run(newId, line.id);
-				if (r.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
-			},
-		});
-		const where = placed.invoice ? `on ${placed.invoice.invoice_number}` : placed.state === "needs_correction" ? "waiting for the week's correction invoice" : "not yet invoiced";
+		const onCommit = (newId) => {
+			const r = db.prepare("UPDATE expense_personal SET reversed_by_id = ? WHERE id = ? AND reversed_by_id IS NULL AND voided_at = ''").run(newId, line.id);
+			if (r.changes !== 1) throw personalRefusal(409, "PERSONAL_CHANGED", "The Personal line changed meanwhile. Reload and try again.");
+		};
+		const mode = PERSONAL_RECEIPT_WEEK_ENABLED ? personalReverseMode(line, expense.driver) : "place";
+		if (mode === "none") {
+			logAuditRefusal(req, "reverse_expense_personal_blocked", "expense", id,
+				`reverse Personal ${personalExpense.formatMoney(line.cents)} (line ${line.id}) WITHHELD [PERSONAL_REVERSE_UNPLACEABLE] — the reversal must go on a weekly invoice and the receipt names no driver. Nothing was written` + (reason ? ` — reason: ${reason}` : ""),
+				"PERSONAL_REVERSE_UNPLACEABLE");
+			return res.status(409).json({ error: "This reversal has to go on a weekly invoice, and the receipt names no driver whose invoice could carry it. Nothing was written.", code: "PERSONAL_REVERSE_UNPLACEABLE" });
+		}
+		let placed;
+		if (mode === "off" || mode === "wait") {
+			// On no invoice for now: for good when no pay was raised for the line
+			// (neither row goes on one), else until the line it reverses is on one.
+			const lineId = db.transaction(() => {
+				const newId = insertPersonalRow({ ...row, invoice_id: null, needs_correction_since: "" });
+				onCommit(newId);
+				return newId;
+			}).immediate();
+			placed = { lineId, state: "reversed", invoice: null, offInvoices: mode === "off", followsCharge: mode === "wait" };
+		} else {
+			placed = await placePersonalLine({ row, receiptType: expense.type, driverName: String(expense.driver || ""), actor: req, onCommit });
+		}
+		const where = placed.invoice ? `on ${placed.invoice.invoice_number}`
+			: placed.offInvoices ? "on no invoice (the line it reverses is on none, so neither goes on one)"
+				: placed.followsCharge ? "on no invoice until the line it reverses is on one: it follows it there"
+					: placed.state === "needs_correction" ? "waiting for the week's correction invoice"
+						: placed.state === "carried" ? `carried: ${placed.carried}` : "not yet invoiced";
 		logAudit(req, "reverse_expense_personal", "expense", id,
 			`Personal ${personalExpense.formatMoney(line.cents)} reversed (line ${line.id} -> ${placed.lineId}); week ${row.week_start}; ${where}; ` +
 			(row.in_place ? `costs ${row.cost_period} in place` : `credit in ${row.cost_period}`) +
@@ -27853,9 +29447,14 @@ app.post("/api/expenses/:id/personal/reverse", requireRole("Super Admin"), refus
 // POST /api/invoices/personal-corrections { driver, weekStart } — a Super Admin
 // creates (or adds to) the week's correction invoice from the lines flagged for
 // it. weekStart is the Saturday that starts the week. A week touching a
-// finalized month is refused for now (409 PERIOD_FINALIZED).
+// finalized month is refused for now (409 PERIOD_FINALIZED). With the receipt's
+// week on, correction invoices are retired (410): a line waits for the driver's
+// next weekly invoice.
 app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refuseCrossOrigin, personalRouteLimiter, async (req, res) => {
 	try {
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+			return res.status(410).json({ error: "Correction invoices for Personal lines are retired: a line waits for the driver's next weekly invoice.", code: "PERSONAL_CORRECTIONS_RETIRED" });
+		}
 		const body = req.body || {};
 		const driver = typeof body.driver === "string" ? body.driver.trim() : "";
 		const weekStart = typeof body.weekStart === "string" ? body.weekStart.trim() : "";
@@ -27905,9 +29504,28 @@ app.post("/api/invoices/personal-corrections", requireRole("Super Admin"), refus
 // (netCents()): the Expenses screen's list beside its Create button
 // (POST /api/invoices/personal-corrections). A line whose receipt names no
 // driver cannot have a correction and is not listed (its flag was audited).
+// With the receipt's week on: { groups: [], carried: [...] }, one row per carried
+// line, oldest first, in the server's words (since_label, amount_text, reason).
 app.get("/api/expenses/personal/waiting-corrections", requireRole("Super Admin"), personalListLimiter, (req, res) => {
 	try {
-		if (!personalLedgerPresent()) return res.json({ groups: [] });
+		if (!personalLedgerPresent()) return res.json(PERSONAL_RECEIPT_WEEK_ENABLED ? { groups: [], carried: [] } : { groups: [] });
+		if (PERSONAL_RECEIPT_WEEK_ENABLED) {
+			const carried = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
+				WHERE ep.voided_at = '' AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '') AND ${PERSONAL_COLLECTABLE_SQL}
+				ORDER BY ep.needs_correction_since, ep.id`).all()
+				.filter((r) => normalizeDriverName(r.receipt_driver || ""))
+				.map((r) => {
+					const since = Date.parse(r.needs_correction_since);
+					const wait = personalCarryReason(personalWeekState(String(r.receipt_driver || ""), r.week_start), r);
+					return {
+						line_id: r.id, expense_id: r.expense_id, driver: String(r.receipt_driver || "").trim(),
+						since_label: Number.isFinite(since) ? personalExpense.formatDay(appDay(new Date(since))) : "",
+						amount_text: personalExpense.signedMoney(personalExpense.netCents(r)),
+						reason: wait.reason, wait_text: wait.text,
+					};
+				});
+			return res.json({ groups: [], carried });
+		}
 		const rows = db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 			WHERE ep.voided_at = '' AND ep.needs_correction_since != '' AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
 			ORDER BY ep.week_start, ep.id`).all();
@@ -28219,6 +29837,12 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 		if (!username || !password) {
 			return res.status(400).json({ error: "Username and password required" });
 		}
+		// A staff desk's name (or "investor") is no account's, the first Super
+		// Admin's included: POST /api/users refuses it the same way.
+		const setupClash = findDriverNameClash(String(username));
+		if (setupClash && setupClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${String(username).trim()}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 
 		const hash = await bcrypt.hash(password, 10);
 
@@ -28286,6 +29910,46 @@ app.post("/api/auth/setup", setupLimiter, async (req, res) => {
 	}
 });
 
+// SIGN_IN_AUDIT_ENABLED: off unless set to exactly "true". On, every sign-in
+// (`login`), sign-out (`logout`) and refused sign-in (`login_refused`:
+// WRONG_PASSWORD, CHANGED_MEANWHILE, AMBIGUOUS_EMAIL) is an audit row naming the
+// account, kept forever; refusals are coalesced (logAuditRefusal()). A Super
+// Admin's or Dispatcher's IP and browser go in sign_in_network, deleted after
+// 90 days and read by GET /api/admin/sign-ins and, like every table, by the
+// Super Admin database browser and download (POST /api/db/download, GET
+// /api/db/tables, GET /api/db/query/:table); a refreshed or replica copy holds
+// none (refresh-env.js, replica/remote/scrub.js). A name no account has writes
+// no row, only a log line a minute. Off: no row and no record.
+const SIGN_IN_AUDIT_ENABLED = process.env.SIGN_IN_AUDIT_ENABLED === "true";
+// NAMED_LOGINS_ENABLED: off unless set to exactly "true". On, POST /api/users
+// applies the password rules to every role (400 PASSWORD_WEAK), refuses the
+// acting admin's own password (400 PASSWORD_IS_YOURS) and makes a new Super
+// Admin or Dispatcher change the password at first sign-in; and sign-in takes
+// a username first, then an email only when one account has it. Off: the
+// create and the sign-in lookup as before.
+const NAMED_LOGINS_ENABLED = process.env.NAMED_LOGINS_ENABLED === "true";
+const signInLib = require("./lib/sign-in");
+try { signInLib.ensureSignInNetworkTable(db); } catch (err) { console.error("sign_in_network table setup failed:", err.message); }
+// The account lookup and the sign-in rows, for the login and logout routes.
+const signIn = signInLib.createSignIn({
+	db, logAudit, logAuditRefusal, networkEvidence: signerNetworkEvidence,
+	auditEnabled: SIGN_IN_AUDIT_ENABLED, uniqueEmail: NAMED_LOGINS_ENABLED,
+});
+// The 90-day limit on the sign-in IP and browser records; audit rows are kept.
+function purgeOldSignInNetwork() {
+	try {
+		const n = signInLib.purgeSignInNetwork(db);
+		if (n > 0) console.log(`[cleanup] Purged ${n} sign_in_network row(s) older than ${signInLib.SIGN_IN_NETWORK_RETENTION_DAYS} days`);
+	} catch (err) {
+		console.error("[cleanup] sign_in_network purge failed:", err.message);
+	}
+}
+if (startsJob("sign-in network record purge (at boot, then daily)")) {
+	purgeOldSignInNetwork();
+	const timer = setInterval(purgeOldSignInNetwork, 24 * 60 * 60 * 1000);
+	if (typeof timer.unref === "function") timer.unref();
+}
+
 // Login — rate limited to prevent brute-force
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many login attempts. Try again in 15 minutes." }, standardHeaders: true });
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
@@ -28307,16 +29971,26 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 			return res.status(400).json({ error: "Username and password required" });
 		}
 
-		const user = db
-			.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)")
-			.get(username.trim(), username.trim());
+		// The account the typed name signs in to (lib/sign-in.js). With
+		// NAMED_LOGINS_ENABLED a username wins and an email counts only when one
+		// account has it; off, the first row matching either, as before. An email
+		// on several accounts signs in to none, with the usual answer.
+		const found = signIn.find(username.trim());
+		if (found.candidates) {
+			signIn.refuse(req, "login_refused", null, "AMBIGUOUS_EMAIL",
+				`Sign-in refused: the email is on ${found.candidates.length} accounts (ids ${found.candidates.slice(0, 20).join(", ")}); none was signed in`);
+			return res.status(401).json({ error: "Invalid credentials" });
+		}
+		const user = found.account;
 
 		if (!user) {
+			signIn.unknown();
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
 		const valid = await bcrypt.compare(password, user.password_hash);
 		if (!valid) {
+			signIn.refuse(req, "login_refused", user, "WRONG_PASSWORD", `Sign-in refused: wrong password (by ${found.by})`);
 			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
@@ -28349,6 +30023,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// Everything from this read to the session assignment is synchronous.
 		const current = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
 		if (!current || current.password_hash !== user.password_hash) {
+			signIn.refuse(req, "login_refused", current || user, "CHANGED_MEANWHILE",
+				`Sign-in refused: the account was changed or removed while its password was checked (by ${found.by})`);
 			return refuse(401, "Invalid credentials");
 		}
 
@@ -28376,6 +30052,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 		// saved, so neither a failed attempt nor a sign-in that could not start a
 		// session looks like a sign-in. Never throws — see stampLastLogin().
 		stampLastLogin(current.id);
+		// The sign-in row (SIGN_IN_AUDIT_ENABLED), after the stamp for the same
+		// reason. Never throws (lib/sign-in.js).
+		signIn.record(req, "login", current, `Signed in by ${found.by}`);
 
 		res.json({
 			success: true,
@@ -28408,6 +30087,9 @@ app.post("/api/auth/logout", (req, res) => {
 	// while req.sessionID still names it. Only this session. The account's other
 	// devices stay signed in, over HTTP and over their sockets alike.
 	disconnectSessionSockets(req.sessionID);
+	// The sign-out row (SIGN_IN_AUDIT_ENABLED), only for a session with a user,
+	// before it ends. An expiry or a purge writes none.
+	if (req.session && req.session.user) signIn.record(req, "logout", req.session.user, "Signed out");
 	req.session.destroy();
 	res.json({ success: true });
 });
@@ -28416,7 +30098,9 @@ app.post("/api/auth/logout", (req, res) => {
 // server dates instants in, so a viewer's "today" never comes from their laptop.
 app.get("/api/auth/session", (req, res) => {
 	if (req.session.user) {
-		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE });
+		// features: what the signed-in client may offer. voiceNotes is the record
+		// button (MESSAGE_VOICE_NOTES_ENABLED); notes already sent play either way.
+		res.json({ authenticated: true, user: req.session.user, appTimeZone: APP_TIMEZONE, features: { voiceNotes: MESSAGE_VOICE_NOTES_ENABLED } });
 	} else {
 		res.json({ authenticated: false, appTimeZone: APP_TIMEZONE });
 	}
@@ -28573,8 +30257,17 @@ app.post("/api/auth/change-password", requireAuth, changePasswordLimiter, async 
 	}
 });
 
+// With NAMED_LOGINS_ENABLED a create answers whether the password is the acting
+// admin's own (PASSWORD_IS_YOURS), as PUT /api/users/:id's reset does, so it
+// spends that reset's budget: userPasswordResetLimiter, one store for both routes,
+// 5 password-bearing requests per 15 minutes per acting admin. Off: no limit.
+function userCreatePasswordLimit(req, res, next) {
+	if (!NAMED_LOGINS_ENABLED) return next();
+	return userPasswordResetLimiter(req, res, next);
+}
+
 // Admin: create a new user
-app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
+app.post("/api/users", requireRole("Super Admin"), userCreatePasswordLimit, async (req, res) => {
 	try {
 		const { username, password, role, driverName, email, fullName, companyName } = req.body;
 		if (!username || !password || !role) {
@@ -28610,6 +30303,14 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			return res.status(400).json({ error: "Username required", code: "USERNAME_REQUIRED" });
 		}
 
+		// NAMED_LOGINS_ENABLED: the password meets the one rule for a new password
+		// (lib/password-rules.js, as the admin reset in PUT /api/users/:id), for
+		// every role, before anything awaits.
+		if (NAMED_LOGINS_ENABLED) {
+			const weakRefusal = passwordRules.newPasswordRefusal(password);
+			if (weakRefusal) return res.status(400).json(weakRefusal);
+		}
+
 		// ⚠️ HASHED ABOVE THE COLLISION CHECKS, AND IT MUST STAY THERE. This
 		// handler is async and `await bcrypt.hash` is its only yield point — ~100 ms
 		// of held event loop. Sitting between the checks and the INSERT it made
@@ -28618,7 +30319,23 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 		// happens anyway. `users.username` has a UNIQUE index to fall back on;
 		// `users.driver_name` has NOTHING, so that half of the race is silent.
 		// Same defect and same remedy as PUT /api/users/:id (#212 security round).
-		const hash = await bcrypt.hash(password, 10);
+		// NAMED_LOGINS_ENABLED: the acting admin's own password is refused beside
+		// the hash, in the same await, as PUT does (PASSWORD_IS_YOURS): that is a
+		// browser filling the admin's saved login into the new account's form.
+		let hash;
+		if (NAMED_LOGINS_ENABLED) {
+			const actor = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(Number(req.session?.user?.id));
+			const [newHash, isActorsOwn] = await Promise.all([
+				bcrypt.hash(password, 10),
+				actor && actor.password_hash ? bcrypt.compare(password, actor.password_hash).catch(() => false) : false,
+			]);
+			if (isActorsOwn) {
+				return res.status(400).json({ code: "PASSWORD_IS_YOURS", error: "This is your own password. Enter a new password for the new account." });
+			}
+			hash = newHash;
+		} else {
+			hash = await bcrypt.hash(password, 10);
+		}
 		// A Driver account adds the driver's drivers_directory row with this
 		// company name as its carrier (syncDriverToCarrierSheet(), below), and that
 		// row is held to the month-end lock (accountDirectoryRowLock()), which sizes
@@ -28635,11 +30352,28 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 			try { jt = await getJobTrackingCached(); } catch (e) { console.error("POST /api/users: Job Tracking unreadable for the month-end lock:", e.message); }
 		}
 
+		// A USERNAME IS AN IDENTITY NAME TOO (THE ACCOUNT NAMESPACE IS WIDER THAN
+		// DRIVER NAMES, beside findDriverNameClashes()): an investor's thread is
+		// selected by his username and chat parties are names, so a new username
+		// is one no other identity answers to. Asked of the same helper the
+		// investor-application path asks, after the last await: a reserved name
+		// (a staff desk, "investor") is 409 USERNAME_RESERVED; an existing
+		// username keeps its 400; any other identity's name (an account's driver
+		// name, a username under another spacing, a drivers-directory row) is 409
+		// USERNAME_TAKEN. The helper lists reserved names first, so its first
+		// match says which.
+		const usernameClash = findDriverNameClash(newUsername);
+		if (usernameClash && usernameClash.source === "reserved") {
+			return res.status(409).json({ error: `The username "${newUsername}" is reserved. Choose another.`, code: "USERNAME_RESERVED" });
+		}
 		const existing = db
 			.prepare("SELECT id FROM users WHERE LOWER(TRIM(username)) = LOWER(?)")
 			.get(newUsername.toLowerCase());
 		if (existing) {
 			return res.status(400).json({ error: "Username already exists" });
+		}
+		if (usernameClash) {
+			return res.status(409).json({ error: `The username "${newUsername}" is already used by another account or driver. Choose another.`, code: "USERNAME_TAKEN" });
 		}
 
 		// ⚠️ THE DRIVER-NAME COLLISION CHECK PUT HAS AND POST DID NOT.
@@ -28721,16 +30455,21 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 				companyAudit);
 		}
 
-		db.prepare(
-			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "");
+		// NAMED_LOGINS_ENABLED: a new Super Admin or Dispatcher changes the password
+		// at first sign-in (requireAuth/requireRole enforce must_change_password).
+		// Off, every account starts at 0, the column's default, as before.
+		const forceChange = NAMED_LOGINS_ENABLED && (role === "Super Admin" || role === "Dispatcher");
+		const created = db.prepare(
+			"INSERT INTO users (username, password_hash, role, driver_name, email, full_name, company_name, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(newUsername, hash, role, newDriverName, email || "", fullName || "", companyName || "", forceChange ? 1 : 0);
 
 		// Auto-sync driver to Carrier Database sheet
 		if (role === "Driver" && newDriverName) {
 			syncDriverToCarrierSheet(newDriverName, { email, companyName, action: "add" });
 		}
 
-		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}`);
+		logAudit(req, 'create_user', 'user', newUsername, `Created user "${newUsername}" with role ${role}${newDriverName ? ` (driver name "${newDriverName}")` : ""}` +
+			(NAMED_LOGINS_ENABLED ? `; account id ${Number(created.lastInsertRowid)}${forceChange ? "; must change password at first sign-in" : ""}` : ""));
 		notifyChange("users");
 		res.json({ success: true });
 	} catch (error) {
@@ -28740,11 +30479,16 @@ app.post("/api/users", requireRole("Super Admin"), async (req, res) => {
 });
 
 // Admin: list all users (without password hashes)
+// MustChangePassword, EmailShared (another account has the same email, compared
+// as the sign-in lookup compares it) and SharedLogin (lib/sign-in.js) are the
+// Users page's chips. newStaffMustChangePassword: whether a new Super Admin or
+// Dispatcher changes the password at first sign-in (NAMED_LOGINS_ENABLED).
 app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 	const users = db
 		.prepare(`SELECT u.id, u.username, u.role, u.driver_name, u.email, u.full_name, u.company_name, u.rating,
 			strftime('%Y-%m-%dT%H:%M:%SZ', u.created_at) AS created_at,
-			u.last_login_at,
+			u.last_login_at, u.must_change_password,
+			EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND COALESCE(u.email, '') <> '' AND LOWER(o.email) = LOWER(u.email)) AS email_shared,
 			do2.status AS onboarding_status
 			FROM users u
 			LEFT JOIN driver_onboarding do2 ON do2.user_id = u.id`)
@@ -28766,8 +30510,11 @@ app.get("/api/users", requireRole("Super Admin"), (req, res) => {
 			LastLoginAt: u.last_login_at || null,
 			Rating: u.rating || 0,
 			OnboardingStatus: u.onboarding_status || null,
+			MustChangePassword: !!u.must_change_password,
+			EmailShared: !!u.email_shared,
+			SharedLogin: signInLib.isSharedLoginName(u.username),
 		}));
-	res.json({ users });
+	res.json({ users, newStaffMustChangePassword: NAMED_LOGINS_ENABLED });
 });
 
 // ============================================================
@@ -29149,7 +30896,9 @@ function userUpdateLockBlockers(user, next) {
 // field counts, whatever the route then answers, and this runs before any
 // validation or comparison. Edits without a password field never count.
 // Mounted after requireRole, so only a Super Admin spends the budget; keyed on
-// the session user, else the IP, like the other per-feature limiters.
+// the session user, else the IP, like the other per-feature limiters. POST
+// /api/users spends the same budget while NAMED_LOGINS_ENABLED is on
+// (userCreatePasswordLimit()).
 const userPasswordResetLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 5,
@@ -30419,14 +32168,10 @@ app.put("/api/load-ratings/:loadId", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, loadRating: rating, averageRating: avg?.avg || rating });
 });
 
-// Per-load rating: get single
-app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
-	const loadId = decodeURIComponent(req.params.loadId).trim();
-	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
-	res.json({ rating: row ? row.rating : null });
-});
-
 // Per-load rating: bulk averages for all drivers
+//
+// Registered above GET /api/load-ratings/:loadId: Express takes the first match,
+// and that route would read "averages" as a load ID.
 app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	const rows = db.prepare("SELECT LOWER(driver_name) as driver, AVG(rating) as average, COUNT(*) as count FROM load_ratings GROUP BY LOWER(driver_name)").all();
 	// Driver-keyed, so a null-prototype object; a name that reads as a built-in
@@ -30437,6 +32182,14 @@ app.get("/api/load-ratings/averages", requireRole("Super Admin", "Dispatcher"), 
 		averages[r.driver] = { average: Math.round(r.average * 10) / 10, count: r.count };
 	});
 	res.json({ averages });
+});
+
+// Per-load rating: get single
+app.get("/api/load-ratings/:loadId", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+	const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim();
+	const row = db.prepare("SELECT rating FROM load_ratings WHERE load_id = ?").get(loadId);
+	res.json({ rating: row ? row.rating : null });
 });
 
 // ============================================================
@@ -30504,13 +32257,18 @@ function blockedExpensePeriods(rows) {
 }
 
 // Everything DELETE /api/users/:id would destroy or restate that a FINALIZED
-// month still depends on. `blockers: []` means the delete is safe to run.
+// month still depends on, plus (5) the load documents filed under the account
+// and (6) the receipts it would remove from an OPEN month (2026-10-22). With (6)
+// every expense row the cascade matches refuses the delete, closed month or
+// open, so a delete never removes a receipt from any month's figures.
+// `blockers: []` means the delete is safe to run.
 //
 // `cascadeName` MUST be the exact string the cascade's DELETEs match on — see
 // the note at the call site. A guard that resolved the name its own way would be
-// answering for a different set of rows than the DELETEs remove. Blocker (4)
-// adds to that match rather than replacing it: it judges rows the delete leaves
-// in place, not rows it removes, so it also takes the driver's other spellings.
+// answering for a different set of rows than the DELETEs remove. Blockers (4)
+// and (5) add to that match rather than replacing it: they judge rows the delete
+// leaves in place, not rows it removes, so they also take the driver's other
+// spellings.
 function userDeleteLockBlockers(user, cascadeName) {
 	// Fail CLOSED, for the reason PUT /api/expenses/:id/status spells out:
 	// isLocked() swallows every error and answers "not locked", so an unreadable
@@ -30519,6 +32277,8 @@ function userDeleteLockBlockers(user, cascadeName) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 
 	const blockers = [];
+	// The rows of (1) in an open month, judged by (6) below.
+	let openExpenseRows = 0;
 
 	// (1) expenses — the direct violation, and the only cascaded table whose rows
 	// each carry a period of their own. expenseRowPeriodLocked() is the shared
@@ -30531,6 +32291,7 @@ function userDeleteLockBlockers(user, cascadeName) {
 			"SELECT id, date, posted_period, created_at FROM expenses WHERE LOWER(driver) = ?"
 		).all(cascadeName);
 		const locked = rows.filter(expenseRowPeriodLocked);
+		openExpenseRows = rows.length - locked.length;
 		// A Personal line (any, undone or reversed ones included) points at a
 		// receipt by id: deleting the receipts would leave the ledger, and any
 		// invoice carrying the line, pointing at nothing.
@@ -30678,9 +32439,15 @@ function userDeleteLockBlockers(user, cascadeName) {
 	// binds no other spelling). Wider only ever means more rows judged, so this
 	// can only refuse more; it removes nothing. A failed read throws, like every
 	// read in this guard, before the delete has written anything.
+	//
+	// The other-spellings answer is asked ONCE (driverRenameWidens()) and shared
+	// by (4) and (5), so the two legs cannot disagree about whose rows a spacing
+	// variant is.
+	const legOpts = !cascadeName ? null
+		: String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
+	if (legOpts && typeof legOpts.widens !== "boolean") legOpts.widens = driverRenameWidens(cascadeName, legOpts);
 	if (cascadeName) {
 		const invoicesLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "invoices");
-		const legOpts = String(user.driver_name || "").trim() ? { userId: user.id } : { userId: user.id, widens: false };
 		const rows = db.prepare(
 			`SELECT id, invoice_number, week_start, week_end, COALESCE(paid_at, '') AS paid_at FROM invoices WHERE (${driverRenameWhereSql(invoicesLeg, legOpts)}) AND deleted_at = ''`
 		).all(...driverRenameWhereArgs(invoicesLeg, cascadeName, legOpts));
@@ -30732,6 +32499,55 @@ function userDeleteLockBlockers(user, cascadeName) {
 			rows: unresolvable.length,
 			periods: asUnknown(namedLockedPeriods(unresolvable.map(() => []))),
 			detail: `${unresolvable.length} invoice${unresolvable.length === 1 ? "" : "s"} carry a billing week the server cannot resolve to a month`,
+		});
+	}
+
+	// (5) and (6) are appended AFTER every older blocker on purpose: the route
+	// answers with the first blocker's code when no month is finalized, so an
+	// existing refusal (INVOICE_ALREADY_PAID, EXPENSE_PERSONAL_LINES) keeps its
+	// code. Both carry counts only, never a load, a file name or an amount.
+	if (cascadeName) {
+		const noun = String(user.driver_name || "").trim() ? "driver" : "account";
+
+		// (5) load documents (2026-10-22). A POD is the proof a broker paid
+		// against and the Delivered rule counts it, so it is never removed with an
+		// account: the cascade below leaves every documents row in place, and
+		// deleting the account would leave the live ones filed under a name no
+		// account holds, where the next account given that name would inherit
+		// them. So any LIVE row refuses, whatever its type. Soft-deleted rows are
+		// already out of every list; they stay under the deleted name and are
+		// reported as retained. Matched like (4), through the rename cascade's
+		// documents leg (the same rows PUT /api/users/:id counts before blanking a
+		// name). PODs are counted whatever their letter case or edge spaces.
+		const docsLeg = DRIVER_RENAME_TARGETS.find((t) => t.key === "documents");
+		const docs = db.prepare(
+			`SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN UPPER(TRIM(COALESCE(type, ''))) = 'POD' THEN 1 ELSE 0 END), 0) AS pods
+			   FROM documents WHERE (${driverRenameWhereSql(docsLeg, legOpts)}) AND deleted_at IS NULL`
+		).get(...driverRenameWhereArgs(docsLeg, cascadeName, legOpts));
+		if (docs.n) blockers.push({
+			table: "documents",
+			code: "DRIVER_HAS_DOCUMENTS",
+			rows: docs.n,
+			pods: docs.pods,
+			periods: [],
+			detail: `${docs.n} load document${docs.n === 1 ? "" : "s"}` +
+				(docs.pods ? ` (${docs.pods} POD${docs.pods === 1 ? "" : "s"})` : "") +
+				` ${docs.n === 1 ? "is" : "are"} filed under this ${noun}`,
+		});
+
+		// (6) receipts in an OPEN month (2026-10-22, DD10). The rows (1) did not
+		// find locked: the cascade would remove them, and with them a figure the
+		// open month's P&L counts. Every such row refuses, a rejected receipt
+		// included, so a delete never removes a receipt from any month's figures.
+		// Same match as (1) and the cascade (the stored spelling, case aside): a
+		// receipt under another spelling is not removed, so it is not judged.
+		if (openExpenseRows) blockers.push({
+			table: "expenses",
+			code: "OPEN_MONTH_EXPENSES",
+			rows: openExpenseRows,
+			periods: [],
+			detail: `${openExpenseRows} open-month expense${openExpenseRows === 1 ? "" : "s"} (receipt${openExpenseRows === 1 ? "" : "s"})` +
+				` ${openExpenseRows === 1 ? "is" : "are"} filed under this ${noun}`,
 		});
 	}
 
@@ -31003,7 +32819,24 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 			} else {
 				if (hasTrucks) remedy.push("Re-assign the trucks to their new owner deliberately, rather than letting this delete drop them to no owner.");
 				if (unresolved) remedy.push("Correct the unreadable dates on the rows listed below.");
-				remedy.push("Or leave the account in place — a closed month's figures are attributed to it.");
+				// Load documents and open-month receipts (blockers (5) and (6)) have
+				// nothing to do with a closed month, so their sentence REPLACES the
+				// fallback below, which would claim one. "it"/"them" only when the
+				// blocker is the only one, so the pronoun has one referent.
+				const docBlock = lock.blockers.find((b) => b.code === "DRIVER_HAS_DOCUMENTS");
+				const openBlock = lock.blockers.find((b) => b.code === "OPEN_MONTH_EXPENSES");
+				const them = (b) => (lock.blockers.length === 1 ? (b.rows === 1 ? "it" : "them") : null);
+				if (docBlock && openBlock) {
+					remedy.push("Deleting the account would leave its load documents under a name no account holds and delete its expenses from an open month's records, so it stays in place.");
+				} else if (docBlock) {
+					remedy.push(`Deleting the account would leave ${them(docBlock) || "its load documents"} under a name no account holds, so it stays in place.`);
+				} else if (openBlock) {
+					remedy.push(`Deleting the account would delete ${them(openBlock) || "its expenses"} from an open month's records, so it stays in place.`);
+				}
+				if (docBlock) remedy.push("A document filed in error can be removed from its load's Documents panel first.");
+				remedy.push(docBlock || openBlock
+					? "Nothing was changed."
+					: "Or leave the account in place — a closed month's figures are attributed to it.");
 			}
 		}
 
@@ -31022,9 +32855,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
-	// Past the guard: every row below belongs to an open month (or carries no
-	// period at all — messages, notifications, driver_locations, load_responses
-	// and the assigned_driver clear are operational, not accounting, rows).
+	// Past the guard: no expense row matches (the guard refuses every one, closed
+	// month or open), and every row below carries no period at all — messages,
+	// notifications, driver_locations, load_responses and the assigned_driver
+	// clear are operational, not accounting, rows.
 	//
 	// ⚠️ ONE TRANSACTION. The guard above decides the delete is safe AS A WHOLE,
 	// and this route has no try/catch — so before this wrapper a throw anywhere in
@@ -31061,6 +32895,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		});
 	}
 
+	// Voice notes (lib/voice-notes.js): the stored audio of every message the
+	// delete below removes, and of every note this account was the party to, read
+	// here (no await between this and the delete) and unlinked once it commits.
+	const voiceFiles = userVoiceNoteFiles(id, name);
 	const removed = {};
 	const detached = {};
 	try {
@@ -31071,25 +32909,32 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 				// counts rows under another spelling of the name too (a doubled or
 				// edge space); these DELETEs do not, and for a removal that is the
 				// safe direction. userDeleteLockBlockers() judges the expense rows by
-				// this same match, so every expense removed here was judged, and the
-				// other tables carry no period. A row of these tables under another
+				// this same match and refuses any of them, closed month or open, so
+				// past the guard this removes none. A row of these tables under another
 				// spelling is neither judged nor removed: it stays in every month it
-				// was counted in. Widening these would permanently delete receipts and
-				// documents under another spelling, and would need the expense check
-				// widened in step. The cost is that such rows stay behind under a
-				// spelling no account holds, and the counts this route reports do not
-				// include them. The guard does see other spellings where this delete
-				// leaves a row in place rather than removing it: its invoice check
-				// matches the rename cascade's `invoices` leg, and only refuses. Of
-				// these writes, the truck is the one matched wider: it is cleared, not
+				// was counted in. Widening these would permanently delete receipts
+				// under another spelling, and would need the expense check widened in
+				// step. The cost is that such rows stay behind under a spelling no
+				// account holds, and the counts this route reports do not include
+				// them. The guard does see other spellings where this delete leaves a
+				// row in place rather than removing it: its invoice and load-document
+				// checks match the rename cascade's legs, and only refuse. Of these
+				// writes, the truck is the one matched wider: it is cleared, not
 				// deleted (findTruckForDriverAccount()). See
 				// docs/claude/user-routes-guards.md.
+				//
+				// Load documents are not in this list (2026-10-22): a live one refuses
+				// the delete, and a soft-deleted one stays where it is, under this
+				// name, counted as retained below.
 				removed.expenses = db.prepare("DELETE FROM expenses WHERE LOWER(driver) = ?").run(name).changes;
-				removed.messages = db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
-				removed.notifications = db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
+				// A staff desk's messages and bell are every party's conversation with
+				// it, never one account's: an account named like a desk (none can be
+				// made since the reserved names cover the desks) removes neither.
+				const deskName = !!chatDeskKey(name);
+				removed.messages = deskName ? 0 : db.prepare(`DELETE FROM messages WHERE LOWER("from") = ? OR LOWER("to") = ?`).run(name, name).changes;
+				removed.notifications = deskName ? 0 : db.prepare("DELETE FROM notifications WHERE LOWER(driver_name) = ?").run(name).changes;
 				removed.driver_locations = db.prepare("DELETE FROM driver_locations WHERE LOWER(driver) = ?").run(name).changes;
 				removed.load_responses = db.prepare("DELETE FROM load_responses WHERE LOWER(driver_name) = ?").run(name).changes;
-				removed.documents = db.prepare("DELETE FROM documents WHERE LOWER(driver) = ?").run(name).changes;
 				// The driver's truck is found the way the driver app finds it
 				// (findTruckForDriverAccount()): case aside, as before — every such
 				// truck — else the one naming them under another spacing, unless
@@ -31160,15 +33005,19 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		})();
 	} catch (err) {
 		console.error("delete user cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...userDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", []);
 		return res.status(500).json({
 			error: "The delete could not be completed and was rolled back. Nothing was removed.",
 			code: "DELETE_ROLLED_BACK",
-			// The old response named no cause at all, which is how a FOREIGN KEY
-			// failure read as "the app is broken" rather than "this user is
-			// onboarded". SQLite's message is schema text, not user data.
-			detail: err.message,
+			// Error and code only, as the truck delete answers: the database's
+			// message (schema text) goes to the server log above, never the client.
 		});
 	}
+	removed.voice_note_files = removeUserVoiceNotes(id, voiceFiles);
 
 	// The account is gone from `users`, but requireRole() reads the SESSION, not
 	// the database — so without this the deleted admin keeps a working Super Admin
@@ -31220,6 +33069,10 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	//                            paid, finalized or in a locked month; anything
 	//                            still counted here is an open month, which the
 	//                            next reconcile recomputes.
+	//  • documents             — blocker (5) refuses the delete while any live
+	//                            row is filed under the account, so what is
+	//                            counted here is soft-deleted rows, kept under
+	//                            the deleted name, recoverable by one UPDATE.
 	//
 	// Read-only: this runs AFTER the delete, so `users` is already gone and these
 	// are pure counts.
@@ -31236,6 +33089,7 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 		countRetained("carrier_driver_history", "SELECT COUNT(*) AS cnt FROM carrier_driver_history WHERE LOWER(driver_name) = ?", name);
 		countRetained("job_applications", "SELECT COUNT(*) AS cnt FROM job_applications WHERE LOWER(full_name) = ? AND deleted_at IS NULL", name);
 		countRetained("load_ratings", "SELECT COUNT(*) AS cnt FROM load_ratings WHERE LOWER(driver_name) = ?", name);
+		countRetained("documents", "SELECT COUNT(*) AS cnt FROM documents WHERE LOWER(driver) = ?", name);
 		countRetained("routemate_dvir", "SELECT COUNT(*) AS cnt FROM routemate_dvir WHERE LOWER(driver_name) = ?", name);
 		countRetained("routemate_hos_daily", "SELECT COUNT(*) AS cnt FROM routemate_hos_daily WHERE LOWER(driver_name) = ?", name);
 	}
@@ -31262,10 +33116,23 @@ app.delete("/api/users/:id", requireRole("Super Admin"), (req, res) => {
 	res.json({ success: true, removed, detached, retained, archivedArtifacts, skippedArtifacts });
 });
 
-// List investor users (for owner dropdown)
+// List investor users (for owner dropdown). `username` is the investor's full
+// name, as the truck owner pickers have always shown it. A Super Admin's answer
+// also carries `accountUsername`: the linked Investor account's sign-in
+// username, the name POST /api/messages addresses an investor by (null when no
+// Investor account is linked). Investor conversations are Super Admin only, so
+// a Dispatcher's answer has no such field.
 app.get("/api/users/investors", requireRole("Super Admin", "Dispatcher"), (req, res) => {
+	if (req.session.user.role !== "Super Admin") {
+		const investors = db
+			.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+			.all();
+		return res.json({ investors });
+	}
 	const investors = db
-		.prepare("SELECT user_id AS id, full_name AS username, full_name AS CompanyName FROM investors ORDER BY full_name ASC")
+		.prepare(`SELECT i.user_id AS id, i.full_name AS username, i.full_name AS CompanyName, u.username AS accountUsername
+			FROM investors i LEFT JOIN users u ON u.id = i.user_id AND u.role = 'Investor'
+			ORDER BY i.full_name ASC`)
 		.all();
 	res.json({ investors });
 });
@@ -32161,9 +34028,9 @@ function truckFeeLockedRows(unitNumber, locked) {
 	// `unit` here is trimmed — so a fee row stored as ' logisx-#33 ' against an
 	// untrimmed unit_number IS summed by the P&L and would NOT have matched a bare
 	// `LOWER(truck) = ?`, i.e. the guard would miss a row the money counts. TRIM on
-	// this side is strictly WIDER than both the join and the cascade's own
-	// `LOWER(truck) = ?` delete, which is the correct direction for a guard: it
-	// can only over-report, never under-report.
+	// this side is strictly WIDER than the join, which is the correct direction
+	// for a guard: it can only over-report, never under-report. The cascade's own
+	// delete matches the same way since 2026-10-22 (LOWER(TRIM(truck)) = ?).
 	return {
 		maintenance: blocked(db.prepare(
 			"SELECT id, amount, strftime('%Y-%m', COALESCE(NULLIF(date, ''), strftime('%Y-%m-%d', created_at))) AS m FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ? AND type = 'service'"
@@ -33093,10 +34960,47 @@ function truckEditLockBlockers(truck, changed, opts = {}) {
 // is safe" would mean dropping the maintenance rows from open months while
 // keeping the truck, or vice versa — a half-deleted truck whose fee rows now
 // point at nothing. Not decomposable, so not partially applied.
+//
+// Besides `blockers` (closed months, answered PERIOD_FINALIZED by the route) it
+// returns two counts the route answers with refusals of their own (2026-10-22):
+//   • openFees — every maintenance_fund / compliance_fees row the delete would
+//     remove that is not already a closed-month blocker in (3)+(4) below: an
+//     open-month service row or Paid fee, and a contribution or Pending fee in
+//     any month. The route refuses OPEN_MONTH_TRUCK_FEES while any exists.
+//   • legalDocuments — the truck's legal_documents rows. The route refuses
+//     TRUCK_HAS_DOCUMENTS while any exists.
+// They are counted BEFORE the "no month locked" early return, so they hold
+// when no month is closed, and they are kept OUT of `blockers`: the route
+// answers blockers through periodBlockedResponse(), which always says
+// PERIOD_FINALIZED and audits it so, which would mislabel an open-month refusal.
 function truckDeleteLockBlockers(truck) {
 	if (!periodLocksReadable()) return { unreadable: true, blockers: [] };
 	const locked = lockedPeriodsDesc();
-	if (!locked.length) return { unreadable: false, blockers: [] };
+
+	// Fee rows are matched case and edge spaces aside, like truckFeeLockedRows()
+	// and the cascade, and not at all for a blank unit number (the cascade
+	// removes none then). `.all()` and a length, not COUNT(*): every row is
+	// needed to subtract the closed-month blockers by id.
+	const unit = String(truck.unit_number || "").trim().toLowerCase();
+	const feeRows = unit
+		? {
+			maintenance: db.prepare("SELECT id FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").all(unit),
+			compliance: db.prepare("SELECT id FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").all(unit),
+		}
+		: { maintenance: [], compliance: [] };
+	const fees = locked.length ? truckFeeLockedRows(truck.unit_number, locked) : { maintenance: [], compliance: [] };
+	const notHeld = (rows, held) => {
+		const ids = new Set(held.map((r) => r.id));
+		return rows.filter((r) => !ids.has(r.id)).length;
+	};
+	const openFees = {
+		maintenance: notHeld(feeRows.maintenance, fees.maintenance),
+		compliance: notHeld(feeRows.compliance, fees.compliance),
+	};
+	// By truck id, whatever the unit number, the same way the cascade deletes them.
+	const legalDocuments = db.prepare("SELECT id FROM legal_documents WHERE truck_id = ?").all(truck.id).length;
+
+	if (!locked.length) return { unreadable: false, blockers: [], openFees, legalDocuments };
 
 	const blockers = [];
 	const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -33142,8 +35046,8 @@ function truckDeleteLockBlockers(truck) {
 	// (3)+(4) maintenance_fund and compliance_fees — HARD deletes. Neither table
 	// has a deleted_at nor a soft-delete peer, so these rows are the part of this
 	// operation that is not merely a restatement but permanent loss, exactly like
-	// the `expenses` leg of the user delete.
-	const fees = truckFeeLockedRows(truck.unit_number, locked);
+	// the `expenses` leg of the user delete. (`fees` was read above, before the
+	// early return, to tell these rows apart from openFees.)
 	for (const [table, rows, what] of [
 		["maintenance_fund", fees.maintenance, "maintenance service payment"],
 		["compliance_fees", fees.compliance, "paid compliance fee"],
@@ -33200,7 +35104,97 @@ function truckDeleteLockBlockers(truck) {
 		}
 	}
 
-	return { unreadable: false, blockers };
+	return { unreadable: false, blockers, openFees, legalDocuments };
+}
+
+// What deleting this truck would change in an OPEN month (TD8, 2026-10-23).
+// truckDeleteLockBlockers() above judges the truck row for closed months only,
+// and a month that is not closed recomputes from the trucks row whenever it is
+// read, so a delete restates it. DELETE /api/trucks/:id refuses
+// OPEN_MONTH_TRUCK_FIGURES while any count is above 0. Counts only, each 0 when
+// it does not apply:
+//   fixed_cost_months       the open months its monthly fixed costs are billed
+//                           in: in the fleet (truckInFleet()), a fixed-cost
+//                           total above 0, charged that month
+//                           (truckChargedInMonth(), the money math's gate);
+//   driver                  1 while it names a driver, whatever its status, the
+//                           pay type or the rate. The rate that prices the
+//                           driver's days (truckRatesByDriver() reads the LAST
+//                           truck naming him) and the investor ledger his
+//                           revenue, receipts and pay land on
+//                           (getInvestorDriverSet(), getInvestorDriverMonthWindows())
+//                           both read it;
+//   eld_link                1 while an ELD device is linked: the loads naming the
+//                           unit pay their ELD days, and the whole scheduled
+//                           window without the link. No sheet read (TD8-2 (a));
+//   financials_line_months  the open months its maintenance reserve or purchase
+//                           price is a Financials line in (financialsExtraItems():
+//                           in the fleet, charged that month), counted even
+//                           while those Financials lines are switched off
+//                           (TD8-3). Depreciation also stops after its years,
+//                           so this can only over-report;
+//   lease_months            the open months it keeps its owner's lease in
+//                           service: a lease row governs the month and the truck
+//                           covers a day of it on or after the lease's first day
+//                           (leaseCoverage(), under the lease retirement
+//                           setting), whether or not the lease payout flag is on
+//                           (TD8-4);
+//   last_truck_receipt_months  the open months holding a receipt that counts on
+//                           its owner only through the driver windows, when it
+//                           is that investor's last truck: with no truck left,
+//                           getInvestorDriverMonthWindows() returns before its
+//                           carrier-history leg, so those receipts leave the
+//                           investor's expenses (TD8 review M1). The ledger's
+//                           source, Rejected filter and month; the -1 owner
+//                           matches no row, so a receipt stamped with the owner
+//                           can only over-report. Moving the truck to another
+//                           owner empties the windows the same way, so the
+//                           only remedy is the retirement date.
+// An open month has no locked period_locks row and is no later than the
+// current business month (appDay(), APP_TIMEZONE): a later month is no open
+// month's figure yet, so a truck entering service next month is not held, even
+// at 23:30 ET on the last day of this one (TD8-6). The driver and the ELD link
+// have no month without the sheet, so each counts 1: that can only over-report.
+// The route calls this only once the lock table has been read.
+function truckDeleteOpenMonthHolds(truck) {
+	const current = appDay().slice(0, 7);
+	const locked = new Set(lockedPeriodsDesc());
+	const ownerId = Number(truck.owner_id) || 0;
+	const leaseRows = ownerId > 0
+		? db.prepare("SELECT effective_month, basis_type, lease_amount_cents FROM investor_payout_basis WHERE owner_id = ? ORDER BY effective_month").all(ownerId)
+		: [];
+	// Every month without a lock from the earliest one a count below can reach,
+	// through this month. The truck's first and last charged months, the lease
+	// rows and the closed months bound it; the predicates below decide.
+	const earliest = [truckChargeFromMonth(truck), truckChargeUntilMonth(truck), ...leaseRows.map((r) => r.effective_month), ...locked, current]
+		.filter((m) => investorPayoutBasis.isMonthKey(m) && m <= current)
+		.sort()[0];
+	const open = [];
+	for (let mk = earliest; mk <= current; mk = investorPayoutBasis.addMonths(mk, 1)) {
+		if (!locked.has(mk)) open.push(mk);
+	}
+	const inFleet = investorPayoutBasis.truckInFleet(truck);
+	const charged = open.filter((mk) => truckChargedInMonth(truck, mk));
+	const financialsLine = (Number(truck.maintenance_fund_monthly) || 0) > 0 || (Number(truck.purchase_price) || 0) > 0;
+	const leaseCovers = (mk) => {
+		const row = investorPayoutBasis.governingBasisRow(leaseRows, mk);
+		return investorPayoutBasis.leaseCentsOf(row) !== null && investorPayoutBasis.leaseCoverage({
+			monthKey: mk, effectiveMonth: row.effective_month, trucks: [truck], retirement: INVESTOR_LEASE_SETTINGS.retirement,
+		}).coveredDays > 0;
+	};
+	const fixed_cost_months = inFleet && truckMonthlyFixed(truck).total > 0 ? charged.length : 0;
+	const driver = normalizeDriverName(truck.assigned_driver) ? 1 : 0;
+	const eld_link = String(truck.routemate_vehicle_id || "").trim() ? 1 : 0;
+	const financials_line_months = inFleet && financialsLine ? charged.length : 0;
+	const lease_months = ownerId > 0 ? open.filter(leaseCovers).length : 0;
+	let last_truck_receipt_months = 0;
+	if (ownerId > 0 && !db.prepare("SELECT 1 FROM trucks WHERE owner_id = ? AND id != ? LIMIT 1").get(ownerId, truck.id)) {
+		const scope = investorExpenseScopeSql(-1, getInvestorDriverMonthWindows(ownerId), EXPENSE_PERIOD_EXPR);
+		last_truck_receipt_months = db.prepare(
+			`SELECT DISTINCT ${EXPENSE_PERIOD_EXPR} AS m FROM ${expenseFrom("book")} WHERE ${scope.sql} AND ${EXPENSE_PNL_FILTER}`
+		).all(...scope.params).filter((r) => investorPayoutBasis.isMonthKey(r.m) && r.m <= current && !locked.has(r.m)).length;
+	}
+	return { fixed_cost_months, driver, eld_link, financials_line_months, lease_months, last_truck_receipt_months };
 }
 
 // ============================================================
@@ -34710,8 +36704,8 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 		const lock = truckEditLockBlockers(truck, changed);
 		// ⚠️ THE ATTEMPTED VALUES ARE THE RECORD HERE. This route's success path
 		// writes one audit line PER FIELD (update_driver_pay, update_truck_status,
-		// _in_service_date, _retired_at, _owner, _fuel_tank, _avg_mpg, _unit_number,
-		// _vin), plus one
+		// _in_service_date, _retired_at, _owner, _driver, _fuel_tank, _avg_mpg,
+		// _unit_number, _vin), plus one
 		// update_truck_costs line per save that names every cost it changed; a
 		// refusal has no such split because the whole edit is refused as one, so the
 		// single row has to name every field that moved and what it would have
@@ -34900,6 +36894,16 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 			logAudit(req, "update_truck_owner", "truck", String(id),
 				`Owner for ${unitLabel}: ${ownerName(truck.owner_id)} → ${ownerName(changed.owner_id)}`);
 		}
+		// The truck's driver decides whose days the truck's rate prices and which
+		// investor ledger the driver is on, and clearing it is one of the edits a
+		// refused truck delete names (TD8-13, 2026-10-23). It left no trail. Keyed
+		// on `changed`, a real change of the trimmed name against the row as
+		// re-read, like the owner line above: a resend writes nothing.
+		if (Object.prototype.hasOwnProperty.call(changed, "assigned_driver")) {
+			const fmtDriver = (v) => auditText(String(v || "").trim(), 100) || "no driver";
+			logAudit(req, "update_truck_driver", "truck", String(id),
+				`Driver for ${unitLabel}: ${fmtDriver(truck.assigned_driver)} → ${fmtDriver(changed.assigned_driver)}`);
+		}
 		// ⚠️ THE FUEL-RANGE CONFIG IS AUDITED BECAUSE IT HAS BEEN WRONG THREE TIMES.
 		// `fuel_tank_gallons` has now been corrected on three separate occasions
 		// (#33 300→198→203, #91 240→189) and every time the investigation stalled on
@@ -35020,7 +37024,12 @@ app.put("/api/trucks/:id", requireRole("Super Admin", "Dispatcher"), async (req,
 // the trucks row is an input every closed month re-reads (see the notes above
 // truckEditLockBlockers). The guard therefore runs before the first DELETE and
 // refuses the whole operation; see truckDeleteLockBlockers for why it is not
-// partially applied.
+// partially applied. Since 2026-10-22 any fee row or legal document refuses the
+// delete (OPEN_MONTH_TRUCK_FEES, TRUCK_HAS_DOCUMENTS), so past the guard the
+// cascade's fee and document deletes find nothing to remove. Since 2026-10-23
+// (TD8) a truck whose own inputs feed an open month's figures is refused too
+// (OPEN_MONTH_TRUCK_FIGURES, truckDeleteOpenMonthHolds()): a delete never
+// changes an open month.
 app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const id = parseInt(req.params.id);
 	const truck = db.prepare("SELECT * FROM trucks WHERE id = ?").get(id);
@@ -35056,6 +37065,99 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 			truckDelAudit);
 	}
 
+	// Fee rows and legal documents (2026-10-22). Neither table has a soft delete,
+	// so the cascade below would remove them for good; any row refuses the delete.
+	// Each refusal has its own code, audited under that code (never through
+	// periodBlockedResponse(), which answers and audits PERIOD_FINALIZED), and
+	// comes after the closed-month answer, so PERIOD_FINALIZED still wins, and
+	// before TRUCK_REFERENCED. Counts only, in the answer and in the audit tail.
+	const truckLabel = truck.unit_number || `truck #${id}`;
+	const retireNote = "To take it out of service, give it a retirement date in an open month. Nothing was changed.";
+	const feeCount = lock.openFees.maintenance + lock.openFees.compliance;
+	if (feeCount) {
+		const parts = [];
+		if (lock.openFees.maintenance) parts.push(`${lock.openFees.maintenance} maintenance fund entr${lock.openFees.maintenance === 1 ? "y" : "ies"}`);
+		if (lock.openFees.compliance) parts.push(`${lock.openFees.compliance} compliance fee${lock.openFees.compliance === 1 ? "" : "s"}`);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — maintenance_fund=${lock.openFees.maintenance}, compliance_fees=${lock.openFees.compliance}` },
+			"OPEN_MONTH_TRUCK_FEES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${parts.join(" and ")} ${feeCount === 1 ? "is" : "are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${feeCount === 1 ? "it" : "them"}, so it stays in place. ${retireNote}`,
+			code: "OPEN_MONTH_TRUCK_FEES",
+			counts: { maintenance_fund: lock.openFees.maintenance, compliance_fees: lock.openFees.compliance },
+		});
+	}
+	// The references, read once here, above the documents check: whether the
+	// truck has assignment history decides the text of the two refusals below
+	// (TD8-8, TD8-9), and TRUCK_REFERENCED answers from the same two counts. No
+	// route removes an assignment row, so a truck with one can never be deleted;
+	// a trailer can be detached.
+	const assignmentRows = db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n;
+	const trailerRows = db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n;
+	if (lock.legalDocuments) {
+		const n = lock.legalDocuments;
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — legal_documents=${n}` },
+			"TRUCK_HAS_DOCUMENTS", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${n} legal document${n === 1 ? " is" : "s are"} filed under this truck. ` +
+				`Deleting the truck would permanently delete ${n === 1 ? "it" : "them"}, so it stays in place. ` +
+				// Removing a document filed in error leads to a delete only for a
+				// truck without assignment history (TD8-9).
+				(assignmentRows ? "" : "A document filed in error can be removed from the truck's documents first. ") +
+				retireNote,
+			code: "TRUCK_HAS_DOCUMENTS",
+			counts: { legal_documents: n },
+		});
+	}
+
+	// The truck's own inputs to an OPEN month (TD8, 2026-10-23): its fixed
+	// costs, the driver it names, its ELD link, its reserve and depreciation
+	// lines, its lease and, on an investor's last truck, the receipts that reach
+	// that investor through its driver windows (truckDeleteOpenMonthHolds()). Deleting it would restate
+	// the open month, so any of them refuses the delete with its own code, after
+	// #590's two refusals and before TRUCK_REFERENCED, audited under that code
+	// (never through periodBlockedResponse(), which answers PERIOD_FINALIZED).
+	// Counts only in the answer; the audit tail names the items, no amounts.
+	// ⚠️ The remedy never says "set it Inactive", for the reason given at the
+	// closed-month answer above. A truck with assignment history can never be
+	// deleted, so it gets the retirement date only (TD8-8); any other truck also
+	// gets the audited edits that clear each item.
+	const holds = truckDeleteOpenMonthHolds(truck);
+	const openMonths = (n) => `${n} open month${n === 1 ? "" : "s"}`;
+	const held = [
+		[holds.fixed_cost_months, "fixed costs", `its monthly fixed costs are billed in ${openMonths(holds.fixed_cost_months)}`],
+		[holds.driver, "driver", "it names a driver, so it sets that driver's daily rate and investor ledger"],
+		[holds.eld_link, "ELD link", "its ELD device sets the paid days of the loads that name it"],
+		[holds.financials_line_months, "reserve or depreciation", `its maintenance reserve or depreciation is a Financials line in ${openMonths(holds.financials_line_months)}`],
+		[holds.lease_months, "lease", `it keeps its investor's lease in service in ${openMonths(holds.lease_months)}`],
+		[holds.last_truck_receipt_months, "investor receipts", `it is its investor's last truck, which keeps receipts that name no truck on that investor's ledger in ${openMonths(holds.last_truck_receipt_months)}`],
+	].filter(([n]) => n > 0);
+	if (held.length) {
+		// Each step is an audited edit: update_truck_costs, update_truck_driver,
+		// routemate_unlink, update_truck_owner (TD8-14) and update_trailer. No
+		// edit clears the investor's receipts (changing the owner drops them the
+		// same way), so with that item the retirement date is the only remedy.
+		const steps = assignmentRows || holds.last_truck_receipt_months ? [] : [
+			[holds.fixed_cost_months, "set its insurance, ELD fee, truck payment, HVUT and IRP to $0"],
+			[holds.financials_line_months, "set its maintenance reserve and purchase price to $0"],
+			[holds.driver, "clear its driver"],
+			[holds.eld_link, "unlink its ELD device"],
+			[holds.lease_months, "set its owner to the company"],
+			[trailerRows, "detach its trailer"],
+		].filter(([n]) => n > 0).map(([, step]) => step);
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — holds: ${held.map(([, name]) => name).join(", ")}` },
+			"OPEN_MONTH_TRUCK_FIGURES", [], `Cannot delete ${truckLabel}`);
+		return res.status(409).json({
+			error: `Cannot delete ${truckLabel}: ${held.map(([, , part]) => part).join("; ")}. ` +
+				"Deleting the truck would change an open month's figures, so it stays in place. " +
+				"To take it out of service, give it a retirement date in an open month." +
+				(steps.length ? ` If it was added by mistake, do these first, then delete it: ${steps.join("; ")}.` : "") +
+				" Nothing was changed.",
+			code: "OPEN_MONTH_TRUCK_FIGURES",
+			counts: holds,
+		});
+	}
+
 	// ⚠️ SEPARATE BUG, found end-to-end while testing the guard above, and it is
 	// live: `truck_assignments.truck_id` and `trailers.truck_id` are both
 	// FOREIGN KEY … REFERENCES trucks(id) with `PRAGMA foreign_keys` ON, so the
@@ -35070,10 +37172,13 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	// made to succeed: detaching assignment history or re-parenting a trailer as a
 	// side effect of a delete is a bigger decision than this handler should take.
 	const refs = [
-		["truck_assignments", db.prepare("SELECT COUNT(*) n FROM truck_assignments WHERE truck_id = ?").get(id).n, "assignment history row"],
-		["trailers", db.prepare("SELECT COUNT(*) n FROM trailers WHERE truck_id = ?").get(id).n, "attached trailer"],
+		["truck_assignments", assignmentRows, "assignment history row"],
+		["trailers", trailerRows, "attached trailer"],
 	].filter(([, n]) => n > 0);
 	if (refs.length) {
+		// Audited like the refusals above, counts only (#594 review, Low 2).
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: `nothing was written — truck_assignments=${assignmentRows}, trailers=${trailerRows}` },
+			"TRUCK_REFERENCED", [], `Cannot delete ${truckLabel}`);
 		return res.status(409).json({
 			error: `Cannot delete ${truck.unit_number || `truck #${id}`}: it still has ${refs.map(([, n, what]) => `${n} ${what}${n === 1 ? "" : "s"}`).join(" and ")}. Detach ${refs.some(([t]) => t === "trailers") ? "the trailer(s) " : ""}first — until then the database itself refuses the delete, and every attempt used to destroy the truck's documents and fee history on the way to failing.`,
 			code: "TRUCK_REFERENCED",
@@ -35084,17 +37189,39 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 	const unit = (truck.unit_number || "").trim().toLowerCase();
 	const removed = {};
 	// One transaction, so a constraint this handler has not anticipated rolls the
-	// cascade back instead of half-applying it. There are no transactions anywhere
-	// else in this file, but there is also nowhere else that hard-deletes finance
-	// rows as a prelude to a statement that can throw.
-	db.transaction(() => {
-		if (unit) {
+	// cascade back instead of half-applying it, as DELETE /api/users/:id does for
+	// its own cascade: both hard-delete rows as a prelude to a statement that can
+	// throw.
+	//
+	// The guard above refuses any fee row or legal document, so these deletes
+	// must find nothing. If one removes a row anyway (the guard and this cascade
+	// drifted apart), the throw rolls the whole delete back: those rows have no
+	// soft delete to recover them from.
+	try {
+		db.transaction(() => {
+			// Legal documents are filed by truck id, so a blank unit number is checked too.
 			removed.legal_documents = db.prepare("DELETE FROM legal_documents WHERE truck_id = ?").run(id).changes;
-			removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(truck) = ?").run(unit).changes;
-			removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(truck) = ?").run(unit).changes;
-		}
-		db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
-	})();
+			if (unit) {
+				removed.maintenance_fund = db.prepare("DELETE FROM maintenance_fund WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+				removed.compliance_fees = db.prepare("DELETE FROM compliance_fees WHERE LOWER(TRIM(truck)) = ?").run(unit).changes;
+			}
+			if (removed.legal_documents || removed.maintenance_fund || removed.compliance_fees) {
+				throw new Error(`truck delete cascade would remove rows the guard did not count: ${Object.entries(removed).map(([t, n]) => `${t}=${n}`).join(", ")}`);
+			}
+			db.prepare("DELETE FROM trucks WHERE id = ?").run(id);
+		})();
+	} catch (err) {
+		console.error("delete truck cascade failed, rolled back:", err.message);
+		// Audited like the 409s above, under the same descriptor: nothing was
+		// written, so without this row the attempt leaves no trace. The error text
+		// (table counts) stays in the server log, never in the row.
+		recordPeriodRefusal({ req, ...truckDelAudit, tail: "nothing was written — rolled back" },
+			"DELETE_ROLLED_BACK", [], `Cannot delete ${truckLabel}`);
+		return res.status(500).json({
+			error: "The delete could not be completed and was rolled back. Nothing was removed.",
+			code: "DELETE_ROLLED_BACK",
+		});
+	}
 	// Like the user delete, this previously left no trace at all — "a truck was
 	// removed" does not tell a later reader that its service history went too.
 	// The VIN, when the truck had one, says which physical truck it was: the row
@@ -35110,6 +37237,15 @@ app.delete("/api/trucks/:id", requireRole("Super Admin"), (req, res) => {
 // ============================================================
 // TRAILERS CRUD
 // ============================================================
+
+// A trailer's truck as its audit lines name it: the unit number and id, the id
+// alone when the truck row is gone, "none" when the trailer is on no truck.
+function trailerTruckLabel(truckId) {
+	if (!truckId) return "none";
+	const t = db.prepare("SELECT unit_number FROM trucks WHERE id = ?").get(truckId);
+	const unit = t ? auditText(t.unit_number, 100) : "";
+	return unit ? `${unit} (#${truckId})` : `#${truckId}`;
+}
 app.get("/api/trailers", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
 		const trailers = db.prepare(`
@@ -35163,21 +37299,43 @@ app.put("/api/trailers/:id", requireRole("Super Admin", "Dispatcher"), (req, res
 		// whitespace, so a resend (padded or not) keeps the stored value as it is,
 		// and a real change is stored trimmed.
 		const vinChanged = vin != null && String(vin).trim() !== String(trailer.vin ?? "").trim();
+		const next = {
+			trailer_number: trailer_number ?? trailer.trailer_number,
+			type: type ?? trailer.type,
+			length: length ?? trailer.length,
+			year: year ?? trailer.year,
+			vin: vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
+			license_plate: license_plate ?? trailer.license_plate,
+			status: status ?? trailer.status,
+			truck_id: truck_id === undefined ? trailer.truck_id : (truck_id || null),
+			notes: notes ?? trailer.notes,
+		};
 		db.prepare(`
 			UPDATE trailers SET trailer_number = ?, type = ?, length = ?, year = ?, vin = ?, license_plate = ?, status = ?, truck_id = ?, notes = ?
 			WHERE id = ?
 		`).run(
-			trailer_number ?? trailer.trailer_number,
-			type ?? trailer.type,
-			length ?? trailer.length,
-			year ?? trailer.year,
-			vinChanged ? (typeof vin === "string" ? vin.trim() : vin) : trailer.vin,
-			license_plate ?? trailer.license_plate,
-			status ?? trailer.status,
-			truck_id === undefined ? trailer.truck_id : (truck_id || null),
-			notes ?? trailer.notes,
+			next.trailer_number, next.type, next.length, next.year, next.vin,
+			next.license_plate, next.status, next.truck_id, next.notes,
 			id
 		);
+		// One update_trailer line per save that really changes a field, like the
+		// truck edit's lines: each changed field old -> new, compared as text to the
+		// row as read (the page resends the whole row, so presence means nothing).
+		// The plate and the notes are named, never quoted: the truck edit records
+		// neither, and notes are free text.
+		const same = (a, b) => String(a ?? "") === String(b ?? "");
+		const shown = (v) => auditText(v, 100) || "not set";
+		const changes = [];
+		for (const [col, label] of [["trailer_number", "trailer number"], ["type", "type"], ["length", "length"], ["year", "year"], ["vin", "VIN"], ["status", "status"]]) {
+			if (!same(trailer[col], next[col])) changes.push(`${label} ${shown(trailer[col])} → ${shown(next[col])}`);
+		}
+		if (!same(trailer.truck_id, next.truck_id)) changes.push(`truck ${trailerTruckLabel(trailer.truck_id)} → ${trailerTruckLabel(next.truck_id)}`);
+		if (!same(trailer.license_plate, next.license_plate)) changes.push("license plate changed");
+		if (!same(trailer.notes, next.notes)) changes.push("notes changed");
+		if (changes.length) {
+			logAudit(req, "update_trailer", "trailer", String(id),
+				`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`}: ${changes.join(", ")}`);
+		}
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
@@ -35191,6 +37349,12 @@ app.delete("/api/trailers/:id", requireRole("Super Admin"), (req, res) => {
 		const trailer = db.prepare("SELECT * FROM trailers WHERE id = ?").get(id);
 		if (!trailer) return res.status(404).json({ error: "Trailer not found" });
 		db.prepare("DELETE FROM trailers WHERE id = ?").run(id);
+		// Like delete_truck: the row is gone, so the line says which trailer it was
+		// (number, VIN) and which truck it was on. Notes and plate are not recorded.
+		const deletedVin = auditText(trailer.vin, 100);
+		logAudit(req, "delete_trailer", "trailer", String(id),
+			`Trailer ${auditText(trailer.trailer_number, 100) || `#${id}`} (${trailer.type}, ${trailer.status}, ` +
+			`${trailer.truck_id ? `on ${trailerTruckLabel(trailer.truck_id)}` : "not on a truck"}${deletedVin ? `, VIN ${deletedVin}` : ""}) deleted`);
 		notifyChange("trailers");
 		res.json({ success: true });
 	} catch (err) {
@@ -35213,8 +37377,35 @@ app.get("/api/admin/audit-trail", requireRole("Super Admin"), (req, res) => {
 	if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
 	sql += " ORDER BY id DESC LIMIT ?";
 	params.push(parseInt(limit) || 100);
-	const logs = db.prepare(sql).all(...params);
+	// sharedLogin: the row's account is a login several people used, so it names
+	// the login, not the person (lib/sign-in.js). Matched on the username, so a
+	// row an old session wrote without an id is labelled too.
+	const logs = db.prepare(sql).all(...params).map((row) => ({ ...row, sharedLogin: signInLib.isSharedLoginName(row.username) }));
 	res.json({ logs });
+});
+
+// GET /api/admin/sign-ins — sign-ins, sign-outs and refused sign-ins
+// (SIGN_IN_AUDIT_ENABLED), newest first, each with the IP and browser kept for a
+// Super Admin's or Dispatcher's row (sign_in_network, 90 days; null after or
+// for any other role). Super Admin only, as is every other route that reaches
+// sign_in_network: the database browser and download, which reach every table.
+// ?userId=<account id>, ?limit=<1-500, default 100>.
+app.get("/api/admin/sign-ins", requireRole("Super Admin"), (req, res) => {
+	try {
+		const raw = req.query.userId;
+		const userId = raw === undefined || raw === "" ? null : Number(raw);
+		if (userId !== null && !(Number.isInteger(userId) && userId >= 0)) {
+			return res.status(400).json({ error: "userId must be an account id.", code: "INVALID_USER_ID" });
+		}
+		res.setHeader("Cache-Control", "no-store");
+		res.json({
+			retentionDays: signInLib.SIGN_IN_NETWORK_RETENTION_DAYS,
+			rows: signInLib.listSignIns(db, { userId, limit: req.query.limit }),
+		});
+	} catch (err) {
+		console.error("Sign-in list error:", err.message);
+		res.status(500).json({ error: "Could not load the sign-ins." });
+	}
 });
 
 // ============================================================
@@ -35547,6 +37738,10 @@ const INVOICE_PAID_LOCK_REMEDY =
 	"The app can't record a payment on an invoice in a closed month yet; its amount stays as recorded. Nothing was changed.";
 const INVOICE_REVERT_LOCK_REMEDY =
 	"A paid invoice in a closed month can't go back for review. If its amount was wrong, create a manual invoice (New Manual Invoice) dated in the current month for the difference. Nothing was changed.";
+// A weekly invoice refused for a closed month (generate): a Driver reads it, and only the
+// office can make the open-month correction draft that pays a day it missed.
+const INVOICE_CLOSED_WEEK_REMEDY =
+	"The office pays any day of that week that no invoice paid on a correction invoice dated in the current month.";
 
 // Ceiling on the months one invoice may claim to bill. A weekly invoice spans 1
 // or 2; the widest legitimate manual invoice anyone has described is a catch-up
@@ -35711,6 +37906,54 @@ function invoiceMonthLockBlockers(inv) {
 				`${locked.map(periodLabel).join(", ")}`,
 		}],
 	};
+}
+
+// INVOICE_CLOSED_MONTH_GUARD_ENABLED's question for an invoice span ({ invoice_number,
+// id, week_start, week_end }), asked only while the flag is on: null when every month in
+// it is open, else invoiceMonthLockBlockers()'s answer (unreadable lock table, or the blockers).
+function invoiceClosedMonthBlock(span) {
+	const lock = invoiceMonthLockBlockers(span);
+	return lock.unreadable || lock.blockers.length ? lock : null;
+}
+
+// The refusal for a block invoiceClosedMonthBlock() found, audited as guard.auditAction:
+// 409 PERIOD_LOCK_UNREADABLE, or 409 PERIOD_FINALIZED whose error names the closed
+// months in plain words (an unresolved week date keeps the composed text). guard.unaudited:
+// a repeat already on record (driverRefusalAuditDue()), answered the same, written once.
+//   guard: { span, doing, cannot, refused, remedy, auditAction, entityId, subject, note, unaudited }
+function invoiceClosedMonthRefusal(req, res, block, guard) {
+	if (block.unreadable) {
+		return periodLockUnreadableResponse(req, res, guard.doing, guard.unaudited ? AUDITED_UPSTREAM
+			: { action: guard.auditAction, entity: "invoice", entityId: guard.entityId, subject: guard.subject, note: guard.note });
+	}
+	return periodBlockedResponse(req, res, guard.cannot, block.blockers, block.remedy || guard.remedy, guard.unaudited ? AUDITED_UPSTREAM
+		: { action: guard.auditAction, entity: "invoice", entityId: guard.entityId, subject: guard.subject, note: guard.note },
+		(months) => `${months.join(", ")} ${months.length === 1 ? "is" : "are"} closed, so ${guard.refused}; nothing was changed. ${guard.remedy}`);
+}
+
+// Is a Driver's closed-month generate refusal due an audit row? Once per week, for at most
+// DRIVER_REFUSAL_AUDIT_WEEKS weeks, per driver in 24 h: period refusal rows are kept forever and
+// generate has no rate limit, so repeated taps must not crowd out the record (the 409 is unchanged).
+const DRIVER_REFUSAL_AUDIT_WEEKS = 10;
+const driverRefusalAudits = new Map();
+function driverRefusalAuditDue(userId, weekStart) {
+	const now = Date.now();
+	let seen = driverRefusalAudits.get(String(userId));
+	if (!seen || now - seen.since >= 24 * 60 * 60 * 1000) {
+		seen = { since: now, weeks: new Set() };
+		driverRefusalAudits.set(String(userId), seen);
+	}
+	if (seen.weeks.has(weekStart) || seen.weeks.size >= DRIVER_REFUSAL_AUDIT_WEEKS) return false;
+	seen.weeks.add(weekStart);
+	return true;
+}
+
+// A real calendar day as YYYY-MM-DD ("2026-02-30" and "2026-13-01" are not).
+function isCalendarDayKey(value) {
+	const m = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) : null;
+	if (!m) return false;
+	const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+	return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]);
 }
 
 // When a closed month was locked: its period_locks.finalized_at as stored ("" when
@@ -36810,6 +39053,7 @@ app.get("/api/admin/scan-orphans", requireRole("Super Admin"), async (req, res) 
 
 // GET /api/archive — Read-only access to old/archived spreadsheet data
 app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const sheetName = req.query.sheet || "Job Tracking";
@@ -36844,6 +39088,7 @@ app.get("/api/archive", requireRole("Super Admin"), async (req, res) => {
 
 // GET /api/archive/tabs — List available tabs in the archive spreadsheet
 app.get("/api/archive/tabs", requireRole("Super Admin"), async (req, res) => {
+	if (!ARCHIVE_SPREADSHEET_ID) return res.status(503).json({ error: "No archive sheet is configured.", code: "ARCHIVE_UNCONFIGURED" });
 	try {
 		const sheets = await getSheets();
 		const meta = await sheets.spreadsheets.get({ spreadsheetId: ARCHIVE_SPREADSHEET_ID, fields: "sheets.properties.title" });
@@ -37875,8 +40120,11 @@ async function staffRowMovedRefusal(req, sheets, a1, headers, rowIndex, before, 
 	const storedRaw = String(b[col] == null ? "" : b[col]).trim();
 	const stored = servedText(hs, b, col);
 	const opened = String(baseline[col] == null ? "" : baseline[col]).trim();
-	let confirmed = false;
-	if (stored && stored !== storedRaw && opened.toLowerCase() === stored.toLowerCase()) {
+	// A Dispatcher's key (`loadId` in the body; WITHHELD LOAD KEYS) names the load
+	// itself: it confirms the row whose stored ID it is, an ID that is only contact
+	// included.
+	let confirmed = !!(req.withheldLoad && normalizeLoadId(storedRaw) && normalizeLoadId(req.withheldLoad.raw) === normalizeLoadId(storedRaw));
+	if (!confirmed && stored && stored !== storedRaw && opened.toLowerCase() === stored.toLowerCase()) {
 		try {
 			const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: a1 });
 			const all = (read && read.data && read.data.values) || [];
@@ -38895,6 +41143,11 @@ app.post("/api/data", requireRole("Super Admin"), async (req, res) => {
 			})),
 			guardedChanged: appendHeaders ? changedGuardedCells(appendHeaders, [], values) : [],
 		}));
+		// PERSON EDIT HOLD: a new Job Tracking row's dates are a person's (decision 7).
+		// The record never fails the save.
+		if (appendHeaders) {
+			try { recordPersonCellEdits(req, sheetName, appendHeaders, [], values); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		}
 
 		// Save coordinates to load_coordinates if provided
 		if (sheetName === "Job Tracking" && coordinates && coordinates.loadId) {
@@ -39321,6 +41574,9 @@ app.put("/api/data/:rowIndex", requireRole("Super Admin", "Dispatcher"), async (
 
 		logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
+		// PERSON EDIT HOLD: the dates this save changed on Job Tracking are a person's.
+		// The record never fails the save.
+		try { recordPersonCellEdits(req, sheetName, headers, before, after); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
 		// The 60s Job Tracking cache would otherwise keep serving the old figures.
 		if (guarded) jtCacheInvalidate();
 
@@ -39762,7 +42018,10 @@ function resolveLoadBinding(headers, rows, rowIndex, loadId, opts) {
 	// body-parser inflates, so an unbounded id in an error string is the same
 	// reflection PR #246 capped on the status route — and POST /api/driver/respond
 	// is Driver-reachable at driverWriteLimiter's 60/min.
-	const shown = typed ? String(loadId).trim().slice(0, 64) : "";
+	// `opts.shownAs`: the text a Dispatcher's request named the load by when it
+	// named it by its key (WITHHELD LOAD KEYS), so no refusal echoes the stored ID.
+	const shownAs = opts && Object.hasOwn(opts, "shownAs") && typeof opts.shownAs === "string" ? opts.shownAs : null;
+	const shown = typed ? (shownAs != null ? shownAs : String(loadId)).trim().slice(0, 64) : "";
 	const wanted = typed ? normLoadKey(loadId) : "";
 	if (!wanted) {
 		return {
@@ -39982,7 +42241,11 @@ function recordOffDutyConfirmation(req, c) {
 // drawn and why it is not a blanket refusal.
 app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, driver: rawDriver, loadId, origin, destination } = req.body;
+		const { rowIndex: rawRowIndex, driver: rawDriver, origin, destination } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		if (!rawDriver) {
 			return res.status(400).json({ error: "rowIndex and driver required" });
 		}
@@ -40016,7 +42279,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"dispatch_blocked", loadId, `Assigning ${driver} to load ${loadId || "(unknown)"}`
+				"dispatch_blocked", loadId, `Assigning ${driver} to load ${idText || "(unknown)"}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -40026,7 +42289,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// load the caller named, its verdict is about the wrong load, so the
 		// subject has to be established first. See resolveLoadBinding().
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "dispatch_blocked", loadId,
@@ -40085,7 +42348,7 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "dispatch_blocked", loadId,
-					`Assigning ${driver} to load ${loadId || "(unknown)"}`
+					`Assigning ${driver} to load ${idText || "(unknown)"}`
 				);
 			}
 		}
@@ -40132,18 +42395,22 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 		});
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
-		// Persist notification and notify the driver in real-time
+		// Persist notification and notify the driver in real-time. The notice names
+		// the load as stored to a Driver account, now the load's driver (served his
+		// loads' IDs so, #549); to a name no Driver account holds, a request that
+		// named the load by its key names it as shown (WITHHELD LOAD KEYS).
+		const noticeLoadId = userMatch ? loadId : idText;
 		const route = [origin, destination].filter(Boolean).join(' → ') || '';
 		const notifResult = insertNotification.run(
 			driver.trim().toLowerCase(), 'load-assigned',
-			`New Load Assigned: ${loadId || 'Load'}`,
+			`New Load Assigned: ${noticeLoadId || 'Load'}`,
 			route,
-			JSON.stringify({ loadId, rowIndex, origin: origin || '', destination: destination || '' })
+			JSON.stringify({ loadId: noticeLoadId, rowIndex, origin: origin || '', destination: destination || '' })
 		);
 		// Always notify the driver in real time. Drivers can hold multiple
 		// accepted loads at once (dispatcher pre-planning), so there's no
 		// busy-suppression — every assignment surfaces immediately.
-		io.to(driverRoom(driver)).emit("load-assigned", { loadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
+		io.to(driverRoom(driver)).emit("load-assigned", { loadId: noticeLoadId, rowIndex, origin: origin || '', destination: destination || '', notificationId: notifResult.lastInsertRowid });
 
 		// Notify dispatch team
 		insertDispatchNotification.run(
@@ -40177,7 +42444,13 @@ app.post("/api/dispatch", requireRole("Super Admin", "Dispatcher"), async (req, 
 // POST /api/dispatch/reassign — Reassign a load to a different driver
 app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { rowIndex: rawRowIndex, newDriver: rawNewDriver, loadId, oldDriver } = req.body;
+		// The old driver is NOT taken from the body: it is read off the bound row
+		// below (`oldDriver`), as POST /api/dispatch/cancel reads its driver.
+		const { rowIndex: rawRowIndex, newDriver: rawNewDriver } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		if (!rawNewDriver) {
 			return res.status(400).json({ error: "rowIndex and newDriver required" });
 		}
@@ -40199,7 +42472,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"reassign_blocked", loadId, `Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+				"reassign_blocked", loadId, `Reassigning load ${idText || "(unknown)"} to ${newDriver}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -40209,7 +42482,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		// load's revenue to another investor (Owner ID) and its active-day pay to
 		// another person (Driver), on a load nobody asked about.
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "reassign_blocked", loadId,
@@ -40222,6 +42495,11 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		if (driverCol === -1) {
 			return res.status(400).json({ error: "Driver column not found" });
 		}
+		// The driver the load is taken from: the cell this route overwrites, read
+		// off the bound row before the write (resolveLoadBinding() above proved the
+		// row holds the load). Never a name the request sends: the old driver's
+		// notice names the load, so it goes only to whom the sheet names.
+		const oldDriver = String((snapshot.row || [])[driverCol] || "").trim();
 
 		// NO FORMULAS, for every caller but a Super Admin — same rule and reason as
 		// POST /api/dispatch: `newDriver` is the caller's own text whenever it names
@@ -40263,7 +42541,7 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "reassign_blocked", loadId,
-					`Reassigning load ${loadId || "(unknown)"} to ${newDriver}`
+					`Reassigning load ${idText || "(unknown)"} to ${newDriver}`
 				);
 			}
 		}
@@ -40307,30 +42585,39 @@ app.post("/api/dispatch/reassign", requireRole("Super Admin", "Dispatcher"), asy
 		});
 		if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
 
+		// Each driver notice names the load as stored to a Driver account (the new
+		// driver now holds the load, the old one held it; each is served his loads'
+		// IDs so, #549); to a name no Driver account holds, a request that named
+		// the load by its key names it as shown (WITHHELD LOAD KEYS).
+		const newNoticeLoadId = userMatch ? loadId : idText;
 		// Notify new driver
 		insertNotification.run(
 			newDriver.trim().toLowerCase(), 'load-assigned',
-			`Load Reassigned: ${loadId || 'Load'}`,
+			`Load Reassigned: ${newNoticeLoadId || 'Load'}`,
 			`Previously assigned to ${oldDriver || 'another driver'}`,
-			JSON.stringify({ loadId, rowIndex })
+			JSON.stringify({ loadId: newNoticeLoadId, rowIndex })
 		);
 		// Always notify the new driver in real time (multi-load acceptance).
-		io.to(driverRoom(newDriver)).emit("load-assigned", { loadId, rowIndex });
+		io.to(driverRoom(newDriver)).emit("load-assigned", { loadId: newNoticeLoadId, rowIndex });
 
 		// Notify old driver — also emit a socket event so their app
 		// optimistically removes the ghost load instead of waiting for the
 		// next manual refresh. Without this, the old driver's UI keeps the
 		// load visible and they hit a confusing 403 when they try to act on it.
-		if (oldDriver) {
-			const oldDriverKey = oldDriver.trim().toLowerCase();
+		// Not when the load stays with the same driver: his app would drop the
+		// load it was just sent.
+		if (oldDriver && normalizeDriverName(oldDriver) !== normalizeDriverName(newDriver)) {
+			const oldDriverKey = oldDriver.toLowerCase();
+			const oldMatch = db.prepare("SELECT driver_name FROM users WHERE LOWER(driver_name) = LOWER(?) AND role = 'Driver'").get(oldDriver);
+			const oldNoticeLoadId = oldMatch ? loadId : idText;
 			const oldNotif = insertNotification.run(
 				oldDriverKey, 'load-cancelled',
-				`Load Removed: ${loadId || 'Load'}`,
+				`Load Removed: ${oldNoticeLoadId || 'Load'}`,
 				`Reassigned to ${newDriver}`,
-				JSON.stringify({ loadId, rowIndex, reassignedTo: newDriver })
+				JSON.stringify({ loadId: oldNoticeLoadId, rowIndex, reassignedTo: newDriver })
 			);
 			io.to(driverRoom(oldDriverKey)).emit("load-cancelled", {
-				loadId, rowIndex, reason: 'reassigned',
+				loadId: oldNoticeLoadId, rowIndex, reason: 'reassigned',
 				notificationId: oldNotif.lastInsertRowid,
 			});
 		}
@@ -41124,7 +43411,11 @@ const locationLimiter = rateLimit({
 // no budget.
 app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, rowIndex: rawRowIndex, response } = req.body;
+		const { rowIndex: rawRowIndex, response } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return; // 401/403 already sent
 		if (!loadId || !response || !driverName) {
@@ -41164,7 +43455,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 		if (!snapshot) {
 			return sendDispatchRefusal(
 				req, res, { code: "PERIOD_UNRESOLVED", periods: [] },
-				"driver_respond_blocked", loadId, `Recording "${response}" on load ${loadId || "(unknown)"}`
+				"driver_respond_blocked", loadId, `Recording "${response}" on load ${idText || "(unknown)"}`
 			);
 		}
 		const headers = snapshot.headers;
@@ -41176,7 +43467,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 		// "Unassigned"` on a stranger's live load. Ownership of the id is not
 		// ownership of the row, so the two have to be tied together.
 		{
-			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId);
+			const unbound = resolveLoadBinding(headers, snapshot.rows, rowIndex, loadId, loadIdBindingOpts(req, loadId));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "driver_respond_blocked", loadId,
@@ -41210,7 +43501,7 @@ app.post("/api/driver/respond", requireRole("Super Admin", "Dispatcher", "Driver
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "driver_respond_blocked", loadId,
-					`Recording "${response}" on load ${loadId || "(unknown)"}`
+					`Recording "${response}" on load ${idText || "(unknown)"}`
 				);
 			}
 		}
@@ -41617,6 +43908,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		const withholdIds = loadIdWithheldFor(req);
 		const loadIdIndex = withholdIds ? routeShownLoadIdIndex(jobTracking) : null;
 		const idShown = (raw, row) => (withholdIds ? shownLoadId(req, raw, { row, index: loadIdIndex }) : raw);
+		// A Dispatcher's key beside each withheld ID (WITHHELD LOAD KEYS; "" otherwise).
+		const keysOn = loadKeysFor(req);
+		const idKey = (raw) => (keysOn ? loadKeyFor(req, raw, { index: loadIdIndex }) : "");
 
 		// Fleet details. "On Load" should only fire when the driver is actually
 		// mid-trip (heading-to-shipper..unloading); a driver whose only loads are
@@ -41668,6 +43962,10 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 					: "",
 				QueueCount: queue.length,
 				QueuedLoadIds: queue.map((q) => idShown(q.load_id)),
+				...(keysOn ? {
+					CurrentLoadKey: inProgressLoad && loadIdCol ? idKey(inProgressLoad[loadIdCol]) : "",
+					QueuedLoadKeys: queue.map((q) => idKey(q.load_id)),
+				} : {}),
 				CompletedLoads: completedJobs.filter((j) => {
 					return driverCol && normalizeDriverName(driverNameForTotals(j[driverCol])) === nameNorm;
 				}).length,
@@ -41719,16 +44017,22 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		enrichLocations(unassignedJobs);
 		enrichLocations(activeJobs);
 		enrichLocations(completedJobs);
+		// Needs Review codes (`_review`, lib/load-review-flags.js): on these raw rows, before
+		// sanitizing, so a withheld Load ID still gets its code (nothing with the flag off)
+		annotateDashboardPickupReview(jobTracking.headers, loadIdCol, [...unassignedJobs, ...activeJobs, ...completedJobs]);
 
 		// Sanitize broker contact data for non-Admin roles
+		// A Dispatcher's rows also carry `_loadKey` beside a withheld Load ID
+		// (withLoadKeys(); WITHHELD LOAD KEYS), never inside sanitizeBrokerColumns(),
+		// which the Driver page shares.
 		const respUnassigned = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, unassignedJobs)
+			? withLoadKeys(req, jobTracking.headers, unassignedJobs, sanitizeBrokerColumns(jobTracking.headers, unassignedJobs), { index: loadIdIndex })
 			: unassignedJobs;
 		const respActive = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, activeJobs)
+			? withLoadKeys(req, jobTracking.headers, activeJobs, sanitizeBrokerColumns(jobTracking.headers, activeJobs), { index: loadIdIndex })
 			: activeJobs;
 		const respCompleted = req.session.user.role !== "Super Admin"
-			? sanitizeBrokerColumns(jobTracking.headers, completedJobs)
+			? withLoadKeys(req, jobTracking.headers, completedJobs, sanitizeBrokerColumns(jobTracking.headers, completedJobs), { index: loadIdIndex })
 			: completedJobs;
 
 		// Search references for the load search (lib/load-search-refs.js), on the
@@ -41743,6 +44047,9 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 		// Driver-instructions review codes on the open loads (codes only; inert while
 		// the flag is off).
 		driverInstructions.annotateDashboardRows({ headers: jobTracking.headers, rows: [...respUnassigned, ...respActive] });
+		// The automatic invoice drafts' status on the completed loads (`_autoInvoice`, codes
+		// only): a Super Admin's rows, while real drafts are on (lib/auto-invoice-job.js).
+		autoInvoice.annotateCompletedRows({ rows: respCompleted, headers: jobTracking.headers, isSuperAdmin: req.session.user.role === "Super Admin" });
 
 		res.json({
 			timestamp: new Date().toISOString(),
@@ -41766,11 +44073,16 @@ app.get("/api/dashboard", requireRole("Super Admin", "Dispatcher"), async (req, 
 			fleet,
 			drivers: driverList,
 			driverQueues: withholdIds
-				? Object.assign(Object.create(null), Object.fromEntries(Object.entries(driverQueues).map(([k, list]) => [k, list.map((q) => ({ ...q, load_id: idShown(q.load_id) }))])))
+				? Object.assign(Object.create(null), Object.fromEntries(Object.entries(driverQueues).map(([k, list]) => [k, list.map((q) => {
+					const key = idKey(q.load_id);
+					return { ...q, load_id: idShown(q.load_id), ...(key ? { load_key: key } : {}) };
+				})])))
 				: driverQueues,
 			...(offUntilByName
 				? { offUntil: Object.fromEntries(driverList.filter((n) => offUntilByName.has(normalizeDriverName(n))).map((n) => [n, offUntilByName.get(normalizeDriverName(n))])) }
 				: {}),
+			// Which automatic-draft mode is on, for a Super Admin's settings dialog; absent while off.
+			...(autoInvoice.mode !== "off" && req.session.user.role === "Super Admin" ? { autoInvoice: { mode: autoInvoice.mode } } : {}),
 		});
 	} catch (error) {
 		console.error("Error building dashboard:", error.message);
@@ -42015,9 +44327,212 @@ function emitDispatchNotice(notice, { staffNotice = null, index = currentShownLo
 function emitLoadEventToDispatch(event, payload, { row = null, index = currentShownLoadIdIndex(), dropForStaff = [] } = {}) {
 	if (!io) return;
 	const staff = { ...payload };
-	if (Object.prototype.hasOwnProperty.call(staff, "loadId")) staff.loadId = shownLoadId("Dispatcher", staff.loadId, { row, index });
+	if (Object.prototype.hasOwnProperty.call(staff, "loadId")) {
+		const key = loadKeyFor("Dispatcher", staff.loadId, { index });
+		staff.loadId = shownLoadId("Dispatcher", staff.loadId, { row, index });
+		if (key) staff.loadKey = key;
+	}
 	for (const k of dropForStaff) delete staff[k];
 	emitDispatchByRole(event, payload, staff);
+}
+
+// WITHHELD LOAD KEYS (the Dispatcher raw Load ID plan, PR 2, decisions 6 and 7;
+// lib/withheld-load-key.js). A Load ID that holds broker contact reaches a
+// Dispatcher as its shown text only, so since #525 a Dispatcher could see such a
+// load but not open, edit, assign or override it. With WITHHELD_LOAD_REFS_ENABLED
+// on (off by default; on after the replica check and Arvin's yes), a Dispatcher
+// is also served an opaque key beside each withheld ID (`_loadKey` on a load row,
+// `loadKey` beside a `loadId`, `CurrentLoadKey`, `QueuedLoadKeys`, `load_key`),
+// and may name the load by it wherever a route takes a Load ID:
+//   - withheldLoadKeyGate() (mounted above every route) finds a key in the path,
+//     in a `loadId` / `load_id` field of the query or the body, or in
+//     X-Message-Load-Id, and puts the load on req.withheldLoad = { raw, shown,
+//     key, drivers }. Path, query and body stay as sent. A key no load of the
+//     current Job Tracking read has answers 404 LOAD_KEY_UNKNOWN before any
+//     handler, so it is never stored as a load_id; key-shaped text in any other
+//     field is left alone; /api/public/* is never read.
+//   - each handler reads its load ID through loadIdFor() and names it in every
+//     reply through loadIdShownFor(), so the stored ID never reaches the caller.
+//   - the reply guard (installed with req.withheldLoad) swaps the stored ID, and
+//     each phone or email its shown text withholds, out of every res.json and
+//     string res.send of that request, keeps the status code, and logs the route
+//     only. A hit is a bug: the runners fail on any.
+// Keys are issued and read for Dispatchers only, never for a Super Admin (served
+// every ID as stored), a Driver (served his own loads' IDs as stored, #549) or an
+// Investor. Nothing changes with the flag off, or with
+// BROKER_CONTACT_VALUE_REDACTION_ENABLED off (no ID is withheld then).
+const withheldLoadKey = require("./lib/withheld-load-key");
+const WITHHELD_LOAD_REFS_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.WITHHELD_LOAD_REFS_ENABLED ?? "").trim());
+// Random per process: a restart makes every key unknown, and the page reads again.
+const WITHHELD_LOAD_KEYS = withheldLoadKey.createLoadKeys();
+const WITHHELD_LOAD_KEY_TABLES = new WeakMap();
+const WITHHELD_LOAD_KEY_FIELDS = ["loadId", "load_id"];
+// Whether `who` (a request, or a role name) is issued keys and may name a load by one.
+function loadKeysFor(who) {
+	if (!WITHHELD_LOAD_REFS_ENABLED || !loadIdWithheldFor(who)) return false;
+	const role = typeof who === "string" ? who : (who && who.session && who.session.user && who.session.user.role) || "";
+	return role === "Dispatcher";
+}
+// The key `who` is served beside `raw`: "" unless keys are for `who` and the
+// index withholds `raw` (an ID on no sheet row gets none: no key could read it back).
+function loadKeyFor(who, raw, { index = currentShownLoadIdIndex() } = {}) {
+	if (!loadKeysFor(who) || !index || !index.byKey) return "";
+	const s = typeof raw === "number" ? String(raw) : raw;
+	if (typeof s !== "string" || !s.trim()) return "";
+	const hit = index.byKey.get(brokerContact.loadIdKey(s));
+	return hit && hit.hidden ? WITHHELD_LOAD_KEYS.keyFor(s) : "";
+}
+// Copies of `served` (sanitizeBrokerColumns() of `source`, row for row) with
+// `_loadKey` on each row whose stored Load ID is withheld from `who`.
+function withLoadKeys(who, headers, source, served, { index = currentShownLoadIdIndex() } = {}) {
+	if (!loadKeysFor(who)) return served;
+	const idCol = (headers || []).find((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (!idCol) return served;
+	return served.map((row, i) => {
+		const key = loadKeyFor(who, source[i] && source[i][idCol], { index });
+		return key ? { ...row, _loadKey: key } : row;
+	});
+}
+// A stored dispatch notice as `served` to `who` (staffDispatchNotice()), with
+// metadata.loadKey beside a withheld load the stored notice names in
+// metadata.loadId (or load_id), so its tap opens the load. JSON text stays text.
+function withNoticeLoadKey(who, stored, served, index = currentShownLoadIdIndex()) {
+	if (!loadKeysFor(who) || !served || served.metadata == null) return served;
+	let meta = null;
+	try { meta = typeof stored.metadata === "object" ? stored.metadata : JSON.parse(String(stored.metadata || "")); } catch { meta = null; }
+	if (!meta || typeof meta !== "object") return served;
+	const key = loadKeyFor(who, meta.loadId != null ? meta.loadId : meta.load_id, { index });
+	if (!key) return served;
+	let shown = null;
+	try { shown = typeof served.metadata === "object" ? served.metadata : JSON.parse(String(served.metadata)); } catch { shown = null; }
+	if (!shown || typeof shown !== "object") return served;
+	const withKey = { ...shown, loadKey: key };
+	return { ...served, metadata: typeof served.metadata === "object" ? withKey : JSON.stringify(withKey) };
+}
+// The key table of one Job Tracking read (lib/withheld-load-key.js
+// buildLoadKeyTable()), built once per read.
+function loadKeyTable(jt) {
+	if (!jt || typeof jt !== "object") return new Map();
+	let table = WITHHELD_LOAD_KEY_TABLES.get(jt);
+	if (!table) {
+		table = withheldLoadKey.buildLoadKeyTable(jt.headers || [], jt.data || [], {
+			index: shownLoadIdIndex(jt), keyFor: WITHHELD_LOAD_KEYS.keyFor, driverKey: normalizeDriverName,
+		});
+		WITHHELD_LOAD_KEY_TABLES.set(jt, table);
+	}
+	return table;
+}
+// The keys a request names a load by: path segments, the query's and the body's
+// load fields, and X-Message-Load-Id (POST /api/messages/voice).
+function namedLoadKeys(req) {
+	const out = [];
+	const take = (v) => {
+		if (typeof v !== "string") return;
+		let s = v.trim();
+		try { s = decodeURIComponent(s); } catch { return; }
+		if (withheldLoadKey.isLoadKey(s)) out.push(s);
+	};
+	for (const seg of String(req.path || "").split("/")) take(seg);
+	for (const src of [req.query, req.body]) {
+		if (!src || typeof src !== "object" || Array.isArray(src)) continue;
+		for (const f of WITHHELD_LOAD_KEY_FIELDS) if (Object.prototype.hasOwnProperty.call(src, f)) take(src[f]);
+	}
+	take(req.headers && req.headers["x-message-load-id"]);
+	return out;
+}
+async function withheldLoadKeyGate(req, res, next) {
+	const user = req.session && req.session.user;
+	if (!user || user.mustChangePassword || !/^\/api\//i.test(req.path || "") || /^\/api\/public(\/|$)/i.test(req.path || "")) return next();
+	if (!loadKeysFor(req)) return next();
+	let entry = null;
+	try {
+		const named = namedLoadKeys(req);
+		if (!named.length) return next();
+		let jt = null;
+		try {
+			jt = await getJobTrackingCached();
+		} catch (e) {
+			console.error("[load-keys] Job Tracking could not be read to resolve a load key:", e.message);
+			return res.status(503).json({ error: "This load couldn't be checked right now. Try again.", code: "LOAD_KEY_UNVERIFIED", retryable: true });
+		}
+		// A key-shaped text that is itself a Load ID on the sheet is that load's ID.
+		const index = shownLoadIdIndex(jt);
+		const keys = [...new Set(named.filter((k) => !(index && index.byKey && index.byKey.has(brokerContact.loadIdKey(k)))))];
+		if (!keys.length) return next();
+		entry = keys.length === 1 ? loadKeyTable(jt).get(keys[0]) : null;
+		if (!entry) {
+			return res.status(404).json({ error: "This load's link is out of date. Reload the page and open the load again.", code: "LOAD_KEY_UNKNOWN" });
+		}
+		req.withheldLoad = { raw: entry.raw, shown: entry.shown, key: entry.key, drivers: entry.drivers };
+		guardWithheldLoadReply(req, res);
+	} catch (e) {
+		console.error("[load-keys] a load key could not be read:", e.message);
+		return res.status(500).json({ error: "This load couldn't be opened. Try again." });
+	}
+	next();
+}
+// The stored Load ID a handler acts on: the load a key names, else `value` as sent.
+function loadIdFor(req, value) {
+	const w = req && req.withheldLoad;
+	if (!w || typeof value !== "string" || value.trim() !== w.key) return value;
+	return w.raw;
+}
+// A Load ID as a reply names it: the shown text for the load the request named
+// by its key, else `value` as it is.
+function loadIdShownFor(req, value) {
+	const w = req && req.withheldLoad;
+	if (!w || value == null) return value;
+	const s = String(value).trim();
+	return s === w.key || normLoadKey(s) === normLoadKey(w.raw) ? w.shown : value;
+}
+// resolveLoadBinding()'s options for a request: when it named `loadId` by its
+// key, the refusals name the load as shown (`shownAs`). `extra` as given otherwise.
+function loadIdBindingOpts(req, loadId, extra) {
+	const w = req && req.withheldLoad;
+	if (!w || normLoadKey(loadId) !== normLoadKey(w.raw)) return extra;
+	return { ...(extra || {}), shownAs: w.shown };
+}
+// POST /api/messages and POST /api/messages/voice: a message names a load by
+// its key as stored only when it goes to that load's own driver, who is served
+// the ID so (#549): a Driver account (`partyUserId`, the recipient
+// resolveChatParties() resolved) whose name `to` is in the Driver cell of the
+// load's row. To anyone else, an Investor account of that name included, as shown.
+function messageLoadIdFor(req, value, to, partyUserId) {
+	const w = req && req.withheldLoad;
+	if (!w || typeof value !== "string" || value.trim() !== w.key) return value;
+	if (!w.drivers || !w.drivers.has(normalizeDriverName(to))) return w.shown;
+	const id = Number(partyUserId);
+	const party = Number.isInteger(id) && id > 0 ? db.prepare("SELECT role FROM users WHERE id = ?").get(id) : null;
+	return party && party.role === "Driver" ? w.raw : w.shown;
+}
+// The reply guard for a request that named a load by its key: res.json and a
+// string res.send are swept (lib/withheld-load-key.js guardReply()); streams,
+// files and buffers are not. The status code and the rest of the reply are kept.
+const WITHHELD_LOAD_KEY_STATE = { replyGuardHits: 0 };
+function guardWithheldLoadReply(req, res) {
+	const w = req.withheldLoad;
+	if (!w || !loadIdWithheldFor(req)) return;
+	const guard = withheldLoadKey.replyGuardFor(w.raw, w.shown);
+	const noteHits = (hits) => {
+		if (!hits) return;
+		WITHHELD_LOAD_KEY_STATE.replyGuardHits += hits;
+		console.error(`[load-keys] reply guard withheld a Load ID in ${req.method} ${(req.route && req.route.path) || "(no route)"}`);
+	};
+	const json = res.json.bind(res);
+	const send = res.send.bind(res);
+	let inJson = false;
+	res.json = (body) => {
+		const r = withheldLoadKey.guardReply(body, guard);
+		noteHits(r.hits);
+		inJson = true;
+		try { return json(r.value); } finally { inJson = false; }
+	};
+	res.send = (body) => {
+		if (inJson || typeof body !== "string") return send(body);
+		const r = withheldLoadKey.guardReply(body, guard);
+		noteHits(r.hits);
+		return send(r.value);
+	};
 }
 
 // PUT /api/data/:rowIndex and PUT /api/load/:loadId, for every caller but a
@@ -42243,7 +44758,10 @@ function findDriverAccountSpelling(name) {
 // never match for the same reason. A failed read throws; each caller asks
 // inside its try, so a read error refuses the write rather than admitting it.
 function findDriverNameClashes(name, opts = {}) {
-	const RESERVED_NAMES = ["dispatch", "investor"];
+	// The staff desks (CHAT_DESK_NAMES) and the investors' room's name. Written
+	// out here because many runners lift this function on its own;
+	// scripts/test-socket-hardening.js pins it to CHAT_DESK_NAMES.
+	const RESERVED_NAMES = ["dispatch", "admin", "investor"];
 	const needle = normalizeDriverName(typeof name === "string" ? name : "");
 	if (!needle) return [];
 	const { exceptUserId = null, exceptUserIds = [], exceptDirectoryId = null, users = true, directory = true } = opts || {};
@@ -43422,6 +45940,20 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 
 		const speedMps = Number.isFinite(rm.speed) ? rm.speed : 0;
 		const lastPingAge = Date.now() - rm.location_date_ms;
+		// Voice notes' driver-safety gate (lib/voice-note-gate.js): since when the
+		// truck has been stopped, from its recent clean fixes taken since the
+		// link: the last fix above the moving threshold, else the oldest one read
+		// (stopped at least since then). Null while the latest fix is moving.
+		// Bounded: at most 120 rows of the same index read as above.
+		let stoppedSinceMs = null;
+		if (!(speedMps > voiceNoteGate.MOVING_MPS)) {
+			const recent = db.prepare(
+				`SELECT speed, location_date_ms FROM routemate_telemetry
+				  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+				  ORDER BY id DESC LIMIT 120`
+			).all(vehicleId).filter((f) => !eldPosition.fixPredatesLink(f.location_date_ms, linkedSince));
+			stoppedSinceMs = voiceNoteGate.stoppedSinceMs(recent);
+		}
 		res.json({
 			ok: true,
 			unit: (truck && truck.unit) || "",
@@ -43447,6 +45979,7 @@ app.get(["/api/driver/position", "/api/driver/me/position"], requireRole("Driver
 				// so the driver and the dispatcher cannot disagree about whether the
 				// truck is moving.
 				movement: classifyMovement({ lastPingAge, speed: speedMps }),
+				stoppedSinceMs,
 			},
 		});
 	} catch (err) {
@@ -43552,16 +46085,17 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 
 		// Messages from SQLite (fast indexed query). Attachments ride along, so the
 		// driver sees the photos and files Dispatch sends (served under /uploads/chat/
-		// to the conversation's participants only).
+		// to the conversation's participants only). Voice notes too, as the reader
+		// may play them (lib/voice-notes.js: by account id, never by name).
 		const nameLower = driverName.toLowerCase();
-		const driverMessages = db
+		const driverMessages = voiceNotes.voiceThreadRows(req.session.user, db
 			.prepare(
-				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+				`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, voice_file, voice_duration_ms, party_user_id
 				 FROM messages
 				 WHERE LOWER("from") = ? OR LOWER("to") = ?
 				 ORDER BY id ASC`,
 			)
-			.all(nameLower, nameLower);
+			.all(nameLower, nameLower));
 
 		// Notifications from SQLite
 		// SQLite's CURRENT_TIMESTAMP is UTC but serializes without a zone
@@ -43583,14 +46117,14 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 		// saveReceiptToDisk() — base64 is written to /uploads/expense-receipts/
 		// on submit and only the URL is stored), so the payload stays small
 		// even for drivers with hundreds of expenses. PDF receipts (admin/
-		// dispatcher-logged via savePdfReceiptToDisk) are blanked here: the
-		// driver app renders photoData in an <img> and would show a broken
-		// thumbnail — the deliberately-unchanged driver UI is image-only.
+		// dispatcher-logged via savePdfReceiptToDisk) are blanked here, a legacy
+		// inline one too: their files are staff only (lib/receipt-files.js), and
+		// the driver app renders photoData in an <img>.
 		const driverExpenses = db
 			.prepare(
 				`SELECT id, timestamp, driver, load_id AS loadId, type, amount,
 				        description, date,
-				        CASE WHEN photo_data LIKE '%.pdf' THEN '' ELSE photo_data END AS photoData,
+				        CASE WHEN photo_data LIKE '%.pdf' OR photo_data LIKE 'data:application/pdf%' THEN '' ELSE photo_data END AS photoData,
 				        status,
 				        location_city AS locationCity, location_state AS locationState
 				 FROM expenses
@@ -43605,39 +46139,46 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			for (const e of driverExpenses) e.personal = personalSummaryForRole(personal[e.id], "Driver");
 		}
 
-		// Count uploaded documents per load (total + per-kind breakdown). The
-		// driver-mobile-view's DocumentUpload needs per-kind counts so BOL /
-		// Receipt / Other show "N uploaded" accurately after a reload, not just
-		// POD. _otherCount is anything that isn't one of the three known kinds.
+		// Count each load's documents (total + per kind).
+		//
+		// _podCount is the LOAD's: every live POD on it, in any letter case and
+		// whoever it is filed under. It is the rule PUT /api/driver/status applies
+		// before Delivered, so the app's Delivered step (StatusStepper.vue, the
+		// only reader of these counts) offers what the server accepts after a
+		// reassignment too. A number only: no document reaches the driver by it.
+		//
+		// The other four count what his Documents panel lists: live, not a rate
+		// con (LOAD_PANEL_DOCUMENT_FILTER), and filed under him
+		// (documentFiledUnder()). Kinds are read without letter case; _otherCount
+		// is anything that isn't POD, BOL or Receipt.
 		const loadIdCol = findCol(jobTracking.headers, /load.?id|job.?id/i);
 		const loadIds = loads
 			.map((l) => (loadIdCol ? l[loadIdCol] : ""))
 			.filter(Boolean);
-		const docCounts = {};
-		const podCounts = {};
-		const bolCounts = {};
-		const receiptCounts = {};
-		const otherCounts = {};
+		const docCounts = Object.create(null);
+		const podCounts = Object.create(null);
+		const bolCounts = Object.create(null);
+		const receiptCounts = Object.create(null);
+		const otherCounts = Object.create(null);
 		if (loadIds.length) {
 			const placeholders = loadIds.map(() => "?").join(",");
-			const docs = db
-				.prepare(
-					`SELECT load_id,
-						COUNT(*) as count,
-						SUM(CASE WHEN type = 'POD' THEN 1 ELSE 0 END) as pod_count,
-						SUM(CASE WHEN type = 'BOL' THEN 1 ELSE 0 END) as bol_count,
-						SUM(CASE WHEN type = 'Receipt' THEN 1 ELSE 0 END) as receipt_count,
-						SUM(CASE WHEN type NOT IN ('POD', 'BOL', 'Receipt') THEN 1 ELSE 0 END) as other_count
-					FROM documents WHERE load_id IN (${placeholders}) AND deleted_at IS NULL GROUP BY load_id`,
-				)
-				.all(...loadIds);
-			docs.forEach((d) => {
-				docCounts[d.load_id] = d.count;
-				podCounts[d.load_id] = d.pod_count;
-				bolCounts[d.load_id] = d.bol_count;
-				receiptCounts[d.load_id] = d.receipt_count;
-				otherCounts[d.load_id] = d.other_count;
-			});
+			db.prepare(
+				`SELECT load_id, COUNT(*) AS n FROM documents
+				 WHERE load_id IN (${placeholders}) AND UPPER(type) = 'POD' AND deleted_at IS NULL
+				 GROUP BY load_id`,
+			).all(...loadIds).forEach((d) => { podCounts[d.load_id] = d.n; });
+			const bump = (counts, lid) => { counts[lid] = (counts[lid] || 0) + 1; };
+			const listed = db.prepare(
+				`SELECT load_id, driver, type FROM documents
+				 WHERE load_id IN (${placeholders}) AND ${LOAD_PANEL_DOCUMENT_FILTER}`,
+			).all(...loadIds).filter((d) => documentFiledUnder(d, driverName));
+			for (const d of listed) {
+				bump(docCounts, d.load_id);
+				const kind = String(d.type == null ? "" : d.type).toUpperCase();
+				if (kind === "BOL") bump(bolCounts, d.load_id);
+				else if (kind === "RECEIPT") bump(receiptCounts, d.load_id);
+				else if (kind !== "POD") bump(otherCounts, d.load_id);
+			}
 		}
 		loads.forEach((load) => {
 			const lid = loadIdCol ? load[loadIdCol] : "";
@@ -43856,6 +46397,10 @@ app.get("/api/driver/:driverName", requireRole("Super Admin", "Driver"), async (
 			.map(({ driver: _driver, ...rest }) => ({ ...rest, total_due: invoiceTotalDue(rest) }));
 		const driverInvoiceLines = personalLinesForInvoices(driverInvoices.map((r) => r.id));
 		for (const inv of driverInvoices) inv.personal_lines = driverInvoiceLines.get(inv.id) || [];
+		// pay_basis: what the card's loads_count holds (days, loads or line items;
+		// invoicePayBasis()), read for these rows only.
+		const driverInvoiceBases = invoicePayBasesOf(driverInvoices.map((r) => r.id));
+		for (const inv of driverInvoices) inv.pay_basis = driverInvoiceBases.get(inv.id) || "daily";
 
 		// Geocode enrichment from the local cache. Lets the driver-mobile-view
 		// pre-fill its navigation handoff and render static-map thumbnails
@@ -44321,7 +46866,11 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// `rowData` is deliberately NOT destructured any more — see the load-binding
 		// block below. Clients still send it and it is simply ignored, so no client
 		// needs a change.
-		let { rowIndex: rawRowIndex, loadId, newStatus } = req.body;
+		let { rowIndex: rawRowIndex, newStatus } = req.body;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
 		// ⚠️ ROW 1 IS THE HEADER ROW. This route had NO rowIndex validation of any
@@ -44490,13 +47039,13 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 		// `rowData` is still ACCEPTED in the body and ignored, so no client needs a
 		// change; it is simply no longer consulted.
 		{
-			const unbound = resolveLoadBinding(headers, dataRows, rowIndex, loadId, {
+			const unbound = resolveLoadBinding(headers, dataRows, rowIndex, loadId, loadIdBindingOpts(req, loadId, {
 				// ⚠️ See the rung-4 ⚠️ in resolveLoadBinding(): measured on the
 				// production sheet, a blanket AMBIGUOUS_LOAD would have refused 4 real
 				// driver taps on load 7052901 and stranded the driver mid-load. The
 				// caller's row must still carry the caller's own load id.
 				callerRowWinsAmongDuplicates: true,
-			});
+			}));
 			if (unbound) {
 				return sendLoadBindRefusal(
 					req, res, unbound, "status_update_blocked", loadId,
@@ -44634,7 +47183,7 @@ app.put("/api/driver/status", requireRole("Super Admin", "Dispatcher", "Driver")
 			if (blocked) {
 				return sendDispatchRefusal(
 					req, res, blocked, "status_update_blocked", loadId,
-					`Setting load ${loadId || "(unknown)"} to "${newStatus}"`
+					`Setting load ${idText || "(unknown)"} to "${newStatus}"`
 				);
 			}
 		}
@@ -44786,7 +47335,10 @@ function statusOverrideBlocker(headers, rows, edits, tripCover = null) {
 // described on statusOverrideBlocker() above.
 app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown
+		// (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const { newStatus, reason } = req.body || {};
 		if (!newStatus || typeof newStatus !== "string") {
 			return res.status(400).json({ error: "newStatus is required" });
@@ -44856,7 +47408,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 		} catch (e) {
 			console.error("Status override blocked — Job Tracking unreadable:", e.message);
 			auditBlocked("PERIOD_UNRESOLVED", [], canonicalStatus);
-			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
+			return sendPeriodRefusal(req, res, "unresolved", null, `Load ${idText}`, AUDITED_UPSTREAM);
 		}
 		const allRows = sheetRes.data.values || [];
 		const headers = allRows[0] || [];
@@ -44894,7 +47446,7 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			if (lid === targetLid) matches.push({ row: dataRows[i], rowIndex: i + 2 });
 		}
 		if (!matches.length) {
-			return res.status(404).json({ error: `Load ${loadId} not found` });
+			return res.status(404).json({ error: `Load ${idText} not found` });
 		}
 
 		const now = new Date();
@@ -44925,12 +47477,12 @@ app.put("/api/loads/:loadId/status-override", requireRole("Super Admin", "Dispat
 			// AUDITED_UPSTREAM on all three: auditBlocked() one line above wrote the
 			// row, and it did so for the AMBIGUOUS_LOAD branch below too.
 			if (blocker.code === "PERIOD_LOCK_UNREADABLE") return sendPeriodRefusal(req, res, "unreadable", null, null, AUDITED_UPSTREAM);
-			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, `Load ${loadId}`, AUDITED_UPSTREAM);
+			if (blocker.code === "PERIOD_UNRESOLVED") return sendPeriodRefusal(req, res, "unresolved", null, `Load ${idText}`, AUDITED_UPSTREAM);
 			if (blocker.code === "PERIOD_FINALIZED") {
-				return sendPeriodRefusal(req, res, "finalized", blocker.periods, `Changing the status of load ${loadId}`, AUDITED_UPSTREAM);
+				return sendPeriodRefusal(req, res, "finalized", blocker.periods, `Changing the status of load ${idText}`, AUDITED_UPSTREAM);
 			}
 			return res.status(409).json({
-				error: `Load ${loadId} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
+				error: `Load ${idText} appears on ${matches.length} rows of Job Tracking (${matches.map((m) => m.rowIndex).join(", ")}), so the server cannot tell which one this override means. Give the duplicate rows distinct load ids — or remove the stale one — and try again.`,
 				code: "AMBIGUOUS_LOAD",
 				rowIndices: matches.map((m) => m.rowIndex),
 			});
@@ -45042,7 +47594,8 @@ function computeStatusPhases(loadId) {
 // empty array (the UI shows a friendly empty state).
 app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 	try {
-		const rawId = (req.params.loadId || "").trim();
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const rawId = (loadIdFor(req, req.params.loadId) || "").trim();
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
 		}
@@ -45056,7 +47609,7 @@ app.get("/api/loads/:loadId/status-history", requireAuth, async (req, res) => {
 		}
 
 		const phases = computeStatusPhases(rawId);
-		res.json({ loadId: rawId, phases });
+		res.json({ loadId: loadIdShownFor(req, rawId), phases });
 	} catch (error) {
 		console.error("status-history error:", error.message);
 		res.status(500).json({ error: error.message });
@@ -46477,22 +49030,100 @@ app.post("/api/routemate/fault-codes/:id/ack", requireRole("Super Admin", "Dispa
 	}
 });
 
+// WHO A CHAT MESSAGE GOES FROM AND TO (decision 30, 2026-10-21: drivers and
+// investors message staff only, never each other). The one rule for
+// POST /api/messages and POST /api/messages/voice:
+//   • a Driver sends as his driver name, an Investor as his username (the names
+//     their threads are read by: GET /api/driver/:driverName, GET
+//     /api/investor/messages), and only to his own role's desk
+//     (CHAT_DESK_BY_ROLE), stored in the desk's own spelling. Anything else is
+//     403: the other desk, another driver, an investor, a staff member's name,
+//     a look-alike spelling, or a sender with no such name or a desk's name.
+//   • staff send as "Dispatch" (also when no sender is named) or as themselves
+//     (422 otherwise), to exactly one existing Driver or Investor account (422
+//     otherwise: a staff account, a name no account holds, a name two hold),
+//     or, where the route allows it (`staffToDesk`: the text route, for a Super
+//     Admin in the driver app), to a desk under their own name only.
+//   • a Dispatcher writes to drivers only (2026-10-23): the investor desk, and
+//     any message INVESTOR_CHAT_SQL would count as an investor conversation
+//     (which only Super Admins read), is 403.
+//   • any other role: 403.
+// A desk's name is tested before any account is looked up, so an account named
+// like a desk is never a recipient. Returns { from, to, partyUserId } or
+// { status, reason: "recipient" | "sender", role, error }; each route names its
+// own code (MESSAGE_*, VOICE_NOTE_*). `noun` and `item` word the refusals.
+const CHAT_DESK_BY_ROLE = Object.freeze({ Driver: "dispatch", Investor: "admin" });
+// Each desk as its own app names it in a sentence ("get in touch with the admin").
+const CHAT_DESK_LABEL = Object.freeze({ dispatch: "Dispatch", admin: "the admin" });
+function resolveChatParties(user, toName, fromName, { noun = "Messages", item = "message", staffToDesk = false } = {}) {
+	const role = user && user.role;
+	const askedDesk = chatDeskKey(toName);
+	if (role === "Driver" || role === "Investor") {
+		const deskKey = CHAT_DESK_BY_ROLE[role];
+		const own = String((role === "Driver" ? user.driverName : user.username) || "").trim();
+		const id = Number(user.id);
+		if (!own || chatDeskKey(own) || askedDesk !== deskKey || !Number.isInteger(id) || id <= 0) {
+			return { status: 403, reason: "recipient", role, error: `${noun} go to ${CHAT_DESK_LABEL[deskKey]}.` };
+		}
+		return { from: own, to: CHAT_DESK_NAMES[deskKey], partyUserId: id };
+	}
+	if (role !== "Super Admin" && role !== "Dispatcher") {
+		return { status: 403, reason: "recipient", role: String(role || ""), error: `${noun} can't be sent from this account.` };
+	}
+	const own = String(user.driverName || user.username || "").trim();
+	const asked = String(fromName || "").trim();
+	const from = !asked || asked.toLowerCase() === "dispatch" ? "Dispatch" : (own && asked.toLowerCase() === own.toLowerCase() ? own : "");
+	if (!from) return { status: 422, reason: "sender", role, error: "Send as Dispatch or as yourself." };
+	const driversOnly = role === "Dispatcher"
+		? { status: 403, reason: "recipient", role, error: `Dispatchers can send ${noun.toLowerCase()} to drivers only.` }
+		: null;
+	// The resolved send, unless it is a Dispatcher's into an investor conversation.
+	const send = (to, partyUserId) => (driversOnly && investorChatParties(from, to) ? driversOnly : { from, to, partyUserId });
+	const pick = driversOnly ? `Pick a driver to send the ${item} to.` : `Pick a driver or an investor to send the ${item} to.`;
+	if (askedDesk) {
+		if (driversOnly && askedDesk === CHAT_DESK_BY_ROLE.Investor) return driversOnly;
+		if (!staffToDesk || from === "Dispatch") return { status: 422, reason: "recipient", role, error: pick };
+		return send(CHAT_DESK_NAMES[askedDesk], null);
+	}
+	const name = typeof toName === "string" ? toName.trim() : "";
+	const spelling = findDriverAccountSpelling(name);
+	// Case aside, so two Driver accounts spelled alike but for letter case are
+	// two hits (a name two accounts hold), as every thread reads LOWER().
+	const drivers = spelling ? db.prepare("SELECT id, driver_name AS name FROM users WHERE role = 'Driver' AND LOWER(driver_name) = LOWER(?)").all(spelling) : [];
+	const investors = name ? db.prepare("SELECT id, username AS name FROM users WHERE role = 'Investor' AND LOWER(TRIM(username)) = LOWER(?)").all(name) : [];
+	const hits = [...drivers, ...investors];
+	if (hits.length !== 1) return { status: 422, reason: "recipient", role, error: pick };
+	return send(hits[0].name, hits[0].id);
+}
+
 // POST /api/messages — Send a new message
 app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 	try {
 		const { to, message, loadId, attachmentUrl, attachmentType, assetRef } = req.body;
-		// SECURITY: never trust the client-supplied `from`. A logged-in driver
-		// who hits this endpoint directly could otherwise impersonate any user
-		// (including dispatch). Drivers + Investors are pinned to their session
-		// identity; Super Admin / Dispatcher may speak as the dispatch desk so
-		// we keep their `from` overridable but default it to driverName / username.
+		// SECURITY: never trust the client-supplied `from` or `to`. Who may write
+		// to whom, and under which name, is resolveChatParties()'s to decide:
+		// a Driver or an Investor only as himself to his own desk, staff as
+		// "Dispatch" or as themselves to one Driver or Investor account.
 		const sessionUser = req.session.user;
-		const sessionName = (sessionUser?.driverName || sessionUser?.username || "").trim();
-		const isPrivilegedSender = sessionUser?.role === "Super Admin" || sessionUser?.role === "Dispatcher";
-		const requestedFrom = (req.body.from || "").trim();
-		const from = isPrivilegedSender ? (requestedFrom || sessionName) : sessionName;
-		if (!from || !to || (!message && !attachmentUrl && !assetRef)) {
+		if (typeof to !== "string" || !to.trim() || (req.body.from != null && typeof req.body.from !== "string")
+			|| (!message && !attachmentUrl && !assetRef)) {
 			return res.status(400).json({ error: "from, to, and message required" });
+		}
+		const parties = resolveChatParties(sessionUser, to, req.body.from, { staffToDesk: true });
+		if (parties.status) {
+			const code = parties.reason === "sender" ? "MESSAGE_SENDER" : "MESSAGE_RECIPIENT";
+			// Neither the name asked for nor the text: the code and the sender's role
+			logAuditRefusal(req, "message_blocked", "message", "", `Message refused for a ${parties.role || "signed-in"} sender [${code}]`, code);
+			return res.status(parties.status).json({ error: parties.error, code });
+		}
+		const { from } = parties;
+		// A voice note is the server's to type: only POST /api/messages/voice
+		// writes one (its bytes checked, its file stored, its player keyed on the
+		// row's id). A text message may not claim the type or point at a voice
+		// note's address.
+		if (String(attachmentType ?? "").trim().toLowerCase() === "voice"
+			|| (typeof attachmentUrl === "string" && attachmentUrl.trim().toLowerCase().startsWith("/api/messages/"))) {
+			return res.status(400).json({ error: "That attachment can't be sent.", code: "ATTACHMENT_TYPE_RESERVED" });
 		}
 		// An attachment is a chat file this same account uploaded through
 		// POST /api/chat/attachment; anything else is refused (lib/chat-files.js).
@@ -46501,60 +49132,101 @@ app.post("/api/messages", requireAuth, driverWriteLimiter, (req, res) => {
 			return res.status(400).json({ error: "That attachment can't be sent. Attach the file again.", code: attachmentRefusal });
 		}
 
-		const timestamp = new Date().toISOString();
-		const result = db
-			.prepare(
-				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "");
-
-		// Persist notification for recipient
-		const msgNotif = insertNotification.run(
-			to.trim().toLowerCase(), 'message',
-			`New message from ${from}`,
-			(message || "").length > 100 ? message.substring(0, 100) + '...' : (message || ""),
-			JSON.stringify({ from, to, loadId: loadId || '' })
-		);
-
-		// PRIVACY: only emit to the actual participants + the dispatch room
-		// (so admins can see all messages they're authorized to see). Previously
-		// this used io.emit() which broadcast every message to every connected
-		// client — drivers were receiving messages between other parties even
-		// though the UI hid them. chatRooms() names those rooms: the dispatch
-		// room always, plus each other party's identity rooms (the desk's own
-		// name adds none); one emit to the list reaches each socket once.
-		const payload = {
-			id: result.lastInsertRowid,
-			notificationId: msgNotif.lastInsertRowid,
-			timestamp,
-			from,
-			to,
-			message,
-			loadId: loadId || "",
-			attachment_url: attachmentUrl || "",
-			attachment_type: attachmentType || "",
-		};
-		// A message about a load whose ID every role but Super Admin is served
-		// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
-		// as stored) goes per role in the dispatch room: Super Admins as sent, the
-		// rest of the room with the load as shown (emitDispatchByRole()), and the
-		// parties' own rooms as sent, without the dispatch room's sockets, so each
-		// socket gets it once. Any other message, as before:
-		const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
-		if (staffLoadId === payload.loadId) {
-			io.to(chatRooms(from, to)).emit("new-message", payload);
-		} else {
-			io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
-			emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
-		}
-
-		res.json({ success: true, id: result.lastInsertRowid });
+		const sent = sendChatMessage({ from, to: parties.to, message, loadId: messageLoadIdFor(req, loadId, parties.to, parties.partyUserId), attachmentUrl, attachmentType, assetRef });
+		res.json({ success: true, id: sent.id });
 	} catch (error) {
 		console.error("Error sending message:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
+
+// ONE MESSAGE, SENT: its row, the recipient's notification, and the live copy to
+// the conversation's rooms. POST /api/messages and POST /api/messages/voice both
+// send through here, so a change to who receives what reaches both.
+//
+// `voice` ({ senderUserId, clientKey, partyUserId, durationMs, bytes, title })
+// makes it a voice note: the row is typed "voice" with no attachment_url, the
+// notification is `title` over the message text, "Voice note (0:42)" (never a
+// file name, URL or id), and the
+// live copy carries voice_duration_ms. `store(id)`, when given, runs inside the
+// same transaction as the insert (the voice route writes its file there): if it
+// throws, the row is rolled back, and nothing is notified or emitted. A text
+// message's insert is the statement it always was.
+function sendChatMessage({ from, to, message, loadId, attachmentUrl, attachmentType, assetRef, voice = null, store = null }) {
+	// Read before anything is written: the live copy's rooms depend on it.
+	const investorChat = investorChatParties(from, to);
+	const timestamp = new Date().toISOString();
+	const insert = () => {
+		const id = voice
+			? db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref,
+					sender_user_id, client_key, party_user_id, voice_file, voice_duration_ms, voice_bytes)
+				 VALUES (?, ?, ?, ?, ?, '', 'voice', '', ?, ?, ?, '', ?, ?)`,
+			).run(timestamp, from, to, message, loadId || "", voice.senderUserId, voice.clientKey, voice.partyUserId, voice.durationMs, voice.bytes).lastInsertRowid
+			: db.prepare(
+				`INSERT INTO messages (timestamp, "from", "to", message, load_id, attachment_url, attachment_type, asset_ref)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(timestamp, from, to, message || "", loadId || "", attachmentUrl || "", attachmentType || "", assetRef || "").lastInsertRowid;
+		if (store) store(id);
+		return id;
+	};
+	const id = store ? db.transaction(insert)() : insert();
+
+	// Persist notification for recipient
+	const msgNotif = insertNotification.run(
+		to.trim().toLowerCase(), 'message',
+		voice ? voice.title : `New message from ${from}`,
+		voice ? message : ((message || "").length > 100 ? message.substring(0, 100) + '...' : (message || "")),
+		JSON.stringify({ from, to, loadId: loadId || '' })
+	);
+
+	// PRIVACY: only emit to the actual participants + the dispatch room
+	// (so admins can see all messages they're authorized to see). Previously
+	// this used io.emit() which broadcast every message to every connected
+	// client — drivers were receiving messages between other parties even
+	// though the UI hid them. chatRooms() names those rooms: the dispatch
+	// room always, plus each other party's identity rooms (the desk's own
+	// name adds none); one emit to the list reaches each socket once.
+	const payload = {
+		id,
+		notificationId: msgNotif.lastInsertRowid,
+		timestamp,
+		from,
+		to,
+		message,
+		loadId: loadId || "",
+		attachment_url: voice ? "" : (attachmentUrl || ""),
+		attachment_type: voice ? "voice" : (attachmentType || ""),
+	};
+	if (voice) payload.voice_duration_ms = voice.durationMs;
+	// A message about a load whose ID every role but Super Admin is served
+	// withheld (LOAD IDS THAT HOLD BROKER CONTACT; a driver names his own load
+	// as stored) goes per role in the dispatch room: Super Admins as sent, the
+	// rest of the room with the load as shown (emitDispatchByRole()), and the
+	// parties' own rooms as sent, without the dispatch room's sockets, so each
+	// socket gets it once. A message in an investor conversation
+	// (INVESTOR_CHAT_SQL) goes the same way but to the super-admin room only:
+	// no Dispatcher's socket gets it, his own name's room included. Any other
+	// message, as before:
+	const staffLoadId = shownLoadId("Dispatcher", payload.loadId);
+	if (!investorChat && staffLoadId === payload.loadId) {
+		io.to(chatRooms(from, to)).emit("new-message", payload);
+	} else {
+		io.to(chatRooms(from, to)).except("dispatch").emit("new-message", payload);
+		if (investorChat) io.to("super-admin").emit("new-message", payload);
+		else emitDispatchByRole("new-message", payload, { ...payload, loadId: staffLoadId });
+	}
+	return { id, timestamp };
+}
+
+// Is a message between the names `from` and `to` in an investor conversation?
+// INVESTOR_CHAT_SQL, asked of the two names as a row. Anything but a plain "no"
+// counts as one, so its live copy goes to Super Admins only.
+function investorChatParties(from, to) {
+	const row = db.prepare(`SELECT ${INVESTOR_CHAT_SQL} AS investor_chat FROM (SELECT ? AS "from", ? AS "to") AS messages`)
+		.get(String(from ?? ""), String(to ?? ""));
+	return !row || row.investor_chat !== 0;
+}
 
 // The one name a caller's own messages and notifications are addressed to, for
 // the two read-flag routes below: a Driver's driver name (their thread is read
@@ -46569,7 +49241,8 @@ function readFlagOwnName(user) {
 
 // PUT /api/messages/read — Mark messages as read
 //
-// ⚠️ SUPER ADMIN AND DISPATCHER MARK ANY MESSAGE; EVERY OTHER CALLER MARKS ONLY
+// ⚠️ SUPER ADMIN MARKS ANY MESSAGE, A DISPATCHER ANY BUT ONE IN AN INVESTOR
+// CONVERSATION (INVESTOR_CHAT_SQL); EVERY OTHER CALLER MARKS ONLY
 // MESSAGES ADDRESSED TO THEM (readFlagOwnName()), and a caller with no name
 // marks nothing. Staff keep the inbox-wide form because the dispatch inbox
 // (/messages) clears messages addressed to the shared
@@ -46586,8 +49259,9 @@ app.put("/api/messages/read", requireAuth, driverWriteLimiter, (req, res) => {
 		const placeholders = messageIds.map(() => "?").join(",");
 		const user = req.session.user;
 		if (user.role === "Super Admin" || user.role === "Dispatcher") {
+			const scope = readsInvestorChats(user) ? "" : ` AND NOT ${INVESTOR_CHAT_SQL}`;
 			db.prepare(
-				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`,
+				`UPDATE messages SET read = 1 WHERE id IN (${placeholders})${scope}`,
 			).run(...messageIds);
 		} else {
 			const recipient = readFlagOwnName(user);
@@ -46644,7 +49318,9 @@ const SUPER_ADMIN_ONLY_NOTICE_TYPES = Object.freeze(["driver-instructions-lock",
 // The SQL that leaves them out for `user`, and its parameters.
 function noticeTypeScope(user) {
 	const types = user && user.role === "Super Admin" ? [] : SUPER_ADMIN_ONLY_NOTICE_TYPES;
-	return { sql: types.length ? `type NOT IN (${types.map(() => "?").join(",")})` : "1 = 1", params: [...types] };
+	// The automatic invoice drafts' notices too (the <auto-invoice-wiring> block).
+	const hidden = types.length ? [...types, AUTO_INVOICE_NOTICE_TYPE] : types;
+	return { sql: hidden.length ? `type NOT IN (${hidden.map(() => "?").join(",")})` : "1 = 1", params: [...hidden] };
 }
 
 // GET /api/dispatch-notifications — Fetch dispatch notifications
@@ -46672,7 +49348,7 @@ app.get("/api/dispatch-notifications", requireRole("Super Admin", "Dispatcher"),
 		// Otherwise each as stored, without the copy (brokerContact.fullDispatchNotice()).
 		const index = currentShownLoadIdIndex();
 		const served = BROKER_CONTACT_VALUE_REDACTION_ENABLED && req.session.user.role !== "Super Admin"
-			? notifications.map((n) => staffDispatchNotice(n, { index }))
+			? notifications.map((n) => withNoticeLoadKey(req, n, staffDispatchNotice(n, { index }), index))
 			: notifications.map((n) => brokerContact.fullDispatchNotice(n));
 		res.json({ notifications: served, unreadCount });
 	} catch (error) {
@@ -46707,7 +49383,8 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 		if (preview.targetMissing) return res.status(404).json({ error: "Investor not found", code: "INVESTOR_NOT_FOUND" });
 		const name = preview.effectiveUsername.trim().toLowerCase();
 		const messages = db.prepare(
-			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref
+			`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type, asset_ref,
+			        voice_file, voice_duration_ms, party_user_id
 			 FROM messages
 			 WHERE LOWER("from") = ? OR LOWER("to") = ?
 			 ORDER BY id ASC`
@@ -46716,7 +49393,9 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 			// Mark messages to this investor as read
 			db.prepare(`UPDATE messages SET read = 1 WHERE LOWER("to") = ? AND read = 0`).run(name);
 		}
-		res.json({ messages });
+		// Voice notes as the reader may play them (lib/voice-notes.js): the
+		// investor by his account id; a Super Admin previewing, as staff.
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (err) {
 		console.error("Error fetching investor messages:", err.message);
 		res.status(500).json({ error: err.message });
@@ -46724,27 +49403,69 @@ app.get("/api/investor/messages", requireRole("Super Admin", "Investor"), (req, 
 });
 
 // GET /api/messages — All messages for dispatch view (Admin/Dispatcher)
+// Each conversation also names its newest message (highest id) for the list's
+// last-message line: lastKind "voice" | "photo" | "file" | "text", lastText (its
+// first 60 characters, the text the thread serves) and lastVoiceMs (a voice
+// note's measured length while its audio is stored, else 0). Never its file
+// name, URL or id.
+// `unread` counts unread messages to either staff desk (CHAT_DESK_NAMES): a
+// driver writes to "Dispatch", an investor to "admin", and this inbox is where
+// staff read both (scripts/test-investor-unread-badge.js). A Dispatcher's inbox
+// holds no investor conversation (INVESTOR_CHAT_SQL): it neither lists nor
+// counts one (scripts/test-investor-chats-super-admin-only.js).
 app.get("/api/messages", requireRole("Super Admin", "Dispatcher"), (req, res) => {
 	try {
+		const deskKeys = Object.keys(CHAT_DESK_NAMES);
+		const scope = readsInvestorChats(req.session.user) ? "" : `WHERE NOT ${INVESTOR_CHAT_SQL}`;
 		// Group conversations by driver + load
 		const conversations = db
 			.prepare(
-				`SELECT
-					CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
-					load_id AS loadId,
-					MAX(timestamp) AS lastTimestamp,
-					SUM(CASE WHEN LOWER("to") = 'dispatch' AND read = 0 THEN 1 ELSE 0 END) AS unread
-				 FROM messages
-				 GROUP BY driver, load_id
-				 ORDER BY lastTimestamp DESC`,
+				`SELECT g.driver, g.loadId, g.lastTimestamp, g.unread,
+				        m.message AS lastMessage, m.attachment_url AS lastUrl, m.attachment_type AS lastType,
+				        m.voice_file AS lastVoiceFile, m.voice_duration_ms AS lastDurationMs
+				 FROM (
+					SELECT
+						CASE WHEN LOWER("from") = 'dispatch' THEN "to" ELSE "from" END AS driver,
+						load_id AS loadId,
+						MAX(timestamp) AS lastTimestamp,
+						SUM(CASE WHEN LOWER("to") IN (${deskKeys.map(() => "?").join(", ")}) AND read = 0 THEN 1 ELSE 0 END) AS unread,
+						MAX(id) AS lastId
+					 FROM messages
+					 ${scope}
+					 GROUP BY driver, load_id
+				 ) g
+				 JOIN messages m ON m.id = g.lastId
+				 ORDER BY g.lastTimestamp DESC`,
 			)
-			.all();
+			.all(...deskKeys)
+			.map((c) => {
+				const voice = c.lastType === "voice";
+				const kind = voice ? "voice" : c.lastUrl ? (c.lastType === "image" ? "photo" : "file") : "text";
+				const stored = voice && voiceNotes.VOICE_FILE_RE.test(c.lastVoiceFile || "");
+				return {
+					driver: c.driver,
+					loadId: c.loadId,
+					lastTimestamp: c.lastTimestamp,
+					unread: c.unread,
+					lastKind: kind,
+					lastText: Array.from(String(c.lastMessage || "")).slice(0, 60).join(""),
+					lastVoiceMs: stored && Number(c.lastDurationMs) > 0 ? Number(c.lastDurationMs) : 0,
+				};
+			});
 
 		// Every role but Super Admin: each conversation's load named as shownLoadId()
-		// does; GET /api/messages/:driverName?loadId= takes that text back.
+		// does; GET /api/messages/:driverName?loadId= takes that text back. A
+		// Dispatcher also gets `loadKey` beside a withheld one (WITHHELD LOAD KEYS),
+		// which that route reads as the load.
 		if (loadIdWithheldFor(req)) {
 			const index = currentShownLoadIdIndex();
-			return res.json({ conversations: conversations.map((c) => ({ ...c, loadId: shownLoadId(req, c.loadId, { index }) })) });
+			return res.json({
+				conversations: conversations.map((c) => {
+					const loadKey = loadKeyFor(req, c.loadId, { index });
+					const served = { ...c, loadId: shownLoadId(req, c.loadId, { index }) };
+					return loadKey ? { ...served, loadKey } : served;
+				}),
+			});
 		}
 		res.json({ conversations });
 	} catch (error) {
@@ -46758,54 +49479,412 @@ app.get("/api/messages/:driverName", requireRole("Super Admin", "Dispatcher"), (
 	try {
 		const driverName = decodeURIComponent(req.params.driverName).trim();
 		const nameLower = driverName.toLowerCase();
-		const loadId = req.query.loadId || "";
+		// A Dispatcher reads no investor conversation (INVESTOR_CHAT_SQL): asking
+		// for one by its name (the investor desk, an investor's username) is 404,
+		// as a chat file or voice note he can't open is; any other thread is
+		// served without such messages (a staff name's thread holds them too).
+		// Each row carries investor_chat for the voice-note rule; never served.
+		const hideInvestorChats = !readsInvestorChats(req.session.user);
+		if (hideInvestorChats && investorChatParties(driverName, "")) return res.status(404).json({ error: "Not found" });
+		const scope = hideInvestorChats ? ` AND NOT ${INVESTOR_CHAT_SQL}` : "";
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.query.loadId) || "";
 		// Every role but Super Admin is served each load as shownLoadId() names it
 		// (the conversation list above too), so a thread is asked for by that text:
 		// the driver's messages are read whole and kept when their load reads as
-		// asked, stored or shown.
+		// asked, stored or shown. Asked by its key, the thread keeps the messages
+		// stored under that load's ID, in any spelling the key covers (normLoadKey());
+		// those stored under its shown text stay on the conversation of that text.
 		const withholdIds = loadIdWithheldFor(req);
 		const index = withholdIds ? currentShownLoadIdIndex() : null;
+		const byKey = !!(req.withheldLoad && loadId && loadId === req.withheldLoad.raw);
 
 		let messages;
 		if (loadId && !withholdIds) {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND load_id = ?${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower, loadId);
 		} else {
 			messages = db
 				.prepare(
-					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type
+					`SELECT id, timestamp, "from", "to", message, load_id AS loadId, read, attachment_url, attachment_type,
+					        voice_file, voice_duration_ms, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat
 					 FROM messages
-					 WHERE LOWER("from") = ? OR LOWER("to") = ?
+					 WHERE (LOWER("from") = ? OR LOWER("to") = ?)${scope}
 					 ORDER BY id ASC`,
 				)
 				.all(nameLower, nameLower);
 		}
 		if (withholdIds) {
 			const asked = String(loadId);
+			const kept = byKey
+				? (m) => normLoadKey(m.loadId) === normLoadKey(asked)
+				: (m) => !asked || m.loadId === asked || m.shown === asked;
 			messages = messages
 				.map((m) => ({ ...m, shown: shownLoadId(req, m.loadId, { index }) }))
-				.filter((m) => !asked || m.loadId === asked || m.shown === asked)
+				.filter(kept)
 				.map(({ shown, ...m }) => ({ ...m, loadId: shown }));
 		}
 
-		res.json({ messages });
+		res.json({ messages: voiceNotes.voiceThreadRows(req.session.user, messages) });
 	} catch (error) {
 		console.error("Error fetching driver messages:", error.message);
 		res.status(500).json({ error: error.message });
 	}
 });
 
+// ============================================================================
+// VOICE NOTES IN MESSAGES (MESSAGE_VOICE_NOTES_ENABLED, off by default)
+// ============================================================================
+// Anyone in a conversation records a voice note; the others play it. Arvin's
+// V1-V13 (2026-10-21), plan 2026-10-22 Revision 2. The flag gates SENDING only:
+// notes already sent stay playable with it off.
+//
+//   POST   /api/messages/voice      one request, the raw audio/mp4 body; the
+//                                   recipient and load in headers, never in the
+//                                   URL (request lines reach the proxy's logs)
+//   GET    /api/messages/:id/voice  the audio, to the people in the conversation
+//   DELETE /api/messages/:id/voice  Super Admin only, audited; the row stays
+//
+// The bytes are checked by lib/voice-note-mp4.js (AAC in MP4, 4 MB, 0.5 s to
+// 3:00, length measured on the server, metadata blanked); the file lives under
+// storage/voice-notes, outside every static mount (lib/voice-notes.js); who may
+// play it is decided by account id, never by name; the send goes through
+// sendChatMessage(), so its notification and live copy follow the text route's
+// rules (#549's per-role load IDs included).
+const voiceNoteMp4 = require("./lib/voice-note-mp4");
+const voiceNoteText = require("./lib/voice-note-text");
+const voiceNoteGate = require("./lib/voice-note-gate");
+const voiceNotes = require("./lib/voice-notes");
+const MESSAGE_VOICE_NOTES_ENABLED = /^(true|1|yes|on)$/i.test(String(process.env.MESSAGE_VOICE_NOTES_ENABLED ?? "").trim());
+const VOICE_NOTE_DIR = voiceNotes.voiceNoteDir(DATA_DIR);
+function voiceNoteNumberSetting(raw, fallback) {
+	const n = Number(String(raw ?? "").trim());
+	return String(raw ?? "").trim() !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+// Per user per Eastern day, summed from the stored sizes (429 past it).
+const VOICE_NOTE_DAILY_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_DAILY_MB, 40) * 1024 * 1024;
+// Sends are refused while the data disk has less than this free (507).
+const VOICE_NOTE_MIN_FREE_BYTES = voiceNoteNumberSetting(process.env.VOICE_NOTE_MIN_FREE_GB, 2) * 1024 * 1024 * 1024;
+const VOICE_NOTE_RETENTION_DAYS = voiceNoteNumberSetting(process.env.VOICE_NOTE_RETENTION_DAYS, 180);
+// The first day the retention sweep deletes (YYYY-MM-DD). Unset: report only.
+const VOICE_NOTE_SWEEP_APPLY_FROM = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM ?? "").trim())
+	? String(process.env.VOICE_NOTE_SWEEP_APPLY_FROM).trim()
+	: "";
+const VOICE_NOTE_REFUSALS = {
+	UNSUPPORTED_AUDIO_TYPE: "That recording can't be sent. Record the voice note in the app and try again.",
+	VOICE_NOTE_TOO_LARGE: "That voice note is too large to send.",
+	VOICE_NOTE_TOO_LONG: "Voice notes can be at most 3 minutes long.",
+	VOICE_NOTE_TOO_SHORT: "That voice note is too short to send.",
+};
+
+// Same shape as chatAttachmentLimiter: per user, requireAuth mounted first, a
+// permanent cost (bytes on disk), so tighter than the general limiters.
+const voiceNoteUploadLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: (req) => {
+		const role = req.session?.user?.role;
+		return role === "Super Admin" || role === "Dispatcher" ? 40 : 20;
+	},
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many voice notes. Try again in a few minutes." },
+	standardHeaders: true,
+});
+// Playback: iPhone sends many range requests for one play, so a wide window.
+const voiceNotePlaybackLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 600,
+	keyGenerator: (req) => {
+		const id = req.session?.user?.id;
+		return id ? `u:${id}` : `ip:${ipKeyGenerator(req.ip)}`;
+	},
+	message: { error: "Too many requests. Try again later." },
+	standardHeaders: true,
+});
+
+// Who a voice note goes from and to, and the Driver or Investor account it
+// belongs to (party_user_id: besides staff, the one account that may play it):
+// the chat rule (resolveChatParties()), without a staff note to a desk.
+// { from, to, partyUserId } or { status, code, error }.
+function resolveVoiceNoteParties(user, toName, fromName) {
+	const parties = resolveChatParties(user, toName, fromName, { noun: "Voice notes", item: "voice note" });
+	if (!parties.status) return parties;
+	return { status: parties.status, code: parties.reason === "sender" ? "VOICE_NOTE_SENDER" : "VOICE_NOTE_RECIPIENT", error: parties.error };
+}
+
+// A Driver's truck's latest clean fix since its device was linked, or null
+// (no truck, no ELD, no fix): the input to lib/voice-note-gate.js.
+function voiceNoteTruckFix(driverName) {
+	const truck = resolveTruckForDriverName(driverName);
+	const vehicleId = (truck && truck.routemate_vehicle_id) || "";
+	if (!vehicleId) return null;
+	const fix = db.prepare(
+		`SELECT speed, location_date_ms FROM routemate_telemetry
+		  WHERE routemate_vehicle_id = ? AND dropped_reason = ''
+		  ORDER BY id DESC LIMIT 1`
+	).get(vehicleId);
+	if (!fix || eldPosition.fixPredatesLink(fix.location_date_ms, eldDeviceLinkedSinceMs(truck.id, vehicleId))) return null;
+	return fix;
+}
+
+// The voice-note bytes this account stored today (Eastern day).
+function voiceNoteBytesToday(userId) {
+	const today = appTodayKey();
+	const since = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+	return db.prepare(
+		`SELECT timestamp, voice_bytes FROM messages
+		  WHERE sender_user_id = ? AND client_key <> '' AND timestamp >= ?`
+	).all(userId, since)
+		.filter((r) => appDay(new Date(r.timestamp)) === today)
+		.reduce((n, r) => n + (Number(r.voice_bytes) || 0), 0);
+}
+
+// True when the data disk is under VOICE_NOTE_MIN_FREE_BYTES. Staff get one
+// notice a day about it. A disk it cannot measure is not refused.
+let voiceNoteStorageNoticeDay = "";
+function voiceNoteDiskLow() {
+	let free;
+	try {
+		const st = fs.statfsSync(DATA_DIR);
+		free = Number(st.bavail) * Number(st.bsize);
+	} catch {
+		return false;
+	}
+	if (!(free < VOICE_NOTE_MIN_FREE_BYTES)) return false;
+	const today = appTodayKey();
+	if (voiceNoteStorageNoticeDay !== today) {
+		voiceNoteStorageNoticeDay = today;
+		const gb = (n) => (n / (1024 * 1024 * 1024)).toFixed(1);
+		const title = "ACTION NEEDED — the server is low on disk space";
+		const body = `Voice notes are refused while less than ${gb(VOICE_NOTE_MIN_FREE_BYTES)} GB is free (${gb(free)} GB now). Free space on the server.`;
+		try {
+			insertDispatchNotification.run("voice-note-storage-low", title, body, JSON.stringify({ freeBytes: free }));
+			emitDispatchNotice({ type: "voice-note-storage-low", title, body });
+		} catch (err) {
+			console.error("[voice-notes] storage notice failed:", err.message);
+		}
+		console.error(`[voice-notes] ${title}: ${body}`);
+	}
+	return true;
+}
+
+function voiceNoteFeatureGate(req, res, next) {
+	if (!MESSAGE_VOICE_NOTES_ENABLED) return res.status(404).json({ error: "Voice notes are not switched on.", code: "FEATURE_OFF" });
+	next();
+}
+
+// Everything that can be decided from the headers, before a byte of the body
+// is read: the key and its earlier send, the recipient and load, the moving
+// truck, the daily cap and the disk. Leaves req.voiceNote for the handler.
+function voiceNoteSendChecks(req, res, next) {
+	const user = req.session.user;
+	const clientKey = voiceNotes.idempotencyKey(req.headers["idempotency-key"]);
+	if (!clientKey) return res.status(400).json({ error: "The voice note is missing its send key. Update the app and try again.", code: "VOICE_NOTE_KEY_REQUIRED" });
+	const senderUserId = Number(user.id);
+	const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(senderUserId, clientKey);
+	if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+	const to = voiceNotes.messageHeader(req.headers["x-message-to"], { required: true });
+	const loadId = voiceNotes.messageHeader(req.headers["x-message-load-id"]);
+	const fromAsked = voiceNotes.messageHeader(req.headers["x-message-from"]);
+	if (to.error || loadId.error || fromAsked.error) {
+		return res.status(400).json({ error: "The voice note's recipient or load could not be read.", code: "VOICE_NOTE_HEADERS" });
+	}
+	const parties = resolveVoiceNoteParties(user, to.value, fromAsked.value);
+	if (parties.error) {
+		// As POST /api/messages audits it: the code and the sender's role only
+		logAuditRefusal(req, "message_blocked", "message", "", `Voice note refused for a ${String(user.role || "signed-in")} sender [${parties.code}]`, parties.code);
+		return res.status(parties.status).json({ error: parties.error, code: parties.code });
+	}
+	if (user.role === "Driver" && voiceNoteGate.movingRefusal(voiceNoteTruckFix(parties.from), Date.now())) {
+		return res.status(409).json({ error: "Voice notes can't be sent while the truck is moving. Park first; your recording is kept.", code: "VOICE_NOTE_WHILE_MOVING" });
+	}
+	if (voiceNoteBytesToday(senderUserId) >= VOICE_NOTE_DAILY_BYTES) {
+		return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+	}
+	if (voiceNoteDiskLow()) {
+		return res.status(507).json({ error: "Voice notes can't be stored right now. Send a text message instead.", code: "STORAGE_LOW" });
+	}
+	req.voiceNote = { ...parties, loadId: messageLoadIdFor(req, loadId.value, parties.to, parties.partyUserId), clientKey, senderUserId };
+	next();
+}
+
+// The body, read only now: audio/mp4 up to 4 MB. A declared length over that
+// is refused before reading; a body that grows past it, as it passes 4 MB.
+const voiceNoteRawBody = express.raw({ type: "audio/mp4", limit: voiceNoteMp4.VOICE_NOTE_MAX_BYTES });
+function readVoiceNoteBody(req, res, next) {
+	const tooLarge = () => res.status(413).json({ error: VOICE_NOTE_REFUSALS.VOICE_NOTE_TOO_LARGE, code: "VOICE_NOTE_TOO_LARGE" });
+	const declared = Number(req.headers["content-length"]);
+	if (Number.isFinite(declared) && declared > voiceNoteMp4.VOICE_NOTE_MAX_BYTES) return tooLarge();
+	voiceNoteRawBody(req, res, (err) => {
+		if (!err) return next();
+		if (err.type === "entity.too.large") return tooLarge();
+		return res.status(400).json({ error: "The recording could not be read. Try sending it again.", code: "VOICE_NOTE_UNREADABLE" });
+	});
+}
+
+// POST /api/messages/voice — send a voice note.
+// Headers: X-Requested-With (the CSRF rule), Idempotency-Key (a retry with
+// the same key answers the first note's id and writes nothing), X-Message-To,
+// optional X-Message-Load-Id and (staff) X-Message-From, each percent-encoded
+// UTF-8. Body: the recording, Content-Type audio/mp4.
+app.post("/api/messages/voice", requireAuth, voiceNoteFeatureGate, voiceNoteUploadLimiter, voiceNoteSendChecks, readVoiceNoteBody, (req, res) => {
+	const v = req.voiceNote;
+	let stored = "";
+	try {
+		const checked = voiceNoteMp4.checkVoiceNote(Buffer.isBuffer(req.body) ? req.body : null);
+		if (!checked.ok) return res.status(checked.status).json({ error: VOICE_NOTE_REFUSALS[checked.code], code: checked.code });
+		// Re-read after the body's await: today's total with this note.
+		if (voiceNoteBytesToday(v.senderUserId) + checked.bytes.length > VOICE_NOTE_DAILY_BYTES) {
+			return res.status(429).json({ error: "You've reached today's limit for voice notes. Send a text message instead.", code: "VOICE_NOTE_DAILY_LIMIT" });
+		}
+		const sent = sendChatMessage({
+			from: v.from,
+			to: v.to,
+			message: voiceNoteText.voiceNoteLabel(checked.durationMs),
+			loadId: v.loadId,
+			voice: {
+				senderUserId: v.senderUserId, clientKey: v.clientKey, partyUserId: v.partyUserId,
+				durationMs: checked.durationMs, bytes: checked.bytes.length, title: voiceNoteText.voiceNoteTitle(v.from),
+			},
+			// Inside the insert's transaction: the row, then its file (never over
+			// another), then the row naming it. A failure rolls the row back and
+			// removes the file this send wrote.
+			store: (id) => {
+				const name = voiceNotes.newVoiceFileName(id);
+				voiceNotes.storeVoiceFile(VOICE_NOTE_DIR, name, checked.bytes);
+				stored = name;
+				db.prepare("UPDATE messages SET voice_file = ? WHERE id = ?").run(name, id);
+			},
+		});
+		res.json({ success: true, id: sent.id, durationMs: checked.durationMs });
+	} catch (error) {
+		const committed = stored && db.prepare("SELECT 1 FROM messages WHERE voice_file = ?").get(stored);
+		if (stored && !committed) voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, stored);
+		// The same key sent twice at once: the index refused the second row.
+		if (error && error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+			const earlier = db.prepare("SELECT id FROM messages WHERE sender_user_id = ? AND client_key = ?").get(v.senderUserId, v.clientKey);
+			if (earlier) return res.json({ success: true, id: earlier.id, duplicate: true });
+		}
+		console.error("Error sending voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be sent. Try again." });
+	}
+});
+
+// GET /api/messages/:id/voice — play a voice note. Super Admin plays any, a
+// Dispatcher any but one in an investor conversation (INVESTOR_CHAT_SQL); a
+// Driver or an Investor only a note whose party_user_id is his own
+// account id. Anyone else, an id that is not a voice note, or a file the sweep
+// removed: 404, never 403 (a 403 would confirm the note exists). Range requests
+// answer 206 (iOS refuses media from a server that ignores Range). Never cached
+// by a shared cache, never sniffed, never embedded by another origin.
+app.get("/api/messages/:id/voice", requireAuth, voiceNotePlaybackLimiter, uploadMissLimiter, (req, res) => {
+	const notFound = () => res.status(404).json({ error: "Not found" });
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return notFound();
+		const row = db.prepare(`SELECT id, attachment_type, voice_file, party_user_id, ${INVESTOR_CHAT_SQL} AS investor_chat FROM messages WHERE id = ?`).get(Number(req.params.id));
+		if (!row || row.attachment_type !== "voice" || !voiceNotes.canPlayVoiceNote(req.session.user, row)) return notFound();
+		if (!voiceNotes.voiceFilePath(VOICE_NOTE_DIR, row.voice_file)) return notFound();
+		res.sendFile(row.voice_file, {
+			root: VOICE_NOTE_DIR,
+			dotfiles: "deny",
+			acceptRanges: true,
+			cacheControl: false,
+			headers: {
+				"Content-Type": "audio/mp4",
+				"Content-Disposition": `inline; filename="voice-note-${row.id}.m4a"`,
+				"X-Content-Type-Options": "nosniff",
+				"Cache-Control": "private, max-age=0, must-revalidate",
+				"Cross-Origin-Resource-Policy": "same-origin",
+			},
+		}, (err) => {
+			if (err && !res.headersSent) notFound();
+		});
+	} catch (error) {
+		console.error("Error serving voice note:", error.message);
+		if (!res.headersSent) res.status(500).json({ error: "The voice note could not be played." });
+	}
+});
+
+// DELETE /api/messages/:id/voice — a Super Admin removes a voice note's audio
+// (there is no unsend). The row stays and reads "Voice note removed by an
+// administrator"; the removal is audited.
+app.delete("/api/messages/:id/voice", requireRole("Super Admin"), voiceNoteUploadLimiter, (req, res) => {
+	try {
+		if (!/^\d{1,12}$/.test(String(req.params.id))) return res.status(404).json({ error: "Not found" });
+		const id = Number(req.params.id);
+		const row = db.prepare(`SELECT id, "from", "to", attachment_type, voice_file, voice_duration_ms FROM messages WHERE id = ?`).get(id);
+		if (!row || row.attachment_type !== "voice") return res.status(404).json({ error: "Not found" });
+		if (row.voice_file && !voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, row.voice_file)) {
+			return res.status(500).json({ error: "The voice note could not be removed. Try again." });
+		}
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0, message = ? WHERE id = ?").run(voiceNoteText.VOICE_NOTE_REMOVED, id);
+		logAudit(req, "voice_note_delete", "message", id, JSON.stringify({ from: row.from, to: row.to, durationMs: row.voice_duration_ms, file: row.voice_file ? "removed" : "already gone" }));
+		res.json({ success: true });
+	} catch (error) {
+		console.error("Error removing voice note:", error.message);
+		res.status(500).json({ error: "The voice note could not be removed. Try again." });
+	}
+});
+
+// DELETE /api/users/:id: the stored voice files of every message its delete
+// removes (from or to the account's name, matched as that delete matches) and
+// of every note the account was the party to (by id, under any name).
+function userVoiceNoteFiles(userId, nameLower) {
+	const files = new Set(
+		db.prepare("SELECT voice_file FROM messages WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").all(userId).map((r) => r.voice_file),
+	);
+	if (nameLower) {
+		for (const r of db.prepare(`SELECT voice_file FROM messages WHERE (LOWER("from") = ? OR LOWER("to") = ?) AND COALESCE(voice_file, '') <> ''`).all(nameLower, nameLower)) {
+			files.add(r.voice_file);
+		}
+	}
+	return [...files];
+}
+// ...once that delete has committed: a note of the account's that kept its row
+// (sent under another name) loses its audio, then every file read is unlinked.
+// Returns how many files are gone.
+function removeUserVoiceNotes(userId, files) {
+	try {
+		db.prepare("UPDATE messages SET voice_file = '', voice_bytes = 0 WHERE party_user_id = ? AND COALESCE(voice_file, '') <> ''").run(userId);
+	} catch (err) {
+		console.error("[voice-notes] clearing a deleted account's notes failed:", err.message);
+	}
+	let gone = 0;
+	for (const file of files) if (voiceNotes.removeVoiceFile(VOICE_NOTE_DIR, file)) gone++;
+	return gone;
+}
+
+// The daily retention sweep (lib/voice-notes.js): report only until
+// VOICE_NOTE_SWEEP_APPLY_FROM is set and reached.
+function sweepVoiceNotesNow() {
+	try {
+		return voiceNotes.sweepVoiceNotes({
+			db, dir: VOICE_NOTE_DIR, retentionDays: VOICE_NOTE_RETENTION_DAYS, applyFrom: VOICE_NOTE_SWEEP_APPLY_FROM, todayKey: appTodayKey(), log: console,
+		});
+	} catch (err) {
+		console.error("[voice-notes] sweep failed:", err.message);
+		return null;
+	}
+}
+if (startsJob("voice note retention sweep")) {
+	setTimeout(sweepVoiceNotesNow, 6 * 60 * 1000);
+	setInterval(sweepVoiceNotesNow, 24 * 60 * 60 * 1000);
+}
+
 // Receipt photo storage helpers — write base64 data URIs to disk and return
 // the URL path. Old base64-in-DB rows still work because the frontend img tag
 // accepts both data URIs and URL paths.
 const RECEIPTS_DIR = path.join(DATA_DIR, "uploads", "expense-receipts");
-try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
+if (!IMPORT_ONLY) try { fs.mkdirSync(RECEIPTS_DIR, { recursive: true }); } catch {}
 // Image formats we are prepared to STORE AND SERVE as a receipt. Deliberately
 // narrower than isValidImageMagic (which also allows GIF, because imageToPdf can
 // render one): every other receipt consumer already agrees on exactly this set —
@@ -47177,7 +50256,8 @@ app.post("/api/expenses", requireAuth, driverWriteLimiter, async (req, res) => {
 		}
 		// Sanitize free-text fields
 		const safeDescription = (description || "").toString().slice(0, 500);
-		const safeLoadId = (loadId || "").toString().slice(0, 100);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const safeLoadId = (loadIdFor(req, loadId) || "").toString().slice(0, 100);
 		// Merchant City/State (optional — prefilled by receipt OCR, editable).
 		// city: trimmed, <=60 chars. state: a 2-letter US code, else dropped.
 		const safeCity = (city || "").toString().trim().slice(0, 60);
@@ -48479,14 +51559,27 @@ app.post("/api/loads/ratecon/extract", requireRole("Super Admin", "Dispatcher"),
 			// person typed (brokerContact.rateConNumberStash).
 			const stashKey = brokerContact.rateConStashKey(base64);
 			brokerContact.rateConNumberStash.put(stashKey, { "Load Number": fields["Load Number"] });
+			// NEEDS CONFIRMATION PICKUPS (flag on): the pickup reading and the extracted
+			// Pickup Appointment, for every role, for the create that follows; the modal
+			// gets one more line when the rate con marks the date "Needs Confirmation".
+			const warnOpts = {};
+			if (RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) {
+				const reading = rateConPickupReadingOfPdf(base64, fields["Pickup Notes/Instructions"]);
+				rateConPickupStash.put(stashKey, {
+					needsConfirmation: reading.needsConfirmation,
+					by: reading.by,
+					pickup: fields["Pickup Appointment Time"] == null ? "" : String(fields["Pickup Appointment Time"]),
+				});
+				if (reading.needsConfirmation) warnOpts.pickupNeedsConfirmation = pickupConfirmation.MODAL_WARNING;
+			}
 			if (req.session.user.role !== "Super Admin") {
 				brokerContact.rateConStash.put(stashKey, fields);
 				return res.json({
 					fields: brokerContact.redactRateConFields(fields, { withheldRe: BROKER_WITHHELD_RE, values: BROKER_CONTACT_VALUE_REDACTION_ENABLED }),
-					warnings: rateconLoad.extractionWarnings(fields),
+					warnings: rateconLoad.extractionWarnings(fields, warnOpts),
 				});
 			}
-			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields) });
+			return res.json({ fields, warnings: rateconLoad.extractionWarnings(fields, warnOpts) });
 		} catch (err) {
 			// A rejected key or an exhausted quota is the same state as having no key
 			// at all, which this route already answers 503 for six lines above — so
@@ -48813,6 +51906,14 @@ app.post("/api/loads/from-ratecon", requireRole("Super Admin", "Dispatcher"), ra
 		const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
 		const rowIndex = rowMatch ? parseInt(rowMatch[1], 10) : null;
 		jtCacheInvalidate();
+		// PERSON EDIT HOLD: a drag-and-drop create's dates are the rate con's (decision
+		// 5). The record never fails the create. NEEDS CONFIRMATION PICKUPS (flag on): a
+		// Pickup Appointment the person changed in the review modal is a person's date, and
+		// the load's pickup record is written.
+		let pickupCreate = null;
+		try { pickupCreate = rateConCreatePickup(req, pdfBase64, stashKey, headers, fields); } catch (e) { console.error("[ratecon-pickup] reading failed:", e && e.message); }
+		try { recordRateConCreateCellWrites(loadId, headers, values, pickupCreate ? pickupCreate.person : null); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
+		if (pickupCreate) recordRateConCreatePickupReading(loadId, headers, values, pickupCreate.reading);
 
 		// ---- 5/6) Payments Table + Job Details upserts ----
 		// Sheets v4 has no native appendOrUpdate (the n8n node fakes it the same
@@ -49192,6 +52293,177 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 }
 // </driver-instructions-wiring>
 
+// <auto-invoice-wiring>
+// AUTOMATIC BROKER INVOICE DRAFTS. Every 5 minutes a sweep of the cached Job Tracking
+// finds the loads that became Delivered and drafts each one's broker invoice into Gmail
+// Drafts with the Draft Invoice button's own engine (brokerInvoiceDraft: prepare,
+// render, record); nothing is ever sent, and what a reviewer would have fixed becomes
+// "Needs attention" (lib/auto-invoice-job.js, -ledger.js, -rules.js). Super Admin
+// only: the /api/auto-invoice/ routes (status, settings, a load's Mark checked and Try
+// again), `_autoInvoice` on /api/dashboard's completed rows, and the notices
+// (AUTO_INVOICE_NOTICE_TYPE, left out for every other role by noticeTypeScope()).
+// The settings, read once at start:
+//   AUTO_INVOICE_DRAFTS_ENABLED  on only when exactly "true". Off: no timer, no table,
+//     no route, and /api/dashboard answers as before.
+//   AUTO_INVOICE_DRAFTS_SHADOW   with the flag on, shadow unless exactly "false": the
+//     sweep only records what it would do, with no engine, invoice number, Drive,
+//     Gemini or Gmail call, so ENABLED=true alone can never make a draft.
+//   AUTO_INVOICE_MAX_PER_HOUR (12, at most 1000) and AUTO_INVOICE_MAX_PER_DAY (60, at
+//     most 10000): a burst of deliveries drains over hours, not into Gmail at once.
+// Real drafts also need GMAIL_USER and its app password (without them the job pauses
+// and logs it once). A replica or an import starts no timer (startsJob()).
+// scripts/test-auto-invoice-wiring.js lifts this block.
+const AUTO_INVOICE_NOTICE_TYPE = "auto-invoice";
+const AUTO_INVOICE_TICK_MS = 5 * 60 * 1000;
+const autoInvoiceImap = require("./lib/imap-draft");
+const autoInvoice = require("./lib/auto-invoice-job").create({
+	db,
+	env: process.env,
+	readJobTracking: getJobTrackingCached,
+	closedMonthsOf: integrityClosedMonthsOf,
+	dayKeyOf: sheetDayKey,
+	uploadsRoot: path.join(DATA_DIR, "uploads"),
+	// The engine is created further down, beside the Draft Invoice route.
+	engine: {
+		prepare: (args) => brokerInvoiceDraft.prepare(args),
+		render: (ctx, opts) => brokerInvoiceDraft.render(ctx, opts),
+		record: (ctx, rendered, opts) => brokerInvoiceDraft.record(ctx, rendered, opts),
+	},
+	nextInvoiceNumber,
+	appendGmailDraft,
+	findDraftByMessageId: autoInvoiceImap.findDraftByMessageId,
+	newMessageId: autoInvoiceImap.newMessageId,
+	mailbox: () => ({ user: process.env.GMAIL_USER || "", pass: REPLICA ? "" : process.env.GMAIL_APP_PASSWORD || "" }), // none in a replica: no mail leaves it
+	bisonRecipient: () => process.env.BISON_INVOICE_EMAIL || "",
+	logAudit,
+	notify: ({ title, body }) => {
+		const notice = { type: AUTO_INVOICE_NOTICE_TYPE, title, body, metadata: {} };
+		insertDispatchNotification.run(notice.type, notice.title, notice.body, "{}");
+		io.to("super-admin").emit("dispatch-notification", notice);
+	},
+	geminiUnavailableAt: () => rateConGeminiUnavailableAt,
+	log: console,
+});
+if (autoInvoice.mode !== "off") autoInvoice.mount(app, { requireRole, refuseCrossSite });
+if (autoInvoice.mode !== "off" && startsJob("automatic invoice drafts")) {
+	// One tick at a time: a draft can take minutes, and a slow tick is never overlapped.
+	let autoInvoiceTicking = false;
+	setInterval(() => {
+		if (autoInvoiceTicking) return;
+		autoInvoiceTicking = true;
+		autoInvoice.tick()
+			.catch((e) => console.error(`[auto-invoice] tick failed: ${(e && e.code) || "ERROR"}`))
+			.finally(() => { autoInvoiceTicking = false; });
+	}, AUTO_INVOICE_TICK_MS);
+}
+// </auto-invoice-wiring>
+
+// POST /api/loads/pickup-confirmed: "Mark pickup confirmed" (the Needs Confirmation pickup
+// plan, decision 10). A Super Admin or Dispatcher keeps a flagged load's Pickup Appointment
+// as it is; the dashboard's code then clears.
+// - 404 while RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED is off, before the role check.
+// - Addressed like PUT /api/data/:rowIndex: { rowIndex, loadId }, the Load ID as the caller
+//   was served it, so a Dispatcher's withheld Load ID works (#549). Job Tracking is read
+//   fresh; a row that no longer holds that load is 409 ROW_MOVED (a withheld ID is taken
+//   only when no other row reads the same).
+// - 409 PICKUP_NOT_FLAGGED: no Needs Confirmation record, Cancelled, or a blank date.
+//   409 PERIOD_FINALIZED: any of the row's months is closed or can't be placed (closed
+//   months are never edited; that variant shows no button).
+// - Writes no sheet cell: a "person" row of the current value in load_cell_writes (the
+//   person-edit hold's record, so the date counts as a person's from then on), then the
+//   audit entry load / pickup_confirmed with the value only. A date that is already a
+//   person's answers 200 alreadyConfirmed and records nothing.
+function pickupConfirmedGate(req, res, next) {
+	if (!RATECON_PICKUP_CONFIRMATION_REVIEW_ENABLED) return res.status(404).json({ error: "Not found" });
+	return next();
+}
+
+// Whether row `rowIndex` of `all` (Job Tracking as read, headers first) is the load the
+// caller named by `sentId`, as that caller is served it.
+function pickupConfirmedRowMatches(req, all, rowIndex, sentId) {
+	const headers = all[0] || [];
+	const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+	if (idCol < 0) return false;
+	const rowOf = (cells) => Object.fromEntries(headers.map((h, i) => [h, cells[i] == null ? "" : cells[i]]));
+	const cells = all[rowIndex - 1] || [];
+	const raw = String(cells[idCol] == null ? "" : cells[idCol]).trim();
+	if (!normLoadKey(raw)) return false;
+	// A load named by its key (WITHHELD LOAD KEYS) is the row's own when the key's stored ID is.
+	if (req.withheldLoad && normLoadKey(sentId) === normLoadKey(req.withheldLoad.raw)) return normLoadKey(raw) === normLoadKey(sentId);
+	const shown = String(shownLoadId(req, raw, { row: rowOf(cells) }) ?? "").trim();
+	if (shown === raw) return normLoadKey(raw) === normLoadKey(sentId);
+	if (!shown || shown.toLowerCase() !== sentId.toLowerCase()) return false;
+	let alike = 0;
+	for (let i = 1; i < all.length; i++) {
+		const c = all[i] || [];
+		const r = String(c[idCol] == null ? "" : c[idCol]).trim();
+		if (r && String(shownLoadId(req, r, { row: rowOf(c) }) ?? "").trim().toLowerCase() === shown.toLowerCase()) alike++;
+	}
+	return alike === 1;
+}
+
+app.post("/api/loads/pickup-confirmed", pickupConfirmedGate, requireRole("Super Admin", "Dispatcher"), async (req, res) => {
+	const body = req.body || {};
+	const rowIndex = Number(body.rowIndex);
+	const sentId = typeof body.loadId === "string" || typeof body.loadId === "number" ? String(body.loadId).trim() : "";
+	if (!Number.isInteger(rowIndex) || rowIndex < 2 || rowIndex > 1000000) {
+		return res.status(400).json({ error: "rowIndex must be a whole number of 2 or more.", code: "INVALID_ROW_INDEX" });
+	}
+	if (!sentId || sentId.length > 200) return res.status(400).json({ error: "loadId is required.", code: "LOAD_ID_REQUIRED" });
+	let all;
+	try {
+		const sheets = await getSheets();
+		const read = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Job Tracking" });
+		all = (read && read.data && read.data.values) || [];
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed: Job Tracking could not be read:", e.message);
+		return res.status(503).json({ error: "Job Tracking could not be read, so nothing was recorded. Try again.", code: "JOB_TRACKING_UNREADABLE" });
+	}
+	try {
+		const headers = all[0] || [];
+		const row = all[rowIndex - 1] || [];
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS); the answer
+		// echoes the key as sent.
+		if (!pickupConfirmedRowMatches(req, all, rowIndex, loadIdFor(req, sentId))) {
+			return res.status(409).json({ error: `Row ${rowIndex} no longer holds this load. Reload the dashboard and open the load again.`, code: "ROW_MOVED" });
+		}
+		const idCol = headers.findIndex((h) => /load.?id|job.?id/i.test(String(h == null ? "" : h)));
+		const raw = String(row[idCol] == null ? "" : row[idCol]).trim();
+		const pickupCol = headers.findIndex((h) => personEditHold.personHoldColumn(h) && RATECON_PICKUP_COLUMN_RE.test(String(h).trim()));
+		const statusCol = headers.findIndex((h) => /^(job[\s._-]?)?status$/i.test(String(h == null ? "" : h).trim()));
+		const stored = pickupCol >= 0 && row[pickupCol] != null ? String(row[pickupCol]) : "";
+		rateConPickupReadingsTable();
+		const key = loadCellKey(raw);
+		const record = db.prepare("SELECT needs_confirmation FROM ratecon_pickup_readings WHERE load_key = ?").get(key);
+		const cancelled = statusCol >= 0 && CANCELED_STATUS_RE.test(String(row[statusCol] == null ? "" : row[statusCol]).trim());
+		if (!record || !Number(record.needs_confirmation) || cancelled || !stored.trim()) {
+			return res.status(409).json({ error: "This load has no unconfirmed rate-con pickup date to confirm.", code: "PICKUP_NOT_FLAGGED" });
+		}
+		const months = loadRowAccountingMonths(headers, row);
+		if (!Array.isArray(months) || !months.length || months.some((mk) => periodWriteLocked(mk))) {
+			return res.status(409).json({
+				error: "This load has a date in a closed month, or one that can't be placed in a month, so its pickup date can't be confirmed here.",
+				code: "PERIOD_FINALIZED",
+			});
+		}
+		const column = loadCellColumnName(headers, headers[pickupCol]);
+		const day = pickupConfirmation.cellDay(stored) || null;
+		// Already a person's date (confirmed before, corrected, or put back in the sheet after an
+		// email replaced it: only the app's own writes clear a value, as in the hold): nothing new
+		// to record.
+		if (personEditHold.personSet(stored, loadCellWriteRows(key, column), { onlyAppClears: true }).set === true) {
+			return res.json({ ok: true, loadId: sentId, stored: day, alreadyConfirmed: true });
+		}
+		recordLoadCellWrite(key, column, stored, "person", { actor: rateConPickupActor(req) });
+		logAudit(req, "pickup_confirmed", "load", raw, JSON.stringify({ value: stored.slice(0, 200) }));
+		notifyChange("dashboard");
+		return res.json({ ok: true, loadId: sentId, stored: day });
+	} catch (e) {
+		console.error("[ratecon-pickup] pickup-confirmed:", e.message);
+		return res.status(500).json({ error: "The pickup date could not be marked confirmed. Try again.", code: "PICKUP_CONFIRM_FAILED" });
+	}
+});
+
 // GET /api/documents/:loadId — Fetch all documents for a load
 //
 // ⚠️ SUPER ADMIN AND DISPATCHER (ANY LOAD) OR THE LOAD'S DRIVER, AND NO OTHER
@@ -49204,7 +52476,8 @@ if (driverInstructions.config().sweepConfigured && startsJob("rate-con driver-in
 // Pinned by scripts/test-documents-role-gates.js.
 app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driver"), async (req, res) => {
 	try {
-		const loadId = decodeURIComponent(req.params.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, decodeURIComponent(req.params.loadId));
 		// SECURITY: drivers can only read documents for their own loads.
 		// Without this guard, any logged-in driver could enumerate PODs and
 		// receipts on any other driver's load by guessing the loadId.
@@ -49234,7 +52507,14 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 		// LOAD_PANEL_DOCUMENT_FILTER (live, not a rate con) is shared with the
 		// /uploads root-file guard, which lets a driver open exactly the files
 		// this list shows them.
-		const docs = db
+		//
+		// A Driver gets only the rows filed under him (documentFiledUnder(), the
+		// copy the root-file guard reads too): on a reassigned load the earlier
+		// driver's documents, OCR text included, stay with the office, and so
+		// does a row filed under no one. Super Admin and Dispatcher get every row.
+		// The column list is explicit: who uploaded a row (uploaded_by_*) is
+		// office-only and never sent here.
+		const rows = db
 			.prepare(
 				`SELECT id, load_id, driver, type, file_name, drive_file_id, drive_url, strftime('%Y-%m-%dT%H:%M:%SZ', uploaded_at) AS uploaded_at, ocr_text
 				 FROM documents
@@ -49242,6 +52522,30 @@ app.get("/api/documents/:loadId", requireRole("Super Admin", "Dispatcher", "Driv
 				 ORDER BY uploaded_at DESC`,
 			)
 			.all(loadId);
+		const docs = req.session.user.role !== "Super Admin" && req.session.user.role !== "Dispatcher"
+			? rows.filter((d) => documentFiledUnder(d, req.session.user.driverName))
+			: rows;
+		// A load whose Load ID a Dispatcher is served withheld (WITHHELD LOAD KEYS):
+		// its documents are listed by type and upload time only, for a Super Admin to
+		// open. A stored file name and its link begin with the stored ID, and OCR text
+		// can hold the broker's contact. A Driver is served his own load's ID (#549).
+		// Judged on the route's own Job Tracking read (by the patterns alone when it
+		// can't be read).
+		if (req.session.user.role === "Dispatcher" && loadIdWithheldFor(req)) {
+			let jt = null;
+			try {
+				jt = await getJobTrackingCached();
+			} catch {
+				jt = null;
+			}
+			if (shownLoadId(req, loadId, { index: routeShownLoadIdIndex(jt) }) !== loadId) {
+				return res.json({
+					documents: docs.map((d) => ({ id: d.id, type: d.type, uploaded_at: d.uploaded_at })),
+					documentsWithheld: true,
+					note: "A Super Admin can open these documents.",
+				});
+			}
+		}
 		res.json({ documents: docs });
 	} catch (error) {
 		console.error("Error fetching documents:", error.message);
@@ -50335,6 +53639,30 @@ const draftInvoiceLimiter = rateLimit({
 	standardHeaders: true,
 });
 
+// The draft route's steps (prepare, render, record) live in
+// lib/broker-invoice-draft.js, so the automatic drafts run the same code.
+const brokerInvoiceDraft = require("./lib/broker-invoice-draft").create({
+	db,
+	brokerInvoice,
+	getSheets,
+	SPREADSHEET_ID,
+	parseSheet,
+	deduplicateLoads,
+	findCol,
+	parseInvoiceOverrides,
+	fetchDocumentBytes,
+	buildRateConLoadCtx,
+	getRateConBytes,
+	GEMINI_API_KEY,
+	runRateConGemini,
+	latestDraftNotes,
+	renderHtmlToPdf,
+	safeAttachmentName,
+	logAudit,
+	sanitizeEvidenceText,
+	env: process.env,
+});
+
 // POST /api/loads/:loadId/draft-invoice  (alias: .../draft-bison-invoice)
 // SUPER ADMIN ONLY (owner, 2026-09-26), like every invoice-draft route —
 // invoice-preview and GET …/invoice-draft below as well. A draft is addressed
@@ -50388,445 +53716,24 @@ app.post(
 			const lineSel = linesOn ? invoiceLines.parseLineSelection(req.body) : null;
 			if (lineSel && !lineSel.ok) return res.status(400).json({ error: lineSel.error, code: lineSel.code, field: lineSel.field });
 
-			// 1) Look up the load in the Job Tracking sheet by loadId.
-			const sheets = await getSheets();
-			const resp = await sheets.spreadsheets.values.get({
-				spreadsheetId: SPREADSHEET_ID,
-				range: "Job Tracking",
-			});
-			const parsed = parseSheet({ values: resp.data.values });
-			const rows = deduplicateLoads(parsed.data, parsed.headers);
-			const headers = parsed.headers;
-			const loadIdCol = findCol(headers, /load.?id|job.?id/i);
-			if (!loadIdCol) return res.status(500).json({ error: "Sheet misconfigured" });
-			const target = loadId.toLowerCase().replace(/^#/, "");
-			const load = rows.find(
-				(r) => (r[loadIdCol] || "").toString().trim().toLowerCase().replace(/^#/, "") === target,
-			);
-			if (!load) return res.status(404).json({ error: "Load not found" });
-
-			// Resolve the columns we need from the sheet.
-			const emailCol = findCol(headers, /^email$/i) || findCol(headers, /broker.*email|email/i);
-			const statusCol = findCol(headers, /^status$/i) || findCol(headers, /status/i);
-			const trailerCol = findCol(headers, /trailer/i);
-			const deliveryDateCol =
-				headers.find((h) => /status.*update.*date|completion.*date/i.test(h)) ||
-				headers.find((h) => /drop.?off.*date|drop.?off.*appoint|deliv.*date|deliv.*appoint/i.test(h));
-			const driverCol = findCol(headers, /^driver$/i) || findCol(headers, /driver/i);
-			const brokerNameCol = findCol(headers, /broker.*(contact|name)/i);
-			// The money column is literally "  Payment  " (real surrounding
-			// spaces) — matched on the trimmed header inside the helper.
-			const paymentCol = brokerInvoice.findPaymentColumn(headers);
-
-			const brokerEmail = emailCol ? (load[emailCol] || "").toString().trim() : "";
-			const brokerContactName = brokerNameCol ? (load[brokerNameCol] || "").toString().trim() : "";
-			const status = statusCol ? (load[statusCol] || "").toString().trim() : "";
-			const sheetTrailer = trailerCol ? (load[trailerCol] || "").toString().trim() : "";
-
-			// 2) Broker identity. Every broker can be invoiced now — the Bison
-			//    check is a BRANCH (it picks the AP inbox), no longer a gate.
-			//    The sheet has no brokerage-company column, so the name is
-			//    resolved from the email domain; see lib/broker-invoice.js.
-			const brokerCtx = { brokerEmail, brokerContactName };
-			const isBison = brokerInvoice.isBisonLoad({ email: brokerEmail });
-			const brokerName = brokerInvoice.resolveBrokerName(brokerCtx);
-			let invoiceTo = brokerInvoice.resolveInvoiceTo(brokerCtx);
-
-			//    The delivered/completed gate is unchanged.
-			if (!/delivered|completed|pod received/i.test(status)) {
-				return res.status(400).json({
-					error: `Load must be delivered/completed to draft an invoice (current status: "${status || "unknown"}").`,
-				});
-			}
-
-			// 3) Get the POD + rate-con bytes (server-side).
-			//
-			// EVERY POD, not just the newest. A proof packet routinely arrives as
-			// several files (driver photographs the signed BOL page by page), and
-			// this used to be `ORDER BY uploaded_at DESC LIMIT 1` — which silently
-			// billed brokers with a one-page fragment of a three-page proof and got
-			// invoices rejected. 14 of 85 loads with a POD have more than one.
-			//
-			// ASC = upload order = page order (id breaks ties: uploaded_at only has
-			// second granularity and a burst of page uploads can share a second).
-			const podDocs = db
-				.prepare(
-					"SELECT * FROM documents WHERE load_id = ? AND UPPER(type) = 'POD' AND deleted_at IS NULL ORDER BY uploaded_at ASC, id ASC",
-				)
-				.all(loadId);
-			if (!podDocs.length) return res.status(400).json({ error: "POD not found for this load" });
-
-			// Fetch sequentially — these are local /uploads reads in the common case,
-			// and the Drive fallback is rate-limited enough that a parallel fan-out
-			// buys nothing. A row whose bytes are unreadable is dropped rather than
-			// failing the whole draft, but it IS surfaced to the caller (below), so a
-			// missing page is never silently omitted a second time.
-			const podFiles = [];
-			const podMissing = [];
-			for (const d of podDocs) {
-				const buf = await fetchDocumentBytes(d);
-				if (buf && buf.length) podFiles.push({ doc: d, buffer: buf });
-				else podMissing.push(d.file_name || String(d.id));
-			}
-			if (!podFiles.length) return res.status(400).json({ error: "POD not found for this load" });
-			if (podMissing.length) {
-				console.warn(
-					`Draft invoice ${loadId}: ${podMissing.length} of ${podDocs.length} POD file(s) unreadable, attaching ${podFiles.length} — ${podMissing.join(", ")}`,
-				);
-			}
-
-			// Attachment names. A single POD keeps its EXACT historical name — the
-			// overwhelming majority of loads, and "1 of 1" would be noise a broker
-			// has to parse. Multi-POD gets "POD_2_of_3_<loadId>.pdf" so an AP clerk
-			// can see at a glance whether the packet is complete.
-			const podSafeLoadId = String(loadId).replace(/[^A-Za-z0-9._-]/g, "_");
-			const podAttachments = podFiles.map((f, i) => ({
-				filename:
-					podFiles.length === 1
-						? f.doc.file_name || `${podSafeLoadId}_POD.pdf`
-						: `POD_${i + 1}_of_${podFiles.length}_${podSafeLoadId}.pdf`,
-				content: f.buffer,
-				contentType: "application/pdf",
-			}));
-			// Back-compat aliases for the single-POD consumers further down.
-			const podDoc = podFiles[0].doc;
-			const podBuffer = podFiles[0].buffer;
-
-			// Facts about this load from a source OTHER than the rate-con, so the
-			// by-content fallback has something independent to check a match
-			// against. Built by the shared helper so this route and the bulk
-			// backfill cannot disagree about which facts the matcher gets.
-			const rateconLoadCtx = buildRateConLoadCtx(load, headers, loadId);
-			// ⚠️ persist:false ON A PREVIEW. This route is documented as previewing
-			// "without burning an invoice number or creating a draft", and a preview
-			// that permanently links a guessed document to a load breaks that
-			// promise: a dispatcher who opens the modal, sees the wrong rate-con and
-			// CANCELS has already written the link, and every later draft is then
-			// served from `documents` with no rescan and no second look.
-			const { buffer: rateconBuffer, candidates: rateconCandidates } = await getRateConBytes(loadId, req.body, rateconLoadCtx, { persist: !dryRun, req });
-			// Say so plainly. The invoice still drafts without one (POD + the
-			// sheet's Payment column carry it), but brokers generally require the
-			// rate-con alongside the invoice, so an unattached one is the reason a
-			// payment later stalls. The preview modal warns the reviewer too.
-			if (!rateconBuffer || !rateconBuffer.length) {
-				console.warn(
-					`Draft invoice ${loadId}: no rate-con found (Drive folder by name, documents table, request body and Drive folder by content all empty) — drafting without it.`,
-				);
-			}
-
-			// 4) Extract the rate-con fields (deterministic text scan → Gemini fallback).
-			//    The Gemini fallback reuses the shared runRateConGemini() helper.
-			//    NOTE: only the Bison rate-con has the "Billing Information" block
-			//    the deterministic scan understands — every OTHER broker takes the
-			//    Gemini path, so it is the primary path now, not an edge case
-			//    (verified against real C.H. Robinson / Navisphere rate-cons).
-			const geminiExtract = GEMINI_API_KEY
-				? async (buf) => {
-						// Defensive: extractRateConFields already skips the call when
-						// there are no bytes, but this wrapper is the seam a future
-						// caller reaches for, and Buffer.from(null) throws.
-						if (!buf || !buf.length) return null;
-						const b64 = Buffer.from(buf).toString("base64");
-						if (!/^JVBERi/.test(b64)) return null;
-						return runRateConGemini(b64);
-				  }
-				: null;
-			// This route already degrades correctly on a Gemini failure —
-			// extractRateConFields returns empty fields, the total falls back to the
-			// sheet's Payment column and the order number to the load ID — so there is
-			// no status to change here. Two things are free, and only those:
-			// (a) NAME the failure in the log. "Gemini fallback failed" on a dead key
-			//     reads as a parsing problem, which is what sent 2026-08-05's outage to
-			//     the wrong diagnosis for a day.
-			// (b) latch it, so the alternate-rate-con loop below stops re-calling a
-			//     scanner that is refusing everything.
-			let geminiUnavailable = null;
-			const onGeminiError = (e) => {
-				if (e && e.kind === "unavailable") {
-					geminiUnavailable = e;
-					console.error(`Draft invoice: Gemini fallback unavailable (Gemini ${e.status}${e.reason ? " " + e.reason : ""}):`, e.message);
-					return;
-				}
-				console.error("Draft invoice: Gemini fallback failed:", e.message);
-			};
-			// ⚠️ WHAT A CANDIDATE MAY SUPPLY IS DECIDED BY ITS SOURCE, IN ONE PLACE.
-			// brokerInvoice.readRateConCandidates() applies rateconSourceTrust() to the
-			// primary AND to the alternate-recipient loop below it, so the two cannot
-			// drift. Do not call extractRateConFields() on a candidate directly here.
-			//
-			// A load can have MULTIPLE rate-con files (the original + a "Re:" reply, or
-			// a signed scan). getRateConBytes returns the newest as the primary, but the
-			// billing / "send documents to" email may live on ANOTHER file — so if the
-			// primary yielded none, the reader checks the other candidates and takes the
-			// first that does. Prevents defaulting the invoice to the wrong inbox (client
-			// 2026-07-30: Steam Logistics load 2214407 — carrierdocs@steamlogistics.com
-			// was only on the original file, not the newer "Re:" scan).
-			//
-			// ⚠️ A DOCUMENT WE FOUND BY INFERENCE MAY NOT CHOOSE WHERE MONEY IS SENT.
-			// For every non-Bison broker `documentsEmail` becomes the Gmail To:, so a
-			// content-matched file that turned out to belong to someone else would
-			// mail this invoice — and that customer's rate — to an address lifted off
-			// THEIR paperwork. 'drive-content' may therefore fill in fields but never
-			// the recipient. Bison is pinned regardless, so this only ever affects the
-			// brokers where it matters.
-			//
-			// ⚠️ ONLY RATE-CON ROWS in `documents` are trusted, and the trust is in who
-			// writes them: POST /api/loads/from-ratecon (a Super Admin or Dispatcher
-			// creating the load FROM that PDF), rememberRateConMatch() (a Super
-			// Admin's non-preview request on this route found the file by content —
-			// normally the approve after the review modal showed it — or a Super
-			// Admin applied the backfill), and an upload typed as a rate-con,
-			// which POST /api/documents/upload's type list keeps to Super Admin
-			// (uploadDocTypeFor()). A BOL row is
-			// not a rate-con: getRateConBytes() tags it 'documents-bol', and nothing —
-			// no total, no order/PO/move #, no trailer, no recipient — is read from
-			// it. It is only attached, as a supporting document, when no rate-con
-			// exists at all.
-			const rcRead = await brokerInvoice.readRateConCandidates(
-				rateconCandidates,
-				(buf, { alternate } = {}) =>
-					brokerInvoice.extractRateConFields(buf, {
-						brokerEmail, // exclude the booking agent's own email from documents-email detection
-						// On an ALTERNATE read, drop only the GEMINI half once the key is
-						// refusing — the documents email that loop hunts for comes from the
-						// deterministic text scan, so skipping the read would throw away a
-						// recovery that never needed Gemini. null keeps the free scan.
-						geminiExtract: alternate && geminiUnavailable ? null : geminiExtract,
-						onGeminiError,
-					}),
-				{ onAlternateError: (e) => console.error("Draft invoice: alternate rate-con extract failed:", e.message) },
-			);
-			const rcFields = rcRead.fields;
-			if (rcRead.primarySource && !rcRead.primaryRead) {
-				console.warn(
-					`Draft invoice ${loadId}: no rate-con on file, only a ${rcRead.primarySource} document — attaching it as supporting paperwork and reading nothing from it.`,
-				);
-			}
-			if (rcRead.recipientIgnored) {
-				console.warn(
-					`Draft invoice ${loadId}: ignoring the documents email on a ${rcRead.primarySource} rate-con — recipient falls back to the broker default.`,
-				);
-			}
-			if (rcRead.recipientFrom > 0) {
-				console.log(`Draft invoice ${loadId}: documents email recovered from an alternate rate-con file (of ${rateconCandidates.length} candidates).`);
-			}
-
-			// Recipient: the rate-con's "email documents to" address wins over the
-			// configured default (drives both the Gmail To: and the printed
-			// "Invoice To" block); falls back to BISON_INVOICE_EMAIL /
-			// DEFAULT_INVOICE_EMAIL when absent, and to "" when that setting is
-			// missing (refused below, step 6a-2, before anything is minted).
-			invoiceTo = brokerInvoice.resolveInvoiceTo({ ...brokerCtx, documentsEmail: rcFields.documentsEmail });
-
-			// The review-before-approve preview sends the recipient the dispatcher SAW
-			// back on approve, pinning it — so a nondeterministic Gemini re-run on the
-			// commit can't silently re-route the draft to a different address than the
-			// one that was reviewed. Classify "manual" only when the override actually
-			// DIFFERS from what extraction resolved (an unchanged confirm keeps the
-			// ratecon/default badge). An invalid/empty override is ignored.
-			const resolvedEmail = invoiceTo.email;
-			const resolvedInvoiceToName = invoiceTo.name;
-			const recipientOverride = ov.has.recipientEmail ? ov.values.recipientEmail : "";
-			let recipientSource = rcFields.documentsEmail ? "ratecon" : "default";
-			if (recipientOverride) {
-				if (recipientOverride.toLowerCase() !== String(resolvedEmail).toLowerCase()) recipientSource = "manual";
-				invoiceTo = { name: invoiceTo.name, email: recipientOverride };
-			}
-			// The "Invoice To" NAME is separately overridable now. It is a different
-			// fact from the address — resolveInvoiceTo() labels the block from the
-			// RECIPIENT's domain, so the two legitimately diverge — which is exactly
-			// why recipient_source above is left alone and keeps meaning "provenance
-			// of the email address" and nothing else.
-			if (ov.has.billToName) invoiceTo = { name: ov.values.billToName, email: invoiceTo.email };
-
-			// 4b) Invoice reference number. Per client (2026-07-30): ONLY Bison
-			//     invoices carry the broker's rate-con Order # (Bison AP matches on
-			//     it). EVERY other broker is invoiced by our Load Number, so a
-			//     non-Bison rate-con Order # is deliberately ignored here. Bison
-			//     still falls back to the load ID when its rate-con had no Order #.
-			const loadRef = loadId.replace(/^#/, "").trim();
-			const derivedOrderNumber = isBison ? (rcFields.orderNumber || loadRef) : loadRef;
-			// The dispatcher's correction wins — this is the field Gemini most often
-			// gets one digit wrong on, and it is what broker AP matches against.
-			const orderNumber = ov.has.orderNumber ? ov.values.orderNumber : derivedOrderNumber;
-			// ⚠️ REPORTED, not just logged. A console.log was the ONLY signal that
-			// the Order # had silently become our load id, so the review modal
-			// rendered a populated, entirely normal-looking field and the wrong
-			// number shipped. The reviewer cannot catch what nothing tells them.
-			// 'load-number' is NOT a failure — it is the designed behaviour for every
-			// non-Bison broker (PR #132), which is invoiced by OUR load number. It
-			// gets its own value because reporting it as 'ratecon' was simply untrue:
-			// the number never came from the document, and this field is the one
-			// thing a reviewer is meant to be able to trust about provenance.
-			const orderNumberSource = ov.has.orderNumber
-				? "override"
-				: !isBison
-					? "load-number"
-					: (rcFields.orderNumber ? "ratecon" : "load-id-fallback");
-			if (isBison && !rcFields.orderNumber) {
-				console.log(
-					`Draft invoice ${loadId}: no order # from the Bison rate-con (gemini=${GEMINI_API_KEY ? "on" : "off"}) — falling back to the load ID.`,
-				);
-			}
-
-			// 5) Validation: rate-con trailer must match the load's stored trailer.
-			//    On mismatch, do NOT call n8n — return 409 so the frontend can alert.
-			//    Only compare when the extracted trailer actually looks like a
-			//    trailer id (contains a digit): a guard that blocks on garbage is
-			//    worse than no guard, and prose like "Trailer Required" has been
-			//    seen leaking out of loosely-labelled rate-cons.
-			const normTrailer = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-			const rcTrailerUsable = /\d/.test(String(rcFields.trailerNumber || ""));
-			if (sheetTrailer && rcTrailerUsable && normTrailer(sheetTrailer) !== normTrailer(rcFields.trailerNumber)) {
-				return res.status(409).json({
-					error: `Trailer mismatch: rate-con says ${rcFields.trailerNumber} but the load is on trailer ${sheetTrailer}. Invoice not drafted.`,
-					code: "TRAILER_MISMATCH",
-					details: { rateconTrailer: rcFields.trailerNumber, loadTrailer: sheetTrailer },
-				});
-			}
-
-			// 6) Invoice total: the rate-con's Total Rate, else the load's
-			//    "  Payment  " cell from the sheet. HARD STOP when neither
-			//    yields a positive number — this endpoint moves money, and a
-			//    $0.00 invoice mailed to a broker is worse than an error.
-			const rcTotal = brokerInvoice.parseMoney(rcFields.totalRate);
-			const sheetTotal = paymentCol ? brokerInvoice.parseMoney(load[paymentCol]) : 0;
-			const derivedTotal = rcTotal > 0 ? rcTotal : sheetTotal;
-			// A SUPPLIED total satisfying this guard IS the feature: extraction
-			// fails, the dispatcher types 2100.00, the invoice drafts. But the
-			// guarantee shifts from "the server proved a number exists" to "a human
-			// typed a number", so the number is RE-DERIVED through the same format
-			// gate / >= $0.01 floor / $1,000,000 ceiling in parseInvoiceOverrides()
-			// rather than trusted. It is never skipped.
-			//
-			// ⚠️ An overridden total is INVOICE-ONLY. Nothing here writes back to the
-			// Job Tracking "  Payment  " column, so revenue, driver pay, investor
-			// payouts and the P&L keep reading the sheet exactly as they do today and
-			// no closed month can be restated by an invoice correction. The
-			// divergence is RECORDED instead (total_source / sheet_total /
-			// ratecon_total below). Owner decision — do not "helpfully" sync it.
-			const totalAmount = ov.has.total ? ov.values.total : derivedTotal;
-			const totalSource = ov.has.total ? "manual" : (rcTotal > 0 ? "ratecon" : (derivedTotal > 0 ? "sheet" : "unknown"));
-			const needsTotal = !(totalAmount > 0);
-			// ⚠️ RELAXED FOR dryRun ONLY, and that relaxation is the blocker fix.
-			// The review modal opens exclusively via ?dryRun=1, so while this 422
-			// fired ahead of the preview response the dispatcher never saw a form to
-			// type the missing total INTO — precisely in the case this feature exists
-			// for. The preview instead returns 200 with needsTotal:true and skips the
-			// render entirely, so no $0.00 LogisX PDF is ever produced. The real
-			// approve keeps the hard 422 unchanged, and the delivered gate, both POD
-			// gates and the trailer 409 above are all untouched.
-			if (needsTotal && !dryRun) {
-				return res.status(422).json({
-					error:
-						`Invoice total is unknown for load ${loadId} — the rate-con had no readable Total Rate` +
-						(paymentCol ? ` and the sheet's ${paymentCol.trim()} column is empty` : " and the sheet has no payment column") +
-						". Refusing to draft a $0.00 invoice. Add the rate to the load, then retry." +
-						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
-					code: "INVOICE_TOTAL_UNKNOWN",
-				});
-			}
-
-			// 6a) REFERENCE NUMBERS ON A BISON INVOICE — the same shape as the
-			//     total guard above, for the same reason, and it must live HERE:
-			//     nextInvoiceNumber() is called a few lines below, so a refusal
-			//     placed after it would burn an invoice number on every attempt.
-			//
-			//     ⚠️ WHY THIS IS A HARD STOP AND NOT A WARNING. Bison AP matches
-			//     payment to their Order #. When the rate-con cannot be read, the
-			//     order number silently becomes OUR load id — a number that looks
-			//     entirely valid to the clerk reading it and matches nothing on
-			//     their side, while the "…& PO #…" sentence vanishes from the body
-			//     because buildInvoiceEmailHtml() omits refs it does not have.
-			//     That is exactly what shipped on load 30080873 on 2026-08-18, and
-			//     a modal warning did not stop it. Owner's call: require a human to
-			//     type both rather than mail a plausible wrong number.
-			//
-			//     Bison ONLY. Every other broker is invoiced by our load number by
-			//     design (PR #132) and its cover note carries no PO language at all
-			//     (PR #133), so there is nothing to be wrong about.
-			//
-			//     An explicitly-sent EMPTY poNumber satisfies this — clearing a
-			//     field is a decision, omitting it is not. Same OMITTED-vs-EMPTY
-			//     rule parseInvoiceOverrides() already enforces.
-			//     ⚠️ THE SEED IS HALF THE GUARD, and without it the guard is
-			//     decorative. `buildOverrideBody()` sends `orderNumber` on EVERY
-			//     request ("always sent"), seeded from this route's own dryRun
-			//     echo — so if that echo carries the load-id fallback, the modal
-			//     hands it straight back, `ov.has.orderNumber` is true, and the
-			//     422 below can never fire on the one path every dispatcher uses.
-			//     Blanking the echo (further down, beside `totalAmount`) is what
-			//     makes the block real: an empty Order # fails the modal's own
-			//     required-field validation AND parseInvoiceOverrides' non-empty
-			//     rule, so nothing reaches the 422 by accident. This mirrors
-			//     `needsTotal`, which has always blanked `totalAmount` for exactly
-			//     this reason — the refs guard originally copied the flag and not
-			//     the seed, which is the whole difference between the two.
-			const refsUnreadable = isBison && !rcFields.orderNumber;
-			const needsOrderNumber = refsUnreadable && !ov.has.orderNumber;
-			const needsPoNumber = refsUnreadable && !ov.has.poNumber;
-			if ((needsOrderNumber || needsPoNumber) && !dryRun) {
-				return res.status(422).json({
-					error:
-						`Could not read the Order # from the rate-con for load ${loadId}, so this Bison invoice ` +
-						`would go out referencing our load id instead — Bison AP matches on their Order #, not ours. ` +
-						`Enter the Order # and PO # from the rate-con, then approve.` +
-						(GEMINI_API_KEY ? "" : " (Rate-con AI extraction is not configured on this server.)"),
-					code: "INVOICE_REFS_REQUIRED",
-					details: { needsOrderNumber, needsPoNumber, rateconFound: !!(rateconBuffer && rateconBuffer.length) },
-				});
-			}
-
-			// 6a-1) ADVANCE LINES (B20). Below the refs guard and above
-			//     nextInvoiceNumber(), for the guards' own reason: a refusal after
-			//     the mint would burn an invoice number. The line haul is this route's
-			//     own base (the rate con's Total Rate, else the sheet's Payment); a
-			//     typed total that differs from it is refused beside a line, since it
-			//     would take the advance off twice. On ?dryRun=1 a refusal is reported
-			//     in the answer's invoiceLines.error and nothing is rendered, so the
-			//     editor still opens and the lines can be unticked. INVOICE-ONLY: the
-			//     balance due is billed; Job Tracking's Payment and every settlement
-			//     figure keep the line haul.
-			let lineResolved = null;
-			if (linesOn) {
-				lineResolved = invoiceLines.resolveInvoiceLines(db, {
-					loadId,
-					selection: lineSel,
-					derivedLineHaul: derivedTotal,
-					lineHaulSource: rcTotal > 0 ? "ratecon" : "sheet",
-					typedTotal: ov.has.total ? ov.values.total : null,
-				});
-				if (!lineResolved.ok && !dryRun) {
-					return res.status(lineResolved.status).json({
-						error: lineResolved.error, code: lineResolved.code, ...(lineResolved.lineId ? { lineId: lineResolved.lineId } : {}),
-					});
-				}
-			}
-			const lineSummary = lineResolved && lineResolved.ok ? lineResolved.summary : null;
-			const lineRefused = !!(lineResolved && !lineResolved.ok);
-
-			// 6a-2) A RECIPIENT. The default AP inboxes are settings with no default
-			//     in code (BISON_INVOICE_EMAIL, DEFAULT_INVOICE_EMAIL), so on a server
-			//     without the one this load needs, and with no rate-con address or
-			//     reviewer-typed recipient, To is empty. No draft is created with an
-			//     empty To: refused HERE, before nextInvoiceNumber() below, so nothing
-			//     is minted, rendered, drafted or recorded. The dryRun still answers
-			//     (with an empty recipient) so the review can collect one, exactly as
-			//     it collects a missing total.
-			if (!invoiceTo.email && !dryRun) {
-				const setting = isBison ? "BISON_INVOICE_EMAIL" : "DEFAULT_INVOICE_EMAIL";
-				return res.status(503).json({
-					error:
-						`No recipient for the invoice on load ${loadId}: this server has no ${isBison ? "Bison" : "default"} ` +
-						`invoice address configured (${setting}). Enter the recipient's email in the review, then approve.`,
-					code: "INVOICE_RECIPIENT_UNCONFIGURED",
-				});
-			}
+			// 1)-6a-2) The load, its PODs and rate cons, every printed field, and
+			//    every refusal that must come before the invoice number:
+			//    lib/broker-invoice-draft.js prepare(). A refusal is this route's
+			//    answer as it always was.
+			const prepared = await brokerInvoiceDraft.prepare({ loadId, body: req.body, dryRun, mode: "manual", ov, lineSel, req });
+			if (!prepared.ok) return res.status(prepared.http).json(prepared.json);
+			const draft = prepared.ctx;
+			const {
+				isBison, brokerName, effBrokerName, invoiceTo, resolvedEmail, resolvedInvoiceToName, recipientSource,
+				podAttachments, podMissing, podBuffer, rateconBuffer, rateconCandidates, rcFields, sheetTrailer, rcTrailerUsable, normTrailer,
+				orderNumber, derivedOrderNumber, orderNumberSource, needsOrderNumber, needsPoNumber,
+				derivedTotal, totalAmount, totalSource, needsTotal, total,
+				lineResolved, lineSummary, deliveryDate, derivedDeliveryDate, poNumber, derivedPoNumber, moveNumber, derivedMoveNumber,
+				notes, derivedNotes,
+			} = draft;
 
 			// 6b) Invoice identifiers + dates. invoiceId/invoiceDate use the
-			//    button-click date (today, printed as the business date). deliveryDate is the
-			//    load's ACTUAL delivery/completion date from the sheet — never
-			//    today, never the rate-con scheduled date.
+			//    button-click date (today, printed as the business date).
 			const today = new Date();
 			// dryRun previews the next number without consuming it; a real draft commits it.
 			//
@@ -50839,112 +53746,10 @@ app.post(
 			const invoiceId = ov.has.invoiceId ? ov.values.invoiceId : mintedInvoiceId;
 			const derivedInvoiceDate = brokerInvoice.formatDate(today);
 			const invoiceDate = ov.has.invoiceDate ? ov.values.invoiceDate : derivedInvoiceDate;
-			const rawDeliveryDate = deliveryDateCol ? (load[deliveryDateCol] || "").toString().trim() : "";
-			const derivedDeliveryDate = brokerInvoice.formatDate(rawDeliveryDate);
-			const deliveryDate = ov.has.deliveryDate ? ov.values.deliveryDate : derivedDeliveryDate;
-			// ⚠️ isBison is NOT recomputed from an edited broker name. It derives from
-			// the broker EMAIL above and drives the AP inbox, the Bison-vs-generic
-			// cover letter and the Bison filename — editing a display name must never
-			// flip the email template or the routing.
-			const effBrokerName = ov.has.brokerName ? ov.values.brokerName : brokerName;
-			const derivedPoNumber = rcFields.poNumber || "";
-			const poNumber = ov.has.poNumber ? ov.values.poNumber : derivedPoNumber;
-			const derivedMoveNumber = rcFields.moveNumber || "";
-			const moveNumber = ov.has.moveNumber ? ov.values.moveNumber : derivedMoveNumber;
-			// Notes: omitted → the last APPROVED note for this load; "" → cleared.
-			// The same omitted-vs-empty rule as every field above. PDF only — the
-			// cover email is untouched, and nothing here reaches Job Tracking.
-			const derivedNotes = latestDraftNotes(loadId);
-			const notes = ov.has.notes ? ov.values.notes : derivedNotes;
-			// "" on the needsTotal dryRun — never "$0.00", which reads as a real
-			// figure the reviewer might approve.
-			const total = needsTotal ? "" : brokerInvoice.formatMoney(totalAmount);
-			// What the draft bills: the balance due when advance lines print (B20),
-			// else the total. `total` above stays the line haul.
-			const billedTotal = lineSummary ? invoiceLines.formatCents(lineSummary.balanceCents) : total;
 
-			// 7) Render the invoice PDF. Skipped entirely when no total could be
-			//    derived AND none was supplied (dryRun only — see the guard above):
-			//    there is nothing honest to print, and a rendered $0.00 invoice is
-			//    the one artifact this route has always refused to create. Skipped
-			//    too on a dryRun whose advance lines were refused (6a-1).
-			let invoicePdf = null;
-			let invoicePdfBase64 = "";
-			if (!needsTotal && !lineRefused) {
-				const invoiceHtml = brokerInvoice.buildInvoiceHtml({
-					invoiceId,
-					invoiceDate,
-					brokerName: effBrokerName,
-					invoiceTo,
-					orderNumber,
-					poNumber,
-					deliveryDate,
-					invoiceLines: lineSummary,
-					total,
-					notes,
-				});
-				invoicePdf = await renderHtmlToPdf(invoiceHtml);
-				invoicePdfBase64 = Buffer.from(invoicePdf).toString("base64");
-			}
-
-			// 7b) Build the standard invoice email (body + signature) — the same
-			//     content the draft carries. For a Bison load brokerName is
-			//     "Bison Transport", so the subject renders exactly as before.
-			//     One builder for this route and the preview — see
-			//     buildInvoiceSubject() for why it is plain text, never esc()'d.
-			//     The message is the dispatcher's edit when one was sent, else the
-			//     generated one; emailBodyDefault is that generated one, which the
-			//     editor shows until somebody types and the audit judges an edit
-			//     against. The signature is never editable.
-			//     ⚠️ Its Order # is BLANKED exactly as the dryRun's `orderNumber` seed
-			//     is (step 6a), for the same reason: with the refs unreadable,
-			//     orderNumber is our load id, and the message the editor starts from
-			//     must not offer it as Bison's Order #. Only a dryRun reaches here
-			//     with needsOrderNumber set — the approve refused above.
-			const draftSubject = brokerInvoice.buildInvoiceSubject({ brokerName: effBrokerName, orderNumber });
-			const emailFields = {
-				brokerName: effBrokerName,
-				isBison,
-				loadNumber: loadRef,
-				orderNumber: needsOrderNumber ? "" : orderNumber,
-				moveNumber,
-				poNumber,
-			};
-			// B20: the balance in its own paragraph when advance lines print.
-			if (lineSummary) emailFields.balanceLine = invoiceLines.emailBalanceLine(lineSummary);
-			const emailBodyDefault = brokerInvoice.buildInvoiceEmailBodyText(emailFields);
-			const emailBody = ov.has.emailBody ? ov.values.emailBody : emailBodyDefault;
-			const draftHtml = brokerInvoice.buildInvoiceEmailHtml({ ...emailFields, bodyText: emailBody });
-			// Bison's attachment name is left byte-identical; other brokers get
-			// their own name (a broker filing "Bison Invoice ..." would be odd).
-			//
-			// Both halves now go through safeAttachmentName(): orderNumber is
-			// dispatcher-supplied and was never sanitized at all. The broker half
-			// passes fallback "" on purpose — an empty broker name legitimately
-			// yields the bare "Invoice Order #…" form.
-			//
-			// 80, matching INVOICE_ORDER_RE, so the file name carries the Order #
-			// at its full length (up to 80) rather than a silently shorter one. It
-			// is not a verbatim copy: the Windows-reserved characters
-			// \ / : * ? " < > | are still turned into spaces (and runs of spaces
-			// collapsed) by safeAttachmentName().
-			const safeName = safeAttachmentName(effBrokerName, 40, "");
-			const safeOrderNumber = safeAttachmentName(orderNumber, 80);
-			const invoiceFileName = isBison
-				? `Bison Invoice Order #${safeOrderNumber}.pdf`
-				: `${safeName ? safeName + " " : ""}Invoice Order #${safeOrderNumber}.pdf`;
-			// invoicePdf is null only on the needsTotal dryRun, which returns below
-			// and never reads this array.
-			const draftAttachments = invoicePdf
-				? [
-						{ filename: invoiceFileName, content: invoicePdf, contentType: "application/pdf" },
-						// ALL PODs, in page order — see step 3.
-						...podAttachments,
-				  ]
-				: [];
-			if (invoicePdf && rateconBuffer && rateconBuffer.length) {
-				draftAttachments.push({ filename: `${safeOrderNumber}.pdf`, content: rateconBuffer, contentType: "application/pdf" });
-			}
+			// 7)-7b) The invoice PDF, the email and the attachments: render().
+			const rendered = await brokerInvoiceDraft.render(draft, { invoiceId, invoiceDate, emailBody: ov.has.emailBody ? ov.values.emailBody : null });
+			const { invoicePdfBase64, draftSubject, emailBodyDefault, emailBody, draftHtml, safeOrderNumber, invoiceFileName, draftAttachments } = rendered;
 
 			// Dry-run / preview: generate everything but create no draft. Echo
 			// the resolved routing so a reviewer can verify recipient/subject/
@@ -51097,7 +53902,6 @@ app.post(
 			// The common path is confirming the peeked values verbatim, so keying on
 			// presence would mark every draft edited and the distinction would be
 			// worth nothing six months later.
-			const fmtMoney = (n) => brokerInvoice.formatMoney(n || 0);
 			const editDiffs = [
 				["invoiceId", mintedInvoiceId, invoiceId],
 				["invoiceDate", derivedInvoiceDate, invoiceDate],
@@ -51118,98 +53922,19 @@ app.post(
 				["notes", derivedNotes, notes],
 			].filter(([, from, to]) => String(from == null ? "" : from) !== String(to == null ? "" : to));
 			const editedFields = editDiffs.map(([f]) => f);
-			// Names the divergence explicitly, and names the RULE with it — an
-			// auditor reading this row months later must not have to go and check
-			// whether the sheet moved too. It did not, and that is owner decision #2.
-			// The email message is the one field logged WITHOUT its text: only that
-			// it was edited, its length, and — when the n8n fallback wrote the draft
-			// with the generated message instead — that the edit was not applied.
-			// An applied edit's words are in the Gmail draft itself.
-			// B20: notes on the lines' part of the audit line that are only known later
-			// (a line voided while the draft was made, recordDraft(); the balance
-			// sentence the n8n fallback's own email leaves out). editEmailApplied keeps
-			// the n8n path's answer for the message when the line is rebuilt for them.
+			// What record()'s audit line must say the n8n fallback left out: an edited
+			// message it did not apply (editEmailApplied), and B20 notes on the lines'
+			// part (the balance sentence its own email leaves out).
 			const lineAuditNotes = [];
 			let editEmailApplied = true;
-			const describeEdits = (emailApplied) => `${invoiceId} load ${loadId} — ` + editDiffs.map(([f, from, to]) =>
-				f === "total"
-					? `total: sheet ${fmtMoney(sheetTotal)} / ratecon ${fmtMoney(rcTotal)} → invoiced ${fmtMoney(to)} (INVOICE ONLY — Job Tracking Payment unchanged)`
-					: f === "emailBody"
-						? `emailBody: edited (${Array.from(to).length} chars)` + (emailApplied ? "" : ", NOT APPLIED (the fallback service used the generated message)")
-						: f === "lines"
-							// Rebuilt here so the notes sit right after the figures, where
-							// the 1000-character cap below cannot reach them.
-							? invoiceLines.auditDraftDetail(lineSummary, lineAuditNotes)
-							: `${f}: "${from}" → "${to}"`,
-			).join("; ");
-			// Replaced on the n8n path only, before recordDraft() logs it.
-			let editDetail = describeEdits(true);
 
 			// Persist that an official draft was created for this load so the load
-			// modal can show "approved draft → recipient / invoice #". Best-effort —
-			// never fails the draft. Only called on a real (non-dryRun) success.
-			const recordDraft = (via) => {
-				let draftRecorded = false;
-				try {
-					// The draft row and, with B20 advance lines, its printed lines are ONE
-					// write: a line record that fails takes the row with it, so no draft
-					// row ever stands without the audit rows that follow.
-					const lineRecord = db.transaction(() => {
-						const draftRow = db.prepare(
-							"INSERT INTO load_invoice_drafts (load_id, invoice_id, recipient, recipient_source, total, broker_name, order_number, via, created_by, edited, edited_fields, overrides_json, total_source, sheet_total, ratecon_total, invoice_id_minted, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-						).run(
-							loadId, invoiceId, invoiceTo.email, recipientSource, billedTotal, effBrokerName, orderNumber, via,
-							(req.session.user && req.session.user.username) || "",
-							editedFields.length ? 1 : 0,
-							editedFields.join(","),
-							// Without the email message, by the audit line's rule: edited_fields
-							// records that it changed, and the text is not kept here.
-							editedFields.length ? JSON.stringify({ ...ov.values, emailBody: undefined }) : "",
-							totalSource,
-							sheetTotal > 0 ? fmtMoney(sheetTotal) : "",
-							rcTotal > 0 ? fmtMoney(rcTotal) : "",
-							invoiceId === mintedInvoiceId ? "" : mintedInvoiceId,
-							notes,
-						);
-						// B20: the printed lines and the line haul on this row, and each
-						// line still active stamped with the first invoice # that printed it.
-						return lineSummary ? invoiceLines.recordDraftLines(db, { draftId: draftRow.lastInsertRowid, summary: lineSummary, invoiceId }) : null;
-					})();
-					draftRecorded = true;
-					// A line voided after this draft resolved its lines is in the Gmail
-					// draft but carries no invoice #: the answer and the audit line say so.
-					if (lineRecord && lineRecord.voidedIds.length) {
-						for (const id of lineRecord.voidedIds) {
-							draftWarnings.push(`Advance line #${id} was voided while this draft was made; check the Gmail draft.`);
-							lineAuditNotes.push(`line #${id} was voided while this draft was made; check the Gmail draft`);
-						}
-						editDetail = describeEdits(editEmailApplied);
-					}
-					// ⚠️ BYTE-IDENTICAL for the unedited case, deliberately — historical
-					// queries over invoice_draft_created must not change shape. The edit
-					// is a SEPARATE action, per the naming discipline beside logAudit():
-					// "which invoices did somebody hand-correct, and to what?" is then a
-					// one-line query instead of a string scan.
-					logAudit(req, "invoice_draft_created", "load", loadId, `${invoiceId} → ${invoiceTo.email} (${via})`);
-					if (editedFields.length) {
-						logAudit(req, "invoice_draft_edited", "load", loadId, sanitizeEvidenceText(editDetail, 1000));
-					}
-				} catch (e) {
-					console.error("Draft invoice: draft record persist failed:", e.message);
-					// The Gmail draft exists but this app has no record of it (no row, no
-					// stamp, no created/edited audit): the answer says so FIRST, so the
-					// warning stands whatever the audit write below does, then a *_failed
-					// row records the attempt.
-					if (!draftRecorded) {
-						draftWarnings.push(`The Gmail draft was created as invoice #${invoiceId} but LogisX could not record it; check before sending.`);
-						try {
-							logAudit(req, "invoice_draft_record_failed", "load", loadId, `${invoiceId} (${via}): ${sanitizeEvidenceText(e && e.message, 200)}`);
-						} catch (auditErr) {
-							console.error("Draft invoice: the record-failed audit row could not be written:", auditErr.message);
-						}
-					}
-				}
-			};
+			// modal can show "approved draft → recipient / invoice #": record() in
+			// lib/broker-invoice-draft.js. Best-effort — never fails the draft. Only
+			// called on a real (non-dryRun) success.
+			const recordDraft = (via) => brokerInvoiceDraft.record(draft, rendered, {
+				via, actor: req, invoiceId, mintedInvoiceId, editDiffs, emailApplied: editEmailApplied, lineAuditNotes, draftWarnings,
+			});
 
 			const gmailUser = process.env.GMAIL_USER;
 			const gmailPass = REPLICA ? "" : process.env.GMAIL_APP_PASSWORD; // none in a replica: no mail leaves it
@@ -51245,7 +53970,6 @@ app.post(
 				if (editedFields.includes("emailBody")) {
 					draftWarnings.push("Your edited email message was not applied: the draft was created by the fallback service, which uses the generated message.");
 					editEmailApplied = false;
-					editDetail = describeEdits(false);
 				}
 				// B20: for the same reason the balance due sentence of an invoice with
 				// advance lines is not in this path's email. The PDF it attaches prints
@@ -51253,7 +53977,6 @@ app.post(
 				if (lineSummary) {
 					draftWarnings.push("The balance due sentence was not added to the email: the draft was created by the fallback service, which writes its own message. The invoice PDF shows the line haul, the advances and the balance due.");
 					lineAuditNotes.push("email balance sentence NOT APPLIED (the fallback service used its own message)");
-					editDetail = describeEdits(editEmailApplied);
 				}
 				// The EFFECTIVE values, not the extracted ones — the fallback must
 				// mail what the dispatcher reviewed, or the two send paths diverge on
@@ -53160,7 +55883,9 @@ function uploadDocTypeFor(role, requested) {
 // scripts/test-documents-role-gates.js.
 app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driver"), driverWriteLimiter, async (req, res) => {
 	try {
-		const { loadId, rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
+		const { rowIndex, photoData, fileType, fileName: clientFileName } = req.body;
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.body.loadId);
 		const driverName = resolveDriverActor(req, res, req.body.driverName);
 		if (driverName === null) return;
 		const docType = uploadDocTypeFor(req.session.user.role, req.body.docType || req.body.type || "POD");
@@ -53288,12 +56013,17 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 			ocrSource = Buffer.from(photoArray[0].replace(/^data:image\/\w+;base64,/, ""), "base64");
 		}
 
-		// Store metadata in SQLite
+		// Store metadata in SQLite. `driver` is the FILED driver: the Driver's
+		// own session name, or the name the office's load panel sends (the
+		// load's driver; blank on a load with no driver yet, which leaves the row
+		// office-only, see documentFiledUnder()). The uploader is recorded beside
+		// it, office-only.
 		let documentId = null;
 		try {
+			const uploader = req.session.user;
 			documentId = db.prepare(
-				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO documents (load_id, driver, type, file_name, drive_file_id, drive_url, ocr_text, uploaded_by_user_id, uploaded_by_role)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			).run(
 				loadId,
 				driverName || "",
@@ -53302,6 +56032,8 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 				"",
 				driveUrl,
 				"",
+				Number.isInteger(uploader.id) ? uploader.id : null,
+				typeof uploader.role === "string" && uploader.role ? uploader.role : null,
 			).lastInsertRowid;
 		} catch (dbErr) {
 			console.error("SQLite insert error:", dbErr.message);
@@ -53332,6 +56064,12 @@ app.post("/api/documents/upload", requireRole("Super Admin", "Dispatcher", "Driv
 
 		// No `ocrText`: the text does not exist yet (see queueReceiptOcr()), and no
 		// client read the field. It reaches DocumentList via documents.ocr_text.
+		// A document on a load whose Load ID a Dispatcher is served withheld: its
+		// link begins with the stored ID, so the answer leaves it out (WITHHELD LOAD
+		// KEYS; GET /api/documents/:loadId lists it for a Super Admin to open). The
+		// row above already holds the link, and JSON leaves an undefined field out;
+		// the work after the answer (the POD cell, a receipt's OCR) runs either way.
+		if (req.session.user.role === "Dispatcher" && shownLoadId(req, loadId) !== loadId) driveUrl = undefined;
 		res.json({ success: true, driveUrl });
 		console.log(`[upload] 200 sent; deferring POD sheet update row ${rowIndex}`);
 
@@ -54271,9 +57009,12 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 							// Every role but Super Admin: the entry's text (details and the
 							// address parts) with broker contact withheld, the row's own
 							// contact included (BROKER CONTACT BY VALUE).
-							loadsBySpelling[spelling].push(redactEntries
+							const servedEntry = redactEntries
 								? brokerContact.redactContactDeep(entry, brokerContact.ownContact(brokerWithheld.map((h) => [h, obj[h]])))
-								: entry);
+								: entry;
+							// A Dispatcher's key beside a withheld ID (WITHHELD LOAD KEYS), after the redaction.
+							const entryKey = loadKeyFor(req, lid);
+							loadsBySpelling[spelling].push(entryKey ? { ...servedEntry, loadKey: entryKey } : servedEntry);
 						}
 					}
 				}
@@ -54431,7 +57172,11 @@ app.get("/api/locations/latest", requireRole("Super Admin", "Dispatcher"), async
 		if (loadIdWithheldFor(req)) {
 			const index = currentShownLoadIdIndex();
 			for (const loc of locations) {
-				if (loc.loadId) loc.loadId = shownLoadId(req, loc.loadId, { row: sheetRowForLoad(loc.loadId) || null, index });
+				if (!loc.loadId) continue;
+				// A Dispatcher's key beside a withheld ID (WITHHELD LOAD KEYS).
+				const key = loadKeyFor(req, loc.loadId, { index });
+				loc.loadId = shownLoadId(req, loc.loadId, { row: sheetRowForLoad(loc.loadId) || null, index });
+				if (key) loc.loadKey = key;
 			}
 		}
 
@@ -54581,7 +57326,9 @@ app.get("/api/tracking/hos", requireRole("Super Admin", "Dispatcher"), async (re
 // GET /api/load/:loadId — Look up a specific load from Job Tracking sheet
 app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; the answer names it as shown,
+		// with its key (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
 		const sheets = await getSheets();
 		const headerResp = await sheets.spreadsheets.values.get({
 			spreadsheetId: SPREADSHEET_ID,
@@ -54605,11 +57352,11 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 				obj._rowIndex = i + 1;
 				// Every role but Super Admin gets the broker contact columns blank,
 				// as from GET /api/data and /api/dashboard (sanitizeBrokerColumns()).
-				return res.json({ load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [obj])[0] : obj });
+				return res.json({ load: req.session.user.role !== "Super Admin" ? withLoadKeys(req, headers, [obj], sanitizeBrokerColumns(headers, [obj]))[0] : obj });
 			}
 		}
 
-		res.status(404).json({ error: `Load ${loadId} not found` });
+		res.status(404).json({ error: `Load ${loadIdShownFor(req, loadId)} not found` });
 	} catch (error) {
 		console.error("Error fetching load:", error.message);
 		res.status(500).json({ error: error.message });
@@ -54631,7 +57378,10 @@ app.get("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 // naming the door.
 app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { loadId } = req.params;
+		// A Dispatcher's key reads as the stored ID; every reply names it as shown,
+		// with its key (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.params.loadId);
+		const idText = loadIdShownFor(req, loadId);
 		const updates = req.body; // { "Column Name": "value", ... }
 		// Arrays and null are both typeof "object". An array body would turn every
 		// key into a numeric index that matches no header, which is worth refusing
@@ -54739,7 +57489,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (wantedLid && normLid(cell) === wantedLid) normRows.push(i);
 		}
 		if (!exactRows.length) {
-			return res.status(404).json({ error: `Load ${loadId} not found` });
+			return res.status(404).json({ error: `Load ${idText} not found` });
 		}
 		// ⚠️ AMBIGUITY REFUSES, IT DOES NOT GUESS — the same rule, code and reasoning
 		// PUT /api/loads/:loadId/status-override adopted in #223, on the same sheet.
@@ -54754,7 +57504,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		if (candidateRows.length > 1) {
 			const shown = candidateRows.map((i) => i + 1);
 			return res.status(409).json({
-				error: `Load '${loadId}' matches ${candidateRows.length} rows in Job Tracking (rows ${shown.join(", ")}). Every total in this app collapses duplicate load ids to the last row, so writing one of them cannot be shown to change what the app reads. Edit the row directly with PUT /api/data/<rowIndex>, or make the load ids unique.`,
+				error: `Load '${idText}' matches ${candidateRows.length} rows in Job Tracking (rows ${shown.join(", ")}). Every total in this app collapses duplicate load ids to the last row, so writing one of them cannot be shown to change what the app reads. Edit the row directly with PUT /api/data/<rowIndex>, or make the load ids unique.`,
 				code: "AMBIGUOUS_LOAD",
 				rowIndexes: shown,
 			});
@@ -54934,7 +57684,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 			if (!same(fresh, before)) {
 				logAudit(req, "update_sheet_row_blocked", "sheet_row", `${sheetName}!${rowIndex}`, sheetAuditWithCode(auditDetails("blocked", { code: "SHEET_CHANGED" }), "SHEET_CHANGED"));
 				return res.status(409).json({
-					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${loadId}' no longer resolves to the row that was validated. Re-read the load and try again.`,
+					error: `Row ${rowIndex} changed while this edit was being checked — another write, or a deleted row shifting the sheet up, means load '${idText}' no longer resolves to the row that was validated. Re-read the load and try again.`,
 					code: "SHEET_CHANGED",
 				});
 			}
@@ -54973,6 +57723,9 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 
 			logAudit(req, "update_sheet_row", "sheet_row", `${sheetName}!${rowIndex}`, auditDetails("updated"));
 			if (offDutyConfirmed) recordOffDutyConfirmation(req, offDutyConfirmed);
+			// PERSON EDIT HOLD: the dates this save changed are a person's. The record
+			// never fails the save.
+			try { recordPersonCellEdits(req, sheetName, headers, before, after); } catch (e) { console.error("[person-edit-hold] record failed:", e && e.message); }
 			// The 60s Job Tracking cache would otherwise keep serving the old figures.
 			if (guarded) jtCacheInvalidate();
 		}
@@ -54985,7 +57738,7 @@ app.put("/api/load/:loadId", requireRole("Super Admin", "Dispatcher"), async (re
 		result._rowIndex = rowIndex;
 		res.json({
 			success: true,
-			load: req.session.user.role !== "Super Admin" ? sanitizeBrokerColumns(headers, [result])[0] : result,
+			load: req.session.user.role !== "Super Admin" ? withLoadKeys(req, headers, [result], sanitizeBrokerColumns(headers, [result]))[0] : result,
 			...(cellWrites.length ? {} : { unchanged: true }),
 		});
 	} catch (error) {
@@ -55511,7 +58264,9 @@ async function getRoute(from, to, opts = {}, retries = 2) {
 // GET /api/locations/trail — ELD trail for a specific driver/load
 app.get("/api/locations/trail", requireRole("Super Admin", "Dispatcher"), async (req, res) => {
 	try {
-		const { driver, loadId } = req.query;
+		const { driver } = req.query;
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, req.query.loadId);
 		if (!driver) {
 			return res.status(400).json({ error: "driver query param required" });
 		}
@@ -56469,7 +59224,8 @@ const haulLimiter = rateLimit({
 // 401s — the same ordering /api/route documents.
 app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) => {
 	try {
-		const rawId = (req.params.loadId || "").trim();
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const rawId = (loadIdFor(req, req.params.loadId) || "").trim();
 		if (!rawId || !/^[A-Za-z0-9\-_.#]{1,40}$/.test(rawId)) {
 			return res.status(400).json({ error: "Invalid load id" });
 		}
@@ -56535,7 +59291,7 @@ app.get("/api/loads/:loadId/haul", requireAuth, haulLimiter, async (req, res) =>
 			return role !== "Super Admin" && BROKER_CONTACT_VALUE_REDACTION_ENABLED ? brokerContact.redactContactText(s).text : s;
 		};
 		res.json({
-			loadId: rawId,
+			loadId: loadIdShownFor(req, rawId),
 			origin: hasOrigin
 				? { lat: originLat, lng: originLng, address: shownAddress(coords && coords.pickup_address) }
 				: null,
@@ -57227,7 +59983,8 @@ const fuelPlanLimiter = rateLimit({
 app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"), fuelPlanLimiter, async (req, res) => {
 	try {
 		const isDriver = req.session.user.role === "Driver";
-		const loadId = queryStr(req.query.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, queryStr(req.query.loadId));
 		if (!loadId) return res.status(400).json({ ok: false, error: "loadId required" });
 
 		// The load's Job Tracking row. Hoisted out of the dispatcher branch because
@@ -57364,7 +60121,7 @@ app.get("/api/fuel/trip-plan", requireRole("Super Admin", "Dispatcher", "Driver"
 
 		res.json({
 			ok: true,
-			loadId,
+			loadId: loadIdShownFor(req, loadId),
 			unit: (truck && truck.unit) || null,
 			...(isDriver ? {} : { vehicleId: vehicleId || null }),
 			routeSource,
@@ -57615,7 +60372,8 @@ app.get("/api/poi/fuel-stops", requireRole("Super Admin", "Dispatcher", "Driver"
 	try {
 		let oLat = parseFloat(req.query.originLat), oLng = parseFloat(req.query.originLng),
 		    dLat = parseFloat(req.query.destLat), dLng = parseFloat(req.query.destLng);
-		const loadId = queryStr(req.query.loadId);
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = loadIdFor(req, queryStr(req.query.loadId));
 		if (req.session.user.role === "Driver") {
 			if (!loadId) {
 				return res.status(400).json({ ok: false, error: "loadId required", stops: [] });
@@ -58182,7 +60940,8 @@ app.get("/api/geocode/search", geocodeLimiter, async (req, res) => {
 // GET /api/geocode/load/:loadId — get coordinates for a load (SQLite lookup, geocodes on-demand if missing)
 app.get("/api/geocode/load/:loadId", requireAuth, async (req, res) => {
 	try {
-		const loadId = decodeURIComponent(req.params.loadId).trim().toLowerCase().replace(/^#/, "");
+		// A Dispatcher's key reads as the stored ID (WITHHELD LOAD KEYS).
+		const loadId = String(loadIdFor(req, decodeURIComponent(req.params.loadId))).trim().toLowerCase().replace(/^#/, "");
 		// SECURITY: allow-list, not a deny-list for one role.
 		//
 		// This used to read `if (role === "Driver")`, which guarded the role
@@ -61927,11 +64686,21 @@ app.get("/api/investor/expenses", requireRole("Super Admin", "Investor"), async 
 		const expenses = db.prepare(sql).all(...params);
 		// Receipt photos follow the Investor rule (investorReceiptImageIds(), beside
 		// the receipt file guard): a photo it withholds is sent blank, so the list
-		// never links a receipt the guard refuses. A Super Admin preview sees what
-		// the investor sees.
+		// never links a receipt the guard refuses. A PDF receipt it would link (by
+		// its name, or inline) is staff only (lib/receipt-files.js,
+		// PDF_RECEIPT_ACCESS): sent blank with receipt_kind PDF_OFFICE_COPY, shown
+		// as "PDF receipt (office copy)". A Super Admin preview sees what the
+		// investor sees.
 		if (!isSuperAdmin) {
 			const shown = investorReceiptImageIds(expenses.map((e) => e.id));
-			for (const e of expenses) if (!shown.has(Number(e.id))) e.photo_data = "";
+			const pdfOpens = receiptFiles.pdfReceiptOpensFor({ role: "Investor" });
+			for (const e of expenses) {
+				if (!shown.has(Number(e.id))) e.photo_data = "";
+				else if (!pdfOpens && receiptFiles.isPdfReceiptRef(e.photo_data)) {
+					e.photo_data = "";
+					e.receipt_kind = receiptFiles.PDF_OFFICE_COPY;
+				}
+			}
 		}
 		res.json({ expenses });
 	} catch (err) {
@@ -64215,8 +66984,11 @@ function pendingReceiptsInPeriod(period) {
 // yet. The close lists them, like Pending receipts, so they are followed up.
 function personalWaitingInPeriod(period) {
 	if (!personalLedgerPresent()) return [];
+	// With the receipt's week on, a reversed line on no invoice and its reversal
+	// are settled in the books and never wait for one.
 	return db.prepare(`${PERSONAL_ROW_SELECT} LEFT JOIN invoices i ON i.id = ep.invoice_id
 		WHERE ep.voided_at = '' AND ep.cost_period = ? AND (ep.invoice_id IS NULL OR i.id IS NULL OR i.deleted_at != '')
+		${PERSONAL_RECEIPT_WEEK_ENABLED ? `AND ${PERSONAL_COLLECTABLE_SQL}` : ""}
 		ORDER BY ep.id`).all(period).map((r) => ({
 		id: r.id,
 		expense_id: r.expense_id,
@@ -64224,7 +66996,7 @@ function personalWaitingInPeriod(period) {
 		kind: r.kind,
 		week_start: r.week_start,
 		amount_text: personalExpense.formatMoney(r.cents),
-		state: r.needs_correction_since ? "needs_correction" : "pending",
+		state: r.needs_correction_since ? (PERSONAL_RECEIPT_WEEK_ENABLED ? "carried" : "needs_correction") : "pending",
 	}));
 }
 
@@ -65710,7 +68482,9 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 		} catch { finalized = new Set(); }
 		// personal: the receipt's live Personal line (personalSummaryByExpense()) as
 		// this role may see it (personalSummaryForRole()), or null; personalEnabled:
-		// whether new marks are accepted. The receipt's own amount is listed as filed.
+		// whether new marks are accepted; personalReceiptWeek: whether a line takes
+		// its receipt's week (the Mark dialog's text). The receipt's own amount is
+		// listed as filed.
 		const rows = db.prepare(sql).all(...params);
 		const personal = personalSummaryByExpense(rows.map((e) => e.id));
 		const role = req.session.user.role;
@@ -65725,7 +68499,7 @@ app.get("/api/expenses/all", requireRole("Super Admin", "Dispatcher"), (req, res
 				receipt_details: parseReceiptDetails(e.receipt_details), finalized_period: finalized.has(period) ? period : "", personal: personalSummaryForRole(personal[e.id], role),
 			};
 		});
-		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED });
+		res.json({ expenses, personalEnabled: PERSONAL_EXPENSE_DEDUCTIONS_ENABLED, personalReceiptWeek: PERSONAL_RECEIPT_WEEK_ENABLED });
 	} catch (err) {
 		console.error("Error fetching all expenses:", err.message);
 		res.status(500).json({ error: err.message });
@@ -65982,7 +68756,10 @@ app.put("/api/expenses/:id/status", requireRole("Super Admin", "Dispatcher"), (r
 				`status ${expense.status || "Pending"} -> ${status} WITHHELD [EXPENSE_PERSONAL] — the receipt has a live Personal line; nothing was written`,
 				"EXPENSE_PERSONAL");
 			return res.status(409).json({
-				error: "This receipt has a Personal line, so it stays Approved. Undo or reverse the Personal line first.",
+				// With the receipt's week on, a line on an approved invoice is final: no Reverse.
+				error: PERSONAL_RECEIPT_WEEK_ENABLED
+					? "This receipt has a Personal line, so it stays Approved. Undo the Personal line first, while its invoice is not approved."
+					: "This receipt has a Personal line, so it stays Approved. Undo or reverse the Personal line first.",
 				code: "EXPENSE_PERSONAL",
 			});
 		}
@@ -69432,7 +72209,12 @@ io.on("connection", (socket) => {
 		// driver room when it is their driver name, the user room when it is
 		// their username (the driver app sends the username when the account
 		// has no driver name). Anything else joins nothing more.
-		if (requested && requested === driverNameLower) socket.join(driverRoom(driverNameLower));
+		// A driver room is a Driver's (joined above) or a Super Admin's, previewing
+		// the driver app (/driver) under his own driver name; never a Dispatcher's
+		// or an Investor's, whatever driver name the account carries: a driver
+		// room's notices name his loads as stored (#549), which those roles are
+		// served withheld.
+		if (role === "Super Admin" && requested && requested === driverNameLower) socket.join(driverRoom(driverNameLower));
 		if (requested && requested === usernameLower) socket.join(userRoom(usernameLower));
 	}));
 });
@@ -69523,7 +72305,7 @@ const PORT = process.env.PORT || 3000;
 // an environment that forgets to set it gets the safe behaviour, not the
 // exposed one.
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
-server.listen(PORT, BIND_HOST, async () => {
+if (!IMPORT_ONLY) server.listen(PORT, BIND_HOST, async () => {
 	console.log(`Server running at http://localhost:${PORT}`);
 	if (REPLICA) REPLICA.listening(server.address());
 	// Tripwire for the umask set at the top of this file — the create-time half
@@ -69540,6 +72322,15 @@ server.listen(PORT, BIND_HOST, async () => {
 			console.error(`WARNING: umask is ${effective.toString(8).padStart(4, "0")}, expected ${BOOT_UMASK.toString(8).padStart(4, "0")} — new uploads may be world-readable`);
 		}
 	} catch {}
+	// The PDF receipt child's self-test, at every start whatever the flags: one
+	// line (uid, gid, groups, whether the settings file and the database are
+	// readable: yes/no only). Until it passes, every PDF receipt keeps its note.
+	// Creating the service throws on a cache folder it refuses (under uploads/).
+	try {
+		receiptPdfService().selfTest();
+	} catch {
+		console.warn("[receipt-pdfs] self-test not started; PDF receipt pages off");
+	}
 	console.log(`API endpoints:`);
 	console.log(`  GET    /api/tabs           — List sheet tabs`);
 	console.log(`  GET    /api/data           — Read all rows`);
@@ -69652,5 +72443,8 @@ async function gracefulShutdown(signal) {
 	try { await shutdownBrowser(); } catch { /* ignore */ }
 	process.exit(0);
 }
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+if (!IMPORT_ONLY) process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+if (!IMPORT_ONLY) process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// What an import (LOGISX_IMPORT_ONLY=1) reads; running the file ignores it.
+module.exports = { app, server, io };

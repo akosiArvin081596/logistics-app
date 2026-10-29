@@ -27,6 +27,20 @@
  *      Personal state and personalEnabled; the investor's receipt list hides a
  *      fully personal receipt and shows a partial one at the company's share;
  *      the driver payload reads the same summary (personalSummaryByExpense)
+ *   §10 every Personal route is rate limited, after its gate
+ * The receipt's week (PERSONAL_RECEIPT_WEEK_ENABLED, on only when exactly "true"):
+ *   §11 W1 a receipt dated Oct 7, marked Thu Oct 15, is keyed to the week of
+ *      Oct 3, not the week it is marked in
+ *   §12 pins: no date, a date after today, or the flag not exactly "true":
+ *      the week it is marked in
+ *   §13 W10 once its invoice is approved the line is final: Undo 409 without
+ *      "Use Reverse", Reverse 409 PERSONAL_LOCKED, the corrections route 410,
+ *      the status refusal offers no reversal; pin: Undo of a line carried off
+ *      its approved week voids it
+ *   §14 W17 the mark's audit row says why the week is the one it is marked in:
+ *      no receipt date, or a date after today
+ *   §15 W18 GET /api/expenses/all carries personalReceiptWeek (the flag), for
+ *      the Mark dialog's text
  *
  * Pure: no server, no app.db, no network.
  * Run: node scripts/test-personal-expense-routes.js    # exits 1 on failure
@@ -38,7 +52,14 @@ const { buildPersonalWorld, makeChecker, SRC } = require("./lib/personal-world")
 const { check, section, finish } = makeChecker();
 
 const ON = { PERSONAL_EXPENSE_DEDUCTIONS_ENABLED: "true" };
+const WEEK_ON = { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "true" };
 const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
+// A receipt of the runner's own, beyond the world's eleven (made up, Approved).
+function addReceipt(w, { id, driver = "Test Driver A", type = "Food", amount = 45.5, date, vendor = "EXAMPLE DINER #3", truck = "T-1", owner = 7 }) {
+	const day = date || "2026-10-15";
+	w.db.prepare(`INSERT INTO expenses (id, timestamp, driver, type, amount, date, status, vendor, truck_unit, owner_id, created_at, description)
+		VALUES (?, ?, ?, ?, ?, ?, 'Approved', ?, ?, ?, ?, '')`).run(id, `${day}T15:00:00.000Z`, driver, type, amount, date, vendor, truck, owner, `${day} 15:00:00`);
+}
 
 (async () => {
 	section("§1 roles: Super Admin only, on every route");
@@ -262,6 +283,108 @@ const world = (env = ON, opts = {}) => buildPersonalWorld({ env, ...opts });
 		const cap = (n) => Number((limiter(n).match(/max: (\d+),/) || [])[1]);
 		check("…the waiting list (re-read on every expenses or invoices change) has a read-sized cap, above the writes'",
 			cap("personalListLimiter") > cap("personalRouteLimiter"), true);
+	}
+
+	section("§11 W1 the receipt's week: dated Oct 7, marked Thu Oct 15");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 20, date: "2026-10-07" });
+		const r = await w.call("POST", "/api/expenses/20/personal", { body: {} });
+		const row = w.lines()[0] || {};
+		check("201; the line is keyed to the week of 2026-10-03 (the receipt's), not 2026-10-10 (the mark's)",
+			[r.status, row.week_start, r.body && r.body.personal && r.body.personal.week_start], [201, "2026-10-03", "2026-10-03"]);
+		const audit = w.audits("mark_expense_personal")[0];
+		check("…and the mark's audit row names that week", !!audit && /week 2026-10-03/.test(audit.details), true);
+		w.cleanup();
+	}
+
+	section("§12 pins: the week it is marked in, for no date, a date after today, or the flag not exactly \"true\"");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 21, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "" });
+		addReceipt(w, { id: 22, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-11-20" });
+		const dateless = await w.call("POST", "/api/expenses/21/personal", { body: {} });
+		const future = await w.call("POST", "/api/expenses/22/personal", { body: {} });
+		check("a receipt with no date: 201, the week of 2026-10-10", [dateless.status, (w.lines("expense_id = 21")[0] || {}).week_start], [201, "2026-10-10"]);
+		check("one dated 2026-11-20: 201, this week, never a future one", [future.status, (w.lines("expense_id = 22")[0] || {}).week_start], [201, "2026-10-10"]);
+		w.cleanup();
+	}
+	for (const [label, env] of [["unset", ON], ["'1'", { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "1" }], ["'TRUE'", { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "TRUE" }]]) {
+		const w = world(env);
+		addReceipt(w, { id: 20, date: "2026-10-07" });
+		await w.call("POST", "/api/expenses/20/personal", { body: {} });
+		check(`PERSONAL_RECEIPT_WEEK_ENABLED ${label}: the Oct 7 receipt marked Thu Oct 15 keeps the week of 2026-10-10`, (w.lines()[0] || {}).week_start, "2026-10-10");
+		w.cleanup();
+	}
+
+	section("§13 W10 once its invoice is approved the line is final");
+	{
+		const w = world(WEEK_ON);
+		await w.call("POST", "/api/expenses/1/personal", { body: {} });
+		const g = await w.generate("Test Driver A");
+		const invoiceId = g.body.invoice.id;
+		const number = g.body.invoice.invoice_number;
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = 't', approved_by = 'super_admin' WHERE id = ?").run(invoiceId);
+		const listed = ((await w.call("GET", "/api/expenses/all")).body.expenses || []).find((e) => e.id === 1) || {};
+		const p = listed.personal || {};
+		check("Super Admin's summary: on the approved invoice, final, neither Undo nor Reverse",
+			[p.state, p.invoice_number, p.final, p.can_undo, p.can_reverse], ["invoiced", number, true, false, false]);
+		// Each refusal below writes nothing, so they run in an order today's code
+		// cannot disturb either (its Reverse writes, so it goes last).
+		const corr = await w.call("POST", "/api/invoices/personal-corrections", { body: { driver: "Test Driver A", weekStart: "2026-10-10" } });
+		check("the corrections route: 410 PERSONAL_CORRECTIONS_RETIRED",
+			[corr.status, corr.body && corr.body.code, corr.body && corr.body.error],
+			[410, "PERSONAL_CORRECTIONS_RETIRED", "Correction invoices for Personal lines are retired: a line waits for the driver's next weekly invoice."]);
+		const undo = await w.call("DELETE", "/api/expenses/1/personal", { body: {} });
+		check("Undo: 409 PERSONAL_INVOICE_APPROVED, locked, with no \"Use Reverse\"",
+			[undo.status, undo.body && undo.body.code, undo.body && undo.body.error],
+			[409, "PERSONAL_INVOICE_APPROVED", `${number} is Approved, so this Personal line stays on it. Approved invoices are locked.`]);
+		const status = await w.call("PUT", "/api/expenses/1/status", { body: { status: "Rejected" } });
+		check("the receipt's status refusal offers no reversal",
+			[status.status, status.body && status.body.code, /revers/i.test((status.body && status.body.error) || "")], [409, "EXPENSE_PERSONAL", false]);
+		const rev = await w.call("POST", "/api/expenses/1/personal/reverse", { body: { reason: "not personal after all" } });
+		check("Reverse: 409 PERSONAL_LOCKED",
+			[rev.status, rev.body && rev.body.code, rev.body && rev.body.error], [409, "PERSONAL_LOCKED", "The invoice is approved, and approved invoices are locked."]);
+		check("…nothing written: the one line on the approved invoice, no reversal, no correction invoice",
+			[w.lines().map((l) => [l.kind, l.invoice_id === invoiceId, l.reversed_by_id]), w.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE is_correction = 1").get().n],
+			[[["deduct", true, null]], 0]);
+		w.cleanup();
+	}
+	{
+		const w = world(WEEK_ON);
+		const g = await w.generate("Test Driver A");
+		w.db.prepare("UPDATE invoices SET status = 'Approved', approved_at = 't', approved_by = 'super_admin' WHERE id = ?").run(g.body.invoice.id);
+		await w.call("POST", "/api/expenses/1/personal", { body: {} });
+		const undo = await w.call("DELETE", "/api/expenses/1/personal", { body: { reason: "Marked by mistake" } });
+		check("pin: a line marked on an approved week, still on no approved invoice: Undo 200, voided, on no invoice",
+			[undo.status, w.lines().map((l) => [!!l.voided_at, l.invoice_id])], [200, [[true, null]]]);
+		w.cleanup();
+	}
+
+	section("§14 W17 the mark's audit row says why it keeps the week it is marked in");
+	{
+		const w = world(WEEK_ON);
+		addReceipt(w, { id: 21, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "" });
+		addReceipt(w, { id: 22, type: "Fuel", vendor: "EXAMPLE FUEL #12", date: "2026-11-20" });
+		await w.call("POST", "/api/expenses/21/personal", { body: {} });
+		await w.call("POST", "/api/expenses/22/personal", { body: {} });
+		const details = (id) => (w.audits("mark_expense_personal").find((a) => a.entity_id === String(id)) || {}).details || "";
+		check("no receipt date: \"week 2026-10-10 (no receipt date: the week it was marked in)\"",
+			/week 2026-10-10 \(no receipt date: the week it was marked in\)/.test(details(21)), true);
+		check("dated 2026-11-20: \"week 2026-10-10 (dated after today: this week)\"",
+			/week 2026-10-10 \(dated after today: this week\)/.test(details(22)), true);
+		w.cleanup();
+	}
+
+	section("§15 W18 personalReceiptWeek follows the flag, for the Mark dialog");
+	{
+		const got = [];
+		for (const env of [WEEK_ON, ON, { ...ON, PERSONAL_RECEIPT_WEEK_ENABLED: "1" }]) {
+			const w = world(env);
+			got.push((await w.call("GET", "/api/expenses/all")).body.personalReceiptWeek);
+			w.cleanup();
+		}
+		check("GET /api/expenses/all: personalReceiptWeek true only when the flag is exactly \"true\"", got, [true, false, false]);
 	}
 
 	finish();

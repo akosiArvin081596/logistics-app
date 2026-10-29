@@ -169,7 +169,7 @@ const nextLabel = computed(() => {
 .wizard-panel {
   position: fixed;
   top: 24px;
-  right: 24px;
+  right: max(24px, env(safe-area-inset-right, 0px));
   width: 380px;
   max-width: calc(100vw - 48px);
   max-height: min(560px, calc(100vh - 140px));
@@ -441,13 +441,15 @@ const nextLabel = computed(() => {
   .wizard-panel {
     top: auto;
     right: 0;
-    bottom: calc(var(--wizard-kb-offset, 0px) + env(safe-area-inset-bottom, 0px));
+    /* A bottom sheet: it sits on the screen's bottom edge and its footer (or,
+       minimized, the strip below the pill) covers the home bar. The inset is
+       counted once, in the footer, not again here and on the panel. */
+    bottom: var(--wizard-kb-offset, 0px);
     left: 0;
     width: 100%;
     max-width: none;
     max-height: 48vh;
     border-radius: 18px 18px 0 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
     transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
                 bottom 0.25s ease,
                 opacity 0.25s ease;
@@ -487,7 +489,7 @@ const nextLabel = computed(() => {
     bottom: auto;
     width: 100%;
     height: 56px;
-    padding: 0 18px calc(0px + env(safe-area-inset-bottom, 0px));
+    padding: 0 18px;
     display: flex;
     align-items: center;
     justify-content: center;

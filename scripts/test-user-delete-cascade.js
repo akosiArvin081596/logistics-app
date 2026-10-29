@@ -41,8 +41,7 @@ const path = require("path");
 const crypto = require("crypto");
 const Database = require("better-sqlite3");
 
-const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+const SRC = require("./lib/server-source").serverSource();
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -109,6 +108,9 @@ check("cascade extraction found the three FK-bearing children", [
 // (Its cases are scripts/test-driver-rename-clash.js §4d's subject.)
 const TRUCK_LOOKUP_SRC = ["normalizeDriverName", "isBuiltInPropertyName", "findDriverNameClashes", "driverNameHeldByOtherAccount", "findTruckForDriver", "findTruckForDriverAccount"]
 	.map(extract).join("\n");
+// The staff desks (decision 30): an account named like one never removes the
+// desk's messages or notifications.
+const DESK_SRC = [extractConst("const CHAT_DESK_NAMES = ", ";\n"), extract("chatDeskKey")].join("\n");
 // The delete guard's invoice blocker matches through the rename cascade's
 // `invoices` leg (the driver's other spellings, with the other-account rule), so
 // every lift of userDeleteLockBlockers() below carries the real helpers.
@@ -121,10 +123,10 @@ const RENAME_LEG_SRC = [
 ].join("\n");
 function runCascade(db, user, name, id, body = CASCADE) {
 	const removed = {}, detached = {};
-	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount };`)(db);
-	const fn = new Function("db", "user", "name", "id", "removed", "detached", "normalizeDriverName", "findTruckForDriverAccount", body);
+	const helpers = new Function("db", `${TRUCK_LOOKUP_SRC}\n${DESK_SRC}\nreturn { normalizeDriverName, findTruckForDriverAccount, chatDeskKey };`)(db);
+	const fn = new Function("db", "user", "name", "id", "removed", "detached", "normalizeDriverName", "findTruckForDriverAccount", "chatDeskKey", body);
 	let threw = null;
-	try { db.transaction(() => fn(db, user, name, id, removed, detached, helpers.normalizeDriverName, helpers.findTruckForDriverAccount))(); }
+	try { db.transaction(() => fn(db, user, name, id, removed, detached, helpers.normalizeDriverName, helpers.findTruckForDriverAccount, helpers.chatDeskKey))(); }
 	catch (err) { threw = err.message; }
 	return { removed, detached, threw };
 }
@@ -296,6 +298,30 @@ function seedOnboardedDriver(db) {
 		[removed.onboarding_documents, removed.driver_onboarding, removed.driver_payment_info], [0, 0, 0]);
 	db.close();
 }
+{
+	// An account named like a staff desk (made before the names were reserved):
+	// its delete keeps every conversation with the desk and the desk's bell.
+	for (const desk of ["admin", "Dispatch"]) {
+		const db = scratch();
+		db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (11,?,'','Investor')").run(desk);
+		const add = db.prepare('INSERT INTO messages ("from", "to") VALUES (?, ?)');
+		add.run("inv_t", desk); add.run(desk, "inv_t"); add.run("Tamsin Vale", desk);
+		db.prepare("INSERT INTO notifications (driver_name) VALUES (?)").run(desk.toLowerCase());
+		const { removed, threw } = runCascade(db, { id: 11, username: desk, role: "Investor" }, desk.toLowerCase(), 11);
+		check(`desk-named account "${desk}": the delete completes`, threw, null);
+		check(`desk-named account "${desk}": no message or notification removed`, [removed.messages, removed.notifications], [0, 0]);
+		check(`desk-named account "${desk}": every message with the desk and its bell stay`,
+			[db.prepare("SELECT COUNT(*) AS c FROM messages").get().c, db.prepare("SELECT COUNT(*) AS c FROM notifications").get().c], [3, 1]);
+		db.close();
+	}
+	// ...while any other account's messages still leave with it.
+	const db = scratch();
+	db.prepare("INSERT INTO users (id, username, driver_name, role) VALUES (12,'inv_t','','Investor')").run();
+	db.prepare('INSERT INTO messages ("from", "to") VALUES (?, ?)').run("inv_t", "admin");
+	const { removed } = runCascade(db, { id: 12, username: "inv_t", role: "Investor" }, "inv_t", 12);
+	check("an ordinary account's messages still leave with it", removed.messages, 1);
+	db.close();
+}
 
 // ---------------------------------------------------------------------------
 // THE SIGNED EVIDENCE — archived, and the original NOT unlinked.
@@ -445,6 +471,7 @@ function seedOnboardedDriver(db) {
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
 			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
+			CREATE TABLE documents (id INTEGER PRIMARY KEY, driver TEXT, type TEXT DEFAULT '', deleted_at TEXT DEFAULT NULL);
 		`);
 		return db;
 	};
@@ -645,6 +672,7 @@ check("refusal extraction picked up the 409 and its code selection", [
 			CREATE TABLE trucks (id INTEGER PRIMARY KEY, unit_number TEXT, owner_id INTEGER, in_service_date TEXT DEFAULT '', retired_at TEXT DEFAULT '', created_at TEXT DEFAULT '');
 			CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_number TEXT, driver TEXT, week_start TEXT, week_end TEXT, paid_at TEXT DEFAULT '', deleted_at TEXT DEFAULT '');
 			CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, driver_name TEXT DEFAULT '', role TEXT);
+			CREATE TABLE documents (id INTEGER PRIMARY KEY, driver TEXT, type TEXT DEFAULT '', deleted_at TEXT DEFAULT NULL);
 		`);
 		return db;
 	};
@@ -934,6 +962,50 @@ check("refusal extraction picked up the 409 and its code selection", [
 		handler.includes("orphans.push(") && handler.includes("missingCount"), true);
 	check("orphan scan: writes no audit row, so refuseCrossSite is not yet earned — and if that changes, the guard must land with it",
 		!/\blogAudit\(/.test(handler) || mount.includes("refuseCrossSite"), true);
+}
+
+// ---------------------------------------------------------------------------
+// A ROLLED-BACK DELETE IS AUDITED. When the cascade throws, the transaction
+// rolls back and the route answers 500 DELETE_ROLLED_BACK; it also records one
+// refusal row under the route's own descriptor (delete_user_blocked), with a
+// fixed tail and none of the error's text. The catch block is lifted verbatim
+// and run with a stand-in recorder; the answer itself is unchanged.
+// ---------------------------------------------------------------------------
+{
+	const marker = `console.error("delete user cascade failed, rolled back:", err.message);`;
+	const hits = SRC.split(marker).length - 1;
+	check("rolled-back delete: the catch's log line is unique", hits, 1);
+	const at = SRC.indexOf(marker);
+	const head = "} catch (err) {\n";
+	const open = SRC.lastIndexOf(head, at);
+	const end = SRC.indexOf("\n\t}\n", at);
+	const body = hits === 1 && open >= 0 && end > at ? SRC.slice(open + head.length, end) : "";
+	check("rolled-back delete: the catch block was located", body.includes(`code: "DELETE_ROLLED_BACK"`), true);
+	if (body) {
+		const recorded = [];
+		const logged = [];
+		const out = {};
+		const res = { status(c) { out.status = c; return this; }, json(b) { out.body = b; return this; } };
+		const req = { session: { user: { id: 1, username: "super_admin", role: "Super Admin" } } };
+		const userDelAudit = { action: "delete_user_blocked", entity: "user", entityId: "7", subject: "delete made_up_user (role Driver)" };
+		const run = new Function("err", "req", "res", "userDelAudit", "recordPeriodRefusal", "console", body);
+		run(new Error("FOREIGN KEY constraint failed"), req, res, userDelAudit,
+			(...args) => recorded.push(args), { error: (...a) => logged.push(a.join(" ")) });
+		check("rolled-back delete: still answers 500 DELETE_ROLLED_BACK", [out.status, out.body && out.body.code], [500, "DELETE_ROLLED_BACK"]);
+		check("rolled-back delete: one refusal recorded", recorded.length, 1);
+		const [audit, code, periods] = recorded[0] || [];
+		check("rolled-back delete: ...under the route's descriptor, its actor and DELETE_ROLLED_BACK",
+			audit ? [audit.req === req, audit.action, audit.entity, audit.entityId, code, periods] : null,
+			[true, "delete_user_blocked", "user", "7", "DELETE_ROLLED_BACK", []]);
+		check("rolled-back delete: ...with the fixed tail", audit && audit.tail, "nothing was written — rolled back");
+		check("rolled-back delete: ...and none of the error's text in the row",
+			JSON.stringify(recorded).includes("FOREIGN KEY"), false);
+		check("rolled-back delete: the error still goes to the server log", logged.length === 1 && logged[0].includes("FOREIGN KEY"), true);
+		// The answer names no database text either: error and code only, as the
+		// truck delete's rollback answers.
+		check("rolled-back delete: the 500 body is error and code only", Object.keys(out.body || {}).sort(), ["code", "error"]);
+		check("rolled-back delete: ...with none of the error's text", JSON.stringify(out.body || {}).includes("FOREIGN KEY"), false);
+	}
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

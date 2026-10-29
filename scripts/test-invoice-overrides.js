@@ -51,7 +51,10 @@ const fs = require("fs");
 const path = require("path");
 
 const SERVER = path.join(__dirname, "..", "server.js");
-const SRC = fs.readFileSync(SERVER, "utf8");
+// The draft route's steps live in lib/broker-invoice-draft.js: read with
+// server.js as one text, and inlined into the route's (extractRouteByLines()).
+const draftLift = require(path.join(__dirname, "lib", "broker-invoice-draft-lift.js"));
+const SRC = draftLift.withEngine(fs.readFileSync(SERVER, "utf8"), path.join(__dirname, ".."));
 const brokerInvoice = require(path.join(__dirname, "..", "lib", "broker-invoice.js"));
 
 // ---------------------------------------------------------------- extraction
@@ -101,7 +104,9 @@ function extractRouteByLines(src, needle) {
 	let e = s;
 	while (e < lines.length && lines[e] !== ");") e++;
 	if (e >= lines.length) throw new Error(`unterminated route registration for ${needle}`);
-	return { text: lines.slice(s, e + 1).join("\n"), startLine: s + 1, endLine: e + 1 };
+	const text = lines.slice(s, e + 1).join("\n");
+	// The draft route's text includes the engine steps it calls, where it calls them.
+	return { text: needle === APPROVE_NEEDLE ? draftLift.inlineSteps(text, draftLift.engineOf(src)) : text, startLine: s + 1, endLine: e + 1 };
 }
 
 // Is `needle`'s occurrence inside a `finally { … }` block? Brace-matched, not

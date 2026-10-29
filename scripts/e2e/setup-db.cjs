@@ -3,13 +3,22 @@
 //
 //   node scripts/e2e/setup-db.cjs <dest.db> [--force]
 //
-// <dest.db> must be inside the work dir (E2E_WORK_DIR, default $TMPDIR/logisx-e2e):
-// the copy is the source database, unsanitized, PII and all.
+// <dest.db> must be inside the work dir (E2E_WORK_DIR, default $TMPDIR/logisx-e2e).
 //
+// MADE-UP DATA BY DEFAULT. With no SOURCE_DB, no existing database is opened:
+// seed-made-up.cjs builds <dest.db> from the app's own schema (server.js booted
+// once on an empty file by boot-server.sh) and makes the five logins and the
+// records the harness needs through the app's own routes, all invented (QA-/qa-e2e-
+// names, example.test mail, images drawn at run time). See seed-made-up.cjs.
+//
+// REAL DATA ONLY ON PURPOSE. SOURCE_DB=<path> copies that database instead, and is
+// accepted only under ~/LogisX-replica/ (where real data lives). A SOURCE_DB inside
+// any checkout or worktree is refused. The copy is that database, PII and all:
 // 1. Takes a PRIVATE copy of SOURCE_DB with SQLite's online backup API, the
 //    source opened READ-ONLY (never cp a WAL database).
 // 2. Resets the super_admin password on the COPY via the repo's own script
-//    (scripts/reset-super-admin-password.js, which also clears the copy's sessions).
+//    (scripts/reset-super-admin-password.js, which also ends super_admin's
+//    sessions on the copy and writes its system audit row there).
 // 3. Picks a Driver user whose driver_name matches (case-insensitive) the
 //    assigned_driver of exactly one truck with an image photo, who is fully
 //    onboarded (so the Kit tab renders) and whose application has an IMAGE
@@ -19,19 +28,24 @@
 //    the maintenance notice section), a random password the same way (on the COPY).
 // 5. Gives the lowest-id Dispatcher a random password the same way (on the COPY);
 //    the E2E's sign-out section (ONLY=signout) signs in as them.
-// 6. Stores each password in the macOS Keychain (keychain.cjs: service
-//    logisx-e2e-local, one account per login) and writes the names and ids to
-//    the logins file (chmod 600, no passwords). Passwords are never printed or
-//    written to a file. The Keychain's passwords (and the logins file's driver,
-//    when they still qualify) are reused, so one set of logins serves every
-//    copy. An old creds.json, which held the passwords themselves, is deleted.
+//
+// Either way, each password is stored in the macOS Keychain (keychain.cjs: service
+// logisx-e2e-local, one account per login) and the names and ids go to the logins
+// file (chmod 600, no passwords; "seed" says "made-up" or "copy"). Passwords are
+// never printed or written to a file. The Keychain's passwords (and, for a copy,
+// the logins file's driver, when they still qualify) are reused, so one set of
+// logins serves every database. An old creds.json, which held the passwords
+// themselves, is deleted.
 //
 // Env:
-//   SOURCE_DB     source database, opened read-only (default: <main checkout>/app.db)
+//   SOURCE_DB     a database under ~/LogisX-replica/ to copy, opened read-only.
+//                 Unset or empty (the default): the made-up database
 //   LOGINS_FILE   where to write the logins (default: <work dir>/logins.json)
 //   E2E_KEYCHAIN_SERVICE  the Keychain service (default: logisx-e2e-local)
 //   E2E_WORK_DIR  the work dir (default: $TMPDIR/logisx-e2e)
 //   APP_DIR       checkout whose node_modules + scripts/ are used (see paths.cjs)
+//   E2E_SEED_CHECKOUT  the checkout whose server.js builds the made-up schema
+//                 (default: this one; for the harness's tests)
 "use strict";
 const path = require("path");
 const fs = require("fs");
@@ -39,6 +53,9 @@ const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 const paths = require("./paths.cjs");
 const keychain = require("./keychain.cjs");
+const { seedMadeUp, ACCOUNTS } = require("./seed-made-up.cjs");
+// SOURCE_DB judged by the shared rule: null means the made-up database.
+const { sourceDb } = require("./source-db.cjs");
 
 function fail(msg, code = 2) {
 	console.error(`setup-db: ${msg}`);
@@ -55,7 +72,7 @@ let WORK, destAbs, SRC_DB, Database, bcrypt;
 try {
 	WORK = paths.workDir();
 	destAbs = paths.workFile(dest, { mustExist: false });
-	SRC_DB = fs.realpathSync(process.env.SOURCE_DB || path.join(paths.mainCheckout(), "app.db"));
+	SRC_DB = sourceDb();
 	Database = paths.appRequire("better-sqlite3");
 	bcrypt = paths.appRequire("bcryptjs");
 	keychain.requireSecurity();
@@ -66,6 +83,7 @@ const APP_DIR = paths.appDir();
 const LOGINS_FILE = keychain.loginsFile(WORK);
 if (SRC_DB === destAbs) fail("refusing: the destination is the source database");
 console.log(`work dir: ${WORK}`);
+console.log(SRC_DB ? `source: a copy of SOURCE_DB ${SRC_DB} (real data, opened read-only)` : "source: none; a made-up database (SOURCE_DB unset)");
 {
 	const legacy = keychain.removeLegacyCreds(WORK);
 	for (const f of legacy.removed) console.log(`deleted ${f} (it held passwords; they live in the Keychain now)`);
@@ -90,7 +108,9 @@ const reuse = (key, userId) => {
 };
 
 (async () => {
-	for (const suffix of ["", "-wal", "-shm"]) {
+	// <db>.sheets.json is the e2e server's copy of the made-up Sheets fixture (boot-server.sh):
+	// a new database starts from a fresh copy.
+	for (const suffix of ["", "-wal", "-shm", ".sheets.json"]) {
 		const f = destAbs + suffix;
 		if (fs.existsSync(f)) {
 			if (!force) fail(`refusing: ${f} exists (pass --force to replace it)`);
@@ -98,6 +118,45 @@ const reuse = (key, userId) => {
 		}
 	}
 
+	let withPassword;
+	if (SRC_DB) {
+		withPassword = await copySource();
+	} else {
+		// The made-up logins keep their Keychain passwords while the logins file names
+		// the same made-up user.
+		const passwords = {};
+		for (const key of keychain.ROLES) {
+			passwords[key] = (previous?.[key]?.username === ACCOUNTS[key].username && reuse(key)) || randomPassword();
+		}
+		const entries = await seedMadeUp({ destAbs, passwords, Database, log: (line) => console.log(line) });
+		withPassword = Object.fromEntries(keychain.ROLES.map((key) => [key, [entries[key], passwords[key]]]));
+		console.log(`made-up logins: ${keychain.ROLES.map((key) => `${key} user id ${entries[key].userId}`).join(", ")}; ` +
+			`driver's truck id ${entries.driver.truckId}, application id ${entries.driver.applicationId}`);
+	}
+
+	// Passwords to the Keychain (each read back), then the names and ids to the
+	// logins file, so the file never names a login the Keychain cannot answer.
+	const logins = {
+		createdAt: new Date().toISOString(),
+		seed: SRC_DB ? "copy" : "made-up",
+		dbs: [...new Set([...(previous?.dbs || []), destAbs])],
+	};
+	for (const [key, [entry, pw]] of Object.entries(withPassword)) {
+		keychain.storePassword(keychain.itemFor(key, null), pw);
+		logins[key] = entry;
+	}
+	fs.writeFileSync(LOGINS_FILE, JSON.stringify(logins, null, 2) + "\n", { mode: 0o600 });
+	fs.chmodSync(LOGINS_FILE, 0o600);
+	console.log(`passwords stored in the Keychain (service ${keychain.DEFAULT_SERVICE()}, ${Object.keys(withPassword).join(", ")})`);
+	console.log(`logins written (0600, no passwords): ${LOGINS_FILE}`);
+})().catch((err) => {
+	console.error("setup-db: setup failed:", err.message);
+	process.exit(1);
+});
+
+// The copy of SOURCE_DB, with the five logins set on it. Returns the logins'
+// entries with their passwords, { key: [entry, password] }.
+async function copySource() {
 	// ---- 1. backup, source read-only ----
 	const src = new Database(SRC_DB, { readonly: true, fileMustExist: true });
 	await src.backup(destAbs);
@@ -200,32 +259,15 @@ const reuse = (key, userId) => {
 	}
 	db.close();
 
-	// Passwords to the Keychain (each read back), then the names and ids to the
-	// logins file, so the file never names a login the Keychain cannot answer.
-	const withPassword = {
+	console.log(`driver chosen: user id ${pick.user_id}, truck id ${pick.truck_id}, application id ${pick.application_id}`);
+	if (investor) console.log(`investor chosen: user id ${investor.userId} (lowest-id Investor)`);
+	if (investor2) console.log(`investor2 chosen: user id ${investor2.userId} (next-lowest-id Investor)`);
+	if (dispatcher) console.log(`dispatcher chosen: user id ${dispatcher.userId} (lowest-id Dispatcher)`);
+	return {
 		superAdmin: [{ username: "super_admin", userId: sa ? sa.id : null }, superPassword],
 		driver: [{ username: pick.username, userId: pick.user_id, truckId: pick.truck_id, applicationId: pick.application_id }, driverPassword],
 		...(investor ? { investor: [{ username: investor.username, userId: investor.userId }, investor.password] } : {}),
 		...(investor2 ? { investor2: [{ username: investor2.username, userId: investor2.userId }, investor2.password] } : {}),
 		...(dispatcher ? { dispatcher: [{ username: dispatcher.username, userId: dispatcher.userId }, dispatcher.password] } : {}),
 	};
-	const logins = {
-		createdAt: new Date().toISOString(),
-		dbs: [...new Set([...(previous?.dbs || []), destAbs])],
-	};
-	for (const [key, [entry, pw]] of Object.entries(withPassword)) {
-		keychain.storePassword(keychain.itemFor(key, null), pw);
-		logins[key] = entry;
-	}
-	fs.writeFileSync(LOGINS_FILE, JSON.stringify(logins, null, 2) + "\n", { mode: 0o600 });
-	fs.chmodSync(LOGINS_FILE, 0o600);
-	console.log(`driver chosen: user id ${pick.user_id}, truck id ${pick.truck_id}, application id ${pick.application_id}`);
-	if (investor) console.log(`investor chosen: user id ${investor.userId} (lowest-id Investor)`);
-	if (investor2) console.log(`investor2 chosen: user id ${investor2.userId} (next-lowest-id Investor)`);
-	if (dispatcher) console.log(`dispatcher chosen: user id ${dispatcher.userId} (lowest-id Dispatcher)`);
-	console.log(`passwords stored in the Keychain (service ${keychain.DEFAULT_SERVICE()}, ${Object.keys(withPassword).join(", ")})`);
-	console.log(`logins written (0600, no passwords): ${LOGINS_FILE}`);
-})().catch((err) => {
-	console.error("setup-db: setup failed:", err.message);
-	process.exit(1);
-});
+}

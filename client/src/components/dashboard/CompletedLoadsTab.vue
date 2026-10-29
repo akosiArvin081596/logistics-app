@@ -13,6 +13,19 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.35rem;"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           Needs Review ({{ needsReviewCount }})
         </button>
+        <!-- Automatic invoice drafts (Super Admin only): a load a person must draft,
+             or a draft whose load changed since. -->
+        <button
+          v-if="auth.isSuperAdmin && autoAttentionCount > 0"
+          type="button"
+          class="auto-toggle"
+          :class="{ 'auto-toggle--on': autoAttentionOnly }"
+          :aria-pressed="autoAttentionOnly"
+          :title="autoAttentionOnly ? 'Showing only loads whose automatic invoice draft needs attention' : 'Show only loads whose automatic invoice draft needs attention'"
+          @click="autoAttentionOnly = !autoAttentionOnly"
+        >
+          Needs attention ({{ autoAttentionCount }})
+        </button>
       </div>
       <PaginationBar :page="page" :page-size="pageSize" :total="filteredJobs.length" :total-pages="totalPages" :sizes="sizes" keep-size-choice @go="goTo" @size="setSize" style="margin:0;padding:0;border:none;" />
     </div>
@@ -55,6 +68,10 @@
 
       <button v-if="filtersActive" type="button" class="cl-clear" title="Clear the driver and date filters" @click="clearFilters">Clear</button>
 
+      <!-- Shown while automatic drafts are on or shadowing: which broker domains a
+           draft may go to, and which brokers are left out. -->
+      <button v-if="auth.isSuperAdmin && autoMode !== 'off'" type="button" class="cl-clear cl-auto" title="Choose the broker domains automatic invoice drafts may go to, and the brokers they leave out" @click="openAutoSettings">Automatic drafts…</button>
+
       <!-- Pushed right: this is the action, not another filter. -->
       <div class="cl-actions">
         <span v-if="filtersActive" class="cl-count">{{ filteredJobs.length }} load{{ filteredJobs.length === 1 ? '' : 's' }}</span>
@@ -66,7 +83,7 @@
       <!-- The export endpoint only understands driver + date range, so a live
            load-number search or the Needs Review toggle would make the file
            wider than the table. Say so rather than surprise them. -->
-      <p v-if="exportWiderThanTable" class="cl-note">Search and Needs Review aren’t applied to the downloaded file.</p>
+      <p v-if="exportWiderThanTable" class="cl-note">{{ auth.isSuperAdmin && autoMode !== 'off' ? 'Search, Needs Review and Needs attention aren’t applied to the downloaded file.' : 'Search and Needs Review aren’t applied to the downloaded file.' }}</p>
     </div>
     <div class="overflow-x-auto">
       <Table v-if="filteredJobs.length > 0">
@@ -85,8 +102,9 @@
               </div>
               <template v-else-if="col === loadIdCol">
                 <span v-if="needsReview(job)" :style="reviewBadgeStyle" :title="reviewReasonText(job)">⚠ {{ reviewBadgeText(job) }}</span>
-                {{ cellValue(job, col) }}
+                {{ cellValue(job, col) || loadIdShown(job, col) }}
                 <span v-if="refVia(job)" class="ref-chip">{{ refChipText(refVia(job)) }}</span>
+                <span v-if="auth.isSuperAdmin && autoChip(job)" class="auto-chip" :class="`auto-chip--${autoChip(job).tone}`" :title="autoChip(job).reason">{{ autoChip(job).label }}</span>
               </template>
               <template v-else>{{ cellValue(job, col) }}</template>
             </TableCell>
@@ -99,7 +117,7 @@
       <DialogContent class="max-w-[700px] max-h-[88vh] flex flex-col overflow-hidden" style="padding:0;">
         <DialogHeader class="border-b border-gray-100 bg-muted/50" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-            <DialogTitle>{{ loadIdValue || 'Load Details' }}</DialogTitle>
+            <DialogTitle>{{ loadIdShownValue || 'Load Details' }}</DialogTitle>
             <span v-if="selectedJob && needsReview(selectedJob)" :style="reviewBadgeStyle" :title="reviewReasonText(selectedJob)">⚠ {{ reviewBadgeText(selectedJob) }}</span>
             <!-- Invoice drafting is Super Admin only (owner, 2026-09-26): every
                  draft route answers anyone else 403. -->
@@ -114,8 +132,15 @@
               <span>✓ Draft #{{ approvedDraft.invoice_id }} → {{ approvedDraft.recipient }} · {{ fmtDraftDate(approvedDraft.created_at) }}</span>
               <button type="button" :style="reviewLinkStyle" :disabled="drafting" @click="draftInvoice">Review</button>
             </div>
+            <!-- The automatic draft's status, in lib/autoInvoiceStatus.js's words. -->
+            <div v-if="selectedAutoChip" class="auto-line" :class="`auto-line--${selectedAutoChip.tone}`">
+              <span class="auto-line-text"><strong>{{ selectedAutoChip.label }}.</strong> {{ selectedAutoChip.reason }}</span>
+              <button v-if="canMarkChecked(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('checked')">Mark checked</button>
+              <button v-if="canTryAgain(selectedJob._autoInvoice)" type="button" class="auto-line-btn" :disabled="autoBusy" @click="autoInvoiceAction('retry')">Try again</button>
+            </div>
+            <div v-if="autoActionResult" class="auto-result" :class="`auto-result--${autoActionResult.tone}`" :role="autoActionResult.tone === 'error' ? 'alert' : 'status'">{{ autoActionResult.msg }}</div>
           </template>
-          <DialogDescription class="sr-only">Details for load {{ loadIdValue }}</DialogDescription>
+          <DialogDescription class="sr-only">Details for load {{ loadIdShownValue }}</DialogDescription>
         </DialogHeader>
         <div style="padding:1.25rem;overflow-y:auto;flex:1;">
           <!-- Why the load is flagged, and where it can be fixed: a completed load
@@ -156,7 +181,7 @@
           <div style="margin-bottom:1rem;">
             <div class="dash-section-title">Status Timeline</div>
             <div class="dash-detail-grid" style="display:block;padding:0.75rem;">
-              <StatusTimeline v-if="loadIdValue" :load-id="loadIdValue" />
+              <StatusTimeline v-if="loadRefValue" :load-id="loadRefValue" />
             </div>
           </div>
           <div style="margin-bottom:1rem;">
@@ -168,6 +193,15 @@
               <div v-if="docError" role="alert" :style="docErrorStyle">{{ docError }}</div>
               <div v-if="loadingDocs" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">Loading...</div>
               <div v-else-if="loadDocs.length === 0" style="text-align:center;color:#6b7280;font-size:0.875rem;padding:0.75rem;">No documents</div>
+              <!-- A load whose ID this user is served withheld: the server lists its
+                   documents by type and upload time only (documentsWithheld). -->
+              <div v-else-if="docsWithheldNote" style="display:flex;flex-direction:column;gap:0.5rem;">
+                <div v-for="doc in loadDocs" :key="doc.id" style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;">
+                  <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:4px;background:#f0f9ff;color:#0284c7;flex-shrink:0;">{{ doc.type }}</span>
+                  <span style="font-size:0.7rem;color:#94a3b8;">Uploaded {{ fmtUploaded(doc.uploaded_at) }}</span>
+                </div>
+                <span style="font-size:0.75rem;color:#6b7280;">{{ docsWithheldNote }}</span>
+              </div>
               <!-- Filename over a muted upload time, matching ActiveLoadsTab and the
                    driver's DocumentList. On a completed load this is the evidence
                    trail for when the POD backing the invoice actually arrived. -->
@@ -207,9 +241,10 @@
                  noticed *after* the load lands here (it's what blocks Draft
                  Invoice Email above), so this is the screen where a Super Admin
                  or Dispatcher needs to attach one on the driver's behalf. -->
-            <div v-if="loadIdValue && canManageDocs" style="margin-top:0.75rem;">
+            <div v-if="loadRefValue && canManageDocs" style="margin-top:0.75rem;">
               <DocumentUpload
-                :load-id="loadIdValue"
+                :load-id="loadRefValue"
+                :load-label="loadIdShownValue"
                 :driver-name="selectedJobDriverName"
                 :row-index="selectedJob?._rowIndex || 0"
                 @uploaded="refreshDocs"
@@ -231,7 +266,7 @@
             <!-- A delivered load has no live position: the one map draws the
                  planned pickup → drop-off lane LoadHaulSection reads. -->
             <DriverRouteMap :load="selectedJob" :headers="mapHeaders" :driver-position="null" :planned-lane="plannedLane" dispatch-mode />
-            <LoadHaulSection :load-id="loadIdValue" :open="!!selectedJob" @lane="onPlannedLane" />
+            <LoadHaulSection :load-id="loadRefValue" :open="!!selectedJob" @lane="onPlannedLane" />
           </div>
           <RateConPdfSection v-if="auth.isSuperAdmin" :load-id="loadIdValue" :open="!!selectedJob" />
         </div>
@@ -247,6 +282,29 @@
       @update:open="v => { previewOpen = v }"
       @approved="onDraftApproved"
     />
+    <!-- Automatic invoice drafts' settings (Super Admin only). -->
+    <Dialog v-if="auth.isSuperAdmin" :open="autoSettingsOpen" @update:open="v => { if (!v) autoSettingsOpen = false }">
+      <DialogContent class="max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>Automatic invoice drafts</DialogTitle>
+          <DialogDescription>{{ autoModeText }}</DialogDescription>
+        </DialogHeader>
+        <div class="auto-settings">
+          <p v-if="autoSettingsProblem" class="auto-settings-problem" role="alert">{{ autoSettingsProblem }}</p>
+          <label class="auto-settings-label" for="auto-confirmed">Confirmed broker domains</label>
+          <p class="auto-settings-help">A broker other than Bison gets an automatic draft only when its Email on Job Tracking is on one of these domains, and only to its rate con's billing email on the same domain. Free mail can't be confirmed. One domain per line, such as example-broker.com.</p>
+          <textarea id="auto-confirmed" v-model="autoConfirmedText" rows="4" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading" />
+          <label class="auto-settings-label" for="auto-opt-out">Brokers left out</label>
+          <p class="auto-settings-help">Loads for these domains, and their subdomains, are never drafted automatically: invoice them by hand.</p>
+          <textarea id="auto-opt-out" v-model="autoOptOutText" rows="3" class="auto-settings-text" spellcheck="false" :disabled="autoSettingsLoading" />
+          <p v-if="autoSettingsError" class="auto-settings-error" role="alert">{{ autoSettingsError }}</p>
+          <div class="auto-settings-actions">
+            <button type="button" class="cl-clear" @click="autoSettingsOpen = false">Cancel</button>
+            <button type="button" class="cl-download" :disabled="autoSettingsLoading || autoSettingsSaving" @click="saveAutoSettings">{{ autoSettingsSaving ? 'Saving…' : 'Save' }}</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
@@ -256,6 +314,7 @@ import { useLoadboardPaging } from '../../composables/useLoadboardPaging'
 import { useApi } from '../../composables/useApi'
 import { useToast } from '../../composables/useToast'
 import { useAuthStore } from '../../stores/auth'
+import { useDashboardStore } from '../../stores/dashboard'
 import { Input } from '@/components/ui/input'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
@@ -270,20 +329,33 @@ import RateConPdfSection from './RateConPdfSection.vue'
 import DocumentUpload from '../driver/DocumentUpload.vue'
 import InvoiceDraftPreviewModal from './InvoiceDraftPreviewModal.vue'
 import { needsReview, countNeedsReview, reviewBadgeText, reviewReasonText } from '../../lib/loadReview'
+import { AUTO_INVOICE_REASONS, autoInvoiceChip, autoInvoiceNeedsAttention, canMarkChecked, canTryAgain } from '../../lib/autoInvoiceStatus'
 import { searchLoads, refChipText, SEARCH_PLACEHOLDER, SEARCH_PLACEHOLDER_PHONE } from '../../lib/loadSearch'
 import { parseJsonCell, detailValue } from '../../lib/loadDetail'
 import { useViewport } from '../../composables/useViewport'
 import { normDriver } from '../../lib/driverName'
+import { loadRef, loadIdShown } from '../../lib/loadRef'
 import { fmtSheetMoment, sheetSortKey, fmtTimestamp, fmtAppInstant } from '@/utils/datetime'
 
 const api = useApi()
 const { show: toast } = useToast()
 const auth = useAuthStore()
+const dashboard = useDashboardStore()
 const { isMobile } = useViewport()
 const props = defineProps({ jobs: { type: Array, required: true }, headers: { type: Array, required: true }, active: { type: Boolean, default: true } })
 watch(() => props.active, v => { if (!v) selectedJob.value = null })
 const searchQuery = ref('')
 const needsReviewOnly = ref(false)
+// Automatic invoice drafts, Super Admin only: the server puts `_autoInvoice` on a
+// Super Admin's completed rows while real drafts are on (codes only, worded by
+// lib/autoInvoiceStatus.js) and names its mode while it isn't off.
+const autoAttentionOnly = ref(false)
+const autoMode = computed(() => {
+  const m = auth.isSuperAdmin && dashboard.data && dashboard.data.autoInvoice ? dashboard.data.autoInvoice.mode : ''
+  return m === 'on' || m === 'shadow' ? m : 'off'
+})
+const autoAttentionCount = computed(() => (auth.isSuperAdmin ? props.jobs.filter(autoInvoiceNeedsAttention).length : 0))
+const autoChip = (job) => (auth.isSuperAdmin && job ? autoInvoiceChip(job._autoInvoice) : null)
 const loadRating = ref(0)
 const loadIdCol = computed(() => props.headers.find(h => /load.?id|job.?id/i.test(h)) || '')
 const needsReviewCount = computed(() => countNeedsReview(props.jobs))
@@ -379,12 +451,14 @@ function clearFilters() { driverFilter.value = ''; fromDate.value = ''; toDate.v
 const searchResult = computed(() => {
   let pool = exportMatches.value
   if (needsReviewOnly.value) pool = pool.filter(needsReview)
+  if (autoAttentionOnly.value) pool = pool.filter(autoInvoiceNeedsAttention)
   return searchLoads(pool, searchQuery.value, loadIdCol.value)
 })
 const filteredJobs = computed(() => searchResult.value.rows)
 function refVia(job) { return searchResult.value.via.get(job) || null }
 const emptyMessage = computed(() => {
   if (needsReviewOnly.value) return 'No completed loads need review.'
+  if (autoAttentionOnly.value) return 'No automatic invoice draft needs attention.'
   if (searchQuery.value.trim()) return 'No loads match your search.'
   if (filtersActive.value) return 'No completed loads match these filters.'
   return 'No completed loads.'
@@ -435,6 +509,10 @@ const reviewBadgeStyle = {
 // Any filter change re-slices the list, so a carried-over page number can land
 // on a blank page (filter while on page 4 → nothing): resetOn snaps back to page 1.
 const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = useLoadboardPaging(sortedJobs, { tab: 'completed', userId: auth.user?.id, resetOn: [searchQuery, needsReviewOnly, driverFilter, fromDate, toDate] })
+// The Needs attention toggle re-slices the list like the filters above; once no
+// load needs attention its button is gone, so the filter goes with it.
+watch(autoAttentionOnly, () => goTo(1))
+watch(autoAttentionCount, (n) => { if (!n) autoAttentionOnly.value = false })
 
 // --- Export ----------------------------------------------------------------
 // "Pattern A": a plain same-origin anchor, deliberately no fetch/blob.
@@ -445,7 +523,7 @@ const { page, pageSize, totalPages, paginatedItems, goTo, setSize, sizes } = use
 // The button is disabled when nothing matches, which is also the case the
 // endpoint answers with a 404 JSON body an anchor couldn't intercept anyway.
 const canDownload = computed(() => exportMatches.value.length > 0)
-const exportWiderThanTable = computed(() => canDownload.value && (!!searchQuery.value.trim() || needsReviewOnly.value))
+const exportWiderThanTable = computed(() => canDownload.value && (!!searchQuery.value.trim() || needsReviewOnly.value || autoAttentionOnly.value))
 const downloadTitle = computed(() => {
   if (!canDownload.value) return 'No completed loads match these filters.'
   const who = driverLabel.value ? `every load ${driverLabel.value} delivered` : 'every completed load'
@@ -482,6 +560,8 @@ function downloadExport() {
 // filter bar became its own surface — the disabled state is :disabled now, so
 // the computed style object it needed is gone with it.
 const selectedJob = ref(null); const loadDocs = ref([]); const loadingDocs = ref(false)
+// The server's note when it lists a withheld load's documents by type and time only.
+const docsWithheldNote = ref('')
 // --- Document management (Super Admin + Dispatcher) -------------------------
 // Same pair that can upload can delete: a POD gets attached here on the driver's
 // behalf, so whoever attached the wrong one has to be able to take it back off.
@@ -514,10 +594,11 @@ const selectedJobDriverName = computed(() => {
   return c ? (selectedJob.value[c] || '').toString().trim() : ''
 })
 async function refreshDocs() {
-  if (!loadIdValue.value) return
+  if (!loadRefValue.value) return
   try {
-    const r = await api.get(`/api/documents/${encodeURIComponent(loadIdValue.value)}`)
+    const r = await api.get(`/api/documents/${encodeURIComponent(loadRefValue.value)}`)
     loadDocs.value = r.documents || []
+    docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : ''
   } catch {
     // Keep the existing list on a transient failure — the upload/delete that
     // triggered this already succeeded server-side.
@@ -562,13 +643,14 @@ async function confirmDeleteDoc(doc) {
 const plannedLane = ref({ status: 'loading' })
 function onPlannedLane(lane) { plannedLane.value = lane }
 async function openDetail(job) {
-  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null
+  selectedJob.value = { ...job }; loadDocs.value = []; loadingDocs.value = true; loadRating.value = 0; draftResult.value = null; autoActionResult.value = null
   plannedLane.value = { status: 'loading' }
-  docError.value = ''; deletingDocId.value = null
+  docError.value = ''; deletingDocId.value = null; docsWithheldNote.value = ''
   previewOpen.value = false; previewData.value = null; approvedDraft.value = null
-  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (job[lc] || '').trim() : ''
+  // The load's key when its Load ID is withheld from this user, else its ID (loadRef()).
+  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = loadRef(job, lc).trim()
   const p = []
-  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || [] }).catch(() => {}))
+  if (lid) p.push(api.get(`/api/documents/${encodeURIComponent(lid)}`).then(r => { loadDocs.value = r.documents || []; docsWithheldNote.value = r.documentsWithheld ? (r.note || 'A Super Admin can open these documents.') : '' }).catch(() => {}))
   if (lid) p.push(api.get(`/api/load-ratings/${encodeURIComponent(lid)}`).then(r => { loadRating.value = r.rating || 0 }).catch(() => {}))
   // Super Admin only, like the route: anyone else would only collect a 403.
   if (lid && auth.isSuperAdmin) p.push(api.get(`/api/loads/${encodeURIComponent(lid)}/invoice-draft`).then(r => { approvedDraft.value = r.draft || null }).catch(() => {}))
@@ -581,8 +663,8 @@ async function openDetail(job) {
 }
 async function submitRating(r) {
   if (!selectedJob.value) return
-  const lc = props.headers.find(h => /load.?id|job.?id/i.test(h)); const lid = lc ? (selectedJob.value[lc] || '').trim() : ''
   const dc = props.headers.find(h => /driver/i.test(h)); const dn = dc ? (selectedJob.value[dc] || '').trim() : ''
+  const lid = loadRefValue.value.trim()
   if (!lid || !dn) return
   try { await api.put(`/api/load-ratings/${encodeURIComponent(lid)}`, { rating: r, driverName: dn }); loadRating.value = r } catch {}
 }
@@ -649,6 +731,13 @@ const sectionPatterns = [
 // single-line raw value in the Route section is redundant.
 const hiddenCols = /broker|phone|email|contact|contract|address/i
 const loadIdValue = computed(() => { if (!selectedJob.value) return ''; const c = props.headers.find(h => /load.?id|job.?id/i.test(h)); return c ? selectedJob.value[c] || '' : '' })
+// The Dispatcher Load ID plan (PR 2), as in Active Loads: every per-load call names
+// the load by loadRef() (its key when this user is served its Load ID withheld, else
+// the ID); the screen shows loadIdShown() ("[contact withheld]" for an ID that is
+// only contact, served blank). The Super Admin-only invoice draft and rate-con PDF
+// keep the served ID: a Super Admin is never served a key.
+const loadRefValue = computed(() => (selectedJob.value ? loadRef(selectedJob.value, loadIdCol.value) : ''))
+const loadIdShownValue = computed(() => (selectedJob.value ? loadIdShown(selectedJob.value, loadIdCol.value) : ''))
 
 // --- Draft Invoice Email (every broker) ------------------------------------
 // One-click: the backend pulls the rate-con from Drive, generates the invoice,
@@ -781,6 +870,74 @@ async function onDraftApproved(payload) {
     approvedDraft.value = r.draft || null
   } catch { /* keep the success banner even if the refresh fails */ }
 }
+
+// --- Automatic invoice drafts (Super Admin only) -----------------------------
+const selectedAutoChip = computed(() => autoChip(selectedJob.value))
+const autoBusy = ref(false)
+// { tone: 'ok' | 'error', msg: string } | null
+const autoActionResult = ref(null)
+// Mark checked (a draft whose load changed) or Try again (a load that needs
+// attention). The server re-reads the claim; the dashboard read after it brings
+// the row's own status back.
+async function autoInvoiceAction(kind) {
+  if (!auth.isSuperAdmin || !loadRefValue.value || autoBusy.value) return
+  autoBusy.value = true; autoActionResult.value = null
+  try {
+    await api.post(`/api/auto-invoice/loads/${encodeURIComponent(loadRefValue.value)}/${kind === 'checked' ? 'checked' : 'retry'}`, {})
+    const status = selectedJob.value && selectedJob.value._autoInvoice
+    if (selectedJob.value) {
+      selectedJob.value = { ...selectedJob.value, _autoInvoice: kind === 'checked' ? { ...status, changed: [] } : { state: 'queued', code: '', invoiceId: '', changed: [] } }
+    }
+    autoActionResult.value = { tone: 'ok', msg: kind === 'checked' ? 'Marked checked.' : 'It will be tried again within a few minutes.' }
+    dashboard.refresh().catch(() => {})
+  } catch (e) {
+    autoActionResult.value = { tone: 'error', msg: (e && e.message) || 'That did not go through. Try again.' }
+  } finally {
+    autoBusy.value = false
+  }
+}
+
+const autoSettingsOpen = ref(false)
+const autoSettingsLoading = ref(false)
+const autoSettingsSaving = ref(false)
+const autoSettingsError = ref('')
+const autoSettingsProblem = ref('')
+const autoConfirmedText = ref('')
+const autoOptOutText = ref('')
+const autoModeText = computed(() => (autoMode.value === 'on'
+  ? 'On: each load delivered with its POD gets its broker invoice as a Gmail draft. Nothing is sent: a person checks each draft and sends it.'
+  : 'Shadow: it records what it would draft, and drafts nothing.'))
+// One domain per line; commas and spaces separate them too. The server checks each.
+const domainList = (text) => String(text || '').split(/[\s,;]+/).filter(Boolean)
+async function openAutoSettings() {
+  if (!auth.isSuperAdmin || autoSettingsLoading.value) return
+  autoSettingsOpen.value = true; autoSettingsError.value = ''; autoSettingsProblem.value = ''; autoSettingsLoading.value = true
+  try {
+    const s = await api.get('/api/auto-invoice/settings')
+    autoConfirmedText.value = (s.confirmedBrokerDomains || []).join('\n')
+    autoOptOutText.value = (s.optOutDomains || []).join('\n')
+    if (s.unreadable) autoSettingsProblem.value = AUTO_INVOICE_REASONS.SETTINGS_UNREADABLE.text
+    else if (Array.isArray(s.dropped) && s.dropped.length) autoSettingsProblem.value = `Ignored until saved again: ${s.dropped.map((x) => x.domain).join(', ')}.`
+  } catch (e) {
+    autoSettingsError.value = (e && e.message) || 'The settings could not be read.'
+  } finally {
+    autoSettingsLoading.value = false
+  }
+}
+async function saveAutoSettings() {
+  if (!auth.isSuperAdmin || autoSettingsSaving.value) return
+  autoSettingsSaving.value = true; autoSettingsError.value = ''
+  try {
+    await api.put('/api/auto-invoice/settings', { confirmedBrokerDomains: domainList(autoConfirmedText.value), optOutDomains: domainList(autoOptOutText.value) })
+    autoSettingsOpen.value = false
+    toast('Automatic draft settings saved')
+    dashboard.refresh().catch(() => {})
+  } catch (e) {
+    autoSettingsError.value = (e && e.message) || 'The settings could not be saved.'
+  } finally {
+    autoSettingsSaving.value = false
+  }
+}
 const detailSections = computed(() => {
   if (!selectedJob.value) return []; const used = new Set(); const secs = []
   for (const c of props.headers) { if (hiddenCols.test(c)) used.add(c) }
@@ -805,6 +962,65 @@ const detailSections = computed(() => {
   line-height: 1.4;
   white-space: nowrap;
 }
+/* Automatic invoice drafts (Super Admin only): the row chip, the Needs attention
+   toggle, the dialog line and the settings dialog. Tones: ok, warn, bad, muted. */
+.auto-chip {
+  display: block;
+  width: fit-content;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.auto-chip--ok { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+.auto-chip--warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.auto-chip--bad { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.auto-toggle {
+  display: inline-flex; align-items: center; white-space: nowrap;
+  padding: 0.4rem 0.75rem; font-size: 0.75rem; font-weight: 600; font-family: inherit;
+  border-radius: 6px; cursor: pointer; transition: all 0.15s;
+  border: 1px solid #d1d5db; background: #ffffff; color: #374151;
+}
+.auto-toggle--on { border-color: #f87171; background: #fef2f2; color: #991b1b; }
+.auto-toggle:focus-visible { outline: 2px solid #f87171; outline-offset: 1px; }
+.auto-line {
+  margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.35rem 0.6rem; border-radius: 6px; font-size: 0.75rem; line-height: 1.4;
+  border: 1px solid #e2e8f0; background: #f8fafc; color: #475569;
+}
+.auto-line--ok { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+.auto-line--warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.auto-line--bad { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.auto-line-text { flex: 1 1 16rem; min-width: 0; }
+.auto-line-btn {
+  padding: 0.2rem 0.6rem; font-size: 0.72rem; font-weight: 700; font-family: inherit;
+  border-radius: 6px; border: 1px solid currentColor; background: #fff; color: inherit;
+  cursor: pointer; white-space: nowrap;
+}
+.auto-line-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.auto-line-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.auto-result { margin-top: 0.35rem; font-size: 0.75rem; font-weight: 600; color: #166534; }
+.auto-result--error { color: #991b1b; }
+.auto-settings { display: flex; flex-direction: column; gap: 0.4rem; }
+.auto-settings-label { margin-top: 0.4rem; font-size: 0.75rem; font-weight: 700; color: #334155; }
+.auto-settings-help { margin: 0; font-size: 0.75rem; color: #64748b; line-height: 1.4; }
+.auto-settings-text {
+  width: 100%; padding: 0.5rem 0.6rem; font-size: 0.8125rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid #e2e8f0; border-radius: 8px; color: #374151; background: #fff; resize: vertical;
+}
+.auto-settings-text:focus { outline: none; border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
+.auto-settings-problem, .auto-settings-error {
+  margin: 0; padding: 0.5rem 0.7rem; border-radius: 6px; font-size: 0.78rem; font-weight: 600; line-height: 1.4;
+  background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+}
+.auto-settings-problem { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.auto-settings-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.6rem; }
 /* Two-line address: street on line 1, "City, ST ZIP" muted on line 2. */
 .addr-cell { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .addr-street { font-weight: 500; }
@@ -921,5 +1137,6 @@ const detailSections = computed(() => {
   /* Full-width action on a phone; auto-margin would strand it mid-row. */
   .cl-actions { flex: 1 1 100%; margin-left: 0; justify-content: space-between; }
   .cl-download { flex: 1 1 auto; justify-content: center; }
+  .cl-auto { flex: 1 1 100%; }
 }
 </style>

@@ -110,7 +110,9 @@ const SHARED_CONSTS = [
 	"RFC2822_MONTHS", "PRE_DISPATCH_PAY_DAY_RULE_ENABLED", "CANCELED_STATUS_RE", "INVOICE_COMPLETED_RE", "EXPENSE_PNL_FILTER", "EXPENSE_PERIOD_EXPR", "INVOICE_AUTOGEN_MAX_ATTEMPTS",
 	"INVOICE_UNDATED_ALERT_ENABLED", "INVOICE_UNDATED_ALERT_MAX_PER_DAY", "INVOICE_UNDATED_MASS_RESOLVE",
 	"INVOICE_UNDATED_BASELINE_KEY", "INVOICE_UNDATED_PENDING_SHRINK_KEY", "INVOICE_UNDATED_STATUS_KEY",
-	"DAY_PAY_DRAFT_LINE_RE",
+	"DAY_PAY_DRAFT_LINE_RE", "INVOICE_GRID_DAYS",
+	// The Personal lines' receipt-week rule (off in these fixtures).
+	"PERSONAL_RECEIPT_WEEK_ENABLED",
 ];
 const SHARED_FNS = [
 	"appDay", "sheetDayKey", "getWeekRange", "normalizeDriverName", "isBuiltInPropertyName", "reservedDriverNameRefusal",
@@ -121,6 +123,8 @@ const SHARED_FNS = [
 	"driverRateOnlyStartRecord", "driverRateOnlyApplies", "resolveDailyRate", "getEldTravelDaysByVehicle", "getAllExcludedDriverDays", "preDispatchPayDayFilter", "isAfterDeadline",
 	// The week's days and their pricing, out of the handler since money plan D.
 	"parseInvoiceDate", "fmtLocalDate", "invoiceCompletionCol", "invoiceLoadWindow", "invoiceWeekPaidDays", "invoiceDayPricing",
+	// The dated day grid, the loads each day lists, and the list's labels (B23).
+	"invoiceDayGrid", "dayKeyPlus", "invoiceGridDayName", "moneySheetDate", "invoicePayBasis", "invoiceLoadCount",
 	// The days a live manual invoice already pays, left off the weekly invoice.
 	"driverLiveManualInvoices", "weeklyManualInvoiceHolds",
 	// Under test.
@@ -132,7 +136,7 @@ const SHARED_FNS = [
 	// The Personal lines a weekly invoice carries (none in these fixtures).
 	"personalLedgerPresent", "personalGenerationPlan", "personalFitForGeneration", "personalCommitGeneration",
 	"personalWaitingRows", "personalRowsOnInvoice", "personalRenderData", "personalDetachUnfit", "undoPersonalDetach", "personalRestoreBlocker",
-	"personalSnapshotOf", "personalLinesForInvoices", "invoiceExpensesRefTotals",
+	"personalSnapshotOf", "personalLinesForInvoices", "invoiceExpensesRefTotals", "personalUnfitTail", "personalFit",
 	// The trip work-day rule (off in these fixtures: TRIP_WORK_DAYS_FROM null) and
 	// the paid-days release a regenerated Draft runs.
 	"tripDayResolver", "releaseInvoicePaidDays", "invoicePaidDaysTablePresent",
@@ -145,7 +149,7 @@ const SHARED_FNS = [
 	"listUndatedCompletedLoads", "undatedAlertedToday", "undatedDigestSlice",
 ];
 const ASYNC_FNS = ["generateInvoiceHandler", "runWeeklyInvoiceBatch", "runUndatedLoadAlerts", "readUndatedLoads", "sendUndatedLoadDigest", "sendUndatedDigestOwed",
-	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines", "personalReceiptRenderData", "warmPersonalReceiptsForWeek"];
+	"rerenderInvoicePdfFromStoredData", "attachLatePersonalLines", "personalReceiptRenderData", "warmPersonalReceiptsForWeek", "renderInvoiceWithReceipts"];
 const ROUTES = [
 	'app.get("/api/invoices", requireAuth, (req, res) => {',
 	'app.post("/api/invoices/manual", requireRole("Super Admin"), async (req, res) => {',
@@ -336,6 +340,9 @@ function buildWorld(opts = {}) {
 		// runs the pay paths with them on).
 		INVOICE_BLANK_PICKUP_FALLBACK_FROM: null,
 		LEDGER_BLANK_DROPOFF_FALLBACK_FROM: null,
+		// The closed-month invoice guard is off here (scripts/test-invoice-period-guard.js
+		// §7 runs it on).
+		INVOICE_CLOSED_MONTH_GUARD_ENABLED: false,
 		SPREADSHEET_ID: "test-sheet",
 		getSheets: async () => ({ spreadsheets: { values: { get: async () => ({ data: { values: sheet.values } }) } } }),
 		// The document records whose invoice it is, so a test can tell which

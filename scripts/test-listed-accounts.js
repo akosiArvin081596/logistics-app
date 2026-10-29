@@ -137,7 +137,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // ── §5 server.js wiring ─────────────────────────────────────────────────────
 {
-	const SRC = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
+	const SRC = require("./lib/server-source").serverSource();
 	const reads = SRC.match(/process\.env\.RATECON_PDF_VIEWER_IDS/g) || [];
 	ok(`§5 server.js reads RATECON_PDF_VIEWER_IDS in one place (${reads.length})`, reads.length === 1);
 	const at = SRC.indexOf('const RATECON_PDF_VIEWERS = require("./lib/listed-accounts.js").fromSetting(\n\t"RATECON_PDF_VIEWER_IDS", process.env.RATECON_PDF_VIEWER_IDS');

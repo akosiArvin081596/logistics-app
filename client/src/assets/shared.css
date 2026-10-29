@@ -72,7 +72,12 @@ body {
 /* ---- Sidebar ---- */
 .sidebar {
   position: fixed; top: 0; left: 0;
-  width: var(--sidebar-w); height: 100vh;
+  /* Safe areas (index.html viewport-fit=cover): on a notched iPhone in
+     landscape the sidebar widens by the left inset and pads its content clear
+     of the notch; top and bottom keep the logo and footer clear of the status
+     bar and the home bar. Every inset is 0 where the device reports none. */
+  width: calc(var(--sidebar-w) + env(safe-area-inset-left, 0px)); height: 100vh;
+  padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
@@ -139,10 +144,11 @@ body {
 
 /* ---- Main Content ---- */
 .main {
-  margin-left: var(--sidebar-w);
-  width: calc(100% - var(--sidebar-w));
+  margin-left: calc(var(--sidebar-w) + env(safe-area-inset-left, 0px));
+  width: calc(100% - var(--sidebar-w) - env(safe-area-inset-left, 0px));
   min-width: 0;
-  padding: 1.5rem 2rem;
+  padding: max(1.5rem, env(safe-area-inset-top, 0px)) max(2rem, env(safe-area-inset-right, 0px))
+    max(1.5rem, env(safe-area-inset-bottom, 0px)) 2rem;
   height: 100vh;
   overflow-y: auto;
   overflow-x: hidden;
@@ -156,7 +162,10 @@ body {
    sitting under the menu icon. Desktop behaviour above is untouched. */
 @media (max-width: 767px) {
   .main {
-    padding: 3rem 0.75rem 1.25rem;
+    /* The top stays 2.4rem below the hamburger's top edge (3rem - 0.6rem),
+       which moves down with the top inset (App.vue). */
+    padding: max(3rem, env(safe-area-inset-top, 0px) + 2.4rem) max(0.75rem, env(safe-area-inset-right, 0px))
+      max(1.25rem, env(safe-area-inset-bottom, 0px)) max(0.75rem, env(safe-area-inset-left, 0px));
   }
 }
 .page-header {
@@ -316,8 +325,14 @@ body {
 
 /* ---- Toast ---- */
 .toast-container {
-  position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%);
+  position: fixed; bottom: max(2rem, env(safe-area-inset-bottom, 0px) + 0.5rem); left: 50%; transform: translateX(-50%);
   z-index: 100; pointer-events: none;
+}
+/* The driver app: above its bottom tab bar (50 px, padded by the home bar). The
+   toast renders in App.vue outside the page, so a scoped rule in DriverView.vue
+   can't reach it; this one is global and keyed to the driver page's root. */
+body:has(.driver-app) .toast-container {
+  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
 }
 .toast {
   background: var(--text); color: #fff;

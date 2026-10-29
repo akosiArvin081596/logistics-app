@@ -73,8 +73,11 @@ const R = W.createRunner("B12 D: late days print in their own week's invoice");
 		const { w, g, g39 } = await boundaryWeek();
 		const d39 = stored(w, g39.invoice.id);
 		eq("W39 Thursday and Friday", [d39.days && d39.days.Thursday, d39.days && d39.days.Friday],
-			// `rate`: the day's Daily Rate column figure, stored with it (test-invoice-daily-rate-label.js).
-			[{ loadBol: "D102", total: 260, completed: true, rate: 260 }, { loadBol: "D102", total: 260, completed: true, rate: 260 }]);
+			// `rate`: the day's Daily Rate column figure, stored with it (test-invoice-daily-rate-label.js);
+			// `date`, `listed` and `scheduled`: the row's day and the loads its PDF row
+			// names, stored with every row (test-invoice-day-rows.js).
+			[{ date: "2026-10-01", loadBol: "D102", total: 260, completed: true, listed: ["D102"], scheduled: [], rate: 260 },
+				{ date: "2026-10-02", loadBol: "D102", total: 260, completed: true, listed: ["D102"], scheduled: [], rate: 260 }]);
 		eq("W39 grid days", W.dayList(W.gridDays(d39, W39)), ["2026-09-28", "2026-09-29", "2026-10-01", "2026-10-02"]);
 		eq("W40: no earlierDays, grid Sat-Mon, its own Thursday and Friday empty",
 			[g.data && g.data.earlierDays, W.dayList(W.gridDays(g.data, W40)), g.data && g.data.days.Thursday.completed, g.data && g.data.days.Friday.completed],
