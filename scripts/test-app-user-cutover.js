@@ -24,8 +24,9 @@
  *      the account's lock folder read back exactly 0700.
  *   §10 the tree check before a rollback, read as the account.
  *   §11 a rollback after an --apply that stopped part way.
- *   §12 the sibling PRs' names, when their files are in this tree: the lock folder (B10), staging's
- *       definition file (B11), the socket units (B9), the AppArmor profile's caches (B8).
+ *   §12 the names it shares with sibling PRs, checked against their files once those are in this
+ *       tree: the lock folder (B10), staging's definition file (B11), the socket units (B9), the
+ *       AppArmor profile's caches (B8).
  *   §13 source pins.
  *   §14 mutants: each property, broken on purpose, turns its case red.
  *
@@ -556,6 +557,9 @@ const CASES = [];
 const kase = (name, fn) => { CASES.push({ name, fn }); return name; };
 
 kase("§1 the target is required", async (t, script) => {
+	for (const cmd of ["pm2", "crontab", "systemctl", "runuser", "chown", "setfacl", "getfacl", "flock", "systemd-tmpfiles", "curl"]) {
+		t.ok(`§1 (the runner) ${cmd} is a stub on the script's PATH, never this machine's own`, fs.existsSync(path.join(BIN, cmd)) && !fs.existsSync(path.join(TOOLS, cmd)));
+	}
 	const c = makeCase("production");
 	for (const [label, argv] of [
 		["no arguments", []], ["only the environment", ["production"]], ["only a mode", ["--dry-run"]],
@@ -978,18 +982,22 @@ kase("§10 the tree check before a rollback", async (t, script) => {
 	}
 });
 
-kase("§1 §12 the made-up box can't reach this machine's own commands", async (t) => {
-	for (const cmd of ["pm2", "crontab", "systemctl", "runuser", "chown", "setfacl", "getfacl", "flock", "systemd-tmpfiles", "curl"]) {
-		t.ok(`§1 ${cmd} is a stub on the script's PATH`, fs.existsSync(path.join(BIN, cmd)) && !fs.existsSync(path.join(TOOLS, cmd)));
-	}
-});
-
 kase("§12 the sibling PRs' names", async (t) => {
+	// The names this script uses, each checked against its own PR's file once that is in this tree.
+	t.ok("§12 the deploy lock: one folder per account, /run/logisx-deploy-<uid>, one file per app folder (B10's layout)",
+		SOURCE.includes("lock_name() { printf 'logisx-deploy%s.lock' \"$(printf '%s' \"$1\" | tr -c 'A-Za-z0-9._-' '_')\"; }") &&
+		SOURCE.includes("ROOT_LOCK_DIR_BOX=/run/logisx-deploy-$ROOT_UID") && SOURCE.includes("ACCT_LOCK_DIR_BOX=/run/logisx-deploy-$ACCT_UID"));
+	t.ok("§12 each environment's definition file: ecosystem.config.js for production, ecosystem.staging.config.js for staging (B11)",
+		/APP_BOX=\/var\/www\/logistics-app\n\tNAME=logistics-app\n\tDEF=ecosystem\.config\.js\n/.test(SOURCE) &&
+		/APP_BOX=\/var\/www\/logisx-staging\n\tNAME=logisx-staging\n\tDEF=ecosystem\.staging\.config\.js\n/.test(SOURCE));
+	t.ok("§12 each environment's two socket units (B9)", SOURCE.includes('SOCKETS="logisx-prd-receipts.socket logisx-prd-photos.socket"') &&
+		SOURCE.includes('SOCKETS="logisx-stg-receipts.socket logisx-stg-photos.socket"'));
+	t.ok("§12 the account's Puppeteer cache: /home/<account>/.cache/puppeteer (B8's profile)", SOURCE.includes("ACCT_CACHE_BOX=$ACCT_HOME_BOX/.cache/puppeteer") &&
+		SOURCE.includes("ACCT_HOME_BOX=/home/$ACCT"));
 	const deploy = readOr(path.join(ROOT, "scripts/deploy/remote-deploy.sh"), "");
 	if (/LOCK_DIR=\$\{DEPLOY_LOCK_DIR:-\/run\/logisx-deploy-\$LOCK_UID\}/.test(deploy)) {
 		t.ok("§12 B10: the deploy scripts' lock file is the one this script takes",
-			deploy.includes("LOCK_FILE=\"$LOCK_DIR/logisx-deploy$(printf '%s' \"$DIR\" | tr -c 'A-Za-z0-9._-' '_').lock\"") &&
-			SOURCE.includes("lock_name() { printf 'logisx-deploy%s.lock' \"$(printf '%s' \"$1\" | tr -c 'A-Za-z0-9._-' '_')\"; }"));
+			deploy.includes("LOCK_FILE=\"$LOCK_DIR/logisx-deploy$(printf '%s' \"$DIR\" | tr -c 'A-Za-z0-9._-' '_').lock\""));
 	} else {
 		t.note("§12 B10's per-account lock folder isn't in this tree yet: the script follows its layout (/run/logisx-deploy-<uid>)");
 	}
